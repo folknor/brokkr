@@ -1434,14 +1434,7 @@ fn run_gremlins(
     }
 
     let total = found.len();
-    let (displayed, trailer) = if triage {
-        (found, None)
-    } else {
-        let changed = scope::changed_files(project_root);
-        let part = scope::partition(found, |g| g.path.as_path(), limit, changed.as_ref());
-        let trailer = scope::format_trailer(part.hidden_unscoped);
-        (part.displayed, trailer)
-    };
+    let (displayed, trailer) = scope_limit(found, project_root, limit, triage, |g| g.path.as_path());
 
     let mut msg = format!("gremlins: {total} found\n");
     for g in &displayed {
@@ -1459,17 +1452,15 @@ fn run_gremlins(
     Err(DevError::Build("gremlins found".into()))
 }
 
-/// Apply the same scope-first prioritisation the gremlins/clippy phases use to a
-/// native phase's violation list. Under `--triage` everything is shown and there is
-/// no trailer; otherwise the list is partitioned so every hit in a branch-changed
-/// file (per `scope::changed_files`) is shown in full and only unscoped overflow
-/// is capped at `limit`, returning the shared `+N in unchanged files` trailer.
-/// `get_path` maps a violation to the file it belongs to.
+/// Choose which of a phase's errors to display: under `--triage` all of them
+/// with no trailer, otherwise [`scope::partition`] - the errors in files with
+/// unstaged changes if there are any, else every error, at most `limit` either
+/// way - with the trailer counting the rest. `get_path` maps an error to its
+/// file.
 ///
-/// `changed_files` is computed here rather than once in `cmd_check` so the git
-/// call is paid only when a phase actually has violations to display. The native
-/// phases fail fast (`?` in `run_phases`), so at most one of them ever reaches
-/// this per invocation - there is no double-compute to avoid.
+/// The unstaged set is computed here rather than once in `cmd_check` so the git
+/// call is paid only when a phase actually has errors to display. Phases fail
+/// fast, so at most one of them reaches this per invocation.
 fn scope_limit<T>(
     violations: Vec<T>,
     project_root: &Path,
@@ -1478,28 +1469,12 @@ fn scope_limit<T>(
     get_path: impl Fn(&T) -> &Path,
 ) -> (Vec<T>, Option<String>) {
     // In `--triage` mode nothing is capped, so skip the git call entirely.
-    let changed = if triage {
-        None
-    } else {
-        scope::changed_files(project_root)
-    };
-    scope_limit_with(violations, limit, triage, get_path, changed.as_ref())
-}
-
-/// Pure core of [`scope_limit`] with the branch-changed file set injected, so the
-/// scope-first ordering can be exercised without a live git repo.
-fn scope_limit_with<T>(
-    violations: Vec<T>,
-    limit: usize,
-    triage: bool,
-    get_path: impl Fn(&T) -> &Path,
-    changed: Option<&std::collections::HashSet<std::path::PathBuf>>,
-) -> (Vec<T>, Option<String>) {
     if triage {
         return (violations, None);
     }
-    let part = scope::partition(violations, get_path, limit, changed);
-    let trailer = scope::format_trailer(part.hidden_unscoped);
+    let unstaged = scope::unstaged_files(project_root);
+    let part = scope::partition(violations, get_path, limit, unstaged.as_ref());
+    let trailer = scope::format_trailer(&part);
     (part.displayed, trailer)
 }
 
@@ -2150,18 +2125,21 @@ fn run_clippy_phase(
 
     announce_allows(allow, allow_exact);
 
-    let results = run_per_build_shape("clippy", project_root, sweeps, packages, clippy_ran, |sweep, run_scope, dir| {
+    let info = build::project_info(Some(project_root))?;
+    let results = run_per_build_shape("clippy", &info, sweeps, packages, clippy_ran, |sweep, run_scope, dir| {
         run_one_clippy(project_root, sweep, run_scope, allow, dir, commands)
     })?;
 
     report_stale_sited_allows(&results, allow_exact, packages);
 
     // With `--cap-lints=warn`, a lint no longer makes cargo exit non-zero, so
-    // the pass/fail decision is brokkr's own: any clippy diagnostic is a
-    // failure, whatever its (capped) level. `any_failed` still catches genuine
-    // non-lint compile errors, and the parse-failure case where cargo died
-    // without emitting parseable diagnostics.
-    let keep = |d: &cargo_json::DiagnosticEvent| !sited_allowed(d, allow_exact);
+    // the pass/fail decision is brokkr's own: every diagnostic is a failure,
+    // whatever its (capped) level, except a dependency's warning. A failed run
+    // with nothing parseable still fails.
+    let members = Some(&info.workspace_members);
+    let keep = |d: &cargo_json::DiagnosticEvent| {
+        !is_dependency_warning(d, members) && !sited_allowed(d, allow_exact)
+    };
     report_diagnostic_phase("clippy", &results, project_root, &keep, raw, limit, triage, multi, commands)
 }
 
@@ -2189,11 +2167,17 @@ fn run_rustdoc_phase(
     let Some(cfg) = cfg else {
         return Ok(());
     };
-    let results = run_per_build_shape("rustdoc", project_root, sweeps, packages, ran, |sweep, run_scope, dir| {
+    let info = build::project_info(Some(project_root))?;
+    let results = run_per_build_shape("rustdoc", &info, sweeps, packages, ran, |sweep, run_scope, dir| {
         let args = doc_args(sweep, run_scope, cfg);
         run_one_diagnostic_cargo("rustdoc", project_root, sweep, &args, run_scope, dir, commands)
     })?;
-    let keep = |d: &cargo_json::DiagnosticEvent| !rustdoc_allowed(d, allow) && !sited_allowed(d, allow_exact);
+    let members = Some(&info.workspace_members);
+    let keep = |d: &cargo_json::DiagnosticEvent| {
+        !is_dependency_warning(d, members)
+            && !rustdoc_allowed(d, allow)
+            && !sited_allowed(d, allow_exact)
+    };
     report_diagnostic_phase("rustdoc", &results, project_root, &keep, raw, limit, triage, sweeps.len() > 1, commands)
 }
 
@@ -2266,7 +2250,7 @@ fn report_diagnostic_phase(
 /// shared by every per-shape diagnostic phase, so they cannot drift apart.
 fn run_per_build_shape(
     phase: &str,
-    project_root: &Path,
+    info: &build::ProjectInfo,
     sweeps: &[ResolvedSweep],
     packages: &[String],
     ran: &mut [bool],
@@ -2275,17 +2259,15 @@ fn run_per_build_shape(
     // cargo's resolved target dir, so a `rustflags` sweep clippy-checks in the
     // *same* isolated `<target>/rustflags-<hash>` its test phase builds into -
     // they must agree on the location, and a workspace can place it off the
-    // project root (S3-20). Only rustflags sweeps need it, so the extra `cargo
-    // metadata` call is paid lazily - the common (no-isolation) run skips it.
-    // "Any sweep needs an isolated dir", not "any sweep has rustflags": a
-    // package-mode sweep isolates on its own, and the old predicate would have
-    // left it clippy-checking in the shared dir while its tests built in the
-    // isolated one - the two disagreeing about where the artifacts are.
-    let meta_target_dir = if sweeps.iter().any(ResolvedSweep::needs_isolated_target_dir) {
-        Some(build::project_info(Some(project_root))?.target_dir)
-    } else {
-        None
-    };
+    // project root (S3-20). Passed only when some sweep needs it: "any sweep
+    // needs an isolated dir", not "any sweep has rustflags" - a package-mode
+    // sweep isolates on its own, and the old predicate would have left it
+    // clippy-checking in the shared dir while its tests built in the isolated
+    // one, the two disagreeing about where the artifacts are.
+    let meta_target_dir = sweeps
+        .iter()
+        .any(ResolvedSweep::needs_isolated_target_dir)
+        .then(|| info.target_dir.clone());
 
     // Diagnostic phases are per-build-shape while tests are per-lane: two lanes
     // sharing a `[[check]]` entry must not be linted or documented twice, so
@@ -2852,7 +2834,7 @@ fn format_clippy_capped_multi(
         .map(|r| {
             let mut events = cargo_json::parse_cargo_diagnostics(&r.stdout);
             events.retain(|d| keep(d));
-            (r.label.clone(), clippy_parse_from_events(&events, !r.success, true))
+            (r.label.clone(), clippy_parse_from_events(&events, !r.success))
         })
         .collect();
 
@@ -2878,40 +2860,23 @@ fn format_clippy_capped_multi(
         return format!("{tool}: no issues");
     }
 
-    let total_errors = merged.iter().filter(|m| m.diag.is_error).count();
-    let total_warnings = merged.len() - total_errors;
-
-    let (displayed, trailer) = if triage {
+    let total = merged.len();
+    let mut refs: Vec<&MergedDiag<'_>> = merged.iter().collect();
+    if triage {
         // `--triage` is the bulk-triage view: sort so every hit of a single
-        // lint clumps together. Errors first (more urgent), then within
-        // each level by lint code, file, line, column. Cached keys keep
-        // the location parsing to one pass per diagnostic.
-        let mut refs: Vec<&MergedDiag<'_>> = merged.iter().collect();
+        // lint clumps together, by lint code, file, line, column. Cached keys
+        // keep the location parsing to one pass per diagnostic.
         refs.sort_by_cached_key(|m| clippy_sort_key(m.diag));
-        (refs, None)
-    } else {
-        let changed = scope::changed_files(project_root);
-        let refs: Vec<&MergedDiag<'_>> = merged.iter().collect();
-        // Errors are pinned: the cap is a warning-volume control, and an
-        // elided error is a failure the reader never sees.
-        let part = scope::partition_pinned(
-            refs,
-            |m| m.diag.path().unwrap_or_else(|| Path::new("")),
-            |m| m.diag.is_error,
-            limit,
-            changed.as_ref(),
-        );
-        let trailer = scope::format_trailer(part.hidden_unscoped);
-        (part.displayed, trailer)
-    };
+    }
+    let (displayed, trailer) = scope_limit(refs, project_root, limit, triage, |m| {
+        m.diag.path().unwrap_or_else(|| Path::new(""))
+    });
 
+    let errors = if total == 1 { "error" } else { "errors" };
     let header = if multi {
-        format!(
-            "{tool}: {total_errors} errors, {total_warnings} warnings ({} sweeps)\n",
-            results.len()
-        )
+        format!("{tool}: {total} {errors} ({} sweeps)\n", results.len())
     } else {
-        format!("{tool}: {total_errors} errors, {total_warnings} warnings\n")
+        format!("{tool}: {total} {errors}\n")
     };
 
     let mut out = header;
@@ -2938,43 +2903,30 @@ fn format_clippy_capped_multi(
 /// [`ClippyParse`](cargo_filter::ClippyParse).
 ///
 /// Walks each compiler-message JSON event and maps it to the formatter
-/// primitive used by `merge_clippy` and `format_one()`. Diagnostics are
-/// ordered errors-first, then warnings (stable within each). When cargo
-/// failed and emitted no compiler-message events, sets `parse_failed` so
-/// callers can fall back to dumping the raw streams.
+/// primitive used by `merge_clippy` and `format_one()`, in discovery order.
+/// When cargo failed and emitted no compiler-message events, sets
+/// `parse_failed` so callers can fall back to dumping the raw streams.
 #[cfg(test)]
 fn parse_clippy_from_json(
     stdout: &str,
     sweep_failed: bool,
-    gate: bool,
     allow_exact: &[SitedAllow],
 ) -> cargo_filter::ClippyParse {
-    clippy_parse_from_events(&gated_diags(stdout, allow_exact), sweep_failed, gate)
+    clippy_parse_from_events(&gated_diags(stdout, allow_exact), sweep_failed)
 }
 
-/// Map already-filtered diagnostic events to the formatter primitive, errors
-/// first. `parse_failed` is set when cargo failed and left no event, so callers
-/// can fall back to dumping the raw streams.
+/// Map already-filtered diagnostic events to the formatter primitive, in
+/// discovery order. `parse_failed` is set when cargo failed and left no event,
+/// so callers can fall back to dumping the raw streams.
 fn clippy_parse_from_events(
     events: &[cargo_json::DiagnosticEvent],
     sweep_failed: bool,
-    gate: bool,
 ) -> cargo_filter::ClippyParse {
-    let mut diagnostics: Vec<cargo_filter::ClippyDiagnostic> = events
-        .iter()
-        .map(|d| event_to_clippy(d, gate))
-        .collect();
-
-    // Errors first, then warnings; each half keeps discovery order.
-    let (errors, warnings): (Vec<_>, Vec<_>) =
-        std::mem::take(&mut diagnostics).into_iter().partition(|d| d.is_error);
-    let mut sorted = errors;
-    sorted.extend(warnings);
-
-    let parse_failed = sweep_failed && sorted.is_empty();
-
+    let diagnostics: Vec<cargo_filter::ClippyDiagnostic> =
+        events.iter().map(event_to_clippy).collect();
+    let parse_failed = sweep_failed && diagnostics.is_empty();
     cargo_filter::ClippyParse {
-        diagnostics: sorted,
+        diagnostics,
         parse_failed,
     }
 }
@@ -2987,16 +2939,15 @@ fn clippy_parse_from_events(
 /// label first ("expected `i32`, found `&str`"), then from a child note
 /// that mentions both "expected" and "found" - matching the two shapes
 /// the old text scraper handled.
-fn event_to_clippy(d: &cargo_json::DiagnosticEvent, gate: bool) -> cargo_filter::ClippyDiagnostic {
-    // Under the gate, every surfaced lint is a hard failure: brokkr ran clippy
-    // with `--cap-lints=warn` only to complete the graph, so a diagnostic that
-    // arrived at the capped `warning` level is really a deny. Restore `error`
-    // for both the flag and the rendered header.
-    let is_error = gate || d.level == "error";
-    let level = if is_error { "error" } else { d.level.as_str() };
+///
+/// Every event reaching here is an error, whatever level cargo gave it: the
+/// one kind of warning `check` does not treat as a failure - a dependency's -
+/// was dropped upstream ([`is_dependency_warning`]), and clippy runs under
+/// `--cap-lints=warn` only so a denied lint cannot abort its crate's compile.
+fn event_to_clippy(d: &cargo_json::DiagnosticEvent) -> cargo_filter::ClippyDiagnostic {
     let header = match &d.code {
-        Some(c) => format!("{level}[{c}]"),
-        None => level.to_string(),
+        Some(c) => format!("error[{c}]"),
+        None => "error".to_string(),
     };
     let location = match (&d.file, d.line, d.column) {
         (Some(f), Some(l), Some(c)) => Some(format!("{f}:{l}:{c}")),
@@ -3004,12 +2955,29 @@ fn event_to_clippy(d: &cargo_json::DiagnosticEvent, gate: bool) -> cargo_filter:
     };
     let detail = extract_detail_from_event(d);
     cargo_filter::ClippyDiagnostic {
-        is_error,
+        is_error: true,
         header,
         location,
         message: d.message.clone(),
         detail,
     }
+}
+
+/// A warning from a package outside the workspace: the one diagnostic `check`
+/// neither fails on nor lists. A dependency's warnings are its maintainers'
+/// business; cargo already silences registry and git dependencies, so what
+/// reaches here is a path dependency outside the workspace, such as a sibling
+/// checkout. An error from a dependency still fails - the build is broken
+/// whoever owns the line.
+///
+/// A diagnostic with no `package_id`, or a run whose workspace members are
+/// unknown, is treated as the workspace's own.
+fn is_dependency_warning(
+    d: &cargo_json::DiagnosticEvent,
+    members: Option<&std::collections::HashSet<String>>,
+) -> bool {
+    d.level == "warning"
+        && matches!((members, &d.package_id), (Some(m), Some(id)) if !m.contains(id))
 }
 
 /// Pull a one-line "expected X, found Y" detail out of the primary
@@ -3033,13 +3001,10 @@ fn collapse_whitespace(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// Sort key for `--triage` bulk triage: errors before warnings, then by
-/// lint code (so every hit of a rule clumps together), then file and
-/// line for stable in-rule ordering. Bare `error` / `warning` headers
-/// (no code) sort to the end of their level since the lint code is
-/// the empty string for those.
-fn clippy_sort_key(d: &cargo_filter::ClippyDiagnostic) -> (u8, String, String, u64, u64) {
-    let level = if d.is_error { 0u8 } else { 1u8 };
+/// Sort key for `--triage` bulk triage: by lint code (so every hit of a rule
+/// clumps together), then file and line for stable in-rule ordering. A bare
+/// `error` header (no code) sorts to the end.
+fn clippy_sort_key(d: &cargo_filter::ClippyDiagnostic) -> (String, String, u64, u64) {
     let lint = extract_lint_code(&d.header);
     // Push bare-level diagnostics to the end of their level by giving
     // them a key that sorts after any real code.
@@ -3049,7 +3014,7 @@ fn clippy_sort_key(d: &cargo_filter::ClippyDiagnostic) -> (u8, String, String, u
         lint.to_string()
     };
     let (file, line, col) = parse_location(d.location.as_deref());
-    (level, lint_key, file, line, col)
+    (lint_key, file, line, col)
 }
 
 fn extract_lint_code(header: &str) -> &str {
@@ -3138,7 +3103,7 @@ fn run_test_phase(
     // release).
     // `whole_workspace` is a property of the tree, not of any sweep. It now
     // feeds `resolve_unification` rather than the parallel lane directly.
-    let build::ProjectInfo { target_dir, bare_selection_is_whole_workspace: _whole_workspace } =
+    let build::ProjectInfo { target_dir, .. } =
         build::project_info(Some(project_root))?;
 
     let mut ran_any = false;
@@ -3345,52 +3310,16 @@ mod sited_summary_tests {
 
 #[cfg(test)]
 mod scope_limit_tests {
-    #![allow(clippy::unwrap_used)]
     use super::*;
-    use std::collections::HashSet;
     use std::path::PathBuf;
 
-    struct Violation {
-        file: PathBuf,
-    }
-
-    fn violation(file: &str) -> Violation {
-        Violation {
-            file: PathBuf::from(file),
-        }
-    }
-
-    #[test]
-    fn scope_first_retains_changed_file_violation_past_limit() {
-        // One violation in a branch-changed file (`b.rs`) sorts last in file-walk
-        // order, behind enough unscoped hits to overflow limit=2. Scope-first must
-        // still surface it in full, capping only the unscoped overflow.
-        let violations = vec![
-            violation("a.rs"),
-            violation("c.rs"),
-            violation("d.rs"),
-            violation("b.rs"),
-        ];
-        let changed: HashSet<PathBuf> = ["b.rs"].iter().map(PathBuf::from).collect();
-        let (displayed, trailer) =
-            scope_limit_with(violations, 2, false, |v| v.file.as_path(), Some(&changed));
-
-        // Scoped `b.rs` is retained (ahead of the capped unscoped tail), 2 unscoped
-        // shown, the last unscoped hidden into the trailer.
-        let shown: Vec<&str> = displayed
-            .iter()
-            .map(|v| v.file.to_str().unwrap())
-            .collect();
-        assert!(shown.contains(&"b.rs"));
-        assert_eq!(displayed.len(), 3); // 1 scoped + 2 unscoped
-        assert_eq!(trailer.unwrap(), "+1 in unchanged files (--triage to see)");
-    }
-
+    /// `--triage` is the uncapped view: every error, no trailer, and no git call
+    /// (the root here is not a repository, and nothing may consult it).
     #[test]
     fn triage_shows_everything_without_trailer() {
-        let violations = vec![violation("a.rs"), violation("b.rs")];
+        let violations = vec![PathBuf::from("a.rs"), PathBuf::from("b.rs")];
         let (displayed, trailer) =
-            scope_limit_with(violations, 1, true, |v| v.file.as_path(), None);
+            scope_limit(violations, Path::new("/nonexistent"), 1, true, PathBuf::as_path);
         assert_eq!(displayed.len(), 2);
         assert!(trailer.is_none());
     }

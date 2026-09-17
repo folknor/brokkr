@@ -140,6 +140,10 @@ pub struct ProjectInfo {
     /// faithful description of its own prebuild - see
     /// `check_cmd/parallel.rs`.
     pub bare_selection_is_whole_workspace: bool,
+    /// Package ids of every workspace member, in the form cargo's JSON
+    /// messages carry as `package_id`. How `check` tells a workspace
+    /// diagnostic from a dependency's.
+    pub workspace_members: std::collections::HashSet<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -177,6 +181,11 @@ pub fn project_info(cwd: Option<&Path>) -> Result<ProjectInfo, DevError> {
     Ok(ProjectInfo {
         target_dir: PathBuf::from(target_dir),
         bare_selection_is_whole_workspace: members_all_default(&val),
+        workspace_members: val
+            .get("workspace_members")
+            .and_then(serde_json::Value::as_array)
+            .map(|ids| ids.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect())
+            .unwrap_or_default(),
     })
 }
 

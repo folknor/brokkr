@@ -19,6 +19,10 @@ pub struct DiagnosticEvent {
     pub primary_label: Option<String>,
     pub children: Vec<ChildDiagnostic>,
     pub rendered: Option<String>,
+    /// The package cargo compiled when rustc emitted this: the
+    /// `compiler-message`'s top-level `package_id`, in the same form
+    /// `cargo metadata` lists `workspace_members`.
+    pub package_id: Option<String>,
 }
 
 pub struct ChildDiagnostic {
@@ -52,6 +56,15 @@ pub fn parse_cargo_diagnostics(stdout: &str) -> Vec<DiagnosticEvent> {
             .and_then(|v| v.as_str())
             .unwrap_or("unknown")
             .to_string();
+
+        // Only the levels a finding is reported at. rustc also emits top-level
+        // `failure-note` messages ("For more information about this error,
+        // try `rustc --explain E0027`") and could emit bare `note`/`help`;
+        // `check` counts every diagnostic it keeps as an error, so those would
+        // surface as phantom errors.
+        if !matches!(level.as_str(), "error" | "warning" | "error: internal compiler error") {
+            continue;
+        }
 
         let code = msg
             .get("code")
@@ -136,6 +149,10 @@ pub fn parse_cargo_diagnostics(stdout: &str) -> Vec<DiagnosticEvent> {
             primary_label,
             children,
             rendered,
+            package_id: val
+                .get("package_id")
+                .and_then(|v| v.as_str())
+                .map(std::string::ToString::to_string),
         });
     }
 
@@ -207,6 +224,14 @@ mod tests {
         let input = r#"{"reason":"compiler-message","message":{"level":"warning","code":{"code":"unused_variables"},"message":"unused","spans":[{"file_name":"src/a.rs","line_start":1,"column_start":1,"line_end":1,"column_end":2,"is_primary":true,"label":""}],"children":[],"rendered":"rendered"}}"#;
         let events = parse_cargo_diagnostics(input);
         assert!(events[0].primary_label.is_none());
+    }
+
+    /// Seen on a failed clippy run: rustc's spanless `--explain` pointer arrives
+    /// as its own compiler-message and was reported as an error.
+    #[test]
+    fn a_failure_note_is_not_a_diagnostic() {
+        let input = r#"{"reason":"compiler-message","message":{"level":"failure-note","code":null,"message":"For more information about this error, try `rustc --explain E0027`.","spans":[],"children":[],"rendered":"For more information about this error, try `rustc --explain E0027`.\n"}}"#;
+        assert!(parse_cargo_diagnostics(input).is_empty());
     }
 
     #[test]

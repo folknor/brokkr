@@ -46,21 +46,22 @@ clippy for a targeted test run).
 Output (default text mode, no flags):
   - Gremlins: one line per banned-Unicode hit. `--fix-gremlins`
     rewrites them in place before the scan.
-  - Clippy: one line per diagnostic in the form
-    `error[CODE] file:line:col message` /
-    `warning[rule] file:line:col message`. Cargo runs with
-    `--message-format=json` so every warning carries its lint code,
+  - Clippy and rustdoc: one line per diagnostic in the form
+    `error[CODE] file:line:col message`. Cargo runs with
+    `--message-format=json` so every diagnostic carries its lint code,
     not just the first occurrence per rule.
   - Tests: one line per failure on failure, compact summary on pass.
-    Never capped or scoped - every failing test in every suite is
-    listed, and `--triage` does not change that.
+    Never capped - every failing test in every suite is listed, and
+    `--triage` does not change that.
 
-Capping and scoping (clippy + gremlins, and the `--timings` list):
-  Output is capped at `--limit N` (default 20). When the cap kicks in,
-  diagnostics in files changed on the current branch (vs upstream /
-  origin/master / origin/main) are surfaced first, and a trailer
-  summarises what's hidden.
-  - `--triage` shows everything, sorted by (level, lint code, file, line)
+Which diagnostics are shown (every diagnostic phase):
+  1. Everything is an error, except a warning from a dependency outside
+     the workspace, which neither fails nor prints.
+  2. If any error is in a file with unstaged changes (git diff, plus
+     untracked files), only those are shown.
+  3. Otherwise every error is shown.
+  4. At most `--limit N` (default 20) either way; a trailer counts the rest.
+  - `--triage` shows everything, sorted by (lint code, file, line)
     so every hit of a single rule clumps together for bulk triage.
     The test phase is not affected - it was never capped.
 
@@ -142,16 +143,16 @@ In depth: `brokkr man check` (one section at a time, e.g. `man check clippy`)."
         #[arg(long)]
         json: bool,
 
-        /// Maximum diagnostics printed per phase (gremlins, clippy). Ignored
-        /// with `--raw` or `--triage`.
+        /// Maximum errors printed per phase. If any error is in a file with
+        /// unstaged changes, only those are candidates. Ignored with `--raw`
+        /// or `--triage`.
         #[arg(long, default_value_t = 20)]
         limit: usize,
 
-        /// Show every gremlins/clippy diagnostic (and every `--timings`
-        /// row) without capping or scoping to changed files. Sorted by
-        /// (level, lint code, file, line) so every hit of a single rule
-        /// clumps together for bulk triage. Does NOT widen the test
-        /// phase: the failure list is never capped or scoped, so a red
+        /// Show every error (and every `--timings` row), with no cap and no
+        /// unstaged-file focus. Sorted by (lint code, file, line) so every
+        /// hit of a single rule clumps together for bulk triage. Does NOT
+        /// widen the test phase: the failure list is never capped, so a red
         /// run reports the same failures with or without this flag.
         #[arg(long)]
         triage: bool,

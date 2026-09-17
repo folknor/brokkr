@@ -106,8 +106,8 @@ cargo clippy --keep-going --all-targets --message-format=json <sel> <feat> -- --
 
 `--cap-lints=warn` lets a deny-level lint produce its `.rmeta` so the whole graph
 is checked in one pass; because a capped lint no longer makes cargo exit
-non-zero, **pass/fail is brokkr's decision: any diagnostic is a failure**, and a
-capped `warning` is promoted back to `error` in the output.
+non-zero, **pass/fail is brokkr's decision: any diagnostic is a failure** and is
+reported as an error, except a warning from a dependency outside the workspace.
 
 A `[lints] allow` list in `brokkr.toml` applies here exactly as in `check`'s
 clippy phase: each entry is appended as `-A <lint>` after `--cap-lints=warn`,
@@ -116,9 +116,10 @@ and the run announces the allowed lints up front. `[lints] allow_exact`
 ingestion rather than via `-A`) applies here too. See
 `docs/commands/check.md`.
 
-- default: one line per diagnostic, capped at `--limit N` (default 20), with
-  branch-changed files surfaced first and a trailer summarising what is hidden.
-- `--triage`: show everything, sorted by (level, lint, file, line) so every hit of a
+- default: one line per error - only those in files with unstaged changes if
+  there are any, otherwise all - at most `--limit N` (default 20), with a
+  trailer counting the rest. The same rule as `check`.
+- `--triage`: show everything, sorted by (lint, file, line) so every hit of a
   rule clumps together for bulk triage.
 - `--raw`: cargo's terminal-style rendering (full source annotations and help
   suggestions). This is human-rendered text, not machine JSON - there is no

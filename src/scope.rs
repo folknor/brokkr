@@ -1,92 +1,48 @@
-//! Scope + limit helpers for `brokkr check`'s gremlins/clippy phases.
+//! Scope + limit helpers for `brokkr check`'s diagnostic output.
 //!
-//! When a phase produces a large pile of diagnostics, dumping all of them
-//! at once is useless. This module computes the set of files changed on
-//! the current branch and partitions diagnostics so that every hit in a
-//! branch-touched file is shown in full and only unscoped hits get capped
-//! at `limit`. The unscoped overflow count is rolled up into a trailer.
+//! Every diagnostic a phase reports is an error, and at most `--limit` of them
+//! are shown. Which ones: if any error sits in a file with unstaged changes -
+//! the file being edited right now - only those are candidates; otherwise every
+//! error is. The rest are counted in a trailer, split by where they are.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Files modified on the current branch vs its upstream base.
+/// Files with unstaged changes: modified in the working tree relative to the
+/// index, plus untracked files git does not ignore (a new file is unstaged
+/// too). Paths are relative to `project_root`, the directory cargo and the
+/// scanners report paths against.
 ///
-/// Returns `None` when no useful scope can be computed - not in a git
-/// repo, detached HEAD, no upstream, branch is identical to base, etc.
-/// Callers treat `None` as "scope unavailable" and fall back to simple
-/// capping.
-pub fn changed_files(project_root: &Path) -> Option<HashSet<PathBuf>> {
-    let base = branch_base(project_root)?;
-    let output = Command::new("git")
-        .args(["diff", "--name-only", "-z", &format!("{base}...HEAD")])
-        .current_dir(project_root)
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let mut set = HashSet::new();
-    for raw in output.stdout.split(|b| *b == 0) {
-        if raw.is_empty() {
-            continue;
-        }
-        if let Ok(s) = std::str::from_utf8(raw) {
-            set.insert(PathBuf::from(s));
-        }
-    }
-    // Also include files modified in the working tree but not yet committed,
-    // so iterating on uncommitted changes still gets scope treatment.
-    if let Ok(wt) = Command::new("git")
-        .args(["diff", "--name-only", "-z", "HEAD"])
-        .current_dir(project_root)
-        .output()
-    {
-        for raw in wt.stdout.split(|b| *b == 0) {
-            if raw.is_empty() {
-                continue;
-            }
-            if let Ok(s) = std::str::from_utf8(raw) {
-                set.insert(PathBuf::from(s));
-            }
-        }
-    }
-    if set.is_empty() { None } else { Some(set) }
+/// Staged and committed changes do not count: the priority is the edit in
+/// progress, and a file staged for commit is one the author has already
+/// signed off on.
+///
+/// `None` when git cannot be asked (not a repository); callers then treat
+/// every error as a candidate.
+pub fn unstaged_files(project_root: &Path) -> Option<HashSet<PathBuf>> {
+    let modified = git_paths(project_root, &["diff", "--name-only", "--relative", "-z"])?;
+    let untracked = git_paths(project_root, &["ls-files", "--others", "--exclude-standard", "-z"])?;
+    Some(modified.into_iter().chain(untracked).collect())
 }
 
-/// Try a few candidate base refs. First hit wins. `None` if nothing
-/// resolves (detached HEAD, new repo, no upstream).
-fn branch_base(project_root: &Path) -> Option<String> {
-    // Upstream of the current branch (most reliable).
-    if let Some(up) = run_git(project_root, &["rev-parse", "--abbrev-ref", "@{upstream}"])
-        && let Some(base) = merge_base(project_root, &up)
-    {
-        return Some(base);
-    }
-    // Fallbacks.
-    for candidate in ["origin/master", "origin/main", "master", "main"] {
-        if let Some(base) = merge_base(project_root, candidate) {
-            return Some(base);
-        }
-    }
-    None
-}
-
-fn merge_base(project_root: &Path, other: &str) -> Option<String> {
-    run_git(project_root, &["merge-base", "HEAD", other])
-}
-
-fn run_git(project_root: &Path, args: &[&str]) -> Option<String> {
+/// Run a git command that prints NUL-separated paths.
+fn git_paths(project_root: &Path, args: &[&str]) -> Option<Vec<PathBuf>> {
     let output = Command::new("git")
         .args(args)
         .current_dir(project_root)
         .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let s = std::str::from_utf8(&output.stdout).ok()?.trim();
-    if s.is_empty() { None } else { Some(s.to_string()) }
+        .ok()
+        .filter(|o| o.status.success())?;
+    Some(
+        output
+            .stdout
+            .split(|b| *b == 0)
+            .filter(|raw| !raw.is_empty())
+            .filter_map(|raw| std::str::from_utf8(raw).ok())
+            .map(PathBuf::from)
+            .collect(),
+    )
 }
 
 /// What kind of work is uncommitted in the working tree.
@@ -184,79 +140,69 @@ fn classify_status(stdout: &[u8]) -> Dirt {
 /// Result of partitioning a diagnostic list into displayed vs hidden.
 pub struct Partition<T> {
     pub displayed: Vec<T>,
-    pub hidden_unscoped: usize,
+    /// Whether the display was narrowed to files with unstaged changes.
+    pub focused: bool,
+    /// Hidden by the cap, in files with unstaged changes.
+    pub hidden_unstaged: usize,
+    /// Hidden in every other file: past the cap, or passed over because the
+    /// unstaged files had errors of their own.
+    pub hidden_elsewhere: usize,
 }
 
-/// Partition `items` so every scoped (branch-touched) hit is shown in
-/// full, followed by up to `limit` unscoped hits. Both halves retain
-/// their input order.
+/// Choose at most `limit` items to display, in input order.
 ///
-/// `scope` = `None` means "no scope available" (all hits are treated as
-/// unscoped and the cap applies); `Some(set)` uses [`HashSet`] membership.
-///
-/// See [`partition_pinned`] for the cap's one exemption.
+/// If any item's path is in `unstaged`, only those items are candidates - an
+/// error in the file being edited is the one to fix first, and errors elsewhere
+/// would only push it off the screen. Otherwise every item is a candidate.
+/// `unstaged = None` (no git) makes every item a candidate.
 pub fn partition<T, F>(
     items: Vec<T>,
     get_path: F,
     limit: usize,
-    scope: Option<&HashSet<PathBuf>>,
+    unstaged: Option<&HashSet<PathBuf>>,
 ) -> Partition<T>
 where
     F: Fn(&T) -> &Path,
 {
-    partition_pinned(items, get_path, |_| false, limit, scope)
-}
-
-/// [`partition`] with an exemption: an item `is_pinned` says yes to is
-/// displayed whatever the cap, even when it is unscoped and past `limit`.
-///
-/// The cap exists to keep a wall of WARNINGS in untouched files from burying
-/// the run. It must never hide a FAILURE - a hard error elided as overflow
-/// reads as "not in this run" to anyone who trusts the list, and the trailer
-/// only says how many were hidden, not that one of them was fatal. Pinned
-/// items keep their input position and do not consume the cap.
-pub fn partition_pinned<T, F, P>(
-    items: Vec<T>,
-    get_path: F,
-    is_pinned: P,
-    limit: usize,
-    scope: Option<&HashSet<PathBuf>>,
-) -> Partition<T>
-where
-    F: Fn(&T) -> &Path,
-    P: Fn(&T) -> bool,
-{
-    let (scoped, rest): (Vec<T>, Vec<T>) = match scope {
+    let (in_unstaged, elsewhere): (Vec<T>, Vec<T>) = match unstaged {
         Some(set) => items.into_iter().partition(|item| set.contains(get_path(item))),
         None => (Vec::new(), items),
     };
-    // Pinned unscoped items bypass the cap entirely; only the remainder
-    // competes for `limit` slots.
-    let (pinned, unscoped): (Vec<T>, Vec<T>) = rest.into_iter().partition(&is_pinned);
-    let scoped: Vec<T> = scoped.into_iter().chain(pinned).collect();
-
-    let mut displayed: Vec<T> = Vec::with_capacity(scoped.len() + limit.min(unscoped.len()));
-    displayed.extend(scoped);
-
-    let mut unscoped_iter = unscoped.into_iter();
-    for item in unscoped_iter.by_ref().take(limit) {
-        displayed.push(item);
+    if in_unstaged.is_empty() {
+        let hidden_elsewhere = elsewhere.len().saturating_sub(limit);
+        let displayed = elsewhere.into_iter().take(limit).collect();
+        return Partition { displayed, focused: false, hidden_unstaged: 0, hidden_elsewhere };
     }
-    let hidden_unscoped = unscoped_iter.count();
-
+    let hidden_unstaged = in_unstaged.len().saturating_sub(limit);
     Partition {
-        displayed,
-        hidden_unscoped,
+        displayed: in_unstaged.into_iter().take(limit).collect(),
+        focused: true,
+        hidden_unstaged,
+        hidden_elsewhere: elsewhere.len(),
     }
 }
 
-/// Build the trailer line summarising hidden unscoped hits. `None` when
-/// nothing is hidden.
-pub fn format_trailer(hidden_unscoped: usize) -> Option<String> {
-    if hidden_unscoped == 0 {
+/// The trailer summarising what [`partition`] hid. `None` when nothing is.
+///
+/// A focused display says so, because it lists fewer errors than the run has:
+/// `+2 more in unstaged files, +31 in other files`. An unfocused one is a plain
+/// cap: `+31 more`.
+pub fn format_trailer<T>(part: &Partition<T>) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    if part.focused {
+        if part.hidden_unstaged > 0 {
+            parts.push(format!("+{} more in unstaged files", part.hidden_unstaged));
+        }
+        if part.hidden_elsewhere > 0 {
+            parts.push(format!("+{} in other files", part.hidden_elsewhere));
+        }
+    } else if part.hidden_elsewhere > 0 {
+        parts.push(format!("+{} more", part.hidden_elsewhere));
+    }
+    if parts.is_empty() {
         return None;
     }
-    Some(format!("+{hidden_unscoped} in unchanged files (--triage to see)"))
+    Some(format!("{} (--triage to see all)", parts.join(", ")))
 }
 
 #[cfg(test)]
@@ -272,65 +218,63 @@ mod tests {
         (p(path), path)
     }
 
+    fn shown<'a>(part: &Partition<(PathBuf, &'a str)>) -> Vec<&'a str> {
+        part.displayed.iter().map(|t| t.1).collect()
+    }
+
     #[test]
-    fn no_scope_caps_and_counts_unscoped() {
+    fn without_unstaged_errors_every_error_competes_for_the_cap() {
+        let unstaged: HashSet<PathBuf> = [p("z")].into_iter().collect();
         let items = vec![item("a"), item("b"), item("c"), item("d")];
+        let part = partition(items, |t| t.0.as_path(), 2, Some(&unstaged));
+        assert_eq!(shown(&part), vec!["a", "b"]);
+        assert!(!part.focused);
+        assert_eq!(part.hidden_elsewhere, 2);
+        assert_eq!(format_trailer(&part).unwrap(), "+2 more (--triage to see all)");
+    }
+
+    /// The rule: an error in the file being edited is shown alone, and the
+    /// others are counted, not listed.
+    #[test]
+    fn unstaged_errors_are_shown_alone() {
+        let unstaged: HashSet<PathBuf> = ["b", "d"].iter().map(|s| p(s)).collect();
+        let items = vec![item("a"), item("b"), item("c"), item("d"), item("e")];
+        let part = partition(items, |t| t.0.as_path(), 20, Some(&unstaged));
+        assert_eq!(shown(&part), vec!["b", "d"]);
+        assert!(part.focused);
+        assert_eq!(part.hidden_elsewhere, 3);
+        assert_eq!(format_trailer(&part).unwrap(), "+3 in other files (--triage to see all)");
+    }
+
+    /// The cap binds the unstaged errors too: no class of error is exempt.
+    #[test]
+    fn the_cap_applies_to_unstaged_errors() {
+        let unstaged: HashSet<PathBuf> = ["a", "b", "c"].iter().map(|s| p(s)).collect();
+        let items = vec![item("a"), item("b"), item("c"), item("d")];
+        let part = partition(items, |t| t.0.as_path(), 2, Some(&unstaged));
+        assert_eq!(shown(&part), vec!["a", "b"]);
+        assert_eq!(part.hidden_unstaged, 1);
+        assert_eq!(part.hidden_elsewhere, 1);
+        assert_eq!(
+            format_trailer(&part).unwrap(),
+            "+1 more in unstaged files, +1 in other files (--triage to see all)"
+        );
+    }
+
+    #[test]
+    fn no_git_caps_everything() {
+        let items = vec![item("a"), item("b"), item("c")];
         let part = partition(items, |t| t.0.as_path(), 2, None);
-        assert_eq!(part.displayed.len(), 2);
-        assert_eq!(part.hidden_unscoped, 2);
+        assert_eq!(shown(&part), vec!["a", "b"]);
+        assert_eq!(part.hidden_elsewhere, 1);
     }
 
     #[test]
-    fn scope_prefers_scoped_hits() {
-        let scope: HashSet<PathBuf> = ["b", "d"].iter().map(|s| p(s)).collect();
-        let items = vec![item("a"), item("b"), item("c"), item("d"), item("e")];
-        let part = partition(items, |t| t.0.as_path(), 3, Some(&scope));
-        // 2 scoped (b, d) + 3 unscoped (a, c, e), limit only caps unscoped.
-        assert_eq!(part.displayed.len(), 5);
-        let displayed_paths: Vec<&str> = part.displayed.iter().map(|t| t.1).collect();
-        assert_eq!(displayed_paths, vec!["b", "d", "a", "c", "e"]);
-        assert_eq!(part.hidden_unscoped, 0);
-    }
-
-    #[test]
-    fn scoped_always_shown_in_full() {
-        let scope: HashSet<PathBuf> = ["a", "b", "c", "d"].iter().map(|s| p(s)).collect();
-        let items = vec![item("a"), item("b"), item("c"), item("d"), item("e")];
-        let part = partition(items, |t| t.0.as_path(), 2, Some(&scope));
-        // All 4 scoped show in full; the 1 unscoped fits within limit=2.
-        assert_eq!(part.displayed.len(), 5);
-        assert_eq!(part.hidden_unscoped, 0);
-    }
-
-    #[test]
-    fn limit_caps_unscoped_only() {
-        let scope: HashSet<PathBuf> = ["a"].iter().map(|s| p(s)).collect();
-        let items = vec![item("a"), item("b"), item("c"), item("d"), item("e")];
-        let part = partition(items, |t| t.0.as_path(), 2, Some(&scope));
-        // 1 scoped + 2 unscoped (b, c); d, e hidden.
-        assert_eq!(part.displayed.len(), 3);
-        let displayed_paths: Vec<&str> = part.displayed.iter().map(|t| t.1).collect();
-        assert_eq!(displayed_paths, vec!["a", "b", "c"]);
-        assert_eq!(part.hidden_unscoped, 2);
-    }
-
-    #[test]
-    fn everything_fits() {
+    fn everything_fits_and_says_nothing() {
         let items = vec![item("a"), item("b")];
         let part = partition(items, |t| t.0.as_path(), 10, None);
         assert_eq!(part.displayed.len(), 2);
-        assert_eq!(part.hidden_unscoped, 0);
-    }
-
-    #[test]
-    fn trailer_unscoped_only() {
-        let s = format_trailer(7).unwrap();
-        assert_eq!(s, "+7 in unchanged files (--triage to see)");
-    }
-
-    #[test]
-    fn trailer_none_when_nothing_hidden() {
-        assert!(format_trailer(0).is_none());
+        assert!(format_trailer(&part).is_none());
     }
 
     #[test]
@@ -377,53 +321,5 @@ mod tests {
         // Re-parsing would strip "xy." and leave an extensionless "md".
         let status = b"R  docs/b.md\0xy.md\0";
         assert_eq!(classify_status(status), Dirt::ProseOnly);
-    }
-}
-
-#[cfg(test)]
-mod pinned_tests {
-    #![allow(clippy::unwrap_used)]
-    use super::*;
-
-    fn p(s: &str) -> PathBuf {
-        PathBuf::from(s)
-    }
-
-    /// The defect: the cap is a warning-volume control, and it used to drop
-    /// an unscoped ERROR as overflow - a failure the reader never sees while
-    /// the trailer only counts it.
-    #[test]
-    fn a_pinned_item_survives_past_the_limit() {
-        // (path, is_error). The error sorts last, well past limit=2.
-        let items = vec![
-            (p("a"), false),
-            (p("b"), false),
-            (p("c"), false),
-            (p("d"), true),
-        ];
-        let part = partition_pinned(items, |t| t.0.as_path(), |t| t.1, 2, None);
-        let shown: Vec<&str> = part
-            .displayed
-            .iter()
-            .map(|t| t.0.to_str().unwrap())
-            .collect();
-        assert_eq!(shown, vec!["d", "a", "b"]);
-        // Only the two capped warnings are hidden; the error is not one.
-        assert_eq!(part.hidden_unscoped, 1);
-    }
-
-    /// Pinned items must not consume cap slots - otherwise a run with many
-    /// errors would silently shrink the warning window as well.
-    #[test]
-    fn pinned_items_do_not_consume_the_cap() {
-        let items = vec![
-            (p("e1"), true),
-            (p("e2"), true),
-            (p("w1"), false),
-            (p("w2"), false),
-        ];
-        let part = partition_pinned(items, |t| t.0.as_path(), |t| t.1, 2, None);
-        assert_eq!(part.displayed.len(), 4);
-        assert_eq!(part.hidden_unscoped, 0);
     }
 }

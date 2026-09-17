@@ -72,11 +72,11 @@ Flags:
 - `--raw` - unfiltered cargo output (terminal-style rendering)
 - `--json` - append one machine-readable summary line (a JSON object) as the
   last line of stdout; human output is unchanged
-- `--limit N` - max diagnostics shown per phase (gremlins, clippy, and the
+- `--limit N` - max errors shown per phase (every diagnostic phase, and the
   `--timings` list), default 20
-- `--triage` - show every gremlins/clippy diagnostic and every `--timings` row, no
-  cap, no changed-files scoping. Does *not* widen the test phase - the failure
-  list is never capped or scoped in the first place
+- `--triage` - show every error and every `--timings` row: no cap, no
+  unstaged-file focus, sorted by lint. Does *not* widen the test phase - the
+  failure list is never capped in the first place
 - `--fix-gremlins` - rewrite banned chars in place before scan
 - `--commands` - log each sweep's full cargo command instead of the collapsed
   form (see the log-lines section)
@@ -87,16 +87,21 @@ Output:
 - `--raw` reconstructs cargo's terminal-style output by concatenating each
   diagnostic's `rendered` field plus the cargo status messages on stderr -
   one cargo invocation.
-- When hits exceed `--limit`, both the gremlin and clippy phases prefer files
-  changed on the current branch (computed via git merge-base against
-  `@{upstream}` / `origin/master` / `origin/main`) and append a trailer
-  summarising what's hidden; see `src/scope.rs`.
-- **The cap never hides an error.** It is a warning-volume control, so clippy
-  *errors* are pinned through `scope::partition_pinned`: they display in full
-  however far past `--limit` they sort, and they do not consume cap slots that
-  would otherwise show warnings. An elided error reads as "not in this run" to
-  anyone who trusts the list, and the trailer only counts what it hid without
-  saying that one of them was fatal.
+- Which diagnostics a phase shows, in every diagnostic phase (gremlins,
+  header, textlint, manifest, dependency rules, clippy, rustdoc):
+  1. **Everything is an error**, whatever level the tool reported it at,
+     except a warning from a dependency - a package outside the workspace,
+     told apart by the `package_id` cargo attaches to each message. Those
+     neither fail the phase nor print. A dependency's *error* still fails.
+  2. **If any error is in a file with unstaged changes**, only those are
+     shown. "Unstaged" is the working tree against the index (`git diff`)
+     plus untracked, non-ignored files; staged and committed changes do not
+     count. The error in the file being edited is the one to fix first.
+  3. **Otherwise every error is shown.**
+  4. **At most `--limit` either way** (default 20). Nothing is exempt from
+     the cap; a trailer counts the rest and where they are - `+2 more in
+     unstaged files, +31 in other files (--triage to see all)`, or `+31 more`
+     when nothing was focused. See `src/scope.rs`.
 - `--json` appends one summary object as the **last line of stdout**, leaving
   the human output untouched (the old NDJSON per-event mode is gone; this is
   the result contract). Fields: `schema` (currently
@@ -954,12 +959,13 @@ graph:
   keeps checking the independent branches of the graph rather than stopping
   at the first failure.)
 - Because a capped lint lets cargo exit 0, pass/fail is brokkr's own decision,
-  not cargo's exit status: **any clippy diagnostic fails the check.** brokkr
-  treats a capped `warning` as the deny it really is - `event_to_clippy`
-  promotes it back to `error` for counting and the header, so the output never
-  misleads with "0 errors, N warnings" while failing. The `--raw` escape hatch
-  still dumps clippy's own rendered text verbatim (which shows the capped
-  `warning:` wording).
+  not cargo's exit status: **any clippy diagnostic fails the check**, except a
+  dependency's warning. A capped `warning` is reported as the error it is, in
+  the count and the header. Only messages at `error` or `warning` level are
+  diagnostics: rustc's spanless `failure-note` ("For more information about
+  this error, try `rustc --explain`") is not. The `--raw` escape hatch still
+  dumps clippy's own rendered text verbatim (which shows the capped `warning:`
+  wording).
 
 ### `[lints] allow`
 

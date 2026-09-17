@@ -394,7 +394,7 @@ fn report_errors(package: &str, errors: &[&cargo_json::DiagnosticEvent], raw: bo
         for d in errors {
             match &d.rendered {
                 Some(r) => output::error(r.trim_end()),
-                None => output::error(&event_to_clippy(d, false).format_one()),
+                None => output::error(&event_to_clippy(d).format_one()),
             }
         }
         return;
@@ -405,7 +405,7 @@ fn report_errors(package: &str, errors: &[&cargo_json::DiagnosticEvent], raw: bo
     );
     for d in errors {
         msg.push_str("  ");
-        msg.push_str(&event_to_clippy(d, false).format_one());
+        msg.push_str(&event_to_clippy(d).format_one());
         msg.push('\n');
     }
     output::error(msg.trim_end());
