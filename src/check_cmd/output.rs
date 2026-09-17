@@ -1356,6 +1356,70 @@ skip = ["edit_only::"]
         );
     }
 
+    fn run(label: &str, selected: Option<&[&str]>) -> SweepResult {
+        SweepResult {
+            label: label.into(),
+            command: String::new(),
+            stdout: String::new(),
+            stderr: String::new(),
+            success: true,
+            selected: selected.map(|s| s.iter().map(|p| (*p).to_owned()).collect()),
+        }
+    }
+
+    /// Two members, both default: `core` and `daemon`.
+    fn two_member_info() -> crate::build::ProjectInfo {
+        crate::build::ProjectInfo {
+            target_dir: std::path::PathBuf::from("target"),
+            bare_selection_is_whole_workspace: true,
+            workspace_members: [
+                ("id-core".to_owned(), "core".to_owned()),
+                ("id-daemon".to_owned(), "daemon".to_owned()),
+            ]
+            .into(),
+            default_members: ["id-core".to_owned(), "id-daemon".to_owned()].into(),
+        }
+    }
+
+    /// Shape of the reporting run: a workspace sweep plus a sweep of one
+    /// package. A daemon diagnostic both report is the code's, not a shape's.
+    #[test]
+    fn no_tag_when_every_covering_sweep_reported_it() {
+        let info = two_member_info();
+        let results = [run("default", None), run("daemon-shape", Some(&["daemon"]))];
+        let both = ["default".to_owned(), "daemon-shape".to_owned()];
+        assert_eq!(coverage_tag(&both, Some("id-daemon"), &results, Some(&info)), None);
+        // A core diagnostic from the workspace sweep alone: the daemon sweep
+        // never selected core, so nothing covering it stayed silent.
+        let default_only = ["default".to_owned()];
+        assert_eq!(coverage_tag(&default_only, Some("id-core"), &results, Some(&info)), None);
+    }
+
+    /// The case the tag exists for: a shape-specific diagnostic, here one the
+    /// package's own sweep found and the workspace sweep did not.
+    #[test]
+    fn tag_when_a_covering_sweep_did_not_report_it() {
+        let info = two_member_info();
+        let results = [run("default", None), run("daemon-shape", Some(&["daemon"]))];
+        let shape_only = ["daemon-shape".to_owned()];
+        assert_eq!(
+            coverage_tag(&shape_only, Some("id-daemon"), &results, Some(&info)),
+            Some("[daemon-shape]".into())
+        );
+    }
+
+    /// Without a package id, every run counts as covering.
+    #[test]
+    fn unknown_package_falls_back_to_every_run() {
+        let info = two_member_info();
+        let results = [run("default", None), run("daemon-shape", Some(&["daemon"]))];
+        let default_only = ["default".to_owned()];
+        assert_eq!(
+            coverage_tag(&default_only, None, &results, Some(&info)),
+            Some("[default]".into())
+        );
+    }
+
     #[test]
     fn merge_clippy_dedups_and_combines_sweeps() {
         let stderr_a = "\
@@ -1504,7 +1568,7 @@ warning: z [too_many_lines]
             }
             cargo_json::parse_cargo_diagnostics(&json).remove(0)
         };
-        let members: std::collections::HashSet<String> = ["member#a@1.0.0".to_owned()].into();
+        let members: HashMap<String, String> = [("member#a@1.0.0".to_owned(), "a".to_owned())].into();
         let dep = "path+file:///elsewhere#b@1.0.0";
 
         assert!(is_dependency_warning(&event("warning", Some(dep)), Some(&members)));

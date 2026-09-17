@@ -1044,7 +1044,19 @@ unification, packages, features, env and isolated target dir. Rustdoc resolves
 comments on code that shape never compiles. It runs once per distinct build
 shape, deduped and `-p`-intersected by the same loop clippy uses
 (`run_per_build_shape`), so the two phases cannot disagree about what a sweep
-covers.
+covers. A `doc_only` sweep is skipped (`skipped (doctest carrier, no build
+shape of its own)`): it exists to run doctests, so documenting it re-reports
+another sweep's diagnostics under a second label - and cannot always be
+deduped, since a carrier that inherits feature unification from
+`.cargo/config.toml` differs on argv from a sibling that passes it.
+
+Sweep tags follow coverage, for clippy and rustdoc alike. A diagnostic is
+tagged with the sweeps that reported it only when some run that selected its
+package (by `-p`, or the default members for a bare selection; matched through
+the message's `package_id`) did not. A shape-specific diagnostic - a link that
+breaks only with a feature off - keeps its `[run-prep-adapter-free]`; one that
+every covering sweep reports is untagged. A dependency member a run compiled
+without selecting does not count as covered.
 
 Output goes through clippy's parser and formatter: one line per diagnostic in
 the `error[<lint>] <file>:<line>:<col> <message>` form, merged across sweeps, capped at `--limit` with changed files first,

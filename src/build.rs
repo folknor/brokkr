@@ -140,10 +140,13 @@ pub struct ProjectInfo {
     /// faithful description of its own prebuild - see
     /// `check_cmd/parallel.rs`.
     pub bare_selection_is_whole_workspace: bool,
-    /// Package ids of every workspace member, in the form cargo's JSON
-    /// messages carry as `package_id`. How `check` tells a workspace
-    /// diagnostic from a dependency's.
-    pub workspace_members: std::collections::HashSet<String>,
+    /// Every workspace member, package id -> package name. The ids are in the
+    /// form cargo's JSON messages carry as `package_id`: how `check` tells a
+    /// workspace diagnostic from a dependency's, and names the package a
+    /// diagnostic belongs to.
+    pub workspace_members: std::collections::HashMap<String, String>,
+    /// Package ids a bare (no `-p`) selection builds.
+    pub default_members: std::collections::HashSet<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -181,12 +184,33 @@ pub fn project_info(cwd: Option<&Path>) -> Result<ProjectInfo, DevError> {
     Ok(ProjectInfo {
         target_dir: PathBuf::from(target_dir),
         bare_selection_is_whole_workspace: members_all_default(&val),
-        workspace_members: val
-            .get("workspace_members")
+        workspace_members: member_names(&val),
+        default_members: val
+            .get("workspace_default_members")
+            .or_else(|| val.get("workspace_members"))
             .and_then(serde_json::Value::as_array)
             .map(|ids| ids.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect())
             .unwrap_or_default(),
     })
+}
+
+/// `workspace_members` ids mapped to their package names, from the
+/// `packages` array a `--no-deps` metadata call lists exactly the members in.
+fn member_names(metadata: &serde_json::Value) -> std::collections::HashMap<String, String> {
+    let ids: std::collections::HashSet<&str> = metadata
+        .get("workspace_members")
+        .and_then(serde_json::Value::as_array)
+        .map(|ids| ids.iter().filter_map(serde_json::Value::as_str).collect())
+        .unwrap_or_default();
+    metadata
+        .get("packages")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|p| Some((p.get("id")?.as_str()?, p.get("name")?.as_str()?)))
+        .filter(|(id, _)| ids.contains(id))
+        .map(|(id, name)| (id.to_owned(), name.to_owned()))
+        .collect()
 }
 
 /// Whether `workspace_default_members` covers every `workspace_members`

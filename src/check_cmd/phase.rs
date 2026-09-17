@@ -2105,6 +2105,13 @@ fn run_one_diagnostic_cargo(
         stdout: String::from_utf8_lossy(&captured.stdout).into_owned(),
         stderr: String::from_utf8_lossy(&captured.stderr).into_owned(),
         success: captured.status.success(),
+        selected: if !run_scope.is_empty() {
+            Some(run_scope.iter().map(|s| (*s).to_owned()).collect())
+        } else if !sweep.packages.is_empty() {
+            Some(sweep.packages.clone())
+        } else {
+            None
+        },
     })
 }
 
@@ -2126,7 +2133,7 @@ fn run_clippy_phase(
     announce_allows(allow, allow_exact);
 
     let info = build::project_info(Some(project_root))?;
-    let results = run_per_build_shape("clippy", &info, sweeps, packages, clippy_ran, |sweep, run_scope, dir| {
+    let results = run_per_build_shape("clippy", &info, sweeps, packages, clippy_ran, |_| None, |sweep, run_scope, dir| {
         run_one_clippy(project_root, sweep, run_scope, allow, dir, commands)
     })?;
 
@@ -2140,7 +2147,7 @@ fn run_clippy_phase(
     let keep = |d: &cargo_json::DiagnosticEvent| {
         !is_dependency_warning(d, members) && !sited_allowed(d, allow_exact)
     };
-    report_diagnostic_phase("clippy", &results, project_root, &keep, raw, limit, triage, multi, commands)
+    report_diagnostic_phase("clippy", &results, &info, project_root, &keep, raw, limit, triage, multi, commands)
 }
 
 /// The `rustdoc` phase: `cargo doc --no-deps` per build shape, failing on any
@@ -2168,7 +2175,12 @@ fn run_rustdoc_phase(
         return Ok(());
     };
     let info = build::project_info(Some(project_root))?;
-    let results = run_per_build_shape("rustdoc", &info, sweeps, packages, ran, |sweep, run_scope, dir| {
+    // A doc-only sweep is a doctest carrier: it names no compile shape of its
+    // own, so documenting it re-reports another sweep's diagnostics under a
+    // second label - and may not dedupe, when it inherits from config what the
+    // sibling passes on argv.
+    let skip = |sweep: &ResolvedSweep| sweep.doc_only.then_some("doctest carrier, no build shape of its own");
+    let results = run_per_build_shape("rustdoc", &info, sweeps, packages, ran, skip, |sweep, run_scope, dir| {
         let args = doc_args(sweep, run_scope, cfg);
         run_one_diagnostic_cargo("rustdoc", project_root, sweep, &args, run_scope, dir, commands)
     })?;
@@ -2178,7 +2190,8 @@ fn run_rustdoc_phase(
             && !rustdoc_allowed(d, allow)
             && !sited_allowed(d, allow_exact)
     };
-    report_diagnostic_phase("rustdoc", &results, project_root, &keep, raw, limit, triage, sweeps.len() > 1, commands)
+    let multi = results.len() > 1;
+    report_diagnostic_phase("rustdoc", &results, &info, project_root, &keep, raw, limit, triage, multi, commands)
 }
 
 /// Whether `[lints] allow` names this diagnostic's lint. Matched on the exact
@@ -2200,6 +2213,7 @@ fn sited_allowed(d: &cargo_json::DiagnosticEvent, allow_exact: &[SitedAllow]) ->
 fn report_diagnostic_phase(
     phase: &str,
     results: &[SweepResult],
+    info: &build::ProjectInfo,
     project_root: &Path,
     keep: &dyn Fn(&cargo_json::DiagnosticEvent) -> bool,
     raw: bool,
@@ -2234,6 +2248,7 @@ fn report_diagnostic_phase(
         output::error(&format_clippy_capped_multi(
             &format!("cargo {}", if phase == "rustdoc" { "doc" } else { phase }),
             results,
+            Some(info),
             project_root,
             limit,
             triage,
@@ -2248,12 +2263,16 @@ fn report_diagnostic_phase(
 /// package-mode unification), marking `ran[i]` for each sweep that got a cargo
 /// run. The dedupe, the CLI `-p` intersection and the nothing-ran refusal are
 /// shared by every per-shape diagnostic phase, so they cannot drift apart.
+/// `skip` names a reason a phase does not apply to a sweep at all; such
+/// sweeps do not count toward the nothing-ran refusal.
+#[allow(clippy::too_many_arguments)]
 fn run_per_build_shape(
     phase: &str,
     info: &build::ProjectInfo,
     sweeps: &[ResolvedSweep],
     packages: &[String],
     ran: &mut [bool],
+    skip: impl Fn(&ResolvedSweep) -> Option<&'static str>,
     mut run_one: impl FnMut(&ResolvedSweep, &[&str], Option<&Path>) -> Result<SweepResult, DevError>,
 ) -> Result<Vec<SweepResult>, DevError> {
     // cargo's resolved target dir, so a `rustflags` sweep clippy-checks in the
@@ -2276,7 +2295,13 @@ fn run_per_build_shape(
         std::collections::HashSet::new();
 
     let mut results: Vec<SweepResult> = Vec::with_capacity(sweeps.len());
+    let mut applicable = 0usize;
     for (i, sweep) in sweeps.iter().enumerate() {
+        if let Some(reason) = skip(sweep) {
+            output::run_msg(&format!("{phase} {}: skipped ({reason})", sweep.label));
+            continue;
+        }
+        applicable += 1;
         // The CLI `-p` set intersects with the sweep's selection - it never
         // combines, because cargo unions selection flags (cli_package_scope).
         // Ruled-out packages are dropped with a note; a sweep keeping none
@@ -2319,8 +2344,8 @@ fn run_per_build_shape(
 
     // Skipping some sweeps for an out-of-scope `-p` is fine; skipping all of
     // them means nothing was checked, which must not read as clean.
-    if results.is_empty() && !sweeps.is_empty() {
-        let labels: Vec<&str> = sweeps.iter().map(|s| s.label.as_str()).collect();
+    if results.is_empty() && applicable > 0 {
+        let labels: Vec<&str> = sweeps.iter().filter(|s| skip(s).is_none()).map(|s| s.label.as_str()).collect();
         // Two different causes, and the message used to assume the first: with
         // no CLI `-p` at all it interpolated an empty list and read as
         // `-p : every sweep's config rules the selection out`, which named
@@ -2741,6 +2766,20 @@ struct SweepResult {
     stdout: String,
     stderr: String,
     success: bool,
+    /// The packages this run selected by name; `None` for a bare selection,
+    /// which builds the workspace's default members. What the run covered,
+    /// for deciding whether a diagnostic it did not report is news.
+    selected: Option<Vec<String>>,
+}
+
+impl SweepResult {
+    /// Whether this run selected the package `id`.
+    fn selects(&self, id: &str, info: &build::ProjectInfo) -> bool {
+        match &self.selected {
+            None => info.default_members.contains(id),
+            Some(names) => info.workspace_members.get(id).is_some_and(|n| names.contains(n)),
+        }
+    }
 }
 
 /// One row of merged-across-sweep clippy output for the text formatter.
@@ -2815,26 +2854,70 @@ fn sweep_tag(sweeps: &[String], active_sweep_count: usize) -> Option<String> {
     }
 }
 
+/// The tag for one merged diagnostic, or `None` when it would say nothing.
+///
+/// A diagnostic reported by every run that selected its package is a property
+/// of the code, not of a build shape, and naming the sweeps only lengthens the
+/// line. The tag earns its place when some run covering the package did *not*
+/// report it - a diagnostic only one feature shape produces, say - so that is
+/// the only time it is printed. `package` is the diagnostic's package id; with
+/// no id or no project info every run counts as covering, which tags anything
+/// not reported by all of them.
+fn coverage_tag(
+    reported_by: &[String],
+    package: Option<&str>,
+    results: &[SweepResult],
+    info: Option<&build::ProjectInfo>,
+) -> Option<String> {
+    let covering: Vec<&str> = results
+        .iter()
+        .filter(|r| match (package, info) {
+            (Some(id), Some(info)) => r.selects(id, info),
+            _ => true,
+        })
+        .map(|r| r.label.as_str())
+        .collect();
+    let reported_everywhere = !covering.is_empty()
+        && covering.iter().all(|label| reported_by.iter().any(|s| s == label));
+    if reported_everywhere {
+        return None;
+    }
+    sweep_tag(reported_by, results.len())
+}
+
 /// Multi-sweep version of the text formatter: parses each sweep's stdout
-/// JSON, merges + dedups diagnostics, applies scope+limit, and tags each
-/// line with its sweep label when `multi` is true. Falls back to per-sweep
+/// JSON, merges + dedups diagnostics, applies scope+limit, and when `multi`
+/// tags a line with the sweeps that reported it - only where some sweep
+/// covering its package did not ([`coverage_tag`]). Falls back to per-sweep
 /// raw streams when cargo failed but emitted no compiler-message events
 /// (e.g. cargo itself crashed before reaching the diagnostic phase).
+#[allow(clippy::too_many_arguments)]
 fn format_clippy_capped_multi(
     tool: &str,
     results: &[SweepResult],
+    info: Option<&build::ProjectInfo>,
     project_root: &Path,
     limit: usize,
     triage: bool,
     multi: bool,
     keep: &dyn Fn(&cargo_json::DiagnosticEvent) -> bool,
 ) -> String {
+    // Each diagnostic's package, keyed as the merge keys it: identical
+    // diagnostics from two runs come from the same source line, so the same
+    // package.
+    let mut package_of: HashMap<DiagKey, String> = HashMap::new();
     let parses: Vec<(String, cargo_filter::ClippyParse)> = results
         .iter()
         .map(|r| {
             let mut events = cargo_json::parse_cargo_diagnostics(&r.stdout);
             events.retain(|d| keep(d));
-            (r.label.clone(), clippy_parse_from_events(&events, !r.success))
+            let parse = clippy_parse_from_events(&events, !r.success);
+            for (d, e) in parse.diagnostics.iter().zip(&events) {
+                if let Some(id) = &e.package_id {
+                    package_of.entry(DiagKey::from(d)).or_insert_with(|| id.clone());
+                }
+            }
+            (r.label.clone(), parse)
         })
         .collect();
 
@@ -2883,7 +2966,12 @@ fn format_clippy_capped_multi(
     for m in &displayed {
         out.push_str("  ");
         if multi
-            && let Some(tag) = sweep_tag(&m.sweeps, results.len())
+            && let Some(tag) = coverage_tag(
+                &m.sweeps,
+                package_of.get(&DiagKey::from(m.diag)).map(String::as_str),
+                results,
+                info,
+            )
         {
             out.push_str(&tag);
             out.push(' ');
@@ -2974,10 +3062,10 @@ fn event_to_clippy(d: &cargo_json::DiagnosticEvent) -> cargo_filter::ClippyDiagn
 /// unknown, is treated as the workspace's own.
 fn is_dependency_warning(
     d: &cargo_json::DiagnosticEvent,
-    members: Option<&std::collections::HashSet<String>>,
+    members: Option<&HashMap<String, String>>,
 ) -> bool {
     d.level == "warning"
-        && matches!((members, &d.package_id), (Some(m), Some(id)) if !m.contains(id))
+        && matches!((members, &d.package_id), (Some(m), Some(id)) if !m.contains_key(id))
 }
 
 /// Pull a one-line "expected X, found Y" detail out of the primary
