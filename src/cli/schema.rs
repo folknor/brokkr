@@ -25,9 +25,9 @@ pub(crate) struct Cli {
 
 // What `check --textlint` / `--script` refuse: everything that shapes the build,
 // certifies a run, or runs a phase the selection skips.
-const SELECTION_CONFLICTS: [&str; 12] = [
+const SELECTION_CONFLICTS: [&str; 11] = [
     "features", "no_default_features", "package", "profile", "gate", "force_rust",
-    "raw", "json", "fix_gremlins", "timings", "commands", "args",
+    "json", "fix_gremlins", "timings", "commands", "args",
 ];
 
 #[derive(Subcommand)]
@@ -61,15 +61,9 @@ Which diagnostics are shown (every diagnostic phase):
      (lint code, file, line) so every hit of a rule clumps together.
   3. Nothing is capped: every error is printed, every time.
 
-Output mode:
-  - `--raw`: reconstruct cargo's terminal-style output by concatenating
-    each diagnostic's `rendered` field (full source annotations and
-    help suggestions).
-
 Examples:
   brokkr check                                     # gremlins + clippy + all tests
   brokkr check --fix-gremlins                      # rewrite banned chars before checking
-  brokkr check --raw                               # full terminal-style cargo output
   brokkr check -- --test read_paths                # run one test file
   brokkr check -- -- --ignored                     # run ignored tests
   brokkr check -- --test read_paths -- --ignored   # one file, ignored only
@@ -122,12 +116,6 @@ In depth: `brokkr man check` (one section at a time, e.g. `man check clippy`)."
         /// profile, and by any flag that shapes the build.
         #[arg(long)]
         force_rust: bool,
-
-        /// Reconstruct cargo's terminal-style output (full source
-        /// annotations, help suggestions) by concatenating each
-        /// diagnostic's `rendered` field.
-        #[arg(long)]
-        raw: bool,
 
         /// Append one machine-readable summary line (a JSON object) as
         /// the last line of stdout: `schema`, `certifies`, `verdict`,
@@ -211,8 +199,8 @@ Two modes:
   - `--sweep NAME`: borrow one [[check]] entry's packages/features/env verbatim.
 
 `--env KEY=VALUE` (repeatable) overrides either env source and wins last.
-Output modes match `brokkr check`'s clippy phase: uncapped text by default,
-`--raw` for cargo's terminal-style rendering.
+Output matches `brokkr check`'s clippy phase: one uncapped line per
+diagnostic.
 Exit 0 iff zero diagnostics; 1 on any lint or build error.
 
 Examples:
@@ -264,9 +252,6 @@ In depth: `brokkr man clippy`."
         #[arg(long, value_parser = validate_env_kv)]
         env: Vec<String>,
 
-        /// Reconstruct cargo's terminal-style output (human-rendered, not JSON).
-        #[arg(long)]
-        raw: bool,
     },
     /// Run `cargo fmt`. All arguments are forwarded raw.
     #[command(display_order = 0)]
@@ -1984,8 +1969,10 @@ In depth: `brokkr man nidhogg`."
     /// Feature selection matches `brokkr check` - defaults to --all-features,
     /// and runs a second sweep with [check].consumer_features if configured.
     /// Streams the test's own stdout/stderr live and prints a [test]
-    /// PASS/FAIL footer with wall time per sweep. Use --raw for unfiltered
-    /// cargo output. Gated off for litehtml/sluggrs (use `brokkr visual`).
+    /// PASS/FAIL footer with wall time per sweep. Libtest's own framing
+    /// (`running N tests`, `test foo ... ok`) is dropped - the test's
+    /// output is the signal. Gated off for litehtml/sluggrs (use
+    /// `brokkr visual`).
     ///
     /// The package passed to `cargo test -p` is resolved in order:
     ///   1. `-p/--package` on the command line
@@ -2022,9 +2009,6 @@ In depth: `brokkr man nidhogg`."
         /// Parallel cargo compile jobs (`cargo test -j N`)
         #[arg(short = 'j', long = "jobs")]
         jobs: Option<u32>,
-        /// Bypass filtering - print everything cargo emits
-        #[arg(long)]
-        raw: bool,
         /// Build and run the test in dev profile instead of release.
         /// BROKKR_TEST_BIN_DIR points at <target>/debug accordingly.
         /// Overrides `[test] debug` from brokkr.toml.

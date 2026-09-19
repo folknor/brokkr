@@ -133,7 +133,6 @@ pub fn run(
     package: Option<&str>,
     repeat: u32,
     jobs: Option<u32>,
-    raw: bool,
     profile_override: Option<bool>,
     timeout: Option<u64>,
     sweep_filter: Option<&str>,
@@ -201,7 +200,7 @@ pub fn run(
         // aggregator marks the sweep as failed.
         let mut pre_build_failed = false;
         for build_pkg in &sweep.build_packages {
-            if !run_pre_build(project_root, sweep, build_pkg, &env_refs, raw, debug)? {
+            if !run_pre_build(project_root, sweep, build_pkg, &env_refs, debug)? {
                 pre_build_failed = true;
                 reports.push(RunReport::bare(Outcome::BuildFailed));
                 break;
@@ -262,7 +261,6 @@ pub fn run(
                 state_root,
                 &env_refs,
                 &tag,
-                raw,
                 ceilings_for(&exact, ceiling),
                 announce,
                 &repeat_state,
@@ -350,7 +348,6 @@ fn run_pre_build(
     sweep: &ResolvedSweep,
     package: &str,
     env: &[(&str, &str)],
-    raw: bool,
     debug: bool,
 ) -> Result<bool, DevError> {
     let mut args: Vec<String> = vec!["build".into()];
@@ -375,20 +372,14 @@ fn run_pre_build(
     }
 
     let stderr = String::from_utf8_lossy(&captured.stderr);
-    if raw {
-        if !stderr.is_empty() {
-            output::error(&stderr);
-        }
-    } else {
-        // The diagnostics come out of `filter_clippy`, but the command that
-        // produced them is `cargo build` - label it as such.
-        let mut filtered = cargo_filter::filter_clippy(&stderr);
-        if filtered.starts_with("cargo clippy:") {
-            filtered = filtered.replacen("cargo clippy:", "cargo build:", 1);
-        }
-        if !filtered.is_empty() {
-            output::error(&filtered);
-        }
+    // The diagnostics come out of `filter_clippy`, but the command that
+    // produced them is `cargo build` - label it as such.
+    let mut filtered = cargo_filter::filter_clippy(&stderr);
+    if filtered.starts_with("cargo clippy:") {
+        filtered = filtered.replacen("cargo clippy:", "cargo build:", 1);
+    }
+    if !filtered.is_empty() {
+        output::error(&filtered);
     }
     println!(
         "[test]    BUILD FAILED {package} (sweep: {})",
@@ -447,8 +438,8 @@ fn test_argv(
     // Drive libtest's JSON event stream: the per-test budget is charged from
     // records libtest states, not from a partial `test NAME ... ` marker
     // reconstructed out of whatever the test printed alongside it. The
-    // reconstructor renders the events back to human text, so streamed output and
-    // `--raw` look exactly as they did. Native on nightly.
+    // reconstructor renders the events back to human text, so streamed output
+    // looks exactly as it did. Native on nightly.
     args.push("-Z".into());
     args.push("unstable-options".into());
     args.push("--format".into());
@@ -870,7 +861,6 @@ fn run_one(
     state_root: &Path,
     env: &[(&str, &str)],
     tag: &str,
-    raw: bool,
     ceilings: test_runner::Ceilings,
     announce: bool,
     repeat_state: &RepeatState,
@@ -883,8 +873,8 @@ fn run_one(
         state_root,
         env,
         ceilings,
-        make_stdout_forwarder(raw, sink.clone()),
-        make_stderr_forwarder(raw, sink.clone()),
+        make_stdout_forwarder(sink.clone()),
+        make_stderr_forwarder(sink.clone()),
         move |elapsed| {
             if announce {
                 println!(
@@ -937,7 +927,7 @@ fn run_one(
         // decided to show.
         let first = repeat_state.first_sighting("build failed");
         flush_sink(sink, !first);
-        return Ok(report_build_failure(tag, &wall, raw, first, stderr_text.as_ref()));
+        return Ok(report_build_failure(tag, &wall, first, stderr_text.as_ref()));
     }
 
     if let Some(fail) = parsed.failures.first() {
@@ -1058,11 +1048,10 @@ fn ceilings_for(exact: &Option<String>, ceiling: Duration) -> test_runner::Ceili
 fn report_build_failure(
     tag: &str,
     wall: &str,
-    raw: bool,
     first: bool,
     stderr_text: &str,
 ) -> RunReport {
-    if !raw && first {
+    if first {
         let filtered = cargo_filter::filter_test_build_failure(stderr_text);
         if !filtered.is_empty() {
             output::error(&filtered);
@@ -1122,11 +1111,8 @@ fn flush_sink(sink: Option<LineSink>, suppress: bool) {
     out.flush().ok();
 }
 
-fn make_stdout_forwarder(
-    raw: bool,
-    sink: Option<LineSink>,
-) -> impl FnMut(&str) + Send + 'static {
-    let mut cond = StdoutCondenser::new(raw);
+fn make_stdout_forwarder(sink: Option<LineSink>) -> impl FnMut(&str) + Send + 'static {
+    let mut cond = StdoutCondenser::new();
     move |line| {
         let lines = cond.next(line);
         if lines.is_empty() {
@@ -1150,7 +1136,7 @@ fn make_stdout_forwarder(
 /// machine (returns the lines to print) so the framing rules are unit
 /// testable without capturing the process's stdout.
 ///
-/// Rules (skipped in `raw` mode except blank collapsing):
+/// Rules:
 /// - framing lines rejected by `keep_stdout_line` are dropped;
 /// - a `failures:` header is held back until a non-blank line follows.
 ///   Libtest prints the section twice (per-test output blocks, then the
@@ -1159,15 +1145,13 @@ fn make_stdout_forwarder(
 ///   is dropped entirely;
 /// - leading blanks and runs of consecutive blanks collapse to one.
 struct StdoutCondenser {
-    raw: bool,
     prev_blank: bool,
     pending_failures: bool,
 }
 
 impl StdoutCondenser {
-    fn new(raw: bool) -> Self {
+    fn new() -> Self {
         Self {
-            raw,
             // Starts `true` so any blank line before we print anything is
             // eaten - that gets rid of the gap cargo leaves between
             // "Finished ..." and the test output.
@@ -1177,17 +1161,15 @@ impl StdoutCondenser {
     }
 
     fn next(&mut self, line: &str) -> Vec<String> {
-        if !self.raw {
-            if !keep_stdout_line(line) {
-                return Vec::new();
-            }
-            if line.trim() == "failures:" {
-                self.pending_failures = true;
-                return Vec::new();
-            }
+        if !keep_stdout_line(line) {
+            return Vec::new();
+        }
+        if line.trim() == "failures:" {
+            self.pending_failures = true;
+            return Vec::new();
         }
         let is_blank = line.trim().is_empty();
-        if !self.raw && self.pending_failures {
+        if self.pending_failures {
             if is_blank {
                 return Vec::new();
             }
@@ -1203,10 +1185,7 @@ impl StdoutCondenser {
     }
 }
 
-fn make_stderr_forwarder(
-    raw: bool,
-    sink: Option<LineSink>,
-) -> impl FnMut(&str) + Send + 'static {
+fn make_stderr_forwarder(sink: Option<LineSink>) -> impl FnMut(&str) + Send + 'static {
     // Cargo emits compile noise (warnings, errors, progress) on stderr before
     // launching the test binary. The test's own eprintln! also lands here
     // once the binary runs. Split on the first "Running tests/..." line:
@@ -1221,9 +1200,7 @@ fn make_stderr_forwarder(
     let mut in_compile_block = false;
     let mut prev_blank = true;
     move |line| {
-        let want = if raw {
-            true
-        } else if is_cargo_running_line(line) {
+        let want = if is_cargo_running_line(line) {
             in_test_phase = true;
             false
         } else if in_test_phase {
@@ -1496,8 +1473,8 @@ mod tests {
         assert!(keep_stdout_line("ok, moving on"));
     }
 
-    fn drive_condenser(raw: bool, lines: &[&str]) -> Vec<String> {
-        let mut cond = StdoutCondenser::new(raw);
+    fn drive_condenser(lines: &[&str]) -> Vec<String> {
+        let mut cond = StdoutCondenser::new();
         lines.iter().flat_map(|l| cond.next(l)).collect()
     }
 
@@ -1505,10 +1482,7 @@ mod tests {
     fn condenser_collapses_duplicate_failures_headers() {
         // The --nocapture shape: empty output-block section, blank,
         // name-list section. One header survives, glued to the list.
-        let out = drive_condenser(
-            false,
-            &["failures:", "", "failures:", "    my_mod::my_test"],
-        );
+        let out = drive_condenser(&["failures:", "", "failures:", "    my_mod::my_test"]);
         assert_eq!(out, vec!["failures:", "    my_mod::my_test"]);
     }
 
@@ -1516,26 +1490,23 @@ mod tests {
     fn condenser_drops_dangling_empty_failures_header() {
         // A failures: header with nothing after it (stream ends) is
         // never emitted.
-        let out = drive_condenser(false, &["real output", "failures:", ""]);
+        let out = drive_condenser(&["real output", "failures:", ""]);
         assert_eq!(out, vec!["real output"]);
     }
 
     #[test]
     fn condenser_collapses_blank_runs_and_leading_blanks() {
-        let out = drive_condenser(false, &["", "", "a", "", "", "b"]);
+        let out = drive_condenser(&["", "", "a", "", "", "b"]);
         assert_eq!(out, vec!["a", "", "b"]);
     }
 
+    /// Libtest's framing is dropped unconditionally now that there is no
+    /// flag to keep it: the test's own output is the signal, and the
+    /// verdict lines are what the `[test]` footer already says.
     #[test]
-    fn condenser_raw_mode_keeps_framing_and_headers() {
-        let out = drive_condenser(
-            true,
-            &["test result: ok. 1 passed", "failures:", "FAILED"],
-        );
-        assert_eq!(
-            out,
-            vec!["test result: ok. 1 passed", "failures:", "FAILED"]
-        );
+    fn condenser_drops_framing_and_bare_verdicts() {
+        let out = drive_condenser(&["test result: ok. 1 passed", "FAILED", "real output"]);
+        assert_eq!(out, vec!["real output"]);
     }
 
     #[test]

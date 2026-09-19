@@ -63,7 +63,6 @@ pub(crate) fn cmd_check(
     profile_name: Option<&str>,
     gate: bool,
     force_rust: bool,
-    raw: bool,
     json: bool,
     fix_gremlins: bool,
     timings: bool,
@@ -172,7 +171,6 @@ pub(crate) fn cmd_check(
                 bin_cfg,
                 certifies,
                 doctests,
-                raw,
                 commands,
                 extra_args,
             },
@@ -449,7 +447,6 @@ struct BuildPhaseArgs<'a> {
     bin_cfg: Option<&'a crate::config::BinConfig>,
     certifies: Option<Certifies>,
     doctests: bool,
-    raw: bool,
     commands: bool,
     extra_args: &'a [String],
 }
@@ -488,7 +485,6 @@ fn run_build_phases(
             a.state_root,
             a.active_sweeps,
             a.packages,
-            a.raw,
             a.doctests,
             a.commands,
             a.extra_args,
@@ -532,7 +528,6 @@ fn run_diagnostic_phases(
             a.packages,
             a.clippy_allow,
             a.clippy_allow_exact,
-            a.raw,
             a.commands,
             ran,
         )?;
@@ -547,7 +542,6 @@ fn run_diagnostic_phases(
             a.packages,
             a.clippy_allow,
             a.clippy_allow_exact,
-            a.raw,
             a.commands,
             ran,
         )?;
@@ -624,7 +618,6 @@ fn finish_build_phases(
             a.packages,
             a.certifies,
             &crate::config::test_phase_allow_flags(a.clippy_allow, a.clippy_allow_exact),
-            a.raw,
             a.commands,
         )?;
     }
@@ -833,8 +826,8 @@ fn run_sequential_resolutions(
     extra_args: &[String],
     project_env: &[(String, String)],
     allow_args: &[String],
-    // (raw, doctests, multi, commands)
-    flags: (bool, bool, bool, bool),
+    // (doctests, multi, commands)
+    flags: (bool, bool, bool),
     mut timings: Option<&mut Vec<TestTiming>>,
 ) -> Result<bool, DevError> {
     let owned: Vec<String> = scope.iter().map(|s| (*s).to_owned()).collect();
@@ -855,7 +848,6 @@ fn run_sequential_resolutions(
             flags.0,
             flags.1,
             flags.2,
-            flags.3,
             timings.as_deref_mut(),
         )?;
         // Keep going rather than returning on the first red package: the phase
@@ -1963,7 +1955,6 @@ fn run_clippy_phase(
     packages: &[String],
     allow: &[String],
     allow_exact: &[SitedAllow],
-    raw: bool,
     commands: bool,
     clippy_ran: &mut [bool],
 ) -> Result<(), DevError> {
@@ -1986,7 +1977,7 @@ fn run_clippy_phase(
     let keep = |d: &cargo_json::DiagnosticEvent| {
         !is_dependency_warning(d, members) && !sited_allowed(d, allow_exact)
     };
-    report_diagnostic_phase("clippy", &results, &info, project_root, &keep, raw, multi, commands)
+    report_diagnostic_phase("clippy", &results, &info, project_root, &keep, multi, commands)
 }
 
 /// The `rustdoc` phase: `cargo doc --no-deps` per build shape, failing on any
@@ -2004,7 +1995,6 @@ fn run_rustdoc_phase(
     packages: &[String],
     allow: &[String],
     allow_exact: &[SitedAllow],
-    raw: bool,
     commands: bool,
     ran: &mut [bool],
 ) -> Result<(), DevError> {
@@ -2028,7 +2018,7 @@ fn run_rustdoc_phase(
             && !sited_allowed(d, allow_exact)
     };
     let multi = results.len() > 1;
-    report_diagnostic_phase("rustdoc", &results, &info, project_root, &keep, raw, multi, commands)
+    report_diagnostic_phase("rustdoc", &results, &info, project_root, &keep, multi, commands)
 }
 
 /// Whether `[lints] allow` names this diagnostic's lint. Matched on the exact
@@ -2045,7 +2035,7 @@ fn sited_allowed(d: &cargo_json::DiagnosticEvent, allow_exact: &[SitedAllow]) ->
 
 /// Decide and report a diagnostic phase from its cargo runs: any failed run
 /// or any diagnostic `keep` admits fails it. Prints the failing commands, then
-/// either `--raw` rendered text or the scoped, cross-sweep summary.
+/// the scoped, cross-sweep summary.
 #[allow(clippy::too_many_arguments)]
 fn report_diagnostic_phase(
     phase: &str,
@@ -2053,7 +2043,6 @@ fn report_diagnostic_phase(
     info: &build::ProjectInfo,
     project_root: &Path,
     keep: &dyn Fn(&cargo_json::DiagnosticEvent) -> bool,
-    raw: bool,
     multi: bool,
     commands: bool,
 ) -> Result<(), DevError> {
@@ -2072,23 +2061,14 @@ fn report_diagnostic_phase(
         }
     }
 
-    if raw {
-        for r in results {
-            if multi {
-                output::error(&format!("[{}]", r.label));
-            }
-            output::error(&raw_clippy_text(r));
-        }
-    } else {
-        output::error(&format_clippy_multi(
-            &format!("cargo {}", if phase == "rustdoc" { "doc" } else { phase }),
-            results,
-            Some(info),
-            project_root,
-            multi,
-            keep,
-        ));
-    }
+    output::error(&format_clippy_multi(
+        &format!("cargo {}", if phase == "rustdoc" { "doc" } else { phase }),
+        results,
+        Some(info),
+        project_root,
+        multi,
+        keep,
+    ));
     Err(DevError::Build(format!("{phase} failed")))
 }
 
@@ -2384,7 +2364,6 @@ pub(crate) fn cmd_clippy(
     env_overrides: &[(String, String)],
     clippy_allow: &[String],
     clippy_allow_exact: &[SitedAllow],
-    raw: bool,
 ) -> Result<(), DevError> {
     let started = std::time::Instant::now();
     let mut sweep = build_clippy_sweep(
@@ -2417,7 +2396,6 @@ pub(crate) fn cmd_clippy(
         &[],
         clippy_allow,
         clippy_allow_exact,
-        raw,
         true,
         &mut clippy_ran,
     ) {
@@ -2546,45 +2524,6 @@ fn merge_check_envs(
         }
     }
     Ok(merged)
-}
-
-/// Reconstruct cargo's terminal-style output for `--raw` mode.
-///
-/// With `--message-format=json` cargo no longer prints rendered
-/// diagnostics to stderr - it emits them as the `rendered` field of
-/// each compiler-message JSON event. `--raw` still wants the
-/// terminal-style text, so concatenate the rendered fields and tack on
-/// any cargo status messages on stderr (Compiling/Finished/etc).
-/// Falls back to the raw streams when the parser found nothing - that's
-/// the "cargo crashed and emitted non-JSON" case where the stderr / stdout
-/// dump is the only useful thing left.
-fn raw_clippy_text(r: &SweepResult) -> String {
-    let events = cargo_json::parse_cargo_diagnostics(&r.stdout);
-    let rendered: Vec<&str> = events
-        .iter()
-        .filter_map(|d| d.rendered.as_deref())
-        .collect();
-
-    if rendered.is_empty() {
-        let mut out = String::new();
-        out.push_str(&r.stderr);
-        if !r.stdout.is_empty() {
-            out.push_str(&r.stdout);
-        }
-        return out;
-    }
-
-    let mut out = String::new();
-    for r in rendered {
-        out.push_str(r);
-        if !r.ends_with('\n') {
-            out.push('\n');
-        }
-    }
-    if !r.stderr.is_empty() {
-        out.push_str(&r.stderr);
-    }
-    out
 }
 
 struct SweepResult {
@@ -2989,7 +2928,6 @@ fn run_test_phase(
     state_root: &Path,
     sweeps: &[ResolvedSweep],
     packages: &[String],
-    raw: bool,
     doctests: bool,
     commands: bool,
     extra_args: &[String],
@@ -3059,7 +2997,6 @@ fn run_test_phase(
                 pkg,
                 &project_env,
                 &allow_args,
-                raw,
                 commands,
             )?;
         }
@@ -3081,7 +3018,6 @@ fn run_test_phase(
                 extra_args,
                 &project_env,
                 &allow_args,
-                raw,
                 doctests,
                 commands,
                 timings.as_deref_mut(),
@@ -3095,7 +3031,6 @@ fn run_test_phase(
                 extra_args,
                 &project_env,
                 &allow_args,
-                raw,
                 doctests,
                 commands,
                 timings.as_deref_mut(),
@@ -3109,7 +3044,7 @@ fn run_test_phase(
                 extra_args,
                 &project_env,
                 &allow_args,
-                (raw, doctests, multi, commands),
+                (doctests, multi, commands),
                 timings.as_deref_mut(),
             )?
         };

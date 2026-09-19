@@ -69,7 +69,6 @@ Flags:
   to certify "complete"). The stable pre-commit invocation. Conflicts with
   `--profile`, `--features`, `--no-default-features`, and `-p`. Trailing
   `-- …` test args are rejected under any `complete` claim (see `certifies`)
-- `--raw` - unfiltered cargo output (terminal-style rendering)
 - `--json` - append one machine-readable summary line (a JSON object) as the
   last line of stdout; human output is unchanged
 - `--fix-gremlins` - rewrite banned chars in place before scan
@@ -77,11 +76,11 @@ Flags:
   form (see the log-lines section)
 
 Output:
-- Default text mode: each diagnostic becomes one line, compilation noise
-  stripped, passing tests aggregated.
-- `--raw` reconstructs cargo's terminal-style output by concatenating each
-  diagnostic's `rendered` field plus the cargo status messages on stderr -
-  one cargo invocation.
+- Each diagnostic becomes one line, compilation noise stripped, passing
+  tests aggregated. There is no unfiltered mode: rustc's rendered form -
+  source excerpt, carets, `help:` spans - is not reachable from `check`.
+  The one-line form is what keeps a thirty-error run readable, and a gate
+  that can turn into a scroll gets read as one.
 - Which diagnostics a phase shows, in every diagnostic phase (gremlins,
   header, textlint, manifest, dependency rules, clippy, rustdoc):
   1. **Everything is an error**, whatever level the tool reported it at,
@@ -128,7 +127,7 @@ re-run clippy before reaching it each time. It is never a gate:
 
 - it prints `selected entries only - not a gate` up front;
 - clap refuses it beside `--gate`, `--profile`, `-p`, `--features`,
-  `--no-default-features`, `--force-rust`, `--json`, `--raw`, `--timings`,
+  `--no-default-features`, `--force-rust`, `--json`, `--timings`,
   `--commands`, `--fix-gremlins` and forwarded test args. `--json` is refused
   because its trailer is a verdict a machine could read as a pass;
 - a name that matches no entry is an error that lists the known names, so a
@@ -933,7 +932,7 @@ Skippable as `publish_cycle` in a partial profile's `skip_phases`.
 ## `clippy` phase
 
 The clippy phase always invokes cargo with `--message-format=json` and ingests
-via `cargo_json::parse_cargo_diagnostics` regardless of `--raw` - the text
+via `cargo_json::parse_cargo_diagnostics` - the text
 formatter converts each `DiagnosticEvent` into a `ClippyDiagnostic` so every
 warning keeps its lint code in the header, even for repeats of the same rule
 (cargo's pretty-printed text only annotates the first occurrence per crate,
@@ -958,9 +957,9 @@ graph:
   dependency's warning. A capped `warning` is reported as the error it is, in
   the count and the header. Only messages at `error` or `warning` level are
   diagnostics: rustc's spanless `failure-note` ("For more information about
-  this error, try `rustc --explain`") is not. The `--raw` escape hatch still
-  dumps clippy's own rendered text verbatim (which shows the capped `warning:`
-  wording).
+  this error, try `rustc --explain`") is not. A capped diagnostic keeps
+  clippy's `warning:` wording in the underlying JSON; brokkr reports it as the
+  error it is, and no view shows the original wording.
 
 ### `[lints] allow`
 
@@ -1017,9 +1016,8 @@ file moved, so the entry should be deleted or re-sited rather than accrete.
 The notice only fires on unscoped runs: a `-p`-narrowed run doesn't check an
 entry's file when it lives outside the selected packages, so "suppressed
 nothing" there proves nothing.
-`--raw` still shows suppressed diagnostics (it dumps clippy's own rendered
-text verbatim); the pass/fail decision and the formatted output do not
-count them. The path half must match the file exactly as clippy reports it
+A suppressed diagnostic is dropped from both the pass/fail decision and the
+output; nothing shows it. The path half must match the file exactly as clippy reports it
 (relative to the tree cargo compiles in - copy it from the failing
 diagnostic's location).
 
@@ -1055,8 +1053,7 @@ without selecting does not count as covered.
 
 Output goes through clippy's parser and formatter: one line per diagnostic in
 the `error[<lint>] <file>:<line>:<col> <message>` form, merged across sweeps,
-sorted by lint with changed files first and nothing capped, and cargo's
-rendered text under `--raw`.
+sorted by lint with changed files first and nothing capped.
 
 **Any diagnostic fails the phase, warnings included** - the rule clippy's gate
 applies, and for the same reason. Rustdoc's lints are warn-by-default, so a
@@ -1160,7 +1157,7 @@ short list and mis-attributed which test carried a mutation's coverage):
 - **libtest's `test result:` tally outranks the parsed roster for the
   headline count.** `cargo test: N failures` reports
   `max(tally, roster.len())`, and when the tally is larger the report says how
-  many failures could not be attributed to a test name and points at `--raw`.
+  many failures could not be attributed to a test name.
   Relatedly, an empty roster no longer routes to the compact "all passed"
   summary when the tally is non-zero.
 
@@ -1272,8 +1269,8 @@ same means: **every lane drives libtest's JSON event stream**
 (`--format json -Z unstable-options`, injected automatically; native on nightly).
 Each `started` event arms the cap for that test, each `ok`/`failed` disarms it,
 and a test that crosses 20s is named and its process group killed. The events are
-reconstructed back into human libtest text, so `--raw` and filtered output look
-exactly as they always did.
+reconstructed back into human libtest text, so the filtered output looks
+exactly as it always did.
 
 The parallel lane always needed this - human output emits no per-test *start*
 signal once tests run concurrently - and the serial lane now uses it too. What it
@@ -1317,13 +1314,18 @@ standard per-test watchdog. Every test runs even after failures (the
 per-test failure list is the point); the sweep fails if any test failed or
 if zero tests were enumerated. Shape lines carry `process-isolated`.
 
-Passing tests are **not** listed one per line: a lane of a hundred serial
-tests would bury the rest of the run, and the sweep's one summary line
-(`serial/live: 52 tests process-isolated passed, 1 pkg-skipped`) carries the
-counts. Failures always report in full. `--raw` restores the roll-call: the
-pre-run plan line, one `PASS <name> (<secs>)` per test, and a `SKIP` line
-per `#[ignore]`d name in a lane without `include_ignored`. It rides on `--raw`
-because that flag already means "no filtering, show me what the tools said".
+This lane - and only this lane - prints a **roll-call**: the pre-run plan
+line, one `PASS <name> (<secs>)` per test, and a `SKIP` line per `#[ignore]`d
+name in a lane without `include_ignored`. Unconditional, no flag.
+
+Everywhere else in the test phase a passing test prints nothing, because a
+hundred green lines bury the run. This lane is exempt because it is small by
+construction: it exists for families of a dozen tests that need a process
+each, and a lane that outgrows that wants nextest (see the module header of
+`src/check_cmd/isolate.rs`). So a roll-call long enough to be a scroll is the
+signal to move the lane, not a reason to hide the lines. It is also the
+slowest-per-test lane in the run, which is exactly where progress is worth
+watching.
 
 Works without a `brokkr.toml` - usable in any Rust+git repo. When a
 `brokkr.toml` is present its host config still applies (e.g. Nidhogg's
@@ -1444,7 +1446,8 @@ one that otherwise reports success.
 
 A passing binary prints nothing of its own. Thirty-five green lines say only
 what the summary says, and a reader who has learned to scroll past the normal
-case will scroll past the abnormal one too; `--raw` still emits everything.
+case will scroll past the abnormal one too. To watch one run, run it:
+`brokkr test <NAME>` streams a single test's output live.
 Build time and fan-out time are reported separately because a lane sold on wall
 time must not fold the compile into the number it is judged on. **The slowest
 binary is named because it is the sweep's floor** - the sweep finishes when it
@@ -1809,14 +1812,10 @@ fine in the rest of the run - genuinely confusing without context - so the
 phase names the mechanism: it diffs the workspace resolve against the
 failing package's install-shaped resolve and prints which features each
 dependency loses ("hyper v1.11.0: server"), with the usual fix being to
-declare the feature in the install package's own manifest. Under `--raw`
-the phase prints rustc's full rendered diagnostics instead of the one-line
-form - the dropped notes ("perhaps two different versions of crate X are
-being used?") are precisely the detail this failure class needs. `--raw`
-stays whole-run, not failing-phase-scoped: phases stream as they run, so
-scoping would mean buffering everything to replay the loser, killing the
-watch-it-run use; the low-noise debug loop is `-p <install pkg> --raw`,
-which narrows the test phases and the install set together.
+declare the feature in the install package's own manifest. The errors print
+in the one-line form like every other phase; the low-noise debug loop is
+`-p <install pkg>`, which narrows the test phases and the install set
+together.
 
 When it runs: `[bin] install_feature_check = "off" | "gate" | "always"`,
 default `gate` - only under a `certifies = "complete"` profile, because
@@ -2204,7 +2203,6 @@ Flags:
   `[test] FAIL` footer alone. A closing `[test] summary:` line gives
   PASS/FAIL counts plus one `Nx <msg> @ <loc>` line per distinct failure
 - `-j <n>` - cargo `-j N` for parallel compile
-- `--raw` - disable all filtering
 - `--debug` - dev profile instead of release (overrides both `[test] debug` and
   a sweep's `[[check]] profile`)
 - `--release` - force release, overriding `[test] debug = true` and a sweep's

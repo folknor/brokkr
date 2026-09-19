@@ -339,7 +339,6 @@ fn probe_missing_bin(
     debug: bool,
     allow_args: &[String],
     env_refs: &[(&str, &str)],
-    raw: bool,
     commands: bool,
 ) -> Result<BinVerdict, DevError> {
     let selector = vec!["--bin".to_owned(), bin.to_owned()];
@@ -373,32 +372,13 @@ fn probe_missing_bin(
     if errors.is_empty() {
         output::error(&stderr);
     } else {
-        report_errors(package, &errors, raw);
+        report_errors(package, &errors);
     }
     Ok(BinVerdict::Failed)
 }
 
-/// Render one invocation's rustc errors, whole under `--raw` and one line
-/// each otherwise.
-fn report_errors(package: &str, errors: &[&cargo_json::DiagnosticEvent], raw: bool) {
-    if raw {
-        // The full rustc diagnostics, not the one-line rendering. This
-        // failure class is exactly where the dropped parts matter:
-        // rustc's notes ("perhaps two different versions of crate X are
-        // being used?"), spans, and help text name the mechanism the
-        // one-liner cannot.
-        output::error(&format!(
-            "install-feature {package}: {}",
-            output::count(errors.len(), "error")
-        ));
-        for d in errors {
-            match &d.rendered {
-                Some(r) => output::error(r.trim_end()),
-                None => output::error(&event_to_clippy(d).format_one()),
-            }
-        }
-        return;
-    }
+/// Render one invocation's rustc errors, one line each.
+fn report_errors(package: &str, errors: &[&cargo_json::DiagnosticEvent]) {
     let mut msg = format!(
         "install-feature {package}: {}\n",
         output::count(errors.len(), "error")
@@ -423,7 +403,6 @@ fn check_one_install_package(
     debug: bool,
     allow_args: &[String],
     env_refs: &[(&str, &str)],
-    raw: bool,
     commands: bool,
 ) -> Result<bool, DevError> {
     // `cargo install` installs every eligible bin in the package, so the
@@ -464,7 +443,7 @@ fn check_one_install_package(
             // carries cargo's own words.
             output::error(&stderr);
         } else {
-            report_errors(package, &errors, raw);
+            report_errors(package, &errors);
         }
         let scan = scan_artifacts(&stdout, package);
         if !scan.duplicate_units.is_empty() {
@@ -490,7 +469,7 @@ fn check_one_install_package(
     let mut waived: Vec<String> = Vec::new();
     for bin in &missing {
         match probe_missing_bin(
-            project_root, package, bin, debug, allow_args, env_refs, raw, commands,
+            project_root, package, bin, debug, allow_args, env_refs, commands,
         )? {
             BinVerdict::Checked => {}
             BinVerdict::Ineligible => waived.push(bin.clone()),
@@ -540,7 +519,6 @@ fn run_install_feature_phase(
     cli_packages: &[String],
     certifies: Option<Certifies>,
     allow_flags: &[String],
-    raw: bool,
     commands: bool,
 ) -> Result<(), DevError> {
     let Some(cfg) = bin_cfg.filter(|c| !c.install.is_empty()) else {
@@ -596,7 +574,6 @@ fn run_install_feature_phase(
             cfg.debug,
             &allow_args,
             &env_refs,
-            raw,
             commands,
         )?;
     }

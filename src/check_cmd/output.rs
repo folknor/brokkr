@@ -361,16 +361,14 @@ pub(crate) fn sweep_run_line(
 }
 
 /// Build one binary package with the sweep's feature flags. Errors
-/// surface compile failures the same way the test phase does: filter
-/// the stderr through `cargo_filter::filter_clippy` (or pass it
-/// through raw).
+/// surface compile failures the same way the test phase does: the
+/// stderr filtered through `cargo_filter::filter_clippy`.
 fn run_sweep_pre_build(
     project_root: &Path,
     sweep: &ResolvedSweep,
     package: &str,
     project_env: &[(String, String)],
     allow_args: &[String],
-    raw: bool,
     commands: bool,
 ) -> Result<(), DevError> {
     let mut args: Vec<String> = vec!["build".into()];
@@ -411,13 +409,7 @@ fn run_sweep_pre_build(
     if !commands {
         output::error(&format!("failing command: cargo {}", args.join(" ")));
     }
-    if raw {
-        if !stderr.is_empty() {
-            output::error(&stderr);
-        }
-    } else {
-        output::error(&cargo_filter::filter_clippy(&stderr));
-    }
+    output::error(&cargo_filter::filter_clippy(&stderr));
     Err(DevError::Build(format!(
         "build failed for package '{package}' in sweep '{}'",
         sweep.label
@@ -525,7 +517,6 @@ fn run_one_test_sweep(
     extra_args: &[String],
     project_env: &[(String, String)],
     allow_args: &[String],
-    raw: bool,
     doctests: bool,
     multi: bool,
     commands: bool,
@@ -753,32 +744,18 @@ fn run_one_test_sweep(
         if !commands {
             output::error(&full_command);
         }
-        if raw {
-            if !stderr.is_empty() {
-                output::error(&stderr);
-            }
-            if !stdout.is_empty() {
-                output::error(&stdout);
-            }
-        } else {
-            output::error(&cargo_filter::filter_test(&stdout, &stderr));
-        }
+        output::error(&cargo_filter::filter_test(&stdout, &stderr));
         return Ok(false);
     }
 
-    if raw {
-        if !stderr.is_empty() {
-            print!("{stderr}");
-        }
-        if !stdout.is_empty() {
-            print!("{stdout}");
-        }
-    } else {
-        let filtered = cargo_filter::filter_clippy_in_tree(&stderr, Some(project_root));
-        if filtered != "cargo clippy: no issues" {
-            let relabeled = filtered.replacen("cargo clippy:", "cargo test:", 1);
-            output::warn(&relabeled);
-        }
+    // A green sweep prints no test output. To watch one test run, run it:
+    // `brokkr test <NAME>` streams its stdout/stderr live. A gate is not a
+    // log tail, and the build warnings below are the one thing here that a
+    // passing run still needs to say.
+    let filtered = cargo_filter::filter_clippy_in_tree(&stderr, Some(project_root));
+    if filtered != "cargo clippy: no issues" {
+        let relabeled = filtered.replacen("cargo clippy:", "cargo test:", 1);
+        output::warn(&relabeled);
     }
 
     // Successful exit, but a profile/filter combo could still have

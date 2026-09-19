@@ -33,15 +33,10 @@ fn run_isolated_sweep(
     extra_args: &[String],
     project_env: &[(String, String)],
     allow_args: &[String],
-    raw: bool,
     doctests: bool,
     commands: bool,
     mut timings: Option<&mut Vec<TestTiming>>,
 ) -> Result<bool, DevError> {
-    // The per-test roll-call rides on `--raw`, the flag that already means
-    // "no filtering, show me what the tools said". A lane that prints one line
-    // per passing test is that same view of the test phase.
-    let roll_call = raw;
     if !extra_args.is_empty() {
         return Err(DevError::Config(
             "`brokkr check -- …` extra args are not supported on a sweep with \
@@ -79,7 +74,7 @@ fn run_isolated_sweep(
         return Ok(false);
     };
 
-    let Some((runnable, pkg_skipped)) = plan_runnable(&plan, &sweep.label, roll_call) else {
+    let Some((runnable, pkg_skipped)) = plan_runnable(&plan, &sweep.label) else {
         return Ok(false);
     };
 
@@ -89,9 +84,7 @@ fn run_isolated_sweep(
     for name in &runnable {
         if !plan.include_ignored && plan.ignored.contains(name) {
             ignored += 1;
-            if roll_call {
-                println!("[test]    SKIP {name} (#[ignore], lane runs without --include-ignored)");
-            }
+            println!("[test]    SKIP {name} (#[ignore], lane runs without --include-ignored)");
             continue;
         }
         let outcome = run_one_isolated_test(
@@ -101,7 +94,6 @@ fn run_isolated_sweep(
             name,
             plan.include_ignored,
             &env_refs,
-            raw,
             commands,
         )?;
         match outcome {
@@ -184,10 +176,9 @@ enum IsolatedOutcome {
 
 /// The plan's runnable name list plus the package-qualified-skipped
 /// count; `None` after reporting a qualified-skip collision or a
-/// zero-runnable enumeration. Under `--raw` the plan is announced before the
-/// run (the roll-call); otherwise the sweep's one summary line reports it
-/// after.
-fn plan_runnable(plan: &IsolatedPlan, label: &str, roll_call: bool) -> Option<(Vec<String>, usize)> {
+/// zero-runnable enumeration. The plan is announced before the run - see the
+/// roll-call note in `run_one_isolated_test`.
+fn plan_runnable(plan: &IsolatedPlan, label: &str) -> Option<(Vec<String>, usize)> {
     // A name present in both a qualified-skipped and an unskipped package
     // cannot be split by one `cargo test -- --exact` invocation: error
     // rather than half-obey the skip.
@@ -224,13 +215,11 @@ fn plan_runnable(plan: &IsolatedPlan, label: &str, roll_call: bool) -> Option<(V
         ));
         return None;
     }
-    if roll_call {
-        println!(
-            "[test]    {label}: {}, one process each{}",
-            count_tests(runnable.len()),
-            skip_note(pkg_skipped)
-        );
-    }
+    println!(
+        "[test]    {label}: {}, one process each{}",
+        count_tests(runnable.len()),
+        skip_note(pkg_skipped)
+    );
     Some((runnable, pkg_skipped))
 }
 
@@ -333,10 +322,8 @@ fn run_one_isolated_test(
     name: &str,
     include_ignored: bool,
     env_refs: &[(&str, &str)],
-    raw: bool,
     commands: bool,
 ) -> Result<IsolatedOutcome, DevError> {
-    let roll_call = raw;
     let mut args: Vec<String> = vec!["test".into()];
     args.extend(selection.iter().cloned());
     // `--tests` selects lib+bins+integration but not doctests (which this
@@ -387,16 +374,7 @@ fn run_one_isolated_test(
         output::error(&format!("FAIL {name}"));
         output::error(&format!("failing command: cargo {}", args.join(" ")));
         let stderr = String::from_utf8_lossy(&run.captured.stderr);
-        if raw {
-            if !stderr.is_empty() {
-                output::error(&stderr);
-            }
-            if !stdout.is_empty() {
-                output::error(&stdout);
-            }
-        } else {
-            output::error(&cargo_filter::filter_test(&stdout, &stderr));
-        }
+        output::error(&cargo_filter::filter_test(&stdout, &stderr));
         return Ok(IsolatedOutcome::Failed);
     }
 
@@ -428,26 +406,18 @@ fn run_one_isolated_test(
         return Ok(IsolatedOutcome::Failed);
     }
 
-    // A passing test is not news: the sweep's summary line carries the
-    // count, and a failure reports itself in full. One line per test turns
-    // a gate run into a scroll. `--raw` is the way back to the roll-call.
+    // The roll-call: one line per test, unconditionally. Elsewhere in the test
+    // phase a passing test prints nothing, because a hundred green lines bury
+    // the run - but this lane is small by construction. It exists for families
+    // of a dozen tests that need a process each, and a lane that grows past
+    // that wants nextest (see the module header), so the scroll this would
+    // cause is the signal to move it rather than a reason to hide it. It is
+    // also the slowest-per-test lane in the run, which is exactly where
+    // progress is worth seeing.
     let elapsed = run.completed.first().map(|(_, e)| *e);
-    if roll_call {
-        match elapsed {
-            Some(e) => println!("[test]    PASS {name} ({:.1}s)", e.as_secs_f64()),
-            None => println!("[test]    PASS {name}"),
-        }
-    }
-    // `--raw` disables all filtering, on the success path too: echo the
-    // passing test's own captured output, matching the non-isolated sweep.
-    if raw {
-        let stderr = String::from_utf8_lossy(&run.captured.stderr);
-        if !stderr.is_empty() {
-            print!("{stderr}");
-        }
-        if !stdout.is_empty() {
-            print!("{stdout}");
-        }
+    match elapsed {
+        Some(e) => println!("[test]    PASS {name} ({:.1}s)", e.as_secs_f64()),
+        None => println!("[test]    PASS {name}"),
     }
     Ok(IsolatedOutcome::Passed(elapsed))
 }

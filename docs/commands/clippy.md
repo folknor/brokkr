@@ -119,9 +119,8 @@ ingestion rather than via `-A`) applies here too. See
 - default: one line per error, sorted by (lint, file, line), those in files
   with unstaged changes first. Every error prints - there is no cap. The same
   rule as `check`.
-- `--raw`: cargo's terminal-style rendering (full source annotations and help
-  suggestions). This is human-rendered text, not machine JSON - there is no
-  `--json` mode (it was removed from `check`; `clippy` never had one).
+There is no unfiltered mode and no `--json` mode: one line per diagnostic is
+the whole output surface.
 
 Exit code: `0` iff clippy produced zero diagnostics; `1` (with a
 `clippy failed in Ns` summary) on any diagnostic or a genuine build error. An

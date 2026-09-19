@@ -18,7 +18,6 @@ pub struct DiagnosticEvent {
     /// Inline label on the primary span, e.g. "expected `i32`, found `&str`".
     pub primary_label: Option<String>,
     pub children: Vec<ChildDiagnostic>,
-    pub rendered: Option<String>,
     /// The package cargo compiled when rustc emitted this: the
     /// `compiler-message`'s top-level `package_id`, in the same form
     /// `cargo metadata` lists `workspace_members`.
@@ -134,11 +133,6 @@ pub fn parse_cargo_diagnostics(stdout: &str) -> Vec<DiagnosticEvent> {
             })
             .unwrap_or_default();
 
-        let rendered = msg
-            .get("rendered")
-            .and_then(|v| v.as_str())
-            .map(|s| s.trim_end().to_string());
-
         events.push(DiagnosticEvent {
             level,
             code,
@@ -148,7 +142,6 @@ pub fn parse_cargo_diagnostics(stdout: &str) -> Vec<DiagnosticEvent> {
             column: col_start,
             primary_label,
             children,
-            rendered,
             package_id: val
                 .get("package_id")
                 .and_then(|v| v.as_str())

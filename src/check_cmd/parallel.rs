@@ -595,7 +595,6 @@ fn run_parallel_sweep(
     extra_args: &[String],
     project_env: &[(String, String)],
     allow_args: &[String],
-    raw: bool,
     doctests: bool,
     commands: bool,
     // `whole_workspace` used to be decided here, as the local `unify` flag.
@@ -849,7 +848,7 @@ fn run_parallel_sweep(
         .collect();
     timings_record(state_root, &sweep.entry_name, &measured);
 
-    report_runs(project_root, sweep, runs, raw, fanout_started, build_elapsed, timings)
+    report_runs(project_root, sweep, runs, fanout_started, build_elapsed, timings)
 }
 
 /// Render every binary's buffered output and decide the sweep's verdict.
@@ -864,7 +863,6 @@ fn report_runs(
     project_root: &Path,
     sweep: &ResolvedSweep,
     runs: Vec<Result<BinaryRun, DevError>>,
-    raw: bool,
     started: Instant,
     build_elapsed: Duration,
     mut timings: Option<&mut Vec<TestTiming>>,
@@ -926,16 +924,7 @@ fn report_runs(
                 sweep.label, run.label
             ));
             output::error(&run.command);
-            if raw {
-                if !stderr.is_empty() {
-                    output::error(&stderr);
-                }
-                if !stdout.is_empty() {
-                    output::error(&stdout);
-                }
-            } else {
-                output::error(&cargo_filter::filter_test(&stdout, &stderr));
-            }
+            output::error(&cargo_filter::filter_test(&stdout, &stderr));
             ok = false;
             continue;
         }
@@ -958,16 +947,8 @@ fn report_runs(
         }
         // A passing binary prints NOTHING. Thirty-five green lines say only
         // what one summary line says, and a reader who has learned to scroll
-        // past the normal case will scroll past the abnormal one too. `--raw`
-        // still gets everything, which is what `--raw` is for.
-        if raw {
-            if !stderr.is_empty() {
-                print!("{stderr}");
-            }
-            if !stdout.is_empty() {
-                print!("{stdout}");
-            }
-        }
+        // past the normal case will scroll past the abnormal one too. To watch
+        // one run, run it: `brokkr test <NAME>` streams its output live.
         if run.elapsed > slowest.1 {
             slowest = (run.label.clone(), run.elapsed);
         }

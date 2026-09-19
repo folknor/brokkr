@@ -386,7 +386,6 @@ fn run(cli: Cli) -> Result<(), DevError> {
         profile,
         gate,
         force_rust,
-        raw,
         json,
         fix_gremlins,
         timings,
@@ -504,7 +503,6 @@ fn run(cli: Cli) -> Result<(), DevError> {
             profile.as_deref(),
             gate,
             force_rust,
-            raw,
             json,
             fix_gremlins,
             timings,
@@ -519,7 +517,6 @@ fn run(cli: Cli) -> Result<(), DevError> {
         no_default_features,
         sweep,
         env,
-        raw,
         lib,
     } = cli.command
     {
@@ -547,7 +544,6 @@ fn run(cli: Cli) -> Result<(), DevError> {
             &env_overrides,
             clippy_cfg.as_ref().map_or(&[][..], |c| &c.allow),
             clippy_cfg.as_ref().map_or(&[][..], |c| &c.allow_exact),
-            raw,
         );
     }
 
@@ -1489,7 +1485,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             }
         }
         // ----- cargo single-test runner -----
-        Command::Test { name, package, repeat, jobs, raw, debug, release, timeout, sweep } => {
+        Command::Test { name, package, repeat, jobs, debug, release, timeout, sweep } => {
             // The lock lives in the config dir (.brokkr); cargo runs
             // against the code tree (build_root), which differs under
             // the one-level-up layout.
@@ -1498,7 +1494,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             // `.brokkr` state (hung-test snapshots) belongs under the
             // config dir (project_root), which differs under the
             // one-level-up foreign-checkout layout.
-            test_cmd::run(&dev_config, project, &build_root, &project_root, &name, package.as_deref(), repeat, jobs, raw, profile_override(debug, release), timeout, sweep.as_deref())
+            test_cmd::run(&dev_config, project, &build_root, &project_root, &name, package.as_deref(), repeat, jobs, profile_override(debug, release), timeout, sweep.as_deref())
         }
         Command::List => {
             match project {
