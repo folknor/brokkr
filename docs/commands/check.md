@@ -72,11 +72,6 @@ Flags:
 - `--raw` - unfiltered cargo output (terminal-style rendering)
 - `--json` - append one machine-readable summary line (a JSON object) as the
   last line of stdout; human output is unchanged
-- `--limit N|all` - max errors shown per phase (every diagnostic phase, and
-  the `--timings` list), default 20. `all` (or `0`) removes the cap and also
-  restores the long views: verbatim script-check output, the process-isolated
-  roll-call, the per-entry quarantine listing. Does *not* widen the test
-  phase - the failure list is never capped in the first place
 - `--fix-gremlins` - rewrite banned chars in place before scan
 - `--commands` - log each sweep's full cargo command instead of the collapsed
   form (see the log-lines section)
@@ -99,10 +94,11 @@ Output:
      count. The error in the file being edited is the one to fix first.
      Clippy and rustdoc diagnostics are sorted by (lint code, file, line)
      within each group, so every hit of a rule clumps together.
-  3. **At most `--limit`** (default 20; `--limit all` for no cap). Nothing is
-     exempt from the cap; a trailer counts the rest and where they are -
-     `+2 more in unstaged files, +31 in other files (--limit all to see all)`,
-     or `+31 more` when no unstaged file had errors. See `src/scope.rs`.
+  3. **Nothing is capped.** Every error prints, every time, and there is no
+     flag that changes that. A cap plus an escape hatch means the default
+     view of a bad run is a lie a reader has to know to re-ask; the number
+     of errors is the reader's problem to scroll, not brokkr's to withhold.
+     See `src/scope.rs`.
 - `--json` appends one summary object as the **last line of stdout**, leaving
   the human output untouched (the old NDJSON per-event mode is gone; this is
   the result contract). Fields: `schema` (currently
@@ -125,7 +121,7 @@ Output:
 named `[[textlint]]` rules and `[[script_check]]` entries - every other phase
 is skipped. Both are repeatable (or comma-separated) and combine. Script checks
 run whatever their `stage`, since stages only place them around phases this
-run skips. `--limit` still applies.
+run skips.
 
 This is for a person iterating on one failing gate, where a full run would
 re-run clippy before reaching it each time. It is never a gate:
@@ -797,8 +793,7 @@ prove it ran to completion by emitting the sentinel. The command's exit code is
 therefore ignored; only a spawn failure is a hard error. Every entry runs (no
 fail-fast within the phase) so one `brokkr check` surfaces all broken gates, and
 each failure prints its captured stdout/stderr - the diagnostic, rendered
-against the entry's declared `diagnostics` shape and readable under `--limit`
-(below). A clean stage prints a single collapsed line -
+against the entry's declared `diagnostics` shape (below). A clean stage prints a single collapsed line -
 `script-check: ok (21 checks)` - rather than one per entry; the count keeps
 the line falsifiable (a stage that quietly stopped running its checks shows a
 shrinking number) while a passing gate's name carries nothing to act on. A
@@ -828,14 +823,13 @@ internals, only what it printed - so the question is which part of it to show.
 
 | View | Prints |
 | --- | --- |
-| default, `diagnostics = "opaque"` | Both streams, first and last `--limit` lines of each, middle elided |
-| default, `diagnostics = "rustc"` | The `error`-level blocks only, up to `--limit` of them, then a trailer counting hidden errors and warnings |
-| `--limit all` | Everything verbatim and uncapped, under either value |
+| `diagnostics = "opaque"` | Both streams, verbatim |
+| `diagnostics = "rustc"` | Every `error`-level block, then a line counting the warnings not shown |
 
-The `opaque` cap keeps both ends rather than truncating the tail: an opaque
-check's verdict is typically its *last* line (that is what `last-line` matches),
-while a command's fatal error is typically near its first, and a head-only cap
-would hide whichever the reader came for.
+`opaque` prints the stream whole rather than capping it: an opaque check's
+verdict is typically its *last* line (that is what `last-line` matches), while
+a command's fatal error is typically near its first, so any cap hides whichever
+the reader came for.
 
 `rustc` exists because a `cargo doc --workspace` gate is not an opaque analyser -
 it emits standard rustc diagnostics, and treating them as a blob throws away
@@ -854,9 +848,10 @@ diagnostic is one line with its lint code, capped and scoped like clippy's.
 `diagnostics = "rustc"` remains for gates that shell out to some other
 rustc-shaped tool.
 
-The `--limit` budget spans both streams: it is a reading budget for the phase's
-output, and a per-stream cap would print twice it on a command that splits its
-diagnostics across the two.
+`rustc` narrows by diagnostic *level* only, never by count - every error block
+prints, across both streams. The trailing warning count exists because the
+omission is brokkr's choice rather than the command's: without it a
+`warning:`-shaped cause reads as absent rather than withheld.
 
 `post-test` entries are skipped when the test phase failed: it fails fast, so
 its later lanes never ran and there is no partial-run reading for a sentinel
@@ -933,8 +928,7 @@ so re-run after each one rather than trusting a single report as the
 complete inventory. The phase points at `brokkr deps` for that, since
 scoping is investigation.
 
-Honours `--limit` like the other finding phases, and is skippable
-as `publish_cycle` in a partial profile's `skip_phases`.
+Skippable as `publish_cycle` in a partial profile's `skip_phases`.
 
 ## `clippy` phase
 
@@ -1060,8 +1054,9 @@ every covering sweep reports is untagged. A dependency member a run compiled
 without selecting does not count as covered.
 
 Output goes through clippy's parser and formatter: one line per diagnostic in
-the `error[<lint>] <file>:<line>:<col> <message>` form, merged across sweeps, sorted by lint, capped at `--limit` with changed files first,
-and cargo's rendered text under `--raw`.
+the `error[<lint>] <file>:<line>:<col> <message>` form, merged across sweeps,
+sorted by lint with changed files first and nothing capped, and cargo's
+rendered text under `--raw`.
 
 **Any diagnostic fails the phase, warnings included** - the rule clippy's gate
 applies, and for the same reason. Rustdoc's lints are warn-by-default, so a
@@ -1144,8 +1139,7 @@ state latched on the first suite: a failing lib test masked every integration
 failure behind it. The exit code stayed correct, so the run was honestly red -
 only the *which-tests* list was short, which is the worse shape of the two,
 because a fixer who clears every listed failure concludes the run is
-understood. Note that `--limit` does not widen test reporting either - it
-governs the finding phases' caps.
+understood.
 
 The reset alone was not enough, and the remaining three holes were closed
 together after a downstream report (two agents in consecutive rounds read a
@@ -1326,9 +1320,10 @@ if zero tests were enumerated. Shape lines carry `process-isolated`.
 Passing tests are **not** listed one per line: a lane of a hundred serial
 tests would bury the rest of the run, and the sweep's one summary line
 (`serial/live: 52 tests process-isolated passed, 1 pkg-skipped`) carries the
-counts. Failures always report in full. `--limit all` restores the roll-call: the
+counts. Failures always report in full. `--raw` restores the roll-call: the
 pre-run plan line, one `PASS <name> (<secs>)` per test, and a `SKIP` line
-per `#[ignore]`d name in a lane without `include_ignored`.
+per `#[ignore]`d name in a lane without `include_ignored`. It rides on `--raw`
+because that flag already means "no filtering, show me what the tools said".
 
 Works without a `brokkr.toml` - usable in any Rust+git repo. When a
 `brokkr.toml` is present its host config still applies (e.g. Nidhogg's
@@ -1635,7 +1630,7 @@ optionally package-scoped, counted per entry - the **most-specific**
 matching pattern takes the pair, so a narrow entry is never starved by a
 broad one it nests under) or ignored at the source
 (counted, reported, not fatal); anything else is **orphaned** and fails
-the check, listed as `shape/package/test` up to `--limit`. A pattern
+the check, listed in full as `shape/package/test`. A pattern
 entry justifying zero pairs is stale and fails the check. A run with
 stale entries, orphans and dead filters (below) prints **all** the
 worksheets before failing. Package-level
@@ -1646,8 +1641,9 @@ The ledger reports as **one rolled-up line** - entry count, total pairs,
 and the per-issue pair breakdown in descending order (`quarantine: 21
 entries, 106 pairs - B51 80, B41 14, B50 10, …`). That keeps both signals
 the per-entry listing carried: the countdown, and the growth warning when a
-substring starts matching more than it used to. `--limit all` prints the old line
-per entry, with each entry's pattern and package scope. The `--json` summary carries a
+substring starts matching more than it used to. It is a summary, not a cap -
+every pair the ledger holds is counted in the line, at the granularity a
+reader acts on (an issue, not the pattern under it). The `--json` summary carries a
 `coverage` object: `pairs`, `run`, `quarantined`, `ignored`, `curated`,
 `orphaned`, `dead_filters`. `dead_filters` counts the dead `skip`/`only`
 filters below; it exists as its own field because a dead filter moves no

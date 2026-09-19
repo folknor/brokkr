@@ -477,12 +477,13 @@ passes - that is always the `expect` match.
 
 | `diagnostics` | Failure shows |
 | --- | --- |
-| `opaque` (default) | Both captured streams, with the first and last `--limit` lines of each and the middle elided |
-| `rustc` | The `error:` / `error[CODE]:` blocks only, up to `--limit` of them, with a trailer counting the hidden errors and warnings |
+| `opaque` (default) | Both captured streams, verbatim |
+| `rustc` | Every `error:` / `error[CODE]:` block, then a line counting the warnings not shown |
 
-`--limit all` prints everything verbatim and uncapped under either value - the
-same flag that widens the gremlins and clippy phases, because a script-check failure
-should not need an escape hatch of its own.
+Neither value caps by line or block count. The only narrowing `rustc` performs
+is by diagnostic level, which is a claim about what the reader needs; the
+warning count says out loud that the omission was brokkr's choice, so a
+`warning:`-shaped cause reads as withheld rather than absent.
 
 Set `rustc` on a command that emits rustc-shaped diagnostics - a `cargo doc`,
 `cargo build` or `cargo rustdoc` gate. The measured case: a

@@ -294,8 +294,6 @@ pub(crate) struct DepKind {
 
 pub struct DepsArgs {
     pub json: bool,
-    pub limit: usize,
-    pub all: bool,
     pub no_fail: bool,
     /// When `Some`, switch into chain-trace mode for the named package
     /// (`"name"` or `"name@version"`). Other phases are suppressed.
@@ -366,7 +364,7 @@ pub fn run(project_root: &Path, args: &DepsArgs) -> Result<(), DevError> {
     if args.json {
         render_json(&events)?;
     } else {
-        render_text(&events, args.limit, args.all);
+        render_text(&events);
     }
 
     if findings > 0 && !args.no_fail {
@@ -460,7 +458,7 @@ fn render_json(events: &[DepsEvent]) -> Result<(), DevError> {
     Ok(())
 }
 
-fn render_text(events: &[DepsEvent], limit: usize, all: bool) {
+fn render_text(events: &[DepsEvent]) {
     let mut dups = Vec::new();
     let mut gits = Vec::new();
     let mut paths = Vec::new();
@@ -498,17 +496,17 @@ fn render_text(events: &[DepsEvent], limit: usize, all: bool) {
             .then(b.age_days.cmp(&a.age_days))
     });
 
-    render_dup_section(&dups, limit, all);
-    render_section(&gits, "git dependency", "git dependencies", "", limit, all, render_git_text);
-    render_section(&paths, "path dependency", "path dependencies", "outside workspace", limit, all, render_path_text);
-    render_section(&cycles, "cargo publication cycle", "cargo publication cycles", "", limit, all, render_cycle_text);
+    render_dup_section(&dups);
+    render_section(&gits, "git dependency", "git dependencies", "", render_git_text);
+    render_section(&paths, "path dependency", "path dependencies", "outside workspace", render_path_text);
+    render_section(&cycles, "cargo publication cycle", "cargo publication cycles", "", render_cycle_text);
     if !cycles.is_empty() {
         output::deps_msg(&format!("  {}", publish_cycle::INVENTORY_CAVEAT));
     }
-    render_section(&ws, "unused workspace dependency", "unused workspace dependencies", "not inherited by any member", limit, all, render_ws_text);
-    render_section(&native, "dependency with native code", "dependencies with native code", "", limit, all, render_native_text);
-    render_outdated_section(&outdated, outdated_ran, limit, all);
-    render_section(&stale, "stale dependency", "stale dependencies", "", limit, all, render_stale_text);
+    render_section(&ws, "unused workspace dependency", "unused workspace dependencies", "not inherited by any member", render_ws_text);
+    render_section(&native, "dependency with native code", "dependencies with native code", "", render_native_text);
+    render_outdated_section(&outdated, outdated_ran);
+    render_section(&stale, "stale dependency", "stale dependencies", "", render_stale_text);
 
     for tool_missing in &missing {
         output::deps_msg(&format!(
@@ -531,11 +529,7 @@ fn render_text(events: &[DepsEvent], limit: usize, all: bool) {
     }
 }
 
-fn render_dup_section(
-    items: &[&DuplicateVersionEvent],
-    limit: usize,
-    all: bool,
-) {
+fn render_dup_section(items: &[&DuplicateVersionEvent]) {
     if items.is_empty() {
         return;
     }
@@ -544,15 +538,8 @@ fn render_dup_section(
         "{} {noun} with multiple versions:",
         items.len()
     ));
-    let shown = if all { items.len() } else { limit.min(items.len()) };
-    for item in items.iter().take(shown) {
+    for item in items {
         render_duplicate_text(item);
-    }
-    if shown < items.len() {
-        output::deps_msg(&format!(
-            "  ... and {} more (use --all to show)",
-            items.len() - shown
-        ));
     }
 }
 
@@ -561,12 +548,7 @@ fn render_dup_section(
 /// version on crates.io. Header phrasing and the explicit zero-case
 /// line both lean on that. When ccu didn't run at all, this prints
 /// nothing - the accompanying `ToolMissing` event covers it.
-fn render_outdated_section(
-    items: &[&OutdatedEvent],
-    outdated_ran: bool,
-    limit: usize,
-    all: bool,
-) {
+fn render_outdated_section(items: &[&OutdatedEvent], outdated_ran: bool) {
     if !outdated_ran {
         return;
     }
@@ -579,15 +561,8 @@ fn render_outdated_section(
         "{} {noun} available on crates.io; no other candidates:",
         items.len()
     ));
-    let shown = if all { items.len() } else { limit.min(items.len()) };
-    for item in items.iter().take(shown) {
+    for item in items {
         render_outdated_text(item);
-    }
-    if shown < items.len() {
-        output::deps_msg(&format!(
-            "  ... and {} more (use --all to show)",
-            items.len() - shown
-        ));
     }
 }
 
@@ -596,8 +571,6 @@ fn render_section<T>(
     singular: &str,
     plural: &str,
     suffix: &str,
-    limit: usize,
-    all: bool,
     render_one: fn(&T),
 ) {
     if items.is_empty() {
@@ -610,15 +583,8 @@ fn render_section<T>(
         format!("{} {noun} {suffix}:", items.len())
     };
     output::deps_msg(&header);
-    let shown = if all { items.len() } else { limit.min(items.len()) };
-    for item in items.iter().take(shown) {
+    for item in items {
         render_one(item);
-    }
-    if shown < items.len() {
-        output::deps_msg(&format!(
-            "  ... and {} more (use --all to show)",
-            items.len() - shown
-        ));
     }
 }
 

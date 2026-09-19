@@ -173,7 +173,7 @@ fn quarantine_rollup(quarantine: &[QuarantineEntry], per_entry: &[usize]) -> Str
         .collect();
 
     format!(
-        "quarantine: {} entries, {pairs} pairs - {} (--limit all to list)",
+        "quarantine: {} entries, {pairs} pairs - {}",
         quarantine.len(),
         breakdown.join(", ")
     )
@@ -271,7 +271,6 @@ fn run_coverage_phase(
     executed: &[bool],
     quarantine: &[QuarantineEntry],
     allow_flags: &[String],
-    limit: usize,
     commands: bool,
 ) -> CoverageOutcome {
     let (shapes, dead) =
@@ -285,32 +284,13 @@ fn run_coverage_phase(
 
     report_doc_only_exclusion(sweeps);
 
-    // The per-entry pair counts are the countdown the ledger exists for,
-    // and the growth signal when a substring starts matching more than it
-    // used to - but one line per entry is a page of them on a real ledger.
-    // Rolled up per issue by default, which keeps both signals; `--limit all`
-    // restores the entry-by-entry listing.
-    if limit == crate::scope::UNLIMITED {
-        for (entry, count) in quarantine.iter().zip(&report.per_entry) {
-            match (&entry.pattern, &entry.category) {
-                (Some(p), _) => {
-                    let scope = entry
-                        .package
-                        .as_deref()
-                        .map(|pkg| format!("{pkg}: "))
-                        .unwrap_or_default();
-                    output::run_msg(&format!(
-                        "quarantine {} ({scope}{p}): {count} pairs",
-                        entry.issue
-                    ));
-                }
-                (None, Some(cat)) => {
-                    output::run_msg(&format!("quarantine {} (category {cat})", entry.issue));
-                }
-                (None, None) => {}
-            }
-        }
-    } else if !quarantine.is_empty() {
+    // The per-entry pair counts are the countdown the ledger exists for, and
+    // the growth signal when a substring starts matching more than it used to -
+    // but one line per entry is a page of them on a real ledger. Rolled up per
+    // issue, which keeps both signals at the granularity a reader acts on: an
+    // issue, not the individual pattern under it. This is a summary, not a cap -
+    // every pair the ledger holds is counted in the line.
+    if !quarantine.is_empty() {
         output::run_msg(&quarantine_rollup(quarantine, &report.per_entry));
     }
     report_declared_narrowing(sweeps, report.stats.curated);
@@ -327,16 +307,10 @@ fn run_coverage_phase(
     // reason this phase runs on failing test phases) just as much as the
     // stale report, and returning on the first hid the other.
     if !report.orphans.is_empty() {
-        for orphan in report.orphans.iter().take(limit) {
+        for orphan in &report.orphans {
             output::error(&format!("orphaned: {orphan} (run nowhere, quarantined nowhere)"));
         }
 
-        if report.orphans.len() > limit {
-            output::error(&format!(
-                "... and {} more (rerun with --limit all)",
-                report.orphans.len() - limit
-            ));
-        }
         output::error(&format!(
             "{}: every skipped test needs a [[quarantine]] \
              entry with an issue, or a lane that runs it under this build shape",

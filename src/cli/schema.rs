@@ -51,8 +51,7 @@ Output (default text mode, no flags):
     `--message-format=json` so every diagnostic carries its lint code,
     not just the first occurrence per rule.
   - Tests: one line per failure on failure, compact summary on pass.
-    Never capped - every failing test in every suite is listed, and
-    `--limit` does not change that.
+    Never capped - every failing test in every suite is listed.
 
 Which diagnostics are shown (every diagnostic phase):
   1. Everything is an error, except a warning from a dependency outside
@@ -60,8 +59,7 @@ Which diagnostics are shown (every diagnostic phase):
   2. Errors in files with unstaged changes (git diff, plus untracked
      files) come first; the rest follow. Diagnostics are sorted by
      (lint code, file, line) so every hit of a rule clumps together.
-  3. At most `--limit N` (default 20); a trailer counts the rest.
-     `--limit all` (or `0`) shows everything.
+  3. Nothing is capped: every error is printed, every time.
 
 Output mode:
   - `--raw`: reconstruct cargo's terminal-style output by concatenating
@@ -70,7 +68,6 @@ Output mode:
 
 Examples:
   brokkr check                                     # gremlins + clippy + all tests
-  brokkr check --limit all                         # every error, uncapped
   brokkr check --fix-gremlins                      # rewrite banned chars before checking
   brokkr check --raw                               # full terminal-style cargo output
   brokkr check -- --test read_paths                # run one test file
@@ -141,13 +138,6 @@ In depth: `brokkr man check` (one section at a time, e.g. `man check clippy`)."
         #[arg(long)]
         json: bool,
 
-        /// Maximum errors printed per phase (and `--timings` rows); `all` or
-        /// `0` for no cap. Errors in files with unstaged changes are listed
-        /// first. Ignored with `--raw`. Does not affect the test phase: its
-        /// failure list is never capped.
-        #[arg(long, default_value = "20", value_parser = parse_limit, value_name = "N|all")]
-        limit: usize,
-
         /// Before checking, rewrite banned Unicode in tracked source files
         /// with their ASCII equivalents (em/en dash -> `-`, smart quotes ->
         /// straight, NBSP -> space, zero-width/bidi deleted). Writes files
@@ -156,8 +146,7 @@ In depth: `brokkr man check` (one section at a time, e.g. `man check clippy`)."
         fix_gremlins: bool,
 
         /// After the check is otherwise done, print every test that ran in
-        /// descending order by wall-clock time. Capped at `--limit` (or
-        /// uncapped with `--limit all`). Build time is excluded - timing
+        /// descending order by wall-clock time. Build time is excluded - timing
         /// starts when libtest emits the per-test start marker.
         #[arg(long)]
         timings: bool,
@@ -222,8 +211,8 @@ Two modes:
   - `--sweep NAME`: borrow one [[check]] entry's packages/features/env verbatim.
 
 `--env KEY=VALUE` (repeatable) overrides either env source and wins last.
-Output modes match `brokkr check`'s clippy phase: default capped text,
-`--limit N|all`, `--raw` (cargo's terminal-style rendering).
+Output modes match `brokkr check`'s clippy phase: uncapped text by default,
+`--raw` for cargo's terminal-style rendering.
 Exit 0 iff zero diagnostics; 1 on any lint or build error.
 
 Examples:
@@ -232,7 +221,6 @@ Examples:
   brokkr clippy --features a,b -p mycrate    # a virtual workspace needs -p
   brokkr clippy --sweep ffi                  # replay the 'ffi' [[check]] entry
   brokkr clippy --sweep ffi --env HIGH_PRECISION=0
-  brokkr clippy --limit all                  # every diagnostic, uncapped
   brokkr clippy -p mycrate --lib             # lib-only lint surface (cfg(test) dead code)
 
 In depth: `brokkr man clippy`."
@@ -279,11 +267,6 @@ In depth: `brokkr man clippy`."
         /// Reconstruct cargo's terminal-style output (human-rendered, not JSON).
         #[arg(long)]
         raw: bool,
-
-        /// Maximum diagnostics printed; `all` or `0` for no cap. Ignored with
-        /// `--raw`.
-        #[arg(long, default_value = "20", value_parser = parse_limit, value_name = "N|all")]
-        limit: usize,
     },
     /// Run `cargo fmt`. All arguments are forwarded raw.
     #[command(display_order = 0)]
@@ -441,15 +424,6 @@ In depth: `brokkr man clippy`."
         /// prefixed log output, no terminal colors.
         #[arg(long)]
         json: bool,
-
-        /// Maximum findings printed per phase. Ignored with `--json` or
-        /// `--all`.
-        #[arg(long, default_value_t = 20)]
-        limit: usize,
-
-        /// Show every finding without capping.
-        #[arg(long)]
-        all: bool,
 
         /// Always exit 0, even when findings exist. Useful for
         /// report-only invocations in CI.

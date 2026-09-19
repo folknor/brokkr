@@ -448,12 +448,12 @@ pub enum Stage {
 pub enum Diagnostics {
     /// Unstructured output with no parseable levels (the default, and what
     /// every entry written before this key had). A failure prints the captured
-    /// streams with a head/tail line cap.
+    /// streams verbatim.
     #[default]
     Opaque,
     /// rustc-shaped output: `error:` / `warning:` blocks at column zero, each
     /// running until the next such line. A failure prints the `error` blocks
-    /// and hides the rest behind `--limit all`.
+    /// alone, then a line counting the warnings it did not print.
     Rustc,
 }
 

@@ -348,8 +348,6 @@ fn run(cli: Cli) -> Result<(), DevError> {
     }
     if let Command::Deps {
         json,
-        limit,
-        all,
         no_fail,
         focus,
     } = cli.command
@@ -375,8 +373,6 @@ fn run(cli: Cli) -> Result<(), DevError> {
             &project_root,
             &deps::DepsArgs {
                 json,
-                limit,
-                all,
                 no_fail,
                 focus,
                 workspace_dep_ignore,
@@ -392,7 +388,6 @@ fn run(cli: Cli) -> Result<(), DevError> {
         force_rust,
         raw,
         json,
-        limit,
         fix_gremlins,
         timings,
         commands,
@@ -484,7 +479,6 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 &script_checks,
                 &textlint_names,
                 &script_names,
-                limit,
             );
         }
         return check_cmd::cmd_check(
@@ -512,7 +506,6 @@ fn run(cli: Cli) -> Result<(), DevError> {
             force_rust,
             raw,
             json,
-            limit,
             fix_gremlins,
             timings,
             commands,
@@ -527,7 +520,6 @@ fn run(cli: Cli) -> Result<(), DevError> {
         sweep,
         env,
         raw,
-        limit,
         lib,
     } = cli.command
     {
@@ -556,7 +548,6 @@ fn run(cli: Cli) -> Result<(), DevError> {
             clippy_cfg.as_ref().map_or(&[][..], |c| &c.allow),
             clippy_cfg.as_ref().map_or(&[][..], |c| &c.allow_exact),
             raw,
-            limit,
         );
     }
 

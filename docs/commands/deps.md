@@ -23,8 +23,8 @@ Mirrors `brokkr check`:
 - Phase-based. Each smell is a phase that emits zero or more events.
 - `DepsEvent` enum in `src/deps/mod.rs`, serde-tagged like `CheckEvent` in
   `src/cargo_json.rs`.
-- Default output: prefixed text via `[deps]`, grouped by phase, capped by
-  `--limit N` with a "+N hidden" trailer.
+- Default output: prefixed text via `[deps]`, grouped by phase. Every
+  finding prints - there is no cap and no flag to raise one.
 - `--json` emits NDJSON on stdout, one event per line. Every run ends
   with a `summary` event listing the phases that ran plus a findings
   count.
@@ -326,8 +326,6 @@ brokkr deps <pkg>                 # focus mode: metadata + chains for one packag
 brokkr deps hashbrown@0.17.1      # focus mode pinned to a specific version
 brokkr deps mime                  # substring fallback if no exact match
 brokkr deps --json                # NDJSON
-brokkr deps --limit 50            # cap shown items per phase (default 20)
-brokkr deps --all                 # no per-phase cap
 brokkr deps --no-fail             # exit 0 even when findings exist
 ```
 

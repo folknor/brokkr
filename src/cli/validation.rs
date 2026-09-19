@@ -30,19 +30,6 @@ fn validate_env_kv(s: &str) -> Result<String, String> {
     }
 }
 
-/// Parse `check`/`clippy --limit`: a count, or `all` / `0` for no cap
-/// ([`crate::scope::UNLIMITED`]). `0` is unlimited rather than "show nothing"
-/// because every phase already prints its total in the header, so a zero-row
-/// view has no use.
-fn parse_limit(s: &str) -> Result<usize, String> {
-    match s {
-        "all" | "0" => Ok(crate::scope::UNLIMITED),
-        _ => s
-            .parse::<usize>()
-            .map_err(|_| format!("expected a count or `all`, got '{s}'")),
-    }
-}
-
 fn validate_compression(s: &str) -> Result<String, String> {
     if s == "none" {
         return Ok(s.to_owned());

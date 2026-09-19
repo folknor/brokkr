@@ -65,7 +65,6 @@ pub(crate) fn cmd_check(
     force_rust: bool,
     raw: bool,
     json: bool,
-    limit: usize,
     fix_gremlins: bool,
     timings: bool,
     commands: bool,
@@ -151,7 +150,6 @@ pub(crate) fn cmd_check(
                 manifest_cfg,
                 script_checks,
                 dependency_rules,
-                limit,
                 fix_gremlins,
                 commands,
             },
@@ -175,7 +173,6 @@ pub(crate) fn cmd_check(
                 certifies,
                 doctests,
                 raw,
-                limit,
                 commands,
                 extra_args,
             },
@@ -190,7 +187,7 @@ pub(crate) fn cmd_check(
     let outcome = run_phases();
 
     if timings {
-        emit_timings(&collected_timings, limit, active_sweeps.len() > 1);
+        emit_timings(&collected_timings, active_sweeps.len() > 1);
     }
 
     let ran_labels = ran_sweep_labels(&active_sweeps, &clippy_ran, &executed);
@@ -229,14 +226,13 @@ pub(crate) fn cmd_check_selected(
     script_checks: &[ScriptCheck],
     textlint_names: &[String],
     script_names: &[String],
-    limit: usize,
 ) -> Result<(), DevError> {
     let rules = select_named(textlint_rules, textlint_names, |r| &r.name, "[[textlint]]")?;
     let checks = select_named(script_checks, script_names, |c| &c.name, "[[script_check]]")?;
     output::run_msg("selected entries only - not a gate; run `brokkr check` before committing");
 
     let started = std::time::Instant::now();
-    let textlint = run_textlint(project_root, &rules, limit);
+    let textlint = run_textlint(project_root, &rules);
     // Every stage in one pass: the selection names entries, and an entry's stage
     // only orders it around phases this run does not execute.
     let scripts = if checks.is_empty() {
@@ -246,7 +242,7 @@ pub(crate) fn cmd_check_selected(
         for c in &mut checks {
             c.stage = Stage::PreClippy;
         }
-        run_script_checks(project_root, &checks, Stage::PreClippy, limit)
+        run_script_checks(project_root, &checks, Stage::PreClippy)
     };
     let elapsed = started.elapsed().as_secs_f64();
     // Both halves always run, so the error names every one that failed - not
@@ -381,7 +377,6 @@ struct ConventionPhaseArgs<'a> {
     manifest_cfg: Option<&'a ManifestConfig>,
     script_checks: &'a [ScriptCheck],
     dependency_rules: &'a [DependencyRule],
-    limit: usize,
     fix_gremlins: bool,
     commands: bool,
 }
@@ -395,37 +390,37 @@ fn run_convention_phases(
 ) -> Result<(), DevError> {
     if !skip("gremlins") {
         begin_phase(failing_phase, "gremlins");
-        run_gremlins(a.project_root, a.gremlins_cfg, a.limit, a.fix_gremlins)?;
+        run_gremlins(a.project_root, a.gremlins_cfg, a.fix_gremlins)?;
     }
 
     if !skip("header") {
         begin_phase(failing_phase, "header");
-        run_header(a.project_root, a.header_cfg, a.limit)?;
+        run_header(a.project_root, a.header_cfg)?;
     }
 
     if !skip("textlint") {
         begin_phase(failing_phase, "textlint");
-        run_textlint(a.project_root, a.textlint_rules, a.limit)?;
+        run_textlint(a.project_root, a.textlint_rules)?;
     }
 
     if !skip("manifest") {
         begin_phase(failing_phase, "manifest");
-        run_manifest(a.project_root, a.manifest_cfg, a.limit)?;
+        run_manifest(a.project_root, a.manifest_cfg)?;
     }
 
     if !skip("script_check") {
         begin_phase(failing_phase, "script_check");
-        run_script_checks(a.project_root, a.script_checks, Stage::PreClippy, a.limit)?;
+        run_script_checks(a.project_root, a.script_checks, Stage::PreClippy)?;
     }
 
     if !skip("dependency_rules") {
         begin_phase(failing_phase, "dependency_rules");
-        run_dependency_rules(a.project_root, a.dependency_rules, a.limit, a.commands)?;
+        run_dependency_rules(a.project_root, a.dependency_rules, a.commands)?;
     }
 
     if !skip("publish_cycle") {
         begin_phase(failing_phase, "publish_cycle");
-        run_publish_cycle(a.project_root, a.limit, a.commands)?;
+        run_publish_cycle(a.project_root, a.commands)?;
     }
     Ok(())
 }
@@ -455,7 +450,6 @@ struct BuildPhaseArgs<'a> {
     certifies: Option<Certifies>,
     doctests: bool,
     raw: bool,
-    limit: usize,
     commands: bool,
     extra_args: &'a [String],
 }
@@ -482,7 +476,7 @@ fn run_build_phases(
 
     if !skip("script_check") {
         begin_phase(failing_phase, "script_check");
-        run_script_checks(a.project_root, a.script_checks, Stage::PreTest, a.limit)?;
+        run_script_checks(a.project_root, a.script_checks, Stage::PreTest)?;
     }
 
     let mut test_failure: Option<DevError> = None;
@@ -495,7 +489,6 @@ fn run_build_phases(
             a.active_sweeps,
             a.packages,
             a.raw,
-            a.limit == scope::UNLIMITED,
             a.doctests,
             a.commands,
             a.extra_args,
@@ -540,7 +533,6 @@ fn run_diagnostic_phases(
             a.clippy_allow,
             a.clippy_allow_exact,
             a.raw,
-            a.limit,
             a.commands,
             ran,
         )?;
@@ -556,7 +548,6 @@ fn run_diagnostic_phases(
             a.clippy_allow,
             a.clippy_allow_exact,
             a.raw,
-            a.limit,
             a.commands,
             ran,
         )?;
@@ -590,7 +581,6 @@ fn finish_build_phases(
             a.active_sweeps,
             executed,
             a.quarantine,
-            a.limit,
             a.commands,
             &crate::config::test_phase_allow_flags(a.clippy_allow, a.clippy_allow_exact),
             test_failure.as_ref(),
@@ -620,7 +610,7 @@ fn finish_build_phases(
     // there, a script-check has no partial-run reading - it just lies.
     if !skip("script_check") {
         begin_phase(failing_phase, "script_check");
-        run_script_checks(a.project_root, a.script_checks, Stage::PostTest, a.limit)?;
+        run_script_checks(a.project_root, a.script_checks, Stage::PostTest)?;
     }
 
     // Last on purpose: package-mode resolution can compile duplicate variants
@@ -756,7 +746,6 @@ fn audit_coverage(
     sweeps: &[ResolvedSweep],
     executed: &[bool],
     quarantine: &[QuarantineEntry],
-    limit: usize,
     commands: bool,
     allow_flags: &[String],
     test_failure: Option<&DevError>,
@@ -769,7 +758,6 @@ fn audit_coverage(
             executed,
             quarantine,
             allow_flags,
-            limit,
             commands,
         ),
         Some(DevError::Build(msg)) if msg == "tests failed" => {
@@ -782,7 +770,6 @@ fn audit_coverage(
                 executed,
                 quarantine,
                 allow_flags,
-                limit,
                 commands,
             );
 
@@ -1208,7 +1195,7 @@ pub(crate) struct TestTiming {
     pub(crate) elapsed: std::time::Duration,
 }
 
-fn emit_timings(timings: &[TestTiming], limit: usize, multi_sweep: bool) {
+fn emit_timings(timings: &[TestTiming], multi_sweep: bool) {
     if timings.is_empty() {
         output::run_msg("timings: no tests ran");
         return;
@@ -1217,24 +1204,14 @@ fn emit_timings(timings: &[TestTiming], limit: usize, multi_sweep: bool) {
     let mut sorted: Vec<&TestTiming> = timings.iter().collect();
     sorted.sort_by_key(|t| std::cmp::Reverse(t.elapsed));
 
-    let total = sorted.len();
-    let displayed: &[&TestTiming] = if total <= limit {
-        &sorted
-    } else {
-        &sorted[..limit]
-    };
-
-    let mut msg = format!("timings: {}, slowest first\n", output::count(total, "test"));
-    for t in displayed {
+    let mut msg = format!("timings: {}, slowest first\n", output::count(sorted.len(), "test"));
+    for t in sorted {
         let secs = t.elapsed.as_secs_f64();
         if multi_sweep {
             msg.push_str(&format!("  {secs:>7.3}s [{}] {}\n", t.sweep, t.name));
         } else {
             msg.push_str(&format!("  {secs:>7.3}s {}\n", t.name));
         }
-    }
-    if displayed.len() < total {
-        msg.push_str(&format!("  ... {} more (rerun with --limit all to show)\n", total - displayed.len()));
     }
     output::run_msg(msg.trim_end());
 }
@@ -1386,7 +1363,6 @@ fn effective_profile_name(
 fn run_gremlins(
     project_root: &Path,
     config: Option<&GremlinsConfig>,
-    limit: usize,
     fix: bool,
 ) -> Result<(), DevError> {
     // `[gremlins] disable = true` skips the whole phase - both the scan and
@@ -1421,7 +1397,7 @@ fn run_gremlins(
     }
 
     let total = found.len();
-    let (displayed, trailer) = scope_limit(found, project_root, limit, |g| g.path.as_path());
+    let displayed = scope_order(found, project_root, |g| g.path.as_path());
 
     let mut msg = format!("gremlins: {total} found\n");
     for g in &displayed {
@@ -1429,34 +1405,25 @@ fn run_gremlins(
         msg.push_str(&gremlins::format_one(g));
         msg.push('\n');
     }
-    if let Some(t) = trailer {
-        msg.push_str("  ");
-        msg.push_str(&t);
-        msg.push('\n');
-    }
     msg.push_str("  hint: rerun with `brokkr check --fix-gremlins` to rewrite all banned chars in place\n");
     output::error(msg.trim_end());
     Err(DevError::Build("gremlins found".into()))
 }
 
-/// Choose which of a phase's errors to display via [`scope::partition`]: the
-/// errors in files with unstaged changes first, then the rest, at most `limit`,
-/// with the trailer counting what was hidden. `get_path` maps an error to its
-/// file.
+/// Order a phase's errors for display via [`scope::prioritize`]: the errors in
+/// files with unstaged changes first, then the rest. Every error is displayed -
+/// there is no cap. `get_path` maps an error to its file.
 ///
 /// The unstaged set is computed here rather than once in `cmd_check` so the git
 /// call is paid only when a phase actually has errors to display. Phases fail
 /// fast, so at most one of them reaches this per invocation.
-fn scope_limit<T>(
+fn scope_order<T>(
     violations: Vec<T>,
     project_root: &Path,
-    limit: usize,
     get_path: impl Fn(&T) -> &Path,
-) -> (Vec<T>, Option<String>) {
+) -> Vec<T> {
     let unstaged = scope::unstaged_files(project_root);
-    let part = scope::partition(violations, get_path, limit, unstaged.as_ref());
-    let trailer = scope::format_trailer(&part);
-    (part.displayed, trailer)
+    scope::prioritize(violations, get_path, unstaged.as_ref())
 }
 
 /// The `[header]` phase: a required file header whose year must be current.
@@ -1464,7 +1431,6 @@ fn scope_limit<T>(
 fn run_header(
     project_root: &Path,
     header_cfg: Option<&HeaderConfig>,
-    limit: usize,
 ) -> Result<(), DevError> {
     let Some(cfg) = header_cfg else {
         return Ok(());
@@ -1481,17 +1447,11 @@ fn run_header(
 
     output::run_msg(&format!("header: require `{expected}`"));
     let total = violations.len();
-    let (displayed, trailer) =
-        scope_limit(violations, project_root, limit, |v| v.file.as_path());
+    let displayed = scope_order(violations, project_root, |v| v.file.as_path());
     let mut msg = format!("header: {}\n", output::count(total, "violation"));
     for v in &displayed {
         msg.push_str("  ");
         msg.push_str(&crate::header::format_one(v, &expected));
-        msg.push('\n');
-    }
-    if let Some(t) = trailer {
-        msg.push_str("  ");
-        msg.push_str(&t);
         msg.push('\n');
     }
     output::error(msg.trim_end());
@@ -1504,7 +1464,6 @@ fn run_header(
 fn run_textlint(
     project_root: &Path,
     rules: &[TextlintRule],
-    limit: usize,
 ) -> Result<(), DevError> {
     if rules.is_empty() {
         return Ok(());
@@ -1527,17 +1486,11 @@ fn run_textlint(
 
     output::run_msg(&format!("textlint: {}", output::count(rules.len(), "rule")));
     let total = violations.len();
-    let (displayed, trailer) =
-        scope_limit(violations, project_root, limit, |v| v.file.as_path());
+    let displayed = scope_order(violations, project_root, |v| v.file.as_path());
     let mut msg = format!("textlint: {}\n", output::count(total, "violation"));
     for v in &displayed {
         msg.push_str("  ");
         msg.push_str(&crate::textlint::format_one(v));
-        msg.push('\n');
-    }
-    if let Some(t) = trailer {
-        msg.push_str("  ");
-        msg.push_str(&t);
         msg.push('\n');
     }
     output::error(msg.trim_end());
@@ -1550,7 +1503,6 @@ fn run_textlint(
 fn run_manifest(
     project_root: &Path,
     manifest_cfg: Option<&ManifestConfig>,
-    limit: usize,
 ) -> Result<(), DevError> {
     let Some(cfg) = manifest_cfg else {
         return Ok(());
@@ -1565,17 +1517,11 @@ fn run_manifest(
 
     output::run_msg("manifest: Cargo.toml conventions");
     let total = violations.len();
-    let (displayed, trailer) =
-        scope_limit(violations, project_root, limit, |v| v.file.as_path());
+    let displayed = scope_order(violations, project_root, |v| v.file.as_path());
     let mut msg = format!("manifest: {}\n", output::count(total, "violation"));
     for v in &displayed {
         msg.push_str("  ");
         msg.push_str(&crate::manifest::format_one(v));
-        msg.push('\n');
-    }
-    if let Some(t) = trailer {
-        msg.push_str("  ");
-        msg.push_str(&t);
         msg.push('\n');
     }
     output::error(msg.trim_end());
@@ -1593,7 +1539,6 @@ fn run_script_checks(
     project_root: &Path,
     checks: &[ScriptCheck],
     stage: Stage,
-    limit: usize,
 ) -> Result<(), DevError> {
     let checks: Vec<&ScriptCheck> = checks.iter().filter(|c| c.stage == stage).collect();
     if checks.is_empty() {
@@ -1635,7 +1580,7 @@ fn run_script_checks(
             stream_label(check.stream),
             check.expect
         ));
-        append_script_failure(&mut msg, check, outcome, limit);
+        append_script_failure(&mut msg, check, outcome);
     }
     output::error(msg.trim_end());
 
@@ -1646,36 +1591,31 @@ fn run_script_checks(
 ///
 /// The captured stream IS the diagnostic here - brokkr never saw the command's
 /// internals, only what it printed - so the rendering question is which part of
-/// it to show, not whether to show any. Three paths:
+/// it to show, not how much. Two paths:
 ///
-/// - `--limit all`: verbatim and uncapped, the phase's original and only
-///   behaviour. Every narrowing below has this as its escape hatch, which is the
-///   point of reusing the flag the clippy and gremlins phases already answer to
-///   rather than inventing a script-check-specific one.
 /// - `diagnostics = "rustc"` with at least one `error` block: the error blocks
-///   alone, with a trailer counting what was withheld. Measured on the consuming
-///   config (a `cargo doc --workspace` gate): 27 denied `broken-intra-doc-links`
-///   errors against several hundred `private-intra-doc-links` warnings from
-///   every other crate - a 1:20 signal-to-noise ratio, with the signal uniformly
-///   at `error`. Printing the failing level alone fit it in a third of a screen.
-/// - Everything else: the streams with a head/tail line cap, so the sentinel a
-///   `last-line` gate missed stays visible at the bottom.
+///   alone, with a trailer counting the warnings withheld. Measured on the
+///   consuming config (a `cargo doc --workspace` gate): 27 denied
+///   `broken-intra-doc-links` errors against several hundred
+///   `private-intra-doc-links` warnings from every other crate - a 1:20
+///   signal-to-noise ratio, with the signal uniformly at `error`. Printing the
+///   failing level alone fit it in a third of a screen.
+/// - Everything else: both streams verbatim.
 ///
-/// A `rustc` entry with no error block falls through to the capped view rather
-/// than printing an empty section: a gate can fail because its sentinel never
-/// appeared at all (the command died, or was stubbed), and that failure's
+/// A `rustc` entry with no error block falls through to the verbatim view
+/// rather than printing an empty section: a gate can fail because its sentinel
+/// never appeared at all (the command died, or was stubbed), and that failure's
 /// evidence is the output, not a diagnostic level that isn't there.
+///
+/// Nothing here is capped by line count. The only narrowing is by diagnostic
+/// level, which is a claim about what the reader needs; a line budget was a
+/// claim about how much they could stand, and it hid the one error that
+/// mattered as readily as the noise around it.
 fn append_script_failure(
     msg: &mut String,
     check: &ScriptCheck,
     outcome: &crate::script_check::Outcome,
-    limit: usize,
 ) {
-    if limit == scope::UNLIMITED {
-        append_captured_stream(msg, "stdout", &outcome.stdout, None);
-        append_captured_stream(msg, "stderr", &outcome.stderr, None);
-        return;
-    }
     if check.diagnostics == Diagnostics::Rustc {
         let stdout = String::from_utf8_lossy(&outcome.stdout).into_owned();
         let stderr = String::from_utf8_lossy(&outcome.stderr).into_owned();
@@ -1687,64 +1627,42 @@ fn append_script_failure(
             .iter()
             .any(|(_, blocks)| blocks.iter().any(|b| b.level == Level::Error))
         {
-            append_rustc_errors(msg, &streams, limit);
+            append_rustc_errors(msg, &streams);
             return;
         }
     }
-    append_captured_stream(msg, "stdout", &outcome.stdout, Some(limit));
-    append_captured_stream(msg, "stderr", &outcome.stderr, Some(limit));
+    append_captured_stream(msg, "stdout", &outcome.stdout);
+    append_captured_stream(msg, "stderr", &outcome.stderr);
 }
 
-/// Append the `error`-level blocks of a rustc-shaped failure, capped at `limit`
-/// blocks across both streams, then one trailer naming everything withheld.
+/// Append every `error`-level block of a rustc-shaped failure, then one trailer
+/// counting the warnings that were not printed.
 ///
-/// The budget spans the streams rather than resetting per stream: `--limit` is a
-/// reading budget for the phase's output, and a per-stream cap would print
-/// `2 * limit` blocks on a command that splits its diagnostics.
-fn append_rustc_errors(
-    msg: &mut String,
-    streams: &[(&str, Vec<crate::script_check::Block>)],
-    limit: usize,
-) {
-    let mut budget = limit;
-    let mut errors_total = 0usize;
-    let mut errors_shown = 0usize;
+/// The trailer exists because the omission is a choice brokkr made, not one the
+/// command made: a reader who sees only errors must be told the warnings were
+/// there, or a `warning:`-shaped cause reads as absent rather than withheld.
+fn append_rustc_errors(msg: &mut String, streams: &[(&str, Vec<crate::script_check::Block>)]) {
     let mut warnings = 0usize;
     for (label, blocks) in streams {
         let errors: Vec<&crate::script_check::Block> =
             blocks.iter().filter(|b| b.level == Level::Error).collect();
         warnings += blocks.iter().filter(|b| b.level == Level::Warning).count();
-        errors_total += errors.len();
-        if errors.is_empty() || budget == 0 {
+        if errors.is_empty() {
             continue;
         }
         msg.push_str(&format!("    --- {label} (errors) ---\n"));
-        let shown = errors.len().min(budget);
-        for block in errors.iter().take(shown) {
+        for block in errors {
             for line in block.text.lines() {
                 msg.push_str("    ");
                 msg.push_str(line);
                 msg.push('\n');
             }
         }
-        errors_shown += shown;
-        budget -= shown;
     }
 
-    let mut withheld: Vec<String> = Vec::new();
-    if errors_total > errors_shown {
-        withheld.push(format!("{} more errors", errors_total - errors_shown));
-    }
     if warnings > 0 {
-        withheld.push(output::count(warnings, "warning"));
+        msg.push_str(&format!("    {} not shown\n", output::count(warnings, "warning")));
     }
-    if withheld.is_empty() {
-        return;
-    }
-    msg.push_str(&format!(
-        "    {} hidden - --limit all for the full output\n",
-        withheld.join(", ")
-    ));
 }
 
 /// The stream(s) a script-check matched against, for its failure line.
@@ -1759,52 +1677,25 @@ fn stream_label(stream: crate::config::Stream) -> &'static str {
 /// Append a labelled, indented block of a script-check's captured stream to the
 /// failure message. A no-op for an empty stream.
 ///
-/// `cap` is `Some(n)` for the default view and `None` under `--limit all`. Capping
-/// keeps the first and last `n` lines and elides the middle, rather than
-/// truncating the tail: an opaque check's verdict is typically its LAST line
-/// (that is what `last-line` matches), while a command's fatal error is
-/// typically near its first - a head-only cap would hide whichever of those the
-/// reader came for. Both ends are cheap; the interior is the noise.
-fn append_captured_stream(msg: &mut String, label: &str, bytes: &[u8], cap: Option<usize>) {
+/// Verbatim: an opaque check's verdict is typically its LAST line (that is what
+/// `last-line` matches), while a command's fatal error is typically near its
+/// first, so any cap hides whichever of those the reader came for.
+fn append_captured_stream(msg: &mut String, label: &str, bytes: &[u8]) {
     if bytes.is_empty() {
         return;
     }
     let text = String::from_utf8_lossy(bytes);
-    let lines: Vec<&str> = text.lines().collect();
     msg.push_str(&format!("    --- {label} ---\n"));
-
-    let mut emit = |line: &str| {
+    for line in text.lines() {
         msg.push_str("    ");
         msg.push_str(line);
         msg.push('\n');
-    };
-    // Only elide when doing so actually saves lines - an elision marker
-    // standing in for one hidden line is a net loss and reads as a lie.
-    match cap.filter(|n| lines.len() > *n * 2 + 1) {
-        Some(n) => {
-            for line in &lines[..n] {
-                emit(line);
-            }
-            emit(&format!(
-                "... {} lines hidden - --limit all for the full output ...",
-                lines.len() - n * 2
-            ));
-            for line in &lines[lines.len() - n..] {
-                emit(line);
-            }
-        }
-        None => {
-            for line in &lines {
-                emit(line);
-            }
-        }
     }
 }
 
 fn run_dependency_rules(
     project_root: &Path,
     rules: &[DependencyRule],
-    limit: usize,
     commands: bool,
 ) -> Result<(), DevError> {
     if rules.is_empty() {
@@ -1830,22 +1721,11 @@ fn run_dependency_rules(
     }
 
     let total = report.violations.len();
-    let displayed = if total <= limit {
-        &report.violations[..]
-    } else {
-        &report.violations[..limit]
-    };
     let mut msg = format!("dependency rules: {}\n", output::count(total, "violation"));
-    for violation in displayed {
+    for violation in &report.violations {
         msg.push_str("  ");
         msg.push_str(&dependency_rules::format_violation(violation));
         msg.push('\n');
-    }
-    if displayed.len() < total {
-        msg.push_str(&format!(
-            "  +{} more (--limit all to see)\n",
-            total - displayed.len()
-        ));
     }
     output::error(msg.trim_end());
 
@@ -1872,7 +1752,6 @@ fn run_dependency_rules(
 /// `brokkr check` and `brokkr deps` can never disagree about a tree.
 fn run_publish_cycle(
     project_root: &Path,
-    limit: usize,
     commands: bool,
 ) -> Result<(), DevError> {
     if commands {
@@ -1885,28 +1764,16 @@ fn run_publish_cycle(
         return Ok(());
     }
 
-    let total = cycles.len();
-    let displayed = if total <= limit {
-        &cycles[..]
-    } else {
-        &cycles[..limit]
-    };
     let mut msg = format!(
         "publish cycle: {}\n",
-        output::count(total, "cargo publication cycle")
+        output::count(cycles.len(), "cargo publication cycle")
     );
-    for cycle in displayed {
+    for cycle in &cycles {
         for line in crate::deps::publish_cycle_lines(cycle) {
             msg.push_str("  ");
             msg.push_str(&line);
             msg.push('\n');
         }
-    }
-    if displayed.len() < total {
-        msg.push_str(&format!(
-            "  +{} more (--limit all to see)\n",
-            total - displayed.len()
-        ));
     }
     // Never let the list read as the complete inventory: the fix someone
     // picks depends on knowing whether anything else is still entangled.
@@ -2097,7 +1964,6 @@ fn run_clippy_phase(
     allow: &[String],
     allow_exact: &[SitedAllow],
     raw: bool,
-    limit: usize,
     commands: bool,
     clippy_ran: &mut [bool],
 ) -> Result<(), DevError> {
@@ -2120,7 +1986,7 @@ fn run_clippy_phase(
     let keep = |d: &cargo_json::DiagnosticEvent| {
         !is_dependency_warning(d, members) && !sited_allowed(d, allow_exact)
     };
-    report_diagnostic_phase("clippy", &results, &info, project_root, &keep, raw, limit, multi, commands)
+    report_diagnostic_phase("clippy", &results, &info, project_root, &keep, raw, multi, commands)
 }
 
 /// The `rustdoc` phase: `cargo doc --no-deps` per build shape, failing on any
@@ -2139,7 +2005,6 @@ fn run_rustdoc_phase(
     allow: &[String],
     allow_exact: &[SitedAllow],
     raw: bool,
-    limit: usize,
     commands: bool,
     ran: &mut [bool],
 ) -> Result<(), DevError> {
@@ -2163,7 +2028,7 @@ fn run_rustdoc_phase(
             && !sited_allowed(d, allow_exact)
     };
     let multi = results.len() > 1;
-    report_diagnostic_phase("rustdoc", &results, &info, project_root, &keep, raw, limit, multi, commands)
+    report_diagnostic_phase("rustdoc", &results, &info, project_root, &keep, raw, multi, commands)
 }
 
 /// Whether `[lints] allow` names this diagnostic's lint. Matched on the exact
@@ -2180,7 +2045,7 @@ fn sited_allowed(d: &cargo_json::DiagnosticEvent, allow_exact: &[SitedAllow]) ->
 
 /// Decide and report a diagnostic phase from its cargo runs: any failed run
 /// or any diagnostic `keep` admits fails it. Prints the failing commands, then
-/// either `--raw` rendered text or the capped, scoped, cross-sweep summary.
+/// either `--raw` rendered text or the scoped, cross-sweep summary.
 #[allow(clippy::too_many_arguments)]
 fn report_diagnostic_phase(
     phase: &str,
@@ -2189,7 +2054,6 @@ fn report_diagnostic_phase(
     project_root: &Path,
     keep: &dyn Fn(&cargo_json::DiagnosticEvent) -> bool,
     raw: bool,
-    limit: usize,
     multi: bool,
     commands: bool,
 ) -> Result<(), DevError> {
@@ -2216,12 +2080,11 @@ fn report_diagnostic_phase(
             output::error(&raw_clippy_text(r));
         }
     } else {
-        output::error(&format_clippy_capped_multi(
+        output::error(&format_clippy_multi(
             &format!("cargo {}", if phase == "rustdoc" { "doc" } else { phase }),
             results,
             Some(info),
             project_root,
-            limit,
             multi,
             keep,
         ));
@@ -2522,7 +2385,6 @@ pub(crate) fn cmd_clippy(
     clippy_allow: &[String],
     clippy_allow_exact: &[SitedAllow],
     raw: bool,
-    limit: usize,
 ) -> Result<(), DevError> {
     let started = std::time::Instant::now();
     let mut sweep = build_clippy_sweep(
@@ -2556,7 +2418,6 @@ pub(crate) fn cmd_clippy(
         clippy_allow,
         clippy_allow_exact,
         raw,
-        limit,
         true,
         &mut clippy_ran,
     ) {
@@ -2854,18 +2715,17 @@ fn coverage_tag(
 }
 
 /// Multi-sweep version of the text formatter: parses each sweep's stdout
-/// JSON, merges + dedups diagnostics, applies scope+limit, and when `multi`
+/// JSON, merges + dedups diagnostics, orders them by scope, and when `multi`
 /// tags a line with the sweeps that reported it - only where some sweep
 /// covering its package did not ([`coverage_tag`]). Falls back to per-sweep
 /// raw streams when cargo failed but emitted no compiler-message events
 /// (e.g. cargo itself crashed before reaching the diagnostic phase).
 #[allow(clippy::too_many_arguments)]
-fn format_clippy_capped_multi(
+fn format_clippy_multi(
     tool: &str,
     results: &[SweepResult],
     info: Option<&build::ProjectInfo>,
     project_root: &Path,
-    limit: usize,
     multi: bool,
     keep: &dyn Fn(&cargo_json::DiagnosticEvent) -> bool,
 ) -> String {
@@ -2913,11 +2773,11 @@ fn format_clippy_capped_multi(
     let total = merged.len();
     let mut refs: Vec<&MergedDiag<'_>> = merged.iter().collect();
     // Sort so every hit of a single lint clumps together, by lint code, file,
-    // line, column; `scope_limit` then moves unstaged files to the front,
+    // line, column; `scope_order` then moves unstaged files to the front,
     // keeping this order within each group. Cached keys keep the location
     // parsing to one pass per diagnostic.
     refs.sort_by_cached_key(|m| clippy_sort_key(m.diag));
-    let (displayed, trailer) = scope_limit(refs, project_root, limit, |m| {
+    let displayed = scope_order(refs, project_root, |m| {
         m.diag.path().unwrap_or_else(|| Path::new(""))
     });
 
@@ -2943,11 +2803,6 @@ fn format_clippy_capped_multi(
             out.push(' ');
         }
         out.push_str(&m.diag.format_one());
-        out.push('\n');
-    }
-    if let Some(t) = trailer {
-        out.push_str("  ");
-        out.push_str(&t);
         out.push('\n');
     }
     out.trim_end().to_string()
@@ -3135,7 +2990,6 @@ fn run_test_phase(
     sweeps: &[ResolvedSweep],
     packages: &[String],
     raw: bool,
-    roll_call: bool,
     doctests: bool,
     commands: bool,
     extra_args: &[String],
@@ -3242,7 +3096,6 @@ fn run_test_phase(
                 &project_env,
                 &allow_args,
                 raw,
-                roll_call,
                 doctests,
                 commands,
                 timings.as_deref_mut(),
@@ -3363,19 +3216,17 @@ mod sited_summary_tests {
 }
 
 #[cfg(test)]
-mod scope_limit_tests {
+mod scope_order_tests {
     use super::*;
     use std::path::PathBuf;
 
-    /// `--limit all` is the uncapped view: every error and no trailer, even
-    /// where git cannot be asked.
+    /// Every error is displayed, even where git cannot be asked and so
+    /// nothing can be moved to the front.
     #[test]
-    fn unlimited_shows_everything_without_trailer() {
+    fn everything_is_displayed_without_git() {
         let violations = vec![PathBuf::from("a.rs"), PathBuf::from("b.rs")];
-        let (displayed, trailer) =
-            scope_limit(violations, Path::new("/nonexistent"), scope::UNLIMITED, PathBuf::as_path);
+        let displayed = scope_order(violations, Path::new("/nonexistent"), PathBuf::as_path);
         assert_eq!(displayed.len(), 2);
-        assert!(trailer.is_none());
     }
 }
 
@@ -3679,72 +3530,36 @@ mod script_failure_render_tests {
     #[test]
     fn rustc_shows_errors_and_counts_the_hidden_warnings() {
         let mut msg = String::new();
-        append_script_failure(
-            &mut msg,
-            &check(Diagnostics::Rustc),
-            &outcome("", &noisy()),
-            20,
-        );
+        append_script_failure(&mut msg, &check(Diagnostics::Rustc), &outcome("", &noisy()));
         // Both errors, with their continuation lines.
         assert!(msg.contains("error: unused imports"));
         assert!(msg.contains("binary.rs:10:5"));
         assert!(msg.contains("error[E0432]"));
         // No warning body survives - that is the whole point.
         assert!(!msg.contains("links to private item"));
-        assert!(msg.contains("40 warnings hidden"));
-        assert!(msg.contains("--limit all"));
+        assert!(msg.contains("40 warnings not shown"));
         // Only the failing stream gets a section; the empty one is skipped.
         assert!(msg.contains("--- stderr (errors) ---"));
         assert!(!msg.contains("stdout"));
     }
 
+    /// Every error block prints, however many there are, and across both
+    /// streams: the narrowing is by level, never by count.
     #[test]
-    fn limit_caps_error_blocks_and_the_trailer_says_so() {
-        let mut msg = String::new();
-        append_script_failure(
-            &mut msg,
-            &check(Diagnostics::Rustc),
-            &outcome("", &noisy()),
-            1,
-        );
-        assert!(msg.contains("error: unused imports"));
-        assert!(!msg.contains("error[E0432]"));
-        assert!(msg.contains("1 more errors"));
-        assert!(msg.contains("40 warnings"));
-    }
-
-    #[test]
-    fn limit_budget_spans_both_streams() {
-        // Two errors, one per stream, under a budget of one: the second
-        // stream must not get a fresh allowance.
+    fn every_error_block_prints_across_both_streams() {
         let mut msg = String::new();
         append_script_failure(
             &mut msg,
             &check(Diagnostics::Rustc),
             &outcome("error: from stdout\n", "error: from stderr\n"),
-            1,
         );
         assert!(msg.contains("from stdout"));
-        assert!(!msg.contains("from stderr"));
-        assert!(msg.contains("1 more errors"));
+        assert!(msg.contains("from stderr"));
+        assert!(!msg.contains("not shown"));
     }
 
     #[test]
-    fn unlimited_prints_everything_verbatim() {
-        let mut msg = String::new();
-        append_script_failure(
-            &mut msg,
-            &check(Diagnostics::Rustc),
-            &outcome("", &noisy()),
-            crate::scope::UNLIMITED,
-        );
-        assert!(msg.contains("links to private item `P39`"));
-        assert!(msg.contains("error[E0432]"));
-        assert!(!msg.contains("hidden"));
-    }
-
-    #[test]
-    fn rustc_without_an_error_block_falls_back_to_the_capped_view() {
+    fn rustc_without_an_error_block_falls_back_to_the_verbatim_view() {
         // A sentinel that never appeared because the command died early: the
         // evidence is the output, not a level that isn't there.
         let mut msg = String::new();
@@ -3752,43 +3567,29 @@ mod script_failure_render_tests {
             &mut msg,
             &check(Diagnostics::Rustc),
             &outcome("", "warning: something\nthe tool was killed\n"),
-            20,
         );
         assert!(msg.contains("--- stderr ---"));
         assert!(msg.contains("the tool was killed"));
         assert!(msg.contains("warning: something"));
     }
 
+    /// An opaque check's captured stream prints whole - the fatal error near
+    /// the first line and the verdict on the last are both the evidence.
     #[test]
-    fn opaque_keeps_both_ends_and_elides_the_middle() {
+    fn opaque_prints_the_whole_stream() {
         let body: String = (0..100).map(|i| format!("line {i}\n")).collect();
         let mut msg = String::new();
-        append_script_failure(
-            &mut msg,
-            &check(Diagnostics::Opaque),
-            &outcome(&body, ""),
-            2,
-        );
-        // Head and tail both survive: a fatal error is near the first line, an
-        // opaque check's verdict is the last.
+        append_script_failure(&mut msg, &check(Diagnostics::Opaque), &outcome(&body, ""));
         assert!(msg.contains("line 0"));
-        assert!(msg.contains("line 1"));
-        assert!(msg.contains("line 98"));
+        assert!(msg.contains("line 50"));
         assert!(msg.contains("line 99"));
-        assert!(!msg.contains("line 50"));
-        assert!(msg.contains("96 lines hidden"));
+        assert!(!msg.contains("hidden"));
     }
 
     #[test]
-    fn opaque_below_the_cap_is_untouched() {
-        // No elision marker standing in for fewer lines than it occupies.
+    fn opaque_keeps_a_short_stream_intact() {
         let mut msg = String::new();
-        append_script_failure(
-            &mut msg,
-            &check(Diagnostics::Opaque),
-            &outcome("a\nb\nc\n", ""),
-            2,
-        );
+        append_script_failure(&mut msg, &check(Diagnostics::Opaque), &outcome("a\nb\nc\n", ""));
         assert!(!msg.contains("hidden"));
         for line in ["a", "b", "c"] {
             assert!(msg.contains(line));

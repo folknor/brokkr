@@ -34,11 +34,14 @@ fn run_isolated_sweep(
     project_env: &[(String, String)],
     allow_args: &[String],
     raw: bool,
-    roll_call: bool,
     doctests: bool,
     commands: bool,
     mut timings: Option<&mut Vec<TestTiming>>,
 ) -> Result<bool, DevError> {
+    // The per-test roll-call rides on `--raw`, the flag that already means
+    // "no filtering, show me what the tools said". A lane that prints one line
+    // per passing test is that same view of the test phase.
+    let roll_call = raw;
     if !extra_args.is_empty() {
         return Err(DevError::Config(
             "`brokkr check -- …` extra args are not supported on a sweep with \
@@ -99,7 +102,6 @@ fn run_isolated_sweep(
             plan.include_ignored,
             &env_refs,
             raw,
-            roll_call,
             commands,
         )?;
         match outcome {
@@ -182,9 +184,9 @@ enum IsolatedOutcome {
 
 /// The plan's runnable name list plus the package-qualified-skipped
 /// count; `None` after reporting a qualified-skip collision or a
-/// zero-runnable enumeration. Under `--limit all` the plan is announced before
-/// the run (the roll-call); otherwise the sweep's one summary line
-/// reports it after.
+/// zero-runnable enumeration. Under `--raw` the plan is announced before the
+/// run (the roll-call); otherwise the sweep's one summary line reports it
+/// after.
 fn plan_runnable(plan: &IsolatedPlan, label: &str, roll_call: bool) -> Option<(Vec<String>, usize)> {
     // A name present in both a qualified-skipped and an unskipped package
     // cannot be split by one `cargo test -- --exact` invocation: error
@@ -332,9 +334,9 @@ fn run_one_isolated_test(
     include_ignored: bool,
     env_refs: &[(&str, &str)],
     raw: bool,
-    roll_call: bool,
     commands: bool,
 ) -> Result<IsolatedOutcome, DevError> {
+    let roll_call = raw;
     let mut args: Vec<String> = vec!["test".into()];
     args.extend(selection.iter().cloned());
     // `--tests` selects lib+bins+integration but not doctests (which this
@@ -428,7 +430,7 @@ fn run_one_isolated_test(
 
     // A passing test is not news: the sweep's summary line carries the
     // count, and a failure reports itself in full. One line per test turns
-    // a gate run into a scroll. `--limit all` is the way back to the roll-call.
+    // a gate run into a scroll. `--raw` is the way back to the roll-call.
     let elapsed = run.completed.first().map(|(_, e)| *e);
     if roll_call {
         match elapsed {
