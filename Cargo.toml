@@ -64,7 +64,7 @@ rustc-hash = "2"
 # nextest-runner is a 0.x with no API stability promise; Cargo.lock is committed,
 # so upgrades are deliberate work rather than drift. Default features only -
 # `self-update` (rustls/aws-lc-rs/ureq), `config-schema` and `usdt` stay off.
-nextest-runner = "0.123.0"
+nextest-runner = "0.124.0"
 # The summary/ID types (RustBinaryId, TestCaseName, FilterMatch, MismatchReason).
 # A dependency of nextest-runner too, declared explicitly because brokkr names
 # these types directly rather than reaching through the runner for them.
@@ -75,7 +75,9 @@ nextest-metadata = "0.15"
 # compiles the package-qualified skip translation, camino is the path
 # vocabulary the whole API speaks.
 # Held at 0.17: must be the same version nextest-runner links, or its
-# PackageGraph and ours are distinct types and the lane won't compile.
+# PackageGraph and ours are distinct types and the lane won't compile. guppy
+# 0.19 is out, but nextest-runner 0.124 still links 0.17 - the pin moves when
+# the runner's does, never before.
 guppy = "0.17.26"
 nextest-filtering = "0.22"
 camino = "1"

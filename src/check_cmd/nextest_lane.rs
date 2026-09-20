@@ -68,7 +68,7 @@ use nextest_runner::{
 /// names the engine that produced it. Must track Cargo.toml's pin - there is
 /// no runtime accessor on the crate, and a compile-time drift here would
 /// only mislabel output, never change behaviour.
-const NEXTEST_ENGINE_VERSION: &str = "0.123.0";
+const NEXTEST_ENGINE_VERSION: &str = "0.124.0";
 
 /// The engine config brokkr synthesizes for one run. Written under the
 /// brokkr-owned state dir (never into the code tree) and handed to the
