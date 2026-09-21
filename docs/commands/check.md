@@ -870,7 +870,9 @@ violations, e.g. `from = "app"` with `forbid = "db"` rejects `app -> db`. A rule
 can scope the forbidden match by dependency `kinds` (`normal`/`dev`/`build`,
 default all) and `optional` (e.g. `optional = false` to require a dep be
 optional), so manifest conventions like "tokio only as a dev-dependency" are
-expressible.
+expressible. A rule with `allow` instead of `forbid` inverts the polarity:
+every in-scope direct dependency not on the list is a violation, which is how a
+leaf boundary stays closed as new crates appear.
 
 ## `publish_cycle` phase
 

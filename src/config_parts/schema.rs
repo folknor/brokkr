@@ -731,6 +731,11 @@ pub struct VersionAlign {
 /// One `[[dependency_rule]]` entry: a direct Cargo dependency that must
 /// not exist.
 ///
+/// A rule has one polarity: `forbid` (the listed crates are violations) or
+/// `allow` (every crate *not* listed is a violation). `allow` exists because a
+/// forbid-list leaf boundary fails open - a crate added later is permitted
+/// until someone remembers to extend every list.
+///
 /// `from` names one or more workspace packages, or the wildcard `"*"` for
 /// every workspace package. `forbid` names package dependencies that are
 /// illegal for those packages - typically an external crate you want to keep
@@ -763,8 +768,15 @@ pub struct DependencyRule {
     #[serde(deserialize_with = "string_or_vec")]
     pub from: Vec<String>,
     /// Package names that may not appear in `from`'s direct dependencies.
-    #[serde(deserialize_with = "string_or_vec")]
-    pub forbid: Vec<String>,
+    /// Exactly one of `forbid` / `allow` is set (enforced by the parser).
+    #[serde(default, deserialize_with = "opt_string_or_vec")]
+    pub forbid: Option<Vec<String>>,
+    /// The allow-list polarity: every in-scope direct dependency of `from`
+    /// whose real package name is not listed is a violation. May be empty
+    /// (`allow = []` - no in-scope dependencies at all). Unlisted-but-unused
+    /// entries are fine: the list states what is permitted, not required.
+    #[serde(default, deserialize_with = "opt_string_or_vec")]
+    pub allow: Option<Vec<String>>,
     /// Workspace packages to drop from the `from` set (mainly for
     /// `from = "*"`). Empty by default.
     #[serde(default, deserialize_with = "string_or_vec")]
@@ -777,6 +789,13 @@ pub struct DependencyRule {
     /// expresses "must be optional". Unset = match regardless.
     #[serde(default)]
     pub optional: Option<bool>,
+}
+
+fn opt_string_or_vec<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    string_or_vec(deserializer).map(Some)
 }
 
 fn string_or_vec<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>

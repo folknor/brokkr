@@ -1412,7 +1412,58 @@ forbid = ["db", "service-state"]
         assert_eq!(rules.len(), 1);
         assert_eq!(rules[0].name.as_deref(), Some("app-db"));
         assert_eq!(rules[0].from, vec!["app"]);
-        assert_eq!(rules[0].forbid, vec!["db", "service-state"]);
+        assert_eq!(
+            rules[0].forbid.as_deref(),
+            Some(&["db".to_owned(), "service-state".to_owned()][..])
+        );
+        assert!(rules[0].allow.is_none());
+    }
+
+    #[test]
+    fn parse_dependency_rules_accepts_allow_including_empty() {
+        let table = root_table(
+            r#"
+project = "ratatoskr"
+
+[[dependency_rule]]
+from = ["a", "b"]
+allow = "libc"
+
+[[dependency_rule]]
+from = "c"
+allow = []
+"#,
+        );
+        let rules = parse_dependency_rules(&table).unwrap();
+        assert_eq!(rules[0].allow.as_deref(), Some(&["libc".to_owned()][..]));
+        assert_eq!(rules[1].allow.as_deref(), Some(&[][..]));
+    }
+
+    #[test]
+    fn parse_dependency_rules_requires_exactly_one_polarity() {
+        let both = root_table(
+            r#"
+project = "ratatoskr"
+
+[[dependency_rule]]
+from = "a"
+forbid = "db"
+allow = "libc"
+"#,
+        );
+        let err = parse_dependency_rules(&both).unwrap_err().to_string();
+        assert!(err.contains("both `forbid` and `allow`"), "got: {err}");
+
+        let neither = root_table(
+            r#"
+project = "ratatoskr"
+
+[[dependency_rule]]
+from = "a"
+"#,
+        );
+        let err = parse_dependency_rules(&neither).unwrap_err().to_string();
+        assert!(err.contains("`forbid` or `allow`"), "got: {err}");
     }
 
     #[test]

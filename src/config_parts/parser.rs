@@ -1014,7 +1014,7 @@ fn parse_dependency_rules(
         return Err(DevError::Config(
             "[dependency_rule] (table form) is not supported. Use one or \
              more `[[dependency_rule]]` array-of-table entries with `from` \
-             and `forbid`."
+             and `forbid` or `allow`."
                 .into(),
         ));
     }
@@ -1035,7 +1035,28 @@ fn parse_dependency_rules(
             )));
         }
         validate_non_empty_string_list("from", &rule.from, &label)?;
-        validate_non_empty_string_list("forbid", &rule.forbid, &label)?;
+        match (&rule.forbid, &rule.allow) {
+            (Some(forbid), None) => validate_non_empty_string_list("forbid", forbid, &label)?,
+            // An empty `allow` is legal: it means "no in-scope dependencies".
+            (None, Some(allow)) => {
+                if allow.iter().any(|v| v.trim().is_empty()) {
+                    return Err(DevError::Config(format!(
+                        "[[dependency_rule]] {label} has blank string in `allow`"
+                    )));
+                }
+            }
+            (Some(_), Some(_)) => {
+                return Err(DevError::Config(format!(
+                    "[[dependency_rule]] {label} sets both `forbid` and `allow`; \
+                     a rule has one polarity"
+                )));
+            }
+            (None, None) => {
+                return Err(DevError::Config(format!(
+                    "[[dependency_rule]] {label} needs `forbid` or `allow`"
+                )));
+            }
+        }
     }
 
     Ok(rules)

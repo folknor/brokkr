@@ -1,8 +1,9 @@
 //! Static Cargo dependency-boundary checks for `brokkr check`.
 //!
 //! Rules come from `[[dependency_rule]]` entries in `brokkr.toml`.
-//! Each rule forbids direct dependencies from one or more workspace
-//! packages to one or more package names.
+//! Each rule judges the direct dependencies of one or more workspace
+//! packages, either against a `forbid` list (listed names are violations) or
+//! an `allow` list (unlisted names are violations).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -135,7 +136,22 @@ pub fn check_metadata(
 
     let mut violations = Vec::new();
     for rule in rules {
-        let forbidden: BTreeSet<&str> = rule.forbid.iter().map(String::as_str).collect();
+        // One polarity per rule (the parser enforces exactly one of the two).
+        // An edge is judged by `dep.name`, the real package name - never the
+        // rename key - so `foo = { package = "bar" }` can't dodge either list.
+        let forbidden: Option<BTreeSet<&str>> = rule
+            .forbid
+            .as_ref()
+            .map(|f| f.iter().map(String::as_str).collect());
+        let allowed: Option<BTreeSet<&str>> = rule
+            .allow
+            .as_ref()
+            .map(|a| a.iter().map(String::as_str).collect());
+        let violates = |name: &str| match (&forbidden, &allowed) {
+            (Some(f), _) => f.contains(name),
+            (None, Some(a)) => !a.contains(name),
+            (None, None) => false,
+        };
         let except: BTreeSet<&str> = rule.except.iter().map(String::as_str).collect();
 
         // Resolve the kind filter once per rule. Empty = every kind.
@@ -179,7 +195,7 @@ pub fn check_metadata(
 
         for pkg in from_pkgs {
             for dep in &pkg.dependencies {
-                if !forbidden.contains(dep.name.as_str()) {
+                if !violates(dep.name.as_str()) {
                     continue;
                 }
                 let dep_kind = DependencyKind::from(dep.kind.as_deref());
@@ -285,7 +301,8 @@ mod tests {
         let rules = vec![DependencyRule {
             name: Some("app-db-boundary".into()),
             from: vec!["app".into()],
-            forbid: vec!["db".into()],
+            forbid: Some(vec!["db".into()]),
+            allow: None,
             except: Vec::new(),
             kinds: Vec::new(),
             optional: None,
@@ -303,7 +320,8 @@ mod tests {
         let rules = vec![DependencyRule {
             name: None,
             from: vec!["app".into()],
-            forbid: vec!["db".into(), "service-state".into()],
+            forbid: Some(vec!["db".into(), "service-state".into()]),
+            allow: None,
             except: Vec::new(),
             kinds: Vec::new(),
             optional: None,
@@ -320,7 +338,8 @@ mod tests {
         let rules = vec![DependencyRule {
             name: None,
             from: vec!["missing".into()],
-            forbid: vec!["db".into()],
+            forbid: Some(vec!["db".into()]),
+            allow: None,
             except: Vec::new(),
             kinds: Vec::new(),
             optional: None,
@@ -336,7 +355,8 @@ mod tests {
         let rules = vec![DependencyRule {
             name: None,
             from: vec!["*".into()],
-            forbid: vec!["db".into()],
+            forbid: Some(vec!["db".into()]),
+            allow: None,
             except: Vec::new(),
             kinds: Vec::new(),
             optional: None,
@@ -346,7 +366,8 @@ mod tests {
         let excepted = vec![DependencyRule {
             name: None,
             from: vec!["*".into()],
-            forbid: vec!["db".into()],
+            forbid: Some(vec!["db".into()]),
+            allow: None,
             except: vec!["app".into()],
             kinds: Vec::new(),
             optional: None,
@@ -359,7 +380,8 @@ mod tests {
         DependencyRule {
             name: None,
             from: vec!["app".into()],
-            forbid: vec![to.into()],
+            forbid: Some(vec![to.into()]),
+            allow: None,
             except: Vec::new(),
             kinds,
             optional,
@@ -398,6 +420,65 @@ mod tests {
 
         let svc = vec![app_rule("service-state", Vec::new(), Some(false))];
         assert!(check_metadata(metadata(), &svc).unwrap().violations.is_empty());
+    }
+
+    /// Build an allow-list rule over `from`.
+    fn allow_rule(from: &[&str], allow: &[&str], kinds: Vec<String>) -> DependencyRule {
+        DependencyRule {
+            name: Some("leaf".into()),
+            from: from.iter().map(|s| (*s).to_owned()).collect(),
+            forbid: None,
+            allow: Some(allow.iter().map(|s| (*s).to_owned()).collect()),
+            except: Vec::new(),
+            kinds,
+            optional: None,
+        }
+    }
+
+    #[test]
+    fn allow_flags_every_unlisted_dependency() {
+        // `app` depends on `db` (normal) and `service-state` (dev); allowing
+        // only `db` flags `service-state`, reported by real name + rename.
+        let rules = vec![allow_rule(&["app"], &["db"], Vec::new())];
+        let report = check_metadata(metadata(), &rules).unwrap();
+        assert_eq!(report.violations.len(), 1);
+        let v = &report.violations[0];
+        assert_eq!(v.rule.as_deref(), Some("leaf"));
+        assert_eq!(v.to, "service-state");
+        assert_eq!(v.alias.as_deref(), Some("service_state"));
+    }
+
+    #[test]
+    fn allow_is_judged_by_real_name_not_rename() {
+        // Listing the rename key does not permit the renamed package.
+        let rules = vec![allow_rule(&["app"], &["db", "service_state"], Vec::new())];
+        assert_eq!(check_metadata(metadata(), &rules).unwrap().violations.len(), 1);
+    }
+
+    #[test]
+    fn allow_scoped_by_kinds_leaves_dev_deps_unconstrained() {
+        let rules = vec![allow_rule(&["app"], &["db"], vec!["normal".into()])];
+        assert!(check_metadata(metadata(), &rules).unwrap().violations.is_empty());
+    }
+
+    #[test]
+    fn allow_empty_list_and_unused_entries() {
+        // `allow = []` means no dependencies at all: both of `app`'s edges trip.
+        let none = vec![allow_rule(&["app"], &[], Vec::new())];
+        assert_eq!(check_metadata(metadata(), &none).unwrap().violations.len(), 2);
+
+        // An entry nothing depends on is not an error; leaves pass trivially.
+        let unused = vec![allow_rule(&["db", "service-state"], &["libc"], Vec::new())];
+        assert!(check_metadata(metadata(), &unused).unwrap().violations.is_empty());
+    }
+
+    #[test]
+    fn allow_with_wildcard_from_and_except() {
+        let rules = vec![DependencyRule {
+            except: vec!["app".into()],
+            ..allow_rule(&["*"], &[], Vec::new())
+        }];
+        assert!(check_metadata(metadata(), &rules).unwrap().violations.is_empty());
     }
 
     #[test]

@@ -1240,8 +1240,9 @@ no second compile; the coverage ledger already reconciles multi-sweep ran-sets.
 
 ## `[[dependency_rule]]` array
 
-Optional. Each entry forbids direct Cargo dependencies from one or more
-workspace packages to one or more package names. `brokkr check` enforces these
+Optional. Each entry judges the direct Cargo dependencies of one or more
+workspace packages, either against a `forbid` list (listed names are
+violations) or an `allow` list (unlisted names are violations). `brokkr check` enforces these
 rules before clippy/tests by reading `cargo metadata --no-deps`. With no
 entries, the phase is skipped silently.
 
@@ -1261,9 +1262,14 @@ forbid = "rusqlite"
 - `from` (required) - workspace package name, or an array of names, whose
   direct dependency list is checked. The wildcard `"*"` means every workspace
   package - use it to ban an external crate across the whole workspace.
-- `forbid` (required) - package name, or array of package names, that may not
+- `forbid` - package name, or array of package names, that may not
   appear in those direct dependencies. This can name workspace crates or
   external crates.
+- `allow` - the inverse polarity: package name(s) that are the *only*
+  permitted direct dependencies; any other in-scope edge is a violation.
+  Exactly one of `forbid` / `allow` must be set. `allow = []` means "no
+  in-scope dependencies at all"; an entry nothing depends on is not an error
+  (the list states what is permitted, not what is required).
 - `except` (optional) - workspace packages to drop from the `from` set. Pairs
   with `from = "*"` to express "no crate may depend on X, except these".
 - `kinds` (optional) - dependency kinds the rule applies to: `normal`, `dev`,
@@ -1300,6 +1306,25 @@ forbid = "tokio"
 kinds = ["normal"]
 optional = false
 ```
+
+A leaf boundary is an allow-list, not a forbid-list: a forbid-list fails open,
+since a crate added to the workspace or lockfile later is permitted until
+someone extends every list.
+
+```toml
+# Everything except these two is a violation as a normal dependency;
+# dev-deps stay unconstrained.
+[[dependency_rule]]
+name = "test-scratch-is-a-leaf"
+from = "broadarrow-test-scratch"
+allow = ["broadarrow-file-lock", "libc"]
+kinds = ["normal"]
+```
+
+Both polarities match by real package name, never the rename key, so
+`foo = { package = "bar" }` is judged as `bar` and a rename can't slip past
+either list. `kinds`, `optional`, `from = "*"` and `except` scope an `allow`
+rule exactly as they scope a `forbid` rule.
 
 Rules are intentionally direct-edge checks: `app -> db` is rejected when `db`
 appears in `app`'s manifest dependencies. Transitive architectural constraints
