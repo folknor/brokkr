@@ -226,22 +226,16 @@ skip a workspace-wide gate.
 
 ## The markdown-only shortcut
 
-In a git repo where **everything uncommitted is markdown the build does not
-read**, `check` runs the `gremlins`, `textlint` and `script_check` phases and
-nothing else. Such documentation cannot change how the code builds, so clippy
-and the tests would be re-proving what the last full run already established on
+In a git repo where **everything uncommitted is markdown**, `check` runs the
+`gremlins`, `textlint` and `script_check` phases and nothing else. Clippy and
+the tests would be re-proving what the last full run already established on
 the same code.
 
-Markdown a Rust source compiles in is not prose for this purpose: brokkr's own
-`man` pages are `include_str!`'d, and a crate with `#![doc =
-include_str!("README.md")]` has doctests and rustdoc output in that file. So
-once every changed path is markdown, `scope::included_files` scans the
-repository's `.rs` files for `include_str!`/`include_bytes!` and any changed
-file they name makes the tree `Code`. A literal path (relative to the including
-file) and `concat!(env!("CARGO_MANIFEST_DIR"), "...")` resolve; any other
-argument cannot be followed without compiling, and the run is full rather than
-guessed short. A `build.rs` or test that reads markdown with `std::fs` at run
-time is outside what the scan sees - `--force-rust` covers it. `post-test`
+Markdown never counts as code, including markdown a Rust source compiles in
+(brokkr's own `include_str!`'d `man` pages, a crate's `#![doc =
+include_str!("README.md")]` doctests). This is deliberate, not a bug: a
+doctest or rustdoc break from a docs edit surfaces on the next full run, and
+`--force-rust` checks the build on demand when a docs edit warrants it. `post-test`
 script checks are the exception inside `script_check`: they judge a test phase,
 and with none having run they are skipped and counted on a `script-check: N
 post-test checks skipped` line, as under a profile that skips `test`.
@@ -256,8 +250,8 @@ outcomes, only one of which shortens the run:
 |---|---|
 | `Unknown` | not a git repo, or git could not be asked - full run |
 | `Clean` | nothing uncommitted - **full run**, since a clean tree is the state a complete check is *for* |
-| `ProseOnly` | markdown no Rust source includes, and nothing else - shortened |
-| `Code` | anything else, including included markdown - full run |
+| `ProseOnly` | markdown and nothing else - shortened |
+| `Code` | anything else - full run |
 
 **Waived by** `--force-rust`, `--gate`, any `--profile` (and so by any
 `certifies` claim), `--features`, `--no-default-features`, `-p`, or trailing

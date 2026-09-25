@@ -151,9 +151,8 @@ fn check_clean(workspace_root: &Path) -> bool {
     // It cannot change what a measured run measures, though - the doc text is
     // inert data on every path a bench exercises - and what the clean-tree
     // demand protects is that the pinned commit describes the measured
-    // behaviour. `check`'s prose-only shortcut is a different question (can
-    // this edit break the build or a test?) and does count included markdown;
-    // see `scope::dirt`.
+    // behaviour. Markdown is never dirt - here or in `check`'s prose-only
+    // shortcut (`scope::dirt`) - and that is deliberate, not a bug.
     //
     // brokkr.toml is excluded by decision, not because it is inert: it carries
     // host build features, `env` and `capture_env`. But brokkr itself writes
