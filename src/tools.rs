@@ -94,7 +94,11 @@ fn ensure_osmosis_binary(data_dir: &Path) -> Result<PathBuf, DevError> {
         "https://github.com/openstreetmap/osmosis/releases/download/{OSMOSIS_VERSION}/osmosis-{OSMOSIS_VERSION}.tgz"
     );
 
-    // Download.
+    // Download. Not checksum-verified: this is a fixed release URL with no
+    // metadata request in front of it, so there is no published digest in hand
+    // to compare against. `OSMOSIS_VERSION` pins the release; verifying would
+    // mean adding a GitHub releases API call to read the asset's `digest`, as
+    // `ensure_planetiler_jar` does.
     let tarball = data_dir.join("osmosis-download.tgz");
     let tarball_str = tarball.display().to_string();
     output::verify_msg(&format!("downloading Osmosis {OSMOSIS_VERSION}"));
@@ -187,18 +191,24 @@ fn ensure_jdk(data_dir: &Path) -> Result<PathBuf, DevError> {
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| DevError::Config("adoptium API missing release_name".into()))?;
 
-    let download_url = first
-        .get("binary")
-        .and_then(|b| b.get("package"))
+    let package = first.get("binary").and_then(|b| b.get("package"));
+    let download_url = package
         .and_then(|p| p.get("link"))
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| DevError::Config("adoptium API missing binary.package.link".into()))?;
+    // The same response carries the package's sha256. Required rather than
+    // optional: it is part of the documented asset shape, so its absence is
+    // an API change to stop on, not a reason to install unverified.
+    let checksum = package
+        .and_then(|p| p.get("checksum"))
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| DevError::Config("adoptium API missing binary.package.checksum".into()))?;
 
     // Download.
     let tarball = data_dir.join("jdk-download.tar.gz");
     let tarball_str = tarball.display().to_string();
     output::bench_msg(&format!("downloading JDK {release_name}"));
-    run_curl(&["-fsSL", "-o", &tarball_str, download_url], Path::new("."))?;
+    fetch_verified(download_url, &tarball, Some(checksum))?;
 
     // Remove old JDK dir and recreate.
     if jdk_dir.exists() {
@@ -274,19 +284,35 @@ fn ensure_planetiler_jar(data_dir: &Path) -> Result<PathBuf, DevError> {
         .and_then(serde_json::Value::as_array)
         .ok_or_else(|| DevError::Config("github API missing assets array".into()))?;
 
-    let download_url = assets
+    let asset = assets
         .iter()
         .find(|a| a.get("name").and_then(serde_json::Value::as_str) == Some("planetiler.jar"))
-        .and_then(|a| a.get("browser_download_url"))
-        .and_then(serde_json::Value::as_str)
         .ok_or_else(|| {
             DevError::Config("github API: no planetiler.jar asset found in release".into())
         })?;
+    let download_url = asset
+        .get("browser_download_url")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            DevError::Config("github API: planetiler.jar asset has no download url".into())
+        })?;
+    // GitHub reports a `digest` of `sha256:<hex>` per release asset, but only
+    // for assets uploaded since it started computing them - older releases
+    // carry `null`. Verify when it is there; without it there is nothing
+    // upstream publishes to check against, so the jar installs unverified.
+    let digest = asset
+        .get("digest")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|d| d.strip_prefix("sha256:"));
+    if digest.is_none() {
+        output::bench_msg(&format!(
+            "Planetiler {tag_name}: release publishes no sha256 digest; installing unverified"
+        ));
+    }
 
-    // Download.
-    let jar_str = jar_path.display().to_string();
+    // Download. Staged, so a partial jar never sits at `jar_path`.
     output::bench_msg(&format!("downloading Planetiler {tag_name}"));
-    run_curl(&["-fsSL", "-o", &jar_str, download_url], Path::new("."))?;
+    fetch_verified(download_url, &jar_path, digest)?;
 
     // Write version file.
     fs::write(&version_file, tag_name)?;
@@ -415,11 +441,19 @@ pub(crate) fn run_curl(args: &[&str], cwd: &Path) -> Result<Vec<u8>, DevError> {
 ///
 /// Uses curl with `--progress-bar` and inherited stderr so the user can see
 /// download progress for large files.
+///
+/// No hash check: the callers fetch map data brokkr pins no digest for, and
+/// much of it (a region's latest extract, osmdata's daily-rebuilt ocean
+/// shapefiles) is republished under a fixed URL, so no stable digest could be
+/// pinned. What is guaranteed is that `dest` is absent or a complete transfer.
 pub(crate) fn download_file(url: &str, dest: &Path) -> Result<(), DevError> {
-    // Download to a temp file and rename on success to avoid leaving partial
-    // files that block future retries.
-    let tmp = dest.with_extension("tmp");
-    let tmp_str = tmp.display().to_string();
+    // Download to a staged sibling and rename on success, so a partial file
+    // never sits at `dest` to block future retries. The stable `.partial`
+    // name (not a per-process one) means a killed multi-gigabyte transfer is
+    // overwritten by the retry instead of leaked; downloads run under the
+    // global lock, so no second writer shares it.
+    let staged = crate::atomic_write::Staged::stable(dest)?;
+    let tmp_str = staged.tmp_path().display().to_string();
 
     // No `--max-time`: see `CURL_STALL_ARGS` for why a stall detector bounds
     // this rather than a total-duration cap.
@@ -435,8 +469,7 @@ pub(crate) fn download_file(url: &str, dest: &Path) -> Result<(), DevError> {
         })?;
 
     if !status.success() {
-        // Clean up partial download.
-        drop(std::fs::remove_file(&tmp));
+        // Dropping `staged` removes the partial download.
         return Err(DevError::Subprocess {
             program: "curl".into(),
             code: status.code(),
@@ -444,9 +477,50 @@ pub(crate) fn download_file(url: &str, dest: &Path) -> Result<(), DevError> {
         });
     }
 
-    std::fs::rename(&tmp, dest)?;
-
+    staged.commit()?;
     Ok(())
+}
+
+/// Download `url` to `dest` through a staged sibling, checking the transfer
+/// against `sha256` (hex) before it is renamed into place when one is given.
+/// A partial or mismatched download never sits at `dest`. Quiet (no progress
+/// bar): for the tool downloads, where [`download_file`]'s bar is noise.
+fn fetch_verified(url: &str, dest: &Path, sha256: Option<&str>) -> Result<(), DevError> {
+    // Stable temp name for the reason `download_file` gives.
+    let staged = crate::atomic_write::Staged::stable(dest)?;
+    let tmp_str = staged.tmp_path().display().to_string();
+    run_curl(&["-fsSL", "-o", &tmp_str, url], Path::new("."))?;
+    if let Some(expected) = sha256 {
+        let actual = sha256_file(staged.tmp_path())?;
+        if !actual.eq_ignore_ascii_case(expected) {
+            return Err(DevError::Preflight(vec![format!(
+                "sha256 mismatch downloading {url}\n  expected: {expected}\n  actual:   {actual}"
+            )]));
+        }
+    }
+    staged.commit()?;
+    Ok(())
+}
+
+/// SHA-256 of a file as lowercase hex, via `sha256sum` (coreutils) or, where
+/// that is absent (macOS), `shasum -a 256`. Shelled out like the rest of this
+/// module's tooling rather than linking a hash crate for one caller.
+fn sha256_file(path: &Path) -> Result<String, DevError> {
+    let path_str = path.display().to_string();
+    let coreutils = output::run_captured("sha256sum", &[&path_str], Path::new("."));
+    let (program, captured) = match coreutils {
+        Err(DevError::Spawn { .. }) => (
+            "shasum",
+            output::run_captured("shasum", &["-a", "256", &path_str], Path::new("."))?,
+        ),
+        other => ("sha256sum", other?),
+    };
+    captured.check_success(program)?;
+    String::from_utf8_lossy(&captured.stdout)
+        .split_whitespace()
+        .next()
+        .map(str::to_ascii_lowercase)
+        .ok_or_else(|| DevError::Config(format!("{program} printed no digest for {path_str}")))
 }
 
 /// Result of an HTTP HEAD request to a URL. Used by `download::run_refresh`
@@ -765,6 +839,17 @@ mod tests {
         // The pre-major marker format (the release name alone).
         assert!(!jdk_marker_matches("jdk-21.0.5+11"));
         assert!(!jdk_marker_matches(""));
+    }
+
+    #[test]
+    fn sha256_file_matches_the_fips_vector() {
+        let dir = crate::test_scratch::scratch("tools", "sha256");
+        let path = dir.join("abc");
+        std::fs::write(&path, b"abc").unwrap();
+        assert_eq!(
+            sha256_file(&path).unwrap(),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
     }
 
     #[test]

@@ -36,8 +36,10 @@ pub(crate) fn run(req: &MeasureRequest, lua: &str) -> Result<(), DevError> {
         } else {
             ""
         };
-        output::bench_msg(&format!("[dry-run] workload {lua} -> {lua_path}{variant}"));
-        output::bench_msg(&format!(
+        // `run_msg`, not the quiet-gated `bench_msg`: `run_measured` sets
+        // quiet unless `--verbose`, and a dry run's output is its whole point.
+        output::run_msg(&format!("[dry-run] workload {lua} -> {lua_path}{variant}"));
+        output::run_msg(&format!(
             "[dry-run] would build --example {example} ({})",
             feature_summary(req)
         ));

@@ -879,6 +879,9 @@ impl PbfhoggCommand {
             // -----------------------------------------------------------------
             // Multi-variant: extract (with resolved bbox)
             // -----------------------------------------------------------------
+            // `-b=<bbox>` (one token) must stay spelled identically to
+            // `bench_extract::strategy_args`, so the two paths' `extract`
+            // rows carry the same bbox spelling in `cli_args`.
             Self::Extract { strategy } => {
                 let bbox = ctx
                     .bbox

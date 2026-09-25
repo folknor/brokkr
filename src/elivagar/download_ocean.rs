@@ -119,6 +119,9 @@ fn download_variant(data_dir: &Path, variant: &OceanVariant) -> Result<(), DevEr
         "downloading {} ({})",
         variant.label, variant.size_hint
     ));
+    // No hash check, deliberately: osmdata regenerates these archives daily
+    // under the same URL, so a pinned digest would be stale within a day (see
+    // `COMPLETE_MARKER`). `download_file` guarantees a complete transfer only.
     tools::download_file(variant.url, &zip_path)?;
 
     output::download_msg("extracting...");

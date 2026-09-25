@@ -482,18 +482,32 @@ fn pair_key(
 ///   can never pair with the current-tree row it exists to be compared
 ///   against. That defeats the flag entirely.
 /// - `--verbose`/`-v` only changes what is printed. It cannot move a wall.
+/// - The iteration count of `--bench N` / `--hotpath N` / `--alloc N` (and
+///   the `=N` forms) is how many samples best-of-N drew, not what was
+///   measured. The flag itself stays - the mode is part of the key anyway.
+/// - `argv[0]` is reduced to its basename: `brokkr` and `~/.cargo/bin/brokkr`
+///   (or `target/release/brokkr`) are the same program to the user.
 ///
 /// Everything else stays. This is a display-level pairing heuristic, not a
 /// correctness gate: a value that happens to be the literal string
-/// `--commit` would consume the token after it, which no real invocation
-/// produces.
+/// `--commit` would consume the token after it, and a numeric positional
+/// directly after a bare `--bench` would be read as its count - which is
+/// how clap reads it too (`num_args = 0..=1`).
 fn normalize_brokkr_args(args: &str) -> String {
     let mut out: Vec<&str> = Vec::new();
     let mut skip_value = false;
+    let mut after_count_flag = false;
 
-    for token in args.split_whitespace() {
+    for (i, token) in args.split_whitespace().enumerate() {
         if skip_value {
             skip_value = false;
+            continue;
+        }
+        if std::mem::take(&mut after_count_flag) && is_iteration_count(token) {
+            continue;
+        }
+        if i == 0 {
+            out.push(token.rsplit('/').next().unwrap_or(token));
             continue;
         }
 
@@ -501,12 +515,32 @@ fn normalize_brokkr_args(args: &str) -> String {
             // Space-separated form: the ref is the next token.
             "--commit" => skip_value = true,
             "--verbose" | "-v" => {}
+            "--bench" | "--hotpath" | "--alloc" => {
+                out.push(token);
+                after_count_flag = true;
+            }
             _ if token.starts_with("--commit=") => {}
-            _ => out.push(token),
+            _ => match strip_count_suffix(token) {
+                Some(flag) => out.push(flag),
+                None => out.push(token),
+            },
         }
     }
 
     out.join(" ")
+}
+
+/// Whether `token` is a measurement-mode iteration count (all digits).
+fn is_iteration_count(token: &str) -> bool {
+    !token.is_empty() && token.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// `--bench=3` -> `--bench` (likewise `--hotpath=`/`--alloc=`); `None` for
+/// any other token.
+fn strip_count_suffix(token: &str) -> Option<&str> {
+    let (flag, value) = token.split_once('=')?;
+    (matches!(flag, "--bench" | "--hotpath" | "--alloc") && is_iteration_count(value))
+        .then_some(flag)
 }
 
 fn split_pair_key(key: &str) -> (&str, &str, &str) {
@@ -1016,8 +1050,51 @@ mod tests {
     #[test]
     fn normalize_does_not_eat_the_token_after_an_unrelated_flag() {
         let out = normalize_brokkr_args("brokkr read --dataset denmark --bench 3");
-        assert!(out.contains("denmark"), "got: {out}");
-        assert!(out.contains("--bench 3"), "got: {out}");
+        assert_eq!(out, "brokkr read --dataset denmark --bench");
+    }
+
+    #[test]
+    fn normalize_strips_iteration_counts() {
+        // `--bench 3` and `--bench 5` drew different sample counts of the
+        // same benchmark; they must pair.
+        let bare = normalize_brokkr_args("brokkr read --bench");
+        for spelled in [
+            "brokkr read --bench 3",
+            "brokkr read --bench 5",
+            "brokkr read --bench=5",
+        ] {
+            assert_eq!(normalize_brokkr_args(spelled), bare, "{spelled}");
+        }
+        assert_eq!(
+            normalize_brokkr_args("brokkr cat --hotpath 2 --dataset dk"),
+            "brokkr cat --hotpath --dataset dk"
+        );
+        assert_eq!(
+            normalize_brokkr_args("brokkr cat --alloc=4"),
+            "brokkr cat --alloc"
+        );
+        // Only a count is consumed, never the next flag or value.
+        assert_eq!(
+            normalize_brokkr_args("brokkr cat --bench --dataset dk"),
+            "brokkr cat --bench --dataset dk"
+        );
+    }
+
+    #[test]
+    fn normalize_reduces_argv0_to_its_basename() {
+        let plain = normalize_brokkr_args("brokkr read --bench");
+        assert_eq!(
+            normalize_brokkr_args("/home/u/.cargo/bin/brokkr read --bench"),
+            plain
+        );
+        assert_eq!(
+            normalize_brokkr_args("target/release/brokkr read --bench 5"),
+            plain
+        );
+        // Only argv[0]: a path later in the line is an argument.
+        assert!(
+            normalize_brokkr_args("brokkr read --pbf data/dk.pbf").contains("data/dk.pbf")
+        );
     }
 
     #[test]

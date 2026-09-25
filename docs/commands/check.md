@@ -138,9 +138,15 @@ Output:
   phase time, a spawn failure - prints its message on the line above the
   verdict, so a red run always names its cause. In code, the first kind is a
   `DevError::Reported`; everything else is printed by the summary.
-- **A graceful `brokkr kill` ends a run as `check interrupted in ...`** and
-  exits 130 with main's scratch cleanup, like every other locked command -
-  not exit 1. `--json` still emits its trailer, with verdict `"failed"`.
+- **A graceful `brokkr kill` (or Ctrl-C) ends a run as `check interrupted in
+  ...`** and exits 130 with main's scratch cleanup, like every other locked
+  command - not exit 1. `check` holds a `SigtermGuard` for its whole run: the
+  handler kills the registered test groups at once, every runner that polls
+  the flag returns, and no new test group is spawned. A second signal while
+  the first is still being honoured takes the default action, so a wait that
+  does not poll cannot swallow the interrupt. `--json` still emits its
+  trailer, with verdict `"failed"`. `brokkr test` and `brokkr clippy` behave
+  the same way.
 - **The run log.** Every run writes `.brokkr/check-logs/check-<ms>.log`
   (under the config dir), the newest ten kept: every line printed, plus the
   narration a green run no longer prints - shapes, full cargo argv, the
@@ -185,7 +191,10 @@ Output:
   legacy runs), `sweeps` (labels), `package` (the CLI `-p` scope, `null`
   when the run was not scoped; multiple `-p` packages comma-joined), `failed_phase` (`null` on success, else one
   of `gremlins`/`header`/`textlint`/`manifest`/`script_check`/
-  `dependency_rules`/`publish_cycle`/`clippy`/`rustdoc`/`test`/`coverage`/`install_feature`), `elapsed_ms`. The object is versioned
+  `dependency_rules`/`publish_cycle`/`clippy`/`rustdoc`/`test`/`coverage`/`install_feature`),
+  `scope` (`"prose_only"` when the markdown-only shortcut skipped the build
+  phases, `null` on a full run - without it a shortened `passed` reads as a
+  full one), `elapsed_ms`. The object is versioned
   and additive: fields are only ever added under `schema: 1`, consumers must
   tolerate unknown fields, and a bump is reserved for renames or semantic
   changes. A config error before the phases run (bad profile name,
@@ -217,10 +226,22 @@ skip a workspace-wide gate.
 
 ## The markdown-only shortcut
 
-In a git repo where **everything uncommitted is markdown**, `check` runs the
-`gremlins`, `textlint` and `script_check` phases and nothing else. Documentation
-cannot change how the code builds, so clippy and the tests would be re-proving
-what the last full run already established on the same code. `post-test`
+In a git repo where **everything uncommitted is markdown the build does not
+read**, `check` runs the `gremlins`, `textlint` and `script_check` phases and
+nothing else. Such documentation cannot change how the code builds, so clippy
+and the tests would be re-proving what the last full run already established on
+the same code.
+
+Markdown a Rust source compiles in is not prose for this purpose: brokkr's own
+`man` pages are `include_str!`'d, and a crate with `#![doc =
+include_str!("README.md")]` has doctests and rustdoc output in that file. So
+once every changed path is markdown, `scope::included_files` scans the
+repository's `.rs` files for `include_str!`/`include_bytes!` and any changed
+file they name makes the tree `Code`. A literal path (relative to the including
+file) and `concat!(env!("CARGO_MANIFEST_DIR"), "...")` resolve; any other
+argument cannot be followed without compiling, and the run is full rather than
+guessed short. A `build.rs` or test that reads markdown with `std::fs` at run
+time is outside what the scan sees - `--force-rust` covers it. `post-test`
 script checks are the exception inside `script_check`: they judge a test phase,
 and with none having run they are skipped and counted on a `script-check: N
 post-test checks skipped` line, as under a profile that skips `test`.
@@ -235,8 +256,8 @@ outcomes, only one of which shortens the run:
 |---|---|
 | `Unknown` | not a git repo, or git could not be asked - full run |
 | `Clean` | nothing uncommitted - **full run**, since a clean tree is the state a complete check is *for* |
-| `ProseOnly` | markdown and nothing else - shortened |
-| `Code` | anything else - full run |
+| `ProseOnly` | markdown no Rust source includes, and nothing else - shortened |
+| `Code` | anything else, including included markdown - full run |
 
 **Waived by** `--force-rust`, `--gate`, any `--profile` (and so by any
 `certifies` claim), `--features`, `--no-default-features`, `-p`, or trailing
@@ -247,7 +268,8 @@ ever run on.
 A shortened run says so twice - `markdown-only tree: running gremlins,
 textlint, script_check (--force-rust to check the build too)` up front, and
 `check passed (markdown only - build phases skipped)` at the end, because the
-announcement has scrolled away by the time the verdict is read.
+announcement has scrolled away by the time the verdict is read. The `--json`
+trailer carries it as `scope: "prose_only"`.
 
 ## Time ceilings
 
@@ -271,18 +293,33 @@ clock restarts at every phase entry (`begin_phase`, which also points the
 summary's `failed_phase` at the phase in flight, so the two cannot drift), so a
 `script_check` stage that runs three times gets five minutes each time.
 
-When a ceiling fires, the run is killed the way `brokkr kill --hard` would
-kill it, not the cooperative way: the cooperative path depends on whichever
-runner is currently polling the shutdown flag, and a run that has overrun by
-this much is the one whose runner may not be polling. The watchdog thread
-(`src/check_cmd/watchdog.rs`) SIGKILLs every descendant of the brokkr process
-found in `/proc` - test children are spawned into their own process groups
-and not all of them are published to the lockfile, so neither a group signal
-nor the lockfile's `child_pid` would reach them all - then exits with status
-124 (`timeout(1)`'s convention) after two `[error]` lines naming which ceiling
-fired and the kill count. The kernel releases the flock on exit; lockfile readers
-fail closed on the stale metadata exactly as after a hard kill. Follow up with
-`brokkr clean` if scratch was left behind.
+The same phase ceilings bound the two commands that share `check`'s pipelines,
+with no whole-run ceiling: `brokkr clippy` runs under the `clippy` ceiling, and
+`brokkr test` under the `test` ceiling, restarted for every sweep (covering its
+pre-build, its `--timeout` enumeration and its first run) and for every `-N`
+iteration after that.
+
+When a ceiling fires, the run's processes are killed the way `brokkr kill
+--hard` would kill them, not the cooperative way: the cooperative path depends
+on whichever runner is currently polling the shutdown flag, and a run that has
+overrun by this much is the one whose runner may not be polling. The watchdog
+thread (`src/check_cmd/watchdog.rs`) SIGKILLs every descendant of the brokkr
+process found in `/proc`, each checked against its starttime first - test
+children are spawned into their own process groups and not all of them are
+published to the lockfile, so neither a group signal nor the lockfile's
+`child_pid` would reach them all. Two `[error]` lines say which ceiling fired
+and how many processes were killed.
+
+brokkr itself is not killed. The watchdog raises the shutdown flag and keeps
+the subtree dead while the main thread unwinds through its normal exit path,
+which prints `check stopped by its time ceiling in ...` and exits 124
+(`timeout(1)`'s convention) - so the run is recorded in `brokkr history`, the
+run log and status line are closed, and the lock's drop restores a
+`disable_toolchain` pin. Only if the main thread has not unwound 20 seconds
+after the kill (blocked somewhere no kill releases) does the watchdog exit the
+process itself, restoring the toolchain pin and recording the history row
+first; the kernel then releases the flock and lockfile readers fail closed on
+the stale metadata exactly as after a hard kill.
 
 The libtest runner carries a third clock, shared by `check`'s test phase and
 `brokkr test`: the 5-minute **idle ceiling** (`IDLE_TIMEOUT` in
@@ -294,9 +331,14 @@ the cargo process group and reports it through the hung-test path, blamed as
 `(no test in flight)` with the usual `/proc` snapshot. The case it was built
 for: cargo parked on `Blocking waiting for file lock on build directory`
 because a rust-analyzer `cargo check` held the target lock - over an hour,
-with nothing for the per-test clock to age. A `brokkr test -N` repeat run has
-no whole-run ceiling; each iteration is bounded by this clock and the per-test
-one.
+with nothing for the per-test clock to age. `brokkr test`'s sweep pre-build
+and its `--timeout` enumeration run outside the libtest runner, so they carry
+the same five minutes as an output-inactivity bound: every chunk cargo prints
+(each `Compiling ...` line) restarts it, so a long cold build that keeps
+reporting progress is never killed, while a cargo parked on a lock is. Their
+total wall time falls under the `test` phase ceiling. A `brokkr test -N` repeat run has
+no whole-run ceiling; each iteration is bounded by this clock, the per-test
+one and the `test` phase ceiling.
 
 ### The per-test budget is a hard cap
 
@@ -368,13 +410,17 @@ Two details decide whether "20 seconds" means 20 seconds:
 Interrupting brokkr stops the tests too. The libtest runners put their
 children in their own process groups (so the watchdog can kill a whole test
 tree), which puts them out of reach of terminal Ctrl-C and of `brokkr kill`'s
-SIGTERM to brokkr's pid. While a test group is live, SIGINT/SIGTERM run a
-handler that SIGKILLs every registered group and re-raises the signal, so
-brokkr still dies as before and takes its tests with it
-(`shutdown::GroupReaper`). A SIGKILLed brokkr runs no handler; the runners'
-direct child carries a parent-death SIGKILL for that case, which reaches the
-test binary on the parallel lane and cargo on the others. The nextest engine
-handles SIGINT/SIGTERM itself while it runs.
+SIGTERM to brokkr's pid. So every test group is registered
+(`shutdown::GroupReaper`), and the signal handler SIGKILLs every registered
+group before anything else: under `check`'s and `brokkr test`'s
+`SigtermGuard` it then sets the shutdown flag and the run unwinds as
+interrupted; outside a guard it re-raises the signal and brokkr dies as before,
+taking its tests with it. A SIGKILLed brokkr runs no handler. `brokkr kill
+--hard` therefore stops brokkr and SIGKILLs every process beneath it itself,
+which reaches a test binary under cargo; against any other SIGKILL (the OOM
+killer) the runners' direct child carries a parent-death SIGKILL, which
+reaches the test binary on the parallel lane but only cargo on the others. The
+nextest engine handles SIGINT/SIGTERM itself while it runs.
 
 ### What the cap can and cannot prove
 
@@ -457,8 +503,9 @@ Two further clocks bound what the per-test cap cannot charge to any test:
   `Blocking waiting for file lock on build directory` because another cargo held
   the target lock, with no test ever announced.
 - **Wall backstop** (`SWEEP_WALL_TIMEOUT`, 30 min): a wedge neither clock above
-  can attribute. Inside `check` the 15-minute test-phase watchdog always fires
-  first, so this only really governs `brokkr test`.
+  can attribute. The 15-minute `test` phase ceiling - `check`'s, and
+  `brokkr test`'s per sweep and per iteration - always fires first, so this is
+  the bound only for a caller that arms no phase watchdog.
 
 The limits are constants in `src/check_cmd/watchdog.rs` (`CHECK_CEILING` and
 `phase_ceiling`) and `src/test_runner.rs` (`IDLE_TIMEOUT`, `TEST_TIMEOUT`,
@@ -527,9 +574,15 @@ read and the signal, and a lease holder can be a detached process with a name no
 cargo-family scan matches. Closing that needs a cgroup, which is a larger change
 than this reaper is.
 
-A consequence worth naming: the post-acquisition reap runs *after* `acquire()`
-returns, so it cannot rescue an acquisition that is itself blocked. That is why
-the drain has its own reap on stall (see below).
+The reap (and the stale-guard check below) runs inside `lockfile::acquire`
+itself, once per *fresh* hold - never on a re-entrant acquire, whose outer hold
+already reaped. It used to live in one command wrapper, and roughly a dozen
+paths that took the lock directly (bench contexts, the pbfhogg verify harness,
+piners, ratatoskr) silently skipped it.
+
+A consequence worth naming: the post-acquisition reap runs only once the hold is
+usable - after the drain - so it cannot rescue an acquisition that is itself
+blocked. That is why the drain has its own reap on stall (see below).
 
 `brokkr strays` is the by-hand form: bare lists, `--kill` lists then kills.
 Works with no `brokkr.toml`. A legitimate run that needs
@@ -882,7 +935,12 @@ expansion work) with cwd = the code tree, and **passes iff the captured output
 matches `expect`**. Asserting on a success sentinel - not the exit code - is the
 point: it catches a check silently stubbed to `exit 0`, because the script must
 prove it ran to completion by emitting the sentinel. The command's exit code is
-therefore ignored; only a spawn failure is a hard error. Every entry runs (no
+therefore ignored; only a spawn failure is a hard error. Each entry runs under a
+deadline - whatever is left of the `script_check` phase ceiling, less ten
+seconds for the report - in its own process group, so a hung script is killed
+pipeline and all and fails as that entry (`killed after ...`, with the output it
+produced so far) instead of the phase watchdog ending the whole run; a killed
+entry never passes, whatever it printed first. Every entry runs (no
 fail-fast within the phase) so one `brokkr check` surfaces all broken gates, and
 each failure prints its captured stdout/stderr - the diagnostic, rendered
 against the entry's declared `diagnostics` shape (below). A clean stage reports once -
@@ -2099,7 +2157,8 @@ build's green is not comparable to the full build's - feature unification
 changes with the package set). Trailing `-- …` test args are rejected the
 same way under `complete`: a libtest `--skip` or a cargo `--lib` narrows
 the real run but not the coverage audit, so the audit would count tests
-that never ran. 2 = clap usage errors, 130 = interrupt.
+that never ran. 2 = clap usage errors, 124 = a time ceiling fired, 130 =
+interrupt.
 
 ## Per-sweep log lines (run log and failures only)
 
@@ -2332,7 +2391,8 @@ force-built into a guaranteed `BUILD FAILED`. The `FAIL` footer cites the panic 
 and location, recovered from the stderr stream since `--nocapture` produces
 no captured failure blocks. Exit code: non-zero if any run was
 `FAIL`/`BUILD FAILED`, or if *every* sweep was `SKIP` (bad name); `SKIP` mixed
-with at least one `PASS` exits `0`.
+with at least one `PASS` exits `0`. A fired `test` phase ceiling exits 124 and a
+graceful `brokkr kill` / Ctrl-C exits 130 (see "Time ceilings").
 
 Flags:
 - `-N <n>` - repeat the test (per sweep) for flaky-test hunting. The

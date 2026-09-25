@@ -102,6 +102,20 @@ pub(crate) fn scratch_path(module: &str, name: &str) -> PathBuf {
     path
 }
 
+/// The one lock serialising unit tests that mutate process-global state:
+/// the compilation capability slot (`hold`) and the armed toolchain-disable
+/// dir (`toolchain::DISABLE_DIR`).
+///
+/// One lock for all of them, not one per module: the state is read across
+/// modules (a lock acquisition reads both), so per-module locks serialised
+/// each module against itself and nothing against the others - which is how a
+/// toolchain test arming a scratch dir could have a concurrent lockfile test
+/// rename files in it. Hold it for the whole test, and restore what you found.
+pub(crate) fn process_global_lock() -> std::sync::MutexGuard<'static, ()> {
+    static SEQ: Mutex<()> = Mutex::new(());
+    SEQ.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 #[cfg(test)]
 mod test_scratch_tests {
     #![allow(clippy::unwrap_used)]

@@ -91,6 +91,13 @@ pub(crate) fn run(req: &MeasureRequest, args: &CorpusArgs) -> Result<(), DevErro
 
     // Measured runs default to release (meaningful timing); `--debug` profiles
     // the dev build instead. Parity runs default debug - see `cmd.rs`.
+    //
+    // `[piners.harness] debug` is deliberately NOT consulted here. That key
+    // sets the *parity* default (`cmd.rs` reads it); piners' config sets it
+    // for the edit/run loop, and inheriting it would silently turn every
+    // measured run into a dev-build timing. `docs/commands/corpus.md` states
+    // the release default. (Reported once as "ignores the config"; it is the
+    // documented contract, not an oversight.)
     let debug = args.profile_override.unwrap_or(false);
 
     let mut build_cfg = BuildConfig::for_harness(harness_cfg, debug);
@@ -138,17 +145,16 @@ pub(crate) fn run(req: &MeasureRequest, args: &CorpusArgs) -> Result<(), DevErro
     }
 
     let selector = selector_label(args);
-    let mut metadata = vec![
+    // The profile lives in the `cargo_profile` column below. Rows recorded
+    // before `CargoProfile::Dev` existed carry `release` there and a
+    // `meta.profile = dev` patch instead.
+    let metadata = vec![
         KvPair::int(
             "probe_count",
             i64::try_from(verified.len()).unwrap_or(i64::MAX),
         ),
         KvPair::text("selector", selector.clone()),
     ];
-    if debug {
-        // The profile column only models release; record the dev override here.
-        metadata.push(KvPair::text("profile", "dev"));
-    }
 
     // Forwarded harness flags (everything after `--`) ride along here too -
     // profiling with a scan toggle enabled is a legitimate measured run. They
@@ -161,7 +167,7 @@ pub(crate) fn run(req: &MeasureRequest, args: &CorpusArgs) -> Result<(), DevErro
         input_file: Some(selector),
         input_mb: None,
         cargo_features: None,
-        cargo_profile: CargoProfile::Release,
+        cargo_profile: CargoProfile::for_debug(debug),
         runs: req.runs(),
         cli_args: Some(harness::format_cli_args(&binary_str, &subprocess_args)),
         brokkr_args: None,
@@ -174,6 +180,11 @@ pub(crate) fn run(req: &MeasureRequest, args: &CorpusArgs) -> Result<(), DevErro
     ];
     let scratch_dir = ctx.paths.scratch_dir.clone();
     let project_root = req.project_root.to_path_buf();
+    // Each measured iteration gets the parity path's hang backstop: a wedged
+    // harness would otherwise hold the global lock until `brokkr kill`.
+    // Applied through the sidecar's ambient scope because the child is
+    // spawned inside `run_hotpath_capture`, which takes no deadline.
+    let _deadline = crate::sidecar::DeadlineScope::enter(crate::piners::cmd::HARNESS_HANG_BACKSTOP);
     ctx.harness.run_hotpath(&config, &ctx.binary, |_i| {
         let (result, _stderr, sidecar) = harness::run_hotpath_capture(
             &binary_str,

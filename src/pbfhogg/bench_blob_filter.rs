@@ -12,7 +12,10 @@ const COMMANDS: &[&str] = &[
     "inspect-nodes",
 ];
 
-fn command_args(name: &str, pbf: &str, output: &str, force: bool) -> Vec<String> {
+/// The argv for one of [`COMMANDS`]. An unknown name is an error rather than
+/// `unreachable!()`: the name is parsed back out of a variant string, and
+/// nothing at this signature proves it came from [`COMMANDS`].
+fn command_args(name: &str, pbf: &str, output: &str, force: bool) -> Result<Vec<String>, DevError> {
     let mut args = match name {
         "cat-way" => vec![
             "cat".into(),
@@ -40,12 +43,17 @@ fn command_args(name: &str, pbf: &str, output: &str, force: bool) -> Vec<String>
             "999999999".into(),
         ],
         "inspect-nodes" => vec!["inspect".into(), "--nodes".into(), pbf.into()],
-        _ => unreachable!("unknown command: {name}"),
+        _ => {
+            return Err(DevError::Config(format!(
+                "unknown blob-filter command {name:?} (expected one of: {})",
+                COMMANDS.join(", ")
+            )));
+        }
     };
     if force {
         args.push("--force".into());
     }
-    args
+    Ok(args)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -86,7 +94,7 @@ pub fn run(
             .find(|&&(l, ..)| l == label_suffix)
             .ok_or_else(|| DevError::Config(format!("unknown variant label '{label_suffix}'")))?;
 
-        let args = command_args(cmd, pbf_str, &output_str, force);
+        let args = command_args(cmd, pbf_str, &output_str, force)?;
         let args_refs: Vec<&str> = args.iter().map(String::as_str).collect();
 
         let config = BenchConfig {
@@ -141,13 +149,18 @@ mod tests {
 
     #[test]
     fn raw_variant_appends_force() {
-        let args = command_args("inspect-nodes", "in.osm.pbf", "out.osm.pbf", true);
+        let args = command_args("inspect-nodes", "in.osm.pbf", "out.osm.pbf", true).unwrap();
         assert_eq!(args, vec!["inspect", "--nodes", "in.osm.pbf", "--force"]);
     }
 
     #[test]
     fn indexed_variant_has_no_force() {
-        let args = command_args("inspect-nodes", "in.osm.pbf", "out.osm.pbf", false);
+        let args = command_args("inspect-nodes", "in.osm.pbf", "out.osm.pbf", false).unwrap();
         assert_eq!(args, vec!["inspect", "--nodes", "in.osm.pbf"]);
+    }
+
+    #[test]
+    fn an_unknown_command_is_an_error_not_a_panic() {
+        assert!(command_args("cat-node", "in.osm.pbf", "out.osm.pbf", false).is_err());
     }
 }

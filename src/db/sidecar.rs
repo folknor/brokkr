@@ -675,16 +675,20 @@ impl SidecarDb {
     }
 
     /// Enumerate distinct `result_uuid` values whose `sidecar_meta.git_commit`
-    /// starts with `commit_prefix`. Only sessions that were tagged with a
-    /// commit (v4+ schema) are found this way.
+    /// matches `commit_prefix` under the results DB's two-way prefix rule
+    /// ([`super::query::commit_match_expr`]), so `invalidate --commit` drops
+    /// the same runs from both databases. Only sessions that were tagged with
+    /// a commit (v4+ schema) are found this way.
     pub fn uuids_matching_commit_prefix(
         &self,
         commit_prefix: &str,
     ) -> Result<Vec<String>, DevError> {
         let mut stmt = self.conn.prepare(&format!(
-            "SELECT DISTINCT result_uuid FROM sidecar_meta WHERE git_commit LIKE ?1 {ESCAPE}"
+            "SELECT DISTINCT result_uuid FROM sidecar_meta WHERE {}",
+            super::query::commit_match_expr_on("git_commit", 1, 2)
         ))?;
-        let rows = stmt.query_map(rusqlite::params![prefix_pattern(commit_prefix)], |row| {
+        let (pattern, raw) = super::query::commit_params(commit_prefix);
+        let rows = stmt.query_map(rusqlite::params![pattern, raw], |row| {
             row.get::<_, String>(0)
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(DevError::from)

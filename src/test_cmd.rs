@@ -123,8 +123,55 @@ impl RepeatState {
 /// already-seen failure - once the outcome is known.
 type LineSink = std::sync::Arc<std::sync::Mutex<Vec<String>>>;
 
+/// Run `<NAME>` in every applicable sweep.
+///
+/// Two things bound the command beyond the per-test cap, both shared with
+/// `check`: the phase watchdog (`check`'s 15-minute `test` ceiling, restarted
+/// for every sweep and every `-N` iteration - there is no whole-run ceiling,
+/// since a repeat run is bounded per iteration) and a `SigtermGuard`, so a
+/// graceful `brokkr kill` ends the command as `Interrupted` (exit 130). A fired
+/// watchdog exits 124 whatever the kill surfaced as.
 #[allow(clippy::too_many_arguments)]
 pub fn run(
+    dev_config: &DevConfig,
+    project: Project,
+    project_root: &Path,
+    state_root: &Path,
+    name: &str,
+    package: Option<&str>,
+    repeat: u32,
+    jobs: Option<u32>,
+    profile_override: Option<bool>,
+    timeout: Option<u64>,
+    sweep_filter: Option<&str>,
+) -> Result<(), DevError> {
+    // Declared before the guard, so the guard drops first and the watchdog's
+    // join is the last thing the command does.
+    let _ceiling = check_cmd::CheckWatchdog::arm_for("brokkr test", None);
+    let _interrupts = crate::shutdown::SigtermGuard::install();
+    let result = run_sweeps(
+        dev_config,
+        project,
+        project_root,
+        state_root,
+        name,
+        package,
+        repeat,
+        jobs,
+        profile_override,
+        timeout,
+        sweep_filter,
+    );
+    // Whatever `result` is: a ceiling that fired as the last child exited can
+    // leave an `Ok` behind it, and a killed run is not a pass.
+    if check_cmd::watchdog_fired().is_some() {
+        return Err(DevError::ExitCode(check_cmd::WATCHDOG_EXIT_CODE));
+    }
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_sweeps(
     dev_config: &DevConfig,
     project: Project,
     project_root: &Path,
@@ -163,6 +210,9 @@ pub fn run(
         if multi {
             println!("[test]    sweep: {}", sweep.label);
         }
+        // The sweep's pre-build, enumeration and first run share one phase
+        // clock, as a `check` test phase's builds and runs do.
+        check_cmd::enter_phase("test");
 
         // A sweep scopes itself to a package set. When it declares a
         // `packages` list and the `-p` target isn't in it (or the target is
@@ -232,6 +282,10 @@ pub fn run(
         )?;
 
         for n in 1..=repeat {
+            if n > 1 {
+                // Each repeat is its own bounded unit; see `run`.
+                check_cmd::enter_phase("test");
+            }
             // Under `--timeout`, run the resolved name exactly; otherwise the
             // user's substring, unchanged.
             let filter = exact.as_deref().unwrap_or(name);
@@ -359,7 +413,7 @@ fn run_pre_build(
     ));
 
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let captured = output::run_captured_with_env("cargo", &arg_refs, project_root, env)?;
+    let captured = cargo_with_deadline(&arg_refs, project_root, env, "sweep pre-build")?;
 
     if captured.status.success() {
         return Ok(true);
@@ -380,6 +434,52 @@ fn run_pre_build(
         sweep.label
     );
     Ok(false)
+}
+
+/// Run one captured cargo invocation outside the libtest runner (the sweep
+/// pre-build, the `--timeout` enumeration) under [`test_runner::IDLE_TIMEOUT`].
+///
+/// These used to run with no deadline at all, which recreated exactly the hang
+/// the idle ceiling was written for: a cargo parked on "Blocking waiting for
+/// file lock on build directory" behind another cargo, for as long as that
+/// cargo lived.
+///
+/// An *idle* bound, as the libtest runner's is: five minutes with no output
+/// on either stream, every `Compiling ...` line restarting the clock. A cold
+/// build of any length that keeps reporting progress runs to completion; a
+/// cargo parked on a lock prints its one "Blocking" line and then nothing,
+/// and is killed. A wall bound here killed legitimately long cold builds.
+/// Total wall time is bounded by the `test` phase ceiling `run` arms, which
+/// covers the `--timeout` enumeration too. Overrunning the idle bound stops
+/// the command, as any blown budget does. The child runs in its own process
+/// group (so the kill takes rustc with it), which the command's
+/// `SigtermGuard` makes safe: an interrupt is forwarded to the group by the
+/// runner's flag poll.
+fn cargo_with_deadline(
+    args: &[&str],
+    project_root: &Path,
+    env: &[(&str, &str)],
+    what: &str,
+) -> Result<output::CapturedOutput, DevError> {
+    let run = output::run_captured_with_idle_deadline(
+        "cargo",
+        args,
+        project_root,
+        env,
+        test_runner::IDLE_TIMEOUT,
+        true,
+    )?;
+    if run.killed_on_deadline {
+        let stderr = String::from_utf8_lossy(&run.captured.stderr);
+        return Err(DevError::Build(format!(
+            "{what} (`cargo {}`) printed nothing for {}s and was killed - cargo parked on \
+             a build-directory lock held by another cargo looks exactly like this\n{}",
+            args.join(" "),
+            test_runner::IDLE_TIMEOUT.as_secs(),
+            stderr.trim_end()
+        )));
+    }
+    Ok(run.captured)
 }
 
 /// The `cargo build` argv for one sweep pre-build.
@@ -608,7 +708,7 @@ fn matching_test_names(
     args.push("--list".into());
 
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let captured = output::run_captured_with_env("cargo", &arg_refs, project_root, env)?;
+    let captured = cargo_with_deadline(&arg_refs, project_root, env, "test enumeration")?;
     // A listing command that failed proves nothing about how many tests match.
     // Returning an empty vec conflated "the build or the harness failed" with
     // "enumeration succeeded and found nothing", so a compile error during the

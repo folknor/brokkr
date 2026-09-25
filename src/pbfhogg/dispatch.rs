@@ -868,28 +868,25 @@ pub(crate) fn ensure_merged_pbf(
     // success: the cache test above is bare existence, so an apply-changes
     // killed mid-write must not leave a truncated file for the next
     // non-measured run to accept as a hit. The partial name keeps the
-    // `.osm.pbf` suffix so the output format is unchanged.
-    let partial_path = merged_path.with_file_name(format!(
-        "{}.partial.osm.pbf",
-        merged_name.trim_end_matches(".osm.pbf")
-    ));
-    let partial_str = partial_path
+    // `.osm.pbf` suffix so the output format is unchanged. Dropping `staged`
+    // on any error removes the partial file.
+    let staged = crate::atomic_write::Staged::stable_keeping(&merged_path, ".osm.pbf")?;
+    let partial_str = staged
+        .tmp_path()
         .to_str()
-        .ok_or_else(|| DevError::Config("merged path not UTF-8".into()))?;
+        .ok_or_else(|| DevError::Config("merged path not UTF-8".into()))?
+        .to_owned();
     let binary_str = binary.display().to_string();
 
     let start = std::time::Instant::now();
     let captured = output::run_captured(
         &binary_str,
-        &["apply-changes", pbf_str, osc_str, "-o", partial_str],
+        &["apply-changes", pbf_str, osc_str, "-o", &partial_str],
         project_root,
     )?;
 
-    if let Err(e) = captured.check_success(&binary_str) {
-        std::fs::remove_file(&partial_path).ok();
-        return Err(e);
-    }
-    std::fs::rename(&partial_path, &merged_path).map_err(|e| {
+    captured.check_success(&binary_str)?;
+    staged.commit().map_err(|e| {
         DevError::Config(format!(
             "failed to move merged PBF into place ({}): {e}",
             merged_path.display()

@@ -12,10 +12,13 @@
 //! ## Robustness
 //!
 //! The guard restores on `Drop`, which covers normal completion, an error
-//! return, and the cooperative-interrupt path (measured runs unwind through
-//! `DevError::Interrupted`). It does **not** cover a hard kill during a
-//! non-tracked window (`brokkr check`, a bare `cargo build`), where SIGTERM
-//! terminates brokkr with no unwinding - that mirrors how the rest of brokkr
+//! return, the cooperative-interrupt path (runs unwind through
+//! `DevError::Interrupted`) and a `check`/`test`/`clippy` watchdog kill, which
+//! unwinds the same way - and whose exit backstop, for a main thread that
+//! cannot unwind, calls [`restore_armed`]. It does **not** cover a hard kill
+//! (`brokkr kill --hard`, SIGKILL) or a signal during an unguarded window (a
+//! bare `cargo build`), which terminates brokkr with no unwinding - that
+//! mirrors how the rest of brokkr
 //! treats a hard kill (scratch is left for `brokkr clean`). We self-heal that
 //! case instead: [`activate`](DisabledToolchain::activate) adopts a leftover
 //! `*.brokkr-disabled` sidecar from a prior aborted run and restores it on the
@@ -87,6 +90,33 @@ pub fn activate_for_lock() -> Result<Option<DisabledToolchain>, DevError> {
     match dir {
         Some(dir) => Ok(Some(DisabledToolchain::activate(&dir)?)),
         None => Ok(None),
+    }
+}
+
+/// Put back whatever the armed build root has moved aside, for a process about
+/// to exit without unwinding - the `check` watchdog's backstop, whose main
+/// thread (and so the `LockGuard` whose drop normally restores) is stuck. Only
+/// a sidecar whose original is absent is renamed back, which is exactly what
+/// the guard's drop would have done; never called on a path where that drop
+/// will still run.
+pub fn restore_armed() {
+    let dir = DISABLE_DIR
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone();
+    let Some(dir) = dir else { return };
+    for name in FILES {
+        let orig = dir.join(name);
+        let aside = dir.join(format!("{name}{SUFFIX}"));
+        if aside.exists()
+            && !orig.exists()
+            && let Err(e) = std::fs::rename(&aside, &orig)
+        {
+            output::error_forced(&format!(
+                "disable_toolchain: failed to restore {}: {e}",
+                orig.display()
+            ));
+        }
     }
 }
 
@@ -255,8 +285,11 @@ mod tests {
         assert!(!aside.exists());
     }
 
+    /// Mutates `DISABLE_DIR`, which every lock acquisition reads, so it holds
+    /// the crate's shared process-global test lock for its whole body.
     #[test]
     fn arm_drives_activation_and_restores_previous() {
+        let _serial = crate::test_scratch::process_global_lock();
         let dir = tmpdir("armed");
         let toml = dir.join("rust-toolchain.toml");
         fs::write(&toml, "pinned").unwrap();

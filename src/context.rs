@@ -36,21 +36,14 @@ pub(crate) fn acquire_cmd_lock_opt(
     project_root: &Path,
     command: &str,
 ) -> Result<lockfile::LockGuard, DevError> {
-    let guard = lockfile::acquire(&lockfile::LockContext {
+    // The stray reap and the stale-guard warning run inside
+    // `lockfile::acquire`'s fresh-hold path, so every acquirer gets them -
+    // not only the commands that come through here.
+    lockfile::acquire(&lockfile::LockContext {
         project: project.map_or("brokkr", Project::name),
         command,
         project_root: &project_root.display().to_string(),
-    })?;
-    // Under the lock, so the scan cannot mistake another brokkr's cargo for
-    // a stray: any cargo alive now with no brokkr ancestor is one nothing
-    // brokkr-shaped started, and it holds (or will take) the build-directory
-    // lock this command's cargo needs.
-    crate::stray::reap_after_lock();
-    // A stale enrolled guard fails in shapes that read as anything but
-    // staleness (a refused probe even poisons cargo's rustc-info cache), so
-    // say it plainly, once, while we know a build may be about to run.
-    crate::guard::warn_if_guard_stale();
-    Ok(guard)
+    })
 }
 
 /// Resolve project info (target_dir) using cargo metadata.
@@ -302,7 +295,7 @@ where
     let git_root = parent_build_root.unwrap_or(project_root);
     match commit {
         Some(hash) if dry_run => {
-            output::bench_msg(&format!(
+            output::run_msg(&format!(
                 "[dry-run] skipping worktree creation for {hash}"
             ));
             f(parent_build_root)

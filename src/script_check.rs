@@ -10,15 +10,21 @@
 //! must prove it ran to completion by emitting the sentinel. The exit code is
 //! therefore ignored; only a spawn failure is a hard error.
 //!
-//! The child is given `BROKKR_CARGO=1`: a script-check may run cargo, and it
-//! runs under a lock brokkr already holds - see [`run_one`] for why the
-//! rustc guard's ancestor path cannot carry that here.
+//! A script-check may run cargo under the lock brokkr already holds; it is
+//! admitted by the inherited hold capability like every other child - see
+//! [`run_one`].
+//!
+//! Each entry runs under a deadline the caller derives from the phase ceiling,
+//! so one hung script fails as that entry - its captured output shown, the
+//! other entries still run - instead of taking the whole run down through the
+//! phase watchdog.
 //!
 //! This module is the logic (`evaluate` + `run_one`); orchestration and
 //! failure formatting live in `check_cmd::phase::run_script_checks`, mirroring
 //! how `textlint`/`manifest` split scan-logic from phase-plumbing.
 
 use std::path::Path;
+use std::time::Duration;
 
 use crate::config::{MatchMode, ScriptCheck, Stream};
 use crate::error::DevError;
@@ -26,8 +32,11 @@ use crate::output;
 
 /// The captured result of running one script-check.
 pub struct Outcome {
-    /// Whether the output matched the `expect` sentinel.
+    /// Whether the output matched the `expect` sentinel. Always false for a
+    /// run killed on its deadline, whatever it printed before the kill.
     pub passed: bool,
+    /// `Some(deadline)` when the command was killed for running past it.
+    pub timed_out: Option<Duration>,
     /// The command's captured stdout (shown verbatim on failure).
     pub stdout: Vec<u8>,
     /// The command's captured stderr (shown verbatim on failure).
@@ -38,7 +47,13 @@ pub struct Outcome {
 ///
 /// The command is run as `sh -c "<command>"` with `cwd` as the working
 /// directory (the code tree), so pipes, redirects, and env expansion work.
-/// Returns `Err` only when the process could not be spawned.
+/// Returns `Err` only when the process could not be spawned, or on a
+/// cooperative shutdown (`Interrupted`).
+///
+/// `deadline` bounds the command's wall time. The shell runs in its own
+/// process group, so a deadline kill takes the whole pipeline down, not just
+/// `sh`; that is safe because every caller runs inside `check`'s
+/// `SigtermGuard`, whose flag poll forwards an interrupt to the group.
 ///
 /// A script-check runs *inside* a brokkr command that already holds the lock,
 /// so a cargo it starts is brokkr's own work and must not be refused by the
@@ -54,17 +69,29 @@ pub struct Outcome {
 /// escape hatch that bypasses the lease protocol entirely, and handing it to
 /// brokkr's own children would let a script descendant keep compiling into
 /// later holds it was never authorized for.
-pub fn run_one(check: &ScriptCheck, cwd: &Path) -> Result<Outcome, DevError> {
-    let captured = output::run_captured_with_env("sh", &["-c", &check.command], cwd, &[])?;
-    let passed = evaluate(
-        &check.expect,
-        check.match_mode,
-        check.stream,
-        &captured.stdout,
-        &captured.stderr,
-    );
+pub fn run_one(check: &ScriptCheck, cwd: &Path, deadline: Duration) -> Result<Outcome, DevError> {
+    let run = output::run_captured_with_env_and_deadline(
+        "sh",
+        &["-c", &check.command],
+        cwd,
+        &[],
+        deadline,
+        None,
+        true,
+    )?;
+    let captured = run.captured;
+    let timed_out = run.killed_on_deadline.then_some(deadline);
+    let passed = timed_out.is_none()
+        && evaluate(
+            &check.expect,
+            check.match_mode,
+            check.stream,
+            &captured.stdout,
+            &captured.stderr,
+        );
     Ok(Outcome {
         passed,
+        timed_out,
         stdout: captured.stdout,
         stderr: captured.stderr,
     })
@@ -194,8 +221,32 @@ fn header_level(line: &str) -> Option<Level> {
 
 #[cfg(test)]
 mod tests {
-    use super::{evaluate, rustc_blocks, Level};
-    use crate::config::{MatchMode, Stream};
+    use super::{evaluate, run_one, rustc_blocks, Level};
+    use crate::config::{Diagnostics, MatchMode, ScriptCheck, Stage, Stream};
+
+    /// A hung script fails as its own entry at its deadline - pipeline and all,
+    /// since the shell runs in its own process group - instead of holding the
+    /// phase until the watchdog ends the whole run.
+    #[test]
+    fn a_hung_script_fails_at_its_deadline() {
+        let check = ScriptCheck {
+            name: "hangs".into(),
+            // The sentinel is printed before the hang: a killed run must not
+            // pass on output it produced before its deadline.
+            command: "echo DONE; sleep 30 | cat".into(),
+            expect: "DONE".into(),
+            match_mode: MatchMode::Contains,
+            stream: Stream::Stdout,
+            stage: Stage::PreClippy,
+            diagnostics: Diagnostics::Opaque,
+        };
+        let started = std::time::Instant::now();
+        let deadline = std::time::Duration::from_millis(300);
+        let outcome = run_one(&check, std::path::Path::new("."), deadline).expect("spawned");
+        assert_eq!(outcome.timed_out, Some(deadline));
+        assert!(!outcome.passed);
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+    }
 
     #[test]
     fn blocks_split_on_column_zero_headers_only() {

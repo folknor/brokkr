@@ -146,9 +146,14 @@ summary, which is reserved for a lint run whose diagnostics were printed.
   pinned `rust-toolchain*` is moved aside for the run.
 - Takes the global per-user lock **blocking**, like every build-running brokkr
   command - a concurrent bench just makes it wait, never error.
+- Runs under `check`'s five-minute `clippy` phase ceiling, measured from lock
+  acquisition: an overrun kills the run's processes and exits 124, as in
+  `check` (see `docs/commands/check.md`, Time ceilings). A graceful
+  `brokkr kill` or Ctrl-C ends it as an interruption (exit 130).
 - **Inherited limitations** (shared with `brokkr check`'s clippy phase, not
   introduced here): the toolchain file is moved aside *before* the lock is
   acquired, so two near-simultaneous invocations can briefly race on it (a
   documented, opt-in-feature window that self-heals on the next run; see
   `src/toolchain.rs`); and the child cargo process is not registered with the
-  lockfile, so `brokkr kill` cannot target it directly.
+  lockfile, so `brokkr kill --hard` reaches it only through its walk of the
+  processes beneath brokkr, not as a named child.

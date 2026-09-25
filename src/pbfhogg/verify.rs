@@ -238,18 +238,11 @@ impl VerifyHarness {
     /// Assert that a captured subprocess exited successfully.
     ///
     /// Returns `DevError::Subprocess` with the program name and stderr if the
-    /// exit code was non-zero (or the process was killed by a signal).
+    /// exit code was non-zero, or naming the signal if one killed it - the
+    /// shared [`CapturedOutput::check_success`], which knows the signal the
+    /// variant cannot carry.
     pub fn check_exit(&self, captured: &CapturedOutput, program: &str) -> Result<(), DevError> {
-        if captured.status.success() {
-            return Ok(());
-        }
-
-        let stderr = String::from_utf8_lossy(&captured.stderr);
-        Err(DevError::Subprocess {
-            program: program.to_owned(),
-            code: captured.status.code(),
-            stderr: stderr.into_owned(),
-        })
+        captured.check_success(program)
     }
 
     // -- Internal helpers --------------------------------------------------

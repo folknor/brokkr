@@ -289,7 +289,10 @@ fn run_lifecycle(
     crate::ratatoskr::process::send_signal(pid, libc::SIGTERM).ok();
 
     // 6. Wait for process exit, then join reader to get remaining stderr.
-    let status = child.wait().map_err(DevError::Io)?;
+    let status = child.wait().map_err(|error| DevError::Spawn {
+        program: binary.display().to_string(),
+        error,
+    })?;
     lock.remove_mock_pid(pid);
     let (_, remaining_stderr) = reader_handle.join().unwrap_or_default();
 
@@ -354,10 +357,9 @@ fn spawn_server(
         .stderr(Stdio::piped())
         .stdin(Stdio::null())
         .spawn()
-        .map_err(|e| DevError::Subprocess {
+        .map_err(|error| DevError::Spawn {
             program: binary.display().to_string(),
-            code: None,
-            stderr: e.to_string(),
+            error,
         })
 }
 

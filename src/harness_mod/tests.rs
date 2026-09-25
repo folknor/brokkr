@@ -115,6 +115,45 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // format_result_line
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn result_line_prints_the_resolved_mode() {
+        // Every writer leaves `BenchConfig.mode` at `None`; the line must
+        // print the harness-resolved mode it is handed, not that field.
+        let config = BenchConfig {
+            command: "cat".into(),
+            mode: None,
+            input_file: None,
+            input_mb: None,
+            cargo_features: None,
+            cargo_profile: CargoProfile::Release,
+            runs: 1,
+            cli_args: None,
+            brokkr_args: None,
+            metadata: Vec::new(),
+        };
+        let result = BenchResult {
+            elapsed_ms: 12,
+            elapsed_us: None,
+            kv: Vec::new(),
+            iterations: Vec::new(),
+            distribution: None,
+            hotpath: None,
+        };
+        let git = GitInfo {
+            commit: "abc".into(),
+            subject: String::new(),
+            is_clean: true,
+        };
+        let line = format_result_line(&config, Some("bench"), &result, &git);
+        assert!(line.contains("mode=bench"), "{line}");
+        let line = format_result_line(&config, None, &result, &git);
+        assert!(!line.contains("mode="), "{line}");
+    }
+
+    // -----------------------------------------------------------------------
     // percentile
     // -----------------------------------------------------------------------
 
@@ -479,9 +518,21 @@ mod tests {
     }
 
     #[test]
-    fn elapsed_to_ms_sub_millisecond_truncates() {
-        let d = Duration::from_micros(999);
-        assert_eq!(elapsed_to_ms(&d), 0, "sub-millisecond should truncate to 0");
+    fn elapsed_to_ms_rounds_to_nearest_not_down() {
+        // Flooring 999us to 0ms read the run as faster than it was - the
+        // one error `us_to_ms` documents as worth avoiding.
+        assert_eq!(elapsed_to_ms(&Duration::from_micros(999)), 1);
+        assert_eq!(elapsed_to_ms(&Duration::from_micros(1499)), 1);
+        assert_eq!(elapsed_to_ms(&Duration::from_micros(1500)), 2);
+        assert_eq!(elapsed_to_ms(&Duration::from_micros(499)), 0);
+    }
+
+    #[test]
+    fn elapsed_to_us_is_exact_and_agrees_with_us_to_ms() {
+        let d = Duration::from_nanos(6_847_900);
+        assert_eq!(elapsed_to_us(&d), 6847);
+        assert_eq!(us_to_ms(elapsed_to_us(&d)), elapsed_to_ms(&d));
+        assert_eq!(elapsed_to_us(&Duration::from_secs(u64::MAX)), i64::MAX);
     }
 
     // -----------------------------------------------------------------------

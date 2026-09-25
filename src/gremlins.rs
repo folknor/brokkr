@@ -496,7 +496,7 @@ pub(crate) fn tracked_files(project_root: &Path) -> Result<Vec<PathBuf>, DevErro
         .args(["ls-files", "-z", "--cached", "--others", "--exclude-standard"])
         .current_dir(project_root)
         .output()
-        .map_err(DevError::Io)?;
+        .map_err(|error| DevError::Spawn { program: "git ls-files".into(), error })?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
         return Err(DevError::Subprocess {

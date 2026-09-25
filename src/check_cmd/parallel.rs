@@ -691,9 +691,9 @@ fn run_parallel_sweep(
 
     // Test counts drive the slot claims, so the listing is not optional: a
     // claim of one for every binary would serialize the fan-out down to one
-    // test at a time per binary and give up most of the win. Listing executes
-    // no test code (the same argument `binaries` relies on for running the
-    // executables directly), so this costs one cheap spawn per binary.
+    // test at a time per binary and give up most of the win. Listing should
+    // cost one cheap spawn per binary; it is bounded like a test all the same
+    // (see `binary_list`), since a ctor or custom harness runs code first.
     let libdir = toolchain_libdir(project_root, &env_refs)?;
     let mut filter_args: Vec<&str> = sweep.name_filters.iter().map(String::as_str).collect();
     filter_args.extend(sweep.libtest_args.iter().map(String::as_str));
@@ -834,6 +834,13 @@ fn run_parallel_sweep(
             }));
         }
     });
+
+    // An interrupt (or the watchdog) killed the in-flight groups and refused
+    // the queued ones: the runs are not a verdict and their timings are
+    // truncated, so neither is reported nor recorded.
+    if crate::shutdown::is_shutdown_requested() {
+        return Err(DevError::Interrupted);
+    }
 
     // Recorded before reporting, and for a red sweep too: a binary that
     // failed still took the time it took, and the next run's allocation is

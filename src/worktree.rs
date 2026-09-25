@@ -39,7 +39,7 @@ pub fn is_brokkr_worktree(path: &Path) -> bool {
 pub struct Worktree {
     /// Absolute path to the worktree directory.
     pub path: PathBuf,
-    /// Short commit hash (from rev-parse --short).
+    /// Short commit hash ([`crate::git::short_of`]).
     pub commit: String,
     /// First line of the commit message.
     pub subject: String,
@@ -73,10 +73,12 @@ impl Worktree {
         before_cut: impl FnOnce(&Path),
     ) -> Result<Self, DevError> {
         // Validate the commit exists and resolve to a full hash for comparison.
-        let full_hash = run_git(project_root, &["rev-parse", "--verify", commit_ref])?;
-
-        let short = run_git(project_root, &["rev-parse", "--short", commit_ref])?;
-        let subject = run_git(project_root, &["log", "-1", "--format=%s", commit_ref])?;
+        // The directory name is the fixed-width abbreviation, so the same
+        // commit names the same worktree whatever width (or ref) it was asked
+        // for by, and however large the repo has grown since.
+        let crate::git::CommitId { full: full_hash, short } =
+            crate::git::resolve_commit(project_root, commit_ref)?;
+        let subject = run_git(project_root, &["log", "-1", "--format=%s", &full_hash])?;
 
         // Place worktree as a sibling so relative path deps still work.
         let (parent, prefix) = sibling_prefix(project_root)?;
@@ -131,7 +133,7 @@ impl Worktree {
         let worktree_str = worktree_dir.display().to_string();
         run_git(
             project_root,
-            &["worktree", "add", "--detach", &worktree_str, commit_ref],
+            &["worktree", "add", "--detach", &worktree_str, &full_hash],
         )?;
 
         Ok(Self {
@@ -282,11 +284,7 @@ fn run_git(cwd: &Path, args: &[&str]) -> Result<String, DevError> {
         .args(args)
         .current_dir(cwd)
         .output()
-        .map_err(|e| DevError::Subprocess {
-            program: "git".into(),
-            code: None,
-            stderr: e.to_string(),
-        })?;
+        .map_err(|error| DevError::Spawn { program: "git".into(), error })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);

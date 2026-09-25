@@ -353,6 +353,16 @@ pub(crate) fn verify(
     features: &[String],
     verbose: bool,
 ) -> Result<(), DevError> {
+    // Refused before the harness builds pbfhogg, not after.
+    if matches!(
+        verify,
+        VerifyCommand::ElivVerify { .. }
+            | VerifyCommand::Batch { .. }
+            | VerifyCommand::NidGeocode { .. }
+            | VerifyCommand::Readonly { .. }
+    ) {
+        return Err(not_a_pbfhogg_verify());
+    }
     let pi = bootstrap(build_root)?;
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
 
@@ -633,14 +643,27 @@ pub(crate) fn verify(
             narrate_osc_scope(snapshot.as_deref(), scope);
             super::verify_diff::run(&harness, &pbf_path, &osc_path)
         }
-        // `all` is handled before this match (it manages its own output).
-        VerifyCommand::All { .. } => unreachable!("verify all handled above"),
-        // Elivagar and nidhogg variants are handled above in cmd_verify().
+        // Both returned before this match: `all` (it manages its own output)
+        // and the other projects' variants (refused at the top). Errors, not
+        // `unreachable!()`: those guards are ordering this match cannot see,
+        // and a reordering should fail the command, not panic the process.
+        VerifyCommand::All { .. } => Err(DevError::Config(
+            "internal error: verify all reached the single-check path".into(),
+        )),
         VerifyCommand::ElivVerify { .. }
         | VerifyCommand::Batch { .. }
         | VerifyCommand::NidGeocode { .. }
-        | VerifyCommand::Readonly { .. } => unreachable!(),
+        | VerifyCommand::Readonly { .. } => Err(not_a_pbfhogg_verify()),
     })
+}
+
+/// The refusal for an elivagar/nidhogg `verify` subcommand reaching the
+/// pbfhogg verifier. `cmd_verify` routes those by project first; this is the
+/// answer if one ever arrives here anyway.
+fn not_a_pbfhogg_verify() -> DevError {
+    DevError::Config(
+        "internal error: a non-pbfhogg verify subcommand reached the pbfhogg verifier".into(),
+    )
 }
 
 /// The result-line name for a pbfhogg verify subcommand (matches the labels

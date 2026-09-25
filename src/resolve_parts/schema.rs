@@ -548,10 +548,11 @@ pub(crate) fn resolve_default_pmtiles_path(
 }
 
 /// Resolve a PMTiles file by --dataset/--commit/--file, per the
-/// `<output>/<dataset>-<commit>.pmtiles` naming convention tilegen produces.
-/// `<output>` is the durable output dir (never wiped by a run), NOT scratch.
-/// `--file` skips resolution entirely. `--commit` defaults to the current
-/// HEAD short hash. Only reads the file; does not rebuild for historical
+/// `<output>/<dataset>-<variant>-<commit>.pmtiles` naming convention tilegen
+/// produces. `<output>` is the durable output dir (never wiped by a run), NOT
+/// scratch. `--file` skips resolution entirely. `--commit` takes any revision
+/// git resolves and defaults to HEAD; either way the name is built from the
+/// fixed-width abbreviation (`git::short_of`). Only reads the file; does not rebuild for historical
 /// commits (the current release binary can inspect a file built by any
 /// commit).
 pub(crate) fn resolve_pmtiles_by_commit(
@@ -570,7 +571,21 @@ pub(crate) fn resolve_pmtiles_by_commit(
         return Ok(p);
     }
     let hash = match commit {
-        Some(c) => c.to_owned(),
+        Some(c) => match crate::git::resolve_commit(build_root, c) {
+            // The fixed-width name tilegen now files under, or failing that an
+            // archive filed under a shorter abbreviation of the same commit
+            // (the width `git rev-parse --short` used to pick grew with the
+            // repo). A revision git cannot resolve - a commit since rebased
+            // away - is looked up exactly as typed.
+            Ok(id) => {
+                let fixed = crate::resolve::pmtiles_archive_name(&paths.output_dir, dataset, variant, &id.short);
+                if fixed.exists() {
+                    return Ok(fixed);
+                }
+                legacy_archive_token(&paths.output_dir, dataset, variant, &id.full).unwrap_or(id.short)
+            }
+            Err(_) => c.to_owned(),
+        },
         None => crate::git::collect(build_root)?.commit,
     };
     // Constructed from (dataset, variant, commit) - the three axes the archive
@@ -588,6 +603,27 @@ pub(crate) fn resolve_pmtiles_by_commit(
         )));
     }
     Ok(path)
+}
+
+/// The commit token of the one constructed archive for `(dataset, variant)`
+/// whose token is a hex abbreviation (4+ digits) of `full` - an archive named
+/// before the hash width was pinned. `None` when there is none, or more than
+/// one (ambiguity is left to the caller's "no build" error rather than
+/// guessed).
+fn legacy_archive_token(output_dir: &Path, dataset: &str, variant: &str, full: &str) -> Option<String> {
+    let prefix = pmtiles_archive_prefix(dataset, variant);
+    let mut found: Vec<String> = std::fs::read_dir(output_dir)
+        .ok()?
+        .filter_map(Result::ok)
+        .filter_map(|e| e.file_name().to_str().map(str::to_owned))
+        .filter(|name| pmtiles_archive_matches(name, dataset, variant))
+        .filter_map(|name| {
+            let token = name.strip_prefix(&prefix)?.strip_suffix(".pmtiles")?.to_owned();
+            (token.len() >= 4 && token.bytes().all(|b| b.is_ascii_hexdigit()) && full.starts_with(&token))
+                .then_some(token)
+        })
+        .collect();
+    if found.len() == 1 { found.pop() } else { None }
 }
 
 /// The canonical durable-archive path: `<output>/<dataset>-<variant>-<commit>.pmtiles`.
@@ -620,7 +656,7 @@ fn pmtiles_archive_prefix(dataset: &str, variant: &str) -> String {
 /// every `denmark-raw-fast-*` file too, so the shorter variant's window fills
 /// with the longer one's archives and evicts the ones per-(dataset, variant)
 /// scoping promised to protect. What follows the prefix in a *constructed* name
-/// is always a single `git rev-parse --short` token (or the `unknown`
+/// is always a single abbreviated-hash token (or the `unknown`
 /// fallback), never containing a hyphen - so requiring a hyphen-free remainder
 /// closes the group exactly, without ever parsing a dataset name back out.
 pub(crate) fn pmtiles_archive_matches(file_name: &str, dataset: &str, variant: &str) -> bool {

@@ -21,7 +21,12 @@ error - not having measured anything is a normal state.
 
 All narrow the table, and all AND together:
 
-- `--commit <REF>` - prefix match on the recorded commit.
+- `--commit <HASH>` - prefix match on the recorded commit, in both
+  directions: the recorded hash may start with what you typed, or what you
+  typed may start with the recorded hash (4+ digits). Rows carry the width
+  brokkr abbreviated to when they were recorded - it used to grow with the
+  repo - so a full hash from `git log` still finds a row stored at 7. The same
+  match selects each side of `--compare`.
 - `--command <SUB>` - substring, so `read` matches `bench read`.
 - `--mode <SUB>` - substring; the exact values are `bench`, `hotpath`,
   `alloc`. `--variant` is accepted as a legacy alias.
@@ -99,14 +104,23 @@ agree. `brokkr_args` is in the key deliberately: arm-defining flags like
 `--direct-io` must never collapse two different measurements into one averaged
 row.
 
-But two tokens are **stripped before the comparison** (`normalize_brokkr_args`
-in `src/db/format/compare.rs`):
+But the tokens that name provenance or presentation rather than the arm are
+**normalized before the comparison** (`normalize_brokkr_args` in
+`src/db/format/compare.rs`):
 
-- `--commit REF` (and `--commit=REF`) - because `--commit` *is* the comparison
-  axis. Keying on it would stop a retroactive row from ever pairing with the
-  current-tree row it exists to be compared against, which is the entire
-  purpose of recording it.
-- `--verbose` / `-v` - noise that changes no measurement.
+- `--commit REF` (and `--commit=REF`) is stripped - because `--commit` *is* the
+  comparison axis. Keying on it would stop a retroactive row from ever pairing
+  with the current-tree row it exists to be compared against, which is the
+  entire purpose of recording it.
+- `--verbose` / `-v` is stripped - noise that changes no measurement.
+- The iteration count of `--bench N`, `--hotpath N` and `--alloc N` (and the
+  `=N` forms) is stripped; the flag stays. `--bench 3` and `--bench 5` drew
+  different numbers of samples of the same benchmark, so they pair.
+- argv[0] is reduced to its basename, so `brokkr` and `~/.cargo/bin/brokkr`
+  pair.
+
+Pairing is by invocation: two different brokkr commands that happen to run the
+same subprocess have different `brokkr_args` and stay separate rows.
 
 Pairs whose **host conditions differed** (memory, governor, kernel) are
 annotated rather than silently rendered as a clean delta: the same numbers mean

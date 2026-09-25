@@ -1,8 +1,28 @@
 //! Monitoring sidecar that runs alongside benchmark processes.
 //!
 //! Samples `/proc/{pid}/*` at fixed intervals, reads application phase markers
-//! from a FIFO, and bulk-inserts everything to SQLite after the child exits.
-//! Zero I/O during the benchmark itself.
+//! from a FIFO, and hands everything back to the harness, which stores it in
+//! SQLite after the child exits. The only write during the benchmark itself
+//! is the status file below.
+//!
+//! # Status file
+//!
+//! Each drain that saw a phase marker writes
+//! the latest marker name to the status file ([`status_path`]) so `brokkr
+//! lock` can show it. The file has one fixed location beside the global lock,
+//! derived by one function that both the writer and the reader call - it used
+//! to sit beside the FIFO, whose directory varies by harness path, while the
+//! reader looked in `<project>/.brokkr/`, so every path whose FIFO lived
+//! elsewhere (`--hotpath`/`--alloc`, the ratatoskr sync bench) was invisible.
+//!
+//! # Deadlines
+//!
+//! [`run_sidecar_with_deadline`] kills the child's process group once it has
+//! run longer than the given limit; [`run_sidecar`] takes its limit from the
+//! enclosing [`DeadlineScope`], if any. The scope exists so a caller several
+//! layers above the sidecar (a measured command driving
+//! `harness::run_hotpath_capture`) can bound a hung child without threading a
+//! parameter through every capture helper.
 //!
 //! # Pipe draining
 //!
@@ -131,6 +151,11 @@ pub struct SidecarRunResult {
     /// `brokkr kill`). Callers store the partial sidecar and then abort
     /// the bench, letting the outer layer run scratch cleanup.
     pub stopped_by_signal: bool,
+    /// True when the child was killed for outliving the run's deadline
+    /// (see [`run_sidecar_with_deadline`]). The exit status reflects the
+    /// SIGKILL, so a caller that ignores this field still sees a failure;
+    /// callers that check it can name the cause.
+    pub stopped_by_deadline: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -354,12 +379,68 @@ fn read_proc_metrics(pid: u32, sample_idx: i32, timestamp_us: i64) -> Option<Sam
 // FIFO management
 // ---------------------------------------------------------------------------
 
+/// Where the last-marker status file lives: `~/.brokkr/sidecar-status`,
+/// beside the global lock. The single definition both [`SidecarFifo`] (the
+/// writer) and `brokkr lock` (the reader, via [`read_status`]) use.
+///
+/// Beside the lock, not under a project or scratch dir, because the reader
+/// starts from the lock and nothing else: only the lock holder runs a
+/// measured child, so one fixed file is unambiguous. `None` when the lock
+/// directory cannot be resolved (`$HOME` unset) - the status line is a
+/// convenience and is simply skipped.
+///
+/// Always `None` in unit tests: the file is host-global, so a test that
+/// creates a [`SidecarFifo`] would otherwise delete or overwrite the status
+/// of a real brokkr measuring on this machine. The pure halves
+/// ([`format_status`]/[`parse_status`]) carry the tested logic.
+#[cfg(not(test))]
+pub(crate) fn status_path() -> Option<PathBuf> {
+    crate::lockfile::compile_lock_path()
+        .ok()
+        .map(|p| p.with_file_name("sidecar-status"))
+}
+
+#[cfg(test)]
+#[allow(clippy::unnecessary_wraps)]
+pub(crate) fn status_path() -> Option<PathBuf> {
+    None
+}
+
+/// Render the status file body: the writer's PID on the first line, the
+/// marker name on the second. The PID lets the reader reject a file left
+/// behind by an earlier holder that died before its `Drop` ran.
+fn format_status(pid: u32, marker_name: &str) -> String {
+    format!("{pid}\n{marker_name}")
+}
+
+/// Parse a status file body, returning the marker only when it was written
+/// by `holder_pid`. Both PIDs come from the holder's own PID namespace (the
+/// lock file records the holder's `getpid()`, and the holder is the process
+/// running the sidecar), so plain equality is the right test here.
+fn parse_status(body: &str, holder_pid: u32) -> Option<&str> {
+    let (pid, marker) = body.split_once('\n')?;
+    if pid.trim().parse::<u32>().ok()? != holder_pid {
+        return None;
+    }
+    let marker = marker.trim();
+    (!marker.is_empty()).then_some(marker)
+}
+
+/// The most recent phase marker the lock holder's sidecar has seen, if it
+/// has seen one. Reader half of [`status_path`], used by `brokkr lock`.
+pub(crate) fn read_status(holder_pid: u32) -> Option<String> {
+    let body = fs::read_to_string(status_path()?).ok()?;
+    parse_status(&body, holder_pid).map(str::to_owned)
+}
+
 /// FIFO handle: path + read end for the sidecar.
 ///
 /// Implements `Drop` to clean up the FIFO file on panic or early error return.
 pub(crate) struct SidecarFifo {
     path: PathBuf,
     reader: BufReader<File>,
+    /// Resolved once at creation; see [`status_path`].
+    status: Option<PathBuf>,
 }
 
 impl SidecarFifo {
@@ -387,9 +468,17 @@ impl SidecarFifo {
 
         let file = Self::open_read_end(&path)?;
 
+        // A status file left by a holder that died before its Drop ran must
+        // not be shown as this run's marker until this run emits one.
+        let status = status_path();
+        if let Some(p) = &status {
+            drop(fs::remove_file(p));
+        }
+
         Ok(Self {
             path,
             reader: BufReader::new(file),
+            status,
         })
     }
 
@@ -413,19 +502,18 @@ impl SidecarFifo {
         Ok(())
     }
 
-    /// Path to the sidecar status file (for `brokkr lock` to read).
-    fn status_path(&self) -> PathBuf {
-        self.path.with_file_name(".sidecar-status")
-    }
-
     /// Write the last marker name to the status file so `brokkr lock` can show it.
     fn update_status(&self, marker_name: &str) {
-        drop(fs::write(self.status_path(), marker_name));
+        if let Some(p) = &self.status {
+            drop(fs::write(p, format_status(std::process::id(), marker_name)));
+        }
     }
 
     /// Clean up the status file.
     fn cleanup_status(&self) {
-        drop(fs::remove_file(self.status_path()));
+        if let Some(p) = &self.status {
+            drop(fs::remove_file(p));
+        }
     }
 
     /// Drain all pending lines from the FIFO, parsing markers and counters.
@@ -581,6 +669,54 @@ fn stop_match(stop: &str, recent: &[Marker]) -> Option<String> {
         .map(|m| m.name.clone())
 }
 
+thread_local! {
+    /// The deadline [`run_sidecar`] applies, set by the innermost live
+    /// [`DeadlineScope`] on this thread. Thread-local because the sidecar
+    /// loop runs on the thread that entered the scope.
+    static AMBIENT_DEADLINE: std::cell::Cell<Option<Duration>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Bounds every [`run_sidecar`] call on this thread while it lives: a child
+/// running longer than `limit` (measured from the caller's `start`) has its
+/// process group SIGKILLed and the run reports `stopped_by_deadline`.
+///
+/// Scopes nest; dropping one restores the enclosing limit.
+pub(crate) struct DeadlineScope {
+    prev: Option<Duration>,
+}
+
+impl DeadlineScope {
+    pub(crate) fn enter(limit: Duration) -> Self {
+        let prev = AMBIENT_DEADLINE.with(|c| c.replace(Some(limit)));
+        Self { prev }
+    }
+}
+
+impl Drop for DeadlineScope {
+    fn drop(&mut self) {
+        AMBIENT_DEADLINE.with(|c| c.set(self.prev));
+    }
+}
+
+fn ambient_deadline() -> Option<Duration> {
+    AMBIENT_DEADLINE.with(std::cell::Cell::get)
+}
+
+/// Run the sidecar sampling loop for a single benchmark run, bounded by the
+/// enclosing [`DeadlineScope`] if there is one (unbounded otherwise).
+///
+/// See [`run_sidecar_with_deadline`].
+pub(crate) fn run_sidecar(
+    child: Child,
+    fifo: &mut SidecarFifo,
+    run_idx: usize,
+    start: Instant,
+    stop_marker: Option<&str>,
+) -> SidecarRunResult {
+    run_sidecar_with_deadline(child, fifo, run_idx, start, stop_marker, ambient_deadline())
+}
+
 /// Run the sidecar sampling loop for a single benchmark run.
 ///
 /// Takes ownership of the `Child` process. Drains stdout/stderr in
@@ -588,15 +724,22 @@ fn stop_match(stop: &str, recent: &[Marker]) -> Option<String> {
 /// `/proc/{pid}/*` at 100ms intervals, drains FIFO markers, and detects
 /// child exit via `try_wait()`.
 ///
+/// `deadline`, when set, is the longest the child may run, measured from
+/// `start`: past it the child's process group is SIGKILLed and the result
+/// carries `stopped_by_deadline`. Checked once per sample tick, so the kill
+/// lands within one interval of the limit. Without it a hung child holds the
+/// global lock until someone runs `brokkr kill`.
+///
 /// Returns a `SidecarRunResult` containing the child's exit status,
 /// captured output, wall-clock elapsed time, and sidecar profile data.
 #[allow(clippy::too_many_lines)]
-pub(crate) fn run_sidecar(
+pub(crate) fn run_sidecar_with_deadline(
     mut child: Child,
     fifo: &mut SidecarFifo,
     run_idx: usize,
     start: Instant,
     stop_marker: Option<&str>,
+    deadline: Option<Duration>,
 ) -> SidecarRunResult {
     // Scope the SIGTERM handler to the sidecar window only. Outside this
     // RAII guard's lifetime, `brokkr kill` falls through to the default
@@ -634,6 +777,7 @@ pub(crate) fn run_sidecar(
     let mut child_elapsed: Option<Duration> = None;
     let mut stopped_by_marker = false;
     let mut stopped_by_signal = false;
+    let mut stopped_by_deadline = false;
 
     loop {
         #[allow(clippy::cast_possible_truncation)]
@@ -712,7 +856,25 @@ pub(crate) fn run_sidecar(
                 exit_status = Some(status);
                 break;
             }
-            Ok(None) => {}
+            Ok(None) => {
+                // Checked only once try_wait has confirmed the child is still
+                // running, so a child that exited on the tick is never killed.
+                if let Some(limit) = deadline
+                    && start.elapsed() >= limit
+                {
+                    output::sidecar_msg(&format!(
+                        "child exceeded its {:.1}s deadline, killing it",
+                        limit.as_secs_f64()
+                    ));
+                    crate::ratatoskr::process::send_signal_pgrp(child.id(), libc::SIGKILL).ok();
+                    child.kill().ok();
+                    let status = child.wait().ok();
+                    child_elapsed = Some(start.elapsed());
+                    exit_status = status;
+                    stopped_by_deadline = true;
+                    break;
+                }
+            }
             Err(_) => {
                 child_elapsed = Some(start.elapsed());
                 break;
@@ -776,6 +938,7 @@ pub(crate) fn run_sidecar(
         },
         stopped_by_marker,
         stopped_by_signal,
+        stopped_by_deadline,
     }
 }
 
@@ -857,6 +1020,43 @@ mod tests {
         let t1 = monotonic_ns();
         let t2 = monotonic_ns();
         assert!(t2 >= t1);
+    }
+
+    #[test]
+    fn status_round_trips_for_its_writer() {
+        let body = format_status(4242, "STAGE2_START");
+        assert_eq!(parse_status(&body, 4242), Some("STAGE2_START"));
+    }
+
+    /// A file left by a holder that died before its Drop ran names a PID
+    /// other than the current holder's, and must not be shown.
+    #[test]
+    fn status_from_another_pid_is_rejected() {
+        let body = format_status(4242, "STAGE2_START");
+        assert_eq!(parse_status(&body, 7), None);
+    }
+
+    #[test]
+    fn status_rejects_legacy_and_empty_bodies() {
+        // The pre-fix format was the bare marker name, no PID line.
+        assert_eq!(parse_status("STAGE2_START", 4242), None);
+        assert_eq!(parse_status("4242\n", 4242), None);
+        assert_eq!(parse_status("x\nSTAGE", 4242), None);
+    }
+
+    #[test]
+    fn deadline_scopes_nest_and_restore() {
+        assert_eq!(ambient_deadline(), None);
+        {
+            let _outer = DeadlineScope::enter(Duration::from_secs(60));
+            assert_eq!(ambient_deadline(), Some(Duration::from_secs(60)));
+            {
+                let _inner = DeadlineScope::enter(Duration::from_secs(5));
+                assert_eq!(ambient_deadline(), Some(Duration::from_secs(5)));
+            }
+            assert_eq!(ambient_deadline(), Some(Duration::from_secs(60)));
+        }
+        assert_eq!(ambient_deadline(), None);
     }
 
     #[test]

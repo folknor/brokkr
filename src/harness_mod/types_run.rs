@@ -17,11 +17,13 @@ use crate::output;
 /// Configuration for a benchmark run.
 pub struct BenchConfig {
     pub command: String,
-    /// Measurement mode override (`"bench"`/`"hotpath"`/`"alloc"`).
-    /// Usually left `None`; the harness fills it from its
-    /// `measure_mode` field, set via `with_measure_mode` at
-    /// construction. Individual writers only set this when they need
-    /// to override the harness default.
+    /// Measurement mode fallback (`"bench"`/`"hotpath"`/`"alloc"`), used
+    /// only when the harness has none. Every writer leaves this `None`:
+    /// the single source is the harness's `measure_mode`, set via
+    /// `with_measure_mode` from the request, and every reader - the stored
+    /// row, the `[result]` line and the sidecar provenance - goes through
+    /// [`BenchHarness::effective_mode`]. Reading this field directly is how
+    /// `mode=` once never printed and `sidecar_meta.mode` was always NULL.
     pub mode: Option<String>,
     pub input_file: Option<String>,
     pub input_mb: Option<f64>,
@@ -31,10 +33,11 @@ pub struct BenchConfig {
     /// Literal subprocess invocation (pbfhogg/elivagar/...). Populated by
     /// dispatch from the argv it hands to the tool binary.
     pub cli_args: Option<String>,
-    /// Literal `brokkr <...>` invocation (std::env::args joined). Populated
-    /// by main.rs and threaded through `MeasureRequest`. Stored parallel to
-    /// `cli_args` so queries can grep either what the user asked brokkr to
-    /// do or what brokkr asked the tool to do.
+    /// Literal `brokkr <...>` invocation fallback, used only when the
+    /// harness has none. Every writer leaves this `None`; the harness's
+    /// `brokkr_args` (set via `with_brokkr_args` from the request) is the
+    /// source. Stored parallel to `cli_args` so queries can grep either
+    /// what the user asked brokkr to do or what brokkr asked the tool to do.
     pub brokkr_args: Option<String>,
     pub metadata: Vec<KvPair>,
 }
@@ -47,9 +50,11 @@ pub struct BenchResult {
     /// `elapsed_ms` is an integer and always will be - every query, format
     /// and historical row depends on it. But sluggrs' measured regions are
     /// single-digit milliseconds and the deltas worth seeing there are
-    /// 100-200us, which integer milliseconds flatten to nothing. Only the
-    /// stderr-kv path currently fills this in, from a fractional
-    /// `elapsed_ms=6.847` line; every other path leaves it `None` and
+    /// 100-200us, which integer milliseconds flatten to nothing. Filled by
+    /// the stderr-kv path (from a fractional `elapsed_ms=6.847` line) and by
+    /// the paths brokkr times itself from an exact `Duration`
+    /// (`run_external`/`run_external_ok`, `run_hotpath_capture`). Closure-
+    /// timed paths (`run_internal`, `run_distribution`) leave it `None` and
     /// `elapsed_ms` remains the only timing available.
     ///
     /// Where both exist, `elapsed_ms` is this value rounded - never treat
@@ -109,10 +114,8 @@ pub struct BenchHarness {
     /// agnostic of the brokkr-level invocation.
     brokkr_args: Option<String>,
     /// Measurement mode string (`"bench"`, `"hotpath"`, `"alloc"`). Set
-    /// once per harness via `with_measure_mode`. Overrides
-    /// `BenchConfig.variant` when set - individual bench writers only
-    /// need to set `variant` when they mean to override (they almost
-    /// never do post-v13).
+    /// once per harness via `with_measure_mode`. The single source of a
+    /// run's mode; read only through [`Self::effective_mode`].
     measure_mode: Option<String>,
     /// Env var snapshot captured at `with_request` time. Merged into
     /// every row's kv via `build_row` as `env.<NAME>` entries - lets
@@ -230,8 +233,8 @@ impl BenchHarness {
     }
 
     /// Set the measurement mode string (`"bench"`, `"hotpath"`, `"alloc"`).
-    /// This overrides whatever `BenchConfig.variant` is set to, so
-    /// individual writers don't have to supply it.
+    /// This takes precedence over `BenchConfig.mode`, so individual
+    /// writers don't have to supply it.
     pub fn with_measure_mode(mut self, mode: Option<&str>) -> Self {
         self.measure_mode = mode.map(str::to_owned);
         self
@@ -310,12 +313,41 @@ impl BenchHarness {
         for i in 0..config.runs {
             output::bench_msg(&format!("run {}/{}", i + 1, config.runs));
             self.lock.set_progress(clamp_u32(i + 1), total);
-            let (result, sidecar) = f(i)?;
+            // A stale parked failure from some earlier, unrelated capture
+            // must not be attributed to this iteration.
+            drop(take_failed_capture());
+            let (result, sidecar) = match f(i) {
+                Ok(pair) => pair,
+                Err(e) => {
+                    // Keep what was collected - the failing run's trajectory
+                    // (parked by `run_hotpath_capture`) and every earlier
+                    // run's - under `dirty`, as `run_external_*` do. The
+                    // loop used to return here and drop all of it.
+                    let (pid, exit_code) = match take_failed_capture() {
+                        Some(failed) => {
+                            sidecar_runs.push(failed.data);
+                            (failed.pid, Some(failed.exit_code))
+                        }
+                        None => (0, None),
+                    };
+                    if !sidecar_runs.is_empty() {
+                        let info =
+                            self.build_run_info(config, program, start_epoch, pid, exit_code);
+                        let idx = sidecar_runs.len() - 1;
+                        self.store_sidecar(None, &sidecar_runs, idx, Some(&info)).ok();
+                    }
+                    return Err(e);
+                }
+            };
             sidecar_runs.push(sidecar);
             walls.push(result.elapsed_ms);
             // Track the best run's index consistently with `pick_best`, which
-            // only replaces on a strict improvement (keeps current on ties).
-            if best.as_ref().is_none_or(|b| result.elapsed_ms < b.elapsed_ms) {
+            // only replaces on a strict improvement (keeps current on ties)
+            // and compares on the same key.
+            if best
+                .as_ref()
+                .is_none_or(|b| bench_ordering_key(&result) < bench_ordering_key(b))
+            {
                 best_run_idx = i;
             }
             best = Some(pick_best(best, result));
@@ -325,11 +357,18 @@ impl BenchHarness {
             best.ok_or_else(|| DevError::Config("benchmark requires at least 1 run".into()))?;
         best.iterations = walls;
 
-        let uuid = self.record_result(config, &best)?;
         // pid is unknown here (the child was reaped inside the closure); 0 is
         // the sentinel. exit_code is 0 since a failing run would have errored
         // out of the closure before reaching this point.
         let info = self.build_run_info(config, program, start_epoch, 0, Some(0));
+        let uuid = match self.record_result(config, &best) {
+            Ok(uuid) => uuid,
+            Err(e) => {
+                // The row is lost; the trajectory need not be.
+                self.store_sidecar(None, &sidecar_runs, best_run_idx, Some(&info)).ok();
+                return Err(e);
+            }
+        };
         self.store_sidecar(uuid.as_deref(), &sidecar_runs, best_run_idx, Some(&info))?;
 
         Ok(best)
@@ -394,7 +433,10 @@ impl BenchHarness {
         let mut fifo = sidecar::SidecarFifo::create(scratch_dir)?;
         let fifo_path_str = fifo.path_str()?.to_owned();
 
-        let mut best_ms: Option<i64> = None;
+        // Best-of-N on the exact microsecond wall; `elapsed_ms` is that
+        // rounded. Comparing floored milliseconds used to make ties of runs
+        // up to 999us apart and store a figure up to 1ms faster than measured.
+        let mut best_us: Option<i64> = None;
         let mut best_run_idx: usize = 0;
         let mut best_stderr: Vec<u8> = Vec::new();
         let mut last_pid: u32 = 0;
@@ -435,6 +477,7 @@ impl BenchHarness {
                 elapsed: result.elapsed,
             };
             let ms = elapsed_to_ms(&captured.elapsed);
+            let us = elapsed_to_us(&captured.elapsed);
 
             // Always collect sidecar data - especially valuable when the
             // child is OOM-killed, since the /proc trajectory shows what
@@ -468,8 +511,8 @@ impl BenchHarness {
             // one entry per iteration that actually completed.
             walls.push(ms);
 
-            if best_ms.is_none_or(|best| ms < best) {
-                best_ms = Some(ms);
+            if best_us.is_none_or(|best| us < best) {
+                best_us = Some(us);
                 best_run_idx = i;
                 best_stderr = captured.stderr;
             }
@@ -477,8 +520,9 @@ impl BenchHarness {
 
         drop(fifo);
 
-        let elapsed_ms =
-            best_ms.ok_or_else(|| DevError::Config("benchmark requires at least 1 run".into()))?;
+        let elapsed_us =
+            best_us.ok_or_else(|| DevError::Config("benchmark requires at least 1 run".into()))?;
+        let elapsed_ms = us_to_ms(elapsed_us);
 
         // Counters from the winning run only. Averaging them across iterations
         // would be wrong for the property they exist to support: a benched
@@ -493,15 +537,22 @@ impl BenchHarness {
 
         let bench_result = BenchResult {
             elapsed_ms,
-            elapsed_us: None,
+            elapsed_us: Some(elapsed_us),
             kv,
             iterations: walls,
             distribution: None,
             hotpath: None,
         };
 
-        let uuid = self.record_result(config, &bench_result)?;
         let info = self.build_run_info(config, program, start_epoch, last_pid, Some(0));
+        let uuid = match self.record_result(config, &bench_result) {
+            Ok(uuid) => uuid,
+            Err(e) => {
+                // The row is lost; the trajectory need not be.
+                self.store_sidecar(None, &sidecar_runs, best_run_idx, Some(&info)).ok();
+                return Err(e);
+            }
+        };
         self.store_sidecar(uuid.as_deref(), &sidecar_runs, best_run_idx, Some(&info))?;
 
         Ok(bench_result)
@@ -568,7 +619,14 @@ impl BenchHarness {
         cwd: &Path,
     ) -> Result<BenchResult, DevError> {
         let (best, _stderr, pending) = self.run_external_with_kv_raw(config, program, args, cwd)?;
-        let uuid = self.record_result(config, &best)?;
+        let uuid = match self.record_result(config, &best) {
+            Ok(uuid) => uuid,
+            Err(e) => {
+                // The row is lost; the trajectory need not be.
+                self.commit_sidecar(None, &pending).ok();
+                return Err(e);
+            }
+        };
         self.commit_sidecar(uuid.as_deref(), &pending)?;
         Ok(best)
     }
@@ -685,24 +743,47 @@ impl BenchHarness {
     /// Record a result: always emit to stdout, store in DB if tree is clean.
     /// Prints the short UUID to stdout (always, regardless of quiet mode).
     /// Returns the full UUID if stored, `None` if the tree was dirty.
+    ///
+    /// A failed insert still prints the `[result]` line - unconditionally,
+    /// since the row cannot be looked up later - before returning the error.
+    /// The harness loops then store the sidecar trajectory under `dirty`, so
+    /// a DB failure costs the row, never the measurement. A caller of
+    /// `run_external_with_kv_raw` that records itself should do the same
+    /// (`commit_sidecar(None, ..)` on error).
     pub fn record_result(
         &self,
         config: &BenchConfig,
         result: &BenchResult,
     ) -> Result<Option<String>, DevError> {
+        let mode = self.effective_mode(config);
         if self.git.is_clean {
             let row = self.build_row(config, result);
-            let (uuid, short) = self.db.insert(&row)?;
-            emit_result_lines(config, result, &self.git);
+            let (uuid, short) = match self.db.insert(&row) {
+                Ok(pair) => pair,
+                Err(e) => {
+                    force_emit_result_lines(config, mode.as_deref(), result, &self.git);
+                    output::error(&format!("results.db insert failed - result not stored: {e}"));
+                    return Err(e);
+                }
+            };
+            emit_result_lines(config, mode.as_deref(), result, &self.git);
             output::bench_msg(&format!("stored in results.db ({short})"));
             println!("{short}");
             Ok(Some(uuid))
         } else {
             // Dirty tree: no DB insert, no UUID. Always print result line
             // since the data can't be looked up later.
-            force_emit_result_lines(config, result, &self.git);
+            force_emit_result_lines(config, mode.as_deref(), result, &self.git);
             Ok(None)
         }
+    }
+
+    /// The measurement mode a row, `[result]` line and sidecar record
+    /// carry: the harness's `measure_mode` (from the request), falling
+    /// back to the per-config override. The one resolution every reader
+    /// uses - see `BenchConfig::mode`.
+    pub fn effective_mode(&self, config: &BenchConfig) -> Option<String> {
+        self.measure_mode.clone().or_else(|| config.mode.clone())
     }
 
     /// Record that measurement is starting now. For the loops that don't
@@ -728,7 +809,7 @@ impl BenchHarness {
             binary_path: Some(program.display().to_string()),
             binary_xxh128,
             git_commit: Some(self.git.commit.clone()),
-            mode: config.mode.clone(),
+            mode: self.effective_mode(config),
             dataset: config.input_file.clone(),
             exit_code,
         }
@@ -838,10 +919,7 @@ impl BenchHarness {
         // Harness-level values take precedence. The individual writers
         // don't have to know or care about the measurement mode or the
         // brokkr invocation string - the harness attaches them.
-        let mode = self
-            .measure_mode
-            .clone()
-            .or_else(|| config.mode.clone());
+        let mode = self.effective_mode(config);
         let brokkr_args = self
             .brokkr_args
             .clone()

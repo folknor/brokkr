@@ -7,22 +7,30 @@ use crate::harness::{BenchConfig, BenchHarness};
 
 pub const ALL_STRATEGIES: &[&str] = &["simple", "complete", "smart"];
 
-fn strategy_args(name: &str, pbf: &str, bbox: &str, output: &str) -> Vec<String> {
-    match name {
+/// The bbox is spelled `-b=<bbox>`, identically to `PbfhoggCommand::Extract`'s
+/// argv in `commands.rs`: the two paths record the same `extract` rows, and a
+/// differing spelling split their `cli_args` for the same work. The `=` form
+/// is the safe one, too - a bbox west of Greenwich starts with `-`, which a
+/// separate token would present to pbfhogg's parser as a flag.
+///
+/// An unknown name is an error rather than `unreachable!()`: the names arrive
+/// as strings from the caller, and nothing at this signature proves they came
+/// from [`ALL_STRATEGIES`].
+fn strategy_args(name: &str, pbf: &str, bbox: &str, output: &str) -> Result<Vec<String>, DevError> {
+    let bbox_arg = format!("-b={bbox}");
+    Ok(match name {
         "simple" => vec![
             "extract".into(),
             pbf.into(),
             "--simple".into(),
-            "-b".into(),
-            bbox.into(),
+            bbox_arg,
             "-o".into(),
             output.into(),
         ],
         "complete" => vec![
             "extract".into(),
             pbf.into(),
-            "-b".into(),
-            bbox.into(),
+            bbox_arg,
             "-o".into(),
             output.into(),
         ],
@@ -30,13 +38,17 @@ fn strategy_args(name: &str, pbf: &str, bbox: &str, output: &str) -> Vec<String>
             "extract".into(),
             pbf.into(),
             "--smart".into(),
-            "-b".into(),
-            bbox.into(),
+            bbox_arg,
             "-o".into(),
             output.into(),
         ],
-        _ => unreachable!("unknown strategy: {name}"),
-    }
+        _ => {
+            return Err(DevError::Config(format!(
+                "unknown extract strategy {name:?} (expected one of: {})",
+                ALL_STRATEGIES.join(", ")
+            )));
+        }
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -58,7 +70,7 @@ pub fn run(
     let (basename, pbf_str) = super::path_strs(pbf_path)?;
 
     let result = crate::harness::run_variants("strategy", strategies, |name| {
-        let args = strategy_args(name, pbf_str, bbox, &output_str);
+        let args = strategy_args(name, pbf_str, bbox, &output_str)?;
         let args_refs: Vec<&str> = args.iter().map(String::as_str).collect();
 
         let config = BenchConfig {

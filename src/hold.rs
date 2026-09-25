@@ -286,12 +286,13 @@ mod tests {
     /// The bug this replaced a `OnceLock` to fix: a second sequential hold must
     /// stamp its own nonce, or every child of it is refused by the guard.
     ///
-    /// Serialized with the other capability-mutating test through one lock, and
-    /// restoring the previous value, because the slot is process-global and
-    /// `cargo test` shares a process across tests.
+    /// Serialized with every other test that touches process-global state
+    /// through the crate's one shared lock, and restoring the previous value,
+    /// because the slot is process-global and `cargo test` shares a process
+    /// across tests.
     #[test]
     fn a_second_hold_replaces_the_first_holds_capability() {
-        let _seq = capability_test_lock();
+        let _seq = crate::test_scratch::process_global_lock();
         let before = capability();
         publish_capability("first");
         assert_eq!(capability().as_deref(), Some("first"));
@@ -304,11 +305,5 @@ mod tests {
         clear_capability();
         assert_eq!(capability(), None, "release must forget the capability");
         *slot() = before;
-    }
-
-    /// Tests that mutate the process-global capability must not interleave.
-    fn capability_test_lock() -> std::sync::MutexGuard<'static, ()> {
-        static SEQ: Mutex<()> = Mutex::new(());
-        SEQ.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }

@@ -425,10 +425,9 @@ fn run_osmosis(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
-        .map_err(|e| DevError::Subprocess {
+        .map_err(|error| DevError::Spawn {
             program: "osmosis".into(),
-            code: None,
-            stderr: e.to_string(),
+            error,
         })?;
 
     Ok(output::CapturedOutput {

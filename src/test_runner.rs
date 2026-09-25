@@ -65,9 +65,9 @@ pub(crate) const WALL_WEDGE: &str = "(sweep wall deadline)";
 /// Not the primary bound - [`TEST_TIMEOUT`] is - but the one that catches a wedge
 /// neither the per-test cap nor [`IDLE_TIMEOUT`] can charge to anything: no test
 /// in flight to bill, and enough parsed activity to keep the idle window
-/// resetting. Inside `brokkr check` the 15-minute test-phase watchdog
-/// (`check_cmd/watchdog.rs`) always fires first, so in practice this governs
-/// `brokkr test`.
+/// resetting. `brokkr check` and `brokkr test` both arm the 15-minute `test`
+/// phase ceiling (`check_cmd/watchdog.rs`), which always fires first, so this
+/// is the bound only for a caller that arms no phase watchdog.
 pub(crate) const SWEEP_WALL_TIMEOUT: Duration = Duration::from_secs(1800);
 
 /// The ceilings one libtest run is subject to.
@@ -502,17 +502,26 @@ where
         watchdog_loop(state_root_t, cargo_pid, tracker_t, done_t, hung_t, ceilings, start);
     });
 
-    let status = child.wait().map_err(|e| DevError::Subprocess {
+    let waited = child.wait().map_err(|error| DevError::Spawn {
         program: "cargo".into(),
-        code: None,
-        stderr: e.to_string(),
-    })?;
+        error,
+    });
     drop(reaper);
+    // Before any early return, so the watchdog thread never outlives the
+    // group whose id it would signal.
     done.store(true, Ordering::SeqCst);
 
     stdout_thread.join().ok();
     stderr_thread.join().ok();
     watchdog_thread.join().ok();
+    let status = waited?;
+
+    // A `brokkr kill` / Ctrl-C under the command's `SigtermGuard` (or the
+    // `check` watchdog) killed this group from the signal handler, which is
+    // what released the `wait` above. The run did not fail; it was stopped.
+    if crate::shutdown::is_shutdown_requested() {
+        return Err(DevError::Interrupted);
+    }
 
     let elapsed = start.elapsed();
     let stdout = clone_buffer(&stdout_buf, "stdout")?;
@@ -657,13 +666,20 @@ where
         );
     });
 
-    let (status, timed_out) = wait_parallel(&mut child, program, start, timeout, abort)?;
+    let waited = wait_parallel(&mut child, program, start, timeout, abort);
     drop(reaper);
+    // Before any early return: the watchdog thread must stop before this
+    // group's id can be recycled, or it could later signal a stranger.
     done.store(true, Ordering::SeqCst);
 
     stdout_thread.join().ok();
     stderr_thread.join().ok();
     watchdog_thread.join().ok();
+
+    let (status, timed_out) = match waited? {
+        ParallelWait::Exited { status, timed_out } => (status, timed_out),
+        ParallelWait::Interrupted => return Err(DevError::Interrupted),
+    };
 
     let elapsed = start.elapsed();
     let stdout = clone_buffer(&stdout_buf, "stdout")?;
@@ -690,43 +706,60 @@ where
     })
 }
 
+/// How [`wait_parallel`] ended.
+enum ParallelWait {
+    /// The leader exited, on its own or killed by the backstop (`timed_out`)
+    /// or a lane-wide abort.
+    Exited { status: std::process::ExitStatus, timed_out: bool },
+    /// A cooperative shutdown (`brokkr kill`, Ctrl-C, the `check` watchdog):
+    /// the group was killed and reaped, and the run is not a verdict.
+    Interrupted,
+}
+
 /// The parallel runner's wait loop: poll the process-group leader until it
 /// exits, or kill the group on the whole-sweep backstop, a lane-wide `abort`,
-/// or a cooperative shutdown. Returns the exit status and whether the
-/// backstop (not a cancellation) is what ended it.
+/// or a cooperative shutdown.
 fn wait_parallel(
     child: &mut std::process::Child,
     program: &str,
     start: Instant,
     timeout: Duration,
     abort: Option<&AtomicBool>,
-) -> Result<(std::process::ExitStatus, bool), DevError> {
+) -> Result<ParallelWait, DevError> {
     // Spawned with `process_group(0)`, so the child's pid is its pgid.
     let cargo_pid = child.id();
-    let subprocess_err = |e: std::io::Error| DevError::Subprocess {
+    let spawn_err = |error: std::io::Error| DevError::Spawn {
         program: program.into(),
-        code: None,
-        stderr: e.to_string(),
+        error,
     };
     loop {
         match child.try_wait() {
-            Ok(Some(status)) => return Ok((status, false)),
+            Ok(Some(status)) => {
+                // Killed from the signal handler rather than seen by the poll:
+                // same meaning.
+                if crate::shutdown::is_shutdown_requested() {
+                    return Ok(ParallelWait::Interrupted);
+                }
+                return Ok(ParallelWait::Exited { status, timed_out: false });
+            }
             Ok(None) => {
                 let overtime = start.elapsed() >= timeout;
                 let cancelled = abort.is_some_and(|a| a.load(Ordering::SeqCst));
-                // The shutdown flag is set only under a `SigtermGuard`, which
-                // `check`/`test` do not install; there the `GroupReaper`
-                // kills this group from the signal handler and brokkr dies on
-                // the re-raised signal, so this poll matters only to a caller
-                // running inside a guard.
-                if overtime || cancelled || crate::shutdown::is_shutdown_requested() {
+                // `check` and `brokkr test` hold a `SigtermGuard` for their
+                // whole run, whose handler already killed this group; the poll
+                // covers a request raised without a signal (the watchdog).
+                let interrupted = crate::shutdown::is_shutdown_requested();
+                if overtime || cancelled || interrupted {
                     kill_process_group(cargo_pid).ok();
-                    let status = child.wait().map_err(subprocess_err)?;
-                    return Ok((status, overtime));
+                    let status = child.wait().map_err(spawn_err)?;
+                    if interrupted {
+                        return Ok(ParallelWait::Interrupted);
+                    }
+                    return Ok(ParallelWait::Exited { status, timed_out: overtime });
                 }
                 thread::sleep(WATCHDOG_POLL);
             }
-            Err(e) => return Err(subprocess_err(e)),
+            Err(e) => return Err(spawn_err(e)),
         }
     }
 }
@@ -1034,6 +1067,13 @@ fn spawn_process_group(
 ) -> Result<std::process::Child, DevError> {
     use std::os::unix::process::CommandExt;
 
+    // A shutdown already requested means the run is unwinding: a queued
+    // parallel binary, or the next sweep, must not start a group the handler
+    // will never see registered in time.
+    if crate::shutdown::is_shutdown_requested() {
+        return Err(DevError::Interrupted);
+    }
+
     let mut cmd = Command::new(program);
     cmd.args(args)
         .current_dir(cwd)
@@ -1047,16 +1087,18 @@ fn spawn_process_group(
     crate::oom::protect_child(&mut cmd);
     // The group is outside brokkr's own, so nothing aimed at brokkr reaches it.
     // Both runners register it with `shutdown::GroupReaper` for SIGINT/SIGTERM;
-    // this covers the direct child when brokkr is SIGKILLed. Both runners wait
-    // on the child from the spawning thread, which the death signal requires.
+    // this covers the direct child when brokkr is SIGKILLed by anything that
+    // does not walk its tree first (`brokkr kill --hard` does - see
+    // `shutdown::kill_descendants` - and so reaches a test binary under cargo;
+    // this reaches only the direct child). Both runners wait on the child from
+    // the spawning thread, which the death signal requires.
     crate::shutdown::die_with_parent(&mut cmd);
     // Last, after every caller-supplied env var: see `crate::hold`.
     crate::hold::stamp(&mut cmd);
 
-    cmd.spawn().map_err(|e| DevError::Subprocess {
+    cmd.spawn().map_err(|error| DevError::Spawn {
         program: program.into(),
-        code: None,
-        stderr: e.to_string(),
+        error,
     })
 }
 

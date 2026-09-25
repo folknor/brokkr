@@ -42,7 +42,8 @@ CREATE TABLE IF NOT EXISTS runs (
     input_mb        REAL,
     elapsed_ms      INTEGER NOT NULL,
     -- Exact wall in microseconds, NULL unless the harness path knew it (the
-    -- stderr-kv path, from a fractional `elapsed_ms=` line). elapsed_ms stays
+    -- stderr-kv path, from a fractional `elapsed_ms=` line, or a path brokkr
+    -- timed itself from an exact Duration). elapsed_ms stays
     -- the required, integer, always-present column every query and historical
     -- row depends on; this is the finer reading beside it, for workloads whose
     -- interesting deltas are smaller than a millisecond. Where both exist,

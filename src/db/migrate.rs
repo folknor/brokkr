@@ -16,7 +16,13 @@ pub(super) fn run_migrations(conn: &rusqlite::Connection) -> Result<(), DevError
         return Ok(());
     }
 
-    if current < 1 {
+    // Probe, don't trust the stamp: litehtml's `MechanicalDb` used to share
+    // this file and wrote `user_version = 1` for its own schema, so a legacy
+    // pre-uuid `runs` table can carry a stamp claiming v1 while lacking the
+    // column. Skipping the step there would also make `SCHEMA`'s
+    // `idx_runs_uuid` fail on the missing column. `migrate_uuid` is
+    // idempotent, so running it on a genuine v1 file is harmless.
+    if current < 1 || !has_column(conn, "runs", "uuid") {
         migrate_uuid(conn)?;
     }
     if current < 2 {
@@ -1101,6 +1107,38 @@ mod tests {
 
         drop(db);
         cleanup(&dir, &db_path);
+    }
+
+    #[test]
+    fn a_litehtml_stamped_v1_without_uuid_still_gets_the_uuid_migration() {
+        // litehtml's MechanicalDb once stamped `user_version = 1` on a shared
+        // results.db. A pre-uuid `runs` table under that stamp must still get
+        // the column and the backfill - trusting the stamp skipped it, and
+        // SCHEMA's `idx_runs_uuid` then failed on the missing column.
+        let dir = crate::test_scratch::scratch("db-migrate", "litehtml_stamped_v1");
+        let db_path = dir.join("results.db");
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.execute_batch(V0_SCHEMA).unwrap();
+            conn.pragma_update(None, "user_version", 1).unwrap();
+            conn.execute(V0_INSERT, rusqlite::params![rusqlite::types::Null])
+                .unwrap();
+        }
+
+        let db = ResultsDb::open(&db_path).expect("open should repair the stamped file");
+        assert!(has_column(&db.conn, "runs", "uuid"));
+        let nulls: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM runs WHERE uuid IS NULL", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(nulls, 0, "uuid should be backfilled");
+        let version: i64 = db
+            .conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
     }
 
     // -----------------------------------------------------------------------

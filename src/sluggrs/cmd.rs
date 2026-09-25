@@ -543,13 +543,11 @@ pub(crate) fn approve(
     // Stage the image, record the approval, then swap the image in. A DB
     // failure leaves the old baseline image and its record untouched; the
     // remaining window is a same-directory rename, not a copy.
-    let staged = snap_dir.join("approved.png.staged");
-    std::fs::copy(&output_png, &staged)?;
-    if let Err(e) = db.set_approval(&snapshot.id, &git_info.commit, pixel_pct) {
-        drop(std::fs::remove_file(&staged));
-        return Err(e);
-    }
-    std::fs::rename(&staged, &approved_png)?;
+    // Dropping `staged` on either error removes the staged copy.
+    let staged = crate::atomic_write::Staged::stable(&approved_png)?;
+    std::fs::copy(&output_png, staged.tmp_path())?;
+    db.set_approval(&snapshot.id, &git_info.commit, pixel_pct)?;
+    staged.commit()?;
 
     sluggrs_msg(&format!(
         "approved '{}' (commit {})",

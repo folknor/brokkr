@@ -191,10 +191,21 @@ elapsed. The best iteration's `summary.json` (if the script writes one into
 `BROKKR_HARNESS_ARTEFACT_DIR`) gets ingested as `meta.<key>` KvPair rows:
 numeric values become Int/Real, strings become Text, nested objects/bools/null
 are skipped. Storage is via the standard `BenchHarness`, so `brokkr results
---compare` and the sidecar DB work the same as for pbfhogg/elivagar benches;
-sidecar provenance (RunInfo) is omitted in v0 because the helper that builds
-it is private to BenchHarness today. `--force` allows recording on a dirty
+--compare` and the sidecar DB work the same as for pbfhogg/elivagar benches.
+The loop is ratatoskr's own (one sæhrimnir across iterations, marker-span
+ranking), but it records the provenance the harness loops do: every
+iteration's ranking value in execution order, `cargo_profile` from the
+profile actually built (`dev` under `[ratatoskr.harness] debug = true` or
+`--debug`), the configured features, the `capture_env` snapshot, sidecar
+RunInfo, and a measurement-start stamp so `prev.gap_seconds` excludes the
+run's own duration. A failed, hung or interrupted run keeps its collected
+sidecar data under the `dirty` alias. `--force` allows recording on a dirty
 git tree (rows land under the `dirty` alias).
+
+Each iteration is bounded by the script's frontmatter `ceiling:` (or
+discover's default), the same watchdog the unmeasured run uses: an iteration
+that outlives it has its process group SIGKILLed and the run fails, so a hung
+harness cannot hold the global lock through a `--gate all` sweep.
 
 ### `--commit REF`
 

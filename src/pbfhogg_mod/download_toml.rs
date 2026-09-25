@@ -261,18 +261,15 @@ fn min_table_position(item: &toml_edit::Item) -> Option<isize> {
 /// that a later run would hash and register. The raw OS code is matched so
 /// this does not depend on `ErrorKind::CrossesDevices`.
 fn move_file_into_place(src: &Path, dest: &Path) -> Result<(), DevError> {
+    // A plain rename *moves* a finished file; it is not a temp-and-replace, so
+    // it stays raw. Only the cross-filesystem copy needs staging.
     match std::fs::rename(src, dest) {
         Ok(()) => Ok(()),
         Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
-            let tmp = dest.with_extension("partial");
-            if let Err(e) = std::fs::copy(src, &tmp) {
-                std::fs::remove_file(&tmp).ok();
-                return Err(DevError::Io(e));
-            }
-            if let Err(e) = std::fs::rename(&tmp, dest) {
-                std::fs::remove_file(&tmp).ok();
-                return Err(DevError::Io(e));
-            }
+            // Dropping `staged` on an error removes the partial copy.
+            let staged = crate::atomic_write::Staged::stable(dest)?;
+            std::fs::copy(src, staged.tmp_path())?;
+            staged.commit()?;
             std::fs::remove_file(src).ok();
             Ok(())
         }
@@ -300,18 +297,19 @@ fn generate_indexed_pbf(
     )?;
     let binary_str = binary.display().to_string();
     let input_str = input.display().to_string();
-    let tmp = dest.with_extension("tmp");
-    let tmp_str = tmp.display().to_string();
+    // Stable temp name, as for downloads: runs under the global lock, and a
+    // killed multi-gigabyte `cat` is overwritten by the retry, not leaked.
+    // It keeps the `.osm.pbf` suffix pbfhogg reads the output format from.
+    // Dropping `staged` on any error removes the partial output.
+    let staged = crate::atomic_write::Staged::stable_keeping(dest, ".osm.pbf")?;
+    let tmp_str = staged.tmp_path().display().to_string();
 
     let captured = output::run_captured(
         &binary_str,
         &["cat", &input_str, "-o", &tmp_str],
         project_root,
     )?;
-    if let Err(e) = captured.check_success(&binary_str) {
-        std::fs::remove_file(&tmp).ok();
-        return Err(e);
-    }
-    std::fs::rename(&tmp, dest)?;
+    captured.check_success(&binary_str)?;
+    staged.commit()?;
     Ok(())
 }

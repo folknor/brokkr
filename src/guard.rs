@@ -228,7 +228,7 @@ fn stale_warning() -> Option<String> {
 }
 
 /// Warn (once per process) if the enrolled guard is stale. Called after every
-/// locked-command acquisition: the guard and brokkr install together, but
+/// fresh lock acquisition (`lockfile::acquire`): the guard and brokkr install together, but
 /// nothing forces them to, and a half-upgraded pair fails in ways that read
 /// as anything but staleness. Detection at the moment checked, not a
 /// guarantee against replacement afterwards; never fails the run.

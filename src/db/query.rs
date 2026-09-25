@@ -79,16 +79,49 @@ impl ResultsDb {
 // Helpers shared with compare module
 // ---------------------------------------------------------------------------
 
-/// Run `sql` with `?1` bound to `commit_pattern` - a `like::prefix_pattern`,
-/// not a raw commit - and the rest of `params` as-is.
+/// The `[commit]` match clause for a user-supplied commit bound at `?{pattern}`
+/// (its [`commit_params`] pattern) and `?{raw}` (its lowercased text).
+///
+/// Prefix matching in *both* directions. Stored rows carry whatever width the
+/// recording brokkr abbreviated to - `git rev-parse --short` grew with the repo
+/// before [`crate::git::SHORT_HASH_LEN`] pinned it - so a one-directional
+/// "stored starts with query" match made a full or longer hash from `git log`
+/// find nothing on a row recorded at 7. The reverse direction ("query starts
+/// with stored") is bounded below by git's minimum abbreviation, 4, so a row
+/// with an empty or truncated commit cannot match every query.
+pub(super) fn commit_match_expr(pattern: usize, raw: usize) -> String {
+    commit_match_expr_on("[commit]", pattern, raw)
+}
+
+/// [`commit_match_expr`] over an arbitrary commit column - sidecar.db names
+/// it `git_commit`. One definition, so `invalidate --commit` selects the same
+/// runs in both databases.
+pub(super) fn commit_match_expr_on(column: &str, pattern: usize, raw: usize) -> String {
+    format!(
+        "({column} LIKE ?{pattern} {ESCAPE} \
+          OR (length({column}) >= 4 \
+              AND substr(?{raw}, 1, length({column})) = lower({column})))"
+    )
+}
+
+/// The two bindings [`commit_match_expr`] reads, in its argument order.
+pub(super) fn commit_params(commit: &str) -> (String, String) {
+    let raw = commit.trim().to_ascii_lowercase();
+    (prefix_pattern(&raw), raw)
+}
+
+/// Run `sql` with `?1`/`?2` bound to `commit`'s [`commit_params`] (the
+/// clause is [`commit_match_expr`]`(1, 2)`) and the rest of `params` as-is.
 pub(super) fn query_commit_filtered(
     conn: &rusqlite::Connection,
     sql: &str,
-    commit_pattern: &str,
+    commit: &str,
     params: &[String],
 ) -> Result<Vec<StoredRow>, DevError> {
     let mut bound = params.to_vec();
-    bound[0] = commit_pattern.to_owned();
+    let (pattern, raw) = commit_params(commit);
+    bound[0] = pattern;
+    bound[1] = raw;
     let param_refs: Vec<&dyn rusqlite::types::ToSql> = bound
         .iter()
         .map(|p| p as &dyn rusqlite::types::ToSql)
@@ -302,8 +335,10 @@ fn build_query_sql(filter: &QueryFilter) -> (String, Vec<String>) {
     // Commit is a prefix, command/mode/dataset are substrings - all literal
     // (see `like`: `_` used to be a wildcard in every one of them).
     if let Some(ref c) = filter.commit {
-        params.push(prefix_pattern(c));
-        clauses.push(format!("[commit] LIKE ?{} {ESCAPE}", params.len()));
+        let (pattern, raw) = commit_params(c);
+        params.push(pattern);
+        params.push(raw);
+        clauses.push(commit_match_expr(params.len() - 1, params.len()));
     }
     if let Some(ref cmd) = filter.command {
         let in_command = contains_expr(&mut params, "command", cmd);
@@ -562,26 +597,28 @@ mod tests {
         let (sql, params) = build_query_sql(&filter);
 
         assert!(sql.contains("WHERE"));
-        assert!(sql.contains("[commit] LIKE ?1 ESCAPE"), "commit should be ?1");
+        assert!(sql.contains("[commit] LIKE ?1 ESCAPE"), "commit pattern should be ?1");
+        assert!(sql.contains("substr(?2, 1, length([commit]))"), "raw commit should be ?2");
         assert!(
-            sql.contains("command LIKE ?2 ESCAPE"),
-            "command should be ?2 contains"
-        );
-        assert!(
-            sql.contains("mode LIKE ?3 ESCAPE"),
-            "command should also check variant as ?3"
+            sql.contains("command LIKE ?3 ESCAPE"),
+            "command should be ?3 contains"
         );
         assert!(
             sql.contains("mode LIKE ?4 ESCAPE"),
-            "variant filter should be ?4 contains"
+            "command should also check variant as ?4"
         );
-        assert!(sql.contains("LIMIT ?5"), "limit should be ?5");
-        assert_eq!(params.len(), 5);
+        assert!(
+            sql.contains("mode LIKE ?5 ESCAPE"),
+            "variant filter should be ?5 contains"
+        );
+        assert!(sql.contains("LIMIT ?6"), "limit should be ?6");
+        assert_eq!(params.len(), 6);
         assert_eq!(params[0], "abc123%");
-        assert_eq!(params[1], "%read%");
+        assert_eq!(params[1], "abc123");
         assert_eq!(params[2], "%read%");
-        assert_eq!(params[3], "%mmap%");
-        assert_eq!(params[4], "10");
+        assert_eq!(params[3], "%read%");
+        assert_eq!(params[4], "%mmap%");
+        assert_eq!(params[5], "10");
     }
 
     #[test]
@@ -594,10 +631,35 @@ mod tests {
         let (sql, params) = build_query_sql(&filter);
 
         assert!(sql.contains("[commit] LIKE ?1 ESCAPE"));
-        assert!(sql.contains("LIMIT ?2"));
-        assert_eq!(params.len(), 2);
+        assert!(sql.contains("LIMIT ?3"));
+        assert_eq!(params.len(), 3);
         assert_eq!(params[0], "deadbeef%");
-        assert_eq!(params[1], "25");
+        assert_eq!(params[1], "deadbeef");
+        assert_eq!(params[2], "25");
+    }
+
+    /// The commit match runs in both directions: a longer hash finds a row
+    /// recorded at a shorter width, and a prefix still finds a longer one -
+    /// but a stored commit under git's 4-digit minimum matches nothing by the
+    /// reverse direction.
+    #[test]
+    fn commit_match_is_a_prefix_either_way() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let matches = |stored: &str, query: &str| -> bool {
+            let (pattern, raw) = commit_params(query);
+            conn.query_row(
+                &format!("SELECT {} FROM (SELECT ?3 AS [commit])", commit_match_expr(1, 2)),
+                rusqlite::params![pattern, raw, stored],
+                |r| r.get::<_, bool>(0),
+            )
+            .unwrap()
+        };
+        assert!(matches("abc1234", "abc1234def0"), "longer query finds shorter row");
+        assert!(matches("abc1234def", "abc12"), "shorter query finds longer row");
+        assert!(matches("abc1234", "ABC1234"), "case-insensitive");
+        assert!(!matches("abc1234", "abd1234def"));
+        assert!(!matches("abc", "abcdef1234"), "under 4 digits never matches in reverse");
+        assert!(!matches("", "abcdef1234"));
     }
 
     #[test]

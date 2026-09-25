@@ -1,8 +1,10 @@
 //! Comparison queries for the results database.
 
 use super::ResultsDb;
-use super::like::{ESCAPE, prefix_pattern, require_prefix};
-use super::query::{contains_expr, load_children, push_grep_clauses, query_commit_filtered};
+use super::like::require_prefix;
+use super::query::{
+    commit_match_expr, contains_expr, load_children, push_grep_clauses, query_commit_filtered,
+};
 use super::schema::SELECT_COLS;
 use crate::error::DevError;
 
@@ -46,9 +48,10 @@ impl ResultsDb {
         // every row in the database against the other side.
         require_prefix(a, "commit")?;
         require_prefix(b, "commit")?;
-        let mut clauses = vec![format!("[commit] LIKE ?1 {ESCAPE}")];
+        let mut clauses = vec![commit_match_expr(1, 2)];
         let mut params: Vec<String> = Vec::new();
-        // ?1 is the commit pattern, filled per-call below.
+        // ?1/?2 are the commit bindings, filled per-call below.
+        params.push(String::new());
         params.push(String::new());
         if let Some(cmd) = filter.command {
             clauses.push(contains_expr(&mut params, "command", cmd));
@@ -64,8 +67,8 @@ impl ResultsDb {
             "SELECT {SELECT_COLS} FROM runs WHERE {} ORDER BY command, mode, id DESC",
             clauses.join(" AND ")
         );
-        let mut rows_a = query_commit_filtered(&self.conn, &sql, &prefix_pattern(a), &params)?;
-        let mut rows_b = query_commit_filtered(&self.conn, &sql, &prefix_pattern(b), &params)?;
+        let mut rows_a = query_commit_filtered(&self.conn, &sql, a, &params)?;
+        let mut rows_b = query_commit_filtered(&self.conn, &sql, b, &params)?;
         for row in rows_a.iter_mut().chain(rows_b.iter_mut()) {
             load_children(&self.conn, row)?;
         }

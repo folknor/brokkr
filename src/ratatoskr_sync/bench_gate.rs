@@ -315,7 +315,16 @@ pub fn run_sync_bench(req: &SyncBenchRequest<'_>) -> Result<(), DevError> {
         None,
     )?
     .with_brokkr_args(req.brokkr_args.clone())
-    .with_measure_mode(Some("bench"));
+    .with_measure_mode(Some("bench"))
+    // The same row provenance `BenchContext` attaches for every other
+    // measured command: the configured features (joined as `BenchContext`
+    // joins them; `None` for a default-features build) and the
+    // `capture_env` snapshot. This path builds its harness by hand, and
+    // used to record neither.
+    .with_cargo_features(
+        (!harness_cfg.features.is_empty()).then(|| harness_cfg.features.join(",")),
+    )
+    .with_env_kv(crate::config::captured_env_pairs(req.dev_config));
 
     // Cooperative SIGTERM for everything outside the sidecar's own window
     // (build, sæhrimnir spawn and readiness, the gaps between iterations,
@@ -331,11 +340,9 @@ pub fn run_sync_bench(req: &SyncBenchRequest<'_>) -> Result<(), DevError> {
         Some(&|pid| harness.lock().set_child_pid(pid)),
         Some(&|| harness.lock().clear_child_pid()),
         // isolate_pg=false: the phase guard above makes the captured
-        // runner forward `brokkr kill` to cargo, but it is not held
-        // continuously across the run (it steps aside for each sidecar
-        // window), so spawns stay in brokkr's PG where terminal Ctrl-C
-        // reaches them directly. --hard accepts the single-PID kill
-        // (rustc workers may briefly orphan, a known and accepted limit).
+        // runner forward `brokkr kill` to cargo; spawns stay in brokkr's PG
+        // so terminal Ctrl-C also reaches them directly. --hard walks
+        // brokkr's process tree, so rustc workers go down with it.
         false,
     )?;
     output::ratatoskr_msg(&format!(
@@ -367,6 +374,11 @@ pub fn run_sync_bench(req: &SyncBenchRequest<'_>) -> Result<(), DevError> {
         &harness,
         fixture_name,
         debug,
+        // The frontmatter `ceiling:` (or discover's default) bounds each
+        // measured iteration exactly as it bounds the unmeasured run: a
+        // hung harness in a `--gate all` sweep otherwise held the global
+        // lock indefinitely.
+        parsed.ceiling,
         &mut phase_guard,
     );
 
@@ -395,53 +407,45 @@ pub fn run_sync_bench(req: &SyncBenchRequest<'_>) -> Result<(), DevError> {
     }
 }
 
-/// Cooperative-SIGTERM coverage for the bench path outside the sidecar's
-/// measured window.
+/// Cooperative-SIGTERM coverage for the whole bench path: build, sæhrimnir
+/// spawn and readiness, every measured iteration, the gaps between them,
+/// mock teardown and recording. Without it, `brokkr kill` outside a guarded
+/// window took the default terminate action: no `Drop` ran, and sæhrimnir
+/// was left running with its ports bound.
 ///
-/// The sidecar installs its own `SigtermGuard` around every iteration,
-/// and guards do not nest: an inner install clears a pending request and
-/// its drop restores `SIG_DFL`. So rather than one outer guard, this
-/// holds a guard for every *phase* and steps aside for each sidecar
-/// window - `release_for_sidecar` before the harness spawn, `resume`
-/// once `run_sidecar` returns. Without it, `brokkr kill` during the
-/// build, sæhrimnir's readiness wait or the gap between iterations took
-/// the default terminate action: no `Drop` ran, and sæhrimnir was left
-/// running with its ports bound.
-///
-/// Residual gaps, both a few syscalls wide: the harness fork/exec between
-/// the release and the sidecar's install (default action), and a request
-/// landing between `release_for_sidecar`'s check and the drop (the drop
-/// clears it). A refcounted guard would remove both.
-struct PhaseGuard(Option<crate::shutdown::SigtermGuard>);
+/// One guard, held throughout. `SigtermGuard` nests, so the sidecar's own
+/// guard around each iteration is an inner one: it neither clears a request
+/// that is already pending nor uncovers the window when it drops. (Guards
+/// used not to nest, and this held a guard per phase and stepped aside for
+/// each sidecar window, which left the harness fork/exec and the step-aside
+/// itself uncovered.)
+struct PhaseGuard {
+    _guard: crate::shutdown::SigtermGuard,
+}
 
 impl PhaseGuard {
     fn install() -> Self {
-        Self(Some(crate::shutdown::SigtermGuard::install()))
+        Self { _guard: crate::shutdown::SigtermGuard::install() }
     }
 
     /// Whether a shutdown request is pending under this guard.
     fn requested(&self) -> bool {
-        self.0.is_some() && crate::shutdown::is_shutdown_requested()
+        crate::shutdown::is_shutdown_requested()
     }
 
-    /// Drop the guard so the sidecar's own can take over. A request that
-    /// is already pending is surfaced as `Interrupted` instead, with the
-    /// guard left in place for the caller's teardown - dropping would
-    /// clear it.
+    /// The last check before a measured iteration spawns: a request that is
+    /// already pending surfaces as `Interrupted` instead of starting a run
+    /// the sidecar would kill at its first tick. The guard stays in place.
     fn release_for_sidecar(&mut self) -> Result<(), DevError> {
         if self.requested() {
             return Err(DevError::Interrupted);
         }
-        self.0 = None;
         Ok(())
     }
 
-    /// Re-take coverage after the sidecar window.
-    fn resume(&mut self) {
-        if self.0.is_none() {
-            self.0 = Some(crate::shutdown::SigtermGuard::install());
-        }
-    }
+    /// Nothing to re-take: the guard never stepped aside. Kept so the
+    /// iteration loop reads the same either side of the sidecar window.
+    fn resume(&mut self) {}
 }
 
 /// One iteration's measured outcome. `marker_span_ms` is the
@@ -475,6 +479,7 @@ fn bench_loop(
     harness: &BenchHarness,
     fixture_name: &str,
     debug: bool,
+    ceiling: Duration,
     phase_guard: &mut PhaseGuard,
 ) -> Result<(), DevError> {
     // PID published from inside spawn_observed - before readiness wait
@@ -501,8 +506,40 @@ fn bench_loop(
     let binary_str = built.binary.display().to_string();
     let script_str = script_abs.display().to_string();
 
+    // Built before the loop so a failed run can still record sidecar
+    // provenance against it.
+    let bench_config = BenchConfig {
+        // Rows file under the command name, and the command is now
+        // `sync` - the measurement mode is what `bench` describes, and
+        // it already has its own column. Migration v17->v18 rewrites
+        // historical `sync-bench` rows so old and new runs still pair
+        // under `brokkr results --compare`.
+        command: "sync".into(),
+        mode: None,
+        input_file: Some(fixture_name.to_owned()),
+        input_mb: None,
+        // The harness default (`with_cargo_features` in `run_sync_bench`).
+        cargo_features: None,
+        // What was actually built: ratatoskr's config sets `debug = true`,
+        // and every row used to say `release` regardless.
+        cargo_profile: CargoProfile::for_debug(debug),
+        runs: req.bench,
+        cli_args: Some(format!("--test-harness {}", script_abs.display())),
+        brokkr_args: None,
+        metadata: Vec::new(),
+    };
+
     let mut sidecar_runs: Vec<sidecar::SidecarData> = Vec::with_capacity(req.bench);
     let mut best: Option<IterOutcome> = None;
+    // Each completed iteration's ranking value (marker span, else wall), in
+    // execution order - the same list `run_external_*` stores.
+    let mut walls: Vec<i64> = Vec::with_capacity(req.bench);
+    let mut last_pid: u32 = 0;
+    // The failing iteration's status, for the dirty sidecar record.
+    let mut failed_status: Option<std::process::ExitStatus> = None;
+    // Stamped before the first iteration so `prev.gap_seconds` measures to
+    // the start of this run, not to its recording.
+    let start_epoch = harness.begin_measurement();
 
     let bench_outcome = (|| -> Result<(), DevError> {
         for i in 0..req.bench {
@@ -555,9 +592,11 @@ fn bench_loop(
                 }
             };
             let pid = child.id();
+            last_pid = pid;
             harness.lock().set_child_pid(pid);
 
-            let result = sidecar::run_sidecar(child, &mut fifo, i, start, None);
+            let result =
+                sidecar::run_sidecar_with_deadline(child, &mut fifo, i, start, None, Some(ceiling));
             phase_guard.resume();
             // Iteration's child has reaped; clear so a stale PID can't
             // be SIGKILLed by `--hard` in the gap before the next iter.
@@ -572,10 +611,21 @@ fn bench_loop(
                 .map_err(DevError::Io)?;
 
             if result.stopped_by_signal {
+                failed_status = Some(result.exit_status);
                 sidecar_runs.push(result.data);
                 return Err(DevError::Interrupted);
             }
+            if result.stopped_by_deadline {
+                failed_status = Some(result.exit_status);
+                sidecar_runs.push(result.data);
+                return Err(DevError::Config(format!(
+                    "harness binary exceeded ceiling {ceiling:?} on iter {}/{}",
+                    i + 1,
+                    req.bench
+                )));
+            }
             if !result.exit_status.success() {
+                failed_status = Some(result.exit_status);
                 let stderr_tail = String::from_utf8_lossy(&result.stderr)
                     .lines()
                     .rev()
@@ -615,6 +665,7 @@ fn bench_loop(
                 },
             ));
 
+            walls.push(outcome.elapsed_ms());
             if best.as_ref().is_none_or(|b| outcome.elapsed_ms() < b.elapsed_ms()) {
                 best = Some(outcome);
             }
@@ -631,7 +682,26 @@ fn bench_loop(
         format_secs(mock_outcome.shutdown_elapsed)
     ));
 
-    bench_outcome?;
+    let program = built.binary.as_path();
+    if let Err(e) = bench_outcome {
+        // Keep what was collected under the `dirty` alias, as
+        // `run_external_*` does - the /proc trajectory of a crashed, hung or
+        // interrupted iteration is the most useful data the run leaves.
+        // Best-effort: the run's own error is the one to report.
+        if !sidecar_runs.is_empty() {
+            let info = harness.run_info_for(
+                &bench_config,
+                program,
+                start_epoch,
+                last_pid,
+                failed_status.as_ref(),
+            );
+            harness
+                .store_sidecar(None, &sidecar_runs, sidecar_runs.len() - 1, Some(&info))
+                .ok();
+        }
+        return Err(e);
+    }
 
     let best = best.ok_or_else(|| DevError::Config("sync: no successful iterations".into()))?;
     let elapsed_ms = best.elapsed_ms();
@@ -653,36 +723,24 @@ fn bench_loop(
         elapsed_ms,
         elapsed_us: None,
         kv,
-        // Single measured run recorded directly - no best-of-N loop.
-        iterations: Vec::new(),
+        // Best-of-N: every iteration's ranking value, in execution order.
+        iterations: walls,
         distribution: None,
         hotpath: None,
     };
 
-    let bench_config = BenchConfig {
-        // Rows file under the command name, and the command is now
-        // `sync` - the measurement mode is what `bench` describes, and
-        // it already has its own column. Migration v17->v18 rewrites
-        // historical `sync-bench` rows so old and new runs still pair
-        // under `brokkr results --compare`.
-        command: "sync".into(),
-        mode: None,
-        input_file: Some(fixture_name.to_owned()),
-        input_mb: None,
-        cargo_features: None,
-        cargo_profile: CargoProfile::Release,
-        runs: req.bench,
-        cli_args: Some(format!("--test-harness {}", script_abs.display())),
-        brokkr_args: None,
-        metadata: Vec::new(),
+    let info = harness.run_info_for(&bench_config, program, start_epoch, last_pid, None);
+    let uuid = match harness.record_result(&bench_config, &bench_result) {
+        Ok(uuid) => uuid,
+        Err(e) => {
+            // The row is lost; the trajectory need not be.
+            harness
+                .store_sidecar(None, &sidecar_runs, best.run_idx, Some(&info))
+                .ok();
+            return Err(e);
+        }
     };
-
-    let uuid = harness.record_result(&bench_config, &bench_result)?;
-    // run_info=None: brokkr's sidecar provenance can carry pid / binary
-    // hash / git commit, but the helper that builds it is private to
-    // BenchHarness today. Sync-bench works without it; revisit if a
-    // diagnostic plugin needs the metadata.
-    harness.store_sidecar(uuid.as_deref(), &sidecar_runs, best.run_idx, None)?;
+    harness.store_sidecar(uuid.as_deref(), &sidecar_runs, best.run_idx, Some(&info))?;
 
     output::ratatoskr_msg(&format!(
         "best-of-{}: {}ms (iter {})",

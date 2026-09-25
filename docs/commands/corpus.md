@@ -22,7 +22,11 @@ the runtime ceiling, and the `runs.db` ingest are all parity-only and skipped.
 - The parity-only flags (`--verify-only`/`--reseed`/`--bless`/`--no-gate`/
   `--keep-artefacts`) conflict with the measurement flags.
 - Profile defaults to **release** for measured runs (meaningful timing);
-  `--debug` profiles the dev build. (Parity runs default debug.)
+  `--debug` profiles the dev build. `[piners.harness] debug` is the parity
+  default and is not consulted here. The row's `cargo_profile` records what
+  was built (`dev` or `release`).
+- Each iteration is bounded by the parity path's one-hour hang backstop
+  (below); a harness still running then is killed and the run fails.
 - `--force` is dual-purpose: ceiling-bypass in a parity run, dirty-tree in a
   measured run (the ceiling is a parity-only concept).
 - `--bench` is **not** supported - the harness emits NDJSON dispositions,

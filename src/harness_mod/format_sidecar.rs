@@ -4,11 +4,21 @@
 // ---------------------------------------------------------------------------
 
 /// Build a result summary string with key=value pairs.
-fn format_result_line(config: &BenchConfig, result: &BenchResult, git: &GitInfo) -> String {
+///
+/// `mode` is the harness-resolved measurement mode
+/// ([`BenchHarness::effective_mode`]), not `config.mode` - the per-config
+/// field is an override no writer sets, so reading it alone meant `mode=`
+/// never printed.
+fn format_result_line(
+    config: &BenchConfig,
+    mode: Option<&str>,
+    result: &BenchResult,
+    git: &GitInfo,
+) -> String {
     let mut parts = Vec::with_capacity(8);
     parts.push(format!("command={}", config.command));
 
-    if let Some(ref v) = config.mode {
+    if let Some(v) = mode {
         parts.push(format!("mode={v}"));
     }
 
@@ -58,14 +68,25 @@ fn format_result_line(config: &BenchConfig, result: &BenchResult, git: &GitInfo)
 }
 
 /// Emit a `[result]` line (respects quiet mode).
-fn emit_result_lines(config: &BenchConfig, result: &BenchResult, git: &GitInfo) {
-    output::result_msg(&format_result_line(config, result, git));
+fn emit_result_lines(
+    config: &BenchConfig,
+    mode: Option<&str>,
+    result: &BenchResult,
+    git: &GitInfo,
+) {
+    output::result_msg(&format_result_line(config, mode, result, git));
 }
 
 /// Emit a `[result]` line unconditionally (ignores quiet mode).
-/// Used for dirty-tree results that can't be looked up later.
-fn force_emit_result_lines(config: &BenchConfig, result: &BenchResult, git: &GitInfo) {
-    println!("[result]  {}", format_result_line(config, result, git));
+/// Used for results that can't be looked up later: a dirty tree, or a
+/// clean one whose results.db insert failed.
+fn force_emit_result_lines(
+    config: &BenchConfig,
+    mode: Option<&str>,
+    result: &BenchResult,
+    git: &GitInfo,
+) {
+    println!("[result]  {}", format_result_line(config, mode, result, git));
 }
 
 /// Look up an integer KV pair by key.
@@ -195,9 +216,54 @@ pub fn hotpath_feature(alloc: bool) -> &'static str {
     if alloc { "hotpath-alloc" } else { "hotpath" }
 }
 
-/// Convert a `Duration` to milliseconds as `i64`.
+/// Convert a `Duration` to milliseconds as `i64`, rounded to nearest.
+///
+/// Nearest, not floored, for the reason [`us_to_ms`] gives: flooring reads
+/// every run as up to a whole millisecond faster than it was. Saturates at
+/// `i64::MAX`.
 pub fn elapsed_to_ms(duration: &Duration) -> i64 {
-    i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
+    i64::try_from(duration.as_micros().saturating_add(500) / 1000).unwrap_or(i64::MAX)
+}
+
+/// Convert a `Duration` to whole microseconds as `i64`. Saturates at
+/// `i64::MAX`.
+///
+/// The externally timed paths measure an exact `Duration`; this is what
+/// they record as `elapsed_us`, so best-of-N compares microseconds rather
+/// than millisecond ties.
+pub fn elapsed_to_us(duration: &Duration) -> i64 {
+    i64::try_from(duration.as_micros()).unwrap_or(i64::MAX)
+}
+
+/// A `run_hotpath_capture` that failed after its child ran, parked for the
+/// enclosing [`BenchHarness::run_hotpath`] loop.
+///
+/// The capture has no harness (no `sidecar.db` path), and its callers
+/// propagate its error with `?` out of the loop's closure, so the
+/// `/proc` trajectory it collected - the most useful data a crashed or
+/// OOM-killed run leaves - used to be dropped with the error. Parking it
+/// here lets the loop store it under `dirty`, as `run_external_*` does,
+/// without changing the closure contract every hotpath writer uses.
+struct FailedCapture {
+    data: crate::sidecar::SidecarData,
+    pid: u32,
+    exit_code: i32,
+}
+
+thread_local! {
+    /// At most one parked failure: the loop clears the slot before each
+    /// iteration and takes it on the iteration's error. Thread-local
+    /// because the closure runs on the loop's own thread.
+    static FAILED_CAPTURE: std::cell::RefCell<Option<FailedCapture>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn park_failed_capture(capture: FailedCapture) {
+    FAILED_CAPTURE.with(|slot| *slot.borrow_mut() = Some(capture));
+}
+
+fn take_failed_capture() -> Option<FailedCapture> {
+    FAILED_CAPTURE.with(|slot| slot.borrow_mut().take())
 }
 
 /// Run a binary with hotpath env vars and sidecar monitoring, capture the
@@ -235,8 +301,9 @@ pub fn run_hotpath_capture(
 
     let start = std::time::Instant::now();
     let child = output::spawn_captured(binary, args, project_root, &env, true)?;
+    let pid = child.id();
     if let Some(lock) = lock {
-        lock.set_child_pid(child.id());
+        lock.set_child_pid(pid);
     }
     let sidecar_result = crate::sidecar::run_sidecar(child, &mut fifo, 0, start, stop_marker);
     if let Some(lock) = lock {
@@ -253,14 +320,27 @@ pub fn run_hotpath_capture(
         stderr: sidecar_result.stderr,
         elapsed: sidecar_result.elapsed,
     };
+    // Failures park the sidecar data for the enclosing `run_hotpath` loop,
+    // which stores it under `dirty` (see `FailedCapture`).
     if interrupted {
+        park_failed_capture(FailedCapture {
+            data: sidecar_result.data,
+            pid,
+            exit_code: exit_code_from_status(&captured.status),
+        });
         return Err(crate::error::DevError::Interrupted);
     }
-    if !stopped {
-        captured.check_success_or(binary, ok_codes)?;
+    if !stopped && let Err(e) = captured.check_success_or(binary, ok_codes) {
+        park_failed_capture(FailedCapture {
+            data: sidecar_result.data,
+            pid,
+            exit_code: exit_code_from_status(&captured.status),
+        });
+        return Err(e);
     }
 
     let ms = elapsed_to_ms(&captured.elapsed);
+    let us = elapsed_to_us(&captured.elapsed);
     let (_stderr_ms, kv) = parse_kv_lines(&captured.stderr);
     let stderr = captured.stderr;
 
@@ -285,7 +365,7 @@ pub fn run_hotpath_capture(
     Ok((
         BenchResult {
             elapsed_ms: ms,
-            elapsed_us: None,
+            elapsed_us: Some(us),
             kv,
             // Single capture - the enclosing run_hotpath loop owns the list.
             iterations: Vec::new(),
@@ -522,27 +602,22 @@ fn backup_sidecar_to(
     std::fs::create_dir_all(&backup_dir)?;
 
     let base = backup_dir.join(format!("{}-sidecar.db", project.name()));
-    let tmp = base.with_extension("db.tmp");
+    // The new backup is staged beside `base` and promoted by
+    // `atomic_write::Staged::commit` (fsync, rename, dir fsync). Dropping
+    // `staged` on any early error removes the temp file.
+    let staged = crate::atomic_write::Staged::stable(&base)?;
 
-    // Clean up any stale tmp from a previous interrupted run.
-    if tmp.exists() {
-        std::fs::remove_file(&tmp).ok();
+    // Clean up any stale temp from a previous interrupted run: the backup
+    // API writes into an existing file rather than replacing it.
+    if staged.tmp_path().exists() {
+        std::fs::remove_file(staged.tmp_path()).ok();
     }
 
     // Create backup via SQLite backup API. This reads the logical DB state
     // (including uncommitted WAL pages from other connections) and writes a
     // self-contained DELETE-journal-mode database at the temp path. The
     // backup API also runs quick_check on the result.
-    if let Err(e) = crate::db::sidecar::backup_to_path(sidecar_path, &tmp) {
-        // Clean up failed temp on best effort.
-        std::fs::remove_file(&tmp).ok();
-        return Err(e);
-    }
-
-    // fsync the temp backup before rotating.
-    let file = std::fs::File::open(&tmp)?;
-    file.sync_all()?;
-    drop(file);
+    crate::db::sidecar::backup_to_path(sidecar_path, staged.tmp_path())?;
 
     // Promote the new backup into the primary slot without displacing the
     // current primary until the new one is in place.
@@ -550,7 +625,7 @@ fn backup_sidecar_to(
     // Sequence:
     //   1. Shift older copies: .1 → .2 (clears .1 slot, drops oldest)
     //   2. Preserve current primary: hard-link base → .1
-    //   3. Atomic promote: rename tmp → base (overwrites old base)
+    //   3. Atomic promote: commit the staged file → base (overwrites old base)
     //
     // Every step propagates errors. If any rotation or preservation step
     // fails, the backup is considered failed rather than silently losing
@@ -558,7 +633,9 @@ fn backup_sidecar_to(
 
     // Shift older copies: .1 → .2, .2 → .3, etc.
     // This clears the .1 slot so the hard-link in the next step can
-    // succeed without a prior remove.
+    // succeed without a prior remove. These renames *move* finished copies
+    // between retention slots - not a temp-and-replace - so they stay raw;
+    // the final commit's directory fsync makes them durable.
     for i in (2..SIDECAR_BACKUP_COPIES).rev() {
         let from = base.with_extension(format!("db.{}", i - 1));
         let to = base.with_extension(format!("db.{i}"));
@@ -574,15 +651,10 @@ fn backup_sidecar_to(
         std::fs::hard_link(&base, &slot1)?;
     }
 
-    // Atomic promotion: rename tmp → base. On Linux this atomically
-    // replaces the old base. If this fails, base is still the old copy
-    // (the hard-link in step 2 created .1 as a second link to the same
-    // inode, so the data is preserved regardless).
-    std::fs::rename(&tmp, &base)?;
-
-    // fsync the directory to make all renames durable.
-    let dir = std::fs::File::open(&backup_dir)?;
-    dir.sync_all()?;
+    // Atomic promotion: the staged file replaces base. If this fails, base
+    // is still the old copy (the hard-link in step 2 created .1 as a second
+    // link to the same inode, so the data is preserved regardless).
+    staged.commit()?;
 
     output::sidecar_msg(&format!("backup: {}", base.display()));
     Ok(())

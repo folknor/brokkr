@@ -329,7 +329,7 @@ fn toolchain_libdir(
 /// the deps dirs track per-shape isolated target dirs for free), then
 /// `existing` - whatever `LD_LIBRARY_PATH` the run already carried. Loader
 /// path only - this is NOT the test-code env (CARGO_MANIFEST_DIR etc.),
-/// which stays cargo's job; listing executes no test code, so loading is
+/// which stays cargo's job; listing runs no test bodies, so loading is
 /// the whole requirement. `existing` is the sweep's own `LD_LIBRARY_PATH`
 /// when it declared one (so a `[[check]] env` shared-object path is
 /// honored during listing, as it is for the cargo-mediated build/test),
@@ -365,9 +365,13 @@ fn loader_path(libdir: &str, executable: &str, existing: Option<&str>) -> String
 }
 
 /// Run one built test binary with `--list` plus the given libtest args.
-/// Listing executes no test code, so direct execution is env-safe once
-/// the loader path is supplied (see [`loader_path`]). `Ok(None)` means
-/// the listing failed and was already reported.
+/// A libtest listing executes no test *bodies*, so direct execution is
+/// env-safe once the loader path is supplied (see [`loader_path`]). It is not
+/// "no code", though: static constructors run before `main`, and a custom
+/// harness is arbitrary code that may ignore `--list` altogether - so the
+/// listing is bounded like a test, by [`crate::test_runner::TEST_TIMEOUT`],
+/// and one that overruns fails enumeration the way a failed listing does.
+/// `Ok(None)` means the listing failed and was already reported.
 fn binary_list(
     binary: &TestBinary,
     project_root: &Path,
@@ -396,7 +400,31 @@ fn binary_list(
     } else {
         binary.manifest_dir.as_path()
     };
-    let captured = output::run_captured_with_env(&binary.executable, &args, cwd, &env)?;
+    // Own process group, so a deadline kill takes anything the binary started
+    // with it; the command's `SigtermGuard` forwards an interrupt to the group.
+    let run = output::run_captured_with_env_and_deadline(
+        &binary.executable,
+        &args,
+        cwd,
+        &env,
+        crate::test_runner::TEST_TIMEOUT,
+        None,
+        true,
+    )?;
+    let captured = run.captured;
+    if run.killed_on_deadline {
+        output::error(&format!(
+            "failing command: {} {}",
+            binary.executable,
+            args.join(" ")
+        ));
+        output::error(&format!(
+            "the listing ran past {}s and was killed - a libtest `--list` answers at once, so a \
+             static constructor or a custom harness is doing work (or hanging) before it lists",
+            crate::test_runner::TEST_TIMEOUT.as_secs()
+        ));
+        return Ok(None);
+    }
 
     if !captured.status.success() {
         output::error(&format!(

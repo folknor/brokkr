@@ -332,7 +332,84 @@ impl Command {
                 ))
             }
 
-            _ => None,
+            // Every other command, named rather than `_`: this match is the
+            // one place a variant is classified as pbfhogg-dispatched or not,
+            // so a new `Command` variant must be a compile error here. With a
+            // wildcard it silently became `None`, and a pbfhogg command that
+            // stopped mapping reached `run`'s arm for it.
+            Self::Lock
+            | Self::Kill { .. }
+            | Self::Strays { .. }
+            | Self::Guard { .. }
+            | Self::History { .. }
+            | Self::Check { .. }
+            | Self::Clippy { .. }
+            | Self::Fmt { .. }
+            | Self::Bench { .. }
+            | Self::Run { .. }
+            | Self::Install { .. }
+            | Self::Wc { .. }
+            | Self::Man { .. }
+            | Self::Deps { .. }
+            | Self::Env
+            | Self::DiffSnapshots { .. }
+            | Self::Extract { .. }
+            | Self::Read { .. }
+            | Self::Write { .. }
+            | Self::MergeBench { .. }
+            | Self::Tilegen { .. }
+            | Self::PmtilesWriter { .. }
+            | Self::NodeStore { .. }
+            | Self::ElivPlanetiler { .. }
+            | Self::ElivTilemaker { .. }
+            | Self::RunApi { .. }
+            | Self::RunNidIngest { .. }
+            | Self::RunTiles { .. }
+            | Self::Dellingr { .. }
+            | Self::Mogwai { .. }
+            | Self::GenericHotpath { .. }
+            | Self::Suite { .. }
+            | Self::Passthrough { .. }
+            | Self::Results { .. }
+            | Self::CorpusResults { .. }
+            | Self::Sidecar { .. }
+            | Self::Invalidate { .. }
+            | Self::Clean { .. }
+            | Self::Verify { .. }
+            | Self::Download { .. }
+            | Self::CompareTiles { .. }
+            | Self::PmtilesInspect { .. }
+            | Self::Diag { .. }
+            | Self::Svg { .. }
+            | Self::Regress { .. }
+            | Self::PmtilesCorpus { .. }
+            | Self::DownloadOcean
+            | Self::OceanBuild { .. }
+            | Self::DownloadNaturalEarth
+            | Self::PmtilesStats { .. }
+            | Self::Serve { .. }
+            | Self::Stop
+            | Self::Status
+            | Self::Ingest { .. }
+            | Self::Update { .. }
+            | Self::Query { .. }
+            | Self::Geocode { .. }
+            | Self::Visual { .. }
+            | Self::Test { .. }
+            | Self::List
+            | Self::Approve { .. }
+            | Self::Report { .. }
+            | Self::VisualStatus
+            | Self::Prepare { .. }
+            | Self::HtmlExtract { .. }
+            | Self::Outline { .. }
+            | Self::Hotpath { .. }
+            | Self::Service { .. }
+            | Self::Sync { .. }
+            | Self::MockServe { .. }
+            | Self::Corpus { .. }
+            | Self::LintCorpus { .. }
+            | Self::LintResults { .. } => None,
         }
     }
 }

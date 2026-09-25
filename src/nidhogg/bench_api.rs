@@ -81,7 +81,8 @@ pub fn run(
 /// rather than stalling it under the global lock.
 const REQUEST_MAX_TIME_SECS: &str = "60";
 
-/// Run a single curl request and return the HTTP round-trip time in milliseconds.
+/// Run a single curl request and return the HTTP round-trip time in
+/// milliseconds, rounded to nearest.
 ///
 /// Uses curl's `--write-out '%{time_total}'` to measure actual HTTP timing,
 /// excluding process spawn overhead. `--fail` makes an HTTP 4xx/5xx a curl
@@ -134,8 +135,18 @@ fn run_curl_timed(url: &str, body: &str) -> Result<i64, DevError> {
     let seconds: f64 = time_str.parse().map_err(|_| {
         DevError::Verify(format!("curl time_total not a valid number: '{time_str}'"))
     })?;
+    if !seconds.is_finite() || seconds < 0.0 {
+        return Err(DevError::Verify(format!(
+            "curl time_total out of range: '{time_str}'"
+        )));
+    }
+    // Nearest, not truncating - the harness-wide policy (`us_to_ms`): a
+    // floored 0.9 ms request would record as 0 ms, reading faster than it
+    // was. The distribution columns are integer milliseconds, so a query
+    // well under half a millisecond still records 0; sub-ms resolution
+    // here would need a microsecond distribution, which the schema lacks.
     #[allow(clippy::cast_possible_truncation)]
-    let ms = (seconds * 1000.0) as i64;
+    let ms = (seconds * 1000.0).round() as i64;
 
     Ok(ms)
 }

@@ -596,11 +596,7 @@ impl HashCache {
             text.push_str(&format!("{key}\t{}\t{hex}\n", stamp.render()));
         }
         // Atomic replace so a reader outside the lock never sees a partial file.
-        let tmp = self.dir.join(format!("hash_cache.tmp.{}", std::process::id()));
-        let written = std::fs::write(&tmp, text).and_then(|()| std::fs::rename(&tmp, &cache_path));
-        if written.is_err() {
-            drop(std::fs::remove_file(&tmp));
-        }
+        let written = crate::atomic_write::replace(&cache_path, text.as_bytes());
         drop(lock);
         written
     }

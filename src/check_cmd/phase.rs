@@ -71,6 +71,12 @@ pub(crate) fn cmd_check(
 ) -> Result<(), DevError> {
     let started = std::time::Instant::now();
     let _scope = RunScope::begin(state_root);
+    // A graceful `brokkr kill` / Ctrl-C ends the run as `Interrupted` (exit 130,
+    // main's scratch cleanup) rather than killing brokkr on the default action
+    // mid-phase. Every runner the phases use either polls the flag or is
+    // released by the handler killing its registered test group; a wait that
+    // does neither still yields to a second signal. See `crate::shutdown`.
+    let _interrupts = crate::shutdown::SigtermGuard::install();
     let gate_name = resolve_gate_profile(gate, test_cfg)?;
     let profile_name = gate_name.as_deref().or(profile_name);
     let active_sweeps = active_sweeps_resolved(check_entries, test_cfg, profile_name,
@@ -231,6 +237,8 @@ pub(crate) fn cmd_check_selected(
     let rules = select_named(textlint_rules, textlint_names, |r| &r.name, "[[textlint]]")?;
     let checks = select_named(script_checks, script_names, |c| &c.name, "[[script_check]]")?;
     output::run_msg("selected entries only - not a gate; run `brokkr check` before committing");
+    // As in `cmd_check`: a graceful kill unwinds as `Interrupted`.
+    let _interrupts = crate::shutdown::SigtermGuard::install();
 
     let started = std::time::Instant::now();
     let textlint = run_textlint(project_root, &rules);
@@ -246,6 +254,12 @@ pub(crate) fn cmd_check_selected(
         run_script_checks(project_root, &checks, Stage::PreClippy)
     };
     let elapsed = started.elapsed().as_secs_f64();
+    if watchdog_fired().is_some() {
+        return Err(DevError::ExitCode(WATCHDOG_EXIT_CODE));
+    }
+    if matches!(scripts, Err(DevError::Interrupted)) {
+        return Err(DevError::Interrupted);
+    }
     // Both halves always run, so the error names every one that failed - not
     // whichever came first, which would hide a script failure behind textlint's.
     let failed: Vec<String> = [textlint, scripts].into_iter().filter_map(Result::err).map(|e| e.to_string()).collect();
@@ -1058,7 +1072,8 @@ fn already_reported(e: DevError, sentinel: &str) -> DevError {
 /// `certifies` existed), `complete` owns the gate verdict, and `partial` may
 /// never print a success word a grep could mistake for one - it exits 10 so
 /// naive `&& git commit` chaining fails closed. Any failure exits 1, except a
-/// cooperative shutdown (`brokkr kill`), which keeps main's exit 130.
+/// cooperative shutdown (`brokkr kill`), which keeps main's exit 130, and a
+/// fired time ceiling, which exits 124.
 #[allow(clippy::too_many_arguments)]
 fn finish_check(
     outcome: &Result<(), DevError>,
@@ -1121,6 +1136,7 @@ fn finish_check(
                     sweep_labels,
                     package,
                     None,
+                    prose_only,
                     coverage,
                     started.elapsed(),
                 );
@@ -1133,11 +1149,28 @@ fn finish_check(
             // it yet - this used to assume the former of every failure, and a
             // `cargo metadata` failure or a config refusal found at phase time
             // ended in a bare `check failed` naming nothing.
-            let interrupted = matches!(e, DevError::Interrupted);
-            if !interrupted && !matches!(e, DevError::Reported(_) | DevError::ExitCode(_)) {
+            // A fired watchdog killed the run's processes and raised the
+            // shutdown flag; whatever error that surfaced as (an interrupt, a
+            // killed test, a failed build) is its echo, not a cause to print.
+            let stopped = watchdog_fired().is_some();
+            // Under a pending request, a failure is the interrupt's echo too: a
+            // child killed by it can surface as a failed build or test before
+            // anything polls the flag.
+            let interrupted = !stopped
+                && (matches!(e, DevError::Interrupted) || crate::shutdown::is_shutdown_requested());
+            if !stopped
+                && !interrupted
+                && !matches!(e, DevError::Reported(_) | DevError::ExitCode(_))
+            {
                 output::error(&e.to_string());
             }
-            let word = if interrupted { "interrupted" } else { "failed" };
+            let word = if stopped {
+                "stopped by its time ceiling"
+            } else if interrupted {
+                "interrupted"
+            } else {
+                "failed"
+            };
             output::error(&format!(
                 "check {word} in {}{context}",
                 fmt_wall(started.elapsed())
@@ -1150,6 +1183,7 @@ fn finish_check(
                     sweep_labels,
                     package,
                     failing_phase,
+                    prose_only,
                     coverage,
                     started.elapsed(),
                 );
@@ -1158,6 +1192,9 @@ fn finish_check(
             // `Interrupted` to 130 and runs the scratch cleanup the
             // cooperative-shutdown contract promises. Folding it into exit 1
             // skipped both.
+            if stopped {
+                return Err(DevError::ExitCode(WATCHDOG_EXIT_CODE));
+            }
             if interrupted {
                 return Err(DevError::Interrupted);
             }
@@ -1239,6 +1276,12 @@ struct CheckSummary<'a> {
     /// string, keeping the field additive under `schema: 1`).
     package: Option<&'a str>,
     failed_phase: Option<&'a str>,
+    /// `"prose_only"` when the markdown-only shortcut skipped the build
+    /// phases, `null` on a full run. Without it a shortened run's `passed`
+    /// was indistinguishable from a full one to a machine reader, which is
+    /// the one reader that never sees the human verdict line's
+    /// "(markdown only - build phases skipped)". Additive under `schema: 1`.
+    scope: Option<&'a str>,
     /// Coverage accounting result; present only when the coverage phase
     /// ran to completion (complete profiles).
     coverage: Option<CoverageStats>,
@@ -1253,6 +1296,7 @@ fn emit_json_summary(
     sweeps: &[&str],
     package: Option<&str>,
     failed_phase: Option<&'static str>,
+    prose_only: bool,
     coverage: Option<CoverageStats>,
     elapsed: std::time::Duration,
 ) {
@@ -1267,6 +1311,7 @@ fn emit_json_summary(
         sweeps: sweeps.to_vec(),
         package,
         failed_phase,
+        scope: prose_only.then_some("prose_only"),
         coverage,
         elapsed_ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
     };
@@ -1637,12 +1682,18 @@ fn run_manifest(
     Err(DevError::Reported("manifest check failed".into()))
 }
 
+/// How much of the phase ceiling a script-check entry leaves unspent: room for
+/// the kill, the drain and the failure report before the phase watchdog would
+/// fire on top of it.
+const SCRIPT_CHECK_MARGIN: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// The `[[script_check]]` phase for one [`Stage`]: run the configured commands
 /// that named this stage and assert each one's output matches its sentinel.
 /// Inert when no entry sits at this stage. Every check runs (failures are
 /// collected, not fail-fast) so one `brokkr check` surfaces all broken gates at
 /// once. The command's exit code is ignored - only the output match decides
-/// pass/fail; a spawn failure is a hard error. See [`crate::script_check`].
+/// pass/fail; a spawn failure is a hard error, and an entry that outlives its
+/// deadline fails as that entry. See [`crate::script_check`].
 fn run_script_checks(
     project_root: &Path,
     checks: &[ScriptCheck],
@@ -1656,7 +1707,16 @@ fn run_script_checks(
     let total = checks.len();
     let mut failures: Vec<(&ScriptCheck, crate::script_check::Outcome)> = Vec::new();
     for check in checks {
-        let outcome = crate::script_check::run_one(check, project_root)?;
+        // Each entry gets what is left of the phase's ceiling, less a margin
+        // for reporting, so a hung script is killed and fails as *that entry*
+        // - its output shown, the rest of the stage still run - rather than
+        // letting the phase watchdog end the whole run. Outside a phase clock
+        // (`check --script NAME`) the phase ceiling itself is the bound.
+        let budget = phase_time_left().unwrap_or_else(|| phase_ceiling("script_check"));
+        let deadline = budget
+            .saturating_sub(SCRIPT_CHECK_MARGIN)
+            .max(std::time::Duration::from_secs(1));
+        let outcome = crate::script_check::run_one(check, project_root, deadline)?;
         if !outcome.passed {
             failures.push((check, outcome));
         }
@@ -1683,11 +1743,17 @@ fn run_script_checks(
     for (check, outcome) in &failures {
         msg.push_str("  ");
         msg.push_str(&check.name);
-        msg.push_str(&format!(
-            ": {} did not match {:?}\n",
-            stream_label(check.stream),
-            check.expect
-        ));
+        match outcome.timed_out {
+            Some(deadline) => msg.push_str(&format!(
+                ": killed after {} (its share of the script_check phase ceiling), output so far:\n",
+                fmt_wall(deadline)
+            )),
+            None => msg.push_str(&format!(
+                ": {} did not match {:?}\n",
+                stream_label(check.stream),
+                check.expect
+            )),
+        }
         append_script_failure(&mut msg, check, outcome);
     }
     output::error(msg.trim_end());
@@ -2562,6 +2628,13 @@ pub(crate) fn cmd_clippy(
     clippy_allow_exact: &[SitedAllow],
 ) -> Result<(), DevError> {
     let started = std::time::Instant::now();
+    // `check`'s clippy ceiling applies here too: the ceilings exist because of
+    // an observed 1h15m clippy hang, and this runner drives the same pipeline.
+    // The caller already holds the lock, so a wait behind another command is
+    // not charged. Declared before the guard, so the guard drops first.
+    let _ceiling = CheckWatchdog::arm_for("brokkr clippy", None);
+    enter_phase("clippy");
+    let _interrupts = crate::shutdown::SigtermGuard::install();
     let mut sweep = build_clippy_sweep(
         check_entries,
         packages,
@@ -2600,7 +2673,7 @@ pub(crate) fn cmd_clippy(
     // unless it covers everything `check`'s sweeps together would - see
     // `probe_is_narrowed`.
     let mut clippy_ran = [false];
-    match run_clippy_phase(
+    let outcome = run_clippy_phase(
         project_root,
         std::slice::from_ref(&sweep),
         &[],
@@ -2609,7 +2682,15 @@ pub(crate) fn cmd_clippy(
         true,
         &mut clippy_ran,
         probe_is_narrowed(&sweep),
-    ) {
+    );
+    // The watchdog already said why it killed the run; whatever the kill
+    // surfaced as is its echo. Checked whatever the outcome: a ceiling that
+    // fired just as the last child exited can leave an `Ok` behind it, and a
+    // run the watchdog killed is not "clean".
+    if watchdog_fired().is_some() {
+        return Err(DevError::ExitCode(WATCHDOG_EXIT_CODE));
+    }
+    match outcome {
         Ok(()) => {
             output::result_msg(&format!("clippy clean in {}", fmt_wall(started.elapsed())));
             Ok(())
@@ -3684,10 +3765,12 @@ mod json_summary_tests {
             sweeps: vec!["default", "ffi"],
             package: None,
             failed_phase: None,
+            scope: Some("prose_only"),
             coverage: None,
             elapsed_ms: 1234,
         };
         let line = serde_json::to_string(&s).unwrap();
+        assert!(line.contains("\"scope\":\"prose_only\""), "{line}");
         // The two contract-critical fields: the version consumers key on,
         // and `certifies` present-but-null until certification exists.
         assert!(line.contains("\"schema\":1"), "{line}");
@@ -3706,6 +3789,7 @@ mod json_summary_tests {
             sweeps: vec!["all-features"],
             package: Some("nautilus-betfair"),
             failed_phase: Some("clippy"),
+            scope: None,
             coverage: Some(CoverageStats {
                 pairs: 100,
                 run: 90,
@@ -3748,6 +3832,7 @@ mod script_failure_render_tests {
     fn outcome(stdout: &str, stderr: &str) -> Outcome {
         Outcome {
             passed: false,
+            timed_out: None,
             stdout: stdout.as_bytes().to_vec(),
             stderr: stderr.as_bytes().to_vec(),
         }

@@ -161,6 +161,15 @@ fn run_elivagar_run(req: &MeasureRequest, command: &ElivagarCommand) -> Result<(
             Ok(())
         }
         BuildKind::Example(example) => {
+            // No BenchContext on this path, so nothing else takes the lock:
+            // take it here, before the build. It used to run unlocked, which
+            // `cargo_build` now refuses - an unlocked build competes with a
+            // concurrent measurement and fails outright on a guarded host.
+            let lock = crate::context::acquire_cmd_lock(
+                req.project,
+                req.project_root,
+                &format!("run {}", command.id()),
+            )?;
             let build_root = req.build_root.unwrap_or(req.project_root);
             let binary = crate::build::cargo_build(
                 &crate::build::BuildConfig {
@@ -181,10 +190,9 @@ fn run_elivagar_run(req: &MeasureRequest, command: &ElivagarCommand) -> Result<(
 
             output::run_msg(&format!("{binary_str} {}", arg_refs.join(" ")));
 
-            // The Example run-mode path builds directly with no BenchContext,
-            // so no lock is held - nothing to register the child PID against.
-            // Graceful `brokkr kill` / ctrl-C still reach it via the guard.
-            let out = output::run_passthrough_timed(&binary_str, &arg_refs, None)?;
+            // Registered against the lock taken above, so `brokkr kill --hard`
+            // reaches the example as well as brokkr.
+            let out = output::run_passthrough_timed(&binary_str, &arg_refs, Some(&lock))?;
 
             if out.code != 0 {
                 return Err(DevError::ExitCode(out.code));

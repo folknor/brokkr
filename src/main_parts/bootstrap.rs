@@ -468,8 +468,10 @@ fn run(cli: Cli) -> Result<(), DevError> {
         };
         let _lock = acquire_cmd_lock_opt(project, &state_root, "check")?;
         // The whole-run ceiling, armed once the lock is ours so a wait behind
-        // another brokkr command is not charged against it. Fires as
-        // `brokkr kill --hard` would: SIGKILL every descendant, then exit.
+        // another brokkr command is not charged against it. Fires by
+        // SIGKILLing every descendant and letting this command unwind to
+        // exit 124. Declared after `_lock`, so it disarms before the lock's
+        // drop restores the toolchain pin.
         let _ceiling = check_cmd::CheckWatchdog::arm(check_cmd::CHECK_CEILING);
         if !textlint_names.is_empty() || !script_names.is_empty() {
             return check_cmd::cmd_check_selected(
@@ -560,7 +562,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
     let build_root = detection.build_root;
     let brokkr_args = capture_brokkr_args();
 
-    // Pbfhogg measured commands: 28 commands → single dispatch path.
+    // Pbfhogg measured commands → single dispatch path.
     if let Some((mode, pbf, pbf_cmd, osc, mut params)) = cli.command.as_pbfhogg() {
         params.direct_io = pbf.direct_io;
         params.io_uring = pbf.io_uring;
@@ -578,13 +580,31 @@ fn run(cli: Cli) -> Result<(), DevError> {
     }
 
     match cli.command {
-        // Already handled by as_pbfhogg() above the match.
+        // Returned from before project detection, at the top of `run`. An
+        // error rather than `unreachable!()`: a reordering that let one fall
+        // through should fail the command, not panic the process.
         Command::Lock
         | Command::Kill { .. }
         | Command::Strays { .. }
         | Command::Guard { .. }
         | Command::History { .. }
-        | Command::Inspect { .. }
+        | Command::Check { .. }
+        | Command::Clippy { .. }
+        | Command::Fmt { .. }
+        | Command::Bench { .. }
+        | Command::Run { .. }
+        | Command::Install { .. }
+        | Command::Wc { .. }
+        | Command::Man { .. }
+        | Command::Deps { .. } => Err(DevError::Config(
+            "internal error: a pre-detection command reached project dispatch".into(),
+        )),
+        // Dispatched through `as_pbfhogg()` above the match. That function is
+        // an exhaustive match, so a new `Command` variant must be classified
+        // there (a compile error, not a silent `None`); this arm is what is
+        // left if a variant here stops mapping - the way `MultiExtract` once
+        // moved out - and it fails the command rather than panicking.
+        Command::Inspect { .. }
         | Command::CheckRefs { .. }
         | Command::CheckIds { .. }
         | Command::Sort { .. }
@@ -600,16 +620,9 @@ fn run(cli: Cli) -> Result<(), DevError> {
         | Command::Degrade { .. }
         | Command::TimeFilter { .. }
         | Command::Diff { .. }
-        | Command::BuildGeocodeIndex { .. }
-        | Command::Check { .. }
-        | Command::Clippy { .. }
-        | Command::Fmt { .. }
-        | Command::Bench { .. }
-        | Command::Run { .. }
-        | Command::Install { .. }
-        | Command::Wc { .. }
-        | Command::Man { .. }
-        | Command::Deps { .. } => unreachable!(),
+        | Command::BuildGeocodeIndex { .. } => Err(DevError::Config(
+            "internal error: a pbfhogg command has no as_pbfhogg() mapping".into(),
+        )),
         Command::Env => cmd_env(&dev_config, project, &project_root),
         Command::DiffSnapshots {
             mode,

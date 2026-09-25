@@ -597,9 +597,9 @@ pub fn render_manifest(
         "path": recorded_style_path(corpus_dir, style_path),
         "xxh3_128": style.hash_hex(),
     });
-    digest::write_atomic(
+    crate::atomic_write::replace(
         &corpus_dir.join("contract.json"),
-        contract_text(&view_contract, Some(style_json))?,
+        contract_text(&view_contract, Some(style_json))?.as_bytes(),
     )?;
     Ok((
         Outcome::Pass,
@@ -782,10 +782,10 @@ pub fn bless(
     let digest_path = corpus_dir.join("digest");
     let contract_path = corpus_dir.join("contract.json");
     let leaves_path = corpus_dir.join("leaves");
-    digest::write_atomic(&digest_path, digest::digest_text(&d))?;
-    digest::write_atomic(&contract_path, contract_text(&contract, None)?)?;
+    crate::atomic_write::replace(&digest_path, digest::digest_text(&d).as_bytes())?;
+    crate::atomic_write::replace(&contract_path, contract_text(&contract, None)?.as_bytes())?;
     if mode == DigestMode::Leaves {
-        digest::write_atomic(&leaves_path, digest::leaves_text(&l))?;
+        crate::atomic_write::replace(&leaves_path, digest::leaves_text(&l).as_bytes())?;
     } else if leaves_path.exists() {
         std::fs::remove_file(&leaves_path)?;
     }

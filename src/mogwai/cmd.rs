@@ -29,7 +29,10 @@ pub(crate) fn run(
     // argv with no target is the CLI surface, which is the common case and
     // must not be mistaken for "show me the list".
     if target.is_none() && args.is_empty() {
-        output::bench_msg("mogwai surfaces:");
+        // Ungated, like the body below: `run_measured` sets quiet unless
+        // `--verbose`, and the quiet-gated `bench_msg` dropped the header
+        // while the raw `print!` body still printed.
+        output::run_msg("mogwai surfaces:");
         print!("{}", targets::format_index(cfg));
         return Ok(());
     }
@@ -54,7 +57,8 @@ pub(crate) fn run(
     let argv: Vec<&str> = args.iter().map(String::as_str).collect();
 
     if req.dry_run {
-        output::bench_msg(&format!(
+        // Not quiet-gated: a dry run's output is its whole point.
+        output::run_msg(&format!(
             "[dry-run] {} -> {}",
             resolved.name,
             args.join(" ")

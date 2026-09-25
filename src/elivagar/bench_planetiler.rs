@@ -61,6 +61,13 @@ pub fn run(
     // `data/sources` relative to its cwd (the project root), which matches the
     // `data_dir/sources` this check looks at only while the host's data dir
     // happens to be `<project>/data`.
+    //
+    // The flag name `download_dir` was written from memory of planetiler's
+    // `Planetiler.java` (`arguments.file("download_dir", ...)`) and has not
+    // been checked against a planetiler checkout - none is available here.
+    // planetiler's `Arguments` looks keys up rather than validating the
+    // command line, so a wrong name may well pass silently; the post-priming
+    // check below is what catches it either way.
     let sources_dir = data_dir.join("sources");
     let download_dir_arg = format!("--download_dir={}", sources_dir.display());
     // Written only after a priming run succeeds. The bare directory is not
@@ -94,7 +101,21 @@ pub fn run(
 
         let captured = output::run_captured(java_str, &prime_args, project_root)?;
         captured.check_success(java_str)?;
-        std::fs::create_dir_all(&sources_dir)?;
+        // A successful `--download` run that left `sources_dir` empty put its
+        // sources somewhere else: planetiler did not honour `--download_dir`
+        // (see above). Marking it primed would send every timed run to the
+        // network, or measure against sources it cannot find.
+        let populated = std::fs::read_dir(&sources_dir)
+            .map(|mut entries| entries.next().is_some())
+            .unwrap_or(false);
+        if !populated {
+            return Err(DevError::Config(format!(
+                "planetiler primed successfully but wrote nothing to {} - \
+                 it did not honour `--download_dir`; check the flag name \
+                 against the planetiler release in use",
+                sources_dir.display()
+            )));
+        }
         std::fs::write(&primed_marker, b"")?;
         output::bench_msg("Planetiler data primed");
     }

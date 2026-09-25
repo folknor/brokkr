@@ -99,10 +99,12 @@ pub(crate) fn cmd(req: &MeasureRequest, target: &str) -> Result<(), DevError> {
     let command_label = command_label(target);
 
     if req.dry_run {
-        output::bench_msg(&format!(
+        // `run_msg`, not the quiet-gated `bench_msg`: `run_measured` sets
+        // quiet unless `--verbose`, and a dry run's output is its whole point.
+        output::run_msg(&format!(
             "[dry-run] target {target} -> --example {example}, filed as '{command_label}'"
         ));
-        output::bench_msg(&format!("[dry-run] would build ({})", feature_summary(req)));
+        output::run_msg(&format!("[dry-run] would build ({})", feature_summary(req)));
         return Ok(());
     }
 

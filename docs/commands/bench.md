@@ -43,11 +43,19 @@ cheap, not instant.
 ## Baseline names
 
 A clean tree names its baseline after the short commit hash: stable,
-meaningful, and recoverable from the git log.
+meaningful, and recoverable from the git log. The hash is always the same
+fixed-width abbreviation (`git::SHORT_HASH_LEN`), never `git rev-parse
+--short`'s repo-size-dependent width, so a commit keeps its baseline name as the
+repo grows.
 
-A `--commit` run takes its name from the ref and never consults the working
-tree: the worktree is a fresh checkout of exactly that commit, so there is
-nothing uncommitted for the name to misrepresent.
+A `--commit` run takes its name from the commit the ref resolves to and never
+consults the working tree: the worktree is a fresh checkout of exactly that
+commit, so there is nothing uncommitted for the name to misrepresent.
+
+`--compare` takes a recorded name as-is. Anything else is resolved as a
+revision: a hash at any width, or a ref, finds the baseline saved for that
+commit - including one saved under a shorter abbreviation before the width was
+fixed.
 
 For a run against the working tree, a dirty tree is **refused** unless you pass
 `--name LABEL`. A label must be a single path component: it is joined into

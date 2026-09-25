@@ -251,10 +251,9 @@ impl MockServer {
         }
         let mut child = cmd
             .spawn()
-            .map_err(|e| DevError::Subprocess {
+            .map_err(|error| DevError::Spawn {
                 program: binary.display().to_string(),
-                code: None,
-                stderr: format!("failed to spawn: {e}"),
+                error,
             })?;
         let pid = child.id();
         if let Some(cb) = on_spawn {
@@ -453,10 +452,9 @@ pub fn run_mock_serve(req: &MockServeRequest<'_>) -> Result<(), DevError> {
         // Capture-and-replay would obscure timing for a foreground tool.
         .process_group(0)
         .spawn()
-        .map_err(|e| DevError::Subprocess {
+        .map_err(|error| DevError::Spawn {
             program: binary.display().to_string(),
-            code: None,
-            stderr: format!("failed to spawn: {e}"),
+            error,
         })?;
     let child_pid = child.id();
     _lock.set_child_pid(child_pid);

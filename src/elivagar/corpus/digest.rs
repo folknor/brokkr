@@ -220,13 +220,6 @@ pub fn leaves_text(leaves: &[LeafRun]) -> String {
     out
 }
 
-/// Atomically replace `path` with `text` via a sibling temp + rename.
-pub fn write_atomic(path: &Path, text: String) -> io::Result<()> {
-    let tmp = path.with_extension("tmp");
-    fs::write(&tmp, text)?;
-    fs::rename(tmp, path)
-}
-
 // ---------------------------------------------------------------------------
 // Baseline parse + self-integrity.
 // ---------------------------------------------------------------------------

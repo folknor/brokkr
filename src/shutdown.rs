@@ -5,14 +5,20 @@
 //! The protocol:
 //!
 //! 1. `brokkr kill` reads the lockfile and sends `SIGTERM` to the brokkr PID.
-//! 2. A [`SigtermGuard`] is installed for the lifetime of each sidecar run.
-//!    Its handler sets [`SHUTDOWN_REQUESTED`] and nothing else - it must be
-//!    async-signal-safe. Outside the sidecar window, `SIGTERM` falls through
-//!    to the default terminate action: killing brokkr mid-`cargo build` or
-//!    mid-`brokkr check` is what the user wants anyway (no scratch to
-//!    clean). The one thing the default action would leave behind is a test
-//!    runner's detached process group; while one is live a [`GroupReaper`]
-//!    handler SIGKILLs it and re-raises, so brokkr still dies by the signal.
+//! 2. A [`SigtermGuard`] is installed for the lifetime of each tracked-child
+//!    window - a sidecar run, a passthrough child, an orchestrator's whole
+//!    run, and the whole of `brokkr check` / `brokkr test` / `brokkr clippy`.
+//!    Its handler kills registered test groups, sets [`SHUTDOWN_REQUESTED`],
+//!    and nothing else - it must be async-signal-safe. Guards nest: only the
+//!    outermost installs and restores the dispositions, so an inner guard can
+//!    neither clear a pending request nor uncover the outer window. A
+//!    *second* signal while a request is already pending takes the default
+//!    action (after killing registered groups), so a wait that never polls
+//!    the flag cannot swallow Ctrl-C for good. Outside any guard, `SIGTERM`
+//!    falls through to the default terminate action; the one thing that
+//!    would leave behind is a test runner's detached process group, and while
+//!    one is live a [`GroupReaper`] handler SIGKILLs it and re-raises, so
+//!    brokkr still dies by the signal.
 //! 3. The sidecar loop polls [`is_shutdown_requested`] on every sample tick
 //!    (alongside `try_wait` and the `--stop` marker check). When set, it
 //!    `SIGKILL`s the child and breaks out of the loop with
@@ -21,12 +27,15 @@
 //!    after saving the partial sidecar data under the `dirty` alias. `main`
 //!    catches that error, runs the scratch-cleanup path, and exits 130.
 //!
-//! `brokkr kill --hard` bypasses this entirely: it SIGKILLs the recorded
-//! child PID first (so it is not orphaned), then the brokkr PID. Scratch
-//! is left in whatever state the tool left it (follow up with
-//! `brokkr clean`). A test runner's direct child carries a parent-death
-//! signal ([`die_with_parent`]), so it goes down with a SIGKILLed brokkr too.
+//! `brokkr kill --hard` bypasses this entirely: it SIGSTOPs the brokkr PID,
+//! SIGKILLs the recorded child PID and every identity-checked descendant of
+//! brokkr ([`kill_descendants`], so a test binary under cargo is not
+//! orphaned), then the brokkr PID. Scratch is left in whatever state the tool
+//! left it (follow up with `brokkr clean`). A test runner's direct child also
+//! carries a parent-death signal ([`die_with_parent`]), the backstop for a
+//! brokkr SIGKILLed by anything else (the OOM killer).
 
+use std::collections::HashMap;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
@@ -35,6 +44,11 @@ static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 /// Whether a [`SigtermGuard`] currently owns the SIGTERM/SIGINT dispositions,
 /// so a [`GroupReaper`] knows not to replace its handler.
 static GUARD_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// How many [`SigtermGuard`]s are live. Only the transition 0 -> 1 installs
+/// the handlers (and clears a stale request); only 1 -> 0 restores the
+/// defaults. Touched outside signal context only.
+static GUARD_DEPTH: Mutex<usize> = Mutex::new(0);
 
 /// Put brokkr in its own process group at startup when it is safe to do so,
 /// so brokkr's internal `kill(-pgid, …)` sweeps can never escape *upward*
@@ -107,18 +121,37 @@ fn terminal_foreground_pgrp() -> Option<libc::pid_t> {
     if fg < 0 { None } else { Some(fg) }
 }
 
-/// Whether a shutdown has been requested via SIGTERM since the current
-/// `SigtermGuard` was installed.
+/// Whether a shutdown has been requested via SIGTERM/SIGINT (or
+/// [`request_shutdown`]) since the outermost `SigtermGuard` was installed.
 pub fn is_shutdown_requested() -> bool {
-    SHUTDOWN_REQUESTED.load(Ordering::Relaxed)
+    SHUTDOWN_REQUESTED.load(Ordering::SeqCst)
 }
 
-extern "C" fn shutdown_handler(_: libc::c_int) {
+/// Raise the shutdown flag from inside brokkr, exactly as a `brokkr kill`
+/// would, minus the signal. The `check` watchdog uses it after killing the
+/// run's processes, so every polling runner returns `Interrupted`, no new
+/// test group is spawned, and the command unwinds through its normal exit
+/// path (history, toolchain restore, lock release) instead of `exit`ing past
+/// them.
+pub fn request_shutdown() {
+    SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
+}
+
+extern "C" fn shutdown_handler(sig: libc::c_int) {
     // Registered test process groups go down at once, not on the next poll:
     // a runner blocked in `wait()` never polls, and a test process has no
     // cooperative-shutdown contract to honour. See [`GroupReaper`].
     kill_registered_groups();
-    SHUTDOWN_REQUESTED.store(true, Ordering::Relaxed);
+    if SHUTDOWN_REQUESTED.swap(true, Ordering::SeqCst) {
+        // A request is already pending and brokkr is still here: whatever is
+        // running is not polling the flag. The second Ctrl-C / `brokkr kill`
+        // takes the default action, as it would with no guard at all.
+        // SAFETY: signal(2) and raise(3) are async-signal-safe.
+        unsafe {
+            libc::signal(sig, libc::SIG_DFL);
+            libc::raise(sig);
+        }
+    }
 }
 
 fn set_handler(signum: libc::c_int, handler: libc::sighandler_t) {
@@ -140,25 +173,52 @@ fn set_handler(signum: libc::c_int, handler: libc::sighandler_t) {
 /// `SHUTDOWN_REQUESTED`; the captured runner's poll loop sees the flag
 /// and forwards SIGTERM to the child PG before returning `Interrupted`.
 ///
-/// Scoped tightly so `brokkr kill` / ctrl-C during non-tracked work
-/// (cargo build outside an orchestrator, `brokkr check`, ...) terminates
-/// brokkr immediately instead of being silently swallowed into a flag
-/// nobody polls.
-pub struct SigtermGuard;
+/// Scoped to windows whose waits poll the flag, so `brokkr kill` / ctrl-C
+/// during untracked work (a cargo build outside an orchestrator, ...)
+/// terminates brokkr immediately instead of being silently swallowed into a
+/// flag nobody polls. Where a guarded window does block somewhere that does
+/// not poll, the second signal escalates to the default action (see
+/// [`shutdown_handler`]).
+///
+/// **Re-entrant.** Guards nest the way the global lock does: the outermost
+/// install clears any stale request and installs the handlers, inner installs
+/// only count, and only the outermost drop restores `SIG_DFL` and clears the
+/// flag. Before, an inner guard (the sidecar's, inside an orchestrator's)
+/// cleared a request that had already landed, and its drop uncovered the
+/// outer window - Ctrl-C then killed brokkr outright, with no mock teardown
+/// and no toolchain restore.
+pub struct SigtermGuard {
+    _private: (),
+}
+
+fn guard_depth() -> std::sync::MutexGuard<'static, usize> {
+    GUARD_DEPTH.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 impl SigtermGuard {
     pub fn install() -> Self {
-        SHUTDOWN_REQUESTED.store(false, Ordering::Relaxed);
-        GUARD_ACTIVE.store(true, Ordering::SeqCst);
-        let h: libc::sighandler_t = shutdown_handler as *const () as usize;
-        set_handler(libc::SIGTERM, h);
-        set_handler(libc::SIGINT, h);
-        Self
+        let mut depth = guard_depth();
+        if *depth == 0 {
+            SHUTDOWN_REQUESTED.store(false, Ordering::SeqCst);
+            GUARD_ACTIVE.store(true, Ordering::SeqCst);
+            let h: libc::sighandler_t = shutdown_handler as *const () as usize;
+            set_handler(libc::SIGTERM, h);
+            set_handler(libc::SIGINT, h);
+        }
+        *depth += 1;
+        Self { _private: () }
     }
 }
 
 impl Drop for SigtermGuard {
     fn drop(&mut self) {
+        let mut depth = guard_depth();
+        *depth = depth.saturating_sub(1);
+        if *depth > 0 {
+            // An outer guard still owns the window, and any pending request
+            // is still its to act on.
+            return;
+        }
         GUARD_ACTIVE.store(false, Ordering::SeqCst);
         set_handler(libc::SIGTERM, libc::SIG_DFL);
         set_handler(libc::SIGINT, libc::SIG_DFL);
@@ -170,7 +230,7 @@ impl Drop for SigtermGuard {
         // sticky `true` left over from a SIGTERM/SIGINT that already
         // fired and was handled. Without this, the captured runner's
         // flag-poll loop would spuriously SIGTERM unrelated children.
-        SHUTDOWN_REQUESTED.store(false, Ordering::Relaxed);
+        SHUTDOWN_REQUESTED.store(false, Ordering::SeqCst);
     }
 }
 
@@ -180,26 +240,28 @@ impl Drop for SigtermGuard {
 // The test runners spawn their children with `process_group(0)` so the
 // watchdog can kill a whole test tree with one `kill(-pgid)`. The price is that
 // terminal Ctrl-C (delivered to brokkr's foreground group only) and `brokkr
-// kill` (SIGTERM to brokkr's pid only) never reach those groups. With no
-// `SigtermGuard` around `check`/`test` - deliberately, so Ctrl-C still stops
-// brokkr at once during a build - brokkr died on the default action and the
-// cargo and test processes kept running, unreapable by the stray reaper, which
-// knows only cargo-family names and so never matches a directly executed test
-// binary.
+// kill` (SIGTERM to brokkr's pid only) never reach those groups. Brokkr dying
+// on the default action left the cargo and test processes running,
+// unreapable by the stray reaper, which knows only cargo-family names and so
+// never matches a directly executed test binary.
 //
-// A `SigtermGuard` for the whole command is the wrong fix: every blocking wait
-// in the pipeline would have to poll its flag, or Ctrl-C would be swallowed.
-// Instead the runners REGISTER each test group. While any group is registered
-// (and no `SigtermGuard` owns the dispositions), SIGINT/SIGTERM run a handler
+// So the runners REGISTER each test group, and the registration is what makes
+// an interrupt reach it whatever else is going on. Under a `SigtermGuard` -
+// which `check`, `brokkr test` and `brokkr clippy` now hold for their whole
+// run, so a graceful `brokkr kill` ends them as `Interrupted` / exit 130 - the
+// guard's handler kills the registered groups before setting its flag, so a
+// runner blocked in `wait()` is released at once rather than on its next poll.
+// Outside a guard, while any group is registered, SIGINT/SIGTERM run a handler
 // that SIGKILLs every registered group and then re-raises the signal under the
-// default action - so brokkr still dies exactly as it did, it just takes its
-// test groups with it. Under a `SigtermGuard`, the guard's own handler kills
-// the registered groups before setting its flag. Everything the handler does
-// (`kill`, `signal`, `raise`, atomic loads) is async-signal-safe.
+// default action - brokkr dies exactly as it would have, taking its test groups
+// with it. Everything either handler does (`kill`, `signal`, `raise`, atomic
+// loads) is async-signal-safe.
 //
-// What this cannot cover is brokkr being SIGKILLed (`brokkr kill --hard`, the
-// OOM killer): no handler runs. [`die_with_parent`] is the backstop for the
-// direct child there.
+// What this cannot cover is brokkr being SIGKILLed: no handler runs.
+// `brokkr kill --hard` walks brokkr's process tree itself
+// ([`kill_descendants`]) before killing brokkr, which reaches a test binary
+// under cargo; for anything else (the OOM killer) [`die_with_parent`] is the
+// backstop for the direct child only.
 // ---------------------------------------------------------------------------
 
 /// Slots for concurrently registered groups. A parallel sweep registers one per
@@ -376,10 +438,118 @@ pub fn die_with_parent(cmd: &mut std::process::Command) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Killing a process tree.
+//
+// Two callers need "everything this brokkr started, wherever it sits": the
+// `check` watchdog (for its own tree) and `brokkr kill --hard` (for the lock
+// holder's). Neither a group signal nor the lockfile's child slot reaches it
+// all - test runners put their children in their own groups, and a test
+// binary under cargo is recorded nowhere - so both walk `/proc`.
+// ---------------------------------------------------------------------------
+
+/// Every live process whose parent chain reaches `root`, deepest first, each
+/// paired with its `/proc` starttime (the identity token) from the same read
+/// as its parent pid. Deepest first so a leaf dies before its parent can
+/// notice and respawn it. `root` itself is not included.
+pub fn descendants(root: u32) -> Vec<(u32, String)> {
+    let mut children: HashMap<u32, Vec<(u32, String)>> = HashMap::new();
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    for entry in entries.flatten() {
+        let Some(pid) = entry.file_name().to_str().and_then(|s| s.parse::<u32>().ok()) else {
+            continue;
+        };
+        if let Some((ppid, starttime)) = proc_ppid_and_starttime(pid) {
+            children.entry(ppid).or_default().push((pid, starttime));
+        }
+    }
+    let mut out = Vec::new();
+    let mut stack: Vec<(u32, String)> = vec![(root, String::new())];
+    // Bounded: a consistent snapshot has no parent cycle, but an inconsistent
+    // one (a pid reused mid-scan) could, and a bound costs nothing.
+    while let Some((pid, starttime)) = stack.pop() {
+        if out.len() > 65_536 {
+            break;
+        }
+        if pid != root {
+            out.push((pid, starttime));
+        }
+        if let Some(kids) = children.remove(&pid) {
+            stack.extend(kids);
+        }
+    }
+    out.reverse();
+    out
+}
+
+/// SIGKILL every descendant of `root` (see [`descendants`]), deepest first.
+/// Each signal is identity-checked: it is sent only if the pid still carries
+/// the starttime recorded by the walk, so a pid that exited and was reused
+/// between the read and the signal is left alone - the rule `stray::kill`
+/// applies. Returns how many processes were signalled.
+///
+/// Not atomic containment: a process can fork between the walk and the
+/// signal. Callers that must not leave such a straggler call this twice (the
+/// second walk sees the children of anything the first missed), or freeze the
+/// root first so nothing new is started from it.
+pub fn kill_descendants(root: u32) -> usize {
+    let mut killed = 0usize;
+    for (pid, starttime) in descendants(root) {
+        if starttime.is_empty()
+            || crate::lockfile::proc_starttime(pid).as_deref() != Some(starttime.as_str())
+        {
+            continue;
+        }
+        // SAFETY: SIGKILL to a pid whose identity was re-verified immediately
+        // above; ESRCH (already gone) is benign, and the residual window is
+        // the one every pid-addressed signal has.
+        if unsafe { libc::kill(pid.cast_signed(), libc::SIGKILL) } == 0 {
+            killed += 1;
+        }
+    }
+    killed
+}
+
+/// The parent pid and starttime from `/proc/<pid>/stat`, from one read so the
+/// pair is coherent. The fields follow the parenthesised comm (which may
+/// itself contain spaces and parentheses, hence the `rfind`): state, then
+/// ppid; starttime is field 22 of the whole line, index 19 after the comm -
+/// the same indexing as `lockfile::proc_starttime`.
+fn proc_ppid_and_starttime(pid: u32) -> Option<(u32, String)> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let comm_end = stat.rfind(')')?;
+    let post: Vec<&str> = stat.get(comm_end + 2..)?.split_whitespace().collect();
+    let ppid = post.get(1)?.parse().ok()?;
+    let starttime = post.get(19).map(|s| (*s).to_owned()).unwrap_or_default();
+    Some((ppid, starttime))
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
+
+    #[test]
+    fn own_process_is_a_descendant_of_its_grandparent() {
+        let me = std::process::id();
+        let (parent, _) = proc_ppid_and_starttime(me).unwrap();
+        let (grandparent, _) = proc_ppid_and_starttime(parent).unwrap();
+        if grandparent == 0 {
+            return; // init as parent: no grandparent to walk from
+        }
+        let found = descendants(grandparent);
+        let mine = found.iter().find(|(pid, _)| *pid == me).unwrap();
+        // The identity token comes from the same read as the topology.
+        assert_eq!(Some(mine.1.clone()), crate::lockfile::proc_starttime(me));
+    }
+
+    #[test]
+    fn descendants_exclude_the_root() {
+        let me = std::process::id();
+        assert!(!descendants(me).iter().any(|(pid, _)| *pid == me));
+    }
 
     /// A registration occupies a slot for exactly its guard's lifetime, and
     /// ids that would turn the handler's `kill(-pgid)` into a broadcast are

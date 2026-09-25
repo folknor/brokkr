@@ -16,6 +16,11 @@ pub enum CargoProfile {
     /// Rust `cargo build --release` - the standard brokkr-built binary.
     #[default]
     Release,
+    /// Rust `cargo build` under the dev profile - a harness whose config or
+    /// `--debug` selects a debug build (ratatoskr's sync bench, piners'
+    /// measured corpus). Labelled `release` before this variant existed, so
+    /// older dev rows in those series carry the wrong profile.
+    Dev,
     /// External Java/Maven build (Planetiler baseline).
     Java,
     /// External CMake/C++ build (Tilemaker baseline).
@@ -23,9 +28,16 @@ pub enum CargoProfile {
 }
 
 impl CargoProfile {
+    /// The Rust profile a `debug` flag selects - the one mapping every
+    /// harness-built writer should use rather than spelling `Release`.
+    pub fn for_debug(debug: bool) -> Self {
+        if debug { Self::Dev } else { Self::Release }
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Release => "release",
+            Self::Dev => "dev",
             Self::Java => "java",
             Self::CMake => "cmake",
         }
@@ -37,6 +49,7 @@ impl CargoProfile {
     pub fn from_db(s: &str) -> Result<Self, UnknownCargoProfile> {
         match s {
             "release" => Ok(Self::Release),
+            "dev" => Ok(Self::Dev),
             "java" => Ok(Self::Java),
             "cmake" => Ok(Self::CMake),
             other => Err(UnknownCargoProfile(other.to_owned())),
@@ -283,24 +296,59 @@ fn extract_string<'a>(val: &'a serde_json::Value, key: &str) -> Result<&'a str, 
 /// Build a crate and return the path to the compiled binary.
 ///
 /// Parses `--message-format=json` output to find the `"executable"` field.
+///
+/// Refuses unless this process holds the brokkr lock - see
+/// [`cargo_build_observed`].
 pub fn cargo_build(config: &BuildConfig, project_root: &Path) -> Result<PathBuf, DevError> {
     cargo_build_observed(config, project_root, None, false)
 }
 
-/// As [`cargo_build`], but takes an `on_spawn` callback that fires with
-/// the cargo PID and an `isolate_pg` policy. Used by ratatoskr
-/// orchestration to publish the cargo PID into the lockfile so
-/// `brokkr kill --hard` during the build phase SIGKILLs cargo
-/// alongside brokkr; the orchestrator passes `isolate_pg = true` only
-/// when a SigtermGuard is active for the build window so terminal
-/// signals can bridge to cargo's process group. Non-orchestration
-/// callers use the simpler [`cargo_build`] wrapper.
+/// As [`cargo_build`], but takes an extra `on_spawn` observer that fires with
+/// the cargo PID, and an `isolate_pg` policy. The orchestrator passes
+/// `isolate_pg = true` only when a SigtermGuard is active for the build window
+/// so terminal signals can bridge to cargo's process group.
+///
+/// **Every build runs under the lock, and publishes its cargo PID into it.**
+/// The hold is looked up here ([`crate::lockfile::current_hold`]) and a build
+/// with none is refused: an unlocked build competes with a measurement, and on
+/// a guarded host it fails anyway at cargo's first rustc probe, in words that
+/// never mention the lock. Checking at this one choke point covers call paths
+/// several layers below the command that took the lock, where threading a
+/// `&LockGuard` down would not. The cargo PID goes into the lock file for the
+/// build's duration, so `brokkr kill --hard` during a build reaches cargo;
+/// before, only ratatoskr's orchestration published it, via `on_spawn`.
 pub fn cargo_build_observed(
     config: &BuildConfig,
     project_root: &Path,
     on_spawn: Option<&dyn Fn(u32)>,
     isolate_pg: bool,
 ) -> Result<PathBuf, DevError> {
+    let hold = crate::lockfile::current_hold().ok_or_else(|| {
+        DevError::Lock(
+            "refusing to run cargo build outside the brokkr lock - this is a brokkr bug: \
+             the command that reached this build must take the lock first"
+                .into(),
+        )
+    })?;
+    let publish = |pid: u32| {
+        hold.set_child_pid(pid);
+        if let Some(cb) = on_spawn {
+            cb(pid);
+        }
+    };
+    let built = cargo_build_locked(config, project_root, &publish, isolate_pg);
+    hold.clear_child_pid();
+    built
+}
+
+/// Body of [`cargo_build_observed`], run once the hold is established.
+fn cargo_build_locked(
+    config: &BuildConfig,
+    project_root: &Path,
+    on_spawn: &dyn Fn(u32),
+    isolate_pg: bool,
+) -> Result<PathBuf, DevError> {
+    let on_spawn = Some(on_spawn);
     let args = build_args(config);
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
 

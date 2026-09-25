@@ -73,6 +73,11 @@ struct LockInner {
     /// rust-toolchain is moved aside for exactly the locked window. See
     /// [`crate::toolchain`].
     toolchain: Option<crate::toolchain::DisabledToolchain>,
+    /// Whether this hold put its nonce into the process-global capability slot
+    /// ([`HoldEffects::publish_capability`]). Only a hold that published may
+    /// clear it: a test hold on a scratch path must not wipe a capability it
+    /// never owned.
+    owns_capability: bool,
 }
 
 impl Drop for LockInner {
@@ -90,7 +95,9 @@ impl Drop for LockInner {
         // release must not carry a mark for a hold that is over: the next
         // holder publishes its own nonce, and a stale mark would be refused
         // anyway - forgetting it makes that explicit rather than incidental.
-        crate::hold::clear_capability();
+        if self.owns_capability {
+            crate::hold::clear_capability();
+        }
         // Restore the disabled toolchain (if any) while we still hold the flock,
         // then release. Doing it before LOCK_UN keeps the moved-aside window
         // inside the locked window, so a concurrent brokkr can never observe it.
@@ -278,14 +285,91 @@ fn lock_path() -> Result<PathBuf, DevError> {
 /// A nested acquire keeps the outer hold's lock-file contents (project /
 /// command / args): the outer command is the honest holder for `brokkr lock`
 /// to report, and its `ctx` was captured from the same argv anyway.
+///
+/// **Every fresh hold reaps strays and checks the enrolled guard.** Both run
+/// here, in the fresh-hold path, rather than in any one caller: they used to
+/// live in `context::acquire_cmd_lock_opt`, and a dozen commands that called
+/// this function directly (bench contexts, the verify harness, piners,
+/// ratatoskr) silently skipped both. A nested acquire runs neither - the
+/// outer hold already did.
 pub fn acquire(ctx: &LockContext<'_>) -> Result<LockGuard, DevError> {
     let path = lock_path()?;
-    acquire_at(&path, ctx)
+    acquire_at(&path, ctx, &HOST_EFFECTS)
 }
 
-/// Path-explicit body of [`acquire`] - also the unit-test seam, so tests can
-/// exercise nesting on a scratch lock file without touching the real one.
-fn acquire_at(path: &Path, ctx: &LockContext<'_>) -> Result<LockGuard, DevError> {
+/// This process's live hold on the global lock, as one more guard on it, or
+/// `None` when the process holds nothing.
+///
+/// The proof `build::cargo_build` demands before it runs cargo. Asking the
+/// registry rather than taking a `&LockGuard` parameter keeps the check at the
+/// one choke point every build passes through, including call paths several
+/// layers below the command that took the lock. The returned guard shares the
+/// hold (like a nested [`acquire`]), so it cannot outlive or split it.
+pub fn current_hold() -> Option<LockGuard> {
+    let path = lock_path().ok()?;
+    let mut held = held_registry();
+    held.retain(|w| w.strong_count() > 0);
+    held.iter()
+        .filter_map(Weak::upgrade)
+        .find(|inner| inner.path == path)
+        .map(|inner| LockGuard { inner })
+}
+
+/// What a fresh hold does beyond taking the flock: the host-wide and
+/// process-global effects.
+///
+/// A seam, so unit tests can take real flocks on scratch paths without any of
+/// them. Before it existed the test entry point ran the production drain on
+/// the real `~/.brokkr/compile.lock` - which, 20 s into a wait behind a live
+/// build, SIGKILLs whatever the stray reaper finds on the host, rust-analyzer's
+/// cargo included - and mutated the process-global capability and
+/// toolchain-disable state that other tests read.
+struct HoldEffects {
+    /// Wait out earlier compilation leases; the returned descriptor is the
+    /// exclusive lease held while the capability is published. `None` means
+    /// no lease was taken (tests).
+    drain: fn() -> Result<Option<OwnedFd>, DevError>,
+    /// Activate the armed toolchain-disable ([`crate::toolchain`]).
+    toolchain: fn() -> Result<Option<crate::toolchain::DisabledToolchain>, DevError>,
+    /// Install the minted nonce as this process's capability (`crate::hold`).
+    publish_capability: bool,
+    /// Runs once the fresh hold is registered: the stray reap and the stale
+    /// guard warning.
+    after_fresh_hold: fn(),
+}
+
+/// The effects a real acquisition has.
+const HOST_EFFECTS: HoldEffects = HoldEffects {
+    drain: host_drain,
+    toolchain: crate::toolchain::activate_for_lock,
+    publish_capability: true,
+    after_fresh_hold: host_after_fresh_hold,
+};
+
+fn host_drain() -> Result<Option<OwnedFd>, DevError> {
+    drain_compile_leases().map(Some)
+}
+
+/// Under the lock, so the scan cannot mistake another brokkr's cargo for a
+/// stray: any cargo alive now with no brokkr ancestor is one nothing
+/// brokkr-shaped started, and it holds (or will take) the build-directory lock
+/// this command's cargo needs. A stale enrolled guard fails in shapes that read
+/// as anything but staleness (a refused probe even poisons cargo's rustc-info
+/// cache), so say it plainly, once, while a build may be about to run.
+fn host_after_fresh_hold() {
+    crate::stray::reap_after_lock();
+    crate::guard::warn_if_guard_stale();
+}
+
+/// Path-explicit body of [`acquire`], parameterised by its [`HoldEffects`] -
+/// the unit-test seam: tests pass inert effects and a scratch path, so they
+/// exercise the flock, re-entry and metadata without draining, reaping, or
+/// touching process-global state.
+fn acquire_at(
+    path: &Path,
+    ctx: &LockContext<'_>,
+    effects: &HoldEffects,
+) -> Result<LockGuard, DevError> {
     {
         let mut held = held_registry();
         held.retain(|w| w.strong_count() > 0);
@@ -405,7 +489,8 @@ fn acquire_at(path: &Path, ctx: &LockContext<'_>) -> Result<LockGuard, DevError>
     // releasing `brokkr.lock`, and we never reach protected work - measuring
     // alongside a compiler we failed to clear is the one outcome worse than not
     // measuring at all.
-    let Authorized { state, nonce, toolchain } = drain_and_authorize(owned.as_raw_fd(), ctx)?;
+    let Authorized { state, nonce, toolchain } =
+        drain_and_authorize(owned.as_raw_fd(), ctx, effects)?;
 
     // Construct the owner first, then hand the process registry the nonce.
     // Nothing fallible may sit between these two statements: an error there
@@ -415,12 +500,17 @@ fn acquire_at(path: &Path, ctx: &LockContext<'_>) -> Result<LockGuard, DevError>
         path: path.to_owned(),
         state: Mutex::new(state),
         toolchain,
+        owns_capability: effects.publish_capability,
     });
-    crate::hold::publish_capability(&nonce);
+    if effects.publish_capability {
+        crate::hold::publish_capability(&nonce);
+    }
     // Register weakly so a later acquire in this process re-enters this hold
     // instead of self-deadlocking on a second fd.
     held_registry().push(Arc::downgrade(&inner));
-    Ok(LockGuard { inner })
+    let guard = LockGuard { inner };
+    (effects.after_fresh_hold)();
+    Ok(guard)
 }
 
 /// Check the global lock status. Returns `None` if no lock is held.
@@ -891,12 +981,16 @@ fn drain_compile_leases() -> Result<OwnedFd, DevError> {
 ///    hold's nonce into an admitted compiler.
 /// 4. Release the exclusive lease, so this hold's own descendants can take
 ///    shares of it.
-fn drain_and_authorize(fd: RawFd, ctx: &LockContext<'_>) -> Result<Authorized, DevError> {
+fn drain_and_authorize(
+    fd: RawFd,
+    ctx: &LockContext<'_>,
+    effects: &HoldEffects,
+) -> Result<Authorized, DevError> {
     let mut state = build_state(ctx);
     rewrite_from_state(fd, &state)
         .map_err(|e| DevError::Lock(format!("failed to publish lock metadata: {e}")))?;
 
-    let compile_lease = drain_compile_leases()?;
+    let compile_lease = (effects.drain)()?;
 
     let nonce = crate::hold::mint_nonce().ok_or_else(|| {
         DevError::Lock(
@@ -918,7 +1012,7 @@ fn drain_and_authorize(fd: RawFd, ctx: &LockContext<'_>) -> Result<Authorized, D
     // activation failure released `brokkr.lock` without ever constructing the
     // guard whose `Drop` clears the registry, and the process went on able to
     // stamp a nonce belonging to no hold.
-    let toolchain = crate::toolchain::activate_for_lock()?;
+    let toolchain = (effects.toolchain)()?;
 
     drop(compile_lease);
     Ok(Authorized { state, nonce, toolchain })
@@ -1296,12 +1390,79 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// Per-test scratch lock file. Each test gets its own path so parallel
     /// test threads never contend (or falsely nest) with each other, and
     /// none of them ever touch the real global lock.
     fn tmp_lock(name: &str) -> PathBuf {
         crate::test_scratch::scratch_path("lockfile", name)
+    }
+
+    fn no_drain() -> Result<Option<OwnedFd>, DevError> {
+        Ok(None)
+    }
+
+    fn no_toolchain() -> Result<Option<crate::toolchain::DisabledToolchain>, DevError> {
+        Ok(None)
+    }
+
+    fn nothing_after() {}
+
+    /// The effects every test hold uses: no drain of the real compile lease
+    /// (and so no stray reap, which SIGKILLs host processes), no toolchain
+    /// activation, no capability published into the process-global slot, and
+    /// no post-hold reap. What remains is exactly what these tests are about:
+    /// the flock, re-entry, and the lock-file metadata.
+    const INERT: HoldEffects = HoldEffects {
+        drain: no_drain,
+        toolchain: no_toolchain,
+        publish_capability: false,
+        after_fresh_hold: nothing_after,
+    };
+
+    /// The fresh-hold hook is where the stray reap and the guard warning live,
+    /// so every `acquire` caller gets them. It must run once per *fresh* hold
+    /// and never on re-entry - a nested acquire inside a cohort would
+    /// otherwise reap in the middle of the sweep.
+    #[test]
+    fn fresh_hold_hook_runs_once_and_not_on_reentry() {
+        static RUNS: AtomicUsize = AtomicUsize::new(0);
+        fn count() {
+            RUNS.fetch_add(1, Ordering::SeqCst);
+        }
+        let counting = HoldEffects { after_fresh_hold: count, ..INERT };
+        let path = tmp_lock("fresh-hook.lock");
+        let outer = acquire_at(&path, &ctx(), &counting).unwrap();
+        let nested = acquire_at(&path, &ctx(), &counting).unwrap();
+        assert_eq!(RUNS.load(Ordering::SeqCst), 1, "nested acquire must not re-run the hook");
+        drop(nested);
+        drop(outer);
+        let _again = acquire_at(&path, &ctx(), &counting).unwrap();
+        assert_eq!(RUNS.load(Ordering::SeqCst), 2, "a new fresh hold runs it again");
+    }
+
+    /// A test hold neither installs nor clears the process-global capability:
+    /// it did not publish one, so it has none to forget. Before the seam the
+    /// test holds did both, racing `hold`'s own capability test.
+    #[test]
+    fn inert_hold_leaves_the_capability_slot_alone() {
+        let _serial = crate::test_scratch::process_global_lock();
+        let before = crate::hold::capability();
+        crate::hold::publish_capability("sentinel");
+        let path = tmp_lock("capability.lock");
+        let guard = acquire_at(&path, &ctx(), &INERT).unwrap();
+        assert_eq!(crate::hold::capability().as_deref(), Some("sentinel"));
+        drop(guard);
+        assert_eq!(
+            crate::hold::capability().as_deref(),
+            Some("sentinel"),
+            "a hold that never published must not clear the slot on release"
+        );
+        match before {
+            Some(n) => crate::hold::publish_capability(&n),
+            None => crate::hold::clear_capability(),
+        }
     }
 
     fn ctx() -> LockContext<'static> {
@@ -1346,8 +1507,8 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         let worker_path = path.clone();
         let worker = std::thread::spawn(move || {
-            let outer = acquire_at(&worker_path, &ctx()).unwrap();
-            let nested = acquire_at(&worker_path, &ctx()).unwrap();
+            let outer = acquire_at(&worker_path, &ctx(), &INERT).unwrap();
+            let nested = acquire_at(&worker_path, &ctx(), &INERT).unwrap();
             tx.send((
                 Arc::ptr_eq(&outer.inner, &nested.inner),
                 Arc::strong_count(&outer.inner),
@@ -1375,8 +1536,8 @@ mod tests {
     #[test]
     fn inner_drop_keeps_lock_until_outer_drop() {
         let path = tmp_lock("drop-order.lock");
-        let outer = acquire_at(&path, &ctx()).unwrap();
-        let nested = acquire_at(&path, &ctx()).unwrap();
+        let outer = acquire_at(&path, &ctx(), &INERT).unwrap();
+        let nested = acquire_at(&path, &ctx(), &INERT).unwrap();
 
         drop(nested);
         assert!(
@@ -1397,8 +1558,8 @@ mod tests {
     #[test]
     fn outer_drop_before_inner_keeps_lock() {
         let path = tmp_lock("outer-first.lock");
-        let outer = acquire_at(&path, &ctx()).unwrap();
-        let nested = acquire_at(&path, &ctx()).unwrap();
+        let outer = acquire_at(&path, &ctx(), &INERT).unwrap();
+        let nested = acquire_at(&path, &ctx(), &INERT).unwrap();
 
         drop(outer);
         assert!(flock_is_held(&path));
@@ -1412,8 +1573,8 @@ mod tests {
     #[test]
     fn nested_guard_forwards_state_to_the_lock_file() {
         let path = tmp_lock("forwarding.lock");
-        let outer = acquire_at(&path, &ctx()).unwrap();
-        let nested = acquire_at(&path, &ctx()).unwrap();
+        let outer = acquire_at(&path, &ctx(), &INERT).unwrap();
+        let nested = acquire_at(&path, &ctx(), &INERT).unwrap();
 
         nested.set_child_pid(4242);
         nested.add_mock_pid(5151);
@@ -1441,8 +1602,8 @@ mod tests {
     fn different_paths_do_not_alias() {
         let path_a = tmp_lock("distinct-a.lock");
         let path_b = tmp_lock("distinct-b.lock");
-        let a = acquire_at(&path_a, &ctx()).unwrap();
-        let b = acquire_at(&path_b, &ctx()).unwrap();
+        let a = acquire_at(&path_a, &ctx(), &INERT).unwrap();
+        let b = acquire_at(&path_b, &ctx(), &INERT).unwrap();
         assert!(!Arc::ptr_eq(&a.inner, &b.inner));
         assert_eq!(Arc::strong_count(&a.inner), 1);
         assert_eq!(Arc::strong_count(&b.inner), 1);
@@ -1453,11 +1614,11 @@ mod tests {
     #[test]
     fn reacquire_after_release_is_a_fresh_hold() {
         let path = tmp_lock("reacquire.lock");
-        let first = acquire_at(&path, &ctx()).unwrap();
+        let first = acquire_at(&path, &ctx(), &INERT).unwrap();
         drop(first);
         assert!(!flock_is_held(&path));
 
-        let second = acquire_at(&path, &ctx()).unwrap();
+        let second = acquire_at(&path, &ctx(), &INERT).unwrap();
         assert_eq!(Arc::strong_count(&second.inner), 1);
         assert!(flock_is_held(&path));
     }
@@ -1468,7 +1629,7 @@ mod tests {
     #[test]
     fn release_truncates_metadata() {
         let path = tmp_lock("release-truncate.lock");
-        let guard = acquire_at(&path, &ctx()).unwrap();
+        let guard = acquire_at(&path, &ctx(), &INERT).unwrap();
         assert!(!std::fs::read_to_string(&path).unwrap().is_empty());
         drop(guard);
         assert_eq!(std::fs::metadata(&path).unwrap().len(), 0);
@@ -1478,7 +1639,7 @@ mod tests {
     #[test]
     fn own_identity_verifies() {
         let path = tmp_lock("identity.lock");
-        let _guard = acquire_at(&path, &ctx()).unwrap();
+        let _guard = acquire_at(&path, &ctx(), &INERT).unwrap();
         let contents = std::fs::read_to_string(&path).unwrap();
         let info = parse_lock_contents(&contents).unwrap();
         assert_eq!(info.pid, std::process::id());

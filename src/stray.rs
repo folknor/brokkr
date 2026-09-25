@@ -392,7 +392,8 @@ pub fn describe(s: &Stray) -> String {
 }
 
 /// The reap every locked command runs once it holds the lock: find, kill,
-/// report on one line. Nothing found prints nothing. Failure to read `/proc`
+/// report on one line. Called from `lockfile::acquire`'s fresh-hold path -
+/// not from any one command wrapper - so no caller of the lock can skip it. Nothing found prints nothing. Failure to read `/proc`
 /// reads as nothing found - the reap is a convenience on the way to the real
 /// work, never a gate on it.
 pub fn reap_after_lock() {

@@ -535,7 +535,77 @@ pub fn run_captured_with_env_and_deadline(
     on_spawn: Option<&dyn Fn(u32)>,
     isolate_pg: bool,
 ) -> Result<DeadlineCapture, DevError> {
-    use std::io::Read;
+    run_captured_limited(program, args, cwd, env, Limit::Wall(deadline), on_spawn, isolate_pg)
+}
+
+/// As [`run_captured_with_env_and_deadline`], but the limit is on
+/// *inactivity*: the child is killed (`killed_on_deadline`) only once `idle`
+/// has passed with no byte arriving on either stdout or stderr. Every chunk
+/// of output restarts the clock, so a long build that keeps reporting
+/// progress runs as long as it needs, while one parked with nothing to say
+/// (cargo "Blocking waiting for file lock" behind another cargo) is killed.
+/// The wall-time bound on such a run is the caller's phase ceiling.
+pub fn run_captured_with_idle_deadline(
+    program: &str,
+    args: &[&str],
+    cwd: &Path,
+    env: &[(&str, &str)],
+    idle: Duration,
+    isolate_pg: bool,
+) -> Result<DeadlineCapture, DevError> {
+    run_captured_limited(program, args, cwd, env, Limit::Idle(idle), None, isolate_pg)
+}
+
+/// What bounds a captured run.
+#[derive(Clone, Copy)]
+enum Limit {
+    /// Total wall time since spawn.
+    Wall(Duration),
+    /// Time since the last output byte (or since spawn, before the first).
+    Idle(Duration),
+}
+
+/// Read `pipe` to its end on a new thread, stamping `last_output_ms` (millis
+/// since `start`) on every chunk - the progress signal [`Limit::Idle`] reads.
+fn drain_stamped(
+    pipe: impl std::io::Read + Send + 'static,
+    start: Instant,
+    last_output_ms: std::sync::Arc<std::sync::atomic::AtomicU64>,
+) -> std::thread::JoinHandle<Vec<u8>> {
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let mut reader = pipe;
+        let mut chunk = [0u8; 8192];
+        loop {
+            match reader.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => {
+                    buf.extend_from_slice(chunk.get(..n).unwrap_or_default());
+                    let now = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+                    last_output_ms.store(now, Ordering::Relaxed);
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(_) => break,
+            }
+        }
+        buf
+    })
+}
+
+/// Shared body of the captured runners; see
+/// [`run_captured_with_env_and_deadline`] for the spawn, kill and interrupt
+/// contract.
+fn run_captured_limited(
+    program: &str,
+    args: &[&str],
+    cwd: &Path,
+    env: &[(&str, &str)],
+    limit: Limit,
+    on_spawn: Option<&dyn Fn(u32)>,
+    isolate_pg: bool,
+) -> Result<DeadlineCapture, DevError> {
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicU64;
 
     let start = Instant::now();
     let mut cmd = Command::new(program);
@@ -571,17 +641,18 @@ pub fn run_captured_with_env_and_deadline(
         cb(child.id());
     }
 
-    fn drain(pipe: impl Read + Send + 'static) -> std::thread::JoinHandle<Vec<u8>> {
-        std::thread::spawn(move || {
-            let mut buf = Vec::new();
-            let mut reader = pipe;
-            drop(reader.read_to_end(&mut buf));
-            buf
-        })
-    }
-
-    let stdout_thread = child.stdout.take().map(drain);
-    let stderr_thread = child.stderr.take().map(drain);
+    // Milliseconds since `start` at which the last output chunk arrived - the
+    // idle clock's reference. Written by both drain threads.
+    let last_output_ms = Arc::new(AtomicU64::new(0));
+    let stdout_thread = child.stdout.take().map(|p| drain_stamped(p, start, Arc::clone(&last_output_ms)));
+    let stderr_thread = child.stderr.take().map(|p| drain_stamped(p, start, Arc::clone(&last_output_ms)));
+    let expired = || match limit {
+        Limit::Wall(deadline) => start.elapsed() >= deadline,
+        Limit::Idle(idle) => {
+            let last = Duration::from_millis(last_output_ms.load(Ordering::Relaxed));
+            start.elapsed().saturating_sub(last) >= idle
+        }
+    };
 
     let mut killed_on_deadline = false;
     let mut interrupted = false;
@@ -602,7 +673,7 @@ pub fn run_captured_with_env_and_deadline(
                         error,
                     })?;
                 }
-                if start.elapsed() >= deadline {
+                if expired() {
                     // SIGKILL: PG-isolated children get a `kill(-pgid,
                     // ...)` sweep so descendants don't outlive the
                     // deadline; non-isolated children share brokkr's
@@ -869,6 +940,38 @@ mod tests {
 
     fn cwd() -> &'static Path {
         Path::new(".")
+    }
+
+    /// A child that keeps printing outlives a wall time several idle windows
+    /// long; one that goes quiet is killed one window after its last output.
+    #[test]
+    fn idle_deadline_resets_on_output_and_fires_on_silence() {
+        let idle = Duration::from_millis(600);
+        let chatty = run_captured_with_idle_deadline(
+            "sh",
+            &["-c", "for i in 1 2 3 4 5 6 7 8; do echo $i; sleep 0.2; done"],
+            cwd(),
+            &[],
+            idle,
+            true,
+        )
+        .unwrap();
+        assert!(!chatty.killed_on_deadline, "progress must keep resetting the clock");
+        assert!(chatty.captured.status.success());
+        assert!(chatty.captured.elapsed > idle);
+
+        let quiet = run_captured_with_idle_deadline(
+            "sh",
+            &["-c", "echo start; sleep 30"],
+            cwd(),
+            &[],
+            idle,
+            true,
+        )
+        .unwrap();
+        assert!(quiet.killed_on_deadline);
+        assert!(quiet.captured.elapsed < Duration::from_secs(10));
+        assert_eq!(String::from_utf8_lossy(&quiet.captured.stdout).trim(), "start");
     }
 
     #[test]

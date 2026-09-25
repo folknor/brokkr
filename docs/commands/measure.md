@@ -56,10 +56,29 @@ timing contract `--bench` needs. The build-config seam both paths share is
   closure also returns the `SidecarData` from `run_hotpath_capture`, which is
   persisted to sidecar.db under the recorded UUID. This is what makes
   `brokkr sidecar <uuid>` work for `--hotpath`/`--alloc`; the raw
-  `run_hotpath_capture` returns the data but stores nothing.
+  `run_hotpath_capture` returns the data but stores nothing. A capture that
+  fails (non-zero exit, signal, `brokkr kill`) parks its payload for the
+  enclosing `run_hotpath` loop, which stores it with the earlier iterations'
+  under `dirty` before returning the error.
 - `run_external(config, binary, args)` - subprocess timing
 - `run_distribution(config, closure)` - distribution timing
   (min/p50/p95/max)
+
+The mode a row records (`bench`/`hotpath`/`alloc`) comes from the harness,
+set once from the request; the same value prints as `mode=` on the `[result]`
+line and lands in the sidecar provenance, so `brokkr sidecar` shows it.
+
+Where brokkr times the child itself (`run_external`, `run_hotpath_capture`) it
+keeps the exact wall as `elapsed_us` and picks best-of-N on it; `elapsed_ms`
+is that value rounded to the nearest millisecond, never floored - flooring
+reads every run as up to a millisecond faster than it was. Closure-timed paths
+(`run_internal`, `run_distribution`) record integer milliseconds only, rounded
+the same way where the harness converts a `Duration` (`elapsed_to_ms`).
+
+If the `results.db` insert fails, the `[result]` line still prints
+(unconditionally, since the row cannot be looked up later) and the sidecar
+trajectory is stored under `dirty` before the error is returned - a DB failure
+costs the row, not the measurement.
 
 Results in `.brokkr/results.db` per project (gitignored).
 
@@ -209,7 +228,10 @@ The FIFO carries two line types (parsed in `SidecarFifo::drain`,
 
 - **Marker** - `<ts_us> <name>`. Assigned a monotonic `marker_idx` in arrival
   order; the last name seen is also mirrored to a status file so `brokkr lock`
-  can show the live phase. Markers are point-in-time bookmarks - the protocol
+  can show the live phase. That file has one location on every harness path -
+  `~/.brokkr/sidecar-status`, beside the global lock (`sidecar::status_path`) -
+  and carries the writer's PID, so `brokkr lock` ignores one left behind by an
+  earlier holder. Markers are point-in-time bookmarks - the protocol
   itself knows nothing about spans or pairs. The name is untrusted text; every
   JSONL view encodes it with serde_json, so control characters are escaped.
 - **Counter** - `<ts_us> @<name>=<value>`. The value **must parse as `i64`**
@@ -272,6 +294,13 @@ switches to fixed-width tables. Rendering lives in `src/sidecar_fmt.rs`.
   lands. That SIGKILL is *not* treated as a failure - `stopped_by_marker`
   flags it and the run records normally, so you can bench one phase in
   isolation.
+- **Deadlines**: a caller may bound each child's wall time
+  (`run_sidecar_with_deadline`, or a `sidecar::DeadlineScope` around code that
+  reaches the sidecar through a capture helper). Past it the child's process
+  group is SIGKILLed, `stopped_by_deadline` is set, and the run fails. The
+  ratatoskr sync bench uses the script's `ceiling:`; measured `corpus` uses the
+  parity path's hang backstop. Paths with no deadline run until the child
+  exits or `brokkr kill`.
 - **`brokkr kill` (SIGTERM)** is handled by a `SigtermGuard` scoped to the
   sidecar window only (outside it, SIGTERM falls through to default terminate
   - there's no child to reap during `cargo build`/`check`). On catch, the
@@ -279,7 +308,8 @@ switches to fixed-width tables. Rendering lives in `src/sidecar_fmt.rs`.
   UUID + the `dirty` alias, and the run returns `Interrupted`.
 - **OOM / crash preservation**: sidecar data is stored even when the child is
   OOM-killed, segfaults, or exits non-zero - the `/proc` trajectory up to the
-  kill is the whole point. Failed/dirty runs get a random UUID and update the
+  kill is the whole point. This holds on every sidecar-enabled harness loop, `--hotpath`/
+  `--alloc` included (via the parked-capture hand-off above). Failed/dirty runs get a random UUID and update the
   `dirty` latest pointer, so `brokkr sidecar dirty` / `brokkr results dirty`
   always resolve the most recent unstored run. The child is also marked as the
   kernel OOM killer's preferred target (`src/oom.rs`) so a memory blow-up

@@ -232,14 +232,8 @@ fn compare_baselines(
     args: &BenchArgs,
     lock: &crate::lockfile::LockGuard,
 ) -> Result<(), DevError> {
-    for name in [a, b] {
-        stamp::validate_label(name)?;
-        if !stamp::stamp_path(home, name).exists() {
-            return Err(DevError::Build(format!(
-                "no baseline '{name}' recorded; `brokkr bench --baselines` lists what exists"
-            )));
-        }
-    }
+    let a = &resolve_stored_baseline(home, build_root, a)?;
+    let b = &resolve_stored_baseline(home, build_root, b)?;
     check_environments(home, a, b, args.lenient)?;
 
     // `--load-baseline` supplies the *new* side from storage; `--baseline` is
@@ -255,6 +249,60 @@ fn compare_baselines(
 
     output::bench_msg(&format!("comparing '{b}' against '{a}' (no sampling)"));
     cargo_bench(home, build_root, target, &criterion_args, lock)
+}
+
+/// The recorded baseline `name` refers to.
+///
+/// A stored name is taken as-is. Otherwise, when `name` is a revision git can
+/// resolve, the baseline recorded for that commit: first under the fixed-width
+/// name ([`crate::git::short_of`]) a measuring run now saves under, then under
+/// any shorter hash prefix of the same commit - the names `git rev-parse
+/// --short` produced before the width was pinned, which grew with the repo. So
+/// `--compare` takes a hash at whatever width it was copied, or a ref.
+fn resolve_stored_baseline(home: &Path, build_root: &Path, name: &str) -> Result<String, DevError> {
+    stamp::validate_label(name)?;
+    if stamp::stamp_path(home, name).exists() {
+        return Ok(name.to_owned());
+    }
+    let missing = || {
+        DevError::Build(format!(
+            "no baseline '{name}' recorded; `brokkr bench --baselines` lists what exists"
+        ))
+    };
+    let Ok(commit) = crate::git::resolve_commit(build_root, name) else {
+        return Err(missing());
+    };
+    if stamp::stamp_path(home, &commit.short).exists() {
+        return Ok(commit.short);
+    }
+    let legacy: Vec<String> = stored_baseline_names(home)
+        .into_iter()
+        .filter(|n| {
+            n.len() >= 4 && n.bytes().all(|b| b.is_ascii_hexdigit()) && commit.full.starts_with(n.as_str())
+        })
+        .collect();
+    match legacy.as_slice() {
+        [one] => Ok(one.clone()),
+        [] => Err(missing()),
+        many => Err(DevError::Build(format!(
+            "'{name}' matches several recorded baselines ({}); name one exactly",
+            many.join(", ")
+        ))),
+    }
+}
+
+/// Every baseline name with a stamp on disk, unsorted.
+fn stored_baseline_names(home: &Path) -> Vec<String> {
+    match std::fs::read_dir(home.join("stamps")) {
+        Ok(entries) => entries
+            .filter_map(Result::ok)
+            .filter_map(|e| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                name.strip_suffix(".txt").map(str::to_owned)
+            })
+            .collect(),
+        Err(_) => Vec::new(),
+    }
 }
 
 /// Refuse a comparison across differing build environments.
@@ -333,10 +381,14 @@ fn resolve_baseline_name(build_root: &Path, args: &BenchArgs) -> Result<String, 
     // ref names the baseline and the working tree's state is irrelevant - there
     // is nothing uncommitted in a tree nobody has edited. Resolved against the
     // live repo, before the worktree exists.
+    //
+    // Named by the fixed-width abbreviation (`git::short_of`), so a commit's
+    // baseline keeps its name as the repo grows and whatever ref or hash width
+    // `--commit` was given.
     if let Some(commit) = &args.commit {
-        return git(build_root, &["rev-parse", "--short", commit]);
+        return Ok(crate::git::resolve_commit(build_root, commit)?.short);
     }
-    let short = git(build_root, &["rev-parse", "--short", "HEAD"])?;
+    let short = crate::git::resolve_commit(build_root, "HEAD")?.short;
     if is_dirty(build_root)? {
         return Err(DevError::Preflight(vec![
             format!(
@@ -370,17 +422,7 @@ fn git(dir: &Path, args: &[&str]) -> Result<String, DevError> {
 
 /// Print the recorded baselines and the environment each was taken under.
 fn list_baselines(home: &Path) -> Result<(), DevError> {
-    let dir = home.join("stamps");
-    let mut names: Vec<String> = match std::fs::read_dir(&dir) {
-        Ok(entries) => entries
-            .filter_map(Result::ok)
-            .filter_map(|e| {
-                let name = e.file_name().to_string_lossy().into_owned();
-                name.strip_suffix(".txt").map(str::to_owned)
-            })
-            .collect(),
-        Err(_) => Vec::new(),
-    };
+    let mut names = stored_baseline_names(home);
     if names.is_empty() {
         output::run_msg("no baselines recorded; `brokkr bench <target>` measures one");
         return Ok(());

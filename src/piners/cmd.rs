@@ -58,7 +58,9 @@ pub(crate) const RUNTIME_CEILING_MS: f64 = 270_000.0;
 /// otherwise hold the global lock until someone runs `brokkr kill`. Set far
 /// above any real run (a `--force`d full pass included), so only a hang
 /// reaches it; the run is then recorded as failed.
-const HARNESS_HANG_BACKSTOP: Duration = Duration::from_secs(60 * 60);
+/// Shared with the measured path (`measured.rs`), which applies it per
+/// iteration through `sidecar::DeadlineScope`.
+pub(crate) const HARNESS_HANG_BACKSTOP: Duration = Duration::from_secs(60 * 60);
 
 /// Flags lifted off the `Corpus` CLI command.
 #[derive(Debug, Default)]

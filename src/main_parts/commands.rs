@@ -964,17 +964,13 @@ fn cmd_lock() -> Result<(), DevError> {
         }
     }
 
-    // Line 4: most recent sidecar marker, if any.
-    if info.pid > 0 {
-        let status_path = std::path::Path::new(&info.project_root)
-            .join(".brokkr")
-            .join(".sidecar-status");
-        if let Ok(marker) = std::fs::read_to_string(&status_path) {
-            let marker = marker.trim();
-            if !marker.is_empty() {
-                output::lock_msg(&format!("last marker: {marker}"));
-            }
-        }
+    // Line 4: most recent sidecar marker, if any. The location and format
+    // are owned by `sidecar::status_path` / `read_status`, which the writer
+    // uses too - a reader-side path of its own drifted from the writer once.
+    if info.pid > 0
+        && let Some(marker) = crate::sidecar::read_status(info.pid)
+    {
+        output::lock_msg(&format!("last marker: {marker}"));
     }
 
     Ok(())
@@ -1056,7 +1052,9 @@ fn cmd_pmtiles_stats(project: Project, files: &[String]) -> Result<(), DevError>
 
 /// Ask the brokkr process holding the lock to shut down. Default sends
 /// SIGTERM (cooperative - brokkr handles cleanup itself). `--hard`
-/// sends SIGKILL to brokkr, the recorded child PID, and every mock.
+/// SIGSTOPs brokkr, then SIGKILLs the recorded child PID, every mock, every
+/// other process beneath brokkr (each starttime-checked, see
+/// `shutdown::kill_descendants`), and brokkr.
 ///
 /// Every recorded PID was written in the HOLDER's PID namespace, which may
 /// not be ours (a sandboxed holder writes pid=2 - kthreadd here), and any
@@ -1113,6 +1111,10 @@ fn cmd_kill(hard: bool) -> Result<(), DevError> {
     }
     let holder = preflight_holder(&info).map_err(|why| refuse_kill(&why))?;
 
+    // Freeze brokkr first, so it cannot start anything new (the next sweep,
+    // a respawned mock) while its tree is being taken down.
+    signal_target(&holder, libc::SIGSTOP);
+
     // Kill children first, then brokkr - otherwise there's a brief window
     // where brokkr is dead but the tool it was measuring is still alive
     // (and anyone peeking at `brokkr lock` sees stale state pointing at a
@@ -1125,6 +1127,21 @@ fn cmd_kill(hard: bool) -> Result<(), DevError> {
             if target.pg_leader { "PG" } else { "PID" },
             target.pid,
             if sent { "sent" } else { "not running" },
+        ));
+    }
+    // Then everything else beneath brokkr. The recorded child is only the
+    // process brokkr published: a test binary under cargo, a rustc under a
+    // build, or a parallel lane's binaries are recorded nowhere, and a parent-
+    // death signal reaches only a direct child - so without this walk a hard
+    // kill orphaned them. Two sweeps for a child forked mid-walk; with brokkr
+    // stopped, nothing restarts them. The holder's identity was verified from
+    // this namespace above, so its pid is meaningful to our `/proc`.
+    let swept = crate::shutdown::kill_descendants(info.pid)
+        + crate::shutdown::kill_descendants(info.pid);
+    if swept > 0 {
+        output::lock_msg(&format!(
+            "SIGKILL sent to {} beneath brokkr",
+            output::count(swept, "process")
         ));
     }
     let brokkr_sent = signal_target(&holder, libc::SIGKILL);
@@ -1273,6 +1290,10 @@ fn cmd_verify(
         }
 
         // ----- nidhogg verify variants -----
+        // `batch` and `geocode` only query an already-running server - no
+        // build, no files touched - so they take no lock. `readonly` builds
+        // the server, stops and restarts it, and chmods the index, so it does
+        // (and `cargo_build` refuses to run without it).
         VerifyCommand::Batch { dataset } => {
             project::require(project, Project::Nidhogg, "verify batch")?;
             nidhogg::cmd::verify_batch(dev_config, project, project_root, &dataset)
@@ -1283,6 +1304,8 @@ fn cmd_verify(
         }
         VerifyCommand::Readonly { dataset } => {
             project::require(project, Project::Nidhogg, "verify readonly")?;
+            // Re-enters the hold when a `--commit` worktree already took it.
+            let _lock = acquire_cmd_lock(project, project_root, "verify readonly")?;
             nidhogg::cmd::verify_readonly(dev_config, project, project_root, build_root, &dataset, features)
         }
         // ----- pbfhogg verify variants -----

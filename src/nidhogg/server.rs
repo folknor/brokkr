@@ -99,10 +99,9 @@ pub fn serve(
         .stderr(log_file_err)
         .stdin(Stdio::null())
         .spawn()
-        .map_err(|e| DevError::Subprocess {
+        .map_err(|error| DevError::Spawn {
             program: binary.display().to_string(),
-            code: None,
-            stderr: e.to_string(),
+            error,
         })?;
 
     let pid = child.id();

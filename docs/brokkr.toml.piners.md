@@ -16,7 +16,9 @@ registry_dir = "corpus/registry" # pins.toml + <keyword>.toml files (default: co
 package = "piners-runner"  # cargo package
 binary  = "corpus"         # bin (built as `cargo build -p piners-runner --bin corpus`)
 # features = ["..."]       # optional
-# debug = true             # corpus defaults to debug; --debug/--release also override
+# debug = true             # parity-run default (debug if unset); --debug/--release
+                           # override. Measured runs (--hotpath/--alloc) ignore it
+                           # and default to release.
 ```
 
 - `corpus_root` - root of the piners-owned corpus tree (default `corpus`):
