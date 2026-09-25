@@ -61,6 +61,10 @@ impl std::fmt::Display for KvValue {
 // ---------------------------------------------------------------------------
 
 /// Distribution statistics from `harness.run_distribution()`.
+///
+/// The `*_ms` fields are integer milliseconds and always present - every
+/// historical row has them. They are the `us` readings rounded to nearest
+/// whenever `us` exists, so never treat the two as independent measurements.
 #[derive(Clone)]
 pub struct Distribution {
     pub samples: i64,
@@ -68,6 +72,22 @@ pub struct Distribution {
     pub p50_ms: i64,
     pub p95_ms: i64,
     pub max_ms: i64,
+    /// The same statistics in microseconds. `None` for every row recorded
+    /// before the v18->v19 schema bump: those samples were rounded to whole
+    /// milliseconds at measure time, so a nidhogg API query under half a
+    /// millisecond stored 0, and the detail cannot be reconstructed. Not
+    /// backfilled from `*_ms * 1000`, which would manufacture a precision
+    /// the row never had.
+    pub us: Option<DistributionUs>,
+}
+
+/// Microsecond distribution statistics; see [`Distribution::us`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DistributionUs {
+    pub min: i64,
+    pub p50: i64,
+    pub p95: i64,
+    pub max: i64,
 }
 
 /// A single function row from hotpath profiling.
@@ -149,6 +169,12 @@ pub struct RunRow {
     /// summary, which is a different question. `elapsed_ms` is the best of
     /// these; keeping them lets a reader see drift *within* one row.
     pub iterations: Vec<i64>,
+    /// The same walls in microseconds, index for index, when the loop
+    /// measured them. Empty when it did not; stored only when its length
+    /// matches `iterations` (a partial list would misalign the order that is
+    /// the table's whole point). Each `iterations[i]` is `iterations_us[i]`
+    /// rounded to nearest.
+    pub iterations_us: Vec<i64>,
     pub distribution: Option<Distribution>,
     pub hotpath: Option<HotpathData>,
 }
@@ -205,6 +231,10 @@ pub struct StoredRow {
     /// v15->v16 schema bump - those walls were discarded at measure time and
     /// cannot be reconstructed from `elapsed_ms`.
     pub iterations: Vec<i64>,
+    /// Per-iteration walls in microseconds, parallel to `iterations`. Empty
+    /// unless every iteration of the row carries one - rows recorded before
+    /// the v18->v19 schema bump, and loops that never measured microseconds.
+    pub iterations_us: Vec<i64>,
     pub distribution: Option<Distribution>,
     pub hotpath: Option<HotpathData>,
 }
@@ -392,6 +422,7 @@ mod tests {
                 .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
                 .collect(),
             iterations: Vec::new(),
+            iterations_us: Vec::new(),
             distribution: None,
             hotpath: None,
         }

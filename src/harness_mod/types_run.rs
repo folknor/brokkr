@@ -3,7 +3,9 @@ use std::time::{Duration, Instant};
 
 use crate::build::CargoProfile;
 use crate::config::DriveConfig;
-use crate::db::{self, Distribution, HotpathData, KvPair, KvValue, ResultsDb, RunRow};
+use crate::db::{
+    self, Distribution, DistributionUs, HotpathData, KvPair, KvValue, ResultsDb, RunRow,
+};
 use crate::env::EnvInfo;
 use crate::error::DevError;
 use crate::git::GitInfo;
@@ -53,9 +55,11 @@ pub struct BenchResult {
     /// 100-200us, which integer milliseconds flatten to nothing. Filled by
     /// the stderr-kv path (from a fractional `elapsed_ms=6.847` line) and by
     /// the paths brokkr times itself from an exact `Duration`
-    /// (`run_external`/`run_external_ok`, `run_hotpath_capture`). Closure-
-    /// timed paths (`run_internal`, `run_distribution`) leave it `None` and
-    /// `elapsed_ms` remains the only timing available.
+    /// (`run_external`/`run_external_ok`, `run_hotpath_capture`, and
+    /// `run_distribution`, whose closures hand back a `Duration` and which
+    /// records the fastest sample here). `run_internal` carries whatever its
+    /// closure returned; a closure that only had milliseconds leaves it
+    /// `None`, and `elapsed_ms` remains the only timing available.
     ///
     /// Where both exist, `elapsed_ms` is this value rounded - never treat
     /// them as independent measurements.
@@ -80,7 +84,7 @@ pub struct BenchResult {
 /// Sidecar payload collected during a benched run but not yet persisted.
 ///
 /// The kv-parsing harness path (`run_external_with_kv_raw`) hands stderr back
-/// to the caller for post-processing before `record_result` mints the run's
+/// to the caller for post-processing before `record_with_pending` mints the run's
 /// UUID. It therefore returns the sidecar data here instead of storing it
 /// eagerly, and the caller flushes it under the recorded UUID via
 /// `commit_sidecar`. Storing eagerly (the pre-fix behaviour) passed `None` for
@@ -91,6 +95,11 @@ pub struct PendingSidecar {
     runs: Vec<crate::sidecar::SidecarData>,
     best_run_idx: usize,
     info: crate::db::sidecar::RunInfo,
+    /// Per-iteration walls in microseconds, deferred for the same reason as
+    /// the sidecar payload: the row is recorded by the caller, after the
+    /// loop, via [`BenchHarness::record_with_pending`]. Kept here rather than
+    /// on `BenchResult`, which loops outside this module also build.
+    iterations_us: Vec<i64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -263,6 +272,7 @@ impl BenchHarness {
         self.mark_measure_start();
         let mut best: Option<BenchResult> = None;
         let mut walls: Vec<i64> = Vec::with_capacity(config.runs);
+        let mut walls_us: Vec<Option<i64>> = Vec::with_capacity(config.runs);
         let total = clamp_u32(config.runs);
 
         for i in 0..config.runs {
@@ -270,6 +280,7 @@ impl BenchHarness {
             self.lock.set_progress(clamp_u32(i + 1), total);
             let result = f(i)?;
             walls.push(result.elapsed_ms);
+            walls_us.push(result.elapsed_us);
             best = Some(pick_best(best, result));
         }
 
@@ -277,7 +288,7 @@ impl BenchHarness {
             best.ok_or_else(|| DevError::Config("benchmark requires at least 1 run".into()))?;
         best.iterations = walls;
 
-        self.record_result(config, &best)?;
+        self.record_measured(config, &best, &all_or_none(walls_us))?;
         Ok(best)
     }
 
@@ -306,6 +317,7 @@ impl BenchHarness {
         let mut best: Option<BenchResult> = None;
         let mut best_run_idx: usize = 0;
         let mut walls: Vec<i64> = Vec::with_capacity(config.runs);
+        let mut walls_us: Vec<Option<i64>> = Vec::with_capacity(config.runs);
         let mut sidecar_runs: Vec<crate::sidecar::SidecarData> =
             Vec::with_capacity(config.runs);
         let total = clamp_u32(config.runs);
@@ -341,6 +353,7 @@ impl BenchHarness {
             };
             sidecar_runs.push(sidecar);
             walls.push(result.elapsed_ms);
+            walls_us.push(result.elapsed_us);
             // Track the best run's index consistently with `pick_best`, which
             // only replaces on a strict improvement (keeps current on ties)
             // and compares on the same key.
@@ -361,7 +374,7 @@ impl BenchHarness {
         // the sentinel. exit_code is 0 since a failing run would have errored
         // out of the closure before reaching this point.
         let info = self.build_run_info(config, program, start_epoch, 0, Some(0));
-        let uuid = match self.record_result(config, &best) {
+        let uuid = match self.record_measured(config, &best, &all_or_none(walls_us)) {
             Ok(uuid) => uuid,
             Err(e) => {
                 // The row is lost; the trajectory need not be.
@@ -441,6 +454,7 @@ impl BenchHarness {
         let mut best_stderr: Vec<u8> = Vec::new();
         let mut last_pid: u32 = 0;
         let mut walls: Vec<i64> = Vec::with_capacity(config.runs);
+        let mut walls_us: Vec<i64> = Vec::with_capacity(config.runs);
         let mut sidecar_runs: Vec<sidecar::SidecarData> = Vec::with_capacity(config.runs);
         let prog_str = program.display().to_string();
         let total = clamp_u32(config.runs);
@@ -510,6 +524,7 @@ impl BenchHarness {
             // Recorded only past the failure checks above, so `walls` holds
             // one entry per iteration that actually completed.
             walls.push(ms);
+            walls_us.push(us);
 
             if best_us.is_none_or(|best| us < best) {
                 best_us = Some(us);
@@ -545,7 +560,7 @@ impl BenchHarness {
         };
 
         let info = self.build_run_info(config, program, start_epoch, last_pid, Some(0));
-        let uuid = match self.record_result(config, &bench_result) {
+        let uuid = match self.record_measured(config, &bench_result, &walls_us) {
             Ok(uuid) => uuid,
             Err(e) => {
                 // The row is lost; the trajectory need not be.
@@ -559,52 +574,48 @@ impl BenchHarness {
     }
 
     /// Distribution timing: collect all N samples, compute min/p50/p95/max.
+    ///
+    /// The closure hands back each sample as a `Duration`, and the whole
+    /// summary is computed in microseconds; the stored `*_ms` fields are
+    /// those rounded. Samples used to be integer milliseconds from the
+    /// closure up, so a nidhogg API query under half a millisecond recorded
+    /// 0 at every percentile. The row's `elapsed_us` is the fastest sample,
+    /// matching `elapsed_ms = min`.
     pub fn run_distribution<F>(&self, config: &BenchConfig, f: F) -> Result<BenchResult, DevError>
     where
-        F: Fn(usize) -> Result<i64, DevError>,
+        F: Fn(usize) -> Result<Duration, DevError>,
     {
         self.mark_measure_start();
-        let mut samples = Vec::with_capacity(config.runs);
+        let mut samples_us = Vec::with_capacity(config.runs);
         let total = clamp_u32(config.runs);
 
         for i in 0..config.runs {
             output::bench_msg(&format!("run {}/{}", i + 1, config.runs));
             self.lock.set_progress(clamp_u32(i + 1), total);
-            let ms = f(i)?;
-            samples.push(ms);
+            let wall = f(i)?;
+            samples_us.push(elapsed_to_us(&wall));
         }
 
-        // Snapshot execution order before sorting: the percentiles below are a
-        // sorted summary, which answers a different question than "did the
-        // walls trend up or down across the run".
-        let walls = samples.clone();
+        // Same refusal as the best-of-N loops: with no samples every
+        // percentile would read 0, which is a flattering row, not an error.
+        let (dist, min_us) = summarize_distribution(&samples_us)
+            .ok_or_else(|| DevError::Config("benchmark requires at least 1 run".into()))?;
 
-        samples.sort_unstable();
-
-        let min = percentile(&samples, 0);
-        let p50 = percentile(&samples, 50);
-        let p95 = percentile(&samples, 95);
-        let max = percentile(&samples, 100);
-
-        #[allow(clippy::cast_possible_wrap)]
-        let dist = Distribution {
-            samples: samples.len() as i64,
-            min_ms: min,
-            p50_ms: p50,
-            p95_ms: p95,
-            max_ms: max,
-        };
+        // Execution order, unsorted - `summarize_distribution` sorted its own
+        // copy. The percentiles are a sorted summary, which answers a
+        // different question than "did the walls trend up or down".
+        let walls: Vec<i64> = samples_us.iter().copied().map(us_to_ms).collect();
 
         let result = BenchResult {
-            elapsed_ms: min,
-            elapsed_us: None,
+            elapsed_ms: dist.min_ms,
+            elapsed_us: Some(min_us),
             kv: Vec::new(),
             iterations: walls,
             distribution: Some(dist),
             hotpath: None,
         };
 
-        self.record_result(config, &result)?;
+        self.record_measured(config, &result, &samples_us)?;
         Ok(result)
     }
 
@@ -619,7 +630,7 @@ impl BenchHarness {
         cwd: &Path,
     ) -> Result<BenchResult, DevError> {
         let (best, _stderr, pending) = self.run_external_with_kv_raw(config, program, args, cwd)?;
-        let uuid = match self.record_result(config, &best) {
+        let uuid = match self.record_with_pending(config, &best, &pending) {
             Ok(uuid) => uuid,
             Err(e) => {
                 // The row is lost; the trajectory need not be.
@@ -633,9 +644,10 @@ impl BenchHarness {
 
     /// Like `run_external_with_kv` but does NOT record - returns the best
     /// result, the raw stderr from the best run, and the collected sidecar
-    /// payload. The caller must call `record_result` (after any stderr
+    /// payload. The caller must call `record_with_pending` (after any stderr
     /// post-processing) and then `commit_sidecar` with the resulting UUID, so
-    /// the sidecar rows land under the recorded row rather than `dirty`.
+    /// the sidecar rows land under the recorded row rather than `dirty` and
+    /// the per-iteration microseconds reach `run_iterations`.
     pub fn run_external_with_kv_raw(
         &self,
         config: &BenchConfig,
@@ -656,6 +668,7 @@ impl BenchHarness {
         let mut best_run_idx: usize = 0;
         let mut last_pid: u32 = 0;
         let mut walls: Vec<i64> = Vec::with_capacity(config.runs);
+        let mut walls_us: Vec<Option<i64>> = Vec::with_capacity(config.runs);
         let mut sidecar_runs: Vec<sidecar::SidecarData> = Vec::with_capacity(config.runs);
         let prog_str = program.display().to_string();
         let total = clamp_u32(config.runs);
@@ -707,12 +720,19 @@ impl BenchHarness {
             }
 
             let result = parse_kv_stderr(&captured.stderr)?;
-            // Self-reported elapsed_ms from stderr, matching what this path
+            // Self-reported elapsed from stderr, matching what this path
             // stores as the run's elapsed - not the external wall clock.
+            // `parse_kv_stderr` always yields microseconds (a fractional
+            // `elapsed_ms=` line keeps them; a whole one is exact at x1000).
             walls.push(result.elapsed_ms);
+            walls_us.push(result.elapsed_us);
+            // Same key and strict-improvement rule as `pick_best`, so the
+            // stderr and sidecar run kept are the winner's. Comparing rounded
+            // milliseconds here could pick a different run than `pick_best`
+            // on a sub-millisecond tie.
             let is_new_best = best
                 .as_ref()
-                .is_none_or(|b| result.elapsed_ms < b.elapsed_ms);
+                .is_none_or(|b| bench_ordering_key(&result) < bench_ordering_key(b));
             if is_new_best {
                 best_stderr = captured.stderr;
                 best_run_idx = i;
@@ -731,6 +751,7 @@ impl BenchHarness {
             runs: sidecar_runs,
             best_run_idx,
             info,
+            iterations_us: all_or_none(walls_us),
         };
 
         Ok((best, best_stderr, pending))
@@ -755,9 +776,26 @@ impl BenchHarness {
         config: &BenchConfig,
         result: &BenchResult,
     ) -> Result<Option<String>, DevError> {
+        self.record_measured(config, result, &[])
+    }
+
+    /// [`record_result`](Self::record_result) plus the per-iteration walls in
+    /// microseconds, for the harness loops that measured them.
+    ///
+    /// A separate argument rather than a `BenchResult` field because
+    /// `BenchResult` is built by loops outside this module too, and a field
+    /// every one of them must fill would couple them to a detail only these
+    /// loops have. Pass `&[]` when unknown; a list whose length differs from
+    /// `result.iterations` is not stored (see `RunRow::iterations_us`).
+    fn record_measured(
+        &self,
+        config: &BenchConfig,
+        result: &BenchResult,
+        iterations_us: &[i64],
+    ) -> Result<Option<String>, DevError> {
         let mode = self.effective_mode(config);
         if self.git.is_clean {
-            let row = self.build_row(config, result);
+            let row = self.build_row(config, result, iterations_us);
             let (uuid, short) = match self.db.insert(&row) {
                 Ok(pair) => pair,
                 Err(e) => {
@@ -815,8 +853,21 @@ impl BenchHarness {
         }
     }
 
+    /// [`record_result`](Self::record_result) for a `run_external_with_kv_raw`
+    /// result: also files the per-iteration microsecond walls the loop
+    /// deferred in `pending`. `record_result` alone would store milliseconds
+    /// only for those iterations.
+    pub fn record_with_pending(
+        &self,
+        config: &BenchConfig,
+        result: &BenchResult,
+        pending: &PendingSidecar,
+    ) -> Result<Option<String>, DevError> {
+        self.record_measured(config, result, &pending.iterations_us)
+    }
+
     /// Persist a deferred sidecar payload under the recorded UUID. Pass the
-    /// `Option<String>` returned by `record_result` (as a `&str`); `None`
+    /// `Option<String>` returned by `record_with_pending` (as a `&str`); `None`
     /// (dirty tree, so no row was inserted) routes the rows to the `dirty`
     /// alias, matching `store_sidecar`'s own fallback.
     pub fn commit_sidecar(
@@ -893,7 +944,12 @@ impl BenchHarness {
     }
 
     /// Build a `RunRow` from harness state, config, and result.
-    fn build_row(&self, config: &BenchConfig, result: &BenchResult) -> RunRow {
+    fn build_row(
+        &self,
+        config: &BenchConfig,
+        result: &BenchResult,
+        iterations_us: &[i64],
+    ) -> RunRow {
         let mut kv = config.metadata.clone();
         // Sources are appended in increasing precedence - metadata, env
         // capture, prev.*, then the run's own counters - and the insert
@@ -955,6 +1011,7 @@ impl BenchHarness {
             stop_marker: self.stop_marker.clone(),
             kv,
             iterations: result.iterations.clone(),
+            iterations_us: iterations_us.to_vec(),
             distribution: result.distribution.clone(),
             hotpath: result.hotpath.clone(),
         }

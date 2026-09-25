@@ -154,6 +154,94 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // run_distribution's microsecond summary
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn distribution_keeps_sub_millisecond_samples() {
+        // The motivating bug: nidhogg API queries under half a millisecond
+        // recorded 0 at every percentile, because samples were rounded to
+        // whole milliseconds before the summary was taken.
+        let (dist, min_us) = summarize_distribution(&[312, 450, 298, 305]).unwrap();
+        assert_eq!(min_us, 298);
+        assert_eq!(dist.samples, 4);
+        assert_eq!(
+            dist.us,
+            Some(DistributionUs {
+                min: 298,
+                // Sorted [298, 305, 312, 450]; pos 1.5 -> 308.5, rounded.
+                p50: 309,
+                // pos 2.85 -> 312 + 0.85 * 138 = 429.3.
+                p95: 429,
+                max: 450,
+            })
+        );
+        // The millisecond columns are the microseconds rounded - still 0 here,
+        // which is exactly why they cannot be the only record.
+        assert_eq!((dist.min_ms, dist.p50_ms, dist.p95_ms, dist.max_ms), (0, 0, 0, 0));
+    }
+
+    #[test]
+    fn distribution_ms_fields_round_to_nearest() {
+        let (dist, _) = summarize_distribution(&[1_499, 1_500, 2_600]).unwrap();
+        assert_eq!(dist.min_ms, 1);
+        assert_eq!(dist.p50_ms, 2);
+        assert_eq!(dist.max_ms, 3);
+    }
+
+    #[test]
+    fn distribution_of_nothing_is_refused() {
+        assert!(summarize_distribution(&[]).is_none());
+    }
+
+    #[test]
+    fn result_line_prints_fractional_distribution() {
+        let config = BenchConfig {
+            command: "api-bbox-small".into(),
+            mode: None,
+            input_file: None,
+            input_mb: None,
+            cargo_features: None,
+            cargo_profile: CargoProfile::Release,
+            runs: 3,
+            cli_args: None,
+            brokkr_args: None,
+            metadata: Vec::new(),
+        };
+        let (dist, min_us) = summarize_distribution(&[312, 298, 450]).unwrap();
+        let result = BenchResult {
+            elapsed_ms: dist.min_ms,
+            elapsed_us: Some(min_us),
+            kv: Vec::new(),
+            iterations: vec![0, 0, 0],
+            distribution: Some(dist),
+            hotpath: None,
+        };
+        let git = GitInfo {
+            commit: "abc".into(),
+            subject: String::new(),
+            is_clean: true,
+        };
+        let line = format_result_line(&config, Some("bench"), &result, &git);
+        assert!(line.contains("elapsed_ms=0.298"), "{line}");
+        assert!(line.contains("min_ms=0.298"), "{line}");
+        assert!(line.contains("max_ms=0.450"), "{line}");
+    }
+
+    #[test]
+    fn iteration_microseconds_are_all_or_none() {
+        assert_eq!(all_or_none(vec![Some(1), Some(2)]), vec![1, 2]);
+        assert!(all_or_none(vec![Some(1), None]).is_empty());
+        assert!(all_or_none(Vec::new()).is_empty());
+    }
+
+    #[test]
+    fn us_to_ms_saturates_instead_of_overflowing() {
+        // `elapsed_to_us` saturates at i64::MAX; rounding that must not panic.
+        assert_eq!(us_to_ms(i64::MAX), i64::MAX / 1000);
+    }
+
+    // -----------------------------------------------------------------------
     // percentile
     // -----------------------------------------------------------------------
 

@@ -31,9 +31,11 @@
 //! SIGKILLs the recorded child PID and every identity-checked descendant of
 //! brokkr ([`kill_descendants`], so a test binary under cargo is not
 //! orphaned), then the brokkr PID. Scratch is left in whatever state the tool
-//! left it (follow up with `brokkr clean`). A test runner's direct child also
-//! carries a parent-death signal ([`die_with_parent`]), the backstop for a
-//! brokkr SIGKILLed by anything else (the OOM killer).
+//! left it (follow up with `brokkr clean`). Against a brokkr SIGKILLed by
+//! anything else (the OOM killer) there are two backstops: a test runner's
+//! direct child carries a parent-death signal ([`die_with_parent`]), and
+//! everything below it carries the run's token and is reaped at the next
+//! fresh hold (`crate::test_orphans`).
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -260,8 +262,10 @@ impl Drop for SigtermGuard {
 // What this cannot cover is brokkr being SIGKILLed: no handler runs.
 // `brokkr kill --hard` walks brokkr's process tree itself
 // ([`kill_descendants`]) before killing brokkr, which reaches a test binary
-// under cargo; for anything else (the OOM killer) [`die_with_parent`] is the
-// backstop for the direct child only.
+// under cargo. For anything else (the OOM killer) [`die_with_parent`] takes
+// the direct child down at once, and what sits below it - the test binary
+// under cargo - is reaped by the next fresh hold through the token every
+// test process carries (`crate::test_orphans`).
 // ---------------------------------------------------------------------------
 
 /// Slots for concurrently registered groups. A parallel sweep registers one per
@@ -411,7 +415,8 @@ impl Drop for GroupReaper {
 /// Have the kernel SIGKILL the child if the thread that spawned it dies -
 /// the backstop for a brokkr that is itself SIGKILLed, where no signal handler
 /// runs. It covers the direct child only (the test binary on the parallel
-/// lane, cargo on the others); grandchildren are the [`GroupReaper`]'s job.
+/// lane, cargo on the others); grandchildren are the [`GroupReaper`]'s job
+/// while brokkr lives, and `crate::test_orphans`' once it has died unannounced.
 ///
 /// The parent is the spawning THREAD, so the caller must wait on the child
 /// from the thread that spawned it - true of every test runner, which spawns

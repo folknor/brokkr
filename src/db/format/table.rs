@@ -230,7 +230,7 @@ fn compute_table_widths(rows: &[StoredRow], matcher: &DatasetMatcher) -> TableWi
         if row.mode.len() > w.mode {
             w.mode = row.mode.len();
         }
-        let elapsed_str = format_elapsed(row.elapsed_ms);
+        let elapsed_str = format_wall(row.elapsed_ms, row.elapsed_us);
         if elapsed_str.len() > w.elapsed {
             w.elapsed = elapsed_str.len();
         }
@@ -289,7 +289,7 @@ fn append_table_row(
 ) {
     use std::fmt::Write;
     let uuid_short = short_uuid(&row.uuid);
-    let elapsed_str = format_elapsed(row.elapsed_ms);
+    let elapsed_str = format_wall(row.elapsed_ms, row.elapsed_us);
     let input_str = matcher.short_name(&row.input_file);
     let args_str = format_args_summary(row);
     write!(
@@ -320,8 +320,26 @@ fn append_table_row(
     }
 }
 
-pub(super) fn format_elapsed(ms: i64) -> String {
-    format!("{ms} ms")
+/// Render a wall in milliseconds, from the microsecond reading when the row
+/// has one (`6.847 ms`), else from the integer milliseconds every row has.
+///
+/// The one rendering every `brokkr results` view uses, so a table row, the
+/// single-result block and a `--compare` column never disagree about the same
+/// run. Preferring microseconds is what keeps a sub-millisecond run - a
+/// nidhogg API query, a sluggrs region - from printing as `0 ms`.
+pub(super) fn format_wall(ms: i64, us: Option<i64>) -> String {
+    match us {
+        Some(us) => format!("{} ms", format_us_as_ms(us)),
+        None => format!("{ms} ms"),
+    }
+}
+
+/// Microseconds as a bare millisecond figure with three decimals, e.g.
+/// `312` -> `0.312`. No unit, for lists that carry one unit at the end.
+pub(super) fn format_us_as_ms(us: i64) -> String {
+    #[allow(clippy::cast_precision_loss)]
+    let ms = us as f64 / 1000.0;
+    format!("{ms:.3}")
 }
 
 /// Format an input filename with size for compare tables
@@ -551,23 +569,32 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // format_elapsed
+    // format_wall
     // -----------------------------------------------------------------------
 
     #[test]
-    fn format_elapsed_positive() {
-        assert_eq!(format_elapsed(1234), "1234 ms");
+    fn format_wall_positive() {
+        assert_eq!(format_wall(1234, None), "1234 ms");
     }
 
     #[test]
-    fn format_elapsed_zero() {
-        assert_eq!(format_elapsed(0), "0 ms");
+    fn format_wall_zero() {
+        assert_eq!(format_wall(0, None), "0 ms");
     }
 
     #[test]
-    fn format_elapsed_negative() {
+    fn format_wall_negative() {
         // Shouldn't happen in practice, but verify it doesn't panic.
-        assert_eq!(format_elapsed(-5), "-5 ms");
+        assert_eq!(format_wall(-5, None), "-5 ms");
+    }
+
+    #[test]
+    fn format_wall_prefers_microseconds() {
+        // The motivating case: a 312us API query stored `elapsed_ms = 0` and
+        // printed as `0 ms`.
+        assert_eq!(format_wall(0, Some(312)), "0.312 ms");
+        assert_eq!(format_wall(7, Some(6847)), "6.847 ms");
+        assert_eq!(format_us_as_ms(1_500_000), "1500.000");
     }
 
     // -----------------------------------------------------------------------

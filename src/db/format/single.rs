@@ -1,6 +1,6 @@
 use super::super::types::short_uuid;
-use super::super::{KvPair, StoredRow};
-use super::table::format_elapsed;
+use super::super::{Distribution, KvPair, StoredRow};
+use super::table::{format_us_as_ms, format_wall};
 
 /// Format a single result row as a standalone labelled block.
 ///
@@ -134,12 +134,20 @@ fn identity_fields(row: &StoredRow) -> Vec<(String, String)> {
 /// are opposite diagnoses.
 ///
 /// A single iteration adds nothing over `elapsed_ms`, so it stays quiet.
+///
+/// The walls are microsecond-precise when every one has a microsecond reading
+/// (`0.312 / 0.298 ms`); otherwise the integer milliseconds, which is all a
+/// pre-v19 row or a loop that never measured microseconds has.
 fn format_elapsed_with_iterations(row: &StoredRow) -> String {
-    let best = format_elapsed(row.elapsed_ms);
+    let best = format_wall(row.elapsed_ms, row.elapsed_us);
     if row.iterations.len() < 2 {
         return best;
     }
-    let walls: Vec<String> = row.iterations.iter().map(i64::to_string).collect();
+    let walls: Vec<String> = if row.iterations_us.len() == row.iterations.len() {
+        row.iterations_us.iter().copied().map(format_us_as_ms).collect()
+    } else {
+        row.iterations.iter().map(i64::to_string).collect()
+    };
     format!(
         "{best} (best of {}: {} ms)",
         row.iterations.len(),
@@ -216,11 +224,7 @@ fn invocation_fields(row: &StoredRow) -> Vec<(String, String)> {
 fn extras_fields(row: &StoredRow) -> Vec<(String, String)> {
     let mut fields: Vec<(String, String)> = Vec::new();
     if let Some(ref dist) = row.distribution {
-        fields.push(("samples".into(), dist.samples.to_string()));
-        fields.push(("min".into(), format!("{} ms", dist.min_ms)));
-        fields.push(("p50".into(), format!("{} ms", dist.p50_ms)));
-        fields.push(("p95".into(), format!("{} ms", dist.p95_ms)));
-        fields.push(("max".into(), format!("{} ms", dist.max_ms)));
+        fields.extend(distribution_fields(dist));
     }
     let mut meta_kv: Vec<&KvPair> = row
         .kv
@@ -247,6 +251,20 @@ fn extras_fields(row: &StoredRow) -> Vec<(String, String)> {
         fields.push((label, kv.value.to_string()));
     }
     fields
+}
+
+/// The `samples`/`min`/`p50`/`p95`/`max` fields of a distribution, each from
+/// its microsecond reading when the row has one. Shared with the details
+/// block so both views render the same run identically.
+pub(super) fn distribution_fields(dist: &Distribution) -> Vec<(String, String)> {
+    let us = dist.us;
+    vec![
+        ("samples".into(), dist.samples.to_string()),
+        ("min".into(), format_wall(dist.min_ms, us.map(|u| u.min))),
+        ("p50".into(), format_wall(dist.p50_ms, us.map(|u| u.p50))),
+        ("p95".into(), format_wall(dist.p95_ms, us.map(|u| u.p95))),
+        ("max".into(), format_wall(dist.max_ms, us.map(|u| u.max))),
+    ]
 }
 
 /// Pretty-print a cli_args string as multi-line for the single-result

@@ -356,8 +356,14 @@ fn host_drain() -> Result<Option<OwnedFd>, DevError> {
 /// this command's cargo needs. A stale enrolled guard fails in shapes that read
 /// as anything but staleness (a refused probe even poisons cargo's rustc-info
 /// cache), so say it plainly, once, while a build may be about to run.
+///
+/// The orphan reap is the stray reap's complement for what a name cannot
+/// match: test processes left behind by a brokkr that died by SIGKILL
+/// (`crate::test_orphans`). Its liveness proof is a per-process flock, not
+/// this hold, so it is only placed here, not dependent on it.
 fn host_after_fresh_hold() {
     crate::stray::reap_after_lock();
+    crate::test_orphans::reap_after_lock();
     crate::guard::warn_if_guard_stale();
 }
 

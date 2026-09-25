@@ -20,11 +20,16 @@ use crate::error::DevError;
 /// deliberately not `run_distribution`: min/p50/p95/max sorts the samples and
 /// throws the ordering - the entire signal - away. `run_idx` is the 0-based
 /// iteration number as executed.
+///
+/// `elapsed_us` is the same wall in microseconds, NULL unless the loop
+/// measured it (added by v18->v19; `migrate_v18_to_v19` adds it to tables
+/// created before then). `elapsed_ms` is that rounded where both exist.
 pub(super) const RUN_ITERATIONS_DDL: &str = "\
 CREATE TABLE IF NOT EXISTS run_iterations (
     run_id      INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
     run_idx     INTEGER NOT NULL,
     elapsed_ms  INTEGER NOT NULL,
+    elapsed_us  INTEGER,
     PRIMARY KEY (run_id, run_idx)
 );
 ";
@@ -43,7 +48,8 @@ CREATE TABLE IF NOT EXISTS runs (
     elapsed_ms      INTEGER NOT NULL,
     -- Exact wall in microseconds, NULL unless the harness path knew it (the
     -- stderr-kv path, from a fractional `elapsed_ms=` line, or a path brokkr
-    -- timed itself from an exact Duration). elapsed_ms stays
+    -- timed itself from an exact Duration, including run_distribution, where
+    -- it is the fastest sample). elapsed_ms stays
     -- the required, integer, always-present column every query and historical
     -- row depends on; this is the finer reading beside it, for workloads whose
     -- interesting deltas are smaller than a millisecond. Where both exist,
@@ -76,6 +82,10 @@ CREATE INDEX IF NOT EXISTS idx_runs_project ON runs(project);
 -- without this line only databases old enough to have migrated had it.
 CREATE INDEX IF NOT EXISTS idx_runs_uuid ON runs(uuid);
 
+-- The *_us columns carry the same statistics in microseconds, NULL for rows
+-- recorded before v19 (whose samples were rounded to whole milliseconds at
+-- measure time, so a sub-0.5 ms query stored 0). Where both exist, *_ms is
+-- the *_us value rounded to nearest.
 CREATE TABLE IF NOT EXISTS run_distribution (
     run_id      INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
     samples     INTEGER NOT NULL,
@@ -83,6 +93,10 @@ CREATE TABLE IF NOT EXISTS run_distribution (
     p50_ms      INTEGER NOT NULL,
     p95_ms      INTEGER NOT NULL,
     max_ms      INTEGER NOT NULL,
+    min_us      INTEGER,
+    p50_us      INTEGER,
+    p95_us      INTEGER,
+    max_us      INTEGER,
     PRIMARY KEY (run_id)
 );
 

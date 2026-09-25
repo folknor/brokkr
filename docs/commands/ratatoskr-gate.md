@@ -30,9 +30,19 @@ CREATE TABLE gate_runs (
   exit_code     INTEGER NOT NULL,
   success       INTEGER NOT NULL,   -- 0/1
   sidecar       TEXT NOT NULL,      -- JSON blob
-  meta          TEXT NOT NULL       -- JSON blob from summary.json ingestion
+  meta          TEXT NOT NULL,      -- JSON blob from summary.json ingestion
+  features      TEXT                -- harness build's cargo features; NULL = pre-v2 row
 );
 ```
+
+`features` is the `[ratatoskr.harness] features` list the harness was
+built with, in canonical form: every name (entries split on `,` and
+whitespace, as cargo accepts), sorted, deduplicated, joined with `,`, so
+list order and shape never read as a different build. The empty string
+is a default-features build. Schema v2 added the column; the v1 -> v2
+migration leaves existing rows NULL rather than backfilling, because the
+features an older row was built with are unknowable and a guessed value
+would claim an identity it may not have.
 
 Index on `(gate_name, hostname, created_at)` for the lookup paths below.
 Normalized metric tables can wait until there is a real query need.
@@ -109,10 +119,16 @@ scope for v1.
    that silently blesses whatever regression is in the tree and leaves
    the gate permanently blind to it. Re-record only from a tree
    independently confirmed good.
-4. Validate the looked-up row's `gate_name`, `script`, `fixture`, and
-   `profile` match the current invocation. Mismatch is a hard error - a
-   `--debug` run against a release baseline (or the reverse) would make
-   every timing rule meaningless.
+4. Validate the looked-up row's `gate_name`, `script`, `fixture`,
+   `profile` and `features` match the current invocation. Mismatch is a
+   hard error - a `--debug` run against a release baseline (or the
+   reverse) would make every timing rule meaningless, and a baseline built
+   with a different feature set measured a different binary. A baseline
+   whose `features` is NULL (recorded before the column existed) is
+   compared anyway, with a warning that the features identity went
+   unchecked: refusing it would force a re-record of every legacy pin,
+   which is the blind rebase the `--as-baseline` warnings exist to
+   prevent. Repin from a tree confirmed good to make the check apply.
 
 ## Bisecting with `--commit`
 

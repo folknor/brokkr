@@ -417,10 +417,13 @@ group before anything else: under `check`'s and `brokkr test`'s
 interrupted; outside a guard it re-raises the signal and brokkr dies as before,
 taking its tests with it. A SIGKILLed brokkr runs no handler. `brokkr kill
 --hard` therefore stops brokkr and SIGKILLs every process beneath it itself,
-which reaches a test binary under cargo; against any other SIGKILL (the OOM
+which reaches a test binary under cargo. Against any other SIGKILL (the OOM
 killer) the runners' direct child carries a parent-death SIGKILL, which
-reaches the test binary on the parallel lane but only cargo on the others. The
-nextest engine handles SIGINT/SIGTERM itself while it runs.
+reaches the test binary on the parallel lane but only cargo on the others;
+what survives below cargo - the test binary, a doctest, anything a test
+spawned - is killed by the orphan reap at the next brokkr command that takes
+the lock (see "Strays"). The nextest engine handles SIGINT/SIGTERM itself
+while it runs, and its test processes are covered by the orphan reap too.
 
 ### What the cap can and cannot prove
 
@@ -588,6 +591,47 @@ blocked. That is why the drain has its own reap on stall (see below).
 Works with no `brokkr.toml`. A legitimate run that needs
 longer is a run whose sweeps want splitting, not a run that wants a longer
 rope.
+
+### Orphaned test processes
+
+The stray reap matches by name, and a test binary is named after its crate. So
+a second reap runs beside it at every fresh hold (`src/test_orphans.rs`) for the
+one shape a name cannot find: test processes left behind by a brokkr that died
+without running a handler - SIGKILLed by the OOM killer, say. The runners'
+parent-death signal takes their direct child with brokkr, but on the serial
+lanes that child is cargo, and the test binary beneath it (or a doctest under
+rustdoc, or anything a test spawned) is reparented and keeps running.
+
+Every process a test runner starts - libtest lanes and nextest lane alike -
+carries `BROKKR_TEST_RUN=<token>`, one random token per brokkr process, and
+inheritance carries it to everything below. The same process holds an
+exclusive flock on `~/.brokkr/test-runs/<token>.lock` for its whole life. The
+flock is the liveness proof: the kernel drops it however the process dies, and
+it reads the same from every PID namespace sharing the filesystem, where a
+recorded pid would mean something else. The reap takes each file's flock it
+can get - a dead owner's - SIGKILLs every process whose `/proc/<pid>/environ`
+carries that token, newest first (a child starts after its parent, so that is
+leaves first), each checked against its starttime, and deletes the file once a
+rescan finds no carrier left. A file whose carriers survive stays for the next
+reap. A brokkr that exits normally leaves its file too; the next reap finds no
+carrier and deletes it, and a process a test leaked past a clean exit goes the
+same way as one left by a crash. The reap prints one line when it kills
+anything, e.g. `SIGKILL sent to 2 orphaned test processes (my_crate-3f2a, sh)
+that outlived the brokkr run that started them`.
+
+Every failure is on the side of leaving processes alone: an unreadable
+directory, a missing file, a flock held by anyone, an environment that cannot be
+read (another user's process, or a test process that made itself
+non-dumpable - which the reap therefore misses rather than kills). The reaping
+brokkr exempts itself, its ancestors
+and its descendants whatever token they carry - the mark is inherited, so a
+brokkr started from inside a test carries the outer run's token, as does every
+non-test child it starts. Killing is after the fact, not at the moment brokkr
+dies: an orphan runs until the next locked brokkr command, which is also when
+the stray reap would clear the rustc and rustdoc left under the dead cargo.
+`brokkr strays` does not list orphans; any locked brokkr command reaps them.
+Unit tests never register a token or run the host reap; the mechanism is
+exercised against a scratch directory and a child the test owns.
 
 ## The rustc guard
 

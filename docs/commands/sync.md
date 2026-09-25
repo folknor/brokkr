@@ -199,8 +199,14 @@ profile actually built (`dev` under `[ratatoskr.harness] debug = true` or
 `--debug`), the configured features, the `capture_env` snapshot, sidecar
 RunInfo, and a measurement-start stamp so `prev.gap_seconds` excludes the
 run's own duration. A failed, hung or interrupted run keeps its collected
-sidecar data under the `dirty` alias. `--force` allows recording on a dirty
-git tree (rows land under the `dirty` alias).
+sidecar data under the `dirty` alias - including an iteration whose child
+succeeded but whose post-processing (the per-iteration log write, or reading
+`summary.json`) then failed: each iteration's data joins the run's list the
+moment its child is reaped, and the dirty record carries the child's real
+exit status. `--force` allows recording on a dirty git tree (rows land under
+the `dirty` alias). A gated run also records the harness build's features
+in `gate.db`, where the gate requires them to match the baseline's (see
+`docs/commands/ratatoskr-gate.md`).
 
 Each iteration is bounded by the script's frontmatter `ceiling:` (or
 discover's default), the same watchdog the unmeasured run uses: an iteration
@@ -242,25 +248,20 @@ through `child_pid` (cleared between iterations so PID-recycling can't
 trip `--hard`), so `brokkr lock` shows both and `brokkr kill --hard`
 SIGKILLs every entry.
 
-Cooperative `brokkr kill` (SIGTERM) is covered in two layers, because
-`SigtermGuard`s do not nest (an inner install clears a pending request, and
-its drop restores the default action). Each measured iteration runs under
-the sidecar's own guard. Every other phase - cargo build, sæhrimnir spawn
-and readiness wait, the gap between iterations, mock teardown, recording
-and the gate hook - runs under a *phase* guard that steps aside before each
-harness spawn and is re-taken when the sidecar returns. Either way the
-request ends the same: the current child is stopped, sæhrimnir is torn
-down through `MockServer::shutdown`, and brokkr exits with
-`DevError::Interrupted`. A request that lands after the last iteration
-still surfaces as `Interrupted` once the run has recorded, so a `--gate
-all` sweep does not start its next gate.
+Cooperative `brokkr kill` (SIGTERM) is covered by one *phase* guard held
+for the whole bench path - cargo build, sæhrimnir spawn and readiness
+wait, every measured iteration and the gaps between them, mock teardown,
+recording and the gate hook. `SigtermGuard`s nest, so the sidecar's own
+guard around each iteration is an inner one: it neither clears a request
+that is already pending nor uncovers the window when it drops. A request
+already pending before an iteration spawns surfaces as `Interrupted`
+instead of starting a run. Either way the request ends the same: the
+current child is stopped, sæhrimnir is torn down through
+`MockServer::shutdown`, and brokkr exits with `DevError::Interrupted`. A
+request that lands after the last iteration still surfaces as
+`Interrupted` once the run has recorded, so a `--gate all` sweep does not
+start its next gate.
 
-Two gaps remain, each a few syscalls wide: the harness fork/exec between
-the phase guard stepping aside and the sidecar installing its own (SIGTERM
-there takes the default action, and sæhrimnir - in brokkr's process group,
-but not signalled by a PID-targeted `brokkr kill` - is orphaned), and a
-request landing between the phase guard's pending-check and its drop (the
-drop clears it). A refcounted guard would close both. The bench path's
-spawns stay in brokkr's foreground process group for the same reason: the
-guard is not held continuously, so terminal Ctrl-C has to reach them
-directly.
+The bench path's pre-loop spawns (cargo build, sæhrimnir) stay in brokkr's
+foreground process group, so terminal Ctrl-C reaches them directly; the
+measured harness iterations get their own group under the sidecar.

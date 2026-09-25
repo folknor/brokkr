@@ -25,13 +25,10 @@ fn format_result_line(
     // Print the exact figure when the target reported one - rounding a 6.847
     // ms region to `elapsed_ms=7` on the console would hide precisely the
     // signal a sub-millisecond workload is being measured for.
-    match result.elapsed_us {
-        Some(us) => {
-            #[allow(clippy::cast_precision_loss)]
-            parts.push(format!("elapsed_ms={:.3}", us as f64 / 1000.0));
-        }
-        None => parts.push(format!("elapsed_ms={}", result.elapsed_ms)),
-    }
+    parts.push(format!(
+        "elapsed_ms={}",
+        ms_value(result.elapsed_ms, result.elapsed_us)
+    ));
     parts.push(format!("commit={}", git.commit));
 
     if let Some(ref input) = config.input_file {
@@ -40,12 +37,15 @@ fn format_result_line(
 
     append_kv_fields(&mut parts, &result.kv);
 
-    // Compute I/O throughput when input size and elapsed time are known.
+    // Compute I/O throughput when input size and elapsed time are known -
+    // from the microsecond wall when there is one, so a run that rounds to
+    // 0 ms still gets a figure instead of silently skipping the line.
+    let wall_us = bench_ordering_key(result);
     if let Some(input_mb) = config.input_mb
-        && result.elapsed_ms > 0
+        && wall_us > 0
     {
         #[allow(clippy::cast_precision_loss)]
-        let secs = result.elapsed_ms as f64 / 1000.0;
+        let secs = wall_us as f64 / 1_000_000.0;
         let read_mbs = input_mb / secs;
         parts.push(format!("read_mbs={read_mbs:.1}"));
         if let Some(output_bytes) = find_kv_int(&result.kv, "output_bytes") {
@@ -57,14 +57,28 @@ fn format_result_line(
     }
 
     if let Some(ref dist) = result.distribution {
+        let us = dist.us;
         parts.push(format!("samples={}", dist.samples));
-        parts.push(format!("min_ms={}", dist.min_ms));
-        parts.push(format!("p50_ms={}", dist.p50_ms));
-        parts.push(format!("p95_ms={}", dist.p95_ms));
-        parts.push(format!("max_ms={}", dist.max_ms));
+        parts.push(format!("min_ms={}", ms_value(dist.min_ms, us.map(|u| u.min))));
+        parts.push(format!("p50_ms={}", ms_value(dist.p50_ms, us.map(|u| u.p50))));
+        parts.push(format!("p95_ms={}", ms_value(dist.p95_ms, us.map(|u| u.p95))));
+        parts.push(format!("max_ms={}", ms_value(dist.max_ms, us.map(|u| u.max))));
     }
 
     parts.join("  ")
+}
+
+/// A millisecond value for a `[result]` field: three decimals from the
+/// microsecond reading when there is one (`0.312`), else the integer.
+fn ms_value(ms: i64, us: Option<i64>) -> String {
+    match us {
+        Some(us) => {
+            #[allow(clippy::cast_precision_loss)]
+            let exact = us as f64 / 1000.0;
+            format!("{exact:.3}")
+        }
+        None => ms.to_string(),
+    }
 }
 
 /// Emit a `[result]` line (respects quiet mode).
@@ -407,6 +421,36 @@ fn percentile(sorted: &[i64], pct: usize) -> i64 {
     }
 }
 
+/// Summarise distribution samples, given in microseconds in any order, as
+/// min/p50/p95/max. Returns the summary and the fastest sample, or `None`
+/// when there are no samples.
+///
+/// The percentiles are taken over the microseconds and each `*_ms` field is
+/// its `*_us` counterpart rounded to nearest (`us_to_ms`), so the two
+/// columns of one row can never disagree by more than the rounding.
+fn summarize_distribution(samples_us: &[i64]) -> Option<(Distribution, i64)> {
+    if samples_us.is_empty() {
+        return None;
+    }
+    let mut sorted = samples_us.to_vec();
+    sorted.sort_unstable();
+    let us = DistributionUs {
+        min: percentile(&sorted, 0),
+        p50: percentile(&sorted, 50),
+        p95: percentile(&sorted, 95),
+        max: percentile(&sorted, 100),
+    };
+    let dist = Distribution {
+        samples: i64::try_from(sorted.len()).unwrap_or(i64::MAX),
+        min_ms: us_to_ms(us.min),
+        p50_ms: us_to_ms(us.p50),
+        p95_ms: us_to_ms(us.p95),
+        max_ms: us_to_ms(us.max),
+        us: Some(us),
+    };
+    Some((dist, us.min))
+}
+
 /// Pick the faster `BenchResult`.
 ///
 /// Compares microseconds when both sides have them - on a single-digit
@@ -466,7 +510,21 @@ pub(crate) fn parse_kv_lines(stderr: &[u8]) -> (Option<i64>, Vec<KvPair>) {
 /// by a whole millisecond in the direction of "faster than it was" is the
 /// one error worth avoiding.
 fn us_to_ms(us: i64) -> i64 {
-    (us + 500) / 1000
+    // Saturating: `elapsed_to_us` saturates at `i64::MAX`, and the plain
+    // addition would then overflow.
+    us.saturating_add(500) / 1000
+}
+
+/// Per-iteration microsecond walls, kept only when every iteration had one.
+///
+/// A list with gaps cannot stay index-aligned with the millisecond walls, and
+/// the alignment - execution order - is the only reason the list exists, so a
+/// single missing reading drops the whole list rather than part of it.
+fn all_or_none(walls_us: Vec<Option<i64>>) -> Vec<i64> {
+    walls_us
+        .into_iter()
+        .collect::<Option<Vec<i64>>>()
+        .unwrap_or_default()
 }
 
 /// As [`parse_kv_lines`], but returns the timing in microseconds.

@@ -23,7 +23,7 @@ use serde::Serialize;
 use crate::build::CargoProfile;
 use crate::config::{DevConfig, GateConfig, HarnessConfig, RatatoskrConfig};
 use crate::context;
-use crate::db::gate::{GateDb, GateRow};
+use crate::db::gate::{canonical_features, GateDb, GateRow};
 use crate::db::{KvPair, KvValue};
 use crate::error::DevError;
 use crate::git;

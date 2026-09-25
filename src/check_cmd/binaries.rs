@@ -690,7 +690,7 @@ mod binaries_tests {
         assert_eq!(filtered[0].target, "cli_sort");
     }
 
-    // BUG-014: forwarded selectors other than `--test NAME` used to be read as
+    // Forwarded selectors other than `--test NAME` used to be read as
     // target names and matched nothing. Every selector kind now selects what
     // cargo would, and selectors union.
     #[test]

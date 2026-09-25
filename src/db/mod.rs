@@ -16,7 +16,7 @@ pub use format::{
 };
 pub use hotpath::hotpath_data_from_json;
 pub use types::{
-    Distribution, HotpathData, HotpathFunction, HotpathThread, KvPair, KvValue, PreviousRun,
+    Distribution, DistributionUs, HotpathData, HotpathFunction, HotpathThread, KvPair, KvValue, PreviousRun,
     QueryFilter, RunRow, StoredRow,
 };
 

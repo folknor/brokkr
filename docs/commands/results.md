@@ -17,6 +17,27 @@ error - not having measured anything is a normal state.
 
 `--top N` caps the functions shown in hotpath reports (default 10, `0` = all).
 
+## Precision
+
+Every row has an integer `elapsed_ms`. Most rows also have `elapsed_us`, the
+exact wall in microseconds: the external and hotpath paths time it
+themselves, the stderr-kv path takes it from a fractional `elapsed_ms=` line,
+and distribution runs (nidhogg `api`) record the fastest sample. Where
+`elapsed_us` exists, `elapsed_ms` is that value rounded to nearest.
+
+Every view - the table, a single run, `--compare` - prints the microsecond
+reading when a row has one, as milliseconds with three decimals (`0.312 ms`,
+`6.847 ms`), and the integer otherwise (`1234 ms`). So a sub-millisecond run
+does not print as `0 ms`, and a view never disagrees with another about the
+same row. Rows recorded before a path learned microseconds have no
+`elapsed_us` and print as integers; that detail was never measured, so it is
+never invented from `elapsed_ms * 1000`.
+
+The same rule applies to a distribution's `min`/`p50`/`p95`/`max` and to the
+per-iteration walls. The per-iteration list shows microseconds only when
+every iteration has one; a row where any is missing shows the integers for
+all of them, so the list stays in execution order.
+
 ## Filters
 
 All narrow the table, and all AND together:
@@ -77,7 +98,8 @@ labelled block instead of a table row: full multi-line `cli_args`, the brokkr
 invocation, and the sidecar hint folded in as a field. For a `--bench N` row it
 adds the per-iteration walls, and the `prev.*` provenance of what ran
 immediately before it - the neighbouring run is often the explanation for an
-outlier.
+outlier. A distribution row (nidhogg `api`) also gets its `samples`, `min`,
+`p50`, `p95` and `max`.
 
 A prefix matching several rows falls back to the table plus per-row details.
 An empty prefix is refused rather than matching every row.

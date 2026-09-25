@@ -15,7 +15,10 @@ use rusqlite::Connection;
 use super::types::generate_uuid;
 use crate::error::DevError;
 
-const SCHEMA_VERSION: i64 = 1;
+/// v1: the original table. v2: `features` (the harness build's cargo
+/// features, canonical form per [`canonical_features`]; NULL on rows
+/// written before v2, whose features were never recorded).
+const SCHEMA_VERSION: i64 = 2;
 
 const CREATE_TABLE: &str = "\
 CREATE TABLE IF NOT EXISTS gate_runs (
@@ -32,8 +35,29 @@ CREATE TABLE IF NOT EXISTS gate_runs (
     exit_code     INTEGER NOT NULL,
     success       INTEGER NOT NULL,
     sidecar       TEXT NOT NULL,
-    meta          TEXT NOT NULL
+    meta          TEXT NOT NULL,
+    features      TEXT
 )";
+
+/// The canonical `gate_runs.features` value for a harness build's
+/// `[ratatoskr.harness] features` list: every feature name (entries are
+/// also split on `,` and whitespace, as cargo's `--features` accepts),
+/// sorted and deduplicated, joined with `,`. The empty string is a
+/// default-features build.
+///
+/// Canonical because the column is compared for identity by the gate:
+/// `["b", "a"]` and `["a,b"]` build the same binary and must not read as
+/// a mismatch.
+pub fn canonical_features(features: &[String]) -> String {
+    let mut names: Vec<&str> = features
+        .iter()
+        .flat_map(|f| f.split(|c: char| c == ',' || c.is_whitespace()))
+        .filter(|s| !s.is_empty())
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    names.join(",")
+}
 
 const CREATE_INDEX: &str = "\
     CREATE INDEX IF NOT EXISTS idx_gate_runs_lookup \
@@ -59,6 +83,9 @@ pub struct GateRow {
     pub sidecar: String,
     /// JSON-serialized meta blob (object). Mirrors `summary.json` ingestion.
     pub meta: String,
+    /// The harness build's cargo features, in [`canonical_features`] form
+    /// (empty for a default-features build). Always known on write.
+    pub features: String,
 }
 
 /// Row data returned from queries (full row including generated `uuid`
@@ -80,6 +107,9 @@ pub struct GateEntry {
     pub success: bool,
     pub sidecar: String,
     pub meta: String,
+    /// `None` for a row written before schema v2, whose build features
+    /// were never recorded.
+    pub features: Option<String>,
 }
 
 impl GateDb {
@@ -105,9 +135,9 @@ impl GateDb {
             "INSERT INTO gate_runs (\
                 uuid, created_at, git_commit, dirty, hostname, gate_name, \
                 script, fixture, profile, elapsed_ms, exit_code, success, \
-                sidecar, meta\
+                sidecar, meta, features\
              ) VALUES (\
-                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14\
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15\
              )",
             rusqlite::params![
                 uuid,
@@ -124,6 +154,7 @@ impl GateDb {
                 i64::from(row.success),
                 row.sidecar,
                 row.meta,
+                row.features,
             ],
         )?;
         Ok(uuid)
@@ -158,7 +189,7 @@ impl GateDb {
         let mut stmt = self.conn.prepare(
             "SELECT uuid, created_at, git_commit, dirty, hostname, gate_name, \
                     script, fixture, profile, elapsed_ms, exit_code, success, \
-                    sidecar, meta \
+                    sidecar, meta, features \
              FROM gate_runs \
              WHERE substr(uuid, 1, ?2) = ?1 AND hostname = ?3 AND uuid != ?4 \
              ORDER BY uuid LIMIT ?5",
@@ -270,6 +301,7 @@ fn row_to_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<GateEntry> {
         success: row.get::<_, i64>(11)? != 0,
         sidecar: row.get(12)?,
         meta: row.get(13)?,
+        features: row.get(14)?,
     })
 }
 
@@ -288,9 +320,24 @@ fn run_migrations(conn: &Connection) -> Result<(), DevError> {
     if current >= SCHEMA_VERSION {
         return Ok(());
     }
-    // Future migrations go here.
+    if current < 2 && !has_column(conn, "gate_runs", "features")? {
+        // v1 -> v2: nullable, no backfill. The features a v1 row was built
+        // with are unknowable after the fact, and inventing a value (the
+        // current config's, say) would make a legacy baseline claim an
+        // identity it may not have. NULL is what the gate reads as
+        // "unrecorded".
+        conn.execute_batch("ALTER TABLE gate_runs ADD COLUMN features TEXT")?;
+    }
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     Ok(())
+}
+
+fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool, DevError> {
+    let mut stmt = conn.prepare("SELECT name FROM pragma_table_info(?1)")?;
+    let names = stmt
+        .query_map([table], |r| r.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(names.iter().any(|n| n == column))
 }
 
 fn has_table(conn: &Connection, table: &str) -> bool {
@@ -331,7 +378,56 @@ mod tests {
             success: true,
             sidecar: "{}".into(),
             meta: r#"{"correct":1}"#.into(),
+            features: "fast-sync".into(),
         }
+    }
+
+    /// The v1 table exactly as shipped, before `features` existed.
+    const CREATE_TABLE_V1: &str = "\
+        CREATE TABLE gate_runs (
+            uuid TEXT PRIMARY KEY, created_at INTEGER NOT NULL,
+            git_commit TEXT NOT NULL, dirty INTEGER NOT NULL,
+            hostname TEXT NOT NULL, gate_name TEXT NOT NULL,
+            script TEXT NOT NULL, fixture TEXT NOT NULL,
+            profile TEXT NOT NULL, elapsed_ms INTEGER NOT NULL,
+            exit_code INTEGER NOT NULL, success INTEGER NOT NULL,
+            sidecar TEXT NOT NULL, meta TEXT NOT NULL
+        )";
+
+    #[test]
+    fn v1_database_migrates_with_legacy_rows_unrecorded() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(CREATE_TABLE_V1).unwrap();
+        conn.pragma_update(None, "user_version", 1).unwrap();
+        conn.execute(
+            "INSERT INTO gate_runs VALUES ('legacy1', 0, 'abc', 0, 'host-a', \
+             'jmap_small', 's.lua', 'fx', 'release', 10, 0, 1, '{}', '{}')",
+            [],
+        )
+        .unwrap();
+        run_migrations(&conn).unwrap();
+        // Idempotent: a second pass must not try to re-add the column.
+        run_migrations(&conn).unwrap();
+        let version: i64 = conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+        let db = GateDb { conn };
+        let legacy = db.lookup_baseline("legacy1", "host-a", "current").unwrap().unwrap();
+        assert_eq!(legacy.features, None);
+        let uuid = db.insert(&sample_row()).unwrap();
+        let fresh = db.lookup_baseline(&uuid, "host-a", "current").unwrap().unwrap();
+        assert_eq!(fresh.features.as_deref(), Some("fast-sync"));
+    }
+
+    #[test]
+    fn canonical_features_is_order_and_split_insensitive() {
+        let a = canonical_features(&["b".into(), "a".into()]);
+        let b = canonical_features(&["a, b".into(), "a".into()]);
+        assert_eq!(a, "a,b");
+        assert_eq!(a, b);
+        assert_eq!(canonical_features(&[]), "");
+        assert_eq!(canonical_features(&[" ,".into()]), "");
     }
 
     /// Insert a row under a chosen UUID, so prefix collisions can be

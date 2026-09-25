@@ -63,10 +63,7 @@ pub fn run(
         let url_clone = url.clone();
         let body_owned = body.clone();
 
-        harness.run_distribution(&config, |_i| {
-            let ms = run_curl_timed(&url_clone, &body_owned)?;
-            Ok(ms)
-        })?;
+        harness.run_distribution(&config, |_i| run_curl_timed(&url_clone, &body_owned))?;
 
         report_response_stats(&url, body, name)?;
         Ok(())
@@ -81,8 +78,7 @@ pub fn run(
 /// rather than stalling it under the global lock.
 const REQUEST_MAX_TIME_SECS: &str = "60";
 
-/// Run a single curl request and return the HTTP round-trip time in
-/// milliseconds, rounded to nearest.
+/// Run a single curl request and return the HTTP round-trip time.
 ///
 /// Uses curl's `--write-out '%{time_total}'` to measure actual HTTP timing,
 /// excluding process spawn overhead. `--fail` makes an HTTP 4xx/5xx a curl
@@ -90,7 +86,7 @@ const REQUEST_MAX_TIME_SECS: &str = "60";
 /// sample, which is the most flattering number a broken server can produce.
 /// (`--fail` rather than `--fail-with-body`: the body goes to `/dev/null`
 /// here either way, and curl's `-S` error line names the status.)
-fn run_curl_timed(url: &str, body: &str) -> Result<i64, DevError> {
+fn run_curl_timed(url: &str, body: &str) -> Result<std::time::Duration, DevError> {
     let output = std::process::Command::new("curl")
         .args([
             "-sS",
@@ -129,9 +125,19 @@ fn run_curl_timed(url: &str, body: &str) -> Result<i64, DevError> {
 
     // curl writes the time_total after a newline in stdout (via -w).
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let time_str = stdout.trim();
+    parse_time_total(stdout.trim())
+}
 
-    // time_total is in seconds with fractional part (e.g., "0.042367").
+/// Parse curl's `%{time_total}` - seconds with a fractional part, e.g.
+/// `0.000312` - into a `Duration`, keeping its full microsecond resolution.
+///
+/// The value used to be rounded to whole milliseconds here, so a query
+/// under half a millisecond recorded 0. `run_distribution` now keeps
+/// microseconds end to end; this is where they have to survive first.
+/// Rounded explicitly to the nearest microsecond (curl's own resolution),
+/// so a value like `0.000312` - not exactly representable in binary - lands
+/// on 312us and not a nanosecond either side of it.
+fn parse_time_total(time_str: &str) -> Result<std::time::Duration, DevError> {
     let seconds: f64 = time_str.parse().map_err(|_| {
         DevError::Verify(format!("curl time_total not a valid number: '{time_str}'"))
     })?;
@@ -140,15 +146,11 @@ fn run_curl_timed(url: &str, body: &str) -> Result<i64, DevError> {
             "curl time_total out of range: '{time_str}'"
         )));
     }
-    // Nearest, not truncating - the harness-wide policy (`us_to_ms`): a
-    // floored 0.9 ms request would record as 0 ms, reading faster than it
-    // was. The distribution columns are integer milliseconds, so a query
-    // well under half a millisecond still records 0; sub-ms resolution
-    // here would need a microsecond distribution, which the schema lacks.
-    #[allow(clippy::cast_possible_truncation)]
-    let ms = (seconds * 1000.0).round() as i64;
-
-    Ok(ms)
+    // Float-to-int `as` saturates, and `--max-time` bounds the value far
+    // below where that could matter.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let micros = (seconds * 1_000_000.0).round() as u64;
+    Ok(std::time::Duration::from_micros(micros))
 }
 
 /// Make one extra request to report element count and response bytes.
@@ -228,7 +230,25 @@ fn parse_response_stats(stdout: &str) -> Result<(u64, usize), String> {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
-    use super::parse_response_stats;
+    use super::{parse_response_stats, parse_time_total};
+
+    #[test]
+    fn time_total_keeps_sub_millisecond_resolution() {
+        // A 312us query used to be rounded to 0 ms here, before the
+        // distribution ever saw it.
+        assert_eq!(parse_time_total("0.000312").unwrap().as_micros(), 312);
+        assert_eq!(parse_time_total("0.042367").unwrap().as_micros(), 42_367);
+        assert_eq!(parse_time_total("0").unwrap().as_micros(), 0);
+    }
+
+    #[test]
+    fn time_total_garbage_is_an_error() {
+        assert!(parse_time_total("").is_err());
+        assert!(parse_time_total("fast").is_err());
+        assert!(parse_time_total("-0.1").is_err());
+        assert!(parse_time_total("NaN").is_err());
+        assert!(parse_time_total("inf").is_err());
+    }
 
     #[test]
     fn stats_parse_body_and_size() {

@@ -1093,6 +1093,12 @@ fn spawn_process_group(
     // this reaches only the direct child). Both runners wait on the child from
     // the spawning thread, which the death signal requires.
     crate::shutdown::die_with_parent(&mut cmd);
+    // What the death signal cannot reach - the test binary under cargo, a
+    // doctest under rustdoc, anything a test spawned - carries this run's
+    // token, and the next fresh hold reaps it once this brokkr is gone. See
+    // `crate::test_orphans`. After the caller's env, so a sweep env cannot
+    // displace it.
+    crate::test_orphans::stamp(&mut cmd);
     // Last, after every caller-supplied env var: see `crate::hold`.
     crate::hold::stamp(&mut cmd);
 

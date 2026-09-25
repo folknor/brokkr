@@ -55,4 +55,17 @@ missing `curl` is reported as such, not as "server not running". Every curl
 call has a `--max-time`, so a server that accepts and hangs cannot stall a
 command.
 
+## `bench api` timing
+
+`bench api` runs each query N times through `run_distribution` and records one
+row per query (`command = api-<query>`) with the min/p50/p95/max of the N
+samples. A sample is curl's `%{time_total}` - the HTTP round trip, excluding
+process spawn - kept at curl's microsecond resolution. Queries against a warm
+server often finish in well under a millisecond, so the summary is stored in
+microseconds (`run_distribution`'s `*_us` columns, and the row's `elapsed_us`
+is the fastest sample) and `brokkr results` prints it as fractional
+milliseconds (`0.312 ms`). The integer `*_ms` columns are those rounded, and
+read 0 for such a query; rows recorded before schema v19 have only those, so
+their sub-millisecond detail is gone.
+
 See `docs/brokkr.toml.md` for full dataset schema.

@@ -492,9 +492,8 @@ fn bench_loop(
         mock_dir,
         Some(&|pid| harness.lock().add_mock_pid(pid)),
         Some(&|pid| harness.lock().remove_mock_pid(pid)),
-        // isolate_pg=false: same reason as the build call - the phase
-        // guard steps aside for each sidecar window, so the mock must
-        // stay reachable by terminal Ctrl-C in brokkr's PG.
+        // isolate_pg=false: same reason as the build call - the mock
+        // stays in brokkr's PG so terminal Ctrl-C reaches it directly.
         false,
     )?;
     output::ratatoskr_msg(&format!("mock ready in {}", format_secs(mock.ready_elapsed())));
@@ -535,7 +534,10 @@ fn bench_loop(
     // execution order - the same list `run_external_*` stores.
     let mut walls: Vec<i64> = Vec::with_capacity(req.bench);
     let mut last_pid: u32 = 0;
-    // The failing iteration's status, for the dirty sidecar record.
+    // The in-flight iteration's child status, for the dirty sidecar record:
+    // set as soon as the child is reaped, cleared once the iteration
+    // completes. A failure after a successful child (log write,
+    // `summary.json`) therefore records that success, not a fabricated code.
     let mut failed_status: Option<std::process::ExitStatus> = None;
     // Stamped before the first iteration so `prev.gap_seconds` measures to
     // the start of this run, not to its recording.
@@ -569,9 +571,9 @@ fn bench_loop(
                 env_pairs.push((name.as_str(), value.as_str()));
             }
 
-            // Hand signal handling to the sidecar's own guard for the
-            // measured window (guards do not nest). Refuses with
-            // `Interrupted` if a request already landed in the gap.
+            // The sidecar's own guard nests inside the phase guard for the
+            // measured window. Refuses with `Interrupted` if a request
+            // already landed in the gap.
             phase_guard.release_for_sidecar()?;
             let start = Instant::now();
             let spawned = output::spawn_captured(
@@ -602,6 +604,19 @@ fn bench_loop(
             // be SIGKILLed by `--hard` in the gap before the next iter.
             harness.lock().clear_child_pid();
 
+            // The iteration's sidecar data joins the run's list the moment
+            // the child is reaped, before anything below can fail. Every
+            // later `?` - the log writes, the `summary.json` read - then
+            // leaves it in `sidecar_runs` for the `dirty` record after the
+            // loop, rather than dropping the trajectory of a run whose child
+            // succeeded. `failed_status` is stamped alongside for the same
+            // reason: a post-processing failure records the status the
+            // child actually had, which may well be success. The index
+            // stays `i`, so `best.run_idx` still addresses this entry.
+            let marker_span_ms = sync_span_from_markers(&result.data.markers);
+            failed_status = Some(result.exit_status);
+            sidecar_runs.push(result.data);
+
             // Persist each iter's stdout/stderr so a later FAIL can
             // be reproduced without re-running. summary.json is
             // already in iter_harness_dir from the harness binary.
@@ -611,13 +626,9 @@ fn bench_loop(
                 .map_err(DevError::Io)?;
 
             if result.stopped_by_signal {
-                failed_status = Some(result.exit_status);
-                sidecar_runs.push(result.data);
                 return Err(DevError::Interrupted);
             }
             if result.stopped_by_deadline {
-                failed_status = Some(result.exit_status);
-                sidecar_runs.push(result.data);
                 return Err(DevError::Config(format!(
                     "harness binary exceeded ceiling {ceiling:?} on iter {}/{}",
                     i + 1,
@@ -625,7 +636,6 @@ fn bench_loop(
                 )));
             }
             if !result.exit_status.success() {
-                failed_status = Some(result.exit_status);
                 let stderr_tail = String::from_utf8_lossy(&result.stderr)
                     .lines()
                     .rev()
@@ -635,7 +645,6 @@ fn bench_loop(
                     .rev()
                     .collect::<Vec<_>>()
                     .join("\n");
-                sidecar_runs.push(result.data);
                 return Err(DevError::Config(format!(
                     "harness binary exited with {:?} on iter {}/{}\n--- last 5 stderr lines ---\n{stderr_tail}",
                     result.exit_status,
@@ -645,7 +654,6 @@ fn bench_loop(
             }
 
             let summary = read_summary_json(&iter_harness_dir)?;
-            let marker_span_ms = sync_span_from_markers(&result.data.markers);
             let wall_clock_ms = i64::try_from(result.elapsed.as_millis()).unwrap_or(i64::MAX);
             let outcome = IterOutcome {
                 run_idx: i,
@@ -669,7 +677,8 @@ fn bench_loop(
             if best.as_ref().is_none_or(|b| outcome.elapsed_ms() < b.elapsed_ms()) {
                 best = Some(outcome);
             }
-            sidecar_runs.push(result.data);
+            // The iteration completed: no failure to attribute to it.
+            failed_status = None;
         }
         Ok(())
     })();
@@ -758,6 +767,13 @@ fn bench_loop(
             script_abs,
             fixture_name,
             debug,
+            // The same `[ratatoskr.harness] features` list the build above
+            // used; `run_sync_bench` refused a config without the section.
+            features: &cfg
+                .harness
+                .as_ref()
+                .map(|h| canonical_features(&h.features))
+                .unwrap_or_default(),
             elapsed_ms,
             summary: &best.summary,
             sidecar_data: &sidecar_runs[best.run_idx],
@@ -776,6 +792,8 @@ struct GateHookCtx<'a> {
     script_abs: &'a Path,
     fixture_name: &'a str,
     debug: bool,
+    /// The harness build's features, in `canonical_features` form.
+    features: &'a str,
     elapsed_ms: i64,
     summary: &'a serde_json::Map<String, serde_json::Value>,
     sidecar_data: &'a sidecar::SidecarData,
@@ -836,6 +854,7 @@ fn run_gate_hook(ctx: &GateHookCtx<'_>) -> Result<(), DevError> {
         success: true,
         sidecar: serde_json::to_string(&sidecar_blob).unwrap_or_else(|_| "{}".into()),
         meta: serde_json::to_string(&meta_blob).unwrap_or_else(|_| "{}".into()),
+        features: ctx.features.to_owned(),
     };
 
     let db_path = ctx.project_root.join(".brokkr/ratatoskr/gate.db");
@@ -986,7 +1005,7 @@ fn missing_baseline_error(
 }
 
 /// Look up the pinned per-hostname baseline UUID in `brokkr.toml`,
-/// fetch the row from `gate.db`, validate gate/script/fixture/profile identity,
+/// fetch the row from `gate.db`, validate gate/script/fixture/profile/features identity,
 /// run rule evaluation, and emit a report. Returns
 /// `DevError::Config("gate failed: ...")` on any rule failure.
 fn evaluate_against_baseline(
@@ -1046,6 +1065,11 @@ fn evaluate_against_baseline(
             baseline_entry.profile, current_row.profile
         )));
     }
+    let features_unrecorded = check_features_identity(
+        gate_name,
+        baseline_entry.features.as_deref(),
+        &current_row.features,
+    )?;
 
     let current_run = gate_eval::GateRun::from_parts(
         current_row.elapsed_ms,
@@ -1074,6 +1098,14 @@ fn evaluate_against_baseline(
              consider re-recording on a clean checkout",
         );
     }
+    if features_unrecorded {
+        output::ratatoskr_msg(&format!(
+            "  [warn] baseline predates gate.db's features column, so the features \
+             it was built with are unknown; this run is {}. Compared on trust - \
+             repin from a tree you have confirmed good to make the identity checkable.",
+            features_label(&current_row.features)
+        ));
+    }
     if !report.is_empty() {
         for line in report.lines() {
             output::ratatoskr_msg(line);
@@ -1086,6 +1118,47 @@ fn evaluate_against_baseline(
     }
     output::ratatoskr_msg(&format!("gate `{gate_name}` PASSED"));
     Ok(())
+}
+
+/// Refuse a baseline built with different cargo features than this run,
+/// for the reason the profile check exists: a different feature set is a
+/// different binary, so every rule compares two programs rather than two
+/// runs of one.
+///
+/// Both sides are `canonical_features` strings, so order and list shape
+/// never read as a mismatch. Returns `Ok(true)` when the baseline row
+/// predates the features column (`None`): the build it measured is
+/// unknowable, and refusing would leave re-recording as the only way
+/// forward - which is exactly the rebase `--as-baseline` warns against,
+/// forced onto every legacy pin at once and blessing whatever the current
+/// tree measures. So a legacy baseline is compared, and the caller warns
+/// that the identity went unchecked.
+fn check_features_identity(
+    gate_name: &str,
+    baseline: Option<&str>,
+    current: &str,
+) -> Result<bool, DevError> {
+    match baseline {
+        None => Ok(true),
+        Some(b) if b == current => Ok(false),
+        Some(b) => Err(DevError::Config(format!(
+            "gate `{gate_name}`: baseline was built with {} but this run with {}. \
+             Build with the baseline's `[ratatoskr.harness] features`, or pin a \
+             baseline recorded under these.",
+            features_label(b),
+            features_label(current)
+        ))),
+    }
+}
+
+/// A canonical features string for a message: the empty string is a
+/// default-features build.
+fn features_label(canonical: &str) -> String {
+    if canonical.is_empty() {
+        "default features".to_owned()
+    } else {
+        format!("features `{canonical}`")
+    }
 }
 
 /// Project a `SidecarData` into a flat JSON object usable by gate
@@ -1263,6 +1336,24 @@ mod tests {
         validate_gate_selection(Some("jmap_steady_state_delta"), true, true).unwrap();
         validate_gate_selection(None, true, false).unwrap();
         validate_gate_selection(None, false, false).unwrap();
+    }
+
+    #[test]
+    fn features_identity_refuses_a_different_build() {
+        let err = check_features_identity("g", Some("a,b"), "a").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("features `a,b`"), "got: {msg}");
+        assert!(msg.contains("features `a`"), "got: {msg}");
+        let err = check_features_identity("g", Some(""), "a").unwrap_err();
+        assert!(err.to_string().contains("default features"), "got: {err}");
+    }
+
+    #[test]
+    fn features_identity_passes_same_and_flags_legacy() {
+        assert!(!check_features_identity("g", Some("a,b"), "a,b").unwrap());
+        assert!(!check_features_identity("g", Some(""), "").unwrap());
+        // A pre-v2 row: compared, but reported as unchecked.
+        assert!(check_features_identity("g", None, "a").unwrap());
     }
 
     fn cfg_with_endpoints() -> RatatoskrConfig {

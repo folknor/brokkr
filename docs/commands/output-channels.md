@@ -60,12 +60,16 @@ A running binary can hand data to brokkr three ways:
 computes itself, on top of the raw kv pairs:
 
 - `read_mbs` - appears whenever the input size is known (`config.input_mb`,
-  resolved from the dataset config) and `elapsed_ms > 0`: `input_mb / secs`.
+  resolved from the dataset config) and the wall is non-zero: `input_mb /
+  secs`, with `secs` from `elapsed_us` when the run has it (so a run that
+  rounds to 0 ms still gets a figure) and from `elapsed_ms` otherwise.
 - `write_mbs` - appears additionally when the run reported an `output_bytes`
   kv pair (so this one *does* depend on the binary emitting it): computed as
   `output_bytes/1e6 / secs`.
 - `samples`/`min_ms`/`p50_ms`/`p95_ms`/`max_ms` - only for `run_distribution`
-  results.
+  results, with three decimals from the microsecond summary (`min_ms=0.298`).
+  The same values land in results.db's `run_distribution` table, both as
+  microseconds (`*_us`) and rounded (`*_ms`).
 
 So a metric can reach the `[result]` line three ways: a raw stderr kv pair, a
 brokkr-derived throughput field, or (for `write_mbs`) a kv pair that feeds a

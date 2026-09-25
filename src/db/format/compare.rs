@@ -1,6 +1,9 @@
 use super::super::{HotpathData, KvPair, StoredRow};
 use super::DatasetMatcher;
-use super::table::{compute_rewrite_pct, find_output_bytes, format_blob_counts, format_input};
+use super::table::{
+    compute_rewrite_pct, find_output_bytes, format_blob_counts, format_input, format_us_as_ms,
+    format_wall,
+};
 
 /// Format side-by-side comparison of two commits.
 pub fn format_compare(
@@ -794,13 +797,8 @@ fn append_compare_row(out: &mut String, pair: &ComparisonPair, w: &CompareWidths
 /// value - the column and the change would visibly disagree.
 fn format_ms_or_dash(ms: Option<i64>, us: Option<i64>) -> String {
     match (ms, us) {
-        (_, Some(v)) => {
-            #[allow(clippy::cast_precision_loss)]
-            {
-                format!("{:.3} ms", v as f64 / 1000.0)
-            }
-        }
-        (Some(v), None) => format!("{v} ms"),
+        (_, Some(v)) => format!("{} ms", format_us_as_ms(v)),
+        (Some(v), None) => format_wall(v, None),
         (None, None) => String::from("--"),
     }
 }
@@ -944,6 +942,7 @@ mod tests {
             kv: vec![],
             captured_env: std::collections::BTreeMap::new(),
             iterations: Vec::new(),
+            iterations_us: Vec::new(),
             distribution: None,
             hotpath: None,
         }

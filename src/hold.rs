@@ -168,7 +168,10 @@ pub fn stamp(cmd: &mut std::process::Command) {
 /// real thing to other users.
 ///
 /// Always carries the rustc-info cache disable (see [`RUSTC_INFO_CACHE_ENV`]);
-/// the capability entry joins it when a hold is active. Returns the path to
+/// the capability entry joins it when a hold is active, and the orphan-reap
+/// token (`crate::test_orphans::MARKER_ENV`) when this process has one
+/// (`test_orphans::marker` registers on first use; a failed registration
+/// leaves the entry out). Returns the path to
 /// hand to `CargoConfigs::new`; any write failure propagates, because
 /// returning the path after a failed truncate would load stale contents.
 pub fn cargo_config_overrides() -> std::io::Result<Vec<String>> {
@@ -188,6 +191,17 @@ pub fn cargo_config_overrides() -> std::io::Result<Vec<String>> {
     if let Some(nonce) = capability() {
         contents.push_str(&format!(
             "{CAPABILITY_ENV} = {{ value = \"{nonce}\", force = true, relative = false }}\n"
+        ));
+    }
+    // The engine builds its own test commands, so brokkr's parent-death signal
+    // (`shutdown::die_with_parent`) is not on them, and a SIGKILLed brokkr
+    // can orphan them as it orphans a test binary under cargo on the libtest
+    // lanes. They carry the same orphan-reap token those lanes stamp
+    // (`crate::test_orphans`).
+    if let Some(token) = crate::test_orphans::marker() {
+        contents.push_str(&format!(
+            "{} = {{ value = \"{token}\", force = true, relative = false }}\n",
+            crate::test_orphans::MARKER_ENV
         ));
     }
 

@@ -3,7 +3,7 @@
 use super::ResultsDb;
 use super::like::{ESCAPE, prefix_pattern, require_prefix};
 use super::schema::INSERT_SQL;
-use super::types::{KvPair, KvValue, RunRow, generate_uuid, short_uuid};
+use super::types::{HotpathData, KvPair, KvValue, RunRow, generate_uuid, short_uuid};
 use crate::error::DevError;
 
 // ---------------------------------------------------------------------------
@@ -96,29 +96,7 @@ fn insert_inner(conn: &rusqlite::Connection, row: &RunRow, uuid: &str) -> Result
     )?;
     let run_id = conn.last_insert_rowid();
 
-    // Distribution child row.
-    if let Some(ref dist) = row.distribution {
-        conn.execute(
-            "INSERT INTO run_distribution (run_id, samples, min_ms, p50_ms, p95_ms, max_ms) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            rusqlite::params![
-                run_id,
-                dist.samples,
-                dist.min_ms,
-                dist.p50_ms,
-                dist.p95_ms,
-                dist.max_ms
-            ],
-        )?;
-    }
-
-    // Per-iteration walls, in execution order.
-    for (run_idx, elapsed_ms) in row.iterations.iter().enumerate() {
-        conn.execute(
-            "INSERT INTO run_iterations (run_id, run_idx, elapsed_ms) VALUES (?1, ?2, ?3)",
-            rusqlite::params![run_id, i64::try_from(run_idx).unwrap_or(i64::MAX), elapsed_ms],
-        )?;
-    }
+    insert_timings(conn, run_id, row)?;
 
     // Key-value pairs. Last one wins: `build_row` appends its sources in
     // increasing precedence (metadata, env capture, `prev.*`, then the run's
@@ -130,45 +108,97 @@ fn insert_inner(conn: &rusqlite::Connection, row: &RunRow, uuid: &str) -> Result
 
     // Hotpath child rows.
     if let Some(ref hp) = row.hotpath {
-        for func in &hp.functions {
-            conn.execute(
-                "INSERT INTO hotpath_functions \
-                 (run_id, section, description, ordinal, name, calls, avg, total, percent_total, p50, p95, p99) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-                rusqlite::params![
-                    run_id, func.section, func.description, func.ordinal, func.name,
-                    func.calls, func.avg, func.total, func.percent_total,
-                    func.p50, func.p95, func.p99,
-                ],
-            )?;
-        }
-        for thread in &hp.threads {
-            conn.execute(
-                "INSERT INTO hotpath_threads \
-                 (run_id, name, status, cpu_percent, cpu_percent_max, cpu_percent_avg, \
-                  alloc_bytes, dealloc_bytes, mem_diff) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                rusqlite::params![
-                    run_id,
-                    thread.name,
-                    thread.status,
-                    thread.cpu_percent,
-                    thread.cpu_percent_max,
-                    thread.cpu_percent_avg,
-                    thread.alloc_bytes,
-                    thread.dealloc_bytes,
-                    thread.mem_diff,
-                ],
-            )?;
-        }
-        // Thread summary stats into run_kv. These yield to anything already
-        // in `row.kv` under the same key: the run's own report is primary.
-        for kv in &hp.thread_summary {
-            insert_kv_row(conn, run_id, kv, OnConflict::Ignore)?;
-        }
+        insert_hotpath(conn, run_id, hp)?;
     }
 
     Ok(short_uuid(uuid))
+}
+
+/// The `run_distribution` and `run_iterations` child rows.
+fn insert_timings(conn: &rusqlite::Connection, run_id: i64, row: &RunRow) -> Result<(), DevError> {
+    // Distribution child row. The microsecond columns stay NULL when the
+    // distribution never measured them.
+    if let Some(ref dist) = row.distribution {
+        let us = dist.us;
+        conn.execute(
+            "INSERT INTO run_distribution \
+             (run_id, samples, min_ms, p50_ms, p95_ms, max_ms, min_us, p50_us, p95_us, max_us) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            rusqlite::params![
+                run_id,
+                dist.samples,
+                dist.min_ms,
+                dist.p50_ms,
+                dist.p95_ms,
+                dist.max_ms,
+                us.map(|u| u.min),
+                us.map(|u| u.p50),
+                us.map(|u| u.p95),
+                us.map(|u| u.max),
+            ],
+        )?;
+    }
+
+    // Per-iteration walls, in execution order. Microseconds ride along only
+    // when there is one per iteration - a shorter list cannot be aligned to
+    // the order the table exists to keep.
+    let iterations_us =
+        (row.iterations_us.len() == row.iterations.len()).then_some(&row.iterations_us);
+    for (run_idx, elapsed_ms) in row.iterations.iter().enumerate() {
+        let elapsed_us = iterations_us.and_then(|us| us.get(run_idx).copied());
+        conn.execute(
+            "INSERT INTO run_iterations (run_id, run_idx, elapsed_ms, elapsed_us) \
+             VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![
+                run_id,
+                i64::try_from(run_idx).unwrap_or(i64::MAX),
+                elapsed_ms,
+                elapsed_us
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+/// The hotpath child rows, plus the thread summary into `run_kv`.
+fn insert_hotpath(conn: &rusqlite::Connection, run_id: i64, hp: &HotpathData) -> Result<(), DevError> {
+    for func in &hp.functions {
+        conn.execute(
+            "INSERT INTO hotpath_functions \
+             (run_id, section, description, ordinal, name, calls, avg, total, percent_total, p50, p95, p99) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            rusqlite::params![
+                run_id, func.section, func.description, func.ordinal, func.name,
+                func.calls, func.avg, func.total, func.percent_total,
+                func.p50, func.p95, func.p99,
+            ],
+        )?;
+    }
+    for thread in &hp.threads {
+        conn.execute(
+            "INSERT INTO hotpath_threads \
+             (run_id, name, status, cpu_percent, cpu_percent_max, cpu_percent_avg, \
+              alloc_bytes, dealloc_bytes, mem_diff) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            rusqlite::params![
+                run_id,
+                thread.name,
+                thread.status,
+                thread.cpu_percent,
+                thread.cpu_percent_max,
+                thread.cpu_percent_avg,
+                thread.alloc_bytes,
+                thread.dealloc_bytes,
+                thread.mem_diff,
+            ],
+        )?;
+    }
+    // Thread summary stats into run_kv. These yield to anything already
+    // in `row.kv` under the same key: the run's own report is primary.
+    for kv in &hp.thread_summary {
+        insert_kv_row(conn, run_id, kv, OnConflict::Ignore)?;
+    }
+    Ok(())
 }
 
 /// What a pair does when its `(run_id, key)` is already in `run_kv`.
@@ -266,6 +296,7 @@ mod tests {
             stop_marker: None,
             kv: vec![],
             iterations: Vec::new(),
+            iterations_us: Vec::new(),
             distribution: None,
             hotpath: None,
         };
@@ -341,6 +372,7 @@ mod tests {
             stop_marker: None,
             kv,
             iterations: Vec::new(),
+            iterations_us: Vec::new(),
             distribution: None,
             hotpath,
         }
@@ -379,6 +411,21 @@ mod tests {
         let row = kv_row(vec![KvPair::text("threads.rss_bytes", "stderr")], Some(hp));
         let (_, short) = db.insert(&row).expect("insert");
         assert_eq!(kv_text(&db, &short, "threads.rss_bytes"), "stderr");
+    }
+
+    // A microsecond list that does not cover every iteration cannot be
+    // aligned to the execution order, so none of it is stored.
+    #[test]
+    fn partial_iteration_microseconds_are_not_stored() {
+        let db_path = crate::test_scratch::scratch("db-write", "partial_iter_us").join("t.db");
+        let db = ResultsDb::open(&db_path).expect("open");
+        let mut row = kv_row(Vec::new(), None);
+        row.iterations = vec![1, 2];
+        row.iterations_us = vec![1_200];
+        let (_, short) = db.insert(&row).expect("insert");
+        let stored = db.query_by_uuid(&short).expect("query");
+        assert_eq!(stored[0].iterations, vec![1, 2]);
+        assert!(stored[0].iterations_us.is_empty());
     }
 
     #[test]

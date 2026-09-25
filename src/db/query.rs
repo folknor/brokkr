@@ -4,7 +4,7 @@ use super::ResultsDb;
 use super::like::{ESCAPE, contains_pattern, prefix_pattern, require_prefix};
 use super::schema::SELECT_COLS;
 use super::{
-    Distribution, HotpathData, HotpathFunction, HotpathThread, KvPair, KvValue, PreviousRun,
+    Distribution, DistributionUs, HotpathData, HotpathFunction, HotpathThread, KvPair, KvValue, PreviousRun,
     QueryFilter, StoredRow,
 };
 use crate::error::DevError;
@@ -136,7 +136,7 @@ pub(super) fn load_children(
     row: &mut StoredRow,
 ) -> Result<(), DevError> {
     row.distribution = load_distribution(conn, row.id)?;
-    row.iterations = load_iterations(conn, row.id)?;
+    (row.iterations, row.iterations_us) = load_iterations(conn, row.id)?;
     let mut kv = load_kv(conn, row.id)?;
     // Promote `env.*` entries to a first-class `captured_env` field.
     // They're still stored in run_kv (no migration needed), but every
@@ -228,6 +228,7 @@ fn map_stored_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredRow> {
         kv: Vec::new(),
         captured_env: std::collections::BTreeMap::new(),
         iterations: Vec::new(),
+        iterations_us: Vec::new(),
         distribution: None,
         hotpath: None,
     })
@@ -387,15 +388,30 @@ fn load_distribution(
     run_id: i64,
 ) -> Result<Option<Distribution>, DevError> {
     let mut stmt = conn.prepare(
-        "SELECT samples, min_ms, p50_ms, p95_ms, max_ms FROM run_distribution WHERE run_id = ?1",
+        "SELECT samples, min_ms, p50_ms, p95_ms, max_ms, min_us, p50_us, p95_us, max_us \
+         FROM run_distribution WHERE run_id = ?1",
     )?;
     let mut rows = stmt.query_map(rusqlite::params![run_id], |row| {
+        // All four or none: a partial set is not a distribution anyone
+        // measured, so it reads as the pre-v19 millisecond-only shape.
+        let us = match (
+            row.get::<_, Option<i64>>(5)?,
+            row.get::<_, Option<i64>>(6)?,
+            row.get::<_, Option<i64>>(7)?,
+            row.get::<_, Option<i64>>(8)?,
+        ) {
+            (Some(min), Some(p50), Some(p95), Some(max)) => {
+                Some(DistributionUs { min, p50, p95, max })
+            }
+            _ => None,
+        };
         Ok(Distribution {
             samples: row.get(0)?,
             min_ms: row.get(1)?,
             p50_ms: row.get(2)?,
             p95_ms: row.get(3)?,
             max_ms: row.get(4)?,
+            us,
         })
     })?;
     match rows.next() {
@@ -408,15 +424,33 @@ fn load_distribution(
 /// Load per-iteration walls ordered by `run_idx`, i.e. back into the order the
 /// iterations actually ran. The ordering is the whole point of the table, so
 /// the ORDER BY is load-bearing rather than cosmetic.
-fn load_iterations(conn: &rusqlite::Connection, run_id: i64) -> Result<Vec<i64>, DevError> {
-    let mut stmt = conn
-        .prepare("SELECT elapsed_ms FROM run_iterations WHERE run_id = ?1 ORDER BY run_idx")?;
-    let rows = stmt.query_map(rusqlite::params![run_id], |row| row.get::<_, i64>(0))?;
-    let mut out = Vec::new();
+///
+/// Returns `(milliseconds, microseconds)`. The microsecond list is empty
+/// unless every iteration has one, so the two stay index-aligned.
+fn load_iterations(
+    conn: &rusqlite::Connection,
+    run_id: i64,
+) -> Result<(Vec<i64>, Vec<i64>), DevError> {
+    let mut stmt = conn.prepare(
+        "SELECT elapsed_ms, elapsed_us FROM run_iterations WHERE run_id = ?1 ORDER BY run_idx",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![run_id], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, Option<i64>>(1)?))
+    })?;
+    let mut ms = Vec::new();
+    let mut us: Option<Vec<i64>> = Some(Vec::new());
     for row in rows {
-        out.push(row?);
+        let (wall_ms, wall_us) = row?;
+        ms.push(wall_ms);
+        us = match (us, wall_us) {
+            (Some(mut list), Some(v)) => {
+                list.push(v);
+                Some(list)
+            }
+            _ => None,
+        };
     }
-    Ok(out)
+    Ok((ms, us.unwrap_or_default()))
 }
 
 fn load_kv(conn: &rusqlite::Connection, run_id: i64) -> Result<Vec<KvPair>, DevError> {
@@ -807,6 +841,7 @@ mod tests {
             stop_marker: None,
             kv,
             iterations: Vec::new(),
+            iterations_us: Vec::new(),
             distribution: None,
             hotpath: None,
         };
@@ -910,6 +945,7 @@ mod tests {
             stop_marker: None,
             kv: vec![],
             iterations: Vec::new(),
+            iterations_us: Vec::new(),
             distribution: None,
             hotpath: None,
         };
@@ -1040,6 +1076,7 @@ mod tests {
             stop_marker: None,
             kv: vec![],
             iterations: Vec::new(),
+            iterations_us: Vec::new(),
             distribution: None,
             hotpath: None,
         };
@@ -1140,12 +1177,19 @@ mod tests {
             // Deliberately not ascending: the round-trip must preserve
             // execution order, not helpfully sort it.
             iterations: vec![500, 700, 600],
+            iterations_us: vec![500_400, 699_600, 600_049],
             distribution: Some(Distribution {
                 samples: 5,
                 min_ms: 100,
                 p50_ms: 110,
                 p95_ms: 130,
                 max_ms: 150,
+                us: Some(crate::db::DistributionUs {
+                    min: 100_312,
+                    p50: 110_000,
+                    p95: 129_501,
+                    max: 150_499,
+                }),
             }),
             hotpath: Some(HotpathData {
                 functions: vec![HotpathFunction {
@@ -1189,6 +1233,7 @@ mod tests {
             "iterations must round-trip in execution order - sorting them \
              would erase the drift signal they exist to carry"
         );
+        assert_eq!(r.iterations_us, vec![500_400, 699_600, 600_049]);
 
         // Distribution.
         let dist = r
@@ -1200,6 +1245,15 @@ mod tests {
         assert_eq!(dist.p50_ms, 110);
         assert_eq!(dist.p95_ms, 130);
         assert_eq!(dist.max_ms, 150);
+        assert_eq!(
+            dist.us,
+            Some(crate::db::DistributionUs {
+                min: 100_312,
+                p50: 110_000,
+                p95: 129_501,
+                max: 150_499,
+            })
+        );
 
         // KV pairs.
         assert!(r.kv.len() >= 2, "should have at least 2 kv pairs");
@@ -1256,6 +1310,7 @@ mod tests {
             stop_marker: None,
             kv: vec![],
             iterations: Vec::new(),
+            iterations_us: Vec::new(),
             distribution: None,
             hotpath: None,
         };
@@ -1385,6 +1440,7 @@ mod tests {
             stop_marker: None,
             kv: vec![],
             iterations: Vec::new(),
+            iterations_us: Vec::new(),
             distribution: None,
             hotpath: None,
         };
@@ -1508,6 +1564,7 @@ mod tests {
                 .map(|(k, v)| vec![KvPair::text(format!("env.{k}"), v)])
                 .unwrap_or_default(),
             iterations: Vec::new(),
+            iterations_us: Vec::new(),
             distribution: None,
             hotpath: None,
         };
@@ -1587,6 +1644,7 @@ mod tests {
             stop_marker: None,
             kv,
             iterations: Vec::new(),
+            iterations_us: Vec::new(),
             distribution: None,
             hotpath: None,
         }

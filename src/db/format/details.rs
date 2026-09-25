@@ -60,11 +60,7 @@ pub fn format_details(row: &StoredRow) -> String {
 
     // Distribution stats.
     if let Some(ref dist) = row.distribution {
-        fields.push(("samples".into(), dist.samples.to_string()));
-        fields.push(("min".into(), format!("{} ms", dist.min_ms)));
-        fields.push(("p50".into(), format!("{} ms", dist.p50_ms)));
-        fields.push(("p95".into(), format!("{} ms", dist.p95_ms)));
-        fields.push(("max".into(), format!("{} ms", dist.max_ms)));
+        fields.extend(super::single::distribution_fields(dist));
     }
 
     // Metadata kv pairs (meta. prefix).

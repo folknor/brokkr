@@ -105,8 +105,8 @@ fn write_synthesized_config(state_root: &Path) -> Result<Utf8PathBuf, DevError> 
 /// apply to every process it starts is cargo's `[env]` table. Two generated
 /// config files ride in that way:
 ///
-/// - the compilation capability and rustc-info cache switch
-///   (`crate::hold::cargo_config_overrides`);
+/// - the compilation capability, rustc-info cache switch and orphan-reap
+///   token (`crate::hold::cargo_config_overrides`);
 /// - the sweep env - `[[check]] env`, a profile's `env`, `BROKKR_TEST_BIN_DIR`,
 ///   nidhogg's `CARGO_TARGET_TMPDIR`: the same pairs the libtest lanes set on
 ///   `cargo test`. Before this file existed those pairs reached only
@@ -115,9 +115,10 @@ fn write_synthesized_config(state_root: &Path) -> Result<Utf8PathBuf, DevError> 
 ///
 /// Every sweep entry is `force = true`, matching the libtest lanes, where
 /// `Command::env` overrides whatever brokkr inherited; `relative = false` for
-/// the reason `hold::cargo_config_overrides` gives. The two hold variables are
-/// left out of the sweep file so the capability file alone decides them - the
-/// libtest lanes stamp them last, after the sweep env, for the same reason.
+/// the reason `hold::cargo_config_overrides` gives. The two hold variables and
+/// the orphan-reap token are left out of the sweep file so the capability file
+/// alone decides them - the libtest lanes stamp them last, after the sweep env,
+/// for the same reason.
 fn engine_cargo_configs(state_root: &Path, env: &[(&str, &str)]) -> Result<CargoConfigs, DevError> {
     let mut overrides = crate::hold::cargo_config_overrides()
         .map_err(|e| DevError::Config(format!("nextest env config unwritable: {e}")))?;
@@ -131,7 +132,10 @@ fn engine_cargo_configs(state_root: &Path, env: &[(&str, &str)]) -> Result<Cargo
 fn sweep_env_config_body(env: &[(&str, &str)]) -> String {
     let mut table = toml_edit::Table::new();
     for (key, value) in env {
-        if *key == crate::hold::CAPABILITY_ENV || *key == crate::hold::RUSTC_INFO_CACHE_ENV {
+        if *key == crate::hold::CAPABILITY_ENV
+            || *key == crate::hold::RUSTC_INFO_CACHE_ENV
+            || *key == crate::test_orphans::MARKER_ENV
+        {
             continue;
         }
         let mut entry = toml_edit::InlineTable::new();
@@ -695,17 +699,18 @@ mod nextest_lane_tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
 
-    // BUG-013: the sweep env must reach the engine's test processes, which
-    // only read cargo's `[env]` table. Every entry is forced (a sweep value
-    // beats an inherited one, as `Command::env` does on the libtest lanes),
-    // awkward keys and values survive quoting, and the hold variables are
-    // left to the capability file alone.
+    // The sweep env must reach the engine's test processes, which only read
+    // cargo's `[env]` table. Every entry is forced (a sweep value beats an
+    // inherited one, as `Command::env` does on the libtest lanes), awkward
+    // keys and values survive quoting, and the hold variables and the
+    // orphan-reap token are left to the capability file alone.
     #[test]
     fn the_sweep_env_renders_as_a_forced_cargo_env_table() {
         let body = sweep_env_config_body(&[
             ("BROKKR_TEST_PLATFORM", "1"),
             ("WEIRD.KEY", "a \"quoted\" value"),
             (crate::hold::CAPABILITY_ENV, "stale"),
+            (crate::test_orphans::MARKER_ENV, "stale"),
         ]);
         let parsed: toml::Table = toml::from_str(&body).unwrap();
         let env = parsed["env"].as_table().unwrap();
@@ -715,6 +720,7 @@ mod nextest_lane_tests {
         assert_eq!(platform["relative"].as_bool(), Some(false));
         assert_eq!(env["WEIRD.KEY"]["value"].as_str(), Some("a \"quoted\" value"));
         assert!(!env.contains_key(crate::hold::CAPABILITY_ENV), "{body}");
+        assert!(!env.contains_key(crate::test_orphans::MARKER_ENV), "{body}");
     }
 }
 

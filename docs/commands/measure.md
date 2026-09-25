@@ -62,7 +62,9 @@ timing contract `--bench` needs. The build-config seam both paths share is
   under `dirty` before returning the error.
 - `run_external(config, binary, args)` - subprocess timing
 - `run_distribution(config, closure)` - distribution timing
-  (min/p50/p95/max)
+  (min/p50/p95/max). The closure returns each sample as a `Duration`; the
+  summary is computed in microseconds and stored in both `run_distribution`'s
+  `*_us` columns and, rounded, its `*_ms` columns (see below).
 
 The mode a row records (`bench`/`hotpath`/`alloc`) comes from the harness,
 set once from the request; the same value prints as `mode=` on the `[result]`
@@ -71,9 +73,18 @@ line and lands in the sidecar provenance, so `brokkr sidecar` shows it.
 Where brokkr times the child itself (`run_external`, `run_hotpath_capture`) it
 keeps the exact wall as `elapsed_us` and picks best-of-N on it; `elapsed_ms`
 is that value rounded to the nearest millisecond, never floored - flooring
-reads every run as up to a millisecond faster than it was. Closure-timed paths
-(`run_internal`, `run_distribution`) record integer milliseconds only, rounded
-the same way where the harness converts a `Duration` (`elapsed_to_ms`).
+reads every run as up to a millisecond faster than it was. `run_distribution`
+does the same with its samples: each is kept in microseconds, every percentile
+is taken over the microseconds, and the row's `elapsed_us` is the fastest
+sample. A sample under half a millisecond (a nidhogg API query) used to record
+0 ms at every percentile; the `*_ms` columns still read 0 for it, which is why
+they are not the only record. `run_internal` records whatever `elapsed_us` its
+closure returned, and integer milliseconds only when the closure had nothing
+finer.
+
+The `[result]` line prints `elapsed_ms=` and a distribution's `min_ms=`/
+`p50_ms=`/`p95_ms=`/`max_ms=` with three decimals whenever the microsecond
+reading exists (`min_ms=0.298`), and as integers otherwise.
 
 If the `results.db` insert fails, the `[result]` line still prints
 (unconditionally, since the row cannot be looked up later) and the sidecar
@@ -85,12 +96,22 @@ Results in `.brokkr/results.db` per project (gitignored).
 ## Per-iteration walls
 
 `--bench N` reports best-of-N, but stores every iteration's wall in the
-`run_iterations` table (`run_id`, `run_idx`, `elapsed_ms`) and renders them on
-`brokkr results <uuid>`:
+`run_iterations` table (`run_id`, `run_idx`, `elapsed_ms`, `elapsed_us`) and
+renders them on `brokkr results <uuid>`:
 
 ```
-elapsed  9m 52s (best of 3: 592200 / 611400 / 634100 ms)
+elapsed  592200.412 ms (best of 3: 592200.412 / 611400.090 / 634100.733 ms)
 ```
+
+`elapsed_us` is NULL unless the loop measured every iteration in microseconds
+(`run_external_ok`, `run_distribution`, `run_external_with_kv_raw` - from the
+target's self-reported `elapsed_ms=`, the same clock its row records - and
+`run_internal`/`run_hotpath` when each iteration's result carried an
+`elapsed_us`). `run_external_with_kv_raw` defers them in its `PendingSidecar`,
+so its caller records with `record_with_pending`, not `record_result`. A list with a gap is not
+stored at all rather than stored in part, since a partial list cannot stay
+aligned with the execution order. Rows without it render the integer
+milliseconds.
 
 The walls are listed **in execution order and never sorted**, because the order
 is the signal:
@@ -108,6 +129,8 @@ Collected by every harness loop (`run_internal`, `run_hotpath`,
 to the best-of-N `BenchResult` before recording. Single-run modes leave it
 empty, and rows recorded before schema v16 have no iteration data - those walls
 were discarded at measure time and cannot be reconstructed from `elapsed_ms`.
+Rows recorded before schema v19 have no per-iteration microseconds, for the
+same reason.
 
 ## What ran before
 
@@ -301,15 +324,33 @@ switches to fixed-width tables. Rendering lives in `src/sidecar_fmt.rs`.
   ratatoskr sync bench uses the script's `ceiling:`; measured `corpus` uses the
   parity path's hang backstop. Paths with no deadline run until the child
   exits or `brokkr kill`.
-- **`brokkr kill` (SIGTERM)** is handled by a `SigtermGuard` scoped to the
-  sidecar window only (outside it, SIGTERM falls through to default terminate
-  - there's no child to reap during `cargo build`/`check`). On catch, the
-  child is killed, the **partial** sidecar data is flushed under a fresh
-  UUID + the `dirty` alias, and the run returns `Interrupted`.
+- **`brokkr kill` (SIGTERM) and Ctrl-C (SIGINT)** are caught by a
+  `SigtermGuard` (`src/shutdown.rs`), installed for every tracked-child
+  window: each sidecar run, a passthrough child, an orchestrator's whole run
+  (the ratatoskr sync bench holds one across all its iterations), and the
+  whole of `check`/`test`/`clippy`. Guards nest: the outermost installs and
+  restores the handlers, so an inner guard (the sidecar's, inside an
+  orchestrator's) can neither clear a request that already landed nor uncover
+  the outer window when it drops. A second signal while a request is still
+  pending takes the default action, so a wait that never polls the flag cannot
+  swallow the interrupt. Outside every guard SIGTERM terminates brokkr by
+  default, except that registered test process groups are SIGKILLed first.
+  On catch in the sidecar window, the child is killed, the **partial** sidecar
+  data is flushed under a fresh UUID + the `dirty` alias, and the run returns
+  `Interrupted`; `main` runs the scratch cleanup and exits 130.
+- **`brokkr kill --hard`** runs no handler: it SIGKILLs the recorded child,
+  mock servers and every identity-checked descendant of brokkr, then brokkr.
+  Nothing is flushed; follow up with `brokkr clean`. A brokkr SIGKILLed by
+  anything else (the OOM killer) gets no walk at all; only the test runners'
+  processes have a backstop for that case (a parent-death signal, and the
+  orphan reap at the next locked command - see `brokkr man check strays`).
 - **OOM / crash preservation**: sidecar data is stored even when the child is
   OOM-killed, segfaults, or exits non-zero - the `/proc` trajectory up to the
   kill is the whole point. This holds on every sidecar-enabled harness loop, `--hotpath`/
-  `--alloc` included (via the parked-capture hand-off above). Failed/dirty runs get a random UUID and update the
+  `--alloc` included (via the parked-capture hand-off above), and on the loops
+  that live outside the harness: ratatoskr's sync bench keeps every reaped
+  iteration's data even when the child succeeded and only the step after it
+  (log write, `summary.json`) failed. Failed/dirty runs get a random UUID and update the
   `dirty` latest pointer, so `brokkr sidecar dirty` / `brokkr results dirty`
   always resolve the most recent unstored run. The child is also marked as the
   kernel OOM killer's preferred target (`src/oom.rs`) so a memory blow-up

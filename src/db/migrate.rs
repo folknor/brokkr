@@ -1,7 +1,7 @@
 use crate::error::DevError;
 
 /// Current schema version. Increment when adding new migrations.
-pub(super) const SCHEMA_VERSION: i64 = 18;
+pub(super) const SCHEMA_VERSION: i64 = 19;
 
 /// Run all pending migrations based on `PRAGMA user_version`.
 pub(super) fn run_migrations(conn: &rusqlite::Connection) -> Result<(), DevError> {
@@ -76,6 +76,9 @@ pub(super) fn run_migrations(conn: &rusqlite::Connection) -> Result<(), DevError
     }
     if current < 18 {
         migrate_v17_to_v18(conn)?;
+    }
+    if current < 19 {
+        migrate_v18_to_v19(conn)?;
     }
 
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -756,6 +759,35 @@ fn migrate_v17_to_v18(conn: &rusqlite::Connection) -> Result<(), DevError> {
         [],
     )?;
 
+    Ok(())
+}
+
+/// Migration v18 -> v19: microsecond columns for distributions and
+/// per-iteration walls.
+///
+/// `run_distribution` gains nullable `min_us`/`p50_us`/`p95_us`/`max_us`,
+/// and `run_iterations` a nullable `elapsed_us`. Purely additive, like
+/// v16->v17: historical rows keep their integer milliseconds and get NULL
+/// here. A nidhogg API query under half a millisecond was stored as 0 ms,
+/// and nothing can recover what it really was - backfilling `*_ms * 1000`
+/// would claim a precision the row never had.
+///
+/// Each table is guarded on existence: the old-schema tests reach here
+/// with only `runs`, and `ResultsDb::open` creates the child tables
+/// afterwards from the current DDL, which already has the columns.
+fn migrate_v18_to_v19(conn: &rusqlite::Connection) -> Result<(), DevError> {
+    if has_table(conn, "run_distribution") {
+        for column in ["min_us", "p50_us", "p95_us", "max_us"] {
+            if !has_column(conn, "run_distribution", column) {
+                conn.execute_batch(&format!(
+                    "ALTER TABLE run_distribution ADD COLUMN {column} INTEGER"
+                ))?;
+            }
+        }
+    }
+    if has_table(conn, "run_iterations") && !has_column(conn, "run_iterations", "elapsed_us") {
+        conn.execute_batch("ALTER TABLE run_iterations ADD COLUMN elapsed_us INTEGER")?;
+    }
     Ok(())
 }
 
@@ -2051,6 +2083,83 @@ mod tests {
 
         drop(db);
         cleanup(&dir, &db_path);
+    }
+
+    // -----------------------------------------------------------------------
+    // Migration: v18 → v19 adds the microsecond distribution/iteration columns
+    // -----------------------------------------------------------------------
+
+    /// The shape v18 left behind: today's `runs` columns, with the child
+    /// tables as they were before the microsecond columns existed.
+    const V18_SCHEMA: &str = "\
+        CREATE TABLE runs (
+            id INTEGER PRIMARY KEY, timestamp TEXT NOT NULL, hostname TEXT NOT NULL,
+            [commit] TEXT NOT NULL, subject TEXT NOT NULL, command TEXT NOT NULL,
+            mode TEXT, input_file TEXT, input_mb REAL, elapsed_ms INTEGER NOT NULL,
+            elapsed_us INTEGER, peak_rss_mb REAL, cargo_features TEXT,
+            cargo_profile TEXT DEFAULT 'release', kernel TEXT, cpu_governor TEXT,
+            avail_memory_mb INTEGER, storage_notes TEXT, extra TEXT, uuid TEXT,
+            cli_args TEXT, metadata TEXT, project TEXT NOT NULL DEFAULT 'pbfhogg',
+            stop_marker TEXT, brokkr_args TEXT
+        );
+        CREATE TABLE run_distribution (
+            run_id INTEGER NOT NULL, samples INTEGER NOT NULL, min_ms INTEGER NOT NULL,
+            p50_ms INTEGER NOT NULL, p95_ms INTEGER NOT NULL, max_ms INTEGER NOT NULL,
+            PRIMARY KEY (run_id));
+        CREATE TABLE run_iterations (
+            run_id INTEGER NOT NULL, run_idx INTEGER NOT NULL, elapsed_ms INTEGER NOT NULL,
+            PRIMARY KEY (run_id, run_idx));";
+
+    /// A pre-v19 distribution row stays readable and claims no microsecond
+    /// precision it never had: its `us` is `None`, not `min_ms * 1000`.
+    #[test]
+    fn migrate_v18_to_v19_keeps_old_distributions_readable() {
+        let dir = crate::test_scratch::scratch("db-migrate", "v18_to_v19");
+        let db_path = dir.join("results.db");
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.execute_batch(V18_SCHEMA).unwrap();
+            conn.pragma_update(None, "user_version", 18).unwrap();
+            conn.execute(
+                "INSERT INTO runs (timestamp, hostname, [commit], subject, command, mode, \
+                 elapsed_ms, uuid, project) VALUES ('2026-09-01 00:00:00', 'h', 'aabb', \
+                 's', 'api-bbox-small', 'bench', 0, 'oldrow01', 'nidhogg')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO run_distribution (run_id, samples, min_ms, p50_ms, p95_ms, max_ms) \
+                 VALUES (1, 3, 0, 0, 1, 2)",
+                [],
+            )
+            .unwrap();
+            conn.execute_batch(
+                "INSERT INTO run_iterations (run_id, run_idx, elapsed_ms) VALUES (1, 0, 0);
+                 INSERT INTO run_iterations (run_id, run_idx, elapsed_ms) VALUES (1, 1, 2);
+                 INSERT INTO run_iterations (run_id, run_idx, elapsed_ms) VALUES (1, 2, 1);",
+            )
+            .unwrap();
+        }
+
+        let db = ResultsDb::open(&db_path).expect("open should migrate v18 to v19");
+        let version: i64 = db
+            .conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+        for column in ["min_us", "p50_us", "p95_us", "max_us"] {
+            assert!(has_column(&db.conn, "run_distribution", column), "{column}");
+        }
+        assert!(has_column(&db.conn, "run_iterations", "elapsed_us"));
+
+        let rows = db.query_by_uuid("oldrow01").unwrap();
+        assert_eq!(rows.len(), 1);
+        let dist = rows[0].distribution.as_ref().expect("distribution survives");
+        assert_eq!((dist.min_ms, dist.p50_ms, dist.p95_ms, dist.max_ms), (0, 0, 1, 2));
+        assert_eq!(dist.us, None, "an old row must not invent microseconds");
+        assert_eq!(rows[0].iterations, vec![0, 2, 1]);
+        assert!(rows[0].iterations_us.is_empty());
+        assert_eq!(rows[0].elapsed_us, None);
     }
 
     // -----------------------------------------------------------------------
