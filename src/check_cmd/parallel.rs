@@ -1036,6 +1036,14 @@ fn report_runs(
         if binaries > 1 {
             note_parallel_slowest(&sweep.label, &slowest.0, slowest.1);
         }
+        // The execution unit here is the sweep, as a cargo resolution is in
+        // the serial lane: a binary listing nothing never enters the plan, and
+        // an empty plan is refused as a wrong-run. What remains is a plan
+        // whose binaries completed nothing between them - every listed test
+        // `#[ignore]`d - which passes green and must be named, not summed.
+        if passed == 0 {
+            note_empty_unit(sweep.label.clone());
+        }
     }
 
     Ok(ok)

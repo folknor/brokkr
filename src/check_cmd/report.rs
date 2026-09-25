@@ -264,8 +264,15 @@ fn open_run_log(state_root: &Path) {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis())
         .unwrap_or_default();
-    let path = dir.join(format!("check-{millis:015}.log"));
-    if let Ok(file) = std::fs::File::create(&path) {
+    // `create_new`, stepping the stamp past a name already taken: two runs
+    // resolving the same millisecond must not truncate one another's log.
+    // Stepping (rather than a suffix) keeps the name all digits, so name
+    // order stays age order for the pruning above.
+    let opened = (0..1000u128).find_map(|step| {
+        let path = dir.join(format!("check-{:015}.log", millis + step));
+        std::fs::OpenOptions::new().write(true).create_new(true).open(path).ok()
+    });
+    if let Some(file) = opened {
         output::open_run_log(file);
         let argv: Vec<String> = std::env::args().collect();
         output::detail(&format!("argv: {}", argv.join(" ")));
