@@ -141,8 +141,9 @@ fn toolchain_exclusions(workspace_root: &Path) -> Vec<String> {
 
 fn check_clean(workspace_root: &Path) -> bool {
     // Exclude `.brokkr/` (brokkr's own measurement stores - results.db,
-    // sidecar.db, ratatoskr's gate.db, piners' runs.db), *.md (docs), and
-    // sluggrs' approved.png baselines, so they don't mark a measured run dirty.
+    // sidecar.db, ratatoskr's gate.db, piners' runs.db), *.md (docs),
+    // brokkr.toml and sluggrs' approved.png baselines, so they don't mark a
+    // measured run dirty.
     //
     // *.md is a judgement, not a certainty: a crate that `include_str!`s its
     // docs (brokkr's own `man`, any `#![doc = include_str!(..)]` crate) does
@@ -154,14 +155,12 @@ fn check_clean(workspace_root: &Path) -> bool {
     // this edit break the build or a test?) and does count included markdown;
     // see `scope::dirt`.
     //
-    // brokkr.toml is NOT excluded from the tracked-file diffs: it carries host
-    // build features, `env` and `capture_env`, all of which change what a
-    // measured run builds or sees, so an uncommitted edit leaves the pinned
-    // commit describing a different run. The price is that a registration
-    // brokkr writes into a tracked brokkr.toml (`--as-snapshot`, a download)
-    // marks the tree dirty until committed. An *untracked* brokkr.toml stays
-    // excluded from the untracked listing: a project that keeps it out of git
-    // has chosen not to pin it, and counting it would make every run dirty.
+    // brokkr.toml is excluded by decision, not because it is inert: it carries
+    // host build features, `env` and `capture_env`. But brokkr itself writes
+    // registrations into it (`--as-snapshot`, downloads), and counting it
+    // would block measured runs after every such write until committed. The
+    // run's features and captured env are recorded on the row itself, so the
+    // row stays interpretable without the pin covering brokkr.toml.
     //
     // approved.png is here because `brokkr approve` was otherwise
     // self-blocking: it demands a clean tree, then writes into the tree, so the
@@ -180,28 +179,27 @@ fn check_clean(workspace_root: &Path) -> bool {
     // store under `.brokkr/` is an output of the run being measured, so none of
     // them can invalidate the commit that run is pinned to. This matches the
     // untracked check below, which has always excluded the whole directory.
-    const EXCLUDES: [&str; 3] = [
+    const EXCLUDES: [&str; 4] = [
         ":(exclude).brokkr/",
         ":(exclude)*.md",
+        ":(exclude)brokkr.toml",
         ":(exclude)snapshots/*/approved.png",
     ];
     let mut excludes: Vec<String> = EXCLUDES.iter().map(|s| (*s).to_owned()).collect();
     excludes.extend(toolchain_exclusions(workspace_root));
-    let mut untracked_excludes = excludes.clone();
-    untracked_excludes.push(":(exclude)brokkr.toml".to_owned());
 
-    let run = |args: &[&str], excludes: &[String]| {
+    let run = |args: &[&str]| {
         let mut cmd = Command::new("git");
         cmd.args(args);
         cmd.arg("--");
-        cmd.args(excludes);
+        cmd.args(&excludes);
         cmd.current_dir(workspace_root);
         cmd.output()
     };
 
-    let unstaged = run(&["diff", "--quiet", "HEAD"], &excludes);
-    let staged = run(&["diff", "--quiet", "--cached", "HEAD"], &excludes);
-    let untracked = run(&["ls-files", "--others", "--exclude-standard"], &untracked_excludes);
+    let unstaged = run(&["diff", "--quiet", "HEAD"]);
+    let staged = run(&["diff", "--quiet", "--cached", "HEAD"]);
+    let untracked = run(&["ls-files", "--others", "--exclude-standard"]);
 
     let unstaged_ok = unstaged.as_ref().ok().is_some_and(|o| o.status.success());
 
