@@ -136,13 +136,25 @@ timing of the harness subprocess) of the most recent run whose selection was a
 **superset** of the current one. Dropping probes can only shorten a run, so
 `wall(subset) ≤ wall(superset)` makes a covering run's real wall a valid upper
 bound - and any `--all` run covers everything, so one full run bounds every
-selection. With no covering run recorded (a fresh DB, or a selection no prior
-run superset-covers) there is no measured basis and the run proceeds. If the
+selection. Only a **comparable** run is a basis: the harness exited 0 or 1 (a
+break is a finished probe; exit 2, a signal, or a spawn failure is not), it
+emitted a disposition line for every probe it was given, it ran with no
+forwarded harness flags, and it was built in the same profile as this run (a
+row predating the recorded profile counts as debug). Otherwise one fast-failing
+`--all` run would bound every later selection at a second or two. With no
+comparable covering run recorded (a fresh DB, or a selection no prior run
+superset-covers) there is no measured basis and the run proceeds. If the
 estimate exceeds **270s**, the run is refused before the build with a preflight
 error naming it; re-run with `--force` to override. Verification runs first, so
 hash drift still surfaces on an over-budget selection; `--verify-only` is
 exempt. The ceiling is a pre-run wall only - a run already underway is never
-killed for exceeding it.
+killed for exceeding it. The only mid-run limit is a one-hour **hang
+backstop** far above any real run: a harness still running then is killed and
+the run recorded as failed, so a wedged harness cannot hold the global lock
+indefinitely.
+
+A `runs.db` written by an older brokkr is migrated to the current schema the
+first time the ceiling (or `corpus-results`) reads it.
 
 This replaced an earlier estimate that **summed** each probe's most recent
 per-probe `runtime_ms`. The harness overlaps probes, so that sum ran ~5× the
@@ -189,12 +201,27 @@ else the outcome. brokkr compares actual vs `expected` per selected probe;
 gate to informational (still runs/aggregates/prints; harness exit governs
 breaks) - for rollout or ad-hoc breakdown runs.
 
+**Pinned breaks.** The harness exits 1 whenever any probe breaks, including a
+probe pinned `expected = "compile_fail"` that is doing exactly what its pin
+says. brokkr therefore accepts exit 1 when every break line in the report
+belongs to a selected probe pinned to that same break; an unpinned, mispinned
+or unselected break still fails the run (gated or `--no-gate` alike).
+
+**Repeated records.** The contract is one disposition line per probe and one
+`trade_diff` line per `(probe, our_index, tv_index)`. A repeat is kept as its
+last occurrence for display and storage, named in the output, and fails the
+run (`N repeated harness record(s)`).
+
 ## Reseed and bless: the two writers of pins.toml
 
 Independent deliberate acts, reviewed via `git diff pins.toml`: reseed
 adopts new *content*, bless adopts new *dispositions*. Both edit the file
 in place (`toml_edit`), so hand-written TOML comments survive - a comment
-on a removed probe goes with it.
+on a removed probe goes with it. Both hold the global brokkr lock across
+their read-modify-write, and bless stamps into the file as it is on disk at
+write time (not the copy the run loaded), so neither can revert the other.
+The file is replaced atomically (temp file + rename), so a kill mid-write
+leaves the old file, never a truncated one.
 
 `--reseed` stamps hashes from the corpus **filesystem** (not `pins.toml`) -
 the only way the file is created or its hashes refreshed. No build/harness.
@@ -221,7 +248,12 @@ build + harness), then stamps each probe's current disposition into
 `expected`. Records reality including fails (a probe exercising an
 unimplemented feature legitimately pins `expected = "compile_fail"`; the
 gate then catches it starting to compile). Never gates. Prints `blessed N
-(changed M)`. Excludes `--verify-only`/`--reseed`.
+(changed M)`. Excludes `--verify-only`/`--reseed`. A bless run whose harness
+failed stamps nothing and exits non-zero: exit 1 is acceptable only when the
+report carries the break lines it signals (recording them is the point), and
+exit 2, any other code, a signal, the hang backstop, or a repeated record
+leaves `pins.toml` untouched. The run row records `gated = no` - bless
+ignores the gate verdict.
 
 Bootstrap: `--reseed --all` → hand-stamp `[feeds]`/`[roots]` + overrides →
 `--reseed --all` again (stamps feed hashes, assigns feeds) → commit → write
@@ -230,11 +262,14 @@ keyword files → `--bless --all` → commit → runs are gated.
 ## Exit codes
 
 Harness exit: `0` clean, `1` compile/runtime break(s), `2` harness error.
-brokkr exits non-zero on a non-zero harness exit (or signal) **or** an active
-gate deviation. Hash mismatch fails earlier (before build); the
+brokkr exits non-zero on a harness exit the pins do not explain - `1` with
+any break not pinned to itself (see pinned breaks, above), `2`, any other
+code, a signal, or the hang backstop - on a repeated harness record, **or** on
+an active gate deviation. Hash mismatch fails earlier (before build); the
 runtime-ceiling refusal after verification but before the build. `--no-gate`
-and `--bless` never fail on gate diffs; `--verify-only` exits 0 once all
-pins (and feeds) verify.
+and `--bless` never fail on gate diffs; `--bless` fails (and stamps nothing)
+on a failed harness. `--verify-only` exits 0 once all pins (and feeds)
+verify.
 
 ## Artefacts
 

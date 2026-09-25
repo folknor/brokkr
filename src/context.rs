@@ -277,6 +277,11 @@ impl BenchContext {
 /// passes `Some(&worktree_path)` as `build_root` to the closure. When `None`,
 /// calls `f(parent_build_root)`.
 ///
+/// With a commit (and not `dry_run`), the global lock is taken before any
+/// worktree is evicted, replaced or created, and held until `f` returns; the
+/// locks `f` takes re-enter that hold. A closure must therefore not wait on
+/// another *process* that needs the brokkr lock.
+///
 /// Worktrees persist across runs so the cargo `target/` inside survives.
 /// Reuse is automatic when the same commit is requested again. Run
 /// `brokkr clean --worktrees` to garbage collect.
@@ -303,17 +308,41 @@ where
             f(parent_build_root)
         }
         Some(hash) => {
-            // Enforce retention BEFORE cutting the new worktree, so the cost
-            // lands beside a build you are already paying for rather than as an
-            // unexplained pause, and so no run is turned into a destructive
-            // operation merely by happening. A project that stops growing
-            // therefore never shrinks on its own - `clean --worktrees` is the
-            // explicit hammer for that. Never fatal: housekeeping must not fail
-            // the measurement that was actually asked for.
-            if let Err(e) = crate::worktree_record::enforce(project_root, git_root, keep) {
-                output::error(&format!("worktree retention: {e}"));
-            }
-            let wt = worktree::Worktree::create(git_root, hash)?;
+            // Take the global lock BEFORE touching any worktree, and hold it
+            // across the closure. Eviction and stale-replacement delete
+            // directories another brokkr may be building in (`is_dirty` cannot
+            // see that use - `target/` is gitignored), `worktrees.toml` is a
+            // read-modify-write, and `clean --worktrees` removes the same
+            // directories under the lock. The closure's own acquires re-enter
+            // this hold (`lockfile::acquire` is re-entrant within the process),
+            // so the build and measurement run under the same hold rather than
+            // leaving a window between housekeeping and build.
+            //
+            // Disarmed for the acquisition: the lock activates whatever
+            // toolchain-disable is armed, and at this point that is the live
+            // build root, which a `--commit` run never builds in. The
+            // worktree's own pin is disabled explicitly below, once the
+            // worktree exists - re-arming would do nothing, since every later
+            // acquire in this run re-enters this hold and activates nothing.
+            let saved_arm = crate::toolchain::arm(None);
+            let lock = acquire_cmd_lock_opt(None, project_root, "worktree");
+            crate::toolchain::arm(saved_arm);
+            let lock = lock?;
+
+            // Retention runs from `create`'s cut hook: only when a worktree is
+            // actually cut, never on reuse, so the cost lands beside a build
+            // you are already paying for and no run is turned into a
+            // destructive operation merely by happening. A project that stops
+            // growing therefore never shrinks on its own - `clean --worktrees`
+            // is the explicit hammer for that. Never fatal: housekeeping must
+            // not fail the measurement that was actually asked for.
+            let wt = worktree::Worktree::create(git_root, hash, |cutting| {
+                if let Err(e) =
+                    crate::worktree_record::enforce(project_root, git_root, keep, cutting)
+                {
+                    output::error(&format!("worktree retention: {e}"));
+                }
+            })?;
             if let Some(name) = wt.path.file_name().and_then(|n| n.to_str())
                 && let Err(e) = crate::worktree_record::Store::touch(project_root, name)
             {
@@ -323,20 +352,21 @@ where
                 "benchmarking commit {} ({})",
                 wt.commit, wt.subject,
             ));
-            // The worktree is a fresh checkout of `hash`, which may carry its
-            // own committed rust-toolchain pin. The startup arm points at the
-            // live build root, not here, so re-arm the disable dir at the
-            // worktree for the build closure - otherwise the pin the build
-            // disables (when it takes the global lock) would be the live root's,
-            // not the worktree's. Restored to the previous arm afterwards.
-            if disable_toolchain {
-                let saved = crate::toolchain::arm(Some(wt.path.clone()));
-                let result = f(Some(&wt.path));
-                crate::toolchain::arm(saved);
-                result
+            // The worktree is a checkout of `hash`, which may carry its own
+            // committed rust-toolchain pin. Move it aside for the closure. Safe
+            // as a bare guard here (unlike the race `toolchain`'s module doc
+            // describes for `fmt`) because it sits entirely inside the lock
+            // held above; declared after `lock`, it drops - restoring the pin -
+            // before the flock is released.
+            let toolchain_guard = if disable_toolchain {
+                Some(crate::toolchain::DisabledToolchain::activate(&wt.path)?)
             } else {
-                f(Some(&wt.path))
-            }
+                None
+            };
+            let result = f(Some(&wt.path));
+            drop(toolchain_guard);
+            drop(lock);
+            result
         }
         None => f(parent_build_root),
     }

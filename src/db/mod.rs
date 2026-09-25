@@ -2,6 +2,7 @@ mod compare;
 mod format;
 pub mod gate;
 mod hotpath;
+pub(crate) mod like;
 mod migrate;
 mod query;
 mod schema;

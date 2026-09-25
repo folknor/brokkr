@@ -814,8 +814,11 @@ impl BenchHarness {
     /// Build a `RunRow` from harness state, config, and result.
     fn build_row(&self, config: &BenchConfig, result: &BenchResult) -> RunRow {
         let mut kv = config.metadata.clone();
-        // Env capture comes before result kv so runtime counters win on
-        // the unlikely key collision (env.foo vs a runtime env.foo).
+        // Sources are appended in increasing precedence - metadata, env
+        // capture, prev.*, then the run's own counters - and the insert
+        // keeps the LAST pair per key (`db::write::insert_inner`), so
+        // runtime counters win the unlikely collision (env.foo vs a
+        // runtime env.foo).
         kv.extend(self.env_kv.iter().cloned());
         kv.extend(previous_run_kv(&self.db, self.measure_start_epoch.get()));
         let mut peak_rss_mb: Option<f64> = None;

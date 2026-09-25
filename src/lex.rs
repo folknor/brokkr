@@ -118,7 +118,10 @@ pub fn use_statements(src: &str) -> Vec<UseStmt> {
     let mut i = 0;
     while i < toks.len() {
         let (start, len, kind) = toks[i];
-        if kind == TokenKind::Ident && &src[start..start + len] == "use" {
+        if kind == TokenKind::Ident
+            && &src[start..start + len] == "use"
+            && !opens_generic_args(&toks, i + 1)
+        {
             // Scan to the depth-0 `;`.
             let mut depth: i32 = 0;
             let mut j = i + 1;
@@ -153,6 +156,24 @@ pub fn use_statements(src: &str) -> Vec<UseStmt> {
         i += 1;
     }
     out
+}
+
+/// Whether the first non-trivia token at or after `from` is `<`. That marks the
+/// Rust 2024 precise-capturing bound (`impl Trait + use<'a>`), whose `use` is
+/// the same reserved keyword but starts no import: an import path can never
+/// begin with `<`. Without this check the bound opened a bogus statement that
+/// ran to the next depth-0 `;`, swallowing a following real `use`.
+fn opens_generic_args(toks: &[(usize, usize, TokenKind)], from: usize) -> bool {
+    toks.get(from..)
+        .unwrap_or(&[])
+        .iter()
+        .find(|(_, _, k)| {
+            !matches!(
+                k,
+                TokenKind::Whitespace | TokenKind::LineComment | TokenKind::BlockComment { .. }
+            )
+        })
+        .is_some_and(|(_, _, k)| *k == TokenKind::Lt)
 }
 
 /// Flatten `src[start..end]` to one line: comment bytes and whitespace runs
@@ -260,6 +281,20 @@ mod tests {
     fn use_keyword_in_string_or_comment_is_not_a_statement() {
         let src = "let s = \"use x::y;\";\n// use a::b;\n";
         assert!(use_statements(src).is_empty());
+    }
+
+    #[test]
+    fn precise_capturing_bound_is_not_a_use_statement() {
+        // `use<'a>` is the Rust 2024 precise-capturing bound, not an import;
+        // it must not open a statement that swallows the real `use` below.
+        let src = "fn f<'a>(x: &'a u8) -> impl Sized + use<'a> { x }\nuse a::b;\n";
+        let s = use_statements(src);
+        assert_eq!(s.len(), 1);
+        assert_eq!(s[0].joined, "use a::b;");
+        assert_eq!((s[0].start_line, s[0].end_line), (1, 1));
+        let spaced = use_statements("fn g() -> impl Sized + use /* c */ <> {}\nuse c::d;\n");
+        assert_eq!(spaced.len(), 1);
+        assert_eq!(spaced[0].start_line, 1);
     }
 
     #[test]

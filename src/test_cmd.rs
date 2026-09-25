@@ -200,7 +200,7 @@ pub fn run(
         // aggregator marks the sweep as failed.
         let mut pre_build_failed = false;
         for build_pkg in &sweep.build_packages {
-            if !run_pre_build(project_root, sweep, build_pkg, &env_refs, debug)? {
+            if !run_pre_build(project_root, sweep, build_pkg, &env_refs, &allow_args, debug)? {
                 pre_build_failed = true;
                 reports.push(RunReport::bare(Outcome::BuildFailed));
                 break;
@@ -348,16 +348,10 @@ fn run_pre_build(
     sweep: &ResolvedSweep,
     package: &str,
     env: &[(&str, &str)],
+    allow_args: &[String],
     debug: bool,
 ) -> Result<bool, DevError> {
-    let mut args: Vec<String> = vec!["build".into()];
-    if !debug {
-        args.push("--release".into());
-    }
-    args.extend(sweep.cargo_feature_args.iter().cloned());
-    args.push("--package".into());
-    args.push(package.into());
-
+    let args = pre_build_argv(sweep, package, allow_args, debug);
     output::run_msg(&format!(
         "cargo {} (sweep build: {})",
         args.join(" "),
@@ -386,6 +380,33 @@ fn run_pre_build(
         sweep.label
     );
     Ok(false)
+}
+
+/// The `cargo build` argv for one sweep pre-build.
+///
+/// It carries the same two things every other cargo command derived from the
+/// sweep carries, for the same reasons: the pinned feature unification (a
+/// package-mode sweep's pre-build otherwise resolves ambiently while its
+/// `cargo test` resolves per package - two feature graphs for one lane), and
+/// the `[lints] allow` `--config` share, since a pre-build compiling the crate
+/// under an unsuppressed lint the project denies fails before the test run is
+/// ever reached. `allow_args` goes before the selection, as in [`test_argv`].
+fn pre_build_argv(
+    sweep: &ResolvedSweep,
+    package: &str,
+    allow_args: &[String],
+    debug: bool,
+) -> Vec<String> {
+    let mut args: Vec<String> = vec!["build".into()];
+    args.extend(sweep.unification_args());
+    args.extend(allow_args.iter().cloned());
+    if !debug {
+        args.push("--release".into());
+    }
+    args.extend(sweep.cargo_feature_args.iter().cloned());
+    args.push("--package".into());
+    args.push(package.into());
+    args
 }
 
 /// Count how many tests `<name>` matches in this sweep via libtest
@@ -1937,6 +1958,32 @@ benches::throughput: benchmark
         let sep = exact.iter().position(|a| a == "--").expect("separator");
         let at = exact.iter().position(|a| a == "--exact").expect("exact");
         assert!(at > sep, "--exact must be a libtest arg: {exact:?}");
+    }
+
+    /// The pre-build compiles the lane like the test run does: the pinned
+    /// unification and the `[lints] allow` `--config` share both ride it, or a
+    /// package-mode lane pre-builds under ambient resolution and a denied lint
+    /// fails the pre-build before `cargo test` is reached.
+    #[test]
+    fn pre_build_carries_the_unification_pin_and_the_allow_config() {
+        use crate::config::{CargoUnification, EffectiveUnification};
+        let sweep = ResolvedSweep {
+            packages: vec!["daemon".to_owned()],
+            effective_unification: EffectiveUnification::Pinned(CargoUnification::Package),
+            ..ResolvedSweep::default()
+        };
+        let allow = vec!["--config".to_owned(), "build.rustflags=[\"-A\",\"x\"]".to_owned()];
+        let args = pre_build_argv(&sweep, "daemon", &allow, false);
+        assert!(
+            args.iter().any(|a| a == "resolver.feature-unification=\"package\""),
+            "{args:?}"
+        );
+        assert!(args.iter().any(|a| a == "build.rustflags=[\"-A\",\"x\"]"), "{args:?}");
+        assert!(args.iter().any(|a| a == "--release"), "{args:?}");
+
+        // An unpinned sweep with no allows stays byte-identical to before.
+        let plain = pre_build_argv(&ResolvedSweep::default(), "bin", &[], true);
+        assert_eq!(plain, ["build", "--package", "bin"]);
     }
 
     #[test]

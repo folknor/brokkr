@@ -575,7 +575,8 @@ fn run_install_feature_phase(
         )?;
     }
     if !ok {
-        return Err(DevError::Build("install-feature check failed".into()));
+        // Every failing package already reported itself above.
+        return Err(DevError::Reported("install-feature check failed".into()));
     }
 
     let bins: usize = expected.iter().map(|(_, b)| b.len()).sum();

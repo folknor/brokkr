@@ -20,6 +20,15 @@ pub(crate) fn cmd_invalidate(
     commit_prefix: Option<&str>,
     force: bool,
 ) -> Result<(), DevError> {
+    // An empty prefix is `LIKE '%'` - every row in both databases, which
+    // `brokkr invalidate "" -f` used to delete. Refused before anything opens.
+    if let Some(u) = uuid_prefix {
+        db::like::require_prefix(u, "uuid")?;
+    }
+    if let Some(c) = commit_prefix {
+        db::like::require_prefix(c, "commit")?;
+    }
+
     let rdb_path = results_db_path(project_root);
     let sdb_path = sidecar_db_path(project_root);
 

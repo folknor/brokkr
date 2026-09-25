@@ -22,6 +22,13 @@ fn tally(counts: &mut (u32, u32), result: &Result<(), DevError>) {
     }
 }
 
+/// Why the OSC-consuming checks skip. `osc` is `None` only when nothing is
+/// configured - a configured OSC that fails to resolve is an error in the
+/// caller (`cmd::verify`), never a skip.
+const NO_OSC: &str = "SKIPPED (dataset has no osc configured; pass --osc-seq to pick one)";
+/// Why the bbox-consuming checks skip; same contract as [`NO_OSC`].
+const NO_BBOX: &str = "SKIPPED (no --bbox and the dataset has no bbox configured)";
+
 /// Run all verify commands sequentially.
 ///
 /// Each check runs under [`run_check`], so a failure is reported (with its
@@ -29,6 +36,9 @@ fn tally(counts: &mut (u32, u32), result: &Result<(), DevError>) {
 /// Passing checks print a single line; failures replay their captured detail.
 /// Returns `Err(ExitCode(1))` when one or more checks failed - the per-check
 /// lines and the banner have already reported everything.
+///
+/// `osc`/`bbox` are `None` only when the input is not configured at all; the
+/// checks needing them then print a SKIPPED line and count as skipped.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub fn run(
     harness: &VerifyHarness,
@@ -61,7 +71,7 @@ pub fn run(
             verify_extract::run(harness, pbf, b, direct_io)
         }));
     } else {
-        verify_summary("extract: SKIPPED (no --bbox provided)");
+        verify_summary(&format!("extract: {NO_BBOX}"));
         skipped += 1;
     }
 
@@ -71,7 +81,7 @@ pub fn run(
             verify_multi_extract::run(harness, pbf, b, 5, direct_io)
         }));
     } else {
-        verify_summary("multi-extract: SKIPPED (no --bbox provided)");
+        verify_summary(&format!("multi-extract: {NO_BBOX}"));
         skipped += 1;
     }
 
@@ -98,13 +108,21 @@ pub fn run(
     // 8. apply-changes
     if let Some(osc_path) = osc {
         // Best-effort osmosis setup - merge works without it. Done outside
-        // run_check so any setup output isn't captured as check detail.
-        let osmosis = crate::tools::ensure_osmosis(data_dir, project_root).ok();
+        // run_check so any setup output isn't captured as check detail, and
+        // narrated on failure the way single `verify merge` does, rather than
+        // dropped: a silently missing reference tool reads as a covered one.
+        let osmosis = match crate::tools::ensure_osmosis(data_dir, project_root) {
+            Ok(tools) => Some(tools),
+            Err(e) => {
+                verify_summary(&format!("osmosis not available (non-fatal): {e}"));
+                None
+            }
+        };
         tally(&mut counts, &run_check("apply-changes", verbose, || {
             verify_merge::run(harness, pbf, osc_path, osmosis.as_ref(), direct_io)
         }));
     } else {
-        verify_summary("apply-changes: SKIPPED (no --osc provided)");
+        verify_summary(&format!("apply-changes: {NO_OSC}"));
         skipped += 1;
     }
 
@@ -114,7 +132,7 @@ pub fn run(
             verify_derive_changes::run(harness, pbf, osc_path, direct_io)
         }));
     } else {
-        verify_summary("diff --format osc: SKIPPED (no --osc provided)");
+        verify_summary(&format!("diff --format osc: {NO_OSC}"));
         skipped += 1;
     }
 
@@ -129,7 +147,7 @@ pub fn run(
             verify_diff::run(harness, pbf, osc_path)
         }));
     } else {
-        verify_summary("diff: SKIPPED (no --osc provided)");
+        verify_summary(&format!("diff: {NO_OSC}"));
         skipped += 1;
     }
 

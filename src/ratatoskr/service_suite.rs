@@ -132,7 +132,6 @@ pub fn service_suite(
                         dev_config,
                         &script.name,
                         fixture_name,
-                        &artefact_parent,
                         &_lock,
                     )?;
                     mocks.insert(fixture_name.to_owned(), session);
@@ -595,7 +594,6 @@ impl FixtureSession {
         dev_config: &crate::config::DevConfig,
         owner_label: &str,
         fixture_name: &str,
-        artefact_parent: &Path,
         lock: &lockfile::LockGuard,
     ) -> Result<Self, DevError> {
         let cfg = dev_config.ratatoskr.as_ref().ok_or_else(|| {
@@ -616,7 +614,9 @@ impl FixtureSession {
         }
         let fixture_path = resolve_fixture(&fixtures_dir, fixture_name)?;
 
-        let mock_dir = artefact_parent.join("mock").join(safe_dir_name(fixture_name));
+        let mock_dir = project_root
+            .join(SERVICE_MOCK_PARENT)
+            .join(safe_dir_name(fixture_name));
         std::fs::create_dir_all(&mock_dir).map_err(DevError::Io)?;
 
         // PID published from inside spawn_observed - before readiness

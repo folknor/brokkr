@@ -72,7 +72,9 @@ pub fn parse_osc_file(path: &Path) -> Result<OscDiff, DevError> {
     let bytes = std::fs::read(path).map_err(|e| {
         DevError::Verify(format!("cannot open OSC {}: {e}", path.display()))
     })?;
-    Ok(parse_osc_text(&decode_osc_bytes(&bytes, path)?))
+    parse_osc_text(&decode_osc_bytes(&bytes, path)?).map_err(|why| {
+        DevError::Verify(format!("{} is not a complete OSC document: {why}", path.display()))
+    })
 }
 
 /// Decompress OSC bytes to XML text. Gzip is detected by magic bytes and
@@ -103,13 +105,32 @@ enum Section {
     Delete,
 }
 
+/// Where the parser stands relative to the `<osmChange>` root element.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Root {
+    /// No element seen yet (only the prolog: `<?xml?>`, comments, DOCTYPE).
+    Before,
+    Open,
+    Closed,
+}
+
 /// Parse already-decompressed OSC XML text. Tolerant of whitespace,
 /// XML comments, and self-closing elements (`<node id="1" .../>`).
 /// Element-body content (tags / refs / members) is silently skipped.
+///
+/// The document must be an OSC one: its first element must be the
+/// `<osmChange>` root and that root must be closed. Without the check, any
+/// non-OSC input - an empty file, an `.osm` document, a diff truncated
+/// mid-write - parsed as an empty diff, which `verify_merge` reports as
+/// "element-identical PASS".
+///
+/// The error is the bare reason; [`parse_osc_file`] wraps it in a
+/// `DevError` that names the file.
 #[allow(clippy::cognitive_complexity)] // single state machine
-pub fn parse_osc_text(text: &str) -> OscDiff {
+pub fn parse_osc_text(text: &str) -> Result<OscDiff, String> {
     let mut out = OscDiff::default();
     let mut section = Section::None;
+    let mut root = Root::Before;
     let bytes = text.as_bytes();
     let mut i = 0;
 
@@ -152,14 +173,30 @@ pub fn parse_osc_text(text: &str) -> OscDiff {
             let name = name.trim();
             match name {
                 "create" | "modify" | "delete" => section = Section::None,
+                "osmChange" if root == Root::Open => root = Root::Closed,
                 _ => {}
             }
             continue;
         }
 
         // Strip self-closing trailing slash for matching.
+        let self_closing = tag.ends_with('/');
         let stripped = tag.trim_end_matches('/').trim();
         let (name, attrs) = split_tag_name(stripped);
+
+        match root {
+            Root::Before if name == "osmChange" => {
+                root = if self_closing { Root::Closed } else { Root::Open };
+                continue;
+            }
+            Root::Before => {
+                return Err(format!("root element is <{name}>, not <osmChange>"));
+            }
+            Root::Closed => {
+                return Err(format!("element <{name}> after the closing </osmChange>"));
+            }
+            Root::Open => {}
+        }
 
         match name {
             "create" => section = Section::Create,
@@ -174,7 +211,11 @@ pub fn parse_osc_text(text: &str) -> OscDiff {
         }
     }
 
-    out
+    match root {
+        Root::Closed => Ok(out),
+        Root::Before => Err("no <osmChange> root element".to_owned()),
+        Root::Open => Err("missing closing </osmChange> (truncated?)".to_owned()),
+    }
 }
 
 fn split_tag_name(tag: &str) -> (&str, &str) {
@@ -299,7 +340,7 @@ mod tests {
 
     #[test]
     fn parses_basic_sections() {
-        let diff = parse_osc_text(SAMPLE);
+        let diff = parse_osc_text(SAMPLE).unwrap();
         assert_eq!(diff.created_nodes.iter().copied().collect::<Vec<_>>(), vec![100]);
         assert_eq!(diff.created_ways.iter().copied().collect::<Vec<_>>(), vec![200]);
         assert!(diff.created_relations.is_empty());
@@ -335,7 +376,7 @@ mod tests {
             "second member missing - GzDecoder truncation? {text}"
         );
 
-        let diff = parse_osc_text(&text);
+        let diff = parse_osc_text(&text).unwrap();
         assert_eq!(diff.created_nodes.iter().copied().collect::<Vec<_>>(), vec![1]);
         assert_eq!(diff.deleted_ways.iter().copied().collect::<Vec<_>>(), vec![2]);
     }
@@ -349,7 +390,7 @@ mod tests {
     #[test]
     fn handles_self_closing_elements() {
         let xml = r#"<osmChange><delete><node id="1" version="1"/><way id="2" version="1"/></delete></osmChange>"#;
-        let diff = parse_osc_text(xml);
+        let diff = parse_osc_text(xml).unwrap();
         assert_eq!(diff.deleted_nodes.iter().copied().collect::<Vec<_>>(), vec![1]);
         assert_eq!(diff.deleted_ways.iter().copied().collect::<Vec<_>>(), vec![2]);
     }
@@ -359,7 +400,7 @@ mod tests {
         let xml = r#"<osmChange><create>
   <way id="42" version="1"><nd ref="100"/><nd ref="200"/></way>
 </create></osmChange>"#;
-        let diff = parse_osc_text(xml);
+        let diff = parse_osc_text(xml).unwrap();
         assert_eq!(diff.created_ways.iter().copied().collect::<Vec<_>>(), vec![42]);
     }
 
@@ -371,7 +412,7 @@ mod tests {
 <delete><node id="1" version="1"/></delete>
 <delete><way id="2" version="1"/></delete>
 </osmChange>"#;
-        let diff = parse_osc_text(xml);
+        let diff = parse_osc_text(xml).unwrap();
         assert_eq!(diff.deleted_nodes.iter().copied().collect::<Vec<_>>(), vec![1]);
         assert_eq!(diff.deleted_ways.iter().copied().collect::<Vec<_>>(), vec![2]);
     }
@@ -382,7 +423,7 @@ mod tests {
 <!-- ignored: <node id="999"/> -->
 <delete><node id="1" version="1"/></delete>
 </osmChange>"#;
-        let diff = parse_osc_text(xml);
+        let diff = parse_osc_text(xml).unwrap();
         assert_eq!(diff.deleted_nodes.iter().copied().collect::<Vec<_>>(), vec![1]);
     }
 
@@ -391,7 +432,7 @@ mod tests {
         let xml = r#"<?xml version="1.0"?>
 <!DOCTYPE osmChange>
 <osmChange><delete><node id="7" version="1"/></delete></osmChange>"#;
-        let diff = parse_osc_text(xml);
+        let diff = parse_osc_text(xml).unwrap();
         assert_eq!(diff.deleted_nodes.iter().copied().collect::<Vec<_>>(), vec![7]);
     }
 
@@ -400,14 +441,14 @@ mod tests {
         // Negative IDs are valid in OSM (placeholder IDs for new
         // objects in JOSM-style edits).
         let xml = r#"<osmChange><create><node id="-12345" version="1" lat="0" lon="0"/></create></osmChange>"#;
-        let diff = parse_osc_text(xml);
+        let diff = parse_osc_text(xml).unwrap();
         assert!(diff.created_nodes.contains(&-12345));
     }
 
     #[test]
     fn handles_single_quoted_id() {
         let xml = "<osmChange><delete><node id='1' version='1'/></delete></osmChange>";
-        let diff = parse_osc_text(xml);
+        let diff = parse_osc_text(xml).unwrap();
         assert_eq!(diff.deleted_nodes.iter().copied().collect::<Vec<_>>(), vec![1]);
     }
 
@@ -419,7 +460,7 @@ mod tests {
 <node id="1" version="1"/>
 <delete><node id="2" version="1"/></delete>
 </osmChange>"#;
-        let diff = parse_osc_text(xml);
+        let diff = parse_osc_text(xml).unwrap();
         assert!(diff.created_nodes.is_empty());
         assert!(diff.modified_nodes.is_empty());
         assert_eq!(diff.deleted_nodes.iter().copied().collect::<Vec<_>>(), vec![2]);
@@ -429,14 +470,54 @@ mod tests {
     fn missing_id_attribute_is_skipped() {
         // Defensive: a malformed element with no id is skipped, not a panic.
         let xml = r#"<osmChange><delete><node version="1"/></delete></osmChange>"#;
-        let diff = parse_osc_text(xml);
+        let diff = parse_osc_text(xml).unwrap();
         assert!(diff.is_empty());
     }
 
     #[test]
-    fn empty_input_yields_empty_diff() {
-        assert!(parse_osc_text("").is_empty());
-        assert!(parse_osc_text("<osmChange></osmChange>").is_empty());
+    fn empty_osmchange_yields_empty_diff() {
+        assert!(parse_osc_text("<osmChange></osmChange>").unwrap().is_empty());
+        assert!(parse_osc_text(r#"<?xml version="1.0"?><osmChange version="0.6"/>"#)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn non_osc_input_is_refused_not_an_empty_diff() {
+        // The bug: each of these parsed as an empty diff, which verify_merge
+        // reported as "element-identical PASS".
+        let empty = parse_osc_text("").unwrap_err();
+        assert!(empty.contains("no <osmChange>"), "got: {empty}");
+        assert!(parse_osc_text("   \n").is_err());
+        assert!(parse_osc_text("not xml at all").is_err());
+        let osm = parse_osc_text(r#"<osm version="0.6"><node id="1"/></osm>"#).unwrap_err();
+        assert!(osm.contains("<osm>"), "got: {osm}");
+    }
+
+    #[test]
+    fn truncated_osc_is_refused() {
+        let err = parse_osc_text(r#"<osmChange><delete><node id="1" version="1"/>"#).unwrap_err();
+        assert!(err.contains("</osmChange>"), "got: {err}");
+        // Cut off inside a tag.
+        assert!(parse_osc_text(r#"<osmChange><delete><node id="1" vers"#).is_err());
+    }
+
+    #[test]
+    fn content_after_root_is_refused() {
+        let err = parse_osc_text(
+            r#"<osmChange></osmChange><osmChange><delete><node id="1"/></delete></osmChange>"#,
+        )
+        .unwrap_err();
+        assert!(err.contains("after the closing"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_osc_file_names_the_file_on_refusal() {
+        let path = crate::test_scratch::scratch_path("osc", "empty-osc-file");
+        std::fs::write(&path, b"").unwrap();
+        let err = parse_osc_file(&path).unwrap_err().to_string();
+        assert!(err.contains("empty-osc-file"), "got: {err}");
+        assert!(err.contains("not a complete OSC document"), "got: {err}");
     }
 
     #[test]

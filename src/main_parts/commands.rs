@@ -94,12 +94,18 @@ fn cmd_approve(
     dev_config: &config::DevConfig,
     project: Project,
     project_root: &Path,
+    build_root: &Path,
     fixture: Vec<String>,
     all: bool,
 ) -> Result<(), DevError> {
     if fixture.is_empty() && !all {
         return Err(DevError::Config(
             "specify one or more fixture/snapshot IDs, or --all".into(),
+        ));
+    }
+    if all && !fixture.is_empty() {
+        return Err(DevError::Config(
+            "give fixture/snapshot IDs or --all, not both".into(),
         ));
     }
 
@@ -115,7 +121,7 @@ fn cmd_approve(
                 fixture
             };
             for id in &ids {
-                litehtml::cmd::approve(project, project_root, cfg, id)?;
+                litehtml::cmd::approve(project, project_root, build_root, cfg, id)?;
             }
             Ok(())
         }
@@ -130,7 +136,7 @@ fn cmd_approve(
                 fixture
             };
             for id in &ids {
-                sluggrs::cmd::approve(project, project_root, cfg, id)?;
+                sluggrs::cmd::approve(project, project_root, build_root, cfg, id)?;
             }
             Ok(())
         }
@@ -524,30 +530,42 @@ fn cargo_clean_package(build_root: &Path, pkg: &str) -> Result<(), DevError> {
 }
 
 /// Clean the project's scratch/tmp directory. Each project's scratch is a
-/// different shape: elivagar wipes `tilegen_tmp` wholesale (and recreates it),
-/// nidhogg has two named tmp dirs, and pbfhogg/others sweep loose `.pbf`
-/// scratch, geocode output dirs, and dead external-join dirs.
+/// different shape: elivagar wipes its scratch dir (recreated) and
+/// `<data>/tilegen_tmp`, nidhogg has two named tmp dirs, and pbfhogg/others
+/// sweep loose `.pbf` scratch, geocode output dirs, and dead external-join dirs.
 fn clean_scratch(project: Project, project_root: &Path, paths: &config::ResolvedPaths, c: &Cleaner) {
-    if !paths.scratch_dir.exists() {
-        return;
-    }
     if project == Project::Elivagar {
-        // Elivagar scratch is tilegen_tmp - remove all contents and recreate.
+        // Two distinct brokkr-designated dirs, not one. The scratch dir (default
+        // `data/scratch`) holds tilegen's `-o` target before it is renamed into
+        // the durable store; `<data>/tilegen_tmp` is the `--tmp-dir` brokkr
+        // passes (`ElivagarCommand::build_args`), where elivagar spills its
+        // intermediates. Cleaning only the scratch dir under the tilegen_tmp
+        // label left the real tmp dir - the large one - untouched on every
+        // host that does not happen to point `scratch` at it.
         if c.dir(&paths.scratch_dir) {
             if !c.dry_run {
                 std::fs::create_dir_all(&paths.scratch_dir).ok();
             }
+            output::run_msg(&format!("{} scratch", c.past()));
+        }
+        let tmp_dir = paths.data_dir.join("tilegen_tmp");
+        if tmp_dir != paths.scratch_dir && c.dir(&tmp_dir) {
             output::run_msg(&format!("{} tilegen_tmp", c.past()));
         }
         return;
     }
     if project == Project::Nidhogg {
+        // Nidhogg's tmp dirs live under the project root, not the scratch dir,
+        // so their cleanup must not be gated on the scratch dir existing.
         if c.dir(&project_root.join(".ingest_tmp")) {
             output::run_msg(&format!("{} .ingest_tmp", c.past()));
         }
         if c.dir(&project_root.join(".tilegen_tmp")) {
             output::run_msg(&format!("{} .tilegen_tmp", c.past()));
         }
+        return;
+    }
+    if !paths.scratch_dir.exists() {
         return;
     }
 
@@ -571,19 +589,119 @@ fn clean_scratch(project: Project, project_root: &Path, paths: &config::Resolved
                 // (.pbfhogg-external-join-{pid}); these survive OOM kills
                 // (SIGKILL prevents Drop cleanup).
                 if let Some(pid_str) = name.strip_prefix(".pbfhogg-external-join-")
-                    && let Ok(pid) = pid_str.parse::<i32>()
+                    && let Ok(pid) = pid_str.parse::<u32>()
+                    && !join_dir_owner_alive(pid, &path)
                 {
-                    let alive = unsafe { libc::kill(pid, 0) } == 0;
-                    if !alive {
-                        c.dir(&path);
-                        removed += 1;
-                    }
+                    c.dir(&path);
+                    removed += 1;
                 }
             }
         }
     }
     if removed > 0 {
         output::run_msg(&format!("{} {removed} scratch file(s)", c.verb()));
+    }
+}
+
+/// Whether the process that created `.pbfhogg-external-join-{pid}` at `dir` may
+/// still be running. The dir name carries only a PID - no starttime token - so
+/// the owner's identity is reconstructed by ordering: a process that started
+/// *after* the directory was created cannot have created it, so a live PID with
+/// a later start is a recycled PID and the dir is orphaned.
+///
+/// Errs toward "alive" whenever it cannot tell: a kept dir leaks disk until the
+/// next clean, a deleted live dir breaks a running join. `EPERM` from
+/// `kill(pid, 0)` means the process exists under another uid - alive, not dead.
+fn join_dir_owner_alive(pid: u32, dir: &Path) -> bool {
+    let Ok(raw) = i32::try_from(pid) else {
+        return true;
+    };
+    if raw <= 0 {
+        return true;
+    }
+    let exists = if unsafe { libc::kill(raw, 0) } == 0 {
+        true
+    } else {
+        std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+    };
+    // The dir's birth time where the filesystem records one, else its mtime.
+    // mtime is never earlier than birth, so "started after mtime" still
+    // implies "started after the dir existed" - the fallback stays sound.
+    let dir_epoch = std::fs::metadata(dir)
+        .ok()
+        .and_then(|m| m.created().or_else(|_| m.modified()).ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs_f64());
+    let proc_start = if exists { proc_start_epoch(pid) } else { None };
+    join_owner_alive_decision(exists, proc_start, dir_epoch)
+}
+
+/// Slack for [`join_owner_alive_decision`]'s ordering test: `btime` is whole
+/// seconds and starttime is in clock ticks, so a process start is known to
+/// within about a second. Generous on purpose - the slack only ever widens the
+/// "alive" side.
+const JOIN_OWNER_START_SLACK_SECS: f64 = 5.0;
+
+/// Pure decision behind [`join_dir_owner_alive`]. `exists` is the `kill(pid, 0)`
+/// verdict (EPERM counted as existing); the two epochs are the live PID's
+/// start and the dir's creation, each `None` when unreadable.
+fn join_owner_alive_decision(
+    exists: bool,
+    proc_start: Option<f64>,
+    dir_created: Option<f64>,
+) -> bool {
+    if !exists {
+        return false;
+    }
+    match (proc_start, dir_created) {
+        (Some(start), Some(created)) => start <= created + JOIN_OWNER_START_SLACK_SECS,
+        _ => true,
+    }
+}
+
+/// A PID's start as seconds since the Unix epoch: `/proc/stat`'s `btime` plus
+/// the PID's starttime ticks. `None` on any read or parse failure.
+fn proc_start_epoch(pid: u32) -> Option<f64> {
+    let ticks: f64 = lockfile::proc_starttime(pid)?.parse().ok()?;
+    let clk_tck = unsafe { libc::sysconf(libc::_SC_CLK_TCK) } as f64;
+    if clk_tck <= 0.0 {
+        return None;
+    }
+    let stat = std::fs::read_to_string("/proc/stat").ok()?;
+    let btime: f64 = stat
+        .lines()
+        .find_map(|l| l.strip_prefix("btime "))?
+        .trim()
+        .parse()
+        .ok()?;
+    Some(btime + ticks / clk_tck)
+}
+
+#[cfg(test)]
+mod join_owner_tests {
+    use super::join_owner_alive_decision;
+
+    #[test]
+    fn a_missing_pid_is_dead() {
+        assert!(!join_owner_alive_decision(false, None, None));
+    }
+
+    #[test]
+    fn an_existing_pid_with_unknown_times_is_alive() {
+        assert!(join_owner_alive_decision(true, None, Some(100.0)));
+        assert!(join_owner_alive_decision(true, Some(100.0), None));
+    }
+
+    #[test]
+    fn a_pid_started_before_the_dir_is_alive() {
+        assert!(join_owner_alive_decision(true, Some(100.0), Some(200.0)));
+        // Within the tick/btime slack.
+        assert!(join_owner_alive_decision(true, Some(203.0), Some(200.0)));
+    }
+
+    #[test]
+    fn a_pid_started_after_the_dir_is_recycled() {
+        assert!(!join_owner_alive_decision(true, Some(1000.0), Some(200.0)));
     }
 }
 
@@ -649,28 +767,18 @@ fn clean_artefact_trees(project: Project, project_root: &Path, c: &Cleaner) {
 /// elsewhere is the user's file and is never touched.
 pub(crate) const CORPUS_CALIBRAND_DIR: &str = "corpus-calibrands";
 
-/// Deep-clean (`--worktrees`) the durable tilegen output store: removes ALL
-/// `*.pmtiles` in the output dir. Unlike `--archives` (canonical-name,
-/// per-(dataset,variant), keep-N), the deep clean wipes the store wholesale
-/// because it is reproducible (rerun tilegen). Skipped when the output dir
-/// coincides with scratch (already wiped by the caller).
+/// Deep-clean (`--worktrees`) the durable tilegen output store: removes every
+/// canonical `<dataset>-<variant>-<commit>.pmtiles` archive, i.e. `--archives`
+/// with a keep window of zero. It used to remove every `*.pmtiles` in the
+/// output dir, which broke the constructed-name rule `clean_archives` states:
+/// with `output = "data"` it would have taken the hand-built ocean artifact
+/// `ocean-tiles.pmtiles` too. Skipped when the output dir coincides with
+/// scratch (already wiped by the caller).
 fn clean_elivagar_outputs(paths: &config::ResolvedPaths, c: &Cleaner) {
-    if paths.output_dir == paths.scratch_dir || !paths.output_dir.exists() {
+    if paths.output_dir == paths.scratch_dir {
         return;
     }
-    let mut removed = 0u32;
-    if let Ok(entries) = std::fs::read_dir(&paths.output_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) == Some("pmtiles") {
-                c.file(&path);
-                removed += 1;
-            }
-        }
-    }
-    if removed > 0 {
-        output::run_msg(&format!("{} {removed} tilegen output archive(s)", c.verb()));
-    }
+    clean_archives(paths, 0, c);
 }
 
 /// `--archives`: prune canonical `<dataset>-<variant>-<commit>.pmtiles` archives
@@ -886,10 +994,9 @@ fn forward_cargo(subcommand: &str, args: &[String]) -> Result<(), DevError> {
     // A raw `Command` outside the `output` helpers, so it needs the capability
     // stamp explicitly: see `crate::hold`.
     crate::hold::stamp(&mut cmd);
-    let status = cmd.status().map_err(|e| DevError::Subprocess {
+    let status = cmd.status().map_err(|error| DevError::Spawn {
         program: "cargo".into(),
-        code: None,
-        stderr: e.to_string(),
+        error,
     })?;
     if status.success() {
         return Ok(());
@@ -928,8 +1035,21 @@ fn cmd_pmtiles_stats(project: Project, files: &[String]) -> Result<(), DevError>
         )));
     }
 
+    // Every file is attempted - one bad archive does not hide the stats of the
+    // rest - but any failure fails the command, as `pmtiles::run` now reports
+    // an unreadable file as an error rather than printing it as output.
+    let mut failed = 0usize;
     for file in files {
-        pmtiles::run(file)?;
+        if let Err(e) = pmtiles::run(file) {
+            output::error(&e.to_string());
+            failed += 1;
+        }
+    }
+    if failed > 0 {
+        return Err(DevError::Reported(format!(
+            "{failed} of {} PMTiles file(s) could not be read",
+            files.len()
+        )));
     }
     Ok(())
 }
@@ -1054,31 +1174,25 @@ fn preflight_holder(info: &lockfile::LockInfo) -> Result<KillTarget, String> {
     Ok(holder)
 }
 
-/// Authenticate one recorded PID and open a pidfd on it. The verify →
-/// pidfd_open → re-verify order ensures the numeric `/proc/{pid}` still
-/// described the same process generation when the pidfd was opened; from
-/// then on the pidfd cannot be redirected by PID recycling.
+/// Authenticate one recorded PID and open a pidfd on it (see
+/// [`lockfile::open_verified_pidfd`] for the verify -> open -> re-verify order).
 fn preflight_target(
     role: &'static str,
     pid: u32,
     starttime: &str,
     boot_id: &str,
 ) -> Result<KillTarget, String> {
-    if !lockfile::verify_identity(pid, starttime, boot_id) {
-        return Err(format!(
-            "{role} PID {pid}: identity could not be verified from this namespace"
-        ));
-    }
-    let Some(pidfd) = pidfd_open(pid) else {
-        return Err(format!(
+    let pidfd = lockfile::open_verified_pidfd(pid, starttime, boot_id).map_err(|r| match r {
+        lockfile::PidfdRefusal::Unverified => {
+            format!("{role} PID {pid}: identity could not be verified from this namespace")
+        }
+        lockfile::PidfdRefusal::OpenFailed => format!(
             "{role} PID {pid}: could not open a pidfd (process gone or namespace-isolated)"
-        ));
-    };
-    if lockfile::proc_starttime(pid).as_deref() != Some(starttime) {
-        return Err(format!(
-            "{role} PID {pid}: process changed identity during verification"
-        ));
-    }
+        ),
+        lockfile::PidfdRefusal::IdentityChanged => {
+            format!("{role} PID {pid}: process changed identity during verification")
+        }
+    })?;
     let pgid = unsafe { libc::getpgid(pid.cast_signed()) };
     // Cast guarded by `pgid > 0`; `cast_unsigned` is the documented
     // i32->u32 conversion that clippy doesn't flag (mirrors the
@@ -1112,38 +1226,8 @@ fn signal_target(target: &KillTarget, signal: libc::c_int) -> bool {
         }
         return std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH);
     }
-    pidfd_send_signal(&target.pidfd, signal)
-}
-
-/// `pidfd_open(2)` via raw syscall (no libc wrapper yet).
-fn pidfd_open(pid: u32) -> Option<std::os::unix::io::OwnedFd> {
-    use std::os::unix::io::FromRawFd;
-    let ret = unsafe { libc::syscall(libc::SYS_pidfd_open, pid.cast_signed(), 0u32) };
-    let fd = i32::try_from(ret).ok()?;
-    if fd < 0 {
-        return None;
-    }
-    // SAFETY: a successful pidfd_open returns a fresh fd we uniquely own.
-    Some(unsafe { std::os::unix::io::OwnedFd::from_raw_fd(fd) })
-}
-
-/// `pidfd_send_signal(2)` via raw syscall. Returns `true` if the process
-/// behind the pidfd still existed (ESRCH means it has already exited).
-fn pidfd_send_signal(pidfd: &std::os::unix::io::OwnedFd, signal: libc::c_int) -> bool {
-    use std::os::unix::io::AsRawFd;
-    let ret = unsafe {
-        libc::syscall(
-            libc::SYS_pidfd_send_signal,
-            pidfd.as_raw_fd(),
-            signal,
-            std::ptr::null::<libc::siginfo_t>(),
-            0u32,
-        )
-    };
-    if ret == 0 {
-        return true;
-    }
-    std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+    // Anything but ESRCH counts as "still existed", as before.
+    lockfile::pidfd_send_signal(&target.pidfd, signal).unwrap_or(true)
 }
 
 // ---------------------------------------------------------------------------

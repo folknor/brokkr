@@ -118,6 +118,10 @@ fn fmt_selector(raw: &str) -> String {
     if v.get("bless").and_then(Value::as_bool) == Some(true) {
         parts.push("bless".to_owned());
     }
+    // Debug is the parity default; only the exception is worth a column.
+    if v.get("debug").and_then(Value::as_bool) == Some(false) {
+        parts.push("release".to_owned());
+    }
     // Forwarded harness flags perturb harness behavior - render them so a
     // perturbed run is never mistaken for a clean one in the table.
     if let Some(extra) = v.get("harness_args").and_then(Value::as_array) {
@@ -371,5 +375,13 @@ mod tests {
         );
         let clean = r#"{"all":false,"bless":false,"harness_args":[],"ids":["x"],"keywords":[],"probe":["x"]}"#;
         assert_eq!(fmt_selector(clean), "probe=x");
+    }
+
+    #[test]
+    fn renders_a_release_profile_but_not_the_debug_default() {
+        let release = r#"{"all":true,"bless":false,"debug":false,"harness_args":[],"ids":[],"keywords":[],"probe":[]}"#;
+        assert_eq!(fmt_selector(release), "all release");
+        let debug = r#"{"all":true,"bless":false,"debug":true,"harness_args":[],"ids":[],"keywords":[],"probe":[]}"#;
+        assert_eq!(fmt_selector(debug), "all");
     }
 }

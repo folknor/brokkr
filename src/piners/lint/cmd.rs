@@ -27,13 +27,36 @@ use crate::piners::lint::diff::classify;
 use crate::piners::lint::registry::{self, LintPin, LintRegistry, TvDiag};
 use crate::piners::lint::select::{self, SelectArgs};
 use crate::piners::lint::{self, now_rfc3339, validators, DiagSet, ProbeResult};
+use crate::piners::registry_io;
 use crate::ratatoskr::build;
 use crate::resolve::lint_runs_db_path;
 
-/// A PID-tracked captured-subprocess runner (`program`, `argv`) -> output.
-/// Factored out so [`reanchor`] can borrow it without a clippy-flagged
-/// closure type in its signature.
-type RunFn<'a> = dyn Fn(&str, &[&str]) -> Result<CapturedOutput, DevError> + 'a;
+/// A PID-tracked captured-subprocess runner (`program`, `argv`, deadline) ->
+/// output. Factored out so [`reanchor`] can borrow it without a clippy-flagged
+/// closure type in its signature. A child still running at the deadline is
+/// killed and reported as an `Err`.
+type RunFn<'a> = dyn Fn(&str, &[&str], Duration) -> Result<CapturedOutput, DevError> + 'a;
+
+/// Wall-clock backstop for one offline validator call (`<bin> validate` or
+/// offline `pine-lint`) on one snippet. Both finish a snippet in well under a
+/// second; this exists so a wedged tool fails that probe as a tool error
+/// instead of holding the global lock indefinitely.
+const OFFLINE_DEADLINE: Duration = Duration::from_secs(60);
+
+/// Wall-clock limit for one `pine-lint --tv` call during `--reanchor`. The
+/// call goes over the network to TradingView, so a stalled connection is the
+/// expected failure; it is reported per probe like any transport failure.
+const TV_DEADLINE: Duration = Duration::from_secs(30);
+
+/// Dispositions that mean a tool produced no comparable output. They describe
+/// the tooling, not the snippet: a run carrying one fails whatever the pin
+/// says, and `--bless` never stamps one (with `pine-lint` missing, every
+/// probe is `lint_error`, and blessing that would pin the outage).
+const TOOL_ERROR_DISPOSITIONS: [&str; 2] = ["piners_error", "lint_error"];
+
+fn is_tool_error(disposition: &str) -> bool {
+    TOOL_ERROR_DISPOSITIONS.contains(&disposition)
+}
 
 /// Flags lifted off the `LintCorpus` CLI command.
 #[derive(Debug, Default)]
@@ -87,7 +110,7 @@ pub fn lint_corpus(
     }
 
     let registry_dir = project_root.join(lint_cfg.registry_dir());
-    let mut registry = LintRegistry::load(&registry_dir)?;
+    let registry = LintRegistry::load(&registry_dir)?;
     registry.lint()?;
 
     let sel = SelectArgs {
@@ -128,32 +151,40 @@ pub fn lint_corpus(
     })?;
     let _sigterm = crate::shutdown::SigtermGuard::install();
 
-    // A captured subprocess run, PID-tracked so `brokkr kill` reaches it.
-    let run = |program: &str, argv: &[&str]| -> Result<CapturedOutput, DevError> {
+    // A captured subprocess run, PID-tracked so `brokkr kill` reaches it, and
+    // killed at `deadline` (reported as an error naming the limit).
+    let run = |program: &str, argv: &[&str], deadline: Duration| -> Result<CapturedOutput, DevError> {
         let r = output::run_captured_with_env_and_deadline(
             program,
             argv,
             project_root,
             &[],
-            Duration::MAX,
+            deadline,
             Some(&|pid| _lock.set_child_pid(pid)),
             false,
-        )?;
+        );
         _lock.clear_child_pid();
+        let r = r?;
+        if r.killed_on_deadline {
+            return Err(DevError::Verify(format!(
+                "{program} did not finish within {}s and was killed",
+                deadline.as_secs()
+            )));
+        }
         Ok(r.captured)
+    };
+
+    let scope = validators::Scope {
+        include_warnings: args.warnings,
+        syntax_only: !args.all_stages,
     };
 
     // --reanchor: refresh the TV fingerprint via `pine-lint --tv`, write the
     // registry, and return. No validator build, no run store. The anchor is
-    // filtered to the same scope the gate compares.
+    // filtered to the run's scope, which is recorded beside it (`tv_scope`).
     if args.reanchor {
-        let scope = validators::Scope {
-            include_warnings: args.warnings,
-            syntax_only: !args.all_stages,
-        };
         return reanchor(
             &registry_dir,
-            &mut registry,
             &ids,
             &abs_paths,
             lint_cfg.pine_lint_bin(),
@@ -184,10 +215,6 @@ pub fn lint_corpus(
     let validator = built.binary.display().to_string();
     let subcommand = lint_cfg.subcommand().to_owned();
     let pine_lint = lint_cfg.pine_lint_bin().to_owned();
-    let scope = validators::Scope {
-        include_warnings: args.warnings,
-        syntax_only: !args.all_stages,
-    };
     output::lint_msg(&format!(
         "validator build ok (features={}, binary={})",
         built.features_label,
@@ -197,42 +224,48 @@ pub fn lint_corpus(
     // Run both validators on each probe and classify.
     let mut results: Vec<ProbeResult> = Vec::with_capacity(ids.len());
     for id in &ids {
+        // A `brokkr kill` interrupts the in-flight call, which then reads as a
+        // tool error; stop here rather than spawn (and kill) every later probe.
+        if crate::shutdown::is_shutdown_requested() {
+            return Err(DevError::Interrupted);
+        }
         let abs = &abs_paths[id];
         let pin = &registry.pins[id];
 
-        let piners_set = match run(&validator, &[&subcommand, "--format", "json", abs]) {
+        let piners_set = match run(&validator, &[&subcommand, "--format", "json", abs], OFFLINE_DEADLINE) {
             Ok(cap) => validators::parse_piners(&cap.stdout, scope),
-            Err(e) => Err(format!("piners validate failed to spawn: {e}")),
+            Err(e) => Err(format!("piners validate failed: {e}")),
         };
-        let lint_set = match run(&pine_lint, &[abs]) {
+        let lint_set = match run(&pine_lint, &[abs], OFFLINE_DEADLINE) {
             Ok(cap) => validators::parse_pine_lint(&cap.stdout, scope),
-            Err(e) => Err(format!("pine-lint failed to spawn: {e}")),
+            Err(e) => Err(format!("pine-lint failed: {e}")),
         };
 
         let outcome = classify(
             piners_set.as_ref().map_err(String::as_str),
             lint_set.as_ref().map_err(String::as_str),
         );
-        results.push(build_result(id, pin, &outcome, piners_set.as_ref().ok()));
+        results.push(build_result(id, pin, &outcome, piners_set.as_ref().ok(), scope));
     }
 
-    render(&results, args.no_gate);
+    render(&results, &registry, args.no_gate, scope);
 
-    // Persist the run before any registry mutation.
-    let tool_error = results
+    // Persist the run before any registry mutation. A tool error fails the
+    // run whatever the pin says: it describes the tooling, not the snippet
+    // (see TOOL_ERROR_DISPOSITIONS), so it is never a state a pin can accept.
+    let tool_errors: Vec<&str> = results
         .iter()
-        .any(|r| r.disposition == "piners_error" || r.disposition == "lint_error");
+        .filter(|r| is_tool_error(&r.disposition))
+        .map(|r| r.probe.as_str())
+        .collect();
+    let tool_error = !tool_errors.is_empty();
     let deviations = results.iter().filter(|r| !r.gate_ok).count();
     let gate_blocks = !args.bless && !args.no_gate && deviations > 0;
     let run_pass = !tool_error && !gate_blocks;
     let fail_reason: Option<String> = if run_pass {
         None
     } else if tool_error {
-        let n = results
-            .iter()
-            .filter(|r| r.disposition == "piners_error" || r.disposition == "lint_error")
-            .count();
-        Some(format!("{n} validator error(s)"))
+        Some(format!("{} validator error(s)", tool_errors.len()))
     } else {
         Some(format!("{deviations} gate deviation(s)"))
     };
@@ -241,7 +274,8 @@ pub fn lint_corpus(
     let meta = RunMeta {
         started_at: &now_rfc3339(),
         selector: &selector,
-        gated: !args.no_gate,
+        // A bless run ignores the gate verdict, so it is not a gated run.
+        gated: !args.no_gate && !args.bless,
         result: if run_pass { "pass" } else { "fail" },
         fail_reason: fail_reason.as_deref(),
         probe_count: results.len(),
@@ -251,16 +285,45 @@ pub fn lint_corpus(
     let mut db = LintDb::open(&db_path)?;
     db.record_run(&meta, &results)?;
 
-    // --bless: stamp current dispositions into `expected`, write the registry.
+    // --bless: stamp current dispositions (and the scope they were computed
+    // under) into `expected`, write the registry. A tool-error probe is not
+    // stamped - its disposition says nothing about the snippet - and makes the
+    // bless fail once the rest are written, so a missing or broken tool is
+    // loud rather than pinned.
     if args.bless {
-        for r in &results {
-            if let Some(pin) = registry.pins.get_mut(&r.probe) {
-                pin.expected = Some(r.disposition.clone());
+        let recorded_scope = scope.recorded_label();
+        let mut blessed = 0usize;
+        let mut changed = 0usize;
+        write_registry(&registry_dir, |pins| {
+            for r in &results {
+                if is_tool_error(&r.disposition) || !lint::is_disposition(&r.disposition) {
+                    continue;
+                }
+                let Some(pin) = pins.get_mut(&r.probe) else {
+                    continue; // dropped from lints.toml by a reseed since the run loaded it
+                };
+                blessed += 1;
+                if pin.expected.as_deref() != Some(r.disposition.as_str())
+                    || pin.expected_scope != recorded_scope
+                {
+                    changed += 1;
+                    pin.expected = Some(r.disposition.clone());
+                    pin.expected_scope = recorded_scope.clone();
+                }
             }
+        })?;
+        output::lint_msg(&format!(
+            "blessed {blessed} (changed {changed}) under scope {}",
+            scope.label()
+        ));
+        if tool_error {
+            output::lint_msg(&format!(
+                "FAIL: {} probe(s) hit a validator error and were not blessed: {}",
+                tool_errors.len(),
+                tool_errors.join(", ")
+            ));
+            return Err(DevError::ExitCode(1));
         }
-        write_registry(&registry_dir, &registry)?;
-        let changed = results.iter().filter(|r| !r.gate_ok).count();
-        output::lint_msg(&format!("blessed {} (changed {changed})", results.len()));
         return Ok(());
     }
 
@@ -278,16 +341,26 @@ pub fn lint_corpus(
 
 /// Assemble a [`ProbeResult`] from a probe's classification, pin, and (when
 /// piners parsed) its diagnostic set for the TV-anchor comparison.
+///
+/// `expected` holds only under the scope it was blessed in: a pin blessed
+/// under another scope is a gate deviation (rendered as a scope mismatch),
+/// not a comparison of dispositions computed from different diagnostics.
+/// Likewise a TV anchor filtered to another scope is not compared at all
+/// (`tv_divergent = None`), since the difference would be the filter, not TV.
 fn build_result(
     id: &str,
     pin: &LintPin,
     outcome: &lint::diff::LintOutcome,
     piners_set: Option<&DiagSet>,
+    scope: validators::Scope,
 ) -> ProbeResult {
     let disposition = outcome.disposition.to_owned();
     let expected = pin.expected.clone();
-    let gate_ok = expected.as_deref() == Some(disposition.as_str());
-    let anchor = pin.tv_anchor();
+    let gate_ok = expected.as_deref() == Some(disposition.as_str())
+        && scope.matches_recorded(pin.expected_scope.as_deref());
+    let anchor = pin
+        .tv_anchor()
+        .filter(|_| scope.matches_recorded(pin.tv_scope.as_deref()));
     let tv_divergent = anchor.as_ref().map(|a| match piners_set {
         Some(set) => set != a,
         None => true, // piners produced nothing comparable => divergent from truth
@@ -307,12 +380,11 @@ fn build_result(
 }
 
 /// Drive `pine-lint --tv` over the selection and re-stamp each probe's TV
-/// fingerprint + `tv_anchored_at` into `lints.toml`. Per-probe transport
-/// failures are reported, not fatal; the run succeeds unless every probe
-/// failed.
+/// fingerprint + `tv_anchored_at` + `tv_scope` into `lints.toml`. Per-probe
+/// transport failures (including a call killed at [`TV_DEADLINE`]) are
+/// reported, not fatal; the run succeeds unless every probe failed.
 fn reanchor(
     registry_dir: &Path,
-    registry: &mut LintRegistry,
     ids: &[String],
     abs_paths: &BTreeMap<String, String>,
     pine_lint: &str,
@@ -320,21 +392,21 @@ fn reanchor(
     run: &RunFn,
 ) -> Result<(), DevError> {
     let now = now_rfc3339();
-    let mut anchored = 0usize;
+    let recorded_scope = scope.recorded_label();
+    let mut fresh: BTreeMap<String, Vec<TvDiag>> = BTreeMap::new();
     let mut failed = 0usize;
     for id in ids {
+        if crate::shutdown::is_shutdown_requested() {
+            return Err(DevError::Interrupted);
+        }
         let abs = &abs_paths[id];
-        let set = match run(pine_lint, &["--tv", abs]) {
+        let set = match run(pine_lint, &["--tv", abs], TV_DEADLINE) {
             Ok(cap) => validators::parse_pine_lint(&cap.stdout, scope),
-            Err(e) => Err(format!("pine-lint --tv failed to spawn: {e}")),
+            Err(e) => Err(format!("pine-lint --tv failed: {e}")),
         };
         match set {
             Ok(diags) => {
-                if let Some(pin) = registry.pins.get_mut(id) {
-                    pin.tv = diags.iter().map(diag_to_tv).collect();
-                    pin.tv_anchored_at = Some(now.clone());
-                }
-                anchored += 1;
+                fresh.insert(id.clone(), diags.iter().map(diag_to_tv).collect());
             }
             Err(e) => {
                 output::lint_msg(&format!("reanchor {id}: {e}"));
@@ -342,10 +414,22 @@ fn reanchor(
             }
         }
     }
+    let anchored = fresh.len();
     if anchored > 0 {
-        write_registry(registry_dir, registry)?;
+        write_registry(registry_dir, |pins| {
+            for (id, tv) in &fresh {
+                if let Some(pin) = pins.get_mut(id) {
+                    pin.tv = tv.clone();
+                    pin.tv_anchored_at = Some(now.clone());
+                    pin.tv_scope = recorded_scope.clone();
+                }
+            }
+        })?;
     }
-    output::lint_msg(&format!("reanchored {anchored} probe(s) ({failed} failed)"));
+    output::lint_msg(&format!(
+        "reanchored {anchored} probe(s) under scope {} ({failed} failed)",
+        scope.label()
+    ));
     if anchored == 0 && failed > 0 {
         return Err(DevError::ExitCode(1));
     }
@@ -361,19 +445,39 @@ fn diag_to_tv(key: &lint::DiagKey) -> TvDiag {
     }
 }
 
-/// Write the in-memory registry back to `lints.toml`, preserving comments.
-fn write_registry(registry_dir: &Path, registry: &LintRegistry) -> Result<(), DevError> {
+/// Read-modify-write `lints.toml`: parse the file as it is on disk now, let
+/// `apply` change the fields this writer owns, and write it back atomically,
+/// preserving comments.
+///
+/// The pins are re-read here rather than taken from the registry the command
+/// loaded at startup: that load happened before the lock was taken, so a
+/// reseed landing in between would otherwise be reverted by this write. The
+/// caller holds the lock. A read failure propagates - the file was loaded at
+/// startup, so failing to read it now is an error, and treating it as absent
+/// would rewrite it without its comments.
+fn write_registry(
+    registry_dir: &Path,
+    apply: impl FnOnce(&mut BTreeMap<String, LintPin>),
+) -> Result<(), DevError> {
     let path = registry_dir.join("lints.toml");
-    let existing = std::fs::read_to_string(&path).ok();
-    let rendered = lint::lints_write::render_lints(existing.as_deref(), &registry.pins)?;
-    std::fs::write(&path, rendered).map_err(DevError::Io)?;
-    Ok(())
+    let existing = std::fs::read_to_string(&path).map_err(|e| {
+        DevError::Config(format!("piners lint: failed to re-read {}: {e}", path.display()))
+    })?;
+    let mut pins = registry::parse_lints(&existing, &path)?.probes;
+    apply(&mut pins);
+    let rendered = lint::lints_write::render_lints(Some(&existing), &pins)?;
+    registry_io::write_atomic(&path, &rendered)
 }
 
 /// Render the run: a disposition summary, the surviving deviation lines (a
 /// probe sitting on its pin is folded into a count when gated), and the TV
 /// shared-but-wrong advisory.
-fn render(results: &[ProbeResult], no_gate: bool) {
+fn render(
+    results: &[ProbeResult],
+    registry: &LintRegistry,
+    no_gate: bool,
+    scope: validators::Scope,
+) {
     let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
     for r in results {
         *counts.entry(r.disposition.as_str()).or_default() += 1;
@@ -391,9 +495,19 @@ fn render(results: &[ProbeResult], no_gate: bool) {
             hidden += 1;
             continue;
         }
+        let pin = registry.pins.get(&r.probe);
+        let blessed_scope = pin.and_then(|p| p.expected_scope.as_deref());
         let line = match (&r.expected, r.error.as_deref()) {
             (_, Some(err)) => format!("{}: {} ({err})", r.probe, r.disposition),
             (None, None) => format!("{}: not blessed (got {}) - run --bless", r.probe, r.disposition),
+            (Some(_), None) if !scope.matches_recorded(blessed_scope) => format!(
+                "{}: blessed under scope {}, this run is {} - rerun with the flags it \
+                 was blessed under, or re-bless (got {})",
+                r.probe,
+                blessed_scope.unwrap_or(validators::DEFAULT_SCOPE_LABEL),
+                scope.label(),
+                r.disposition
+            ),
             (Some(exp), None) if *exp == r.disposition => {
                 format!("{}: {}", r.probe, r.disposition)
             }
@@ -409,6 +523,20 @@ fn render(results: &[ProbeResult], no_gate: bool) {
     if tv_div > 0 {
         output::lint_msg(&format!(
             "TV advisory: {tv_div} probe(s) diverge from their TV anchor (re-investigate or --reanchor)"
+        ));
+    }
+    // Anchors stamped under another scope are skipped by build_result, not
+    // compared; say so, so a quiet advisory is not read as "TV agrees".
+    let other_scope = results
+        .iter()
+        .filter_map(|r| registry.pins.get(&r.probe))
+        .filter(|p| p.tv_anchor().is_some() && !scope.matches_recorded(p.tv_scope.as_deref()))
+        .count();
+    if other_scope > 0 {
+        output::lint_msg(&format!(
+            "TV advisory: {other_scope} anchor(s) were stamped under another scope than {} \
+             and were not compared",
+            scope.label()
         ));
     }
 }

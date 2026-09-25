@@ -4,8 +4,12 @@
 //! `last_insert_rowid()` -> bulk-insert disposition / dense_na_site /
 //! trade_diff / gate_miss children -> COMMIT), mirroring
 //! `src/db/write.rs::insert_inner`. `expected`/`gate_ok` come from the
-//! registry's pinned expectations; `gate_miss` rows come from the gate
-//! violations the harness emitted no disposition line for.
+//! registry's pinned expectations and the gate's own verdict
+//! (`gate::evaluate`), never a second computation of it; `gate_miss` rows
+//! come from the gate violations the harness emitted no disposition line for.
+//! The caller collapses repeated harness records first
+//! (`HarnessReport::take_duplicates`); an insert failure still names the
+//! probe it was storing.
 
 use std::collections::BTreeMap;
 
@@ -98,8 +102,19 @@ fn record_inner(
     )?;
     let run_id = conn.last_insert_rowid();
 
+    // The stored verdict is the gate's own, not a recomputation: a probe is
+    // `gate_ok` unless `gate::evaluate` flagged it. The two used to diverge on
+    // a line for a probe outside the selection, which the gate ignores but a
+    // recomputation against the (selection-only) expected map stored as
+    // DEVIATES - so a passing run read as failing in `corpus-results`.
+    let deviating: std::collections::HashSet<&str> =
+        gate_diffs.iter().map(|d| d.probe.as_str()).collect();
+
     for p in &report.probes {
-        insert_disposition(conn, run_id, p, expected)?;
+        let gate_ok = !deviating.contains(p.probe.as_str());
+        insert_disposition(conn, run_id, p, expected, gate_ok).map_err(|e| {
+            DevError::Database(format!("storing the disposition of probe '{}': {e}", p.probe))
+        })?;
         for site in &p.dense_na_sites {
             conn.execute(
                 "INSERT INTO dense_na_site (run_id, probe, name, call_site, na_count) \
@@ -110,7 +125,12 @@ fn record_inner(
     }
 
     for t in &report.trade_diffs {
-        insert_trade_diff(conn, run_id, t)?;
+        insert_trade_diff(conn, run_id, t).map_err(|e| {
+            DevError::Database(format!(
+                "storing trade_diff our_index={} tv_index={} of probe '{}': {e}",
+                t.our_index, t.tv_index, t.probe
+            ))
+        })?;
     }
 
     // Gate violations the harness emitted NO disposition line for (a selected
@@ -135,11 +155,10 @@ fn insert_disposition(
     run_id: i64,
     p: &ProbeLine,
     expected: &BTreeMap<String, Option<String>>,
+    gate_ok: bool,
 ) -> Result<(), DevError> {
     let disposition = p.disposition();
-    // `None` expected (never blessed) is never satisfied - matches gate::evaluate.
     let expected_label = expected.get(&p.probe).cloned().flatten();
-    let gate_ok = matches!(&expected_label, Some(e) if *e == disposition);
 
     let (acc_tier, acc_profile, acc_failing, p90_entry, p90_exit, p90_pnl) = match &p.acceptance {
         Some(a) => {
@@ -329,5 +348,37 @@ mod tests {
         let trend = db.trend_for_probe("p1", 5).unwrap();
         assert_eq!(trend.len(), 1);
         assert_eq!(trend[0].disposition, "actionable_drift");
+    }
+
+    #[test]
+    fn stored_gate_verdict_is_the_gates_own() {
+        // `stray` was not selected: the gate ignores its line, so the store
+        // must not mark it DEVIATES. `p1` deviates per the gate.
+        let report = parse(
+            br#"{"probe":"p1","outcome":"parity","acceptance":{"tier":"accepted"}}
+{"probe":"stray","outcome":"parity","acceptance":{"tier":"accepted"}}
+"#,
+        );
+        let expected = expected_map(&[("p1", Some("byte_exact"))]);
+        let gate_diffs = vec![GateDiff {
+            probe: "p1".to_owned(),
+            expected: Some("byte_exact".to_owned()),
+            actual: Some("accepted".to_owned()),
+        }];
+        let db = CorpusDb::open_in_memory().unwrap();
+        let run = RunRecord {
+            selector: "{}",
+            gated: true,
+            result: "fail",
+            fail_reason: Some("1 gate deviation(s)"),
+            harness_exit_code: Some(0),
+            stderr: "",
+            wall_ms: None,
+        };
+        let run_id = db.record_run(&run, &report, &expected, &gate_diffs).unwrap();
+        assert!(!db.disposition_for_probe(run_id, "p1").unwrap().unwrap().gate_ok);
+        let stray = db.disposition_for_probe(run_id, "stray").unwrap().unwrap();
+        assert!(stray.gate_ok);
+        assert_eq!(stray.expected, None);
     }
 }

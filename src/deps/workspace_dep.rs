@@ -14,6 +14,7 @@ use std::path::Path;
 use serde::Serialize;
 
 use super::CargoMetadata;
+use crate::error::DevError;
 
 #[derive(Serialize)]
 pub struct UnusedWorkspaceDepEvent {
@@ -23,14 +24,23 @@ pub struct UnusedWorkspaceDepEvent {
 
 /// Find declared workspace deps that no member inherits (minus the ignore
 /// list, whose entries may end in `*` for a prefix match).
-pub fn run(metadata: &CargoMetadata, ignore: &[String]) -> Vec<UnusedWorkspaceDepEvent> {
+///
+/// A manifest that cannot be read or parsed is an error, never a skip: an
+/// unreadable root would read as "declares nothing" (a silent all-clear),
+/// and an unreadable member would drop its inherited deps from `used`,
+/// turning every dep only it inherits into a false "unused" finding.
+pub fn run(
+    metadata: &CargoMetadata,
+    ignore: &[String],
+) -> Result<Vec<UnusedWorkspaceDepEvent>, DevError> {
     if metadata.workspace_root.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     let root_manifest = Path::new(&metadata.workspace_root).join("Cargo.toml");
-    let declared = read_workspace_deps(&root_manifest);
+    let root = parse(&root_manifest)?;
+    let declared = workspace_deps(&root);
     if declared.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
     let members: BTreeSet<&str> = metadata
@@ -39,18 +49,18 @@ pub fn run(metadata: &CargoMetadata, ignore: &[String]) -> Vec<UnusedWorkspaceDe
         .map(String::as_str)
         .collect();
     let mut used = BTreeSet::new();
-    collect_inherited(&root_manifest, &mut used);
+    collect_from(&root, &mut used);
     for pkg in &metadata.packages {
         if members.contains(pkg.id.as_str()) {
-            collect_inherited(Path::new(&pkg.manifest_path), &mut used);
+            collect_from(&parse(Path::new(&pkg.manifest_path))?, &mut used);
         }
     }
 
-    declared
+    Ok(declared
         .into_iter()
         .filter(|d| !used.contains(d.as_str()) && !ignored(d, ignore))
         .map(|krate| UnusedWorkspaceDepEvent { krate })
-        .collect()
+        .collect())
 }
 
 /// Whether `name` matches any ignore entry - exact, or a `*`-suffixed prefix.
@@ -68,10 +78,8 @@ fn ignored(name: &str, ignore: &[String]) -> bool {
 }
 
 /// Keys of the root manifest's `[workspace.dependencies]`.
-fn read_workspace_deps(manifest: &Path) -> BTreeSet<String> {
-    parse(manifest)
-        .as_ref()
-        .and_then(|v| v.get("workspace"))
+fn workspace_deps(root: &toml::Value) -> BTreeSet<String> {
+    root.get("workspace")
         .and_then(|w| w.get("dependencies"))
         .and_then(toml::Value::as_table)
         .map(|t| t.keys().cloned().collect())
@@ -80,12 +88,6 @@ fn read_workspace_deps(manifest: &Path) -> BTreeSet<String> {
 
 /// Names of deps this manifest inherits from the workspace
 /// (`dep = { workspace = true }`), across every dependency table.
-fn collect_inherited(manifest: &Path, out: &mut BTreeSet<String>) {
-    if let Some(v) = parse(manifest) {
-        collect_from(&v, out);
-    }
-}
-
 fn collect_from(value: &toml::Value, out: &mut BTreeSet<String>) {
     let Some(table) = value.as_table() else {
         return;
@@ -119,9 +121,13 @@ fn collect_from(value: &toml::Value, out: &mut BTreeSet<String>) {
     }
 }
 
-fn parse(manifest: &Path) -> Option<toml::Value> {
-    let text = std::fs::read_to_string(manifest).ok()?;
-    toml::from_str(&text).ok()
+fn parse(manifest: &Path) -> Result<toml::Value, DevError> {
+    let text = std::fs::read_to_string(manifest).map_err(|e| {
+        DevError::Config(format!("workspace_dep: cannot read {}: {e}", manifest.display()))
+    })?;
+    toml::from_str(&text).map_err(|e| {
+        DevError::Config(format!("workspace_dep: cannot parse {}: {e}", manifest.display()))
+    })
 }
 
 #[cfg(test)]
@@ -184,6 +190,40 @@ libc = { workspace = true }\n";
         assert!(!ignored("serde", &ignore));
         assert!(!ignored("tokio", &ignore));
         assert!(ignored("*", &ignore));
+    }
+
+    fn metadata_for(root: &Path, member_manifest: &Path) -> CargoMetadata {
+        let json = serde_json::json!({
+            "packages": [{
+                "name": "m", "version": "0.1.0", "id": "m-id",
+                "manifest_path": member_manifest.to_string_lossy(),
+            }],
+            "workspace_members": ["m-id"],
+            "workspace_root": root.to_string_lossy(),
+        });
+        serde_json::from_value(json).unwrap()
+    }
+
+    #[test]
+    fn unparseable_member_is_an_error_not_a_false_finding() {
+        // Before: the member's `serde = { workspace = true }` was lost with
+        // the parse failure, and `serde` came back as "unused".
+        let dir = crate::test_scratch::scratch("workspace_dep", "bad_member");
+        std::fs::write(dir.join("Cargo.toml"), "[workspace.dependencies]\nserde = \"1\"\n").unwrap();
+        let member = dir.join("member.toml");
+        std::fs::write(&member, "[dependencies]\nserde = { workspace = true\n").unwrap();
+        assert!(run(&metadata_for(&dir, &member), &[]).is_err());
+        // The same member, well-formed, inherits it: no finding.
+        std::fs::write(&member, "[dependencies]\nserde = { workspace = true }\n").unwrap();
+        assert!(run(&metadata_for(&dir, &member), &[]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn unreadable_root_is_an_error_not_an_all_clear() {
+        let dir = crate::test_scratch::scratch("workspace_dep", "missing_root");
+        let member = dir.join("member.toml");
+        std::fs::write(&member, "[dependencies]\n").unwrap();
+        assert!(run(&metadata_for(&dir, &member), &[]).is_err());
     }
 
     #[test]

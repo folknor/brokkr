@@ -32,6 +32,12 @@ All narrow the table, and all AND together:
 - `--env NAME=VALUE` - exact match on a captured env var, name written without
   its `env.` prefix. Repeatable.
 
+Prefixes and substrings are literal: `_` and `%` match only themselves (they
+used to be SQL `LIKE` wildcards), while ASCII case is still ignored. `--meta`
+and `--env` compare the stored value as text whichever type it was recorded
+as, so `--meta threads=8` matches an integer `8`; a real is SQLite's text form
+of it (`2.0`, not `2`).
+
 `--meta` and `--env` **exclude rows missing the key entirely**. For an A/B
 where one arm is defined by an unset variable, record an explicit baseline
 value (`=0`) on the off runs rather than relying on absence - or use
@@ -69,6 +75,7 @@ immediately before it - the neighbouring run is often the explanation for an
 outlier.
 
 A prefix matching several rows falls back to the table plus per-row details.
+An empty prefix is refused rather than matching every row.
 
 A UUID with sidecar data but no results row reports itself as a **sidecar-only
 run** (a dirty tree, or a run that failed before it could file a result) and

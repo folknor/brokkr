@@ -424,25 +424,117 @@ fn binary_list(
     Ok(Some(names))
 }
 
-/// Restrict the binary set to a lane's `--test <target>` filters: cargo
-/// semantics, where any `--test` flag selects only the named integration
-/// targets and drops lib/bin unit tests.
-fn filter_binaries<'a>(
-    binaries: &'a [TestBinary],
-    cargo_test_filters: &[String],
-) -> Vec<&'a TestBinary> {
-    let targets: Vec<&str> = cargo_test_filters
-        .iter()
-        .filter(|a| *a != "--test")
-        .map(String::as_str)
-        .collect();
+/// One cargo target selector, as [`filter_binaries`] evaluates it.
+enum TargetSelector {
+    /// `--test NAME` / `--bin NAME` / `--example NAME` / `--bench NAME`, or
+    /// the `=`-attached spelling: the named targets of that kind. `NAME` may
+    /// be a glob, as cargo allows.
+    Named { kind: &'static str, name: String },
+    /// `--lib`: the library unit-test harness.
+    Lib,
+    /// `--bins` / `--examples` / `--benches`: every target of that kind.
+    Kind(&'static str),
+    /// `--tests` / `--all-targets`: everything the enumeration built. `--tests`
+    /// depends on per-target `test = true` manifest flags this struct does not
+    /// carry, so it is read as "whatever cargo built", which is exact whenever
+    /// the enumeration saw the flag.
+    Everything,
+    /// `--doc` (and the `--doctests` spelling): the doctest pseudo-target,
+    /// which has no binary to select.
+    Nothing,
+}
 
-    if targets.is_empty() {
+/// The unit kind a binary answers to under cargo's selectors: its own kind
+/// for the four named kinds, and `lib` for everything else (`rlib`,
+/// `proc-macro`, `cdylib`, ... are all the library harness).
+fn selector_kind(binary: &TestBinary) -> &str {
+    match binary.kind.as_str() {
+        k @ ("test" | "bin" | "example" | "bench") => k,
+        _ => "lib",
+    }
+}
+
+/// Whether `target` matches a selector's `name`, with cargo's glob support.
+/// A name that is not a valid glob is compared literally.
+fn target_name_matches(name: &str, target: &str) -> bool {
+    globset::Glob::new(name).map_or(name == target, |g| g.compile_matcher().is_match(target))
+}
+
+/// Parse a selector list (`["--test", "a", "--lib", "--bin=x"]`). Tokens
+/// that are not target selectors are ignored; a value-taking selector with
+/// no value selects nothing.
+fn parse_target_selectors(args: &[String]) -> Vec<TargetSelector> {
+    const VALUED: [(&str, &str); 4] = [
+        ("--test", "test"),
+        ("--bin", "bin"),
+        ("--example", "example"),
+        ("--bench", "bench"),
+    ];
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_str();
+        let (head, inline) = a.split_once('=').map_or((a, None), |(h, v)| (h, Some(v)));
+        if let Some((_, kind)) = VALUED.iter().find(|(flag, _)| *flag == head) {
+            let value = match inline {
+                Some(v) => Some(v.to_owned()),
+                None => {
+                    i += 1;
+                    args.get(i).cloned()
+                }
+            };
+            if let Some(name) = value {
+                out.push(TargetSelector::Named { kind, name });
+            }
+        } else {
+            match a {
+                "--lib" => out.push(TargetSelector::Lib),
+                "--bins" => out.push(TargetSelector::Kind("bin")),
+                "--examples" => out.push(TargetSelector::Kind("example")),
+                "--benches" => out.push(TargetSelector::Kind("bench")),
+                "--tests" | "--all-targets" => out.push(TargetSelector::Everything),
+                "--doc" | "--doctests" => out.push(TargetSelector::Nothing),
+                _ => {}
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
+/// Restrict the binary set to a lane's target selectors, with cargo's
+/// semantics: selectors UNION (`--lib --test cli` is the lib harness plus
+/// `cli`), and any selector at all drops the targets none of them name. An
+/// empty list keeps everything.
+///
+/// Every selector kind is honoured, not only `--test NAME`. The parallel lane
+/// feeds the forwarded selectors (`-- --lib`, `-- --test=cli`, `-- --bins`)
+/// through here alongside the sweep's own `--test` filters; reading every
+/// token after a bare `--test` as a target name made each of those match no
+/// binary, and the lane refused as "matched no test binaries".
+///
+/// Where the enumeration already carried the same selectors (every
+/// non-package-mode resolution), this filter is idempotent. Under package
+/// mode the sweep's `--test` filters cannot ride the per-package enumeration
+/// (cargo refuses a target a package lacks), so this is where they narrow.
+fn filter_binaries<'a>(binaries: &'a [TestBinary], selectors: &[String]) -> Vec<&'a TestBinary> {
+    let parsed = parse_target_selectors(selectors);
+    if parsed.is_empty() {
         return binaries.iter().collect();
     }
     binaries
         .iter()
-        .filter(|b| b.kind == "test" && targets.contains(&b.target.as_str()))
+        .filter(|b| {
+            parsed.iter().any(|s| match s {
+                TargetSelector::Named { kind, name } => {
+                    selector_kind(b) == *kind && target_name_matches(name, &b.target)
+                }
+                TargetSelector::Lib => selector_kind(b) == "lib",
+                TargetSelector::Kind(kind) => selector_kind(b) == *kind,
+                TargetSelector::Everything => true,
+                TargetSelector::Nothing => false,
+            })
+        })
         .collect()
 }
 
@@ -568,5 +660,30 @@ mod binaries_tests {
         let filtered = filter_binaries(&bins, &["--test".into(), "cli_sort".into()]);
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].target, "cli_sort");
+    }
+
+    // BUG-014: forwarded selectors other than `--test NAME` used to be read as
+    // target names and matched nothing. Every selector kind now selects what
+    // cargo would, and selectors union.
+    #[test]
+    fn every_selector_kind_selects_what_cargo_would() {
+        let bins = vec![
+            bin("a", "a", "lib", "/1"),
+            bin("a", "cli", "test", "/2"),
+            bin("a", "tool", "bin", "/3"),
+            bin("m", "m", "proc-macro", "/4"),
+        ];
+        let names = |sel: &[&str]| -> Vec<String> {
+            let sel: Vec<String> = sel.iter().map(|s| (*s).to_owned()).collect();
+            filter_binaries(&bins, &sel).iter().map(|b| b.target.clone()).collect()
+        };
+        assert_eq!(names(&["--lib"]), vec!["a", "m"]);
+        assert_eq!(names(&["--test=cli"]), vec!["cli"]);
+        assert_eq!(names(&["--bin", "tool"]), vec!["tool"]);
+        assert_eq!(names(&["--bins"]), vec!["tool"]);
+        assert_eq!(names(&["--tests"]).len(), 4);
+        assert_eq!(names(&["--test", "cli", "--lib"]), vec!["a", "cli", "m"]);
+        assert_eq!(names(&["--test", "c*"]), vec!["cli"]);
+        assert!(names(&["--doc"]).is_empty());
     }
 }

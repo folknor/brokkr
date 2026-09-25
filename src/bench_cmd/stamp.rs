@@ -155,19 +155,13 @@ fn cpu_model() -> Option<String> {
 }
 
 /// Digest of the user's cargo config, the usual home of standing rustflags.
+///
+/// Digests the file cargo actually reads, which is the extensionless legacy
+/// `config` when both spellings exist (`user_dirs::cargo_config_file`).
 fn cargo_config_digest() -> Option<String> {
-    let home = match std::env::var_os("CARGO_HOME") {
-        Some(h) => PathBuf::from(h),
-        None => PathBuf::from(std::env::var_os("HOME")?).join(".cargo"),
-    };
-    // Cargo accepts both spellings; check the modern one first.
-    for name in ["config.toml", "config"] {
-        let path = home.join(name);
-        if path.exists() {
-            return preflight::compute_xxh128(&path).ok();
-        }
-    }
-    None
+    let home = crate::user_dirs::cargo_home()?;
+    let path = crate::user_dirs::cargo_config_file(&home)?;
+    preflight::compute_xxh128(&path).ok()
 }
 
 /// Digests of every `.cargo/config{.toml}` from `build_root` upwards, paired
@@ -182,14 +176,10 @@ fn cargo_config_digest() -> Option<String> {
 fn repo_config_digests(build_root: &Path) -> Vec<(usize, String)> {
     let mut out = Vec::new();
     for (depth, dir) in build_root.ancestors().enumerate() {
-        for name in ["config.toml", "config"] {
-            let path = dir.join(".cargo").join(name);
-            if path.exists() {
-                if let Ok(d) = preflight::compute_xxh128(&path) {
-                    out.push((depth, d));
-                }
-                break;
-            }
+        if let Some(path) = crate::user_dirs::cargo_config_file(&dir.join(".cargo"))
+            && let Ok(d) = preflight::compute_xxh128(&path)
+        {
+            out.push((depth, d));
         }
     }
     out
@@ -245,11 +235,19 @@ pub fn write(bench_home: &Path, baseline: &str, stamp: &Stamp) -> Result<(), Dev
     Ok(())
 }
 
-/// Read a stamp, if one was recorded.
-pub fn read(bench_home: &Path, baseline: &str) -> Option<Stamp> {
-    std::fs::read_to_string(stamp_path(bench_home, baseline))
-        .ok()
-        .map(|t| Stamp::parse(&t))
+/// Read a stamp. `Ok(None)` when none was recorded; any other failure to read
+/// it is an error, so a caller gating on the stamp cannot mistake "could not
+/// read" for "nothing to compare".
+pub fn read(bench_home: &Path, baseline: &str) -> Result<Option<Stamp>, DevError> {
+    let path = stamp_path(bench_home, baseline);
+    match std::fs::read_to_string(&path) {
+        Ok(t) => Ok(Some(Stamp::parse(&t))),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(DevError::Config(format!(
+            "cannot read baseline stamp {}: {e}",
+            path.display()
+        ))),
+    }
 }
 
 #[cfg(test)]

@@ -71,8 +71,36 @@ fn validate_osc_range(s: &str) -> Result<String, String> {
     Ok(s.to_owned())
 }
 
-/// Validate `--since` format: YYYY-MM-DD or YYYY-MM-DD HH:MM:SS.
+/// Validate `--since`/`--until` format: YYYY-MM-DD or YYYY-MM-DD HH:MM:SS, with
+/// every field in range (month 1-12, a day that exists in that month, hour
+/// 0-23, minute and second 0-59). The value is compared as a string against
+/// the stored UTC timestamps, so an out-of-range field would not error there -
+/// it would silently select the wrong rows.
 fn validate_since(s: &str) -> Result<String, String> {
+    let shape = validate_since_shape(s)?;
+    let num = |range: std::ops::Range<usize>| -> u32 {
+        s[range].parse().unwrap_or(u32::MAX)
+    };
+    let (year, month, day) = (num(0..4), num(5..7), num(8..10));
+    let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+    let days_in_month = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return Err(format!("invalid month in '{s}', expected 01-12")),
+    };
+    if day == 0 || day > days_in_month {
+        return Err(format!("invalid day in '{s}', month {month:02} has {days_in_month} days"));
+    }
+    if s.len() == 19 && (num(11..13) > 23 || num(14..16) > 59 || num(17..19) > 59) {
+        return Err(format!("invalid time in '{s}', expected HH 00-23, MM and SS 00-59"));
+    }
+    Ok(shape)
+}
+
+/// The shape half of [`validate_since`]: digits and separators in place.
+fn validate_since_shape(s: &str) -> Result<String, String> {
     let b = s.as_bytes();
     let date_ok = b.len() >= 10
         && b[4] == b'-'
@@ -279,6 +307,26 @@ mod tests {
         assert_eq!(pbf.dataset, "japan");
         assert!(tags);
         assert_eq!(type_filter, None);
+    }
+
+    #[test]
+    fn validate_since_checks_field_ranges() {
+        for good in ["2026-03-01", "2024-02-29", "2026-12-31 23:59:59", "2026-01-01 00:00:00"] {
+            assert!(validate_since(good).is_ok(), "expected {good:?} to be accepted");
+        }
+        for bad in [
+            "2026-13-01",
+            "2026-00-10",
+            "2026-02-29",
+            "2026-04-31",
+            "2026-03-00",
+            "2026-03-01 24:00:00",
+            "2026-03-01 12:60:00",
+            "2026-03-01 12:00:60",
+            "2026/03/01",
+        ] {
+            assert!(validate_since(bad).is_err(), "expected {bad:?} to be rejected");
+        }
     }
 
     #[test]

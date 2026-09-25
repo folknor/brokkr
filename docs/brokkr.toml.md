@@ -57,7 +57,9 @@ Config-only commands (`man`, `results`, `history`) work from either directory.
 ## The user-wide brokkr.toml
 
 A second, optional config lives at `$XDG_CONFIG_HOME/brokkr/brokkr.toml`
-(falling back to `$HOME/.config/brokkr/brokkr.toml`). It holds the conventions
+(falling back to `$HOME/.config/brokkr/brokkr.toml`; an empty or relative
+`XDG_CONFIG_HOME` counts as unset, as the XDG spec says, rather than resolving
+against the cwd). It holds the conventions
 that belong to *you* rather than to any one tree, and it applies in every
 project brokkr detects.
 
@@ -149,7 +151,11 @@ names carry hyphens, and a prefix test alone would let a variant claim a
 dash-extending sibling's files (`raw` swallowing `raw-fast`) and evict them. Host `features` are cargo features
 appended to every build command (all measurable commands, `verify`, `serve`,
 `ingest`, `update`). CLI `--features` are additive on top of host features
-(deduped). Reserved top-level keys (skipped by host parsing): `project`,
+(deduped). Host `port` is the nidhogg server port (default 3033) that
+`serve`/`status`/`query`/`geocode`/`verify`/the benches target; brokkr passes
+it to the server it spawns as `PORT`, but never reads `PORT` from its own
+environment - an unrelated `PORT` in the shell must not retarget the commands.
+Reserved top-level keys (skipped by host parsing): `project`,
 `litehtml`, `sluggrs`, `check`, `dependency_rule`, `test`, `capture_env`,
 `gremlins`, `header`, `textlint`, `textlint_preset`, `script_check`,
 `manifest`, `rustdoc`, `deps`, `disable_toolchain`.
@@ -174,6 +180,14 @@ becoming a destructive operation merely by happening. The consequence is that a
 project which stops growing never shrinks on its own; `brokkr clean
 --worktrees` is the explicit hammer for that.
 
+Eviction makes room for the worktree being cut, so the steady state is
+`worktree_keep` worktrees, not one more. The worktree being cut is never itself
+a victim - including when it replaces a stale directory of the same name. The
+whole sequence (eviction, replacement, creation, bookkeeping) runs under the
+global lock, which is then held through the build and measurement, so a
+concurrent brokkr can neither evict a worktree mid-build nor lose a
+bookkeeping update.
+
 **This is a growth damper, not a bound.** The count is per project, so the
 disk-wide total is this number times however many projects you have worktrees
 for. Only a global byte budget could promise "never fills the disk", and a count
@@ -195,7 +209,10 @@ Two rules the eviction obeys:
   git would have succeeded in removing it. That is correctness, not courtesy: a
   dirty worktree is the one place where removal destroys something
   unrecoverable. If git cannot be consulted at all, the worktree is assumed
-  dirty and kept.
+  dirty and kept. The same rule guards replacement: a directory at the name
+  `--commit` wants that is not checked out at the requested commit is replaced
+  only if clean, and a dirty (or unreadable) one fails the run with its path
+  rather than being force-removed.
 - **Failures skip and continue**, because housekeeping must not fail the
   measurement you actually asked for. Since skips can hold the count above the
   limit, brokkr reports the overage on *every* run where it is exceeded, not
@@ -206,7 +223,15 @@ Bookkeeping lives in `.brokkr/worktrees.toml` at the project root, written on
 both create and reuse. It is safe to delete; losing it costs a suboptimal
 eviction order, never data. A worktree with no record sorts as oldest, since it
 predates the bookkeeping - treating it as freshest would make pre-existing
-worktrees permanently un-evictable.
+worktrees permanently un-evictable. A file that exists but does not parse is
+reported as an error on every `--commit` run and left untouched (eviction and
+bookkeeping are skipped, the run itself proceeds) rather than silently read as
+empty and overwritten; delete it to recover.
+
+Where one project root governs several checkouts (the config-one-level-up
+layout), they share that one file. Each checkout's eviction and pruning touch
+only records named for its own worktrees (`.brokkr-worktree-<checkout>-<short
+hash>`, matched by construction, so checkout `foo` never claims `foo-bar`'s).
 
 ## `disable_toolchain`
 
@@ -287,6 +312,14 @@ keeps `brokkr.toml` itself free of literal, possibly-invisible gremlin
 characters. Omit the section to scan everything with the built-in set (the
 default).
 
+Files are read as bytes. A scanned file that is not valid UTF-8 (a Latin-1
+`.md` whose raw 0xA0 is an NBSP) reports each invalid byte as
+`byte 0xNN INVALID UTF-8` at its own line and column; `--fix-gremlins` leaves
+such a file untouched, since rewriting it would mean guessing its encoding. A
+file that cannot be read at all fails the phase naming it - the same holds for
+the header, textlint and manifest phases. Only a path deleted from the working
+tree (still listed by `git ls-files`) is passed over.
+
 ## `[header]` section
 
 A required file header whose year must be current (the header phase). A file
@@ -301,7 +334,9 @@ pattern = "Copyright (C) 2015-{year}"
 exempt = ["**/examples/**", "**/core/rust/**"]
 ```
 
-`paths`/`exempt` are globs (`**` matches any directories). The current year
+`paths`/`exempt` are globs (`**` matches any directories). The header is
+matched as bytes, so a file that is not valid UTF-8 is judged on its content
+like any other rather than skipped. The current year
 comes from libc `gmtime` (no date-crate dependency). Ported from
 nautilus_trader's `check_copyright_year` hook; see `src/header.rs`.
 
@@ -372,6 +407,12 @@ Fields: `name`, `pattern` (a linear-time `regex`; a match is a violation),
 
 No arbitrary multiline matching, except `join_wrapped_use` (bounded to `use`
 statements). See `src/textlint.rs` and `src/lex.rs`.
+
+A matched file that is not valid UTF-8 is decoded lossily and scanned (ASCII,
+which patterns are written against, survives verbatim; an invalid byte becomes
+U+FFFD). A *binary* file - a NUL in its first 8000 bytes, git's heuristic - is
+skipped, because a broad `paths` glob legitimately sweeps in images and
+archives where a line pattern means nothing.
 
 ## `[textlint_preset]` blocks
 
@@ -523,7 +564,10 @@ once.
 `post-test` entries are **skipped entirely when the test phase failed**. The
 test phase fails fast, so its later lanes never ran; a script-check has no
 partial-run reading, unlike the coverage audit, which deliberately still runs
-there. Leaving `stage` off is exactly the old behaviour.
+there. They are also skipped when the test phase **did not run** - a profile's
+`skip_phases = ["test"]`, or the markdown-only shortcut - with a
+`script-check: N post-test checks skipped` line saying so, since there is no
+test phase for them to judge. Leaving `stage` off is exactly the old behaviour.
 
 All three stages share the one `script_check` phase name, so a profile's
 `skip_phases = ["script_check"]` drops every stage, and a failure is reported
@@ -596,6 +640,12 @@ The section/target-shape checks (`section_order`, `crate_type_order`,
 `cargo-fuzz = true` crate, matching the hook's standalone-fuzz-workspace
 exemption. The dependency-content checks (`sort_dependencies`, cargo-machete,
 `version_align`) apply to every manifest.
+
+A matched manifest that is not valid UTF-8 or does not parse as TOML is one
+`unparseable` violation for that file (not a skip, which passed every enabled
+check on a file none of them read; not a phase error, which one broken fixture
+would turn into a dead phase). Exempt a deliberately non-manifest file - a
+`cargo-generate` template, a fixture - with `exclude`.
 
 See `src/manifest.rs`.
 

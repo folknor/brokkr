@@ -22,24 +22,46 @@ use crate::error::DevError;
 use crate::output;
 use crate::piners::pins_write;
 use crate::piners::registry::{self, Registry};
+use crate::piners::registry_io;
 use crate::piners::report::HarnessReport;
 
 /// Stamp dispositions for `scope_ids` into the registry's pins, then
 /// rewrite `pins_path` (the whole file - `[feeds]`/`[roots]` round-trip
 /// untouched).
 ///
-/// The registry holds the whole loaded universe; only the selected ids are
-/// updated. A selected probe the harness emitted no line for is skipped
-/// with a warning (nothing to bless). A disposition that is not a known
-/// label (a malformed `parity` line with no tier) is refused for that probe
-/// rather than written, since it would fail [`Registry::lint`] on the next
-/// load.
+/// Only the selected ids' `expected` is updated. The pin universe stamped
+/// into is re-read from `pins_path` here rather than taken from the
+/// `registry` the run loaded: the run loaded it before taking the lock, so a
+/// reseed that landed in between would otherwise be silently reverted by
+/// this write. The caller holds the lock across this call. `registry` is
+/// refreshed to match what was written.
+///
+/// A selected probe the harness emitted no line for is skipped with a
+/// warning (nothing to bless). A disposition that is not a known label (a
+/// malformed `parity` line with no tier) is refused for that probe rather
+/// than written, since it would fail [`Registry::lint`] on the next load.
+/// The caller is responsible for refusing to bless a run whose harness
+/// failed (see `cmd.rs`); this function stamps what it is given.
 pub fn apply(
     pins_path: &Path,
     registry: &mut Registry,
     report: &HarnessReport,
     scope_ids: &[String],
 ) -> Result<(), DevError> {
+    // Edit the existing file in place so hand-written comments survive, and
+    // stamp into its current contents (see above).
+    let existing = if pins_path.exists() {
+        Some(std::fs::read_to_string(pins_path).map_err(DevError::Io)?)
+    } else {
+        None
+    };
+    if let Some(text) = existing.as_deref() {
+        let fresh = registry::parse_pins(text, pins_path)?;
+        registry.pins = fresh.probes;
+        registry.feeds = fresh.feeds;
+        registry.roots = fresh.roots;
+    }
+
     let actual: BTreeMap<&str, String> = report
         .probes
         .iter()
@@ -50,6 +72,7 @@ pub fn apply(
     let mut changed = 0usize;
     let mut missing: Vec<String> = Vec::new();
     let mut rejected: Vec<String> = Vec::new();
+    let mut vanished: Vec<String> = Vec::new();
 
     for id in scope_ids {
         let Some(disp) = actual.get(id.as_str()) else {
@@ -61,7 +84,10 @@ pub fn apply(
             continue;
         }
         let Some(pin) = registry.pins.get_mut(id) else {
-            continue; // selection came from this map; cannot happen
+            // The probe was selected from the pins the run loaded, but a
+            // reseed since then dropped it from the file: nothing to stamp.
+            vanished.push(id.clone());
+            continue;
         };
         blessed += 1;
         if pin.expected.as_deref() != Some(disp.as_str()) {
@@ -70,22 +96,15 @@ pub fn apply(
         }
     }
 
-    // Edit the existing file in place so hand-written comments survive.
-    let existing = if pins_path.exists() {
-        Some(std::fs::read_to_string(pins_path).map_err(DevError::Io)?)
-    } else {
-        None
-    };
-    std::fs::write(
+    registry_io::write_atomic(
         pins_path,
-        pins_write::render_pins(
+        &pins_write::render_pins(
             existing.as_deref(),
             &registry.feeds,
             &registry.roots,
             &registry.pins,
         )?,
-    )
-    .map_err(DevError::Io)?;
+    )?;
     output::corpus_msg(&format!(
         "blessed {blessed} (changed {changed}) -> {}",
         pins_path.display()
@@ -102,6 +121,13 @@ pub fn apply(
             "warning: {} probe(s) had an unstampable disposition, not blessed: {}",
             rejected.len(),
             rejected.join(", ")
+        ));
+    }
+    if !vanished.is_empty() {
+        output::corpus_msg(&format!(
+            "warning: {} probe(s) left pins.toml during the run, not blessed: {}",
+            vanished.len(),
+            vanished.join(", ")
         ));
     }
     Ok(())
@@ -177,5 +203,32 @@ mod tests {
 
         // unchanged: no disposition emitted, nothing to bless
         assert_eq!(reg.pins["a"].expected.as_deref(), Some("accepted"));
+    }
+
+    #[test]
+    fn stamps_into_the_file_on_disk_not_the_stale_loaded_pins() {
+        // The run loaded `a` with hash "00"; a reseed then re-stamped the file
+        // to "ff" before bless wrote. Bless must keep the reseed's hash and
+        // only change `expected`.
+        let dir = crate::test_scratch::scratch("piners_bless", "fresh_reread");
+        let pins_path = dir.join("pins.toml");
+        std::fs::write(
+            &pins_path,
+            "# keep me\n[probes.a]\npine = { path = \"p.pine\", xxh128 = \"ff\" }\n\
+             csv = { path = \"p.csv\", xxh128 = \"ff\" }\n",
+        )
+        .unwrap();
+
+        let mut pins = BTreeMap::new();
+        pins.insert("a".to_owned(), pin(None)); // stale: hashes "00"/"11"
+        let mut reg = registry_of(pins);
+        let rep = report(r#"{"probe":"a","outcome":"parity","acceptance":{"tier":"accepted"}}"#);
+        apply(&pins_path, &mut reg, &rep, &["a".to_owned()]).unwrap();
+
+        let written = std::fs::read_to_string(&pins_path).unwrap();
+        assert!(written.contains("# keep me"));
+        let data = registry::parse_pins(&written, &pins_path).unwrap();
+        assert_eq!(data.probes["a"].pine.xxh128, "ff");
+        assert_eq!(data.probes["a"].expected.as_deref(), Some("accepted"));
     }
 }

@@ -1244,7 +1244,8 @@ fn validate_check_entry(entry: &CheckEntry) -> Result<(), DevError> {
         && p.budget == Some(0)
     {
         return Err(DevError::Config(format!(
-            "[[check]] entry '{}' sets `parallel.budget = 0`; the budget is a              count of tests allowed in flight and must be at least 1.",
+            "[[check]] entry '{}' sets `parallel.budget = 0`; the budget is a \
+             count of tests allowed in flight and must be at least 1.",
             entry.name
         )));
     }

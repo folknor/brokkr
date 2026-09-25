@@ -136,16 +136,19 @@ history). One transaction after the harness exits: a `run` row plus child
 (FK clauses are declarative; enforcement off), per-db `PRAGMA user_version`
 migrations, WAL - mirroring `src/db` (`ResultsDb`). Code: `src/piners/corpus_db/`.
 
-- `run` - `started_at`, `selector` (JSON: resolved ids + raw flags), `gated`
-  (`!--no-gate`), `result` (pass/fail), `fail_reason`, `harness_exit_code`,
+- `run` - `started_at`, `selector` (JSON: resolved ids + raw flags, forwarded
+  harness flags, and the build profile as `debug`), `gated` (neither
+  `--no-gate` nor `--bless`), `result` (pass/fail), `fail_reason`, `harness_exit_code`,
   `probe_count`, `harness_stderr`, `wall_ms` (brokkr's own measured whole-run
   harness wall; `NULL` on a spawn failure or pre-v4 rows). The exit/reason/stderr
-  make a failed run self-contained; `wall_ms` + `selector.ids` are what the
-  pre-run runtime ceiling estimates the next run from (superset-covering run's
-  measured wall - see `docs/commands/corpus.md`).
+  make a failed run self-contained; `wall_ms` + `selector` are what the
+  pre-run runtime ceiling estimates the next run from (a comparable
+  superset-covering run's measured wall - see `docs/commands/corpus.md`).
 - `disposition` (PK `run_id,probe`) - `outcome`, `disposition` (gate label),
-  `expected` + `gate_ok` (from the pins at run time; `None` expected is never
-  ok), `matched`/`ours_only`/`tv_only`, `boundary_ours`/`boundary_tv` (the
+  `expected` (from the pins at run time; `NULL` for a probe outside the
+  selection) + `gate_ok` (the gate's own verdict - a probe is ok unless the
+  gate flagged it, so a never-blessed selected probe is not ok and a stray
+  line for an unselected probe is), `matched`/`ours_only`/`tv_only`, `boundary_ours`/`boundary_tv` (the
   window-boundary discount; `NOT NULL DEFAULT 0`, so pre-v3 rows read as
   "nothing discounted"), `count_tier`, `acc_tier`/`acc_profile`,
   `acc_failing` (JSON array), `p90_entry/exit/pnl`, `sig_domain`/`sig_leg`/
@@ -153,7 +156,10 @@ migrations, WAL - mirroring `src/db` (`ResultsDb`). Code: `src/piners/corpus_db/
   wall-clock ms from the harness; absent on older output, surfaced by the
   `--runtimes` view).
 - `trade_diff` (PK `run_id,probe,our_index,tv_index`) - all 26 NDJSON fields.
-  The volume driver; the PK covers probe-within-run lookups.
+  The volume driver; the PK covers probe-within-run lookups. A harness that
+  repeats a disposition or `trade_diff` key has the repeats collapsed to the
+  last occurrence before ingest (and the run fails - see
+  `docs/commands/corpus.md`), so the PKs hold.
 - `gate_miss` (PK `run_id,probe`) - selected probes the harness emitted **no**
   disposition line for (the gate violations with no disposition row).
 - `dense_na_site` - one row per dense-`na` call site (`name`, `call_site`,
@@ -175,7 +181,9 @@ meaning and the corpus store moved to a dedicated command. No overloaded query
 struct, no benchmark filters to reject. The corpus views:
 
 - `brokkr corpus-results` - table of recent runs. The `selector` column renders
-  the selection *intent* (`all` / `kw=…` / `probe=…` / `+bless`), not the full
+  the selection *intent* (`all` / `kw=…` / `probe=…` / `+bless`, plus
+  `release` for a non-default profile and `-- <flags>` for forwarded harness
+  flags), not the full
   resolved id list it stores - that would be 200+ ids wide for an `--all` run.
   The id list stays reachable via the run-detail view or `--sql`.
 - `brokkr corpus-results <id>` / `--run <id>` - that run's per-probe dispositions (+

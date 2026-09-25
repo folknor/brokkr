@@ -426,12 +426,10 @@ fn enumerate_shapes(
         // either direction re-fingerprints the shape and rebuilds it.
         let (env_allows, allow_args) =
             rustflags::plumbing(project_root, !first.rustflags.is_empty(), allow_flags);
-        let mut env_owned: Vec<(String, String)> = first
-            .env
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-        env_owned.extend(sweep_cargo_env(first, &meta_target_dir, env_allows));
+        // `merged_env`, the test phase's composition, so the enumeration sees
+        // the env the lane ran under - including which side wins a collision.
+        let env_owned =
+            merged_env(&first.env, &sweep_cargo_env(first, &meta_target_dir, env_allows));
         let env_refs: Vec<(&str, &str)> = env_owned
             .iter()
             .map(|(k, v)| (k.as_str(), v.as_str()))

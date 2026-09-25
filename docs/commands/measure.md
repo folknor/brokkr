@@ -151,6 +151,11 @@ set). `--bench N` stores **all N runs** in sidecar.db but marks
 the default view and `--stat`/`--phase` read that best run unless another
 `run_idx` is selected.
 
+The UUID argument is a prefix, matched literally (`_`/`%` are not wildcards),
+and it must name **one** session: a prefix shared by several sessions is an
+error listing the candidates rather than a merged timeline, and an empty
+prefix is refused.
+
 ## Sample fields
 
 Each 100ms sample is assembled by `read_proc_metrics` from three files, and
@@ -193,6 +198,10 @@ Compose these with `--samples` (and, where noted, `--stat`):
 - `--stat <field>` prints min/max/avg + p50/p95 (linear-interpolation
   percentiles, matching `harness::percentile`).
 
+A `--where` that does not parse, or a field name outside the table above in
+`--where`/`--fields`/`--stat`, is an error before anything prints - never a
+silently skipped filter or dropped column.
+
 ## Marker & counter rules
 
 The FIFO carries two line types (parsed in `SidecarFifo::drain`,
@@ -201,7 +210,8 @@ The FIFO carries two line types (parsed in `SidecarFifo::drain`,
 - **Marker** - `<ts_us> <name>`. Assigned a monotonic `marker_idx` in arrival
   order; the last name seen is also mirrored to a status file so `brokkr lock`
   can show the live phase. Markers are point-in-time bookmarks - the protocol
-  itself knows nothing about spans or pairs.
+  itself knows nothing about spans or pairs. The name is untrusted text; every
+  JSONL view encodes it with serde_json, so control characters are escaped.
 - **Counter** - `<ts_us> @<name>=<value>`. The value **must parse as `i64`**
   or the line is silently dropped. `<ts_us>` that doesn't parse is skipped for
   either type. Timestamps are microseconds since process start.

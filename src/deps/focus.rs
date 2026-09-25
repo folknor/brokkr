@@ -155,7 +155,7 @@ pub struct ChainTrace {
     pub krate: String,
     pub version: String,
     /// Normalised source label: `crates.io`, `git+<url>#<sha>`,
-    /// `registry=<url>`, `workspace`, or `path`. Replaces the raw
+    /// `registry=<url>` (git or sparse index), `workspace`, or `path`. Replaces the raw
     /// `source` string from cargo metadata which is verbose and full
     /// of `registry+` URL noise.
     pub source: String,
@@ -187,8 +187,14 @@ fn exact_predicate<'a>(
     move |p: &CargoPackage| p.name == name && version.is_none_or(|v| p.version == v)
 }
 
+/// Normalised source label. Cargo spells a registry source two ways:
+/// `registry+<url>` for a git-protocol index and `sparse+<url>` for a
+/// sparse one (crates.io itself is canonicalised to its git-index id, but
+/// the sparse form is accepted too in case that ever changes). Both become
+/// `registry=<url>` - the protocol is transport, not provenance.
 fn format_source(p: &CargoPackage, workspace_set: &HashSet<&str>) -> String {
     const CRATES_IO: &str = "registry+https://github.com/rust-lang/crates.io-index";
+    const CRATES_IO_SPARSE: &str = "sparse+https://index.crates.io/";
     match p.source.as_deref() {
         None => {
             if workspace_set.contains(p.id.as_str()) {
@@ -197,8 +203,11 @@ fn format_source(p: &CargoPackage, workspace_set: &HashSet<&str>) -> String {
                 "path".to_string()
             }
         }
-        Some(s) if s == CRATES_IO => "crates.io".to_string(),
-        Some(s) => match s.strip_prefix("registry+") {
+        Some(s) if s == CRATES_IO || s == CRATES_IO_SPARSE => "crates.io".to_string(),
+        Some(s) => match s
+            .strip_prefix("registry+")
+            .or_else(|| s.strip_prefix("sparse+"))
+        {
             Some(rest) => format!("registry={rest}"),
             None => s.to_string(),
         },
@@ -270,4 +279,34 @@ fn chains_to_workspace(
 
 fn label(id: &str, id_to_label: &HashMap<&str, String>) -> String {
     id_to_label.get(id).cloned().unwrap_or_else(|| id.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pkg(source: Option<&str>) -> CargoPackage {
+        CargoPackage {
+            name: "x".to_string(),
+            version: "1.0.0".to_string(),
+            id: "x-id".to_string(),
+            source: source.map(str::to_string),
+            manifest_path: String::new(),
+            links: None,
+            publish: None,
+            dependencies: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn format_source_normalises_both_registry_protocols() {
+        let ws = HashSet::new();
+        let label = |s| format_source(&pkg(Some(s)), &ws);
+        assert_eq!(label("registry+https://github.com/rust-lang/crates.io-index"), "crates.io");
+        assert_eq!(label("sparse+https://index.crates.io/"), "crates.io");
+        assert_eq!(label("registry+https://example.com/index"), "registry=https://example.com/index");
+        assert_eq!(label("sparse+https://example.com/index/"), "registry=https://example.com/index/");
+        assert_eq!(label("git+https://example.com/r#abc"), "git+https://example.com/r#abc");
+        assert_eq!(format_source(&pkg(None), &ws), "path");
+    }
 }

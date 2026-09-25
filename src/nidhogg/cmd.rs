@@ -12,21 +12,24 @@ use crate::resolve::{
     self, file_size_mb, resolve_bbox, resolve_nidhogg_data_dir, resolve_pbf_path,
 };
 
-fn resolve_port(dev_config: &config::DevConfig) -> u16 {
-    // Check PORT env var first
-    if let Ok(port_str) = std::env::var("PORT")
-        && let Ok(port) = port_str.parse::<u16>()
-    {
-        return port;
-    }
-    // Try brokkr.toml host config
-    if let Ok(hostname) = config::hostname()
-        && let Some(host) = dev_config.hosts.get(&hostname)
-        && let Some(port) = host.port
-    {
-        return port;
-    }
-    super::server::DEFAULT_PORT
+/// The nidhogg server port: `[<host>] port` in brokkr.toml, else
+/// `DEFAULT_PORT`.
+///
+/// brokkr's own `PORT` environment variable is deliberately NOT consulted.
+/// `PORT` is the variable brokkr *hands to* the nidhogg child
+/// (`server::serve`, `bench_tiles::spawn_server`), and it is a common
+/// ambient name in shells (web dev servers, PaaS tooling): reading it here
+/// let an unrelated export silently retarget `serve`/`status`/`query`/the
+/// benches at another port. A hostname lookup failure is an error rather
+/// than a silent fall-through to the default, which would likewise point
+/// every command at a port the config never named.
+fn resolve_port(dev_config: &config::DevConfig) -> Result<u16, DevError> {
+    let hostname = config::hostname()?;
+    Ok(dev_config
+        .hosts
+        .get(&hostname)
+        .and_then(|host| host.port)
+        .unwrap_or(super::server::DEFAULT_PORT))
 }
 
 fn build_config_with_features(package: Option<&str>, features: &[String]) -> build::BuildConfig {
@@ -72,7 +75,7 @@ pub(crate) fn serve(
         )));
     }
 
-    let port = resolve_port(dev_config);
+    let port = resolve_port(dev_config)?;
     let build_config = build_config_with_features(Some("nidhogg"), features);
     let binary = build::cargo_build(&build_config, build_root)?;
     super::server::serve(
@@ -137,7 +140,7 @@ pub(crate) fn status(
     _project_root: &Path,
 ) -> Result<(), DevError> {
     project::require(project, Project::Nidhogg, "status")?;
-    let port = resolve_port(dev_config);
+    let port = resolve_port(dev_config)?;
     let running = super::server::status(port)?;
     if running {
         output::run_msg(&format!("server running on port {port}"));
@@ -161,7 +164,9 @@ pub(crate) fn ingest(
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
     let pbf_path = resolve_pbf_path(dataset, variant, &paths, project_root)?;
 
-    let data_dir = resolve_nidhogg_data_dir(dataset, &paths)?;
+    // Not `resolve_nidhogg_data_dir`: that requires the directory to exist,
+    // and ingest is what creates it (`ingest::run` does `create_dir_all`).
+    let data_dir = resolve::nidhogg_data_dir_path(dataset, &paths)?;
 
     let build_config = build_config_with_features(Some("nidhogg"), features);
     let binary = build::cargo_build(&build_config, build_root)?;
@@ -189,7 +194,7 @@ pub(crate) fn query(
     json: Option<&str>,
 ) -> Result<(), DevError> {
     project::require(project, Project::Nidhogg, "query")?;
-    let port = resolve_port(dev_config);
+    let port = resolve_port(dev_config)?;
     super::query::run(port, json)
 }
 
@@ -200,7 +205,7 @@ pub(crate) fn geocode(
     term: &str,
 ) -> Result<(), DevError> {
     project::require(project, Project::Nidhogg, "geocode")?;
-    let port = resolve_port(dev_config);
+    let port = resolve_port(dev_config)?;
     super::geocode::run(port, term)
 }
 
@@ -214,7 +219,7 @@ pub(crate) fn bench_api(req: &MeasureRequest, query: Option<&str>) -> Result<(),
         req.force,        req.stop_marker.map(str::to_owned),
     )?
     .with_request(req);
-    let port = resolve_port(req.dev_config);
+    let port = resolve_port(req.dev_config)?;
 
     // Resolve dataset PBF for metadata recording.
     let pbf_path = resolve_pbf_path(req.dataset, req.variant, &ctx.paths, req.project_root).ok();
@@ -262,7 +267,7 @@ pub(crate) fn bench_tiles(
     )?
     .with_request(req);
     let data_dir = resolve_nidhogg_data_dir(req.dataset, &ctx.paths)?;
-    let port = resolve_port(req.dev_config);
+    let port = resolve_port(req.dev_config)?;
 
     let (tiles_path, tiles_mb) = match tiles_variant {
         Some(v) => {
@@ -314,7 +319,7 @@ pub(crate) fn verify_batch(
 ) -> Result<(), DevError> {
     let pi = bootstrap(None)?;
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
-    let port = resolve_port(dev_config);
+    let port = resolve_port(dev_config)?;
     let bbox = resolve_bbox(None, dataset, &paths)?;
     super::verify_batch::run(port, &bbox)
 }
@@ -325,7 +330,7 @@ pub(crate) fn verify_geocode(
     _project_root: &Path,
     queries: &[String],
 ) -> Result<(), DevError> {
-    let port = resolve_port(dev_config);
+    let port = resolve_port(dev_config)?;
     let query_refs: Vec<&str> = if queries.is_empty() {
         super::client::GEOCODE_TEST_QUERIES.to_vec()
     } else {
@@ -344,7 +349,7 @@ pub(crate) fn verify_readonly(
 ) -> Result<(), DevError> {
     let pi = bootstrap(None)?;
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
-    let port = resolve_port(dev_config);
+    let port = resolve_port(dev_config)?;
 
     let data_dir_str = resolve_nidhogg_data_dir(dataset, &paths)?
         .display()

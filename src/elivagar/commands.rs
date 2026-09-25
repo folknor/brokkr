@@ -38,9 +38,9 @@ pub enum BuildKind {
 pub enum ElivagarCommand<'a> {
     /// Full elivagar pipeline: PBF -> PMTiles.
     ///
-    /// Currently `bench self`. Builds the main binary, runs with pipeline
-    /// options, parses self-reported kv metrics from stderr (total_ms, phase12_ms,
-    /// ocean_ms, phase3_ms, phase4_ms, features, tiles, output_bytes).
+    /// Filed as `self`. Builds the main binary and runs it with the pipeline
+    /// options under brokkr's own external wall-clock; tilegen reports its
+    /// metrics as FIFO counters (sidecar.db), not as stderr `key=value` lines.
     Tilegen {
         opts: &'a PipelineOpts<'a>,
         /// Resume from a checkpoint. Per-invocation, not part of the contract:
@@ -164,17 +164,6 @@ impl<'a> ElivagarCommand<'a> {
     /// Returns `None` for the default package and external tools.
     pub fn package(&self) -> Option<&'static str> {
         None
-    }
-
-    /// Cargo example to build for this command.
-    ///
-    /// Returns `Some` for micro-benchmarks that are cargo examples.
-    pub fn example(&self) -> Option<&'static str> {
-        match self {
-            Self::PmtilesWriter { .. } => Some("bench_pmtiles"),
-            Self::NodeStore { .. } => Some("bench_node_store"),
-            _ => None,
-        }
     }
 
     /// Whether this command needs the scratch directory to be created.

@@ -1,6 +1,7 @@
 //! Query operations for the results database.
 
 use super::ResultsDb;
+use super::like::{ESCAPE, contains_pattern, prefix_pattern, require_prefix};
 use super::schema::SELECT_COLS;
 use super::{
     Distribution, HotpathData, HotpathFunction, HotpathThread, KvPair, KvValue, PreviousRun,
@@ -14,11 +15,16 @@ use crate::error::DevError;
 
 impl ResultsDb {
     /// Query rows by UUID prefix. Loads all child data (kv, distribution, hotpath).
+    ///
+    /// The prefix matches literally (`_`/`%` are not wildcards), and an empty
+    /// prefix is refused rather than matching every row.
     pub fn query_by_uuid(&self, prefix: &str) -> Result<Vec<StoredRow>, DevError> {
-        let sql =
-            format!("SELECT {SELECT_COLS} FROM runs WHERE uuid LIKE ?1||'%' ORDER BY id DESC");
+        require_prefix(prefix, "uuid")?;
+        let sql = format!(
+            "SELECT {SELECT_COLS} FROM runs WHERE uuid LIKE ?1 {ESCAPE} ORDER BY id DESC"
+        );
         let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map(rusqlite::params![prefix], map_stored_row)?;
+        let rows = stmt.query_map(rusqlite::params![prefix_pattern(prefix)], map_stored_row)?;
         let mut result = collect_rows(rows)?;
         for row in &mut result {
             load_children(&self.conn, row)?;
@@ -73,14 +79,16 @@ impl ResultsDb {
 // Helpers shared with compare module
 // ---------------------------------------------------------------------------
 
+/// Run `sql` with `?1` bound to `commit_pattern` - a `like::prefix_pattern`,
+/// not a raw commit - and the rest of `params` as-is.
 pub(super) fn query_commit_filtered(
     conn: &rusqlite::Connection,
     sql: &str,
-    commit: &str,
+    commit_pattern: &str,
     params: &[String],
 ) -> Result<Vec<StoredRow>, DevError> {
     let mut bound = params.to_vec();
-    bound[0] = commit.to_owned();
+    bound[0] = commit_pattern.to_owned();
     let param_refs: Vec<&dyn rusqlite::types::ToSql> = bound
         .iter()
         .map(|p| p as &dyn rusqlite::types::ToSql)
@@ -230,6 +238,37 @@ fn grep_match_expr(params: &mut Vec<String>, term: &str) -> String {
     )
 }
 
+/// `column` contains `term` literally (ASCII case-insensitive). Binds one param.
+///
+/// Shared by [`build_query_sql`] and `query_compare` for `--command`/`--mode`/
+/// `--dataset`. `column` is always a fixed identifier from the caller, never
+/// user input.
+pub(super) fn contains_expr(params: &mut Vec<String>, column: &str, term: &str) -> String {
+    params.push(contains_pattern(term));
+    format!("{column} LIKE ?{} {ESCAPE}", params.len())
+}
+
+/// A run_kv row with key `key` whose value, rendered as text, equals `value`.
+/// Binds two params.
+///
+/// Coalesced across all three value columns, the way `--grep` does: a counter
+/// written as `meta.threads=8` is stored in `value_int`, and comparing
+/// `value_text` alone made `--meta threads=8` silently match nothing. The CAST
+/// is load-bearing - SQLite never considers an INTEGER equal to a TEXT, so the
+/// coalesced value must be text before it meets the (text) parameter.
+fn kv_equals_expr(params: &mut Vec<String>, key: &str, value: &str) -> String {
+    params.push(key.to_owned());
+    let key_idx = params.len();
+    params.push(value.to_owned());
+    let val_idx = params.len();
+    format!(
+        "EXISTS (SELECT 1 FROM run_kv WHERE run_kv.run_id = runs.id \
+         AND run_kv.key = ?{key_idx} \
+         AND CAST(COALESCE(run_kv.value_text, run_kv.value_int, run_kv.value_real) AS TEXT) \
+             = ?{val_idx})"
+    )
+}
+
 /// Append the `--grep` / `--grep-v` WHERE clauses.
 ///
 /// Shared by [`build_query_sql`] and `query_compare` so the two can't drift -
@@ -260,26 +299,22 @@ fn build_query_sql(filter: &QueryFilter) -> (String, Vec<String>) {
     let mut clauses = Vec::new();
     let mut params: Vec<String> = Vec::new();
 
+    // Commit is a prefix, command/mode/dataset are substrings - all literal
+    // (see `like`: `_` used to be a wildcard in every one of them).
     if let Some(ref c) = filter.commit {
-        params.push(c.clone());
-        clauses.push(format!("[commit] LIKE ?{}||'%'", params.len()));
+        params.push(prefix_pattern(c));
+        clauses.push(format!("[commit] LIKE ?{} {ESCAPE}", params.len()));
     }
     if let Some(ref cmd) = filter.command {
-        params.push(cmd.clone());
-        let i = params.len();
-        params.push(cmd.clone());
-        let j = params.len();
-        clauses.push(format!(
-            "(command LIKE '%'||?{i}||'%' OR mode LIKE '%'||?{j}||'%')"
-        ));
+        let in_command = contains_expr(&mut params, "command", cmd);
+        let in_mode = contains_expr(&mut params, "mode", cmd);
+        clauses.push(format!("({in_command} OR {in_mode})"));
     }
     if let Some(ref v) = filter.mode {
-        params.push(v.clone());
-        clauses.push(format!("mode LIKE '%'||?{}||'%'", params.len()));
+        clauses.push(contains_expr(&mut params, "mode", v));
     }
     if let Some(ref d) = filter.dataset {
-        params.push(d.clone());
-        clauses.push(format!("input_file LIKE '%'||?{}||'%'", params.len()));
+        clauses.push(contains_expr(&mut params, "input_file", d));
     }
     push_grep_clauses(&mut clauses, &mut params, &filter.grep, &filter.grep_v);
     // Metadata filters: each becomes an EXISTS subquery against run_kv. The
@@ -287,28 +322,16 @@ fn build_query_sql(filter: &QueryFilter) -> (String, Vec<String>) {
     // and we look up `key = 'meta.<key>'` in run_kv. Rows missing the key are
     // excluded (no row matches => EXISTS is false). Multiple filters AND.
     for (key, value) in &filter.meta {
-        params.push(format!("meta.{key}"));
-        let key_idx = params.len();
-        params.push(value.clone());
-        let val_idx = params.len();
-        clauses.push(format!(
-            "EXISTS (SELECT 1 FROM run_kv WHERE run_kv.run_id = runs.id \
-             AND run_kv.key = ?{key_idx} AND run_kv.value_text = ?{val_idx})"
-        ));
+        let expr = kv_equals_expr(&mut params, &format!("meta.{key}"), value);
+        clauses.push(expr);
     }
     // Env filters: like meta but keyed under `env.<NAME>`. No missing-as-0
     // coercion - rows without the key are excluded. Explicit baseline runs
     // (`PBFHOGG_USE_NEW_PATH=0 brokkr ...`) are the intended way to record
     // "off" rather than relying on implicit absence.
     for (key, value) in &filter.env {
-        params.push(format!("env.{key}"));
-        let key_idx = params.len();
-        params.push(value.clone());
-        let val_idx = params.len();
-        clauses.push(format!(
-            "EXISTS (SELECT 1 FROM run_kv WHERE run_kv.run_id = runs.id \
-             AND run_kv.key = ?{key_idx} AND run_kv.value_text = ?{val_idx})"
-        ));
+        let expr = kv_equals_expr(&mut params, &format!("env.{key}"), value);
+        clauses.push(expr);
     }
 
     let mut sql = format!("SELECT {SELECT_COLS} FROM runs");
@@ -539,25 +562,25 @@ mod tests {
         let (sql, params) = build_query_sql(&filter);
 
         assert!(sql.contains("WHERE"));
-        assert!(sql.contains("[commit] LIKE ?1||'%'"), "commit should be ?1");
+        assert!(sql.contains("[commit] LIKE ?1 ESCAPE"), "commit should be ?1");
         assert!(
-            sql.contains("command LIKE '%'||?2||'%'"),
+            sql.contains("command LIKE ?2 ESCAPE"),
             "command should be ?2 contains"
         );
         assert!(
-            sql.contains("mode LIKE '%'||?3||'%'"),
+            sql.contains("mode LIKE ?3 ESCAPE"),
             "command should also check variant as ?3"
         );
         assert!(
-            sql.contains("mode LIKE '%'||?4||'%'"),
+            sql.contains("mode LIKE ?4 ESCAPE"),
             "variant filter should be ?4 contains"
         );
         assert!(sql.contains("LIMIT ?5"), "limit should be ?5");
         assert_eq!(params.len(), 5);
-        assert_eq!(params[0], "abc123");
-        assert_eq!(params[1], "read");
-        assert_eq!(params[2], "read");
-        assert_eq!(params[3], "mmap");
+        assert_eq!(params[0], "abc123%");
+        assert_eq!(params[1], "%read%");
+        assert_eq!(params[2], "%read%");
+        assert_eq!(params[3], "%mmap%");
         assert_eq!(params[4], "10");
     }
 
@@ -570,10 +593,10 @@ mod tests {
         };
         let (sql, params) = build_query_sql(&filter);
 
-        assert!(sql.contains("[commit] LIKE ?1||'%'"));
+        assert!(sql.contains("[commit] LIKE ?1 ESCAPE"));
         assert!(sql.contains("LIMIT ?2"));
         assert_eq!(params.len(), 2);
-        assert_eq!(params[0], "deadbeef");
+        assert_eq!(params[0], "deadbeef%");
         assert_eq!(params[1], "25");
     }
 
@@ -589,14 +612,14 @@ mod tests {
 
         // Without commit, command becomes ?1 (+ variant fallback ?2),
         // variant filter ?3, limit ?4
-        assert!(sql.contains("command LIKE '%'||?1||'%'"));
-        assert!(sql.contains("mode LIKE '%'||?2||'%'"));
-        assert!(sql.contains("mode LIKE '%'||?3||'%'"));
+        assert!(sql.contains("command LIKE ?1 ESCAPE"));
+        assert!(sql.contains("mode LIKE ?2 ESCAPE"));
+        assert!(sql.contains("mode LIKE ?3 ESCAPE"));
         assert!(sql.contains("LIMIT ?4"));
         assert_eq!(params.len(), 4);
-        assert_eq!(params[0], "write");
-        assert_eq!(params[1], "write");
-        assert_eq!(params[2], "direct");
+        assert_eq!(params[0], "%write%");
+        assert_eq!(params[1], "%write%");
+        assert_eq!(params[2], "%direct%");
         assert_eq!(params[3], "5");
     }
 
@@ -610,12 +633,12 @@ mod tests {
         let (sql, params) = build_query_sql(&filter);
 
         assert!(
-            sql.contains("input_file LIKE '%'||?1||'%'"),
+            sql.contains("input_file LIKE ?1 ESCAPE"),
             "dataset should filter on input_file as ?1"
         );
         assert!(sql.contains("LIMIT ?2"));
         assert_eq!(params.len(), 2);
-        assert_eq!(params[0], "europe");
+        assert_eq!(params[0], "%europe%");
         assert_eq!(params[1], "20");
     }
 
@@ -630,14 +653,14 @@ mod tests {
         let (sql, params) = build_query_sql(&filter);
 
         // command becomes ?1 + variant fallback ?2, dataset filter ?3, limit ?4
-        assert!(sql.contains("command LIKE '%'||?1||'%'"));
-        assert!(sql.contains("mode LIKE '%'||?2||'%'"));
-        assert!(sql.contains("input_file LIKE '%'||?3||'%'"));
+        assert!(sql.contains("command LIKE ?1 ESCAPE"));
+        assert!(sql.contains("mode LIKE ?2 ESCAPE"));
+        assert!(sql.contains("input_file LIKE ?3 ESCAPE"));
         assert!(sql.contains("LIMIT ?4"));
         assert_eq!(params.len(), 4);
-        assert_eq!(params[0], "tags-filter");
-        assert_eq!(params[1], "tags-filter");
-        assert_eq!(params[2], "eu");
+        assert_eq!(params[0], "%tags-filter%");
+        assert_eq!(params[1], "%tags-filter%");
+        assert_eq!(params[2], "%eu%");
         assert_eq!(params[3], "10");
     }
 
@@ -663,7 +686,7 @@ mod tests {
         assert!(sql.contains("EXISTS (SELECT 1 FROM run_kv"));
         assert!(sql.contains("run_kv.run_id = runs.id"));
         assert!(sql.contains("run_kv.key = ?1"));
-        assert!(sql.contains("run_kv.value_text = ?2"));
+        assert!(sql.contains("= ?2)"));
         // The user passes "format" but the kv key is stored as "meta.format".
         assert_eq!(params[0], "meta.format");
         assert_eq!(params[1], "osc");
@@ -1476,5 +1499,88 @@ mod tests {
 
         drop(db);
         cleanup(&dir, &db_path);
+    }
+
+    fn plain_row(command: &str, kv: Vec<KvPair>) -> RunRow {
+        RunRow {
+            hostname: String::from("testhost"),
+            commit: String::from("aabbccdd"),
+            subject: String::from("test"),
+            command: String::from(command),
+            mode: Some(String::from("bench")),
+            input_file: None,
+            input_mb: None,
+            elapsed_ms: 100,
+            elapsed_us: None,
+            peak_rss_mb: None,
+            cargo_features: None,
+            cargo_profile: crate::build::CargoProfile::Release,
+            kernel: None,
+            cpu_governor: None,
+            avail_memory_mb: None,
+            storage_notes: None,
+            cli_args: None,
+            brokkr_args: None,
+            project: String::from("test"),
+            stop_marker: None,
+            kv,
+            iterations: Vec::new(),
+            distribution: None,
+            hotpath: None,
+        }
+    }
+
+    #[test]
+    fn meta_and_env_filters_match_numeric_values() {
+        let db_path = crate::test_scratch::scratch("db-query", "meta_filter_numeric").join("t.db");
+        let db = ResultsDb::open(&db_path).expect("open");
+        db.insert(&plain_row("read", vec![KvPair::int("meta.threads", 8)])).unwrap();
+        db.insert(&plain_row("read", vec![KvPair::int("meta.threads", 4)])).unwrap();
+        db.insert(&plain_row("read", vec![KvPair::real("env.RATIO", 1.5)])).unwrap();
+
+        let rows = db
+            .query(&QueryFilter {
+                meta: vec![("threads".into(), "8".into())],
+                limit: 50,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(rows.len(), 1, "an Int meta value must be matchable by --meta");
+
+        let rows = db
+            .query(&QueryFilter {
+                env: vec![("RATIO".into(), "1.5".into())],
+                limit: 50,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(rows.len(), 1, "a Real env value must be matchable by --env");
+    }
+
+    #[test]
+    fn command_filter_underscore_is_literal() {
+        let db_path =
+            crate::test_scratch::scratch("db-query", "underscore_literal").join("t.db");
+        let db = ResultsDb::open(&db_path).expect("open");
+        db.insert(&plain_row("tags-filter", vec![])).unwrap();
+        db.insert(&plain_row("tags_filter", vec![])).unwrap();
+
+        let rows = db
+            .query(&QueryFilter {
+                command: Some(String::from("tags_filter")),
+                limit: 50,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(rows.len(), 1, "_ must not act as a LIKE wildcard");
+        assert_eq!(rows[0].command, "tags_filter");
+    }
+
+    #[test]
+    fn query_by_uuid_refuses_empty_prefix() {
+        let db_path = crate::test_scratch::scratch("db-query", "uuid_empty").join("t.db");
+        let db = ResultsDb::open(&db_path).expect("open");
+        db.insert(&plain_row("read", vec![])).unwrap();
+        assert!(db.query_by_uuid("").is_err(), "an empty prefix must not match every row");
     }
 }

@@ -71,14 +71,25 @@ pub fn scan(
             continue;
         }
         let abs = project_root.join(rel);
-        let Ok(content) = std::fs::read_to_string(&abs) else {
+        // Bytes, not a `String`: a file that is not valid UTF-8 used to fail
+        // `read_to_string` and be skipped - i.e. pass. Matching the header's
+        // bytes judges it on content like any other file. An unreadable file
+        // is an error (see `gremlins::read_in_scope`); only a path deleted
+        // from the working tree is skipped.
+        let Some(bytes) = gremlins::read_in_scope(&abs, rel)? else {
             continue;
         };
-        if !content.contains(&expected) {
+        if !contains_bytes(&bytes, expected.as_bytes()) {
             out.push(HeaderViolation { file: rel.clone() });
         }
     }
     Ok(out)
+}
+
+/// Whether `needle` occurs in `haystack`. An empty needle always does, as
+/// with `str::contains`.
+fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+    needle.is_empty() || haystack.windows(needle.len()).any(|w| w == needle)
 }
 
 #[cfg(test)]
@@ -94,6 +105,15 @@ mod tests {
         );
         // No placeholder is a valid (static) header requirement.
         assert_eq!(expand("SPDX-License-Identifier: MIT", 2026), "SPDX-License-Identifier: MIT");
+    }
+
+    #[test]
+    fn header_match_works_on_non_utf8_bytes() {
+        // A Latin-1 file is judged on its content, not skipped as a pass.
+        assert!(contains_bytes(b"\xA9 Copyright 2026\n", b"Copyright 2026"));
+        assert!(!contains_bytes(b"\xA9 nothing here\n", b"Copyright 2026"));
+        assert!(contains_bytes(b"", b""));
+        assert!(!contains_bytes(b"ab", b"abc"));
     }
 
     #[test]

@@ -36,7 +36,11 @@ as bare cargo does - the flag is passed straight through.
 **Sweep replay** (`--sweep NAME`): borrow one `[[check]]` entry's
 packages/features/env verbatim and run just its clippy invocation. Useful for
 reproducing the precise configuration a check sweep lints under, without the
-test phase.
+test phase. The entry's `feature_unification` is resolved at the same point and
+by the same rule `check` uses, so a `package` entry lints once per package under
+the package pin and a parallel `auto` entry `check` would promote to a workspace
+pin is promoted here too. A profile's `env` is not applied: `--sweep` names a
+`[[check]]` entry, not a profile lane.
 
 ```
 brokkr clippy --sweep ffi
@@ -91,6 +95,9 @@ The base env depends on the mode:
 
 `--env` overrides both, and a key set via `--env` is exempt from the cross-sweep
 conflict check (so `--env` can resolve a conflict, not just be masked by it).
+It also wins over the `CARGO_TARGET_DIR` / `RUSTFLAGS` pair brokkr composes for
+a `rustflags` or package-mode sweep - the same sweep-env-wins rule every
+`check` phase applies.
 
 ## Output
 
@@ -114,7 +121,10 @@ clippy phase: each entry is appended as `-A <lint>` after `--cap-lints=warn`,
 and the run announces the allowed lints up front. `[lints] allow_exact`
 (`"lint@path"` sited suppressions, filtered on brokkr's side at JSON
 ingestion rather than via `-A`) applies here too. See
-`docs/commands/check.md`.
+`docs/commands/check.md`. Its `suppressed nothing (stale entry?)` notice fires
+only when the probe covers the whole lint surface - no package scope (ad-hoc
+`-p` or the `--sweep` entry's `packages`), no `--lib`, and `--all-features` -
+since a narrower probe simply never lints the entry's site.
 
 - default: one line per error, sorted by (lint, file, line), those in files
   with unstaged changes first. Every error prints - there is no cap. The same
@@ -125,9 +135,10 @@ the whole output surface.
 Exit code: `0` iff clippy produced zero diagnostics; `1` (with a
 `clippy failed in Ns` summary) on any diagnostic or a genuine build error. An
 unknown `--sweep`, an empty `--env` key, or a cross-sweep env conflict on an
-un-overridden key exits via the normal config-error path; a cargo-spawn failure
-or interruption propagates its real cause rather than the `clippy failed`
-summary.
+un-overridden key exits via the normal config-error path; a missing
+`Cargo.toml`, a failed `cargo metadata`, a cargo-spawn failure or an
+interruption propagates its real cause rather than the `clippy failed`
+summary, which is reserved for a lint run whose diagnostics were printed.
 
 ## Discipline and limitations
 

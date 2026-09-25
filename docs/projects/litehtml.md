@@ -7,13 +7,18 @@ visual-test surface, different pipeline binary).
 
 - `src/litehtml/cmd.rs` - command dispatch. Also handles `prepare` /
   `extract` / `outline` by shelling out to a Node.js script.
-- `src/litehtml/db.rs` - `MechanicalDb`.
+- `src/litehtml/db.rs` - `MechanicalDb`: the `mechanical_*` tables in
+  `.brokkr/results.db`. That file's `PRAGMA user_version` belongs to
+  `ResultsDb`, so `MechanicalDb` (and sluggrs' `SnapshotDb`) never read or
+  write it; migrations detect the schema directly (column probes).
 - `src/litehtml/compare.rs` - pixel + element comparison.
 - `src/litehtml/mod.rs` - UUID generation.
 - `scripts/litehtml-prepare/` - Node.js fixture preprocessing (cheerio +
   pngjs). `prepare.js` handles `prepare`, `extract`, and `outline`
   subcommands. Dependencies managed via pnpm (`package.json`,
-  `pnpm-lock.yaml`).
+  `pnpm-lock.yaml`). Its `INLINE_ELEMENTS` must stay a superset of
+  `compare.rs`'s `is_inline_tag`, or the pretty-printer treats an inline tag
+  (`<font>`, say) as a block and invents whitespace around it.
 
 ## Commands
 

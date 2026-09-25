@@ -854,54 +854,12 @@ impl PbfhoggCommand {
             // Multi-extract: single-pass N-region extract benchmark
             // -----------------------------------------------------------------
             Self::MultiExtract { regions, strategy } => {
-                if *regions == 0 {
-                    return Err(DevError::Config(
-                        "multi-extract requires at least 1 region".into(),
-                    ));
-                }
-                let bbox_str = ctx
-                    .bbox
-                    .as_deref()
-                    .ok_or_else(|| DevError::Config("multi-extract requires a bbox".into()))?;
-                let parts: Vec<f64> = bbox_str
-                    .split(',')
-                    .map(|s| s.trim().parse::<f64>())
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(|e| DevError::Config(format!("invalid bbox: {e}")))?;
-                if parts.len() != 4 {
-                    return Err(DevError::Config(format!(
-                        "bbox must have 4 values, got {}",
-                        parts.len()
-                    )));
-                }
-                let (min_lon, min_lat, max_lon, max_lat) =
-                    (parts[0], parts[1], parts[2], parts[3]);
-
-                let output_dir = ctx.scratch_dir.join("multi-extract");
-                std::fs::create_dir_all(&output_dir)?;
-
-                let strip_width = (max_lon - min_lon) / *regions as f64;
-                let mut extracts = Vec::new();
-                for i in 0..*regions {
-                    let strip_min = min_lon + strip_width * i as f64;
-                    let strip_max = if i + 1 == *regions {
-                        max_lon
-                    } else {
-                        min_lon + strip_width * (i + 1) as f64
-                    };
-                    extracts.push(format!(
-                        r#"    {{ "output": "strip-{i}.osm.pbf", "bbox": [{strip_min}, {min_lat}, {strip_max}, {max_lat}] }}"#
-                    ));
-                }
-
-                let config_json = format!(
-                    "{{\n  \"directory\": \"{}\",\n  \"extracts\": [\n{}\n  ]\n}}",
-                    output_dir.display(),
-                    extracts.join(",\n"),
-                );
-
-                let config_path = ctx.scratch_dir.join("multi-extract-config.json");
-                std::fs::write(&config_path, &config_json)?;
+                // Validates regions/bbox and names the config file, but does
+                // NOT write it: build_args is also dry-run's validator, and
+                // dry-run must not touch the filesystem. The real run paths
+                // call `prepare_scratch` to materialise it.
+                let plan = multi_extract_plan(ctx, *regions)?;
+                let config_path = plan.config_path;
 
                 let mut args: Vec<String> = vec![
                     "extract".into(),
@@ -957,6 +915,95 @@ impl PbfhoggCommand {
         }
     }
 
+    /// Materialise the on-disk inputs `build_args` only names.
+    ///
+    /// `build_args` is pure so that `--dry-run` can call it as a validator
+    /// without writing anything. Commands whose argv refers to a generated
+    /// file (multi-extract's `--config` JSON and its output directory) get
+    /// that file written here, by the paths that actually run the binary.
+    /// A no-op for every other command.
+    pub fn prepare_scratch(&self, ctx: &CommandContext) -> Result<(), DevError> {
+        let Self::MultiExtract { regions, .. } = self else {
+            return Ok(());
+        };
+        let plan = multi_extract_plan(ctx, *regions)?;
+        std::fs::create_dir_all(&plan.output_dir)?;
+        std::fs::write(&plan.config_path, plan.config_json)?;
+        Ok(())
+    }
+}
+
+/// Multi-extract's generated config: where it goes and what it says.
+struct MultiExtractPlan {
+    output_dir: PathBuf,
+    config_path: PathBuf,
+    config_json: String,
+}
+
+/// Compute multi-extract's config without touching the filesystem.
+///
+/// Splits the bbox into `regions` equal-width longitude strips. The JSON is
+/// built with `serde_json` so the output directory path is escaped properly
+/// (it used to be spliced in with `display()`, which broke on a `"` or `\`).
+#[allow(clippy::cast_precision_loss)]
+fn multi_extract_plan(ctx: &CommandContext, regions: usize) -> Result<MultiExtractPlan, DevError> {
+    if regions == 0 {
+        return Err(DevError::Config(
+            "multi-extract requires at least 1 region".into(),
+        ));
+    }
+    let bbox_str = ctx
+        .bbox
+        .as_deref()
+        .ok_or_else(|| DevError::Config("multi-extract requires a bbox".into()))?;
+    let parts: Vec<f64> = bbox_str
+        .split(',')
+        .map(|s| s.trim().parse::<f64>())
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| DevError::Config(format!("invalid bbox: {e}")))?;
+    if parts.len() != 4 {
+        return Err(DevError::Config(format!(
+            "bbox must have 4 values, got {}",
+            parts.len()
+        )));
+    }
+    if parts.iter().any(|v| !v.is_finite()) {
+        return Err(DevError::Config(format!(
+            "invalid bbox: non-finite value in {bbox_str}"
+        )));
+    }
+    let (min_lon, min_lat, max_lon, max_lat) = (parts[0], parts[1], parts[2], parts[3]);
+
+    let output_dir = ctx.scratch_dir.join("multi-extract");
+    let output_dir_str = path_to_string(&output_dir)?;
+
+    let strip_width = (max_lon - min_lon) / regions as f64;
+    let extracts: Vec<serde_json::Value> = (0..regions)
+        .map(|i| {
+            let strip_min = min_lon + strip_width * i as f64;
+            let strip_max = if i + 1 == regions {
+                max_lon
+            } else {
+                min_lon + strip_width * (i + 1) as f64
+            };
+            serde_json::json!({
+                "output": format!("strip-{i}.osm.pbf"),
+                "bbox": [strip_min, min_lat, strip_max, max_lat],
+            })
+        })
+        .collect();
+    let config = serde_json::json!({
+        "directory": output_dir_str,
+        "extracts": extracts,
+    });
+    let config_json = serde_json::to_string_pretty(&config)
+        .map_err(|e| DevError::Config(format!("failed to encode multi-extract config: {e}")))?;
+
+    Ok(MultiExtractPlan {
+        output_dir,
+        config_path: ctx.scratch_dir.join("multi-extract-config.json"),
+        config_json,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1435,5 +1482,41 @@ mod tests {
         let cmd = PbfhoggCommand::MergeChanges { simplify: false };
         let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
         assert!(!args.iter().any(|a| a == "--simplify"));
+    }
+
+    // build_args is dry-run's validator, so it must not write the config it
+    // names; prepare_scratch is what materialises it.
+    #[test]
+    fn multi_extract_build_args_writes_nothing() {
+        let mut ctx = test_ctx();
+        ctx.scratch_dir =
+            crate::test_scratch::scratch("pbfhogg-commands", "multi_extract_pure");
+        let cmd = PbfhoggCommand::MultiExtract {
+            regions: 3,
+            strategy: ExtractStrategy::Simple,
+        };
+        let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
+        let config_path = ctx.scratch_dir.join("multi-extract-config.json");
+        assert!(args.iter().any(|a| a == config_path.to_str().unwrap()));
+        assert_eq!(std::fs::read_dir(&ctx.scratch_dir).unwrap().count(), 0);
+
+        cmd.prepare_scratch(&ctx).unwrap();
+        assert!(ctx.scratch_dir.join("multi-extract").is_dir());
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+        assert_eq!(json["extracts"].as_array().unwrap().len(), 3);
+        assert_eq!(json["extracts"][2]["bbox"][2].as_f64().unwrap(), 12.7);
+    }
+
+    #[test]
+    fn multi_extract_config_escapes_the_directory() {
+        let mut ctx = test_ctx();
+        ctx.scratch_dir = PathBuf::from("/data/odd \"quoted\\\" dir");
+        let plan = multi_extract_plan(&ctx, 1).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&plan.config_json).unwrap();
+        assert_eq!(
+            json["directory"].as_str().unwrap(),
+            "/data/odd \"quoted\\\" dir/multi-extract"
+        );
     }
 }

@@ -913,8 +913,21 @@ fn report_runs(
     // first so the operator sees what did run.
     let mut budget_blown: Option<String> = None;
     let mut skipped = 0usize;
+    // Binaries whose run errored rather than reported (a spawn failure, a
+    // panicked thread, a poisoned budget). Collected, not returned at once:
+    // `run?` here used to abandon every later binary's report - including the
+    // one that blew its budget - on the first such error, so the operator saw
+    // one spawn error and none of the failures that had already run.
+    let mut errors: Vec<DevError> = Vec::new();
     for run in runs {
-        let run = run?;
+        let run = match run {
+            Ok(run) => run,
+            Err(e) => {
+                ok = false;
+                errors.push(e);
+                continue;
+            }
+        };
         if run.skipped {
             skipped += 1;
             continue;
@@ -991,9 +1004,22 @@ fn report_runs(
         }
     }
 
+    // Every binary that did run has spoken; now the errors. The first is
+    // returned (the caller voices an `Err`'s message), so any others are
+    // printed here or they would be lost. A blown budget still outranks them
+    // below, since it is the verdict that stops the run.
+    let mut errors = errors.into_iter();
+    let first_error = errors.next();
+    for extra in errors {
+        output::error(&format!("sweep '{}': {extra}", sweep.label));
+    }
+
     // A blown budget ends the run rather than failing a sweep. Reported after the
     // loop so every binary that did run has already spoken.
     if let Some(label) = budget_blown {
+        if let Some(e) = &first_error {
+            output::error(&format!("sweep '{}': {e}", sweep.label));
+        }
         if skipped > 0 {
             output::error(&format!(
                 "{skipped} binary/binaries in sweep '{}' were not started, because the lane \
@@ -1005,6 +1031,9 @@ fn report_runs(
             "binary {label} exceeded its time budget in sweep '{}' - stopping",
             sweep.label
         )));
+    }
+    if let Some(e) = first_error {
+        return Err(e);
     }
 
     // The summary carries what no other line can: the wall time, the build

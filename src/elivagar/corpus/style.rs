@@ -54,10 +54,14 @@ pub struct Style {
 }
 
 impl Style {
+    /// A malformed style is `InvalidData` (not `Other`), so the gate can fold it
+    /// into the baseline verdict like any other damaged committed file.
     pub fn load(path: &Path) -> io::Result<Self> {
         let bytes = fs::read(path)?;
-        let file = toml::from_str(std::str::from_utf8(&bytes).map_err(io::Error::other)?)
-            .map_err(io::Error::other)?;
+        let text = std::str::from_utf8(&bytes)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let file =
+            toml::from_str(text).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         Ok(Self {
             file,
             hash: format!("{:032x}", xxh3_128(&bytes)),

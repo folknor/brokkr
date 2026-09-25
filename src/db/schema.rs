@@ -71,6 +71,9 @@ CREATE INDEX IF NOT EXISTS idx_runs_commit ON runs([commit]);
 CREATE INDEX IF NOT EXISTS idx_runs_command ON runs(command);
 CREATE INDEX IF NOT EXISTS idx_runs_timestamp ON runs(timestamp);
 CREATE INDEX IF NOT EXISTS idx_runs_project ON runs(project);
+-- Also created by the v0->v1 migration, which a fresh database never runs;
+-- without this line only databases old enough to have migrated had it.
+CREATE INDEX IF NOT EXISTS idx_runs_uuid ON runs(uuid);
 
 CREATE TABLE IF NOT EXISTS run_distribution (
     run_id      INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,

@@ -16,7 +16,7 @@
 use std::fs;
 use std::path::Path;
 
-use super::verify::VerifyHarness;
+use super::verify::{Findings, VerifyHarness};
 use crate::error::DevError;
 use crate::output::verify_msg;
 
@@ -179,7 +179,7 @@ pub fn run(
     dataset: &str,
     start_id: Option<&str>,
     verbose: bool,
-) -> Result<(), DevError> {
+) -> Result<Findings, DevError> {
     let outdir = harness.subdir("renumber")?;
 
     verify_msg("--- renumber cross-validation ---");
@@ -380,7 +380,8 @@ pub fn run(
             drop(fs::remove_file(&osmium_out));
             drop(fs::remove_file(&pbfhogg_out));
             drop(fs::remove_file(&diff_log));
-            Ok(())
+            // Every failure above is an `Err`; nothing is left to fold.
+            Ok(Findings::new())
         }
     }
 }

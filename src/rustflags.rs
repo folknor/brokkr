@@ -77,13 +77,26 @@ impl Sink {
 /// `sweep_sets_rustflags` is brokkr's own doing: a `[[check]]` entry carrying
 /// `rustflags` is exported as an env var by `sweep_runtime_env`, which makes
 /// source 1/2 live for that sweep regardless of what the config chain says.
+///
+/// Only the process environment is inspected, not a sweep's `env` table, and
+/// that is sufficient rather than an oversight: `RUSTFLAGS` and
+/// `CARGO_ENCODED_RUSTFLAGS` are reserved keys that config loading refuses in
+/// both a `[[check]]` entry's `env` and a profile's `env`, unconditionally
+/// (`reject_reserved_sweep_env`). No sweep can reach a compiling phase carrying
+/// either, so the process env plus `sweep_sets_rustflags` is the whole set of
+/// ways source 1/2 can be live.
+///
+/// Presence, not content, decides both env sources, because that is cargo's
+/// rule: it reads `RUSTFLAGS` whenever the variable is set, and a set-but-empty
+/// value is source 2 with no flags - it still shadows every config-file
+/// rustflags table. Treating an empty `RUSTFLAGS` as unset would pick a
+/// `--config` sink cargo never reads, and every allow injected there would be
+/// silently inert.
 pub fn sink(build_root: &Path, sweep_sets_rustflags: bool) -> Sink {
     if std::env::var_os("CARGO_ENCODED_RUSTFLAGS").is_some() {
         return Sink::EncodedEnv;
     }
-    if sweep_sets_rustflags
-        || std::env::var("RUSTFLAGS").is_ok_and(|v| !v.trim().is_empty())
-    {
+    if sweep_sets_rustflags || std::env::var_os("RUSTFLAGS").is_some() {
         return Sink::Env;
     }
     let triple = host_triple();
@@ -166,24 +179,17 @@ pub(crate) fn config_paths(build_root: &Path) -> Vec<PathBuf> {
     for dir in build_root.ancestors() {
         push_config(&mut out, &dir.join(".cargo"));
     }
-    let home = std::env::var_os("CARGO_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cargo")));
-    if let Some(home) = home {
+    if let Some(home) = crate::user_dirs::cargo_home() {
         push_config(&mut out, &home);
     }
     out
 }
 
-/// Cargo accepts both spellings and prefers `config.toml`; only the first found
-/// in a directory is read.
+/// Cargo accepts both spellings but reads only one per directory - the
+/// extensionless `config` when both exist (`user_dirs::cargo_config_file`).
 fn push_config(out: &mut Vec<PathBuf>, dir: &Path) {
-    for name in ["config.toml", "config"] {
-        let path = dir.join(name);
-        if path.exists() {
-            out.push(path);
-            return;
-        }
+    if let Some(path) = crate::user_dirs::cargo_config_file(dir) {
+        out.push(path);
     }
 }
 

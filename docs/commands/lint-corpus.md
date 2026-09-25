@@ -56,6 +56,12 @@ Two filters narrow what the diff compares, both reversible per run:
   prototype.
 - **Severity** - default **errors only** (`--warnings` includes warnings).
 
+The pair of choices is the run's **scope**, named `errors/syntax` (the
+default), `errors+warnings/syntax`, `errors/all-stages` or
+`errors+warnings/all-stages`. A disposition and a TV fingerprint are both
+functions of the scope, so each is recorded in `lints.toml` with the scope it
+was stamped under (below) and only compared under that scope.
+
 ## Config
 
 ```toml
@@ -81,11 +87,16 @@ No feeds, no OHLCV, no `[roots]` - lint needs no market data. Each probe is a
 [probes.unterminated-string-01]
 pine     = { path = "lint/unterminated-string-01.pine", xxh128 = "<hex>" }
 expected = "agree_flagged"          # the gated piners<->pine-lint disposition
+expected_scope = "errors+warnings/syntax"  # scope --bless ran under; absent = errors/syntax
 
 # TV anchor - written only by --reanchor, informational on frequent runs:
 tv_anchored_at = "2026-06-22T14:03:00Z"
+tv_scope = "errors+warnings/syntax"  # scope the fingerprint was filtered to; absent = errors/syntax
 tv = [ { line = 4, col = 8, severity = "error" } ]
 ```
+
+`expected_scope`/`tv_scope` are written only for a non-default scope, so a
+corpus blessed and anchored with the default flags carries neither.
 
 `path` is relative to the registry's snippet tree; `xxh128` is brokkr's
 standard file hash (`preflight::compute_xxh128`), verified before any run.
@@ -116,9 +127,14 @@ recursively for `*.pine`, keyed by file stem:
 - `--reseed --probe <id>` (repeatable) - upsert the named snippet(s).
 
 It touches the pinned *content* (snippet path + `xxh128`) only - each
-surviving probe's `expected` and TV anchor are carried forward. No build, no
-run. Bootstrap order: `--reseed --all` -> write keyword files -> `--bless
---all` -> runs are gated.
+surviving probe's `expected` and TV anchor (with their scopes) are carried
+forward. No build, no run. Bootstrap order: `--reseed --all` -> write keyword
+files -> `--bless --all` -> runs are gated.
+
+Every `lints.toml` writer (`--reseed`, `--bless`, `--reanchor`) holds the
+global brokkr lock across its read-modify-write and re-reads the file under
+it, so none can revert another's change; the file is replaced atomically
+(temp file + rename), so a kill mid-write leaves the old file intact.
 
 ## The diff and the disposition
 
@@ -130,7 +146,10 @@ Each probe yields two `(line, col, severity)` key sets - piners `P`, pine-lint
 - `divergent` - `P != L`, carrying a **signature**: `piners_only` (`L ⊂ P`),
   `lint_only` (`P ⊂ L`), `severity_mismatch` (same `(line,col)`, different
   severity), or `mixed`.
-- `piners_error` / `lint_error` - a tool produced no parsable output.
+- `piners_error` / `lint_error` - a tool produced no parsable output (or did
+  not finish within brokkr's 60s per-call backstop). These describe the
+  tooling, not the snippet: they are recorded, but never blessed, and a run
+  carrying one fails whatever the pin says.
 
 Columns are compared as reported (piners is 1-based byte columns; pine-lint
 1-based). Non-ASCII source can spuriously mismatch columns; lint snippets stay
@@ -141,35 +160,46 @@ ASCII where practical.
 Each probe pins one `expected` disposition; brokkr compares actual vs expected
 per selected probe and **any** deviation fails - regression and surprise
 convergence alike, each as `id: expected X, got Y`. No `expected` yet is a hard
-"must bless". `--no-gate` downgrades to informational (still runs, aggregates,
-prints; exit governed by tool errors only).
+"must bless". A pin blessed under another scope than the run's is also a
+deviation, reported as such (rerun with the blessed flags, or re-bless) rather
+than as a disposition mismatch. `--no-gate` downgrades to informational (still
+runs, aggregates, prints; exit governed by tool errors only).
 
 ## Re-anchor: the periodic TV writer
 
 `--reanchor [--all|--keyword <k>|--probe <id>]` drives `pine-lint --tv` over the
 selection and stamps each probe's TV diagnostic fingerprint + an absolute
-`tv_anchored_at` into `lints.toml` (via `toml_edit`, comment-preserving). It is
+`tv_anchored_at` + the run's scope (`tv_scope`) into `lints.toml` (via
+`toml_edit`, comment-preserving). It is
 the deliberate, network-touching registry writer - the analogue of `corpus`'s
 `--reseed`/`--bless`, run on a cadence, never in a normal run. On frequent runs
 the anchor is **informational**: when piners and pine-lint agree but both
 diverge from a fresh anchor, brokkr surfaces it (`agree but TV-divergent,
 anchored Nd ago`) - the shared-but-wrong consensus the corpus exists to catch.
-TV is rate-limited and times out at 10s; re-anchor is sequential and tolerant of
-per-probe transport failures (reported, not fatal).
+An anchor stamped under another scope than the run's is not compared; the run
+says how many were skipped. TV is rate-limited; brokkr kills a `pine-lint
+--tv` call still running after 30s. Re-anchor is sequential and tolerant of
+per-probe transport failures, timeouts included (reported, not fatal).
 
 ## Bless
 
 `--bless [selection]` runs the selection (verify + build + both offline tools),
-then stamps each probe's current disposition into `expected`. Records reality
-including divergences a snippet legitimately pins. Never gates. Excludes
-`--verify-only`/`--reanchor`.
+then stamps each probe's current disposition, and the run's scope
+(`expected_scope`), into `expected`. Records reality including divergences a
+snippet legitimately pins. Never gates (the run row records `gated = no`).
+Prints `blessed N (changed M)`, where changed counts pins whose `expected` or
+scope actually moved. A tool-error probe is **not** stamped - with
+`pine-lint` missing every probe would otherwise be blessed as `lint_error` -
+and makes bless exit non-zero after stamping the rest, naming the skipped
+probes. Excludes `--verify-only`/`--reanchor`.
 
 ## Exit codes
 
-`0` clean; non-zero on a tool error (`piners_error`/`lint_error`) **or** an
-active gate deviation. Hash mismatch fails before the build. `--no-gate` and
-`--bless` never fail on gate diffs; `--verify-only` exits 0 once all pins
-verify; `--reanchor` exits 0 unless every TV call failed.
+`0` clean; non-zero on a tool error (`piners_error`/`lint_error`, whatever the
+pin) **or** an active gate deviation. Hash mismatch fails before the build.
+`--no-gate` and `--bless` never fail on gate diffs, but `--bless` fails on a
+tool error; `--verify-only` exits 0 once all pins verify; `--reanchor` exits 0
+unless every TV call failed.
 
 ## Artefacts and the run store
 

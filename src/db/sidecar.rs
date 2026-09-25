@@ -6,6 +6,7 @@
 
 use std::path::Path;
 
+use super::like::{ESCAPE, prefix_pattern, require_prefix};
 use crate::error::DevError;
 
 // ---------------------------------------------------------------------------
@@ -356,14 +357,18 @@ impl SidecarDb {
     }
 
     /// Query metadata for a result UUID prefix.
-    /// Returns (best_run_idx, total_runs), defaulting to (0, 1) if not found.
+    /// Returns (best_run_idx, total_runs), defaulting to (0, 1) if not found
+    /// or if the prefix does not name exactly one session (callers that need
+    /// the ambiguity reported resolve with [`Self::resolve_session`] first).
     pub fn query_meta(&self, uuid_prefix: &str) -> (usize, usize) {
-        let uuid_prefix = self.resolve_latest(uuid_prefix);
+        let Ok(uuid) = self.resolve_session(uuid_prefix) else {
+            return (0, 1);
+        };
         self.conn
             .query_row(
                 "SELECT best_run_idx, total_runs FROM sidecar_meta
-                 WHERE result_uuid LIKE ?1||'%'",
-                rusqlite::params![uuid_prefix],
+                 WHERE result_uuid = ?1",
+                rusqlite::params![uuid],
                 |row| {
                     let best: i64 = row.get(0)?;
                     let total: i64 = row.get(1)?;
@@ -374,15 +379,16 @@ impl SidecarDb {
             .unwrap_or((0, 1))
     }
 
-    /// Query run provenance for a result UUID prefix.
+    /// Query run provenance for a result UUID prefix. `None` when absent or
+    /// when the prefix does not name exactly one session.
     pub fn query_run_info(&self, uuid_prefix: &str) -> Option<RunInfo> {
-        let uuid_prefix = self.resolve_latest(uuid_prefix);
+        let uuid = self.resolve_session(uuid_prefix).ok()?;
         self.conn
             .query_row(
                 "SELECT run_start_epoch, pid, command, binary_path, binary_xxh128,
                         git_commit, mode, dataset, exit_code
-                 FROM sidecar_meta WHERE result_uuid LIKE ?1||'%'",
-                rusqlite::params![uuid_prefix],
+                 FROM sidecar_meta WHERE result_uuid = ?1",
+                rusqlite::params![uuid],
                 |row| {
                     Ok(RunInfo {
                         run_start_epoch: row.get(0)?,
@@ -427,6 +433,36 @@ impl SidecarDb {
             .unwrap_or_else(|_| uuid_prefix.to_owned())
     }
 
+    /// Resolve a user-supplied prefix (or latest-key alias such as `dirty`)
+    /// to the one session it names.
+    ///
+    /// The read queries then match `result_uuid` exactly, so a
+    /// prefix shared by two sessions can no longer merge their samples,
+    /// markers and counters into one timeline - it is an error listing the
+    /// candidates instead. A prefix matching nothing comes back unchanged
+    /// (the exact-match queries then find nothing, and the caller reports
+    /// "no sidecar data"). An empty prefix is refused outright.
+    pub fn resolve_session(&self, uuid_prefix: &str) -> Result<String, DevError> {
+        let resolved = self.resolve_latest(uuid_prefix);
+        require_prefix(&resolved, "uuid")?;
+        let candidates = self.uuids_matching_prefix(&resolved)?;
+        match candidates.as_slice() {
+            [] => Ok(resolved),
+            [only] => Ok(only.clone()),
+            many => {
+                const SHOWN: usize = 10;
+                let listed: Vec<&str> = many.iter().take(SHOWN).map(String::as_str).collect();
+                let more = many.len().saturating_sub(SHOWN);
+                let tail = if more > 0 { format!(", and {more} more") } else { String::new() };
+                Err(DevError::Config(format!(
+                    "uuid prefix '{uuid_prefix}' is ambiguous - it matches {} sidecar sessions: {}{tail}",
+                    many.len(),
+                    listed.join(", "),
+                )))
+            }
+        }
+    }
+
     // -------------------------------------------------------------------
     // Read
     // -------------------------------------------------------------------
@@ -434,13 +470,14 @@ impl SidecarDb {
     /// Query sidecar samples for a result UUID prefix.
     ///
     /// If `run_idx` is `Some`, filters to that run only. If `None`, returns
-    /// all runs. Resolves latest-keys (e.g. "dirty") before querying.
+    /// all runs. Resolves latest-keys (e.g. "dirty") and the prefix via
+    /// [`Self::resolve_session`] - an ambiguous prefix is an error.
     pub fn query_samples(
         &self,
         uuid_prefix: &str,
         run_idx: Option<usize>,
     ) -> Result<Vec<crate::sidecar::Sample>, DevError> {
-        let uuid_prefix = self.resolve_latest(uuid_prefix);
+        let uuid_prefix = self.resolve_session(uuid_prefix)?;
         let (sql, run_filter) = match run_idx {
             Some(idx) => (
                 "SELECT sample_idx, timestamp_us,
@@ -449,7 +486,7 @@ impl SidecarDb {
                         rchar, wchar, read_bytes, write_bytes, cancelled_write_bytes,
                         syscr, syscw, vol_cs, nonvol_cs
                  FROM sidecar_samples
-                 WHERE result_uuid LIKE ?1||'%' AND run_idx = ?2
+                 WHERE result_uuid = ?1 AND run_idx = ?2
                  ORDER BY sample_idx",
                 Some(i64::try_from(idx).unwrap_or(0)),
             ),
@@ -460,7 +497,7 @@ impl SidecarDb {
                         rchar, wchar, read_bytes, write_bytes, cancelled_write_bytes,
                         syscr, syscw, vol_cs, nonvol_cs
                  FROM sidecar_samples
-                 WHERE result_uuid LIKE ?1||'%'
+                 WHERE result_uuid = ?1
                  ORDER BY run_idx, sample_idx",
                 None,
             ),
@@ -503,25 +540,26 @@ impl SidecarDb {
     /// Query sidecar markers for a result UUID prefix.
     ///
     /// If `run_idx` is `Some`, filters to that run only.
-    /// Resolves latest-keys (e.g. "dirty") before querying.
+    /// Resolves latest-keys (e.g. "dirty") and the prefix via
+    /// [`Self::resolve_session`] - an ambiguous prefix is an error.
     pub fn query_markers(
         &self,
         uuid_prefix: &str,
         run_idx: Option<usize>,
     ) -> Result<Vec<crate::sidecar::Marker>, DevError> {
-        let uuid_prefix = self.resolve_latest(uuid_prefix);
+        let uuid_prefix = self.resolve_session(uuid_prefix)?;
         let (sql, run_filter) = match run_idx {
             Some(idx) => (
                 "SELECT marker_idx, timestamp_us, name
                  FROM sidecar_markers
-                 WHERE result_uuid LIKE ?1||'%' AND run_idx = ?2
+                 WHERE result_uuid = ?1 AND run_idx = ?2
                  ORDER BY marker_idx",
                 Some(i64::try_from(idx).unwrap_or(0)),
             ),
             None => (
                 "SELECT marker_idx, timestamp_us, name
                  FROM sidecar_markers
-                 WHERE result_uuid LIKE ?1||'%'
+                 WHERE result_uuid = ?1
                  ORDER BY run_idx, marker_idx",
                 None,
             ),
@@ -544,25 +582,26 @@ impl SidecarDb {
     /// Query sidecar counters for a result UUID prefix.
     ///
     /// If `run_idx` is `Some`, filters to that run only.
-    /// Resolves latest-keys (e.g. "dirty") before querying.
+    /// Resolves latest-keys (e.g. "dirty") and the prefix via
+    /// [`Self::resolve_session`] - an ambiguous prefix is an error.
     pub fn query_counters(
         &self,
         uuid_prefix: &str,
         run_idx: Option<usize>,
     ) -> Result<Vec<crate::sidecar::Counter>, DevError> {
-        let uuid_prefix = self.resolve_latest(uuid_prefix);
+        let uuid_prefix = self.resolve_session(uuid_prefix)?;
         let (sql, run_filter) = match run_idx {
             Some(idx) => (
                 "SELECT timestamp_us, name, value
                  FROM sidecar_counters
-                 WHERE result_uuid LIKE ?1||'%' AND run_idx = ?2
+                 WHERE result_uuid = ?1 AND run_idx = ?2
                  ORDER BY timestamp_us, name",
                 Some(i64::try_from(idx).unwrap_or(0)),
             ),
             None => (
                 "SELECT timestamp_us, name, value
                  FROM sidecar_counters
-                 WHERE result_uuid LIKE ?1||'%'
+                 WHERE result_uuid = ?1
                  ORDER BY run_idx, timestamp_us, name",
                 None,
             ),
@@ -593,45 +632,45 @@ impl SidecarDb {
     ///
     /// Returns the number of `sidecar_summary` rows removed (one per
     /// (uuid, run_idx) session, i.e. the run count).
+    ///
+    /// The prefix matches literally and an empty one is refused - it would
+    /// match every session.
     pub fn delete_by_uuid_prefix(&self, uuid_prefix: &str) -> Result<usize, DevError> {
+        require_prefix(uuid_prefix, "uuid")?;
+        let pattern = prefix_pattern(uuid_prefix);
         let tx = self.conn.unchecked_transaction()?;
-        tx.execute(
-            "DELETE FROM sidecar_samples WHERE result_uuid LIKE ?1||'%'",
-            rusqlite::params![uuid_prefix],
-        )?;
-        tx.execute(
-            "DELETE FROM sidecar_markers WHERE result_uuid LIKE ?1||'%'",
-            rusqlite::params![uuid_prefix],
-        )?;
-        tx.execute(
-            "DELETE FROM sidecar_counters WHERE result_uuid LIKE ?1||'%'",
-            rusqlite::params![uuid_prefix],
-        )?;
-        tx.execute(
-            "DELETE FROM sidecar_meta WHERE result_uuid LIKE ?1||'%'",
-            rusqlite::params![uuid_prefix],
-        )?;
-        tx.execute(
-            "DELETE FROM sidecar_latest WHERE uuid LIKE ?1||'%'",
-            rusqlite::params![uuid_prefix],
-        )?;
+        for (table, column) in [
+            ("sidecar_samples", "result_uuid"),
+            ("sidecar_markers", "result_uuid"),
+            ("sidecar_counters", "result_uuid"),
+            ("sidecar_meta", "result_uuid"),
+            ("sidecar_latest", "uuid"),
+        ] {
+            tx.execute(
+                &format!("DELETE FROM {table} WHERE {column} LIKE ?1 {ESCAPE}"),
+                rusqlite::params![pattern],
+            )?;
+        }
         let removed = tx.execute(
-            "DELETE FROM sidecar_summary WHERE result_uuid LIKE ?1||'%'",
-            rusqlite::params![uuid_prefix],
+            &format!("DELETE FROM sidecar_summary WHERE result_uuid LIKE ?1 {ESCAPE}"),
+            rusqlite::params![pattern],
         )?;
         tx.commit()?;
         Ok(removed)
     }
 
-    /// Enumerate distinct `result_uuid` values whose prefix matches.
+    /// Enumerate distinct `result_uuid` values whose prefix matches, sorted.
     /// Used by `brokkr invalidate` to find sidecar-only runs (dirty/failed)
-    /// that have no row in the results DB.
+    /// that have no row in the results DB, and by [`Self::resolve_session`].
     pub fn uuids_matching_prefix(&self, uuid_prefix: &str) -> Result<Vec<String>, DevError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT DISTINCT result_uuid FROM sidecar_summary WHERE result_uuid LIKE ?1||'%' \
-             UNION SELECT DISTINCT result_uuid FROM sidecar_meta WHERE result_uuid LIKE ?1||'%'",
-        )?;
-        let rows = stmt.query_map(rusqlite::params![uuid_prefix], |row| row.get::<_, String>(0))?;
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT result_uuid FROM sidecar_summary WHERE result_uuid LIKE ?1 {ESCAPE} \
+             UNION SELECT result_uuid FROM sidecar_meta WHERE result_uuid LIKE ?1 {ESCAPE} \
+             ORDER BY 1"
+        ))?;
+        let rows = stmt.query_map(rusqlite::params![prefix_pattern(uuid_prefix)], |row| {
+            row.get::<_, String>(0)
+        })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(DevError::from)
     }
 
@@ -642,22 +681,25 @@ impl SidecarDb {
         &self,
         commit_prefix: &str,
     ) -> Result<Vec<String>, DevError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT DISTINCT result_uuid FROM sidecar_meta WHERE git_commit LIKE ?1||'%'",
-        )?;
-        let rows = stmt.query_map(rusqlite::params![commit_prefix], |row| row.get::<_, String>(0))?;
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT DISTINCT result_uuid FROM sidecar_meta WHERE git_commit LIKE ?1 {ESCAPE}"
+        ))?;
+        let rows = stmt.query_map(rusqlite::params![prefix_pattern(commit_prefix)], |row| {
+            row.get::<_, String>(0)
+        })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(DevError::from)
     }
 
     /// Check whether sidecar data exists for a result UUID prefix.
     ///
-    /// Resolves latest-keys (e.g. "dirty") before querying.
+    /// Resolves latest-keys (e.g. "dirty") before querying. A pure existence
+    /// test, so a prefix shared by several sessions is simply `true`.
     pub fn has_data(&self, uuid_prefix: &str) -> bool {
         let uuid_prefix = self.resolve_latest(uuid_prefix);
         self.conn
             .query_row(
-                "SELECT COUNT(*) FROM sidecar_summary WHERE result_uuid LIKE ?1||'%'",
-                rusqlite::params![uuid_prefix],
+                &format!("SELECT COUNT(*) FROM sidecar_summary WHERE result_uuid LIKE ?1 {ESCAPE}"),
+                rusqlite::params![prefix_pattern(&uuid_prefix)],
                 |row| row.get::<_, i64>(0),
             )
             .map(|count| count > 0)
@@ -761,6 +803,54 @@ mod tests {
             .unwrap();
         drop(db);
         path
+    }
+
+    fn insert_session(db: &SidecarDb, uuid: &str, marker: &str) {
+        db.conn
+            .execute(
+                "INSERT INTO sidecar_summary (result_uuid, run_idx, vm_hwm_kb, sample_count, \
+                 marker_count, wall_time_ms) VALUES (?1, 0, 0, 0, 1, 0)",
+                rusqlite::params![uuid],
+            )
+            .unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO sidecar_markers (result_uuid, run_idx, marker_idx, \
+                 timestamp_us, name) VALUES (?1, 0, 0, 1000, ?2)",
+                rusqlite::params![uuid, marker],
+            )
+            .unwrap();
+    }
+
+    // A prefix shared by two sessions used to concatenate both timelines.
+    #[test]
+    fn ambiguous_prefix_is_an_error_not_a_merge() {
+        let path = crate::test_scratch::scratch("db-sidecar", "ambiguous").join("s.db");
+        let db = SidecarDb::open(&path).unwrap();
+        insert_session(&db, "abc111", "A");
+        insert_session(&db, "abc222", "B");
+
+        let err = db.query_markers("abc", None).expect_err("ambiguous prefix must fail");
+        let msg = err.to_string();
+        assert!(msg.contains("abc111") && msg.contains("abc222"), "lists candidates: {msg}");
+
+        let markers = db.query_markers("abc1", None).unwrap();
+        assert_eq!(markers.len(), 1);
+        assert_eq!(markers[0].name, "A");
+        assert_eq!(db.resolve_session("abc2").unwrap(), "abc222");
+    }
+
+    #[test]
+    fn empty_and_wildcard_prefixes_match_nothing_extra() {
+        let path = crate::test_scratch::scratch("db-sidecar", "empty_wildcard").join("s.db");
+        let db = SidecarDb::open(&path).unwrap();
+        insert_session(&db, "abc111", "A");
+
+        assert!(db.resolve_session("").is_err());
+        assert!(db.delete_by_uuid_prefix("").is_err());
+        assert!(db.uuids_matching_prefix("a_c").unwrap().is_empty(), "_ is literal");
+        assert!(db.uuids_matching_prefix("%").unwrap().is_empty(), "% is literal");
+        assert_eq!(db.delete_by_uuid_prefix("abc111").unwrap(), 1);
     }
 
     #[test]

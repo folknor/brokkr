@@ -311,8 +311,11 @@ struct LayoutElement {
     h: Option<f64>,
 }
 
+/// Whether `path` is `head` or sits under it. Matches whole path segments:
+/// a substring probe for `head[` also matched every `thead[N]`, silently
+/// dropping whole table-header subtrees from scoring.
 fn is_head_path(path: &str) -> bool {
-    path.contains("head[") || path == "html>head"
+    path.split('>').any(|seg| seg == "head" || seg.starts_with("head["))
 }
 
 /// The element's tag: the dumped `tag` when present, else derived from
@@ -339,7 +342,8 @@ fn is_br(el: &LayoutElement) -> bool {
 
 /// CSS-inline tags the pipeline folds into rich-text leaves when they
 /// are plain inline. Mirror of litehtml-rs `is_inline_tag`
-/// (src/style.rs) - keep in sync.
+/// (src/style.rs) - keep in sync. `INLINE_ELEMENTS` in
+/// `scripts/litehtml-prepare/prepare.js` must be a superset of this list.
 ///
 /// Unlike `br`, this filter applies ONLY to the chrome-only bucket:
 /// the pipeline *does* emit these elements when they are
@@ -621,6 +625,19 @@ mod tests {
         assert!(is_head_path("html>head[0]>meta[0]"));
         assert!(is_head_path("html>head"));
         assert!(!is_head_path("html>body[0]>div[0]"));
+    }
+
+    #[test]
+    fn thead_is_not_head() {
+        assert!(!is_head_path("html>body[0]>table[0]>thead[0]"));
+        assert!(!is_head_path("html>body[0]>table[0]>thead[0]>tr[0]>th[1]"));
+        // And a thead subtree is actually scored.
+        let reference = vec![
+            el("html", 0.0, 0.0, 800.0, 100.0),
+            el("html>body[0]>table[0]>thead[0]", 0.0, 0.0, 600.0, 20.0),
+        ];
+        let r = compare_element_sets(&reference, &reference);
+        assert_eq!(r.total_elements, 2);
     }
 
     #[test]

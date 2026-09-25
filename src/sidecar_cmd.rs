@@ -14,6 +14,7 @@ use crate::sidecar_fmt::{
     apply_timeline_filter, parse_time_range, print_compare_timeline, print_counters,
     print_field_stat, print_marker_durations, print_phase_summary, print_run_info,
     resolve_phase_range, sidecar_marker_json, sidecar_sample_json_projected,
+    validate_timeline_args,
 };
 
 fn open_sidecar_db(project_root: &Path) -> Option<db::sidecar::SidecarDb> {
@@ -51,6 +52,11 @@ fn resolve_run_filter(
 }
 
 pub(crate) fn cmd_sidecar(project_root: &Path, q: &SidecarQuery) -> Result<(), DevError> {
+    // Malformed filters fail before anything is printed: `--where`/`--fields`
+    // used to fail open (a bad condition printed every sample, an unknown
+    // field silently vanished), which reads as a real answer.
+    validate_timeline_args(q)?;
+
     let Some(sdb) = open_sidecar_db(project_root) else {
         output::result_msg("no sidecar.db found");
         return Ok(());
@@ -67,6 +73,9 @@ pub(crate) fn cmd_sidecar(project_root: &Path, q: &SidecarQuery) -> Result<(), D
         .query
         .clone()
         .expect("clap required_unless_present guarantees query is set");
+    // Pin the prefix to one session up front: an ambiguous prefix is an
+    // error naming the candidates, never a merged timeline.
+    let uuid_prefix = sdb.resolve_session(&uuid_prefix)?;
 
     if q.samples {
         return run_samples(&sdb, &uuid_prefix, q);
@@ -131,7 +140,7 @@ fn run_samples(
         samples.retain(|s| s.timestamp_us >= start_us && s.timestamp_us < end_us);
     }
 
-    let filtered = apply_timeline_filter(&samples, q);
+    let filtered = apply_timeline_filter(&samples, q)?;
     let fields = if q.fields.is_empty() {
         None
     } else {
@@ -252,7 +261,7 @@ fn run_stat(
         let (start_us, end_us) = parse_time_range(range_str)?;
         samples.retain(|s| s.timestamp_us >= start_us && s.timestamp_us < end_us);
     }
-    let filtered = apply_timeline_filter(&samples, q);
+    let filtered = apply_timeline_filter(&samples, q)?;
     print_field_stat(&filtered, field)
 }
 
@@ -261,8 +270,11 @@ fn run_compare(
     uuids: &[String],
     human: bool,
 ) -> Result<(), DevError> {
-    let uuid_a = &uuids[0];
-    let uuid_b = &uuids[1];
+    // Each side must name exactly one session, as for a single-UUID view.
+    let resolved_a = sdb.resolve_session(&uuids[0])?;
+    let resolved_b = sdb.resolve_session(&uuids[1])?;
+    let uuid_a = resolved_a.as_str();
+    let uuid_b = resolved_b.as_str();
     let (best_a, _) = sdb.query_meta(uuid_a);
     let (best_b, _) = sdb.query_meta(uuid_b);
     let samples_a = sdb.query_samples(uuid_a, Some(best_a))?;

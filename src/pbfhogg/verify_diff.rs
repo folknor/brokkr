@@ -3,7 +3,7 @@
 use std::fs;
 use std::path::Path;
 
-use super::verify::VerifyHarness;
+use super::verify::{Findings, VerifyHarness};
 use crate::error::DevError;
 use crate::output::verify_msg;
 
@@ -11,7 +11,7 @@ use crate::output::verify_msg;
 ///
 /// Creates a "new" PBF by merging, then diffs old vs new with both tools
 /// and compares their summary output and line counts.
-pub fn run(harness: &VerifyHarness, pbf: &Path, osc: &Path) -> Result<(), DevError> {
+pub fn run(harness: &VerifyHarness, pbf: &Path, osc: &Path) -> Result<Findings, DevError> {
     let outdir = harness.subdir("diff")?;
 
     verify_msg("=== verify diff ===");
@@ -77,7 +77,9 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, osc: &Path) -> Result<(), DevErr
     verify_msg(&format!("  pbfhogg: {} lines", pbfhogg_diff.lines().count()));
     verify_msg(&format!("  osmium:  {} lines", osmium_diff.lines().count()));
 
-    compare_diff_classes(&pbfhogg_summary, &osmium_summary)
+    // compare_diff_classes reports every failure as an `Err`.
+    compare_diff_classes(&pbfhogg_summary, &osmium_summary)?;
+    Ok(Findings::new())
 }
 
 /// Cross-check pbfhogg's `{c} created, {m} modified, {d} deleted` summary

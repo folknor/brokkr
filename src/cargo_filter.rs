@@ -756,7 +756,7 @@ pub fn filter_test(stdout: &str, stderr: &str) -> String {
     }
 
     // Failures present - format as one-liners.
-    format_test_failures(&parsed)
+    format_test_failures(&parsed, stderr)
 }
 
 /// Format a `cargo test` run that died in the build phase: the clippy-style
@@ -895,8 +895,9 @@ fn format_test_summary(parsed: &ParsedTestResults) -> String {
     }
 }
 
-/// Format parsed test failures as one-liner text output.
-fn format_test_failures(parsed: &ParsedTestResults) -> String {
+/// Format parsed test failures as one-liner text output. `stderr` is cargo's,
+/// shown only when some failures could not be attributed to a name.
+fn format_test_failures(parsed: &ParsedTestResults, stderr: &str) -> String {
     // The headline count is the larger of the parsed roster and libtest's own
     // tally - never the roster alone, which is what let "1 failure" head a run
     // with two tests down.
@@ -923,13 +924,25 @@ fn format_test_failures(parsed: &ParsedTestResults) -> String {
     // failed; the list above is only as complete as the output we could
     // parse. When they disagree the tally wins and the shortfall is stated,
     // so a reader never mistakes a short list for the whole story.
+    //
+    // There is no unfiltered mode to point at (the `--raw` flag this once
+    // named is gone), so the evidence rides along instead: cargo's stderr
+    // names the failing binary (`to rerun pass `-p X --test Y``), which is
+    // the one handle a reader has on failures libtest never named.
     if parsed.failed > parsed.failures.len() {
         result.push_str(&format!(
-            "  (libtest counted {} failed; {} could not be attributed to a test name \
-             - rerun with --raw for the unfiltered output)\n",
+            "  (libtest counted {} failed; {} could not be attributed to a test name)\n",
             parsed.failed,
             parsed.failed - parsed.failures.len(),
         ));
+        let excerpt = harness_failure_excerpt(stderr);
+        if !excerpt.is_empty() {
+            for line in excerpt.lines() {
+                result.push_str("  ");
+                result.push_str(line);
+                result.push('\n');
+            }
+        }
     }
 
     result.trim_end().to_string()
@@ -1949,8 +1962,12 @@ running 3 tests
 
 test result: FAILED. 1 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
 ";
-        let out = filter_test(stdout, "error: test failed");
+        let out = filter_test(stdout, "error: test failed, to rerun pass `-p a --test b`");
         assert!(out.starts_with("cargo test: 2 failures"), "got: {out}");
         assert!(out.contains("libtest counted 2 failed"), "got: {out}");
+        // The binary cargo names is the reader's only handle on the unnamed
+        // failures, and no hint may point at a flag that does not exist.
+        assert!(out.contains("-p a --test b"), "got: {out}");
+        assert!(!out.contains("--raw"), "got: {out}");
     }
 }

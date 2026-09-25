@@ -156,9 +156,14 @@ fn ensure_jdk(data_dir: &Path) -> Result<PathBuf, DevError> {
     let version_file = data_dir.join(".jdk-version");
     let java = jdk_dir.join("bin/java");
 
-    // Cache-first: if both the java binary and version marker exist, the JDK
-    // is already installed. Skip the network call entirely.
-    if java.exists() && version_file.exists() {
+    // Cache-first: if the java binary exists and the version marker records
+    // the major we want, the JDK is already installed. Skip the network call
+    // entirely. The major has to be checked, not just the marker's existence,
+    // or bumping `JDK_MAJOR` would never replace the installed JDK.
+    if java.exists()
+        && let Ok(marker) = fs::read_to_string(&version_file)
+        && jdk_marker_matches(&marker)
+    {
         return Ok(java);
     }
 
@@ -216,14 +221,28 @@ fn ensure_jdk(data_dir: &Path) -> Result<PathBuf, DevError> {
     )?;
     captured.check_success("tar")?;
 
-    // Write version file.
-    fs::write(&version_file, release_name)?;
+    // Write version file: the major the cache check keys on, then the exact
+    // release for a human reading it.
+    fs::write(&version_file, jdk_marker(release_name))?;
 
     // Clean up tarball.
     fs::remove_file(&tarball).ok();
 
     output::bench_msg(&format!("installed JDK {release_name}"));
     Ok(java)
+}
+
+/// `.jdk-version` content: `JDK_MAJOR` on the first line, the release name on
+/// the second.
+fn jdk_marker(release_name: &str) -> String {
+    format!("{JDK_MAJOR}\n{release_name}\n")
+}
+
+/// Whether a `.jdk-version` marker records the current `JDK_MAJOR`. A marker
+/// from before the major was recorded (the release name alone) does not
+/// match, which costs one re-download and then settles.
+fn jdk_marker_matches(marker: &str) -> bool {
+    marker.lines().next().map(str::trim) == Some(JDK_MAJOR.to_string().as_str())
 }
 
 // ---------------------------------------------------------------------------
@@ -363,9 +382,29 @@ fn detect_os() -> Result<&'static str, DevError> {
 // Helpers: curl wrapper
 // ---------------------------------------------------------------------------
 
+/// curl flags that bound a transfer without capping its length.
+///
+/// Every curl brokkr runs holds the global lock, so a transfer that stalls
+/// would hold it indefinitely. A hard `--max-time` is wrong for the large
+/// downloads (a planet PBF legitimately takes hours), so the bound is a stall
+/// detector instead: give up on a connection that has not opened in 30s, or on
+/// a transfer that has averaged under 1 KiB/s for a full two minutes. A slow
+/// but moving download survives; a dead one fails.
+const CURL_STALL_ARGS: [&str; 6] = [
+    "--connect-timeout",
+    "30",
+    "--speed-limit",
+    "1024",
+    "--speed-time",
+    "120",
+];
+
 /// Run curl with the given arguments, returning stdout bytes on success.
+/// Bounded by [`CURL_STALL_ARGS`].
 pub(crate) fn run_curl(args: &[&str], cwd: &Path) -> Result<Vec<u8>, DevError> {
-    let captured = output::run_captured("curl", args, cwd)?;
+    let mut all: Vec<&str> = CURL_STALL_ARGS.to_vec();
+    all.extend_from_slice(args);
+    let captured = output::run_captured("curl", &all, cwd)?;
 
     captured.check_success("curl")?;
 
@@ -382,15 +421,17 @@ pub(crate) fn download_file(url: &str, dest: &Path) -> Result<(), DevError> {
     let tmp = dest.with_extension("tmp");
     let tmp_str = tmp.display().to_string();
 
+    // No `--max-time`: see `CURL_STALL_ARGS` for why a stall detector bounds
+    // this rather than a total-duration cap.
     let status = std::process::Command::new("curl")
+        .args(CURL_STALL_ARGS)
         .args(["-fL", "--progress-bar", "-o", &tmp_str, url])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::inherit())
         .status()
-        .map_err(|e| DevError::Subprocess {
+        .map_err(|error| DevError::Spawn {
             program: "curl".into(),
-            code: None,
-            stderr: e.to_string(),
+            error,
         })?;
 
     if !status.success() {
@@ -423,13 +464,14 @@ pub(crate) struct HeadResponse {
 /// succeeds but no `Last-Modified` header is present (or it can't be parsed).
 /// Errors only when the HEAD request itself fails (e.g. 404, network error).
 pub(crate) fn head_url(url: &str) -> Result<HeadResponse, DevError> {
+    // A HEAD carries no body, so unlike the downloads it can take a hard cap:
+    // a server that accepts the connection and never answers fails in 60s.
     let output = std::process::Command::new("curl")
-        .args(["-fsIL", url])
+        .args(["--connect-timeout", "30", "--max-time", "60", "-fsIL", url])
         .output()
-        .map_err(|e| DevError::Subprocess {
+        .map_err(|error| DevError::Spawn {
             program: "curl".into(),
-            code: None,
-            stderr: e.to_string(),
+            error,
         })?;
 
     if !output.status.success() {
@@ -711,6 +753,18 @@ mod tests {
         let unix = parse_http_date("Sat, 11 Apr 2026 12:34:56 GMT").unwrap();
         // Cross-check: 2026-04-11T12:34:56Z = 1775910896
         assert_eq!(unix, 1775910896);
+    }
+
+    #[test]
+    fn jdk_marker_keys_on_the_major() {
+        assert!(jdk_marker_matches(&jdk_marker("jdk-25.0.1+8")));
+        // A marker naming another major - what a `JDK_MAJOR` bump leaves
+        // behind - must not satisfy the cache.
+        let other = format!("{}\njdk-x\n", JDK_MAJOR + 1);
+        assert!(!jdk_marker_matches(&other));
+        // The pre-major marker format (the release name alone).
+        assert!(!jdk_marker_matches("jdk-21.0.5+11"));
+        assert!(!jdk_marker_matches(""));
     }
 
     #[test]

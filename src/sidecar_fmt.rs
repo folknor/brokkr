@@ -201,6 +201,43 @@ pub(crate) fn parse_time_range(range: &str) -> Result<(i64, i64), DevError> {
     Ok((start_us, end_us))
 }
 
+/// Every name [`sample_field_value`] answers, in output order. `t` (always
+/// emitted) is accepted by `--fields` on top of these.
+const SAMPLE_FIELDS: &[&str] = &[
+    "i", "rss", "anon", "file", "shmem", "swap", "vsize", "hwm", "utime", "stime", "threads",
+    "minflt", "majflt", "rchar", "wchar", "rd", "wr", "cwr", "syscr", "syscw", "vcs", "nvcs",
+];
+
+fn unknown_field(flag: &str, field: &str) -> DevError {
+    DevError::Config(format!(
+        "{flag}: unknown sample field '{field}' (known: {})",
+        SAMPLE_FIELDS.join(", ")
+    ))
+}
+
+/// Reject a malformed `--where`, or an unknown field in `--where`/`--fields`/
+/// `--stat`, before any output. Each of these used to fail open: a condition
+/// that did not parse was skipped (every sample printed), a `--where` on an
+/// unknown field filtered everything out, and an unknown `--fields` entry was
+/// dropped from the projection - all three indistinguishable from a real
+/// answer.
+pub(crate) fn validate_timeline_args(q: &SidecarQuery) -> Result<(), DevError> {
+    if let Some(ref cond) = q.where_cond {
+        parse_where_cond(cond)?;
+    }
+    for f in &q.fields {
+        if f != "t" && !SAMPLE_FIELDS.contains(&f.as_str()) {
+            return Err(unknown_field("--fields", f));
+        }
+    }
+    if let Some(ref f) = q.stat
+        && !SAMPLE_FIELDS.contains(&f.as_str())
+    {
+        return Err(unknown_field("--stat", f));
+    }
+    Ok(())
+}
+
 /// All known sample field names and their accessor functions.
 fn sample_field_value(s: &sidecar::Sample, field: &str) -> Option<i64> {
     match field {
@@ -242,6 +279,9 @@ fn parse_where_cond(cond: &str) -> Result<(&str, &str, i64), DevError> {
             let val: i64 = val_str.parse().map_err(|_| {
                 DevError::Config(format!("--where: cannot parse '{val_str}' as integer"))
             })?;
+            if !SAMPLE_FIELDS.contains(&field) {
+                return Err(unknown_field("--where", field));
+            }
             return Ok((field, op, val));
         }
     }
@@ -250,17 +290,17 @@ fn parse_where_cond(cond: &str) -> Result<(&str, &str, i64), DevError> {
     )))
 }
 
-/// Apply --where, --every, --head, --tail filters to a sample list.
+/// Apply --where, --every, --head, --tail filters to a sample list. A
+/// malformed `--where` is an error, never a skipped filter.
 pub(crate) fn apply_timeline_filter<'a>(
     samples: &'a [sidecar::Sample],
     q: &SidecarQuery,
-) -> Vec<&'a sidecar::Sample> {
+) -> Result<Vec<&'a sidecar::Sample>, DevError> {
     let mut result: Vec<&sidecar::Sample> = samples.iter().collect();
 
     // --where filter
-    if let Some(ref cond) = q.where_cond
-        && let Ok((field, op, threshold)) = parse_where_cond(cond)
-    {
+    if let Some(ref cond) = q.where_cond {
+        let (field, op, threshold) = parse_where_cond(cond)?;
         result.retain(|s| {
             if let Some(val) = sample_field_value(s, field) {
                 match op {
@@ -298,7 +338,7 @@ pub(crate) fn apply_timeline_filter<'a>(
         result.truncate(n);
     }
 
-    result
+    Ok(result)
 }
 
 /// Print min/max/avg/p50/p95 for a field across the given samples.
@@ -438,18 +478,17 @@ pub(crate) fn sidecar_sample_json_projected(
 
 /// Format a sidecar marker as a compact JSON object (single line).
 /// `t` is fractional seconds.
+///
+/// The name comes from the child's FIFO, so it is untrusted text: it is
+/// encoded by serde_json, which escapes every control character. The old
+/// hand-rolled escape covered only `\\`, `"` and `\n`, so a tab or any other
+/// control byte in a marker name produced invalid JSONL. `t` stays
+/// hand-formatted to keep its fixed three decimals.
 pub(crate) fn sidecar_marker_json(m: &sidecar::Marker) -> String {
     #[allow(clippy::cast_precision_loss)]
     let t_sec = m.timestamp_us as f64 / 1_000_000.0;
-    let name = m
-        .name
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n");
-    format!(
-        "{{\"i\":{},\"t\":{t_sec:.3},\"name\":\"{}\"}}",
-        m.marker_idx, name,
-    )
+    let name = serde_json::Value::String(m.name.clone());
+    format!("{{\"i\":{},\"t\":{t_sec:.3},\"name\":{name}}}", m.marker_idx)
 }
 
 /// Print per-phase summary table from sidecar samples and markers.
@@ -1437,6 +1476,74 @@ pub(crate) fn print_counters(counters: &[sidecar::Counter], human: bool) {
     }
 }
 
+
+#[cfg(test)]
+mod timeline_arg_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::*;
+
+    fn zero_sample() -> sidecar::Sample {
+        sidecar::Sample {
+            sample_idx: 0,
+            timestamp_us: 0,
+            rss_kb: 0,
+            anon_kb: 0,
+            file_kb: 0,
+            shmem_kb: 0,
+            swap_kb: 0,
+            vm_hwm_kb: 0,
+            vsize_kb: 0,
+            utime: 0,
+            stime: 0,
+            num_threads: 0,
+            minflt: 0,
+            majflt: 0,
+            rchar: 0,
+            wchar: 0,
+            read_bytes: 0,
+            write_bytes: 0,
+            cancelled_write_bytes: 0,
+            syscr: 0,
+            syscw: 0,
+            vol_cs: 0,
+            nonvol_cs: 0,
+        }
+    }
+
+    // The validation list and the accessor must name the same fields, or a
+    // valid field is refused (or an unknown one accepted and filtered to
+    // nothing, the fail-open this list exists to close).
+    #[test]
+    fn field_list_matches_accessor() {
+        let s = zero_sample();
+        for f in SAMPLE_FIELDS {
+            assert!(sample_field_value(&s, f).is_some(), "{f} listed but not answered");
+        }
+        assert!(sample_field_value(&s, "nope").is_none());
+    }
+
+    #[test]
+    fn where_rejects_malformed_and_unknown() {
+        assert!(parse_where_cond("majflt>0").is_ok());
+        assert!(parse_where_cond("majflt").is_err(), "no operator");
+        assert!(parse_where_cond("majflt>x").is_err(), "non-integer threshold");
+        assert!(parse_where_cond("majflts>0").is_err(), "unknown field");
+    }
+
+    #[test]
+    fn marker_json_escapes_control_characters() {
+        let m = sidecar::Marker {
+            marker_idx: 3,
+            timestamp_us: 1_500_000,
+            name: String::from("A\tB\u{1}\"q\"\\\n"),
+        };
+        let line = sidecar_marker_json(&m);
+        let v: serde_json::Value = serde_json::from_str(&line).expect("valid JSON");
+        assert_eq!(v["name"], m.name.as_str());
+        assert_eq!(v["i"], 3);
+        assert!(line.contains("\"t\":1.500"), "t keeps three decimals: {line}");
+    }
+}
 
 #[cfg(test)]
 mod stall_tests {

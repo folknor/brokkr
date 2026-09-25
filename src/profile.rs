@@ -656,14 +656,30 @@ impl RunShaping {
 /// A `lanes` profile returns an empty shaping: load-time validation
 /// guarantees lanes carry no run-shaping fields of their own, and there is
 /// no defensible way to pick one lane's filters for a single ad-hoc run.
+///
+/// The shaping lands on an ad-hoc sweep, which is always a shared-process
+/// libtest lane unless the profile itself sets `isolation = "process"`. So the
+/// same rule [`resolve_single`] applies to a profile's own sweeps applies here,
+/// and it cannot be inherited from there: a profile may carry
+/// package-qualified skips legitimately because every sweep it names is a
+/// nextest lane, and handing those skips to an ad-hoc libtest lane - where
+/// `qualified_skips` is never read - would silently run the tests they
+/// exclude. Refused, never dropped.
 pub fn run_shaping(cfg: &TestConfig, name: &str) -> Result<RunShaping, DevError> {
     if cfg.profiles.get(name).is_some_and(|d| d.lanes.is_some()) {
         return Ok(RunShaping::default());
     }
-    Ok(shaping_from(
-        &resolve_profile_chain(&cfg.profiles, name)?,
-        name,
-    ))
+    let shaping = shaping_from(&resolve_profile_chain(&cfg.profiles, name)?, name);
+    if !shaping.qualified_skips.is_empty() && !shaping.process_isolation {
+        return Err(DevError::Config(format!(
+            "[test.profiles.{name}] has package-qualified skip entries, and an ad-hoc \
+             `--features`/`--no-default-features` run replaces its sweeps with one \
+             shared-process libtest lane, which cannot apply a package-scoped skip. \
+             Run the profile without ad-hoc features, pick a profile without qualified \
+             skips (`--profile`), or set `isolation = \"process\"` on it."
+        )));
+    }
+    Ok(shaping)
 }
 
 /// `profile_name` is carried for provenance alone: the merged profile is the
@@ -889,6 +905,39 @@ isolation = "process"
         // of the same entry still dedupe to one clippy run.
         let plain = sweep_from_check_entry(&checks[0]);
         assert_eq!(plain.build_shape_key(), sweeps[0].build_shape_key());
+    }
+
+    #[test]
+    fn ad_hoc_shaping_refuses_qualified_skips_it_cannot_apply() {
+        // The profile is legal on its own sweeps (all nextest), but the
+        // ad-hoc path hands its shaping to one shared-process libtest lane
+        // that never reads `qualified_skips` - the excluded tests would run.
+        let (checks, cfg) = parse_fragment(
+            r#"
+[[check]]
+name = "nx"
+harness = "nextest"
+
+[test.profiles.p]
+sweeps = ["nx"]
+skip = [{ package = "a", pattern = "slow" }]
+"#,
+        );
+        assert!(resolve(&cfg, &checks, "p").is_ok());
+        let err = run_shaping(&cfg, "p").unwrap_err().to_string();
+        assert!(err.contains("package-qualified"), "{err}");
+
+        // Under process isolation the ad-hoc lane enumerates, so the skips
+        // are honoured and the shaping goes through.
+        let (_, cfg) = parse_fragment(
+            r#"
+[test.profiles.p]
+sweeps = ["x"]
+isolation = "process"
+skip = [{ package = "a", pattern = "slow" }]
+"#,
+        );
+        assert!(run_shaping(&cfg, "p").is_ok());
     }
 
     #[test]

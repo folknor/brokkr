@@ -303,9 +303,17 @@ fn announce_invocation_shaping(packages: &[String], extra_args: &[String]) {
     if !extra_args.is_empty() {
         parts.push(format!("forwarded `-- {}`", extra_args.join(" ")));
     }
+    // Presence, not content: cargo reads a set-but-empty variable as a live
+    // (empty) flag source that shadows every config-file rustflags table, so
+    // the project's own `-Dwarnings`/linker flags silently drop out. That is
+    // exactly the kind of shaping this line exists to name.
     for var in ["CARGO_ENCODED_RUSTFLAGS", "RUSTFLAGS"] {
-        if std::env::var(var).is_ok_and(|v| !v.trim().is_empty()) {
-            parts.push(format!("{var} inherited from the environment"));
+        match std::env::var_os(var) {
+            Some(v) if v.to_string_lossy().trim().is_empty() => parts.push(format!(
+                "{var} set but empty in the environment (cargo ignores config rustflags)"
+            )),
+            Some(_) => parts.push(format!("{var} inherited from the environment")),
+            None => {}
         }
     }
     if !parts.is_empty() {
@@ -503,10 +511,9 @@ fn run_build_phases(
     collected_timings: Option<&mut Vec<TestTiming>>,
     coverage_stats: &mut Option<CoverageStats>,
 ) -> Result<(), DevError> {
-    // Voiced here because the summary path deliberately does not echo error
-    // messages (phases print their own detail) - an unvoiced refusal reads
-    // as `check failed` with no line naming why.
-    verify_doc_only_rules(a).inspect_err(|e| output::error(&e.to_string()))?;
+    // A refusal here prints through `finish_check`, like every error that is
+    // not `DevError::Reported`.
+    verify_doc_only_rules(a)?;
     run_diagnostic_phases(a, skip, failing_phase, clippy_ran)?;
 
     if !skip("script_check") {
@@ -532,19 +539,12 @@ fn run_build_phases(
             executed,
         )
         .err();
-        // The reporting contract: a failing path prints its own detail, and
-        // the summary branch adds only the timing line. `tests failed` is the
-        // one error whose detail was already reported (the failure list
-        // above); everything else leaving the test phase - a lane refusal, a
-        // wrong-run, a config conflict discovered at run time - carries its
-        // whole diagnostic in the message and was previously swallowed:
-        // a refused `isolation` x `parallel` gate died between lanes printing
-        // nothing but `check failed` (measured on the consuming config).
-        if let Some(e) = &test_failure
-            && !matches!(e, DevError::Build(m) if m == "tests failed")
-        {
-            output::error(&e.to_string());
-        }
+        // `tests failed` is the one error leaving the test phase whose detail
+        // was already reported (the failure list above); everything else - a
+        // lane refusal, a wrong-run, a config conflict discovered at run time
+        // - carries its whole diagnostic in the message, which `finish_check`
+        // prints. It stays a `Build` sentinel until then because the coverage
+        // audit below keys its best-effort run on it.
     }
     finish_build_phases(a, skip, failing_phase, executed, coverage_stats, test_failure)
 }
@@ -568,6 +568,7 @@ fn run_diagnostic_phases(
             a.clippy_allow_exact,
             a.commands,
             ran,
+            false,
         )?;
     }
 
@@ -620,29 +621,40 @@ fn finish_build_phases(
         // Counts first, verdict second: the summary carries them even when
         // the audit is what failed.
         *coverage_stats = audit.stats;
-        // Same reporting contract as the test phase: `coverage failed` is the
-        // sentinel whose detail (worksheets, orphans) already printed; any
-        // other error - an enumeration abort, an engine failure - carries its
-        // whole diagnostic in the message and would otherwise be silent.
-        if let Err(e) = &audit.result
-            && !matches!(e, DevError::Build(m) if m == "coverage failed")
-        {
-            output::error(&e.to_string());
-        }
-        audit.result?;
+        // `coverage failed` is the sentinel whose detail (worksheets, orphans)
+        // already printed; any other error - an enumeration abort, an engine
+        // failure - carries its whole diagnostic in the message, which
+        // `finish_check` prints.
+        audit.result.map_err(|e| already_reported(e, "coverage failed"))?;
     }
 
     if let Some(e) = test_failure {
-        return Err(e);
+        return Err(already_reported(e, TESTS_FAILED));
     }
 
     // Only past a green test phase: the test phase fails fast, so a post-test
     // gate on a failing run would be judging a tree whose later lanes never
     // ran. Unlike the coverage audit above, which is deliberately best-effort
     // there, a script-check has no partial-run reading - it just lies.
+    //
+    // "Green" means the phase ran and passed, not merely that it left no
+    // error: a skipped test phase (`skip_phases = ["test"]`, or the
+    // markdown-only shortcut) also leaves `test_failure` empty, and a
+    // post-test check run there judges a test phase that never happened.
+    // Named, not silent - a narrowed run must never look like a full one.
     if !skip("script_check") {
-        begin_phase(failing_phase, "script_check");
-        run_script_checks(a.project_root, a.script_checks, Stage::PostTest)?;
+        if skip("test") {
+            let held = a.script_checks.iter().filter(|c| c.stage == Stage::PostTest).count();
+            if held > 0 {
+                output::run_msg(&format!(
+                    "script-check: {} skipped (the test phase did not run)",
+                    output::count(held, "post-test check")
+                ));
+            }
+        } else {
+            begin_phase(failing_phase, "script_check");
+            run_script_checks(a.project_root, a.script_checks, Stage::PostTest)?;
+        }
     }
 
     // Last on purpose: package-mode resolution can compile duplicate variants
@@ -791,7 +803,7 @@ fn audit_coverage(
             allow_flags,
             commands,
         ),
-        Some(DevError::Build(msg)) if msg == "tests failed" => {
+        Some(DevError::Build(msg)) if msg == TESTS_FAILED => {
             // The test failure is the run's verdict; the audit only
             // contributes its worksheet and its counts.
             let outcome = run_coverage_phase(
@@ -1026,12 +1038,27 @@ fn ran_sweep_labels<'a>(
         .collect()
 }
 
+/// The test phase's "failures already listed" sentinel. A `Build` rather than
+/// a `Reported` until the build phases finish, because the coverage audit
+/// keys its best-effort run on it; [`already_reported`] converts it after.
+const TESTS_FAILED: &str = "tests failed";
+
+/// Mark a phase's printed-detail sentinel as [`DevError::Reported`], leaving
+/// every other error (whose message is its only diagnostic) untouched.
+fn already_reported(e: DevError, sentinel: &str) -> DevError {
+    match e {
+        DevError::Build(m) if m == sentinel => DevError::Reported(m),
+        other => other,
+    }
+}
+
 /// Print the summary line, emit the `--json` trailer, and map the claim to
 /// the exit contract. The claim decides the word and the exit code: `passed`
 /// stays with unclaimed legacy profiles (exactly as trustworthy as before
 /// `certifies` existed), `complete` owns the gate verdict, and `partial` may
 /// never print a success word a grep could mistake for one - it exits 10 so
-/// naive `&& git commit` chaining fails closed. Any failure exits 1.
+/// naive `&& git commit` chaining fails closed. Any failure exits 1, except a
+/// cooperative shutdown (`brokkr kill`), which keeps main's exit 130.
 #[allow(clippy::too_many_arguments)]
 fn finish_check(
     outcome: &Result<(), DevError>,
@@ -1052,93 +1079,67 @@ fn finish_check(
     output::disable_status_line();
     let context = verdict_context(profile_label, sweep_labels.len(), lints.0, lints.1);
     match outcome {
-        Ok(()) => match certifies {
-            None => {
+        Ok(()) => {
+            let (word, scope, suffix, result) = match certifies {
                 // A shortened run must not sign off in the same words a full
                 // one does - the announcement at the top has scrolled away by
                 // the time this line is read.
-                let scope = if prose_only {
-                    " (markdown only - build phases skipped)"
-                } else {
-                    ""
-                };
-                output::result_msg(&format!(
-                    "check passed{scope} in {}{context}",
-                    fmt_wall(started.elapsed())
-                ));
-                if json {
-                    emit_json_summary(
-                        "passed",
-                        certifies,
-                        profile_label,
-                        sweep_labels,
-                        package,
-                        None,
-                        coverage,
-                        started.elapsed(),
-                    );
+                None => {
+                    let scope = if prose_only {
+                        " (markdown only - build phases skipped)"
+                    } else {
+                        ""
+                    };
+                    ("passed", scope, String::new(), Ok(()))
                 }
-                Ok(())
+                Some(Certifies::Complete) => ("complete", "", String::new(), Ok(())),
+                Some(Certifies::Partial) => {
+                    let mut narrowed: Vec<String> = Vec::new();
+                    if !skip_phases.is_empty() {
+                        narrowed.push(format!("skipped phases: {}", skip_phases.join(", ")));
+                    }
+                    if let Some(p) = package {
+                        narrowed.push(format!("scoped to -p {p}"));
+                    }
+                    let suffix = if narrowed.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" ({})", narrowed.join("; "))
+                    };
+                    ("partial", "", suffix, Err(DevError::ExitCode(10)))
+                }
+            };
+            output::result_msg(&format!(
+                "check {word}{scope} in {}{suffix}{context}",
+                fmt_wall(started.elapsed())
+            ));
+            if json {
+                emit_json_summary(
+                    word,
+                    certifies,
+                    profile_label,
+                    sweep_labels,
+                    package,
+                    None,
+                    coverage,
+                    started.elapsed(),
+                );
             }
-            Some(Certifies::Complete) => {
-                output::result_msg(&format!(
-                    "check complete in {}{context}",
-                    fmt_wall(started.elapsed())
-                ));
-                if json {
-                    emit_json_summary(
-                        "complete",
-                        certifies,
-                        profile_label,
-                        sweep_labels,
-                        package,
-                        None,
-                        coverage,
-                        started.elapsed(),
-                    );
-                }
-                Ok(())
+            result
+        }
+        Err(e) => {
+            // A `Reported` failure printed its own detail above. Every other
+            // error carries its diagnostic in the message and nobody has shown
+            // it yet - this used to assume the former of every failure, and a
+            // `cargo metadata` failure or a config refusal found at phase time
+            // ended in a bare `check failed` naming nothing.
+            let interrupted = matches!(e, DevError::Interrupted);
+            if !interrupted && !matches!(e, DevError::Reported(_) | DevError::ExitCode(_)) {
+                output::error(&e.to_string());
             }
-            Some(Certifies::Partial) => {
-                let mut narrowed: Vec<String> = Vec::new();
-
-                if !skip_phases.is_empty() {
-                    narrowed.push(format!("skipped phases: {}", skip_phases.join(", ")));
-                }
-
-                if let Some(p) = package {
-                    narrowed.push(format!("scoped to -p {p}"));
-                }
-                let suffix = if narrowed.is_empty() {
-                    String::new()
-                } else {
-                    format!(" ({})", narrowed.join("; "))
-                };
-                output::result_msg(&format!(
-                    "check partial in {}{suffix}{context}",
-                    fmt_wall(started.elapsed())
-                ));
-                if json {
-                    emit_json_summary(
-                        "partial",
-                        certifies,
-                        profile_label,
-                        sweep_labels,
-                        package,
-                        None,
-                        coverage,
-                        started.elapsed(),
-                    );
-                }
-                Err(DevError::ExitCode(10))
-            }
-        },
-        Err(_) => {
-            // The failing phase already printed its detail above; add the
-            // symmetric summary line and exit non-zero without main echoing a
-            // second, timing-less `[error]` line.
+            let word = if interrupted { "interrupted" } else { "failed" };
             output::error(&format!(
-                "check failed in {}{context}",
+                "check {word} in {}{context}",
                 fmt_wall(started.elapsed())
             ));
             if json {
@@ -1153,6 +1154,14 @@ fn finish_check(
                     started.elapsed(),
                 );
             }
+            // A graceful `brokkr kill` keeps its own exit: main maps
+            // `Interrupted` to 130 and runs the scratch cleanup the
+            // cooperative-shutdown contract promises. Folding it into exit 1
+            // skipped both.
+            if interrupted {
+                return Err(DevError::Interrupted);
+            }
+            // Exit 1 without main echoing a second, timing-less `[error]`.
             Err(DevError::ExitCode(1))
         }
     }
@@ -1215,7 +1224,8 @@ fn verdict_context(
 /// `schema: 1`, consumers must tolerate unknown ones, and a bump is
 /// reserved for renames or semantic changes. `certifies` mirrors the
 /// resolved profile's claim (`null` for unclaimed profiles); `verdict` is
-/// `passed`/`complete`/`partial`/`failed`, paired with exit codes 0/0/10/1.
+/// `passed`/`complete`/`partial`/`failed`, paired with exit codes 0/0/10/1 -
+/// except a cooperatively interrupted run, which reports `failed` and exits 130.
 #[derive(serde::Serialize)]
 struct CheckSummary<'a> {
     schema: u32,
@@ -1502,7 +1512,7 @@ fn run_gremlins(
     }
     msg.push_str("  hint: rerun with `brokkr check --fix-gremlins` to rewrite all banned chars in place\n");
     output::error(msg.trim_end());
-    Err(DevError::Build("gremlins found".into()))
+    Err(DevError::Reported("gremlins found".into()))
 }
 
 /// Order a phase's errors for display via [`scope::prioritize`]: the errors in
@@ -1551,7 +1561,7 @@ fn run_header(
     }
     output::error(msg.trim_end());
 
-    Err(DevError::Build("header check failed".into()))
+    Err(DevError::Reported("header check failed".into()))
 }
 
 /// The `[[textlint]]` phase: declarative forbid-a-pattern line rules. Inert
@@ -1593,7 +1603,7 @@ fn run_textlint(
     }
     output::error(msg.trim_end());
 
-    Err(DevError::Build("textlint failed".into()))
+    Err(DevError::Reported("textlint failed".into()))
 }
 
 /// The `[manifest]` phase: native structural `Cargo.toml` conventions. Inert
@@ -1624,7 +1634,7 @@ fn run_manifest(
     }
     output::error(msg.trim_end());
 
-    Err(DevError::Build("manifest check failed".into()))
+    Err(DevError::Reported("manifest check failed".into()))
 }
 
 /// The `[[script_check]]` phase for one [`Stage`]: run the configured commands
@@ -1682,7 +1692,7 @@ fn run_script_checks(
     }
     output::error(msg.trim_end());
 
-    Err(DevError::Build("script-check failed".into()))
+    Err(DevError::Reported("script-check failed".into()))
 }
 
 /// Render one failing script-check's captured output.
@@ -1828,7 +1838,7 @@ fn run_dependency_rules(
     }
     output::error(msg.trim_end());
 
-    Err(DevError::Build("dependency rules failed".into()))
+    Err(DevError::Reported("dependency rules failed".into()))
 }
 
 /// The `publish_cycle` phase: refuse a dependency cycle among publishable
@@ -1880,7 +1890,7 @@ fn run_publish_cycle(
     msg.push_str("  `brokkr deps` reports these alongside the rest of the dependency picture\n");
     output::error(msg.trim_end());
 
-    Err(DevError::Build("publish cycle failed".into()))
+    Err(DevError::Reported("publish cycle failed".into()))
 }
 
 /// Assemble the `cargo clippy` argv for one sweep. Always
@@ -2018,22 +2028,23 @@ fn run_one_diagnostic_cargo(
     // Apply the sweep's env to the clippy build too, so a build-affecting
     // var (codegen toggle, etc.) is set consistently across every phase -
     // clippy, the test pre-build, and the test run - not just the tests.
-    let mut env_owned: Vec<(String, String)> = sweep
-        .env
-        .iter()
-        .map(|(k, v)| (k.clone(), v.clone()))
-        .collect();
     // A sweep with `rustflags` (or package-mode unification) clippy-checks
     // under the same cfg + isolated target dir as its tests, so the gate's
     // lints match its build. Plain sweeps contribute nothing here, and for
     // those `meta_target_dir` is `None` (computed by the caller).
-    if let Some(dir) = meta_target_dir {
-        // No lint allows in the env here: clippy passes the same `-A` set
-        // on its own argv (`clippy_args`), and a second copy in RUSTFLAGS
-        // would only change the build fingerprint away from the test
-        // phase's, costing a rebuild for no change in what is suppressed.
-        env_owned.extend(sweep_cargo_env(sweep, dir, &[]));
-    }
+    //
+    // No lint allows in the env here: clippy passes the same `-A` set on its
+    // own argv (`clippy_args`), and a second copy in RUSTFLAGS would only
+    // change the build fingerprint away from the test phase's, costing a
+    // rebuild for no change in what is suppressed.
+    let brokkr_env = meta_target_dir.map_or_else(Vec::new, |dir| sweep_cargo_env(sweep, dir, &[]));
+    // Composed through `merged_env`, the test phase's rule, so every phase
+    // agrees on who wins a collision: the sweep's env. Config loading refuses
+    // the colliding keys (`RUSTFLAGS`, `CARGO_TARGET_DIR`, ...) in `[[check]]`
+    // and profile env, so a collision only arises from `brokkr clippy --env`,
+    // which is documented to win over every other source - appending brokkr's
+    // pair after it used to silently undo the override.
+    let env_owned = merged_env(&sweep.env, &brokkr_env);
     let env_refs: Vec<(&str, &str)> = env_owned
         .iter()
         .map(|(k, v)| (k.as_str(), v.as_str()))
@@ -2065,6 +2076,10 @@ fn run_clippy_phase(
     allow_exact: &[SitedAllow],
     commands: bool,
     clippy_ran: &mut [bool],
+    // The caller's word that this run lints less than the gate's whole
+    // surface, beyond what a CLI `-p` already says (`brokkr clippy`'s probe
+    // shapes). Only silences the stale-allow report.
+    narrowed: bool,
 ) -> Result<(), DevError> {
     let multi = sweeps.len() > 1;
 
@@ -2078,7 +2093,12 @@ fn run_clippy_phase(
         run_one_clippy(project_root, sweep, run_scope, allow, dir, commands)
     })?;
 
-    report_stale_sited_allows(&results, allow_exact, packages);
+    report_stale_sited_allows(
+        "clippy",
+        &results,
+        allow_exact,
+        narrowed || !packages.is_empty(),
+    );
 
     // With `--cap-lints=warn`, a lint no longer makes cargo exit non-zero, so
     // the pass/fail decision is brokkr's own: every diagnostic is a failure,
@@ -2122,6 +2142,9 @@ fn run_rustdoc_phase(
         let args = doc_args(sweep, run_scope, cfg);
         run_one_diagnostic_cargo("rustdoc", project_root, sweep, &args, run_scope, dir, commands)
     })?;
+    // The `rustdoc::` half of the sited list is judged here, where those lints
+    // can actually appear; clippy judges the rest.
+    report_stale_sited_allows("rustdoc", &results, allow_exact, !packages.is_empty());
     let members = Some(&info.workspace_members);
     let keep = |d: &cargo_json::DiagnosticEvent| {
         !is_dependency_warning(d, members)
@@ -2193,7 +2216,7 @@ fn report_diagnostic_phase(
         multi,
         keep,
     ));
-    Err(DevError::Build(format!("{phase} failed")))
+    Err(DevError::Reported(format!("{phase} failed")))
 }
 
 /// Run `run_one` once per distinct build shape (and once per package under
@@ -2436,32 +2459,55 @@ fn summarize_sited(allow_exact: &[SitedAllow]) -> String {
 /// moved (re-site it). Say so - a notice, not a failure - so the list never
 /// accretes silently. Only an unscoped run can testify: a `-p`-narrowed run
 /// simply doesn't check the entry's file when it lives in another package,
-/// so "suppressed nothing" there is noise, not evidence of staleness.
+/// so "suppressed nothing" there is noise, not evidence of staleness. The
+/// caller folds every such narrowing into `narrowed` (a CLI `-p`, and for
+/// `brokkr clippy` a probe shape smaller than the gate's).
+///
+/// Each phase testifies only for the entries it can produce: `rustdoc::` lints
+/// never appear in clippy's stream, and every other lint is clippy's to judge
+/// (rustdoc re-reports a subset of rustc lints, but clippy sees those too). So
+/// clippy passes judgement on the non-`rustdoc::` entries and the rustdoc
+/// phase on the `rustdoc::` ones - judged by clippy alone, a `rustdoc::`
+/// entry warned "suppressed nothing" on every run. A project with no
+/// `[rustdoc]` runs no rustdoc phase and so never judges those entries.
 fn report_stale_sited_allows(
+    phase: &str,
     results: &[SweepResult],
     allow_exact: &[SitedAllow],
-    packages: &[String],
+    narrowed: bool,
 ) {
-    if allow_exact.is_empty() || !packages.is_empty() {
+    if narrowed {
         return;
     }
-    let mut matched = vec![false; allow_exact.len()];
+    let judged: Vec<&SitedAllow> = allow_exact
+        .iter()
+        .filter(|s| is_rustdoc_lint(&s.lint) == (phase == "rustdoc"))
+        .collect();
+    if judged.is_empty() {
+        return;
+    }
+    let mut matched = vec![false; judged.len()];
     for r in results {
         for d in cargo_json::parse_cargo_diagnostics(&r.stdout) {
-            for (i, s) in allow_exact.iter().enumerate() {
+            for (i, s) in judged.iter().enumerate() {
                 if sited_match(s, &d) {
                     matched[i] = true;
                 }
             }
         }
     }
-    for (s, hit) in allow_exact.iter().zip(&matched) {
+    for (s, hit) in judged.iter().zip(&matched) {
         if !hit {
             output::warn(&format!(
-                "clippy: allow_exact {s} suppressed nothing (stale entry?)"
+                "{phase}: allow_exact {s} suppressed nothing (stale entry?)"
             ));
         }
     }
+}
+
+/// Whether a lint name belongs to rustdoc's tool namespace.
+fn is_rustdoc_lint(lint: &str) -> bool {
+    lint.starts_with("rustdoc::")
 }
 
 /// Does a `[clippy] allow_exact` entry suppress this diagnostic? Lint names
@@ -2530,6 +2576,16 @@ pub(crate) fn cmd_clippy(
     // `--lib` composes with `--sweep NAME` the same way it does with ad-hoc
     // `-p`, without the borrowed entry having to know about it.
     sweep.lib_only = lib_only;
+    // The same resolution point `check` uses, so `--sweep NAME` replays the
+    // entry's graph and not just its flags: a `feature_unification =
+    // "package"` entry lints once per package under the package pin, and a
+    // parallel `auto` entry that `check` promotes to a workspace pin is
+    // promoted here too. Without this the sweep kept its unresolved `Ambient`
+    // default and linted one ambient invocation - a lint surface no gate
+    // build compiles. An ad-hoc sweep is never parallel, so it resolves to
+    // exactly what it was. The CLI scope is empty on purpose: ad-hoc `-p`
+    // lives in `sweep.packages`, where it already disqualifies promotion.
+    resolve_sweep_unification(std::slice::from_mut(&mut sweep), project_root, &[], &[])?;
 
     // One sweep -> run_clippy_phase runs `multi = false`, so output carries no
     // sweep-label tags. `packages: &[]` because ad-hoc `-p` is already in
@@ -2539,6 +2595,10 @@ pub(crate) fn cmd_clippy(
     // is the point - unlike `brokkr check`, where it is per-run noise.
     // The investigative runner has no `--json` trailer, so the ran-mask is
     // write-only here; a single throwaway slot satisfies the shared signature.
+    //
+    // `narrowed`: one probe shape cannot testify that a sited allow is stale
+    // unless it covers everything `check`'s sweeps together would - see
+    // `probe_is_narrowed`.
     let mut clippy_ran = [false];
     match run_clippy_phase(
         project_root,
@@ -2548,6 +2608,7 @@ pub(crate) fn cmd_clippy(
         clippy_allow_exact,
         true,
         &mut clippy_ran,
+        probe_is_narrowed(&sweep),
     ) {
         Ok(()) => {
             output::result_msg(&format!("clippy clean in {}", fmt_wall(started.elapsed())));
@@ -2555,15 +2616,40 @@ pub(crate) fn cmd_clippy(
         }
         // A *rendered* clippy failure: the phase already printed the diagnostics,
         // so add the summary and exit 1 without main echoing a second line.
-        Err(DevError::Build(_)) => {
+        //
+        // Matched on the phase's own verdict, not on any `Build`: the phase
+        // also returns `Build` from `project_info` ("cargo metadata failed:
+        // ...", "no Cargo.toml ..."), and those carry their whole diagnostic
+        // in the message - swallowing them printed `clippy failed in 0.0s`
+        // with no cause in a non-Rust directory. The verdict is a
+        // `DevError::Reported`, the variant for "detail already printed".
+        Err(DevError::Reported(m)) if m == CLIPPY_FAILED => {
             output::error(&format!("clippy failed in {}", fmt_wall(started.elapsed())));
             Err(DevError::ExitCode(1))
         }
-        // Anything else (cargo missing, spawn failure, cooperative interrupt) is
-        // NOT an already-rendered lint result - propagate the real cause so main
-        // reports it, instead of masking it behind "clippy failed".
+        // Anything else (no Cargo.toml, cargo metadata failure, cargo missing,
+        // spawn failure, cooperative interrupt) is NOT an already-rendered lint
+        // result - propagate the real cause so main reports it, instead of
+        // masking it behind "clippy failed".
         Err(other) => Err(other),
     }
+}
+
+/// The label `report_diagnostic_phase` returns (as `DevError::Reported`) for a
+/// failed clippy phase - the one error from it whose detail is already on
+/// screen.
+const CLIPPY_FAILED: &str = "clippy failed";
+
+/// Whether a `brokkr clippy` probe covers less than the gate's lint surface,
+/// in which case "this sited allow suppressed nothing" is not evidence the
+/// entry is stale - the site may simply be outside what was linted. A package
+/// scope (ad-hoc `-p` or a `--sweep` entry's `packages`) leaves other crates
+/// unlinted; `--lib` leaves every test-only site unlinted; and a feature set
+/// short of `--all-features` leaves feature-gated sites unlinted.
+fn probe_is_narrowed(sweep: &ResolvedSweep) -> bool {
+    !sweep.packages.is_empty()
+        || sweep.lib_only
+        || !sweep.cargo_feature_args.iter().any(|a| a == "--all-features")
 }
 
 /// Construct the single `ResolvedSweep` a `brokkr clippy` invocation runs.
@@ -3151,7 +3237,7 @@ fn run_test_phase(
         // spawn failure - names it here, once, whatever path it took.
         let failed = match lane {
             Ok(true) => None,
-            Ok(false) => Some(DevError::Build("tests failed".into())),
+            Ok(false) => Some(DevError::Build(TESTS_FAILED.into())),
             Err(e) => Some(e),
         };
         if let Some(e) = failed {
@@ -3789,5 +3875,62 @@ mod complete_rejection_tests {
         assert!(reject_scoped_complete(Some(Certifies::Complete), &pkgs).is_err());
         reject_scoped_complete(Some(Certifies::Complete), &[]).unwrap();
         reject_scoped_complete(Some(Certifies::Partial), &pkgs).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod failure_exit_tests {
+    use super::{already_reported, finish_check, TESTS_FAILED};
+    use crate::error::DevError;
+
+    fn finish(outcome: &Result<(), DevError>) -> Result<(), DevError> {
+        finish_check(
+            outcome,
+            None,
+            &None,
+            &[],
+            (&[], &[]),
+            &[],
+            false,
+            None,
+            Some("test"),
+            None,
+            false,
+            std::time::Instant::now(),
+        )
+    }
+
+    /// A graceful `brokkr kill` must reach main as `Interrupted`, which is
+    /// what buys exit 130 and the scratch cleanup - not a plain exit 1.
+    #[test]
+    fn an_interrupted_run_keeps_its_exit_path() {
+        assert!(matches!(finish(&Err(DevError::Interrupted)), Err(DevError::Interrupted)));
+    }
+
+    #[test]
+    fn any_other_failure_exits_one() {
+        for e in [
+            DevError::Reported("gremlins found".into()),
+            DevError::Config("printed by the summary".into()),
+        ] {
+            assert!(matches!(finish(&Err(e)), Err(DevError::ExitCode(1))));
+        }
+    }
+
+    #[test]
+    fn only_the_named_sentinel_becomes_reported() {
+        assert!(matches!(
+            already_reported(DevError::Build(TESTS_FAILED.into()), TESTS_FAILED),
+            DevError::Reported(_)
+        ));
+        // A different message is a diagnostic nobody has printed yet.
+        assert!(matches!(
+            already_reported(DevError::Build("cargo metadata failed".into()), TESTS_FAILED),
+            DevError::Build(_)
+        ));
+        assert!(matches!(
+            already_reported(DevError::Interrupted, TESTS_FAILED),
+            DevError::Interrupted
+        ));
     }
 }

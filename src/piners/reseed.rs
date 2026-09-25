@@ -43,6 +43,7 @@ use crate::output;
 use crate::piners::cmd::CorpusArgs;
 use crate::piners::pins_write;
 use crate::piners::registry::{self, FeedGroup, FilePin, Pin, PinsData, RootEntry};
+use crate::piners::registry_io;
 use crate::preflight;
 
 /// The two files whose joint presence marks a directory as a parity probe.
@@ -72,6 +73,10 @@ pub fn run(
     let corpus_root = project_root.join(cfg.corpus_root());
     let registry_dir = project_root.join(cfg.registry_dir());
     let pins_path = registry_dir.join(PINS_FILE);
+
+    // Held across the read-modify-write, so a concurrent `--bless` (which
+    // holds the same lock for its run) cannot interleave with this rewrite.
+    let _lock = registry_io::lock(project_root, "corpus-reseed")?;
 
     // Keep the raw text alongside the parsed data: the writer edits the
     // existing document in place so hand-written comments survive.
@@ -127,11 +132,10 @@ pub fn run(
     let diff = Diff::compute(&existing.probes, &new_pins);
 
     std::fs::create_dir_all(&registry_dir).map_err(DevError::Io)?;
-    std::fs::write(
+    registry_io::write_atomic(
         &pins_path,
-        pins_write::render_pins(existing_text.as_deref(), &feeds, &existing.roots, &new_pins)?,
-    )
-    .map_err(DevError::Io)?;
+        &pins_write::render_pins(existing_text.as_deref(), &feeds, &existing.roots, &new_pins)?,
+    )?;
 
     if discovered.skipped > 0 {
         output::corpus_msg(&format!(

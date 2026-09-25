@@ -32,6 +32,10 @@ pub fn evaluate(
     current: &GateRun,
     baseline: &GateRun,
 ) -> Result<Vec<RuleOutcome>, DevError> {
+    // Re-checked here, not only at the entry point: an evaluation that
+    // yields no outcome reports PASSED, so this is the last place a
+    // predicate-free rule can be stopped from passing silently.
+    validate_rules("<gate>", gate)?;
     let mut out = Vec::new();
     for (metric, rule) in &gate.metrics {
         let current_v = lookup_scalar(current, metric)?;
@@ -39,6 +43,50 @@ pub fn evaluate(
         out.extend(evaluate_rule(metric, rule, &current_v, &baseline_v)?);
     }
     Ok(out)
+}
+
+/// Refuse a metric table that carries no predicate.
+///
+/// Every predicate is optional in the schema, so `[...metrics.elapsed_ms]`
+/// with nothing under it - or with only `equal_to_baseline = false` -
+/// parses fine and then yields zero outcomes, which the report reads as
+/// PASSED. The non-empty-`metrics` refusal at the entry point cannot see
+/// this: the table is there, it just checks nothing. Called before
+/// anything is built, and again from [`evaluate`].
+pub fn validate_rules(gate_name: &str, gate: &GateConfig) -> Result<(), DevError> {
+    let empty: Vec<&str> = gate
+        .metrics
+        .iter()
+        .filter(|(_, rule)| predicate_count(rule) == 0)
+        .map(|(metric, _)| metric.as_str())
+        .collect();
+    if empty.is_empty() {
+        return Ok(());
+    }
+    Err(DevError::Config(format!(
+        "gate `{gate_name}`: no predicate set on metric `{}` - a rule like that \
+         checks nothing and passes. Give each at least one of max, min, max_relative, \
+         min_relative, max_delta, equal, or equal_to_baseline = true.",
+        empty.join("`, `")
+    )))
+}
+
+/// How many predicates `rule` actually applies - the count of outcomes
+/// [`evaluate_rule`] will produce for it. `equal_to_baseline = false`
+/// applies nothing.
+fn predicate_count(rule: &MetricRule) -> usize {
+    [
+        rule.max.is_some(),
+        rule.min.is_some(),
+        rule.max_relative.is_some(),
+        rule.min_relative.is_some(),
+        rule.max_delta.is_some(),
+        rule.equal.is_some(),
+        rule.equal_to_baseline == Some(true),
+    ]
+    .into_iter()
+    .filter(|b| *b)
+    .count()
 }
 
 /// Format a list of `RuleOutcome`s as one line each, prefixed with
@@ -424,6 +472,32 @@ mod tests {
         );
         let r = evaluate(&g, &cur, &base).unwrap();
         assert!(!r[0].pass);
+    }
+
+    /// A metric table with no predicate used to produce zero outcomes and
+    /// a PASSED report.
+    #[test]
+    fn predicate_free_rule_is_refused() {
+        let cur = run(0, "{}", "{}");
+        let base = run(0, "{}", "{}");
+        let g = gate_with("elapsed_ms", MetricRule::default());
+        let err = validate_rules("g", &g).unwrap_err();
+        assert!(err.to_string().contains("elapsed_ms"), "got: {err}");
+        assert!(evaluate(&g, &cur, &base).is_err());
+    }
+
+    #[test]
+    fn equal_to_baseline_false_alone_is_refused() {
+        let g = gate_with(
+            "meta.messages",
+            MetricRule { equal_to_baseline: Some(false), ..Default::default() },
+        );
+        assert!(validate_rules("g", &g).is_err());
+        let g = gate_with(
+            "meta.messages",
+            MetricRule { equal_to_baseline: Some(true), ..Default::default() },
+        );
+        validate_rules("g", &g).unwrap();
     }
 
     #[test]

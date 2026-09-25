@@ -13,6 +13,7 @@ pub mod manifest;
 pub mod measured;
 pub mod pins_write;
 pub mod registry;
+pub mod registry_io;
 pub mod report;
 pub mod reseed;
 pub mod select;

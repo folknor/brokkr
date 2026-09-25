@@ -341,6 +341,29 @@ pub(crate) fn describe_sweep(
     parts.join(", ")
 }
 
+/// The `cargo build` argv for one `build_packages` pre-build.
+///
+/// The pre-build is one of the sweep's compiling paths, so it carries the
+/// sweep's pinned unification like every other: the binaries the tests spawn
+/// must come from the same feature graph as the tests themselves, or a
+/// package-mode lane runs its tests against a binary built under ambient
+/// resolution.
+fn pre_build_args(sweep: &ResolvedSweep, package: &str, allow_args: &[String]) -> Vec<String> {
+    let mut args: Vec<String> = vec!["build".into()];
+    args.extend(allow_args.iter().cloned());
+    // The pre-build must land where the tests will look for it: a sweep
+    // pinned to a profile builds its binaries into that profile's
+    // directory, which is the one BROKKR_TEST_BIN_DIR names.
+    args.extend(sweep_profile_args(sweep));
+    args.extend(sweep.unification_args());
+    for f in &sweep.cargo_feature_args {
+        args.push(f.clone());
+    }
+    args.push("--package".into());
+    args.push(package.into());
+    args
+}
+
 /// Build one binary package with the sweep's feature flags. Errors
 /// surface compile failures the same way the test phase does: the
 /// stderr filtered through `cargo_filter::filter_clippy`.
@@ -352,17 +375,7 @@ fn run_sweep_pre_build(
     allow_args: &[String],
     commands: bool,
 ) -> Result<(), DevError> {
-    let mut args: Vec<String> = vec!["build".into()];
-    args.extend(allow_args.iter().cloned());
-    // The pre-build must land where the tests will look for it: a sweep
-    // pinned to a profile builds its binaries into that profile's
-    // directory, which is the one BROKKR_TEST_BIN_DIR names.
-    args.extend(sweep_profile_args(sweep));
-    for f in &sweep.cargo_feature_args {
-        args.push(f.clone());
-    }
-    args.push("--package".into());
-    args.push(package.into());
+    let args = pre_build_args(sweep, package, allow_args);
 
     // A pre-build is part of its sweep's shape: logged, shown as the status,
     // printed only under `--commands`.
@@ -907,6 +920,10 @@ fn zero_test_run(p: &cargo_filter::ParsedTestResults) -> bool {
 /// always-set vars (e.g. nidhogg's `CARGO_TARGET_TMPDIR`). Sweep
 /// values come first; project values append (so a sweep can shadow a
 /// project default if it really needs to).
+///
+/// The one composition rule for every phase - test, pre-build, clippy,
+/// rustdoc and the coverage enumeration - so no two of them can disagree
+/// about which side of a collision cargo sees.
 pub(crate) fn merged_env(
     sweep_env: &std::collections::BTreeMap<String, String>,
     project_env: &[(String, String)],
@@ -2034,6 +2051,14 @@ warning: z [too_many_lines]
         let enumeration = shape_selection_args(&pkg);
         assert!(enumeration.iter().any(|a| a == pin), "audit: {enumeration:?}");
 
+        // The `build_packages` pre-build and the rustdoc phase compile the
+        // sweep too; both once went out without the pin.
+        let pre_build = pre_build_args(&pkg, "daemon", &[]);
+        assert!(pre_build.iter().any(|a| a == pin), "pre-build: {pre_build:?}");
+
+        let doc = doc_args(&pkg, &[], &crate::config::RustdocConfig::default());
+        assert!(doc.iter().any(|a| a == pin), "rustdoc: {doc:?}");
+
         // The pin is a cargo option, so it must land before the `--` split or
         // libtest receives it.
         if let Some(split) = test_args.iter().position(|a| a == "--") {
@@ -2056,6 +2081,7 @@ warning: z [too_many_lines]
             sweep_selection_args(&plain, &[]),
             clippy_args(&plain, &[], &[]),
             shape_selection_args(&plain),
+            pre_build_args(&plain, "bin", &[]),
         ] {
             assert!(!args.iter().any(|a| a == "-Zfeature-unification"), "got: {args:?}");
         }

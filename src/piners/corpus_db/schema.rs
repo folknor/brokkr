@@ -123,14 +123,35 @@ impl CorpusDb {
     /// Open the database read-only for queries. The read-only flag is the
     /// load-bearing guard behind the `--where`/`--sql` raw-SQL paths: SQLite
     /// rejects any write regardless of what the interpolated SQL asks for.
+    ///
+    /// A store written by an older brokkr is brought to the current schema
+    /// first, through a short-lived read-write [`Self::open`]: the read paths
+    /// (the runtime ceiling's `wall_ms`, the `boundary_*` columns) name columns
+    /// only a migrated store has, and a read-only connection cannot migrate -
+    /// so without this step an old `runs.db` failed every query and blocked
+    /// every corpus run short of `--force`. The migrations are additive column
+    /// adds; the read-only connection the caller gets is opened afterwards.
     pub fn open_readonly(path: &Path) -> Result<Self, DevError> {
+        let conn = Self::readonly_conn(path)?;
+        let current: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if current >= migrate::SCHEMA_VERSION {
+            return Ok(Self { conn });
+        }
+        drop(conn);
+        drop(Self::open(path)?);
+        Ok(Self {
+            conn: Self::readonly_conn(path)?,
+        })
+    }
+
+    fn readonly_conn(path: &Path) -> Result<rusqlite::Connection, DevError> {
         let conn = rusqlite::Connection::open_with_flags(
             path,
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
         )?;
         // Belt-and-suspenders; read-only open already blocks writes.
         conn.pragma_update(None, "query_only", "ON").ok();
-        Ok(Self { conn })
+        Ok(conn)
     }
 
     /// Borrow the underlying connection (crate-internal, for sibling modules).
@@ -145,5 +166,40 @@ impl CorpusDb {
         let conn = rusqlite::Connection::open_in_memory()?;
         conn.execute_batch(SCHEMA)?;
         Ok(Self { conn })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::*;
+
+    #[test]
+    fn readonly_open_migrates_an_older_store_first() {
+        // A pre-v4 store on disk: `run` has no `wall_ms`, and `disposition`
+        // is the v1 shape. The ceiling's query names `wall_ms`.
+        let dir = crate::test_scratch::scratch("piners_corpus_db_schema", "old_store");
+        let path = dir.join("runs.db");
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE run (run_id INTEGER PRIMARY KEY, started_at TEXT NOT NULL, \
+                     selector TEXT NOT NULL, gated INTEGER NOT NULL, result TEXT NOT NULL, \
+                     fail_reason TEXT, harness_exit_code INTEGER, probe_count INTEGER NOT NULL, \
+                     harness_stderr TEXT);
+                 CREATE TABLE disposition (run_id INTEGER NOT NULL, probe TEXT NOT NULL, \
+                     outcome TEXT NOT NULL, disposition TEXT NOT NULL, PRIMARY KEY (run_id, probe));",
+            )
+            .unwrap();
+            conn.pragma_update(None, "user_version", 1).unwrap();
+        }
+
+        let db = CorpusDb::open_readonly(&path).unwrap();
+        assert_eq!(db.estimated_wall_ms(&["a".to_owned()], true).unwrap(), None);
+        let version: i64 = db
+            .conn()
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, migrate::SCHEMA_VERSION);
     }
 }

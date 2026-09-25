@@ -38,14 +38,22 @@ pub fn run(
         &build::BuildConfig::release_with_owned_features(Some("pbfhogg-cli"), &paths.features),
         project_root,
     )?;
-    let osc_path = crate::resolve::get_default_osc_entry(dataset, paths)
-        .map(|entry| paths.data_dir.join(&entry.file))
-        .filter(|p| p.exists());
+    // The seq the OSC is registered under travels with it: it keys the
+    // merged-PBF cache (same rule as `get_default_osc_entry` - exactly one
+    // osc entry, or none).
+    let default_osc = paths
+        .datasets
+        .get(dataset)
+        .filter(|ds| ds.osc.len() == 1)
+        .and_then(|ds| ds.osc.iter().next())
+        .map(|(seq, entry)| (seq.as_str(), paths.data_dir.join(&entry.file)))
+        .filter(|(_, p)| p.exists());
     bench_commands::run(
         harness,
         &binary,
         pbf_path,
-        osc_path.as_deref(),
+        default_osc.as_ref().map(|(_, p)| p.as_path()),
+        default_osc.as_ref().map(|(seq, _)| *seq),
         Some(&paths.scratch_dir),
         runs,
         bench_commands::ALL_COMMANDS,

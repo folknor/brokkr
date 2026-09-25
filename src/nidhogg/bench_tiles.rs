@@ -361,20 +361,33 @@ fn spawn_server(
         })
 }
 
+/// Ceiling on one tile request. The server is a child brokkr spawned under
+/// the global lock; one that accepts and then hangs must fail the run, not
+/// hold the lock forever.
+const TILE_MAX_TIME_SECS: &str = "30";
+
 /// Fire a single tile GET request. Non-fatal on HTTP errors (tile misses
 /// are valid - the server counts them in tile_misses).
 fn curl_get_tile(port: u16, z: u32, x: u32, y: u32) -> Result<(), DevError> {
     let url = super::client::tile_url(port, z, x, y);
 
     let output = Command::new("curl")
-        .args(["-s", "-o", "/dev/null", &url])
+        .args([
+            "-sS",
+            "--connect-timeout",
+            "5",
+            "--max-time",
+            TILE_MAX_TIME_SECS,
+            "-o",
+            "/dev/null",
+            &url,
+        ])
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .output()
-        .map_err(|e| DevError::Subprocess {
+        .map_err(|error| DevError::Spawn {
             program: "curl".into(),
-            code: None,
-            stderr: e.to_string(),
+            error,
         })?;
 
     // Don't fail on HTTP errors (404 = tile miss, still useful data).
@@ -383,7 +396,7 @@ fn curl_get_tile(port: u16, z: u32, x: u32, y: u32) -> Result<(), DevError> {
         return Err(DevError::Subprocess {
             program: "curl".into(),
             code: output.status.code(),
-            stderr: String::new(),
+            stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
         });
     }
 

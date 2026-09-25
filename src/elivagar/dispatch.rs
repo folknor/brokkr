@@ -154,7 +154,7 @@ fn run_elivagar_run(req: &MeasureRequest, command: &ElivagarCommand) -> Result<(
                 req.dataset,
                 req.variant,
                 req.effective_build_root(),
-            );
+            )?;
 
             let ms = crate::duration_ms(out.elapsed);
             output::run_msg(&format!("elapsed={ms}ms"));
@@ -306,16 +306,17 @@ fn run_elivagar_wallclock(req: &MeasureRequest, command: &ElivagarCommand) -> Re
         req.dataset,
         req.variant,
         req.effective_build_root(),
-    );
-
-    Ok(())
+    )
 }
 
 /// Elivagar internal benchmark for cargo examples (PmtilesWriter, NodeStore).
 ///
-/// Builds the example binary, runs via `run_internal` (the example handles
-/// its own iteration), and stores results. The harness does 1 external run
-/// while the example does N internal runs.
+/// Delegates to the same `bench_pmtiles::run` / `bench_node_store::run` that
+/// `bench all` uses, so one command name files one row shape (`tiles` /
+/// `nodes_millions` plus `internal_runs`) whichever entry point produced it.
+/// The harness does 1 external run while the example does `req.runs()`
+/// internal runs - this path used to hard-code `--runs 1` while printing
+/// "N run(s)", and recorded no values at all.
 fn run_elivagar_internal(req: &MeasureRequest, command: &ElivagarCommand) -> Result<(), DevError> {
     use crate::context::HarnessContext;
 
@@ -329,59 +330,19 @@ fn run_elivagar_internal(req: &MeasureRequest, command: &ElivagarCommand) -> Res
     )?
     .with_request(req);
 
-    let example = command.example().ok_or_else(|| {
-        DevError::Config(format!("command '{}' has no cargo example", command.id()))
-    })?;
-
     let build_root = req.build_root.unwrap_or(req.project_root);
-    let binary = crate::build::cargo_build(
-        &crate::build::BuildConfig {
-            package: None,
-            bin: None,
-            example: Some(example.into()),
-            features: vec![],
-            default_features: true,
-            profile: "release",
-        },
-        build_root,
-    )?;
-    let binary_str = binary.display().to_string();
-
-    // build_args returns ["--tiles", "500000", "--runs", "1"] or similar.
-    // We pass an empty pbf_str and dummy paths since examples don't need them.
-    let args = command.build_args("", std::path::Path::new(""), std::path::Path::new(""))?;
-    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-
-    output::bench_msg(&format!("{}, {} run(s)", command.id(), req.runs()));
-
-    let config = BenchConfig {
-        command: command.result_command().into(),
-        mode: None,
-        input_file: None,
-        input_mb: None,
-        cargo_features: None,
-        cargo_profile: crate::build::CargoProfile::Release,
-        runs: 1, // example handles its own iterations
-        cli_args: None,
-        brokkr_args: None,
-        metadata: command.metadata(),
-    };
-
-    ctx.harness.run_internal(&config, |_i| {
-        let captured = output::run_captured(&binary_str, &arg_refs, build_root)?;
-        captured.check_success(&binary_str)?;
-        let ms = harness::elapsed_to_ms(&captured.elapsed);
-        Ok(crate::harness::BenchResult {
-            elapsed_ms: ms,
-            elapsed_us: None,
-            kv: vec![],
-            iterations: Vec::new(),
-            distribution: None,
-            hotpath: None,
-        })
-    })?;
-
-    Ok(())
+    match command {
+        ElivagarCommand::PmtilesWriter { tiles } => {
+            elivagar::bench_pmtiles::run(&ctx.harness, build_root, *tiles, req.runs())
+        }
+        ElivagarCommand::NodeStore { nodes } => {
+            elivagar::bench_node_store::run(&ctx.harness, build_root, *nodes, req.runs())
+        }
+        _ => Err(DevError::Config(format!(
+            "command '{}' has no cargo example",
+            command.id()
+        ))),
+    }
 }
 
 /// Elivagar hotpath/alloc: build with hotpath feature, run with instrumentation.
@@ -575,6 +536,13 @@ const OUTPUT_RETENTION: usize = 5;
 /// [`OUTPUT_RETENTION`] archives per dataset.
 ///
 /// For non-Tilegen commands, cleans up output files as before.
+///
+/// Every way of ending without a durable archive is an `Err`, not a logged
+/// line: a tilegen run whose output never reaches the store has not produced
+/// what `pmtiles-inspect`/`regress`/`pmtiles-corpus` will go looking for, and
+/// returning success there let a caller (or a script) move on to a resolver
+/// that then reports "no build" with nothing tying it to this run. The scratch
+/// output is left in place on every failure path so it can be moved by hand.
 fn rename_elivagar_output(
     command: &ElivagarCommand,
     scratch_dir: &std::path::Path,
@@ -583,10 +551,10 @@ fn rename_elivagar_output(
     dataset: &str,
     variant: &str,
     git_root: &std::path::Path,
-) {
+) -> Result<(), DevError> {
     let output_files = command.output_files(scratch_dir);
     if output_files.is_empty() {
-        return;
+        return Ok(());
     }
 
     // Only Tilegen produces output to rename.
@@ -594,7 +562,7 @@ fn rename_elivagar_output(
         for path in &output_files {
             std::fs::remove_file(path).ok();
         }
-        return;
+        return Ok(());
     }
 
     // Refuse to use a wiped directory as the durable store: elivagar wipes its
@@ -604,12 +572,12 @@ fn rename_elivagar_output(
     // mis-points `output` at scratch or the tmp dir.
     let tmp_dir = data_dir.join("tilegen_tmp");
     if output_dir == scratch_dir || output_dir == tmp_dir {
-        output::error(&format!(
+        return Err(DevError::Config(format!(
             "output dir {} coincides with elivagar's scratch/tmp dir; \
-             set a distinct [<host>].output in brokkr.toml. Leaving output in place.",
-            output_dir.display()
-        ));
-        return;
+             set a distinct [<host>].output in brokkr.toml. Output left in {}",
+            output_dir.display(),
+            scratch_dir.display(),
+        )));
     }
 
     // Provenance must name the commit whose code produced these tiles. For a
@@ -617,30 +585,48 @@ fn rename_elivagar_output(
     // main tree's HEAD - collecting from the main tree would stamp an
     // unrelated commit onto an old build's output (and feed the same
     // misattribution as a stale binary). Callers pass `effective_build_root()`.
+    //
+    // A git failure is fatal rather than a `-unknown` suffix: no resolver
+    // constructs that name, so the archive would sit in the store unreachable
+    // by every consumer while the run reported success.
     let commit = crate::git::collect(git_root)
-        .map(|g| g.commit)
-        .unwrap_or_else(|_| "unknown".into());
+        .map_err(|e| {
+            DevError::Config(format!(
+                "cannot name the tilegen archive: git commit of {} unavailable ({e}); \
+                 output left in {}",
+                git_root.display(),
+                scratch_dir.display(),
+            ))
+        })?
+        .commit;
 
-    if let Err(e) = std::fs::create_dir_all(output_dir) {
-        output::error(&format!("failed to create output dir: {e}"));
-        return;
-    }
+    std::fs::create_dir_all(output_dir).map_err(|e| {
+        DevError::Config(format!(
+            "failed to create output dir {}: {e}; output left in {}",
+            output_dir.display(),
+            scratch_dir.display(),
+        ))
+    })?;
 
     for path in &output_files {
-        if path.exists() {
-            let dest = crate::resolve::pmtiles_archive_name(output_dir, dataset, variant, &commit);
-            match std::fs::rename(path, &dest) {
-                Ok(()) => {
-                    output::run_msg(&format!("output: {}", dest.display()));
-                    prune_output_dir(output_dir, dataset, variant);
-                }
-                Err(e) => {
-                    output::error(&format!("failed to rename output: {e}"));
-                    // Leave the original in place.
-                }
-            }
+        if !path.exists() {
+            return Err(DevError::Config(format!(
+                "tilegen exited 0 but wrote no output at {}",
+                path.display()
+            )));
         }
+        let dest = crate::resolve::pmtiles_archive_name(output_dir, dataset, variant, &commit);
+        std::fs::rename(path, &dest).map_err(|e| {
+            DevError::Config(format!(
+                "failed to move {} to {}: {e}; output left in place",
+                path.display(),
+                dest.display(),
+            ))
+        })?;
+        output::run_msg(&format!("output: {}", dest.display()));
+        prune_output_dir(output_dir, dataset, variant);
     }
+    Ok(())
 }
 
 /// Keep only the [`OUTPUT_RETENTION`] most-recent

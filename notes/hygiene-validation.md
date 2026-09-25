@@ -209,7 +209,7 @@ Check core:
 - `CheckEntry.harness`/`Harness::Nextest` docs say the engine runs "under the project's own `.config/nextest.toml`" and "owns build, list and run"; check.md says the file is never opened and brokkr owns compile shape (config-cli-bootstrap reported the same).
 - `Certifies` doc: "until coverage accounting exists".
 - `SkipSpec` doc and `ResolvedSweep.qualified_skips` ("only on process-isolated sweeps, enforced at resolve time") ignore nextest and the ad-hoc path.
-- `ResolvedSweep.parallel_budget` "enforced at resolve time" — actually `reject_conflicting_lanes` at run time.
+- `ResolvedSweep.parallel_budget` "enforced at resolve time" - actually `reject_conflicting_lanes` at run time.
 - `ResolvedSweep.build_packages` says "`cargo build --release`"; the pre-build uses the sweep profile.
 - cargo_filter module doc says the text path is the "rare build-error case"; it runs on every green test sweep (`filter_clippy_in_tree`), pre-builds and `brokkr test`; `ClippyParse` "errors-first" holds only for text.
 - `decide_active_sweeps` doc ("Err only when --profile doesn't resolve").
@@ -221,7 +221,7 @@ Test execution:
 - `check_cmd/output.rs`: "parallel ⇒ no watchdog, one whole-sweep timeout instead"; `build_test_env`: check "always tests in the dev profile".
 - `parallel.rs` header "Slices are proportional to test count" (duration-weighted now); "the per-binary runs below re-enter cargo"; the `partition_target_selectors` rationale describes the old re-entry design; "sequential parallel path"; `binaries.rs`' `-Zfeature-unification` hint says "per-binary runs".
 - `nextest.rs` "NOT YET WIRED" with `#[allow(dead_code)]` on items `nextest_lane` uses; measurements recorded against "cargo-nextest 0.9.143" while the engine is nextest-runner 0.124.
-- `isolate.rs`: "replicating [cargo's env] is nextest's whole job, not brokkr's" — `direct_runtime.rs` now does it.
+- `isolate.rs`: "replicating [cargo's env] is nextest's whole job, not brokkr's" - `direct_runtime.rs` now does it.
 - `Ceilings::one_test` on the isolated lane (and check.md "process is the unit of exactly one test"): `cargo test <selection> -- --exact name` spawns every selected binary and the plan merges names across binaries; the 20s wall covers cargo startup plus N launches.
 - `test_scratch.rs` calls itself "the one scratch-directory allocator" and cites "Eleven modules" (see PLT-038, PLT-041); its uniqueness guard is process-local (no-op under process-per-test or across the two bin crates).
 - `--timeout` help: "Exact test name to run (substring filter…)".
@@ -229,7 +229,7 @@ Test execution:
 `check.md`:
 - "a tenth phase, `coverage`" (predates rustdoc and install_feature); the opening phase list omits rustdoc and install_feature.
 - Rustdoc section "capped … like clippy's" vs "nothing is capped".
-- "must not set `--format` … on a parallel lane" — applies to every lane; "Serial vs parallel" says the serial lane "attribut[es] a stall … from libtest's sequential output"; repeats the stale selector rationale.
+- "must not set `--format` … on a parallel lane" - applies to every lane; "Serial vs parallel" says the serial lane "attribut[es] a stall … from libtest's sequential output"; repeats the stale selector rationale.
 - Says whole-sweep ceilings (30 min) back up and stop the run; unreachable inside `check` (VAL-010).
 
 ## VAL-026 - Misattached doc comments and stale naming in check core
@@ -247,7 +247,7 @@ Reported by: check-core, test-execution.
 - `format_hung_test` always says "killed cargo process group", even when the leader is a directly executed test binary; the serial lane's "a test exceeded its {ceiling}s budget" prints 300s for an idle kill; the nextest zero-work error says "cargo test: zero tests ran".
 - `brokkr test` hand-rolls `println!("[test]    …")` ~15 times and writes stdout/stderr directly in `flush_sink` and forwarders (no `test_msg`; bypasses quiet and run log). The nextest engine prints straight to the terminal (`ReporterOutput::Terminal`) on green runs, breaking "one grouped line per phase on green". See PLT-004.
 - Pluralisation is ad hoc: `format_clippy_multi` spells `error`/`errors`, `dead filter{}` pluralises manually, `filter_clippy_in_tree` prints `1 errors` (pinned by a test).
-- "skipped" goes to stdout when caused by `-p`, to the log when caused by config — deliberate and documented, but each site re-implements it.
+- "skipped" goes to stdout when caused by `-p`, to the log when caused by config - deliberate and documented, but each site re-implements it.
 - Silent where something significant happens: watchdog thread spawn failure (`.ok()`, no ceilings), run log open failure, `PHASE_CLOCK` poisoned (ceiling skipped), the `BuildConfig` sink chosen because of an unmodelled env rustflags source.
 - The verdict line lists every `[lints] allow` entry unbounded (the `allow_exact` list was collapsed for this reason); `invocation:` echoes all forwarded args.
 - `DevError::Verify` is used for test timeouts.
@@ -278,7 +278,7 @@ Enforcement proposed: one shared case-folded table with a test that every prose 
 
 Reported by: convention-engines.
 
-- Dependency kind (`None` = normal, `"dev"`, `"build"`): `dependency_rules` (`DependencyKind::from`, `parse_config_kind`, `as_str` — three spellings in one file), `publish_cycle` (`KIND_*` constants and its own match), `duplicate_version`/`focus` (`kind.is_none()`), `native_code` (`== Some("build")`).
+- Dependency kind (`None` = normal, `"dev"`, `"build"`): `dependency_rules` (`DependencyKind::from`, `parse_config_kind`, `as_str` - three spellings in one file), `publish_cycle` (`KIND_*` constants and its own match), `duplicate_version`/`focus` (`kind.is_none()`), `native_code` (`== Some("build")`).
 - Dependency-table names: `manifest::is_dependency_table_name` has 3; `workspace_dep::collect_from` has 5 including `dev_dependencies`/`build_dependencies` aliases, so `sort_dependencies`, `declared_deps` and `version_align` ignore alias tables `workspace_dep` reads.
 - Two TOML parsers (`toml_edit`, `toml`) read the same manifests.
 
@@ -349,9 +349,9 @@ Reported by: convention-engines.
 Reported by: convention-engines.
 
 - `globs::build_set` uses `Glob::new` (default `literal_separator(false)`), so `*` matches `/`: `crates/*/src/**` (the preset example in `brokkr.toml.md`) also matches deeper paths. One-line `GlobBuilder` fix in the single owner.
-- `manifest.adapter_group`: a `marker` matching no comment group silently no-ops; it compares dependency keys, so `foo = { package = "adapter" }` passes (dependency_rules guards this rename); `forbidden_in` names are never checked against real packages (dependency_rules errors on unknown `from`) — two implementations of one rule with opposite validation.
+- `manifest.adapter_group`: a `marker` matching no comment group silently no-ops; it compares dependency keys, so `foo = { package = "adapter" }` passes (dependency_rules guards this rename); `forbidden_in` names are never checked against real packages (dependency_rules errors on unknown `from`) - two implementations of one rule with opposite validation.
 - `version_align`: `find_dep_version` finds no version for `{ workspace = true }`, so the check does nothing in inheriting members.
-- Entries that match nothing are silent: gremlins `exclude`, textlint `exclude`, header `exempt`, manifest `exclude`/`shape_exclude`, `workspace_dep_ignore`, dependency_rule `except` — inconsistent with the parser's "dead preset config is an error" rule.
+- Entries that match nothing are silent: gremlins `exclude`, textlint `exclude`, header `exempt`, manifest `exclude`/`shape_exclude`, `workspace_dep_ignore`, dependency_rule `except` - inconsistent with the parser's "dead preset config is an error" rule.
 - Textlint's file count aggregates across rules, so one rule's dead `paths` is hidden whenever another matches (docs promise "a shrinking count" gives it away); header and manifest have no count, so a `[header].paths` matching nothing is green.
 - `gremlins::tracked_files` drops non-UTF-8 paths silently; `scope::classify_status` treats the same case as "cannot vouch" (fail-closed).
 
@@ -361,7 +361,7 @@ Reported by: convention-engines.
 
 - `script_check.rs` module doc: "The child is given `BROKKR_CARGO=1`" (removed; `run_one` passes empty env); lists a nonexistent "style" phase.
 - `textlint.rs` header: "Four bounded capabilities… the *only* two predicates: no arbitrary multiline" (now also `region`, `join_wrapped_use`, `skip_after`, `only_if_file_matches(_above)`, four context windows); CLAUDE.md's textlint line lists only the old four.
-- `lex.rs`: "(and, later, logical-line joins)" — joins exist.
+- `lex.rs`: "(and, later, logical-line joins)" - joins exist.
 - `deps/mod.rs`: "v1 phases: `duplicate_version`" (8 phases); `deps` CLI help "v1 ships `duplicate_version`" (config-cli-bootstrap).
 - `deps.md`: "serde-tagged like `CheckEvent` in `src/cargo_json.rs`" (removed); "Shells out to `cargo metadata` once per run" (twice plus `rustc -vV`); "Dispatch lands in `src/main.rs`" (in `main_parts/bootstrap.rs`); `OutdatedComplete` "ccu emits" (brokkr emits); summary lists "the phases that ran" (VAL-033).
 - `check.md` manifest: "today `sort_dependencies`" (about 10 checks).

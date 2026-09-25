@@ -14,7 +14,7 @@ use std::path::Path;
 
 use xxhash_rust::xxh3::Xxh3;
 
-use super::super::eliv::{tile_id_to_zxy, xy_to_tile_id};
+use super::super::eliv::{next_zoom_boundary, tile_id_to_zxy, xy_to_tile_id};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DigestMode {
@@ -349,8 +349,17 @@ fn parse_leaves_text(text: &str) -> io::Result<Vec<LeafRun>> {
         let run_length = u32::try_from(parse_u64(p.get(3).copied())?)
             .map_err(|_| invalid("leaf run length out of range"))?;
         let hash = parse_hex(p[4])?;
+        let tile_id = checked_tile_id(z, x, y)?;
+        // A leaf run is a span WITHIN one zoom (see `compute`), so a committed
+        // run that crosses its zoom's end is damage - and left unchecked it
+        // hands `fold_leaves` a per-tile loop of up to u32::MAX iterations.
+        if run_length == 0
+            || tile_id + u64::from(run_length) > next_zoom_boundary(tile_id)
+        {
+            return Err(invalid("leaf run length out of range for its zoom"));
+        }
         out.push(LeafRun {
-            tile_id: xy_to_tile_id(z, x, y),
+            tile_id,
             run_length,
             hash,
         });
@@ -438,6 +447,21 @@ fn parse_cell(token: Option<&str>) -> io::Result<u64> {
         .next()
         .and_then(|t| t.parse().ok())
         .ok_or_else(|| invalid("cell y"))?;
+    checked_tile_id(z, x, y)
+}
+
+/// The deepest zoom a committed coordinate may name: [`next_zoom_boundary`]
+/// saturates from z30, so past it a run's zoom-end check stops meaning anything.
+/// Far beyond any zoom elivagar writes (z14).
+const MAX_COMMITTED_ZOOM: u8 = 29;
+
+/// `xy_to_tile_id` for a coordinate read from committed text: the zoom and the
+/// x/y range are checked first, because the addressing math assumes a valid
+/// tile and a damaged file is exactly what does not provide one.
+fn checked_tile_id(z: u8, x: u32, y: u32) -> io::Result<u64> {
+    if z > MAX_COMMITTED_ZOOM || u64::from(x) >= 1u64 << z || u64::from(y) >= 1u64 << z {
+        return Err(invalid(format!("tile coordinate {z}/{x}/{y} out of range")));
+    }
     Ok(xy_to_tile_id(z, x, y))
 }
 
@@ -530,6 +554,22 @@ mod tests {
         assert!(parse_baseline_text(&headerless).is_err());
         // A version this parser does not speak is not silently read as v1.
         assert!(parse_baseline_text(&text.replace("v1", "v2")).is_err());
+    }
+
+    #[test]
+    fn leaves_reject_out_of_range_coordinates_and_zoom_crossing_runs() {
+        let head = "elivagar-corpus-leaves v1\n";
+        let h = hex(1);
+        // x beyond the z2 grid.
+        assert!(parse_leaves_text(&format!("{head}2 4 0 1 {h}\n")).is_err());
+        // A zoom the addressing math cannot place.
+        assert!(parse_leaves_text(&format!("{head}40 0 0 1 {h}\n")).is_err());
+        // z1 holds 4 tiles; a run of 5 from its first crosses into z2.
+        assert!(parse_leaves_text(&format!("{head}1 0 0 5 {h}\n")).is_err());
+        // An empty run.
+        assert!(parse_leaves_text(&format!("{head}1 0 0 0 {h}\n")).is_err());
+        // The whole of z1 is fine.
+        assert!(parse_leaves_text(&format!("{head}1 0 0 4 {h}\n")).is_ok());
     }
 
     #[test]

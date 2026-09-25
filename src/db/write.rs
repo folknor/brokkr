@@ -1,6 +1,7 @@
 //! Insert operations for the results database.
 
 use super::ResultsDb;
+use super::like::{ESCAPE, prefix_pattern, require_prefix};
 use super::schema::INSERT_SQL;
 use super::types::{KvPair, KvValue, RunRow, generate_uuid, short_uuid};
 use crate::error::DevError;
@@ -33,12 +34,16 @@ impl ResultsDb {
     /// transaction.
     ///
     /// Returns the number of `runs` rows removed.
+    ///
+    /// The prefix matches literally, and an empty one is refused: `LIKE '%'`
+    /// is every row, which is what `brokkr invalidate "" -f` used to delete.
     pub fn delete_by_uuid_prefix(&self, uuid_prefix: &str) -> Result<usize, DevError> {
+        require_prefix(uuid_prefix, "uuid")?;
+        let pattern = prefix_pattern(uuid_prefix);
         let tx = self.conn.unchecked_transaction()?;
         let ids: Vec<i64> = {
-            let mut stmt =
-                tx.prepare("SELECT id FROM runs WHERE uuid LIKE ?1||'%'")?;
-            let rows = stmt.query_map(rusqlite::params![uuid_prefix], |row| row.get::<_, i64>(0))?;
+            let mut stmt = tx.prepare(&format!("SELECT id FROM runs WHERE uuid LIKE ?1 {ESCAPE}"))?;
+            let rows = stmt.query_map(rusqlite::params![pattern], |row| row.get::<_, i64>(0))?;
             rows.collect::<Result<Vec<_>, _>>()?
         };
         for id in &ids {
@@ -49,8 +54,8 @@ impl ResultsDb {
             tx.execute("DELETE FROM hotpath_threads WHERE run_id = ?1", rusqlite::params![id])?;
         }
         let removed = tx.execute(
-            "DELETE FROM runs WHERE uuid LIKE ?1||'%'",
-            rusqlite::params![uuid_prefix],
+            &format!("DELETE FROM runs WHERE uuid LIKE ?1 {ESCAPE}"),
+            rusqlite::params![pattern],
         )?;
         tx.commit()?;
         Ok(removed)
@@ -115,9 +120,12 @@ fn insert_inner(conn: &rusqlite::Connection, row: &RunRow, uuid: &str) -> Result
         )?;
     }
 
-    // Key-value pairs.
+    // Key-value pairs. Last one wins: `build_row` appends its sources in
+    // increasing precedence (metadata, env capture, `prev.*`, then the run's
+    // own stderr counters), so a later pair with the same key is the one the
+    // row must keep.
     for kv in &row.kv {
-        insert_kv_row(conn, run_id, kv)?;
+        insert_kv_row(conn, run_id, kv, OnConflict::Replace)?;
     }
 
     // Hotpath child rows.
@@ -153,29 +161,48 @@ fn insert_inner(conn: &rusqlite::Connection, row: &RunRow, uuid: &str) -> Result
                 ],
             )?;
         }
-        // Thread summary stats into run_kv.
+        // Thread summary stats into run_kv. These yield to anything already
+        // in `row.kv` under the same key: the run's own report is primary.
         for kv in &hp.thread_summary {
-            insert_kv_row(conn, run_id, kv)?;
+            insert_kv_row(conn, run_id, kv, OnConflict::Ignore)?;
         }
     }
 
     Ok(short_uuid(uuid))
 }
 
-fn insert_kv_row(conn: &rusqlite::Connection, run_id: i64, kv: &KvPair) -> Result<(), DevError> {
-    // OR IGNORE: row.kv (stderr) is inserted first, thread_summary second.
-    // Duplicates (same run_id+key) are silently skipped, keeping the stderr value.
+/// What a pair does when its `(run_id, key)` is already in `run_kv`.
+#[derive(Clone, Copy)]
+enum OnConflict {
+    /// Overwrite: the later pair wins.
+    Replace,
+    /// Skip: the earlier pair wins.
+    Ignore,
+}
+
+fn insert_kv_row(
+    conn: &rusqlite::Connection,
+    run_id: i64,
+    kv: &KvPair,
+    on_conflict: OnConflict,
+) -> Result<(), DevError> {
+    // REPLACE deletes the old row and inserts the new one whole, so a key
+    // that changes type (Int then Text) leaves no stale value column behind.
+    let verb = match on_conflict {
+        OnConflict::Replace => "REPLACE",
+        OnConflict::Ignore => "IGNORE",
+    };
     match &kv.value {
         KvValue::Int(v) => conn.execute(
-            "INSERT OR IGNORE INTO run_kv (run_id, key, value_int) VALUES (?1, ?2, ?3)",
+            &format!("INSERT OR {verb} INTO run_kv (run_id, key, value_int) VALUES (?1, ?2, ?3)"),
             rusqlite::params![run_id, kv.key, v],
         )?,
         KvValue::Real(v) => conn.execute(
-            "INSERT OR IGNORE INTO run_kv (run_id, key, value_real) VALUES (?1, ?2, ?3)",
+            &format!("INSERT OR {verb} INTO run_kv (run_id, key, value_real) VALUES (?1, ?2, ?3)"),
             rusqlite::params![run_id, kv.key, v],
         )?,
         KvValue::Text(v) => conn.execute(
-            "INSERT OR IGNORE INTO run_kv (run_id, key, value_text) VALUES (?1, ?2, ?3)",
+            &format!("INSERT OR {verb} INTO run_kv (run_id, key, value_text) VALUES (?1, ?2, ?3)"),
             rusqlite::params![run_id, kv.key, v],
         )?,
     };
@@ -205,7 +232,7 @@ mod tests {
         clippy::let_underscore_must_use,
         clippy::useless_vec
     )]
-    use crate::db::{QueryFilter, ResultsDb, RunRow};
+    use crate::db::{HotpathData, KvPair, QueryFilter, ResultsDb, RunRow};
 
     #[test]
     fn db_open_and_insert_roundtrip() {
@@ -288,5 +315,96 @@ mod tests {
 
         drop(std::fs::remove_file(&db_path));
         drop(std::fs::remove_dir(&dir));
+    }
+
+    fn kv_row(kv: Vec<KvPair>, hotpath: Option<HotpathData>) -> RunRow {
+        RunRow {
+            hostname: String::from("testhost"),
+            commit: String::from("aabbccdd"),
+            subject: String::from("test"),
+            command: String::from("read"),
+            mode: Some(String::from("bench")),
+            input_file: None,
+            input_mb: None,
+            elapsed_ms: 1,
+            elapsed_us: None,
+            peak_rss_mb: None,
+            cargo_features: None,
+            cargo_profile: crate::build::CargoProfile::Release,
+            kernel: None,
+            cpu_governor: None,
+            avail_memory_mb: None,
+            storage_notes: None,
+            cli_args: None,
+            brokkr_args: None,
+            project: String::from("test"),
+            stop_marker: None,
+            kv,
+            iterations: Vec::new(),
+            distribution: None,
+            hotpath,
+        }
+    }
+
+    fn kv_text(db: &ResultsDb, short: &str, key: &str) -> String {
+        let rows = db.query_by_uuid(short).expect("query");
+        let pair = rows[0].kv.iter().find(|p| p.key == key).expect("key present");
+        pair.value.to_string()
+    }
+
+    // `build_row` appends metadata, env, prev.* and then the run's own stderr
+    // counters, documenting that the runtime value wins a key collision. That
+    // only holds if the later pair is the one stored.
+    #[test]
+    fn later_kv_pair_wins_a_key_collision() {
+        let db_path = crate::test_scratch::scratch("db-write", "kv_last_wins").join("t.db");
+        let db = ResultsDb::open(&db_path).expect("open");
+        let row = kv_row(
+            vec![KvPair::text("meta.cache", "harness"), KvPair::int("meta.cache", 7)],
+            None,
+        );
+        let (_, short) = db.insert(&row).expect("insert");
+        assert_eq!(kv_text(&db, &short, "meta.cache"), "7");
+    }
+
+    #[test]
+    fn thread_summary_yields_to_row_kv() {
+        let db_path = crate::test_scratch::scratch("db-write", "kv_thread_summary").join("t.db");
+        let db = ResultsDb::open(&db_path).expect("open");
+        let hp = HotpathData {
+            functions: Vec::new(),
+            threads: Vec::new(),
+            thread_summary: vec![KvPair::text("threads.rss_bytes", "summary")],
+        };
+        let row = kv_row(vec![KvPair::text("threads.rss_bytes", "stderr")], Some(hp));
+        let (_, short) = db.insert(&row).expect("insert");
+        assert_eq!(kv_text(&db, &short, "threads.rss_bytes"), "stderr");
+    }
+
+    #[test]
+    fn delete_refuses_empty_prefix() {
+        let db_path = crate::test_scratch::scratch("db-write", "delete_empty").join("t.db");
+        let db = ResultsDb::open(&db_path).expect("open");
+        let (_, short) = db.insert(&kv_row(Vec::new(), None)).expect("insert");
+        assert!(db.delete_by_uuid_prefix("").is_err());
+        assert_eq!(db.query_by_uuid(&short).expect("query").len(), 1, "nothing deleted");
+        assert_eq!(db.delete_by_uuid_prefix(&short).expect("delete"), 1);
+    }
+
+    // The index used to be created only by the v0->v1 migration, which a fresh
+    // database never runs.
+    #[test]
+    fn fresh_db_has_uuid_index() {
+        let db_path = crate::test_scratch::scratch("db-write", "uuid_index").join("t.db");
+        let db = ResultsDb::open(&db_path).expect("open");
+        let count: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_runs_uuid'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
     }
 }

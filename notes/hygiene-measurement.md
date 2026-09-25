@@ -111,7 +111,7 @@ Reported by: measurement-storage.
 
 Reported by: measurement-storage.
 
-`insert` uses hand-written `BEGIN`/`COMMIT` strings (a failed `COMMIT` leaves the transaction open) while `delete` uses `unchecked_transaction`. Two ms-rounding policies (floor in `elapsed_to_ms`, nearest in `us_to_ms`; BUG-048). The compare pair key is a tab-joined string split back apart; `pair_key_tabs_in_values_still_bleed` documents the resulting bug instead of fixing it — a tuple key would make it unrepresentable.
+`insert` uses hand-written `BEGIN`/`COMMIT` strings (a failed `COMMIT` leaves the transaction open) while `delete` uses `unchecked_transaction`. Two ms-rounding policies (floor in `elapsed_to_ms`, nearest in `us_to_ms`; BUG-048). The compare pair key is a tab-joined string split back apart; `pair_key_tabs_in_values_still_bleed` documents the resulting bug instead of fixing it - a tuple key would make it unrepresentable.
 
 ## MEA-016 - Measurement resources grow without bound
 

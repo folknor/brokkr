@@ -28,6 +28,7 @@ use crate::piners::lint::cmd::LintArgs;
 use crate::piners::lint::lints_write;
 use crate::piners::lint::registry::{self, LintPin};
 use crate::piners::registry::FilePin;
+use crate::piners::registry_io;
 use crate::preflight;
 
 const LINTS_FILE: &str = "lints.toml";
@@ -56,6 +57,10 @@ pub fn run(
     let snippets_dir = project_root.join(lint_cfg.snippets_dir());
     let registry_dir = project_root.join(lint_cfg.registry_dir());
     let lints_path = registry_dir.join(LINTS_FILE);
+
+    // Held across the read-modify-write, so a concurrent `--bless`/
+    // `--reanchor` (which hold the same lock) cannot interleave with it.
+    let _lock = registry_io::lock(project_root, "lint-reseed")?;
 
     let existing_text = if lints_path.exists() {
         Some(std::fs::read_to_string(&lints_path).map_err(DevError::Io)?)
@@ -100,11 +105,10 @@ pub fn run(
     let (added, changed, removed) = diff(&existing, &new_pins);
 
     std::fs::create_dir_all(&registry_dir).map_err(DevError::Io)?;
-    std::fs::write(
+    registry_io::write_atomic(
         &lints_path,
-        lints_write::render_lints(existing_text.as_deref(), &new_pins)?,
-    )
-    .map_err(DevError::Io)?;
+        &lints_write::render_lints(existing_text.as_deref(), &new_pins)?,
+    )?;
 
     output::lint_msg(&format!(
         "reseed: {} snippet(s) -> {} (added={added} changed={changed} removed={removed})",
@@ -177,7 +181,9 @@ fn stamp_one(id: &str, abs: &Path, corpus_root: &Path) -> Result<LintPin, DevErr
         .to_path_buf();
     Ok(LintPin {
         expected: None,
+        expected_scope: None,
         tv_anchored_at: None,
+        tv_scope: None,
         tv: Vec::new(),
         pine: FilePin {
             path: rel,
@@ -186,14 +192,17 @@ fn stamp_one(id: &str, abs: &Path, corpus_root: &Path) -> Result<LintPin, DevErr
     })
 }
 
-/// Carry each surviving probe's `expected` disposition and TV anchor forward
-/// onto the freshly content-stamped pin. A snippet new to the corpus stays
-/// unblessed (the gate's "must bless").
+/// Carry each surviving probe's `expected` disposition and TV anchor (each
+/// with the scope it was stamped under) forward onto the freshly
+/// content-stamped pin. A snippet new to the corpus stays unblessed (the
+/// gate's "must bless").
 fn carry_preserved(new: &mut BTreeMap<String, LintPin>, old: &BTreeMap<String, LintPin>) {
     for (id, pin) in new.iter_mut() {
         if let Some(prev) = old.get(id) {
             pin.expected = prev.expected.clone();
+            pin.expected_scope = prev.expected_scope.clone();
             pin.tv_anchored_at = prev.tv_anchored_at.clone();
+            pin.tv_scope = prev.tv_scope.clone();
             pin.tv = prev.tv.clone();
         }
     }
@@ -244,7 +253,9 @@ mod tests {
         let mut old = BTreeMap::new();
         let mut blessed = LintPin {
             expected: Some("agree_flagged".to_owned()),
+            expected_scope: Some("errors+warnings/syntax".to_owned()),
             tv_anchored_at: Some("2026-06-22T00:00:00Z".to_owned()),
+            tv_scope: None,
             tv: vec![registry::TvDiag {
                 line: 1,
                 col: Some(1),
@@ -261,20 +272,16 @@ mod tests {
         let mut new = BTreeMap::new();
         new.insert(
             "keep".to_owned(),
-            LintPin {
-                expected: None,
-                tv_anchored_at: None,
-                tv: Vec::new(),
-                pine: FilePin {
-                    path: PathBuf::from("lint/keep.pine"),
-                    xxh128: "new".into(),
-                },
-            },
+            LintPin::new(FilePin {
+                path: PathBuf::from("lint/keep.pine"),
+                xxh128: "new".into(),
+            }),
         );
 
         carry_preserved(&mut new, &old);
         let kept = &new["keep"];
         assert_eq!(kept.expected.as_deref(), Some("agree_flagged"));
+        assert_eq!(kept.expected_scope.as_deref(), Some("errors+warnings/syntax"));
         assert_eq!(kept.tv.len(), 1);
         assert_eq!(kept.pine.xxh128, "new"); // content still refreshed
     }

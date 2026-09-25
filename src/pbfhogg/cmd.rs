@@ -119,6 +119,39 @@ fn resolve_verify_osc(
     Ok((path, scope))
 }
 
+/// Whether `verify all` has an OSC to resolve at all: `--osc-seq` was given,
+/// or the dataset (or the named snapshot) registers at least one OSC. `false`
+/// is the only case in which the OSC-consuming checks may be skipped; when
+/// this is `true`, a resolution failure is an error. An unknown dataset
+/// counts as configured so resolution reports it rather than a skip hiding it.
+fn osc_configured(
+    dataset: &str,
+    snapshot: Option<&str>,
+    osc_seq: Option<&str>,
+    paths: &config::ResolvedPaths,
+) -> bool {
+    if osc_seq.is_some() {
+        return true;
+    }
+    let Some(ds) = paths.datasets.get(dataset) else {
+        return true;
+    };
+    !ds.osc.is_empty()
+        || snapshot
+            .and_then(|key| ds.snapshot.get(key))
+            .is_some_and(|snap| !snap.osc.is_empty())
+}
+
+/// Whether `verify all` has a bbox to resolve: `--bbox`, or the dataset's
+/// configured `bbox`. Same skip-versus-error split as [`osc_configured`].
+fn bbox_configured(bbox: Option<&str>, dataset: &str, paths: &config::ResolvedPaths) -> bool {
+    bbox.is_some()
+        || paths
+            .datasets
+            .get(dataset)
+            .is_none_or(|ds| ds.bbox.is_some())
+}
+
 /// Narrate which OSC chain a verify subcommand resolved, but only when the
 /// user actually passed `--snapshot` (the plain base case is unremarkable).
 fn narrate_osc_scope(snapshot: Option<&str>, scope: OscScope) {
@@ -338,19 +371,34 @@ pub(crate) fn verify(
             &paths,
             project_root,
         )?;
-        let osc_resolved = resolve_verify_osc(
+        // An input that is simply not configured skips the checks needing it;
+        // an input that IS configured but fails to resolve - hash mismatch,
+        // missing file, ambiguous OSC, malformed bbox - fails the command.
+        // Resolving with `.ok()` used to fold both into "SKIPPED", so a
+        // corrupted OSC turned five checks into skips and the suite exited 0.
+        let osc_path = if osc_configured(
             &pbf.dataset,
             pbf.snapshot.as_deref(),
             osc_seq.as_deref(),
             &paths,
-            project_root,
-        )
-        .ok();
-        if let Some((_, scope)) = &osc_resolved {
-            narrate_osc_scope(pbf.snapshot.as_deref(), *scope);
-        }
-        let osc_path = osc_resolved.map(|(p, _)| p);
-        let bbox_str = resolve_bbox(bbox.as_deref(), &pbf.dataset, &paths).ok();
+        ) {
+            let (path, scope) = resolve_verify_osc(
+                &pbf.dataset,
+                pbf.snapshot.as_deref(),
+                osc_seq.as_deref(),
+                &paths,
+                project_root,
+            )?;
+            narrate_osc_scope(pbf.snapshot.as_deref(), scope);
+            Some(path)
+        } else {
+            None
+        };
+        let bbox_str = if bbox_configured(bbox.as_deref(), &pbf.dataset, &paths) {
+            Some(resolve_bbox(bbox.as_deref(), &pbf.dataset, &paths)?)
+        } else {
+            None
+        };
         return super::verify_all::run(
             &harness,
             &pbf_path,

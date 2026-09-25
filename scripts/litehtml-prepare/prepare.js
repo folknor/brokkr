@@ -531,22 +531,31 @@ const VOID_ELEMENTS = new Set([
 	"wbr",
 ]);
 
+// Superset of the element scorer's `is_inline_tag` (src/litehtml/compare.rs)
+// plus `br`/`img`: every tag the pipeline treats as inline must be here, or
+// the pretty-printer lays it out as a block and invents whitespace around it
+// (`<font>` in old email HTML is the common case). Keep the two in sync.
 const INLINE_ELEMENTS = new Set([
 	"a",
 	"abbr",
 	"b",
 	"bdi",
 	"bdo",
+	"big",
 	"br",
 	"cite",
 	"code",
 	"data",
+	"del",
 	"dfn",
 	"em",
+	"font",
 	"i",
 	"img",
+	"ins",
 	"kbd",
 	"mark",
+	"output",
 	"q",
 	"rp",
 	"rt",

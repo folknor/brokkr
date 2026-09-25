@@ -46,14 +46,15 @@ pub fn validate_gate_selection(
 /// refactor the useful answer is the whole blast radius, not the first
 /// provider that happened to trip. Every failure is collected and
 /// re-reported at the end, and the command exits non-zero if any gate
-/// failed.
+/// failed. An interrupt (`brokkr kill`, Ctrl-C) is not a breach: it
+/// stops the sweep at once and propagates as `Interrupted`.
 ///
 /// `--as-baseline` is refused upstream in `bootstrap.rs`, not here, so
 /// the refusal happens before anything is built. Re-recording a whole
 /// cohort in one command would silently re-anchor every
-/// baseline-relative rule at once - on ratatoskr's own config that is 14
-/// zero-drift rules across the entire provider surface, with no per-gate
-/// moment to notice a regression being blessed.
+/// baseline-relative rule at once - on ratatoskr's own config that is most
+/// of its gates carrying zero-drift rules across the provider surface, with
+/// no per-gate moment to notice a regression being blessed.
 pub fn run_gate_cohort(req: &SyncBenchRequest<'_>) -> Result<(), DevError> {
     let cfg = req.dev_config.ratatoskr.as_ref().ok_or_else(|| {
         DevError::Config(
@@ -84,6 +85,16 @@ pub fn run_gate_cohort(req: &SyncBenchRequest<'_>) -> Result<(), DevError> {
                 script.display()
             )));
         }
+        // Same reasoning for the rule set: a predicate-free rule in the
+        // last gate is a config error, not something to find after every
+        // other gate has benched. (Per-gate `run_sync_bench` re-checks.)
+        if gate.metrics.is_empty() {
+            return Err(DevError::Config(format!(
+                "sync --gate all: gate `{name}` has no [ratatoskr.gate.{name}.metrics.*] \
+                 rules - an empty rule set silently passes"
+            )));
+        }
+        gate_eval::validate_rules(name, gate)?;
         plan.push((name.as_str(), script.display().to_string()));
     }
 
@@ -112,8 +123,10 @@ pub fn run_gate_cohort(req: &SyncBenchRequest<'_>) -> Result<(), DevError> {
     })?;
 
     let mut failures: Vec<(&str, String)> = Vec::new();
+    let mut ran = 0usize;
     for (name, script) in &plan {
         output::ratatoskr_msg(&format!("── gate `{name}` ──"));
+        ran += 1;
         let one = SyncBenchRequest {
             project_root: req.project_root,
             build_root: req.build_root,
@@ -127,9 +140,25 @@ pub fn run_gate_cohort(req: &SyncBenchRequest<'_>) -> Result<(), DevError> {
             gate: Some(name),
             as_baseline: false,
         };
-        if let Err(e) = run_sync_bench(&one) {
-            output::ratatoskr_msg(&format!("gate `{name}`: FAIL - {e}"));
-            failures.push((name, e.to_string()));
+        match run_sync_bench(&one) {
+            Ok(()) => {}
+            // `brokkr kill` / Ctrl-C is a request to stop the sweep, not a
+            // gate verdict. Recording it as a FAIL and moving on kept the
+            // sweep running to completion under the global lock - and each
+            // later gate's sidecar guard cleared the request on install, so
+            // nothing downstream ever saw it again.
+            Err(DevError::Interrupted) => {
+                output::ratatoskr_msg(&format!(
+                    "gate cohort: interrupted during gate `{name}` ({ran}/{} started, {} failed before it)",
+                    plan.len(),
+                    failures.len()
+                ));
+                return Err(DevError::Interrupted);
+            }
+            Err(e) => {
+                output::ratatoskr_msg(&format!("gate `{name}`: FAIL - {e}"));
+                failures.push((name, e.to_string()));
+            }
         }
     }
 
@@ -232,6 +261,7 @@ pub fn run_sync_bench(req: &SyncBenchRequest<'_>) -> Result<(), DevError> {
                  --as-baseline if you only want to record."
             )));
         }
+        gate_eval::validate_rules(name, gate)?;
     }
 
     let script_abs = Path::new(req.script).canonicalize().map_err(|e| {
@@ -287,6 +317,12 @@ pub fn run_sync_bench(req: &SyncBenchRequest<'_>) -> Result<(), DevError> {
     .with_brokkr_args(req.brokkr_args.clone())
     .with_measure_mode(Some("bench"));
 
+    // Cooperative SIGTERM for everything outside the sidecar's own window
+    // (build, sæhrimnir spawn and readiness, the gaps between iterations,
+    // mock teardown, recording). See `PhaseGuard`. Declared after
+    // `harness` so it drops first, before the lock is released.
+    let mut phase_guard = PhaseGuard::install();
+
     let debug = req.profile_override.unwrap_or_else(|| harness_cfg.debug.unwrap_or(false));
     let built = build::build_for_harness(
         code_root,
@@ -294,13 +330,12 @@ pub fn run_sync_bench(req: &SyncBenchRequest<'_>) -> Result<(), DevError> {
         debug,
         Some(&|pid| harness.lock().set_child_pid(pid)),
         Some(&|| harness.lock().clear_child_pid()),
-        // isolate_pg=false: the sync bench has no outer SigtermGuard
-        // (BenchHarness's sidecar installs its own per-iteration, but
-        // it doesn't cover the build phase). PG-isolating cargo here
-        // would orphan it on terminal Ctrl-C; --hard accepts the
-        // single-PID kill (cargo reaps its own children on its way
-        // down via SIGCHLD, but rustc workers may briefly orphan, a
-        // known and accepted limit).
+        // isolate_pg=false: the phase guard above makes the captured
+        // runner forward `brokkr kill` to cargo, but it is not held
+        // continuously across the run (it steps aside for each sidecar
+        // window), so spawns stay in brokkr's PG where terminal Ctrl-C
+        // reaches them directly. --hard accepts the single-PID kill
+        // (rustc workers may briefly orphan, a known and accepted limit).
         false,
     )?;
     output::ratatoskr_msg(&format!(
@@ -332,11 +367,19 @@ pub fn run_sync_bench(req: &SyncBenchRequest<'_>) -> Result<(), DevError> {
         &harness,
         fixture_name,
         debug,
+        &mut phase_guard,
     );
 
     match outcome {
         Ok(()) => {
             artefacts.finalize_success()?;
+            // A request that landed after the last iteration (during
+            // teardown, recording or the gate hook) had nothing left to
+            // stop, but it still has to reach the caller: a `--gate all`
+            // sweep must not start the next gate.
+            if phase_guard.requested() {
+                return Err(DevError::Interrupted);
+            }
             Ok(())
         }
         Err(e) => {
@@ -348,6 +391,55 @@ pub fn run_sync_bench(req: &SyncBenchRequest<'_>) -> Result<(), DevError> {
             ));
             artefacts::emit_clean_hint();
             Err(e)
+        }
+    }
+}
+
+/// Cooperative-SIGTERM coverage for the bench path outside the sidecar's
+/// measured window.
+///
+/// The sidecar installs its own `SigtermGuard` around every iteration,
+/// and guards do not nest: an inner install clears a pending request and
+/// its drop restores `SIG_DFL`. So rather than one outer guard, this
+/// holds a guard for every *phase* and steps aside for each sidecar
+/// window - `release_for_sidecar` before the harness spawn, `resume`
+/// once `run_sidecar` returns. Without it, `brokkr kill` during the
+/// build, sæhrimnir's readiness wait or the gap between iterations took
+/// the default terminate action: no `Drop` ran, and sæhrimnir was left
+/// running with its ports bound.
+///
+/// Residual gaps, both a few syscalls wide: the harness fork/exec between
+/// the release and the sidecar's install (default action), and a request
+/// landing between `release_for_sidecar`'s check and the drop (the drop
+/// clears it). A refcounted guard would remove both.
+struct PhaseGuard(Option<crate::shutdown::SigtermGuard>);
+
+impl PhaseGuard {
+    fn install() -> Self {
+        Self(Some(crate::shutdown::SigtermGuard::install()))
+    }
+
+    /// Whether a shutdown request is pending under this guard.
+    fn requested(&self) -> bool {
+        self.0.is_some() && crate::shutdown::is_shutdown_requested()
+    }
+
+    /// Drop the guard so the sidecar's own can take over. A request that
+    /// is already pending is surfaced as `Interrupted` instead, with the
+    /// guard left in place for the caller's teardown - dropping would
+    /// clear it.
+    fn release_for_sidecar(&mut self) -> Result<(), DevError> {
+        if self.requested() {
+            return Err(DevError::Interrupted);
+        }
+        self.0 = None;
+        Ok(())
+    }
+
+    /// Re-take coverage after the sidecar window.
+    fn resume(&mut self) {
+        if self.0.is_none() {
+            self.0 = Some(crate::shutdown::SigtermGuard::install());
         }
     }
 }
@@ -383,24 +475,21 @@ fn bench_loop(
     harness: &BenchHarness,
     fixture_name: &str,
     debug: bool,
+    phase_guard: &mut PhaseGuard,
 ) -> Result<(), DevError> {
     // PID published from inside spawn_observed - before readiness wait
-    // - so a `brokkr kill --hard` arriving during startup finds it.
-    // No outer `SigtermGuard` here because BenchHarness's sidecar
-    // installs its own around the measured window - a nested install
-    // would clobber the outer's `Drop` and restore SIG_DFL early.
-    // Cooperative SIGTERM during build / between iterations therefore
-    // still falls through to the default terminate action. Extending
-    // coverage there would need a guard that composes with the sidecar's.
+    // - so a `brokkr kill --hard` arriving during startup finds it. The
+    // phase guard covers the readiness wait: it polls the shutdown flag
+    // and reaps sæhrimnir before returning `Interrupted`.
     let mock = MockServer::spawn_observed(
         mock_binary,
         fixture_path,
         mock_dir,
         Some(&|pid| harness.lock().add_mock_pid(pid)),
         Some(&|pid| harness.lock().remove_mock_pid(pid)),
-        // isolate_pg=false: same reason as the build call above. The
-        // mock spawns BEFORE the bench loop where sidecar's
-        // SigtermGuard takes over.
+        // isolate_pg=false: same reason as the build call - the phase
+        // guard steps aside for each sidecar window, so the mock must
+        // stay reachable by terminal Ctrl-C in brokkr's PG.
         false,
     )?;
     output::ratatoskr_msg(&format!("mock ready in {}", format_secs(mock.ready_elapsed())));
@@ -417,6 +506,9 @@ fn bench_loop(
 
     let bench_outcome = (|| -> Result<(), DevError> {
         for i in 0..req.bench {
+            if phase_guard.requested() {
+                return Err(DevError::Interrupted);
+            }
             output::bench_msg(&format!("run {}/{}", i + 1, req.bench));
             harness.lock().set_progress(
                 u32::try_from(i + 1).unwrap_or(u32::MAX),
@@ -440,8 +532,12 @@ fn bench_loop(
                 env_pairs.push((name.as_str(), value.as_str()));
             }
 
+            // Hand signal handling to the sidecar's own guard for the
+            // measured window (guards do not nest). Refuses with
+            // `Interrupted` if a request already landed in the gap.
+            phase_guard.release_for_sidecar()?;
             let start = Instant::now();
-            let child = output::spawn_captured(
+            let spawned = output::spawn_captured(
                 &binary_str,
                 &["--test-harness", &script_str],
                 req.project_root,
@@ -450,11 +546,19 @@ fn bench_loop(
                 // SigtermGuard around `run_sidecar` below, covering
                 // the lifetime of this child.
                 true,
-            )?;
+            );
+            let child = match spawned {
+                Ok(c) => c,
+                Err(e) => {
+                    phase_guard.resume();
+                    return Err(e);
+                }
+            };
             let pid = child.id();
             harness.lock().set_child_pid(pid);
 
             let result = sidecar::run_sidecar(child, &mut fifo, i, start, None);
+            phase_guard.resume();
             // Iteration's child has reaped; clear so a stale PID can't
             // be SIGKILLed by `--hard` in the gap before the next iter.
             harness.lock().clear_child_pid();
@@ -740,7 +844,9 @@ fn warn_if_rebasing(gate_name: &str, gate: &GateConfig, hostname: &str) {
         .map(|(name, _)| name.as_str())
         .collect();
 
-    let short = &pinned[..8.min(pinned.len())];
+    // Char-based, not a byte slice: the pin is hand-pasted TOML and may
+    // hold a multi-byte character, which a byte slice would panic on.
+    let short: String = pinned.chars().take(8).collect();
     output::ratatoskr_msg(&format!(
         "  [warn] gate `{gate_name}` already pins baseline {short} for host \
          `{hostname}` - repinning rebases every baseline-relative rule onto \
@@ -822,7 +928,7 @@ fn missing_baseline_error(
 }
 
 /// Look up the pinned per-hostname baseline UUID in `brokkr.toml`,
-/// fetch the row from `gate.db`, validate gate/script/fixture identity,
+/// fetch the row from `gate.db`, validate gate/script/fixture/profile identity,
 /// run rule evaluation, and emit a report. Returns
 /// `DevError::Config("gate failed: ...")` on any rule failure.
 fn evaluate_against_baseline(
@@ -840,8 +946,14 @@ fn evaluate_against_baseline(
              and add the printed line to brokkr.toml."
         ))
     })?;
+    // Exact-or-unambiguous-prefix, never the current row (already
+    // inserted above): see `GateDb::lookup_baseline`.
     let baseline_entry = db
-        .lookup_baseline(baseline_uuid, hostname)?
+        .lookup_baseline(baseline_uuid, hostname, current_uuid)
+        .map_err(|e| match e {
+            DevError::Config(msg) => DevError::Config(format!("gate `{gate_name}`: {msg}")),
+            other => other,
+        })?
         .ok_or_else(|| {
             missing_baseline_error(db, gate_name, hostname, baseline_uuid, current_uuid)
         })?;
@@ -861,6 +973,19 @@ fn evaluate_against_baseline(
         return Err(DevError::Config(format!(
             "gate `{gate_name}`: baseline fixture `{}` != current `{}`",
             baseline_entry.fixture, current_row.fixture
+        )));
+    }
+    // A debug build is several times slower than release, so comparing
+    // across profiles makes every timing rule meaningless in one
+    // direction or the other: a `--debug` run breaches a release
+    // baseline, and a release run against a debug baseline passes
+    // anything. Same identity check as script and fixture.
+    if baseline_entry.profile != current_row.profile {
+        return Err(DevError::Config(format!(
+            "gate `{gate_name}`: baseline was built `{}` but this run is `{}`. \
+             Re-run with the baseline's profile (--debug / --release), or pin a \
+             baseline recorded under this one.",
+            baseline_entry.profile, current_row.profile
         )));
     }
 
@@ -1302,6 +1427,58 @@ mod tests {
         fs::write(dir.join("summary.json"), "{not valid json").unwrap();
         let err = read_summary_json(&dir).unwrap_err();
         assert!(err.to_string().contains("parse"), "got: {err}");
+    }
+
+    /// The sync `run.toml` used to be `format!`ed, so a `"` or `\` in a
+    /// path or the features label produced a file no TOML reader could
+    /// open. It must round-trip whatever the strings hold.
+    #[test]
+    fn run_toml_round_trips_hostile_strings() {
+        use std::os::unix::process::ExitStatusExt;
+        let built = HarnessBuild {
+            binary: PathBuf::from("/odd \"dir\"/back\\slash/app"),
+            bin_dir: PathBuf::from("/odd \"dir\"/back\\slash"),
+            features_label: "a\"b\\c".to_owned(),
+        };
+        let dc = output::DeadlineCapture {
+            captured: output::CapturedOutput {
+                status: std::process::ExitStatus::from_raw(3 << 8),
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+                elapsed: Duration::from_millis(42),
+            },
+            killed_on_deadline: true,
+        };
+        let mock = MockOutcome {
+            exit_code: None,
+            signal: Some(9),
+            killed_after_budget: true,
+            shutdown_elapsed: Duration::ZERO,
+        };
+        let git = git::GitInfo {
+            commit: "abc1234".to_owned(),
+            subject: "fix \"quoted\" \\ thing".to_owned(),
+            is_clean: false,
+        };
+        let body = render_run_toml(
+            Path::new("/scripts/we\"ird.lua"),
+            &built,
+            &dc,
+            &mock,
+            Some(&git),
+        )
+        .unwrap();
+        let parsed: toml::Value = toml::from_str(&body).unwrap();
+        assert_eq!(parsed["binary"].as_str(), Some("/odd \"dir\"/back\\slash/app"));
+        assert_eq!(parsed["features"].as_str(), Some("a\"b\\c"));
+        assert_eq!(parsed["script"].as_str(), Some("/scripts/we\"ird.lua"));
+        assert_eq!(parsed["git_subject"].as_str(), Some("fix \"quoted\" \\ thing"));
+        assert_eq!(parsed["exit_code"].as_integer(), Some(3));
+        assert_eq!(parsed["elapsed_ms"].as_integer(), Some(42));
+        assert_eq!(parsed["killed_on_deadline"].as_bool(), Some(true));
+        assert_eq!(parsed["mock"]["signal"].as_integer(), Some(9));
+        assert_eq!(parsed["mock"]["killed_after_budget"].as_bool(), Some(true));
+        assert!(parsed["mock"].get("exit_code").is_none());
     }
 
     #[test]

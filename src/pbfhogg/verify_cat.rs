@@ -2,16 +2,16 @@
 
 use std::path::Path;
 
-use super::verify::VerifyHarness;
+use super::verify::{Findings, VerifyHarness};
 use crate::error::DevError;
 use crate::output::verify_msg;
 
 /// Cross-validate `pbfhogg cat` against `osmium cat` for node/way/relation types.
-pub fn run(harness: &VerifyHarness, pbf: &Path, direct_io: bool) -> Result<(), DevError> {
+pub fn run(harness: &VerifyHarness, pbf: &Path, direct_io: bool) -> Result<Findings, DevError> {
     let outdir = harness.subdir("cat")?;
 
     let pbf_str = pbf.display().to_string();
-    let mut all_identical = true;
+    let mut findings = Findings::new();
 
     for elem_type in &["node", "way", "relation"] {
         verify_msg(&format!("=== verify cat -t {elem_type} ==="));
@@ -50,23 +50,20 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, direct_io: bool) -> Result<(), D
         harness.print_inspect("osmium", &osmium_out)?;
 
         // --- Diff ---
-        let identical = harness.diff_pbfs(&pbfhogg_out, &osmium_out)?;
-        if identical {
+        let diff = harness.diff_pbfs(&pbfhogg_out, &osmium_out)?;
+        if diff.is_pass() {
             verify_msg(&format!("  diff ({elem_type}): PASS (identical)"));
         } else {
             verify_msg(&format!("  diff ({elem_type}): FAIL (differences found)"));
-            all_identical = false;
         }
+        findings.record(&format!("cat -t {elem_type} diff"), diff);
 
         // --- Sort feature comparison ---
-        harness.compare_sort_feature(&pbfhogg_out, &osmium_out)?;
+        findings.record(
+            &format!("cat -t {elem_type} sort feature"),
+            harness.compare_sort_feature(&pbfhogg_out, &osmium_out)?,
+        );
     }
 
-    if !all_identical {
-        return Err(DevError::Verify(
-            "cat: pbfhogg and osmium output differ".into(),
-        ));
-    }
-
-    Ok(())
+    Ok(findings)
 }

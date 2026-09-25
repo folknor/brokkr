@@ -25,6 +25,42 @@ struct FixtureOutcome {
     /// Worst-first geometry offenders from the element comparison; empty
     /// when the comparison did not run or everything was in tolerance.
     offenders: Vec<compare::Offender>,
+    /// An `expected = "fail"` fixture that came out `PASS`. Still a pass
+    /// (it does not fail the run), but reported separately: the manifest
+    /// entry is now stale, and a silent PASS would leave it that way.
+    unexpected_pass: bool,
+}
+
+impl FixtureOutcome {
+    fn error() -> Self {
+        Self {
+            pixel_diff_pct: None,
+            element_match_pct: None,
+            status: compare::Status::Error,
+            offenders: Vec::new(),
+            unexpected_pass: false,
+        }
+    }
+}
+
+/// The embedded capture script on disk, removed on drop - including when a
+/// capture fails partway, which used to leave `.brokkr/capture.js` behind.
+struct CaptureScript {
+    path: PathBuf,
+}
+
+impl CaptureScript {
+    fn write(project_root: &Path) -> Result<Self, DevError> {
+        Ok(Self {
+            path: write_capture_script(project_root)?,
+        })
+    }
+}
+
+impl Drop for CaptureScript {
+    fn drop(&mut self) {
+        drop(std::fs::remove_file(&self.path));
+    }
 }
 
 struct TestContext<'a> {
@@ -85,6 +121,39 @@ fn run_pipeline(
 // Per-fixture test
 // ---------------------------------------------------------------------------
 
+/// Record one fixture as `ERROR` and say why, then let the run continue.
+///
+/// A capture or pipeline failure is this fixture's problem, not the run's:
+/// propagating it aborted the loop and left a `mechanical_runs` row holding
+/// only the fixtures before it, which `report` then showed as a complete run.
+/// Sluggrs has always degraded the same failure to one ERROR row.
+fn record_error(
+    ctx: &TestContext,
+    fixture: &LitehtmlFixture,
+    reason: &str,
+) -> Result<FixtureOutcome, DevError> {
+    output::litehtml_msg(&format!("  ERROR {}: {reason}", fixture.id));
+    ctx.db.insert_result(
+        ctx.run_id,
+        &fixture.id,
+        None,
+        None,
+        compare::Status::Error.as_str(),
+    )?;
+    Ok(FixtureOutcome::error())
+}
+
+/// Remove a file if present. Used to clear the previous run's pipeline
+/// outputs before rendering, so a pipeline that stops writing one of them
+/// cannot be scored against a stale copy.
+fn remove_if_present(path: &Path) -> Result<(), DevError> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.into()),
+    }
+}
+
 fn run_fixture(ctx: &TestContext, fixture: &LitehtmlFixture) -> Result<FixtureOutcome, DevError> {
     let fixture_dir = ctx.project_root.join("fixtures").join(&fixture.id);
     std::fs::create_dir_all(&fixture_dir)?;
@@ -92,59 +161,61 @@ fn run_fixture(ctx: &TestContext, fixture: &LitehtmlFixture) -> Result<FixtureOu
     let ref_png = fixture_dir.join("chrome.png");
     let ref_json = fixture_dir.join("chrome.json");
 
-    // Auto-capture or recapture Chrome reference if needed.
-    let needs_capture = !ref_png.exists() || ctx.capture_script.is_some();
-    if needs_capture {
-        if let Some(script) = ctx.capture_script {
-            capture_fixture(fixture, ctx.config, ctx.project_root, script)?;
-        } else {
-            let script = write_capture_script(ctx.project_root)?;
-            capture_fixture(fixture, ctx.config, ctx.project_root, &script)?;
-            drop(std::fs::remove_file(&script));
+    // Chrome reference: `--recapture` always captures. Otherwise a missing
+    // reference is captured only for a fixture nobody has approved yet - its
+    // first run. Once an approval exists, its numbers were measured against
+    // THAT reference, so silently recapturing a deleted one would swap the
+    // baseline's ground truth mid-run; that takes an explicit `--recapture`.
+    if let Some(script) = ctx.capture_script {
+        if let Err(e) = capture_fixture(fixture, ctx.config, ctx.project_root, script) {
+            return record_error(ctx, fixture, &e.to_string());
+        }
+    } else if !ref_png.exists() || !ref_json.exists() {
+        if ctx.db.get_approval(&fixture.id)?.is_some() {
+            return record_error(
+                ctx,
+                fixture,
+                "Chrome reference (chrome.png/chrome.json) is missing but the fixture has an \
+                 approved baseline measured against it - restore it, or rerun with --recapture",
+            );
+        }
+        let script = CaptureScript::write(ctx.project_root)?;
+        if let Err(e) = capture_fixture(fixture, ctx.config, ctx.project_root, &script.path) {
+            return record_error(ctx, fixture, &e.to_string());
         }
     }
 
-    if !ref_png.exists() {
-        ctx.db.insert_result(
-            ctx.run_id,
-            &fixture.id,
-            None,
-            None,
-            compare::Status::Error.as_str(),
-        )?;
-        return Ok(FixtureOutcome {
-            pixel_diff_pct: None,
-            element_match_pct: None,
-            status: compare::Status::Error,
-            offenders: Vec::new(),
-        });
+    if !ref_png.exists() || !ref_json.exists() {
+        return record_error(
+            ctx,
+            fixture,
+            "capture did not produce both chrome.png and chrome.json",
+        );
+    }
+
+    // Clear the previous run's outputs first: existence is the only signal
+    // that the pipeline wrote them, so a leftover would be scored as fresh.
+    for name in ["pipeline.png", "pipeline.json", "diff.png"] {
+        remove_if_present(&fixture_dir.join(name))?;
     }
 
     // Run the pipeline to produce pipeline.png + pipeline.json.
-    run_pipeline(
+    if let Err(e) = run_pipeline(
         ctx.binary,
         fixture,
         ctx.config,
         ctx.project_root,
         &fixture_dir,
-    )?;
+    ) {
+        return record_error(ctx, fixture, &e.to_string());
+    }
 
-    let pipeline_png = fixture_dir.join("pipeline.png");
-
-    if !pipeline_png.exists() {
-        ctx.db.insert_result(
-            ctx.run_id,
-            &fixture.id,
-            None,
-            None,
-            compare::Status::Error.as_str(),
-        )?;
-        return Ok(FixtureOutcome {
-            pixel_diff_pct: None,
-            element_match_pct: None,
-            status: compare::Status::Error,
-            offenders: Vec::new(),
-        });
+    if !fixture_dir.join("pipeline.png").exists() || !fixture_dir.join("pipeline.json").exists() {
+        return record_error(
+            ctx,
+            fixture,
+            "pipeline exited 0 but did not write both pipeline.png and pipeline.json",
+        );
     }
 
     score_fixture(ctx, fixture, &fixture_dir, &ref_png, &ref_json)
@@ -175,35 +246,33 @@ fn score_fixture(
     let approved_pixel = approval.as_ref().map(|a| a.pixel_diff_pct);
     let approved_element = approval.as_ref().and_then(|a| a.element_match_pct);
 
-    let pixel_result = compare::compare_pixels(&pipeline_png, ref_png, &diff_png);
-    let element_result = if ref_json.exists() && pipeline_json.exists() {
-        Some(compare::compare_elements(&pipeline_json, ref_json))
-    } else {
-        None
+    // Both comparisons are required. An element comparison that cannot run
+    // (unreadable or malformed JSON) is an ERROR, not "no element score":
+    // the latter enforced neither the element threshold nor the ratchet, and
+    // approving it stored a NULL element baseline that disabled the element
+    // ratchet for good.
+    let px = match compare::compare_pixels(&pipeline_png, ref_png, &diff_png) {
+        Ok(px) => px,
+        Err(e) => return record_error(ctx, fixture, &format!("pixel comparison failed: {e}")),
     };
-
-    let (elem_pct, offenders) = match element_result {
-        Some(Ok(em)) => (Some(em.match_pct), em.offenders),
-        _ => (None, Vec::new()),
+    let em = match compare::compare_elements(&pipeline_json, ref_json) {
+        Ok(em) => em,
+        Err(e) => return record_error(ctx, fixture, &format!("element comparison failed: {e}")),
     };
+    let offenders = em.offenders;
     write_offenders_file(fixture_dir, &offenders)?;
 
-    let (pixel_diff_pct, status) = match pixel_result {
-        Ok(px) => {
-            let s = compare::determine_status(
-                px.diff_pct,
-                elem_pct,
-                pixel_threshold,
-                element_threshold,
-                expected_fail,
-                approved_pixel,
-                approved_element,
-            );
-            (Some(px.diff_pct), s)
-        }
-        Err(_) => (None, compare::Status::Error),
-    };
-    let element_match_pct = if pixel_diff_pct.is_some() { elem_pct } else { None };
+    let status = compare::determine_status(
+        px.diff_pct,
+        Some(em.match_pct),
+        pixel_threshold,
+        element_threshold,
+        expected_fail,
+        approved_pixel,
+        approved_element,
+    );
+    let pixel_diff_pct = Some(px.diff_pct);
+    let element_match_pct = Some(em.match_pct);
 
     ctx.db.insert_result(
         ctx.run_id,
@@ -213,11 +282,13 @@ fn score_fixture(
         status.as_str(),
     )?;
 
+    let unexpected_pass = expected_fail && matches!(status, compare::Status::Pass);
     Ok(FixtureOutcome {
         pixel_diff_pct,
         element_match_pct,
         status,
         offenders,
+        unexpected_pass,
     })
 }
 
@@ -320,6 +391,15 @@ fn resolve_fixtures<'a>(
     suite: Option<&str>,
     all: bool,
 ) -> Result<Vec<&'a LitehtmlFixture>, DevError> {
+    // One selector, not a precedence order: `--all` used to win silently
+    // over `--suite` and an ID, so a typo'd narrow run became a full one.
+    let selectors =
+        usize::from(all) + usize::from(suite.is_some()) + usize::from(fixture_id.is_some());
+    if selectors > 1 {
+        return Err(DevError::Config(
+            "give exactly one of a fixture ID, --suite, or --all".into(),
+        ));
+    }
     if all {
         Ok(manifest.fixtures.iter().collect())
     } else if let Some(suite) = suite {
@@ -337,37 +417,43 @@ fn resolve_fixtures<'a>(
     }
 }
 
-fn build_pipeline(project_root: &Path) -> Result<PathBuf, DevError> {
+fn build_pipeline(build_root: &Path) -> Result<PathBuf, DevError> {
     let config = build::BuildConfig::release(None);
-    build::cargo_build(&config, project_root)
+    build::cargo_build(&config, build_root)
 }
 
 // ---------------------------------------------------------------------------
 // Test command
 // ---------------------------------------------------------------------------
 
+/// `project_root` is the config dir (fixtures, `.brokkr/`, results.db);
+/// `build_root` is the code tree cargo and git run in. They differ only under
+/// the one-level-up layout, where using `project_root` for the build and the
+/// commit stamp built and described the wrong tree.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn test(
     project: Project,
     project_root: &Path,
+    build_root: &Path,
     litehtml_config: &LitehtmlConfig,
     fixture_id: Option<&str>,
     suite: Option<&str>,
     all: bool,
     recapture: bool,
 ) -> Result<(), DevError> {
-    project::require(project, Project::Litehtml, "litehtml test")?;
+    project::require(project, Project::Litehtml, "visual")?;
 
     let db = open_db(project_root)?;
-    let git_info = git::collect(project_root)?;
+    let git_info = git::collect(build_root)?;
     let fixtures = resolve_fixtures(litehtml_config, fixture_id, suite, all)?;
 
     // Build the pipeline binary once.
-    let binary = build_pipeline(project_root)?;
+    let binary = build_pipeline(build_root)?;
 
-    // Write the capture script once if --recapture was requested.
+    // Write the capture script once if --recapture was requested; the guard
+    // removes it however the run ends.
     let recapture_script = if recapture {
-        Some(write_capture_script(project_root)?)
+        Some(CaptureScript::write(project_root)?)
     } else {
         None
     };
@@ -392,18 +478,23 @@ pub(crate) fn test(
         project_root,
         db: &db,
         run_id: &run_id,
-        capture_script: recapture_script.as_deref(),
+        capture_script: recapture_script.as_ref().map(|s| s.path.as_path()),
     };
 
-    let mut counts = [0u32; 4]; // pass, fail, expected_fail, error
+    let mut counts = [0u32; 5]; // pass, fail, expected_fail, error, unexpected pass
 
     for fixture in &fixtures {
         let outcome = run_fixture(&ctx, fixture)?;
 
         let px = format_pct(outcome.pixel_diff_pct, 1);
         let el = format_pct(outcome.element_match_pct, 0);
+        let note = if outcome.unexpected_pass {
+            " (unexpected pass: drop `expected = \"fail\"`)"
+        } else {
+            ""
+        };
         output::litehtml_msg(&format!(
-            "  {:<25} {:<9} {:<11} {}",
+            "  {:<25} {:<9} {:<11} {}{note}",
             fixture.id, px, el, outcome.status,
         ));
 
@@ -418,6 +509,7 @@ pub(crate) fn test(
         }
 
         match outcome.status {
+            compare::Status::Pass if outcome.unexpected_pass => counts[4] += 1,
             compare::Status::Pass => counts[0] += 1,
             compare::Status::ExpectedFail => counts[2] += 1,
             compare::Status::Error => counts[3] += 1,
@@ -425,18 +517,18 @@ pub(crate) fn test(
         }
     }
 
-    if let Some(ref script) = recapture_script {
-        drop(std::fs::remove_file(script));
-    }
+    drop(recapture_script);
 
     print_run_summary(&counts)?;
     Ok(())
 }
 
-fn print_run_summary(counts: &[u32; 4]) -> Result<(), DevError> {
+/// An unexpected pass is reported but does not fail the run: the render got
+/// better, and the only thing wrong is the manifest's stale expectation.
+fn print_run_summary(counts: &[u32; 5]) -> Result<(), DevError> {
     output::litehtml_msg(&format!("  {}", "\u{2500}".repeat(60)));
 
-    let labels = ["passed", "failed", "expected fail", "error"];
+    let labels = ["passed", "failed", "expected fail", "error", "unexpected pass"];
     let parts: Vec<String> = counts
         .iter()
         .zip(labels.iter())
@@ -460,7 +552,7 @@ pub(crate) fn list(
     project_root: &Path,
     litehtml_config: &LitehtmlConfig,
 ) -> Result<(), DevError> {
-    project::require(project, Project::Litehtml, "litehtml list")?;
+    project::require(project, Project::Litehtml, "list")?;
 
     let db = open_db(project_root)?;
 
@@ -666,15 +758,18 @@ fn capture_fixture(
 // Approve command
 // ---------------------------------------------------------------------------
 
+/// `build_root` is the code tree whose cleanliness and commit the approval
+/// is pinned to; `project_root` holds results.db. See [`test()`].
 pub(crate) fn approve(
     project: Project,
     project_root: &Path,
+    build_root: &Path,
     litehtml_config: &LitehtmlConfig,
     fixture_id: &str,
 ) -> Result<(), DevError> {
-    project::require(project, Project::Litehtml, "litehtml approve")?;
+    project::require(project, Project::Litehtml, "approve")?;
 
-    let git_info = git::collect(project_root)?;
+    let git_info = git::collect(build_root)?;
     if !git_info.is_clean {
         return Err(DevError::Verify(
             "litehtml approve requires a clean git tree".into(),
@@ -687,23 +782,29 @@ pub(crate) fn approve(
 
     let result = db.latest_result_for_fixture(&fixture.id)?.ok_or_else(|| {
         DevError::Verify(format!(
-            "no test results for fixture '{}' \u{2014} run `brokkr litehtml test` first",
-            fixture.id,
+            "no test results for fixture '{}' \u{2014} run `brokkr visual {}` first",
+            fixture.id, fixture.id,
         ))
     })?;
 
-    let pixel_pct = result.pixel_diff_pct.unwrap_or(0.0);
-    let element_pct = result.element_match_pct;
+    // Both scores or nothing. An errored run has no pixel score, and
+    // defaulting it to 0.0 turned "could not render" into a perfect
+    // baseline (`approve --all` did it to every errored fixture); a missing
+    // element score stored a NULL that disabled the element ratchet for good.
+    let (Some(pixel_pct), Some(element_pct)) = (result.pixel_diff_pct, result.element_match_pct)
+    else {
+        return Err(DevError::Verify(format!(
+            "latest result for fixture '{}' is {} without both a pixel and an element score \
+             \u{2014} nothing to approve; fix it and rerun `brokkr visual {}`",
+            fixture.id, result.status, fixture.id,
+        )));
+    };
 
-    db.set_approval(&fixture.id, &git_info.commit, pixel_pct, element_pct)?;
+    db.set_approval(&fixture.id, &git_info.commit, pixel_pct, Some(element_pct))?;
 
     output::litehtml_msg(&format!(
-        "approved '{}' at pixel={pixel_pct:.1}%{} (commit {})",
-        fixture.id,
-        element_pct
-            .map(|e| format!(", elements={e:.0}%"))
-            .unwrap_or_default(),
-        git_info.commit,
+        "approved '{}' at pixel={pixel_pct:.1}%, elements={element_pct:.0}% (commit {})",
+        fixture.id, git_info.commit,
     ));
 
     Ok(())
@@ -714,7 +815,7 @@ pub(crate) fn approve(
 // ---------------------------------------------------------------------------
 
 pub(crate) fn report(project: Project, project_root: &Path, run_id: &str) -> Result<(), DevError> {
-    project::require(project, Project::Litehtml, "litehtml report")?;
+    project::require(project, Project::Litehtml, "report")?;
 
     let db = open_db(project_root)?;
     let results = db.run_results(run_id)?;
@@ -748,7 +849,7 @@ pub(crate) fn status(
     project_root: &Path,
     litehtml_config: &LitehtmlConfig,
 ) -> Result<(), DevError> {
-    project::require(project, Project::Litehtml, "litehtml status")?;
+    project::require(project, Project::Litehtml, "visual-status")?;
 
     let db = open_db(project_root)?;
     let approvals = db.all_approvals()?;
@@ -880,7 +981,7 @@ pub(crate) fn prepare(
     input: &str,
     output_path: &str,
 ) -> Result<(), DevError> {
-    project::require(project, Project::Litehtml, "litehtml prepare")?;
+    project::require(project, Project::Litehtml, "prepare")?;
 
     let script = ensure_prepare_script(project_root)?;
     let script_str = script.display().to_string();
@@ -960,7 +1061,7 @@ pub(crate) fn extract(
     to: Option<&str>,
     output_path: &str,
 ) -> Result<(), DevError> {
-    project::require(project, Project::Litehtml, "litehtml extract")?;
+    project::require(project, Project::Litehtml, "html-extract")?;
 
     let script = ensure_prepare_script(project_root)?;
     let script_str = script.display().to_string();
@@ -1025,7 +1126,7 @@ pub(crate) fn outline(
     full: bool,
     selectors: bool,
 ) -> Result<(), DevError> {
-    project::require(project, Project::Litehtml, "litehtml outline")?;
+    project::require(project, Project::Litehtml, "outline")?;
 
     let script = ensure_prepare_script(project_root)?;
     let script_str = script.display().to_string();

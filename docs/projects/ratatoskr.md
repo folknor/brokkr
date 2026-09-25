@@ -75,8 +75,13 @@ points at the directory containing both binaries.
 
 ## Artefact layout
 
-- `service <SCRIPT>`: `.brokkr/ratatoskr/<test>/run-N/` with `binary-stdout.log`
-  / `binary-stderr.log` / `run.toml` plus runtime-emitted artefacts.
+- `service <SCRIPT>`: `.brokkr/ratatoskr/service/<test>/run-N/` with
+  `binary-stdout.log` / `binary-stderr.log` / `run.toml` plus
+  runtime-emitted artefacts; a fixture's sæhrimnir state goes to
+  `.brokkr/ratatoskr/service-mock/<fixture>/`. Neither sits directly in
+  `.brokkr/ratatoskr/`, where a script named `mock` or `sync` would write
+  into brokkr's own trees.
+- `mock-serve`: `.brokkr/ratatoskr/mock/` (`readiness`).
 - `sync <SCRIPT>`: `.brokkr/ratatoskr/sync/<test>/run-N/` with `harness/` and
   `mock/` subdirs (`mock/readiness`, `mock/stderr.log`).
 - `sync <SCRIPT> --bench N`: `.brokkr/ratatoskr/sync/<test>/run-N/iter-K/harness/` per

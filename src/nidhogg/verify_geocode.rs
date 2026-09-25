@@ -50,7 +50,7 @@ pub fn run(port: u16, queries: &[&str]) -> Result<(), DevError> {
 
     if failed > 0 {
         return Err(DevError::Config(format!(
-            "geocode verification failed: {failed} query(ies) returned no results"
+            "geocode verification failed: {failed} query(ies) failed"
         )));
     }
 
@@ -73,7 +73,7 @@ fn run_single_geocode(port: u16, query: &str) -> Result<GeoResult, DevError> {
 
     let stdout = match super::client::curl_get(&url) {
         Ok(s) => s,
-        Err(_) => return Ok(GeoResult::Error("curl request failed".into())),
+        Err(e) => return Ok(GeoResult::Error(super::client::describe_curl_error(&e))),
     };
 
     let parsed: Result<serde_json::Value, _> = serde_json::from_str(&stdout);

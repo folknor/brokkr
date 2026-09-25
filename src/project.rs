@@ -170,6 +170,12 @@ pub fn detect_optional() -> Result<Option<Detection>, DevError> {
 
 /// Require the current project matches the expected project.
 /// Returns an error with a helpful message if mismatched.
+///
+/// `command` is rendered as `'brokkr {command}'`, so it must be what the user
+/// actually types: its first word a real subcommand name (a key of
+/// `cli::TABLE`), optionally followed by a sub-subcommand (`"verify batch"`).
+/// A literal label that names no command is caught by
+/// `tests::require_labels_are_real_commands`.
 pub fn require(current: Project, expected: Project, command: &str) -> Result<(), DevError> {
     if current != expected {
         return Err(DevError::Config(format!(
@@ -227,6 +233,55 @@ mod tests {
         let deep = root.join("a").join("b");
         fs::create_dir_all(&deep).unwrap();
         assert_eq!(find_config_dir(&deep), None);
+    }
+
+    /// Every literal `project::require` label must start with a real
+    /// subcommand name. Labels like `"litehtml extract"` rendered as
+    /// `'brokkr litehtml extract' is only available...` - a command that does
+    /// not exist, in the one message whose job is to name the right one.
+    /// Scans the source rather than a registry because the labels are
+    /// arguments at scattered call sites; non-literal labels (`command.id()`)
+    /// are skipped.
+    #[test]
+    fn require_labels_are_real_commands() {
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut stack = vec![src];
+        let mut files = Vec::new();
+        while let Some(dir) = stack.pop() {
+            for entry in fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    files.push(path);
+                }
+            }
+        }
+
+        // Built with concat! so this file's own source never matches it.
+        let needle = concat!("project::", "require(");
+        let mut bad = Vec::new();
+        let mut seen = 0usize;
+        for file in &files {
+            let text = fs::read_to_string(file).unwrap();
+            for (at, _) in text.match_indices(needle) {
+                let call = &text[at + needle.len()..];
+                let close = call.find(')').unwrap_or(call.len());
+                let Some(open) = call[..close].find('"') else {
+                    continue; // non-literal label
+                };
+                let rest = &call[open + 1..];
+                let Some(end) = rest.find('"') else { continue };
+                let label = &rest[..end];
+                seen += 1;
+                let head = label.split_whitespace().next().unwrap_or("");
+                if !crate::cli::TABLE.iter().any(|(name, _)| *name == head) {
+                    bad.push(format!("{}: {label:?}", file.display()));
+                }
+            }
+        }
+        assert!(seen > 0, "found no literal require labels - the scan is broken");
+        assert!(bad.is_empty(), "require labels naming no subcommand: {bad:#?}");
     }
 
     #[test]

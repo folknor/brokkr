@@ -607,12 +607,18 @@ pub fn resolve_fixture(fixtures_dir: &Path, name: &str) -> Result<PathBuf, DevEr
 /// Returns the parsed [`Endpoints`] on success; errors if the child
 /// exits before writing the sentinel (covers fixture-validation errors,
 /// port-in-use, etc.) or if the budget expires.
+///
+/// Also polls the cooperative-shutdown flag, so a `brokkr kill` landing
+/// while an orchestrator's `SigtermGuard` is active aborts the wait with
+/// `DevError::Interrupted` (and [`MockServer::spawn_observed`] reaps the
+/// child) instead of waiting out the readiness budget. Without a guard the
+/// flag is never set, so this costs nothing there.
 pub fn wait_for_endpoints(
     child: &mut std::process::Child,
     readiness: &Path,
     budget: Duration,
 ) -> Result<Endpoints, DevError> {
-    wait_for_endpoints_inner(child, readiness, budget, &|| false)
+    wait_for_endpoints_inner(child, readiness, budget, &crate::shutdown::is_shutdown_requested)
 }
 
 /// As [`wait_for_endpoints`], but also polls a caller-supplied signal

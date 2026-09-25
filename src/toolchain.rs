@@ -23,16 +23,18 @@
 //! there.
 //!
 //! A `--commit` run builds in a persistent worktree rather than the live build
-//! root, so [`with_worktree`](crate::context::with_worktree) re-[`arm`]s the
-//! disable dir to the worktree path for the build closure when
-//! `disable_toolchain` is set - otherwise the commit's own committed pin would
-//! be honoured there.
+//! root, so [`with_worktree`](crate::context::with_worktree), which holds the
+//! lock across the whole `--commit` run, activates a [`DisabledToolchain`] on
+//! the worktree path itself for the build closure when `disable_toolchain` is
+//! set - otherwise the commit's own committed pin would be honoured there.
+//! (Re-arming would not reach it: every acquire inside that run re-enters the
+//! existing hold, and a re-entry activates nothing.)
 //!
 //! ## Serialisation
 //!
 //! Activation is driven by the global command lock, not the top of `run`. The
-//! build root to disable is *armed* once ([`arm`], from `main` and
-//! `with_worktree`); [`crate::lockfile::acquire`] then activates it - moving the
+//! build root to disable is *armed* once ([`arm`], from `main`);
+//! [`crate::lockfile::acquire`] then activates it - moving the
 //! file aside - immediately after taking the flock, and the returned
 //! `LockGuard`'s drop restores it just before releasing the flock. The
 //! moved-aside window is thus exactly the locked window, so concurrent brokkr
@@ -57,15 +59,16 @@ use crate::output;
 
 /// The build root whose pinned toolchain should be disabled when the global
 /// lock is taken, or `None`. Armed once from `main` (the live build root) and
-/// temporarily re-pointed at a worktree by `with_worktree`. Read by
+/// briefly cleared by `with_worktree` while it takes the lock for a `--commit`
+/// run, which never builds in the live root. Read by
 /// [`activate_for_lock`], which the lockfile calls under the flock.
 static DISABLE_DIR: Mutex<Option<PathBuf>> = Mutex::new(None);
 
 /// Set the build root to disable at lock time, returning the previous value.
 ///
 /// Called once at startup with the live build root (or `None` when
-/// `disable_toolchain` is off / no project), and by `with_worktree` to scope
-/// the dir to a `--commit` worktree for the duration of its build closure.
+/// `disable_toolchain` is off / no project), and by `with_worktree` to disarm
+/// it around the `--commit` run's lock acquisition.
 pub fn arm(dir: Option<PathBuf>) -> Option<PathBuf> {
     let mut slot = DISABLE_DIR.lock().unwrap_or_else(PoisonError::into_inner);
     std::mem::replace(&mut *slot, dir)

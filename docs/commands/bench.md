@@ -72,8 +72,11 @@ nothing in the output would look wrong.
 
 Each saved baseline therefore gets a stamp recording `rustc` version, host
 triple, CPU model, any `RUSTFLAGS` in the environment, and digests of both
-`~/.cargo/config.toml` and every `.cargo/config.toml` from the build root
-upwards. The repo-local ones matter as much as the user-level file - that is
+the `$CARGO_HOME` cargo config and every `.cargo/` config from the build root
+upwards. In each directory the digested file is the one cargo reads: the
+extensionless legacy `config` when both it and `config.toml` exist (cargo warns
+and ignores `config.toml`), otherwise whichever exists. The repo-local ones
+matter as much as the user-level file - that is
 where a project pins `target-cpu`, a linker, or target-specific rustflags, and
 cargo merges the two - and a `--commit` run is exactly the case where such a
 file can legitimately differ between the sides being compared. `--compare` refuses when the two disagree. `--lenient`
@@ -89,6 +92,9 @@ Two limits worth knowing:
 - Only fields **both** stamps recorded are compared. A field one side never had
   is not a difference, so adding a new field later does not retroactively
   invalidate every existing baseline.
+- A stamp that exists but cannot be read (permissions, I/O) is **not** a pass:
+  `--compare` refuses, since the environments were never checked. `--lenient`
+  downgrades that to a warning like any other mismatch.
 
 ## Where baselines live
 

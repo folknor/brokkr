@@ -37,7 +37,20 @@ pub struct Gremlin {
 /// Format a gremlin occurrence as a one-liner matching cargo_filter style.
 ///
 /// `src/foo.rs:10:5 U+200B ZERO WIDTH SPACE`
+///
+/// A raw byte that is not valid UTF-8 has no codepoint, so it prints as the
+/// byte itself: `docs/a.md:3:7 byte 0xA0 INVALID UTF-8`.
 pub fn format_one(g: &Gremlin) -> String {
+    if g.name == INVALID_UTF8 {
+        return format!(
+            "{}:{}:{} byte 0x{:02X} {}",
+            g.path.display(),
+            g.line,
+            g.column,
+            g.codepoint,
+            g.name,
+        );
+    }
     format!(
         "{}:{}:{} U+{:04X} {}",
         g.path.display(),
@@ -128,7 +141,14 @@ pub fn fix(
             continue;
         }
         let abs = project_root.join(rel);
-        let Ok(content) = std::fs::read_to_string(&abs) else {
+        let Some(bytes) = read_in_scope(&abs, rel)? else {
+            continue;
+        };
+        // A non-UTF-8 file is left untouched: rewriting it means guessing
+        // its encoding, and a wrong guess corrupts every other non-ASCII
+        // byte in it. Not silent - `scan` reports each invalid byte, so the
+        // gremlins phase still fails until the file is re-encoded by hand.
+        let Ok(content) = String::from_utf8(bytes) else {
             continue;
         };
         let (fixed, count) = fix_content(&content, &allow);
@@ -275,12 +295,63 @@ pub fn scan(
             continue;
         }
         let abs = project_root.join(rel);
-        let Ok(content) = std::fs::read_to_string(&abs) else {
+        let Some(bytes) = read_in_scope(&abs, rel)? else {
             continue;
         };
-        scan_content(rel, &content, &mut out, &allow, &ban);
+        scan_bytes(rel, &bytes, &mut out, &allow, &ban);
     }
     Ok(out)
+}
+
+/// Read one in-scope file as raw bytes - not a `String`, because a file that
+/// is not valid UTF-8 is exactly where a gremlin hides (a Latin-1 `.md` with
+/// a raw 0xA0 NBSP), and `read_to_string` failing on it used to make the
+/// file invisible.
+///
+/// `Ok(None)` only for a path that no longer exists: `git ls-files --cached`
+/// still lists a file deleted from the working tree, and there is nothing
+/// left to scan. Any other read failure is an error naming the file, never a
+/// silent skip - an in-scope file the scan could not look at is not clean.
+pub(crate) fn read_in_scope(abs: &Path, rel: &Path) -> Result<Option<Vec<u8>>, DevError> {
+    match std::fs::read(abs) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(DevError::Io(std::io::Error::new(
+            e.kind(),
+            format!("cannot read {}: {e}", rel.display()),
+        ))),
+    }
+}
+
+/// Label for a byte that is not part of any valid UTF-8 sequence. Its
+/// `Gremlin::codepoint` carries the raw byte value; [`format_one`] prints it
+/// as a byte rather than a `U+` codepoint.
+const INVALID_UTF8: &str = "INVALID UTF-8";
+
+/// [`scan_chars`] over raw bytes: valid UTF-8 runs scan as usual, and every
+/// byte of an invalid sequence is reported as an [`INVALID_UTF8`] gremlin at
+/// its own column, so a legacy-encoded file fails loudly at the exact spot.
+fn scan_bytes(
+    rel: &Path,
+    bytes: &[u8],
+    out: &mut Vec<Gremlin>,
+    allow: &CodepointSet,
+    ban: &CodepointSet,
+) {
+    let mut pos = (1usize, 1usize);
+    for chunk in bytes.utf8_chunks() {
+        scan_chars(rel, chunk.valid(), &mut pos, out, allow, ban);
+        for &b in chunk.invalid() {
+            out.push(Gremlin {
+                path: rel.to_path_buf(),
+                line: pos.0,
+                column: pos.1,
+                codepoint: u32::from(b),
+                name: INVALID_UTF8,
+            });
+            pos.1 += 1;
+        }
+    }
 }
 
 /// The config's `allow` set, or an empty set when there is no `[gremlins]`.
@@ -293,6 +364,7 @@ fn ban_set(config: Option<&GremlinsConfig>) -> CodepointSet {
     config.map(|c| c.ban.clone()).unwrap_or_default()
 }
 
+#[cfg(test)]
 fn scan_content(
     rel: &Path,
     content: &str,
@@ -300,8 +372,21 @@ fn scan_content(
     allow: &CodepointSet,
     ban: &CodepointSet,
 ) {
-    let mut line = 1usize;
-    let mut col = 1usize;
+    scan_chars(rel, content, &mut (1, 1), out, allow, ban);
+}
+
+/// Scan `content`, continuing from the 1-based `(line, column)` in `pos` and
+/// leaving it just past the last char (so [`scan_bytes`] can resume after an
+/// invalid run).
+fn scan_chars(
+    rel: &Path,
+    content: &str,
+    pos: &mut (usize, usize),
+    out: &mut Vec<Gremlin>,
+    allow: &CodepointSet,
+    ban: &CodepointSet,
+) {
+    let (mut line, mut col) = *pos;
     for c in content.chars() {
         if c == '\n' {
             line += 1;
@@ -327,6 +412,7 @@ fn scan_content(
         }
         col += 1;
     }
+    *pos = (line, col);
 }
 
 /// Label for a codepoint flagged only because it is in the config `ban` list.
@@ -505,6 +591,40 @@ mod tests {
         let out = scan_str("foo\u{00A0}bar\n");
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].codepoint, 0x00A0);
+    }
+
+    #[test]
+    fn raw_latin1_nbsp_is_reported_not_skipped() {
+        // A Latin-1 file: 0xA0 is an NBSP there but not valid UTF-8. It used
+        // to fail `read_to_string` and make the whole file invisible.
+        let mut out = Vec::new();
+        let bytes = b"ok\nfoo\xA0bar \xE2\x80\x94\n";
+        scan_bytes(
+            Path::new("n.md"),
+            bytes,
+            &mut out,
+            &CodepointSet::default(),
+            &CodepointSet::default(),
+        );
+        assert_eq!(out.len(), 2);
+        assert_eq!((out[0].line, out[0].column), (2, 4));
+        assert_eq!(out[0].name, INVALID_UTF8);
+        assert_eq!(out[0].codepoint, 0xA0);
+        assert_eq!(format_one(&out[0]), "n.md:2:4 byte 0xA0 INVALID UTF-8");
+        // Scanning resumes after the invalid byte with columns intact.
+        assert_eq!((out[1].line, out[1].column), (2, 9));
+        assert_eq!(out[1].name, "EM DASH");
+    }
+
+    #[test]
+    fn unreadable_in_scope_file_is_an_error_but_a_deleted_one_is_not() {
+        let dir = crate::test_scratch::scratch("gremlins", "unreadable");
+        // A directory with a scannable name cannot be read as a file.
+        let as_dir = dir.join("odd.md");
+        std::fs::create_dir_all(&as_dir).unwrap();
+        assert!(read_in_scope(&as_dir, Path::new("odd.md")).is_err());
+        let gone = dir.join("gone.md");
+        assert!(read_in_scope(&gone, Path::new("gone.md")).unwrap().is_none());
     }
 
     #[test]

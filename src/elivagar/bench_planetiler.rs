@@ -56,9 +56,21 @@ pub fn run(
     let tmpdir = scratch_dir.join("planetiler_tmp");
     let tmpdir_str = tmpdir.display().to_string();
 
-    // Prime Planetiler source data (ocean + natural earth) on first run.
+    // Where Planetiler keeps its source downloads (ocean + natural earth),
+    // passed explicitly on every invocation. Planetiler's own default is
+    // `data/sources` relative to its cwd (the project root), which matches the
+    // `data_dir/sources` this check looks at only while the host's data dir
+    // happens to be `<project>/data`.
     let sources_dir = data_dir.join("sources");
-    if !sources_dir.exists() {
+    let download_dir_arg = format!("--download_dir={}", sources_dir.display());
+    // Written only after a priming run succeeds. The bare directory is not
+    // evidence of anything: an interrupted download leaves it behind, half
+    // full, and every later run would then measure against partial sources.
+    let primed_marker = sources_dir.join(".brokkr-primed");
+
+    // Prime Planetiler source data on first run - the only invocation that
+    // passes `--download`, so network time never lands inside a timed run.
+    if !primed_marker.exists() {
         output::bench_msg("priming Planetiler data (first-time download of ocean + natural earth)");
 
         let osm_arg = format!("--osm-path={pbf_str}");
@@ -72,6 +84,7 @@ pub fn run(
             "shortbread",
             "--force",
             "--download",
+            &download_dir_arg,
             "--area=extract",
             &osm_arg,
             &out_arg,
@@ -81,6 +94,8 @@ pub fn run(
 
         let captured = output::run_captured(java_str, &prime_args, project_root)?;
         captured.check_success(java_str)?;
+        std::fs::create_dir_all(&sources_dir)?;
+        std::fs::write(&primed_marker, b"")?;
         output::bench_msg("Planetiler data primed");
     }
 
@@ -99,7 +114,10 @@ pub fn run(
         jar_str,
         "shortbread".into(),
         "--force".into(),
-        "--download".into(),
+        // No `--download`: sources were primed above. With it, Planetiler
+        // re-checks (and on a stale source re-fetches) over the network inside
+        // the measured wall.
+        download_dir_arg,
         "--area=extract".into(),
         osm_arg,
         out_arg,

@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use super::verify::VerifyHarness;
+use super::verify::{Findings, VerifyHarness};
 use crate::error::DevError;
 use crate::output::verify_msg;
 
@@ -14,9 +14,10 @@ const EXPRESSIONS: &[(&str, &str)] = &[
 ];
 
 /// Run tags-filter cross-validation: pbfhogg vs osmium, 3 expressions with `-R`.
-pub fn run(harness: &VerifyHarness, pbf: &Path, direct_io: bool) -> Result<(), DevError> {
+pub fn run(harness: &VerifyHarness, pbf: &Path, direct_io: bool) -> Result<Findings, DevError> {
     let outdir = harness.subdir("tags-filter")?;
     let pbf_str = pbf.display().to_string();
+    let mut findings = Findings::new();
 
     for (expr, label) in EXPRESSIONS {
         verify_msg(&format!("--- tags-filter {expr} -R ---"));
@@ -53,16 +54,20 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, direct_io: bool) -> Result<(), D
         harness.print_inspect("osmium", &osmium_out)?;
 
         // Diff and report.
-        let identical = harness.diff_pbfs(&pbfhogg_out, &osmium_out)?;
-        if identical {
+        let diff = harness.diff_pbfs(&pbfhogg_out, &osmium_out)?;
+        if diff.is_pass() {
             verify_msg(&format!("  {label}: PASS (identical)"));
         } else {
             verify_msg(&format!("  {label}: FAIL (differences found)"));
         }
+        findings.record(&format!("{label} diff"), diff);
 
         // Compare sort feature flags.
-        harness.compare_sort_feature(&pbfhogg_out, &osmium_out)?;
+        findings.record(
+            &format!("{label} sort feature"),
+            harness.compare_sort_feature(&pbfhogg_out, &osmium_out)?,
+        );
     }
 
-    Ok(())
+    Ok(findings)
 }

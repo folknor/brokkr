@@ -25,7 +25,8 @@ const USER_CONFIG_ENV: &str = "BROKKR_USER_CONFIG";
 /// `None` means there is no user-wide layer to look for: either
 /// `BROKKR_USER_CONFIG` is set to the empty string (an explicit opt-out), or
 /// neither `XDG_CONFIG_HOME` nor `HOME` is set, which is a sandbox, not an
-/// error.
+/// error. An empty or relative `XDG_CONFIG_HOME` counts as unset, per the XDG
+/// spec (`user_dirs`) - taken literally it would read a config out of the cwd.
 pub fn user_config_path() -> Option<PathBuf> {
     if let Some(v) = std::env::var_os(USER_CONFIG_ENV) {
         if v.is_empty() {
@@ -33,11 +34,7 @@ pub fn user_config_path() -> Option<PathBuf> {
         }
         return Some(PathBuf::from(v));
     }
-    let dir = if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
-        PathBuf::from(xdg)
-    } else {
-        PathBuf::from(std::env::var("HOME").ok()?).join(".config")
-    };
+    let dir = crate::user_dirs::xdg_config_home()?;
     Some(dir.join("brokkr").join("brokkr.toml"))
 }
 

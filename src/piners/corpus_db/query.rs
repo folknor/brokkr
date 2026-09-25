@@ -224,14 +224,14 @@ pub fn resolve_diff_columns(requested: &[String]) -> Result<Vec<String>, DevErro
     for c in requested {
         if c == "all" {
             return Err(DevError::Config(
-                "results --columns: 'all' selects every column and must stand alone, \
+                "corpus-results --columns: 'all' selects every column and must stand alone, \
                  not be mixed with named columns"
                     .to_owned(),
             ));
         }
         if !TRADE_DIFF_COLUMNS.contains(&c.as_str()) {
             return Err(DevError::Config(format!(
-                "results --columns: unknown trade_diff column '{c}'. Valid columns:\n  {}",
+                "corpus-results --columns: unknown trade_diff column '{c}'. Valid columns:\n  {}",
                 TRADE_DIFF_COLUMNS.join(", ")
             )));
         }
@@ -449,22 +449,43 @@ impl CorpusDb {
     /// This replaces the old sum-of-per-probe-`runtime_ms` estimate, which
     /// assumed serial probes and so overshot the real (probe-overlapping) wall
     /// several-fold. Coverage is read off the stored `selector` JSON `ids`.
-    pub fn estimated_wall_ms(&self, selection: &[String]) -> Result<Option<f64>, DevError> {
+    ///
+    /// Only a run that actually did the work it was asked to is a valid bound,
+    /// so a covering run must also be **comparable**: the harness completed
+    /// (exit 0, or 1 - a break is a finished probe, not an abort), it emitted a
+    /// line for every probe it was given (`probe_count >= ids`), it ran with no
+    /// forwarded harness flags, and it was built in the same profile (`debug`;
+    /// a row predating the recorded profile counts as debug, the parity
+    /// default). Without these, one fast-failing `--all` run - a harness error
+    /// at startup, say - would bound every later selection at a second or two
+    /// and silently disable the ceiling.
+    pub fn estimated_wall_ms(
+        &self,
+        selection: &[String],
+        debug: bool,
+    ) -> Result<Option<f64>, DevError> {
         let want: std::collections::HashSet<&str> =
             selection.iter().map(String::as_str).collect();
-        // Newest first; stop at the first run whose id-set covers the selection.
-        // The most recent run is often `--all` (covers everything), so this
-        // typically returns on the first row.
+        // Newest first; stop at the first comparable run whose id-set covers
+        // the selection. The most recent run is often `--all` (covers
+        // everything), so this typically returns on the first rows.
         let mut stmt = self.conn().prepare(
-            "SELECT selector, wall_ms FROM run \
-             WHERE wall_ms IS NOT NULL ORDER BY run_id DESC",
+            "SELECT selector, wall_ms, probe_count FROM run \
+             WHERE wall_ms IS NOT NULL AND harness_exit_code IN (0, 1) \
+             ORDER BY run_id DESC",
         )?;
         let rows = stmt.query_map([], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1)?))
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, f64>(1)?,
+                r.get::<_, i64>(2)?,
+            ))
         })?;
         for row in rows {
-            let (selector, wall_ms) = row?;
-            if selection_covered(&selector, &want) {
+            let (selector, wall_ms, probe_count) = row?;
+            if selection_covered(&selector, &want)
+                && comparable_run(&selector, probe_count, debug)
+            {
                 return Ok(Some(wall_ms));
             }
         }
@@ -519,6 +540,30 @@ fn selection_covered(selector: &str, want: &std::collections::HashSet<&str>) -> 
     want.iter().all(|id| have.contains(id))
 }
 
+/// Is the run whose stored `selector` JSON is `selector` a valid wall basis
+/// for a run built in profile `debug`? See [`CorpusDb::estimated_wall_ms`]:
+/// no forwarded harness flags, the same profile (absent = debug), and a
+/// disposition line for every selected id. Unparsable = not comparable.
+fn comparable_run(selector: &str, probe_count: i64, debug: bool) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(selector) else {
+        return false;
+    };
+    let perturbed = value
+        .get("harness_args")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|a| !a.is_empty());
+    let run_debug = value
+        .get("debug")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(true);
+    let asked = value
+        .get("ids")
+        .and_then(serde_json::Value::as_array)
+        .map_or(0, Vec::len);
+    let complete = usize::try_from(probe_count).is_ok_and(|n| n >= asked);
+    !perturbed && run_debug == debug && complete
+}
+
 fn value_to_string(v: rusqlite::types::ValueRef<'_>) -> String {
     use rusqlite::types::ValueRef;
     match v {
@@ -546,54 +591,70 @@ mod tests {
     /// Record a run with an explicit `selector` JSON and measured `wall_ms` -
     /// the inputs the superset-wall estimator reads.
     fn record_full(db: &CorpusDb, selector: &str, wall_ms: Option<f64>, result: &str, nd: &[u8]) {
+        record_exit(db, selector, wall_ms, Some(0), result, nd);
+    }
+
+    /// [`record_full`] with an explicit harness exit code.
+    fn record_exit(
+        db: &CorpusDb,
+        selector: &str,
+        wall_ms: Option<f64>,
+        exit: Option<i32>,
+        result: &str,
+        nd: &[u8],
+    ) {
         let report = parse(nd);
         let run = crate::piners::corpus_db::RunRecord {
             selector,
             gated: true,
             result,
             fail_reason: None,
-            harness_exit_code: Some(0),
+            harness_exit_code: exit,
             stderr: "",
             wall_ms,
         };
         db.record_run(&run, &report, &BTreeMap::new(), &[]).unwrap();
     }
 
-    /// Body NDJSON is irrelevant to the wall estimator (it reads the run
-    /// envelope's selector + wall_ms), so the wall tests use a one-probe line.
-    const ONE_LINE: &[u8] = br#"{"probe":"x","outcome":"parity"}
-"#;
+    /// One disposition line per id - a run that finished every probe it was
+    /// given, which is what makes it a valid wall basis.
+    fn lines(ids: &[&str]) -> Vec<u8> {
+        ids.iter()
+            .map(|id| format!("{{\"probe\":\"{id}\",\"outcome\":\"parity\"}}\n"))
+            .collect::<String>()
+            .into_bytes()
+    }
 
     #[test]
     fn estimated_wall_uses_the_most_recent_superset_runs_measured_wall() {
         let db = CorpusDb::open_in_memory().unwrap();
         // Run 1: an `--all`-style full run over [a,b,c], wall 60s.
-        record_full(&db, r#"{"ids":["a","b","c"]}"#, Some(60_000.0), "pass", ONE_LINE);
+        record_full(&db, r#"{"ids":["a","b","c"]}"#, Some(60_000.0), "pass", &lines(&["a", "b", "c"]));
         // Run 2: a smaller slice [a], wall 5s.
-        record_full(&db, r#"{"ids":["a"]}"#, Some(5_000.0), "pass", ONE_LINE);
+        record_full(&db, r#"{"ids":["a"]}"#, Some(5_000.0), "pass", &lines(&["a"]));
 
         // Selecting {a,b}: run 2 ([a]) does NOT cover it; run 1 ([a,b,c]) does,
         // so the estimate is run 1's real 60s wall - the valid upper bound.
         let est = db
-            .estimated_wall_ms(&["a".to_owned(), "b".to_owned()])
+            .estimated_wall_ms(&["a".to_owned(), "b".to_owned()], true)
             .unwrap();
         assert_eq!(est, Some(60_000.0));
 
         // Selecting {a}: the newest covering run wins - run 2's 5s, not run 1's.
-        assert_eq!(db.estimated_wall_ms(&["a".to_owned()]).unwrap(), Some(5_000.0));
+        assert_eq!(db.estimated_wall_ms(&["a".to_owned()], true).unwrap(), Some(5_000.0));
     }
 
     #[test]
     fn estimated_wall_is_none_when_no_run_covers_the_selection() {
         let db = CorpusDb::open_in_memory().unwrap();
-        record_full(&db, r#"{"ids":["a","b"]}"#, Some(10_000.0), "pass", ONE_LINE);
+        record_full(&db, r#"{"ids":["a","b"]}"#, Some(10_000.0), "pass", &lines(&["a", "b"]));
 
         // `z` is not in any recorded run's selection -> no covering run -> None
         // (the caller reads this as "no measured basis, don't refuse").
-        assert_eq!(db.estimated_wall_ms(&["z".to_owned()]).unwrap(), None);
+        assert_eq!(db.estimated_wall_ms(&["z".to_owned()], true).unwrap(), None);
         // A partial overlap still isn't coverage: {a,z} needs BOTH in one run.
         assert_eq!(
-            db.estimated_wall_ms(&["a".to_owned(), "z".to_owned()]).unwrap(),
+            db.estimated_wall_ms(&["a".to_owned(), "z".to_owned()], true).unwrap(),
             None
         );
     }
@@ -603,9 +664,40 @@ mod tests {
         let db = CorpusDb::open_in_memory().unwrap();
         // Newest covering run has NULL wall (e.g. a spawn failure) -> skipped;
         // the older covering run with a real wall is used.
-        record_full(&db, r#"{"ids":["a"]}"#, Some(8_000.0), "pass", ONE_LINE);
-        record_full(&db, r#"{"ids":["a"]}"#, None, "fail", ONE_LINE);
-        assert_eq!(db.estimated_wall_ms(&["a".to_owned()]).unwrap(), Some(8_000.0));
+        record_full(&db, r#"{"ids":["a"]}"#, Some(8_000.0), "pass", &lines(&["a"]));
+        record_full(&db, r#"{"ids":["a"]}"#, None, "fail", &lines(&["a"]));
+        assert_eq!(db.estimated_wall_ms(&["a".to_owned()], true).unwrap(), Some(8_000.0));
+    }
+
+    #[test]
+    fn estimated_wall_skips_runs_that_are_not_comparable() {
+        let db = CorpusDb::open_in_memory().unwrap();
+        // The one real basis: a complete debug run, 90s.
+        record_full(&db, r#"{"ids":["a","b"]}"#, Some(90_000.0), "pass", &lines(&["a", "b"]));
+        // Newer, all covering, all fast, none a valid bound:
+        // a harness error at startup (exit 2, no lines),
+        record_exit(&db, r#"{"ids":["a","b"]}"#, Some(900.0), Some(2), "fail", b"");
+        // a run that stopped emitting after one probe,
+        record_full(&db, r#"{"ids":["a","b"]}"#, Some(1_000.0), "fail", &lines(&["a"]));
+        // a run perturbed by forwarded harness flags,
+        record_full(
+            &db,
+            r#"{"ids":["a","b"],"harness_args":["--fast"]}"#,
+            Some(1_100.0),
+            "pass",
+            &lines(&["a", "b"]),
+        );
+        // and a release build.
+        record_full(&db, r#"{"ids":["a","b"],"debug":false}"#, Some(1_200.0), "pass", &lines(&["a", "b"]));
+
+        let sel = ["a".to_owned(), "b".to_owned()];
+        assert_eq!(db.estimated_wall_ms(&sel, true).unwrap(), Some(90_000.0));
+        // A release selection is bounded by the release run only; the
+        // profile-less legacy row reads as debug.
+        assert_eq!(db.estimated_wall_ms(&sel, false).unwrap(), Some(1_200.0));
+        // Exit 1 (breaks) is a finished run and still counts.
+        record_exit(&db, r#"{"ids":["a","b"]}"#, Some(70_000.0), Some(1), "fail", &lines(&["a", "b"]));
+        assert_eq!(db.estimated_wall_ms(&sel, true).unwrap(), Some(70_000.0));
     }
 
     fn owned(cols: &[&str]) -> Vec<String> {
@@ -635,6 +727,8 @@ mod tests {
         let err = resolve_diff_columns(&owned(&["our_qty", "bogus"])).unwrap_err();
         assert!(err.to_string().contains("bogus"));
         assert!(err.to_string().contains("our_qty"));
+        // The hint names the command that owns the flag.
+        assert!(err.to_string().contains("corpus-results --columns"));
         // `all` mixed with names is rejected (it means "everything", alone).
         assert!(resolve_diff_columns(&owned(&["all", "our_qty"])).is_err());
     }

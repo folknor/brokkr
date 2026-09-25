@@ -224,20 +224,84 @@ fn map_result_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ResultRow> {
     })
 }
 
+/// Bring the `mechanical_*` tables up to the current shape.
+///
+/// Deliberately keyed on the schema itself (column probes), never on
+/// `PRAGMA user_version`: this file is `results.db`, whose `user_version`
+/// belongs to `ResultsDb` (`src/db/schema.rs`). Reading it here saw
+/// `ResultsDb`'s number, so a litehtml step gated on `version < N` was dead
+/// on any file `ResultsDb` had touched; writing it stamped a fresh or legacy
+/// file with litehtml's number, so `ResultsDb` then skipped its own early
+/// migrations. Every step below must be idempotent and self-detecting.
 fn migrate(conn: &Connection) -> Result<(), DevError> {
-    let version: i32 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    if version < 1 {
-        // Check if artifact_dir column exists before trying to drop it.
-        let has_column = conn
-            .prepare("SELECT artifact_dir FROM mechanical_results LIMIT 0")
-            .is_ok();
-        if has_column {
-            conn.execute(
-                "ALTER TABLE mechanical_results DROP COLUMN artifact_dir",
-                [],
-            )?;
-        }
-        conn.pragma_update(None, "user_version", 1)?;
+    if has_column(conn, "mechanical_results", "artifact_dir") {
+        conn.execute(
+            "ALTER TABLE mechanical_results DROP COLUMN artifact_dir",
+            [],
+        )?;
     }
     Ok(())
+}
+
+fn has_column(conn: &Connection, table: &str, column: &str) -> bool {
+    conn.prepare(&format!("SELECT {column} FROM {table} LIMIT 0")).is_ok()
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+
+    /// Opening must neither read nor write `user_version`, which `ResultsDb`
+    /// owns in this same file.
+    #[test]
+    fn open_leaves_user_version_alone() {
+        let dir = crate::test_scratch::scratch("litehtml_db", "user_version");
+        let path = dir.join("results.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.pragma_update(None, "user_version", 0).unwrap();
+        }
+        drop(MechanicalDb::open(&path).unwrap());
+        let conn = Connection::open(&path).unwrap();
+        let v: i32 = conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, 0);
+
+        conn.pragma_update(None, "user_version", 18).unwrap();
+        drop(conn);
+        drop(MechanicalDb::open(&path).unwrap());
+        let conn = Connection::open(&path).unwrap();
+        let v: i32 = conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, 18);
+    }
+
+    /// The legacy `artifact_dir` column is dropped whatever `user_version`
+    /// says - including a file `ResultsDb` already stamped.
+    #[test]
+    fn drops_legacy_column_regardless_of_user_version() {
+        let dir = crate::test_scratch::scratch("litehtml_db", "legacy_column");
+        let path = dir.join("results.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute(SCHEMA_RUNS, []).unwrap();
+            conn.execute(
+                "CREATE TABLE mechanical_results (
+                    run_id TEXT NOT NULL, fixture_id TEXT NOT NULL,
+                    pixel_diff_pct REAL, element_match_pct REAL,
+                    status TEXT NOT NULL, artifact_dir TEXT,
+                    PRIMARY KEY (run_id, fixture_id))",
+                [],
+            )
+            .unwrap();
+            conn.pragma_update(None, "user_version", 18).unwrap();
+        }
+        drop(MechanicalDb::open(&path).unwrap());
+        let conn = Connection::open(&path).unwrap();
+        assert!(!has_column(&conn, "mechanical_results", "artifact_dir"));
+        assert!(has_column(&conn, "mechanical_results", "status"));
+    }
 }

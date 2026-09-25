@@ -27,7 +27,40 @@ pub struct Scope {
     pub syntax_only: bool,
 }
 
+/// The label of the default scope (errors only, syntax stage only) - what a
+/// run with neither `--warnings` nor `--all-stages` compares, and what a pin
+/// that records no scope (`expected_scope`/`tv_scope` absent) was stamped
+/// under.
+pub const DEFAULT_SCOPE_LABEL: &str = "errors/syntax";
+
 impl Scope {
+    /// The stable name of this scope, as recorded in `lints.toml` beside a
+    /// blessed `expected` (`expected_scope`) and a TV anchor (`tv_scope`).
+    /// Both are only meaningful under the scope they were stamped in: a
+    /// fingerprint filtered to errors is not comparable with a run that also
+    /// counts warnings.
+    pub fn label(self) -> &'static str {
+        match (self.include_warnings, self.syntax_only) {
+            (false, true) => DEFAULT_SCOPE_LABEL,
+            (true, true) => "errors+warnings/syntax",
+            (false, false) => "errors/all-stages",
+            (true, false) => "errors+warnings/all-stages",
+        }
+    }
+
+    /// The label to write into `lints.toml`: `None` for the default scope, so
+    /// the common case adds no key, and a pin without the key reads back as
+    /// the default.
+    pub fn recorded_label(self) -> Option<String> {
+        let label = self.label();
+        (label != DEFAULT_SCOPE_LABEL).then(|| label.to_owned())
+    }
+
+    /// True if a pin's recorded scope (`None` = default) is this scope.
+    pub fn matches_recorded(self, recorded: Option<&str>) -> bool {
+        recorded.unwrap_or(DEFAULT_SCOPE_LABEL) == self.label()
+    }
+
     /// True if a diagnostic of `severity` passes the severity filter.
     fn keeps(self, severity: Severity) -> bool {
         self.include_warnings || severity == Severity::Error
@@ -327,6 +360,24 @@ mod tests {
     fn pine_lint_success_with_no_diagnostics_is_clean() {
         // success=true with neither `result` nor top-level arrays => clean.
         assert!(parse_pine_lint(br#"{"success":true}"#, ALL).unwrap().is_empty());
+    }
+
+    #[test]
+    fn scope_labels_are_distinct_and_default_is_unrecorded() {
+        let labels = [
+            ERR_SYNTAX.label(),
+            ALL.label(),
+            Scope { include_warnings: true, syntax_only: true }.label(),
+            Scope { include_warnings: false, syntax_only: false }.label(),
+        ];
+        let unique: std::collections::BTreeSet<_> = labels.iter().collect();
+        assert_eq!(unique.len(), 4);
+        assert_eq!(ERR_SYNTAX.recorded_label(), None);
+        assert_eq!(ALL.recorded_label().as_deref(), Some("errors+warnings/all-stages"));
+        // An absent recorded scope is the default one.
+        assert!(ERR_SYNTAX.matches_recorded(None));
+        assert!(!ALL.matches_recorded(None));
+        assert!(ALL.matches_recorded(Some("errors+warnings/all-stages")));
     }
 
     #[test]

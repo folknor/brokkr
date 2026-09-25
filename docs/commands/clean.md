@@ -65,12 +65,19 @@ Bare `brokkr clean`, in order:
   nothing else reaches. Taken from cargo's real resolved target dir, not a
   host `target` override, since that is where the check phase actually built
   them.
-- **Scratch**, whose shape differs per project: elivagar's `tilegen_tmp` is
-  wiped and recreated; nidhogg's `.ingest_tmp` and `.tilegen_tmp` go; every
-  other project sweeps loose `.pbf` files, `geocode-<dataset>/` output dirs,
-  and orphaned `.pbfhogg-external-join-<pid>` dirs. Those last survive OOM
-  kills (SIGKILL runs no destructor), so each is removed **only after checking
-  the PID is dead** - a live sibling run's scratch is left alone.
+- **Scratch**, whose shape differs per project: elivagar's scratch dir (the
+  host `scratch`, where tilegen writes before the rename into the durable
+  store) is wiped and recreated, and `<data>/tilegen_tmp` (the `--tmp-dir`
+  brokkr hands elivagar) is removed; nidhogg's `.ingest_tmp` and `.tilegen_tmp`
+  go, whether or not a scratch dir exists; every other project sweeps loose
+  `.pbf` files, `geocode-<dataset>/` output dirs, and orphaned
+  `.pbfhogg-external-join-<pid>` dirs. Those last survive OOM kills (SIGKILL
+  runs no destructor), so each is removed **only once its owner is known to be
+  gone**: no process holds the PID (`ESRCH` - an `EPERM` means a live process
+  under another uid), or the process holding it started after the dir was
+  created, which makes it a recycled PID. When either fact cannot be read the
+  dir is kept - a leak until the next clean, rather than a live sibling run's
+  scratch deleted.
 - **Elivagar also**: `corpus-calibrands/` (the default `-o` for
   `pmtiles-corpus mutate`) and `ocean-build_tmp`.
 - **Run-artefact trees**: `.brokkr/ratatoskr/` directories (run-N dirs left by
@@ -112,7 +119,12 @@ and pre-rename `<dataset>-<commit>` archives all survive untouched.
 ## `--worktrees`
 
 Purge every persistent benchmark worktree (the sibling
-`.brokkr-worktree-<project>-*` dirs that `--commit` creates).
+`.brokkr-worktree-<project>-<short hash>` dirs that `--commit` creates). The
+name is matched by construction - the prefix followed by a bare hex hash - so a
+checkout named `foo` never claims a sibling checkout `foo-bar`'s worktrees.
+Unlike retention eviction, the purge does not spare a worktree with
+uncommitted work: it is asked for by name, and a purge that quietly kept some
+would misreport what was reclaimed.
 
 This is the explicit hammer. Routine growth is damped automatically: cutting a
 new `--commit` worktree first evicts the least-recently-used ones beyond
@@ -135,11 +147,14 @@ reads `removed N of M worktree(s) found` whenever those differ. "Removed 0" and
 directories carry an isolated `target/` each: on the nautilus workload, ~1.3G
 apiece.
 
-On elivagar this also wipes the durable output store **wholesale** - every
-`*.pmtiles` in the output dir, not the keep-N pruning of `--archives`. The deep
-clean is the one place the store is treated as what it is, reproducible; rerun
-`tilegen` to get an archive back. Skipped when the output dir coincides with
-scratch, which the routine pass already wiped.
+On elivagar this also empties the durable output store - every canonical
+archive, not the keep-N pruning of `--archives` (it is `--archives --keep 0`).
+The deep clean is the one place the store is treated as what it is,
+reproducible; rerun `tilegen` to get an archive back. It still follows the
+constructed-name rule: only `<dataset>-<variant>-<commit>.pmtiles` names built
+from configured datasets go, so a hand-named file or the ocean artifact
+survives even when `output` points at the data dir. Skipped when the output dir
+coincides with scratch, which the routine pass already wiped.
 
 ## `--all` and `--dry-run`
 

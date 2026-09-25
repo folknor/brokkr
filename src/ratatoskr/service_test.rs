@@ -21,7 +21,19 @@ use crate::ratatoskr::saehrimnir::{
 
 /// Where per-test artefact directories live, relative to the project
 /// root. Allocator under [`ArtefactDir`] creates `<this>/<test_id>/run-N/`.
-const ARTEFACT_PARENT: &str = ".brokkr/ratatoskr";
+///
+/// A dedicated `service/` level, not `.brokkr/ratatoskr` itself: there
+/// the script stem shared a namespace with brokkr's own entries (`sync/`,
+/// `mock/`, `gate.db`), so a `mock.lua` or `sync.lua` wrote into those
+/// trees.
+const ARTEFACT_PARENT: &str = ".brokkr/ratatoskr/service";
+
+/// Where a service run's sæhrimnir state lives: `<this>/<fixture>/`.
+/// Separate from [`ARTEFACT_PARENT`] so a fixture name can never collide
+/// with a script stem, and from mock-serve's `.brokkr/ratatoskr/mock/`,
+/// where a fixture called `readiness` would otherwise become a directory
+/// on the path mock-serve deletes as a file.
+const SERVICE_MOCK_PARENT: &str = ".brokkr/ratatoskr/service-mock";
 
 /// Run one or more service-script iterations through the harness binary
 /// built via `[ratatoskr.harness]`.
@@ -159,7 +171,6 @@ pub fn service_test(
             dev_config,
             &test_id,
             fixture_name,
-            &artefact_parent,
             &_lock,
         )?)
     } else {

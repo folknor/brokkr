@@ -44,6 +44,11 @@ pub use mutate::MutationOp;
 /// The gate's verdict, mapped 1:1 to the process exit code the caller contract
 /// pins (`brokkr.md`, Signals). 0 pass / 1 content changed / 2 archive cannot be
 /// judged / 3 the baseline is the problem (damage OR staleness).
+///
+/// A run that reaches no verdict at all - lock, bootstrap, archive resolution,
+/// a genuine IO failure - is none of these: it exits [`INCOMPLETE_EXIT`] via
+/// `cmd::operational`, so it can never read as exit 1's "the archive
+/// regressed".
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Outcome {
     Pass,
@@ -63,6 +68,12 @@ impl Outcome {
         }
     }
 }
+
+/// Exit code for a `pmtiles-corpus` run that could not be completed. Distinct
+/// from every verdict code; 2 is taken by `ArchiveRefused` (which clap's usage
+/// errors also use - a usage error prints clap's usage text, a refusal prints
+/// the gate's reason).
+pub const INCOMPLETE_EXIT: i32 = 4;
 
 #[derive(Clone, Debug, Default)]
 pub struct CheckReport {
@@ -112,7 +123,14 @@ fn baseline_material<T>(what: &str, read: io::Result<T>) -> io::Result<Result<T,
 /// The corpus-global canonical style: `<corpus-root>/style.toml`, where
 /// `corpus_dir` is `<corpus-root>/<dataset>`. Anchored at the corpus root so it
 /// resolves the same regardless of the invoking cwd.
-fn corpus_style_path(corpus_dir: &Path) -> std::path::PathBuf {
+///
+/// The ONE rule for locating the style. `check`'s staleness scan reads it, and
+/// the dispatch derives `render-manifest`'s and `render`'s `--style` default
+/// from it too: a second rule (the dispatch used to default to
+/// `<build-root>/corpus/style.toml`) agrees only while `--corpus` sits under the
+/// build root, and otherwise has render-manifest record one style's hash while
+/// check compares another's - stale forever.
+pub(crate) fn corpus_style_path(corpus_dir: &Path) -> std::path::PathBuf {
     corpus_dir.parent().unwrap_or(corpus_dir).join("style.toml")
 }
 
@@ -356,7 +374,19 @@ pub fn check(archive: &Path, corpus_dir: &Path) -> io::Result<(Outcome, CheckRep
 
     // STEP 4 - staleness (subject: the baseline; exit 3, strictly subordinate).
     // Only reached with a passing content walk, so it can never mask a mismatch.
-    let stale = svg_staleness(&view, corpus_dir, &base)?;
+    let stale = match svg_staleness(&view, corpus_dir, &base)? {
+        Ok(stale) => stale,
+        Err(msg) => {
+            return Ok((
+                Outcome::BaselineTrouble,
+                CheckReport {
+                    message: msg,
+                    warnings,
+                    ..Default::default()
+                },
+            ));
+        }
+    };
     if !stale.is_empty() {
         let message = stale
             .into_iter()
@@ -391,32 +421,56 @@ pub fn check(archive: &Path, corpus_dir: &Path) -> io::Result<(Outcome, CheckRep
 /// render differs from the committed file, plus orphaned tile files. All of
 /// these mean "re-render the corpus" - baseline staleness, never an archive
 /// verdict. Skipped entirely when the corpus has no manifest.
-fn svg_staleness(view: &ArchiveView, corpus_dir: &Path, _base: &Baseline) -> io::Result<Vec<String>> {
+///
+/// The outer `Err(String)` is baseline *damage* met on the way: a missing or
+/// malformed `contract.json`, `style.toml` or `manifest.toml`. Those fold
+/// through `baseline_material` like step 1's reads, so they report as exit 3
+/// rather than escaping as an `io::Error` the dispatch would turn into a
+/// non-verdict failure.
+fn svg_staleness(
+    view: &ArchiveView,
+    corpus_dir: &Path,
+    _base: &Baseline,
+) -> io::Result<Result<Vec<String>, String>> {
     let manifest_path = corpus_dir.join("manifest.toml");
     if !manifest_path.exists() {
-        return Ok(Vec::new());
+        return Ok(Ok(Vec::new()));
     }
-    let raw: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(corpus_dir.join("contract.json"))?)
-            .map_err(io::Error::other)?;
+    let contract_read = std::fs::read_to_string(corpus_dir.join("contract.json")).and_then(|t| {
+        serde_json::from_str::<serde_json::Value>(&t)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+    });
+    let raw = match baseline_material("committed corpus contract", contract_read)? {
+        Ok(v) => v,
+        Err(msg) => return Ok(Err(msg)),
+    };
     let recorded = raw
         .pointer("/style/xxh3_128")
         .and_then(serde_json::Value::as_str);
     let Some(recorded) = recorded else {
-        return Ok(vec![
+        return Ok(Ok(vec![
             "contract records no style hash - run render-manifest".to_string()
-        ]);
+        ]));
     };
     // The canonical style is corpus-global, one per corpus root
     // (`<root>/style.toml`), and `corpus_dir` is `<root>/<dataset>`. Anchor there
     // rather than at the cwd-relative path recorded in contract.json.
-    let style = style::Style::load(&corpus_style_path(corpus_dir))?;
+    let style = match baseline_material(
+        "corpus style",
+        style::Style::load(&corpus_style_path(corpus_dir)),
+    )? {
+        Ok(s) => s,
+        Err(msg) => return Ok(Err(msg)),
+    };
     if recorded != style.hash_hex() {
-        return Ok(vec![
+        return Ok(Ok(vec![
             "style hash differs from contract - run render-manifest".to_string()
-        ]);
+        ]));
     }
-    let manifest = manifest::load(&manifest_path)?;
+    let manifest = match baseline_material("corpus manifest", manifest::load(&manifest_path))? {
+        Ok(m) => m,
+        Err(msg) => return Ok(Err(msg)),
+    };
     let tiles = corpus_dir.join("tiles");
     let mut expected = BTreeSet::new();
     let mut stale = Vec::new();
@@ -446,7 +500,7 @@ fn svg_staleness(view: &ArchiveView, corpus_dir: &Path, _base: &Baseline) -> io:
             }
         }
     }
-    Ok(stale)
+    Ok(Ok(stale))
 }
 
 // ---------------------------------------------------------------------------
@@ -483,12 +537,35 @@ pub fn render_manifest(
     if !manifest_path.exists() {
         return Ok(baseline_trouble("manifest.toml is absent"));
     }
-    let manifest = manifest::load(&manifest_path)?;
-    let style = style::Style::load(style_path)?;
+    let manifest = match baseline_material("corpus manifest", manifest::load(&manifest_path))? {
+        Ok(m) => m,
+        Err(msg) => return Ok(baseline_trouble(msg)),
+    };
+    let style = match baseline_material("corpus style", style::Style::load(style_path))? {
+        Ok(s) => s,
+        Err(msg) => return Ok(baseline_trouble(msg)),
+    };
+    let mut warnings = Vec::new();
+    // `check` judges staleness against the canonical style alone
+    // (`corpus_style_path`); rendering with any other records a hash check
+    // will never match, so say so rather than leave a corpus stale forever.
+    let canonical_style = corpus_style_path(corpus_dir);
+    let same_style = style_path == canonical_style
+        || matches!(
+            (std::fs::canonicalize(style_path), std::fs::canonicalize(&canonical_style)),
+            (Ok(a), Ok(b)) if a == b
+        );
+    if !same_style {
+        warnings.push(format!(
+            "--style {} is not the corpus style {}: `check` compares against the \
+             latter and will report this render as stale",
+            style_path.display(),
+            canonical_style.display()
+        ));
+    }
     let tiles = corpus_dir.join("tiles");
     std::fs::create_dir_all(&tiles)?;
     let mut wanted = BTreeSet::new();
-    let mut warnings = Vec::new();
     for entry in &manifest.tile {
         let name = manifest::file_name(entry);
         wanted.insert(name.clone());
@@ -642,10 +719,33 @@ pub fn bless(
         return Ok(archive_refused("candidate is not locations-generated"));
     }
     if corpus_dir.join("digest").exists() && !rotate {
-        let base = digest::parse_baseline(&corpus_dir.join("digest"))?;
+        // A damaged existing baseline is exit 3, like `check`'s step 1 - not
+        // an escaping io::Error, and not the exit 1 this branch otherwise
+        // returns for "rotation not adjudicated". `--rotate` overwrites it.
+        let base = match baseline_material(
+            "baseline digest",
+            digest::parse_baseline(&corpus_dir.join("digest")),
+        )? {
+            Ok(b) => b,
+            Err(msg) => {
+                return Ok(baseline_trouble(format!(
+                    "{msg} (bless --rotate replaces it)"
+                )));
+            }
+        };
         let committed_leaves =
             if base.mode == DigestMode::Leaves && corpus_dir.join("leaves").is_file() {
-                Some(digest::parse_leaves(&corpus_dir.join("leaves"))?)
+                match baseline_material(
+                    "baseline leaves",
+                    digest::parse_leaves(&corpus_dir.join("leaves")),
+                )? {
+                    Ok(l) => Some(l),
+                    Err(msg) => {
+                        return Ok(baseline_trouble(format!(
+                            "{msg} (bless --rotate replaces it)"
+                        )));
+                    }
+                }
             } else {
                 None
             };

@@ -62,6 +62,10 @@ pub(crate) struct SnapshotDb {
 }
 
 impl SnapshotDb {
+    /// Opens `results.db`, a file shared with `ResultsDb` and litehtml's
+    /// `MechanicalDb`. No versioning of its own: `PRAGMA user_version` is
+    /// `ResultsDb`'s, so any future migration here must detect the schema
+    /// directly (see `litehtml::db::migrate`), never read or bump it.
     pub fn open(path: &Path) -> Result<Self, DevError> {
         let conn = Connection::open(path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;

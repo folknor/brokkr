@@ -27,7 +27,8 @@
 
 ## Variant defaults
 
-- `--variant <name>` defaults to `raw` (vs pbfhogg's `indexed`).
+- `--variant <name>` defaults to `raw` (vs pbfhogg's `indexed`), except on
+  `pmtiles-corpus`, where it is required (see the corpus section).
 - The shared `--tiles <variant>` flag (the `pmtiles.<variant>` config entry)
   has **no elivagar consumer**. Elivagar produces archives rather than reading
   configured ones, so every archive-consuming command addresses the durable
@@ -131,7 +132,13 @@ e.g. `north-america`, so splitting is ambiguous but construction is not).
 `--variant` defaults to `raw` (matching `tilegen`); `--commit` defaults to
 current HEAD; the commit is `git rev-parse --short HEAD` from the *build root*
 (the worktree's HEAD under `tilegen --commit <hash>`, else the main tree), so
-the name always names the commit whose code produced the tiles. The durable
+the name always names the commit whose code produced the tiles. A tilegen run
+that cannot place its archive there - the commit cannot be read, the output
+dir cannot be created or coincides with scratch/tmp, the rename fails, or
+elivagar exited 0 without writing output - fails, leaving any output in
+scratch, rather than reporting success with nothing the resolver can find (it
+used to log the failure and exit 0, and a git failure named the file
+`...-unknown.pmtiles`, which no resolver constructs). The durable
 store survives a routine `brokkr clean`; only the deep clean (`brokkr clean
 --worktrees`) reclaims it. These subcommands only read the file - the current
 release binary can inspect output built by any commit, so `--commit` picks
@@ -188,7 +195,10 @@ clap `ArgGroup` over the two `--against*` flags means a missing comparand is a
 usage error at clap's exit **2** - never colliding with regress's own verdict
 codes. Exit 0 is no accountable diff, exit 1 a regression or budget overrun, and
 exit **3** means the run could not be completed at all (an unreadable archive, a
-tile that will not decode, an overlay that will not write). 3 is separate from 1
+tile that will not decode, an overlay that will not write - and equally a failure
+before the diff starts: the lock is held, `cargo metadata` fails, an archive does
+not resolve; the dispatch wraps the whole command in `cmd::operational`, so no
+error path falls through to `main`'s generic 1). 3 is separate from 1
 on purpose: exit 1 is the *verdict*, so a caller that could not tell it from an
 operational failure would read a truncated archive as a regression, with nothing
 but stderr to say otherwise.
@@ -329,14 +339,23 @@ elsewhere is the user's file and clean never touches it.
 
 Every subcommand resolves the archive through the SAME
 `resolve_pmtiles_by_commit()` as `pmtiles-inspect`/`diag`/`svg`
-(`[--dataset D] [--variant V] [--commit H | --file P]`, variant default
-`raw`), so default-commit/variant semantics never diverge. The standing gate is
+(`[--dataset D] --variant V [--commit H | --file P]`), so default-commit
+semantics never diverge. Unlike those commands, `--variant` has **no default**
+here: it is required unless `--file` is given. The corpus contract pins one
+variant and `bless` refuses any archive that is not locations-generated, so the
+shared `raw` default could never bless and made every default `check` against a
+locations corpus a contract mismatch. The standing gate is
 therefore symmetric: `brokkr tilegen --dataset denmark --variant locations`
 then `brokkr pmtiles-corpus check --dataset denmark --variant locations`; a
 wrong variant fails loudly at resolution (`no locations build for <hash>`)
 before the archive even opens. `--corpus` defaults to `corpus/<dataset>` under the **build root**
 (where the git-committed corpus lives, alongside the code - NOT the
-config/`data/` dir), and is overridable. brokkr owns the value sets now that the
+config/`data/` dir), and is overridable. The canonical style is always the
+corpus root's `style.toml` - the parent of the corpus dir - and that one rule
+supplies both `check`'s staleness scan and the `--style` default of
+`render-manifest`/`render`, so an out-of-tree `--corpus` still records and
+checks the same file. An explicit `--style` that is not that file renders, with
+a warning that `check` will call the result stale. brokkr owns the value sets now that the
 gate is native: `--mode` parses to `DigestMode`, `--op` to `MutationOp`, and an
 unknown spelling is a config error before anything opens.
 
@@ -350,17 +369,21 @@ normal state).
 
 **0** pass, **1** content mismatch, **2** the archive cannot be judged
 (non-MVT/non-gzip, absent or invalid embedded contract, contract mismatch),
-**3** the baseline is the problem. The distinction is load-bearing for an
-automated caller, which is why 3 exists at all: 1 says *the archive regressed*,
-and merge damage to a committed `digest` is not that.
+**3** the baseline is the problem, **4** the run could not be completed at all.
+The distinction is load-bearing for an automated caller, which is why 3 and 4
+exist: 1 says *the archive regressed*, and neither merge damage to a committed
+`digest` nor a held lock is that. (clap's own usage errors also exit 2; they
+print clap's usage text rather than a gate reason.)
 
-Every read of committed material in step 1 therefore goes through
-`baseline_material` (`corpus/mod.rs`), which folds `NotFound`/`InvalidData`
-into the exit-3 verdict - a missing or malformed `digest`, `leaves` or
-`contract.json` all report as baseline trouble. Letting the `io::Error` escape
-instead makes the dispatch wrap it as `DevError::Io` and exit **1**, which is
-the misreport this closes. The fold is deliberately narrow: a genuine IO
-failure (permissions, a bad disk) is not a verdict about anything and still
-propagates as an error. Baseline *staleness* (step 4) shares exit 3 with
-baseline damage and stays strictly subordinate to the content walk, so it can
-never mask a mismatch.
+Every read of committed material therefore goes through `baseline_material`
+(`corpus/mod.rs`), which folds `NotFound`/`InvalidData` into the exit-3
+verdict: a missing or malformed `digest`, `leaves`, `contract.json`, `manifest.toml` or
+corpus `style.toml` all report as baseline trouble, whether met in step 1, in
+the step-4 staleness scan, in `render-manifest`, or in `bless`'s
+rotation-refusal path. The fold is deliberately narrow: a genuine IO failure
+(permissions, a bad disk) is not a verdict about anything and still propagates
+as an error - which the dispatch, like every other non-verdict failure (lock,
+`cargo metadata`, archive resolution), turns into exit **4** through
+`cmd::operational` rather than `main`'s generic 1. Baseline *staleness* (step 4)
+shares exit 3 with baseline damage and stays strictly subordinate to the content
+walk, so it can never mask a mismatch.

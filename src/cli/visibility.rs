@@ -42,16 +42,17 @@ pub(crate) enum Visibility {
 ///
 /// Litehtml is the only one. It *does* open `results_db_path`, but through
 /// `MechanicalDb` - the `mechanical_runs` / `mechanical_results` /
-/// `mechanical_approvals` schema for visual-reference runs, sharing the file
-/// and nothing else. `brokkr results` reads `ResultsDb` and would find
-/// nothing.
+/// `mechanical_approvals` schema for visual-reference runs. It shares the
+/// file with `ResultsDb`, and never `PRAGMA user_version`, which is
+/// `ResultsDb`'s alone (`MechanicalDb` migrates by probing its own columns).
+/// `brokkr results` reads `ResultsDb` and would find nothing.
 ///
 /// Every other project reaches `BenchHarness`, which is what writes those
 /// rows: pbfhogg and elivagar heavily, nidhogg via `bench_{api,tiles}`,
 /// ratatoskr via `bench_gate`/`list_smoke`, sluggrs via `hotpath` (so sluggrs
-/// is on both lists - `MechanicalDb` for visual work, real result rows from
-/// hotpath), piners for its hotpath/alloc runs, and any `Other(_)` tree
-/// through the ungated `generic-hotpath`.
+/// writes the file two ways - `SnapshotDb`'s `snapshot_*` tables for visual
+/// work, real result rows from hotpath), piners for its hotpath/alloc runs,
+/// and any `Other(_)` tree through the ungated `generic-hotpath`.
 pub(crate) const MEASURED_DB_ABSENT: &[Project] = &[Project::Litehtml];
 
 /// Table of every top-level subcommand name -> the projects it applies to.

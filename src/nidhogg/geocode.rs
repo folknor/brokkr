@@ -31,15 +31,15 @@ pub fn run(port: u16, query: &str) -> Result<(), DevError> {
             // Print top result details.
             let display_name = super::client::geocode_top_name(&parsed).unwrap_or("(unknown)");
             if let Some(top) = results.first() {
-                let lat = top
-                    .get("lat")
-                    .and_then(serde_json::Value::as_f64)
-                    .unwrap_or(0.0);
-                let lon = top
-                    .get("lon")
-                    .and_then(serde_json::Value::as_f64)
-                    .unwrap_or(0.0);
-                output::result_msg(&format!("  top: {display_name} ({lat:.4}, {lon:.4})"));
+                // A missing coordinate prints as `?`, not 0.0: (0, 0) is a
+                // real place, and printing it hid a malformed response.
+                let coord = |key: &str| {
+                    top.get(key)
+                        .and_then(serde_json::Value::as_f64)
+                        .map_or_else(|| "?".to_owned(), |v| format!("{v:.4}"))
+                };
+                let (lat, lon) = (coord("lat"), coord("lon"));
+                output::result_msg(&format!("  top: {display_name} ({lat}, {lon})"));
             }
         }
         Some(_) => {

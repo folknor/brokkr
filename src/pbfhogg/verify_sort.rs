@@ -2,12 +2,12 @@
 
 use std::path::Path;
 
-use super::verify::VerifyHarness;
+use super::verify::{Findings, VerifyHarness};
 use crate::error::DevError;
 use crate::output::verify_msg;
 
 /// Cross-validate `pbfhogg sort` against `osmium sort`.
-pub fn run(harness: &VerifyHarness, pbf: &Path, direct_io: bool) -> Result<(), DevError> {
+pub fn run(harness: &VerifyHarness, pbf: &Path, direct_io: bool) -> Result<Findings, DevError> {
     let outdir = harness.subdir("sort")?;
 
     verify_msg("=== verify sort ===");
@@ -38,22 +38,22 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, direct_io: bool) -> Result<(), D
     harness.print_inspect("pbfhogg", &pbfhogg_out)?;
     harness.print_inspect("osmium", &osmium_out)?;
 
+    let mut findings = Findings::new();
+
     // --- Diff ---
-    let identical = harness.diff_pbfs(&pbfhogg_out, &osmium_out)?;
-    if identical {
+    let diff = harness.diff_pbfs(&pbfhogg_out, &osmium_out)?;
+    if diff.is_pass() {
         verify_msg("  diff: PASS (identical)");
     } else {
         verify_msg("  diff: FAIL (differences found)");
     }
+    findings.record("pbfhogg vs osmium diff", diff);
 
-    // --- Sort flag ---
-    harness.check_sorted("pbfhogg sort", &pbfhogg_out)?;
+    // --- Sort order ---
+    findings.record(
+        "pbfhogg sort output order",
+        harness.check_sorted("pbfhogg sort", &pbfhogg_out)?,
+    );
 
-    if !identical {
-        return Err(DevError::Verify(
-            "sort: pbfhogg and osmium output differ".into(),
-        ));
-    }
-
-    Ok(())
+    Ok(findings)
 }

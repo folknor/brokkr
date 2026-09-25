@@ -2,9 +2,9 @@
 
 use std::path::Path;
 
-use super::verify::VerifyHarness;
+use super::verify::{Findings, VerifyHarness};
 use crate::error::DevError;
-use crate::output::verify_msg;
+use crate::output::{verify_msg, verify_summary};
 
 /// Cross-validate `pbfhogg extract` against `osmium extract` for
 /// simple, complete-ways, and smart strategies.
@@ -13,10 +13,11 @@ pub fn run(
     pbf: &Path,
     bbox: &str,
     direct_io: bool,
-) -> Result<(), DevError> {
+) -> Result<Findings, DevError> {
     let outdir = harness.subdir("extract")?;
 
     let pbf_str = pbf.display().to_string();
+    let mut findings = Findings::new();
 
     for strategy in &["simple", "complete", "smart"] {
         verify_msg(&format!("=== verify extract --{strategy} ==="));
@@ -71,19 +72,33 @@ pub fn run(
         harness.print_inspect("pbfhogg", &pbfhogg_out)?;
         harness.print_inspect("osmium", &osmium_out)?;
 
-        // --- Diff (extract has known minor differences, just log) ---
-        let identical = harness.diff_pbfs(&pbfhogg_out, &osmium_out)?;
-        if identical {
+        // --- Diff (informational) ---
+        //
+        // Deliberately NOT a verdict: extract is known to differ from osmium
+        // in minor ways, so an element diff is expected and gating on it
+        // would fail every run. Making it a verdict needs the expected
+        // differences characterised first (as verify_merge does for osmium's
+        // version-based deletes), not just counted. What this check gates is
+        // that both tools completed (a crashed diff is still an `Err` from
+        // `diff_pbfs`) and that the output is sorted. Because a quiet run
+        // discards detail on pass, the difference is surfaced on the summary
+        // channel rather than left in the buffer where nobody sees it.
+        let diff = harness.diff_pbfs(&pbfhogg_out, &osmium_out)?;
+        if diff.is_pass() {
             verify_msg(&format!("  diff ({strategy}): PASS (identical)"));
         } else {
-            verify_msg(&format!(
-                "  diff ({strategy}): differences found (expected for extract)"
+            verify_summary(&format!(
+                "extract --{strategy}: differs from osmium (informational, not gated)"
             ));
         }
 
-        // --- Sort flag ---
-        harness.check_sorted(&format!("pbfhogg extract --{strategy}"), &pbfhogg_out)?;
+        // --- Sort order ---
+        let label = format!("pbfhogg extract --{strategy}");
+        findings.record(
+            &format!("{label} output order"),
+            harness.check_sorted(&label, &pbfhogg_out)?,
+        );
     }
 
-    Ok(())
+    Ok(findings)
 }

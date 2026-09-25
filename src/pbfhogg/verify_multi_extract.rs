@@ -8,15 +8,16 @@
 
 use std::path::Path;
 
-use super::verify::VerifyHarness;
+use super::verify::{Findings, VerifyHarness};
 use crate::error::DevError;
 use crate::output::verify_msg;
 
-/// Element counts parsed from `pbfhogg inspect` output.
-struct Counts {
-    nodes: u64,
-    ways: u64,
-    relations: u64,
+/// Element counts parsed from `pbfhogg inspect` output. Shared with
+/// `verify_getid_removeid`'s complement assertion.
+pub(super) struct Counts {
+    pub(super) nodes: u64,
+    pub(super) ways: u64,
+    pub(super) relations: u64,
 }
 
 /// Strip comma separators from a number string (e.g. "918,549" → "918549").
@@ -60,7 +61,7 @@ fn parse_inspect_counts(stdout: &str) -> Option<Counts> {
 }
 
 /// Get element counts for a PBF file via `pbfhogg inspect`.
-fn inspect_counts(harness: &VerifyHarness, pbf: &Path) -> Result<Counts, DevError> {
+pub(super) fn inspect_counts(harness: &VerifyHarness, pbf: &Path) -> Result<Counts, DevError> {
     let pbf_str = pbf.display().to_string();
     let captured = harness.run_pbfhogg(&["inspect", &pbf_str])?;
     harness.check_exit(&captured, "pbfhogg inspect")?;
@@ -82,7 +83,7 @@ pub fn run(
     bbox: &str,
     regions: usize,
     direct_io: bool,
-) -> Result<(), DevError> {
+) -> Result<Findings, DevError> {
     if regions == 0 {
         return Err(DevError::Config(
             "multi-extract verify requires at least 1 region".into(),
@@ -185,7 +186,7 @@ pub fn run(
 
     // --- Compare element counts ---
     verify_msg("  comparing element counts...");
-    let mut all_match = true;
+    let mut findings = Findings::new();
 
     for i in 0..regions {
         let multi_pbf = multi_dir.join(format!("strip-{i}.osm.pbf"));
@@ -204,7 +205,7 @@ pub fn run(
                 multi_counts.nodes, multi_counts.ways, multi_counts.relations
             ));
         } else {
-            all_match = false;
+            findings.fail(format!("strip-{i} element counts differ from sequential extract"));
             verify_msg(&format!("  strip-{i}: FAIL"));
             if !nodes_ok {
                 verify_msg(&format!(
@@ -227,12 +228,8 @@ pub fn run(
         }
     }
 
-    if !all_match {
-        return Err(DevError::Verify(
-            "multi-extract element counts differ from sequential extracts".into(),
-        ));
+    if findings.is_clean() {
+        verify_msg("  multi-extract: PASS (all regions match)");
     }
-
-    verify_msg("  multi-extract: PASS (all regions match)");
-    Ok(())
+    Ok(findings)
 }

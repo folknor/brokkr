@@ -20,7 +20,25 @@ For project-specific fixture conventions and the prepare pipeline see
 
 - `visual [ID] [--suite S] [--all] [--recapture]` - run fixtures against
   Chrome reference artifacts. Builds pipeline binary, produces pixel diff +
-  element match comparison. `--suite` and `--recapture` are litehtml-only.
+  element match comparison. Give exactly one selector (an ID, `--suite`, or
+  `--all`); combining them is refused rather than letting one silently win.
+  `--suite` and `--recapture` are litehtml-only and refused on sluggrs.
+
+  The build and the run's commit stamp use the code tree (cwd), so the
+  one-level-up layout builds and describes the checkout, not the config
+  dir; fixtures, snapshots and `results.db` stay under the config dir.
+
+  A fixture whose Chrome reference (`chrome.png` + `chrome.json`) is missing
+  is captured automatically only while it has no approval - its first run.
+  Once approved, a missing reference is an `ERROR` naming the fix (restore
+  it, or `--recapture`): the approved numbers were measured against that
+  reference, and recapturing it silently would swap the baseline's ground
+  truth. Each run deletes the previous `pipeline.png`/`pipeline.json`
+  (sluggrs: `output.png`) before rendering, so a pipeline that stops writing
+  one is an `ERROR`, not a comparison against last run's file.
+
+  A capture, pipeline, or comparison failure is one `ERROR` row with the
+  reason printed, and the run continues with the next fixture.
 
   Capture (litehtml, embedded puppeteer script) awaits `document.fonts.ready`
   after load - `networkidle0` does not cover data-URI `@font-face` decoding,
@@ -37,7 +55,17 @@ For project-specific fixture conventions and the prepare pipeline see
 - `approve <ID>... | --all` - record current divergence as accepted baseline.
   Takes several IDs, or `--all` for every configured entry, because the
   natural flow is run `visual`, eyeball the images, approve the good ones,
-  and commit the baselines once. The first bad ID stops the batch.
+  and commit the baselines once. The first bad ID stops the batch; IDs
+  together with `--all` are refused.
+
+  Only a scored result can be approved. Litehtml needs the latest result to
+  carry both a pixel and an element score - an `ERROR` row is refused rather
+  than stored as a perfect 0% baseline, and a missing element score would
+  have disabled the element ratchet. Sluggrs refuses a snapshot whose latest
+  run is `ERROR`; approving makes `output.png` the new `approved.png` and
+  records a 0% pixel baseline, since that image is what later runs are
+  compared against. The image is staged, the record written, then the image
+  renamed into place, so a database failure leaves the old baseline intact.
 
   Requires a clean git tree, so that the commit an approval is pinned to
   actually describes what rendered the image. Sluggrs' own
@@ -63,6 +91,11 @@ not positional). Scoring is designed to be honest rather than flattering:
   out instead of failing every element below the drift point, so the 2px
   position tolerance means "sits wrong inside its parent". Sizes (5px
   tolerance) are always absolute.
+- **`head` is filtered from both sides** - the `head` element and its
+  subtree, matched by whole path segment, so `thead` is scored.
+- **Both dumps are required.** A missing or unreadable `pipeline.json` /
+  `chrome.json` is an `ERROR`, never "no element score" (which enforced
+  neither the element threshold nor the ratchet).
 - **`br` is filtered from both sides.** Chrome emits `br` boxes; the
   pipeline folds line breaks into rich-text leaves and never will.
 - **Chrome-only inline elements leave the denominator.** The pipeline
@@ -99,6 +132,14 @@ describing the tree.
 `ERROR` (`compare::Status`, `src/litehtml/compare.rs`). Sluggrs reaches all
 but `EXPECTED_FAIL`, which needs a per-fixture `expected_fail` flag that
 `[[sluggrs.snapshot]]` does not have.
+
+A litehtml `expected = "fail"` fixture that passes is reported as `PASS
+(unexpected pass: ...)` and counted separately in the summary. It does not
+fail the run - the render improved - but the stale expectation is named so it
+gets dropped.
+
+A sluggrs snapshot with an approval record but no `approved.png` is an
+`ERROR`, not `NO_BASELINE`: the baseline was deleted, not never set.
 
 `REGRESSION` is the ratchet against the approved baseline, on either
 metric: pixel diff rising more than 0.5pp above the approved value, or

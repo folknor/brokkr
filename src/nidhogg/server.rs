@@ -2,15 +2,35 @@
 //!
 //! Start, stop, and check the status of the nidhogg serve process.
 //! Replaces `serve.sh`, `stop.sh`, `status.sh`, and `serve-tiles.sh`.
+//!
+//! `stop` signals only the process `serve` recorded, and only after proving
+//! it is still that process: the pid file carries the PID's `/proc`
+//! starttime and the boot id, the same identity token `lockfile`/`brokkr
+//! kill` verify, and the signal goes through a pidfd opened between two
+//! verifications, so PID recycling cannot redirect it. There is no
+//! name-based fallback (the old `pkill -f "nidhogg serve"` reached every
+//! matching process on the host, other checkouts' servers included).
 
+use std::os::unix::io::{AsRawFd, OwnedFd};
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
 
 use crate::error::DevError;
+use crate::lockfile;
 use crate::output;
 
 /// Default port for the nidhogg server.
 pub const DEFAULT_PORT: u16 = 3033;
+
+/// How long `serve` waits for the health endpoint to answer.
+const READY_TIMEOUT: Duration = Duration::from_secs(6);
+
+/// How long `stop` waits after SIGTERM before escalating to SIGKILL.
+const TERM_GRACE: Duration = Duration::from_secs(5);
+
+/// How long `stop` waits for the process to die after SIGKILL.
+const KILL_GRACE: Duration = Duration::from_secs(2);
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -18,9 +38,11 @@ pub const DEFAULT_PORT: u16 = 3033;
 
 /// Start the nidhogg server as a background process.
 ///
-/// Kills any existing server first, spawns the binary with stdout/stderr
-/// redirected to `logs/serve.log`, saves the PID to `.brokkr/nidhogg.pid`,
-/// and polls the HTTP health endpoint until ready (6s timeout).
+/// Stops the server brokkr previously recorded, refuses if something else
+/// still answers on the port, spawns the binary with stdout/stderr
+/// redirected to `logs/serve.log`, records its identity in
+/// `.brokkr/nidhogg.pid`, and polls the HTTP health endpoint until ready
+/// (6s timeout).
 pub fn serve(
     binary: &Path,
     data_dir: Option<&str>,
@@ -28,8 +50,19 @@ pub fn serve(
     port: u16,
     project_root: &Path,
 ) -> Result<(), DevError> {
-    // Kill any existing server first.
+    // Stop the server we recorded, if any.
     stop(project_root)?;
+
+    // Anything still answering is a server brokkr has no identity record
+    // for. Without this check the health poll below would be satisfied by
+    // *that* server and report a start that never happened.
+    if status(port)? {
+        return Err(DevError::Config(format!(
+            "a server is already answering on port {port} and it is not one \
+             brokkr recorded in .brokkr/nidhogg.pid; stop it by hand or set \
+             a different [<host>] port in brokkr.toml"
+        )));
+    }
 
     // Ensure logs/ and .brokkr/ directories exist.
     let logs_dir = project_root.join("logs");
@@ -58,7 +91,7 @@ pub fn serve(
     let port_str = port.to_string();
 
     // Spawn background process.
-    let child = Command::new(binary)
+    let mut child = Command::new(binary)
         .args(&args)
         .env("PORT", &port_str)
         .current_dir(project_root)
@@ -74,13 +107,35 @@ pub fn serve(
 
     let pid = child.id();
 
-    // Save PID to file.
-    std::fs::write(&pid_path, pid.to_string())?;
+    // Capture the identity while the child is ours and unreaped, so the
+    // starttime is guaranteed to be this process's. A record we cannot
+    // write is a server `stop` could never verify - don't leave it running.
+    let record = match (lockfile::proc_starttime(pid), lockfile::local_boot_id()) {
+        (Some(starttime), Some(boot_id)) => ServerRecord {
+            pid,
+            starttime,
+            boot_id,
+        },
+        _ => {
+            child.kill().ok();
+            child.wait().ok();
+            return Err(DevError::Config(format!(
+                "could not read the identity of the spawned server (PID {pid}) \
+                 from /proc; refusing to leave an unverifiable server running"
+            )));
+        }
+    };
+    if let Err(e) = std::fs::write(&pid_path, record.render()) {
+        child.kill().ok();
+        child.wait().ok();
+        return Err(e.into());
+    }
 
     // Poll HTTP health endpoint until the server is ready.
-    if !poll_for_ready(port) {
+    if !poll_for_ready(port, &mut child)? {
         return Err(DevError::Config(format!(
-            "server did not start within 6s (check {})",
+            "server did not start within {}s (check {})",
+            READY_TIMEOUT.as_secs(),
             log_path.display()
         )));
     }
@@ -89,93 +144,57 @@ pub fn serve(
     Ok(())
 }
 
-/// Stop the nidhogg server.
+/// Stop the nidhogg server recorded in `.brokkr/nidhogg.pid`.
 ///
-/// Reads PID from `.brokkr/nidhogg.pid`, sends SIGTERM, waits up to 5s for
-/// the process to exit, then escalates to SIGKILL if still alive.
+/// Verifies the recorded identity, sends SIGTERM through a pidfd, waits up
+/// to 5s for the process to exit, then escalates to SIGKILL. A pid file
+/// that carries no identity (the pre-starttime format) or whose identity no
+/// longer matches is dropped without signalling anything.
 pub fn stop(project_root: &Path) -> Result<(), DevError> {
     let pid_path = project_root.join(".brokkr").join("nidhogg.pid");
 
-    let mut stopped = false;
+    let content = match std::fs::read_to_string(&pid_path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.into()),
+    };
 
-    // Try PID file first.
-    if pid_path.exists() {
-        if let Ok(content) = std::fs::read_to_string(&pid_path)
-            && let Ok(pid) = content.trim().parse::<i32>()
-        {
-            stopped = stop_pid(pid);
+    let result = match ServerRecord::parse(&content) {
+        None => {
+            output::run_msg(&format!(
+                "{} has no identity record (starttime/boot id); not signalling \
+                 anything - stop a leftover server by hand",
+                pid_path.display()
+            ));
+            Ok(())
         }
-        std::fs::remove_file(&pid_path).ok();
-    }
+        Some(record) => match stop_verified(&record)? {
+            StopOutcome::Stopped => {
+                output::run_msg("nidhogg server stopped");
+                Ok(())
+            }
+            StopOutcome::NotRunning => Ok(()),
+            StopOutcome::Unverified => {
+                output::run_msg(&format!(
+                    "recorded server PID {} could not be verified (exited, PID \
+                     recycled, or not visible from this namespace); not \
+                     signalling it",
+                    record.pid
+                ));
+                Ok(())
+            }
+        },
+    };
 
-    if !stopped {
-        // Fallback: pkill any remaining nidhogg serve processes.
-        Command::new("pkill")
-            .args(["-f", "nidhogg serve"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .ok();
-    }
-
-    if stopped {
-        output::run_msg("nidhogg server stopped");
-    }
-
-    Ok(())
-}
-
-/// Send SIGTERM to a process, wait up to 5s for it to die, escalate to
-/// SIGKILL if it's still alive. Returns `true` if the process was running.
-fn stop_pid(pid: i32) -> bool {
-    // SAFETY: sending signals to a process is safe; the worst case is the
-    // PID no longer exists and we get ESRCH.
-    let ret = unsafe { libc::kill(pid, libc::SIGTERM) };
-    if ret != 0 {
-        return false;
-    }
-
-    // Poll for up to 5s (25 x 200ms) to see if the process exited.
-    for _ in 0..25 {
-        std::thread::sleep(std::time::Duration::from_millis(200));
-        let alive = unsafe { libc::kill(pid, 0) };
-        if alive != 0 {
-            return true;
-        }
-    }
-
-    // Still alive after 5s - check if the PID was recycled before escalating.
-    if !is_nidhogg_process(pid) {
-        // PID was recycled to a different process; the original nidhogg exited.
-        return true;
-    }
-
-    output::run_msg(&format!(
-        "PID {pid} did not exit after SIGTERM, sending SIGKILL"
-    ));
-    unsafe { libc::kill(pid, libc::SIGKILL) };
-    std::thread::sleep(std::time::Duration::from_millis(100));
-    true
-}
-
-/// Check whether the given PID is still a nidhogg process by reading
-/// `/proc/{pid}/cmdline`. Returns `false` if the PID doesn't exist or
-/// belongs to a different program (i.e., was recycled).
-fn is_nidhogg_process(pid: i32) -> bool {
-    let cmdline_path = format!("/proc/{pid}/cmdline");
-    match std::fs::read(&cmdline_path) {
-        Ok(bytes) => {
-            // /proc/pid/cmdline uses NUL as argument separator.
-            let cmdline = String::from_utf8_lossy(&bytes);
-            cmdline.contains("nidhogg")
-        }
-        Err(_) => false,
-    }
+    std::fs::remove_file(&pid_path).ok();
+    result
 }
 
 /// Check if the server is responding to API requests.
 ///
-/// Returns `true` if a health-check query succeeds, `false` otherwise.
+/// Returns `true` if a health-check query succeeds, `false` if nothing
+/// healthy answers. Errors when the check itself could not run (curl
+/// missing), which is not the same thing as "server not running".
 pub fn status(port: u16) -> Result<bool, DevError> {
     super::client::health_check(port)
 }
@@ -196,13 +215,233 @@ pub fn check_running(port: u16) -> Result<(), DevError> {
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-/// Poll the HTTP health endpoint, up to 30 attempts x 200ms = 6s.
-pub(crate) fn poll_for_ready(port: u16) -> bool {
-    for _ in 0..30 {
-        std::thread::sleep(std::time::Duration::from_millis(200));
-        if let Ok(true) = status(port) {
-            return true;
+/// Poll the HTTP health endpoint for up to [`READY_TIMEOUT`]. Returns
+/// `Ok(false)` on timeout; errors if the server process exits first (its
+/// log names why) or the health check cannot run at all.
+fn poll_for_ready(port: u16, child: &mut Child) -> Result<bool, DevError> {
+    let deadline = Instant::now() + READY_TIMEOUT;
+    while Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(200));
+        if let Some(exit) = child.try_wait()? {
+            return Err(DevError::Config(format!(
+                "server exited during startup ({exit}); see logs/serve.log"
+            )));
+        }
+        if status(port)? {
+            return Ok(true);
         }
     }
-    false
+    Ok(false)
+}
+
+/// The identity of the server `serve` spawned, as stored in the pid file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ServerRecord {
+    pid: u32,
+    starttime: String,
+    boot_id: String,
+}
+
+impl ServerRecord {
+    fn render(&self) -> String {
+        format!(
+            "pid={}\nstarttime={}\nboot_id={}\n",
+            self.pid, self.starttime, self.boot_id
+        )
+    }
+
+    /// Parse a pid file. `None` for anything without all three keys - in
+    /// particular the older bare-PID format, which carries no identity and
+    /// must never be signalled on. First occurrence of a key wins.
+    fn parse(text: &str) -> Option<Self> {
+        let mut pid: Option<&str> = None;
+        let mut starttime: Option<&str> = None;
+        let mut boot_id: Option<&str> = None;
+        for line in text.lines() {
+            let Some((key, value)) = line.split_once('=') else {
+                continue;
+            };
+            let slot = match key.trim() {
+                "pid" => &mut pid,
+                "starttime" => &mut starttime,
+                "boot_id" => &mut boot_id,
+                _ => continue,
+            };
+            if slot.is_none() {
+                *slot = Some(value.trim());
+            }
+        }
+        let pid: u32 = pid?.parse().ok()?;
+        let starttime = starttime?;
+        let boot_id = boot_id?;
+        if pid == 0 || starttime.is_empty() || boot_id.is_empty() {
+            return None;
+        }
+        Some(Self {
+            pid,
+            starttime: starttime.to_owned(),
+            boot_id: boot_id.to_owned(),
+        })
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum StopOutcome {
+    /// The verified process was signalled and has exited.
+    Stopped,
+    /// Identity verified, but the process exited before it could be signalled.
+    NotRunning,
+    /// The recorded identity does not describe any process visible here.
+    Unverified,
+}
+
+/// Terminate the recorded process, never anything else.
+///
+/// verify -> `pidfd_open` -> re-verify, the order `brokkr kill` uses: the
+/// numeric PID still described the recorded process generation when the
+/// pidfd was opened, and from then on the pidfd cannot be redirected by
+/// PID recycling. Exit is observed by polling the pidfd, which becomes
+/// readable when the process terminates (a zombie counts, so a server that
+/// is our own unreaped child - `verify readonly` - is seen as exited too).
+fn stop_verified(record: &ServerRecord) -> Result<StopOutcome, DevError> {
+    let Ok(pidfd) = lockfile::open_verified_pidfd(record.pid, &record.starttime, &record.boot_id)
+    else {
+        return Ok(StopOutcome::Unverified);
+    };
+
+    if !pidfd_send_signal(&pidfd, libc::SIGTERM)? {
+        return Ok(StopOutcome::NotRunning);
+    }
+    if wait_for_exit(&pidfd, TERM_GRACE) {
+        return Ok(StopOutcome::Stopped);
+    }
+
+    output::run_msg(&format!(
+        "PID {} did not exit after SIGTERM, sending SIGKILL",
+        record.pid
+    ));
+    if !pidfd_send_signal(&pidfd, libc::SIGKILL)? {
+        return Ok(StopOutcome::Stopped);
+    }
+    if wait_for_exit(&pidfd, KILL_GRACE) {
+        return Ok(StopOutcome::Stopped);
+    }
+    Err(DevError::Config(format!(
+        "nidhogg server PID {} survived SIGKILL for {}s",
+        record.pid,
+        KILL_GRACE.as_secs()
+    )))
+}
+
+/// `pidfd_send_signal(2)`: `Ok(false)` when the process has already exited
+/// (ESRCH); any other failure is an error, not a guess.
+fn pidfd_send_signal(pidfd: &OwnedFd, signal: libc::c_int) -> Result<bool, DevError> {
+    lockfile::pidfd_send_signal(pidfd, signal).map_err(DevError::Io)
+}
+
+/// Wait until the pidfd reports process exit, up to `timeout`.
+fn wait_for_exit(pidfd: &OwnedFd, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let ms = i32::try_from(remaining.as_millis()).unwrap_or(i32::MAX);
+        let mut pfd = libc::pollfd {
+            fd: pidfd.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: one valid pollfd, count 1.
+        let ret = unsafe { libc::poll(&raw mut pfd, 1, ms) };
+        if ret > 0 {
+            return true;
+        }
+        if ret == 0 {
+            return false;
+        }
+        if std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
+            return false;
+        }
+        if remaining.is_zero() {
+            return false;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    use super::*;
+
+    #[test]
+    fn record_round_trips() {
+        let rec = ServerRecord {
+            pid: 4242,
+            starttime: "123456".into(),
+            boot_id: "abc-def".into(),
+        };
+        assert_eq!(ServerRecord::parse(&rec.render()), Some(rec));
+    }
+
+    #[test]
+    fn bare_pid_file_carries_no_identity() {
+        // The pre-starttime format: must never be treated as signallable.
+        assert_eq!(ServerRecord::parse("4242\n"), None);
+        assert_eq!(ServerRecord::parse("pid=4242\n"), None);
+        assert_eq!(ServerRecord::parse("pid=4242\nstarttime=1\n"), None);
+    }
+
+    #[test]
+    fn empty_or_zero_fields_are_rejected() {
+        assert_eq!(
+            ServerRecord::parse("pid=0\nstarttime=1\nboot_id=x\n"),
+            None
+        );
+        assert_eq!(ServerRecord::parse("pid=5\nstarttime=\nboot_id=x\n"), None);
+    }
+
+    #[test]
+    fn first_occurrence_wins() {
+        let rec = ServerRecord::parse("pid=5\nstarttime=1\nboot_id=x\npid=6\n").unwrap();
+        assert_eq!(rec.pid, 5);
+    }
+
+    fn spawn_sleeper() -> Child {
+        Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn sleep")
+    }
+
+    #[test]
+    fn mismatched_starttime_is_never_signalled() {
+        let mut child = spawn_sleeper();
+        let pid = child.id();
+        let rec = ServerRecord {
+            pid,
+            starttime: "1".into(),
+            boot_id: lockfile::local_boot_id().unwrap(),
+        };
+        assert_eq!(stop_verified(&rec).unwrap(), StopOutcome::Unverified);
+        // Still alive: nothing was sent.
+        assert!(child.try_wait().unwrap().is_none());
+        child.kill().ok();
+        child.wait().ok();
+    }
+
+    #[test]
+    fn verified_process_is_stopped() {
+        let mut child = spawn_sleeper();
+        let pid = child.id();
+        let rec = ServerRecord {
+            pid,
+            starttime: lockfile::proc_starttime(pid).unwrap(),
+            boot_id: lockfile::local_boot_id().unwrap(),
+        };
+        assert_eq!(stop_verified(&rec).unwrap(), StopOutcome::Stopped);
+        let status = child.wait().unwrap();
+        assert!(!status.success());
+    }
 }

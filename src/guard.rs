@@ -76,20 +76,11 @@ fn guard_bin_path() -> Result<PathBuf, DevError> {
 /// is the path only when it is the only candidate (including the
 /// neither-exists case, where a fresh install should create the modern name).
 fn cargo_config_path() -> Result<PathBuf, DevError> {
-    let cargo_home = match std::env::var_os("CARGO_HOME") {
-        Some(dir) => PathBuf::from(dir),
-        None => {
-            let home = std::env::var_os("HOME")
-                .ok_or_else(|| DevError::Config("$HOME is not set - cannot locate the cargo config".into()))?;
-            PathBuf::from(home).join(".cargo")
-        }
-    };
-    let modern = cargo_home.join("config.toml");
-    let legacy = cargo_home.join("config");
-    if legacy.exists() {
-        return Ok(legacy);
-    }
-    Ok(modern)
+    let cargo_home = crate::user_dirs::cargo_home().ok_or_else(|| {
+        DevError::Config("neither $CARGO_HOME nor $HOME is set - cannot locate the cargo config".into())
+    })?;
+    Ok(crate::user_dirs::cargo_config_file(&cargo_home)
+        .unwrap_or_else(|| cargo_home.join("config.toml")))
 }
 
 fn load_doc(path: &std::path::Path) -> Result<toml_edit::DocumentMut, DevError> {

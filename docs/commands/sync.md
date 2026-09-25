@@ -97,6 +97,14 @@ cohort is most useful when it reports the whole blast radius. Exits
 non-zero if any script failed; the exit error names the failures
 without repeating the messages already printed inline.
 
+Keep-going covers script failures, not interrupts. A `brokkr kill` or
+Ctrl-C stops the sweep: the in-flight script reports `INTERRUPTED`, no
+further script is started (the shutdown request is checked before each
+spawn as well as on each result), the cohort prints how far it got, and
+brokkr exits with `DevError::Interrupted`. Sæhrimnir's readiness wait
+polls the same request, so an interrupt during mock startup does not wait
+out the readiness budget.
+
 The cohort holds the global lock for the whole sweep, not per-script,
 so another brokkr invocation can't interleave a build or bench between
 two scripts and the sweep can't stall mid-way waiting behind one. With
@@ -156,8 +164,11 @@ teardown drains sæhrimnir and brokkr exits with `DevError::Interrupted`.
 After the harness exits, brokkr SIGTERMs sæhrimnir with the standard 1.5s
 budget then escalates to SIGKILL. PASS/FAIL on the harness exit code; FAIL
 preserves the artefact dir with `run.toml` (top-level metadata: brokkr
-version, sweep, harness exit code/elapsed, mock outcome) plus the harness's
-own artefacts and the captured mock stderr.
+version, script, binary, features, harness exit code/signal/elapsed, git
+state, and a `[mock]` table with the mock outcome) plus the harness's own
+artefacts and the captured mock stderr. `run.toml` is serialized, not
+string-formatted, so a quote or backslash in a path cannot corrupt it, and
+its field names match `service`'s `run.toml`.
 
 The PASS/FAIL line carries a phase summary so a slow run is decomposable at
 a glance: `PASS in 3.7s (mock 0.4s, harness 3.2s, shutdown 0.1s)`. Phases
@@ -218,10 +229,27 @@ Lockfile / kill semantics: sæhrimnir joins the auxiliary `mock_pids` set
 for the lifetime of the bench, and each iteration's harness PID rotates
 through `child_pid` (cleared between iterations so PID-recycling can't
 trip `--hard`), so `brokkr lock` shows both and `brokkr kill --hard`
-SIGKILLs every entry. Cooperative `brokkr kill` (SIGTERM) is handled only by the
-sidecar's own `SigtermGuard` around each measured iteration - no outer
-guard is installed at the bench path's entry because nesting would clobber the
-sidecar's `Drop`. SIGTERM during cargo build, sæhrimnir spawn, or the gap
-between iterations therefore falls through to the default terminate
-action (brokkr dies; mock and any in-flight harness child are reaped via
-their `Drop` impls).
+SIGKILLs every entry.
+
+Cooperative `brokkr kill` (SIGTERM) is covered in two layers, because
+`SigtermGuard`s do not nest (an inner install clears a pending request, and
+its drop restores the default action). Each measured iteration runs under
+the sidecar's own guard. Every other phase - cargo build, sæhrimnir spawn
+and readiness wait, the gap between iterations, mock teardown, recording
+and the gate hook - runs under a *phase* guard that steps aside before each
+harness spawn and is re-taken when the sidecar returns. Either way the
+request ends the same: the current child is stopped, sæhrimnir is torn
+down through `MockServer::shutdown`, and brokkr exits with
+`DevError::Interrupted`. A request that lands after the last iteration
+still surfaces as `Interrupted` once the run has recorded, so a `--gate
+all` sweep does not start its next gate.
+
+Two gaps remain, each a few syscalls wide: the harness fork/exec between
+the phase guard stepping aside and the sidecar installing its own (SIGTERM
+there takes the default action, and sæhrimnir - in brokkr's process group,
+but not signalled by a PID-targeted `brokkr kill` - is orphaned), and a
+request landing between the phase guard's pending-check and its drop (the
+drop clears it). A refcounted guard would close both. The bench path's
+spawns stay in brokkr's foreground process group for the same reason: the
+guard is not held continuously, so terminal Ctrl-C has to reach them
+directly.

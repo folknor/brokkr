@@ -77,15 +77,26 @@ pub fn run(
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Ceiling on one timed request. A request that exceeds it fails the bench
+/// rather than stalling it under the global lock.
+const REQUEST_MAX_TIME_SECS: &str = "60";
+
 /// Run a single curl request and return the HTTP round-trip time in milliseconds.
 ///
 /// Uses curl's `--write-out '%{time_total}'` to measure actual HTTP timing,
-/// excluding process spawn overhead.
+/// excluding process spawn overhead. `--fail` makes an HTTP 4xx/5xx a curl
+/// failure: without it a fast 500 was timed and recorded as a successful
+/// sample, which is the most flattering number a broken server can produce.
+/// (`--fail` rather than `--fail-with-body`: the body goes to `/dev/null`
+/// here either way, and curl's `-S` error line names the status.)
 fn run_curl_timed(url: &str, body: &str) -> Result<i64, DevError> {
     let output = std::process::Command::new("curl")
         .args([
-            "-s",
+            "-sS",
             "--compressed",
+            "--fail",
+            "--max-time",
+            REQUEST_MAX_TIME_SECS,
             "-o",
             "/dev/null",
             "-w",
@@ -101,10 +112,9 @@ fn run_curl_timed(url: &str, body: &str) -> Result<i64, DevError> {
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .output()
-        .map_err(|e| DevError::Subprocess {
+        .map_err(|error| DevError::Spawn {
             program: "curl".into(),
-            code: None,
-            stderr: e.to_string(),
+            error,
         })?;
 
     if !output.status.success() {
@@ -112,7 +122,7 @@ fn run_curl_timed(url: &str, body: &str) -> Result<i64, DevError> {
         return Err(DevError::Subprocess {
             program: "curl".into(),
             code: output.status.code(),
-            stderr: stderr.into_owned(),
+            stderr: stderr.trim().to_owned(),
         });
     }
 
@@ -131,11 +141,19 @@ fn run_curl_timed(url: &str, body: &str) -> Result<i64, DevError> {
 }
 
 /// Make one extra request to report element count and response bytes.
+///
+/// Every failure is an error, never a zero: an HTTP error, an unparseable
+/// size, a non-JSON body, or a body with no `elements` array used to print
+/// "0 elements, 0 bytes response" - indistinguishable from a real empty
+/// result, right after a timing run that may have been measuring errors.
 fn report_response_stats(url: &str, body: &str, name: &str) -> Result<(), DevError> {
     let output = std::process::Command::new("curl")
         .args([
-            "-s",
+            "-sS",
             "--compressed",
+            "--fail-with-body",
+            "--max-time",
+            REQUEST_MAX_TIME_SECS,
             "-w",
             "\n%{size_download}",
             "-X",
@@ -149,28 +167,23 @@ fn report_response_stats(url: &str, body: &str, name: &str) -> Result<(), DevErr
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .output()
-        .map_err(|e| DevError::Subprocess {
+        .map_err(|error| DevError::Spawn {
             program: "curl".into(),
-            code: None,
-            stderr: e.to_string(),
+            error,
         })?;
 
     if !output.status.success() {
-        return Ok(()); // Non-fatal: just skip stats reporting.
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(DevError::Subprocess {
+            program: "curl".into(),
+            code: output.status.code(),
+            stderr: format!("{name} stats request: {}", stderr.trim()),
+        });
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-
-    // The response body is followed by a newline and the download size.
-    // Split on the last newline to separate JSON body from write-out.
-    let (json_body, size_str) = split_curl_output(&stdout);
-
-    let download_bytes: u64 = size_str.trim().parse().unwrap_or(0);
-
-    let count = match serde_json::from_str::<serde_json::Value>(json_body) {
-        Ok(val) => super::client::element_count(&val),
-        Err(_) => 0,
-    };
+    let (download_bytes, count) = parse_response_stats(&stdout)
+        .map_err(|why| DevError::Verify(format!("{name} stats request: {why}")))?;
 
     output::bench_msg(&format!(
         "{name}: {count} elements, {download_bytes} bytes response"
@@ -179,12 +192,46 @@ fn report_response_stats(url: &str, body: &str, name: &str) -> Result<(), DevErr
     Ok(())
 }
 
-/// Split curl output into (response body, size_download write-out).
-///
-/// The `-w '\n%{size_download}'` flag appends the size after the body.
-fn split_curl_output(stdout: &str) -> (&str, &str) {
-    match stdout.rfind('\n') {
-        Some(pos) => (&stdout[..pos], &stdout[pos + 1..]),
-        None => (stdout, "0"),
+/// Parse `<json body>\n<size_download>` into (bytes, element count).
+fn parse_response_stats(stdout: &str) -> Result<(u64, usize), String> {
+    // The `-w '\n%{size_download}'` flag appends the size after the body;
+    // split on the last newline. No newline means the write-out is missing.
+    let (json_body, size_str) = stdout
+        .rfind('\n')
+        .map(|pos| (&stdout[..pos], &stdout[pos + 1..]))
+        .ok_or_else(|| "curl output carries no size_download write-out".to_owned())?;
+    let size_str = size_str.trim();
+    let download_bytes: u64 = size_str
+        .parse()
+        .map_err(|_| format!("size_download not a number: '{size_str}'"))?;
+    let val: serde_json::Value = serde_json::from_str(json_body)
+        .map_err(|e| format!("response is not JSON: {e}"))?;
+    let count = val
+        .get("elements")
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::len)
+        .ok_or_else(|| "response has no \"elements\" array".to_owned())?;
+    Ok((download_bytes, count))
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+    use super::parse_response_stats;
+
+    #[test]
+    fn stats_parse_body_and_size() {
+        assert_eq!(
+            parse_response_stats("{\"elements\":[1,2,3]}\n42").unwrap(),
+            (42, 3)
+        );
+    }
+
+    #[test]
+    fn stats_failures_are_errors_not_zeros() {
+        assert!(parse_response_stats("{\"elements\":[]}").is_err());
+        assert!(parse_response_stats("{\"elements\":[]}\nabc").is_err());
+        assert!(parse_response_stats("<html>500</html>\n12").is_err());
+        assert!(parse_response_stats("{\"error\":\"x\"}\n12").is_err());
     }
 }

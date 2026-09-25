@@ -671,8 +671,25 @@ pub(crate) fn resolve_pbf_with_size(
     Ok((path, mb))
 }
 
-/// Resolve the nidhogg dataset data directory (required).
+/// Resolve the nidhogg dataset data directory (required, and must exist).
 pub(crate) fn resolve_nidhogg_data_dir(
+    dataset: &str,
+    paths: &config::ResolvedPaths,
+) -> Result<PathBuf, DevError> {
+    let path = nidhogg_data_dir_path(dataset, paths)?;
+    if !path.exists() {
+        return Err(DevError::Config(format!(
+            "data directory not found: {}",
+            path.display()
+        )));
+    }
+    Ok(path)
+}
+
+/// Where the nidhogg dataset data directory lives, without requiring it to
+/// exist. `ingest` is the one caller that creates the directory, so it must
+/// not be gated on its existence - a first ingest would be impossible.
+pub(crate) fn nidhogg_data_dir_path(
     dataset: &str,
     paths: &config::ResolvedPaths,
 ) -> Result<PathBuf, DevError> {
@@ -683,14 +700,7 @@ pub(crate) fn resolve_nidhogg_data_dir(
     let dir_name = ds.data_dir.as_ref().ok_or_else(|| {
         DevError::Config(format!("dataset '{dataset}' has no data_dir configured"))
     })?;
-    let path = paths.data_dir.join(dir_name);
-    if !path.exists() {
-        return Err(DevError::Config(format!(
-            "data directory not found: {}",
-            path.display()
-        )));
-    }
-    Ok(path)
+    Ok(paths.data_dir.join(dir_name))
 }
 
 /// Get a PBF entry reference for direct field access (e.g. checking if a variant exists).

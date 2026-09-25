@@ -336,7 +336,7 @@ pub fn run(project_root: &Path, args: &DepsArgs) -> Result<(), DevError> {
     // wasm-only native bundlers (e.g. sqlite-wasm-rs) don't show up on a
     // native host.
     let native_events = native_code::run(&host_metadata);
-    let ws_events = workspace_dep::run(&metadata, &args.workspace_dep_ignore);
+    let ws_events = workspace_dep::run(&metadata, &args.workspace_dep_ignore)?;
 
     // Only offline *smell* phases contribute to the failure-counting
     // findings. `native_code` is offline but informational (native code
@@ -374,7 +374,31 @@ pub fn run(project_root: &Path, args: &DepsArgs) -> Result<(), DevError> {
 }
 
 fn load_metadata(project_root: &Path) -> Result<CargoMetadata, DevError> {
-    run_metadata(project_root, &["metadata", "--format-version", "1"])
+    run_metadata_locked(project_root, &["metadata", "--format-version", "1"])
+}
+
+/// A resolving `cargo metadata`, pinned with `--locked`. `deps` audits the
+/// lockfile as committed; without the flag cargo re-resolves whenever the
+/// lock is missing or behind a manifest, rewriting `Cargo.lock` and querying
+/// the registry index - so the report would describe a graph that exists
+/// nowhere but this run, and the tree would be dirty afterwards. `--offline`
+/// is deliberately not passed: metadata reads every dependency's manifest,
+/// so an uncached crate source still has to be downloaded, and refusing that
+/// would fail on any fresh machine for no correctness gain.
+///
+/// No lockfile at all is refused rather than generated: there is nothing to
+/// audit, and creating one is a build's job, not a report's.
+fn run_metadata_locked(project_root: &Path, args: &[&str]) -> Result<CargoMetadata, DevError> {
+    let mut locked: Vec<&str> = args.to_vec();
+    locked.push("--locked");
+    run_metadata(project_root, &locked).map_err(|e| match e {
+        DevError::Build(msg) => DevError::Build(format!(
+            "{msg}\n`brokkr deps` runs cargo metadata with --locked: it audits Cargo.lock as \
+             committed and never rewrites it. A missing or out-of-date lockfile must be \
+             brought current by a build first."
+        )),
+        other => other,
+    })
 }
 
 /// The shared renderer: `deps` and the `check` phase print an identical
@@ -408,7 +432,7 @@ pub(crate) fn publication_cycles(project_root: &Path) -> Result<Vec<PublishCycle
 /// `rustc -vV` field `host:`.
 fn load_metadata_host_filtered(project_root: &Path) -> Result<CargoMetadata, DevError> {
     let host = host_triple()?;
-    run_metadata(
+    run_metadata_locked(
         project_root,
         &[
             "metadata",
@@ -688,13 +712,31 @@ fn stale_rank(severity: &str) -> u8 {
     }
 }
 
+/// Coarse years-and-months age. Months are 30-day buckets of the remainder
+/// under 365, so days 360-364 would divide out to 12 - clamped to 11, since
+/// "12mo" (or "1y12mo") is a year the year column already owns.
 fn human_age(days: u64) -> String {
     let years = days / 365;
-    let months = (days % 365) / 30;
+    let months = ((days % 365) / 30).min(11);
     match (years, months) {
         (0, m) => format!("{}mo", m.max(1)),
         (y, 0) => format!("{y}y"),
         (y, m) => format!("{y}y{m}mo"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::human_age;
+
+    #[test]
+    fn human_age_never_prints_twelve_months() {
+        assert_eq!(human_age(0), "1mo");
+        assert_eq!(human_age(45), "1mo");
+        assert_eq!(human_age(364), "11mo");
+        assert_eq!(human_age(365), "1y");
+        assert_eq!(human_age(365 + 362), "1y11mo");
+        assert_eq!(human_age(800), "2y2mo");
     }
 }
 

@@ -12,7 +12,8 @@
   through run/bench/hotpath/alloc based on command enum + mode. Uses
   `BenchContext` for build+harness.
 - `src/pbfhogg/...` - benchmarks (read, write, merge, commands, extract,
-  allocator, blob-filter, planetiler, all), verify (11 commands + all),
+  allocator, blob-filter, planetiler, all), verify (one check per
+  cross-validated command, plus `all`),
   download (Geofabrik region/OSC fetcher with auto-registration in
   `brokkr.toml`).
 
@@ -29,6 +30,35 @@ The buffer lives in `output.rs` (`verify_buffer_begin/flush/discard`, fed by
 `verify_msg`); one-line results use `verify_summary`, which bypasses it. On
 failure `run_check` returns `DevError::ExitCode(1)` so `main` exits non-zero
 without re-printing an error it already reported.
+
+**Verdicts.** A check fails by returning `Err` (a tool crashed, output could
+not be parsed) or by returning `Findings` that carry a failed comparison;
+`run_check` folds the latter into a FAIL exactly like the former, detail
+replay included. The comparison helpers on `VerifyHarness` (`diff_pbfs`,
+`check_sorted`, `compare_sort_feature`) return a `#[must_use]` `Verdict`
+rather than a `bool`, so a comparison whose result is dropped is a compile
+warning instead of a silent PASS - the only way to consume one is
+`findings.record(...)`. `diff_pbfs` reads `pbfhogg diff`'s exit status: 0 with
+no listing is identical, 1 is different, anything else (a signal, another
+code) is an error - never "identical". Two comparisons are deliberately not
+verdicts: `extract`'s element diff against osmium (known to differ; reported
+on the summary channel as informational), and the `dense` index variant of
+`add-locations-to-ways`, whose non-zero exit is taken as an allocation
+failure on hosts without `vm.overcommit_memory=1` and skipped.
+
+**Fresh outputs.** `VerifyHarness::subdir` empties `target/verify/<check>/`
+before handing it back, so every file a check finds there was written by this
+run. Checks rely on that: `verify_merge` treats the diff OSC's existence as
+proof the diff ran and prints the optional osmosis/osmconvert outputs only if
+present, and a failed optional tool's partial output is removed.
+
+**`verify all` inputs.** The OSC- and bbox-consuming checks skip only when
+the input is not configured at all (no `--osc-seq` and no OSC registered for
+the dataset or named snapshot; no `--bbox` and no dataset `bbox`). A
+configured input that fails to resolve - hash mismatch, missing file, several
+OSCs and no `--osc-seq`, a malformed bbox - fails the command before the suite
+runs rather than turning its checks into skips. osmosis setup failure is
+non-fatal but narrated.
 
 Every verify subcommand that takes `--dataset` also accepts `--input <PATH>`
 to skip dataset resolution and use a handcrafted fixture, and `--snapshot
@@ -65,7 +95,11 @@ Minimal `.osc` / `.osc.gz` reader. Returns `OscDiff` with sorted ID sets per
 Hand-rolled tag-start scanner; tolerant of XML comments, processing
 instructions, self-closing elements, and single-quoted attributes. Element
 bodies (tags / refs / members / coords / metadata) are deliberately skipped -
-only IDs are needed.
+only IDs are needed. The document itself is checked: the first element must
+be the `<osmChange>` root and the root must be closed, with nothing after it.
+An empty file, a non-OSC document or a truncated diff is an error, not an
+empty `OscDiff` - `verify_merge` would otherwise report it as
+"element-identical PASS".
 
 ## Snapshots and variant selection
 
@@ -173,6 +207,21 @@ Accepts short aliases (`denmark`, `europe`) or full Geofabrik paths
 (`europe/france`, `asia/japan/kanto`). Dataset key is the last path component.
 Checks configured filenames in `brokkr.toml` before downloading. `--osc-seq N`
 downloads all missing diffs from `last_configured_seq + 1` through N. After
-downloading, computes xxh128 hashes and appends new entries to `brokkr.toml`.
-Filenames follow project convention: `{key}-{YYYYMMDD}-seq{N}.osc.gz`,
-`{key}-{YYYYMMDD}.osm.pbf`.
+downloading, computes xxh128 hashes and registers the new entries in
+`brokkr.toml`. Filenames follow project convention: `{key}-{YYYYMMDD}-seq{N}.osc.gz`,
+`{key}-{YYYYMMDD}.osm.pbf`. The indexed variant is generated with plain
+`pbfhogg cat <raw> -o <indexed>` (`generate_indexed_pbf`, shared by the
+primary, `--as-snapshot` and `--refresh` flows).
+
+Every `brokkr.toml` change a download flow (or `--as-snapshot` promotion)
+makes goes through one `toml_edit` transaction (`DatasetToml` in
+`src/pbfhogg_mod/download_toml.rs`): keys and values are escaped by the
+writer, comments and unrelated tables survive untouched, and the batch is
+committed once with an atomic replace, only after every file it names exists
+and is hashed. A failure before the commit leaves `brokkr.toml` unchanged -
+in particular `--refresh` never leaves a dataset with its primary rotated out
+and no replacement registered. `--replace-snapshot` unlinks the displaced
+snapshot's files only after the new registration is committed, and keeps any
+file the primary or another snapshot still names. `--refresh` refuses when
+today's dated filenames are already registered (a same-day refresh would
+overwrite the primary it is archiving).

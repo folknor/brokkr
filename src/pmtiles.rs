@@ -70,19 +70,30 @@ fn u64_le(buf: &[u8], offset: usize) -> u64 {
 // Varint (LEB128 unsigned)
 // ---------------------------------------------------------------------------
 
-fn read_varint(data: &[u8], pos: &mut usize) -> u64 {
+/// Every reader below treats its input as untrusted: `pmtiles-stats` is pointed
+/// at arbitrary files, and a truncated or corrupt one must produce an error,
+/// never an index panic, an arithmetic overflow, or an allocation sized by a
+/// garbage header field.
+fn corrupt(what: &str) -> DevError {
+    DevError::Config(format!("corrupt PMTiles data: {what}"))
+}
+
+fn read_varint(data: &[u8], pos: &mut usize) -> Result<u64, DevError> {
     let mut result: u64 = 0;
     let mut shift: u32 = 0;
     loop {
-        let b = data[*pos];
+        let b = *data.get(*pos).ok_or_else(|| corrupt("truncated varint"))?;
         *pos += 1;
+        if shift > 63 || (shift == 63 && b & 0x7E != 0) {
+            return Err(corrupt("varint overflows u64"));
+        }
         result |= u64::from(b & 0x7F) << shift;
         if b & 0x80 == 0 {
             break;
         }
         shift += 7;
     }
-    result
+    Ok(result)
 }
 
 // ---------------------------------------------------------------------------
@@ -96,39 +107,54 @@ struct DirEntry {
     offset: u64,
 }
 
-fn decode_directory(data: &[u8]) -> Vec<DirEntry> {
+fn decode_directory(data: &[u8]) -> Result<Vec<DirEntry>, DevError> {
     let mut pos = 0;
-    #[allow(clippy::cast_possible_truncation)]
-    let count = read_varint(data, &mut pos) as usize;
+    let count = read_varint(data, &mut pos)?;
+    // Every entry costs at least four varint bytes, so a count the remaining
+    // data cannot hold is corrupt - and must be refused before it sizes an
+    // allocation.
+    let count = usize::try_from(count)
+        .ok()
+        .filter(|&c| c <= data.len().saturating_sub(pos) / 4)
+        .ok_or_else(|| corrupt("directory entry count exceeds its data"))?;
 
     // Column 1: delta-encoded tile IDs.
     let mut tile_ids = Vec::with_capacity(count);
     let mut prev: u64 = 0;
     for _ in 0..count {
-        let delta = read_varint(data, &mut pos);
-        prev += delta;
+        let delta = read_varint(data, &mut pos)?;
+        prev = prev
+            .checked_add(delta)
+            .ok_or_else(|| corrupt("tile id overflows u64"))?;
         tile_ids.push(prev);
     }
 
     // Column 2: run lengths.
     let mut run_lengths = Vec::with_capacity(count);
     for _ in 0..count {
-        run_lengths.push(read_varint(data, &mut pos));
+        run_lengths.push(read_varint(data, &mut pos)?);
     }
 
     // Column 3: lengths.
     let mut lengths = Vec::with_capacity(count);
     for _ in 0..count {
-        lengths.push(read_varint(data, &mut pos));
+        lengths.push(read_varint(data, &mut pos)?);
     }
 
-    // Column 4: offsets (contiguous-tile encoding).
+    // Column 4: offsets (contiguous-tile encoding). 0 means "right after the
+    // previous entry", so it is meaningless - and `val - 1` underflows - on the
+    // first entry.
     let mut offsets = Vec::with_capacity(count);
     let mut running: u64 = 0;
     for i in 0..count {
-        let val = read_varint(data, &mut pos);
-        if val == 0 && i > 0 {
-            running += lengths[i - 1];
+        let val = read_varint(data, &mut pos)?;
+        if val == 0 {
+            if i == 0 {
+                return Err(corrupt("first directory entry has a contiguous offset"));
+            }
+            running = running
+                .checked_add(lengths[i - 1])
+                .ok_or_else(|| corrupt("tile offset overflows u64"))?;
         } else {
             running = val - 1;
         }
@@ -144,7 +170,7 @@ fn decode_directory(data: &[u8]) -> Vec<DirEntry> {
             offset: offsets[i],
         });
     }
-    entries
+    Ok(entries)
 }
 
 // ---------------------------------------------------------------------------
@@ -189,7 +215,10 @@ fn tile_id_to_zoom(tile_id: u64) -> u8 {
     if tile_id == 0 {
         return 0;
     }
-    for z in 1..=31u8 {
+    // Stops at z30: the z31 bound, 4^32, does not fit in a u64 (the loop used to
+    // run to 31 and overflow on exactly the huge ids a corrupt directory
+    // produces). Everything past z30's end is reported as z31.
+    for z in 1..=30u8 {
         let n: u64 = 1 << z;
         // next_base = (4^(z+1) - 1) / 3
         let next_base = (n * n * 4 - 1) / 3;
@@ -247,8 +276,10 @@ struct ZoomStats {
 
 impl ZoomStats {
     fn record(&mut self, entry: &DirEntry) {
+        // Saturating: run lengths and lengths are file-supplied, and a stats
+        // printout should degrade on a corrupt archive rather than overflow.
         let tiles = entry.run_length.max(1);
-        self.tile_count += tiles;
+        self.tile_count = self.tile_count.saturating_add(tiles);
         self.unique_offsets.insert((entry.offset, entry.length));
 
         if entry.length > 0 {
@@ -257,7 +288,9 @@ impl ZoomStats {
                 None => entry.length,
             });
             self.max_length = self.max_length.max(entry.length);
-            self.total_length += entry.length * tiles;
+            self.total_length = self
+                .total_length
+                .saturating_add(entry.length.saturating_mul(tiles));
         }
     }
 }
@@ -266,17 +299,13 @@ impl ZoomStats {
 // Public entry point
 // ---------------------------------------------------------------------------
 
-/// Read a PMTiles v3 file and print statistics.
+/// Read a PMTiles v3 file and print statistics. An unreadable or corrupt file
+/// is an `Err` (it used to be printed to stdout and reported as success, so a
+/// script could not tell a stats run from a failed one).
 #[allow(clippy::too_many_lines)]
 pub fn run(path: &str) -> Result<(), DevError> {
-    let (header, all_entries) = match read_all_entries(Path::new(path)) {
-        Ok(pair) => pair,
-        Err(e) => {
-            println!("\n=== {path} ===");
-            println!("  {e}");
-            return Ok(());
-        }
-    };
+    let (header, all_entries) = read_all_entries(Path::new(path))
+        .map_err(|e| DevError::Config(format!("{path}: {e}")))?;
 
     // Compute per-zoom statistics.
     let mut zoom_stats: HashMap<u8, ZoomStats> = HashMap::new();
@@ -317,13 +346,13 @@ pub fn run(path: &str) -> Result<(), DevError> {
 
     for &z in &zooms {
         let stats = &zoom_stats[&z];
-        total_tiles += stats.tile_count;
+        total_tiles = total_tiles.saturating_add(stats.tile_count);
 
         if let Some(min) = stats.min_length {
             global_min = Some(global_min.map_or(min, |prev: u64| prev.min(min)));
         }
         global_max = global_max.max(stats.max_length);
-        global_total_length += stats.total_length;
+        global_total_length = global_total_length.saturating_add(stats.total_length);
 
         let avg = match stats.total_length.checked_div(stats.tile_count) {
             Some(v) => format!("{} avg bytes", fmt_int(v)),
@@ -370,7 +399,7 @@ fn read_all_entries(path: &Path) -> Result<(Header, Vec<DirEntry>), DevError> {
     let root_entries = {
         let compressed = read_range(&mut file, header.root_dir_offset, header.root_dir_length)?;
         let decompressed = decompress(&compressed, header.internal_compression)?;
-        decode_directory(&decompressed)
+        decode_directory(&decompressed)?
     };
 
     let all_entries = if header.leaf_dirs_length > 0 {
@@ -379,11 +408,11 @@ fn read_all_entries(path: &Path) -> Result<(Header, Vec<DirEntry>), DevError> {
 
         for entry in &root_entries {
             if entry.run_length == 0 {
-                #[allow(clippy::cast_possible_truncation)]
-                let start = entry.offset as usize;
-                #[allow(clippy::cast_possible_truncation)]
-                let end = start + entry.length as usize;
-                if end > leaf_blob.len() {
+                let bounds = usize::try_from(entry.offset).ok().and_then(|start| {
+                    let end = start.checked_add(usize::try_from(entry.length).ok()?)?;
+                    (end <= leaf_blob.len()).then_some((start, end))
+                });
+                let Some((start, end)) = bounds else {
                     return Err(DevError::Config(format!(
                         "{}: leaf pointer out of bounds (offset={}, length={}, blob={})",
                         path.display(),
@@ -391,9 +420,9 @@ fn read_all_entries(path: &Path) -> Result<(Header, Vec<DirEntry>), DevError> {
                         entry.length,
                         leaf_blob.len(),
                     )));
-                }
+                };
                 let leaf_data = decompress(&leaf_blob[start..end], header.internal_compression)?;
-                entries.extend(decode_directory(&leaf_data));
+                entries.extend(decode_directory(&leaf_data)?);
             } else {
                 entries.push(DirEntry {
                     tile_id: entry.tile_id,
@@ -470,11 +499,22 @@ fn pick_spread<T: Copy>(items: &[T], count: usize) -> Vec<T> {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Read `length` bytes from `file` starting at `offset`.
+/// Read `length` bytes from `file` starting at `offset`. The range is checked
+/// against the file's size first: both numbers come from the header, and a
+/// corrupt one would otherwise size the buffer (up to aborting on allocation)
+/// before `read_exact` ever got to notice the file is shorter.
 fn read_range(file: &mut File, offset: u64, length: u64) -> Result<Vec<u8>, DevError> {
+    let file_len = file.metadata()?.len();
+    let in_bounds = offset
+        .checked_add(length)
+        .is_some_and(|end| end <= file_len);
+    let len = usize::try_from(length).ok().filter(|_| in_bounds).ok_or_else(|| {
+        corrupt(&format!(
+            "range {offset}+{length} exceeds the file's {file_len} bytes"
+        ))
+    })?;
     file.seek(SeekFrom::Start(offset))?;
-    #[allow(clippy::cast_possible_truncation)]
-    let mut buf = vec![0u8; length as usize];
+    let mut buf = vec![0u8; len];
     file.read_exact(&mut buf)?;
     Ok(buf)
 }
@@ -533,7 +573,7 @@ mod tests {
     fn varint_zero() {
         let data = [0x00];
         let mut pos = 0;
-        assert_eq!(read_varint(&data, &mut pos), 0);
+        assert_eq!(read_varint(&data, &mut pos).unwrap(), 0);
         assert_eq!(pos, 1);
     }
 
@@ -541,14 +581,14 @@ mod tests {
     fn varint_one() {
         let data = [0x01];
         let mut pos = 0;
-        assert_eq!(read_varint(&data, &mut pos), 1);
+        assert_eq!(read_varint(&data, &mut pos).unwrap(), 1);
     }
 
     #[test]
     fn varint_127() {
         let data = [0x7F];
         let mut pos = 0;
-        assert_eq!(read_varint(&data, &mut pos), 127);
+        assert_eq!(read_varint(&data, &mut pos).unwrap(), 127);
     }
 
     #[test]
@@ -556,7 +596,7 @@ mod tests {
         // 128 = 0x80 → 0x80 0x01
         let data = [0x80, 0x01];
         let mut pos = 0;
-        assert_eq!(read_varint(&data, &mut pos), 128);
+        assert_eq!(read_varint(&data, &mut pos).unwrap(), 128);
         assert_eq!(pos, 2);
     }
 
@@ -565,7 +605,7 @@ mod tests {
         // 300 = 0x12C → low 7 bits = 0x2C | 0x80 = 0xAC, high bits = 0x02
         let data = [0xAC, 0x02];
         let mut pos = 0;
-        assert_eq!(read_varint(&data, &mut pos), 300);
+        assert_eq!(read_varint(&data, &mut pos).unwrap(), 300);
     }
 
     #[test]
@@ -573,7 +613,7 @@ mod tests {
         // 16384 = 0x4000 → 0x80 0x80 0x01
         let data = [0x80, 0x80, 0x01];
         let mut pos = 0;
-        assert_eq!(read_varint(&data, &mut pos), 16384);
+        assert_eq!(read_varint(&data, &mut pos).unwrap(), 16384);
         assert_eq!(pos, 3);
     }
 
@@ -617,7 +657,7 @@ mod tests {
         push_varint(&mut data, 100); // length
         push_varint(&mut data, 1); // offset (val-1 = 0)
 
-        let entries = decode_directory(&data);
+        let entries = decode_directory(&data).unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].tile_id, 10);
         assert_eq!(entries[0].run_length, 1);
@@ -646,7 +686,7 @@ mod tests {
         push_varint(&mut data, 0);
         push_varint(&mut data, 201);
 
-        let entries = decode_directory(&data);
+        let entries = decode_directory(&data).unwrap();
         assert_eq!(entries.len(), 3);
         assert_eq!(entries[0].tile_id, 5);
         assert_eq!(entries[1].tile_id, 8);
@@ -657,6 +697,43 @@ mod tests {
             "contiguous: prev offset 0 + prev length 50"
         );
         assert_eq!(entries[2].offset, 200, "explicit: 201 - 1 = 200");
+    }
+
+    // -- corrupt input ------------------------------------------------------
+
+    #[test]
+    fn truncated_varint_is_an_error_not_a_panic() {
+        let mut pos = 0;
+        assert!(read_varint(&[0x80], &mut pos).is_err());
+        let mut pos = 0;
+        assert!(read_varint(&[], &mut pos).is_err());
+    }
+
+    #[test]
+    fn overlong_varint_is_an_error() {
+        let mut pos = 0;
+        assert!(read_varint(&[0xFF; 11], &mut pos).is_err());
+    }
+
+    #[test]
+    fn a_contiguous_first_offset_is_corrupt() {
+        let mut data = Vec::new();
+        for v in [1, 10, 1, 100, 0] {
+            push_varint(&mut data, v);
+        }
+        assert!(decode_directory(&data).is_err());
+    }
+
+    #[test]
+    fn an_entry_count_the_data_cannot_hold_is_refused() {
+        let mut data = Vec::new();
+        push_varint(&mut data, u64::MAX);
+        assert!(decode_directory(&data).is_err());
+    }
+
+    #[test]
+    fn huge_tile_ids_do_not_overflow_zoom_lookup() {
+        assert_eq!(tile_id_to_zoom(u64::MAX), 31);
     }
 
     // -- fmt_int ------------------------------------------------------------

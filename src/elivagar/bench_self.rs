@@ -1,15 +1,21 @@
-//! Benchmark: full elivagar pipeline (PBF -> PMTiles).
+//! Benchmark: full elivagar pipeline (PBF -> PMTiles), `bench all`'s self arm.
 //!
-//! Replaces `bench-self.sh`. Builds the release binary, runs N times (best of),
-//! and parses self-reported kv metrics from stderr (total_ms, phase12_ms,
-//! ocean_ms, phase3_ms, phase4_ms, features, tiles, output_bytes).
+//! Builds nothing itself (the caller hands in the binary) and measures the
+//! same way `brokkr tilegen --bench` does (`dispatch::run_elivagar_wallclock`):
+//! brokkr's own best-of-N external wall-clock via `run_external_ok`, with the
+//! argv built by the same `ElivagarCommand::Tilegen::build_args`. tilegen
+//! emits its metrics as FIFO counters (sidecar.db) as of the elivagar side's
+//! 54f9b07 and no longer prints `elapsed_ms=` on stderr, so the old
+//! `run_external_with_kv_raw` path - which requires that line - failed this
+//! arm outright.
 
 use std::path::Path;
 
-use crate::db::KvPair;
 use crate::error::DevError;
 use crate::harness::{BenchConfig, BenchHarness};
 use crate::output;
+
+use super::commands::ElivagarCommand;
 
 // ---------------------------------------------------------------------------
 // Public entry point
@@ -38,50 +44,19 @@ pub fn run(
         .unwrap_or_default()
         .to_owned();
 
-    std::fs::create_dir_all(scratch_dir)?;
-
-    let output_path = scratch_dir.join("bench-self-output.pmtiles");
-    let output_str = output_path.display().to_string();
-
-    let tmp_dir = data_dir.join("tilegen_tmp");
-    std::fs::create_dir_all(&tmp_dir)?;
-    let tmp_dir_str = tmp_dir.display().to_string();
-
-    // Build the command args: elivagar run <pbf> -o <output> [flags]
-    let mut args: Vec<String> = vec![
-        "run".into(),
-        pbf_str.into(),
-        "-o".into(),
-        output_str,
-        "--tmp-dir".into(),
-        tmp_dir_str,
-    ];
-
-    if let Some(phase) = skip_to {
-        args.push("--skip-to".into());
-        args.push(phase.into());
-    }
-    if let Some(level) = opts.tilegen.compression_level {
-        args.push("--compression-level".into());
-        args.push(level.to_string());
-    }
-    opts.push_args(&mut args, data_dir)?;
-
+    let command = ElivagarCommand::Tilegen { opts, skip_to };
+    let args = command.build_args(pbf_str, scratch_dir, data_dir)?;
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
 
     output::bench_msg(&format!(
         "elivagar pipeline: {basename} ({file_mb:.0} MB), {runs} run(s)"
     ));
 
-    // The pipeline contract (skip_to plus everything the tilegen block
-    // expands to, ocean inputs included) lands in cli_args verbatim - no need
-    // to mirror it here, and `brokkr results --grep` selects on it. Metadata
-    // is empty;
-    // locations_on_ways_detected is attached below from stderr.
-    let metadata: Vec<KvPair> = Vec::new();
-
-    let mut config = BenchConfig {
-        command: "self".into(),
+    // Same row shape as `tilegen --bench`: the pipeline contract (skip_to plus
+    // everything the tilegen block expands to, ocean inputs included) lands in
+    // cli_args verbatim, and `brokkr results --grep` selects on it.
+    let config = BenchConfig {
+        command: command.result_command().into(),
         mode: None,
         input_file: Some(basename),
         input_mb: Some(file_mb),
@@ -93,24 +68,16 @@ pub fn run(
             &arg_refs,
         )),
         brokkr_args: None,
-        metadata,
+        metadata: command.metadata(),
     };
 
-    // Use kv parsing: elivagar emits elapsed_ms, phase12_ms, ocean_ms,
-    // phase3_ms, phase4_ms, features, tiles, output_bytes to stderr.
-    // Use _raw so we can detect LocationsOnWays from stderr before recording.
-    let (result, stderr, pending) =
-        harness.run_external_with_kv_raw(&config, binary, &arg_refs, project_root)?;
-    let detected = super::detect_locations_on_ways_stderr(&stderr);
-    config.metadata.push(KvPair::text(
-        "meta.locations_on_ways_detected",
-        detected.to_string(),
-    ));
-    let uuid = harness.record_result(&config, &result)?;
-    harness.commit_sidecar(uuid.as_deref(), &pending)?;
+    let result = harness.run_external_ok(&config, binary, &arg_refs, project_root, &[]);
 
-    // Clean up output.
-    std::fs::remove_file(&output_path).ok();
+    // The self arm measures; it does not feed the durable store. Clean up on
+    // failure too, so a half-written archive is not left in scratch.
+    for path in command.output_files(scratch_dir) {
+        std::fs::remove_file(path).ok();
+    }
 
-    Ok(())
+    result.map(|_| ())
 }

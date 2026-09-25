@@ -10,7 +10,7 @@
 
 use std::path::Path;
 
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::Connection;
 
 use super::types::generate_uuid;
 use crate::error::DevError;
@@ -64,6 +64,7 @@ pub struct GateRow {
 /// Row data returned from queries (full row including generated `uuid`
 /// and `created_at`).
 #[allow(dead_code)]
+#[derive(Debug)]
 pub struct GateEntry {
     pub uuid: String,
     pub created_at: i64,
@@ -128,36 +129,84 @@ impl GateDb {
         Ok(uuid)
     }
 
-    /// Look up a baseline row by full-or-prefix UUID, scoped to the
-    /// given hostname. Returns `Ok(None)` when no row matches.
+    /// Resolve a pinned baseline to exactly one row on `hostname`.
+    ///
+    /// The pin is a full UUID or a prefix of one, and it must resolve
+    /// **unambiguously**: an exact match wins, a prefix matching one row
+    /// resolves to it, and a prefix matching several is refused rather
+    /// than resolved newest-wins - otherwise a later run that happened to
+    /// share the pinned prefix would silently become the baseline. An
+    /// empty or whitespace-bearing pin is refused outright, since it
+    /// prefix-matches everything.
+    ///
+    /// `exclude_uuid` is the run being evaluated. The gate hook inserts
+    /// it before the lookup, so without the exclusion a short pin could
+    /// match the current row and make it its own baseline - where
+    /// `max_delta = 0` and `equal_to_baseline` pass by construction.
+    ///
+    /// Matching is a byte-exact `substr` comparison, not `LIKE`: `%` and
+    /// `_` in a pin are ordinary characters, never wildcards.
+    ///
+    /// Returns `Ok(None)` when no row matches.
     pub fn lookup_baseline(
         &self,
-        uuid_prefix: &str,
+        pin: &str,
         hostname: &str,
+        exclude_uuid: &str,
     ) -> Result<Option<GateEntry>, DevError> {
+        let pin_len = validate_pin(pin)?;
         let mut stmt = self.conn.prepare(
             "SELECT uuid, created_at, git_commit, dirty, hostname, gate_name, \
                     script, fixture, profile, elapsed_ms, exit_code, success, \
                     sidecar, meta \
              FROM gate_runs \
-             WHERE uuid LIKE ?1 || '%' AND hostname = ?2 \
-             ORDER BY created_at DESC LIMIT 1",
+             WHERE substr(uuid, 1, ?2) = ?1 AND hostname = ?3 AND uuid != ?4 \
+             ORDER BY uuid LIMIT ?5",
         )?;
-        stmt.query_row(rusqlite::params![uuid_prefix, hostname], row_to_entry)
-            .optional()
-            .map_err(DevError::from)
+        let mut rows = stmt
+            .query_map(
+                rusqlite::params![pin, pin_len, hostname, exclude_uuid, AMBIGUITY_LISTING + 1],
+                row_to_entry,
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        if let Some(idx) = rows.iter().position(|r| r.uuid == pin) {
+            return Ok(Some(rows.swap_remove(idx)));
+        }
+        match rows.len() {
+            0 => Ok(None),
+            1 => Ok(rows.pop()),
+            n => {
+                let listed: Vec<&str> = rows
+                    .iter()
+                    .take(usize::try_from(AMBIGUITY_LISTING).unwrap_or(usize::MAX))
+                    .map(|r| r.uuid.as_str())
+                    .collect();
+                let more = if i64::try_from(n).unwrap_or(i64::MAX) > AMBIGUITY_LISTING {
+                    ", ..."
+                } else {
+                    ""
+                };
+                Err(DevError::Config(format!(
+                    "baseline pin `{pin}` is ambiguous on host `{hostname}`: it is a \
+                     prefix of several gate.db rows ({}{more}). Pin the full UUID.",
+                    listed.join(", ")
+                )))
+            }
+        }
     }
 
-    /// Hostnames that have a row matching `uuid_prefix`, ignoring the
+    /// Hostnames that have a row matching `pin` (exact or prefix, same
+    /// byte-exact matching as [`GateDb::lookup_baseline`]), ignoring the
     /// hostname scope `lookup_baseline` applies. Lets a failed baseline
     /// lookup say whether the UUID is absent outright or merely filed
     /// under a different machine - two conditions with different remedies.
-    pub fn hosts_with_uuid(&self, uuid_prefix: &str) -> Result<Vec<String>, DevError> {
+    pub fn hosts_with_uuid(&self, pin: &str) -> Result<Vec<String>, DevError> {
+        let pin_len = validate_pin(pin)?;
         let mut stmt = self.conn.prepare(
             "SELECT DISTINCT hostname FROM gate_runs \
-             WHERE uuid LIKE ?1 || '%' ORDER BY hostname",
+             WHERE substr(uuid, 1, ?2) = ?1 ORDER BY hostname",
         )?;
-        let rows = stmt.query_map(rusqlite::params![uuid_prefix], |r| r.get::<_, String>(0))?;
+        let rows = stmt.query_map(rusqlite::params![pin, pin_len], |r| r.get::<_, String>(0))?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(DevError::from)
     }
@@ -181,6 +230,28 @@ impl GateDb {
             )
             .map_err(DevError::from)
     }
+}
+
+/// How many candidate UUIDs an ambiguous-pin error lists.
+const AMBIGUITY_LISTING: i64 = 5;
+
+/// Refuse a pin that cannot identify one row, and return its length in
+/// characters (what SQLite's `substr` counts). An empty pin is a prefix
+/// of every UUID; whitespace only arises from a mangled paste.
+fn validate_pin(pin: &str) -> Result<i64, DevError> {
+    if pin.is_empty() {
+        return Err(DevError::Config(
+            "baseline pin is empty - it would match every gate.db row. \
+             Pin the UUID printed by --as-baseline."
+                .into(),
+        ));
+    }
+    if pin.chars().any(char::is_whitespace) {
+        return Err(DevError::Config(format!(
+            "baseline pin `{pin}` contains whitespace - pin the UUID printed by --as-baseline"
+        )));
+    }
+    Ok(i64::try_from(pin.chars().count()).unwrap_or(i64::MAX))
 }
 
 fn row_to_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<GateEntry> {
@@ -263,11 +334,34 @@ mod tests {
         }
     }
 
+    /// Insert a row under a chosen UUID, so prefix collisions can be
+    /// staged deterministically.
+    fn insert_with_uuid(db: &GateDb, uuid: &str) {
+        let row = sample_row();
+        db.conn
+            .execute(
+                "INSERT INTO gate_runs (uuid, created_at, git_commit, dirty, hostname, \
+                 gate_name, script, fixture, profile, elapsed_ms, exit_code, success, \
+                 sidecar, meta) VALUES (?1, 0, ?2, 0, ?3, ?4, ?5, ?6, ?7, ?8, 0, 1, '{}', '{}')",
+                rusqlite::params![
+                    uuid,
+                    row.git_commit,
+                    row.hostname,
+                    row.gate_name,
+                    row.script,
+                    row.fixture,
+                    row.profile,
+                    row.elapsed_ms
+                ],
+            )
+            .unwrap();
+    }
+
     #[test]
     fn insert_then_lookup_by_full_uuid() {
         let db = open_mem();
         let uuid = db.insert(&sample_row()).unwrap();
-        let entry = db.lookup_baseline(&uuid, "host-a").unwrap().unwrap();
+        let entry = db.lookup_baseline(&uuid, "host-a", "current").unwrap().unwrap();
         assert_eq!(entry.gate_name, "jmap_small");
         assert_eq!(entry.meta, r#"{"correct":1}"#);
     }
@@ -277,7 +371,7 @@ mod tests {
         let db = open_mem();
         let uuid = db.insert(&sample_row()).unwrap();
         let prefix = &uuid[..8];
-        let entry = db.lookup_baseline(prefix, "host-a").unwrap().unwrap();
+        let entry = db.lookup_baseline(prefix, "host-a", "current").unwrap().unwrap();
         assert_eq!(entry.uuid, uuid);
     }
 
@@ -286,7 +380,62 @@ mod tests {
         let db = open_mem();
         let uuid = db.insert(&sample_row()).unwrap();
         // Same UUID, wrong host => not found.
-        assert!(db.lookup_baseline(&uuid, "host-b").unwrap().is_none());
+        assert!(db.lookup_baseline(&uuid, "host-b", "current").unwrap().is_none());
+    }
+
+    #[test]
+    fn empty_pin_is_refused() {
+        let db = open_mem();
+        db.insert(&sample_row()).unwrap();
+        assert!(db.lookup_baseline("", "host-a", "current").is_err());
+        assert!(db.lookup_baseline("ab cd", "host-a", "current").is_err());
+        assert!(db.hosts_with_uuid("").is_err());
+    }
+
+    /// The run being evaluated is inserted before the lookup; a pin that
+    /// prefixes it must never make it its own baseline.
+    #[test]
+    fn lookup_never_matches_the_current_run() {
+        let db = open_mem();
+        insert_with_uuid(&db, "aaaa1111");
+        assert!(db.lookup_baseline("aaaa", "host-a", "aaaa1111").unwrap().is_none());
+        assert!(db.lookup_baseline("aaaa1111", "host-a", "aaaa1111").unwrap().is_none());
+        // With a real baseline beside it, the prefix resolves to that one.
+        insert_with_uuid(&db, "aaaa2222");
+        let entry = db.lookup_baseline("aaaa", "host-a", "aaaa1111").unwrap().unwrap();
+        assert_eq!(entry.uuid, "aaaa2222");
+    }
+
+    #[test]
+    fn ambiguous_prefix_is_refused() {
+        let db = open_mem();
+        insert_with_uuid(&db, "bbbb1111");
+        insert_with_uuid(&db, "bbbb2222");
+        let err = db.lookup_baseline("bbbb", "host-a", "current").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("ambiguous"), "got: {msg}");
+        assert!(msg.contains("bbbb1111") && msg.contains("bbbb2222"), "got: {msg}");
+        // A longer pin disambiguates.
+        let entry = db.lookup_baseline("bbbb2", "host-a", "current").unwrap().unwrap();
+        assert_eq!(entry.uuid, "bbbb2222");
+    }
+
+    #[test]
+    fn exact_match_wins_over_longer_prefixed_rows() {
+        let db = open_mem();
+        insert_with_uuid(&db, "cccc");
+        insert_with_uuid(&db, "cccc9999");
+        let entry = db.lookup_baseline("cccc", "host-a", "current").unwrap().unwrap();
+        assert_eq!(entry.uuid, "cccc");
+    }
+
+    #[test]
+    fn like_wildcards_are_literal() {
+        let db = open_mem();
+        insert_with_uuid(&db, "dddd1111");
+        assert!(db.lookup_baseline("%", "host-a", "current").unwrap().is_none());
+        assert!(db.lookup_baseline("d_dd", "host-a", "current").unwrap().is_none());
+        assert!(db.hosts_with_uuid("%").unwrap().is_empty());
     }
 
     #[test]
@@ -295,7 +444,7 @@ mod tests {
         let uuid = db.insert(&sample_row()).unwrap();
         // The row is on host-a; asking from host-b's perspective, the
         // lookup fails but the UUID is still locatable.
-        assert!(db.lookup_baseline(&uuid, "host-b").unwrap().is_none());
+        assert!(db.lookup_baseline(&uuid, "host-b", "current").unwrap().is_none());
         assert_eq!(db.hosts_with_uuid(&uuid).unwrap(), vec!["host-a"]);
         assert!(db.hosts_with_uuid("deadbeef").unwrap().is_empty());
     }
@@ -323,7 +472,7 @@ mod tests {
     fn lookup_missing_returns_none() {
         let db = open_mem();
         assert!(
-            db.lookup_baseline("deadbeef", "host-a")
+            db.lookup_baseline("deadbeef", "host-a", "current")
                 .unwrap()
                 .is_none()
         );

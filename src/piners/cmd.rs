@@ -13,9 +13,13 @@
 //! expected-disposition gate** ([`crate::piners::gate`]): each probe pins an
 //! `expected` label in `pins.toml`, and any deviation - regression or
 //! surprise improvement - fails the run, as does a probe never blessed.
-//! `--no-gate` downgrades the gate to informational. The run also fails on a
-//! real break (`compile_fail`/`runtime_fail`) or any non-zero harness exit;
-//! the exit code stays authoritative for breaks.
+//! `--no-gate` downgrades the gate to informational. The run also fails on
+//! any non-zero harness exit the pins do not explain: exit 1 (break(s)) is
+//! acceptable only when every break line is a selected probe pinned to that
+//! break ([`crate::piners::gate::breaks_all_pinned`]), so a probe pinned to
+//! `compile_fail` can pass; any other code, a signal, or a repeated record
+//! always fails. `--bless` refuses to stamp anything from a run that failed
+//! this way.
 //!
 //! `--reseed` (re-stamp hashes) and `--bless` (re-stamp dispositions) are the
 //! two deliberate writers of `pins.toml`; see [`crate::piners::reseed`] and
@@ -43,9 +47,18 @@ use crate::resolve::corpus_runs_db_path;
 const ARTEFACT_PARENT: &str = ".brokkr/piners";
 
 /// Pre-run runtime wall, in milliseconds (~270s). A selection whose estimated
-/// runtime (the sum over selected probes of each probe's most recent recorded
-/// `runtime_ms`) exceeds this is refused before building, unless `--force`.
+/// runtime (the measured wall of a comparable covering run - see
+/// [`CorpusDb::estimated_wall_ms`]) exceeds this is refused before building,
+/// unless `--force`.
 pub(crate) const RUNTIME_CEILING_MS: f64 = 270_000.0;
+
+/// Wall-clock backstop on the harness subprocess. Not a budget - the
+/// ~270s budget is the pre-run [`RUNTIME_CEILING_MS`] wall, and a run that
+/// outgrows it is let finish - but a hang guard: a wedged harness would
+/// otherwise hold the global lock until someone runs `brokkr kill`. Set far
+/// above any real run (a `--force`d full pass included), so only a hang
+/// reaches it; the run is then recorded as failed.
+const HARNESS_HANG_BACKSTOP: Duration = Duration::from_secs(60 * 60);
 
 /// Flags lifted off the `Corpus` CLI command.
 #[derive(Debug, Default)]
@@ -130,13 +143,23 @@ pub fn corpus(
         return Ok(());
     }
 
+    // Default profile is debug: parity is opt-level-independent, and the
+    // debug build keeps the edit/run loop inside the cache-warm window.
+    // Resolved before the ceiling, which only estimates from same-profile runs.
+    //
     // Pre-run runtime wall: now that the selection has verified, refuse it if
-    // its estimated runtime (sum of each probe's most recent recorded runtime)
+    // its estimated runtime (the measured wall of a comparable covering run)
     // blows the ~270s ceiling, unless --force. Placed after verification so a
     // submodule/hash drift surfaces even on an over-budget selection;
     // verify_only has already returned, so it's naturally exempt.
+    let debug = args.profile_override.unwrap_or_else(|| {
+        cfg.harness
+            .as_ref()
+            .and_then(|h| h.debug)
+            .unwrap_or(true)
+    });
     if !args.force {
-        enforce_runtime_ceiling(project_root, &ids)?;
+        enforce_runtime_ceiling(project_root, &ids, debug)?;
     }
 
     let harness_cfg = cfg.harness.as_ref().ok_or_else(|| {
@@ -156,11 +179,6 @@ pub fn corpus(
     })?;
     let _sigterm = crate::shutdown::SigtermGuard::install();
 
-    // Default profile is debug: parity is opt-level-independent, and the
-    // debug build keeps the edit/run loop inside the cache-warm window.
-    let debug = args
-        .profile_override
-        .unwrap_or_else(|| harness_cfg.debug.unwrap_or(true));
     let built = build::build_for_harness(
         project_root,
         harness_cfg,
@@ -189,8 +207,8 @@ pub fn corpus(
     ));
 
     // The ~270s budget is enforced as a pre-run wall (above), not mid-run:
-    // once we commit to a run we let it finish. PID is tracked so `brokkr
-    // kill` reaches the harness.
+    // once we commit to a run we let it finish, bounded only by the hang
+    // backstop. PID is tracked so `brokkr kill` reaches the harness.
     let binary_str = built.binary.display().to_string();
     let manifest_str = manifest_path.display().to_string();
     let artefact_str = artefacts.path().display().to_string();
@@ -214,7 +232,7 @@ pub fn corpus(
         &harness_argv,
         project_root,
         &env_pairs,
-        Duration::MAX,
+        HARNESS_HANG_BACKSTOP,
         Some(&|pid| _lock.set_child_pid(pid)),
         true,
     ) {
@@ -230,10 +248,10 @@ pub fn corpus(
             // Record the failed run so it surfaces in `brokkr corpus-results`, then
             // still preserve the dir - a spawn failure is exactly when on-disk
             // forensics matter most, and the DB row is a convenience index.
-            let selector = selector_json(args, &ids);
+            let selector = selector_json(args, &ids, debug);
             let record = RunRecord {
                 selector: &selector,
-                gated: !args.no_gate,
+                gated: !args.no_gate && !args.bless,
                 result: "fail",
                 fail_reason: Some("harness failed to spawn"),
                 harness_exit_code: None,
@@ -255,17 +273,27 @@ pub fn corpus(
     };
     _lock.clear_child_pid();
 
+    let killed_on_backstop = capture.killed_on_deadline;
     let captured = capture.captured;
     // Keep stdout/stderr on disk until ingest commits - the pre-ingest safety
     // net if anything panics between here and the DB write.
     std::fs::write(artefacts.path().join("harness.stdout"), &captured.stdout).ok();
     std::fs::write(artefacts.path().join("harness.stderr"), &captured.stderr).ok();
 
-    let report = report::parse(&captured.stdout);
+    let mut report = report::parse(&captured.stdout);
+    // One record per key from here on, for the gate, bless and ingest alike;
+    // a repeat is a harness contract violation that fails the run below.
+    let duplicates = report.take_duplicates();
+    if !duplicates.is_empty() {
+        output::corpus_msg(&format!(
+            "harness emitted {} repeated record(s), kept the last of each: {}",
+            duplicates.len(),
+            duplicates.join(", ")
+        ));
+    }
 
     let elapsed_ms = captured.elapsed.as_millis();
     let harness_code = captured.status.code();
-    let harness_ok = harness_code == Some(0);
 
     // Evaluate the gate up front. It drives the pass/fail decision, feeds the
     // gate_miss table (selected probes the harness emitted no line for), and
@@ -276,6 +304,20 @@ pub fn corpus(
     // pins about to be re-stamped).
     let gate_diffs = crate::piners::gate::evaluate(&ids, &registry, &report);
     let gate_blocks = !args.bless && !args.no_gate && !gate_diffs.is_empty();
+
+    // Is the harness exit acceptable? 0 always is. 1 ("break(s)") is when
+    // every break is one the pins expect - or, for bless, when the report
+    // actually carries the breaks, since recording them is bless's job. A
+    // repeated record, 2, any other code, a signal, or the hang backstop is
+    // never acceptable.
+    let harness_ok = duplicates.is_empty()
+        && !killed_on_backstop
+        && match harness_code {
+            Some(0) => true,
+            Some(1) if args.bless => crate::piners::gate::report_has_break(&report),
+            Some(1) => crate::piners::gate::breaks_all_pinned(&ids, &registry, &report),
+            _ => false,
+        };
     let run_pass = harness_ok && !gate_blocks;
 
     // Render the body now that the deviation set is known. Probes matching
@@ -289,6 +331,13 @@ pub fn corpus(
         None
     } else if harness_ok {
         Some(format!("{} gate deviation(s)", gate_diffs.len()))
+    } else if killed_on_backstop {
+        Some(format!(
+            "harness killed at the {}s hang backstop",
+            HARNESS_HANG_BACKSTOP.as_secs()
+        ))
+    } else if !duplicates.is_empty() {
+        Some(format!("{} repeated harness record(s)", duplicates.len()))
     } else {
         Some(match harness_code {
             Some(1) => "parity break(s)".to_owned(),
@@ -308,11 +357,12 @@ pub fn corpus(
             (id.clone(), exp)
         })
         .collect();
-    let selector = selector_json(args, &ids);
+    let selector = selector_json(args, &ids, debug);
     let stderr_text = String::from_utf8_lossy(&captured.stderr);
     let record = RunRecord {
         selector: &selector,
-        gated: !args.no_gate,
+        // A bless run ignores the gate verdict, so it is not a gated run.
+        gated: !args.no_gate && !args.bless,
         result: if run_pass { "pass" } else { "fail" },
         fail_reason: fail_reason.as_deref(),
         harness_exit_code: harness_code,
@@ -332,7 +382,18 @@ pub fn corpus(
 
     // Bless: stamp current dispositions into pins.toml. The run is already
     // persisted, so the dir drops like any other (unless --keep-artefacts).
+    // A harness that failed (see harness_ok) blesses nothing: its surviving
+    // lines are whatever it emitted before it died, not the dispositions.
     if args.bless {
+        if !harness_ok {
+            artefacts.finalize_success()?;
+            let reason = fail_reason.unwrap_or_else(|| "harness failed".to_owned());
+            output::corpus_msg(&format!(
+                "FAIL: {reason} in {elapsed_ms}ms - nothing blessed, pins.toml untouched \
+                 (recorded; see `brokkr corpus-results`)"
+            ));
+            return Err(DevError::ExitCode(1));
+        }
         let pins_path = registry_dir.join("pins.toml");
         crate::piners::bless::apply(&pins_path, &mut registry, &report, &ids)?;
         artefacts.finalize_success()?;
@@ -388,17 +449,19 @@ pub(crate) fn verify_selected_feeds(
 }
 
 /// Refuse a selection projected to exceed [`RUNTIME_CEILING_MS`]. The estimate
-/// is the measured whole-run wall of the most recent run whose selection was a
-/// superset of `ids` (see [`CorpusDb::estimated_wall_ms`]) - a real wall, not
-/// the sum of the harness's overlapping per-probe runtimes. With no covering
-/// run recorded (a fresh DB, or a selection no prior run superset-covers) there
-/// is no measured basis, so the run proceeds. Read-only DB open - never writes.
-fn enforce_runtime_ceiling(project_root: &Path, ids: &[String]) -> Result<(), DevError> {
+/// is the measured whole-run wall of the most recent comparable run whose
+/// selection was a superset of `ids` (see [`CorpusDb::estimated_wall_ms`] for
+/// what counts as comparable) - a real wall, not the sum of the harness's
+/// overlapping per-probe runtimes. With no covering run recorded (a fresh DB,
+/// or a selection no prior run superset-covers) there is no measured basis, so
+/// the run proceeds. Opens the DB for reading (an older `runs.db` is migrated
+/// first - see [`CorpusDb::open_readonly`]).
+fn enforce_runtime_ceiling(project_root: &Path, ids: &[String], debug: bool) -> Result<(), DevError> {
     let db_path = corpus_runs_db_path(project_root);
     if !db_path.exists() {
         return Ok(());
     }
-    let Some(est_ms) = CorpusDb::open_readonly(&db_path)?.estimated_wall_ms(ids)? else {
+    let Some(est_ms) = CorpusDb::open_readonly(&db_path)?.estimated_wall_ms(ids, debug)? else {
         return Ok(());
     };
     if est_ms > RUNTIME_CEILING_MS {
@@ -416,15 +479,18 @@ fn enforce_runtime_ceiling(project_root: &Path, ids: &[String]) -> Result<(), De
 
 /// Build the `selector` JSON stored on the run row: the resolved probe ids
 /// plus the raw selection flags - enough to group by and to reproduce.
-/// Forwarded harness flags are part of the run's identity (they perturb
-/// harness behavior), so they persist here too.
-fn selector_json(args: &CorpusArgs, ids: &[String]) -> String {
+/// Forwarded harness flags and the build profile are part of the run's
+/// identity (both change what the harness does and how long it takes), so
+/// they persist here too; the runtime ceiling only estimates from runs that
+/// match on both.
+fn selector_json(args: &CorpusArgs, ids: &[String], debug: bool) -> String {
     serde_json::json!({
         "all": args.all,
         "keywords": args.keywords,
         "probe": args.probe,
         "bless": args.bless,
         "harness_args": args.harness_args,
+        "debug": debug,
         "ids": ids,
     })
     .to_string()

@@ -1361,37 +1361,43 @@ fn run(cli: Cli) -> Result<(), DevError> {
         } => {
             // The archive resolver still bootstraps through `cargo metadata`,
             // so the lock is still held; the diff itself is in-process.
-            let _lock = acquire_cmd_lock(project, &project_root, "regress")?;
-            elivagar::cmd::regress(
-                &dev_config,
-                project,
-                &project_root,
-                &build_root,
-                &dataset,
-                &variant,
-                commit.as_deref(),
-                file.as_deref(),
-                &against_variant,
-                against_commit.as_deref(),
-                against.as_deref(),
-                tol,
-                max_moved,
-                max_examples,
-                overlay.as_deref(),
-                overlay_max,
-                json,
-            )
+            // `operational`: a failure before any verdict (lock, bootstrap,
+            // resolution) exits regress's "could not complete" code, not 1.
+            elivagar::cmd::operational(elivagar::regress::INCOMPLETE_EXIT, || {
+                let _lock = acquire_cmd_lock(project, &project_root, "regress")?;
+                elivagar::cmd::regress(
+                    &dev_config,
+                    project,
+                    &project_root,
+                    &build_root,
+                    &dataset,
+                    &variant,
+                    commit.as_deref(),
+                    file.as_deref(),
+                    &against_variant,
+                    against_commit.as_deref(),
+                    against.as_deref(),
+                    tol,
+                    max_moved,
+                    max_examples,
+                    overlay.as_deref(),
+                    overlay_max,
+                    json,
+                )
+            })
         }
         Command::PmtilesCorpus { cmd } => {
-            let _lock = acquire_cmd_lock(project, &project_root, "pmtiles-corpus")?;
-            elivagar::cmd::corpus(
-                &dev_config,
-                project,
-                &project_root,
-                &build_root,
-                &cmd,
-                Some(&_lock),
-            )
+            elivagar::cmd::operational(elivagar::corpus::INCOMPLETE_EXIT, || {
+                let _lock = acquire_cmd_lock(project, &project_root, "pmtiles-corpus")?;
+                elivagar::cmd::corpus(
+                    &dev_config,
+                    project,
+                    &project_root,
+                    &build_root,
+                    &cmd,
+                    Some(&_lock),
+                )
+            })
         }
         Command::DownloadOcean => {
             let _lock = acquire_cmd_lock(project, &project_root, "download-ocean")?;
@@ -1471,13 +1477,13 @@ fn run(cli: Cli) -> Result<(), DevError> {
                     let litehtml_config = dev_config.litehtml.as_ref().ok_or_else(|| {
                         DevError::Config("no [litehtml] section in brokkr.toml".into())
                     })?;
-                    litehtml::cmd::test(project, &project_root, litehtml_config, fixture.as_deref(), suite.as_deref(), all, recapture)
+                    litehtml::cmd::test(project, &project_root, &build_root, litehtml_config, fixture.as_deref(), suite.as_deref(), all, recapture)
                 }
                 Project::Sluggrs => {
                     let sluggrs_config = dev_config.sluggrs.as_ref().ok_or_else(|| {
                         DevError::Config("no [sluggrs] section in brokkr.toml".into())
                     })?;
-                    sluggrs::cmd::test(project, &project_root, sluggrs_config, fixture.as_deref(), all)
+                    sluggrs::cmd::test(project, &project_root, &build_root, sluggrs_config, fixture.as_deref(), suite.as_deref(), all, recapture)
                 }
                 other => Err(DevError::Config(format!(
                     "'visual' runs visual tests and is only available for litehtml/sluggrs projects (current: {other})"
@@ -1512,7 +1518,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             }
         }
         Command::Approve { fixture, all } => {
-            cmd_approve(&dev_config, project, &project_root, fixture, all)
+            cmd_approve(&dev_config, project, &project_root, &build_root, fixture, all)
         }
         Command::Report { run_id } => {
             match project {

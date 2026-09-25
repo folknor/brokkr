@@ -98,8 +98,12 @@ after cargo's own `--`.
 The bare form with arguments - `brokkr run -- --variations 64` - needs a
 pre-pass. As far as clap is concerned that `--` sits in the `NAME` position and
 the first real argument would be swallowed as a target name. `bare_run_sentinel`
-in `src/runnables.rs` rewrites argv before parsing: it walks past `run`'s
-leading flags, and if the next token is `--`, replaces it with a sentinel that
+in `src/runnables.rs` rewrites argv before parsing. It acts only when `run` is
+the subcommand itself - the first argument, since brokkr has no top-level
+options that take a value - so a `run` that is some other command's value
+(`brokkr mogwai run -- ...`, `history --command run`) is never touched. It
+walks past `run`'s leading flags, and if the next token is `--`, replaces it
+with a sentinel that
 `cmd_run` reads back as "no name". The sentinel contains a NUL byte, so no
 target name can collide with it. `brokkr run NAME -- ARGS` is left untouched,
 as is every other command's argv.
@@ -144,7 +148,10 @@ a `check`, and a commit, so the lockfile carries the decision.
 
 A tree with **no** `Cargo.lock` is re-resolved either way: cargo refuses
 `--locked` without one, so brokkr omits the flag and prints a line saying the
-install is not the resolution `check` validated, rather than aborting.
+install is not the resolution `check` validated, rather than aborting. "No
+lockfile" means none at the `workspace_root` cargo metadata reports - where
+cargo itself reads it for every member - so invoking from a member
+subdirectory still installs locked.
 
 `install` takes **no feature flags**. It is the session-workflow closer -
 it ships the project as configured, and what it ships should not depend on

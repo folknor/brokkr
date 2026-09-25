@@ -56,6 +56,7 @@ img { background-color: #d0d0d0; }
 </tr></table>
 <p>${longRun}</p>
 <div><b>x</b> <i>y</i><div>block</div></div>
+<div><font color="red">f</font><span>s</span><div>block2</div></div>
 </body>
 </html>
 `;
@@ -120,6 +121,9 @@ check(
 // survives in the mixed-content run.
 check("long inline run verbatim", out.includes("</span><span>"));
 check("inter-inline space survives", out.includes("</b> <i>"));
+// Legacy inline tags (`<font>` and kin) join the inline run too: treated as
+// blocks they were split onto their own line, inventing whitespace.
+check("font stays in the inline run", out.includes("</font><span>"));
 
 // Legacy `background` attribute: remote URL stripped (Chrome would
 // fetch it at capture time), data URI left alone.

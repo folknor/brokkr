@@ -13,22 +13,29 @@
 //! Schema version pinned at 1 - the JSON contract is in
 //! `~/Programs/check-updates/ccu`.
 //!
-//! All failure modes (tool missing, subprocess error, non-zero exit,
-//! schema mismatch, parse error) collapse into a single `ToolMissing`
+//! All failure modes (tool missing, subprocess error, deadline kill,
+//! non-zero exit, schema mismatch, parse error) collapse into a single `ToolMissing`
 //! event covering both phases. The check is informational - if it
 //! can't run, that shouldn't fail the whole `brokkr deps` invocation.
 
 use std::collections::HashSet;
 use std::io::ErrorKind;
 use std::path::Path;
-use std::process::{Command, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
 
 use super::{DepsEvent, OutdatedEvent, StaleEvent, ToolMissingEvent};
+use crate::error::DevError;
+use crate::output;
 
 const TOOL: &str = "ccu";
+/// Wall-clock ceiling on the `ccu` call. It is a network client, and a
+/// stalled registry connection otherwise hangs `brokkr deps` indefinitely.
+/// Generous on purpose: a large workspace issues one registry query per
+/// direct dep. Exceeding it degrades to the usual `ToolMissing` skip - the
+/// phases are informational, so a timeout must never fail the run.
+const CCU_DEADLINE: Duration = Duration::from_secs(120);
 const PHASES: &[&str] = &["outdated", "stale"];
 const INSTALL_HINT: &str = "not installed; cargo install --path ~/Programs/check-updates/ccu";
 const SUPPORTED_SCHEMA: u32 = 1;
@@ -85,19 +92,28 @@ pub fn run(project_root: &Path) -> Vec<DepsEvent> {
 }
 
 fn try_run(project_root: &Path) -> Result<Vec<DepsEvent>, String> {
-    let output = match Command::new(TOOL)
-        .arg("--json")
-        .current_dir(project_root)
-        .stderr(Stdio::piped())
-        .stdout(Stdio::piped())
-        .output()
-    {
-        Ok(o) => o,
-        Err(err) if err.kind() == ErrorKind::NotFound => {
+    let run = match output::run_captured_with_env_and_deadline(
+        TOOL,
+        &["--json"],
+        project_root,
+        &[],
+        CCU_DEADLINE,
+        None,
+        false,
+    ) {
+        Ok(r) => r,
+        Err(DevError::Spawn { error, .. }) if error.kind() == ErrorKind::NotFound => {
             return Err(INSTALL_HINT.to_string());
         }
         Err(err) => return Err(format!("spawn failed: {err}")),
     };
+    if run.killed_on_deadline {
+        return Err(format!(
+            "killed after {}s with no answer (network trouble?)",
+            CCU_DEADLINE.as_secs()
+        ));
+    }
+    let output = run.captured;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let code = output

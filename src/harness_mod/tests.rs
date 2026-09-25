@@ -20,6 +20,23 @@ mod tests {
     use super::*;
 
     // -----------------------------------------------------------------------
+    // run_variants
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn run_variants_refuses_an_empty_selection() {
+        // `brokkr api --query typo --bench` filtered the query list to nothing
+        // and used to record no rows and exit 0.
+        let mut calls = 0;
+        let result = run_variants("query", &[], |_| {
+            calls += 1;
+            Ok(())
+        });
+        assert!(matches!(result, Err(DevError::Config(_))));
+        assert_eq!(calls, 0);
+    }
+
+    // -----------------------------------------------------------------------
     // fractional elapsed_ms
     // -----------------------------------------------------------------------
 

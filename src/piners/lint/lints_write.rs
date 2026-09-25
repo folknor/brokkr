@@ -23,8 +23,16 @@ use crate::piners::lint::registry::{LintPin, TvDiag};
 use crate::piners::registry::FilePin;
 
 /// Field order inside a `[probes.<id>]` entry: the contract fields and TV
-/// anchor first, then the volatile `pine` hash.
-const PROBE_FIELDS: [&str; 4] = ["expected", "tv_anchored_at", "tv", "pine"];
+/// anchor first (each followed by the scope it was stamped under), then the
+/// volatile `pine` hash.
+const PROBE_FIELDS: [&str; 6] = [
+    "expected",
+    "expected_scope",
+    "tv_anchored_at",
+    "tv_scope",
+    "tv",
+    "pine",
+];
 
 /// Render the new lint pin state into `existing` (the current `lints.toml`
 /// text; `None` on bootstrap), preserving comments and formatting of
@@ -92,9 +100,15 @@ fn fill_probe(table: &mut Table, pin: &LintPin) -> Result<(), DevError> {
     sync_opt(table, "expected", pin.expected.as_deref().map(Value::from));
     sync_opt(
         table,
+        "expected_scope",
+        pin.expected_scope.as_deref().map(Value::from),
+    );
+    sync_opt(
+        table,
         "tv_anchored_at",
         pin.tv_anchored_at.as_deref().map(Value::from),
     );
+    sync_opt(table, "tv_scope", pin.tv_scope.as_deref().map(Value::from));
     sync_opt(table, "tv", tv_value(&pin.tv)?);
     set_value(table, "pine", pin_value(&pin.pine)?);
     sort_fields(table, &PROBE_FIELDS);
@@ -243,12 +257,7 @@ mod tests {
     }
 
     fn pin(id: &str, hash: &str) -> LintPin {
-        LintPin {
-            expected: None,
-            tv_anchored_at: None,
-            tv: Vec::new(),
-            pine: file_pin(&format!("lint/{id}.pine"), hash),
-        }
+        LintPin::new(file_pin(&format!("lint/{id}.pine"), hash))
     }
 
     fn reparse(text: &str) -> LintsData {
@@ -260,7 +269,9 @@ mod tests {
         let mut probes = BTreeMap::new();
         let alpha = LintPin {
             expected: Some("agree_flagged".to_owned()),
+            expected_scope: None,
             tv_anchored_at: Some("2026-06-22T14:03:00Z".to_owned()),
+            tv_scope: Some("errors+warnings/syntax".to_owned()),
             tv: vec![
                 TvDiag {
                     line: 4,
@@ -297,6 +308,8 @@ mod tests {
         let a = &data.probes["unterminated-01"];
         assert_eq!(a.expected.as_deref(), Some("agree_flagged"));
         assert_eq!(a.tv_anchored_at.as_deref(), Some("2026-06-22T14:03:00Z"));
+        assert_eq!(a.tv_scope.as_deref(), Some("errors+warnings/syntax"));
+        assert_eq!(a.expected_scope, None);
         assert_eq!(a.tv.len(), 2);
         assert_eq!(a.tv[0].col, Some(8));
         assert_eq!(a.tv[1].col, None);

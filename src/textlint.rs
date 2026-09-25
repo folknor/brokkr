@@ -275,7 +275,13 @@ pub fn scan(project_root: &Path, rules: &[TextlintRule]) -> Result<TextlintScan,
             continue;
         }
         let abs = project_root.join(rel);
-        let Ok(content) = std::fs::read_to_string(&abs) else {
+        // An unreadable file is an error, not a skip (see
+        // `gremlins::read_in_scope`); only a path deleted from the working
+        // tree is passed over.
+        let Some(bytes) = gremlins::read_in_scope(&abs, rel)? else {
+            continue;
+        };
+        let Some(content) = text_of(&bytes) else {
             continue;
         };
         scanned += 1;
@@ -285,6 +291,25 @@ pub fn scan(project_root: &Path, rules: &[TextlintRule]) -> Result<TextlintScan,
         violations: out,
         files: scanned,
     })
+}
+
+/// The text a rule is matched against, or `None` for a binary file.
+///
+/// A file that merely is not valid UTF-8 (a Latin-1 `.md`, say) used to fail
+/// `read_to_string` and be skipped, so no rule ever saw it - a silent pass.
+/// It is now decoded lossily: every ASCII byte, which is what patterns are
+/// written against, survives verbatim, and an invalid byte becomes U+FFFD
+/// (gremlins reports the byte itself). Only a *binary* file is skipped, by
+/// git's own heuristic - a NUL in the first 8000 bytes - because rule globs
+/// are author-supplied and a broad one (`**/*`) legitimately sweeps in
+/// images and archives, where a line pattern means nothing. Reporting those
+/// as violations would fail every tree with a binary asset in it.
+fn text_of(bytes: &[u8]) -> Option<Cow<'_, str>> {
+    const BINARY_PROBE: usize = 8000;
+    if bytes[..bytes.len().min(BINARY_PROBE)].contains(&0) {
+        return None;
+    }
+    Some(String::from_utf8_lossy(bytes))
 }
 
 /// Whether a compiled rule scans `rel`: matched by `paths` and not excused by
@@ -645,6 +670,17 @@ mod tests {
         // A file starting with U+FEFF must not shift line 1's first character:
         // a `^use ` rule fires on line 1. Before the BOM strip it silently missed.
         assert_eq!(run(rule("^use "), "\u{FEFF}use foo;\n"), vec![(1, "r".into())]);
+    }
+
+    #[test]
+    fn non_utf8_text_is_scanned_and_binary_is_skipped() {
+        // Latin-1 text: decoded lossily and scanned, not skipped as a pass.
+        let latin1 = b"caf\xE9 todo!()\n";
+        let text = text_of(latin1).unwrap();
+        assert_eq!(run(rule("todo!"), &text), vec![(1, "r".into())]);
+        // A NUL in the probe window marks the file binary.
+        assert!(text_of(b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR").is_none());
+        assert!(text_of(b"").is_some());
     }
 
     #[test]

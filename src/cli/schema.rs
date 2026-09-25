@@ -1495,9 +1495,12 @@ wedged; follow up with `brokkr clean` manually."
     #[command(
         display_order = 7,
         long_about = "\
-Browse the global command history log (~/.local/share/brokkr/history.db).
+Browse the global command history log ($XDG_DATA_HOME/brokkr/history.db,
+default ~/.local/share/brokkr/history.db).
 
-Every brokkr invocation is recorded with timing and exit status.
+Every brokkr invocation is recorded with timing and exit status. Each line
+starts with the entry's id, which `brokkr history <id>` takes. Timestamps
+are UTC, and so are the --since/--until dates they are compared against.
 
 Examples:
   brokkr history                        # last 25 entries
@@ -1510,7 +1513,7 @@ Examples:
   brokkr history --failed               # only non-zero exit
   brokkr history --status 130           # filter by exit code (e.g. 130 = interrupt)
   brokkr history --since 2026-03-01     # from date (YYYY-MM-DD)
-  brokkr history --until 2026-03-05     # up to date (YYYY-MM-DD)
+  brokkr history --until 2026-03-05     # through the end of that day
   brokkr history --slow 10000           # commands that took >10s"
     )]
     History {
@@ -1537,11 +1540,12 @@ Examples:
         #[arg(long, conflicts_with = "id")]
         status: Option<i32>,
 
-        /// Show entries from this date onward (YYYY-MM-DD or YYYY-MM-DD HH:MM:SS)
+        /// Show entries from this UTC date onward (YYYY-MM-DD or YYYY-MM-DD HH:MM:SS)
         #[arg(long, value_parser = validate_since, conflicts_with = "id")]
         since: Option<String>,
 
-        /// Show entries up to this date (YYYY-MM-DD or YYYY-MM-DD HH:MM:SS)
+        /// Show entries up to this UTC date (YYYY-MM-DD, inclusive of that
+        /// whole day, or YYYY-MM-DD HH:MM:SS)
         #[arg(long, value_parser = validate_since, conflicts_with = "id")]
         until: Option<String>,
 
@@ -3079,9 +3083,13 @@ pub(crate) struct CorpusArchiveArgs {
     /// Dataset name from brokkr.toml
     #[arg(long, default_value = "denmark")]
     pub(crate) dataset: String,
-    /// PBF variant, selecting which archive to open (raw, indexed, locations)
-    #[arg(long, default_value = "raw")]
-    pub(crate) variant: String,
+    /// PBF variant, selecting which archive to open (raw, indexed, locations).
+    /// Required unless --file is given: the corpus contract pins one variant
+    /// (bless accepts only a locations-generated archive), so a default of
+    /// `raw` could never bless and failed every check against a locations
+    /// corpus with a contract mismatch.
+    #[arg(long, required_unless_present = "file")]
+    pub(crate) variant: Option<String>,
     /// Commit short hash selecting which archive to open (default: current HEAD)
     #[arg(long)]
     pub(crate) commit: Option<String>,
@@ -3090,19 +3098,17 @@ pub(crate) struct CorpusArchiveArgs {
     pub(crate) file: Option<String>,
 }
 
-/// Subcommands of `brokkr pmtiles-corpus`, each a thin wrapper over the
-/// matching `elivagar corpus <sub>`. brokkr resolves the archive (and the
-/// corpus dir, where one applies) and passes every other flag through
-/// verbatim; elivagar owns the value sets (`--mode`, `--op`) and the exit-code
-/// contract (0 pass / 1 mismatch / 2 refusal), so brokkr carries strings, not
-/// re-validated enums, and never interprets the verdict.
+/// Subcommands of `brokkr pmtiles-corpus` - the native corpus gate
+/// (`src/elivagar/corpus/`). brokkr resolves the archive (and the corpus dir,
+/// where one applies), owns the value sets (`--mode`, `--op`) and the verdicts;
+/// the exit-code contract is in `docs/projects/elivagar.md`.
 ///
 /// Named `pmtiles-corpus` (not `corpus`) because `corpus` is already piners'
 /// parity-corpus runner and brokkr's command names share one flat namespace -
 /// the same reason `inspect` became `pmtiles-inspect`.
 #[derive(Subcommand)]
 pub(crate) enum PmtilesCorpusCommand {
-    /// Check an archive against the committed baseline (exit 0 pass / 1 content mismatch / 2 archive refusal / 3 baseline trouble)
+    /// Check an archive against the committed baseline (exit 0 pass / 1 content mismatch / 2 archive refusal / 3 baseline trouble / 4 could not run)
     Check {
         #[command(flatten)]
         archive: CorpusArchiveArgs,

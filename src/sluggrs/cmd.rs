@@ -84,6 +84,12 @@ fn resolve_snapshots<'a>(
     snapshot_id: Option<&str>,
     all: bool,
 ) -> Result<Vec<&'a SluggrsSnapshot>, DevError> {
+    // `--all` used to win silently over an ID.
+    if all && snapshot_id.is_some() {
+        return Err(DevError::Config(
+            "give a snapshot ID or --all, not both".into(),
+        ));
+    }
     if all {
         Ok(config.snapshots.iter().collect())
     } else if let Some(id) = snapshot_id {
@@ -93,7 +99,7 @@ fn resolve_snapshots<'a>(
     }
 }
 
-fn build_snapshot_binary(project_root: &Path) -> Result<PathBuf, DevError> {
+fn build_snapshot_binary(build_root: &Path) -> Result<PathBuf, DevError> {
     let config = build::BuildConfig {
         package: None,
         bin: None,
@@ -102,7 +108,7 @@ fn build_snapshot_binary(project_root: &Path) -> Result<PathBuf, DevError> {
         default_features: true,
         profile: "release",
     };
-    build::cargo_build(&config, project_root)
+    build::cargo_build(&config, build_root)
 }
 
 /// Parse the JSON metadata line from snapshot binary stdout.
@@ -190,6 +196,17 @@ fn run_snapshot(
         args.push(font);
     }
 
+    // Clear the previous run's output first: `output.png` existing is the
+    // only evidence the binary wrote it, so a leftover would be scored (and
+    // could be approved) as this run's render.
+    for stale in [&output_png, &diff_png] {
+        match std::fs::remove_file(stale) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+
     sluggrs_msg(&format!("  rendering {}", snapshot.id));
 
     let captured = output::run_captured(&binary_str, &args, project_root)?;
@@ -243,7 +260,25 @@ fn run_snapshot(
     // No approved baseline yet: NO_BASELINE, not a threshold failure. This is
     // the expected state of every newly registered snapshot - see
     // `compare::Status::NoBaseline`.
+    let approval = db.get_approval(&snapshot.id)?;
     if !approved_png.exists() {
+        // An approval record with no image means the baseline was deleted,
+        // not that it was never set; reporting NO_BASELINE would quietly
+        // reset the ratchet on the next `approve --all`.
+        if approval.is_some() {
+            sluggrs_msg(&format!(
+                "  ERROR: {} has an approval record but approved.png is missing - restore it",
+                snapshot.id
+            ));
+            db.insert_result(run_id, &snapshot.id, None, compare::Status::Error.as_str())?;
+            return Ok((
+                SnapshotOutcome {
+                    pixel_diff_pct: None,
+                    status: compare::Status::Error,
+                },
+                Some(adapter_name),
+            ));
+        }
         db.insert_result(
             run_id,
             &snapshot.id,
@@ -265,7 +300,7 @@ fn run_snapshot(
 
     // Pixel diff against approved baseline.
     let pixel_threshold = config.pixel_diff_threshold;
-    let approved_pixel = db.get_approval(&snapshot.id)?.map(|a| a.pixel_diff_pct);
+    let approved_pixel = approval.map(|a| a.pixel_diff_pct);
 
     let pixel_result = compare::compare_pixels(&output_png, &approved_png, &diff_png);
 
@@ -282,7 +317,11 @@ fn run_snapshot(
             );
             (Some(px.diff_pct), s)
         }
-        Err(_) => (None, compare::Status::Error),
+        Err(e) => {
+            // Say why: a bare ERROR row left the decode failure unexplained.
+            sluggrs_msg(&format!("  ERROR: {} (pixel comparison failed: {e})", snapshot.id));
+            (None, compare::Status::Error)
+        }
     };
 
     db.insert_result(run_id, &snapshot.id, pixel_diff_pct, status.as_str())?;
@@ -300,20 +339,35 @@ fn run_snapshot(
 // Test command
 // ---------------------------------------------------------------------------
 
+/// `project_root` is the config dir (snapshots, results.db); `build_root` is
+/// the code tree cargo and git run in - they differ only under the
+/// one-level-up layout. `suite`/`recapture` are litehtml's flags on the
+/// shared `visual` command; sluggrs has neither concept, so they are refused
+/// rather than silently dropped.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn test(
     project: Project,
     project_root: &Path,
+    build_root: &Path,
     sluggrs_config: &SluggrsConfig,
     snapshot_id: Option<&str>,
+    suite: Option<&str>,
     all: bool,
+    recapture: bool,
 ) -> Result<(), DevError> {
-    project::require(project, Project::Sluggrs, "sluggrs test")?;
+    project::require(project, Project::Sluggrs, "visual")?;
+    if suite.is_some() || recapture {
+        return Err(DevError::Config(
+            "--suite and --recapture are litehtml-only; sluggrs snapshots take an ID or --all"
+                .into(),
+        ));
+    }
 
     let db = open_db(project_root)?;
-    let git_info = git::collect(project_root)?;
+    let git_info = git::collect(build_root)?;
     let snapshots = resolve_snapshots(sluggrs_config, snapshot_id, all)?;
 
-    let binary = build_snapshot_binary(project_root)?;
+    let binary = build_snapshot_binary(build_root)?;
 
     let run_id = super::generate_run_id()?;
     let short_id = &run_id[..8.min(run_id.len())];
@@ -406,7 +460,7 @@ pub(crate) fn list(
     project_root: &Path,
     sluggrs_config: &SluggrsConfig,
 ) -> Result<(), DevError> {
-    project::require(project, Project::Sluggrs, "sluggrs list")?;
+    project::require(project, Project::Sluggrs, "list")?;
 
     let db = open_db(project_root)?;
 
@@ -434,15 +488,18 @@ pub(crate) fn list(
 // Approve command
 // ---------------------------------------------------------------------------
 
+/// `build_root` is the code tree whose cleanliness and commit the approval
+/// is pinned to; `project_root` holds the snapshots and results.db.
 pub(crate) fn approve(
     project: Project,
     project_root: &Path,
+    build_root: &Path,
     sluggrs_config: &SluggrsConfig,
     snapshot_id: &str,
 ) -> Result<(), DevError> {
-    project::require(project, Project::Sluggrs, "sluggrs approve")?;
+    project::require(project, Project::Sluggrs, "approve")?;
 
-    let git_info = git::collect(project_root)?;
+    let git_info = git::collect(build_root)?;
     if !git_info.is_clean {
         return Err(DevError::Verify(
             "sluggrs approve requires a clean git tree".into(),
@@ -456,33 +513,46 @@ pub(crate) fn approve(
     let output_png = snap_dir.join("output.png");
     let approved_png = snap_dir.join("approved.png");
 
-    if !output_png.exists() {
-        return Err(DevError::Verify(format!(
-            "no output.png for snapshot '{}' \u{2014} run `brokkr sluggrs test` first",
-            snapshot.id,
-        )));
+    // Only approve an output the latest run actually produced and scored:
+    // an ERROR row means output.png is missing or untrustworthy.
+    match db.latest_result_for_snapshot(&snapshot.id)? {
+        Some(r) if r.status == compare::Status::Error.as_str() => {
+            return Err(DevError::Verify(format!(
+                "latest run of snapshot '{}' is ERROR \u{2014} nothing to approve; fix it and \
+                 rerun `brokkr visual {}`",
+                snapshot.id, snapshot.id,
+            )));
+        }
+        Some(_) if output_png.exists() => {}
+        _ => {
+            return Err(DevError::Verify(format!(
+                "no output.png for snapshot '{}' \u{2014} run `brokkr visual {}` first",
+                snapshot.id, snapshot.id,
+            )));
+        }
     }
 
-    // Compute pixel diff of current output against itself (0.0%) for the
-    // approval record. If there was already an approved.png we diff against
-    // that to capture the actual approved delta.
-    let pixel_pct = if approved_png.exists() {
-        let diff_png = snap_dir.join("diff.png");
-        match compare::compare_pixels(&output_png, &approved_png, &diff_png) {
-            Ok(px) => px.diff_pct,
-            Err(_) => 0.0,
-        }
-    } else {
-        0.0
-    };
+    // Approving makes this output the image every later run is compared
+    // against, so the ratchet value that belongs with it is its diff against
+    // itself: 0. Recording the diff against the *old* baseline (as this
+    // used to) judged later runs, compared to the new image, against the
+    // old image's number - loosening the ratchet by exactly the change
+    // being approved - and a compare error recorded 0.0 by accident.
+    let pixel_pct = 0.0;
 
-    // Copy output.png to approved.png.
-    std::fs::copy(&output_png, &approved_png)?;
-
-    db.set_approval(&snapshot.id, &git_info.commit, pixel_pct)?;
+    // Stage the image, record the approval, then swap the image in. A DB
+    // failure leaves the old baseline image and its record untouched; the
+    // remaining window is a same-directory rename, not a copy.
+    let staged = snap_dir.join("approved.png.staged");
+    std::fs::copy(&output_png, &staged)?;
+    if let Err(e) = db.set_approval(&snapshot.id, &git_info.commit, pixel_pct) {
+        drop(std::fs::remove_file(&staged));
+        return Err(e);
+    }
+    std::fs::rename(&staged, &approved_png)?;
 
     sluggrs_msg(&format!(
-        "approved '{}' at pixel={pixel_pct:.1}% (commit {})",
+        "approved '{}' (commit {})",
         snapshot.id, git_info.commit,
     ));
 
@@ -498,7 +568,7 @@ pub(crate) fn status(
     project_root: &Path,
     sluggrs_config: &SluggrsConfig,
 ) -> Result<(), DevError> {
-    project::require(project, Project::Sluggrs, "sluggrs status")?;
+    project::require(project, Project::Sluggrs, "visual-status")?;
 
     let db = open_db(project_root)?;
     let approvals = db.all_approvals()?;
@@ -583,7 +653,7 @@ fn format_status_columns(
 // ---------------------------------------------------------------------------
 
 pub(crate) fn report(project: Project, project_root: &Path, run_id: &str) -> Result<(), DevError> {
-    project::require(project, Project::Sluggrs, "sluggrs report")?;
+    project::require(project, Project::Sluggrs, "report")?;
 
     let db = open_db(project_root)?;
     let results = db.run_results(run_id)?;

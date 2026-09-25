@@ -62,10 +62,21 @@ pub struct LintPin {
     /// blessed: a hard "must bless" gate failure, not a silent pass.
     #[serde(default)]
     pub expected: Option<String>,
+    /// The diagnostic scope (`validators::Scope::label`) `expected` was
+    /// blessed under. `None` = the default scope. A disposition is a function
+    /// of the scope (`--warnings` can turn `agree_clean` into `divergent`), so
+    /// the gate holds a run to `expected` only when the scopes match.
+    #[serde(default)]
+    pub expected_scope: Option<String>,
     /// When the TV anchor was last refreshed (absolute RFC3339). `--reanchor`
     /// writes it; informational on frequent runs.
     #[serde(default)]
     pub tv_anchored_at: Option<String>,
+    /// The diagnostic scope the `tv` fingerprint was filtered to at
+    /// `--reanchor` time. `None` = the default scope. A run under another
+    /// scope does not compare against the anchor.
+    #[serde(default)]
+    pub tv_scope: Option<String>,
     /// TV's last-seen diagnostic fingerprint. Written by `--reanchor`.
     #[serde(default)]
     pub tv: Vec<TvDiag>,
@@ -79,7 +90,9 @@ impl LintPin {
     pub fn new(pine: FilePin) -> Self {
         Self {
             expected: None,
+            expected_scope: None,
             tv_anchored_at: None,
+            tv_scope: None,
             tv: Vec::new(),
             pine,
         }

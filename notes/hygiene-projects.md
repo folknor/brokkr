@@ -55,7 +55,7 @@ Enforcement proposed: a `Compression` type with `FromStr` used by clap.
 
 Reported by: pbfhogg-nidhogg.
 
-`.brokkr/nidhogg.pid` in both `server::serve` and `server::stop`; `http://localhost:{port}` in five URL builders while `health_check` builds its own; the 6s readiness timeout exists as `30 × 200ms` in `poll_for_ready` and a literal "6s" in the error; `ITERATIONS=5`, `STARTUP_TIMEOUT=30s` (`bench_tiles.rs`), stop 5s and ready 6s (`server.rs`), curl `--max-time 30`/`--connect-timeout 2` (`client.rs`) — no list, no injection. Six curl invocations with six flag policies (failures: BUG-083). Port resolution: BUG-088.
+`.brokkr/nidhogg.pid` in both `server::serve` and `server::stop`; `http://localhost:{port}` in five URL builders while `health_check` builds its own; the 6s readiness timeout exists as `30 × 200ms` in `poll_for_ready` and a literal "6s" in the error; `ITERATIONS=5`, `STARTUP_TIMEOUT=30s` (`bench_tiles.rs`), stop 5s and ready 6s (`server.rs`), curl `--max-time 30`/`--connect-timeout 2` (`client.rs`) - no list, no injection. Six curl invocations with six flag policies (failures: BUG-083). Port resolution: BUG-088.
 
 ## PRJ-008 - Denmark-only fixtures on dataset-parameterized commands
 
@@ -121,7 +121,7 @@ Reported by: pbfhogg-nidhogg, elivagar.
 
 - `docs/projects/pbfhogg.md` names `build_hotpath_args()` and `result_variant()` (don't exist); says CLI fields go in `src/cli.rs` (they're in `src/cli/schema.rs`); verify counts (PLT-041).
 - `docs/projects/nidhogg.md`: status is "PID file under the host's scratch dir" (it's an HTTP health check; the pid file is `.brokkr/nidhogg.pid`).
-- `docs/projects/pbfhogg-vs-elivagar.md`: pbfhogg has one build kind, a uniform `run_external_ok` path, no external baselines, "stderr kv → results.db: never" — all false (`run_external_ok` scrapes stderr kv; read/write/merge use `run_external_with_kv`; osmpbf and planetiler are self-reported via `run_internal`; the suite runs osmium, osmpbf and planetiler baselines). Elivagar half: PRJ-029.
+- `docs/projects/pbfhogg-vs-elivagar.md`: pbfhogg has one build kind, a uniform `run_external_ok` path, no external baselines, "stderr kv → results.db: never" - all false (`run_external_ok` scrapes stderr kv; read/write/merge use `run_external_with_kv`; osmpbf and planetiler are self-reported via `run_internal`; the suite runs osmium, osmpbf and planetiler baselines). Elivagar half: PRJ-029.
 - `VerifyPbfArgs` help: OSC "still resolve[s] from the dataset's primary chain" (`resolve_verify_osc` is snapshot-aware).
 - `dispatch.rs::run_wallclock_core` claims argv construction is "centralised here"; build_args + io + compression assembly repeats in dry-run, run and hotpath.
 - `commands.rs`: Hotpath mode "prepends the binary path (matching the format expected by `run_hotpath_capture`)"; dispatch slices it off (`hotpath_args[1..]`) and dry-run needs a fake binary for it. Headers reference removed `bench_build_geocode_index.rs` and `hotpath.rs`.
@@ -218,11 +218,11 @@ Reported by: elivagar.
 
 Reported by: elivagar, config-cli-bootstrap.
 
-- `PmtilesCorpusCommand` doc and `--help`: "thin wrapper over `elivagar corpus`", "elivagar owns the value sets and exit codes (0/1/2)", "passed through to elivagar", "elivagar refuses to overwrite" — all false (and why mode/op are still `String`s); two different exit-code lists in one file.
+- `PmtilesCorpusCommand` doc and `--help`: "thin wrapper over `elivagar corpus`", "elivagar owns the value sets and exit codes (0/1/2)", "passed through to elivagar", "elivagar refuses to overwrite" - all false (and why mode/op are still `String`s); two different exit-code lists in one file.
 - `regress --overlay` help: "worst structural diffs"; the code emits the first differing tiles.
 - `docs/brokkr.toml.datasets.md` documents `[<host>.datasets.<D>.blessed]` ("written by `brokkr bless`, read by `regress`"); both removed, and `deny_unknown_fields` makes following the doc a config error.
 - `pbfhogg-vs-elivagar.md`: "no stderr kv into results.db" (false for `bench_self`/`bench_all`); "`meta.locations_on_ways_detected` dropped" (`bench_self` stamps it); "same run mode, no DB" (`run_elivagar_external` sends Run mode to the recording bench); store as `<dataset>-<commit>`; names `bless`.
-- `commands.rs` Tilegen doc ("parses kv from stderr"); `resolve_pmtiles_by_commit` and `OUTPUT_RETENTION` docs (`<dataset>-<commit>`, "per dataset" — now dataset and variant); `bench_*` headers mention a nonexistent `run_hotpath()`; `corpus/mod.rs` map calls render a "scaffold"; `contract_diff` mentions an `effective` block `ContractDoc` lacks.
+- `commands.rs` Tilegen doc ("parses kv from stderr"); `resolve_pmtiles_by_commit` and `OUTPUT_RETENTION` docs (`<dataset>-<commit>`, "per dataset" - now dataset and variant); `bench_*` headers mention a nonexistent `run_hotpath()`; `corpus/mod.rs` map calls render a "scaffold"; `contract_diff` mentions an `effective` block `ContractDoc` lacks.
 
 ## PRJ-030 - elivagar resources and leftovers
 
@@ -292,7 +292,7 @@ Reported by: ratatoskr.
 
 Reported by: ratatoskr.
 
-Every one of the 17 gates in ratatoskr's config has `success equal = 1` and `exit_code equal = 0` (34 rules); the gate hook runs only after every iteration succeeded and the row hard-codes `exit_code: 0, success: true`, so these bare metrics are constants. `MetricRule.equal_to_baseline: Option<bool>` — `false` means nothing. Empty-predicate rules: BUG-072. Profile check: BUG-068.
+Every one of the 17 gates in ratatoskr's config has `success equal = 1` and `exit_code equal = 0` (34 rules); the gate hook runs only after every iteration succeeded and the row hard-codes `exit_code: 0, success: true`, so these bare metrics are constants. `MetricRule.equal_to_baseline: Option<bool>` - `false` means nothing. Empty-predicate rules: BUG-072. Profile check: BUG-068.
 
 ## PRJ-040 - Stale claims in ratatoskr code and docs
 
@@ -336,7 +336,7 @@ Enforcement proposed: text rules for file names and env literals; a serde enum f
 
 Reported by: piners.
 
-`Registry::load`/`lint` vs `LintRegistry::load`/`lint`; `select.rs` vs `lint/select.rs` ("mirrors"); `pins_write.rs` vs `lints_write.rs` (`set_value`, `sync_opt`, `sort_fields`, `rank`, `set_block_prefix`, `pin_value`, `parse_value`, `toml_str` — a third copy is `rustflags::toml_string`); reseed diff/carry-forward; `grid` in `corpus_db/format.rs` and `lint/db.rs`. Bless is implemented twice with different rules (BUG-090). Directory walks differ: corpus reseed `file_type()` (no symlink follow), lint reseed `is_dir()` (follows; a symlink loop recurses). `lint/cmd.rs` rebuilds a `HarnessConfig` by hand from `LintConfig`'s package/binary/features/debug fields; the config could embed `HarnessConfig`. Hunter's recommendation: a single generic registry, selector, writer and run store with a per-corpus pin type — a rewrite with real payoff.
+`Registry::load`/`lint` vs `LintRegistry::load`/`lint`; `select.rs` vs `lint/select.rs` ("mirrors"); `pins_write.rs` vs `lints_write.rs` (`set_value`, `sync_opt`, `sort_fields`, `rank`, `set_block_prefix`, `pin_value`, `parse_value`, `toml_str` - a third copy is `rustflags::toml_string`); reseed diff/carry-forward; `grid` in `corpus_db/format.rs` and `lint/db.rs`. Bless is implemented twice with different rules (BUG-090). Directory walks differ: corpus reseed `file_type()` (no symlink follow), lint reseed `is_dir()` (follows; a symlink loop recurses). `lint/cmd.rs` rebuilds a `HarnessConfig` by hand from `LintConfig`'s package/binary/features/debug fields; the config could embed `HarnessConfig`. Hunter's recommendation: a single generic registry, selector, writer and run store with a per-corpus pin type - a rewrite with real payoff.
 
 ## PRJ-045 - piners query commands diverge
 
@@ -390,7 +390,7 @@ Harness stdout is buffered whole in memory; `runs.db` is append-only with full s
 
 Reported by: piners.
 
-`RunMeta.stderr` and the lint `run.stderr` column always `""` (one call site); lint `run_migrations` scaffolding has no migrations; the duplicated `project::require` in `measured.rs`. Compatibility paths whose continued need can't be checked from this repo: `report.rs` skipping a legacy `summary` line ("the harness no longer emits one") and `fmt_selector` accepting the legacy string `probe` shape — depends on the piners harness and existing `runs.db` rows.
+`RunMeta.stderr` and the lint `run.stderr` column always `""` (one call site); lint `run_migrations` scaffolding has no migrations; the duplicated `project::require` in `measured.rs`. Compatibility paths whose continued need can't be checked from this repo: `report.rs` skipping a legacy `summary` line ("the harness no longer emits one") and `fmt_selector` accepting the legacy string `probe` shape - depends on the piners harness and existing `runs.db` rows.
 
 ## PRJ-053 - litehtml and sluggrs visual layers are near-clones that have diverged
 

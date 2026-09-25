@@ -65,10 +65,46 @@ pub fn run(data_dir: &Path) -> Result<(), DevError> {
     Ok(())
 }
 
+/// Marker written into an extracted shapefile directory once the extraction
+/// (or reprojection) that produced it has finished. The `.shp` alone is not
+/// evidence of a complete set: an interrupted `unzip` can leave it present -
+/// even truncated - beside a missing `.dbf`/`.shx`, and every later check would
+/// call that "already exists".
+///
+/// A tree extracted before the marker existed is adopted (marker written) when
+/// its whole component set is present, rather than re-fetched: these files feed
+/// tilegen's ocean inputs, whose digests the corpus contract and the ocean
+/// artifact key pin, and osmdata regenerates them daily - a silent re-download
+/// would change every archive's ocean. The adoption cannot see a truncated
+/// `.shp`; only extractions this code performed carry that guarantee.
+///
+/// There is no content hash to verify against: osmdata.openstreetmap.de
+/// regenerates these archives daily under fixed URLs, so any pinned digest
+/// would be stale within a day. Completeness is what can be checked here.
+const COMPLETE_MARKER: &str = ".brokkr-complete";
+
+/// Whether the shapefile at `shp` is complete: marked by a finished
+/// extraction, or (legacy, pre-marker trees) carrying every component file, in
+/// which case the marker is written now.
+fn shapefile_complete(shp: &Path) -> bool {
+    let Some(dir) = shp.parent() else {
+        return false;
+    };
+    let marker = dir.join(COMPLETE_MARKER);
+    if marker.exists() {
+        return shp.exists();
+    }
+    let legacy_complete = ["shp", "shx", "dbf", "prj"]
+        .iter()
+        .all(|ext| shp.with_extension(ext).exists());
+    legacy_complete && std::fs::write(&marker, b"").is_ok()
+}
+
 fn download_variant(data_dir: &Path, variant: &OceanVariant) -> Result<(), DevError> {
     let shp_path = data_dir.join(variant.dir_name).join(variant.shp_name);
+    let marker = data_dir.join(variant.dir_name).join(COMPLETE_MARKER);
 
-    if shp_path.exists() {
+    if shapefile_complete(&shp_path) {
         output::download_msg(&format!(
             "{} already exists: {}",
             variant.label,
@@ -92,6 +128,13 @@ fn download_variant(data_dir: &Path, variant: &OceanVariant) -> Result<(), DevEr
     let captured = output::run_captured("unzip", &["-o", &zip_str, "-d", &data_str], data_dir)?;
 
     captured.check_success("unzip")?;
+    if !shp_path.exists() {
+        return Err(DevError::Config(format!(
+            "unzip succeeded but {} is missing - archive layout changed?",
+            shp_path.display()
+        )));
+    }
+    std::fs::write(&marker, b"")?;
 
     std::fs::remove_file(&zip_path).ok();
 
@@ -154,8 +197,9 @@ pub fn ensure_ocean_4326(data_dir: &Path) -> Result<(), DevError> {
     // Simplified 4326 - reprojected from 3857 source via ogr2ogr.
     let simplified_dir = data_dir.join("simplified-water-polygons-split-4326");
     let simplified = simplified_dir.join("simplified_water_polygons.shp");
+    let simplified_marker = simplified_dir.join(COMPLETE_MARKER);
 
-    if simplified.exists() {
+    if shapefile_complete(&simplified) {
         output::download_msg(&format!(
             "simplified ocean polygons (4326) already exists: {}",
             simplified.display()
@@ -176,6 +220,8 @@ pub fn ensure_ocean_4326(data_dir: &Path) -> Result<(), DevError> {
         let captured = output::run_captured(
             "ogr2ogr",
             &[
+                // A partial reprojection may have left output behind.
+                "-overwrite",
                 "-f",
                 "ESRI Shapefile",
                 &dst_str,
@@ -189,6 +235,7 @@ pub fn ensure_ocean_4326(data_dir: &Path) -> Result<(), DevError> {
         )?;
 
         captured.check_success("ogr2ogr")?;
+        std::fs::write(&simplified_marker, b"")?;
 
         output::download_msg(&format!("done: {}", simplified.display()));
     }

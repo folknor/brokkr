@@ -397,6 +397,8 @@ impl CapturedOutput {
     /// Like `check_success`, but also treats the given exit codes as success.
     /// For example, `diff` uses exit 1 to mean "differences found" (not an error).
     pub fn check_success_or(&self, program: &str, ok_codes: &[i32]) -> Result<(), DevError> {
+        use std::os::unix::process::ExitStatusExt;
+
         if self.status.success() {
             return Ok(());
         }
@@ -405,10 +407,18 @@ impl CapturedOutput {
         {
             return Ok(());
         }
+        let stderr = String::from_utf8_lossy(&self.stderr).into_owned();
+        // `DevError::Subprocess` carries no signal, so name it here: with no
+        // exit code the variant can only say the child "ended without" one.
+        let stderr = match (self.status.code(), self.status.signal()) {
+            (None, Some(sig)) if stderr.trim().is_empty() => format!("killed by signal {sig}"),
+            (None, Some(sig)) => format!("killed by signal {sig}\n{stderr}"),
+            _ => stderr,
+        };
         Err(DevError::Subprocess {
             program: program.to_owned(),
             code: self.status.code(),
-            stderr: String::from_utf8_lossy(&self.stderr).into_owned(),
+            stderr,
         })
     }
 }
@@ -416,7 +426,7 @@ impl CapturedOutput {
 /// Run a subprocess, capturing stdout and stderr.
 ///
 /// Returns `CapturedOutput` on success (even if the process exited non-zero).
-/// Returns `DevError::Subprocess` only if the process could not be spawned.
+/// Returns `DevError::Spawn` only if the process could not be spawned.
 pub fn run_captured(program: &str, args: &[&str], cwd: &Path) -> Result<CapturedOutput, DevError> {
     run_captured_with_env(program, args, cwd, &[])
 }
@@ -553,10 +563,9 @@ pub fn run_captured_with_env_and_deadline(
         cmd.process_group(0);
     }
 
-    let mut child = cmd.spawn().map_err(|e| DevError::Subprocess {
+    let mut child = cmd.spawn().map_err(|error| DevError::Spawn {
         program: program.to_owned(),
-        code: None,
-        stderr: e.to_string(),
+        error,
     })?;
     if let Some(cb) = on_spawn {
         cb(child.id());
@@ -588,10 +597,9 @@ pub fn run_captured_with_env_and_deadline(
                     // before main's scratch-cleanup.
                     forward_sigterm_then_kill(&mut child, isolate_pg);
                     interrupted = true;
-                    break child.wait().map_err(|e| DevError::Subprocess {
+                    break child.wait().map_err(|error| DevError::Spawn {
                         program: program.to_owned(),
-                        code: None,
-                        stderr: e.to_string(),
+                        error,
                     })?;
                 }
                 if start.elapsed() >= deadline {
@@ -606,19 +614,17 @@ pub fn run_captured_with_env_and_deadline(
                     }
                     drop(child.kill());
                     killed_on_deadline = true;
-                    break child.wait().map_err(|e| DevError::Subprocess {
+                    break child.wait().map_err(|error| DevError::Spawn {
                         program: program.to_owned(),
-                        code: None,
-                        stderr: e.to_string(),
+                        error,
                     })?;
                 }
                 std::thread::sleep(DEADLINE_POLL_INTERVAL);
             }
-            Err(e) => {
-                return Err(DevError::Subprocess {
+            Err(error) => {
+                return Err(DevError::Spawn {
                     program: program.to_owned(),
-                    code: None,
-                    stderr: e.to_string(),
+                    error,
                 });
             }
         }
@@ -725,10 +731,9 @@ pub fn spawn_captured(
         cmd.process_group(0);
     }
 
-    cmd.spawn().map_err(|e| DevError::Subprocess {
+    cmd.spawn().map_err(|error| DevError::Spawn {
         program: program.to_owned(),
-        code: None,
-        stderr: e.to_string(),
+        error,
     })
 }
 
@@ -786,10 +791,9 @@ pub fn run_passthrough_in(
     // not isolated - so a terminal SIGINT still hits it directly, and the guard
     // covers the `brokkr kill` case where only brokkr's PID is signalled.
     let _guard = crate::shutdown::SigtermGuard::install();
-    let mut child = cmd.spawn().map_err(|e| DevError::Subprocess {
+    let mut child = cmd.spawn().map_err(|error| DevError::Spawn {
         program: program.to_owned(),
-        code: None,
-        stderr: e.to_string(),
+        error,
     })?;
     // Publish the child PID into the lockfile so `brokkr kill --hard` (which
     // reads child_pid from the lock file rather than holding the Child handle)
@@ -817,14 +821,13 @@ pub fn run_passthrough_in(
                 }
                 std::thread::sleep(DEADLINE_POLL_INTERVAL);
             }
-            Err(e) => {
+            Err(error) => {
                 if let Some(lock) = lock {
                     lock.clear_child_pid();
                 }
-                return Err(DevError::Subprocess {
+                return Err(DevError::Spawn {
                     program: program.to_owned(),
-                    code: None,
-                    stderr: e.to_string(),
+                    error,
                 });
             }
         }

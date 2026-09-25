@@ -280,255 +280,6 @@ fn is_nonempty(path: &Path) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// TOML config updates
-// ---------------------------------------------------------------------------
-
-/// Append a new OSC entry to `brokkr.toml`.
-fn append_osc_entry(
-    project_root: &Path,
-    hostname: &str,
-    dataset_key: &str,
-    seq: u64,
-    filename: &str,
-    xxhash: &str,
-) -> Result<(), DevError> {
-    let toml_path = project_root.join("brokkr.toml");
-    let block = format!(
-        "\n[{hostname}.datasets.{dataset_key}.osc.{seq}]\n\
-         file = \"{filename}\"\n\
-         xxhash = \"{xxhash}\"\n"
-    );
-    let mut contents = std::fs::read_to_string(&toml_path)?;
-    contents.push_str(&block);
-    std::fs::write(&toml_path, contents)?;
-    output::download_msg(&format!(
-        "  added [{hostname}.datasets.{dataset_key}.osc.{seq}] to brokkr.toml"
-    ));
-    Ok(())
-}
-
-/// Append a new PBF entry to `brokkr.toml`.
-fn append_pbf_entry(
-    project_root: &Path,
-    hostname: &str,
-    dataset_key: &str,
-    variant: &str,
-    filename: &str,
-    xxhash: &str,
-) -> Result<(), DevError> {
-    let toml_path = project_root.join("brokkr.toml");
-    let block = format!(
-        "\n[{hostname}.datasets.{dataset_key}.pbf.{variant}]\n\
-         file = \"{filename}\"\n\
-         xxhash = \"{xxhash}\"\n"
-    );
-    let mut contents = std::fs::read_to_string(&toml_path)?;
-    contents.push_str(&block);
-    std::fs::write(&toml_path, contents)?;
-    output::download_msg(&format!(
-        "  added [{hostname}.datasets.{dataset_key}.pbf.{variant}] to brokkr.toml"
-    ));
-    Ok(())
-}
-
-/// Append a new snapshot header `[host.datasets.<dataset>.snapshot.<key>]` to `brokkr.toml`.
-fn append_snapshot_header(
-    project_root: &Path,
-    hostname: &str,
-    dataset_key: &str,
-    snapshot_key: &str,
-    date: &str,
-) -> Result<(), DevError> {
-    let toml_path = project_root.join("brokkr.toml");
-    let block = format!(
-        "\n[{hostname}.datasets.{dataset_key}.snapshot.{snapshot_key}]\n\
-         download_date = \"{date}\"\n"
-    );
-    let mut contents = std::fs::read_to_string(&toml_path)?;
-    contents.push_str(&block);
-    std::fs::write(&toml_path, contents)?;
-    output::download_msg(&format!(
-        "  added [{hostname}.datasets.{dataset_key}.snapshot.{snapshot_key}] to brokkr.toml"
-    ));
-    Ok(())
-}
-
-/// Append a snapshot PBF entry `[...snapshot.<key>.pbf.<variant>]` to `brokkr.toml`.
-fn append_snapshot_pbf_entry(
-    project_root: &Path,
-    hostname: &str,
-    dataset_key: &str,
-    snapshot_key: &str,
-    variant: &str,
-    filename: &str,
-    xxhash: &str,
-) -> Result<(), DevError> {
-    let toml_path = project_root.join("brokkr.toml");
-    let block = format!(
-        "\n[{hostname}.datasets.{dataset_key}.snapshot.{snapshot_key}.pbf.{variant}]\n\
-         file = \"{filename}\"\n\
-         xxhash = \"{xxhash}\"\n"
-    );
-    let mut contents = std::fs::read_to_string(&toml_path)?;
-    contents.push_str(&block);
-    std::fs::write(&toml_path, contents)?;
-    output::download_msg(&format!(
-        "  added [{hostname}.datasets.{dataset_key}.snapshot.{snapshot_key}.pbf.{variant}] to brokkr.toml"
-    ));
-    Ok(())
-}
-
-/// Rotate the dataset's primary pbf/osc table headers into a snapshot block.
-///
-/// Performs a line-based rewrite of `brokkr.toml`:
-/// - Renames every `[<host>.datasets.<dataset>.pbf.<variant>]` header to
-///   `[<host>.datasets.<dataset>.snapshot.<snap_key>.pbf.<variant>]`.
-/// - Renames every `[<host>.datasets.<dataset>.osc.<seq>]` header to
-///   `[<host>.datasets.<dataset>.snapshot.<snap_key>.osc.<seq>]`.
-/// - Updates the `download_date` field inside the `[<host>.datasets.<dataset>]`
-///   block to `new_download_date` (or inserts it right after the dataset
-///   header line if absent).
-///
-/// Body lines (file = "...", xxhash = "...", seq = N, etc.) are preserved
-/// unchanged. Comments and other dataset blocks are not touched.
-///
-/// This is line-based, not a TOML parser - it works only on brokkr-generated
-/// TOML where each table starts with `[name]` on its own line. Hand-edited
-/// TOMLs with unusual formatting may break it; that's a known limitation
-/// documented in CLAUDE.md.
-fn rotate_dataset_to_snapshot(
-    project_root: &Path,
-    hostname: &str,
-    dataset_key: &str,
-    snap_key: &str,
-    new_download_date: &str,
-) -> Result<(), DevError> {
-    let toml_path = project_root.join("brokkr.toml");
-    let contents = std::fs::read_to_string(&toml_path)?;
-
-    let dataset_header = format!("[{hostname}.datasets.{dataset_key}]");
-    let pbf_prefix = format!("[{hostname}.datasets.{dataset_key}.pbf.");
-    let osc_prefix = format!("[{hostname}.datasets.{dataset_key}.osc.");
-    let snap_pbf_prefix =
-        format!("[{hostname}.datasets.{dataset_key}.snapshot.{snap_key}.pbf.");
-    let snap_osc_prefix =
-        format!("[{hostname}.datasets.{dataset_key}.snapshot.{snap_key}.osc.");
-
-    let mut output = String::with_capacity(contents.len() + 256);
-    let mut in_dataset_block = false;
-    let mut updated_download_date = false;
-
-    for line in contents.lines() {
-        let trimmed = line.trim_start();
-
-        // Track which block we're currently inside.
-        if trimmed.starts_with('[') {
-            // Did we just leave the dataset block without seeing download_date?
-            // If so, insert it right after the header (this branch only fires
-            // when entering a *new* block; we'll catch the entry case below).
-            if in_dataset_block && !updated_download_date {
-                output.push_str(&format!(
-                    "download_date = \"{new_download_date}\"\n"
-                ));
-                updated_download_date = true;
-            }
-            in_dataset_block = trimmed == dataset_header;
-        }
-
-        // Rename pbf table headers: keep the leading whitespace from the
-        // original line so indented TOML survives untouched.
-        if trimmed.starts_with(&pbf_prefix) {
-            let leading_ws = &line[..line.len() - trimmed.len()];
-            let suffix = &trimmed[pbf_prefix.len()..];
-            output.push_str(leading_ws);
-            output.push_str(&snap_pbf_prefix);
-            output.push_str(suffix);
-            output.push('\n');
-            continue;
-        }
-        if trimmed.starts_with(&osc_prefix) {
-            let leading_ws = &line[..line.len() - trimmed.len()];
-            let suffix = &trimmed[osc_prefix.len()..];
-            output.push_str(leading_ws);
-            output.push_str(&snap_osc_prefix);
-            output.push_str(suffix);
-            output.push('\n');
-            continue;
-        }
-
-        // Inside the dataset block: replace existing download_date in place.
-        if in_dataset_block && trimmed.starts_with("download_date") && trimmed.contains('=') {
-            let leading_ws = &line[..line.len() - trimmed.len()];
-            output.push_str(leading_ws);
-            output.push_str(&format!("download_date = \"{new_download_date}\""));
-            output.push('\n');
-            updated_download_date = true;
-            continue;
-        }
-
-        output.push_str(line);
-        output.push('\n');
-    }
-
-    // EOF case: dataset block was the last block and we never saw download_date.
-    if in_dataset_block && !updated_download_date {
-        output.push_str(&format!("download_date = \"{new_download_date}\"\n"));
-    }
-
-    std::fs::write(&toml_path, output)?;
-    output::download_msg(&format!(
-        "  rotated [{hostname}.datasets.{dataset_key}] pbf/osc tables → snapshot.{snap_key}"
-    ));
-    Ok(())
-}
-
-/// Append a snapshot OSC entry `[...snapshot.<key>.osc.<seq>]` to `brokkr.toml`.
-fn append_snapshot_osc_entry(
-    project_root: &Path,
-    hostname: &str,
-    dataset_key: &str,
-    snapshot_key: &str,
-    seq: u64,
-    filename: &str,
-    xxhash: &str,
-) -> Result<(), DevError> {
-    let toml_path = project_root.join("brokkr.toml");
-    let block = format!(
-        "\n[{hostname}.datasets.{dataset_key}.snapshot.{snapshot_key}.osc.{seq}]\n\
-         file = \"{filename}\"\n\
-         xxhash = \"{xxhash}\"\n"
-    );
-    let mut contents = std::fs::read_to_string(&toml_path)?;
-    contents.push_str(&block);
-    std::fs::write(&toml_path, contents)?;
-    output::download_msg(&format!(
-        "  added [{hostname}.datasets.{dataset_key}.snapshot.{snapshot_key}.osc.{seq}] to brokkr.toml"
-    ));
-    Ok(())
-}
-
-/// Append a new dataset header to `brokkr.toml` if the dataset doesn't exist yet.
-fn append_dataset_header(
-    project_root: &Path,
-    hostname: &str,
-    dataset_key: &str,
-    origin: &str,
-) -> Result<(), DevError> {
-    let toml_path = project_root.join("brokkr.toml");
-    let block = format!(
-        "\n[{hostname}.datasets.{dataset_key}]\n\
-         origin = \"{origin}\"\n"
-    );
-    let mut contents = std::fs::read_to_string(&toml_path)?;
-    contents.push_str(&block);
-    std::fs::write(&toml_path, contents)?;
-    output::download_msg(&format!(
-        "  added [{hostname}.datasets.{dataset_key}] to brokkr.toml"
-    ));
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
 // Snapshot promotion (used by `brokkr repack` / `brokkr degrade --as-snapshot`)
 // ---------------------------------------------------------------------------
 
@@ -567,8 +318,8 @@ pub(crate) fn preflight_snapshot_collision(
 /// Promote a generated PBF artifact into the dataset's snapshot graph.
 ///
 /// Moves `scratch_pbf` into the dataset's `data_dir` under a stable filename,
-/// computes its xxh128, and appends a `[..snapshot.<key>]` header plus a
-/// `[..snapshot.<key>.pbf.<variant>]` entry to `brokkr.toml`. The `variant`
+/// computes its xxh128, and registers a `[..snapshot.<key>]` header plus a
+/// `[..snapshot.<key>.pbf.<variant>]` entry in `brokkr.toml`. The `variant`
 /// parameter is `"raw"` for `degrade --strip-indexdata` outputs (which carry
 /// no indexdata) and `"indexed"` everywhere else.
 ///
@@ -576,8 +327,16 @@ pub(crate) fn preflight_snapshot_collision(
 /// - `"base"` is reserved (CLI sentinel for the legacy top-level data).
 /// - The dataset must already exist in `brokkr.toml`.
 /// - The snapshot key must not already be registered, unless `replace = true`.
-///   With `replace`, any existing snapshot blocks are stripped from the TOML
-///   and any per-pbf files under the dataset's data dir are unlinked first.
+///
+/// Ordering is the safety property. Nothing destructive happens until the
+/// new artefact exists: the scratch file is checked first, moved into place,
+/// and hashed; then one atomic `brokkr.toml` commit swaps the old snapshot's
+/// tables for the new ones; only after that commit are the replaced
+/// snapshot's files unlinked (skipping any path the new registration, the
+/// primary, or another snapshot still names). A failure at any step before
+/// the commit leaves the old registration intact - including when the new
+/// artefact's filename equals a replaced file's: that file is parked under a
+/// hidden sibling name until the commit lands and restored if it does not.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn promote_snapshot(
     project_root: &Path,
@@ -599,23 +358,12 @@ pub(crate) fn promote_snapshot(
         ))
     })?;
 
-    if ds.snapshot.contains_key(snap_key) {
-        if replace {
-            for entry in ds.snapshot[snap_key].pbf.values() {
-                let p = data_dir.join(&entry.file);
-                std::fs::remove_file(&p).ok();
-            }
-            for entry in ds.snapshot[snap_key].osc.values() {
-                let p = data_dir.join(&entry.file);
-                std::fs::remove_file(&p).ok();
-            }
-            remove_snapshot_blocks(project_root, hostname, dataset_key, snap_key)?;
-        } else {
-            return Err(DevError::Config(format!(
-                "snapshot '{snap_key}' is already registered for dataset '{dataset_key}'. \
-                 Pass `--replace-snapshot` to overwrite, or pick a different key."
-            )));
-        }
+    let replaced = ds.snapshot.get(snap_key);
+    if replaced.is_some() && !replace {
+        return Err(DevError::Config(format!(
+            "snapshot '{snap_key}' is already registered for dataset '{dataset_key}'. \
+             Pass `--replace-snapshot` to overwrite, or pick a different key."
+        )));
     }
 
     if !scratch_pbf.exists() {
@@ -637,91 +385,103 @@ pub(crate) fn promote_snapshot(
         "  promoting artifact -> {}",
         target_path.display()
     ));
-    if let Err(e) = std::fs::rename(scratch_pbf, &target_path) {
-        // rename() fails across filesystems with EXDEV; fall back to copy +
-        // remove. Use the raw OS code so we don't depend on the
-        // `ErrorKind::CrossesDevices` variant (recent stable only).
-        if e.raw_os_error() == Some(libc::EXDEV) {
-            std::fs::copy(scratch_pbf, &target_path)?;
-            std::fs::remove_file(scratch_pbf).ok();
-        } else {
-            return Err(DevError::Io(e));
+    // A replaced snapshot commonly owns the very filename the new artefact
+    // takes (the name derives from dataset, key and variant alone). Park it
+    // beside the target until the commit lands, and put it back on any
+    // failure, so a failed promotion never costs the registered bytes.
+    let parked = data_dir.join(format!(".{target_filename}.replaced-{}", std::process::id()));
+    let parked = if replaced.is_some() && target_path.exists() {
+        std::fs::rename(&target_path, &parked)?;
+        Some(parked)
+    } else {
+        None
+    };
+
+    let committed = (|| -> Result<(), DevError> {
+        move_file_into_place(scratch_pbf, &target_path)?;
+
+        output::download_msg(&format!("  hashing {target_filename}..."));
+        let hash = preflight::cached_xxh128(&target_path, project_root)?;
+
+        let date = today();
+        let snapshot_download_date = snapshot_key_to_iso_date(snap_key)
+            .unwrap_or_else(|| iso_date_today(&date));
+        let mut toml = DatasetToml::open(project_root, hostname, dataset_key)?;
+        if replaced.is_some() {
+            toml.remove_snapshot(snap_key)?;
+        }
+        toml.set_snapshot_header(snap_key, &snapshot_download_date)?;
+        toml.set_snapshot_pbf(snap_key, target_variant, &target_filename, &hash)?;
+        toml.commit()
+    })();
+    if let Some(parked) = &parked {
+        match &committed {
+            Ok(()) => {
+                std::fs::remove_file(parked).ok();
+            }
+            Err(_) => {
+                if let Err(e) = std::fs::rename(parked, &target_path) {
+                    output::download_msg(&format!(
+                        "  warning: could not restore the replaced snapshot file from {}: {e}",
+                        parked.display()
+                    ));
+                }
+            }
         }
     }
+    committed?;
 
-    let date = today();
-    let snapshot_download_date = snapshot_key_to_iso_date(snap_key)
-        .unwrap_or_else(|| iso_date_today(&date));
-    append_snapshot_header(
-        project_root,
-        hostname,
-        dataset_key,
-        snap_key,
-        &snapshot_download_date,
-    )?;
-
-    output::download_msg(&format!("  hashing {target_filename}..."));
-    let hash = preflight::cached_xxh128(&target_path, project_root)?;
-    append_snapshot_pbf_entry(
-        project_root,
-        hostname,
-        dataset_key,
-        snap_key,
-        target_variant,
-        &target_filename,
-        &hash,
-    )?;
+    if let Some(old) = replaced {
+        remove_replaced_snapshot_files(ds, snap_key, old, &target_filename, data_dir);
+    }
     Ok(())
 }
 
-/// Strip every `[<host>.datasets.<dataset>.snapshot.<key>...]` block from
-/// `brokkr.toml` (the snapshot header itself plus its pbf/osc sub-tables).
+/// Unlink the files of a snapshot that `--replace-snapshot` just displaced.
 ///
-/// Line-based rewrite: drops every line inside a matched block until the
-/// next `[` header. Other dataset blocks are untouched. Same caveats as
-/// `rotate_dataset_to_snapshot` - works only on brokkr-generated TOML where
-/// each header sits on its own line.
-fn remove_snapshot_blocks(
-    project_root: &Path,
-    hostname: &str,
-    dataset_key: &str,
+/// Runs after the replacing registration is committed. A file is kept when
+/// the new registration reuses its name, or when the primary tables or any
+/// other snapshot still name it - deleting a file some surviving entry
+/// points at would trade one stale registration for a broken one. Failures
+/// are reported and skipped: the registration is already correct, and a
+/// leftover file is clutter, not corruption.
+fn remove_replaced_snapshot_files(
+    ds: &Dataset,
     snap_key: &str,
-) -> Result<(), DevError> {
-    let toml_path = project_root.join("brokkr.toml");
-    let contents = std::fs::read_to_string(&toml_path)?;
-
-    let prefix = format!("[{hostname}.datasets.{dataset_key}.snapshot.{snap_key}");
-    let mut out = String::with_capacity(contents.len());
-    let mut dropping = false;
-
-    for line in contents.lines() {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with('[') {
-            // The match needs the next char after the prefix to be either
-            // `]` (the snapshot header itself) or `.` (a sub-table). This
-            // avoids accidentally matching an unrelated key whose name
-            // happens to start with `<snap_key>`.
-            if trimmed.starts_with(&prefix) {
-                let rest = &trimmed[prefix.len()..];
-                let starts_subblock = rest.starts_with(']') || rest.starts_with('.');
-                if starts_subblock {
-                    dropping = true;
-                    continue;
-                }
-            }
-            dropping = false;
+    old: &crate::config::Snapshot,
+    new_filename: &str,
+    data_dir: &Path,
+) {
+    let still_named = |file: &str| {
+        file == new_filename
+            || ds.pbf.values().any(|e| e.file == file)
+            || ds.osc.values().any(|e| e.file == file)
+            || ds.snapshot.iter().any(|(key, snap)| {
+                key != snap_key
+                    && (snap.pbf.values().any(|e| e.file == file)
+                        || snap.osc.values().any(|e| e.file == file))
+            })
+    };
+    let old_files = old
+        .pbf
+        .values()
+        .map(|e| e.file.as_str())
+        .chain(old.osc.values().map(|e| e.file.as_str()));
+    for file in old_files {
+        if still_named(file) {
+            // Named by the new registration or a surviving one: keep it.
+            continue;
         }
-        if !dropping {
-            out.push_str(line);
-            out.push('\n');
+        let path = data_dir.join(file);
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => output::download_msg(&format!(
+                "  warning: could not remove replaced snapshot file {}: {e}",
+                path.display()
+            )),
         }
     }
-
-    std::fs::write(&toml_path, out)?;
-    output::download_msg(&format!(
-        "  removed previous [{hostname}.datasets.{dataset_key}.snapshot.{snap_key}*] blocks from brokkr.toml"
-    ));
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------

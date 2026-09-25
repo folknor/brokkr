@@ -7,6 +7,7 @@ use std::path::PathBuf;
 
 use rusqlite::Connection;
 
+use crate::db::like;
 use crate::error::DevError;
 
 // ---------------------------------------------------------------------------
@@ -118,16 +119,16 @@ impl HistoryDb {
         let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
 
         if let Some(ref cmd) = filter.command {
-            params.push(Box::new(format!("%{cmd}%")));
-            clauses.push(format!("command LIKE ?{}", params.len()));
+            params.push(Box::new(like::contains_pattern(cmd)));
+            clauses.push(format!("command LIKE ?{} {}", params.len(), like::ESCAPE));
         }
         if let Some(ref project) = filter.project {
             params.push(Box::new(project.clone()));
             clauses.push(format!("project = ?{}", params.len()));
         }
         if let Some(ref dir) = filter.project_dir {
-            params.push(Box::new(format!("%{dir}%")));
-            clauses.push(format!("cwd LIKE ?{}", params.len()));
+            params.push(Box::new(like::contains_pattern(dir)));
+            clauses.push(format!("cwd LIKE ?{} {}", params.len(), like::ESCAPE));
         }
         if filter.failed {
             clauses.push("exit_status != 0".to_owned());
@@ -142,7 +143,15 @@ impl HistoryDb {
         }
         if let Some(ref until) = filter.until {
             params.push(Box::new(until.clone()));
-            clauses.push(format!("timestamp <= ?{}", params.len()));
+            // A bare date means "through the end of that day". Compared as a
+            // string against 'YYYY-MM-DD HH:MM:SS', '2026-03-05' sorts before
+            // every timestamp on the 5th, so `<=` would exclude the whole day;
+            // compare against the start of the next day instead.
+            if until.len() == 10 {
+                clauses.push(format!("timestamp < datetime(?{}, '+1 day')", params.len()));
+            } else {
+                clauses.push(format!("timestamp <= ?{}", params.len()));
+            }
         }
         if let Some(slow_ms) = filter.slow_ms {
             params.push(Box::new(slow_ms));
@@ -293,6 +302,9 @@ pub fn format_history(entries: &[HistoryEntry]) -> String {
         return String::from("no history entries");
     }
 
+    // The id leads each line: it is what `brokkr history <id>` takes, and
+    // nothing else in the listing identifies a row.
+    let id_width = entries.iter().map(|e| e.id.to_string().len()).max().unwrap_or(1);
     let mut lines = Vec::with_capacity(entries.len());
     for entry in entries {
         let project = entry.project.as_deref().unwrap_or("-");
@@ -318,7 +330,8 @@ pub fn format_history(entries: &[HistoryEntry]) -> String {
         };
 
         lines.push(format!(
-            "{ts}  {project:<10} {elapsed:>7}  {cmd}{commit_display}{fail_tag}",
+            "{id:>id_width$}  {ts}  {project:<10} {elapsed:>7}  {cmd}{commit_display}{fail_tag}",
+            id = entry.id,
             ts = entry.timestamp,
             cmd = entry.command,
         ));
@@ -334,18 +347,14 @@ pub fn format_history(entries: &[HistoryEntry]) -> String {
 /// Return the path to the history database.
 ///
 /// Uses `$XDG_DATA_HOME/brokkr/history.db`, falling back to
-/// `$HOME/.local/share/brokkr/history.db`.
+/// `$HOME/.local/share/brokkr/history.db` (an empty or relative
+/// `XDG_DATA_HOME` counts as unset - see `user_dirs`).
 fn db_path() -> Result<PathBuf, DevError> {
-    let data_dir = if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
-        PathBuf::from(xdg)
-    } else if let Ok(home) = std::env::var("HOME") {
-        PathBuf::from(home).join(".local").join("share")
-    } else {
-        return Err(DevError::Config(
+    let data_dir = crate::user_dirs::xdg_data_home().ok_or_else(|| {
+        DevError::Config(
             "cannot determine data directory: neither XDG_DATA_HOME nor HOME is set".into(),
-        ));
-    };
-
+        )
+    })?;
     Ok(data_dir.join("brokkr").join("history.db"))
 }
 
@@ -529,6 +538,58 @@ mod tests {
         };
         let entries = db.query(&filter).unwrap();
         assert_eq!(entries.len(), 10);
+    }
+
+    fn insert_at(db: &HistoryDb, command: &str, timestamp: &str) {
+        db.insert(&make_row(command, 0)).unwrap();
+        db.conn
+            .execute(
+                "UPDATE history SET timestamp = ?1 WHERE id = last_insert_rowid()",
+                [timestamp],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn until_date_includes_that_whole_day() {
+        let db = test_db();
+        insert_at(&db, "before", "2026-03-04 12:00:00");
+        insert_at(&db, "on", "2026-03-05 23:59:59");
+        insert_at(&db, "after", "2026-03-06 00:00:00");
+
+        let filter = HistoryFilter {
+            until: Some("2026-03-05".into()),
+            limit: 25,
+            ..Default::default()
+        };
+        let mut got: Vec<String> = db.query(&filter).unwrap().into_iter().map(|e| e.command).collect();
+        got.sort();
+        assert_eq!(got, vec!["before", "on"]);
+
+        let filter = HistoryFilter {
+            until: Some("2026-03-05 12:00:00".into()),
+            limit: 25,
+            ..Default::default()
+        };
+        let got: Vec<String> = db.query(&filter).unwrap().into_iter().map(|e| e.command).collect();
+        assert_eq!(got, vec!["before"]);
+    }
+
+    #[test]
+    fn format_history_shows_id() {
+        let db = test_db();
+        db.insert(&make_row("check", 0)).unwrap();
+        let entries = db
+            .query(&HistoryFilter {
+                limit: 25,
+                ..Default::default()
+            })
+            .unwrap();
+        let output = format_history(&entries);
+        assert!(
+            output.trim_start().starts_with(&entries[0].id.to_string()),
+            "id must lead the line: {output}"
+        );
     }
 
     #[test]

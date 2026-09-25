@@ -4,12 +4,11 @@
 //! construction has a single source of truth. `preset_to_command` is the
 //! only place suite-preset strings meet the typed command enum.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::error::DevError;
 use crate::harness::BenchHarness;
 use crate::measure::{CommandContext, CommandParams};
-use crate::output;
 use crate::pbfhogg::commands::{
     CatTypeFilter, DiffFormat, ExtractStrategy, InputKind, PbfhoggCommand,
 };
@@ -191,59 +190,21 @@ fn suite_needs_osc(commands: &[&str]) -> Result<bool, DevError> {
         })
 }
 
-/// Ensure a merged PBF exists in the scratch directory. Returns the path.
-/// Skips merge if the file already exists.
-fn ensure_merged_pbf(
-    binary: &Path,
-    pbf_path: &Path,
-    osc_path: &Path,
-    scratch_dir: &Path,
-    project_root: &Path,
-) -> Result<PathBuf, DevError> {
-    let stem = pbf_path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("input");
-    let merged_name = format!("{stem}-bench-merged.osm.pbf");
-    let merged_path = scratch_dir.join(&merged_name);
-
-    if merged_path.exists() {
-        output::bench_msg(&format!("using cached merged PBF: {merged_name}"));
-        return Ok(merged_path);
-    }
-
-    std::fs::create_dir_all(scratch_dir)
-        .map_err(|e| DevError::Config(format!("failed to create scratch dir: {e}")))?;
-
-    output::bench_msg(&format!("generating merged PBF: {merged_name}"));
-    let pbf_str = pbf_path
-        .to_str()
-        .ok_or_else(|| DevError::Config("PBF path not UTF-8".into()))?;
-    let osc_str = osc_path
-        .to_str()
-        .ok_or_else(|| DevError::Config("OSC path not UTF-8".into()))?;
-    let merged_str = merged_path
-        .to_str()
-        .ok_or_else(|| DevError::Config("merged path not UTF-8".into()))?;
-    let binary_str = binary.display().to_string();
-
-    let captured = output::run_captured(
-        &binary_str,
-        &["apply-changes", pbf_str, osc_str, "-o", merged_str],
-        project_root,
-    )?;
-
-    captured.check_success(&binary_str)?;
-
-    Ok(merged_path)
-}
-
+/// Run the suite presets.
+///
+/// `osc_seq` is the replication seq `osc_path` was registered under; together
+/// with the snapshot key it names the merged-PBF cache. The suite always runs
+/// against the dataset's primary snapshot, so that key is `base`. The merged
+/// PBF comes from the same `dispatch::ensure_merged_pbf` the single-command
+/// path uses, and is always rebuilt: the suite is a measured mode, and the
+/// cache key cannot see a primary PBF refreshed in place under the same stem.
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     harness: &BenchHarness,
     binary: &Path,
     pbf_path: &Path,
     osc_path: Option<&Path>,
+    osc_seq: Option<&str>,
     scratch_dir: Option<&Path>,
     runs: usize,
     commands: &[&str],
@@ -272,15 +233,24 @@ pub fn run(
                 "diff/diff-osc require an OSC file (dataset must have osc configured)".into(),
             )
         })?;
+        let seq = osc_seq.ok_or_else(|| {
+            DevError::Config(
+                "diff/diff-osc require the OSC file's replication seq (dataset osc entry)".into(),
+            )
+        })?;
         let scratch = scratch_dir
             .ok_or_else(|| DevError::Config("diff/diff-osc require a scratch directory".into()))?;
-        Some(ensure_merged_pbf(
+        let (merged, _state) = crate::pbfhogg::dispatch::ensure_merged_pbf(
             binary,
             pbf_path,
             osc,
+            "base",
+            seq,
             scratch,
             project_root,
-        )?)
+            true,
+        )?;
+        Some(merged)
     } else {
         None
     };

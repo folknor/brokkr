@@ -499,6 +499,81 @@ pub fn verify_identity(pid: u32, starttime: &str, boot_id: &str) -> bool {
     proc_starttime(pid).as_deref() == Some(starttime)
 }
 
+/// Open a pidfd on a recorded process, authenticated: verify -> `pidfd_open`
+/// -> re-verify. The numeric `/proc/{pid}` still described the recorded
+/// process generation when the pidfd was opened, and from then on the pidfd
+/// cannot be redirected by PID recycling. `None` covers every failure -
+/// unverifiable identity, a process already gone, or a PID that changed
+/// generation mid-check.
+pub fn open_verified_pidfd(
+    pid: u32,
+    starttime: &str,
+    boot_id: &str,
+) -> Result<std::os::fd::OwnedFd, PidfdRefusal> {
+    if !verify_identity(pid, starttime, boot_id) {
+        return Err(PidfdRefusal::Unverified);
+    }
+    let Some(pidfd) = pidfd_open(pid) else {
+        return Err(PidfdRefusal::OpenFailed);
+    };
+    if proc_starttime(pid).as_deref() != Some(starttime) {
+        return Err(PidfdRefusal::IdentityChanged);
+    }
+    Ok(pidfd)
+}
+
+/// Why [`open_verified_pidfd`] refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PidfdRefusal {
+    /// The recorded tokens do not describe any process visible here.
+    Unverified,
+    /// `pidfd_open` failed: the process is gone or namespace-isolated.
+    OpenFailed,
+    /// The PID changed generation between the two checks.
+    IdentityChanged,
+}
+
+/// `pidfd_open(2)` via raw syscall (no libc wrapper yet).
+fn pidfd_open(pid: u32) -> Option<std::os::fd::OwnedFd> {
+    use std::os::fd::FromRawFd;
+    // SAFETY: a plain syscall with no pointer arguments.
+    let ret = unsafe { libc::syscall(libc::SYS_pidfd_open, pid.cast_signed(), 0u32) };
+    let fd = i32::try_from(ret).ok()?;
+    if fd < 0 {
+        return None;
+    }
+    // SAFETY: a successful pidfd_open returns a fresh fd we uniquely own.
+    Some(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) })
+}
+
+/// `pidfd_send_signal(2)` via raw syscall. `Ok(false)` when the process has
+/// already exited (ESRCH); any other failure is returned for the caller to
+/// judge.
+pub fn pidfd_send_signal(
+    pidfd: &std::os::fd::OwnedFd,
+    signal: libc::c_int,
+) -> std::io::Result<bool> {
+    use std::os::fd::AsRawFd;
+    // SAFETY: the fd is a live pidfd we own; a null siginfo is permitted.
+    let ret = unsafe {
+        libc::syscall(
+            libc::SYS_pidfd_send_signal,
+            pidfd.as_raw_fd(),
+            signal,
+            std::ptr::null::<libc::siginfo_t>(),
+            0u32,
+        )
+    };
+    if ret == 0 {
+        return Ok(true);
+    }
+    let err = std::io::Error::last_os_error();
+    if err.raw_os_error() == Some(libc::ESRCH) {
+        return Ok(false);
+    }
+    Err(err)
+}
+
 /// This kernel's boot id, trimmed.
 pub fn local_boot_id() -> Option<String> {
     let id = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").ok()?;

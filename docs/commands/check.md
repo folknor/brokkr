@@ -105,7 +105,9 @@ Output:
 - **What still prints on green**, because each changes what the verdict
   means: an `invocation:` line up front naming what this run changed about
   the configured gate (`-p`, forwarded `-- …` args, `RUSTFLAGS` /
-  `CARGO_ENCODED_RUSTFLAGS` inherited from the environment); the ad-hoc
+  `CARGO_ENCODED_RUSTFLAGS` inherited from the environment - set-but-empty
+  included, since cargo reads an empty one as a live source that shadows the
+  config-file rustflags); the ad-hoc
   features, `skip_phases` and markdown-only announcements; `-p` drops and
   skips per sweep; warnings (below); zero-test units on the test line; and
   the verdict line's context - the profile, the sweeps that ran, and every
@@ -129,7 +131,16 @@ Output:
   parallel`) and its `failing command:` beside its diagnostics. Every failure
   site carries its own context - the diagnostic phases report after all their
   sweeps ran, and a parallel lane after its join, so no ambient "current
-  sweep" could say which one a failure belongs to.
+  sweep" could say which one a failure belongs to. A failure whose site
+  printed its own findings (gremlins, lint diagnostics, the test failure
+  list, a coverage worksheet) ends in `check failed in ...` alone; any other
+  error - an IO error, a `cargo metadata` failure, a config refusal found at
+  phase time, a spawn failure - prints its message on the line above the
+  verdict, so a red run always names its cause. In code, the first kind is a
+  `DevError::Reported`; everything else is printed by the summary.
+- **A graceful `brokkr kill` ends a run as `check interrupted in ...`** and
+  exits 130 with main's scratch cleanup, like every other locked command -
+  not exit 1. `--json` still emits its trailer, with verdict `"failed"`.
 - **The run log.** Every run writes `.brokkr/check-logs/check-<ms>.log`
   (under the config dir), the newest ten kept: every line printed, plus the
   narration a green run no longer prints - shapes, full cargo argv, the
@@ -209,7 +220,10 @@ skip a workspace-wide gate.
 In a git repo where **everything uncommitted is markdown**, `check` runs the
 `gremlins`, `textlint` and `script_check` phases and nothing else. Documentation
 cannot change how the code builds, so clippy and the tests would be re-proving
-what the last full run already established on the same code.
+what the last full run already established on the same code. `post-test`
+script checks are the exception inside `script_check`: they judge a test phase,
+and with none having run they are skipped and counted on a `script-check: N
+post-test checks skipped` line, as under a profile that skips `test`.
 
 The classifier is `scope::dirt` (`git status --porcelain=v1 -z
 --untracked-files=all`): staged, unstaged and untracked-not-ignored paths all
@@ -350,6 +364,17 @@ Two details decide whether "20 seconds" means 20 seconds:
   `TerminateMode::Immediate`. The cap is not negotiable and the failure list is.
   Its `grace-period` is also `0s`: a grace period SIGTERMs at the ceiling and only
   SIGKILLs afterwards, which lets a test that blocks SIGTERM outlive its budget.
+
+Interrupting brokkr stops the tests too. The libtest runners put their
+children in their own process groups (so the watchdog can kill a whole test
+tree), which puts them out of reach of terminal Ctrl-C and of `brokkr kill`'s
+SIGTERM to brokkr's pid. While a test group is live, SIGINT/SIGTERM run a
+handler that SIGKILLs every registered group and re-raises the signal, so
+brokkr still dies as before and takes its tests with it
+(`shutdown::GroupReaper`). A SIGKILLed brokkr runs no handler; the runners'
+direct child carries a parent-death SIGKILL for that case, which reaches the
+test binary on the parallel lane and cargo on the others. The nextest engine
+handles SIGINT/SIGTERM itself while it runs.
 
 ### What the cap can and cannot prove
 
@@ -1089,7 +1114,11 @@ that suppressed nothing across the run draws a
 file moved, so the entry should be deleted or re-sited rather than accrete.
 The notice only fires on unscoped runs: a `-p`-narrowed run doesn't check an
 entry's file when it lives outside the selected packages, so "suppressed
-nothing" there proves nothing.
+nothing" there proves nothing. `brokkr clippy` applies the same rule to its
+one probe shape, and stays silent unless that shape is unscoped, lints every
+target (no `--lib`) and uses `--all-features`. Each phase judges only the
+entries it can produce: clippy the non-`rustdoc::` ones, the rustdoc phase the
+`rustdoc::` ones (so a project without `[rustdoc]` never judges those).
 A suppressed diagnostic is dropped from both the pass/fail decision and the
 output; nothing shows it. The path half must match the file exactly as clippy reports it
 (relative to the tree cargo compiles in - copy it from the failing
@@ -1143,9 +1172,11 @@ For the same reason suppression happens at ingestion, not on argv:
   since a diagnostic carries its member lint's code. Prefer `Cargo.toml`'s
   `[lints.rustdoc]` for a rustdoc lint: brokkr's list also reaches the test
   phase's rustflags, and a new entry there costs a full test rebuild.
-- `[lints] allow_exact` drops `lint@path` sites, as for clippy. Its
-  stale-entry notice is clippy's alone: a clippy-only site that rustdoc never
-  reports is not stale.
+- `[lints] allow_exact` drops `lint@path` sites, as for clippy. The
+  stale-entry notice splits by lint namespace: this phase judges the
+  `rustdoc::` entries (`rustdoc: allow_exact ... suppressed nothing`), clippy
+  judges the rest, so a clippy-only site that rustdoc never reports is not
+  stale, and a `rustdoc::` site that clippy never reports is not either.
 
 Skippable as `rustdoc` in a partial profile's `skip_phases`, skipped on a
 markdown-only tree, and 5-minute ceilinged like clippy.
@@ -1185,7 +1216,10 @@ The flags reach **every call site in the run that compiles**, not only the
 `cargo test` invocation: the sweep pre-build (which would otherwise fail on the
 unsuppressed lint before `cargo test` was ever reached), the process-isolated
 lane's enumeration and per-test invocations, and the coverage audit's
-`cargo test --no-run` enumeration.
+`cargo test --no-run` enumeration. `brokkr test`'s own `build_packages`
+pre-build carries them too. Both pre-builds also carry the sweep's pinned
+`feature_unification`, like every other compiling path, so the binaries a
+lane's tests spawn come from the same feature graph as the tests.
 
 That last one is worth stating because it is where the rule was learned. The
 audit runs last, so a call site missing the injection turns a run whose every
@@ -1547,7 +1581,12 @@ must include one among its own sweeps. Both are load errors.
 Cargo target selectors passed after `--` (`brokkr check -- --test read_paths`)
 shape which binaries the sweep plans, rather than being appended to each
 per-binary command - cargo unions selection flags, so copying a selector onto
-every invocation would run that target once per planned binary.
+every invocation would run that target once per planned binary. Every
+selector kind is honoured with cargo's meaning - `--test NAME`/`--test=NAME`,
+`--bin`, `--example`, `--bench` (names may be globs), `--lib`, `--bins`,
+`--examples`, `--benches`, `--tests`, `--all-targets` - and they union with
+the sweep's own `tests` filters (`-- --lib` on a sweep with `tests = ["cli"]`
+plans the lib harness and `cli`).
 Full semantics, and the rule for partitioning a suite across a parallel and a
 serial entry, are in `docs/brokkr.toml.md`.
 
@@ -1584,6 +1623,15 @@ A `[[check]]` entry selects the lane with `harness = "nextest"`
   `BinaryListBuilder` - so a nextest lane and a libtest lane with equal
   compile inputs share the target dir and dedupe in clippy. `harness` is
   execution policy, never part of the build shape.
+- **Brokkr owns the test env.** The sweep env the libtest lanes set on
+  `cargo test` (`[[check]] env`, a profile's `env`, `BROKKR_TEST_BIN_DIR`,
+  host-specific values like nidhogg's `CARGO_TARGET_TMPDIR`) reaches every
+  test process and listing run the engine starts. The engine builds its own
+  commands, so the pairs ride the one route it applies to all of them:
+  cargo's `[env]` table, via a generated config file
+  (`.brokkr/nextest-sweep-env.toml` under the state dir, rewritten per run)
+  whose entries are `force = true` - a sweep value beats an inherited one,
+  as it does on the libtest lanes.
 - **Brokkr owns the filters.** The sweep's `only` and unqualified `skip`
   entries ride nextest's own libtest pattern emulation (identical substring
   semantics, nothing to escape); `include_ignored` maps to nextest's

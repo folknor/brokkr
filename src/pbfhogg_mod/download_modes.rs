@@ -137,43 +137,18 @@ pub fn run(
     if indexed_dest.exists() && is_nonempty(&indexed_dest) {
         output::download_msg(&format!("  SKIP (exists): {}", indexed_dest.display()));
     } else {
-        output::download_msg("  generating indexed PBF via cat");
-
         let cat_input = has_existing_pbf(dataset, data_dir)
             .unwrap_or_else(|| pbf_dest.clone());
-
-        let binary = build::cargo_build(
-            &build::BuildConfig::release(Some("pbfhogg-cli")),
-            build_root,
-        )?;
-        let binary_str = binary.display().to_string();
-        let cat_input_str = cat_input.display().to_string();
-        let indexed_tmp = indexed_dest.with_extension("tmp");
-        let indexed_tmp_str = indexed_tmp.display().to_string();
-
-        let captured = output::run_captured(
-            &binary_str,
-            &[
-                "cat",
-                &cat_input_str,
-                "-o",
-                &indexed_tmp_str,
-            ],
-            project_root,
-        )?;
-
-        if let Err(e) = captured.check_success(&binary_str) {
-            drop(std::fs::remove_file(&indexed_tmp));
-            return Err(e);
-        }
-        std::fs::rename(&indexed_tmp, &indexed_dest)?;
+        generate_indexed_pbf(&cat_input, &indexed_dest, project_root, build_root)?;
         generated_indexed = true;
     }
 
     // -- Update brokkr.toml with new entries --
+    // Hash everything first, then commit every entry in one atomic write.
+    let mut toml = DatasetToml::open(project_root, hostname, dataset_key)?;
     let has_new_osc = !osc_downloaded.is_empty();
     if is_new_dataset && (downloaded_pbf || has_new_osc || generated_indexed) {
-        append_dataset_header(project_root, hostname, dataset_key, source.origin())?;
+        toml.set_dataset_origin(source.origin())?;
     }
 
     let has_raw = dataset.is_some_and(|ds| ds.pbf.contains_key("raw"));
@@ -186,14 +161,7 @@ pub fn run(
             .to_string_lossy();
         output::download_msg(&format!("  hashing {filename}..."));
         let hash = preflight::cached_xxh128(&pbf_dest, project_root)?;
-        append_pbf_entry(project_root, hostname, dataset_key, "raw", &filename, &hash)?;
-    }
-
-    if downloaded_pbf {
-        output::download_msg(
-            "  NOTE: run 'pbfhogg inspect <file>' to find the PBF sequence number, \
-             then add seq = <N> to the brokkr.toml entry"
-        );
+        toml.set_pbf("raw", &filename, &hash)?;
     }
 
     if generated_indexed && !has_indexed {
@@ -203,7 +171,7 @@ pub fn run(
             .to_string_lossy();
         output::download_msg(&format!("  hashing {filename}..."));
         let hash = preflight::cached_xxh128(&indexed_dest, project_root)?;
-        append_pbf_entry(project_root, hostname, dataset_key, "indexed", &filename, &hash)?;
+        toml.set_pbf("indexed", &filename, &hash)?;
     }
 
     for (seq, osc_path) in &osc_downloaded {
@@ -213,7 +181,15 @@ pub fn run(
             .to_string_lossy();
         output::download_msg(&format!("  hashing {filename}..."));
         let hash = preflight::cached_xxh128(osc_path, project_root)?;
-        append_osc_entry(project_root, hostname, dataset_key, *seq, &filename, &hash)?;
+        toml.set_osc(*seq, &filename, &hash)?;
+    }
+    toml.commit()?;
+
+    if downloaded_pbf {
+        output::download_msg(
+            "  NOTE: run 'pbfhogg inspect <file>' to find the PBF sequence number, \
+             then add seq = <N> to the brokkr.toml entry"
+        );
     }
 
     // -- Summary --
@@ -326,31 +302,7 @@ fn run_as_snapshot(
     if is_nonempty(&indexed_dest) {
         output::download_msg(&format!("  SKIP (exists): {}", indexed_dest.display()));
     } else {
-        output::download_msg("  generating indexed PBF via cat");
-        let binary = build::cargo_build(
-            &build::BuildConfig::release(Some("pbfhogg-cli")),
-            build_root,
-        )?;
-        let binary_str = binary.display().to_string();
-        let cat_input_str = pbf_dest.display().to_string();
-        let indexed_tmp = indexed_dest.with_extension("tmp");
-        let indexed_tmp_str = indexed_tmp.display().to_string();
-
-        let captured = output::run_captured(
-            &binary_str,
-            &[
-                "cat",
-                &cat_input_str,
-                "-o",
-                &indexed_tmp_str,
-            ],
-            project_root,
-        )?;
-        if let Err(e) = captured.check_success(&binary_str) {
-            drop(std::fs::remove_file(&indexed_tmp));
-            return Err(e);
-        }
-        std::fs::rename(&indexed_tmp, &indexed_dest)?;
+        generate_indexed_pbf(&pbf_dest, &indexed_dest, project_root, build_root)?;
         generated_indexed = true;
     }
 
@@ -366,34 +318,16 @@ fn run_as_snapshot(
     // schema.
     let snapshot_download_date = snapshot_key_to_iso_date(snap_key)
         .unwrap_or_else(|| iso_date_today(&date));
-    append_snapshot_header(
-        project_root,
-        hostname,
-        dataset_key,
-        snap_key,
-        &snapshot_download_date,
-    )?;
+    // Hash everything first, then commit the header and every entry in one
+    // atomic write - a failed hash must not leave a header with no pbf.
+    let mut toml = DatasetToml::open(project_root, hostname, dataset_key)?;
+    toml.set_snapshot_header(snap_key, &snapshot_download_date)?;
 
     if downloaded_pbf || pbf_dest.exists() {
         let filename = pbf_dest.file_name().unwrap_or_default().to_string_lossy();
         output::download_msg(&format!("  hashing {filename}..."));
         let hash = preflight::cached_xxh128(&pbf_dest, project_root)?;
-        append_snapshot_pbf_entry(
-            project_root,
-            hostname,
-            dataset_key,
-            snap_key,
-            "raw",
-            &filename,
-            &hash,
-        )?;
-    }
-
-    if downloaded_pbf {
-        output::download_msg(
-            "  NOTE: run 'pbfhogg inspect <file>' to find the PBF sequence number, \
-             then add seq = <N> to the snapshot's pbf.raw entry"
-        );
+        toml.set_snapshot_pbf(snap_key, "raw", &filename, &hash)?;
     }
 
     if generated_indexed || indexed_dest.exists() {
@@ -403,15 +337,7 @@ fn run_as_snapshot(
             .to_string_lossy();
         output::download_msg(&format!("  hashing {filename}..."));
         let hash = preflight::cached_xxh128(&indexed_dest, project_root)?;
-        append_snapshot_pbf_entry(
-            project_root,
-            hostname,
-            dataset_key,
-            snap_key,
-            "indexed",
-            &filename,
-            &hash,
-        )?;
+        toml.set_snapshot_pbf(snap_key, "indexed", &filename, &hash)?;
     }
 
     for (seq, osc_path) in &osc_downloaded {
@@ -421,15 +347,15 @@ fn run_as_snapshot(
             .to_string_lossy();
         output::download_msg(&format!("  hashing {filename}..."));
         let hash = preflight::cached_xxh128(osc_path, project_root)?;
-        append_snapshot_osc_entry(
-            project_root,
-            hostname,
-            dataset_key,
-            snap_key,
-            *seq,
-            &filename,
-            &hash,
-        )?;
+        toml.set_snapshot_osc(snap_key, *seq, &filename, &hash)?;
+    }
+    toml.commit()?;
+
+    if downloaded_pbf {
+        output::download_msg(
+            "  NOTE: run 'pbfhogg inspect <file>' to find the PBF sequence number, \
+             then add seq = <N> to the snapshot's pbf.raw entry"
+        );
     }
 
     if !osc_downloaded.is_empty() {
@@ -632,6 +558,29 @@ fn run_refresh(
     let date = today();
     let new_pbf_filename = format!("{dataset_key}-{date}.osm.pbf");
     let new_pbf_dest = data_dir.join(&new_pbf_filename);
+    let new_indexed_filename = format!("{dataset_key}-{date}-with-indexdata.osm.pbf");
+    let new_indexed_dest = data_dir.join(&new_indexed_filename);
+
+    // The new primary's dated names must not be files the dataset already
+    // registers. A refresh on the day of the previous download computes the
+    // same names: the download would "resume" onto the old primary and `cat`
+    // would overwrite the old indexed file that is about to be archived.
+    let registered = |name: &str| {
+        ds.pbf.values().any(|e| e.file == name)
+            || ds.osc.values().any(|e| e.file == name)
+            || ds.snapshot.values().any(|s| {
+                s.pbf.values().any(|e| e.file == name) || s.osc.values().any(|e| e.file == name)
+            })
+    };
+    for name in [&new_pbf_filename, &new_indexed_filename] {
+        if registered(name.as_str()) {
+            return Err(DevError::Config(format!(
+                "refresh would write {name}, which dataset '{dataset_key}' already registers. \
+                 Refreshing on the day of the previous download is not supported - retry tomorrow, \
+                 or rename the registered file first."
+            )));
+        }
+    }
 
     if is_nonempty(&new_pbf_dest) {
         // Defensive: don't clobber a freshly-downloaded file from a previous
@@ -645,83 +594,36 @@ fn run_refresh(
         tools::download_file(&pbf_url, &new_pbf_dest)?;
     }
 
-    // -- Step 4: rotate TOML - rename existing pbf/osc tables into the snapshot block --
-    rotate_dataset_to_snapshot(
-        project_root,
-        hostname,
-        dataset_key,
-        &snap_key,
-        &iso_date_today(&date),
-    )?;
-    // Append the snapshot header itself with the OLD download_date.
+    // -- Step 4: generate the new indexed PBF --
+    // Before any brokkr.toml change: the rotation below is only committed
+    // once every file the new primary names exists and is hashed.
+    generate_indexed_pbf(&new_pbf_dest, &new_indexed_dest, project_root, build_root)?;
+
+    // -- Step 5: hash the new primary --
+    output::download_msg(&format!("  hashing {new_pbf_filename}..."));
+    let new_raw_hash = preflight::cached_xxh128(&new_pbf_dest, project_root)?;
+    output::download_msg(&format!("  hashing {new_indexed_filename}..."));
+    let indexed_hash = preflight::cached_xxh128(&new_indexed_dest, project_root)?;
+
+    // -- Step 6: one atomic brokkr.toml commit --
+    // Archive the current primary pbf/osc tables under the snapshot (with the
+    // OLD download_date), stamp the dataset with today's, and register the
+    // new raw + indexed. Everything or nothing: a failure before this point
+    // leaves the dataset's primary exactly as it was, and the downloaded
+    // file is picked up by the SKIP branch above on retry.
     let old_download_date = ds
         .download_date
         .clone()
         .unwrap_or_else(|| iso_date_today(&unix_to_yyyymmdd(local_unix)));
-    append_snapshot_header(
-        project_root,
-        hostname,
-        dataset_key,
-        &snap_key,
-        &old_download_date,
-    )?;
-
-    // -- Step 5: hash and append the new top-level pbf.raw --
-    output::download_msg(&format!("  hashing {new_pbf_filename}..."));
-    let new_raw_hash = preflight::cached_xxh128(&new_pbf_dest, project_root)?;
-    append_pbf_entry(
-        project_root,
-        hostname,
-        dataset_key,
-        "raw",
-        &new_pbf_filename,
-        &new_raw_hash,
-    )?;
+    let mut toml = DatasetToml::open(project_root, hostname, dataset_key)?;
+    toml.rotate_primary_to_snapshot(&snap_key, &old_download_date, &iso_date_today(&date))?;
+    toml.set_pbf("raw", &new_pbf_filename, &new_raw_hash)?;
+    toml.set_pbf("indexed", &new_indexed_filename, &indexed_hash)?;
+    toml.commit()?;
     output::download_msg(
         "  NOTE: run 'pbfhogg inspect <new pbf>' to find the new sequence number, \
          then add seq = <N> to the brokkr.toml entry"
     );
-
-    // -- Step 6: regenerate the indexed PBF via pbfhogg cat --
-    let new_indexed_filename = format!("{dataset_key}-{date}-with-indexdata.osm.pbf");
-    let new_indexed_dest = data_dir.join(&new_indexed_filename);
-    output::download_msg("  generating indexed PBF via cat");
-    let binary = build::cargo_build(
-        &build::BuildConfig::release(Some("pbfhogg-cli")),
-        build_root,
-    )?;
-    let binary_str = binary.display().to_string();
-    let cat_input_str = new_pbf_dest.display().to_string();
-    let indexed_tmp = new_indexed_dest.with_extension("tmp");
-    let indexed_tmp_str = indexed_tmp.display().to_string();
-    let captured = output::run_captured(
-        &binary_str,
-        &[
-            "cat",
-            &cat_input_str,
-            "--type",
-            "node,way,relation",
-            "-o",
-            &indexed_tmp_str,
-        ],
-        project_root,
-    )?;
-    if let Err(e) = captured.check_success(&binary_str) {
-        drop(std::fs::remove_file(&indexed_tmp));
-        return Err(e);
-    }
-    std::fs::rename(&indexed_tmp, &new_indexed_dest)?;
-
-    output::download_msg(&format!("  hashing {new_indexed_filename}..."));
-    let indexed_hash = preflight::cached_xxh128(&new_indexed_dest, project_root)?;
-    append_pbf_entry(
-        project_root,
-        hostname,
-        dataset_key,
-        "indexed",
-        &new_indexed_filename,
-        &indexed_hash,
-    )?;
 
     // -- Summary --
     output::download_msg("=== Refresh complete ===");
@@ -863,37 +765,48 @@ mod tests {
         assert_eq!(iso_date_today("2026-04-11"), "2026-04-11");
     }
 
-    /// Helper: write a TOML to a temp file, run rotate_dataset_to_snapshot,
-    /// read back, and return the new contents.
+    /// Write `contents` as `brokkr.toml` in a fresh scratch dir named by the
+    /// calling test, and return the dir.
+    fn toml_dir(test_name: &str, contents: &str) -> PathBuf {
+        let dir = crate::test_scratch::scratch("pbfhogg-download", test_name);
+        std::fs::write(dir.join("brokkr.toml"), contents).unwrap();
+        dir
+    }
+
+    /// Run `edit` as one committed `DatasetToml` transaction on `before` and
+    /// return the file's new contents.
+    fn edit_toml(
+        test_name: &str,
+        before: &str,
+        hostname: &str,
+        dataset: &str,
+        edit: impl FnOnce(&mut DatasetToml),
+    ) -> String {
+        let dir = toml_dir(test_name, before);
+        let mut toml = DatasetToml::open(&dir, hostname, dataset).unwrap();
+        edit(&mut toml);
+        toml.commit().unwrap();
+        std::fs::read_to_string(dir.join("brokkr.toml")).unwrap()
+    }
+
+    /// Rotation as `--refresh` performs it.
     fn run_rotation(
+        test_name: &str,
         before: &str,
         hostname: &str,
         dataset: &str,
         snap_key: &str,
+        old_date: &str,
         new_date: &str,
     ) -> String {
-        let dir = std::env::current_dir()
-            .unwrap()
-            .join(".brokkr")
-            .join("test-artifacts")
-            .join(format!(
-                "rotation-{}-{}",
-                std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-            ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let toml_path = dir.join("brokkr.toml");
-        std::fs::write(&toml_path, before).unwrap();
+        edit_toml(test_name, before, hostname, dataset, |t| {
+            t.rotate_primary_to_snapshot(snap_key, old_date, new_date)
+                .expect("rotate");
+        })
+    }
 
-        rotate_dataset_to_snapshot(&dir, hostname, dataset, snap_key, new_date)
-            .expect("rotate");
-
-        let result = std::fs::read_to_string(&toml_path).unwrap();
-        drop(std::fs::remove_dir_all(&dir));
-        result
+    fn dataset_of<'a>(parsed: &'a toml::Value, host: &str, ds: &str) -> &'a toml::Value {
+        &parsed[host]["datasets"][ds]
     }
 
     #[test]
@@ -916,7 +829,15 @@ file = \"planet-20260223-with-indexdata.osm.pbf\"
 file = \"planet-20260223-seq4913.osc.gz\"
 xxhash = \"abc\"
 ";
-        let after = run_rotation(before, "plantasjen", "planet", "20260223", "2026-04-11");
+        let after = run_rotation(
+            "rotate_renames",
+            before,
+            "plantasjen",
+            "planet",
+            "20260223",
+            "2026-02-23",
+            "2026-04-11",
+        );
 
         // Original pbf headers are renamed under snapshot.20260223.
         assert!(
@@ -947,15 +868,31 @@ xxhash = \"abc\"
         assert!(after.contains("seq = 4912"));
         assert!(after.contains("xxhash = \"abc\""));
 
-        // download_date in the [planet] block is updated to the new value.
-        assert!(
-            after.contains("download_date = \"2026-04-11\""),
-            "expected updated download_date, got:\n{after}"
+        // download_date in the [planet] block is updated to the new value;
+        // the old one moves to the snapshot header.
+        let parsed: toml::Value = toml::from_str(&after).unwrap();
+        let ds = dataset_of(&parsed, "plantasjen", "planet");
+        assert_eq!(ds["download_date"].as_str(), Some("2026-04-11"), "{after}");
+        assert_eq!(
+            ds["snapshot"]["20260223"]["download_date"].as_str(),
+            Some("2026-02-23"),
+            "{after}"
         );
-        assert!(
-            !after.contains("download_date = \"2026-02-23\""),
-            "old download_date should be gone, got:\n{after}"
+        assert!(ds.get("pbf").is_none(), "{after}");
+        assert!(ds.get("osc").is_none(), "{after}");
+        assert_eq!(
+            ds["snapshot"]["20260223"]["pbf"]["raw"]["seq"].as_integer(),
+            Some(4912)
         );
+
+        // The snapshot header renders above its sub-tables.
+        let header = after
+            .find("[plantasjen.datasets.planet.snapshot.20260223]")
+            .expect("snapshot header");
+        let first_sub = after
+            .find("[plantasjen.datasets.planet.snapshot.20260223.pbf.raw]")
+            .unwrap();
+        assert!(header < first_sub, "{after}");
     }
 
     #[test]
@@ -969,12 +906,22 @@ origin = \"planet.openstreetmap.org\"
 [plantasjen.datasets.planet.pbf.raw]
 file = \"planet-20260223.osm.pbf\"
 ";
-        let after = run_rotation(before, "plantasjen", "planet", "20260223", "2026-04-11");
+        let after = run_rotation(
+            "rotate_inserts_date",
+            before,
+            "plantasjen",
+            "planet",
+            "20260223",
+            "2026-02-23",
+            "2026-04-11",
+        );
 
-        // download_date should be inserted somewhere in the [planet] block.
-        assert!(
-            after.contains("download_date = \"2026-04-11\""),
-            "expected download_date inserted, got:\n{after}"
+        // download_date is inserted into the [planet] block.
+        let parsed: toml::Value = toml::from_str(&after).unwrap();
+        assert_eq!(
+            dataset_of(&parsed, "plantasjen", "planet")["download_date"].as_str(),
+            Some("2026-04-11"),
+            "{after}"
         );
     }
 
@@ -996,7 +943,15 @@ download_date = \"2026-02-23\"
 [plantasjen.datasets.planet.pbf.raw]
 file = \"planet-20260223.osm.pbf\"
 ";
-        let after = run_rotation(before, "plantasjen", "planet", "20260223", "2026-04-11");
+        let after = run_rotation(
+            "rotate_unrelated",
+            before,
+            "plantasjen",
+            "planet",
+            "20260223",
+            "2026-02-23",
+            "2026-04-11",
+        );
 
         // Denmark untouched.
         assert!(
@@ -1007,5 +962,81 @@ file = \"planet-20260223.osm.pbf\"
 
         // Planet rotated.
         assert!(after.contains("[plantasjen.datasets.planet.snapshot.20260223.pbf.raw]"));
+    }
+
+    // Values the old hand-rolled appenders spliced in raw now round-trip:
+    // a quote or backslash in a filename, and a dotted hostname that used to
+    // re-nest the table under a different key.
+    #[test]
+    fn entries_are_escaped() {
+        let after = edit_toml(
+            "escaped",
+            "project = \"pbfhogg\"\n",
+            "host.local",
+            "denmark",
+            |t| {
+                t.set_dataset_origin("Geofabrik").unwrap();
+                t.set_pbf("raw", "odd \"name\\.osm.pbf", "abc").unwrap();
+                t.set_osc(4705, "d-seq4705.osc.gz", "def").unwrap();
+            },
+        );
+        let parsed: toml::Value = toml::from_str(&after).unwrap();
+        let ds = dataset_of(&parsed, "host.local", "denmark");
+        assert_eq!(ds["origin"].as_str(), Some("Geofabrik"));
+        assert_eq!(ds["pbf"]["raw"]["file"].as_str(), Some("odd \"name\\.osm.pbf"));
+        assert_eq!(ds["osc"]["4705"]["xxhash"].as_str(), Some("def"));
+    }
+
+    // Comments and unrelated tables survive an edit byte-for-byte.
+    #[test]
+    fn edits_preserve_comments() {
+        let before = "\
+# top comment
+project = \"pbfhogg\"
+
+# denmark is hand-maintained
+[plantasjen.datasets.denmark]
+origin = \"Geofabrik\" # trailing
+";
+        let after = edit_toml("preserve", before, "plantasjen", "denmark", |t| {
+            t.set_osc(1, "d-seq1.osc.gz", "abc").unwrap();
+        });
+        assert!(after.starts_with(before), "{after}");
+        assert!(after.contains("[plantasjen.datasets.denmark.osc.1]"), "{after}");
+    }
+
+    #[test]
+    fn remove_snapshot_drops_header_and_sub_tables_only() {
+        let before = "\
+[h.datasets.d]
+origin = \"x\"
+
+[h.datasets.d.snapshot.a]
+download_date = \"2026-01-01\"
+
+[h.datasets.d.snapshot.a.pbf.raw]
+file = \"a.osm.pbf\"
+
+[h.datasets.d.snapshot.ab]
+download_date = \"2026-01-02\"
+";
+        let after = edit_toml("remove_snapshot", before, "h", "d", |t| {
+            t.remove_snapshot("a").unwrap();
+        });
+        let parsed: toml::Value = toml::from_str(&after).unwrap();
+        let snaps = &dataset_of(&parsed, "h", "d")["snapshot"];
+        assert!(snaps.get("a").is_none(), "{after}");
+        assert!(snaps.get("ab").is_some(), "{after}");
+    }
+
+    // A transaction that is never committed leaves the file untouched.
+    #[test]
+    fn uncommitted_edits_do_not_write() {
+        let before = "project = \"pbfhogg\"\n";
+        let dir = toml_dir("uncommitted", before);
+        let mut toml = DatasetToml::open(&dir, "h", "d").unwrap();
+        toml.set_pbf("raw", "r.osm.pbf", "abc").unwrap();
+        drop(toml);
+        assert_eq!(std::fs::read_to_string(dir.join("brokkr.toml")).unwrap(), before);
     }
 }

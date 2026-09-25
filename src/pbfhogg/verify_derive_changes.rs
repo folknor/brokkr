@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use super::verify::VerifyHarness;
+use super::verify::{Findings, VerifyHarness};
 use crate::error::DevError;
 use crate::output::verify_msg;
 
@@ -16,7 +16,7 @@ pub fn run(
     pbf: &Path,
     osc: &Path,
     direct_io: bool,
-) -> Result<(), DevError> {
+) -> Result<Findings, DevError> {
     let outdir = harness.subdir("derive-changes")?;
 
     verify_msg("=== verify diff --format osc ===");
@@ -124,44 +124,29 @@ pub fn run(
     harness.print_inspect("roundtrip-pbfhogg", &rt_pbfhogg)?;
     harness.print_inspect("roundtrip-osmium", &rt_osmium)?;
 
-    let mut all_pass = true;
+    let mut findings = Findings::new();
 
-    verify_msg("=== diff: pbfhogg roundtrip vs new ===");
-    let identical = harness.diff_pbfs(&rt_pbfhogg, &new_pbf)?;
-    if identical {
-        verify_msg("  PASS (identical)");
-    } else {
-        verify_msg("  FAIL (differences found)");
-        all_pass = false;
-    }
-
-    verify_msg("=== diff: osmium roundtrip vs new ===");
-    let identical = harness.diff_pbfs(&rt_osmium, &new_pbf)?;
-    if identical {
-        verify_msg("  PASS (identical)");
-    } else {
-        verify_msg("  FAIL (differences found)");
-        all_pass = false;
-    }
-
-    verify_msg("=== diff: pbfhogg roundtrip vs osmium roundtrip ===");
-    let identical = harness.diff_pbfs(&rt_pbfhogg, &rt_osmium)?;
-    if identical {
-        verify_msg("  PASS (identical)");
-    } else {
-        verify_msg("  FAIL (differences found)");
-        all_pass = false;
+    for (label, a, b) in [
+        ("pbfhogg roundtrip vs new", &rt_pbfhogg, &new_pbf),
+        ("osmium roundtrip vs new", &rt_osmium, &new_pbf),
+        ("pbfhogg roundtrip vs osmium roundtrip", &rt_pbfhogg, &rt_osmium),
+    ] {
+        verify_msg(&format!("=== diff: {label} ==="));
+        let diff = harness.diff_pbfs(a, b)?;
+        if diff.is_pass() {
+            verify_msg("  PASS (identical)");
+        } else {
+            verify_msg("  FAIL (differences found)");
+        }
+        findings.record(&format!("diff {label}"), diff);
     }
 
     // Sort checks.
-    harness.check_sorted("new", &new_pbf)?;
-    harness.check_sorted("roundtrip-pbfhogg", &rt_pbfhogg)?;
+    findings.record("new order", harness.check_sorted("new", &new_pbf)?);
+    findings.record(
+        "roundtrip-pbfhogg order",
+        harness.check_sorted("roundtrip-pbfhogg", &rt_pbfhogg)?,
+    );
 
-    if !all_pass {
-        return Err(DevError::Verify(
-            "diff --format osc: roundtrip produced differences".into(),
-        ));
-    }
-
-    Ok(())
+    Ok(findings)
 }

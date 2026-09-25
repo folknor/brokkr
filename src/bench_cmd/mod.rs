@@ -258,9 +258,36 @@ fn compare_baselines(
 }
 
 /// Refuse a comparison across differing build environments.
+///
+/// Fails closed: the caller has already established that both stamps exist,
+/// so a stamp that cannot be read now (permissions, I/O, removed in between)
+/// is a comparability question left unanswered, not a pass. `--lenient`
+/// downgrades that to a warning exactly as it does a mismatch.
 fn check_environments(home: &Path, a: &str, b: &str, lenient: bool) -> Result<(), DevError> {
-    let (Some(sa), Some(sb)) = (stamp::read(home, a), stamp::read(home, b)) else {
-        return Ok(());
+    let read = |name: &str| -> Result<stamp::Stamp, DevError> {
+        stamp::read(home, name)?.ok_or_else(|| {
+            DevError::Config(format!(
+                "baseline stamp for '{name}' disappeared before it could be read"
+            ))
+        })
+    };
+    let (sa, sb) = match (read(a), read(b)) {
+        (Ok(sa), Ok(sb)) => (sa, sb),
+        (Err(e), _) | (_, Err(e)) => {
+            if lenient {
+                output::error(&format!(
+                    "{e}\ncomparing anyway (--lenient); build environments were not checked"
+                ));
+                return Ok(());
+            }
+            return Err(DevError::Preflight(vec![
+                e.to_string(),
+                "the build environments cannot be checked, so a delta is not \
+                 attributable to the code. Fix the stamp, or pass --lenient to \
+                 compare regardless"
+                    .into(),
+            ]));
+        }
     };
     let diffs = sa.differences(&sb);
     if diffs.is_empty() {
@@ -362,14 +389,11 @@ fn list_baselines(home: &Path) -> Result<(), DevError> {
 
     let mut msg = format!("{} baselines:\n", names.len());
     for name in &names {
-        let summary = stamp::read(home, name)
-            .map(|s| {
-                s.render()
-                    .lines()
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            })
-            .unwrap_or_default();
+        let summary = match stamp::read(home, name) {
+            Ok(Some(s)) => s.render().lines().collect::<Vec<_>>().join(", "),
+            Ok(None) => String::new(),
+            Err(e) => format!("(unreadable: {e})"),
+        };
         msg.push_str(&format!("  {name}  {summary}\n"));
     }
     output::run_msg(msg.trim_end());

@@ -299,9 +299,18 @@ impl TestTracker {
         }
     }
 
-    fn observe_result(&mut self, name: &str) {
+    /// A test finished. `ran` is false for an `ignored` result: libtest emits
+    /// `started` for an `#[ignore]`d test too, immediately followed by
+    /// `ignored`, so the start alone does not mean the test body executed.
+    /// Such a test leaves the in-flight set (it is no longer running) but is
+    /// kept out of `completed`, which callers sum as the pass count and feed to
+    /// timing history - counting it there reported ignored tests as passed and
+    /// made an all-`#[ignore]` binary look like it had run something.
+    fn observe_result(&mut self, name: &str, ran: bool) {
         let first_completion = self.finished.insert(name.to_owned());
-        if let Some(started) = self.current.remove(name) {
+        if let Some(started) = self.current.remove(name)
+            && ran
+        {
             self.completed.push((name.to_owned(), started.elapsed()));
         }
         self.idle_since = Instant::now();
@@ -441,6 +450,9 @@ where
     let start = Instant::now();
     let mut child = spawn_cargo_process_group(args, cwd, env)?;
     let cargo_pid = child.id();
+    // Ctrl-C / `brokkr kill` take this group down with brokkr. Released right
+    // after the leader is reaped. See `shutdown::GroupReaper`.
+    let reaper = crate::shutdown::GroupReaper::register(cargo_pid);
 
     let Some(stdout_pipe) = child.stdout.take() else {
         return Err(DevError::Build("cargo stdout was not piped".into()));
@@ -460,7 +472,7 @@ where
     let stdout_thread = thread::spawn(move || {
         // The same JSON drain the parallel lane uses. Both lanes read libtest's
         // event stream now; the reconstructor renders it back to human text, so
-        // downstream consumers and `--raw` see what they always saw.
+        // the downstream parsers and forwarded output see what they always saw.
         drain_libtest_json(stdout_pipe, &stdout_buf_t, &tracker_t, forward_stdout_line);
     });
 
@@ -495,6 +507,7 @@ where
         code: None,
         stderr: e.to_string(),
     })?;
+    drop(reaper);
     done.store(true, Ordering::SeqCst);
 
     stdout_thread.join().ok();
@@ -590,6 +603,9 @@ where
     let mut child = spawn_process_group(program, args, cwd, env)?;
     // Spawned with `process_group(0)`, so the child's pid is its pgid.
     let cargo_pid = child.id();
+    // Ctrl-C / `brokkr kill` take this group down with brokkr, whether or not
+    // a `SigtermGuard` is active. See `shutdown::GroupReaper`.
+    let reaper = crate::shutdown::GroupReaper::register(cargo_pid);
 
     let Some(stdout_pipe) = child.stdout.take() else {
         return Err(DevError::Build(format!("{program} stdout was not piped")));
@@ -641,36 +657,8 @@ where
         );
     });
 
-    let mut timed_out = false;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) => {
-                let overtime = start.elapsed() >= timeout;
-                let cancelled = abort
-                    .as_ref()
-                    .is_some_and(|a| a.load(Ordering::SeqCst));
-                if overtime || cancelled || crate::shutdown::is_shutdown_requested() {
-                    timed_out = overtime;
-                    kill_process_group(cargo_pid).ok();
-                    let status = child.wait().map_err(|e| DevError::Subprocess {
-                        program: program.into(),
-                        code: None,
-                        stderr: e.to_string(),
-                    })?;
-                    break status;
-                }
-                thread::sleep(WATCHDOG_POLL);
-            }
-            Err(e) => {
-                return Err(DevError::Subprocess {
-                    program: program.into(),
-                    code: None,
-                    stderr: e.to_string(),
-                });
-            }
-        }
-    };
+    let (status, timed_out) = wait_parallel(&mut child, program, start, timeout, abort)?;
+    drop(reaper);
     done.store(true, Ordering::SeqCst);
 
     stdout_thread.join().ok();
@@ -700,6 +688,47 @@ where
         timed_out,
         completed,
     })
+}
+
+/// The parallel runner's wait loop: poll the process-group leader until it
+/// exits, or kill the group on the whole-sweep backstop, a lane-wide `abort`,
+/// or a cooperative shutdown. Returns the exit status and whether the
+/// backstop (not a cancellation) is what ended it.
+fn wait_parallel(
+    child: &mut std::process::Child,
+    program: &str,
+    start: Instant,
+    timeout: Duration,
+    abort: Option<&AtomicBool>,
+) -> Result<(std::process::ExitStatus, bool), DevError> {
+    // Spawned with `process_group(0)`, so the child's pid is its pgid.
+    let cargo_pid = child.id();
+    let subprocess_err = |e: std::io::Error| DevError::Subprocess {
+        program: program.into(),
+        code: None,
+        stderr: e.to_string(),
+    };
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok((status, false)),
+            Ok(None) => {
+                let overtime = start.elapsed() >= timeout;
+                let cancelled = abort.is_some_and(|a| a.load(Ordering::SeqCst));
+                // The shutdown flag is set only under a `SigtermGuard`, which
+                // `check`/`test` do not install; there the `GroupReaper`
+                // kills this group from the signal handler and brokkr dies on
+                // the re-raised signal, so this poll matters only to a caller
+                // running inside a guard.
+                if overtime || cancelled || crate::shutdown::is_shutdown_requested() {
+                    kill_process_group(cargo_pid).ok();
+                    let status = child.wait().map_err(subprocess_err)?;
+                    return Ok((status, overtime));
+                }
+                thread::sleep(WATCHDOG_POLL);
+            }
+            Err(e) => return Err(subprocess_err(e)),
+        }
+    }
 }
 
 /// Line-buffered drain of the parallel runner's stdout, which is libtest's
@@ -904,16 +933,17 @@ impl JsonReconstructor {
                 Vec::new()
             }
             ("test", "ok") => {
-                let name = self.finish(val, tracker);
+                let name = self.finish(val, tracker, true);
                 name.map(|n| vec![format!("test {n} ... ok")]).unwrap_or_default()
             }
             ("test", "ignored") => {
-                let name = self.finish(val, tracker);
+                // Not a run: see `TestTracker::observe_result`.
+                let name = self.finish(val, tracker, false);
                 name.map(|n| vec![format!("test {n} ... ignored")])
                     .unwrap_or_default()
             }
             ("test", "failed") => {
-                let Some(name) = self.finish(val, tracker) else {
+                let Some(name) = self.finish(val, tracker, true) else {
                     return Vec::new();
                 };
                 let captured = val
@@ -927,11 +957,12 @@ impl JsonReconstructor {
         }
     }
 
-    /// Clear a completed test from the tracker and return its name.
-    fn finish(&self, val: &Value, tracker: &Mutex<TestTracker>) -> Option<String> {
+    /// Clear a completed test from the tracker and return its name. `ran` is
+    /// false for an ignored result, which must not count as completed.
+    fn finish(&self, val: &Value, tracker: &Mutex<TestTracker>, ran: bool) -> Option<String> {
         let name = val.get("name").and_then(Value::as_str)?.to_owned();
         if let Ok(mut t) = tracker.lock() {
-            t.observe_result(&name);
+            t.observe_result(&name, ran);
         }
         Some(name)
     }
@@ -1014,6 +1045,11 @@ fn spawn_process_group(
         cmd.env(key, value);
     }
     crate::oom::protect_child(&mut cmd);
+    // The group is outside brokkr's own, so nothing aimed at brokkr reaches it.
+    // Both runners register it with `shutdown::GroupReaper` for SIGINT/SIGTERM;
+    // this covers the direct child when brokkr is SIGKILLed. Both runners wait
+    // on the child from the spawning thread, which the death signal requires.
+    crate::shutdown::die_with_parent(&mut cmd);
     // Last, after every caller-supplied env var: see `crate::hold`.
     crate::hold::stamp(&mut cmd);
 
@@ -1642,7 +1678,7 @@ mod tests {
         let mut tracker = TestTracker::default();
         tracker.observe_suite_start();
         tracker.observe_start("tests::works".to_owned());
-        tracker.observe_result("tests::works");
+        tracker.observe_result("tests::works", true);
 
         // Second binary of the same invocation, same test path, clock wound past
         // the cap in between. The first suite summarises first, as a real stream
@@ -1691,7 +1727,7 @@ mod tests {
         // A start marker ends the idle window and switches to per-test aging.
         tracker.observe_start("a::fast".to_owned());
         assert!(tracker.timed_out(TEST_TIMEOUT).is_none());
-        tracker.observe_result("a::fast");
+        tracker.observe_result("a::fast", true);
         assert!(tracker.timed_out(TEST_TIMEOUT).is_none(), "idle window restarts at the result");
     }
 
@@ -1819,7 +1855,7 @@ mod tests {
         let mut tracker = TestTracker::default();
         tracker.observe_suite_start();
         tracker.observe_start("a::one".to_owned());
-        tracker.observe_result("a::one");
+        tracker.observe_result("a::one", true);
 
         // Wind the clock back past the cap, then replay the same records - which
         // is exactly what a test looping `println!` of a captured event does.
@@ -1827,7 +1863,7 @@ mod tests {
             .checked_sub(TEST_TIMEOUT + Duration::from_secs(1))
             .unwrap_or_else(Instant::now);
         tracker.observe_start("a::one".to_owned());
-        tracker.observe_result("a::one");
+        tracker.observe_result("a::one", true);
 
         let (name, _) = tracker
             .timed_out(TEST_TIMEOUT)
@@ -2085,6 +2121,29 @@ mod tests {
             "location parsed: {:?}",
             parsed.failures[0].location
         );
+    }
+
+    /// libtest emits `started` for an `#[ignore]`d test, then `ignored`. The
+    /// test leaves the in-flight set but must not land in `completed`, which
+    /// the parallel lane sums as its pass count: counting it reported ignored
+    /// tests as passed and hid an all-ignored binary from the empty-unit note.
+    #[test]
+    fn an_ignored_test_is_not_counted_as_completed() {
+        let tracker = Mutex::new(TestTracker::default());
+        let mut recon = JsonReconstructor::default();
+        for ev in [
+            r#"{"type":"suite","event":"started","test_count":2}"#,
+            r#"{"type":"test","event":"started","name":"a::skipped"}"#,
+            r#"{"type":"test","name":"a::skipped","event":"ignored"}"#,
+            r#"{"type":"test","event":"started","name":"a::ran"}"#,
+            r#"{"type":"test","name":"a::ran","event":"ok"}"#,
+        ] {
+            recon.observe(ev, &tracker);
+        }
+        let t = tracker.lock().unwrap();
+        assert!(t.current.is_empty(), "an ignored test is not in flight");
+        let names: Vec<&str> = t.completed.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, vec!["a::ran"]);
     }
 
     #[test]

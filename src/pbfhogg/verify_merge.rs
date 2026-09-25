@@ -4,7 +4,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Instant;
 
-use super::verify::{self, VerifyHarness};
+use super::verify::{self, Findings, VerifyHarness};
 use crate::error::DevError;
 use crate::osc::{self, OscDiff};
 use crate::output;
@@ -23,7 +23,7 @@ pub fn run(
     osc: &Path,
     osmosis: Option<&OsmosisTools>,
     direct_io: bool,
-) -> Result<(), DevError> {
+) -> Result<Findings, DevError> {
     let outdir = harness.subdir("merge")?;
 
     verify_msg("=== verify apply-changes ===");
@@ -85,6 +85,9 @@ pub fn run(
             Ok(captured) => {
                 if let Err(e) = harness.check_exit(&captured, "osmosis") {
                     verify_msg(&format!("  osmosis failed: {e}"));
+                    // A failed run may leave a partial file; the element-count
+                    // section below reads `exists()` as "osmosis produced this".
+                    drop(std::fs::remove_file(&osmosis_out));
                 }
             }
             Err(e) => {
@@ -103,6 +106,7 @@ pub fn run(
             Ok(captured) => {
                 if let Err(e) = harness.check_exit(&captured, "osmconvert") {
                     verify_msg(&format!("  osmconvert failed: {e}"));
+                    drop(std::fs::remove_file(&osmconvert_out));
                 }
             }
             Err(e) => {
@@ -112,6 +116,9 @@ pub fn run(
     }
 
     // --- Element counts ---
+    // `exists()` is sound here only because `subdir` hands back an emptied
+    // directory and a failed tool run removes its partial output above - a
+    // file present now was written by this run.
     verify_msg("=== element counts ===");
     harness.print_inspect("pbfhogg", &pbfhogg_out)?;
     harness.print_inspect("osmium", &osmium_out)?;
@@ -122,8 +129,13 @@ pub fn run(
         harness.print_inspect("osmconvert", &osmconvert_out)?;
     }
 
+    let mut findings = Findings::new();
+
     // --- Sort check ---
-    harness.check_sorted("pbfhogg apply-changes", &pbfhogg_out)?;
+    findings.record(
+        "pbfhogg apply-changes output order",
+        harness.check_sorted("pbfhogg apply-changes", &pbfhogg_out)?,
+    );
 
     // pbfhogg diff (the deep-compare below) is a merge-join and requires both
     // inputs to declare the Sort.Type_then_ID optional feature. pbfhogg's
@@ -155,7 +167,7 @@ pub fn run(
     // elements, or content-level `<modify>` differences) fails verify.
     verify_pbfhogg_vs_osmium(harness, osc, &pbfhogg_out, &osmium_sorted, &outdir)?;
 
-    Ok(())
+    Ok(findings)
 }
 
 /// Run `pbfhogg diff --format osc` on `(pbfhogg_out, osmium_out)`,
@@ -203,10 +215,19 @@ fn verify_pbfhogg_vs_osmium(
         &osmium_str,
     ])?;
 
-    // pbfhogg diff exits non-zero when differences are found - that's
-    // expected. A signal kill or argument error would also surface as
-    // non-success, so distinguish: trust the exit code, but only fail
-    // hard if the output OSC is missing.
+    // pbfhogg diff exits 1 when differences are found - that's expected.
+    // A signal kill or any other exit code means the diff did not complete,
+    // and whatever OSC it left behind is partial, so that is a hard error.
+    // The OSC's existence is then a real signal: `subdir` emptied the
+    // directory, so a file here was written by this run.
+    if !matches!(captured.status.code(), Some(0 | 1)) {
+        let stderr = String::from_utf8_lossy(&captured.stderr);
+        return Err(DevError::Subprocess {
+            program: "pbfhogg diff --format osc".into(),
+            code: captured.status.code(),
+            stderr: stderr.into_owned(),
+        });
+    }
     if !diff_path.exists() {
         let stderr = String::from_utf8_lossy(&captured.stderr);
         return Err(DevError::Verify(format!(

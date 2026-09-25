@@ -315,6 +315,51 @@ pub struct HarnessReport {
     pub trade_diffs: Vec<TradeDiffLine>,
 }
 
+impl HarnessReport {
+    /// Collapse repeated records to the last one emitted, returning a
+    /// description of each repeat (sorted, one per affected key).
+    ///
+    /// The harness contract is one disposition line per probe and one
+    /// `trade_diff` line per `(probe, our_index, tv_index)`. A repeat breaks
+    /// the run store's primary keys - ingest would fail with an anonymous
+    /// `UNIQUE constraint failed` - while the gate and bless, which index
+    /// dispositions by probe, would silently keep the last. Collapsing here,
+    /// before any consumer sees the report, gives all three the same record;
+    /// the caller fails the run on a non-empty return, naming the repeats.
+    pub fn take_duplicates(&mut self) -> Vec<String> {
+        let mut repeats: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut kept: Vec<ProbeLine> = Vec::with_capacity(self.probes.len());
+        for p in std::mem::take(&mut self.probes).into_iter().rev() {
+            if seen.insert(p.probe.clone()) {
+                kept.push(p);
+            } else {
+                repeats.insert(format!("{} (disposition)", p.probe));
+            }
+        }
+        kept.reverse();
+        self.probes = kept;
+
+        let mut seen: HashSet<(String, i64, i64)> = HashSet::new();
+        let mut kept: Vec<TradeDiffLine> = Vec::with_capacity(self.trade_diffs.len());
+        for t in std::mem::take(&mut self.trade_diffs).into_iter().rev() {
+            if seen.insert((t.probe.clone(), t.our_index, t.tv_index)) {
+                kept.push(t);
+            } else {
+                repeats.insert(format!(
+                    "{} (trade_diff our_index={} tv_index={})",
+                    t.probe, t.our_index, t.tv_index
+                ));
+            }
+        }
+        kept.reverse();
+        self.trade_diffs = kept;
+
+        repeats.into_iter().collect()
+    }
+}
+
 /// Computed summary tally, replacing the deleted harness-emitted summary.
 #[derive(Debug, Default)]
 pub struct Summary {
@@ -892,6 +937,30 @@ mod tests {
         assert_eq!(r.probes[0].dense_na_sites.len(), 1); // bad site dropped
         assert_eq!(r.probes[0].dense_na_sites[0].name, "a");
         assert_eq!(r.probes[0].dense_na_sites[0].call_site, "8");
+    }
+
+    #[test]
+    fn take_duplicates_keeps_the_last_line_and_names_each_repeat() {
+        let mut r = parse(
+            br#"{"probe":"a","outcome":"parity","acceptance":{"tier":"accepted"}}
+{"probe":"b","outcome":"parity","acceptance":{"tier":"accepted"}}
+{"probe":"a","outcome":"compile_fail","error":"x"}
+{"kind":"trade_diff","probe":"b","our_index":1,"tv_index":1,"our_entry_ts":1,"our_exit_ts":2,"our_entry_price":1.0,"our_exit_price":2.0,"our_qty":1.0,"our_pnl":1.0}
+{"kind":"trade_diff","probe":"b","our_index":1,"tv_index":1,"our_entry_ts":1,"our_exit_ts":2,"our_entry_price":1.0,"our_exit_price":2.0,"our_qty":1.0,"our_pnl":9.0}
+"#,
+        );
+        let dups = r.take_duplicates();
+        assert_eq!(dups.len(), 2);
+        assert!(dups[0].starts_with("a (disposition)"));
+        assert!(dups[1].contains("b (trade_diff our_index=1 tv_index=1)"));
+        // One record per key survives, the last emitted, in emission order.
+        assert_eq!(r.probes.len(), 2);
+        assert_eq!(r.probes[0].probe, "b");
+        assert_eq!(r.probes[1].disposition(), "compile_fail");
+        assert_eq!(r.trade_diffs.len(), 1);
+        assert!((r.trade_diffs[0].our_pnl - 9.0).abs() < f64::EPSILON);
+        // A clean report has nothing to report.
+        assert!(r.take_duplicates().is_empty());
     }
 
     #[test]

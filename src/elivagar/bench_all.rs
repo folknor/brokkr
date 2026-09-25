@@ -45,9 +45,16 @@ pub fn run(
         opts,
     )?;
 
+    // The two external baselines no longer downgrade a failure to "skipped".
+    // A missing JDK and a crash mid-measurement both used to print one line
+    // and let the suite exit 0, so a suite run could silently lack its
+    // comparison rows. The remaining arms still run (one broken external tool
+    // should not cost the others' numbers), and the suite fails at the end.
+    let mut failures: Vec<String> = Vec::new();
+
     // 2. bench planetiler -- comparison baseline
     output::bench_msg("=== bench planetiler ===");
-    match bench_planetiler::run(
+    if let Err(e) = bench_planetiler::run(
         harness,
         pbf_path,
         file_mb,
@@ -56,8 +63,11 @@ pub fn run(
         &paths.scratch_dir,
         project_root,
     ) {
-        Ok(()) => {}
-        Err(e) => output::bench_msg(&format!("planetiler skipped: {e}")),
+        if matches!(e, DevError::Interrupted) {
+            return Err(e);
+        }
+        output::error(&format!("planetiler failed: {e}"));
+        failures.push("planetiler".into());
     }
 
     // 3. bench node-store -- micro-benchmark
@@ -70,7 +80,7 @@ pub fn run(
 
     // 5. bench tilemaker -- comparison baseline
     output::bench_msg("=== bench tilemaker ===");
-    match bench_tilemaker::run(
+    if let Err(e) = bench_tilemaker::run(
         harness,
         pbf_path,
         file_mb,
@@ -79,9 +89,19 @@ pub fn run(
         &paths.scratch_dir,
         project_root,
     ) {
-        Ok(()) => {}
-        Err(e) => output::bench_msg(&format!("tilemaker skipped: {e}")),
+        if matches!(e, DevError::Interrupted) {
+            return Err(e);
+        }
+        output::error(&format!("tilemaker failed: {e}"));
+        failures.push("tilemaker".into());
     }
 
-    Ok(())
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(DevError::Reported(format!(
+            "bench all: {} failed",
+            failures.join(", ")
+        )))
+    }
 }

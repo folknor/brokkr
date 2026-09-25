@@ -1,4 +1,5 @@
 mod artefacts;
+mod atomic_write;
 mod bench_cmd;
 mod build;
 mod cargo_filter;
@@ -64,6 +65,7 @@ mod test_runner;
 mod test_scratch;
 mod toolchain;
 mod tools;
+mod user_dirs;
 mod wc;
 mod worktree;
 mod worktree_record;

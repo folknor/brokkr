@@ -18,6 +18,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use serde::Serialize;
+
 use crate::build::CargoProfile;
 use crate::config::{DevConfig, GateConfig, HarnessConfig, RatatoskrConfig};
 use crate::context;
@@ -109,6 +111,35 @@ fn sync_script_dir(project_root: &Path, cfg: Option<&RatatoskrConfig>) -> PathBu
 // sync --all - run the whole discovered cohort
 // ---------------------------------------------------------------------------
 
+/// The cohort `sync --all` runs: the discovered scripts narrowed by the name
+/// filter and, unless asked, stripped of `expected = "ignored"` ones. An empty
+/// discovery or an empty selection is a refusal, not a vacuous pass.
+fn select_cohort<'a>(
+    scripts: &'a [ScriptInfo],
+    req: &SyncAllRequest<'_>,
+    dir: &Path,
+) -> Result<Vec<&'a ScriptInfo>, DevError> {
+    if scripts.is_empty() {
+        return Err(DevError::Config(format!(
+            "sync --all: no sync-test scripts found under {}",
+            dir.display()
+        )));
+    }
+    let selected: Vec<&ScriptInfo> = scripts
+        .iter()
+        .filter(|s| req.filter.is_none_or(|f| s.name.contains(f)))
+        .filter(|s| req.include_ignored || s.expected.as_str() != "ignored")
+        .collect();
+    if selected.is_empty() {
+        return Err(DevError::Config(format!(
+            "sync --all: no scripts matched (filter: {}, {} discovered)",
+            req.filter.unwrap_or("none"),
+            scripts.len()
+        )));
+    }
+    Ok(selected)
+}
+
 /// `brokkr sync --all [--filter SUB]` - run every discovered sync script
 /// unmeasured, in discovery order.
 ///
@@ -134,30 +165,7 @@ fn sync_script_dir(project_root: &Path, cfg: Option<&RatatoskrConfig>) -> PathBu
 pub fn run_sync_all(req: &SyncAllRequest<'_>) -> Result<(), DevError> {
     let dir = sync_script_dir(req.project_root, req.dev_config.ratatoskr.as_ref());
     let scripts = discover::discover_at(&dir)?;
-
-    if scripts.is_empty() {
-        return Err(DevError::Config(format!(
-            "sync --all: no sync-test scripts found under {}",
-            dir.display()
-        )));
-    }
-
-    let selected: Vec<&ScriptInfo> = scripts
-        .iter()
-        .filter(|s| {
-            req.filter
-                .is_none_or(|f| s.name.contains(f))
-        })
-        .filter(|s| req.include_ignored || s.expected.as_str() != "ignored")
-        .collect();
-
-    if selected.is_empty() {
-        return Err(DevError::Config(format!(
-            "sync --all: no scripts matched (filter: {}, {} discovered)",
-            req.filter.unwrap_or("none"),
-            scripts.len()
-        )));
-    }
+    let selected = select_cohort(&scripts, req, &dir)?;
 
     let (cfg, harness_cfg, mock_binary, fixtures_dir) =
         validate_sync_config(req.project_root, req.dev_config)?;
@@ -202,7 +210,18 @@ pub fn run_sync_all(req: &SyncAllRequest<'_>) -> Result<(), DevError> {
 
     let mut failures: Vec<&str> = Vec::new();
     let mut any_preserved = false;
-    for script in &selected {
+    let mut interrupted_at: Option<usize> = None;
+    for (idx, script) in selected.iter().enumerate() {
+        // Keep-going covers script failures, not `brokkr kill` / Ctrl-C.
+        // The flag stays set for the rest of the sweep (one guard for the
+        // whole cohort), so continuing would spawn sæhrimnir for every
+        // remaining script only to kill its harness at once, preserving
+        // an artefact dir each time. Checked before the spawn as well as
+        // on the result, since a request can land between scripts.
+        if crate::shutdown::is_shutdown_requested() {
+            interrupted_at = Some(idx);
+            break;
+        }
         let outcome = match resolve_info(script, &fixtures_dir) {
             Ok(resolved) => runner.run_resolved(&resolved, &_lock),
             Err(e) => {
@@ -214,6 +233,15 @@ pub fn run_sync_all(req: &SyncAllRequest<'_>) -> Result<(), DevError> {
         match outcome.result {
             Ok(()) => {
                 output::ratatoskr_msg(&format!("{}: PASS{}", script.name, outcome.summary));
+            }
+            Err(DevError::Interrupted) => {
+                output::ratatoskr_msg(&format!("{}: INTERRUPTED{}", script.name, outcome.summary));
+                if let Some(path) = outcome.preserved {
+                    output::ratatoskr_msg(&format!("  artefacts preserved at {}", path.display()));
+                    any_preserved = true;
+                }
+                interrupted_at = Some(idx);
+                break;
             }
             Err(e) => {
                 output::ratatoskr_msg(&format!("{}: FAIL{} - {e}", script.name, outcome.summary));
@@ -228,6 +256,16 @@ pub fn run_sync_all(req: &SyncAllRequest<'_>) -> Result<(), DevError> {
 
     if any_preserved {
         artefacts::emit_clean_hint();
+    }
+    if let Some(idx) = interrupted_at {
+        output::ratatoskr_msg(&format!(
+            "sync cohort: interrupted at script {}/{} ({} passed, {} failed before it)",
+            idx + 1,
+            selected.len(),
+            idx - failures.len(),
+            failures.len(),
+        ));
+        return Err(DevError::Interrupted);
     }
     let passed = selected.len() - failures.len();
     output::ratatoskr_msg(&format!("sync cohort: {passed}/{} passed", selected.len()));
@@ -630,6 +668,7 @@ impl SyncRunner<'_> {
             self.built,
             &dc,
             &mock_outcome,
+            self.project_root,
         )?;
 
         if dc.killed_on_deadline {
@@ -647,6 +686,78 @@ impl SyncRunner<'_> {
     }
 }
 
+/// Top-level `run.toml` for a sync run. Field names match service's
+/// `run.toml` (`binary`, `elapsed_ms`, `exit_code`, `signal`, the `git_*`
+/// trio) so one reader handles both; the sync-only parts are the deadline
+/// flag and the `[mock]` table.
+#[derive(Serialize)]
+struct SyncRunMetadata {
+    brokkr_version: String,
+    script: String,
+    binary: String,
+    features: String,
+    /// The harness binary's wall time.
+    elapsed_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    exit_code: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    signal: Option<i32>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    killed_on_deadline: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    git_commit: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    git_subject: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    git_clean: Option<bool>,
+    /// Last, so it serializes as a trailing `[mock]` table.
+    mock: SyncMockMetadata,
+}
+
+#[derive(Serialize)]
+struct SyncMockMetadata {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    exit_code: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    signal: Option<i32>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    killed_after_budget: bool,
+}
+
+/// Render the sync `run.toml` body. Serialized, never `format!`ed: paths,
+/// the features label and the git subject go into TOML strings, and any
+/// `"` or `\` in them would otherwise produce a file no TOML reader can
+/// open. Pure so the escaping is testable without a run.
+fn render_run_toml(
+    script_abs: &Path,
+    built: &HarnessBuild,
+    dc: &output::DeadlineCapture,
+    mock: &MockOutcome,
+    git: Option<&git::GitInfo>,
+) -> Result<String, DevError> {
+    use std::os::unix::process::ExitStatusExt;
+    let meta = SyncRunMetadata {
+        brokkr_version: env!("CARGO_PKG_VERSION").to_owned(),
+        script: script_abs.display().to_string(),
+        binary: built.binary.display().to_string(),
+        features: built.features_label.clone(),
+        elapsed_ms: u64::try_from(dc.captured.elapsed.as_millis()).unwrap_or(u64::MAX),
+        exit_code: dc.captured.status.code(),
+        signal: dc.captured.status.signal(),
+        killed_on_deadline: dc.killed_on_deadline,
+        git_commit: git.map(|g| g.commit.clone()),
+        git_subject: git.map(|g| g.subject.clone()),
+        git_clean: git.map(|g| g.is_clean),
+        mock: SyncMockMetadata {
+            exit_code: mock.exit_code,
+            signal: mock.signal,
+            killed_after_budget: mock.killed_after_budget,
+        },
+    };
+    toml::to_string(&meta)
+        .map_err(|e| DevError::Config(format!("sync: failed to serialize run.toml: {e}")))
+}
+
 /// Write top-level `run.toml` with reproducibility metadata. Mock and
 /// harness keep their own subdir state; this top-level file ties them
 /// together for triage.
@@ -657,38 +768,16 @@ fn write_run_toml(
     built: &HarnessBuild,
     dc: &output::DeadlineCapture,
     mock: &MockOutcome,
+    project_root: &Path,
 ) -> Result<(), DevError> {
-    let mut s = format!(
-        "brokkr_version = \"{}\"\nscript = \"{}\"\nharness_binary = \"{}\"\nfeatures = \"{}\"\nharness_elapsed_ms = {}\n",
-        env!("CARGO_PKG_VERSION"),
-        script_abs.display(),
-        built.binary.display(),
-        built.features_label,
-        dc.captured.elapsed.as_millis(),
-    );
-    if let Some(code) = dc.captured.status.code() {
-        s.push_str(&format!("harness_exit_code = {code}\n"));
-    }
-    if dc.killed_on_deadline {
-        s.push_str("harness_killed_on_deadline = true\n");
-    }
-    s.push_str("\n[mock]\n");
-    if let Some(code) = mock.exit_code {
-        s.push_str(&format!("exit_code = {code}\n"));
-    }
-    if let Some(sig) = mock.signal {
-        s.push_str(&format!("signal = {sig}\n"));
-    }
-    if mock.killed_after_budget {
-        s.push_str("killed_after_budget = true\n");
-    }
-
+    let git_info = git::collect(project_root).ok();
+    let body = render_run_toml(script_abs, built, dc, mock, git_info.as_ref())?;
     fs::write(
         harness_dir
             .parent()
             .unwrap_or(harness_dir)
             .join("run.toml"),
-        s,
+        body,
     )
     .map_err(DevError::Io)?;
     let _mock_dir_anchor = mock_dir; // future: copy mock data dir on failure

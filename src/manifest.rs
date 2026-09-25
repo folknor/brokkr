@@ -81,23 +81,33 @@ pub fn scan(
     }
 
     let mut manifests: Vec<(PathBuf, DocumentMut)> = Vec::new();
+    let mut out = Vec::new();
     for rel in gremlins::tracked_files(project_root)? {
         if !globs::matches(&paths, &rel) || globs::matches(&exclude, &rel) {
             continue;
         }
         let abs = project_root.join(&rel);
-        let Ok(text) = std::fs::read_to_string(&abs) else {
+        // An unreadable file is an error (see `gremlins::read_in_scope`); only a
+        // path deleted from the working tree is skipped.
+        let Some(bytes) = gremlins::read_in_scope(&abs, &rel)? else {
             continue;
         };
-        // A broken template/fixture manifest elsewhere in the tree must not
-        // down the whole phase - skip it, mirroring the read_to_string branch.
-        let Ok(doc) = text.parse::<DocumentMut>() else {
-            continue;
+        // A manifest that is not UTF-8 or not TOML is reported, not skipped:
+        // skipping it passed every enabled check on a file none of them looked
+        // at, and the adapter-group check silently lost that crate. A broken
+        // template/fixture manifest must not down the whole phase either, so
+        // it is one violation for that file - exempt it with
+        // `[manifest].exclude` if it is deliberately not a real manifest.
+        let parsed = match std::str::from_utf8(&bytes) {
+            Ok(text) => text.parse::<DocumentMut>().map_err(|e| e.to_string()),
+            Err(e) => Err(format!("not valid UTF-8 ({e})")),
         };
-        manifests.push((rel, doc));
+        match parsed {
+            Ok(doc) => manifests.push((rel, doc)),
+            Err(why) => out.push(unparseable(rel, &why)),
+        }
     }
 
-    let mut out = Vec::new();
     for (rel, doc) in &manifests {
         check_document(rel, doc, cfg, globs::matches(&shape_exclude, rel), &mut out);
     }
@@ -107,6 +117,18 @@ pub fn scan(
         check_adapter_group(&manifests, ag, &mut out);
     }
     Ok(out)
+}
+
+/// The violation for an in-scope manifest no check could read. `why` is
+/// flattened to one line: `toml_edit`'s parse error is a multi-line snippet,
+/// and the report format is one line per violation.
+fn unparseable(file: PathBuf, why: &str) -> ManifestViolation {
+    let why = why.split_whitespace().collect::<Vec<_>>().join(" ");
+    ManifestViolation {
+        file,
+        rule: "unparseable",
+        message: format!("cannot be parsed, so no check ran on it: {why}"),
+    }
 }
 
 /// Cargo-conv check 9: crates named in `forbidden_in` must not depend on any
@@ -602,6 +624,17 @@ mod tests {
         let mut out = Vec::new();
         check_document(Path::new("Cargo.toml"), &doc, cfg, shape_excluded, &mut out);
         out.iter().map(|v| (v.rule, v.message.clone())).collect()
+    }
+
+    #[test]
+    fn unparseable_manifest_is_one_single_line_violation() {
+        let err = "[dependencies\nfoo = 1"
+            .parse::<DocumentMut>()
+            .map_err(|e| e.to_string())
+            .unwrap_err();
+        let v = unparseable(PathBuf::from("t/Cargo.toml"), &err);
+        assert_eq!(v.rule, "unparseable");
+        assert!(!format_one(&v).contains('\n'), "{}", format_one(&v));
     }
 
     #[test]

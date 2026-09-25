@@ -133,6 +133,12 @@ pub fn format_cli_args(program: &str, args: &[&str]) -> String {
 /// On completion, returns `Ok(())` if all succeeded, or a summary error
 /// listing which variants failed and why.
 ///
+/// An empty `variants` list is an error, not a vacuous success. Callers build
+/// the list by filtering a fixed set against a user selector (`--query NAME`,
+/// `--mode NAME`, ...), so an empty list means the selector matched nothing -
+/// a typo. Returning `Ok` there recorded no rows and exited 0, which reads
+/// exactly like a successful bench.
+///
 /// Usage:
 /// ```ignore
 /// run_variants("mode", &["sequential", "parallel", "pipelined"], |variant| {
@@ -144,6 +150,12 @@ pub fn run_variants<F>(label: &str, variants: &[&str], mut run_one: F) -> Result
 where
     F: FnMut(&str) -> Result<(), DevError>,
 {
+    if variants.is_empty() {
+        return Err(DevError::Config(format!(
+            "no {label} variants selected - nothing to benchmark (check the {label} name)"
+        )));
+    }
+
     let mut failures: Vec<(&str, String)> = Vec::new();
 
     for &variant in variants {
@@ -457,17 +469,13 @@ const SIDECAR_BACKUP_COPIES: usize = 3;
 /// Resolve the sidecar backup directory.
 ///
 /// Uses `$XDG_DATA_HOME/brokkr/sidecar-backups/`, falling back to
-/// `$HOME/.local/share/brokkr/sidecar-backups/`.
+/// `$HOME/.local/share/brokkr/sidecar-backups/`. An empty or relative
+/// `XDG_DATA_HOME` counts as unset (`user_dirs`), so the backups can never
+/// land in - and dirty - the tree brokkr is running in.
 fn sidecar_backup_dir() -> Result<PathBuf, DevError> {
-    let data_dir = if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
-        PathBuf::from(xdg)
-    } else if let Ok(home) = std::env::var("HOME") {
-        PathBuf::from(home).join(".local").join("share")
-    } else {
-        return Err(DevError::Config(
-            "cannot determine data directory for sidecar backup".into(),
-        ));
-    };
+    let data_dir = crate::user_dirs::xdg_data_home().ok_or_else(|| {
+        DevError::Config("cannot determine data directory for sidecar backup".into())
+    })?;
     Ok(data_dir.join("brokkr").join("sidecar-backups"))
 }
 

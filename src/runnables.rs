@@ -32,10 +32,18 @@ const RUN_VALUE_FLAGS: [&str; 2] = ["--features", "-F"];
 /// Rewrite `run [flags] -- ARGS...` so the `--` no longer lands in the
 /// name position. Returns the argv unchanged in every other shape,
 /// including `run NAME -- ARGS...`.
+///
+/// Anchored on the subcommand position, `argv[1]`: `Cli` has no top-level
+/// options that take a value (only clap's `--help`/`--version`, which end
+/// parsing), so the subcommand is always the first argument. Matching the
+/// first `run` anywhere would rewrite a `run` that is some other command's
+/// value - a mogwai target named `run`, `history --command run` - whenever a
+/// `--` followed it.
 pub fn bare_run_sentinel(args: Vec<String>) -> Vec<String> {
-    let Some(run_at) = args.iter().position(|a| a == "run") else {
+    let run_at = 1;
+    if args.get(run_at).is_none_or(|a| a != "run") {
         return args;
-    };
+    }
     let mut i = run_at + 1;
     while args.get(i).is_some_and(|a| a.starts_with('-') && a != "--") {
         // `--features=a` carries its value inline; `--features a` does not.
@@ -107,6 +115,12 @@ fn resolve_debug(cfg: Option<&BinConfig>, debug: bool, release: bool) -> bool {
 /// Discover every bin and example target in the workspace via
 /// `cargo metadata --no-deps`.
 fn discover(project_root: &Path) -> Result<Vec<Runnable>, DevError> {
+    discover_workspace(project_root).map(|(runnables, _)| runnables)
+}
+
+/// [`discover`], plus metadata's `workspace_root` - the directory cargo reads
+/// `Cargo.lock` from for every member, wherever the invocation started.
+fn discover_workspace(project_root: &Path) -> Result<(Vec<Runnable>, PathBuf), DevError> {
     let captured = output::run_captured(
         "cargo",
         &["metadata", "--format-version", "1", "--no-deps"],
@@ -122,6 +136,11 @@ fn discover(project_root: &Path) -> Result<Vec<Runnable>, DevError> {
         .get("packages")
         .and_then(serde_json::Value::as_array)
         .ok_or_else(|| DevError::Build("cargo metadata missing \"packages\"".into()))?;
+    let workspace_root = val
+        .get("workspace_root")
+        .and_then(serde_json::Value::as_str)
+        .map(PathBuf::from)
+        .ok_or_else(|| DevError::Build("cargo metadata missing \"workspace_root\"".into()))?;
 
     let mut out = Vec::new();
     for pkg in packages {
@@ -160,7 +179,7 @@ fn discover(project_root: &Path) -> Result<Vec<Runnable>, DevError> {
             });
         }
     }
-    Ok(out)
+    Ok((out, workspace_root))
 }
 
 /// One index line per runnable: `name (bin, pkg)` / `name (example, pkg)`.
@@ -304,7 +323,7 @@ pub fn cmd_install(
     unlocked: bool,
     lock: Option<&crate::lockfile::LockGuard>,
 ) -> Result<(), DevError> {
-    let runnables = discover(project_root)?;
+    let (runnables, workspace_root) = discover_workspace(project_root)?;
     let bins: Vec<&Runnable> = runnables.iter().filter(|r| !r.example).collect();
 
     let selected: Vec<&Runnable> = match cfg.map(|c| c.install.as_slice()) {
@@ -352,13 +371,14 @@ pub fn cmd_install(
     };
 
     let dev = resolve_debug(cfg, debug, release);
+    // A lock cargo cannot find is a lock `--locked` would only make it abort
+    // over. Look where cargo does: every package discovered here is a member
+    // of one workspace, and `cargo install --path <member>` reads that
+    // workspace's `Cargo.lock` at metadata's `workspace_root` - not the member
+    // directory, and not wherever brokkr happened to be invoked from.
+    let has_lock = workspace_root.join("Cargo.lock").is_file();
     for r in selected {
-        // A lock cargo cannot find is a lock `--locked` would only make it
-        // abort over. Look where cargo does: the package's own directory
-        // first, then the workspace root that owns it.
-        let locked = !unlocked
-            && (r.package_dir.join("Cargo.lock").is_file()
-                || project_root.join("Cargo.lock").is_file());
+        let locked = !unlocked && has_lock;
         if !unlocked && !locked {
             output::run_msg(&format!(
                 "no Cargo.lock for {} - installing with cargo's own \
@@ -460,6 +480,14 @@ mod tests {
     #[test]
     fn other_commands_are_untouched() {
         let argv = ["brokkr", "check", "--", "x"];
+        assert_eq!(rewrite(&argv), argv.to_vec());
+    }
+
+    #[test]
+    fn run_as_another_commands_value_is_untouched() {
+        let argv = ["brokkr", "mogwai", "run", "--", "--threads", "1"];
+        assert_eq!(rewrite(&argv), argv.to_vec());
+        let argv = ["brokkr", "history", "--command", "run", "--", "x"];
         assert_eq!(rewrite(&argv), argv.to_vec());
     }
 }

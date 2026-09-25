@@ -84,9 +84,18 @@ scope for v1.
 2. Look up `[ratatoskr.gate.<name>.baseline].<hostname>`. If missing,
    fail with: `no baseline pinned for host "<hostname>" in gate "<name>"
    - record one with --as-baseline and add it to brokkr.toml`.
-3. Look up that UUID in `gate.db`, scoped to this hostname. If missing,
-   fail - but the failure distinguishes three conditions, because the
-   remedies differ and only the lookup's absence is a fact:
+3. Look up that UUID in `gate.db`, scoped to this hostname. The pin is a
+   full UUID or a prefix of one (the `a344fcc2` form below), and it must
+   resolve to exactly one row: an exact match wins, a prefix matching a
+   single row resolves to it, and a prefix matching several is a hard
+   error naming them - never newest-wins, which would let a later run
+   sharing the prefix silently become the baseline. An empty pin is
+   refused, matching is byte-exact (`%` and `_` are not wildcards), and
+   the run being evaluated is excluded: it is recorded before the lookup,
+   and a pin that matched it would make it its own baseline, where
+   `max_delta = 0` and `equal_to_baseline` pass by construction. If no
+   row matches, fail - but the failure distinguishes three conditions,
+   because the remedies differ and only the lookup's absence is a fact:
    - the UUID exists under **another** hostname: the pin is filed under
      the wrong host key;
    - the UUID is absent and the gate has **no other rows** on this host:
@@ -100,8 +109,10 @@ scope for v1.
    that silently blesses whatever regression is in the tree and leaves
    the gate permanently blind to it. Re-record only from a tree
    independently confirmed good.
-4. Validate the looked-up row's `gate_name`, `script`, and `fixture`
-   match the current invocation. Mismatch is a hard error.
+4. Validate the looked-up row's `gate_name`, `script`, `fixture`, and
+   `profile` match the current invocation. Mismatch is a hard error - a
+   `--debug` run against a release baseline (or the reverse) would make
+   every timing rule meaningless.
 
 ## Bisecting with `--commit`
 
@@ -172,6 +183,11 @@ Each metric sub-table accepts one or more of:
 Multiple rules on the same metric all apply (logical AND). All comparisons
 are scalar; no list/object diffing.
 
+Every metric sub-table must set at least one of these; a table with none
+(or with only `equal_to_baseline = false`) is refused before anything is
+built. It would otherwise check nothing and report PASSED. Likewise a gate
+with no metric tables at all is refused unless the run is `--as-baseline`.
+
 ## Selectors
 
 Three namespaces:
@@ -211,10 +227,16 @@ Every gate's script is resolved and existence-checked **before anything
 is built**, so a typo in the last gate surfaces immediately rather than
 twenty minutes into the sweep.
 
+Every gate's rule set is validated up front too (non-empty, every rule
+carrying a predicate).
+
 A breach does not stop the sweep. After a refactor the useful answer is
 the whole blast radius, not the first provider that tripped, so every
 gate runs, each failure is collected, and the command exits non-zero
-with all of them listed. Fixture-based auto-match remains out of scope.
+with all of them listed. An interrupt is not a breach: `brokkr kill` or
+Ctrl-C stops the sweep at the current gate, prints how far it got, and
+exits with `DevError::Interrupted` rather than recording a FAIL and
+carrying on under the lock. Fixture-based auto-match remains out of scope.
 
 The sweep holds the global lock for its **whole duration**, not
 per-gate. The per-gate bench still acquires internally (via

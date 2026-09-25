@@ -56,10 +56,14 @@ const OVERLAY_BACKGROUND: &str = "#f2efe9";
 /// This is exit **3**, never 1. Exit 1 is the diff *verdict*, and a caller that
 /// cannot separate "content differs" from "regress never ran" reads a truncated
 /// archive as a regression, with only stderr to say otherwise. 2 stays reserved
-/// for clap's usage errors, so the three outcomes never collide.
+/// for clap's usage errors, so the three outcomes never collide. The same code
+/// covers failures before the diff starts - lock, bootstrap, archive
+/// resolution - via `cmd::operational` at the dispatch site.
+pub(crate) const INCOMPLETE_EXIT: i32 = 3;
+
 fn failed(message: &str) -> DevError {
     output::error(message);
-    DevError::ExitCode(3)
+    DevError::ExitCode(INCOMPLETE_EXIT)
 }
 
 /// Run the diff and print the report; `Err(ExitCode(1))` on a failing verdict,

@@ -297,11 +297,36 @@ pub(crate) fn regress(
     )
 }
 
+/// Run a verdict-bearing command (`regress`, `pmtiles-corpus`) so that a failure
+/// to reach any verdict exits `code` rather than the generic 1.
+///
+/// Both commands give exit 1 a meaning - "the archive regressed" / "content
+/// mismatch" - and `main` maps every unmapped `Err` to 1 as well, so a lock
+/// conflict, a `cargo metadata` failure, an unresolvable archive or a real IO
+/// error used to read, to an automated caller, as a regression. The error is
+/// printed here, since `main` prints nothing for `ExitCode`. Verdicts
+/// (`ExitCode`) and cooperative shutdown (`Interrupted`) pass through untouched.
+pub(crate) fn operational<F>(code: i32, f: F) -> Result<(), DevError>
+where
+    F: FnOnce() -> Result<(), DevError>,
+{
+    match f() {
+        Err(e @ (DevError::ExitCode(_) | DevError::Interrupted)) => Err(e),
+        Err(e) => {
+            crate::output::error(&e.to_string());
+            Err(DevError::ExitCode(code))
+        }
+        Ok(()) => Ok(()),
+    }
+}
+
 /// `brokkr pmtiles-corpus <sub>` - the corpus gate, now native brokkr code over
 /// the linked elivagar crate (no shelling). Resolves the archive and corpus dir
 /// from the shared selector, runs the gate in-process, prints the report, and
 /// maps the verdict to the process exit code (0 pass / 1 content mismatch / 2
-/// archive refusal / 3 baseline trouble) via `DevError::ExitCode`.
+/// archive refusal / 3 baseline trouble) via `DevError::ExitCode`. The dispatch
+/// wraps this in [`operational`] with `corpus::INCOMPLETE_EXIT` (4), so any
+/// error that is not a verdict exits 4.
 ///
 /// `lock` is currently unused: the gate is read-only on the archive (check /
 /// render) or writes only into the committed corpus dir (bless / render-manifest
@@ -322,11 +347,12 @@ pub(crate) fn corpus(
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
 
     // Resolve an archive through the same commit/file resolver as
-    // pmtiles-inspect/diag/svg.
+    // pmtiles-inspect/diag/svg. `variant` is `None` only alongside `--file`
+    // (clap's `required_unless_present`), where the resolver ignores it.
     let resolve = |a: &CorpusArchiveArgs| -> Result<PathBuf, DevError> {
         resolve_pmtiles_by_commit(
             &a.dataset,
-            &a.variant,
+            a.variant.as_deref().unwrap_or_default(),
             a.commit.as_deref(),
             a.file.as_deref(),
             &paths,
@@ -340,6 +366,10 @@ pub(crate) fn corpus(
         over.clone()
             .unwrap_or_else(|| build_root.join("corpus").join(&a.dataset))
     };
+    // `--style` default: derived from the corpus dir by the gate's own rule
+    // (`corpus_style_path`), never from the build root independently - the two
+    // disagree as soon as `--corpus` points elsewhere.
+    let style_default = gate::corpus_style_path;
 
     match cmd {
         PmtilesCorpusCommand::Check { archive, corpus } => {
@@ -367,9 +397,7 @@ pub(crate) fn corpus(
         } => {
             let path = resolve(archive)?;
             let dir = corpus_dir(archive, corpus);
-            let style_path = style
-                .clone()
-                .unwrap_or_else(|| build_root.join("corpus").join("style.toml"));
+            let style_path = style.clone().unwrap_or_else(|| style_default(&dir));
             let (outcome, report) = gate::render_manifest(&path, &dir, &style_path)
                 .map_err(DevError::Io)?;
             emit_corpus(outcome, &report)
@@ -384,9 +412,10 @@ pub(crate) fn corpus(
             output,
         } => {
             let path = resolve(archive)?;
+            // `render` takes no `--corpus`; the default corpus dir stands in.
             let style_path = style
                 .clone()
-                .unwrap_or_else(|| build_root.join("corpus").join("style.toml"));
+                .unwrap_or_else(|| style_default(&corpus_dir(archive, &None)));
             let layer_list: Option<Vec<String>> = layers
                 .as_ref()
                 .map(|l| l.split(',').map(str::to_owned).collect());
@@ -421,7 +450,15 @@ pub(crate) fn corpus(
                 None => {
                     let dir = paths.data_dir.join(crate::CORPUS_CALIBRAND_DIR);
                     std::fs::create_dir_all(&dir).ok();
-                    dir.join(format!("{}-{}-{op}.pmtiles", archive.dataset, archive.variant))
+                    // With `--file` and no `--variant`, name the calibrand
+                    // after the input file instead.
+                    let stem = match &archive.variant {
+                        Some(v) => format!("{}-{v}", archive.dataset),
+                        None => path
+                            .file_stem()
+                            .map_or_else(|| "file".to_owned(), |s| s.to_string_lossy().into_owned()),
+                    };
+                    dir.join(format!("{stem}-{op}.pmtiles"))
                 }
             };
             let target = tile.as_deref().map(parse_tile).transpose()?;
@@ -478,4 +515,29 @@ fn parse_tile(s: &str) -> Result<(u8, u32, u32), DevError> {
         return Err(bad());
     }
     Ok((z, x, y))
+}
+
+#[cfg(test)]
+mod operational_tests {
+    use super::operational;
+    use crate::error::DevError;
+
+    #[test]
+    fn a_non_verdict_error_exits_the_given_code() {
+        let r = operational(4, || Err(DevError::Config("lock held".into())));
+        assert!(matches!(r, Err(DevError::ExitCode(4))));
+    }
+
+    #[test]
+    fn verdicts_and_interrupts_pass_through() {
+        assert!(matches!(
+            operational(4, || Err(DevError::ExitCode(1))),
+            Err(DevError::ExitCode(1))
+        ));
+        assert!(matches!(
+            operational(4, || Err(DevError::Interrupted)),
+            Err(DevError::Interrupted)
+        ));
+        assert!(operational(4, || Ok(())).is_ok());
+    }
 }

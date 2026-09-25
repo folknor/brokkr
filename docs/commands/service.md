@@ -65,7 +65,7 @@ frontmatter parse (`ceiling`, `preserve_data_dir`, `fixture`), lockfile,
 sweep-aware build via `[ratatoskr.harness]` (same feature contract as
 `brokkr check`), optional sæhrimnir spawn for fixture-bearing scripts (see
 "Fixture frontmatter" below), per-run artefact-dir allocation under
-`.brokkr/ratatoskr/<test>/run-N/`, sync `std::process::Command` spawn of
+`.brokkr/ratatoskr/service/<test>/run-N/`, sync `std::process::Command` spawn of
 `<binary> --test-harness <script>` with `BROKKR_HARNESS_ARTEFACT_DIR` and
 `BROKKR_TEST_BIN_DIR` exported (plus the `RATATOSKR_TEST_*_ENDPOINT` family
 when a fixture is bound), stdout/
@@ -149,8 +149,10 @@ SIGTERM'd with the standard 1.5s drain budget then escalated to SIGKILL
 if it overruns.
 
 Mock artefacts (`stderr.log`, `readiness`) land under
-`.brokkr/ratatoskr/<test>/mock/<fixture-name>/` for single-script runs and
-`.brokkr/ratatoskr/mock/<fixture-name>/` for the cohort.
+`.brokkr/ratatoskr/service-mock/<fixture-name>/` for single-script runs and
+the cohort alike. Both service trees sit one level below
+`.brokkr/ratatoskr/` so a script stem or fixture name can never collide
+with brokkr's own entries there (`sync/`, mock-serve's `mock/`, `gate.db`).
 
 `brokkr lock` from another shell shows the live harness PID (and progress
 `run R/T,` when the run set has more than one entry - soak with `--repeat

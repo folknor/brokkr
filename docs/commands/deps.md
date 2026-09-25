@@ -36,11 +36,21 @@ it into `run()`, add a render arm. No changes to callers.
 
 ## Data source
 
-Shells out to `cargo metadata --format-version 1` once per run and
-deserializes a minimal subset (packages, workspace members, resolve
-graph). No extra crate dependencies. Network phases shell out to
-existing tools (`ccu` today, `cargo audit` planned) - no native
-network code in brokkr.
+Shells out to `cargo metadata --format-version 1 --locked` (once
+unfiltered, once `--filter-platform`ed) and deserializes a minimal
+subset (packages, workspace members, resolve graph). No extra crate
+dependencies. Network phases shell out to existing tools (`ccu`
+today, `cargo audit` planned) - no native network code in brokkr.
+
+`--locked` is what makes "audits `Cargo.lock`" true: without it cargo
+re-resolves whenever the lockfile is missing or behind a manifest,
+rewriting `Cargo.lock` and querying the registry index, so the report
+would describe a graph that exists only in that run. With it, a
+missing or out-of-date lockfile is an error - bring it current with a
+build first; `deps` never generates one. `--offline` is *not* passed:
+metadata reads every dependency's own manifest, so a crate whose
+source is not yet in the local cache still has to be downloaded. The
+index is not consulted once the lock is complete.
 
 ## Checks
 
@@ -106,7 +116,8 @@ Normal-kind chain from a workspace member down to it:
 ```
 
 `source` is the normalised origin: `crates.io`, `git+<url>#<sha>`,
-`registry=<url>`, `workspace`, or `path`. `manifest` is the resolved
+`registry=<url>` (an alternate registry, git-index `registry+` and
+sparse-index `sparse+` alike), `workspace`, or `path`. `manifest` is the resolved
 Cargo.toml with `$HOME` collapsed to `~`. The JSON output carries
 the same two fields on each `ChainTrace`.
 
@@ -220,7 +231,10 @@ while metadata still supplies the workspace root and member list. Emits
 `UnusedWorkspaceDep` (an offline finding: counts toward the exit-1 tally). The
 `[deps].workspace_dep_ignore` list exempts names that are legitimately
 unreferenced (dev tools, top-level members); an entry ending in `*` is a prefix
-glob (`cargo-*`). See `src/deps/workspace_dep.rs`.
+glob (`cargo-*`). A root or member manifest that cannot be read or parsed
+fails the run rather than being skipped: a skipped root would read as an
+all-clear, and a skipped member would lose its inherited deps and report
+them as unused. See `src/deps/workspace_dep.rs`.
 
 ### native_code [v1]
 
@@ -279,8 +293,10 @@ ccu found nothing, prints `All direct deps are at latest on crates.io.`
 (`OutdatedComplete`) ccu emits after a successful parse so the
 renderer can distinguish "0 upgrades, checked" from "didn't check".
 
-If `ccu` is missing or fails for any reason (offline, schema mismatch,
-crash), the phase emits a single `ToolMissing` event with a reason
+`ccu` runs under a wall-clock ceiling (`CCU_DEADLINE` in
+`src/deps/ccu.rs`) and is killed past it, so a stalled registry
+connection cannot hang `deps`. If `ccu` is missing or fails for any
+reason (offline, timed out, schema mismatch, crash), the phase emits a single `ToolMissing` event with a reason
 string and skips. Doesn't fail the run, and doesn't print the
 "all at latest" line - the `ToolMissing` event covers it.
 

@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use super::verify::VerifyHarness;
+use super::verify::{Findings, Verdict, VerifyHarness};
 use crate::cli::AltwMode;
 use crate::error::DevError;
 use crate::output::{CapturedOutput, verify_msg};
@@ -20,7 +20,7 @@ pub fn run(
     pbf: &Path,
     mode: AltwMode,
     direct_io: bool,
-) -> Result<(), DevError> {
+) -> Result<Findings, DevError> {
     let outdir = harness.subdir("add-locations-to-ways")?;
 
     verify_msg("=== verify add-locations-to-ways ===");
@@ -69,21 +69,38 @@ fn run_all(
     pbf_str: &str,
     osmium_out: &Path,
     direct_io: bool,
-) -> Result<(), DevError> {
+) -> Result<Findings, DevError> {
+    let mut findings = Findings::new();
+
     // Hash is the baseline - must succeed, diffed directly against osmium.
     let hash_out = outdir.join("pbfhogg.osm.pbf");
     let captured = run_pbfhogg_mode(harness, pbf_str, &hash_out, None, direct_io)?;
     harness.check_exit(&captured, "pbfhogg add-locations-to-ways")?;
     harness.print_inspect("pbfhogg", &hash_out)?;
-    report_diff(harness, osmium_out, &hash_out, "hash vs osmium")?;
-    harness.compare_sort_feature(&hash_out, osmium_out)?;
+    findings.record(
+        "hash vs osmium diff",
+        report_diff(harness, osmium_out, &hash_out, "hash vs osmium")?,
+    );
+    findings.record(
+        "hash sort feature",
+        harness.compare_sort_feature(&hash_out, osmium_out)?,
+    );
 
     // Optional variants - compared against hash baseline, tolerating alloc failure.
-    run_optional_variant(harness, outdir, pbf_str, &hash_out, "sparse", direct_io, false)?;
-    run_optional_variant(harness, outdir, pbf_str, &hash_out, "dense", direct_io, true)?;
-    run_optional_variant(harness, outdir, pbf_str, &hash_out, "external", direct_io, false)?;
+    for (index_type, alloc_may_fail) in [("sparse", false), ("dense", true), ("external", false)] {
+        run_optional_variant(
+            harness,
+            outdir,
+            pbf_str,
+            &hash_out,
+            index_type,
+            direct_io,
+            alloc_may_fail,
+            &mut findings,
+        )?;
+    }
 
-    Ok(())
+    Ok(findings)
 }
 
 fn run_single(
@@ -93,7 +110,8 @@ fn run_single(
     osmium_out: &Path,
     index_type: Option<&str>,
     direct_io: bool,
-) -> Result<(), DevError> {
+) -> Result<Findings, DevError> {
+    let mut findings = Findings::new();
     let label = index_type.unwrap_or("hash");
     let filename = format!("pbfhogg-{label}.osm.pbf");
     let out_path = outdir.join(&filename);
@@ -101,12 +119,26 @@ fn run_single(
     let captured = run_pbfhogg_mode(harness, pbf_str, &out_path, index_type, direct_io)?;
     harness.check_exit(&captured, &format!("pbfhogg add-locations-to-ways ({label})"))?;
     harness.print_inspect(&format!("pbfhogg ({label})"), &out_path)?;
-    report_diff(harness, osmium_out, &out_path, &format!("{label} vs osmium"))?;
-    harness.compare_sort_feature(&out_path, osmium_out)?;
+    findings.record(
+        &format!("{label} vs osmium diff"),
+        report_diff(harness, osmium_out, &out_path, &format!("{label} vs osmium"))?,
+    );
+    findings.record(
+        &format!("{label} sort feature"),
+        harness.compare_sort_feature(&out_path, osmium_out)?,
+    );
 
-    Ok(())
+    Ok(findings)
 }
 
+/// Run one non-baseline index variant and diff it against the hash output.
+///
+/// A non-zero exit is a failure, except for a variant marked
+/// `alloc_may_fail` (dense), whose up-front allocation legitimately fails on
+/// hosts without `vm.overcommit_memory=1`. That exemption keys on the exit
+/// status alone - brokkr does not parse pbfhogg's allocation-failure message -
+/// so the variant's stderr is echoed to make a different cause visible.
+#[allow(clippy::too_many_arguments)]
 fn run_optional_variant(
     harness: &VerifyHarness,
     outdir: &Path,
@@ -115,6 +147,7 @@ fn run_optional_variant(
     index_type: &str,
     direct_io: bool,
     alloc_may_fail: bool,
+    findings: &mut Findings,
 ) -> Result<(), DevError> {
     verify_msg(&format!("--- {index_type} index variant ---"));
 
@@ -124,13 +157,24 @@ fn run_optional_variant(
     let result = run_pbfhogg_mode(harness, pbf_str, &out_path, Some(index_type), direct_io)?;
 
     if result.status.success() {
-        report_diff(harness, hash_out, &out_path, &format!("hash vs {index_type}"))?;
-    } else if alloc_may_fail {
-        verify_msg(&format!(
-            "  {index_type} index skipped (allocation failed - expected on systems without vm.overcommit_memory=1)"
-        ));
+        findings.record(
+            &format!("hash vs {index_type} diff"),
+            report_diff(harness, hash_out, &out_path, &format!("hash vs {index_type}"))?,
+        );
     } else {
-        verify_msg(&format!("  {index_type} index FAILED (non-zero exit)"));
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        if alloc_may_fail {
+            verify_msg(&format!(
+                "  {index_type} index skipped (non-zero exit, taken as allocation failure - \
+                 expected on systems without vm.overcommit_memory=1)"
+            ));
+        } else {
+            verify_msg(&format!("  {index_type} index FAILED (non-zero exit)"));
+            findings.fail(format!("{index_type} index exited non-zero"));
+        }
+        for line in stderr.lines() {
+            verify_msg(&format!("    {line}"));
+        }
     }
 
     Ok(())
@@ -155,18 +199,19 @@ fn run_pbfhogg_mode(
     harness.run_pbfhogg(&args)
 }
 
+/// Diff `a` against `b`, narrate the outcome, and hand the verdict back for
+/// the caller to record.
 fn report_diff(
     harness: &VerifyHarness,
     a: &Path,
     b: &Path,
     label: &str,
-) -> Result<(), DevError> {
-    let identical = harness.diff_pbfs(a, b)?;
-    if identical {
+) -> Result<Verdict, DevError> {
+    let verdict = harness.diff_pbfs(a, b)?;
+    if verdict.is_pass() {
         verify_msg(&format!("  diff ({label}): PASS (identical)"));
     } else {
         verify_msg(&format!("  diff ({label}): FAIL (differences found)"));
     }
-    Ok(())
+    Ok(verdict)
 }
-

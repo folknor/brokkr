@@ -171,70 +171,61 @@ pub fn geocode_url(port: u16, term: &str) -> String {
 ///
 /// Fails on HTTP 4xx/5xx via `--fail-with-body`. Times out after 30s.
 pub fn curl_get(url: &str) -> Result<String, DevError> {
-    let output = Command::new("curl")
-        .args([
-            "-s",
-            "--compressed",
-            "--fail-with-body",
-            "--max-time",
-            "30",
-            url,
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(|e| DevError::Subprocess {
-            program: "curl".into(),
-            code: None,
-            stderr: e.to_string(),
-        })?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(DevError::Subprocess {
-            program: "curl".into(),
-            code: output.status.code(),
-            stderr: stderr.into_owned(),
-        });
-    }
-
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    run_curl_body(&[url])
 }
 
 /// Send an HTTP POST request with a JSON body via curl and return the response body.
 ///
 /// Fails on HTTP 4xx/5xx via `--fail-with-body`. Times out after 30s.
 pub fn curl_post(url: &str, body: &str) -> Result<String, DevError> {
+    run_curl_body(&[
+        "-X",
+        "POST",
+        url,
+        "-H",
+        "Content-Type: application/json",
+        "-d",
+        body,
+    ])
+}
+
+/// Longest slice of an error response body carried into the error message.
+const ERROR_BODY_PREVIEW: usize = 300;
+
+/// Shared body of [`curl_get`] / [`curl_post`]. `-sS` keeps the progress
+/// meter off but curl's own error line on (plain `-s` silences both, which
+/// left every failure an empty-stderr exit code). On failure the error
+/// carries that line plus a preview of the response body `--fail-with-body`
+/// kept, so an HTTP 500's explanation survives.
+fn run_curl_body(request_args: &[&str]) -> Result<String, DevError> {
+    let mut args = vec!["-sS", "--compressed", "--fail-with-body", "--max-time", "30"];
+    args.extend_from_slice(request_args);
     let output = Command::new("curl")
-        .args([
-            "-s",
-            "--compressed",
-            "--fail-with-body",
-            "--max-time",
-            "30",
-            "-X",
-            "POST",
-            url,
-            "-H",
-            "Content-Type: application/json",
-            "-d",
-            body,
-        ])
+        .args(&args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
-        .map_err(|e| DevError::Subprocess {
+        .map_err(|error| DevError::Spawn {
             program: "curl".into(),
-            code: None,
-            stderr: e.to_string(),
+            error,
         })?;
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        let mut stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        let body = String::from_utf8_lossy(&output.stdout);
+        let body = body.trim();
+        if !body.is_empty() {
+            let preview: String = body.chars().take(ERROR_BODY_PREVIEW).collect();
+            if !stderr.is_empty() {
+                stderr.push('\n');
+            }
+            stderr.push_str("response body: ");
+            stderr.push_str(&preview);
+        }
         return Err(DevError::Subprocess {
             program: "curl".into(),
             code: output.status.code(),
-            stderr: stderr.into_owned(),
+            stderr,
         });
     }
 
@@ -243,32 +234,68 @@ pub fn curl_post(url: &str, body: &str) -> Result<String, DevError> {
 
 /// Check if the server is responding on the given port.
 ///
-/// Sends a GET to `/api/health` with a 2s connect timeout.
-/// Returns `true` if the server responds with HTTP 200.
+/// Sends a GET to `/api/health` with a 2s connect timeout and a 5s ceiling
+/// on the whole request - a server that accepts and then hangs must read as
+/// "not ready", not block `serve`'s readiness poll forever.
+/// Returns `true` if the server responds with HTTP 200, `false` if nothing
+/// healthy answers (refused, timed out, non-200). Errors only when curl
+/// itself cannot be run: "curl is not installed" is not "server not running".
 pub fn health_check(port: u16) -> Result<bool, DevError> {
     let url = format!("http://localhost:{port}/api/health");
 
-    let result = Command::new("curl")
+    let output = Command::new("curl")
         .args([
             "-s",
             "-o",
             "/dev/null",
             "-w",
             "%{http_code}",
-            &url,
             "--connect-timeout",
             "2",
+            "--max-time",
+            "5",
+            &url,
         ])
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .output();
+        .output()
+        .map_err(|error| DevError::Spawn {
+            program: "curl".into(),
+            error,
+        })?;
 
-    match result {
-        Ok(output) if output.status.success() => {
-            let code = String::from_utf8_lossy(&output.stdout);
-            Ok(code.trim() == "200")
+    if !output.status.success() {
+        return Ok(false);
+    }
+    let code = String::from_utf8_lossy(&output.stdout);
+    Ok(code.trim() == "200")
+}
+
+/// One-line description of a failed curl call for PASS/FAIL reports: the
+/// exit code plus curl's error line and any response-body preview
+/// ([`curl_get`]/[`curl_post`] put both in the error), so "HTTP 500" and
+/// "connection refused" read differently.
+pub fn describe_curl_error(err: &DevError) -> String {
+    match err {
+        DevError::Subprocess { code, stderr, .. } => {
+            let detail = stderr
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .collect::<Vec<_>>()
+                .join("; ");
+            let head = match code {
+                Some(c) => format!("curl exit {c}"),
+                None => "curl ended without an exit code".to_owned(),
+            };
+            if detail.is_empty() {
+                head
+            } else {
+                format!("{head}: {detail}")
+            }
         }
-        _ => Ok(false),
+        // `Spawn` renders as "could not run curl: <why>".
+        other => other.to_string(),
     }
 }
 
@@ -423,6 +450,28 @@ mod tests {
     fn geocode_url_encodes_term() {
         let url = geocode_url(3033, "hello world");
         assert_eq!(url, "http://localhost:3033/api/geocode?q=hello%20world");
+    }
+
+    #[test]
+    fn curl_error_description_keeps_status_and_body() {
+        let e = DevError::Subprocess {
+            program: "curl".into(),
+            code: Some(22),
+            stderr: "curl: (22) The requested URL returned error: 500\nresponse body: boom".into(),
+        };
+        assert_eq!(
+            describe_curl_error(&e),
+            "curl exit 22: curl: (22) The requested URL returned error: 500; response body: boom"
+        );
+    }
+
+    #[test]
+    fn curl_spawn_failure_is_not_described_as_a_request_failure() {
+        let e = DevError::Spawn {
+            program: "curl".into(),
+            error: std::io::Error::from(std::io::ErrorKind::NotFound),
+        };
+        assert!(describe_curl_error(&e).starts_with("could not run curl"));
     }
 
     #[test]
