@@ -129,10 +129,15 @@ fn run_nextest_sweep(
         .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect();
 
-    output::run_msg(&format!(
-        "test {}: nextest engine {NEXTEST_ENGINE_VERSION}, process-per-test, brokkr-owned config",
-        sweep.label
-    ));
+    announce_sweep(
+        &format!(
+            "test {}: {}, nextest engine {NEXTEST_ENGINE_VERSION}, process-per-test, brokkr-owned config",
+            sweep.label,
+            describe_sweep(sweep, true, packages)
+        ),
+        None,
+        commands,
+    );
 
     // The graph feeds config parsing (filterset predicates, test groups) and
     // artifact resolution. `--all-features --filter-platform` mirrors what
@@ -189,9 +194,7 @@ fn run_nextest_sweep(
     if !has_target_selector(&args) {
         args.push("--tests".into());
     }
-    if commands {
-        output::run_msg(&format!("cargo {}", args.join(" ")));
-    }
+    cargo_line(commands, &format!("cargo {}", args.join(" ")));
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     let build = output::run_captured_with_env("cargo", &arg_refs, project_root, &env_refs)?;
     if !build.status.success() {
@@ -365,11 +368,21 @@ fn run_nextest_sweep(
         .map_err(|e| DevError::Build(format!("nextest run failed to execute: {e}")))?;
     let _ = reporter.finish();
 
-    let passed = run_stats.summarize_final();
-    Ok(matches!(
-        passed,
+    let passed = matches!(
+        run_stats.summarize_final(),
         nextest_runner::reporter::events::FinalRunStats::Success
-    ))
+    );
+    if passed {
+        // Into the grouped test line like every other lane. The engine's
+        // `skipped` folds filtered-out and ignored tests into one number, so
+        // it goes to the log rather than being passed off as either.
+        note_tests(run_stats.passed, 0, 0);
+        output::detail(&format!(
+            "test {}: {} passed, {} skipped by the engine",
+            sweep.label, run_stats.passed, run_stats.skipped
+        ));
+    }
+    Ok(passed)
 }
 
 /// One testcase from an engine listing, as plain data: the audit's view of
@@ -434,9 +447,7 @@ fn nextest_shape_cases(
     if !has_target_selector(&args) {
         args.push("--tests".into());
     }
-    if commands {
-        output::run_msg(&format!("cargo {}", args.join(" ")));
-    }
+    cargo_line(commands, &format!("cargo {}", args.join(" ")));
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     let build = output::run_captured_with_env("cargo", &arg_refs, project_root, env_refs)?;
     if !build.status.success() {

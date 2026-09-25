@@ -68,7 +68,11 @@ fn run_isolated_sweep(
         .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect();
 
-    output::run_msg(&sweep_run_line("test", sweep, &[], true, false, packages));
+    announce_sweep(
+        &format!("test {}: {}", sweep.label, describe_sweep(sweep, true, packages)),
+        None,
+        commands,
+    );
     let Some(plan) = enumerate_isolated(project_root, sweep, &selection, &env_refs, commands)?
     else {
         return Ok(false);
@@ -84,9 +88,12 @@ fn run_isolated_sweep(
     for name in &runnable {
         if !plan.include_ignored && plan.ignored.contains(name) {
             ignored += 1;
-            println!("[test]    SKIP {name} (#[ignore], lane runs without --include-ignored)");
+            output::detail(&format!(
+                "SKIP {name} (#[ignore], lane runs without --include-ignored)"
+            ));
             continue;
         }
+        output::status(&format!("test {}: {name}", sweep.label));
         let outcome = run_one_isolated_test(
             project_root,
             state_root,
@@ -135,12 +142,14 @@ fn run_isolated_sweep(
         ));
         return Ok(false);
     }
-    println!(
-        "[test]    {}: {} process-isolated passed{ignored_note}{}",
+    output::detail(&format!(
+        "{}: {} process-isolated passed{ignored_note}{}",
         sweep.label,
         count_tests(ran),
         skip_note(pkg_skipped)
-    );
+    ));
+    note_tests(ran, ignored, 0);
+    note_pkg_skipped(pkg_skipped);
     Ok(true)
 }
 
@@ -215,11 +224,11 @@ fn plan_runnable(plan: &IsolatedPlan, label: &str) -> Option<(Vec<String>, usize
         ));
         return None;
     }
-    println!(
-        "[test]    {label}: {}, one process each{}",
+    output::detail(&format!(
+        "{label}: {}, one process each{}",
         count_tests(runnable.len()),
         skip_note(pkg_skipped)
-    );
+    ));
     Some((runnable, pkg_skipped))
 }
 
@@ -343,9 +352,7 @@ fn run_one_isolated_test(
         args.push("--include-ignored".into());
     }
 
-    if commands {
-        output::run_msg(&format!("cargo {}", args.join(" ")));
-    }
+    cargo_line(commands, &format!("cargo {}", args.join(" ")));
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     let run = test_runner::streaming_run_libtest(
         &arg_refs,
@@ -406,18 +413,15 @@ fn run_one_isolated_test(
         return Ok(IsolatedOutcome::Failed);
     }
 
-    // The roll-call: one line per test, unconditionally. Elsewhere in the test
-    // phase a passing test prints nothing, because a hundred green lines bury
-    // the run - but this lane is small by construction. It exists for families
-    // of a dozen tests that need a process each, and a lane that grows past
-    // that wants nextest (see the module header), so the scroll this would
-    // cause is the signal to move it rather than a reason to hide it. It is
-    // also the slowest-per-test lane in the run, which is exactly where
-    // progress is worth seeing.
+    // The roll-call: one line per test, into the run log. It used to print,
+    // because this is the slowest-per-test lane in the run and so the one
+    // where progress is worth watching - but a passing run's reader pays for
+    // every line, and the live view is the status line's job: it names the
+    // test in flight on a terminal, which is what the roll-call was for.
     let elapsed = run.completed.first().map(|(_, e)| *e);
     match elapsed {
-        Some(e) => println!("[test]    PASS {name} ({:.1}s)", e.as_secs_f64()),
-        None => println!("[test]    PASS {name}"),
+        Some(e) => output::detail(&format!("PASS {name} ({:.1}s)", e.as_secs_f64())),
+        None => output::detail(&format!("PASS {name}")),
     }
     Ok(IsolatedOutcome::Passed(elapsed))
 }

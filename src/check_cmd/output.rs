@@ -182,14 +182,15 @@ fn describe_features(args: &[String]) -> Option<String> {
 /// package scope, feature shape, rustflags - plus the test-phase-only bits
 /// (libtest filters, thread policy) when `for_test`.
 ///
-/// This is the routine success form. The full cargo command is ~90% profile
-/// boilerplate repeated identically across every sweep (a 14-entry `--skip`
-/// list dwarfs the `-p`/`--features` part that actually varies), so it is
-/// reprinted verbatim only when a sweep fails, or on demand via
-/// `brokkr check --commands`. `rustflags` is always surfaced here even though
-/// it is a single config field: it silently redirects the sweep to an isolated
-/// target dir, and an unexplained full recompile is exactly the thing a
-/// collapsed log must not hide.
+/// A green run never prints it: the shape is config plus invocation,
+/// identical run to run. It goes to the run log and the status line, and a
+/// failing sweep prints it beside its failing command. The full cargo command
+/// is ~90% profile boilerplate repeated identically across every sweep (a
+/// 14-entry `--skip` list dwarfs the `-p`/`--features` part that actually
+/// varies), so the shape is the readable form of it. `rustflags` is always
+/// surfaced here even though it is a single config field: it silently
+/// redirects the sweep to an isolated target dir, and the log is where an
+/// unexplained full recompile gets explained.
 /// Resolve the CLI `-p` list against one sweep's own package selection.
 ///
 /// Cargo *unions* package-selection flags: `--workspace --exclude a -p X`
@@ -340,26 +341,6 @@ pub(crate) fn describe_sweep(
     parts.join(", ")
 }
 
-/// The log line announcing one sweep's cargo run: the full command under
-/// `--commands`, else `<phase> <label>: <shape>`.
-pub(crate) fn sweep_run_line(
-    phase: &str,
-    sweep: &ResolvedSweep,
-    args: &[String],
-    for_test: bool,
-    commands: bool,
-    cli_packages: &[&str],
-) -> String {
-    if commands {
-        return format!("cargo {}", args.join(" "));
-    }
-    format!(
-        "{phase} {}: {}",
-        sweep.label,
-        describe_sweep(sweep, for_test, cli_packages)
-    )
-}
-
 /// Build one binary package with the sweep's feature flags. Errors
 /// surface compile failures the same way the test phase does: the
 /// stderr filtered through `cargo_filter::filter_clippy`.
@@ -383,15 +364,15 @@ fn run_sweep_pre_build(
     args.push("--package".into());
     args.push(package.into());
 
-    if commands {
-        output::run_msg(&format!(
-            "cargo {} (sweep build: {})",
-            args.join(" "),
-            sweep.label
-        ));
-    } else {
-        output::run_msg(&format!("build {package} (sweep: {})", sweep.label));
-    }
+    // A pre-build is part of its sweep's shape: logged, shown as the status,
+    // printed only under `--commands`.
+    let shape = format!("build {package} (sweep: {})", sweep.label);
+    output::status(&shape);
+    output::detail(&shape);
+    cargo_line(
+        commands,
+        &format!("cargo {} (sweep build: {})", args.join(" "), sweep.label),
+    );
 
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     let env_full = merged_env(&sweep.env, project_env);
@@ -618,12 +599,24 @@ fn run_one_test_sweep(
         }
     }
 
-    let line = if commands && multi {
+    let command = if multi {
         format!("cargo {} (sweep: {})", args.join(" "), sweep.label)
     } else {
-        sweep_run_line("test", sweep, &args, true, commands, packages)
+        format!("cargo {}", args.join(" "))
     };
-    output::run_msg(&line);
+    announce_sweep(
+        &format!("test {}: {}", sweep.label, describe_sweep(sweep, true, packages)),
+        Some(&command),
+        commands,
+    );
+    // What the grouped test line and a zero-test note call this execution
+    // unit: the sweep, qualified by its package when one sweep runs as
+    // several resolutions.
+    let unit = if packages.is_empty() {
+        sweep.label.clone()
+    } else {
+        format!("{} ({})", sweep.label, packages.join(", "))
+    };
 
     // Reprinted on any failure below: when a sweep fails, the copy-pasteable
     // cargo line is the most useful thing in the output, so collapsing applies
@@ -653,11 +646,9 @@ fn run_one_test_sweep(
             None,
             |_| {},
             |_| {},
-            move |elapsed| {
-                println!(
-                    "[test]    test binaries built in {:.1}s; running tests (parallel)",
-                    elapsed.as_secs_f64()
-                );
+            {
+                let unit = unit.clone();
+                move |elapsed| built_line(&unit, elapsed, " (parallel)")
             },
         )?;
         let hung = match run.outcome {
@@ -676,11 +667,9 @@ fn run_one_test_sweep(
             test_runner::Ceilings::shared_harness(),
             |_| {},
             |_| {},
-            move |elapsed| {
-                println!(
-                    "[test]    test binaries built in {:.1}s; running tests",
-                    elapsed.as_secs_f64()
-                );
+            {
+                let unit = unit.clone();
+                move |elapsed| built_line(&unit, elapsed, "")
             },
         )?;
         let hung = match run.outcome {
@@ -752,10 +741,12 @@ fn run_one_test_sweep(
     // `brokkr test <NAME>` streams its stdout/stderr live. A gate is not a
     // log tail, and the build warnings below are the one thing here that a
     // passing run still needs to say.
+    // Held until the phase ends and merged with the identical block every other
+    // sweep produced: one cargo warning seen by four sweeps is one warning.
     let filtered = cargo_filter::filter_clippy_in_tree(&stderr, Some(project_root));
     if filtered != "cargo clippy: no issues" {
         let relabeled = filtered.replacen("cargo clippy:", "cargo test:", 1);
-        output::warn(&relabeled);
+        note_warning(&relabeled, &sweep.label);
     }
 
     // Successful exit, but a profile/filter combo could still have
@@ -807,27 +798,27 @@ fn run_one_test_sweep(
         return Ok(false);
     }
 
-    // The symmetric close to "running tests" above: always report how many
-    // tests actually ran, 0 or thousands. On a green run every counted test
-    // passed (a failure returns early), so the headline is the pass count;
-    // ignored / filtered-out are appended only when non-zero. The wrong-run
-    // shapes were already caught by `zero_test_run`, so a 0 here is a
-    // *legitimate* empty run - but on an explicit `-p` spot-check it is worth
-    // a word, since `--tests` excludes doctests and an all-doctest crate
-    // greens on clippy alone.
-    let label = if multi {
-        format!(" (sweep: {})", sweep.label)
-    } else {
-        String::new()
-    };
-    let mut extra = String::new();
-    if parsed.ignored > 0 {
-        extra.push_str(&format!(", {} ignored", parsed.ignored));
+    // The symmetric close to "running tests" above: always account for how
+    // many tests actually ran, 0 or thousands - into the phase's grouped test
+    // line, and per unit into the run log. On a green run every counted test
+    // passed (a failure returns early). The wrong-run shapes were already
+    // caught by `zero_test_run`, so a 0 here is a *legitimate* empty run, and
+    // the grouped line names it rather than letting it vanish into the total;
+    // on an explicit `-p` spot-check it also earns a warning, since `--tests`
+    // excludes doctests and an all-doctest crate greens on clippy alone.
+    note_tests(parsed.passed, parsed.ignored, parsed.filtered_out);
+    output::detail(&format!(
+        "test {unit}: {} passed, {} ignored, {} filtered out",
+        parsed.passed, parsed.ignored, parsed.filtered_out
+    ));
+    if parsed.passed == 0 {
+        let why = if parsed.ignored > 0 {
+            format!("{unit} (all {} ignored)", parsed.ignored)
+        } else {
+            unit.clone()
+        };
+        note_empty_unit(why);
     }
-    if parsed.filtered_out > 0 {
-        extra.push_str(&format!(", {} filtered out", parsed.filtered_out));
-    }
-    println!("[test]    {} passed{extra}{label}", parsed.passed);
     let total = parsed.passed + parsed.failed + parsed.ignored;
     if total == 0 && !packages.is_empty() {
         let flags: Vec<String> = packages.iter().map(|p| format!("-p {p}")).collect();
@@ -838,6 +829,17 @@ fn run_one_test_sweep(
         ));
     }
     Ok(true)
+}
+
+/// The build-finished callback of a test run: the split between compile time
+/// and test time, for the log and the status line.
+fn built_line(unit: &str, elapsed: std::time::Duration, lane: &str) {
+    let msg = format!(
+        "test {unit}: test binaries built in {:.1}s; running tests{lane}",
+        elapsed.as_secs_f64()
+    );
+    output::detail(&msg);
+    output::status(&msg);
 }
 
 /// Refuse a libtest argv that could override the injected `--format json`.
@@ -1336,6 +1338,7 @@ skip = ["edit_only::"]
     fn run(label: &str, selected: Option<&[&str]>) -> SweepResult {
         SweepResult {
             label: label.into(),
+            shape: String::new(),
             command: String::new(),
             stdout: String::new(),
             stderr: String::new(),
@@ -2190,10 +2193,6 @@ warning: z [too_many_lines]
             ..sweep("all-features")
         };
         assert_eq!(describe_sweep(&legacy, false, &[]), "workspace");
-        assert_eq!(
-            sweep_run_line("clippy", &legacy, &[], false, false, &[]),
-            "clippy all-features: workspace"
-        );
     }
 
     #[test]
@@ -2371,22 +2370,4 @@ warning: z [too_many_lines]
         assert_eq!(describe_sweep(&excluded, false, &["x", "y"]), "-p x -p y");
     }
 
-    #[test]
-    fn sweep_run_line_switches_on_commands_flag() {
-        let ffi = ResolvedSweep {
-            packages: s(&["nautilus-core"]),
-            cargo_feature_args: s(&["--features", "ffi"]),
-            ..sweep("ffi")
-        };
-        let args = s(&["clippy", "-p", "nautilus-core", "--features", "ffi"]);
-
-        assert_eq!(
-            sweep_run_line("clippy", &ffi, &args, false, false, &[]),
-            "clippy ffi: 1 pkg, +ffi"
-        );
-        assert_eq!(
-            sweep_run_line("clippy", &ffi, &args, true, true, &[]),
-            "cargo clippy -p nautilus-core --features ffi"
-        );
-    }
 }

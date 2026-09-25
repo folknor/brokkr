@@ -184,7 +184,13 @@ fn quarantine_rollup(quarantine: &[QuarantineEntry], per_entry: &[usize]) -> Str
 /// outside the pair audit entirely (the binaries cannot even build), and
 /// curated sweeps have their shapes' non-run pairs exempted by declaration
 /// (`curated_pairs` is the audit's count of those).
-fn report_declared_narrowing(sweeps: &[ResolvedSweep], curated_pairs: usize) {
+///
+/// Returned as clauses rather than printed: they ride on the coverage line
+/// itself - the green summary or, on a failing audit, a line of their own
+/// ahead of the findings - so `0 orphaned` can never be read apart from what
+/// the universe left out.
+fn declared_narrowing(sweeps: &[ResolvedSweep], curated_pairs: usize) -> Vec<String> {
+    let mut out = Vec::new();
     let excluding: Vec<String> = sweeps
         .iter()
         .filter(|s| !s.test_exclude_packages.is_empty())
@@ -192,11 +198,7 @@ fn report_declared_narrowing(sweeps: &[ResolvedSweep], curated_pairs: usize) {
         .collect();
 
     if !excluding.is_empty() {
-        output::run_msg(&format!(
-            "coverage: sweeps excluding packages from tests - outside the pair \
-             audit: {}",
-            excluding.join(", ")
-        ));
+        out.push(format!("packages excluded from tests in {}", excluding.join(", ")));
     }
     let curated: Vec<&str> = sweeps
         .iter()
@@ -205,12 +207,12 @@ fn report_declared_narrowing(sweeps: &[ResolvedSweep], curated_pairs: usize) {
         .collect();
 
     if !curated.is_empty() {
-        output::run_msg(&format!(
-            "coverage: curated sweeps - non-run pairs exempt from the \
-             universe ({curated_pairs} pairs): {}",
+        out.push(format!(
+            "{curated_pairs} non-run pairs of curated sweeps {}",
             curated.join(", ")
         ));
     }
+    out
 }
 
 /// One audited unit per cargo RESOLUTION, not per configured sweep.
@@ -228,15 +230,14 @@ type ResolutionKey = (profile::BuildShapeKey, Option<String>);
 /// Doc-only sweeps sit outside the pair audit, and the narrowing is
 /// reported like `test_exclude_packages`: visible on every run rather than
 /// silently absent.
-fn report_doc_only_exclusion(sweeps: &[ResolvedSweep]) {
+fn doc_only_exclusion(sweeps: &[ResolvedSweep]) -> Option<String> {
     let doc_only = sweeps.iter().filter(|s| s.doc_only).count();
-    if doc_only > 0 {
-        output::run_msg(&format!(
-            "coverage: {doc_only} doc-only sweep{} outside the pair audit (doctests are not \
-             enumerable)",
-            if doc_only == 1 { "" } else { "s" }
-        ));
-    }
+    (doc_only > 0).then(|| {
+        format!(
+            "{} (doctests are not enumerable)",
+            output::count(doc_only, "doc-only sweep")
+        )
+    })
 }
 
 fn group_by_resolution(
@@ -282,7 +283,7 @@ fn run_coverage_phase(
     report.stats.dead_filters = dead.len();
     let stats = Some(report.stats);
 
-    report_doc_only_exclusion(sweeps);
+    let mut outside: Vec<String> = doc_only_exclusion(sweeps).into_iter().collect();
 
     // The per-entry pair counts are the countdown the ledger exists for, and
     // the growth signal when a substring starts matching more than it used to -
@@ -293,7 +294,12 @@ fn run_coverage_phase(
     if !quarantine.is_empty() {
         output::run_msg(&quarantine_rollup(quarantine, &report.per_entry));
     }
-    report_declared_narrowing(sweeps, report.stats.curated);
+    outside.extend(declared_narrowing(sweeps, report.stats.curated));
+    let outside_clause = if outside.is_empty() {
+        String::new()
+    } else {
+        format!(" (outside the audit: {})", outside.join("; "))
+    };
 
     let stale: Vec<&str> = quarantine
         .iter()
@@ -301,6 +307,11 @@ fn run_coverage_phase(
         .filter(|(q, n)| q.pattern.is_some() && **n == 0)
         .map(|(q, _)| q.issue.as_str())
         .collect();
+
+    let failing = !report.orphans.is_empty() || !stale.is_empty() || !dead.is_empty();
+    if failing && !outside.is_empty() {
+        output::run_msg(&format!("coverage:{outside_clause}"));
+    }
 
     // Both findings are printed before the phase fails: an unhealthy run
     // with stale entries AND orphans needs the orphan worksheet (the very
@@ -350,7 +361,7 @@ fn run_coverage_phase(
         ));
     }
 
-    if !report.orphans.is_empty() || !stale.is_empty() || !dead.is_empty() {
+    if failing {
         return CoverageOutcome { stats, result: Err(DevError::Build("coverage failed".into())) };
     }
 
@@ -360,12 +371,14 @@ fn run_coverage_phase(
         String::new()
     };
     output::run_msg(&format!(
-        "coverage: {} shapes, {} pairs - {} run, {} quarantined, {} ignored, {curated_frag}0 orphaned",
+        "coverage: {} shapes, {} pairs - {} run, {} quarantined, {} ignored, {curated_frag}0 \
+         orphaned{outside_clause} in {}",
         shapes.len(),
         report.stats.pairs,
         report.stats.run,
         report.stats.quarantined,
-        report.stats.ignored
+        report.stats.ignored,
+        fmt_wall(phase_elapsed())
     ));
 
     CoverageOutcome { stats, result: Ok(()) }

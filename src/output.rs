@@ -66,19 +66,182 @@ pub fn verify_buffer_flush() {
     }
 }
 
+// --- Run log and status line ---
+// `brokkr check` tees every line it prints - plus the narration it no longer
+// prints (`detail`) - into a per-run log file, and on a terminal keeps one
+// transient status line under the output. Both live here because every
+// prefixed printer has to go through them: a persistent line written past a
+// drawn status line without clearing it first garbles both.
+//
+// Two locks, never nested: the log writer and the renderer. The watchdog must
+// reach `exit(124)` whatever state either is in, so its path (`error_forced`)
+// only ever try-locks, and writes around a lock it cannot get.
+
+struct Renderer {
+    status: Option<String>,
+    drawn: bool,
+}
+
+static RENDER: Mutex<Renderer> = Mutex::new(Renderer { status: None, drawn: false });
+static RUN_LOG: Mutex<Option<std::fs::File>> = Mutex::new(None);
+static STATUS_ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// The longest status line drawn, in chars. The line is transient and is
+/// never read back, so a fixed cap is enough to keep it from wrapping on an
+/// ordinary terminal (a wrapped line cannot be cleared with one `\r`).
+const STATUS_WIDTH: usize = 100;
+
+/// Start teeing output into `file`. Every line printed from here on, and every
+/// [`detail`] line, is appended and flushed as it happens, so a run the
+/// watchdog kills still leaves everything up to the kill on disk.
+pub fn open_run_log(file: std::fs::File) {
+    *RUN_LOG.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(file);
+}
+
+pub fn close_run_log() {
+    RUN_LOG.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
+}
+
+/// Turn the status line on when stdout is a terminal. Off otherwise: a pipe or
+/// a file (the LLM case) gets persistent lines only.
+pub fn enable_status_line() {
+    use std::io::IsTerminal;
+    STATUS_ENABLED.store(std::io::stdout().is_terminal(), Ordering::Relaxed);
+}
+
+/// Clear any drawn status line and stop drawing one.
+pub fn disable_status_line() {
+    let mut r = RENDER.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    r.status = None;
+    render(&mut r, "");
+    STATUS_ENABLED.store(false, Ordering::Relaxed);
+}
+
+/// Show `msg` as the transient status line (a no-op off a terminal). Replaced
+/// by the next status, and cleared from under every persistent line.
+pub fn status(msg: &str) {
+    if !STATUS_ENABLED.load(Ordering::Relaxed) {
+        return;
+    }
+    let line: String = format!("[....]    {msg}").chars().take(STATUS_WIDTH).collect();
+    let mut r = RENDER.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    r.status = Some(line);
+    render(&mut r, "");
+}
+
+/// Narration for the run log only: what a passing run no longer prints but a
+/// reader investigating one (a slow build, a cross-host comparison) needs.
+/// Dropped when no log is open.
+pub fn detail(msg: &str) {
+    log_write(&prefixed("[run]     ", msg), false);
+}
+
+/// `prefix` on every line of `msg`, newline-terminated.
+fn prefixed(prefix: &str, msg: &str) -> String {
+    let mut out = String::new();
+    for line in msg.lines() {
+        out.push_str(prefix);
+        out.push_str(line);
+        out.push('\n');
+    }
+    if msg.is_empty() {
+        out.push_str(prefix.trim_end());
+        out.push('\n');
+    }
+    out
+}
+
+/// Append to the run log, if one is open. `forced` try-locks rather than
+/// waiting (the watchdog path).
+fn log_write(text: &str, forced: bool) {
+    use std::io::Write;
+    let guard = if forced {
+        lock_patiently(&RUN_LOG)
+    } else {
+        Some(RUN_LOG.lock().unwrap_or_else(std::sync::PoisonError::into_inner))
+    };
+    if let Some(mut guard) = guard
+        && let Some(file) = guard.as_mut()
+    {
+        file.write_all(text.as_bytes()).ok();
+    }
+}
+
+/// Try a lock for about a second, then give up. For the watchdog only.
+fn lock_patiently<T>(m: &Mutex<T>) -> Option<std::sync::MutexGuard<'_, T>> {
+    for _ in 0..100 {
+        match m.try_lock() {
+            Ok(g) => return Some(g),
+            Err(std::sync::TryLockError::Poisoned(p)) => return Some(p.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+    }
+    None
+}
+
+/// Write `text` (whole lines) to stdout under the renderer: clear a drawn
+/// status line, write, redraw it. Write errors are ignored - a reader that
+/// closed the pipe must not turn into a panic that stops the run log.
+fn render(r: &mut Renderer, text: &str) {
+    use std::io::Write;
+    let mut out = std::io::stdout().lock();
+    if r.drawn {
+        out.write_all(b"\r\x1b[2K").ok();
+        r.drawn = false;
+    }
+    out.write_all(text.as_bytes()).ok();
+    if STATUS_ENABLED.load(Ordering::Relaxed)
+        && let Some(s) = &r.status
+    {
+        out.write_all(s.as_bytes()).ok();
+        r.drawn = true;
+    }
+    out.flush().ok();
+}
+
+/// Print a persistent block (every line prefixed) and tee it to the run log.
+/// The whole block goes out under one renderer hold, so nothing can split it.
+fn emit(prefix: &str, msg: &str) {
+    let text = prefixed(prefix, msg);
+    log_write(&text, false);
+    let mut r = RENDER.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    render(&mut r, &text);
+}
+
+/// [`error`] for the watchdog: never waits on either lock for long, so the
+/// caller always reaches its `exit`. A renderer held for that long is a
+/// thread blocked writing to a stdout nobody is reading - and that thread
+/// also holds std's own stdout lock, so writing around it would block just
+/// the same. The message is skipped on stdout then, and survives in the log.
+pub fn error_forced(msg: &str) {
+    let text = prefixed("[error]   ", msg);
+    log_write(&text, true);
+    if let Some(mut r) = lock_patiently(&RENDER) {
+        render(&mut r, &text);
+    }
+}
+
+/// Print `msg` with no tag, through the renderer and into the run log - for
+/// machine-readable lines such as `check --json`'s trailer.
+pub fn plain(msg: &str) {
+    emit("", msg);
+}
+
 pub fn build_msg(msg: &str) {
     if !is_quiet() {
-        println!("[build]   {msg}");
+        emit("[build]   ", msg);
     }
 }
 
 pub fn run_msg(msg: &str) {
-    println!("[run]     {msg}");
+    emit("[run]     ", msg);
 }
 
 pub fn result_msg(msg: &str) {
     if !is_quiet() {
-        println!("[result]  {msg}");
+        emit("[result]  ", msg);
     }
 }
 
@@ -169,16 +332,16 @@ pub fn wc_msg(msg: &str) {
 /// Print an error message. Multi-line messages get each line prefixed.
 /// Errors are NEVER suppressed by quiet mode.
 pub fn error(msg: &str) {
-    for line in msg.lines() {
-        println!("[error]   {line}");
+    if !msg.is_empty() {
+        emit("[error]   ", msg);
     }
 }
 
 /// Print a warning message. Multi-line messages get each line prefixed.
 /// Warnings are NEVER suppressed by quiet mode.
 pub fn warn(msg: &str) {
-    for line in msg.lines() {
-        println!("[warn]    {line}");
+    if !msg.is_empty() {
+        emit("[warn]    ", msg);
     }
 }
 

@@ -124,9 +124,7 @@ fn test_binaries_with_runtime(
         args.push("--tests".into());
     }
 
-    if commands {
-        output::run_msg(&format!("cargo {}", args.join(" ")));
-    }
+    cargo_line(commands, &format!("cargo {}", args.join(" ")));
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     let captured = output::run_captured_with_env("cargo", &arg_refs, project_root, env_refs)?;
 

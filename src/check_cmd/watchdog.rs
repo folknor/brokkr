@@ -56,6 +56,18 @@ pub(crate) fn begin_phase(failing_phase: &mut Option<&'static str>, phase: &'sta
     if let Ok(mut clock) = PHASE_CLOCK.lock() {
         *clock = Some((phase, std::time::Instant::now()));
     }
+    output::detail(&format!("phase {phase}: started"));
+    output::status(phase);
+}
+
+/// How long the phase in flight has been running - the wall time its grouped
+/// green line reports. Zero outside a phase.
+pub(crate) fn phase_elapsed() -> std::time::Duration {
+    PHASE_CLOCK
+        .lock()
+        .ok()
+        .and_then(|c| c.map(|(_, since)| since.elapsed()))
+        .unwrap_or_default()
 }
 
 /// Arms the ceilings; dropping it disarms. Hold it for the whole of `cmd_check`.
@@ -114,7 +126,11 @@ impl Drop for CheckWatchdog {
 
 /// A ceiling was hit: report, SIGKILL every descendant, exit.
 fn fire(why: &str) -> ! {
-    output::error(&format!(
+    // `error_forced`, not `error`: the output locks may be held by a thread
+    // this kill is about to strand, and nothing may stand between a fired
+    // ceiling and the exit. It also lands the kill in the run log, the one
+    // record of how far an incomplete run got.
+    output::error_forced(&format!(
         "{why} - killing the run (as `brokkr kill --hard` would)"
     ));
     // SAFETY: getpid takes no arguments and cannot fail.
@@ -135,7 +151,7 @@ fn fire(why: &str) -> ! {
             }
         }
     }
-    output::error(&format!(
+    output::error_forced(&format!(
         "SIGKILL sent to {killed} descendant process(es); brokkr exiting {WATCHDOG_EXIT_CODE}",
     ));
     std::process::exit(WATCHDOG_EXIT_CODE)

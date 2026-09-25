@@ -343,9 +343,7 @@ fn probe_missing_bin(
 ) -> Result<BinVerdict, DevError> {
     let selector = vec!["--bin".to_owned(), bin.to_owned()];
     let args = install_check_args(package, &selector, debug, allow_args);
-    if commands {
-        output::run_msg(&format!("cargo {}", args.join(" ")));
-    }
+    cargo_line(commands, &format!("cargo {}", args.join(" ")));
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     let captured = output::run_captured_with_env("cargo", &arg_refs, project_root, env_refs)?;
     if captured.status.success() {
@@ -410,9 +408,8 @@ fn check_one_install_package(
     // honest about `required-features` skips.
     let args = install_check_args(package, &["--bins".to_owned()], debug, allow_args);
 
-    if commands {
-        output::run_msg(&format!("cargo {}", args.join(" ")));
-    }
+    output::status(&format!("install-feature {package}"));
+    cargo_line(commands, &format!("cargo {}", args.join(" ")));
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     let captured = output::run_captured_with_env("cargo", &arg_refs, project_root, env_refs)?;
     let stdout = String::from_utf8_lossy(&captured.stdout);
@@ -584,9 +581,10 @@ fn run_install_feature_phase(
     let bins: usize = expected.iter().map(|(_, b)| b.len()).sum();
     output::run_msg(&format!(
         "install-feature: ok ({}, {}, resolved per package like `cargo install`; \
-         shared lockfile, no codegen)",
+         shared lockfile, no codegen) in {}",
         output::count(expected.len(), "package"),
         output::count(bins, "bin"),
+        fmt_wall(phase_elapsed())
     ));
     Ok(())
 }

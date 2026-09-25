@@ -452,8 +452,9 @@ diagnostics = "opaque"  # opaque | rustc                  (default: opaque)
 ```
 
 - `name` - label shown when the entry **fails** (`beta: stdout did not match
-  "ok"`). A passing stage prints one collapsed line, `script-check: ok (N
-  checks)`, rather than a line per entry: a passing gate's name carries
+  "ok"`). A passing stage reports once - `script-check (N checks)` on the
+  conventions line for `pre-clippy`, its own `script-check: ok (N checks)`
+  line for a later stage - rather than a line per entry: a passing gate's name carries
   nothing to act on, while the count still says which corpus passed. A stage
   with some failures prints `script-check: M of N ok` above the failure block.
 - `command` - run as `sh -c "<command>"`, cwd = the code tree, so
@@ -1106,9 +1107,10 @@ out at any sane setting: overlapping two of them would have needed a budget
 above their test counts, which is hundreds in flight - the mistake the budget
 exists to make unspellable. It failed green, too: measured on a 35-binary tree,
 eight fat binaries serialized at the full budget each and the sweep reported
-success. The `claims N-M` figure on the sweep's first output line is what makes
-that visible - several binaries claiming the whole budget means they cannot
-have overlapped.
+success. The claims are what make that visible - several binaries claiming the
+whole budget means they cannot have overlapped - and that case prints as a
+warning on an otherwise green run; the full `claims N-M` plan line is in the
+run log (`.brokkr/check-logs/`, see `docs/commands/check.md`).
 
 `budget = 0` is a load error. There is no spelling for "unlimited": an
 unbounded lane is precisely the mistake the key exists to make unspellable.
@@ -1141,8 +1143,10 @@ budget clears `total_serial / pole_serial`, the pole can never claim a second
 slot, its tests run end to end, and the sweep converges to `claims 1-1` at
 roughly the pole's full serial cost. Measured on a ~150-binary suite: budget 6
 put the 193s pole at a 0.94-slot share, both warm runs landed `claims 1-1`,
-and the sweep took longer than not fanning out at all. On a many-binary suite,
-check `claims N-M` on the first warm runs and raise the budget past
+and the sweep took longer than not fanning out at all. No warning catches this
+shape - nothing in one run distinguishes a starved pole from a pole that is
+simply the floor - so on a many-binary suite, read the `claims N-M` plan line
+in the run log for the first warm runs and raise the budget past
 `total_serial / pole_serial` (both figures are in `--timings`) before judging
 the lane.
 

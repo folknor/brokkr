@@ -605,6 +605,11 @@ fn run_parallel_sweep(
     timings: Option<&mut Vec<TestTiming>>,
 ) -> Result<bool, DevError> {
     let sweep_started = Instant::now();
+    announce_sweep(
+        &format!("test {}: {}", sweep.label, describe_sweep(sweep, true, packages)),
+        None,
+        commands,
+    );
     let (cargo_extra, libtest_extra) = split_extra_args(extra_args);
     // Selectors narrow the PLAN; the rest rides on each per-binary command.
     // See `partition_target_selectors` for why mixing the two is a real bug
@@ -760,7 +765,7 @@ fn run_parallel_sweep(
     // half a second, which is the opposite of what a lane sold on wall time
     // should tell its reader.
     let build_elapsed = sweep_started.elapsed();
-    output::run_msg(&format!(
+    let plan_line = format!(
         "test {}: {} {}, budget {} in flight (claims {}-{})",
         sweep.label,
         planned.len(),
@@ -768,7 +773,10 @@ fn run_parallel_sweep(
         budget,
         planned.iter().map(|(_, c)| *c).min().unwrap_or(0),
         planned.iter().map(|(_, c)| *c).max().unwrap_or(0),
-    ));
+    );
+    output::detail(&plan_line);
+    output::status(&plan_line);
+    warn_serialized_claims(sweep, budget, &planned);
     let fanout_started = Instant::now();
 
     let pool = Budget::new(budget);
@@ -849,6 +857,35 @@ fn run_parallel_sweep(
     timings_record(state_root, &sweep.entry_name, &measured);
 
     report_runs(project_root, sweep, runs, fanout_started, build_elapsed, timings)
+}
+
+/// Warn when the plan put binaries beyond each other's reach: two binaries
+/// that each claimed the whole budget cannot overlap, however the rest of the
+/// lane schedules. That is the failure the claims spread exists to expose, and
+/// it otherwise reports success - so it is the one part of the plan that
+/// prints on a green run. A budget of one serializes by design, so it never
+/// warns.
+///
+/// Worded as what the claims prove and no more: smaller binaries may still
+/// overlap around the full-budget ones, so this does not say the lane ran
+/// serially.
+fn warn_serialized_claims(sweep: &ResolvedSweep, budget: u32, planned: &[(&TestBinary, u32)]) {
+    if budget <= 1 {
+        return;
+    }
+    let full: Vec<String> = planned
+        .iter()
+        .filter(|(_, c)| *c >= budget)
+        .map(|(b, _)| format!("{}/{}", b.package, b.target))
+        .collect();
+    if full.len() >= 2 {
+        output::warn(&format!(
+            "test {}: {} binaries each claimed the full budget ({budget}) and could not overlap: {}",
+            sweep.label,
+            full.len(),
+            full.join(", ")
+        ));
+    }
 }
 
 /// Render every binary's buffered output and decide the sweep's verdict.
@@ -970,22 +1007,22 @@ fn report_runs(
         )));
     }
 
-    // The summary earns its line by carrying what no other line can: the wall
-    // time, and WHICH binary was the critical path. A parallel sweep finishes
-    // when its slowest binary finishes, so that name is the answer to "what do
-    // I do next" - split it, or move it to the serial lane, or leave it alone
-    // because it is already the floor.
+    // The summary carries what no other line can: the wall time, the build
+    // time kept apart from it, and WHICH binary was the critical path. A
+    // parallel sweep finishes when its slowest binary finishes, so that name
+    // is the answer to "what do I do next" - split it, or move it to the
+    // serial lane, or leave it alone because it is already the floor. The
+    // per-sweep line goes to the run log; the grouped test line names the
+    // slowest parallel binary across every sweep.
     if ok {
-        // The slowest binary IS the sweep's floor, so naming it is the whole
-        // actionable content - it is the one to split, or to move to the
-        // serial lane. Omitted for a single binary, where it would only
-        // restate the line's own duration.
+        // Omitted for a single binary, where it would only restate the line's
+        // own duration.
         let critical = if binaries > 1 {
             format!(", slowest {} {:.1}s", slowest.0, slowest.1.as_secs_f64())
         } else {
             String::new()
         };
-        output::run_msg(&format!(
+        output::detail(&format!(
             "test {}: {} passed in {:.1}s ({} {}, built in {:.1}s{})",
             sweep.label,
             passed,
@@ -995,6 +1032,10 @@ fn report_runs(
             build_elapsed.as_secs_f64(),
             critical,
         ));
+        note_tests(passed, 0, 0);
+        if binaries > 1 {
+            note_parallel_slowest(&sweep.label, &slowest.0, slowest.1);
+        }
     }
 
     Ok(ok)

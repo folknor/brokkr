@@ -26,12 +26,13 @@ cargo-level. The leading `--` is **required**: `check` takes no
 `trailing_var_arg`, so an unrecognised brokkr flag is a parse error rather
 than a token silently forwarded to `cargo test`. The test phase also fails on a successful `cargo test` that ran
 zero tests (suites=0, or filters excluded everything) so a too-narrow
-profile/filter combo can't silently green-light a check. Each test sweep
-closes with a `[test]    N passed` count line (`, M ignored` / `, K filtered
-out` appended when non-zero) - the symmetric bookend to `running tests`, so a
-green run always says how much it ran. A suite that *legitimately* ran zero
-tests (nothing filtered out - e.g. an all-doctest crate, since `--tests`
-excludes doctests) still passes; on an explicit `-p <pkg>` spot-check that ran
+profile/filter combo can't silently green-light a check. The test phase
+closes with one grouped line - `test: N passed (, M ignored / , K filtered
+out when non-zero) (S sweeps; ...)` - so a green run always says how much it
+ran (see "Output"). A unit that *legitimately* ran zero tests (nothing
+filtered out - e.g. an all-doctest crate, since `--tests` excludes doctests)
+still passes, but is named on that line as `no tests ran in <sweep>` rather
+than vanishing into the total; on an explicit `-p <pkg>` spot-check that ran
 nothing, an extra warning notes the green validated clippy, not tests. The
 warning is scoped to the hand-typed `-p` path so a whole-workspace run never
 nags.
@@ -57,8 +58,8 @@ Flags:
   is dropped with a log line, a sweep keeping none is skipped (mirroring
   `brokkr test`'s SKIP) - so `-p a -p b` still reaches `a` in the sweep that
   admits it when `b` lives in another sweep. If every sweep skips, the phase
-  fails rather than reading as green. The shape line shows `-p <pkg> …` and
-  the `--json` summary carries a `package` field (comma-joined for a
+  fails rather than reading as green. The `invocation:` line up front shows
+  `-p <pkg> …` and the `--json` summary carries a `package` field (comma-joined for a
   multi-package run). Rejected under a `certifies = "complete"` profile
 - `--features` / `--no-default-features` - ad-hoc sweep, no `build_packages`.
   Overrides sweep *selection* only; the resolved profile's run shaping (skips,
@@ -72,10 +73,76 @@ Flags:
 - `--json` - append one machine-readable summary line (a JSON object) as the
   last line of stdout; human output is unchanged
 - `--fix-gremlins` - rewrite banned chars in place before scan
-- `--commands` - log each sweep's full cargo command instead of the collapsed
-  form (see the log-lines section)
+- `--commands` - print each cargo command before it runs (see the log-lines
+  section)
 
 Output:
+- **A passing run prints one line per phase, not per sweep.** An LLM runs
+  `check` many times a session, and every green line is paid for on every
+  run, so a green run prints only what can change what its reader does next.
+  A five-sweep run reads:
+  ```
+  [run]     gremlins, textlint (94 rules, 1043 files), manifest, script-check (14 checks), dependency rules (21 rules, 17 workspace packages), publish cycle: ok in 0.6s
+  [run]     clippy: ok (5 sweeps) in 1m12s
+  [run]     rustdoc: ok (4 sweeps) in 58.0s
+  [run]     script-check: ok (2 checks)
+  [warn]    cargo test: 0 errors, 1 warnings
+  [warn]      warning broadarrow-ba v0.1.0 (...) ignoring invalid dependency `broadarrow-ba` which is missing a lib target
+  [warn]      (sweeps: threaded/telemetry-features, doc-twin/doctests)
+  [run]     test: 6546 passed (5 sweeps; slowest parallel binary broadarrow-daemon/broadarrow_daemon 32.8s in threaded/default) in 4m35s
+  [result]  check passed in 7m01s (profile standard, 5 sweeps; lints allowed: rustdoc::private_intra_doc_links)
+  ```
+  The convention phases (gremlins through publish cycle) share one line with
+  their counts; each build phase (clippy, rustdoc, test, coverage,
+  install-feature) prints one line with its wall time as it completes -
+  streamed per phase, not rendered at the end, so a run the watchdog kills
+  still shows which phases finished. A pre-test or post-test script-check
+  stage keeps its own line. What a green run no longer prints - each sweep's
+  shape and cargo argv, per-sweep counts and build/fan-out times, the
+  parallel plan, the process-isolated roll-call, config-derived skips and
+  build-shape dedupes - goes to the run log (below). Nothing is dropped, only
+  moved.
+- **What still prints on green**, because each changes what the verdict
+  means: an `invocation:` line up front naming what this run changed about
+  the configured gate (`-p`, forwarded `-- …` args, `RUSTFLAGS` /
+  `CARGO_ENCODED_RUSTFLAGS` inherited from the environment); the ad-hoc
+  features, `skip_phases` and markdown-only announcements; `-p` drops and
+  skips per sweep; warnings (below); zero-test units on the test line; and
+  the verdict line's context - the profile, the sweeps that ran, and every
+  `[lints]` suppression. The suppressions sit on the verdict rather than on a
+  phase line because they narrow clippy (`-A`), rustdoc (dropped at
+  ingestion) and every compiling phase (test, coverage, install-feature,
+  through rustflags) alike; `allow_exact` adds where it is sited and where it
+  is not (`sited in clippy/rustdoc; build-wide in test, coverage and install
+  builds`). The verdict prints on a red run too, so the context does.
+- **Warnings print once.** A cargo warning from a passing test sweep is held
+  until the phase ends and merged with the identical block from every other
+  sweep - keyed by the whole block, never split - then printed once with the
+  sweeps that produced it (`every sweep` when it is all of them). A
+  parallel plan in which two or more binaries each claimed the whole
+  in-flight budget (budget above 1) warns, since those binaries could not
+  overlap and the run otherwise reports success. A `[lints]` injection whose
+  sink brokkr chose on a guess (see `src/rustflags.rs`: a `target.*.rustflags`
+  selector it cannot evaluate) warns that the allows may be inert.
+- **A failure prints what the green run left out.** Each failing sweep prints
+  its shape (`test threaded/default: workspace, unification workspace,
+  parallel`) and its `failing command:` beside its diagnostics. Every failure
+  site carries its own context - the diagnostic phases report after all their
+  sweeps ran, and a parallel lane after its join, so no ambient "current
+  sweep" could say which one a failure belongs to.
+- **The run log.** Every run writes `.brokkr/check-logs/check-<ms>.log`
+  (under the config dir), the newest ten kept: every line printed, plus the
+  narration a green run no longer prints - shapes, full cargo argv, the
+  `[lints]` sink, per-unit counts, build and fan-out times, the parallel plan
+  and per-sweep slowest binary, the roll-call. Written and flushed as each
+  event happens, so a watchdog-killed or panicked run keeps everything up to
+  the point it stopped (the watchdog's own kill lines land in it too); ten
+  are kept so that run survives the retries after it. This is where a
+  cross-host comparison or a slow-build investigation reads from.
+- **On a terminal**, one transient status line under the output names what is
+  running (the phase, the sweep, the process-isolated test in flight). It is
+  cleared from under every persistent line and at exit, and never drawn when
+  stdout is a pipe or a file, so captured output is unchanged by it.
 - Each diagnostic becomes one line, compilation noise stripped, passing
   tests aggregated. There is no unfiltered mode: rustc's rendered form -
   source excerpt, carets, `help:` spans - is not reachable from `check`.
@@ -759,8 +826,9 @@ context patterns fragment-tolerant (match `madsim`, not a full single-line
 attribute) so a rustfmt-wrapped `#[cfg(...)]` still suppresses. The generic
 engine behind most grep-style convention hooks; see `src/textlint.rs`.
 
-A clean run reports what it covered - `textlint: ok (21 rules, 812 files)`
-- rather than a bare `ok`, matching the `dependency rules` line. The file count
+A clean run reports what it covered - `textlint (21 rules, 812 files)` on the
+conventions line - rather than a bare `ok`, matching the `dependency rules`
+fragment. The file count
 is files at least one rule applied to, not the tracked-file total, so it is a
 statement about the corpus that was actually scanned: a rule whose `paths` glob
 has stopped matching anything still passes, and a shrinking count is the only
@@ -792,8 +860,10 @@ prove it ran to completion by emitting the sentinel. The command's exit code is
 therefore ignored; only a spawn failure is a hard error. Every entry runs (no
 fail-fast within the phase) so one `brokkr check` surfaces all broken gates, and
 each failure prints its captured stdout/stderr - the diagnostic, rendered
-against the entry's declared `diagnostics` shape (below). A clean stage prints a single collapsed line -
-`script-check: ok (21 checks)` - rather than one per entry; the count keeps
+against the entry's declared `diagnostics` shape (below). A clean stage reports once -
+`script-check (21 checks)` on the conventions line for the `pre-clippy` stage,
+its own `script-check: ok (2 checks)` line for a later stage - rather than one
+per entry; the count keeps
 the line falsifiable (a stage that quietly stopped running its checks shows a
 shrinking number) while a passing gate's name carries nothing to act on. A
 partly-failing stage prints `script-check: M of N ok` above the failure block. It fills the gap for gates brokkr's native phases can't
@@ -1005,15 +1075,17 @@ decision, so no lint-level attribute at the site can defeat it. It is
 deliberately narrow where `allow` is broad: one lint in one file (every
 occurrence in that file - file-granular by design, since line numbers drift
 with unrelated edits), never workspace-wide, and no `-A` is injected for it,
-so other sites of the same lint keep failing the check. Each entry is
-announced up front, but *collapsed*: entries are grouped by lint with a file
-count (`clippy: allowing clippy::assert_is_empty (59 files), deprecated (3
-files) ([lints] allow_exact)`), and a lint with a single site keeps its path
-instead. Naming the lints is what keeps a narrowed gate from reading as a full
-one; the paths are already in `brokkr.toml`, and one line per entry buries the
-rest of the run once a project has more than a handful. An entry that
-suppressed nothing across the run still draws a
-`suppressed nothing (stale entry?)` notice - upstream fixed the site or the
+so other sites of the same lint keep failing the check. The entries' distinct
+lints are named on the verdict line (`allow_exact: clippy::assert_is_empty,
+deprecated (sited in clippy/rustdoc; build-wide in test, coverage and install
+builds)`); the per-lint file-count summary (`clippy: allowing
+clippy::assert_is_empty (59 files), deprecated (3 files) ([lints]
+allow_exact)`) goes to the run log, and prints under `brokkr clippy` or
+`--commands`. Naming the lints is what keeps a narrowed gate from reading as a
+full one; the paths are already in `brokkr.toml`, and one line per entry
+buries the rest of the run once a project has more than a handful. An entry
+that suppressed nothing across the run draws a
+`suppressed nothing (stale entry?)` warning - upstream fixed the site or the
 file moved, so the entry should be deleted or re-sited rather than accrete.
 The notice only fires on unscoped runs: a `-p`-narrowed run doesn't check an
 entry's file when it lives outside the selected packages, so "suppressed
@@ -1207,7 +1279,8 @@ real error, and brokkr can't tell the two apart.
 ### Foreign manifest warnings
 
 A *passing* test sweep still renders whatever cargo wrote to stderr, condensed
-through `filter_clippy` and relabelled `cargo test:`. Cargo emits its own
+through `filter_clippy`, relabelled `cargo test:`, and printed once per
+distinct block at the end of the phase (see "Output"). Cargo emits its own
 manifest complaints there - deprecated `lints.*` keys, unused manifest keys -
 once per dependency manifest it loads, path dependencies included. A project
 that builds against a vendored fork therefore collected dozens of lines about a
@@ -1316,18 +1389,15 @@ standard per-test watchdog. Every test runs even after failures (the
 per-test failure list is the point); the sweep fails if any test failed or
 if zero tests were enumerated. Shape lines carry `process-isolated`.
 
-This lane - and only this lane - prints a **roll-call**: the pre-run plan
+This lane - and only this lane - keeps a **roll-call**: the pre-run plan
 line, one `PASS <name> (<secs>)` per test, and a `SKIP` line per `#[ignore]`d
-name in a lane without `include_ignored`. Unconditional, no flag.
-
-Everywhere else in the test phase a passing test prints nothing, because a
-hundred green lines bury the run. This lane is exempt because it is small by
-construction: it exists for families of a dozen tests that need a process
-each, and a lane that outgrows that wants nextest (see the module header of
-`src/check_cmd/isolate.rs`). So a roll-call long enough to be a scroll is the
-signal to move the lane, not a reason to hide the lines. It is also the
-slowest-per-test lane in the run, which is exactly where progress is worth
-watching.
+name in a lane without `include_ignored`. It goes to the run log, not stdout:
+a passing run's reader pays for every line, and the lane's tests fold into the
+grouped test line with its ignored and pkg-skipped totals. It is the
+slowest-per-test lane in the run, which is where progress is worth watching -
+on a terminal the status line names the test in flight, which is what the
+printed roll-call was for. A failing test still prints `FAIL <name>` with its
+command and output as it happens.
 
 Works without a `brokkr.toml` - usable in any Rust+git repo. When a
 `brokkr.toml` is present its host config still applies (e.g. Nidhogg's
@@ -1434,27 +1504,35 @@ granted, and feeding that back oscillates.
 An unset budget (`parallel = {}`) resolves to the physical cores sharing one
 last-level cache - `brokkr env`'s `l3 domain:` line prints the number.
 
-Output is two lines regardless of how many binaries run:
+The lane writes two lines to the run log regardless of how many binaries run:
 
 ```
 [run]     test fanout: 35 binaries, budget 24 in flight (claims 1-3)
 [run]     test fanout: 4210 passed in 31.2s (35 binaries, built in 48.9s, slowest broadarrow-worker/ba-worker 28.7s)
 ```
 
+On stdout its tests fold into the grouped test line, which names the slowest
+parallel binary across every sweep with the sweep it came from.
+
 The `claims N-M` spread is the diagnostic for whether the sweep actually
-overlapped. Several binaries each claiming the full budget means they ran one
-at a time - the failure mode the proportional claim rule exists to prevent, and
-one that otherwise reports success.
+overlapped. Two binaries that each claim the full budget cannot overlap - the
+failure mode the proportional claim rule exists to prevent, and one that
+otherwise reports success - so that case alone prints, as a warning naming
+the binaries (`N binaries each claimed the full budget (B) and could not
+overlap`). Worded as what the claims prove: smaller binaries may still overlap
+around them, so it does not claim the lane ran serially. A budget of 1
+serializes by design and never warns.
 
 A passing binary prints nothing of its own. Thirty-five green lines say only
 what the summary says, and a reader who has learned to scroll past the normal
 case will scroll past the abnormal one too. To watch one run, run it:
 `brokkr test <NAME>` streams a single test's output live.
-Build time and fan-out time are reported separately because a lane sold on wall
+Build time and fan-out time are logged separately because a lane sold on wall
 time must not fold the compile into the number it is judged on. **The slowest
 binary is named because it is the sweep's floor** - the sweep finishes when it
-does, so it is the one to split, or to move to the serial lane, and no other
-line can say which it was.
+does, so it is the one to split, or to move to the serial lane. The grouped
+line carries the slowest across sweeps; each sweep's own floor is in the run
+log, which is where a tuning session reads.
 
 Failures are the exception: a failing binary prints its label, its
 copy-pasteable cargo line, and its output. Every binary's output is buffered
@@ -1975,25 +2053,34 @@ same way under `complete`: a libtest `--skip` or a cargo `--lib` narrows
 the real run but not the coverage audit, so the audit would count tests
 that never ran. 2 = clap usage errors, 130 = interrupt.
 
-## Per-sweep log lines (collapsed by default)
+## Per-sweep log lines (run log and failures only)
 
-Each sweep announces itself as `<phase> <name>: <shape>` rather than its full
-cargo command:
+Each sweep describes itself as `<phase> <name>: <shape>` rather than its full
+cargo command. A passing run never prints these: the shape is a function of
+the config and the invocation, identical run to run, so on green it carries
+no news - what this invocation changed prints on the `invocation:` line
+instead (see "Output"). The shape goes to the run log with the full argv
+under it, and to the status line on a terminal:
 
 ```
 [run]     profile tier1: 3 sweeps (default, ffi, live)
 [run]     clippy default: workspace
+[run]     cargo clippy --keep-going --all-targets ...
 [run]     clippy ffi: 4 pkgs, +ffi
-[run]     clippy live: 2 pkgs, +live
 [run]     test default: workspace -2 pkgs, 14 skips, parallel
 ```
+
+A failing sweep prints its shape beside its failing command. Resolved facts
+the config does not spell out - `feature_unification = "auto"` promoting a
+lane, the topology-derived parallel budget - are machine- and tree-stable and
+stay log-only; they are the data for a cross-host comparison, not for
+reading a verdict.
 
 The full command is ~90% profile boilerplate repeated identically per sweep -
 on nautilus_trader the three `cargo test` lines are ~1,100 chars each, of which
 ~900 are the same 14 `--skip` flags, because those come from the *profile*, not
 the sweep. What actually varies is package scope and features, which is what
-the shape carries. The profile header names the sweep set once; it is printed
-only when more than one sweep is active.
+the shape carries.
 
 The shape is `<package scope>[, <features>][, rustflags …][, <test bits>]`:
 
@@ -2004,24 +2091,26 @@ The shape is `<package scope>[, <features>][, rustflags …][, <test bits>]`:
   cargo is handed: `all-features`, `no-default`, `+ffi,live`. A fragment that
   merely restates the sweep's name is dropped (the legacy no-`[[check]]` path
   names its synthesized sweep `all-features`).
-- `rustflags <flags> (isolated target)` - always shown, because `rustflags`
-  silently redirects the sweep to `target/rustflags-<hash>`, and an unexplained
-  full recompile is the one thing a collapsed log must not hide.
+- `rustflags <flags> (isolated target)` - always part of the shape, because
+  `rustflags` silently redirects the sweep to `target/rustflags-<hash>`, and
+  the log is where an unexplained full recompile gets explained.
 - test-phase bits - `N skips`, `include-ignored`, any `--test <name>` filters,
   and the lane (`serial` under the per-test watchdog, `parallel` otherwise).
 
-**Failures always reprint the full command**, as `[error] failing command:
-cargo …` - when a sweep fails, the copy-pasteable line is the most useful thing
-in the output, so the collapsing applies to success only. This covers clippy
-failures, test failures, hung tests, parallel-sweep timeouts, zero-test runs,
-and `build_packages` pre-build failures.
+**Failures always print the shape and the full command**, as `[error] <phase>
+<name>: <shape>` and `[error] failing command: cargo …` - when a sweep fails,
+the copy-pasteable line is the most useful thing in the output. This covers
+clippy and rustdoc failures, test failures, hung tests, parallel-sweep
+timeouts, zero-test runs, `build_packages` pre-build failures, and any error
+leaving a test lane.
 
-`--commands` restores the full command on every line, and additionally logs the
-`cargo metadata` invocations of the dependency-rule and publish-cycle phases
-(suppressed by default: each is a fixed string that says less than the
-`dependency rules: ok (…)` / `publish cycle: ok` line following it). `brokkr clippy` is unaffected and always prints its command: it
-is the investigative runner, invoked precisely to find out what a given target
-shape does.
+`--commands` prints each cargo command on stdout before it runs - every
+sweep's, the pre-builds', the enumeration and install-feature probes', and the
+`cargo metadata` invocations of the dependency-rule and publish-cycle phases.
+Streamed, not collected, so a run the watchdog kills still shows what it was
+running. The grouped green lines are unchanged by it. `brokkr clippy` is
+unaffected and always prints its command: it is the investigative runner,
+invoked precisely to find out what a given target shape does.
 
 ## Sweep selection
 

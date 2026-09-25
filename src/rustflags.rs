@@ -194,9 +194,19 @@ fn push_config(out: &mut Vec<PathBuf>, dir: &Path) {
 /// bare `[target.<triple>]` table cannot be confirmed to match and is treated
 /// as not matching - the inert direction.
 fn has_matching_target_rustflags(doc: &toml::Table, triple: Option<&str>) -> bool {
+    target_rustflags_match(doc, triple) == Some(true)
+}
+
+/// Three-valued form of [`has_matching_target_rustflags`]: `Some(true)` when
+/// some flagged target table confidently matches the host, `Some(false)` when
+/// none can, and `None` when none matched confidently but at least one could
+/// not be decided (an unmodelled `cfg(...)`, or a bare triple with no host
+/// triple to compare against).
+fn target_rustflags_match(doc: &toml::Table, triple: Option<&str>) -> Option<bool> {
     let Some(targets) = doc.get("target").and_then(toml::Value::as_table) else {
-        return false;
+        return Some(false);
     };
+    let mut undecided = false;
     for (selector, table) in targets {
         let has_flags = table
             .as_table()
@@ -206,14 +216,35 @@ fn has_matching_target_rustflags(doc: &toml::Table, triple: Option<&str>) -> boo
             continue;
         }
         let matches = match selector.strip_prefix("cfg(").and_then(|s| s.strip_suffix(')')) {
-            Some(expr) => eval_cfg(expr) == Some(true),
-            None => triple.is_some_and(|t| t == selector),
+            Some(expr) => eval_cfg(expr),
+            None => triple.map(|t| t == selector),
         };
-        if matches {
-            return true;
+        match matches {
+            Some(true) => return Some(true),
+            Some(false) => {}
+            None => undecided = true,
         }
     }
-    false
+    if undecided { None } else { Some(false) }
+}
+
+/// Whether [`sink`]'s answer for a plain sweep (one exporting no `rustflags`)
+/// might be inert: it fell through to `build.rustflags`, but some flagged
+/// `target.*` table in the chain could not be decided. If that table does
+/// match the host, cargo reads it instead and the injected flags do nothing.
+/// The fall-through is the deliberate safe direction; this is how the caller
+/// finds out it was taken on a guess.
+pub fn sink_may_be_inert(build_root: &Path) -> bool {
+    if sink(build_root, false) != Sink::BuildConfig {
+        return false;
+    }
+    let triple = host_triple();
+    config_paths(build_root).iter().any(|path| {
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|text| text.parse::<toml::Table>().ok())
+            .is_some_and(|doc| target_rustflags_match(&doc, triple.as_deref()).is_none())
+    })
 }
 
 /// `rustc -vV`'s host triple. Read once per process; a failure here degrades

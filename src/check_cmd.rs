@@ -10,3 +10,4 @@ include!("check_cmd/direct_runtime.rs");
 include!("check_cmd/nextest.rs");
 include!("check_cmd/nextest_lane.rs");
 include!("check_cmd/watchdog.rs");
+include!("check_cmd/report.rs");
