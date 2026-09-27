@@ -2,7 +2,7 @@
 //! disposition into its `expected` field in `pins.toml`.
 //!
 //! Bless is the sibling of `--reseed`: reseed adopts new corpus *content*
-//! (re-hashing `pine`/`csv`), bless adopts new *dispositions*. Both are
+//! (re-hashing the pinned probe files), bless adopts new *dispositions*. Both are
 //! deliberate human acts whose review surface is `git diff pins.toml`. Bless
 //! records reality - including `compile_fail`/`runtime_fail`/`no_tv_data`/
 //! `no_overlap` outcomes - so a probe known to exercise an unimplemented
@@ -142,11 +142,11 @@ mod tests {
     fn pin(expected: Option<&str>) -> Pin {
         let mut p = Pin::new(
             FilePin {
-                path: "p.pine".into(),
+                path: "p/strategy.pine".into(),
                 xxh128: "00".into(),
             },
             FilePin {
-                path: "p.csv".into(),
+                path: "p/tv_trades.csv".into(),
                 xxh128: "11".into(),
             },
         );
@@ -167,8 +167,7 @@ mod tests {
 
     #[test]
     fn stamps_current_dispositions_including_fails() {
-        let dir = std::env::temp_dir().join(format!("brokkr_bless_{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_scratch::scratch("piners_bless", "stamps_current");
         let pins_path = dir.join("pins.toml");
 
         let mut pins = BTreeMap::new();
@@ -182,7 +181,6 @@ mod tests {
 
         let mut reg = registry_of(pins);
         apply(&pins_path, &mut reg, &rep, &["a".to_owned(), "b".to_owned()]).unwrap();
-        std::fs::remove_dir_all(&dir).ok();
 
         assert_eq!(reg.pins["a"].expected.as_deref(), Some("count_divergent"));
         assert_eq!(reg.pins["b"].expected.as_deref(), Some("compile_fail"));
@@ -191,15 +189,13 @@ mod tests {
 
     #[test]
     fn skips_probe_with_no_emitted_disposition() {
-        let dir = std::env::temp_dir().join(format!("brokkr_bless_skip_{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_scratch::scratch("piners_bless", "skips_missing");
         let pins_path = dir.join("pins.toml");
         let mut pins = BTreeMap::new();
         pins.insert("a".to_owned(), pin(Some("accepted")));
 
         let mut reg = registry_of(pins);
         apply(&pins_path, &mut reg, &report(""), &["a".to_owned()]).unwrap();
-        std::fs::remove_dir_all(&dir).ok();
 
         // unchanged: no disposition emitted, nothing to bless
         assert_eq!(reg.pins["a"].expected.as_deref(), Some("accepted"));
@@ -214,8 +210,8 @@ mod tests {
         let pins_path = dir.join("pins.toml");
         std::fs::write(
             &pins_path,
-            "# keep me\n[probes.a]\npine = { path = \"p.pine\", xxh128 = \"ff\" }\n\
-             csv = { path = \"p.csv\", xxh128 = \"ff\" }\n",
+            "# keep me\n[probes.a]\npine = { path = \"p/strategy.pine\", xxh128 = \"ff\" }\n\
+             csv = { path = \"p/tv_trades.csv\", xxh128 = \"ff\" }\n",
         )
         .unwrap();
 

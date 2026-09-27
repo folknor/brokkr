@@ -23,6 +23,7 @@ paths or re-checking hashes). Schema:
   "probes": [{
     "probe": "<id>", "probe_dir": "vendor/pineforge-engine/validation/<id>",
     "pine": { "path": "vendor/pineforge-engine/validation/<id>/strategy.pine", "xxh128": "..." },
+    "inputs": { "path": "vendor/pineforge-engine/validation/<id>/inputs.json", "xxh128": "..." },
     "csv":  { "path": "vendor/pineforge-engine/validation/<id>/tv_trades.csv", "xxh128": "..." },
     "record": { "path": "vendor/pineforge-engine/validation/<id>/tv_record.json", "xxh128": "..." },
     "keywords": ["magnifier"], "feed": "eth-15m-2025",
@@ -38,9 +39,11 @@ paths or re-checking hashes). Schema:
 Probe paths are relative to `corpus_root`. The explicit `probe` id (the
 `pins.toml` key) is what the harness emits - never inferred from `probe_dir`'s
 basename. `expected` is brokkr-side (the gate), *not* in the manifest. The
-harness ignores `pine`/`csv`/`record`/`keywords` (already verified;
+harness ignores `pine`/`inputs`/`csv`/`record`/`keywords` (already verified;
 provenance) and reads its inputs from `probe_dir` by fixed name - which is why
-`csv` and `record` each appear only when pinned, with no version bump. `feeds`
+`inputs`, `csv` and `record` each appear only when pinned, with no version
+bump. `feed` is always present: verification refuses a feedless pin, since
+the harness requires the key. `feeds`
 holds the selection's referenced feed groups, roles resolved absolute;
 per-probe `feed` names a group, and the overrides appear only when pinned
 (their semantics: `docs/commands/corpus.md`).

@@ -424,9 +424,10 @@ pub fn corpus(
 }
 
 /// Hard-verify the feed groups referenced by the selection, the feed leg of
-/// the content gate: the feed is part of each probe's oracle identity (same
-/// pine + csv against the wrong feed gates as a fake regression), so its
-/// files get the same hash-or-abort policy as `pine`/`csv`. Returns the
+/// the content gate: the feed is part of each probe's oracle identity (the
+/// same script and oracle against the wrong feed gates as a fake
+/// regression), so its files get the same hash-or-abort policy as the probe
+/// files. Returns the
 /// number of groups verified. Shared by the parity and measured paths.
 pub(crate) fn verify_selected_feeds(
     ids: &[String],

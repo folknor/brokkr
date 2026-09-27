@@ -2439,8 +2439,10 @@ In depth: `brokkr man nidhogg`."
     ///
     /// Resolves probes from the piners-owned registry (`pins.toml` +
     /// `<keyword>.toml` files under `[piners] registry_dir`), hard-verifies
-    /// each selected probe's `strategy.pine` + `tv_trades.csv` (and the
-    /// selection's referenced feed groups) against the corpus tree under
+    /// each selected probe's pinned files - `strategy.pine`, its oracle
+    /// (`tv_trades.csv` and/or `tv_record.json`), and `inputs.json` when it
+    /// has one - plus the selection's referenced feed groups against the
+    /// corpus tree under
     /// `[piners] corpus_root` by xxh128, writes a manifest, builds the
     /// `[piners.harness]` binary once, and invokes it with `--manifest
     /// <path>`. The harness emits NDJSON per-probe disposition lines that
@@ -2452,10 +2454,11 @@ In depth: `brokkr man nidhogg`."
     /// bare invocation with
     /// no selection is an error - the full corpus never runs by accident.
     /// `--verify-only` walks and verifies the whole universe without
-    /// building or running. A missing pinned path or a hash mismatch is a
-    /// hard error. The run fails on a real break (compile/runtime) or a
-    /// non-zero harness exit; parity tiers are reported but do not fail the
-    /// run yet (baseline work is deferred). Default profile is debug.
+    /// building or running. A missing pinned path, a hash mismatch, or a
+    /// record/inputs file the pin does not declare is a hard error. Each
+    /// probe's disposition is gated against its pinned `expected`: any
+    /// deviation fails the run (`--no-gate` reports it instead), as does a
+    /// harness exit the pins do not explain. Default profile is debug.
     ///
     /// In depth: `brokkr man corpus`.
     #[command(name = "corpus", display_order = 70)]
@@ -2486,8 +2489,9 @@ In depth: `brokkr man nidhogg`."
         /// Stamp `pins.toml` from the corpus filesystem (no build, no
         /// harness). Sibling to `--verify-only`, and the only way
         /// `pins.toml` is created or re-stamped. Discovers probe dirs
-        /// anywhere under `corpus_root` by the marker (`strategy.pine` +
-        /// `tv_trades.csv`), not the pinned universe. `--reseed --all`
+        /// anywhere under `corpus_root` by the marker (`strategy.pine` plus
+        /// `tv_trades.csv` or `tv_record.json`), not the pinned universe.
+        /// Pins every oracle present and `inputs.json`. `--reseed --all`
         /// regenerates the whole file from the tree (probes whose dirs
         /// vanished drop out); `--reseed --probe <id>` (repeatable)
         /// upserts each. Re-stamps `[feeds]` hashes, preserves `[roots]`

@@ -13,24 +13,27 @@
 //! Layout stays deterministic: `[feeds.<name>]` sorted, then `[roots]`,
 //! then `[probes.<id>]` sorted (the `BTreeMap` order), one blank line
 //! between blocks, fields in contract-first order (`expected`/`feed`/
-//! overrides before the volatile `pine`/`csv`/`record` hashes).
+//! overrides before the volatile file hashes). Every render is parsed back
+//! through the loader before it is returned (see [`render_pins`]).
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use toml_edit::{DocumentMut, Item, RawString, Table, Value};
 
 use crate::error::DevError;
-use crate::piners::registry::{FeedGroup, FilePin, Pin, RootEntry};
+use crate::piners::registry::{self, FeedGroup, FilePin, Pin, RootEntry};
 
 /// Field order inside a `[probes.<id>]` entry: the hand-maintained contract
 /// fields first, then the volatile hashes.
-const PROBE_FIELDS: [&str; 8] = [
+const PROBE_FIELDS: [&str; 9] = [
     "expected",
     "feed",
     "bar_budget",
     "ohlcv_start_ms",
     "tv_trades_csv_tz",
     "pine",
+    "inputs",
     "csv",
     "record",
 ];
@@ -43,6 +46,12 @@ const FEED_FIELDS: [&str; 4] = ["base", "primary", "warmup", "lower"];
 /// Render the new pin state into `existing` (the current `pins.toml` text;
 /// `None` on bootstrap), preserving comments and formatting of everything
 /// that survives. See the module header for the sync rules.
+///
+/// The rendered text is parsed back through [`registry::parse_pins`] before
+/// it is returned, so a writer can never replace the file with one the next
+/// load refuses - the loader's rules (at least one oracle, fixed file names,
+/// no dead override) bind the writers by construction, not by each caller
+/// remembering them.
 pub fn render_pins(
     existing: Option<&str>,
     feeds: &BTreeMap<String, FeedGroup>,
@@ -57,7 +66,9 @@ pub fn render_pins(
     ensure_roots(&mut doc, roots)?;
     sync_section(&mut doc, "probes", probes, fill_probe)?;
     finalize_layout(&mut doc, feeds, probes);
-    Ok(doc.to_string())
+    let text = doc.to_string();
+    registry::parse_pins(&text, Path::new("pins.toml (as rendered, not written)"))?;
+    Ok(text)
 }
 
 /// Sync one keyed section (`[<name>.<key>]` sub-tables) to `entries`:
@@ -143,6 +154,7 @@ fn fill_probe(table: &mut Table, pin: &Pin) -> Result<(), DevError> {
         pin.tv_trades_csv_tz.as_deref().map(Value::from),
     );
     set_value(table, "pine", pin_value(&pin.pine)?);
+    sync_opt(table, "inputs", pin.inputs.as_ref().map(pin_value).transpose()?);
     sync_opt(table, "csv", pin.csv.as_ref().map(pin_value).transpose()?);
     sync_opt(table, "record", pin.record.as_ref().map(pin_value).transpose()?);
     sort_fields(table, &PROBE_FIELDS);
@@ -542,6 +554,16 @@ csv = { path = \"validation/alpha-01/tv_trades.csv\", xxh128 = \"aa\" } # the ol
         let data = reparse(&text);
         assert!(data.probes["alpha-01"].csv.is_none());
         assert_eq!(data.probes["alpha-01"].record.as_ref().unwrap().xxh128, "rr");
+    }
+
+    #[test]
+    fn render_refuses_state_the_loader_would_reject() {
+        let mut p = pin("alpha-01", "aa");
+        p.csv = None; // no oracle left
+        let mut probes = BTreeMap::new();
+        probes.insert("alpha-01".to_owned(), p);
+        let err = render_pins(None, &BTreeMap::new(), &BTreeMap::new(), &probes).unwrap_err();
+        assert!(format!("{err:?}").contains("pins no oracle"));
     }
 
     #[test]

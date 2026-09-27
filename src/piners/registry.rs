@@ -42,6 +42,10 @@ pub const CSV_FILE: &str = "tv_trades.csv";
 /// precision. When a probe dir carries one, the harness judges against it and
 /// never reads a `tv_trades.csv` beside it.
 pub const RECORD_FILE: &str = "tv_record.json";
+/// A probe's declared inputs (input-panel overrides, window, timezone,
+/// candle, syminfo block). Optional, but it moves the verdict whenever
+/// present, so it is pinned like the oracle.
+pub const INPUTS_FILE: &str = "inputs.json";
 
 /// The canonical per-probe disposition labels. A probe's actual disposition
 /// (and its pinned `expected`) is one of these: the four parity acceptance
@@ -73,9 +77,10 @@ pub struct FilePin {
     pub xxh128: String,
 }
 
-/// One hash-pinned OHLCV feed group. A probe's TV export was taken against
-/// one specific feed, so the feed files are pinned oracles like `pine`/`csv` -
-/// the same pine + csv against the wrong feed gates as a fake regression.
+/// One hash-pinned OHLCV feed group. A probe's TV oracle was taken against
+/// one specific feed, so the feed files are pinned like the probe's own
+/// files - the same script and oracle against the wrong feed gates as a fake
+/// regression.
 ///
 /// Two mutually exclusive forms, selected per group:
 ///
@@ -229,6 +234,11 @@ pub struct RootEntry {
 /// neither. Both are pinned when both are on disk, even though the harness
 /// reads only the record then: pins mirror the probe dir, and a pinned CSV
 /// stays verified for the day the record is removed.
+///
+/// Every pinned file sits in one probe dir under its fixed name, because
+/// the harness reads `<probe_dir>/<name>` and nothing else: a pin naming any
+/// other path would verify one file while the harness read another.
+/// [`parse_pins`] enforces that too.
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Pin {
@@ -254,10 +264,15 @@ pub struct Pin {
     #[serde(default)]
     pub ohlcv_start_ms: Option<i64>,
     /// Piners-side `tv_trades.csv` timezone override; same carve-out rules
-    /// as `ohlcv_start_ms`. Hand-edited, reseed-preserved.
+    /// as `ohlcv_start_ms`. Hand-edited, reseed-preserved - except that a pin
+    /// with a `record` may not carry it: the harness then never reads the
+    /// CSV, so the override would be dead.
     #[serde(default)]
     pub tv_trades_csv_tz: Option<String>,
     pub pine: FilePin,
+    /// The probe's `inputs.json`, when the probe dir carries one.
+    #[serde(default)]
+    pub inputs: Option<FilePin>,
     /// The `tv_trades.csv` export oracle, when the probe dir carries one.
     #[serde(default)]
     pub csv: Option<FilePin>,
@@ -267,26 +282,58 @@ pub struct Pin {
     pub record: Option<FilePin>,
 }
 
+/// A probe's pinned files, as reseed stamps them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProbeFiles {
+    pub pine: FilePin,
+    pub inputs: Option<FilePin>,
+    pub csv: Option<FilePin>,
+    pub record: Option<FilePin>,
+}
+
 impl Pin {
     /// A content-only pin: the pinned files, no `expected`, no feed, no
-    /// overrides. The caller guarantees at least one oracle.
-    pub fn content(pine: FilePin, csv: Option<FilePin>, record: Option<FilePin>) -> Self {
+    /// overrides. [`parse_pins`] - which every writer runs on its output -
+    /// is what refuses a pin with no oracle.
+    pub fn content(files: ProbeFiles) -> Self {
         Self {
             expected: None,
             feed: None,
             bar_budget: None,
             ohlcv_start_ms: None,
             tv_trades_csv_tz: None,
-            pine,
-            csv,
-            record,
+            pine: files.pine,
+            inputs: files.inputs,
+            csv: files.csv,
+            record: files.record,
         }
     }
 
     /// A content-only CSV-oracle pin, the common test shape.
     #[cfg(test)]
     pub fn new(pine: FilePin, csv: FilePin) -> Self {
-        Self::content(pine, Some(csv), None)
+        Self::content(ProbeFiles {
+            pine,
+            inputs: None,
+            csv: Some(csv),
+            record: None,
+        })
+    }
+
+    /// The probe dir, relative to `corpus_root`: where the harness reads
+    /// every probe file from.
+    pub fn probe_dir(&self) -> &Path {
+        self.pine.path.parent().unwrap_or_else(|| Path::new(""))
+    }
+
+    /// The optional pinned files, each with the fixed name the harness
+    /// reads it by.
+    pub fn optional_files(&self) -> [(&'static str, Option<&FilePin>); 3] {
+        [
+            (INPUTS_FILE, self.inputs.as_ref()),
+            (CSV_FILE, self.csv.as_ref()),
+            (RECORD_FILE, self.record.as_ref()),
+        ]
     }
 }
 
@@ -337,26 +384,71 @@ pub fn load_pins(pins_path: &Path) -> Result<PinsData, DevError> {
     parse_pins(&text, pins_path)
 }
 
-/// Parse `pins.toml` text already in hand (reseed keeps the raw text around
-/// so the comment-preserving writer can edit it in place).
+/// Parse `pins.toml` text already in hand, and hold every pin to the
+/// structural rules in [`check_pins`]. The writers run this on their own
+/// output before replacing the file, so neither can write one the next load
+/// refuses.
 pub fn parse_pins(text: &str, origin: &Path) -> Result<PinsData, DevError> {
-    let data: PinsData = toml::from_str(text)
+    let data = parse_pins_unchecked(text, origin)?;
+    check_pins(&data.probes)
         .map_err(|e| DevError::Config(format!("piners: {}: {e}", origin.display())))?;
-    let oracleless: Vec<&str> = data
-        .probes
-        .iter()
-        .filter(|(_, pin)| pin.csv.is_none() && pin.record.is_none())
-        .map(|(id, _)| id.as_str())
-        .collect();
-    if !oracleless.is_empty() {
-        return Err(DevError::Config(format!(
-            "piners: {}: probe(s) pin no oracle - each needs `csv` ({CSV_FILE}), \
-             `record` ({RECORD_FILE}), or both:\n  {}",
-            origin.display(),
-            oracleless.join("\n  ")
-        )));
-    }
     Ok(data)
+}
+
+/// [`parse_pins`] without the structural rules: the TOML shape only. For
+/// reseed's read of the file it is about to regenerate, so a hand edit that
+/// broke a rule is repaired by the regen instead of blocking it. The
+/// regenerated text still goes through [`parse_pins`] before it is written.
+pub fn parse_pins_unchecked(text: &str, origin: &Path) -> Result<PinsData, DevError> {
+    toml::from_str(text)
+        .map_err(|e| DevError::Config(format!("piners: {}: {e}", origin.display())))
+}
+
+/// The structural rules every pin obeys: at least one oracle, every pinned
+/// file in the probe dir under its fixed name, and no `tv_trades_csv_tz`
+/// beside a `record` (the harness never reads the CSV then, so the override
+/// would be dead). Returns every violation, one per line.
+fn check_pins(probes: &BTreeMap<String, Pin>) -> Result<(), String> {
+    let mut problems: Vec<String> = Vec::new();
+    for (id, pin) in probes {
+        if pin.csv.is_none() && pin.record.is_none() {
+            problems.push(format!(
+                "{id}: pins no oracle - needs `csv` ({CSV_FILE}), `record` ({RECORD_FILE}), \
+                 or both"
+            ));
+        }
+        let dir = pin.probe_dir();
+        let pine_want = dir.join(PINE_FILE);
+        if pin.pine.path != pine_want {
+            problems.push(format!(
+                "{id}: `pine` must be named {PINE_FILE}, got {}",
+                pin.pine.path.display()
+            ));
+        }
+        for (name, file) in pin.optional_files() {
+            let Some(file) = file else { continue };
+            let want = dir.join(name);
+            if file.path != want {
+                problems.push(format!(
+                    "{id}: pins {} but the harness reads {} (every probe file sits \
+                     beside {PINE_FILE} under its fixed name)",
+                    file.path.display(),
+                    want.display()
+                ));
+            }
+        }
+        if pin.record.is_some() && pin.tv_trades_csv_tz.is_some() {
+            problems.push(format!(
+                "{id}: `tv_trades_csv_tz` is dead beside a `record` (the harness judges \
+                 against {RECORD_FILE} and never reads {CSV_FILE}); remove it"
+            ));
+        }
+    }
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("invalid probe pin(s):\n  {}", problems.join("\n  ")))
+    }
 }
 
 impl Registry {
@@ -498,22 +590,29 @@ impl Registry {
 pub struct VerifiedProbe {
     pub id: String,
     pub pine: FilePin,
+    pub inputs: Option<FilePin>,
     pub csv: Option<FilePin>,
     pub record: Option<FilePin>,
 }
 
 /// Resolve and hard-verify a single pinned probe against `corpus_root`:
-/// the script and every oracle the pin declares.
+/// the script and every other file the pin declares.
 ///
 /// A missing file or a hash mismatch is a hard error: either the registry
 /// is lying or the corpus drifted under us. Reuses
 /// [`preflight::verify_file_hash`] (xxh128, mtime-cached) so the digest
 /// matches the rest of brokkr.
 ///
-/// A `tv_record.json` in the probe dir that the pin does not declare is a
-/// hard error too. The harness picks the record over the CSV by presence
-/// alone, so an unpinned record would silently become the oracle while
-/// verification vouched for a CSV nothing reads.
+/// Two more refusals, both about what the harness will actually do:
+///
+/// - A `tv_record.json` or `inputs.json` in the probe dir that the pin does
+///   not declare. The harness reads both by presence alone - the record
+///   outranks the CSV, the inputs move the verdict - so an unpinned one
+///   would steer the run unverified while verification vouched for the rest.
+///   (An unpinned `tv_trades.csv` is harmless: it is read only as the
+///   oracle, and a pin with no `csv` has a `record`, which outranks it.)
+/// - A pin with no `feed`. The harness requires one per probe and would
+///   abort the whole run over it, not just this probe.
 pub fn verify_probe(
     id: &str,
     pin: &Pin,
@@ -521,26 +620,34 @@ pub fn verify_probe(
     project_root: &Path,
 ) -> Result<VerifiedProbe, DevError> {
     let subject = format!("probe '{id}'");
-    verify_one(&subject, PINE_FILE, &pin.pine, corpus_root, project_root)?;
-    if let Some(csv) = &pin.csv {
-        verify_one(&subject, CSV_FILE, csv, corpus_root, project_root)?;
+    if pin.feed.is_none() {
+        return Err(DevError::Preflight(vec![format!(
+            "piners: {subject} pins no `feed`; the harness needs the [feeds] group its \
+             oracle was taken against. Set `feed` on the pin, or add a [roots] prefix \
+             covering {} and re-run `brokkr corpus --reseed --probe {id}`",
+            pin.probe_dir().display()
+        )]));
     }
-    if let Some(record) = &pin.record {
-        verify_one(&subject, RECORD_FILE, record, corpus_root, project_root)?;
-    } else if let Some(dir) = pin.pine.path.parent() {
-        let unpinned = corpus_root.join(dir).join(RECORD_FILE);
-        if unpinned.exists() {
-            return Err(DevError::Preflight(vec![format!(
-                "piners: {subject} has a {RECORD_FILE} its pin does not declare:\n  {}\n  \
-                 (the harness would judge against it unverified; pin it with \
-                 `brokkr corpus --reseed --probe {id}`)",
-                unpinned.display()
-            )]));
+    verify_one(&subject, PINE_FILE, &pin.pine, corpus_root, project_root)?;
+    let dir = corpus_root.join(pin.probe_dir());
+    for (name, file) in pin.optional_files() {
+        match file {
+            Some(file) => verify_one(&subject, name, file, corpus_root, project_root)?,
+            None if name != CSV_FILE && dir.join(name).exists() => {
+                return Err(DevError::Preflight(vec![format!(
+                    "piners: {subject} has a {name} its pin does not declare:\n  {}\n  \
+                     (the harness would read it unverified; pin it with \
+                     `brokkr corpus --reseed --probe {id}`)",
+                    dir.join(name).display()
+                )]));
+            }
+            None => {}
         }
     }
     Ok(VerifiedProbe {
         id: id.to_owned(),
         pine: pin.pine.clone(),
+        inputs: pin.inputs.clone(),
         csv: pin.csv.clone(),
         record: pin.record.clone(),
     })
@@ -686,8 +793,7 @@ mod tests {
 
     #[test]
     fn load_parses_pins_and_keyword_files() {
-        let dir = std::env::temp_dir().join(format!("brokkr_piners_reg_{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_scratch::scratch("piners_registry", "load");
         std::fs::write(
             dir.join("pins.toml"),
             r#"
@@ -715,7 +821,6 @@ csv  = { path = "piners/beta-02/tv_trades.csv", xxh128 = "ddd" }
         std::fs::write(dir.join("ema.toml"), "probes = [\"alpha-01\"]\n").unwrap();
 
         let r = Registry::load(&dir).unwrap();
-        std::fs::remove_dir_all(&dir).ok();
 
         assert_eq!(r.pins.len(), 2);
         assert_eq!(r.pins["alpha-01"].pine.xxh128, "aaa");
@@ -823,38 +928,49 @@ pine = { path = "p/bare/strategy.pine", xxh128 = "aa" }
         )
         .unwrap_err();
         let msg = format!("{err:?}");
-        assert!(msg.contains("pin no oracle"));
+        assert!(msg.contains("bare: pins no oracle"));
         assert!(msg.contains("bare"));
     }
 
-    fn write_file(path: &Path, bytes: &[u8]) -> FilePin {
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(path, bytes).unwrap();
+    /// Write `root/rel_dir/name` and return its pin (path relative to `root`).
+    fn write_file(root: &Path, rel_dir: &Path, name: &str, bytes: &[u8]) -> FilePin {
+        let rel = rel_dir.join(name);
+        let abs = root.join(&rel);
+        std::fs::create_dir_all(abs.parent().unwrap()).unwrap();
+        std::fs::write(&abs, bytes).unwrap();
         FilePin {
-            path: PathBuf::new(),
-            xxh128: preflight::compute_xxh128(path).unwrap(),
+            path: rel,
+            xxh128: preflight::compute_xxh128(&abs).unwrap(),
         }
+    }
+
+    /// A feed-bearing pin over `files`, the shape `verify_probe` accepts.
+    fn fed(files: ProbeFiles) -> Pin {
+        let mut pin = Pin::content(files);
+        pin.feed = Some("f".to_owned());
+        pin
     }
 
     #[test]
     fn verify_checks_the_record_and_refuses_an_unpinned_one() {
         let root = crate::test_scratch::scratch("piners_registry", "verify_record");
-        let dir = root.join("p/probe");
-        let rel = PathBuf::from("p/probe");
-        let mut pine = write_file(&dir.join(PINE_FILE), b"//@version=6\n");
-        pine.path = rel.join(PINE_FILE);
-        let mut csv = write_file(&dir.join(CSV_FILE), b"a,b\n");
-        csv.path = rel.join(CSV_FILE);
-        let pin = Pin::new(pine.clone(), csv);
+        let rel = Path::new("p/probe");
+        let pine = write_file(&root, rel, PINE_FILE, b"//@version=6\n");
+        let csv = write_file(&root, rel, CSV_FILE, b"a,b\n");
+        let pin = fed(ProbeFiles {
+            pine,
+            inputs: None,
+            csv: Some(csv),
+            record: None,
+        });
 
         // A CSV-only pin verifies while no record sits beside it.
         assert!(verify_probe("probe", &pin, &root, &root).is_ok());
 
         // A record appears on disk: the CSV-only pin is now refused.
-        let mut record = write_file(&dir.join(RECORD_FILE), b"{}\n");
-        record.path = rel.join(RECORD_FILE);
+        let record = write_file(&root, rel, RECORD_FILE, b"{}\n");
         let err = verify_probe("probe", &pin, &root, &root).unwrap_err();
-        assert!(format!("{err:?}").contains("does not declare"));
+        assert!(format!("{err:?}").contains("tv_record.json its pin does not declare"));
 
         // Pinned, it verifies and travels in the result.
         let mut with_record = pin.clone();
@@ -868,7 +984,101 @@ pine = { path = "p/bare/strategy.pine", xxh128 = "aa" }
             path: record.path,
             xxh128: "0".repeat(32),
         });
-        assert!(verify_probe("probe", &drifted, &root, &root).is_err());
+        let err = verify_probe("probe", &drifted, &root, &root).unwrap_err();
+        assert!(format!("{err:?}").contains("hash mismatch"));
+    }
+
+    #[test]
+    fn verify_accepts_a_record_only_probe() {
+        let root = crate::test_scratch::scratch("piners_registry", "verify_record_only");
+        let rel = Path::new("p/rec");
+        let pin = fed(ProbeFiles {
+            pine: write_file(&root, rel, PINE_FILE, b"//@version=6\n"),
+            inputs: None,
+            csv: None,
+            record: Some(write_file(&root, rel, RECORD_FILE, b"{}\n")),
+        });
+        let v = verify_probe("rec", &pin, &root, &root).unwrap();
+        assert!(v.csv.is_none());
+        assert!(v.record.is_some());
+
+        // A CSV turning up beside a record-only pin is harmless (the record
+        // outranks it), so it is not refused.
+        write_file(&root, rel, CSV_FILE, b"a,b\n");
+        assert!(verify_probe("rec", &pin, &root, &root).is_ok());
+    }
+
+    #[test]
+    fn verify_pins_inputs_and_refuses_an_unpinned_one() {
+        let root = crate::test_scratch::scratch("piners_registry", "verify_inputs");
+        let rel = Path::new("p/inp");
+        let mut pin = fed(ProbeFiles {
+            pine: write_file(&root, rel, PINE_FILE, b"//@version=6\n"),
+            inputs: None,
+            csv: Some(write_file(&root, rel, CSV_FILE, b"a,b\n")),
+            record: None,
+        });
+        let inputs = write_file(&root, rel, INPUTS_FILE, b"{\"Source\":\"high\"}\n");
+        let err = verify_probe("inp", &pin, &root, &root).unwrap_err();
+        assert!(format!("{err:?}").contains("inputs.json its pin does not declare"));
+
+        pin.inputs = Some(inputs.clone());
+        let v = verify_probe("inp", &pin, &root, &root).unwrap();
+        assert_eq!(v.inputs.unwrap().xxh128, inputs.xxh128);
+
+        write_file(&root, rel, INPUTS_FILE, b"{\"Source\":\"low\"}\n");
+        let err = verify_probe("inp", &pin, &root, &root).unwrap_err();
+        assert!(format!("{err:?}").contains("hash mismatch"));
+    }
+
+    #[test]
+    fn verify_refuses_a_feedless_pin() {
+        let root = crate::test_scratch::scratch("piners_registry", "verify_feedless");
+        let rel = Path::new("p/nofeed");
+        let mut pin = fed(ProbeFiles {
+            pine: write_file(&root, rel, PINE_FILE, b"//@version=6\n"),
+            inputs: None,
+            csv: Some(write_file(&root, rel, CSV_FILE, b"a,b\n")),
+            record: None,
+        });
+        pin.feed = None;
+        let err = verify_probe("nofeed", &pin, &root, &root).unwrap_err();
+        assert!(format!("{err:?}").contains("pins no `feed`"));
+    }
+
+    #[test]
+    fn a_pinned_file_off_its_fixed_path_is_rejected() {
+        let err = parse_pins(
+            r#"
+[probes.moved]
+pine = { path = "p/moved/strategy.pine", xxh128 = "aa" }
+record = { path = "elsewhere/tv_record.json", xxh128 = "bb" }
+
+[probes.renamed]
+pine = { path = "p/renamed/main.pine", xxh128 = "aa" }
+csv = { path = "p/renamed/tv_trades.csv", xxh128 = "cc" }
+"#,
+            Path::new("pins.toml"),
+        )
+        .unwrap_err();
+        let msg = format!("{err:?}");
+        assert!(msg.contains("moved: pins elsewhere/tv_record.json"));
+        assert!(msg.contains("renamed: `pine` must be named strategy.pine"));
+    }
+
+    #[test]
+    fn csv_timezone_beside_a_record_is_rejected() {
+        let err = parse_pins(
+            r#"
+[probes.dead-tz]
+tv_trades_csv_tz = "utc"
+pine = { path = "p/dead-tz/strategy.pine", xxh128 = "aa" }
+record = { path = "p/dead-tz/tv_record.json", xxh128 = "bb" }
+"#,
+            Path::new("pins.toml"),
+        )
+        .unwrap_err();
+        assert!(format!("{err:?}").contains("`tv_trades_csv_tz` is dead"));
     }
 
     #[test]

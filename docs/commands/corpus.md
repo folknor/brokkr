@@ -48,7 +48,10 @@ re-pin) plus first-party probe dirs. Each probe is a directory with
 tree naming (`validation/`, `strategies/`, flat). The oracle is
 `tv_trades.csv` (the List of Trades export), `tv_record.json` (a tvr capture
 of the in-memory strategy report at full precision), or both. When a record
-is present the harness judges against it and does not read the CSV.
+is present the harness judges against it and does not read the CSV. A probe
+may also carry `inputs.json` (input-panel overrides, window, timezone,
+candle, syminfo block), which moves the verdict whenever present and is
+pinned like the oracle.
 Probes are pinned in the registry (`registry_dir`), two file kinds:
 
 - `pins.toml` - the canonical, verified universe. `[feeds.<name>]` groups
@@ -71,8 +74,9 @@ Probes are pinned in the registry (`registry_dir`), two file kinds:
   [probes.magnifier-tick-dist-endpoints-01]
   expected = "actionable_drift"  # the blessed disposition (gate contract)
   feed = "eth-15m-2025"          # the [feeds] group (oracle identity)
-  pine = { path = "vendor/pineforge-engine/validation/<id>/strategy.pine", xxh128 = "<hex>" }
-  csv  = { path = "vendor/pineforge-engine/validation/<id>/tv_trades.csv", xxh128 = "<hex>" }
+  pine   = { path = "vendor/pineforge-engine/validation/<id>/strategy.pine", xxh128 = "<hex>" }
+  inputs = { path = "vendor/pineforge-engine/validation/<id>/inputs.json", xxh128 = "<hex>" }
+  csv    = { path = "vendor/pineforge-engine/validation/<id>/tv_trades.csv", xxh128 = "<hex>" }
 
   [probes.some-tvr-capture]
   expected = "byte_exact"
@@ -81,8 +85,14 @@ Probes are pinned in the registry (`registry_dir`), two file kinds:
   record = { path = "piners/some-tvr-capture/tv_record.json", xxh128 = "<hex>" }
   ```
 
-  A probe pins `csv`, `record`, or both - whichever oracles its dir holds.
-  A pin with neither is a parse error.
+  A probe pins `csv`, `record`, or both - whichever oracles its dir holds -
+  plus `inputs` when its dir has an `inputs.json`. Loading refuses a pin
+  with neither oracle, and a pinned file that is not in `pine`'s directory
+  under its fixed name (`strategy.pine`, `inputs.json`, `tv_trades.csv`,
+  `tv_record.json`): the harness reads `<probe_dir>/<name>` and nothing else,
+  so any other path would verify one file while the harness read another.
+  Both writers (reseed, bless) parse their own output against these rules
+  before replacing the file, so neither can write one the next load refuses.
 
   A feed group is either **single-base** (exactly `base`, the only committed
   input - a lower-TF feed the harness aggregates locally) or **role** (`primary`
@@ -101,6 +111,8 @@ Probes are pinned in the registry (`registry_dir`), two file kinds:
   and warrants a re-bless in the same diff), `ohlcv_start_ms`, and
   `tv_trades_csv_tz` (carve-outs for vendor probes whose in-submodule
   `inputs.json` cannot carry them; probe-local `inputs.json` wins).
+  `tv_trades_csv_tz` is refused beside a `record`: the harness never reads
+  the CSV then, so the override would be dead.
 
 - `<keyword>.toml` (any other `*.toml`) - a pure selection grouping. Keyword
   = file stem; body is `probes = ["id", ...]`. Ids only - the volatile
@@ -181,17 +193,24 @@ real wall (a ~60s full corpus summed to ~320s), producing false refusals.
 
 ## Verification (the content gate)
 
-Each selected probe's pinned files (`pine` plus its `csv` and/or `record`) -
-plus every role (`primary`/`warmup`/`lower`, or the single `base`) of every
-feed group the selection references - are resolved under `corpus_root` and
-hashed before any build. A missing path or hash mismatch is a hard error
-(registry lying or the corpus drifted) - no `--allow-drift`; re-stamp with
-`--reseed` or fix the tree.
+Each selected probe's pinned files (`pine`, its `csv` and/or `record`, and
+`inputs` when pinned) - plus every role (`primary`/`warmup`/`lower`, or the
+single `base`) of every feed group the selection references - are resolved
+under `corpus_root` and hashed before any build. A missing path or hash
+mismatch is a hard error (registry lying or the corpus drifted) - no
+`--allow-drift`; re-stamp with `--reseed` or fix the tree.
 
-A `tv_record.json` in a probe dir whose pin declares no `record` is a hard
-error too. The harness picks the record by its presence alone, so an
-unpinned record would become the oracle unverified while the pinned CSV
-went unread. `--reseed --probe <id>` pins it.
+Two more hard errors, both about what the harness will actually do:
+
+- A `tv_record.json` or `inputs.json` in a probe dir whose pin does not
+  declare it. The harness reads both by presence alone - the record
+  outranks the CSV, the inputs move the verdict - so an unpinned one would
+  steer the run unverified. `--reseed --probe <id>` pins it. (An unpinned
+  `tv_trades.csv` beside a record-only pin is harmless and allowed: the
+  record outranks it.)
+- A pin with no `feed`. The harness needs one per probe and would abort the
+  whole run over a single feedless probe, so it is refused here, naming the
+  probe. Set `feed`, or add a `[roots]` prefix and re-run reseed.
 
 **Git-LFS guard.** The `pineforge-engine` submodule routes its 1m base feed
 through Git LFS, so a checkout without an LFS smudge leaves a pointer file, not
@@ -243,29 +262,40 @@ on a removed probe goes with it. Both hold the global brokkr lock across
 their read-modify-write, and bless stamps into the file as it is on disk at
 write time (not the copy the run loaded), so neither can revert the other.
 The file is replaced atomically (temp file + rename), so a kill mid-write
-leaves the old file, never a truncated one.
+leaves the old file, never a truncated one. Before the replace, each writer
+parses its own output against the loader's rules, so a write can never
+produce a file the next load refuses.
 
 `--reseed` stamps hashes from the corpus **filesystem** (not `pins.toml`) -
 the only way the file is created or its hashes refreshed. No build/harness.
 Probe dirs are discovered anywhere under `corpus_root` by the marker (a dir
-containing `strategy.pine` plus `tv_trades.csv` or `tv_record.json`),
-independent of depth and root layout; the registry dir is excluded from the
-walk. The id is the dir basename - a collision across roots is a hard error.
-Every oracle present is pinned, and one that has left the dir drops out of
-the pin.
+containing `strategy.pine` plus `tv_trades.csv` or `tv_record.json`, all
+regular files), independent of depth and root layout; the registry dir is
+excluded from the walk. The id is the dir basename - a collision across
+roots is a hard error. Every oracle present is pinned, as is `inputs.json`
+when present, and a file that has left the dir drops out of the pin.
 
 - `--reseed --all` - stamp every discovered parity probe; dirs with
   `strategy.pine` but no oracle (self-tests) skipped with a count;
-  vanished probes drop out.
-- `--reseed --probe <id>` (repeatable) - upsert each named probe (hard-errors
-  when no dir named `<id>` carries the marker).
+  vanished probes drop out. The existing file is read without the
+  structural rules, so a hand edit that broke one is repaired by the regen
+  instead of blocking it.
+- `--reseed --probe <id>` (repeatable) - upsert each named probe. Hard-errors
+  when no dir named `<id>` carries the marker, and says so specifically when
+  the dir exists with `strategy.pine` but no oracle.
 
 Prints `added/changed/removed`. Touches the pinned *content* only:
-re-hashes `pine`/`csv`/`record` and the `[feeds]` group files, preserves `[roots]`
+re-hashes the probe files and the `[feeds]` group files, preserves `[roots]`
 verbatim, and **preserves** each surviving probe's hand-maintained fields
 (`expected`, `feed`, `bar_budget`, `ohlcv_start_ms`, `tv_trades_csv_tz`).
-A newly discovered probe gets `feed` assigned by the longest matching
-`[roots]` prefix (an explicit `feed` always wins) and stays unblessed.
+Two exceptions follow from the content: a `tv_trades_csv_tz` on a probe that
+now has a `record` is dropped (it is dead there), and a blessed probe that
+gained or lost a `record` - so is now judged against a different oracle -
+keeps its `expected` but is named in a re-bless warning, since a
+disposition that happens to match across the switch would otherwise pass
+the gate unnoticed. A newly discovered probe gets `feed` assigned by the
+longest matching `[roots]` prefix (an explicit `feed` always wins) and stays
+unblessed.
 
 `--bless [--all|--keyword <k>|--probe <id>]` runs the selection (verify +
 build + harness), then stamps each probe's current disposition into

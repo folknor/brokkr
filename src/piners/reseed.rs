@@ -11,11 +11,12 @@
 //! **filesystem**, not `pins.toml`: it must be able to pin probes that are
 //! not pinned yet. Probe dirs are discovered anywhere under `corpus_root`
 //! by the marker (a directory containing `strategy.pine` plus an oracle -
-//! `tv_trades.csv`, `tv_record.json`, or both; every oracle present is
-//! pinned), independent of depth and tree naming - the roots use
-//! `validation/`, `strategies/`, and flat layouts. The registry dir is
-//! explicitly excluded from the walk (it contains no probe markers, but
-//! the exclusion is cheap insurance now that it lives inside the tree).
+//! `tv_trades.csv`, `tv_record.json`, or both), independent of depth and
+//! tree naming - the roots use `validation/`, `strategies/`, and flat
+//! layouts. Every oracle present is pinned, and so is `inputs.json` when
+//! the dir has one. The registry dir is explicitly excluded from the walk
+//! (it contains no probe markers, but the exclusion is cheap insurance now
+//! that it lives inside the tree).
 //!
 //! - `--reseed --all` - walk `corpus_root`, stamp every probe.
 //!   Authoritative full regen: a probe whose dir vanished upstream drops
@@ -23,11 +24,14 @@
 //! - `--reseed --probe <id>` (repeatable) - upsert the named probe(s),
 //!   leaving the rest intact.
 //!
-//! Reseed touches the pinned *content* only: it re-hashes `pine`/`csv`/`record` and
-//! the `[feeds]` group files, preserves `[roots]` verbatim, and carries
+//! Reseed touches the pinned *content* only: it re-hashes the probe files
+//! and the `[feeds]` group files, preserves `[roots]` verbatim, and carries
 //! forward every probe's hand-maintained fields (`expected`, `feed`,
-//! `bar_budget`, `ohlcv_start_ms`, `tv_trades_csv_tz`). A newly discovered
-//! probe gets its `feed` assigned by the longest matching `[roots]` prefix.
+//! `bar_budget`, `ohlcv_start_ms`, `tv_trades_csv_tz`) - except a
+//! `tv_trades_csv_tz` beside a `record`, which is dead and dropped. A newly
+//! discovered probe gets its `feed` assigned by the longest matching
+//! `[roots]` prefix. A blessed probe whose oracle changed kind keeps its
+//! `expected` but is named in a re-bless warning.
 //!
 //! Output is deterministic (sections and entries sorted by key, inline
 //! `{ path, xxh128 }` tables) for clean diffs, idempotent (re-stamping
@@ -44,7 +48,8 @@ use crate::output;
 use crate::piners::cmd::CorpusArgs;
 use crate::piners::pins_write;
 use crate::piners::registry::{
-    self, CSV_FILE, FeedGroup, FilePin, PINE_FILE, Pin, PinsData, RECORD_FILE, RootEntry,
+    self, CSV_FILE, FeedGroup, FilePin, INPUTS_FILE, PINE_FILE, Pin, PinsData, ProbeFiles,
+    RECORD_FILE, RootEntry,
 };
 use crate::piners::registry_io;
 use crate::preflight;
@@ -69,6 +74,13 @@ pub fn run(
             "corpus --reseed: --all and --probe are mutually exclusive.".into(),
         ));
     }
+    if !args.all && args.probe.is_empty() {
+        return Err(DevError::Config(
+            "corpus --reseed requires --all (full regen) or --probe <id> \
+             (repeatable upsert)."
+                .into(),
+        ));
+    }
 
     let corpus_root = project_root.join(cfg.corpus_root());
     let registry_dir = project_root.join(cfg.registry_dir());
@@ -78,99 +90,173 @@ pub fn run(
     // holds the same lock for its run) cannot interleave with this rewrite.
     let _lock = registry_io::lock(project_root, "corpus-reseed")?;
 
-    // Keep the raw text alongside the parsed data: the writer edits the
-    // existing document in place so hand-written comments survive.
+    // Keep the raw text: the writer edits the existing document in place so
+    // hand-written comments survive.
     let existing_text = if pins_path.exists() {
         Some(std::fs::read_to_string(&pins_path).map_err(DevError::Io)?)
     } else {
         None
     };
-    let existing = match existing_text.as_deref() {
-        Some(text) => registry::parse_pins(text, &pins_path)?,
-        None => PinsData::default(),
-    };
-
-    let discovered = discover(&corpus_root, &registry_dir)?;
-
-    let mut new_pins = if args.all {
-        let mut pins = BTreeMap::new();
-        for (id, rel_dir) in &discovered.probes {
-            pins.insert(id.clone(), stamp_one(id, rel_dir, &corpus_root)?);
-        }
-        pins
-    } else if !args.probe.is_empty() {
-        let mut merged = existing.probes.clone();
-        for id in &args.probe {
-            let rel_dir = discovered.probes.get(id).ok_or_else(|| {
-                DevError::Config(format!(
-                    "corpus --reseed: probe '{id}' not found under {} \
-                     (no directory named '{id}' containing {PINE_FILE} plus \
-                     {CSV_FILE} or {RECORD_FILE})",
-                    corpus_root.display()
-                ))
-            })?;
-            merged.insert(id.clone(), stamp_one(id, rel_dir, &corpus_root)?);
-        }
-        merged
-    } else {
-        return Err(DevError::Config(
-            "corpus --reseed requires --all (full regen) or --probe <id> \
-             (repeatable upsert)."
-                .into(),
-        ));
-    };
-
-    // Reseed touches the pinned content (pine/csv/feed hashes) only. The
-    // blessed `expected` disposition and the hand-maintained per-probe fields
-    // (feed, bar_budget, ohlcv_start_ms, tv_trades_csv_tz) are independent
-    // contracts, so carry them forward for every probe that survives the
-    // re-stamp; then assign a feed (from [roots], longest prefix wins) to
-    // probes that still have none.
-    carry_preserved(&mut new_pins, &existing.probes);
-    assign_feeds(&mut new_pins, &existing.roots);
-
-    let feeds = restamp_feeds(&existing.feeds, &corpus_root)?;
-    let diff = Diff::compute(&existing.probes, &new_pins);
+    let plan = plan(existing_text.as_deref(), &pins_path, &corpus_root, &registry_dir, args)?;
 
     std::fs::create_dir_all(&registry_dir).map_err(DevError::Io)?;
-    registry_io::write_atomic(
-        &pins_path,
-        &pins_write::render_pins(existing_text.as_deref(), &feeds, &existing.roots, &new_pins)?,
-    )?;
+    registry_io::write_atomic(&pins_path, &plan.text)?;
 
-    if discovered.skipped > 0 {
+    if plan.skipped > 0 {
         output::corpus_msg(&format!(
             "skipped {} non-parity dir(s) (no {CSV_FILE} or {RECORD_FILE})",
-            discovered.skipped
+            plan.skipped
         ));
     }
     output::corpus_msg(&format!(
         "reseed: {} probe(s), {} feed group(s) -> {} (added={} changed={} removed={})",
-        new_pins.len(),
-        feeds.len(),
+        plan.probes,
+        plan.feeds,
         pins_path.display(),
-        diff.added,
-        diff.changed,
-        diff.removed,
+        plan.diff.added,
+        plan.diff.changed,
+        plan.diff.removed,
     ));
+    if !plan.diff.oracle_switched.is_empty() {
+        output::corpus_msg(&format!(
+            "warning: {} probe(s) now judged against a different oracle ({CSV_FILE} <-> \
+             {RECORD_FILE}); their `expected` was carried forward from the old one - \
+             re-bless: brokkr corpus --bless --probe {}",
+            plan.diff.oracle_switched.len(),
+            plan.diff.oracle_switched.join(",")
+        ));
+    }
+    if !plan.dropped_tz.is_empty() {
+        output::corpus_msg(&format!(
+            "dropped `tv_trades_csv_tz` from {} probe(s) now judged against {RECORD_FILE}, \
+             where it is dead: {}",
+            plan.dropped_tz.len(),
+            plan.dropped_tz.join(", ")
+        ));
+    }
     Ok(())
 }
 
+/// Everything a reseed decided, before anything is written.
+#[derive(Debug)]
+struct Plan {
+    /// The new `pins.toml` text, already parsed back through the loader.
+    text: String,
+    probes: usize,
+    feeds: usize,
+    diff: Diff,
+    /// Near-miss dirs the walk passed over (`strategy.pine`, no oracle).
+    skipped: usize,
+    /// Probes whose `tv_trades_csv_tz` was removed because they now have a
+    /// `record`, beside which the override is dead.
+    dropped_tz: Vec<String>,
+}
+
+/// Compute a reseed against `existing_text` (the current `pins.toml`, `None`
+/// on bootstrap) without touching the file or taking the lock - `run` does
+/// both around this, which keeps the whole decision testable.
+///
+/// The existing file is read *unchecked*: `--all` regenerates every probe from
+/// the filesystem, so a hand edit that broke a structural rule is repaired by
+/// the regen rather than blocking it. Whatever survives (the untouched probes
+/// of a `--probe` upsert) is held to the rules again when the writer parses
+/// its own output.
+fn plan(
+    existing_text: Option<&str>,
+    pins_path: &Path,
+    corpus_root: &Path,
+    registry_dir: &Path,
+    args: &CorpusArgs,
+) -> Result<Plan, DevError> {
+    let existing = match existing_text {
+        Some(text) => registry::parse_pins_unchecked(text, pins_path)?,
+        None => PinsData::default(),
+    };
+
+    let discovered = discover(corpus_root, registry_dir)?;
+
+    let mut new_pins = if args.all {
+        let mut pins = BTreeMap::new();
+        for (id, rel_dir) in &discovered.probes {
+            pins.insert(id.clone(), stamp_one(id, rel_dir, corpus_root)?);
+        }
+        pins
+    } else {
+        let mut merged = existing.probes.clone();
+        for id in &args.probe {
+            let Some(rel_dir) = discovered.probes.get(id) else {
+                return Err(not_a_probe(id, &discovered, corpus_root));
+            };
+            merged.insert(id.clone(), stamp_one(id, rel_dir, corpus_root)?);
+        }
+        merged
+    };
+
+    // Reseed touches the pinned files and feed hashes only. The blessed
+    // `expected` disposition and the hand-maintained per-probe fields (feed,
+    // bar_budget, ohlcv_start_ms, tv_trades_csv_tz) are independent
+    // contracts, so carry them forward for every probe that survives the
+    // re-stamp; drop an override the new content made dead; then assign a
+    // feed (from [roots], longest prefix wins) to probes that still have none.
+    carry_preserved(&mut new_pins, &existing.probes);
+    let dropped_tz = drop_dead_overrides(&mut new_pins);
+    assign_feeds(&mut new_pins, &existing.roots);
+
+    let feeds = restamp_feeds(&existing.feeds, corpus_root)?;
+    let diff = Diff::compute(&existing.probes, &new_pins);
+    let text = pins_write::render_pins(existing_text, &feeds, &existing.roots, &new_pins)?;
+
+    Ok(Plan {
+        text,
+        probes: new_pins.len(),
+        feeds: feeds.len(),
+        diff,
+        skipped: discovered.skipped.len(),
+        dropped_tz,
+    })
+}
+
+/// The error for a `--probe` id the walk did not find as a probe, naming
+/// the near miss when there is one: a dir by that name with `strategy.pine`
+/// but no oracle exists, it just is not a parity probe.
+fn not_a_probe(id: &str, discovered: &Discovered, corpus_root: &Path) -> DevError {
+    let near: Vec<String> = discovered
+        .skipped
+        .iter()
+        .filter(|rel| rel.file_name().is_some_and(|n| n.to_string_lossy() == id))
+        .map(|rel| rel.display().to_string())
+        .collect();
+    if near.is_empty() {
+        DevError::Config(format!(
+            "corpus --reseed: probe '{id}' not found under {} (no directory named \
+             '{id}' containing {PINE_FILE})",
+            corpus_root.display()
+        ))
+    } else {
+        DevError::Config(format!(
+            "corpus --reseed: '{id}' has {PINE_FILE} but no oracle ({CSV_FILE} or \
+             {RECORD_FILE}), so it is not a parity probe:\n  {}",
+            near.join("\n  ")
+        ))
+    }
+}
+
 /// The discovery result: probe id -> dir relative to `corpus_root`, plus
-/// the count of near-miss dirs (had `strategy.pine` but no oracle).
+/// the near-miss dirs (had `strategy.pine` but no oracle), also relative.
 #[derive(Debug)]
 struct Discovered {
     probes: BTreeMap<String, PathBuf>,
-    skipped: usize,
+    skipped: Vec<PathBuf>,
 }
 
 /// Walk `corpus_root` recursively for probe dirs by the marker: a directory
-/// containing `strategy.pine` plus `tv_trades.csv` or `tv_record.json`. A probe dir is
-/// terminal (no descent). A dir with `strategy.pine` but no oracle is a
-/// non-parity dir (multi-mode self-test etc.) - skipped with a count, also
-/// terminal. The registry dir and dot-dirs (`.git` in a plain checkout) are
-/// excluded. The probe id is the dir basename; since ids key `pins.toml`, a
-/// basename collision across roots is a hard error naming both paths.
+/// containing `strategy.pine` plus `tv_trades.csv` or `tv_record.json`, all
+/// regular files. A probe dir is terminal (no descent). A dir with
+/// `strategy.pine` but no oracle is a non-parity dir (multi-mode self-test
+/// etc.) - skipped and remembered, also terminal. The registry dir and
+/// dot-dirs (`.git` in a plain checkout) are excluded. The probe id is the
+/// dir basename; since ids key `pins.toml`, a basename collision across
+/// roots is a hard error naming both paths.
 fn discover(corpus_root: &Path, registry_dir: &Path) -> Result<Discovered, DevError> {
     if !corpus_root.is_dir() {
         return Err(DevError::Config(format!(
@@ -180,7 +266,7 @@ fn discover(corpus_root: &Path, registry_dir: &Path) -> Result<Discovered, DevEr
     }
     let mut found = Discovered {
         probes: BTreeMap::new(),
-        skipped: 0,
+        skipped: Vec::new(),
     };
     walk(corpus_root, corpus_root, registry_dir, &mut found)?;
     Ok(found)
@@ -210,22 +296,24 @@ fn walk(
     subdirs.sort();
 
     for sub in subdirs {
-        let has_pine = sub.join(PINE_FILE).exists();
-        let has_oracle = sub.join(CSV_FILE).exists() || sub.join(RECORD_FILE).exists();
-        if has_pine && has_oracle {
-            let id = sub
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            let rel = sub
-                .strip_prefix(corpus_root)
+        let has_pine = sub.join(PINE_FILE).is_file();
+        let has_oracle = sub.join(CSV_FILE).is_file() || sub.join(RECORD_FILE).is_file();
+        let rel = || {
+            sub.strip_prefix(corpus_root)
+                .map(Path::to_path_buf)
                 .map_err(|_| {
                     DevError::Config(format!(
                         "corpus --reseed: probe dir escapes corpus root: {}",
                         sub.display()
                     ))
-                })?
-                .to_path_buf();
+                })
+        };
+        if has_pine && has_oracle {
+            let id = sub
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let rel = rel()?;
             if let Some(prev) = found.probes.get(&id) {
                 return Err(DevError::Config(format!(
                     "corpus --reseed: probe id '{id}' is ambiguous - two dirs share \
@@ -236,7 +324,7 @@ fn walk(
             }
             found.probes.insert(id, rel);
         } else if has_pine {
-            found.skipped += 1; // non-parity dir: self-test etc.
+            found.skipped.push(rel()?); // non-parity dir: self-test etc.
         } else {
             walk(&sub, corpus_root, registry_dir, found)?;
         }
@@ -244,19 +332,20 @@ fn walk(
     Ok(())
 }
 
-/// Stamp a single discovered probe: hash `strategy.pine` and every oracle
-/// present in `rel_dir`. Absence is re-read here, not trusted from the walk:
-/// an oracle gone since discovery drops out of the pin, and a probe left with
-/// none is an error.
+/// Stamp a single discovered probe: hash `strategy.pine` and every other
+/// probe file present in `rel_dir` (`inputs.json` and the oracles). Absence
+/// is re-read here, not trusted from the walk: a file gone since discovery
+/// drops out of the pin, and a probe left with no oracle is an error.
 fn stamp_one(id: &str, rel_dir: &Path, corpus_root: &Path) -> Result<Pin, DevError> {
-    let pine = stamp_file(rel_dir, PINE_FILE, corpus_root)?.ok_or_else(|| {
+    let pine = stamp_file(id, rel_dir, PINE_FILE, corpus_root)?.ok_or_else(|| {
         DevError::Config(format!(
             "corpus --reseed: probe '{id}' is missing {PINE_FILE}: {}",
             corpus_root.join(rel_dir).join(PINE_FILE).display()
         ))
     })?;
-    let csv = stamp_file(rel_dir, CSV_FILE, corpus_root)?;
-    let record = stamp_file(rel_dir, RECORD_FILE, corpus_root)?;
+    let inputs = stamp_file(id, rel_dir, INPUTS_FILE, corpus_root)?;
+    let csv = stamp_file(id, rel_dir, CSV_FILE, corpus_root)?;
+    let record = stamp_file(id, rel_dir, RECORD_FILE, corpus_root)?;
     if csv.is_none() && record.is_none() {
         return Err(DevError::Config(format!(
             "corpus --reseed: probe '{id}' has no oracle ({CSV_FILE} or {RECORD_FILE}) in {}",
@@ -266,15 +355,33 @@ fn stamp_one(id: &str, rel_dir: &Path, corpus_root: &Path) -> Result<Pin, DevErr
 
     // Content-only stamp; the caller carries the hand-maintained fields
     // forward and assigns the feed.
-    Ok(Pin::content(pine, csv, record))
+    Ok(Pin::content(ProbeFiles {
+        pine,
+        inputs,
+        csv,
+        record,
+    }))
 }
 
-/// Hash `rel_dir/name` into a pin, or `None` when the file is absent.
-fn stamp_file(rel_dir: &Path, name: &str, corpus_root: &Path) -> Result<Option<FilePin>, DevError> {
+/// Hash `rel_dir/name` into a pin, or `None` when nothing is there. Anything
+/// there that is not a regular file is an error: the harness reads it as a
+/// file, and hashing a directory would pin a tree digest nothing consumes.
+fn stamp_file(
+    id: &str,
+    rel_dir: &Path,
+    name: &str,
+    corpus_root: &Path,
+) -> Result<Option<FilePin>, DevError> {
     let rel = rel_dir.join(name);
     let abs = corpus_root.join(&rel);
     if !abs.exists() {
         return Ok(None);
+    }
+    if !abs.is_file() {
+        return Err(DevError::Config(format!(
+            "corpus --reseed: probe '{id}': {} is not a regular file",
+            abs.display()
+        )));
     }
     // Probe files are not LFS today, but the guard is cheap insurance: a
     // pointer stamped as a probe hash would poison the pin exactly as a
@@ -303,18 +410,31 @@ fn carry_preserved(new: &mut BTreeMap<String, Pin>, old: &BTreeMap<String, Pin>)
     }
 }
 
+/// Remove `tv_trades_csv_tz` from every pin that has a `record`: the harness
+/// then judges against the record and never reads the CSV, so the override
+/// is dead, and the loader refuses it. Returns the ids it was removed from.
+/// Runs over every pin, not only re-stamped ones, so a `--probe` upsert
+/// also repairs a hand edit elsewhere in the file.
+fn drop_dead_overrides(pins: &mut BTreeMap<String, Pin>) -> Vec<String> {
+    let mut dropped = Vec::new();
+    for (id, pin) in pins.iter_mut() {
+        if pin.record.is_some() && pin.tv_trades_csv_tz.take().is_some() {
+            dropped.push(id.clone());
+        }
+    }
+    dropped
+}
+
 /// Assign a feed to every probe that has none, by the longest `[roots]`
 /// prefix matching its probe dir. An existing explicit `feed` (carried
 /// forward by [`carry_preserved`]) is preserved; a probe under no root
-/// stays feedless.
+/// stays feedless (and is refused at verification until it gets one).
 fn assign_feeds(pins: &mut BTreeMap<String, Pin>, roots: &BTreeMap<String, RootEntry>) {
     for pin in pins.values_mut() {
         if pin.feed.is_some() {
             continue;
         }
-        let Some(probe_dir) = pin.pine.path.parent() else {
-            continue;
-        };
+        let probe_dir = pin.probe_dir().to_path_buf();
         pin.feed = roots
             .iter()
             .filter(|(prefix, _)| probe_dir.starts_with(Path::new(prefix)))
@@ -352,21 +472,35 @@ fn restamp_feeds(
     Ok(out)
 }
 
-/// Added/changed/removed counts between the old and new pin sets.
+/// Added/changed/removed counts between the old and new pin sets, plus the
+/// surviving blessed probes whose effective oracle changed kind.
+#[derive(Debug)]
 struct Diff {
     added: usize,
     changed: usize,
     removed: usize,
+    /// Blessed probes that gained or lost a `record` - the harness judges
+    /// against the record whenever there is one, so this is exactly the set
+    /// whose carried-forward `expected` was blessed against another oracle.
+    /// A disposition that happens to match across the switch would pass the
+    /// gate silently, so it is reported rather than folded into `changed`.
+    oracle_switched: Vec<String>,
 }
 
 impl Diff {
     fn compute(old: &BTreeMap<String, Pin>, new: &BTreeMap<String, Pin>) -> Self {
         let mut added = 0;
         let mut changed = 0;
+        let mut oracle_switched = Vec::new();
         for (id, pin) in new {
             match old.get(id) {
                 None => added += 1,
-                Some(prev) if prev != pin => changed += 1,
+                Some(prev) if prev != pin => {
+                    changed += 1;
+                    if pin.expected.is_some() && prev.record.is_some() != pin.record.is_some() {
+                        oracle_switched.push(id.clone());
+                    }
+                }
                 Some(_) => {}
             }
         }
@@ -375,6 +509,7 @@ impl Diff {
             added,
             changed,
             removed,
+            oracle_switched,
         }
     }
 }
@@ -513,9 +648,7 @@ mod tests {
 
     #[test]
     fn discover_finds_probes_across_roots_and_depths() {
-        let root =
-            std::env::temp_dir().join(format!("brokkr_piners_disc_{}", std::process::id()));
-        std::fs::remove_dir_all(&root).ok();
+        let root = crate::test_scratch::scratch("piners_reseed", "discover_layouts");
         // Engine layout: validation/<id>/.
         write_probe(&root.join("vendor/engine/validation/alpha-01"));
         // Bench layout: strategies/<id>/.
@@ -537,7 +670,6 @@ mod tests {
         write_probe(&root.join(".git/fake-probe"));
 
         let found = discover(&root, &registry).unwrap();
-        std::fs::remove_dir_all(&root).ok();
 
         let ids: Vec<&str> = found.probes.keys().map(String::as_str).collect();
         assert_eq!(
@@ -548,7 +680,11 @@ mod tests {
             found.probes["01-trend"],
             PathBuf::from("vendor/bench-assets/strategies/01-trend")
         );
-        assert_eq!(found.skipped, 1); // the self-test
+        // The self-test, remembered by path for the --probe near-miss error.
+        assert_eq!(
+            found.skipped,
+            vec![PathBuf::from("vendor/engine/validation/selftest-01")]
+        );
     }
 
     #[test]
@@ -567,7 +703,7 @@ mod tests {
         std::fs::create_dir_all(&registry).unwrap();
 
         let found = discover(&root, &registry).unwrap();
-        assert_eq!(found.skipped, 0);
+        assert!(found.skipped.is_empty());
         let rec = stamp_one("rec-only", &found.probes["rec-only"], &root).unwrap();
         let dual = stamp_one("both", &found.probes["both"], &root).unwrap();
 
@@ -588,26 +724,128 @@ mod tests {
     }
 
     #[test]
+    fn stamp_pins_inputs_and_refuses_a_non_file() {
+        let root = crate::test_scratch::scratch("piners_reseed", "inputs_and_non_file");
+        let dir = root.join("piners/inp");
+        write_probe(&dir);
+        std::fs::write(dir.join("inputs.json"), b"{\"Source\":\"high\"}\n").unwrap();
+        let pin = stamp_one("inp", Path::new("piners/inp"), &root).unwrap();
+        assert_eq!(
+            pin.inputs.unwrap().path,
+            PathBuf::from("piners/inp/inputs.json")
+        );
+
+        // A directory where the record should be: not a probe in the walk,
+        // and an error rather than a tree digest if stamped.
+        let odd = root.join("piners/odd");
+        std::fs::create_dir_all(odd.join("tv_record.json")).unwrap();
+        std::fs::write(odd.join("strategy.pine"), b"//@version=6\n").unwrap();
+        let err = stamp_one("odd", Path::new("piners/odd"), &root).unwrap_err();
+        assert!(format!("{err:?}").contains("not a regular file"));
+        let registry = root.join("registry");
+        let found = discover(&root, &registry).unwrap();
+        assert!(!found.probes.contains_key("odd"));
+        assert_eq!(found.skipped, vec![PathBuf::from("piners/odd")]);
+    }
+
+    fn args_probe(ids: &[&str]) -> CorpusArgs {
+        CorpusArgs {
+            probe: ids.iter().map(|s| (*s).to_owned()).collect(),
+            ..CorpusArgs::default()
+        }
+    }
+
+    fn args_all() -> CorpusArgs {
+        CorpusArgs {
+            all: true,
+            ..CorpusArgs::default()
+        }
+    }
+
+    #[test]
+    fn plan_switches_a_blessed_probe_from_csv_to_record() {
+        let root = crate::test_scratch::scratch("piners_reseed", "plan_csv_to_record");
+        let registry = root.join("registry");
+        std::fs::create_dir_all(&registry).unwrap();
+        let pins_path = registry.join("pins.toml");
+        let dir = root.join("piners/alpha");
+        write_probe(&dir);
+        let first = plan(None, &pins_path, &root, &registry, &args_all()).unwrap();
+        // Bless it and give it a CSV timezone override, by hand, with a comment.
+        let blessed = first.text.replace(
+            "[probes.alpha]\n",
+            "# alpha is the flagship\n[probes.alpha]\nexpected = \"accepted\"\n\
+             tv_trades_csv_tz = \"utc\"\n",
+        );
+
+        // The capture is redone with tvr: the CSV goes, a record arrives.
+        std::fs::remove_file(dir.join("tv_trades.csv")).unwrap();
+        std::fs::write(dir.join("tv_record.json"), b"{}\n").unwrap();
+        let p = plan(Some(&blessed), &pins_path, &root, &registry, &args_probe(&["alpha"]))
+            .unwrap();
+
+        assert_eq!((p.diff.added, p.diff.changed, p.diff.removed), (0, 1, 0));
+        assert_eq!(p.diff.oracle_switched, vec!["alpha".to_owned()]);
+        assert_eq!(p.dropped_tz, vec!["alpha".to_owned()]);
+        assert!(p.text.contains("# alpha is the flagship"));
+        let data = registry::parse_pins(&p.text, &pins_path).unwrap();
+        let alpha = &data.probes["alpha"];
+        assert_eq!(alpha.expected.as_deref(), Some("accepted")); // carried
+        assert!(alpha.csv.is_none());
+        assert!(alpha.record.is_some());
+        assert!(alpha.tv_trades_csv_tz.is_none());
+    }
+
+    #[test]
+    fn plan_all_repairs_a_hand_broken_file() {
+        let root = crate::test_scratch::scratch("piners_reseed", "plan_repairs");
+        let registry = root.join("registry");
+        std::fs::create_dir_all(&registry).unwrap();
+        let pins_path = registry.join("pins.toml");
+        write_probe(&root.join("piners/alpha"));
+        // Hand-edited: the oracle line was deleted, which the loader refuses.
+        let broken = "[probes.alpha]\nexpected = \"accepted\"\n\
+                      pine = { path = \"piners/alpha/strategy.pine\", xxh128 = \"00\" }\n";
+        assert!(registry::parse_pins(broken, &pins_path).is_err());
+        let p = plan(Some(broken), &pins_path, &root, &registry, &args_all()).unwrap();
+        let data = registry::parse_pins(&p.text, &pins_path).unwrap();
+        assert!(data.probes["alpha"].csv.is_some());
+        assert_eq!(data.probes["alpha"].expected.as_deref(), Some("accepted"));
+    }
+
+    #[test]
+    fn plan_probe_names_a_dir_without_an_oracle() {
+        let root = crate::test_scratch::scratch("piners_reseed", "plan_near_miss");
+        let registry = root.join("registry");
+        std::fs::create_dir_all(&registry).unwrap();
+        let dir = root.join("piners/selftest");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("strategy.pine"), b"//@version=6\n").unwrap();
+        let err = plan(None, &registry.join("pins.toml"), &root, &registry, &args_probe(&[
+            "selftest",
+        ]))
+        .unwrap_err();
+        let msg = format!("{err:?}");
+        assert!(msg.contains("has strategy.pine but no oracle"));
+        assert!(msg.contains("piners/selftest"));
+    }
+
+    #[test]
     fn discover_errors_on_duplicate_basename_across_roots() {
-        let root =
-            std::env::temp_dir().join(format!("brokkr_piners_dup_{}", std::process::id()));
-        std::fs::remove_dir_all(&root).ok();
+        let root = crate::test_scratch::scratch("piners_reseed", "duplicate_basename");
         write_probe(&root.join("vendor/engine/validation/same-id"));
         write_probe(&root.join("piners/same-id"));
         let registry = root.join("registry");
         std::fs::create_dir_all(&registry).unwrap();
 
         let err = discover(&root, &registry).unwrap_err();
-        std::fs::remove_dir_all(&root).ok();
         assert!(format!("{err:?}").contains("same-id"));
         assert!(format!("{err:?}").contains("ambiguous"));
     }
 
     #[test]
     fn restamp_feeds_rehashes_and_errors_on_missing_file() {
-        let root =
-            std::env::temp_dir().join(format!("brokkr_piners_feed_{}", std::process::id()));
-        std::fs::remove_dir_all(&root).ok();
+        let root = crate::test_scratch::scratch("piners_reseed", "restamp_roles");
         std::fs::create_dir_all(root.join("data")).unwrap();
         std::fs::write(root.join("data/15m.csv"), b"ohlcv\n").unwrap();
 
@@ -633,15 +871,12 @@ mod tests {
             _ => unreachable!(),
         }
         let err = restamp_feeds(&feeds, &root).unwrap_err();
-        std::fs::remove_dir_all(&root).ok();
         assert!(format!("{err:?}").contains("missing.csv"));
     }
 
     #[test]
     fn restamp_feeds_rehashes_a_single_base_group() {
-        let root =
-            std::env::temp_dir().join(format!("brokkr_piners_base_{}", std::process::id()));
-        std::fs::remove_dir_all(&root).ok();
+        let root = crate::test_scratch::scratch("piners_reseed", "restamp_base");
         std::fs::create_dir_all(root.join("data")).unwrap();
         std::fs::write(root.join("data/ohlcv_1m.csv"), b"timestamp,o,h,l,c,v\n1,2,3,4,5,6\n")
             .unwrap();
@@ -658,7 +893,6 @@ mod tests {
         );
 
         let stamped = restamp_feeds(&feeds, &root).unwrap();
-        std::fs::remove_dir_all(&root).ok();
         match &stamped["eth-15m-2025"] {
             FeedGroup::Base { base } => {
                 assert_ne!(base.xxh128, "stale");

@@ -7,11 +7,11 @@
 //!
 //! Schema (the harness's contract, version 3): a top-level absolute
 //! `corpus_root`, and per-probe a `probe_dir` plus the pinned files (`pine`,
-//! and whichever of the `csv`/`record` oracles the pin declares), all
+//! and whichever of `inputs`/`csv`/`record` the pin declares), all
 //! expressed **relative to `corpus_root`**. The pinned files are provenance:
 //! the harness reads its inputs from `probe_dir` by fixed name and ignores
-//! these keys, which is why an absent `csv` or a new `record` needed no
-//! version bump. Each entry also carries
+//! these keys, which is why an absent `csv` or a new `record`/`inputs`
+//! needed no version bump. Each entry also carries
 //! the explicit canonical `probe` id (the `pins.toml` key). The harness
 //! prefers `probe` over deriving an id from `probe_dir`'s basename - the
 //! basename holds for the upstream PineForge layout but is fragile once
@@ -68,6 +68,9 @@ pub struct ManifestProbe {
     /// Probe directory relative to `corpus_root`.
     pub probe_dir: PathBuf,
     pub pine: ManifestFile,
+    /// The probe's `inputs.json`, when pinned.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inputs: Option<ManifestFile>,
     /// The `tv_trades.csv` oracle, when pinned.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub csv: Option<ManifestFile>,
@@ -142,6 +145,7 @@ impl Manifest {
                         .map(Path::to_path_buf)
                         .unwrap_or_default(),
                     pine: ManifestFile::from(&v.pine),
+                    inputs: v.inputs.as_ref().map(ManifestFile::from),
                     csv: v.csv.as_ref().map(ManifestFile::from),
                     record: v.record.as_ref().map(ManifestFile::from),
                     keywords: registry.keywords_for(&v.id),
@@ -184,6 +188,7 @@ mod tests {
                 path: PathBuf::from(format!("validation/{id}/strategy.pine")),
                 xxh128: "aa".into(),
             },
+            inputs: None,
             csv: Some(FilePin {
                 path: PathBuf::from(format!("validation/{id}/tv_trades.csv")),
                 xxh128: "bb".into(),
