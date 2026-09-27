@@ -528,6 +528,15 @@ fn collect_storage(paths: &ResolvedPaths) -> Vec<StorageInfo> {
         .collect()
 }
 
+/// Probe the filesystem holding `path`, as `brokkr env` does for its storage
+/// rows: the nearest existing ancestor, symlinks resolved, so a `target`
+/// that is a symlink into a shared directory reports the disk it points at.
+/// `None` when the path's mount cannot be found; a zero `total_bytes` means
+/// `statvfs` failed.
+pub(crate) fn probe_path(label: &str, path: &Path) -> Option<StorageInfo> {
+    probe_storage(label, path, &read_mounts())
+}
+
 fn probe_storage(label: &str, path: &Path, mounts: &[MountEntry]) -> Option<StorageInfo> {
     let existing = existing_ancestor(path)?;
     let canonical = std::fs::canonicalize(&existing).unwrap_or(existing);
@@ -659,7 +668,7 @@ fn parent_block_device(name: &str) -> String {
     }
 }
 
-fn format_bytes(b: u64) -> String {
+pub(crate) fn format_bytes(b: u64) -> String {
     const KB: u64 = 1024;
     const MB: u64 = KB * 1024;
     const GB: u64 = MB * 1024;

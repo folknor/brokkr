@@ -336,6 +336,9 @@ struct HoldEffects {
     /// Runs once the fresh hold is registered: the stray reap and the stale
     /// guard warning.
     after_fresh_hold: fn(),
+    /// Refuse the hold when the disks the command writes to are nearly full
+    /// ([`crate::disk_gate`]).
+    disk_gate: fn(&LockContext<'_>) -> Result<(), DevError>,
 }
 
 /// The effects a real acquisition has.
@@ -344,6 +347,7 @@ const HOST_EFFECTS: HoldEffects = HoldEffects {
     toolchain: crate::toolchain::activate_for_lock,
     publish_capability: true,
     after_fresh_hold: host_after_fresh_hold,
+    disk_gate: crate::disk_gate::check,
 };
 
 fn host_drain() -> Result<Option<OwnedFd>, DevError> {
@@ -490,6 +494,11 @@ fn acquire_at(
     }
 
     let owned = unsafe { OwnedFd::from_raw_fd(fd) };
+    // The free-space gate. After the flock, not before: the wait may have been
+    // behind a `brokkr clean` that freed the space, or a build that used it.
+    // Before the drain, so a refusal costs nothing but the release, which
+    // dropping `owned` does.
+    (effects.disk_gate)(ctx)?;
     // We hold `brokkr.lock`, but the hold is not yet usable: compilers admitted
     // under an earlier hold may still be running. On failure `owned` drops here,
     // releasing `brokkr.lock`, and we never reach protected work - measuring
@@ -1415,17 +1424,42 @@ mod tests {
 
     fn nothing_after() {}
 
+    fn no_disk_gate(_: &LockContext<'_>) -> Result<(), DevError> {
+        Ok(())
+    }
+
     /// The effects every test hold uses: no drain of the real compile lease
     /// (and so no stray reap, which SIGKILLs host processes), no toolchain
-    /// activation, no capability published into the process-global slot, and
-    /// no post-hold reap. What remains is exactly what these tests are about:
-    /// the flock, re-entry, and the lock-file metadata.
+    /// activation, no capability published into the process-global slot, no
+    /// post-hold reap, and no free-space gate (a test must not fail because
+    /// the host's disk is full). What remains is exactly what these tests are
+    /// about: the flock, re-entry, and the lock-file metadata.
     const INERT: HoldEffects = HoldEffects {
         drain: no_drain,
         toolchain: no_toolchain,
         publish_capability: false,
         after_fresh_hold: nothing_after,
+        disk_gate: no_disk_gate,
     };
+
+    /// A refused gate releases the lock: the next acquirer takes it at once.
+    #[test]
+    fn a_refused_disk_gate_releases_the_lock() {
+        fn refuse(_: &LockContext<'_>) -> Result<(), DevError> {
+            Err(DevError::Preflight(vec!["disk full".to_owned()]))
+        }
+        let path = tmp_lock("disk-gate.lock");
+        let ctx = LockContext {
+            project: "p",
+            command: "check",
+            project_root: "/r",
+        };
+        let refusing = HoldEffects { disk_gate: refuse, ..INERT };
+        assert!(acquire_at(&path, &ctx, &refusing).is_err());
+        assert!(!flock_is_held(&path), "a refused hold must not keep the flock");
+        let guard = acquire_at(&path, &ctx, &INERT).unwrap();
+        drop(guard);
+    }
 
     /// The fresh-hold hook is where the stray reap and the guard warning live,
     /// so every `acquire` caller gets them. It must run once per *fresh* hold

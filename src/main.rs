@@ -13,6 +13,7 @@ mod dellingr;
 mod mogwai;
 mod dependency_rules;
 mod deps;
+mod disk_gate;
 mod elivagar;
 mod env;
 mod error;

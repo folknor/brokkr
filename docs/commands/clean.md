@@ -7,6 +7,10 @@ brokkr clean [--worktrees] [--cargo [PKG]] [--archives [--keep N]] [--all] [--dr
 Remove the scratch and temporary files a brokkr project accumulates. Runs in
 any project; what it finds is project-shaped, but the rule it follows is not.
 
+Every other locked command refuses to start when the project's or `target`'s
+disk has under 5% of its size available (`src/disk_gate.rs`). `clean` is
+exempt, being the remedy - as is `env`, which shows the free space.
+
 ## The rule
 
 **`clean` removes only what brokkr created, identified either by a
