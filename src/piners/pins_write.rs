@@ -13,7 +13,7 @@
 //! Layout stays deterministic: `[feeds.<name>]` sorted, then `[roots]`,
 //! then `[probes.<id>]` sorted (the `BTreeMap` order), one blank line
 //! between blocks, fields in contract-first order (`expected`/`feed`/
-//! overrides before the volatile `pine`/`csv` hashes).
+//! overrides before the volatile `pine`/`csv`/`record` hashes).
 
 use std::collections::BTreeMap;
 
@@ -24,7 +24,7 @@ use crate::piners::registry::{FeedGroup, FilePin, Pin, RootEntry};
 
 /// Field order inside a `[probes.<id>]` entry: the hand-maintained contract
 /// fields first, then the volatile hashes.
-const PROBE_FIELDS: [&str; 7] = [
+const PROBE_FIELDS: [&str; 8] = [
     "expected",
     "feed",
     "bar_budget",
@@ -32,6 +32,7 @@ const PROBE_FIELDS: [&str; 7] = [
     "tv_trades_csv_tz",
     "pine",
     "csv",
+    "record",
 ];
 
 /// Field order inside a `[feeds.<name>]` group. `base` is the single-base
@@ -142,7 +143,8 @@ fn fill_probe(table: &mut Table, pin: &Pin) -> Result<(), DevError> {
         pin.tv_trades_csv_tz.as_deref().map(Value::from),
     );
     set_value(table, "pine", pin_value(&pin.pine)?);
-    set_value(table, "csv", pin_value(&pin.csv)?);
+    sync_opt(table, "csv", pin.csv.as_ref().map(pin_value).transpose()?);
+    sync_opt(table, "record", pin.record.as_ref().map(pin_value).transpose()?);
     sort_fields(table, &PROBE_FIELDS);
     Ok(())
 }
@@ -517,6 +519,29 @@ warmup = { path = \"data/15m_warmup.csv\", xxh128 = \"f1\" }
             reparse(&text).feeds["eth-15m"],
             FeedGroup::Base { .. }
         ));
+    }
+
+    #[test]
+    fn record_oracle_round_trips_and_a_vanished_csv_drops_out() {
+        let existing = "\
+[probes.alpha-01]
+pine = { path = \"validation/alpha-01/strategy.pine\", xxh128 = \"aa\" }
+csv = { path = \"validation/alpha-01/tv_trades.csv\", xxh128 = \"aa\" } # the old export
+";
+        // The CSV was replaced by a tvr record on disk.
+        let mut p = pin("alpha-01", "aa");
+        p.csv = None;
+        p.record = Some(file_pin("validation/alpha-01/tv_record.json", "rr"));
+        let mut probes = BTreeMap::new();
+        probes.insert("alpha-01".to_owned(), p);
+        let text = render_pins(Some(existing), &BTreeMap::new(), &BTreeMap::new(), &probes)
+            .unwrap();
+        assert!(!text.contains("tv_trades.csv"));
+        assert!(text.contains("record = { path = \"validation/alpha-01/tv_record.json\""));
+        assert!(text.find("pine").unwrap() < text.find("record").unwrap());
+        let data = reparse(&text);
+        assert!(data.probes["alpha-01"].csv.is_none());
+        assert_eq!(data.probes["alpha-01"].record.as_ref().unwrap().xxh128, "rr");
     }
 
     #[test]

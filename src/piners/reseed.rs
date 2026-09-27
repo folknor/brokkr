@@ -10,8 +10,9 @@
 //! Unlike every other mode, reseed's selection universe is the corpus
 //! **filesystem**, not `pins.toml`: it must be able to pin probes that are
 //! not pinned yet. Probe dirs are discovered anywhere under `corpus_root`
-//! by the marker (a directory containing both `strategy.pine` and
-//! `tv_trades.csv`), independent of depth and tree naming - the roots use
+//! by the marker (a directory containing `strategy.pine` plus an oracle -
+//! `tv_trades.csv`, `tv_record.json`, or both; every oracle present is
+//! pinned), independent of depth and tree naming - the roots use
 //! `validation/`, `strategies/`, and flat layouts. The registry dir is
 //! explicitly excluded from the walk (it contains no probe markers, but
 //! the exclusion is cheap insurance now that it lives inside the tree).
@@ -22,7 +23,7 @@
 //! - `--reseed --probe <id>` (repeatable) - upsert the named probe(s),
 //!   leaving the rest intact.
 //!
-//! Reseed touches the pinned *content* only: it re-hashes `pine`/`csv` and
+//! Reseed touches the pinned *content* only: it re-hashes `pine`/`csv`/`record` and
 //! the `[feeds]` group files, preserves `[roots]` verbatim, and carries
 //! forward every probe's hand-maintained fields (`expected`, `feed`,
 //! `bar_budget`, `ohlcv_start_ms`, `tv_trades_csv_tz`). A newly discovered
@@ -42,13 +43,12 @@ use crate::error::DevError;
 use crate::output;
 use crate::piners::cmd::CorpusArgs;
 use crate::piners::pins_write;
-use crate::piners::registry::{self, FeedGroup, FilePin, Pin, PinsData, RootEntry};
+use crate::piners::registry::{
+    self, CSV_FILE, FeedGroup, FilePin, PINE_FILE, Pin, PinsData, RECORD_FILE, RootEntry,
+};
 use crate::piners::registry_io;
 use crate::preflight;
 
-/// The two files whose joint presence marks a directory as a parity probe.
-const PINE_FILE: &str = "strategy.pine";
-const CSV_FILE: &str = "tv_trades.csv";
 const PINS_FILE: &str = "pins.toml";
 
 /// Entry point for `brokkr corpus --reseed`.
@@ -104,7 +104,8 @@ pub fn run(
             let rel_dir = discovered.probes.get(id).ok_or_else(|| {
                 DevError::Config(format!(
                     "corpus --reseed: probe '{id}' not found under {} \
-                     (no directory named '{id}' containing {PINE_FILE} + {CSV_FILE})",
+                     (no directory named '{id}' containing {PINE_FILE} plus \
+                     {CSV_FILE} or {RECORD_FILE})",
                     corpus_root.display()
                 ))
             })?;
@@ -139,7 +140,7 @@ pub fn run(
 
     if discovered.skipped > 0 {
         output::corpus_msg(&format!(
-            "skipped {} non-parity dir(s) (no {CSV_FILE})",
+            "skipped {} non-parity dir(s) (no {CSV_FILE} or {RECORD_FILE})",
             discovered.skipped
         ));
     }
@@ -164,7 +165,7 @@ struct Discovered {
 }
 
 /// Walk `corpus_root` recursively for probe dirs by the marker: a directory
-/// containing both `strategy.pine` and `tv_trades.csv`. A probe dir is
+/// containing `strategy.pine` plus `tv_trades.csv` or `tv_record.json`. A probe dir is
 /// terminal (no descent). A dir with `strategy.pine` but no oracle is a
 /// non-parity dir (multi-mode self-test etc.) - skipped with a count, also
 /// terminal. The registry dir and dot-dirs (`.git` in a plain checkout) are
@@ -210,8 +211,8 @@ fn walk(
 
     for sub in subdirs {
         let has_pine = sub.join(PINE_FILE).exists();
-        let has_csv = sub.join(CSV_FILE).exists();
-        if has_pine && has_csv {
+        let has_oracle = sub.join(CSV_FILE).exists() || sub.join(RECORD_FILE).exists();
+        if has_pine && has_oracle {
             let id = sub
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
@@ -243,38 +244,46 @@ fn walk(
     Ok(())
 }
 
-/// Stamp a single discovered probe: hash both marker files in `rel_dir`.
+/// Stamp a single discovered probe: hash `strategy.pine` and every oracle
+/// present in `rel_dir`. Absence is re-read here, not trusted from the walk:
+/// an oracle gone since discovery drops out of the pin, and a probe left with
+/// none is an error.
 fn stamp_one(id: &str, rel_dir: &Path, corpus_root: &Path) -> Result<Pin, DevError> {
-    let pine_rel = rel_dir.join(PINE_FILE);
-    let csv_rel = rel_dir.join(CSV_FILE);
-    let pine_abs = corpus_root.join(&pine_rel);
-    let csv_abs = corpus_root.join(&csv_rel);
-
-    for (label, path) in [(PINE_FILE, &pine_abs), (CSV_FILE, &csv_abs)] {
-        if !path.exists() {
-            return Err(DevError::Config(format!(
-                "corpus --reseed: probe '{id}' is missing {label}: {}",
-                path.display()
-            )));
-        }
-        // Probe files are not LFS today, but the guard is cheap insurance: a
-        // pointer stamped as a probe hash would poison the pin exactly as a
-        // feed pointer would.
-        crate::piners::lfs::ensure_materialized(path)?;
+    let pine = stamp_file(rel_dir, PINE_FILE, corpus_root)?.ok_or_else(|| {
+        DevError::Config(format!(
+            "corpus --reseed: probe '{id}' is missing {PINE_FILE}: {}",
+            corpus_root.join(rel_dir).join(PINE_FILE).display()
+        ))
+    })?;
+    let csv = stamp_file(rel_dir, CSV_FILE, corpus_root)?;
+    let record = stamp_file(rel_dir, RECORD_FILE, corpus_root)?;
+    if csv.is_none() && record.is_none() {
+        return Err(DevError::Config(format!(
+            "corpus --reseed: probe '{id}' has no oracle ({CSV_FILE} or {RECORD_FILE}) in {}",
+            corpus_root.join(rel_dir).display()
+        )));
     }
 
     // Content-only stamp; the caller carries the hand-maintained fields
     // forward and assigns the feed.
-    Ok(Pin::new(
-        FilePin {
-            path: pine_rel,
-            xxh128: preflight::compute_xxh128(&pine_abs)?,
-        },
-        FilePin {
-            path: csv_rel,
-            xxh128: preflight::compute_xxh128(&csv_abs)?,
-        },
-    ))
+    Ok(Pin::content(pine, csv, record))
+}
+
+/// Hash `rel_dir/name` into a pin, or `None` when the file is absent.
+fn stamp_file(rel_dir: &Path, name: &str, corpus_root: &Path) -> Result<Option<FilePin>, DevError> {
+    let rel = rel_dir.join(name);
+    let abs = corpus_root.join(&rel);
+    if !abs.exists() {
+        return Ok(None);
+    }
+    // Probe files are not LFS today, but the guard is cheap insurance: a
+    // pointer stamped as a probe hash would poison the pin exactly as a
+    // feed pointer would.
+    crate::piners::lfs::ensure_materialized(&abs)?;
+    Ok(Some(FilePin {
+        path: rel,
+        xxh128: preflight::compute_xxh128(&abs)?,
+    }))
 }
 
 /// Copy each surviving probe's hand-maintained fields (`expected`, `feed`,
@@ -540,6 +549,42 @@ mod tests {
             PathBuf::from("vendor/bench-assets/strategies/01-trend")
         );
         assert_eq!(found.skipped, 1); // the self-test
+    }
+
+    #[test]
+    fn reseed_discovers_and_stamps_record_oracles() {
+        let root = crate::test_scratch::scratch("piners_reseed", "record_oracles");
+        // A tvr capture with no CSV export.
+        let rec_only = root.join("piners/rec-only");
+        std::fs::create_dir_all(&rec_only).unwrap();
+        std::fs::write(rec_only.join("strategy.pine"), b"//@version=6\n").unwrap();
+        std::fs::write(rec_only.join("tv_record.json"), b"{}\n").unwrap();
+        // Both oracles side by side.
+        let both = root.join("piners/both");
+        write_probe(&both);
+        std::fs::write(both.join("tv_record.json"), b"{\"v\":1}\n").unwrap();
+        let registry = root.join("registry");
+        std::fs::create_dir_all(&registry).unwrap();
+
+        let found = discover(&root, &registry).unwrap();
+        assert_eq!(found.skipped, 0);
+        let rec = stamp_one("rec-only", &found.probes["rec-only"], &root).unwrap();
+        let dual = stamp_one("both", &found.probes["both"], &root).unwrap();
+
+        assert!(rec.csv.is_none());
+        assert_eq!(
+            rec.record.as_ref().unwrap().path,
+            PathBuf::from("piners/rec-only/tv_record.json")
+        );
+        assert_eq!(rec.record.as_ref().unwrap().xxh128.len(), 32);
+        assert!(dual.csv.is_some());
+        assert!(dual.record.is_some());
+
+        // The oracle vanishing between walk and stamp is an error, not an
+        // oracle-less pin.
+        std::fs::remove_file(rec_only.join("tv_record.json")).unwrap();
+        let err = stamp_one("rec-only", &found.probes["rec-only"], &root).unwrap_err();
+        assert!(format!("{err:?}").contains("no oracle"));
     }
 
     #[test]

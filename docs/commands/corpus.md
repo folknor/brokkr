@@ -44,8 +44,11 @@ in `docs/brokkr.toml.piners.md`. Kept out of the `[[check]]` sweep, like
 The corpus tree under `corpus_root` is piners-owned: vendor git submodules
 (read-only - writing inside one diverges from upstream and is clobbered on
 re-pin) plus first-party probe dirs. Each probe is a directory with
-`strategy.pine` (input) and `tv_trades.csv` (the TradingView oracle), at
-any depth and under any tree naming (`validation/`, `strategies/`, flat).
+`strategy.pine` (input) and a TradingView oracle, at any depth and under any
+tree naming (`validation/`, `strategies/`, flat). The oracle is
+`tv_trades.csv` (the List of Trades export), `tv_record.json` (a tvr capture
+of the in-memory strategy report at full precision), or both. When a record
+is present the harness judges against it and does not read the CSV.
 Probes are pinned in the registry (`registry_dir`), two file kinds:
 
 - `pins.toml` - the canonical, verified universe. `[feeds.<name>]` groups
@@ -70,7 +73,16 @@ Probes are pinned in the registry (`registry_dir`), two file kinds:
   feed = "eth-15m-2025"          # the [feeds] group (oracle identity)
   pine = { path = "vendor/pineforge-engine/validation/<id>/strategy.pine", xxh128 = "<hex>" }
   csv  = { path = "vendor/pineforge-engine/validation/<id>/tv_trades.csv", xxh128 = "<hex>" }
+
+  [probes.some-tvr-capture]
+  expected = "byte_exact"
+  feed = "eth-15m-2025"
+  pine   = { path = "piners/some-tvr-capture/strategy.pine", xxh128 = "<hex>" }
+  record = { path = "piners/some-tvr-capture/tv_record.json", xxh128 = "<hex>" }
   ```
+
+  A probe pins `csv`, `record`, or both - whichever oracles its dir holds.
+  A pin with neither is a parse error.
 
   A feed group is either **single-base** (exactly `base`, the only committed
   input - a lower-TF feed the harness aggregates locally) or **role** (`primary`
@@ -169,11 +181,17 @@ real wall (a ~60s full corpus summed to ~320s), producing false refusals.
 
 ## Verification (the content gate)
 
-Each selected probe's two files - plus every role (`primary`/`warmup`/`lower`,
-or the single `base`) of every feed group the selection references - are
-resolved under `corpus_root` and hashed before any build. A missing path or
-hash mismatch is a hard error (registry lying or the corpus drifted) - no
-`--allow-drift`; re-stamp with `--reseed` or fix the tree.
+Each selected probe's pinned files (`pine` plus its `csv` and/or `record`) -
+plus every role (`primary`/`warmup`/`lower`, or the single `base`) of every
+feed group the selection references - are resolved under `corpus_root` and
+hashed before any build. A missing path or hash mismatch is a hard error
+(registry lying or the corpus drifted) - no `--allow-drift`; re-stamp with
+`--reseed` or fix the tree.
+
+A `tv_record.json` in a probe dir whose pin declares no `record` is a hard
+error too. The harness picks the record by its presence alone, so an
+unpinned record would become the oracle unverified while the pinned CSV
+went unread. `--reseed --probe <id>` pins it.
 
 **Git-LFS guard.** The `pineforge-engine` submodule routes its 1m base feed
 through Git LFS, so a checkout without an LFS smudge leaves a pointer file, not
@@ -230,18 +248,20 @@ leaves the old file, never a truncated one.
 `--reseed` stamps hashes from the corpus **filesystem** (not `pins.toml`) -
 the only way the file is created or its hashes refreshed. No build/harness.
 Probe dirs are discovered anywhere under `corpus_root` by the marker (a dir
-containing `strategy.pine` + `tv_trades.csv`), independent of depth and root
-layout; the registry dir is excluded from the walk. The id is the dir
-basename - a collision across roots is a hard error.
+containing `strategy.pine` plus `tv_trades.csv` or `tv_record.json`),
+independent of depth and root layout; the registry dir is excluded from the
+walk. The id is the dir basename - a collision across roots is a hard error.
+Every oracle present is pinned, and one that has left the dir drops out of
+the pin.
 
 - `--reseed --all` - stamp every discovered parity probe; dirs with
-  `strategy.pine` but no `tv_trades.csv` (self-tests) skipped with a count;
+  `strategy.pine` but no oracle (self-tests) skipped with a count;
   vanished probes drop out.
 - `--reseed --probe <id>` (repeatable) - upsert each named probe (hard-errors
-  when no dir named `<id>` carries both marker files).
+  when no dir named `<id>` carries the marker).
 
 Prints `added/changed/removed`. Touches the pinned *content* only:
-re-hashes `pine`/`csv` and the `[feeds]` group files, preserves `[roots]`
+re-hashes `pine`/`csv`/`record` and the `[feeds]` group files, preserves `[roots]`
 verbatim, and **preserves** each surviving probe's hand-maintained fields
 (`expected`, `feed`, `bar_budget`, `ohlcv_start_ms`, `tv_trades_csv_tz`).
 A newly discovered probe gets `feed` assigned by the longest matching

@@ -1,7 +1,7 @@
 //! `brokkr corpus` - the piners parity-corpus runner.
 //!
 //! Resolves a keyword-selected slice of the pinned corpus, hard-verifies
-//! every selected probe's `strategy.pine` + `tv_trades.csv` against the
+//! every selected probe's `strategy.pine` + pinned oracle(s) against the
 //! read-only submodule, writes a manifest, builds the harness once, and
 //! invokes it with `--manifest <path>`. The harness consumes the manifest
 //! and emits one enriched NDJSON disposition line per probe (no trailing

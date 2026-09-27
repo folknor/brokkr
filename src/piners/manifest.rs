@@ -6,8 +6,12 @@
 //! re-checks hashes.
 //!
 //! Schema (the harness's contract, version 3): a top-level absolute
-//! `corpus_root`, and per-probe a `probe_dir` plus the two pinned files,
-//! all expressed **relative to `corpus_root`**. Each entry also carries
+//! `corpus_root`, and per-probe a `probe_dir` plus the pinned files (`pine`,
+//! and whichever of the `csv`/`record` oracles the pin declares), all
+//! expressed **relative to `corpus_root`**. The pinned files are provenance:
+//! the harness reads its inputs from `probe_dir` by fixed name and ignores
+//! these keys, which is why an absent `csv` or a new `record` needed no
+//! version bump. Each entry also carries
 //! the explicit canonical `probe` id (the `pins.toml` key). The harness
 //! prefers `probe` over deriving an id from `probe_dir`'s basename - the
 //! basename holds for the upstream PineForge layout but is fragile once
@@ -37,13 +41,22 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use crate::error::DevError;
-use crate::piners::registry::{Registry, VerifiedProbe};
+use crate::piners::registry::{FilePin, Registry, VerifiedProbe};
 
 /// A pinned file in the manifest: path relative to `corpus_root` + xxh128.
 #[derive(Debug, Serialize)]
 pub struct ManifestFile {
     pub path: PathBuf,
     pub xxh128: String,
+}
+
+impl From<&FilePin> for ManifestFile {
+    fn from(pin: &FilePin) -> Self {
+        Self {
+            path: pin.path.clone(),
+            xxh128: pin.xxh128.clone(),
+        }
+    }
 }
 
 /// One probe in the manifest.
@@ -55,7 +68,12 @@ pub struct ManifestProbe {
     /// Probe directory relative to `corpus_root`.
     pub probe_dir: PathBuf,
     pub pine: ManifestFile,
-    pub csv: ManifestFile,
+    /// The `tv_trades.csv` oracle, when pinned.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub csv: Option<ManifestFile>,
+    /// The `tv_record.json` oracle, when pinned.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub record: Option<ManifestFile>,
     /// Keywords in the registry that contain this id (provenance).
     pub keywords: Vec<String>,
     /// Feed group name (a key of the top-level `feeds`), when pinned.
@@ -118,18 +136,14 @@ impl Manifest {
                 ManifestProbe {
                     probe: v.id.clone(),
                     probe_dir: v
-                        .pine_rel
+                        .pine
+                        .path
                         .parent()
                         .map(Path::to_path_buf)
                         .unwrap_or_default(),
-                    pine: ManifestFile {
-                        path: v.pine_rel.clone(),
-                        xxh128: v.pine_xxh128.clone(),
-                    },
-                    csv: ManifestFile {
-                        path: v.csv_rel.clone(),
-                        xxh128: v.csv_xxh128.clone(),
-                    },
+                    pine: ManifestFile::from(&v.pine),
+                    csv: v.csv.as_ref().map(ManifestFile::from),
+                    record: v.record.as_ref().map(ManifestFile::from),
                     keywords: registry.keywords_for(&v.id),
                     feed,
                     bar_budget: pin.and_then(|p| p.bar_budget),
@@ -166,11 +180,30 @@ mod tests {
     fn verified(id: &str) -> VerifiedProbe {
         VerifiedProbe {
             id: id.to_owned(),
-            pine_rel: PathBuf::from(format!("validation/{id}/strategy.pine")),
-            pine_xxh128: "aa".into(),
-            csv_rel: PathBuf::from(format!("validation/{id}/tv_trades.csv")),
-            csv_xxh128: "bb".into(),
+            pine: FilePin {
+                path: PathBuf::from(format!("validation/{id}/strategy.pine")),
+                xxh128: "aa".into(),
+            },
+            csv: Some(FilePin {
+                path: PathBuf::from(format!("validation/{id}/tv_trades.csv")),
+                xxh128: "bb".into(),
+            }),
+            record: None,
         }
+    }
+
+    #[test]
+    fn record_only_probe_omits_csv_and_carries_record() {
+        let mut v = verified("rec-01");
+        v.csv = None;
+        v.record = Some(FilePin {
+            path: PathBuf::from("validation/rec-01/tv_record.json"),
+            xxh128: "cc".into(),
+        });
+        let m = Manifest::build(Path::new("/c"), &[v], &Registry::default());
+        let json = serde_json::to_string(&m).unwrap();
+        assert!(!json.contains("\"csv\""));
+        assert!(json.contains("\"record\":{\"path\":\"validation/rec-01/tv_record.json\""));
     }
 
     #[test]
