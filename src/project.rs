@@ -110,7 +110,7 @@ pub struct Detection {
 /// (a stray `brokkr.toml` in a home directory, or a parent that is itself a
 /// brokkr project). One level up is the documented layout for driving a
 /// foreign checkout and nothing more.
-fn find_config_dir(cwd: &Path) -> Option<PathBuf> {
+pub(crate) fn find_config_dir(cwd: &Path) -> Option<PathBuf> {
     if cwd.join("brokkr.toml").exists() {
         return Some(cwd.to_path_buf());
     }

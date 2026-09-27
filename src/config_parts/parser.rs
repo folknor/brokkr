@@ -1,17 +1,11 @@
 /// Load `brokkr.toml` from the project root directory.
 ///
 /// Returns both the detected `Project` and the parsed `DevConfig`.
-/// This is the **single code path** that reads and parses `brokkr.toml`.
+/// This is the **single code path** that reads and parses `brokkr.toml`,
+/// together with every file it `include`s (see [`compose`]).
 pub fn load(project_root: &Path) -> Result<(Project, DevConfig), DevError> {
-    let path = project_root.join("brokkr.toml");
-    let text = std::fs::read_to_string(&path)
-        .map_err(|e| DevError::Config(format!("{}: {e}", path.display())))?;
-
-    let root: toml::Value = toml::from_str(&text)?;
-
-    let table = root
-        .as_table()
-        .ok_or_else(|| DevError::Config("brokkr.toml root is not a table".into()))?;
+    let (root, _sources) = compose(&project_root.join("brokkr.toml"))?;
+    let table = &root;
 
     let project_str = table
         .get("project")

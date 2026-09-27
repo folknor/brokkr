@@ -21,9 +21,14 @@
 // Comments and formatting of everything the edit does not touch survive the
 // round trip (`toml_edit` is lossless), so hand-maintained files are safe.
 
-/// One read-modify-write transaction on `<project_root>/brokkr.toml`.
+/// One read-modify-write transaction on the config file that holds the
+/// dataset: `<project_root>/brokkr.toml`, or the file it `include`s the
+/// dataset from ([`crate::config::ConfigSources::owner_of_table`]).
 struct DatasetToml {
     path: PathBuf,
+    /// `path` as narration shows it: `brokkr.toml` for the project's own
+    /// file, the full path for an included one.
+    shown: String,
     doc: toml_edit::DocumentMut,
     hostname: String,
     dataset_key: String,
@@ -33,15 +38,28 @@ struct DatasetToml {
 }
 
 impl DatasetToml {
-    /// Parse `brokkr.toml` for editing `[<hostname>.datasets.<dataset_key>]`.
+    /// Parse the file holding `[<hostname>.datasets.<dataset_key>]` for
+    /// editing. The composition is resolved afresh rather than taken from the
+    /// loaded config, so the choice of file reflects the files as they are
+    /// about to be edited.
     fn open(project_root: &Path, hostname: &str, dataset_key: &str) -> Result<Self, DevError> {
-        let path = project_root.join("brokkr.toml");
+        let root = project_root.join("brokkr.toml");
+        let (_, sources) = crate::config::compose(&root)?;
+        let path = sources
+            .owner_of_table(&[hostname, "datasets", dataset_key])?
+            .to_path_buf();
+        let shown = if path == root {
+            "brokkr.toml".to_owned()
+        } else {
+            path.display().to_string()
+        };
         let text = std::fs::read_to_string(&path)?;
         let doc: toml_edit::DocumentMut = text
             .parse()
             .map_err(|e| DevError::Config(format!("{}: {e}", path.display())))?;
         Ok(Self {
             path,
+            shown,
             doc,
             hostname: hostname.to_owned(),
             dataset_key: dataset_key.to_owned(),
@@ -73,8 +91,9 @@ impl DatasetToml {
                 .and_then(toml_edit::Item::as_table_mut)
                 .ok_or_else(|| {
                     DevError::Config(format!(
-                        "brokkr.toml: [{}] is not a table (inline tables and dotted keys \
+                        "{}: [{}] is not a table (inline tables and dotted keys \
                          are not supported here)",
+                        self.shown,
                         path[..=depth].join(".")
                     ))
                 })?;
@@ -228,7 +247,7 @@ impl DatasetToml {
         Ok(())
     }
 
-    /// Atomically replace `brokkr.toml` with the edited document, then narrate
+    /// Atomically replace the file with the edited document, then narrate
     /// what changed.
     fn commit(self) -> Result<(), DevError> {
         if self.changes.is_empty() {
@@ -236,7 +255,7 @@ impl DatasetToml {
         }
         crate::atomic_write::replace(&self.path, self.doc.to_string().as_bytes())?;
         for change in &self.changes {
-            output::download_msg(&format!("  {change} in brokkr.toml"));
+            output::download_msg(&format!("  {change} in {}", self.shown));
         }
         Ok(())
     }

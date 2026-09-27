@@ -1039,4 +1039,28 @@ download_date = \"2026-01-02\"
         drop(toml);
         assert_eq!(std::fs::read_to_string(dir.join("brokkr.toml")).unwrap(), before);
     }
+
+    // A dataset registered in an included file is edited there, and the
+    // including brokkr.toml is left byte-identical.
+    #[test]
+    fn edits_land_in_the_included_file_holding_the_dataset() {
+        let root = "project = \"pbfhogg\"\ninclude = [\"shared/hosts.toml\"]\n";
+        let dir = toml_dir("edit_included", root);
+        std::fs::create_dir_all(dir.join("shared")).unwrap();
+        let hosts = "[h.datasets.d]\norigin = \"x\"\n";
+        std::fs::write(dir.join("shared/hosts.toml"), hosts).unwrap();
+
+        let mut toml = DatasetToml::open(&dir, "h", "d").unwrap();
+        toml.set_pbf("raw", "r.osm.pbf", "abc").unwrap();
+        toml.commit().unwrap();
+
+        assert_eq!(std::fs::read_to_string(dir.join("brokkr.toml")).unwrap(), root);
+        let after = std::fs::read_to_string(dir.join("shared/hosts.toml")).unwrap();
+        let parsed: toml::Value = toml::from_str(&after).unwrap();
+        assert_eq!(
+            dataset_of(&parsed, "h", "d")["pbf"]["raw"]["file"].as_str(),
+            Some("r.osm.pbf"),
+            "{after}"
+        );
+    }
 }

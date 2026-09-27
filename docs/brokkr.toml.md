@@ -109,6 +109,49 @@ would let one typo switch off every rule you wrote.
 entries of each kind it contributed - a rule that comes from outside the tree is
 otherwise invisible from inside it.
 
+## `include` - composing brokkr.toml from several files
+
+```toml
+project = "pbfhogg"
+include = ["../shared/hosts.toml", "../shared/checks.toml"]
+```
+
+A top-level `include` lists further config files that are folded in *beneath*
+the file naming them. Any key of the project schema may appear in an included
+file - host sections, datasets, `[[check]]`, `[lints]` - except `project`, which
+belongs to the project's own `brokkr.toml`. Included files may `include` more
+files in turn.
+
+**Precedence.** A file's own keys override everything it includes, and a later
+include overrides an earlier one. Merging is key by key:
+
+| Both sides hold | Result |
+|---|---|
+| a table | merged recursively - a host section may be split across files |
+| an array of tables (`[[check]]`, `[[textlint]]`, `[[script_check]]`, ...) | joined, included entries first; an included entry whose `name` the including side reuses is dropped (the user layer's shadowing rule) |
+| anything else | the including side's value replaces the included one |
+
+**Paths.** `include` paths resolve against the directory of the file naming
+them. Every *other* path in an included file (dataset files, `[[script_check]]`
+commands, globs) means what it means in `brokkr.toml`: it resolves against the
+project root. An included file is config for the project that includes it,
+not a project of its own.
+
+**Errors, not skips.** A missing, unreadable or malformed include is an error
+naming the file that included it, as is a cycle, or a file reached twice (its
+`[[array]]` entries would be counted twice).
+
+**Where brokkr writes.** Dataset registration (`download`, `--as-snapshot`,
+`--refresh`) edits the file that defines `[<host>.datasets.<name>]`, located
+from the composed config's per-table provenance. A dataset not registered
+anywhere yet goes into the file that already holds that host's datasets, when
+that is one file, and into `brokkr.toml` otherwise. A dataset table split across
+two files is refused: editing one half would leave a mixture.
+
+**Clean-tree checks.** Included files inside the checkout are exempt from the
+measured-run dirty check, exactly as `brokkr.toml` is, since brokkr writes
+registrations into them too.
+
 ## Top-level shape
 
 ```toml
@@ -155,10 +198,11 @@ appended to every build command (all measurable commands, `verify`, `serve`,
 `serve`/`status`/`query`/`geocode`/`verify`/the benches target; brokkr passes
 it to the server it spawns as `PORT`, but never reads `PORT` from its own
 environment - an unrelated `PORT` in the shell must not retarget the commands.
-Reserved top-level keys (skipped by host parsing): `project`,
-`litehtml`, `sluggrs`, `check`, `dependency_rule`, `test`, `capture_env`,
-`gremlins`, `header`, `textlint`, `textlint_preset`, `script_check`,
-`manifest`, `rustdoc`, `deps`, `disable_toolchain`.
+Reserved top-level keys (skipped by host parsing): `project`, `include`,
+`litehtml`, `sluggrs`, `ratatoskr`, `piners`, `dellingr`, `mogwai`, `check`,
+`dependency_rule`, `test`, `quarantine`, `capture_env`, `gremlins`, `header`,
+`textlint`, `textlint_preset`, `script_check`, `manifest`, `rustdoc`, `deps`,
+`lints` (and its `clippy` alias), `bin`, `disable_toolchain`.
 
 ## `worktree_keep`
 

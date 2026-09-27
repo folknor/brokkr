@@ -5,6 +5,11 @@ litehtml, sluggrs, ratatoskr, and piners do not use any of this. Datasets are
 host-scoped - they live under `[<hostname>.datasets.<name>]`, never a global
 `[datasets]` table. See the host example in `docs/brokkr.toml.md`.
 
+Host dataset blocks may live in a file shared between projects and pulled in
+with `include` (`brokkr man config include`). Registration edits the file that
+defines the dataset, not necessarily `brokkr.toml`; `data` and dataset `file`
+paths still resolve against each including project's root.
+
 ## Dataset structure
 
 - `pbf.<variant>` - PBF file entries keyed by variant name (e.g. `raw`,

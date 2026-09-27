@@ -139,6 +139,33 @@ fn toolchain_exclusions(workspace_root: &Path) -> Vec<String> {
     out
 }
 
+/// Pathspecs excluding the files the governing `brokkr.toml` `include`s, for
+/// the same decision that excludes `brokkr.toml` itself (see [`check_clean`]):
+/// an included file is part of that config, and brokkr writes dataset
+/// registrations into whichever file holds the dataset.
+///
+/// Only files inside `workspace_root` are named - git refuses a pathspec
+/// outside the repository, and a file outside the tree cannot dirty it. A
+/// config that does not compose adds nothing: the command that loaded it has
+/// already failed, or is not a brokkr project at all.
+fn include_exclusions(workspace_root: &Path) -> Vec<String> {
+    let Some(dir) = crate::project::find_config_dir(workspace_root) else {
+        return Vec::new();
+    };
+    let Ok((_, sources)) = crate::config::compose(&dir.join("brokkr.toml")) else {
+        return Vec::new();
+    };
+    let Ok(root) = std::fs::canonicalize(workspace_root) else {
+        return Vec::new();
+    };
+    sources
+        .included()
+        .iter()
+        .filter_map(|file| file.strip_prefix(&root).ok())
+        .map(|rel| format!(":(exclude,literal){}", rel.display()))
+        .collect()
+}
+
 fn check_clean(workspace_root: &Path) -> bool {
     // Exclude `.brokkr/` (brokkr's own measurement stores - results.db,
     // sidecar.db, ratatoskr's gate.db, piners' runs.db), *.md (docs),
@@ -159,7 +186,8 @@ fn check_clean(workspace_root: &Path) -> bool {
     // registrations into it (`--as-snapshot`, downloads), and counting it
     // would block measured runs after every such write until committed. The
     // run's features and captured env are recorded on the row itself, so the
-    // row stays interpretable without the pin covering brokkr.toml.
+    // row stays interpretable without the pin covering brokkr.toml. The files
+    // it `include`s are excluded with it (`include_exclusions`).
     //
     // approved.png is here because `brokkr approve` was otherwise
     // self-blocking: it demands a clean tree, then writes into the tree, so the
@@ -186,6 +214,7 @@ fn check_clean(workspace_root: &Path) -> bool {
     ];
     let mut excludes: Vec<String> = EXCLUDES.iter().map(|s| (*s).to_owned()).collect();
     excludes.extend(toolchain_exclusions(workspace_root));
+    excludes.extend(include_exclusions(workspace_root));
 
     let run = |args: &[&str]| {
         let mut cmd = Command::new("git");
