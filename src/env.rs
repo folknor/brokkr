@@ -228,7 +228,7 @@ fn format_storage_row(s: &StorageInfo) -> String {
         (None, None) => "unknown device".to_owned(),
     };
     format!(
-        "{}  {}  {} {}  {}  {} free / {}",
+        "{}  {}  {} {}  {}  {} free / {}{}",
         s.mount_point,
         s.device,
         s.fstype,
@@ -236,7 +236,26 @@ fn format_storage_row(s: &StorageInfo) -> String {
         model,
         format_bytes(s.free_bytes),
         format_bytes(s.total_bytes),
+        free_share(s.free_bytes, s.total_bytes),
     )
+}
+
+/// The free share as ` (N%)`, flagged when it is under the free-space gate's
+/// floor, so `env` shows why a locked command would refuse. Empty when the
+/// size could not be read.
+fn free_share(free: u64, total: u64) -> String {
+    if total == 0 {
+        return String::new();
+    }
+    let pct = crate::disk_gate::percent(free, total);
+    if crate::disk_gate::is_low(free, total) {
+        format!(
+            " ({pct:.1}%, under the {}% floor - locked commands refuse)",
+            crate::disk_gate::MIN_FREE_PERCENT
+        )
+    } else {
+        format!(" ({pct:.0}%)")
+    }
 }
 
 fn print_tools(info: &EnvInfo) {
@@ -891,6 +910,16 @@ mod tests {
         clippy::useless_vec
     )]
     use super::*;
+
+    #[test]
+    fn free_share_shows_percent_and_flags_the_gate_floor() {
+        assert_eq!(free_share(43, 100), " (43%)");
+        assert_eq!(
+            free_share(3, 100),
+            " (3.0%, under the 5% floor - locked commands refuse)"
+        );
+        assert_eq!(free_share(0, 0), ""); // unreadable size
+    }
 
     // -----------------------------------------------------------------------
     // extract_version_from_stdout

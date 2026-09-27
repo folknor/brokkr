@@ -16,7 +16,8 @@
 //! count as headroom. A filesystem whose size cannot be read fails open.
 //!
 //! `clean` is exempt, since it is the remedy, and so is `env`, which reports
-//! free space and is how you look.
+//! free space and is how you look: its storage rows show each disk's free
+//! share and flag one under the floor by this module's rule.
 
 use std::path::{Path, PathBuf};
 
@@ -79,13 +80,15 @@ fn candidates(root: &Path, cargo_target_dir: Option<&std::ffi::OsStr>) -> Vec<(&
 }
 
 /// True when `free` is below [`MIN_FREE_PERCENT`] of `total`. A zero total
-/// means the size could not be read, which fails open.
-fn is_low(free: u64, total: u64) -> bool {
+/// means the size could not be read, which fails open. Shared with `brokkr
+/// env`, which flags a storage row by the same rule.
+pub(crate) fn is_low(free: u64, total: u64) -> bool {
     total > 0 && u128::from(free) * 100 < u128::from(total) * u128::from(MIN_FREE_PERCENT)
 }
 
+/// `free` as a percentage of a nonzero `total`, for display.
 #[allow(clippy::cast_precision_loss)] // a display percentage
-fn percent(free: u64, total: u64) -> f64 {
+pub(crate) fn percent(free: u64, total: u64) -> f64 {
     free as f64 * 100.0 / total as f64
 }
 
