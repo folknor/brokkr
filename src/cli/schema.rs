@@ -32,16 +32,17 @@ const SELECTION_CONFLICTS: [&str; 11] = [
 
 #[derive(Subcommand)]
 pub(crate) enum Command {
-    /// Run gremlins + clippy + tests
+    /// Run the convention checks, clippy, rustdoc and tests
     #[command(
         display_order = 0,
         long_about = "\
-Three phases in order: gremlin scan, clippy, then tests. Each phase
-short-circuits the next - gremlins fail the run before clippy starts,
-clippy warnings are denied by the project's Cargo.toml lints so a
-clippy failure short-circuits before tests run. Extra args after `--`
-are forwarded raw to `cargo test` (invoke `cargo test` directly to skip
-clippy for a targeted test run).
+Phases in order: the convention checks (gremlins, header, textlint,
+manifest, script checks, dependency rules, publish cycle), then clippy,
+rustdoc and tests - plus coverage and the install-feature phase where the
+profile asks for them. A failing phase stops the run before the next one
+starts. Extra args after `--` go to the test phase: tokens before a second
+`--` to `cargo test`, tokens after it to libtest. To run one test without
+the other phases, use `brokkr test NAME`.
 
 Output (default text mode, no flags):
   - Gremlins: one line per banned-Unicode hit. `--fix-gremlins`
@@ -166,7 +167,8 @@ In depth: `brokkr man check` (one section at a time, e.g. `man check clippy`)."
         /// Raw arguments forwarded to the test phase. Tokens before a
         /// literal `--` are passed to `cargo test` (before cargo's own
         /// `--`); tokens after the second `--` are passed to libtest
-        /// (after brokkr's enforced `--test-threads=1`). Examples:
+        /// (after brokkr's default `--test-threads=1`, which a profile's
+        /// `test_threads` replaces). Examples:
         /// `brokkr check -- --test read_paths` (cargo-level filter),
         /// `brokkr check -- -- --ignored` (libtest-level flag). Rejected
         /// under a `certifies = "complete"` profile: they narrow the test
