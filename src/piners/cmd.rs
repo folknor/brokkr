@@ -130,10 +130,10 @@ pub fn corpus(
     ));
     let mut verified = Vec::with_capacity(ids.len());
     for id in &ids {
-        let pin = registry.pins.get(id).ok_or_else(|| {
+        let (pin, config) = registry.pins.get(id).zip(registry.config(id)).ok_or_else(|| {
             DevError::Config(format!("piners: internal: selected id '{id}' absent from pins"))
         })?;
-        verified.push(registry::verify_probe(id, pin, &corpus_root, project_root)?);
+        verified.push(registry::verify_probe(id, pin, config, &corpus_root, project_root)?);
     }
     let feed_count = verify_selected_feeds(&ids, &registry, &corpus_root, project_root)?;
 
@@ -435,13 +435,13 @@ pub(crate) fn verify_selected_feeds(
     corpus_root: &Path,
     project_root: &Path,
 ) -> Result<usize, DevError> {
-    let referenced: std::collections::BTreeSet<&str> = ids
+    let referenced: std::collections::BTreeSet<String> = ids
         .iter()
-        .filter_map(|id| registry.pins.get(id).and_then(|p| p.feed.as_deref()))
+        .filter_map(|id| registry.config(id).and_then(|c| c.feed))
         .collect();
     for name in &referenced {
         // lint guarantees the group exists; the ok_or_else is belt-and-braces.
-        let group = registry.feeds.get(*name).ok_or_else(|| {
+        let group = registry.feeds.get(name).ok_or_else(|| {
             DevError::Config(format!(
                 "piners: internal: referenced feed group '{name}' absent from [feeds]"
             ))

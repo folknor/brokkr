@@ -55,8 +55,9 @@ pinned like the oracle.
 Probes are pinned in the registry (`registry_dir`), two file kinds:
 
 - `pins.toml` - the canonical, verified universe. `[feeds.<name>]` groups
-  (hash-pinned OHLCV feeds, two forms below), `[roots]` (root-prefix -> feed
-  assignments, consumed by reseed), and one `[probes.<id>]` table per probe:
+  (hash-pinned OHLCV feeds, two forms below), `[probe_config."<prefix>"]`
+  (each probe's execution facts, declared by directory prefix - below), and
+  one `[probes.<id>]` table per probe:
 
   ```toml
   # single-base form: one committed 1m base feed the harness aggregates to the
@@ -69,18 +70,25 @@ Probes are pinned in the registry (`registry_dir`), two file kinds:
   primary = { path = "vendor/pineforge-benchmarks-assets/..ETHUSDT_15.csv", xxh128 = "<hex>" }
   warmup  = { path = "vendor/pineforge-benchmarks-assets/..warmup6m.csv", xxh128 = "<hex>" }
 
-  [roots]
-  "vendor/pineforge-engine" = { feed = "eth-15m-2025" }
+  [probe_config."vendor/pineforge-engine"]
+  feed = "eth-15m-2025"          # the [feeds] group (oracle identity)
+
+  [probe_config."piners"]
+  feed = "eth-15m-2025"
+
+  [probe_config."piners/some-tvr-capture"]
+  feed = "eth-15m-live"          # this capture was taken on another feed
+  bar_budget = 21000
+  ohlcv_start_ms = 1772323200000
+
   [probes.magnifier-tick-dist-endpoints-01]
   expected = "actionable_drift"  # the blessed disposition (gate contract)
-  feed = "eth-15m-2025"          # the [feeds] group (oracle identity)
   pine   = { path = "vendor/pineforge-engine/validation/<id>/strategy.pine", xxh128 = "<hex>" }
   inputs = { path = "vendor/pineforge-engine/validation/<id>/inputs.json", xxh128 = "<hex>" }
   csv    = { path = "vendor/pineforge-engine/validation/<id>/tv_trades.csv", xxh128 = "<hex>" }
 
   [probes.some-tvr-capture]
   expected = "byte_exact"
-  feed = "eth-15m-2025"
   pine   = { path = "piners/some-tvr-capture/strategy.pine", xxh128 = "<hex>" }
   record = { path = "piners/some-tvr-capture/tv_record.json", xxh128 = "<hex>" }
   ```
@@ -104,15 +112,55 @@ Probes are pinned in the registry (`registry_dir`), two file kinds:
   All `path`s (probe and feed) are relative to `corpus_root`. `xxh128` is
   brokkr's standard file hash (`preflight::compute_xxh128`, 32 lowercase hex,
   case-insensitive). `expected` is one disposition label (see the gate,
-  below); absent until the probe is blessed. Probes can also carry optional
-  hand-edited, reseed-preserved scan overrides that flow into the manifest:
-  `bar_budget` (overrides the harness's 10,000-bar scan cap; changing a
-  budget changes the disposition contract, so it lives next to `expected`
-  and warrants a re-bless in the same diff), `ohlcv_start_ms`, and
-  `tv_trades_csv_tz` (carve-outs for vendor probes whose in-submodule
-  `inputs.json` cannot carry them; probe-local `inputs.json` wins).
-  `tv_trades_csv_tz` is refused beside a `record`: the harness never reads
-  the CSV then, so the override would be dead.
+  below); absent until the probe is blessed. A probe entry holds nothing
+  else: it is machine-stamped (reseed writes its hashes, bless its
+  `expected`), and reseed drops it when the probe's directory vanishes.
+
+  **`[probe_config."<prefix>"]` - how each probe runs.** Four optional
+  fields, each flowing into the probe's manifest entry: `feed` (the `[feeds]`
+  group its oracle was taken against - every probe must resolve one),
+  `bar_budget` (the harness's scan cap, default 10,000), `ohlcv_start_ms`
+  (the execution start) and `tv_trades_csv_tz` (the CSV oracle's timezone).
+  A key is a directory prefix relative to `corpus_root`, and a probe takes
+  **each field independently** from the longest prefix covering its
+  directory that sets it: a root declares the shared feed and budget, one
+  probe dir beneath it declares only what it differs by. Coverage is by
+  whole path components (`piners/a` does not cover `piners/ab`) and is
+  structural - it reads the pinned paths, never the filesystem, so a
+  declaration over an uninitialized submodule still covers its probes.
+  Against the probe's own `inputs.json` the precedence is the harness's and
+  is per field: a resolved `ohlcv_start_ms` **outranks** an `inputs.json`
+  start (a registry start corrects an upstream window guess), while an
+  `inputs.json` timezone outranks a resolved `tv_trades_csv_tz`.
+
+  These facts lived on the probe entry until a lost entry showed why they
+  cannot: reseed re-added the probe with its feed re-derived from a
+  directory default and its budget and start forgotten, and the probe ran
+  against the wrong feed with a plausible, wrong verdict. No writer ever
+  touches `[probe_config]`, so a probe entry lost and re-added comes back
+  running exactly as before. The loader holds the table to rules that keep
+  it honest, and since both writers parse their own output, a reseed that
+  would break one is refused too:
+
+  - a prefix is canonical (plain components joined by `/`; no `.`, `..` or
+    stray slashes), and a declaration sets at least one field;
+  - every declared field **governs** at least one pinned probe - one
+    covering none, or shadowed for every probe it covers, is stale (so a
+    reseed dropping the last probe under an exact-dir declaration is refused
+    until the declaration leaves in the same diff);
+  - no field **restates** the value it would inherit from an ancestor - a
+    copy would silently keep the old value when the ancestor changes. An
+    explicit value where no ancestor sets one is not a restatement, even if
+    it equals the harness default: absent means "the harness default",
+    whatever that becomes;
+  - no probe with a `record` resolves a `tv_trades_csv_tz` (the harness then
+    never reads the CSV, so the value is dead). There is no way to clear an
+    inherited field, so declare a timezone only on prefixes covering CSV
+    probes alone.
+
+  A prefix-level `bar_budget` can move many probes in a one-line diff. That
+  weakens only the review surface, not the gate: every run re-validates each
+  selected probe's `expected` against what it actually did.
 
 - `<keyword>.toml` (any other `*.toml`) - a pure selection grouping. Keyword
   = file stem; body is `probes = ["id", ...]`. Ids only - the volatile
@@ -208,9 +256,10 @@ Two more hard errors, both about what the harness will actually do:
   steer the run unverified. `--reseed --probe <id>` pins it. (An unpinned
   `tv_trades.csv` beside a record-only pin is harmless and allowed: the
   record outranks it.)
-- A pin with no `feed`. The harness needs one per probe and would abort the
-  whole run over a single feedless probe, so it is refused here, naming the
-  probe. Set `feed`, or add a `[roots]` prefix and re-run reseed.
+- A probe resolving no `feed`. The harness needs one per probe and would
+  abort the whole run over a single feedless probe, so the registry lint
+  refuses it for the whole pinned universe before any selection, naming each
+  one. Declare `feed` on a `[probe_config]` prefix covering it.
 
 **Git-LFS guard.** The `pineforge-engine` submodule routes its 1m base feed
 through Git LFS, so a checkout without an LFS smudge leaves a pointer file, not
@@ -285,17 +334,17 @@ when present, and a file that has left the dir drops out of the pin.
   the dir exists with `strategy.pine` but no oracle.
 
 Prints `added/changed/removed`. Touches the pinned *content* only:
-re-hashes the probe files and the `[feeds]` group files, preserves `[roots]`
-verbatim, and **preserves** each surviving probe's hand-maintained fields
-(`expected`, `feed`, `bar_budget`, `ohlcv_start_ms`, `tv_trades_csv_tz`).
-Two exceptions follow from the content: a `tv_trades_csv_tz` on a probe that
-now has a `record` is dropped (it is dead there), and a blessed probe that
-gained or lost a `record` - so is now judged against a different oracle -
-keeps its `expected` but is named in a re-bless warning, since a
-disposition that happens to match across the switch would otherwise pass
-the gate unnoticed. A newly discovered probe gets `feed` assigned by the
-longest matching `[roots]` prefix (an explicit `feed` always wins) and stays
-unblessed.
+re-hashes the probe files and the `[feeds]` group files, preserves
+`[probe_config]` verbatim, and carries each surviving probe's `expected`
+forward. It decides nothing about how a probe runs, so a newly discovered or
+re-added probe runs under whatever `[probe_config]` declares for its
+directory and stays unblessed. A blessed probe that gained or lost a
+`record` - so is now judged against a different oracle - keeps its
+`expected` but is named in a re-bless warning, since a disposition that
+happens to match across the switch would otherwise pass the gate unnoticed.
+A content change that breaks a `[probe_config]` rule - the probe gained a
+`record` under a declared CSV timezone, or the last probe under an exact-dir
+declaration vanished - refuses the reseed, naming the declaration to edit.
 
 `--bless [--all|--keyword <k>|--probe <id>]` runs the selection (verify +
 build + harness), then stamps each probe's current disposition into
@@ -309,9 +358,9 @@ exit 2, any other code, a signal, the hang backstop, or a repeated record
 leaves `pins.toml` untouched. The run row records `gated = no` - bless
 ignores the gate verdict.
 
-Bootstrap: `--reseed --all` → hand-stamp `[feeds]`/`[roots]` + overrides →
-`--reseed --all` again (stamps feed hashes, assigns feeds) → commit → write
-keyword files → `--bless --all` → commit → runs are gated.
+Bootstrap: `--reseed --all` → hand-write `[feeds]` groups and the
+`[probe_config]` declarations → `--reseed --all` again (stamps feed hashes)
+→ commit → write keyword files → `--bless --all` → commit → runs are gated.
 
 ## Exit codes
 

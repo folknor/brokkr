@@ -25,13 +25,14 @@
 //!   leaving the rest intact.
 //!
 //! Reseed touches the pinned *content* only: it re-hashes the probe files
-//! and the `[feeds]` group files, preserves `[roots]` verbatim, and carries
-//! forward every probe's hand-maintained fields (`expected`, `feed`,
-//! `bar_budget`, `ohlcv_start_ms`, `tv_trades_csv_tz`) - except a
-//! `tv_trades_csv_tz` beside a `record`, which is dead and dropped. A newly
-//! discovered probe gets its `feed` assigned by the longest matching
-//! `[roots]` prefix. A blessed probe whose oracle changed kind keeps its
-//! `expected` but is named in a re-bless warning.
+//! and the `[feeds]` group files, preserves `[probe_config]` verbatim, and
+//! carries each surviving probe's blessed `expected` forward. It decides
+//! nothing about how a probe runs - feed, budget, start and CSV timezone are
+//! resolved from `[probe_config]` at run time - so a probe entry lost and
+//! re-added comes back running exactly as before; only its `expected` has
+//! to be re-blessed, which the gate demands loudly. A blessed probe whose
+//! oracle changed kind keeps its `expected` but is named in a re-bless
+//! warning.
 //!
 //! Output is deterministic (sections and entries sorted by key, inline
 //! `{ path, xxh128 }` tables) for clean diffs, idempotent (re-stamping
@@ -49,7 +50,7 @@ use crate::piners::cmd::CorpusArgs;
 use crate::piners::pins_write;
 use crate::piners::registry::{
     self, CSV_FILE, FeedGroup, FilePin, INPUTS_FILE, PINE_FILE, Pin, PinsData, ProbeFiles,
-    RECORD_FILE, RootEntry,
+    RECORD_FILE,
 };
 use crate::piners::registry_io;
 use crate::preflight;
@@ -126,14 +127,6 @@ pub fn run(
             plan.diff.oracle_switched.join(",")
         ));
     }
-    if !plan.dropped_tz.is_empty() {
-        output::corpus_msg(&format!(
-            "dropped `tv_trades_csv_tz` from {} probe(s) now judged against {RECORD_FILE}, \
-             where it is dead: {}",
-            plan.dropped_tz.len(),
-            plan.dropped_tz.join(", ")
-        ));
-    }
     Ok(())
 }
 
@@ -147,9 +140,6 @@ struct Plan {
     diff: Diff,
     /// Near-miss dirs the walk passed over (`strategy.pine`, no oracle).
     skipped: usize,
-    /// Probes whose `tv_trades_csv_tz` was removed because they now have a
-    /// `record`, beside which the override is dead.
-    dropped_tz: Vec<String>,
 }
 
 /// Compute a reseed against `existing_text` (the current `pins.toml`, `None`
@@ -193,18 +183,13 @@ fn plan(
     };
 
     // Reseed touches the pinned files and feed hashes only. The blessed
-    // `expected` disposition and the hand-maintained per-probe fields (feed,
-    // bar_budget, ohlcv_start_ms, tv_trades_csv_tz) are independent
-    // contracts, so carry them forward for every probe that survives the
-    // re-stamp; drop an override the new content made dead; then assign a
-    // feed (from [roots], longest prefix wins) to probes that still have none.
-    carry_preserved(&mut new_pins, &existing.probes);
-    let dropped_tz = drop_dead_overrides(&mut new_pins);
-    assign_feeds(&mut new_pins, &existing.roots);
+    // `expected` disposition is an independent contract, so carry it forward
+    // for every probe that survives the re-stamp.
+    carry_expected(&mut new_pins, &existing.probes);
 
     let feeds = restamp_feeds(&existing.feeds, corpus_root)?;
     let diff = Diff::compute(&existing.probes, &new_pins);
-    let text = pins_write::render_pins(existing_text, &feeds, &existing.roots, &new_pins)?;
+    let text = pins_write::render_pins(existing_text, &feeds, &new_pins)?;
 
     Ok(Plan {
         text,
@@ -212,7 +197,6 @@ fn plan(
         feeds: feeds.len(),
         diff,
         skipped: discovered.skipped.len(),
-        dropped_tz,
     })
 }
 
@@ -353,8 +337,7 @@ fn stamp_one(id: &str, rel_dir: &Path, corpus_root: &Path) -> Result<Pin, DevErr
         )));
     }
 
-    // Content-only stamp; the caller carries the hand-maintained fields
-    // forward and assigns the feed.
+    // Content-only stamp; the caller carries `expected` forward.
     Ok(Pin::content(ProbeFiles {
         pine,
         inputs,
@@ -393,53 +376,14 @@ fn stamp_file(
     }))
 }
 
-/// Copy each surviving probe's hand-maintained fields (`expected`, `feed`,
-/// `bar_budget`, `ohlcv_start_ms`, `tv_trades_csv_tz`) from the old pin set
-/// into the freshly stamped one. A probe new to the corpus stays
-/// `expected: None` (unblessed), which the gate treats as a hard "must
-/// bless".
-fn carry_preserved(new: &mut BTreeMap<String, Pin>, old: &BTreeMap<String, Pin>) {
+/// Copy each surviving probe's blessed `expected` from the old pin set into
+/// the freshly stamped one. A probe new to the corpus stays `expected: None`
+/// (unblessed), which the gate treats as a hard "must bless".
+fn carry_expected(new: &mut BTreeMap<String, Pin>, old: &BTreeMap<String, Pin>) {
     for (id, pin) in new.iter_mut() {
         if let Some(prev) = old.get(id) {
             pin.expected = prev.expected.clone();
-            pin.feed = prev.feed.clone();
-            pin.bar_budget = prev.bar_budget;
-            pin.ohlcv_start_ms = prev.ohlcv_start_ms;
-            pin.tv_trades_csv_tz = prev.tv_trades_csv_tz.clone();
         }
-    }
-}
-
-/// Remove `tv_trades_csv_tz` from every pin that has a `record`: the harness
-/// then judges against the record and never reads the CSV, so the override
-/// is dead, and the loader refuses it. Returns the ids it was removed from.
-/// Runs over every pin, not only re-stamped ones, so a `--probe` upsert
-/// also repairs a hand edit elsewhere in the file.
-fn drop_dead_overrides(pins: &mut BTreeMap<String, Pin>) -> Vec<String> {
-    let mut dropped = Vec::new();
-    for (id, pin) in pins.iter_mut() {
-        if pin.record.is_some() && pin.tv_trades_csv_tz.take().is_some() {
-            dropped.push(id.clone());
-        }
-    }
-    dropped
-}
-
-/// Assign a feed to every probe that has none, by the longest `[roots]`
-/// prefix matching its probe dir. An existing explicit `feed` (carried
-/// forward by [`carry_preserved`]) is preserved; a probe under no root
-/// stays feedless (and is refused at verification until it gets one).
-fn assign_feeds(pins: &mut BTreeMap<String, Pin>, roots: &BTreeMap<String, RootEntry>) {
-    for pin in pins.values_mut() {
-        if pin.feed.is_some() {
-            continue;
-        }
-        let probe_dir = pin.probe_dir().to_path_buf();
-        pin.feed = roots
-            .iter()
-            .filter(|(prefix, _)| probe_dir.starts_with(Path::new(prefix)))
-            .max_by_key(|(prefix, _)| Path::new(prefix.as_str()).components().count())
-            .map(|(_, root)| root.feed.clone());
     }
 }
 
@@ -539,17 +483,10 @@ mod tests {
     }
 
     #[test]
-    fn carry_preserved_keeps_hand_maintained_fields_across_restamp() {
-        // old probe was blessed and carried overrides; the re-stamp produced
-        // a fresh content-only pin with a new hash. carry_preserved must
-        // restore every hand-maintained field.
+    fn carry_expected_keeps_the_blessing_across_restamp() {
         let mut old = BTreeMap::new();
         let mut blessed = pin("keep", "old-hash");
         blessed.expected = Some("accepted".to_owned());
-        blessed.feed = Some("eth-15m".to_owned());
-        blessed.bar_budget = Some(38000);
-        blessed.ohlcv_start_ms = Some(1_700_000_000_000);
-        blessed.tv_trades_csv_tz = Some("America/New_York".to_owned());
         old.insert("keep".to_owned(), blessed);
         old.insert("vanished".to_owned(), pin("vanished", "x"));
 
@@ -557,79 +494,91 @@ mod tests {
         new.insert("keep".to_owned(), pin("keep", "new-hash")); // re-stamped
         new.insert("fresh".to_owned(), pin("fresh", "y")); // brand new
 
-        carry_preserved(&mut new, &old);
+        carry_expected(&mut new, &old);
 
-        let kept = &new["keep"];
-        assert_eq!(kept.expected.as_deref(), Some("accepted"));
-        assert_eq!(kept.feed.as_deref(), Some("eth-15m"));
-        assert_eq!(kept.bar_budget, Some(38000));
-        assert_eq!(kept.ohlcv_start_ms, Some(1_700_000_000_000));
-        assert_eq!(kept.tv_trades_csv_tz.as_deref(), Some("America/New_York"));
-        assert_eq!(kept.pine.xxh128, "new-hash"); // content still updated
+        assert_eq!(new["keep"].expected.as_deref(), Some("accepted"));
+        assert_eq!(new["keep"].pine.xxh128, "new-hash"); // content still updated
         assert_eq!(new["fresh"].expected, None); // unblessed newcomer
     }
 
+    /// A tree with a directory default and one live capture that declares a
+    /// different feed, as piners' first-party probes do.
+    const DECLARED: &str = "\
+[feeds.eth-15m-2025]
+base = { path = \"data/old.csv\", xxh128 = \"00\" }
+
+[feeds.eth-15m-live]
+base = { path = \"data/live.csv\", xxh128 = \"00\" }
+
+[probe_config.\"piners\"]
+feed = \"eth-15m-2025\"
+
+[probe_config.\"piners/live-01\"]
+feed = \"eth-15m-live\"
+bar_budget = 20200
+";
+
+    fn declared_tree(name: &str) -> (PathBuf, PathBuf, PathBuf) {
+        let root = crate::test_scratch::scratch("piners_reseed", name);
+        std::fs::create_dir_all(root.join("data")).unwrap();
+        std::fs::write(root.join("data/old.csv"), b"t,o,h,l,c,v\n").unwrap();
+        std::fs::write(root.join("data/live.csv"), b"t,o,h,l,c,v\n1,2,3,4,5,6\n").unwrap();
+        write_probe(&root.join("piners/live-01"));
+        write_probe(&root.join("piners/old-01"));
+        let registry = root.join("registry");
+        std::fs::create_dir_all(&registry).unwrap();
+        let pins_path = registry.join("pins.toml");
+        (root, registry, pins_path)
+    }
+
+    fn live_facts(text: &str, pins_path: &Path) -> registry::ProbeConfig {
+        let data = registry::parse_pins(text, pins_path).unwrap();
+        registry::resolve(&data.probe_config, data.probes["live-01"].probe_dir())
+    }
+
     #[test]
-    fn assign_feeds_uses_longest_root_prefix_and_preserves_explicit() {
-        let mut pins = BTreeMap::new();
-        let mut engine = Pin::new(
-            FilePin {
-                path: "vendor/engine/validation/a/strategy.pine".into(),
-                xxh128: "0".into(),
-            },
-            FilePin {
-                path: "vendor/engine/validation/a/tv_trades.csv".into(),
-                xxh128: "0".into(),
-            },
+    fn first_reseed_resolves_the_declared_feed_not_the_directory_default() {
+        // The live probe has no entry yet (never pinned, or its entry was
+        // lost). Its first reseed adds it, and it resolves the feed and
+        // budget its directory declares - not the `piners` default.
+        let (root, registry, pins_path) = declared_tree("first_reseed");
+        let with_old = format!(
+            "{DECLARED}\n[probes.old-01]\n\
+             pine = {{ path = \"piners/old-01/strategy.pine\", xxh128 = \"00\" }}\n\
+             csv = {{ path = \"piners/old-01/tv_trades.csv\", xxh128 = \"00\" }}\n"
         );
-        engine.feed = Some("explicit".to_owned()); // must survive
-        pins.insert("a".to_owned(), engine);
-        pins.insert(
-            "b".to_owned(),
-            Pin::new(
-                FilePin {
-                    path: "vendor/engine/nested/deep/b/strategy.pine".into(),
-                    xxh128: "0".into(),
-                },
-                FilePin {
-                    path: "vendor/engine/nested/deep/b/tv_trades.csv".into(),
-                    xxh128: "0".into(),
-                },
-            ),
-        );
-        pins.insert(
-            "c".to_owned(),
-            Pin::new(
-                FilePin {
-                    path: "unrooted/c/strategy.pine".into(),
-                    xxh128: "0".into(),
-                },
-                FilePin {
-                    path: "unrooted/c/tv_trades.csv".into(),
-                    xxh128: "0".into(),
-                },
-            ),
-        );
+        // The file as it stands is refused: the live declaration governs no
+        // pinned probe yet. That is the loader's rule, and the reseed that
+        // adds the probe is what satisfies it.
+        assert!(registry::parse_pins(&with_old, &pins_path).is_err());
+        let p = plan(Some(&with_old), &pins_path, &root, &registry, &args_probe(&["live-01"]))
+            .unwrap();
+        assert_eq!((p.diff.added, p.diff.changed, p.diff.removed), (1, 0, 0));
+        let facts = live_facts(&p.text, &pins_path);
+        assert_eq!(facts.feed.as_deref(), Some("eth-15m-live"));
+        assert_eq!(facts.bar_budget, Some(20200));
+        // The declarations were not rewritten.
+        assert!(p.text.contains("[probe_config.\"piners/live-01\"]\nfeed = \"eth-15m-live\""));
+    }
 
-        let mut roots = BTreeMap::new();
-        roots.insert(
-            "vendor".to_owned(),
-            RootEntry {
-                feed: "broad".to_owned(),
-            },
+    #[test]
+    fn re_reseed_keeps_the_declared_feed_and_the_blessing() {
+        let (root, registry, pins_path) = declared_tree("re_reseed");
+        let first = plan(Some(DECLARED), &pins_path, &root, &registry, &args_all()).unwrap();
+        assert_eq!(first.diff.added, 2);
+        let blessed = first.text.replace(
+            "[probes.live-01]\n",
+            "[probes.live-01]\nexpected = \"accepted\"\n",
         );
-        roots.insert(
-            "vendor/engine".to_owned(),
-            RootEntry {
-                feed: "narrow".to_owned(),
-            },
-        );
-
-        assign_feeds(&mut pins, &roots);
-
-        assert_eq!(pins["a"].feed.as_deref(), Some("explicit"));
-        assert_eq!(pins["b"].feed.as_deref(), Some("narrow")); // longest wins
-        assert_eq!(pins["c"].feed, None); // no matching root
+        // The capture is re-taken: new oracle bytes, same declared feed.
+        std::fs::write(root.join("piners/live-01/tv_trades.csv"), b"a,b\n9,9\n").unwrap();
+        let again =
+            plan(Some(&blessed), &pins_path, &root, &registry, &args_probe(&["live-01"])).unwrap();
+        assert_eq!((again.diff.added, again.diff.changed, again.diff.removed), (0, 1, 0));
+        let facts = live_facts(&again.text, &pins_path);
+        assert_eq!(facts.feed.as_deref(), Some("eth-15m-live"));
+        let data = registry::parse_pins(&again.text, &pins_path).unwrap();
+        assert_eq!(data.probes["live-01"].expected.as_deref(), Some("accepted"));
     }
 
     #[test]
@@ -771,11 +720,10 @@ mod tests {
         let dir = root.join("piners/alpha");
         write_probe(&dir);
         let first = plan(None, &pins_path, &root, &registry, &args_all()).unwrap();
-        // Bless it and give it a CSV timezone override, by hand, with a comment.
+        // Bless it, by hand, with a comment.
         let blessed = first.text.replace(
             "[probes.alpha]\n",
-            "# alpha is the flagship\n[probes.alpha]\nexpected = \"accepted\"\n\
-             tv_trades_csv_tz = \"utc\"\n",
+            "# alpha is the flagship\n[probes.alpha]\nexpected = \"accepted\"\n",
         );
 
         // The capture is redone with tvr: the CSV goes, a record arrives.
@@ -786,14 +734,21 @@ mod tests {
 
         assert_eq!((p.diff.added, p.diff.changed, p.diff.removed), (0, 1, 0));
         assert_eq!(p.diff.oracle_switched, vec!["alpha".to_owned()]);
-        assert_eq!(p.dropped_tz, vec!["alpha".to_owned()]);
         assert!(p.text.contains("# alpha is the flagship"));
         let data = registry::parse_pins(&p.text, &pins_path).unwrap();
         let alpha = &data.probes["alpha"];
         assert_eq!(alpha.expected.as_deref(), Some("accepted")); // carried
         assert!(alpha.csv.is_none());
         assert!(alpha.record.is_some());
-        assert!(alpha.tv_trades_csv_tz.is_none());
+
+        // A CSV timezone declared for the probe is now dead beside the
+        // record, so the reseed refuses until the declaration goes too.
+        let with_tz = format!(
+            "[probe_config.\"piners/alpha\"]\ntv_trades_csv_tz = \"utc\"\n\n{blessed}"
+        );
+        let err = plan(Some(&with_tz), &pins_path, &root, &registry, &args_probe(&["alpha"]))
+            .unwrap_err();
+        assert!(format!("{err:?}").contains("resolves `tv_trades_csv_tz`"));
     }
 
     #[test]

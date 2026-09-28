@@ -42,11 +42,15 @@ basename. `expected` is brokkr-side (the gate), *not* in the manifest. The
 harness ignores `pine`/`inputs`/`csv`/`record`/`keywords` (already verified;
 provenance) and reads its inputs from `probe_dir` by fixed name - which is why
 `inputs`, `csv` and `record` each appear only when pinned, with no version
-bump. `feed` is always present: verification refuses a feedless pin, since
-the harness requires the key. `feeds`
-holds the selection's referenced feed groups, roles resolved absolute;
-per-probe `feed` names a group, and the overrides appear only when pinned
-(their semantics: `docs/commands/corpus.md`).
+bump. `feed`, `bar_budget`, `ohlcv_start_ms` and `tv_trades_csv_tz` are the
+probe's **resolved** execution facts - `[probe_config]` prefix inheritance
+already applied (`registry::resolve`), so a consumer such as piners'
+measurement-manifest scripts reads them as-is and never re-derives them.
+`feed` is always present: the registry lint refuses a probe resolving none,
+since the harness requires the key; the other three appear only when
+resolved. `feeds` holds the selection's referenced feed groups, roles
+resolved absolute. Semantics and precedence against `inputs.json`:
+`docs/commands/corpus.md`.
 
 **Feed group forms (`version` 3).** A group's role map takes one of two
 shapes, and the harness must branch on which. **Role form** - keys among

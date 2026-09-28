@@ -22,8 +22,12 @@
 //! Version 2 additions: `feeds` is the selection's referenced feed groups
 //! with roles resolved absolute (`{"<group>": {"primary": "/abs/..."}}`),
 //! and each probe carries its `feed` group name plus the optional
-//! `bar_budget` / `ohlcv_start_ms` / `tv_trades_csv_tz` overrides when
-//! pinned. Harness behavior on these is piners' side of the contract.
+//! `bar_budget` / `ohlcv_start_ms` / `tv_trades_csv_tz` when it resolves
+//! them. These are the probe's *resolved* execution facts - `[probe_config]`
+//! prefix inheritance already applied by `registry::resolve` - so a consumer
+//! never re-derives them. Their precedence against the probe's `inputs.json`
+//! is piners' side of the contract: a resolved start outranks an
+//! `inputs.json` start, an `inputs.json` timezone outranks a resolved one.
 //!
 //! Version 3 addition: a feed group may take the *single-base* form, emitted
 //! as one `base` role (`{"<group>": {"base": "/abs/ohlcv_1m.csv"}}`) instead
@@ -79,17 +83,20 @@ pub struct ManifestProbe {
     pub record: Option<ManifestFile>,
     /// Keywords in the registry that contain this id (provenance).
     pub keywords: Vec<String>,
-    /// Feed group name (a key of the top-level `feeds`), when pinned.
+    /// Feed group name (a key of the top-level `feeds`). Verification
+    /// refuses a probe that resolves none, so this is always present in a
+    /// manifest brokkr hands the harness.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub feed: Option<String>,
-    /// Override for the harness's scan bar cap, when pinned.
+    /// The harness's scan bar cap, when resolved.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bar_budget: Option<u64>,
-    /// Piners-side OHLCV start override (epoch ms), when pinned.
-    /// Probe-local `inputs.json` keeps precedence.
+    /// The execution start (epoch ms), when resolved. Outranks an
+    /// `inputs.json` start harness-side.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ohlcv_start_ms: Option<i64>,
-    /// Piners-side `tv_trades.csv` timezone override, when pinned.
+    /// The `tv_trades.csv` timezone, when resolved. An `inputs.json`
+    /// timezone outranks it harness-side.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tv_trades_csv_tz: Option<String>,
 }
@@ -115,7 +122,7 @@ const MANIFEST_VERSION: u32 = 3;
 impl Manifest {
     /// Build a manifest from the verified probe set. `corpus_root` is the
     /// absolute corpus tree root; probe paths stay relative to it. The
-    /// per-probe feed name and overrides come off the registry pins; the
+    /// per-probe execution facts are the ones verification resolved; the
     /// top-level `feeds` covers exactly the groups the selection
     /// references, roles resolved absolute.
     pub fn build(corpus_root: &Path, verified: &[VerifiedProbe], registry: &Registry) -> Self {
@@ -123,8 +130,7 @@ impl Manifest {
         let probes = verified
             .iter()
             .map(|v| {
-                let pin = registry.pins.get(&v.id);
-                let feed = pin.and_then(|p| p.feed.clone());
+                let feed = v.config.feed.clone();
                 if let Some(name) = &feed
                     && let Some(group) = registry.feeds.get(name)
                 {
@@ -150,9 +156,9 @@ impl Manifest {
                     record: v.record.as_ref().map(ManifestFile::from),
                     keywords: registry.keywords_for(&v.id),
                     feed,
-                    bar_budget: pin.and_then(|p| p.bar_budget),
-                    ohlcv_start_ms: pin.and_then(|p| p.ohlcv_start_ms),
-                    tv_trades_csv_tz: pin.and_then(|p| p.tv_trades_csv_tz.clone()),
+                    bar_budget: v.config.bar_budget,
+                    ohlcv_start_ms: v.config.ohlcv_start_ms,
+                    tv_trades_csv_tz: v.config.tv_trades_csv_tz.clone(),
                 }
             })
             .collect();
@@ -178,7 +184,7 @@ impl Manifest {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
-    use crate::piners::registry::{FeedGroup, FilePin, Pin, Registry};
+    use crate::piners::registry::{FeedGroup, FilePin, ProbeConfig, Registry};
     use std::collections::BTreeMap;
 
     fn verified(id: &str) -> VerifiedProbe {
@@ -194,6 +200,7 @@ mod tests {
                 xxh128: "bb".into(),
             }),
             record: None,
+            config: ProbeConfig::default(),
         }
     }
 
@@ -232,22 +239,14 @@ mod tests {
     }
 
     #[test]
-    fn resolves_referenced_feed_groups_and_per_probe_overrides() {
-        let mut pin = Pin::new(
-            FilePin {
-                path: "validation/probe-01/strategy.pine".into(),
-                xxh128: "aa".into(),
-            },
-            FilePin {
-                path: "validation/probe-01/tv_trades.csv".into(),
-                xxh128: "bb".into(),
-            },
-        );
-        pin.feed = Some("eth-15m".to_owned());
-        pin.bar_budget = Some(38000);
-        pin.tv_trades_csv_tz = Some("America/New_York".to_owned());
-        let mut pins = BTreeMap::new();
-        pins.insert("probe-01".to_owned(), pin);
+    fn carries_the_verified_facts_and_only_the_referenced_feed_groups() {
+        let mut v = verified("probe-01");
+        v.config = ProbeConfig {
+            feed: Some("eth-15m".to_owned()),
+            bar_budget: Some(38000),
+            ohlcv_start_ms: None,
+            tv_trades_csv_tz: Some("America/New_York".to_owned()),
+        };
 
         let mut feeds = BTreeMap::new();
         feeds.insert(
@@ -277,12 +276,11 @@ mod tests {
             },
         );
         let registry = Registry {
-            pins,
             feeds,
             ..Registry::default()
         };
 
-        let m = Manifest::build(Path::new("/abs/corpus"), &[verified("probe-01")], &registry);
+        let m = Manifest::build(Path::new("/abs/corpus"), &[v], &registry);
 
         let p = &m.probes[0];
         assert_eq!(p.feed.as_deref(), Some("eth-15m"));
@@ -307,19 +305,8 @@ mod tests {
 
     #[test]
     fn emits_single_base_feed_group_as_base_role() {
-        let mut pin = Pin::new(
-            FilePin {
-                path: "validation/probe-01/strategy.pine".into(),
-                xxh128: "aa".into(),
-            },
-            FilePin {
-                path: "validation/probe-01/tv_trades.csv".into(),
-                xxh128: "bb".into(),
-            },
-        );
-        pin.feed = Some("eth-15m-2025".to_owned());
-        let mut pins = BTreeMap::new();
-        pins.insert("probe-01".to_owned(), pin);
+        let mut v = verified("probe-01");
+        v.config.feed = Some("eth-15m-2025".to_owned());
 
         let mut feeds = BTreeMap::new();
         feeds.insert(
@@ -332,12 +319,11 @@ mod tests {
             },
         );
         let registry = Registry {
-            pins,
             feeds,
             ..Registry::default()
         };
 
-        let m = Manifest::build(Path::new("/abs/corpus"), &[verified("probe-01")], &registry);
+        let m = Manifest::build(Path::new("/abs/corpus"), &[v], &registry);
         let group = &m.feeds["eth-15m-2025"];
         // Exactly one role, `base`, resolved absolute; no primary/warmup/lower.
         assert_eq!(group.len(), 1);

@@ -2494,9 +2494,9 @@ In depth: `brokkr man nidhogg`."
         /// Pins every oracle present and `inputs.json`. `--reseed --all`
         /// regenerates the whole file from the tree (probes whose dirs
         /// vanished drop out); `--reseed --probe <id>` (repeatable)
-        /// upserts each. Re-stamps `[feeds]` hashes, preserves `[roots]`
-        /// and the hand-maintained probe fields, assigns feeds to new
-        /// probes by longest `[roots]` prefix. Prints added/changed/removed;
+        /// upserts each. Re-stamps `[feeds]` hashes, carries each probe's
+        /// blessed `expected` forward, and never touches `[probe_config]`
+        /// (where feed, budget and start are declared). Prints added/changed/removed;
         /// review the result with `git diff pins.toml`. Not usable with
         /// `--keyword` or `--verify-only`.
         #[arg(long, conflicts_with_all = ["verify_only", "keyword", "bench", "hotpath", "alloc"])]

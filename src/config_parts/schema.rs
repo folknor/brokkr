@@ -2257,8 +2257,8 @@ pub struct PinersConfig {
     pub corpus_root: Option<PathBuf>,
 
     /// Directory holding the piners-owned registry: `pins.toml` (the
-    /// canonical id -> path+xxh128 universe plus the `[feeds]`/`[roots]`
-    /// tables) and one `*.toml` per keyword (id lists). Resolved relative
+    /// canonical id -> path+xxh128 universe plus the `[feeds]` and
+    /// `[probe_config]` tables) and one `*.toml` per keyword (id lists). Resolved relative
     /// to `brokkr.toml`. Defaults to `corpus-registry`.
     pub registry_dir: Option<PathBuf>,
 }

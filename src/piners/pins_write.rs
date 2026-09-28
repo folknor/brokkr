@@ -7,14 +7,16 @@
 //! into it: values are replaced in place (keeping each key's spacing and any
 //! trailing `# comment`), vanished probes are removed (their attached
 //! comments go with them - correct: the comment described the probe), and
-//! new entries are inserted in house style. `[roots]` is never touched once
-//! it exists - it is hand-maintained and the writers only round-trip it.
+//! new entries are inserted in house style. `[probe_config]` is never
+//! written - it is hand-maintained, and the writers only round-trip it
+//! (see `registry` for why the execution facts live there and not on the
+//! probe entries these writers own).
 //!
-//! Layout stays deterministic: `[feeds.<name>]` sorted, then `[roots]`,
-//! then `[probes.<id>]` sorted (the `BTreeMap` order), one blank line
-//! between blocks, fields in contract-first order (`expected`/`feed`/
-//! overrides before the volatile file hashes). Every render is parsed back
-//! through the loader before it is returned (see [`render_pins`]).
+//! Layout stays deterministic: `[feeds.<name>]` sorted, then
+//! `[probe_config]`, then `[probes.<id>]` sorted (the `BTreeMap` order), one
+//! blank line between blocks, fields in contract-first order (`expected`
+//! before the volatile file hashes). Every render is parsed back through the
+//! loader before it is returned (see [`render_pins`]).
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -22,21 +24,11 @@ use std::path::Path;
 use toml_edit::{DocumentMut, Item, RawString, Table, Value};
 
 use crate::error::DevError;
-use crate::piners::registry::{self, FeedGroup, FilePin, Pin, RootEntry};
+use crate::piners::registry::{self, FeedGroup, FilePin, Pin};
 
-/// Field order inside a `[probes.<id>]` entry: the hand-maintained contract
-/// fields first, then the volatile hashes.
-const PROBE_FIELDS: [&str; 9] = [
-    "expected",
-    "feed",
-    "bar_budget",
-    "ohlcv_start_ms",
-    "tv_trades_csv_tz",
-    "pine",
-    "inputs",
-    "csv",
-    "record",
-];
+/// Field order inside a `[probes.<id>]` entry: the blessed contract first,
+/// then the volatile hashes.
+const PROBE_FIELDS: [&str; 5] = ["expected", "pine", "inputs", "csv", "record"];
 
 /// Field order inside a `[feeds.<name>]` group. `base` is the single-base
 /// form; `primary`/`warmup`/`lower` the role form. The two forms never
@@ -50,12 +42,13 @@ const FEED_FIELDS: [&str; 4] = ["base", "primary", "warmup", "lower"];
 /// The rendered text is parsed back through [`registry::parse_pins`] before
 /// it is returned, so a writer can never replace the file with one the next
 /// load refuses - the loader's rules (at least one oracle, fixed file names,
-/// no dead override) bind the writers by construction, not by each caller
-/// remembering them.
+/// no stale or dead `[probe_config]` declaration) bind the writers by
+/// construction, not by each caller remembering them. That includes a
+/// reseed that drops the last probe a declaration covered: it is refused
+/// until the declaration goes in the same diff.
 pub fn render_pins(
     existing: Option<&str>,
     feeds: &BTreeMap<String, FeedGroup>,
-    roots: &BTreeMap<String, RootEntry>,
     probes: &BTreeMap<String, Pin>,
 ) -> Result<String, DevError> {
     let mut doc: DocumentMut = existing
@@ -63,7 +56,6 @@ pub fn render_pins(
         .parse()
         .map_err(|e| DevError::Config(format!("piners: pins.toml: {e}")))?;
     sync_section(&mut doc, "feeds", feeds, fill_feed)?;
-    ensure_roots(&mut doc, roots)?;
     sync_section(&mut doc, "probes", probes, fill_probe)?;
     finalize_layout(&mut doc, feeds, probes);
     let text = doc.to_string();
@@ -145,14 +137,6 @@ fn fill_feed(table: &mut Table, group: &FeedGroup) -> Result<(), DevError> {
 /// Stamp a `[probes.<id>]` entry's fields in place.
 fn fill_probe(table: &mut Table, pin: &Pin) -> Result<(), DevError> {
     sync_opt(table, "expected", pin.expected.as_deref().map(Value::from));
-    sync_opt(table, "feed", pin.feed.as_deref().map(Value::from));
-    sync_opt(table, "bar_budget", pin.bar_budget.map(budget_value).transpose()?);
-    sync_opt(table, "ohlcv_start_ms", pin.ohlcv_start_ms.map(Value::from));
-    sync_opt(
-        table,
-        "tv_trades_csv_tz",
-        pin.tv_trades_csv_tz.as_deref().map(Value::from),
-    );
     set_value(table, "pine", pin_value(&pin.pine)?);
     sync_opt(table, "inputs", pin.inputs.as_ref().map(pin_value).transpose()?);
     sync_opt(table, "csv", pin.csv.as_ref().map(pin_value).transpose()?);
@@ -161,26 +145,8 @@ fn fill_probe(table: &mut Table, pin: &Pin) -> Result<(), DevError> {
     Ok(())
 }
 
-/// Create `[roots]` on bootstrap only. An existing table is left byte-for-
-/// byte untouched (the verbatim guarantee) - no writer ever modifies roots.
-fn ensure_roots(
-    doc: &mut DocumentMut,
-    roots: &BTreeMap<String, RootEntry>,
-) -> Result<(), DevError> {
-    if roots.is_empty() || doc.contains_key("roots") {
-        return Ok(());
-    }
-    let mut table = Table::new();
-    table.decor_mut().set_prefix("\n");
-    for (prefix, root) in roots {
-        let value = parse_value(&format!("{{ feed = {} }}", toml_str(&root.feed)))?;
-        table.insert(prefix, Item::Value(value));
-    }
-    doc.insert("roots", Item::Table(table));
-    Ok(())
-}
-
-/// Walk the canonical block order (feeds sorted, roots, probes sorted),
+/// Walk the canonical block order (feeds sorted, `[probe_config]` as
+/// written, probes sorted),
 /// pinning each table's render position and its block spacing: one blank
 /// line before every block but the first. Existing prefix decor that
 /// carries a comment is left alone - only missing/whitespace-only prefixes
@@ -203,8 +169,27 @@ fn finalize_layout(
             }
         }
     }
-    if let Some(t) = doc.get_mut("roots").and_then(Item::as_table_mut) {
-        place(t);
+    // `[probe_config]` keeps its hand-written order. A `[probe_config]`
+    // header of its own (inline `"prefix" = { ... }` values) is one block;
+    // `[probe_config."prefix"]` sub-tables are one block each, in the order
+    // they were written.
+    if let Some(t) = doc.get_mut("probe_config").and_then(Item::as_table_mut) {
+        if !t.is_implicit() {
+            place(t);
+        }
+        let mut children: Vec<(isize, String)> = t
+            .iter()
+            .filter_map(|(k, item)| {
+                item.as_table()
+                    .map(|c| (c.position().unwrap_or(isize::MAX), k.to_owned()))
+            })
+            .collect();
+        children.sort();
+        for (_, key) in children {
+            if let Some(child) = t.get_mut(&key).and_then(Item::as_table_mut) {
+                place(child);
+            }
+        }
     }
     if let Some(parent) = doc.get_mut("probes").and_then(Item::as_table_mut) {
         for id in probes.keys() {
@@ -275,15 +260,6 @@ fn pin_value(pin: &FilePin) -> Result<Value, DevError> {
     ))
 }
 
-/// `bar_budget` as a TOML integer (TOML integers are i64).
-fn budget_value(budget: u64) -> Result<Value, DevError> {
-    i64::try_from(budget).map(Value::from).map_err(|_| {
-        DevError::Config(format!(
-            "piners: bar_budget {budget} exceeds TOML's integer range"
-        ))
-    })
-}
-
 /// Parse a value the writer itself formatted; failure is a writer bug.
 fn parse_value(text: &str) -> Result<Value, DevError> {
     text.parse().map_err(|e| {
@@ -343,30 +319,19 @@ mod tests {
             lower: Some(file_pin("vendor/engine/data/1m.csv", "f2")),
         };
         feeds.insert("eth-15m".to_owned(), group);
-        let mut roots = BTreeMap::new();
-        roots.insert(
-            "vendor/engine".to_owned(),
-            RootEntry {
-                feed: "eth-15m".to_owned(),
-            },
-        );
         let mut probes = BTreeMap::new();
         let mut p = pin("alpha-01", "aa");
         p.expected = Some("accepted".to_owned());
-        p.feed = Some("eth-15m".to_owned());
-        p.bar_budget = Some(38000);
-        p.ohlcv_start_ms = Some(1_700_000_000_000);
-        p.tv_trades_csv_tz = Some("America/New_York".to_owned());
         probes.insert("alpha-01".to_owned(), p);
 
-        let text = render_pins(None, &feeds, &roots, &probes).unwrap();
+        let text = render_pins(None, &feeds, &probes).unwrap();
 
         // No leading blank line; sections in order; blank line between blocks.
         assert!(text.starts_with("[feeds.eth-15m]"));
-        assert!(text.find("[feeds.eth-15m]").unwrap() < text.find("[roots]").unwrap());
-        assert!(text.find("[roots]").unwrap() < text.find("[probes.alpha-01]").unwrap());
-        assert!(text.contains("\n\n[roots]"));
+        assert!(text.find("[feeds.eth-15m]").unwrap() < text.find("[probes.alpha-01]").unwrap());
         assert!(text.contains("\n\n[probes.alpha-01]"));
+        // A writer never creates [probe_config]: it is hand-declared.
+        assert!(!text.contains("probe_config"));
         // Contract fields precede the volatile hashes.
         assert!(text.find("expected").unwrap() < text.find("pine").unwrap());
 
@@ -377,12 +342,8 @@ mod tests {
             }
             other => panic!("expected role form, got {other:?}"),
         }
-        assert_eq!(data.roots["vendor/engine"].feed, "eth-15m");
         let p = &data.probes["alpha-01"];
         assert_eq!(p.expected.as_deref(), Some("accepted"));
-        assert_eq!(p.bar_budget, Some(38000));
-        assert_eq!(p.ohlcv_start_ms, Some(1_700_000_000_000));
-        assert_eq!(p.tv_trades_csv_tz.as_deref(), Some("America/New_York"));
         assert_eq!(p.pine.xxh128, "aa");
     }
 
@@ -391,14 +352,16 @@ mod tests {
 [feeds.eth-15m]
 primary = { path = \"data/15m.csv\", xxh128 = \"f-old\" } # pinned upstream
 
-[roots]
-# longest prefix wins
-\"vendor/engine\" = { feed = \"eth-15m\" }
+# each field from the longest prefix that sets it
+[probe_config.\"validation\"]
+feed = \"eth-15m\" # the engine export feed
+
+[probe_config.\"validation/alpha-01\"]
+bar_budget = 38000
 
 # alpha is the flagship probe
 [probes.alpha-01]
 expected = \"accepted\" # blessed 2026-05
-feed = \"eth-15m\"
 pine = { path = \"validation/alpha-01/strategy.pine\", xxh128 = \"a-old\" }
 csv = { path = \"validation/alpha-01/tv_trades.csv\", xxh128 = \"a-old\" }
 
@@ -408,7 +371,7 @@ pine = { path = \"validation/zulu-09/strategy.pine\", xxh128 = \"zz\" }
 csv = { path = \"validation/zulu-09/tv_trades.csv\", xxh128 = \"zz\" }
 ";
 
-    fn commented_state() -> (BTreeMap<String, FeedGroup>, BTreeMap<String, RootEntry>) {
+    fn commented_feeds() -> BTreeMap<String, FeedGroup> {
         let mut feeds = BTreeMap::new();
         feeds.insert(
             "eth-15m".to_owned(),
@@ -418,35 +381,35 @@ csv = { path = \"validation/zulu-09/tv_trades.csv\", xxh128 = \"zz\" }
                 lower: None,
             },
         );
-        let mut roots = BTreeMap::new();
-        roots.insert(
-            "vendor/engine".to_owned(),
-            RootEntry {
-                feed: "eth-15m".to_owned(),
-            },
-        );
-        (feeds, roots)
+        feeds
     }
 
     #[test]
     fn restamp_preserves_comments_and_updates_values() {
-        let (feeds, roots) = commented_state();
+        let feeds = commented_feeds();
         let mut probes = BTreeMap::new();
         let mut alpha = pin("alpha-01", "a-new");
         alpha.expected = Some("byte_exact".to_owned()); // changed by a bless
-        alpha.feed = Some("eth-15m".to_owned());
         probes.insert("alpha-01".to_owned(), alpha);
         probes.insert("mid-05".to_owned(), pin("mid-05", "mm")); // newly discovered
         // zulu-09 vanished from the corpus.
 
-        let text = render_pins(Some(COMMENTED), &feeds, &roots, &probes).unwrap();
+        let text = render_pins(Some(COMMENTED), &feeds, &probes).unwrap();
 
         // Comments survive: file header, block comment, both trailing ones.
         assert!(text.contains("# top-of-file commentary"));
         assert!(text.contains("# alpha is the flagship probe"));
         assert!(text.contains("# blessed 2026-05"));
         assert!(text.contains("# pinned upstream"));
-        assert!(text.contains("# longest prefix wins"));
+        // [probe_config] round-trips byte for byte, in its written order,
+        // between the feeds and the probes.
+        let config = "# each field from the longest prefix that sets it\n\
+                      [probe_config.\"validation\"]\n\
+                      feed = \"eth-15m\" # the engine export feed\n\n\
+                      [probe_config.\"validation/alpha-01\"]\nbar_budget = 38000\n";
+        assert!(text.contains(config), "{text}");
+        assert!(text.find("[feeds.eth-15m]").unwrap() < text.find("[probe_config").unwrap());
+        assert!(text.find("alpha-01\"]").unwrap() < text.find("[probes.alpha-01]").unwrap());
         // Values updated in place.
         assert!(text.contains("\"f-new\""));
         assert!(!text.contains("f-old"));
@@ -462,22 +425,32 @@ csv = { path = \"validation/zulu-09/tv_trades.csv\", xxh128 = \"zz\" }
         assert_eq!(data.probes["alpha-01"].expected.as_deref(), Some("byte_exact"));
         assert_eq!(data.probes["mid-05"].expected, None);
         assert_eq!(data.feeds["eth-15m"].roles()[0].1.xxh128, "f-new");
-        assert_eq!(data.roots["vendor/engine"].feed, "eth-15m");
+        assert_eq!(data.probe_config["validation/alpha-01"].bar_budget, Some(38000));
+    }
+
+    #[test]
+    fn a_restamp_that_strands_a_declaration_is_refused() {
+        // alpha-01 vanished: its exact-dir declaration now governs nothing, so
+        // the write is refused until the declaration leaves in the same diff.
+        let feeds = commented_feeds();
+        let mut probes = BTreeMap::new();
+        probes.insert("zulu-09".to_owned(), pin("zulu-09", "zz"));
+        let err = render_pins(Some(COMMENTED), &feeds, &probes).unwrap_err();
+        assert!(format!("{err:?}").contains("validation/alpha-01\\\"]: `bar_budget` governs no"));
     }
 
     #[test]
     fn bless_insert_puts_expected_before_pine() {
-        let (feeds, roots) = commented_state();
+        let feeds = commented_feeds();
         let mut probes = BTreeMap::new();
         let mut alpha = pin("alpha-01", "a-old");
         alpha.expected = Some("accepted".to_owned());
-        alpha.feed = Some("eth-15m".to_owned());
         probes.insert("alpha-01".to_owned(), alpha);
         let mut zulu = pin("zulu-09", "zz");
         zulu.expected = Some("compile_fail".to_owned()); // first bless
         probes.insert("zulu-09".to_owned(), zulu);
 
-        let text = render_pins(Some(COMMENTED), &feeds, &roots, &probes).unwrap();
+        let text = render_pins(Some(COMMENTED), &feeds, &probes).unwrap();
 
         let zulu_at = text.find("[probes.zulu-09]").unwrap();
         let block = &text[zulu_at..];
@@ -497,7 +470,7 @@ csv = { path = \"validation/zulu-09/tv_trades.csv\", xxh128 = \"zz\" }
             },
         );
         let text =
-            render_pins(None, &feeds, &BTreeMap::new(), &BTreeMap::new()).unwrap();
+            render_pins(None, &feeds, &BTreeMap::new()).unwrap();
         assert!(text.contains("base = { path ="));
         assert!(!text.contains("primary"));
         match &reparse(&text).feeds["eth-15m-2025"] {
@@ -523,7 +496,7 @@ warmup = { path = \"data/15m_warmup.csv\", xxh128 = \"f1\" }
             },
         );
         let text =
-            render_pins(Some(existing), &feeds, &BTreeMap::new(), &BTreeMap::new()).unwrap();
+            render_pins(Some(existing), &feeds, &BTreeMap::new()).unwrap();
         assert!(!text.contains("primary"));
         assert!(!text.contains("warmup"));
         assert!(text.contains("base = { path ="));
@@ -546,7 +519,7 @@ csv = { path = \"validation/alpha-01/tv_trades.csv\", xxh128 = \"aa\" } # the ol
         p.record = Some(file_pin("validation/alpha-01/tv_record.json", "rr"));
         let mut probes = BTreeMap::new();
         probes.insert("alpha-01".to_owned(), p);
-        let text = render_pins(Some(existing), &BTreeMap::new(), &BTreeMap::new(), &probes)
+        let text = render_pins(Some(existing), &BTreeMap::new(), &probes)
             .unwrap();
         assert!(!text.contains("tv_trades.csv"));
         assert!(text.contains("record = { path = \"validation/alpha-01/tv_record.json\""));
@@ -562,23 +535,7 @@ csv = { path = \"validation/alpha-01/tv_trades.csv\", xxh128 = \"aa\" } # the ol
         p.csv = None; // no oracle left
         let mut probes = BTreeMap::new();
         probes.insert("alpha-01".to_owned(), p);
-        let err = render_pins(None, &BTreeMap::new(), &BTreeMap::new(), &probes).unwrap_err();
+        let err = render_pins(None, &BTreeMap::new(), &probes).unwrap_err();
         assert!(format!("{err:?}").contains("pins no oracle"));
-    }
-
-    #[test]
-    fn removing_an_override_drops_the_key() {
-        let existing = "\
-[probes.alpha-01]
-bar_budget = 38000
-pine = { path = \"validation/alpha-01/strategy.pine\", xxh128 = \"aa\" }
-csv = { path = \"validation/alpha-01/tv_trades.csv\", xxh128 = \"aa\" }
-";
-        let mut probes = BTreeMap::new();
-        probes.insert("alpha-01".to_owned(), pin("alpha-01", "aa")); // no overrides
-        let text = render_pins(Some(existing), &BTreeMap::new(), &BTreeMap::new(), &probes)
-            .unwrap();
-        assert!(!text.contains("bar_budget"));
-        assert!(reparse(&text).probes["alpha-01"].bar_budget.is_none());
     }
 }

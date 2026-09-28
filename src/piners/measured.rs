@@ -82,10 +82,10 @@ pub(crate) fn run(req: &MeasureRequest, args: &CorpusArgs) -> Result<(), DevErro
     ));
     let mut verified = Vec::with_capacity(ids.len());
     for id in &ids {
-        let pin = reg.pins.get(id).ok_or_else(|| {
+        let (pin, config) = reg.pins.get(id).zip(reg.config(id)).ok_or_else(|| {
             DevError::Config(format!("piners: internal: selected id '{id}' absent from pins"))
         })?;
-        verified.push(registry::verify_probe(id, pin, &corpus_root, req.project_root)?);
+        verified.push(registry::verify_probe(id, pin, config, &corpus_root, req.project_root)?);
     }
     crate::piners::cmd::verify_selected_feeds(&ids, &reg, &corpus_root, req.project_root)?;
 

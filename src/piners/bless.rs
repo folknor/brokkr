@@ -26,8 +26,8 @@ use crate::piners::registry_io;
 use crate::piners::report::HarnessReport;
 
 /// Stamp dispositions for `scope_ids` into the registry's pins, then
-/// rewrite `pins_path` (the whole file - `[feeds]`/`[roots]` round-trip
-/// untouched).
+/// rewrite `pins_path` (the whole file - `[feeds]`/`[probe_config]`
+/// round-trip untouched).
 ///
 /// Only the selected ids' `expected` is updated. The pin universe stamped
 /// into is re-read from `pins_path` here rather than taken from the
@@ -59,7 +59,7 @@ pub fn apply(
         let fresh = registry::parse_pins(text, pins_path)?;
         registry.pins = fresh.probes;
         registry.feeds = fresh.feeds;
-        registry.roots = fresh.roots;
+        registry.probe_config = fresh.probe_config;
     }
 
     let actual: BTreeMap<&str, String> = report
@@ -98,12 +98,7 @@ pub fn apply(
 
     registry_io::write_atomic(
         pins_path,
-        &pins_write::render_pins(
-            existing.as_deref(),
-            &registry.feeds,
-            &registry.roots,
-            &registry.pins,
-        )?,
+        &pins_write::render_pins(existing.as_deref(), &registry.feeds, &registry.pins)?,
     )?;
     output::corpus_msg(&format!(
         "blessed {blessed} (changed {changed}) -> {}",
