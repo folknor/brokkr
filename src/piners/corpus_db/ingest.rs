@@ -66,11 +66,6 @@ impl CorpusDb {
     }
 }
 
-/// Map an empty harness string to `NULL`, a non-empty one to `Some`.
-fn ne(s: &str) -> Option<String> {
-    (!s.is_empty()).then(|| s.to_owned())
-}
-
 /// SQLite stores signed i64; harness counts are `u64`/`usize`. Clamp rather
 /// than wrap - these are trade/probe counts that never approach `i64::MAX`.
 fn as_i64<T: TryInto<i64>>(v: T) -> i64 {
@@ -150,6 +145,9 @@ fn record_inner(
     Ok(run_id)
 }
 
+/// Store one disposition line: the harness record whole, plus brokkr's own
+/// annotations. Every harness column is generated from `raw_json` (see
+/// `schema.rs`), so nothing here restates a harness field.
 fn insert_disposition(
     conn: &rusqlite::Connection,
     run_id: i64,
@@ -157,66 +155,25 @@ fn insert_disposition(
     expected: &BTreeMap<String, Option<String>>,
     gate_ok: bool,
 ) -> Result<(), DevError> {
-    let disposition = p.disposition();
-    let expected_label = expected.get(&p.probe).cloned().flatten();
-
-    let (acc_tier, acc_profile, acc_failing, p90_entry, p90_exit, p90_pnl) = match &p.acceptance {
-        Some(a) => {
-            let failing = serde_json::to_string(&a.failing).unwrap_or_else(|_| "[]".to_owned());
-            let (entry, exit, pnl) = a
-                .p90
-                .as_ref()
-                .map_or((None, None, None), |p| (p.entry, p.exit, p.pnl));
-            (ne(&a.tier), ne(&a.profile), failing, entry, exit, pnl)
-        }
-        None => (None, None, "[]".to_owned(), None, None, None),
-    };
-
-    let (sig_domain, sig_leg, sig_dimension, sig_detail, sig_breaches) = match &p.signature {
-        Some(s) => (
-            ne(&s.domain),
-            ne(&s.leg),
-            ne(&s.dimension),
-            ne(&s.detail),
-            Some(as_i64(s.dimension_breaches)),
-        ),
-        None => (None, None, None, None, None),
-    };
-
+    if p.raw.is_empty() {
+        // Only `report::parse` builds lines for ingest, and it always sets the
+        // record; an empty one would store a row every projection reads NULL.
+        return Err(DevError::Database(format!(
+            "internal: probe '{}' reached the run store without its harness record",
+            p.probe
+        )));
+    }
     conn.execute(
         "INSERT INTO disposition \
-         (run_id, probe, outcome, disposition, expected, gate_ok, matched, ours_only, tv_only, \
-          boundary_ours, boundary_tv, \
-          count_tier, acc_tier, acc_profile, acc_failing, p90_entry, p90_exit, p90_pnl, \
-          sig_domain, sig_leg, sig_dimension, sig_detail, sig_breaches, error, runtime_ms) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, \
-                 ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
+         (run_id, probe, disposition, expected, gate_ok, raw_source, raw_json) \
+         VALUES (?1, ?2, ?3, ?4, ?5, 'harness', ?6)",
         params![
             run_id,
             p.probe,
-            p.outcome,
-            disposition,
-            expected_label,
+            p.disposition(),
+            expected.get(&p.probe).cloned().flatten(),
             i64::from(gate_ok),
-            as_i64(p.matched),
-            as_i64(p.ours_only),
-            as_i64(p.tv_only),
-            as_i64(p.boundary_ours),
-            as_i64(p.boundary_tv),
-            p.count_tier,
-            acc_tier,
-            acc_profile,
-            acc_failing,
-            p90_entry,
-            p90_exit,
-            p90_pnl,
-            sig_domain,
-            sig_leg,
-            sig_dimension,
-            sig_detail,
-            sig_breaches,
-            p.error,
-            p.runtime_ms,
+            p.raw,
         ],
     )?;
     Ok(())
@@ -326,12 +283,11 @@ mod tests {
         assert_eq!((disp.ours_only, disp.tv_only), (2, 1));
         assert_eq!((disp.boundary_ours, disp.boundary_tv), (2, 0));
 
-        // runtime_ms is stored (store-only for now: reachable via raw SQL, not
-        // yet on any canned query row).
+        // runtime_ms is projected from the stored record.
         let rt = db
-            .raw_sql("SELECT runtime_ms FROM disposition WHERE probe = 'p1'")
+            .raw_sql("SELECT runtime_ms, raw_source FROM disposition WHERE probe = 'p1'")
             .unwrap();
-        assert_eq!(rt.rows[0][0], "142.7");
+        assert_eq!(rt.rows[0], vec!["142.7".to_owned(), "harness".to_owned()]);
 
         // Both trade_diff rows persisted; the second has NULL tv_pnl.
         let diffs = db.trade_diffs_for_probe(run_id, "p1").unwrap();
@@ -348,6 +304,37 @@ mod tests {
         let trend = db.trend_for_probe("p1", 5).unwrap();
         assert_eq!(trend.len(), 1);
         assert_eq!(trend[0].disposition, "actionable_drift");
+    }
+
+    #[test]
+    fn a_field_brokkr_never_modelled_is_stored_and_projected() {
+        // The harness adds diagnostics brokkr has no struct field for; the
+        // record keeps them, and the named ones read back as columns.
+        let report = parse(
+            br#"{"probe":"p1","outcome":"parity","matched":4,"acceptance":{"tier":"accepted"},"boundary_anchor":"carry_tv","boundary_rules":{"start_ours":0,"tail_ours":0,"start_tv":2,"end_tv":0,"start_anchor_consumed":true},"ts_shift":{"entry_considered":4,"entry_shifted":2,"entry_share_pct":50.0,"exit_considered":0,"exit_shifted":0},"clipped_tv":3,"future_field":{"x":1}}
+"#,
+        );
+        let db = CorpusDb::open_in_memory().unwrap();
+        let run = RunRecord {
+            selector: "{}",
+            gated: true,
+            result: "pass",
+            fail_reason: None,
+            harness_exit_code: Some(0),
+            stderr: "",
+            wall_ms: None,
+        };
+        db.record_run(&run, &report, &expected_map(&[("p1", Some("accepted"))]), &[])
+            .unwrap();
+        let t = db
+            .raw_sql(
+                "SELECT boundary_anchor, anchor_consumed, rule_start_tv, ts_entry_share_pct, \
+                        ts_exit_considered, ts_exit_share_pct, clipped_tv, \
+                        json_extract(raw_json, '$.future_field.x') FROM disposition",
+            )
+            .unwrap();
+        // An exit census with nothing comparable has no share: NULL, not 0.
+        assert_eq!(t.rows[0], ["carry_tv", "1", "2", "50", "0", "", "3", "1"]);
     }
 
     #[test]

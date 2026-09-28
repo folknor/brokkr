@@ -2581,6 +2581,8 @@ Examples:
   brokkr corpus-results --diffs --probe a --columns our_qty,tv_entry_qty,our_pnl,tv_pnl  # projected
   brokkr corpus-results --diffs --probe a --columns all            # every column, rendered vertically
   brokkr corpus-results --diffs --where 'exit_price_delta > 0.05'  # filtered trade rows (latest run)
+  brokkr corpus-results --dispositions --columns probe,boundary_anchor,anchor_consumed  # projected
+  brokkr corpus-results --dispositions --where 'ts_entry_share_pct >= 50'   # filtered probes
   brokkr corpus-results --runtimes --over 269                      # probes whose runtime nears the wall
   brokkr corpus-results --trend magnifier-tick-dist-endpoints-01   # tier/p90 over recent runs
   brokkr corpus-results --sql 'SELECT probe, p90_exit FROM disposition'  # read-only escape hatch
@@ -2611,13 +2613,21 @@ In depth: `brokkr man piners`."
 
         /// List `trade_diff` rows across the run (latest run by default). Shape
         /// it with `--probe`, `--columns`, and/or `--where`.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "dispositions")]
         diffs: bool,
 
-        /// Project the `--diffs` table onto these columns (comma-separated or
-        /// repeated). Default is a curated set covering the time/price/qty/pnl
-        /// axes; `all` selects every trade_diff column and renders vertically.
-        /// An unknown name lists the valid columns.
+        /// List `disposition` rows across the run (latest run by default),
+        /// including the harness diagnostics the run-detail view leaves out
+        /// (boundary anchor and rules, timestamp-shift census, clipped trades,
+        /// history prefix, oracle trims). Shape it with `--probe`, `--columns`,
+        /// and/or `--where`.
+        #[arg(long)]
+        dispositions: bool,
+
+        /// Project the `--diffs` or `--dispositions` table onto these columns
+        /// (comma-separated or repeated). Each has a curated default; `all`
+        /// selects every column and renders vertically. An unknown name lists
+        /// the valid columns.
         #[arg(long, value_name = "COLS", value_delimiter = ',')]
         columns: Vec<String>,
 
@@ -2632,12 +2642,14 @@ In depth: `brokkr man piners`."
         #[arg(long, value_name = "SECS")]
         over: Option<f64>,
 
-        /// Trend a probe's disposition/tier/p90 over recent runs.
+        /// Trend a probe's disposition/tier/p90, boundary anchor and
+        /// timestamp-shift census over recent runs.
         #[arg(long, value_name = "ID")]
         trend: Option<String>,
 
-        /// Raw SQL boolean filter for `--diffs` (trusted local input; the DB is
-        /// opened read-only). E.g. `--diffs --where "exit_price_delta > 0.05"`.
+        /// Raw SQL boolean filter for `--diffs` or `--dispositions` (trusted
+        /// local input; the DB is opened read-only). E.g. `--diffs --where
+        /// "exit_price_delta > 0.05"`.
         #[arg(long = "where", value_name = "EXPR")]
         where_expr: Option<String>,
 

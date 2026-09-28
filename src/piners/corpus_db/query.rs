@@ -79,6 +79,24 @@ pub struct TrendRow {
     pub boundary_ours: i64,
     pub boundary_tv: i64,
     pub p90_exit: Option<f64>,
+    /// `false` for a row migrated from the typed schema: its diagnostics
+    /// below were never kept, so NULL there means "not retained".
+    pub from_harness: bool,
+    pub boundary_anchor: Option<String>,
+    /// Whether the armed anchor granted any discount (an armed anchor that
+    /// granted nothing is decorative).
+    pub anchor_consumed: Option<bool>,
+    pub ts_entry: ShiftCensus,
+    pub ts_exit: ShiftCensus,
+}
+
+/// One side of the timestamp-shift census: shifted of considered, and the
+/// harness's share, which it omits when nothing was comparable.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ShiftCensus {
+    pub considered: Option<i64>,
+    pub shifted: Option<i64>,
+    pub share_pct: Option<f64>,
 }
 
 /// One probe's most-recent runtime, for the `--runtimes` view.
@@ -207,18 +225,134 @@ pub const DEFAULT_DIFF_COLUMNS: &[&str] = &[
     "tv_pnl",
 ];
 
-/// Resolve a `--columns` request into a validated SELECT list. Empty -> the
-/// curated [`DEFAULT_DIFF_COLUMNS`]; the lone token `all` -> every column;
-/// otherwise each name must be a known [`TRADE_DIFF_COLUMNS`] entry. An unknown
-/// name errors with the full valid set - that error *is* the column-discovery
-/// path, which is why there is no separate `--list-columns`.
-pub fn resolve_diff_columns(requested: &[String]) -> Result<Vec<String>, DevError> {
+/// Every queryable `disposition` column (`run_id` excluded, as for
+/// [`TRADE_DIFF_COLUMNS`]): brokkr's annotations, the harness projections
+/// `schema.rs` generates from the stored record, and the record itself. The
+/// `--dispositions` allow-list; a test holds it to the table's real columns.
+pub const DISPOSITION_COLUMNS: &[&str] = &[
+    "probe",
+    "disposition",
+    "expected",
+    "gate_ok",
+    "raw_source",
+    "outcome",
+    "matched",
+    "ours_only",
+    "tv_only",
+    "boundary_ours",
+    "boundary_tv",
+    "count_tier",
+    "acc_tier",
+    "acc_profile",
+    "acc_failing",
+    "p90_entry",
+    "p90_exit",
+    "p90_pnl",
+    "sig_domain",
+    "sig_leg",
+    "sig_dimension",
+    "sig_detail",
+    "sig_breaches",
+    "error",
+    "runtime_ms",
+    "boundary_anchor",
+    "anchor_consumed",
+    "rule_start_ours",
+    "rule_tail_ours",
+    "rule_start_tv",
+    "rule_end_tv",
+    "clipped_ours",
+    "clipped_tv",
+    "history_prefix_bars",
+    "oracle_trimmed",
+    "oracle_realtime",
+    "ts_entry_considered",
+    "ts_entry_shifted",
+    "ts_entry_share_pct",
+    "ts_exit_considered",
+    "ts_exit_shifted",
+    "ts_exit_share_pct",
+    "window_sensitive",
+    "dynamic_builtin_calls",
+    "raw_json",
+];
+
+/// The curated default projection for `--dispositions`: the window-edge
+/// diagnostics the run-detail view does not show. The anchor rides with
+/// `anchor_consumed` because an armed anchor that granted nothing is
+/// decorative, and each timestamp-shift share rides with its counts because
+/// 1/1 and 100/100 are both 100 percent. `raw_source` says whether a NULL means
+/// "the harness did not report it" or "this row predates storing it".
+pub const DEFAULT_DISPOSITION_COLUMNS: &[&str] = &[
+    "probe",
+    "disposition",
+    "gate_ok",
+    "boundary_ours",
+    "boundary_tv",
+    "boundary_anchor",
+    "anchor_consumed",
+    "clipped_ours",
+    "clipped_tv",
+    "ts_entry_shifted",
+    "ts_entry_considered",
+    "ts_entry_share_pct",
+    "ts_exit_shifted",
+    "ts_exit_considered",
+    "ts_exit_share_pct",
+    "raw_source",
+];
+
+/// A table `corpus-results` can shape with `--columns`/`--where`.
+#[derive(Clone, Copy, Debug)]
+pub enum Shaped {
+    /// `--diffs`: `trade_diff`, ordered by probe then trade.
+    Diffs,
+    /// `--dispositions`: `disposition`, ordered by probe.
+    Dispositions,
+}
+
+impl Shaped {
+    fn table(self) -> &'static str {
+        match self {
+            Shaped::Diffs => "trade_diff",
+            Shaped::Dispositions => "disposition",
+        }
+    }
+
+    fn columns(self) -> &'static [&'static str] {
+        match self {
+            Shaped::Diffs => TRADE_DIFF_COLUMNS,
+            Shaped::Dispositions => DISPOSITION_COLUMNS,
+        }
+    }
+
+    fn defaults(self) -> &'static [&'static str] {
+        match self {
+            Shaped::Diffs => DEFAULT_DIFF_COLUMNS,
+            Shaped::Dispositions => DEFAULT_DISPOSITION_COLUMNS,
+        }
+    }
+
+    fn order(self) -> &'static str {
+        match self {
+            Shaped::Diffs => "probe, our_index",
+            Shaped::Dispositions => "probe",
+        }
+    }
+}
+
+/// Resolve a `--columns` request for `table` into a validated SELECT list.
+/// Empty -> the table's curated default; the lone token `all` -> every
+/// column; otherwise each name must be a known column of that table. An
+/// unknown name errors with the full valid set - that error *is* the
+/// column-discovery path, which is why there is no separate `--list-columns`.
+pub fn resolve_columns(table: Shaped, requested: &[String]) -> Result<Vec<String>, DevError> {
     let owned = |cols: &[&str]| cols.iter().map(|s| (*s).to_owned()).collect();
     if requested.is_empty() {
-        return Ok(owned(DEFAULT_DIFF_COLUMNS));
+        return Ok(owned(table.defaults()));
     }
     if requested.len() == 1 && requested[0] == "all" {
-        return Ok(owned(TRADE_DIFF_COLUMNS));
+        return Ok(owned(table.columns()));
     }
     let mut out = Vec::with_capacity(requested.len());
     for c in requested {
@@ -229,10 +363,11 @@ pub fn resolve_diff_columns(requested: &[String]) -> Result<Vec<String>, DevErro
                     .to_owned(),
             ));
         }
-        if !TRADE_DIFF_COLUMNS.contains(&c.as_str()) {
+        if !table.columns().contains(&c.as_str()) {
             return Err(DevError::Config(format!(
-                "corpus-results --columns: unknown trade_diff column '{c}'. Valid columns:\n  {}",
-                TRADE_DIFF_COLUMNS.join(", ")
+                "corpus-results --columns: unknown {} column '{c}'. Valid columns:\n  {}",
+                table.table(),
+                table.columns().join(", ")
             )));
         }
         out.push(c.clone());
@@ -355,12 +490,27 @@ impl CorpusDb {
                     d.count_tier AS count_tier, d.gate_ok AS gate_ok, d.matched AS matched, \
                     d.ours_only AS ours_only, d.tv_only AS tv_only, \
                     d.boundary_ours AS boundary_ours, d.boundary_tv AS boundary_tv, \
-                    d.p90_exit AS p90_exit \
+                    d.p90_exit AS p90_exit, d.raw_source AS raw_source, \
+                    d.boundary_anchor AS boundary_anchor, d.anchor_consumed AS anchor_consumed, \
+                    d.ts_entry_considered, d.ts_entry_shifted, d.ts_entry_share_pct, \
+                    d.ts_exit_considered, d.ts_exit_shifted, d.ts_exit_share_pct \
              FROM disposition d JOIN run r ON r.run_id = d.run_id \
              WHERE d.probe = ?1 ORDER BY d.run_id DESC LIMIT ?2",
         )?;
         let rows = stmt.query_map(rusqlite::params![probe, clamp(limit)], |r| {
+            let census = |side: &str| -> rusqlite::Result<ShiftCensus> {
+                Ok(ShiftCensus {
+                    considered: r.get(format!("ts_{side}_considered").as_str())?,
+                    shifted: r.get(format!("ts_{side}_shifted").as_str())?,
+                    share_pct: r.get(format!("ts_{side}_share_pct").as_str())?,
+                })
+            };
             Ok(TrendRow {
+                from_harness: r.get::<_, String>("raw_source")? == "harness",
+                boundary_anchor: r.get("boundary_anchor")?,
+                anchor_consumed: r.get::<_, Option<i64>>("anchor_consumed")?.map(|v| v != 0),
+                ts_entry: census("entry")?,
+                ts_exit: census("exit")?,
                 run_id: r.get("run_id")?,
                 started_at: r.get("started_at")?,
                 disposition: r.get("disposition")?,
@@ -377,22 +527,23 @@ impl CorpusDb {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
-    /// `trade_diff` rows for a run, narrowed to a `probes` set (empty = all
+    /// `table`'s rows for a run, narrowed to a `probes` set (empty = all
     /// probes in the run), projected onto `columns`, optionally further filtered
     /// by a raw boolean expression. `columns` must come from
-    /// [`resolve_diff_columns`] - it is interpolated, so the allow-list is the
-    /// only thing standing between projection and SQL injection; the probe set
-    /// and `run_id` are bound, and `where_expr` is trusted local input against a
-    /// read-only connection. Ordered (probe, our_index).
-    pub fn diffs(
+    /// [`resolve_columns`] for the same table - it is interpolated, so the
+    /// allow-list is the only thing standing between projection and SQL
+    /// injection; the probe set and `run_id` are bound, and `where_expr` is
+    /// trusted local input against a read-only connection.
+    pub fn shaped(
         &self,
+        table: Shaped,
         run_id: i64,
         probes: &[String],
         columns: &[String],
         where_expr: Option<&str>,
     ) -> Result<RawTable, DevError> {
         let select = columns.join(", ");
-        let mut sql = format!("SELECT {select} FROM trade_diff WHERE run_id = ?1");
+        let mut sql = format!("SELECT {select} FROM {} WHERE run_id = ?1", table.table());
         if !probes.is_empty() {
             // probe IN (?2, ?3, ...) - the ids are bound, never interpolated.
             let placeholders: Vec<String> =
@@ -402,7 +553,7 @@ impl CorpusDb {
         if let Some(expr) = where_expr {
             sql.push_str(&format!(" AND ({expr})"));
         }
-        sql.push_str(" ORDER BY probe, our_index");
+        sql.push_str(&format!(" ORDER BY {}", table.order()));
         let mut stmt = self.conn().prepare(&sql)?;
         let mut params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(1 + probes.len());
         params.push(&run_id);
@@ -419,11 +570,15 @@ impl CorpusDb {
     /// [`Self::estimated_wall_ms`], which the ceiling uses instead). `over_ms`,
     /// when set, keeps only probes above it.
     pub fn runtimes(&self, over_ms: Option<f64>) -> Result<Vec<RuntimeRow>, DevError> {
+        // One pass with a window, not a correlated subquery per row:
+        // `runtime_ms` is projected from the stored record, so every
+        // evaluation parses JSON, and the store grows without bound.
         let mut sql = String::from(
-            "SELECT probe, runtime_ms, run_id FROM disposition d \
-             WHERE runtime_ms IS NOT NULL \
-               AND run_id = (SELECT MAX(run_id) FROM disposition d2 \
-                             WHERE d2.probe = d.probe AND d2.runtime_ms IS NOT NULL)",
+            "SELECT probe, runtime_ms, run_id FROM ( \
+                 SELECT probe, runtime_ms, run_id, ROW_NUMBER() OVER \
+                     (PARTITION BY probe ORDER BY run_id DESC) AS newest \
+                 FROM disposition WHERE runtime_ms IS NOT NULL) \
+             WHERE newest = 1",
         );
         if over_ms.is_some() {
             sql.push_str(" AND runtime_ms > ?1");
@@ -706,7 +861,7 @@ mod tests {
 
     #[test]
     fn resolve_columns_empty_is_the_curated_default_with_qty() {
-        let cols = resolve_diff_columns(&[]).unwrap();
+        let cols = resolve_columns(Shaped::Diffs, &[]).unwrap();
         assert_eq!(cols, owned(DEFAULT_DIFF_COLUMNS));
         // The whole point of the change: qty is in the default.
         assert!(cols.iter().any(|c| c == "our_qty"));
@@ -715,22 +870,92 @@ mod tests {
 
     #[test]
     fn resolve_columns_all_is_every_column() {
-        assert_eq!(resolve_diff_columns(&owned(&["all"])).unwrap(), owned(TRADE_DIFF_COLUMNS));
+        assert_eq!(resolve_columns(Shaped::Diffs, &owned(&["all"])).unwrap(), owned(TRADE_DIFF_COLUMNS));
     }
 
     #[test]
     fn resolve_columns_validates_and_preserves_order() {
         let req = owned(&["our_qty", "tv_entry_qty", "our_pnl"]);
-        assert_eq!(resolve_diff_columns(&req).unwrap(), req);
+        assert_eq!(resolve_columns(Shaped::Diffs, &req).unwrap(), req);
         // Unknown name errors (and the message lists the valid set - the
         // discovery path that stands in for --list-columns).
-        let err = resolve_diff_columns(&owned(&["our_qty", "bogus"])).unwrap_err();
+        let err = resolve_columns(Shaped::Diffs, &owned(&["our_qty", "bogus"])).unwrap_err();
         assert!(err.to_string().contains("bogus"));
         assert!(err.to_string().contains("our_qty"));
         // The hint names the command that owns the flag.
         assert!(err.to_string().contains("corpus-results --columns"));
         // `all` mixed with names is rejected (it means "everything", alone).
-        assert!(resolve_diff_columns(&owned(&["all", "our_qty"])).is_err());
+        assert!(resolve_columns(Shaped::Diffs, &owned(&["all", "our_qty"])).is_err());
+    }
+
+    #[test]
+    fn the_disposition_allow_list_is_exactly_the_tables_columns() {
+        // Generated columns are hidden from table_info; table_xinfo lists
+        // them. A projection added to the schema without an allow-list entry
+        // (or the reverse) fails here, not at a user's --columns.
+        let db = CorpusDb::open_in_memory().unwrap();
+        let t = db
+            .raw_sql("SELECT name FROM pragma_table_xinfo('disposition') WHERE name <> 'run_id'")
+            .unwrap();
+        let mut table: Vec<String> = t.rows.into_iter().map(|r| r[0].clone()).collect();
+        let mut listed = owned(DISPOSITION_COLUMNS);
+        table.sort();
+        listed.sort();
+        assert_eq!(table, listed);
+        for c in DEFAULT_DISPOSITION_COLUMNS {
+            assert!(DISPOSITION_COLUMNS.contains(c), "{c}");
+        }
+    }
+
+    #[test]
+    fn dispositions_table_projects_and_filters_the_diagnostics() {
+        let db = CorpusDb::open_in_memory().unwrap();
+        record(
+            &db,
+            "pass",
+            br#"{"probe":"a","outcome":"parity","acceptance":{"tier":"accepted"},"boundary_anchor":"carry_tv","ts_shift":{"entry_considered":4,"entry_shifted":3,"entry_share_pct":75.0,"exit_considered":4,"exit_shifted":0,"exit_share_pct":0.0}}
+{"probe":"b","outcome":"parity","acceptance":{"tier":"byte_exact"},"ts_shift":{"entry_considered":9,"entry_shifted":0,"entry_share_pct":0.0,"exit_considered":9,"exit_shifted":0,"exit_share_pct":0.0}}
+"#,
+        );
+        let cols = resolve_columns(Shaped::Dispositions, &owned(&["probe", "boundary_anchor"]))
+            .unwrap();
+        let t = db
+            .shaped(Shaped::Dispositions, 1, &[], &cols, Some("ts_entry_share_pct >= 50"))
+            .unwrap();
+        assert_eq!(t.rows, vec![vec!["a".to_owned(), "carry_tv".to_owned()]]);
+        let err = resolve_columns(Shaped::Dispositions, &owned(&["our_qty"])).unwrap_err();
+        assert!(err.to_string().contains("unknown disposition column 'our_qty'"));
+    }
+
+    #[test]
+    fn trend_carries_the_anchor_and_shift_census() {
+        let db = CorpusDb::open_in_memory().unwrap();
+        record(
+            &db,
+            "pass",
+            br#"{"probe":"a","outcome":"parity","acceptance":{"tier":"accepted"},"boundary_anchor":"carry_tv","boundary_rules":{"start_ours":0,"tail_ours":0,"start_tv":1,"end_tv":0,"start_anchor_consumed":true},"ts_shift":{"entry_considered":2,"entry_shifted":1,"entry_share_pct":50.0,"exit_considered":0,"exit_shifted":0}}
+"#,
+        );
+        let rows = db.trend_for_probe("a", 5).unwrap();
+        assert_eq!(rows.len(), 1);
+        let t = &rows[0];
+        assert!(t.from_harness);
+        assert_eq!(t.boundary_anchor.as_deref(), Some("carry_tv"));
+        assert_eq!(t.anchor_consumed, Some(true));
+        assert_eq!(
+            t.ts_entry,
+            ShiftCensus {
+                considered: Some(2),
+                shifted: Some(1),
+                share_pct: Some(50.0)
+            }
+        );
+        // Nothing comparable: the harness sends no share, and none is invented.
+        assert_eq!(t.ts_exit.share_pct, None);
+        let table = crate::piners::corpus_db::trend_table(&rows);
+        assert!(table.contains("carry_tv+"), "{table}");
+        assert!(table.contains("1/2 50%"), "{table}");
+        assert!(table.contains("0/0"), "{table}");
     }
 
     #[test]

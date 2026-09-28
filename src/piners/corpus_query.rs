@@ -14,12 +14,15 @@
 //! - `--diffs [--probe …]  -> `trade_diff` table across the run, optionally
 //!    [--columns …]            narrowed to a probe set, projected onto columns
 //!    [--where E]`             (`all` => every column, vertical), and/or filtered
+//! - `--dispositions …`    -> the same shaping over `disposition`, including
+//!   the harness diagnostics the run-detail view omits
 //! - `--runtimes [--over S]` -> per-probe most-recent runtime, slowest first
-//! - `--trend X`           -> X's disposition/tier/p90 over recent runs
+//! - `--trend X`           -> X's disposition/tier/p90, anchor and shift
+//!   census over recent runs
 //! - `--sql Q`             -> read-only `SELECT`/`WITH` escape hatch
 //!
 //! The canned views are `?N`-parameterized; `--columns` interpolates only
-//! allow-listed identifiers (see [`super::corpus_db::query::resolve_diff_columns`]),
+//! allow-listed identifiers (see [`super::corpus_db::query::resolve_columns`]),
 //! while `--where`/`--sql` interpolate trusted local SQL - all guarded by the
 //! read-only DB open plus a SELECT-only UX check (see [`super::corpus_db`]).
 
@@ -28,7 +31,7 @@ use std::path::Path;
 use crate::error::DevError;
 use crate::output;
 use crate::piners::corpus_db::query::DispositionRow;
-use crate::piners::corpus_db::{self, CorpusDb};
+use crate::piners::corpus_db::{self, CorpusDb, Shaped};
 use crate::request::CorpusQuery;
 use crate::resolve::corpus_runs_db_path;
 
@@ -39,6 +42,32 @@ pub fn cmd(project_root: &Path, q: &CorpusQuery) -> Result<(), DevError> {
         return Ok(());
     }
     let db = CorpusDb::open_readonly(&db_path)?;
+
+    // `--columns`/`--where` only shape the `--diffs`/`--dispositions` tables;
+    // refuse them anywhere else rather than silently ignore them, and refuse
+    // the two table flags beside a view that would ignore them.
+    let shaped = if q.diffs {
+        Some(Shaped::Diffs)
+    } else if q.dispositions {
+        Some(Shaped::Dispositions)
+    } else {
+        None
+    };
+    let other_view = q.sql.is_some() || q.runtimes || q.trend.is_some();
+    if shaped.is_none() && (!q.columns.is_empty() || q.where_expr.is_some()) {
+        return Err(DevError::Config(
+            "corpus-results --columns/--where shape the --diffs or --dispositions table - \
+             add one (e.g. `--diffs --probe <id> --columns our_qty,tv_entry_qty`)"
+                .to_owned(),
+        ));
+    }
+    if shaped.is_some() && other_view {
+        return Err(DevError::Config(
+            "corpus-results --diffs/--dispositions is its own view; it cannot be combined \
+             with --sql, --runtimes or --trend"
+                .to_owned(),
+        ));
+    }
 
     // --sql escape hatch (read-only, SELECT/WITH only).
     if let Some(sql) = &q.sql {
@@ -69,25 +98,15 @@ pub fn cmd(project_root: &Path, q: &CorpusQuery) -> Result<(), DevError> {
         return Ok(());
     }
 
-    // `--columns` only shapes the `--diffs` table; reject it elsewhere rather
-    // than silently ignore it.
-    if !q.columns.is_empty() && !q.diffs {
-        return Err(DevError::Config(
-            "corpus-results --columns shapes the --diffs table - add --diffs \
-             (e.g. `--diffs --probe <id> --columns our_qty,tv_entry_qty`)"
-                .to_owned(),
-        ));
-    }
-
-    // --diffs [--probe ... ] [--columns ...] [--where E]: the shapeable diff
-    // table across the selected/latest run. `--probe` here is an IN-list
-    // filter, not the combo view.
-    if q.diffs {
+    // --diffs / --dispositions [--probe ...] [--columns ...] [--where E]: a
+    // shapeable table across the selected/latest run. `--probe` here is an
+    // IN-list filter, not the combo view.
+    if let Some(shape) = shaped {
         let Some(run_id) = resolve_run(&db, q)? else {
             output::result_msg("no corpus runs to filter");
             return Ok(());
         };
-        let columns = corpus_db::resolve_diff_columns(&q.columns)?;
+        let columns = corpus_db::resolve_columns(shape, &q.columns)?;
         let vertical = q.columns.len() == 1 && q.columns[0] == "all";
         let where_expr = match &q.where_expr {
             Some(e) => {
@@ -96,7 +115,7 @@ pub fn cmd(project_root: &Path, q: &CorpusQuery) -> Result<(), DevError> {
             }
             None => None,
         };
-        let table = db.diffs(run_id, &q.probe, &columns, where_expr)?;
+        let table = db.shaped(shape, run_id, &q.probe, &columns, where_expr)?;
         println!("run {run_id}");
         if vertical {
             println!("{}", corpus_db::raw_records(&table));
@@ -111,8 +130,8 @@ pub fn cmd(project_root: &Path, q: &CorpusQuery) -> Result<(), DevError> {
     if !q.probe.is_empty() {
         if q.probe.len() > 1 {
             return Err(DevError::Config(
-                "corpus-results: multiple --probe needs --diffs (the multi-probe diff table); \
-                 a bare --probe shows one probe's full combo view"
+                "corpus-results: multiple --probe needs --diffs or --dispositions (the \
+                 multi-probe tables); a bare --probe shows one probe's full combo view"
                     .to_owned(),
             ));
         }

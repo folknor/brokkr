@@ -8,7 +8,8 @@
 use serde_json::Value;
 
 use super::query::{
-    DispositionRow, GateMissRow, RawTable, RunRow, RuntimeRow, TradeDiffRow, TrendRow,
+    DispositionRow, GateMissRow, RawTable, RunRow, RuntimeRow, ShiftCensus, TradeDiffRow,
+    TrendRow,
 };
 
 /// Render a header + rows as a left-aligned, space-padded grid. Empty rows
@@ -236,11 +237,35 @@ pub fn trade_diffs_table(rows: &[TradeDiffRow]) -> String {
     )
 }
 
-/// A probe's cross-run trend (`--trend`).
+/// The boundary anchor with whether it granted anything: `carry_tv+` when it
+/// did, `carry_tv` when it only armed, `-` when none armed.
+fn anchor(t: &TrendRow) -> String {
+    match (&t.boundary_anchor, t.anchor_consumed) {
+        (Some(a), Some(true)) => format!("{a}+"),
+        (Some(a), _) => a.clone(),
+        (None, _) => "-".to_owned(),
+    }
+}
+
+/// One side of the shift census as `shifted/considered share%`: the share
+/// alone hides that 1/1 and 100/100 are both 100 percent. The harness omits
+/// the share when nothing was comparable, which renders as `0/0`.
+fn census(c: &ShiftCensus) -> String {
+    match (c.shifted, c.considered, c.share_pct) {
+        (Some(s), Some(n), Some(p)) => format!("{s}/{n} {}%", ff(Some(p))),
+        (Some(s), Some(n), None) => format!("{s}/{n}"),
+        _ => "-".to_owned(),
+    }
+}
+
+/// A probe's cross-run trend (`--trend`). A row migrated from the typed
+/// schema never kept the diagnostics, so its `anchor`/`ts_*` cells read `n/r`
+/// (not retained) rather than passing for "nothing reported".
 pub fn trend_table(rows: &[TrendRow]) -> String {
     let cells: Vec<Vec<String>> = rows
         .iter()
         .map(|t| {
+            let retained = |cell: String| if t.from_harness { cell } else { "n/r".to_owned() };
             vec![
                 t.run_id.to_string(),
                 t.started_at.clone(),
@@ -253,13 +278,16 @@ pub fn trend_table(rows: &[TrendRow]) -> String {
                 bnd(t.boundary_ours),
                 bnd(t.boundary_tv),
                 ff(t.p90_exit),
+                retained(anchor(t)),
+                retained(census(&t.ts_entry)),
+                retained(census(&t.ts_exit)),
             ]
         })
         .collect();
     grid(
         &[
             "run", "started_at", "disposition", "tier", "gate", "matched", "ours", "tv", "b_ours",
-            "b_tv", "p90_ex",
+            "b_tv", "p90_ex", "anchor", "ts_entry", "ts_exit",
         ],
         &cells,
     )

@@ -36,12 +36,14 @@ pub(crate) struct CorpusQuery {
     pub(crate) run: Option<i64>,
     /// Row cap for the recent-runs table and `--trend` history.
     pub(crate) limit: usize,
-    /// Probe selector. One id (no `--diffs`) is the combo view; repeated under
-    /// `--diffs` is an IN-list filter on the diff table.
+    /// Probe selector. One id (no table flag) is the combo view; repeated
+    /// under `--diffs`/`--dispositions` is an IN-list filter on that table.
     pub(crate) probe: Vec<String>,
     pub(crate) diffs: bool,
-    /// `--columns` projection for the `--diffs` table. Empty = curated default;
-    /// `["all"]` = every column, rendered vertically; else a validated subset.
+    pub(crate) dispositions: bool,
+    /// `--columns` projection for the `--diffs`/`--dispositions` table. Empty
+    /// = that table's curated default; `["all"]` = every column, rendered
+    /// vertically; else a validated subset.
     pub(crate) columns: Vec<String>,
     /// `--runtimes`: per-probe most-recent runtime, slowest first.
     pub(crate) runtimes: bool,

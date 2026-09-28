@@ -24,20 +24,9 @@ use serde::Deserialize;
 use crate::output;
 use crate::piners::registry;
 
-/// Per-dimension p90 divergence magnitudes carried on the acceptance block of
-/// a non-exact parity probe. Each field is absent when that dimension had no
-/// divergence to summarize.
-#[derive(Debug, Clone, Deserialize)]
-pub struct P90 {
-    #[serde(default)]
-    pub entry: Option<f64>,
-    #[serde(default)]
-    pub exit: Option<f64>,
-    #[serde(default)]
-    pub pnl: Option<f64>,
-}
-
-/// Acceptance detail, present only when `outcome == "parity"`.
+/// Acceptance detail, present only when `outcome == "parity"`. Models what
+/// brokkr reads for the gate and the console; the p90 magnitudes and anything
+/// else ride in [`ProbeLine::raw`] and reach the run store from there.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Acceptance {
     #[serde(default)]
@@ -46,27 +35,18 @@ pub struct Acceptance {
     pub profile: String,
     #[serde(default)]
     pub failing: Vec<String>,
-    /// Per-dimension p90 magnitudes; present on non-exact parity probes.
-    #[serde(default)]
-    pub p90: Option<P90>,
 }
 
-/// Root-cause signature, present on non-exact parity probes. brokkr groups by
-/// `domain`/`dimension` and persists the rest (`leg`, `detail`,
-/// `dimension_breaches`) to the corpus DB. Still forward-compat: serde drops
-/// any field not modelled here (no `deny_unknown_fields`).
+/// Root-cause signature, present on non-exact parity probes. brokkr groups the
+/// console breakdown by `domain`/`dimension`; `leg`, `detail` and
+/// `dimension_breaches` reach the run store through [`ProbeLine::raw`].
+/// Forward-compat: serde drops any field not modelled here.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Signature {
     #[serde(default)]
     pub domain: String,
     #[serde(default)]
     pub dimension: String,
-    #[serde(default)]
-    pub leg: String,
-    #[serde(default)]
-    pub detail: String,
-    #[serde(default)]
-    pub dimension_breaches: u64,
 }
 
 /// One dense-`na` call site, present only when non-empty. brokkr aggregates by
@@ -207,11 +187,16 @@ pub struct ProbeLine {
     /// Error string carried by a `*_fail` outcome.
     #[serde(default)]
     pub error: Option<String>,
-    /// Wall-clock time the harness spent on this probe, in milliseconds.
-    /// Absent on harness output predating the field; modelled as `f64` to
-    /// accept both integer and fractional ms. Stored but not yet rendered.
-    #[serde(default)]
-    pub runtime_ms: Option<f64>,
+    /// The whole line as parsed, re-serialized compactly (the harness's key
+    /// order is kept; its original bytes are not), every field kept,
+    /// including the ones this struct does not model. The run store
+    /// persists it as the authoritative record and projects its columns from
+    /// it, so a diagnostic the harness adds is stored the day it ships rather
+    /// than dropped until brokkr learns its name. Set by [`parse`]; it rides
+    /// on the line so [`HarnessReport::take_duplicates`] keeps raw and typed
+    /// from the same occurrence.
+    #[serde(skip)]
+    pub raw: String,
 }
 
 impl ProbeLine {
@@ -457,10 +442,18 @@ pub fn parse(stdout: &[u8]) -> HarnessReport {
             None => String::new(),
         };
         match value.get("kind").and_then(serde_json::Value::as_str) {
-            None | Some("disposition") => match serde_json::from_value::<ProbeLine>(value) {
-                Ok(p) => report.probes.push(p),
-                Err(e) => output::corpus_msg(&format!("warning: unparsable probe line{at}: {e}")),
-            },
+            None | Some("disposition") => {
+                let raw = value.to_string();
+                match serde_json::from_value::<ProbeLine>(value) {
+                    Ok(mut p) => {
+                        p.raw = raw;
+                        report.probes.push(p);
+                    }
+                    Err(e) => {
+                        output::corpus_msg(&format!("warning: unparsable probe line{at}: {e}"));
+                    }
+                }
+            }
             Some("trade_diff") => match serde_json::from_value::<TradeDiffLine>(value) {
                 Ok(t) => report.trade_diffs.push(t),
                 Err(e) => {

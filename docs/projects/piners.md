@@ -123,7 +123,8 @@ kinds without a brokkr change:
   aggregate these but **persists** them (below).
 - any other `kind` - skipped (forward-compat).
 
-brokkr parses tolerantly (unknown fields ignored) and renders per-probe lines +
+brokkr parses tolerantly (a field it does not model is ignored for rendering,
+and stored with the rest of the line - see the run store below) and renders per-probe lines +
 a computed summary + root-cause breakdown (by `signature` domain/dimension) +
 dense-na breakdown (by builtin: site/na/probe counts). When any probe carried a
 window-boundary discount, a `boundary artifacts: N probe(s), M trade(s)
@@ -143,8 +144,9 @@ Every run's harness NDJSON is ingested into a per-project SQLite store at
 `.brokkr/piners/corpus/runs.db` (gitignore it - unbounded, regenerable run
 history). One transaction after the harness exits: a `run` row plus child
 `disposition` / `trade_diff` / `gate_miss` / `dense_na_site` rows. Append-only
-(FK clauses are declarative; enforcement off), per-db `PRAGMA user_version`
-migrations, WAL - mirroring `src/db` (`ResultsDb`). Code: `src/piners/corpus_db/`.
+(the bundled SQLite enforces the FK clauses; ingest writes the `run` row
+first), per-db `PRAGMA user_version` migrations, WAL - mirroring `src/db`
+(`ResultsDb`). Code: `src/piners/corpus_db/`.
 
 - `run` - `started_at`, `selector` (JSON: resolved ids + raw flags, forwarded
   harness flags, and the build profile as `debug`), `gated` (neither
@@ -154,17 +156,44 @@ migrations, WAL - mirroring `src/db` (`ResultsDb`). Code: `src/piners/corpus_db/
   make a failed run self-contained; `wall_ms` + `selector` are what the
   pre-run runtime ceiling estimates the next run from (a comparable
   superset-covering run's measured wall - see `docs/commands/corpus.md`).
-- `disposition` (PK `run_id,probe`) - `outcome`, `disposition` (gate label),
-  `expected` (from the pins at run time; `NULL` for a probe outside the
-  selection) + `gate_ok` (the gate's own verdict - a probe is ok unless the
-  gate flagged it, so a never-blessed selected probe is not ok and a stray
-  line for an unselected probe is), `matched`/`ours_only`/`tv_only`, `boundary_ours`/`boundary_tv` (the
-  window-boundary discount; `NOT NULL DEFAULT 0`, so pre-v3 rows read as
-  "nothing discounted"), `count_tier`, `acc_tier`/`acc_profile`,
-  `acc_failing` (JSON array), `p90_entry/exit/pnl`, `sig_domain`/`sig_leg`/
-  `sig_dimension`/`sig_detail`/`sig_breaches`, `error`, `runtime_ms` (per-probe
-  wall-clock ms from the harness; absent on older output, surfaced by the
-  `--runtimes` view).
+- `disposition` (PK `run_id,probe`) - the harness line stored **whole** as
+  `raw_json`, the authoritative record, with every harness field a generated
+  column projected from it. The harness adds diagnostics faster than brokkr
+  learns their names, and the run dir is deleted after ingest, so a field with
+  no column used to be destroyed on arrival; now it is stored the day it ships
+  (reachable through `json_extract(raw_json, '$.field')` in `--sql`). Naming
+  it is a projection in `schema.rs`, which reaches fresh stores, plus a
+  migration step - `ALTER TABLE ... ADD COLUMN ... GENERATED ALWAYS AS (...)
+  VIRTUAL` - that reaches every row already stored. The record is the parsed
+  line re-serialized compactly (the harness's key order kept, its original
+  bytes not). Every projection is gated on the JSON type it expects, so a
+  mistyped value reads `NULL` rather than as garbage. Physical columns are only what is
+  not the harness's: `disposition` (brokkr's own gate label, derived, never
+  trusted from the line), `expected` (from the pins at run time; `NULL` for a
+  probe outside the selection), `gate_ok` (the gate's own verdict - a probe is
+  ok unless the gate flagged it, so a never-blessed selected probe is not ok
+  and a stray line for an unselected probe is), and `raw_source` - `harness`,
+  or `reconstructed` for a row migrated from the v4 typed table, whose record
+  was rebuilt from exactly the columns it kept (so its newer diagnostics read
+  `NULL`, meaning *not retained*, not zero). The projections: `outcome`,
+  `matched`/`ours_only`/`tv_only`, `boundary_ours`/`boundary_tv` (the
+  window-boundary discount; 0 when absent, so pre-v3 rows read as "nothing
+  discounted"), `count_tier`, `acc_tier`/`acc_profile`, `acc_failing` (JSON
+  array), `p90_entry/exit/pnl`, `sig_domain`/`sig_leg`/`sig_dimension`/
+  `sig_detail`/`sig_breaches`, `error`, `runtime_ms` (per-probe wall-clock ms,
+  surfaced by `--runtimes`), and the diagnostics: `boundary_anchor` with
+  `anchor_consumed` and the per-rule split `rule_start_ours`/`rule_tail_ours`/
+  `rule_start_tv`/`rule_end_tv`, `clipped_ours`/`clipped_tv`,
+  `history_prefix_bars`, `oracle_trimmed`/`oracle_realtime`, the
+  timestamp-shift census `ts_{entry,exit}_{considered,shifted,share_pct}` (the
+  share is `NULL` when nothing was comparable, as the harness omits it),
+  `window_sensitive` (JSON array) and `dynamic_builtin_calls`. The v5
+  migration refuses to swap in the rebuilt table unless every projection
+  reproduces the column it replaced, row for row.
+  Durability covers the disposition lines the parser accepts. One it cannot
+  parse is dropped with a warning; under the gate that probe then fails the
+  run as a gate miss, but under `--no-gate` a clean harness exit can still
+  pass, and the dropped line goes with the run dir.
 - `trade_diff` (PK `run_id,probe,our_index,tv_index`) - all 26 NDJSON fields.
   The volume driver; the PK covers probe-within-run lookups. A harness that
   repeats a disposition or `trade_diff` key has the repeats collapsed to the
@@ -218,6 +247,15 @@ struct, no benchmark filters to reject. The corpus views:
   a row); an unknown column name errors with the valid set - that error is the
   column-discovery path (there is no `--list-columns`). `--where` still takes a
   raw boolean expression. Default order is `(probe, our_index)`.
+- `brokkr corpus-results --dispositions [--probe <id>…] [--columns …] [--where "<expr>"]` -
+  the same shaping over `disposition`, ordered by probe. The curated default
+  is the window-edge diagnostics the run-detail view leaves out: the boundary
+  discount, `boundary_anchor` beside `anchor_consumed` (an armed anchor that
+  granted nothing is decorative), the clipped counts, each timestamp-shift
+  share beside its counts (1/1 and 100/100 are both 100 percent), and
+  `raw_source`. `--columns all` includes `raw_json`. `--columns`/`--where`
+  without `--diffs` or `--dispositions` is an error rather than ignored, as
+  is either table flag beside `--sql`, `--runtimes` or `--trend`.
 - `brokkr corpus-results --runtimes [--over <secs>]` - each probe's most-recent
   runtime, slowest first, in milliseconds (the harness's unit). A **diagnostic**
   for spotting heavy probes (trim `bar_budget`, or disable), *not* the ceiling's
@@ -225,7 +263,11 @@ struct, no benchmark filters to reject. The corpus views:
   sum, several times the real run wall. The ceiling estimates from the measured
   `run.wall_ms` of a superset-covering run instead (`estimated_wall_ms`).
   `--over 269` shows what single probe nears the wall on its own.
-- `brokkr corpus-results --trend <probe>` - disposition/tier/p90 over recent runs.
+- `brokkr corpus-results --trend <probe>` - disposition/tier/p90 over recent
+  runs, plus the `anchor` (suffixed `+` when it granted a discount) and the
+  entry/exit timestamp-shift census as `shifted/considered share%` - the
+  census was added to be trended even when it does not breach. On a row
+  migrated from the typed schema those cells read `n/r` (not retained).
 - `brokkr corpus-results --sql "<SELECT…>"` - read-only escape hatch, for the genuinely
   ad-hoc query no view covers. The standing rule: when an ad-hoc query recurs,
   promote it to a named view rather than keep reaching through this door.

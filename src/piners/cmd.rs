@@ -163,6 +163,14 @@ pub fn corpus(
     if !args.force {
         enforce_runtime_ceiling(project_root, &ids, debug)?;
     }
+    // Bring the run store to this binary's schema before anything is built or
+    // run. The ceiling above does it on its way to a read, but `--force` skips
+    // the ceiling, and a store that refuses to migrate would otherwise be
+    // found only at ingest - after the whole harness run it was meant to keep.
+    let db_path = corpus_runs_db_path(project_root);
+    if db_path.exists() {
+        drop(CorpusDb::open(&db_path)?);
+    }
 
     let harness_cfg = cfg.harness.as_ref().ok_or_else(|| {
         DevError::Config(
