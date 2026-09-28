@@ -481,9 +481,9 @@ pub fn parse_pins_unchecked(text: &str, origin: &Path) -> Result<PinsData, DevEr
         .map_err(|e| DevError::Config(format!("piners: {}: {e}", origin.display())))
 }
 
-/// The structural rules every pin obeys: at least one oracle, and every
-/// pinned file in the probe dir under its fixed name. Returns every
-/// violation, one per line.
+/// The structural rules every pin obeys: at least one oracle, a probe dir
+/// below the corpus root, and every pinned file in that dir under its fixed
+/// name. Returns every violation, one per line.
 fn check_pins(probes: &BTreeMap<String, Pin>) -> Vec<String> {
     let mut problems: Vec<String> = Vec::new();
     for (id, pin) in probes {
@@ -494,6 +494,29 @@ fn check_pins(probes: &BTreeMap<String, Pin>) -> Vec<String> {
             ));
         }
         let dir = pin.probe_dir();
+        // `components()` quietly drops an internal `.`, so the rebuilt spelling
+        // is compared with the written one, as `check_probe_config` does.
+        let plain: Option<Vec<String>> = dir
+            .components()
+            .map(|c| match c {
+                std::path::Component::Normal(s) => Some(s.to_string_lossy().into_owned()),
+                _ => None,
+            })
+            .collect();
+        let below_root = plain.is_some_and(|parts| {
+            !parts.is_empty() && parts.join("/") == dir.to_string_lossy()
+        });
+        if !below_root {
+            // Pin paths are relative to the corpus root and name a directory
+            // below it: reseed never discovers a probe anywhere else, and no
+            // `[probe_config]` prefix (plain relative components) could cover
+            // one at the root, outside it, or behind a `..`.
+            problems.push(format!(
+                "{id}: pins {} - a probe is a directory below the corpus root, named by \
+                 plain relative components",
+                pin.pine.path.display()
+            ));
+        }
         let pine_want = dir.join(PINE_FILE);
         if pin.pine.path != pine_want {
             problems.push(format!(
@@ -1432,6 +1455,23 @@ csv = { path = "p/renamed/tv_trades.csv", xxh128 = "cc" }
         let msg = format!("{err:?}");
         assert!(msg.contains("moved: pins elsewhere/tv_record.json"));
         assert!(msg.contains("renamed: `pine` must be named strategy.pine"));
+
+        for (id, dir) in [
+            ("rooted", ""),
+            ("outside", "../p/"),
+            ("absolute", "/abs/p/"),
+            ("dotted", "p/./q/"),
+        ] {
+            let text = format!(
+                "[probes.{id}]\npine = {{ path = \"{dir}strategy.pine\", xxh128 = \"aa\" }}\n\
+                 csv = {{ path = \"{dir}tv_trades.csv\", xxh128 = \"cc\" }}\n"
+            );
+            let err = parse_pins(&text, Path::new("pins.toml")).unwrap_err();
+            assert!(
+                format!("{err:?}").contains(&format!("{id}: pins {dir}strategy.pine")),
+                "{id}: {err:?}"
+            );
+        }
     }
 
     #[test]

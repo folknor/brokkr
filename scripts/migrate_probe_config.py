@@ -147,26 +147,56 @@ def main():
     section = None
     pending_comments = []
     in_roots = False
+    roots_tail = []  # comments after a blank line inside [roots]
+    roots_blank = False  # the previous [roots] line was blank
     for line in lines:
         m = HEADER_RE.match(line.strip())
         if m and not line.startswith(" "):
             section = m.group(1)
-            in_roots = section == "roots"
             if in_roots:
+                # A comment block after the last [roots] blank line belongs to
+                # the header that follows it.
+                out.extend(roots_tail)
+                roots_tail = []
+            in_roots = section == "roots"
+            roots_blank = False
+            if in_roots:
+                # Comments directly above the [roots] header are its own.
+                for c in pending_comments:
+                    if c.strip():
+                        print(f"note: dropping [roots] comment: {c.strip()}")
+                pending_comments = []
                 continue
             out.extend(pending_comments)
             pending_comments = []
             out.append(line)
             continue
         if in_roots:
-            # The [roots] body runs to its first blank line; a comment after
-            # that belongs to the next block.
-            if line.strip() == "":
-                in_roots = False
-                section = None
+            # The [roots] body runs to the next header. Its entries and its own
+            # comments are dropped; a comment block separated from the next
+            # header only by being last is kept for that header.
+            s = line.strip()
+            if s == "":
+                if roots_tail:
+                    roots_tail.append(line)
+                roots_blank = True
                 continue
-            if line.strip().startswith("#"):
-                print(f"note: dropping [roots] comment: {line.strip()}")
+            if s.startswith("#"):
+                if roots_tail:
+                    roots_tail.append(line)
+                elif roots_blank:
+                    # Only a comment block set off by a blank line can belong
+                    # to the next section; one hugging an entry is the entry's.
+                    roots_tail = ["", line]
+                else:
+                    print(f"note: dropping [roots] comment: {s}")
+                roots_blank = False
+                continue
+            for c in roots_tail:
+                if c.strip():
+                    print(f"note: dropping [roots] comment: {c.strip()}")
+            roots_tail = []
+            roots_blank = False
             continue
         if section and section.startswith("probes.") and line.strip().startswith("#"):
             pending_comments.append(line)
@@ -183,6 +213,11 @@ def main():
         pending_comments = []
         out.append(line)
     out.extend(pending_comments)
+    # [roots] was the last section: a trailing comment block has no next
+    # section to move to.
+    for c in roots_tail:
+        if c.strip():
+            print(f"note: dropping [roots] comment: {c.strip()}")
 
     block = [
         "# Execution facts, declared by directory prefix: each probe takes each",
@@ -213,8 +248,9 @@ def main():
     new_text = re.sub(r"\n{3,}", "\n\n", "\n".join(new_lines))
 
     check = tomllib.loads(new_text)
-    if "roots" in check:
-        sys.exit("internal: [roots] survived")
+    stray = set(check) - {"feeds", "probe_config", "probes"}
+    if stray:
+        sys.exit(f"internal: unexpected top-level keys after the rewrite: {sorted(stray)}")
     if check.get("probe_config", {}) != config:
         sys.exit("internal: written [probe_config] differs from the computed one")
     for pid, pin in check["probes"].items():

@@ -95,7 +95,10 @@ Probes are pinned in the registry (`registry_dir`), two file kinds:
 
   A probe pins `csv`, `record`, or both - whichever oracles its dir holds -
   plus `inputs` when its dir has an `inputs.json`. Loading refuses a pin
-  with neither oracle, and a pinned file that is not in `pine`'s directory
+  with neither oracle, a probe dir that is not a plain relative path below
+  `corpus_root` (the root itself, an absolute path, or a `.`/`..` component -
+  reseed never discovers a probe there, and no `[probe_config]` prefix could
+  cover one), and a pinned file that is not in `pine`'s directory
   under its fixed name (`strategy.pine`, `inputs.json`, `tv_trades.csv`,
   `tv_record.json`): the harness reads `<probe_dir>/<name>` and nothing else,
   so any other path would verify one file while the harness read another.
