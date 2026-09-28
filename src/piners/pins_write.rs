@@ -200,9 +200,12 @@ fn finalize_layout(
     }
 }
 
-/// Normalize a block's leading decor without disturbing comments: the first
-/// block sheds a pure-newline prefix (no blank line at the top of the
-/// file), every later block gains a `\n` when it has no prefix at all.
+/// Normalize a block's leading decor without disturbing comments: a prefix
+/// that is only whitespace becomes nothing for the first block (no blank
+/// line at the top of the file) and exactly one blank line for every later
+/// one. A prefix holding a comment is left as written. The whitespace case
+/// matters beyond tidiness: an entry deleted by hand usually leaves its blank
+/// lines behind, and the next table would otherwise keep them for good.
 fn set_block_prefix(table: &mut Table, first: bool) {
     let decor = table.decor_mut();
     let prefix = decor
@@ -210,12 +213,8 @@ fn set_block_prefix(table: &mut Table, first: bool) {
         .and_then(RawString::as_str)
         .unwrap_or("")
         .to_owned();
-    if first {
-        if !prefix.is_empty() && prefix.chars().all(|c| c == '\n') {
-            decor.set_prefix("");
-        }
-    } else if prefix.is_empty() {
-        decor.set_prefix("\n");
+    if prefix.chars().all(char::is_whitespace) {
+        decor.set_prefix(if first { "" } else { "\n" });
     }
 }
 
@@ -527,6 +526,31 @@ csv = { path = \"validation/alpha-01/tv_trades.csv\", xxh128 = \"aa\" } # the ol
         let data = reparse(&text);
         assert!(data.probes["alpha-01"].csv.is_none());
         assert_eq!(data.probes["alpha-01"].record.as_ref().unwrap().xxh128, "rr");
+    }
+
+    #[test]
+    fn a_hand_deleted_entry_leaves_no_stray_blank_line_behind() {
+        // An entry deleted by hand usually leaves its blank lines behind, so
+        // the next table arrives with two. Re-adding the entry must restore
+        // one blank line between blocks, not carry the extra one.
+        let existing = "\
+[probes.alpha-01]
+pine = { path = \"validation/alpha-01/strategy.pine\", xxh128 = \"aa\" }
+csv = { path = \"validation/alpha-01/tv_trades.csv\", xxh128 = \"aa\" }
+
+
+[probes.zulu-09]
+pine = { path = \"validation/zulu-09/strategy.pine\", xxh128 = \"zz\" }
+csv = { path = \"validation/zulu-09/tv_trades.csv\", xxh128 = \"zz\" }
+";
+        let mut probes = BTreeMap::new();
+        for (id, h) in [("alpha-01", "aa"), ("mid-05", "mm"), ("zulu-09", "zz")] {
+            probes.insert(id.to_owned(), pin(id, h));
+        }
+        let text = render_pins(Some(existing), &BTreeMap::new(), &probes).unwrap();
+        assert!(!text.contains("\n\n\n"), "stray blank line: {text:?}");
+        assert!(text.contains("\n\n[probes.mid-05]"));
+        assert!(text.contains("\n\n[probes.zulu-09]"));
     }
 
     #[test]

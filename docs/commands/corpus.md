@@ -123,7 +123,9 @@ Probes are pinned in the registry (`registry_dir`), two file kinds:
   fields, each flowing into the probe's manifest entry: `feed` (the `[feeds]`
   group its oracle was taken against - every probe must resolve one),
   `bar_budget` (the harness's scan cap, default 10,000), `ohlcv_start_ms`
-  (the execution start) and `tv_trades_csv_tz` (the CSV oracle's timezone).
+  (the execution start) and `tv_trades_csv_tz` (the CSV oracle's timezone -
+  the harness accepts `utc`, `utc_plus_N`, `utc_minus_N` or an IANA zone
+  without DST, since it applies one constant offset).
   A key is a directory prefix relative to `corpus_root`, and a probe takes
   **each field independently** from the longest prefix covering its
   directory that sets it: a root declares the shared feed and budget, one
@@ -150,7 +152,11 @@ Probes are pinned in the registry (`registry_dir`), two file kinds:
   - every declared field **governs** at least one pinned probe - one
     covering none, or shadowed for every probe it covers, is stale (so a
     reseed dropping the last probe under an exact-dir declaration is refused
-    until the declaration leaves in the same diff);
+    until the declaration leaves in the same diff). The same rule means a
+    declaration written ahead of its probe fails every load - `--verify-only`
+    included - until `--reseed --probe <id>` pins the probe: reseed reads the
+    file without the rules and writes it back satisfying them. Declare, then
+    reseed;
   - no field **restates** the value it would inherit from an ancestor - a
     copy would silently keep the old value when the ancestor changes. An
     explicit value where no ancestor sets one is not a restatement, even if
@@ -195,7 +201,7 @@ full-corpus pass never runs by accident.
 Everything after a literal `--` is appended verbatim to the harness
 invocation, after `--manifest <path>`:
 
-    brokkr corpus --probe 16-volty-expan --no-gate -- --scan-signal-extra
+    brokkr corpus --probe 16-volty-expan --no-gate -- --signal-extra
 
 The allowlist-friendly replacement for env-var-prefixed invocations
 (`PINERS_CORPUS_*=1 brokkr corpus ...`), whose shifting prefixes defeat

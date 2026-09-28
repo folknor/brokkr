@@ -629,7 +629,10 @@ fn check_probe_config(
             if entry.setting(i).is_some() && !winners.contains(&(prefix.as_str(), i)) {
                 problems.push(format!(
                     "[probe_config.\"{prefix}\"]: `{name}` governs no pinned probe (it covers \
-                     none, or narrower declarations override it for all it covers); remove it"
+                     none, or narrower declarations override it for all it covers); remove \
+                     it, or - if it was written ahead of the probe it is for - pin that probe \
+                     with `brokkr corpus --reseed --probe <id>`, which reads the file without \
+                     this rule and writes it back satisfying it"
                 ));
             }
         }
@@ -1193,7 +1196,7 @@ bar_budget = 38000
 [probe_config."piners/beta-02"]
 feed = "eth-15m"
 ohlcv_start_ms = 1700000000000
-tv_trades_csv_tz = "America/New_York"
+tv_trades_csv_tz = "utc_minus_5"
 
 [probes.alpha-01]
 pine = { path = "vendor/engine/validation/alpha-01/strategy.pine", xxh128 = "aaa" }
@@ -1216,7 +1219,7 @@ csv  = { path = "piners/beta-02/tv_trades.csv", xxh128 = "ddd" }
         assert_eq!(alpha.bar_budget, Some(38000));
         let beta = r.config("beta-02").unwrap();
         assert_eq!(beta.ohlcv_start_ms, Some(1_700_000_000_000));
-        assert_eq!(beta.tv_trades_csv_tz.as_deref(), Some("America/New_York"));
+        assert_eq!(beta.tv_trades_csv_tz.as_deref(), Some("utc_minus_5"));
         assert_eq!(beta.bar_budget, None);
         assert_eq!(r.config("ghost"), None);
         let roles = r.feeds["eth-15m"].roles();

@@ -245,7 +245,7 @@ mod tests {
             feed: Some("eth-15m".to_owned()),
             bar_budget: Some(38000),
             ohlcv_start_ms: None,
-            tv_trades_csv_tz: Some("America/New_York".to_owned()),
+            tv_trades_csv_tz: Some("utc_minus_5".to_owned()),
         };
 
         let mut feeds = BTreeMap::new();
@@ -286,7 +286,7 @@ mod tests {
         assert_eq!(p.feed.as_deref(), Some("eth-15m"));
         assert_eq!(p.bar_budget, Some(38000));
         assert_eq!(p.ohlcv_start_ms, None);
-        assert_eq!(p.tv_trades_csv_tz.as_deref(), Some("America/New_York"));
+        assert_eq!(p.tv_trades_csv_tz.as_deref(), Some("utc_minus_5"));
 
         assert_eq!(m.feeds.len(), 1); // only the referenced group
         let group = &m.feeds["eth-15m"];

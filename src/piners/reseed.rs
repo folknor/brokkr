@@ -559,6 +559,7 @@ bar_budget = 20200
         assert_eq!(facts.bar_budget, Some(20200));
         // The declarations were not rewritten.
         assert!(p.text.contains("[probe_config.\"piners/live-01\"]\nfeed = \"eth-15m-live\""));
+        assert!(!p.text.contains("\n\n\n"), "stray blank line:\n{}", p.text);
     }
 
     #[test]
@@ -579,6 +580,8 @@ bar_budget = 20200
         assert_eq!(facts.feed.as_deref(), Some("eth-15m-live"));
         let data = registry::parse_pins(&again.text, &pins_path).unwrap();
         assert_eq!(data.probes["live-01"].expected.as_deref(), Some("accepted"));
+        assert!(!first.text.contains("\n\n\n"), "stray blank line:\n{}", first.text);
+        assert!(!again.text.contains("\n\n\n"), "stray blank line:\n{}", again.text);
     }
 
     #[test]

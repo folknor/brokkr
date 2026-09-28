@@ -27,7 +27,7 @@ paths or re-checking hashes). Schema:
     "csv":  { "path": "vendor/pineforge-engine/validation/<id>/tv_trades.csv", "xxh128": "..." },
     "record": { "path": "vendor/pineforge-engine/validation/<id>/tv_record.json", "xxh128": "..." },
     "keywords": ["magnifier"], "feed": "eth-15m-2025",
-    "bar_budget": 38000, "ohlcv_start_ms": 1700000000000, "tv_trades_csv_tz": "America/New_York"
+    "bar_budget": 38000, "ohlcv_start_ms": 1700000000000, "tv_trades_csv_tz": "utc_minus_5"
   }],
   "feeds": {
     "eth-15m-2025":  { "base": "/abs/.../ohlcv_ETH-USDT-USDT_1m.csv" },

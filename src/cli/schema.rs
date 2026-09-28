@@ -2541,7 +2541,7 @@ In depth: `brokkr man nidhogg`."
 
         /// Extra flags forwarded verbatim to the harness binary, appended
         /// after `--manifest <path>`: everything after a literal `--`, e.g.
-        /// `brokkr corpus --probe x --no-gate -- --scan-signal-extra`. The
+        /// `brokkr corpus --probe x --no-gate -- --signal-extra`. The
         /// allowlist-friendly replacement for env-var-prefixed invocations.
         /// Works for parity and measured runs; recorded in the run row's
         /// selector (runs.db) / cli_args (results.db). Conflicts with
@@ -2631,9 +2631,10 @@ In depth: `brokkr man piners`."
         #[arg(long, value_name = "COLS", value_delimiter = ',')]
         columns: Vec<String>,
 
-        /// Show each probe's most-recent runtime, slowest first (shares the
-        /// pre-run ceiling's per-probe estimate, so it can't drift from the
-        /// wall).
+        /// Show each probe's most-recent runtime, slowest first. A diagnostic
+        /// for spotting heavy probes: probes overlap in the harness, so these
+        /// do not sum to a run's wall, and the pre-run ceiling estimates from
+        /// a measured run wall instead.
         #[arg(long)]
         runtimes: bool,
 
@@ -2811,7 +2812,9 @@ pub(crate) struct ModeArgs {
     #[arg(long, value_delimiter = ',')]
     pub(crate) features: Vec<String>,
 
-    /// Run even if the git tree is dirty (results will not be stored)
+    /// Run even if the git tree is dirty (results will not be stored). For
+    /// a `corpus` parity run it instead bypasses the 270s pre-run runtime
+    /// ceiling
     #[arg(long)]
     pub(crate) force: bool,
 
