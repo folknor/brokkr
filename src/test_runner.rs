@@ -161,6 +161,11 @@ pub(crate) struct LibtestRun {
     /// looks like a bare status (`println!("ok")`) will have its duration
     /// inflated by the gap until the next test starts.
     pub(crate) completed: Vec<(String, Duration)>,
+    /// Tests whose start the tracker saw and whose result it never did, when
+    /// the process ended. For a harness that died mid-test this names the
+    /// SUSPECT, not a proven crash site: the names come from the stream the
+    /// test itself writes to, so a lost or forged record can move them.
+    pub(crate) in_flight: Vec<String>,
 }
 
 // The size difference is real - `HungTest` carries snapshot paths and pid
@@ -531,9 +536,13 @@ where
         .lock()
         .map_err(|_| DevError::Build("build_elapsed mutex poisoned".into()))?
         .take();
-    let completed = tracker
+    let (completed, in_flight) = tracker
         .lock()
-        .map(|mut t| std::mem::take(&mut t.completed))
+        .map(|mut t| {
+            let mut in_flight: Vec<String> = t.current.keys().cloned().collect();
+            in_flight.sort();
+            (std::mem::take(&mut t.completed), in_flight)
+        })
         .map_err(|_| DevError::Build("test tracker mutex poisoned".into()))?;
 
     Ok(LibtestRun {
@@ -549,6 +558,7 @@ where
         },
         build_elapsed,
         completed,
+        in_flight,
     })
 }
 

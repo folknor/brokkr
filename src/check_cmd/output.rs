@@ -2106,6 +2106,7 @@ warning: z [too_many_lines]
             ignored,
             filtered_out,
             suites,
+            started: suites,
             duration: None,
             completeness: cargo_filter::Completeness::Complete,
         }

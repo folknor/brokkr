@@ -1966,8 +1966,12 @@ In depth: `brokkr man nidhogg`."
         #[arg(long)]
         recapture: bool,
     },
-    /// Run one specific cargo test (release by default; --debug for dev)
+    /// Run the cargo tests matching a name (release by default; --debug for dev)
     ///
+    /// Every test harness of the package runs, each in its own cargo
+    /// invocation after one build, so a failing or crashing harness never
+    /// hides the ones after it; every failure is listed, tagged with its
+    /// harness.
     /// Always: --include-ignored, --nocapture, --test-threads=1.
     /// Adds --release unless dev profile is selected. Profile precedence:
     /// `--debug` / `--release` on the CLI win; otherwise `[test] debug` in
@@ -1975,7 +1979,7 @@ In depth: `brokkr man nidhogg`."
     /// Feature selection matches `brokkr check` - defaults to --all-features,
     /// and runs a second sweep with [check].consumer_features if configured.
     /// Streams the test's own stdout/stderr live and prints a [test]
-    /// PASS/FAIL footer with wall time per sweep. Libtest's own framing
+    /// PASS/FAIL footer with wall time per harness that ran it. Libtest's own framing
     /// (`running N tests`, `test foo ... ok`) is dropped - the test's
     /// output is the signal. Gated off for litehtml/sluggrs (use
     /// `brokkr visual`).

@@ -1,7 +1,10 @@
-//! `brokkr test <NAME>` - single-test cargo runner.
+//! `brokkr test <NAME>` - named-test cargo runner.
 //!
-//! Runs exactly one named cargo test with the host/check features and
-//! `--include-ignored --nocapture --test-threads=1`. Defaults to release;
+//! Runs the cargo tests matching `<NAME>` with the host/check features and
+//! `--include-ignored --nocapture --test-threads=1`, in every test harness of
+//! the package: one prebuild per sweep, then one cargo invocation per harness,
+//! so a failing or crashing harness never hides the ones after it (see
+//! `run_split`). Defaults to release;
 //! `--debug` switches to the dev profile, `--release` forces it back, and
 //! when neither is passed the `[test] debug` toml field decides. Streams
 //! the test's own
@@ -65,16 +68,71 @@ enum Outcome {
     NoMatch,
 }
 
-/// One run's outcome plus the failure identity the `-N` summary groups
-/// on. `fail_loc`/`fail_msg` are only set for `Outcome::Fail` and may
-/// be partial (an exit-code failure with no parsed panic has neither).
+/// One failure a run reported.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Failure {
+    /// The test harness it came from (`test:cli_sort`, `lib:pkg`), or empty
+    /// when the run was one invocation over the whole package (`--timeout`, a
+    /// doc-only sweep).
+    target: String,
+    /// What failed: a test name, or a harness-level failure (a crash, a stream
+    /// that stopped reporting, a hang).
+    what: String,
+    loc: Option<String>,
+    msg: Option<String>,
+}
+
+impl Failure {
+    /// What the `-N` summary groups on: the harness, what failed, and where -
+    /// the panic location, falling back to the message. Location first because
+    /// a flaky assertion's message often carries the varying value
+    /// (`rolled 0`, `rolled 2`) while its location does not move.
+    fn key(&self) -> String {
+        let site = self.loc.as_deref().or(self.msg.as_deref()).unwrap_or("");
+        format!("{}|{}|{site}", self.target, self.what)
+    }
+
+    /// The footer form: the harness is already in the run's tag.
+    fn describe(&self) -> String {
+        match (&self.msg, &self.loc) {
+            (Some(m), Some(l)) => format!("{}: {m} @ {l}", self.what),
+            (Some(m), None) => format!("{}: {m}", self.what),
+            (None, Some(l)) => format!("{} @ {l}", self.what),
+            (None, None) => self.what.clone(),
+        }
+    }
+
+    /// The summary form, which spans harnesses and so names the one each
+    /// failure came from.
+    fn describe_qualified(&self) -> String {
+        if self.target.is_empty() {
+            self.describe()
+        } else {
+            format!("[{}] {}", self.target, self.describe())
+        }
+    }
+}
+
+/// The identity of a whole failure set: every failure's key, sorted. Two runs
+/// failing the same tests the same way share it whatever order their harnesses
+/// reported in; a run failing one test more does not.
+fn failure_set_key(failures: &[Failure]) -> String {
+    let mut keys: Vec<String> = failures.iter().map(Failure::key).collect();
+    keys.sort();
+    keys.dedup();
+    keys.join("\n")
+}
+
+/// One run's outcome plus every failure it reported - one sweep's iteration,
+/// across all of that sweep's test harnesses.
 struct RunReport {
     /// The run blew a time budget rather than merely failing. Stops the command:
     /// see the `-N` loop in [`run`].
     timed_out: bool,
     outcome: Outcome,
-    fail_loc: Option<String>,
-    fail_msg: Option<String>,
+    /// Empty for a PASS/SKIP/BUILD FAILED, and for a FAIL nothing could be
+    /// attributed to (the summary then says `unknown failure`).
+    failures: Vec<Failure>,
 }
 
 impl RunReport {
@@ -82,18 +140,39 @@ impl RunReport {
         Self {
             outcome,
             timed_out: false,
-            fail_loc: None,
-            fail_msg: None,
+            failures: Vec::new(),
         }
     }
 
     /// A run that blew a time budget. Fails, and stops the command.
-    fn timed_out(msg: String) -> Self {
+    fn timed_out(target: &str, msg: String) -> Self {
         Self {
             outcome: Outcome::Fail,
             timed_out: true,
-            fail_loc: None,
-            fail_msg: Some(msg),
+            failures: vec![Failure { target: target.to_owned(), what: msg, loc: None, msg: None }],
+        }
+    }
+
+    /// Fold one iteration's per-harness reports into the sweep's. Any FAIL
+    /// fails it, then any BUILD FAILED; it passes when some harness ran the
+    /// test, and is a SKIP only when no harness matched anything - a name
+    /// matching nothing in most harnesses is the normal case once each runs
+    /// on its own.
+    fn merge(parts: Vec<RunReport>) -> Self {
+        let has = |o: Outcome| parts.iter().any(|p| p.outcome == o);
+        let outcome = if has(Outcome::Fail) {
+            Outcome::Fail
+        } else if has(Outcome::BuildFailed) {
+            Outcome::BuildFailed
+        } else if has(Outcome::Pass) {
+            Outcome::Pass
+        } else {
+            Outcome::NoMatch
+        };
+        Self {
+            outcome,
+            timed_out: parts.iter().any(|p| p.timed_out),
+            failures: parts.into_iter().flat_map(|p| p.failures).collect(),
         }
     }
 }
@@ -281,45 +360,41 @@ fn run_sweeps(
             debug,
         )?;
 
+        // Every other run splits per test harness: one prebuild for the sweep,
+        // then one cargo invocation per harness, each running exactly one
+        // libtest process. `--timeout` already refuses more than one match, and
+        // a doc-only sweep is one rustdoc run, so both stay single invocations.
+        // See `run_split` for why the split is the fix and not `--no-fail-fast`.
+        let shape = BuildShape { sweep, allow_args: &allow_args, pkg: &pkg, jobs, debug };
+        let targets = if exact.is_none() && !sweep.doc_only {
+            let Some(targets) = prebuild_targets(&shape, &env_refs, project_root)? else {
+                reports.push(RunReport::bare(Outcome::BuildFailed));
+                continue;
+            };
+            Some(targets)
+        } else {
+            None
+        };
+        let plan = SweepPlan {
+            shape,
+            name,
+            targets,
+            exact,
+            env: &env_refs,
+            project_root,
+            state_root,
+            ceiling,
+            sweep_label: multi.then_some(sweep.label.as_str()),
+            repeat,
+            repeat_state: &repeat_state,
+        };
+
         for n in 1..=repeat {
             if n > 1 {
                 // Each repeat is its own bounded unit; see `run`.
                 check_cmd::enter_phase("test");
             }
-            // Under `--timeout`, run the resolved name exactly; otherwise the
-            // user's substring, unchanged.
-            let filter = exact.as_deref().unwrap_or(name);
-            let args =
-                test_argv(sweep, &allow_args, &pkg, filter, jobs, debug, exact.is_some());
-
-            let label = sweep.label.as_str();
-            let tag = match (multi, repeat > 1) {
-                (true, true) => format!("{pkg}::{name} [{label}] run {n}/{repeat}"),
-                (true, false) => format!("{pkg}::{name} [{label}]"),
-                (false, true) => format!("{pkg}::{name} run {n}/{repeat}"),
-                (false, false) => format!("{pkg}::{name}"),
-            };
-
-            let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-            // Under `-N`, the invocation and build-time framing is identical
-            // every iteration - print it for run 1 only and let repeats
-            // collapse to their PASS/FAIL footer line.
-            let announce = n == 1;
-            if announce {
-                output::run_msg(&format!("cargo {}", arg_refs.join(" ")));
-            }
-
-            let report = run_one(
-                &arg_refs,
-                project_root,
-                state_root,
-                &env_refs,
-                &tag,
-                ceilings_for(&exact, ceiling),
-                announce,
-                &repeat_state,
-                n > 1,
-            )?;
+            let report = run_iteration(&plan, n)?;
             let timed_out = report.timed_out;
             reports.push(report);
             // A blown time budget stops brokkr. Unlike a failing test - where a
@@ -343,9 +418,103 @@ fn run_sweeps(
     aggregate_exit(&outcomes, &pkg, name)
 }
 
-/// The `-N` closing summary: one counts line, then one line per distinct
-/// failure signature (grouped by panic location, falling back to message)
-/// with its occurrence count and a representative message.
+/// One sweep, built and ready: what every `-N` iteration of it shares.
+struct SweepPlan<'a> {
+    shape: BuildShape<'a>,
+    name: &'a str,
+    /// The sweep's test harnesses when it runs split; `None` for a single
+    /// whole-package invocation (`--timeout`, a doc-only sweep).
+    targets: Option<Vec<check_cmd::TestTarget>>,
+    /// The resolved full name `--timeout` runs with `--exact`.
+    exact: Option<String>,
+    env: &'a [(&'a str, &'a str)],
+    project_root: &'a Path,
+    state_root: &'a Path,
+    ceiling: Duration,
+    /// The sweep's label when several sweeps run, so its tag says which.
+    sweep_label: Option<&'a str>,
+    repeat: u32,
+    repeat_state: &'a RepeatState,
+}
+
+/// Run iteration `n` of a sweep and report it, printing its footers.
+fn run_iteration(plan: &SweepPlan<'_>, n: u32) -> Result<RunReport, DevError> {
+    let (pkg, name, repeat) = (plan.shape.pkg, plan.name, plan.repeat);
+    let tag = |target: Option<&str>| {
+        let quals: Vec<&str> = plan.sweep_label.into_iter().chain(target).collect();
+        let quals =
+            if quals.is_empty() { String::new() } else { format!(" [{}]", quals.join(", ")) };
+        let run = if repeat > 1 { format!(" run {n}/{repeat}") } else { String::new() };
+        format!("{pkg}::{name}{quals}{run}")
+    };
+    // Under `-N`, the invocation and build-time framing is identical every
+    // iteration - print it for run 1 only and let repeats collapse to their
+    // PASS/FAIL footer line.
+    let announce = n == 1;
+
+    let Some(targets) = &plan.targets else {
+        // Under `--timeout`, run the resolved name exactly; otherwise the
+        // user's substring, unchanged.
+        let s = &plan.shape;
+        let filter = plan.exact.as_deref().unwrap_or(name);
+        let args =
+            test_argv(s.sweep, s.allow_args, pkg, &[], filter, s.jobs, s.debug, plan.exact.is_some());
+        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        if announce {
+            output::run_msg(&format!("cargo {}", arg_refs.join(" ")));
+        }
+        return run_one(
+            &arg_refs,
+            plan.project_root,
+            plan.state_root,
+            plan.env,
+            &OneRun {
+                tag: &tag(None),
+                target: "",
+                ceilings: ceilings_for(&plan.exact, plan.ceiling),
+                announce,
+                quiet_no_match: false,
+            },
+            plan.repeat_state,
+            n > 1,
+        );
+    };
+
+    let report = run_split(
+        &plan.shape,
+        name,
+        targets,
+        &SplitRun {
+            project_root: plan.project_root,
+            state_root: plan.state_root,
+            env: plan.env,
+            ceiling: plan.ceiling,
+            announce,
+            repeat_state: plan.repeat_state,
+            buffered: n > 1,
+            tag: &tag,
+        },
+    )?;
+    if report.outcome == Outcome::NoMatch {
+        println!(
+            "[test]    SKIP {} - no tests matched in any of {} test {} (likely feature-gated out \
+             of this sweep)",
+            tag(None),
+            targets.len(),
+            if targets.len() == 1 { "harness" } else { "harnesses" }
+        );
+    }
+    Ok(report)
+}
+
+/// The `-N` closing summary: one counts line, then one group per distinct
+/// failure SET with its occurrence count - the first-seen run's failures
+/// represent it, one per line when there are several.
+///
+/// Grouped on the whole set, not on the first failure: once every harness runs,
+/// one run can fail three tests, and keying on the first of them folded a run
+/// that failed A and B into the group of a run that failed A alone - the flake
+/// report then said nothing about B.
 fn format_repeat_summary(reports: &[RunReport]) -> Vec<String> {
     let total = reports.len();
     let count = |o: Outcome| reports.iter().filter(|r| r.outcome == o).count();
@@ -364,32 +533,33 @@ fn format_repeat_summary(reports: &[RunReport]) -> Vec<String> {
         parts.join(", ")
     )];
 
-    // (group key, display text, count) - insertion order, first-seen
-    // message represents the group.
-    let mut groups: Vec<(String, String, usize)> = Vec::new();
+    // (group key, display lines, count) - insertion order, the first-seen
+    // run's failures represent the group.
+    let mut groups: Vec<(String, Vec<String>, usize)> = Vec::new();
     for r in reports {
         if r.outcome != Outcome::Fail {
             continue;
         }
-        let key = r
-            .fail_loc
-            .clone()
-            .or_else(|| r.fail_msg.clone())
-            .unwrap_or_else(|| "unknown failure".to_owned());
+        let key = failure_set_key(&r.failures);
         if let Some(g) = groups.iter_mut().find(|g| g.0 == key) {
             g.2 += 1;
             continue;
         }
-        let display = match (&r.fail_msg, &r.fail_loc) {
-            (Some(m), Some(l)) => format!("{m} @ {l}"),
-            (Some(m), None) => m.clone(),
-            (None, Some(l)) => format!("@ {l}"),
-            (None, None) => "unknown failure".to_owned(),
+        let display = if r.failures.is_empty() {
+            vec!["unknown failure".to_owned()]
+        } else {
+            r.failures.iter().map(Failure::describe_qualified).collect()
         };
         groups.push((key, display, 1));
     }
     for (_, display, n) in groups {
-        lines.push(format!("[test]      {n}x {display}"));
+        let mut display = display.into_iter();
+        if let Some(first) = display.next() {
+            lines.push(format!("[test]      {n}x {first}"));
+        }
+        for more in display {
+            lines.push(format!("[test]         + {more}"));
+        }
     }
     lines
 }
@@ -509,42 +679,74 @@ fn pre_build_argv(
     args
 }
 
-/// Count how many tests `<name>` matches in this sweep via libtest
-/// `--list`. Used to gate the `--timeout` override on a single match.
-/// Builds (cache-shared with the real run that follows) then lists; each
-/// runnable test prints a `path::to::test: test` line, so we count those.
-/// A build/list failure returns `Ok(0)` so the subsequent real run is the
-/// one that surfaces the compile error through the normal BUILD FAILED path.
-/// The `cargo test` argv for one run of one named test in one sweep.
+/// Everything that shapes a sweep's build, shared by its prebuild and every
+/// run that follows it, so the two cannot name different graphs.
+struct BuildShape<'a> {
+    sweep: &'a ResolvedSweep,
+    allow_args: &'a [String],
+    pkg: &'a str,
+    jobs: Option<u32>,
+    debug: bool,
+}
+
+/// The cargo half every invocation of a sweep shares: subcommand, resolution
+/// pin, lint allows, profile, features, `-j`, and the one package.
 ///
-/// `allow_args` goes first: `--config` is a cargo option, and everything past
-/// the `--` split belongs to libtest.
+/// `allow_args` goes before the selection: `--config` is a cargo option, and
+/// everything past the `--` split belongs to libtest.
+fn cargo_head(shape: &BuildShape<'_>, leading: &[&str]) -> Vec<String> {
+    let mut args: Vec<String> = leading.iter().map(|s| (*s).to_owned()).collect();
+    // The lane's pinned resolution, same as every cargo command `check`
+    // builds. This path is already one package per invocation (`-p pkg`
+    // below), so package mode's one-resolution-per-package rule is satisfied
+    // by construction and needs no loop here.
+    args.extend(shape.sweep.unification_args());
+    args.extend(shape.allow_args.iter().cloned());
+    if !shape.debug {
+        args.push("--release".into());
+    }
+    args.extend(shape.sweep.cargo_feature_args.iter().cloned());
+    if let Some(j) = shape.jobs {
+        args.push("-j".into());
+        args.push(j.to_string());
+    }
+    args.push("-p".into());
+    args.push(shape.pkg.into());
+    args
+}
+
+/// The prebuild that compiles a split sweep's test harnesses and lists them.
+///
+/// `--tests` because that is the selection a named `cargo test -p PKG NAME`
+/// resolves to (a positional test name with no target flag selects all test
+/// targets, not cargo's default set): the default set also builds every
+/// example merely to check it compiles, so an unrelated broken example would
+/// newly fail the build. `json-render-diagnostics` keeps the artifact records
+/// on stdout for the listing while compiler errors stay readable on stderr.
+fn prebuild_argv(shape: &BuildShape<'_>) -> Vec<String> {
+    let mut args =
+        cargo_head(shape, &["test", "--no-run", "--message-format=json-render-diagnostics"]);
+    args.push("--tests".into());
+    args
+}
+
+/// The `cargo test` argv for one run of `name` in one sweep, over the harness
+/// `selector` names (`--test cli`, `--lib`), or over the whole package when it
+/// is empty (`--timeout`, a doc-only sweep).
+#[allow(clippy::too_many_arguments)]
 fn test_argv(
     sweep: &ResolvedSweep,
     allow_args: &[String],
     pkg: &str,
+    selector: &[String],
     name: &str,
     jobs: Option<u32>,
     debug: bool,
     exact: bool,
 ) -> Vec<String> {
-    let mut args: Vec<String> = vec!["test".into()];
-    // The lane's pinned resolution, same as every cargo command `check`
-    // builds. This path is already one package per invocation (`-p pkg`
-    // below), so package mode's one-resolution-per-package rule is satisfied
-    // by construction and needs no loop here.
-    args.extend(sweep.unification_args());
-    args.extend(allow_args.iter().cloned());
-    if !debug {
-        args.push("--release".into());
-    }
-    args.extend(sweep.cargo_feature_args.iter().cloned());
-    if let Some(j) = jobs {
-        args.push("-j".into());
-        args.push(j.to_string());
-    }
-    args.push("-p".into());
-    args.push(pkg.into());
+    let shape = BuildShape { sweep, allow_args, pkg, jobs, debug };
+    let mut args = cargo_head(&shape, &["test"]);
+    args.extend(selector.iter().cloned());
     // A doc-only sweep runs doctests and nothing else, here as everywhere:
     // <NAME> filters within the `--doc` pseudo-target, and a name matching
     // no doctest SKIPs like any feature-gated miss.
@@ -574,6 +776,172 @@ fn test_argv(
         args.push("--exact".into());
     }
     args
+}
+
+/// Build a split sweep's test harnesses once and list them in cargo's run
+/// order. `Ok(None)` is a build failure, already reported.
+///
+/// Bounded like the sweep pre-build, by the idle ceiling: a cold build of any
+/// length that keeps printing runs to completion, a cargo parked on a lock
+/// does not.
+fn prebuild_targets(
+    shape: &BuildShape<'_>,
+    env: &[(&str, &str)],
+    project_root: &Path,
+) -> Result<Option<Vec<check_cmd::TestTarget>>, DevError> {
+    let args = prebuild_argv(shape);
+    output::run_msg(&format!("cargo {}", args.join(" ")));
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let started = std::time::Instant::now();
+    let captured = cargo_with_deadline(&arg_refs, project_root, env, "test build")?;
+    if !captured.status.success() {
+        let stderr = String::from_utf8_lossy(&captured.stderr);
+        let filtered = cargo_filter::filter_test_build_failure(&stderr);
+        if !filtered.is_empty() {
+            output::error(&filtered);
+        }
+        println!(
+            "[test]    BUILD FAILED {} (sweep: {})",
+            shape.pkg, shape.sweep.label
+        );
+        return Ok(None);
+    }
+    // An unrecognised stream is not an empty one: treating it as "no harnesses"
+    // would SKIP every sweep and report a bad test name for what is really a
+    // cargo whose output brokkr could not read.
+    let Some(targets) = check_cmd::test_targets(&String::from_utf8_lossy(&captured.stdout))
+    else {
+        return Err(DevError::Build(format!(
+            "cargo exited successfully but produced no recognisable artifact stream for: cargo {} \
+             - brokkr cannot tell which test harnesses exist",
+            args.join(" ")
+        )));
+    };
+    println!(
+        "[test]    test binaries built in {:.1}s; {} test {}",
+        started.elapsed().as_secs_f64(),
+        targets.len(),
+        if targets.len() == 1 { "harness" } else { "harnesses" }
+    );
+    Ok(Some(targets))
+}
+
+/// What a split run needs beyond the build shape.
+struct SplitRun<'a> {
+    project_root: &'a Path,
+    state_root: &'a Path,
+    env: &'a [(&'a str, &'a str)],
+    ceiling: Duration,
+    announce: bool,
+    repeat_state: &'a RepeatState,
+    buffered: bool,
+    /// The run's tag, qualified by the harness when given one.
+    tag: &'a dyn Fn(Option<&str>) -> String,
+}
+
+/// Run `name` in every test harness of the sweep, one cargo invocation each,
+/// and fold the results.
+///
+/// # Why one invocation per harness
+///
+/// One `cargo test -p PKG NAME` stops at the first harness with a failing test:
+/// the harnesses after it never run, and a mutation check reading "these tests
+/// went red" reads an incomplete list. `--no-fail-fast` is not the fix on its
+/// own. It keeps every harness in ONE libtest stream, and a harness that dies
+/// mid-test (an abort, a stack overflow - what a mutation produces) leaves its
+/// suite open with that test in flight. The next harness's `suite/started` is
+/// then indistinguishable from one a live test forged, so the per-test clock
+/// keeps billing the dead test and kills the next, healthy harness as its hang.
+///
+/// Running each harness in its own invocation makes every stream one process:
+/// a crash ends its own run, the next harness starts with a fresh tracker, and
+/// every failure (stdout verdicts and the `--nocapture` panics on stderr alike)
+/// belongs to the harness that printed it, so the same test name in two
+/// harnesses is two failures, not one.
+///
+/// The package set never changes (`-p PKG`, one package - see
+/// [`resolve_package`]), and with it fixed cargo resolves the same feature graph
+/// whichever target is selected: the harness each invocation runs is the one
+/// the prebuild compiled.
+fn run_split(
+    shape: &BuildShape<'_>,
+    name: &str,
+    targets: &[check_cmd::TestTarget],
+    ctx: &SplitRun<'_>,
+) -> Result<RunReport, DevError> {
+    if ctx.announce && !targets.is_empty() {
+        let template = test_argv(
+            shape.sweep,
+            shape.allow_args,
+            shape.pkg,
+            &["<HARNESS>".to_owned()],
+            name,
+            shape.jobs,
+            shape.debug,
+            false,
+        );
+        let labels: Vec<String> = targets.iter().map(check_cmd::TestTarget::label).collect();
+        output::run_msg(&format!(
+            "cargo {} (once per harness: {})",
+            template.join(" "),
+            labels.join(", ")
+        ));
+    }
+    let mut parts = Vec::new();
+    for target in targets {
+        let label = target.label();
+        let args = test_argv(
+            shape.sweep,
+            shape.allow_args,
+            shape.pkg,
+            &target.selector(),
+            name,
+            shape.jobs,
+            shape.debug,
+            false,
+        );
+        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        let report = run_one(
+            &arg_refs,
+            ctx.project_root,
+            ctx.state_root,
+            ctx.env,
+            &OneRun {
+                tag: &(ctx.tag)(Some(&label)),
+                target: &label,
+                ceilings: ceilings_for(&None, ctx.ceiling),
+                announce: false,
+                quiet_no_match: true,
+            },
+            ctx.repeat_state,
+            ctx.buffered,
+        )?;
+        // The copy-pasteable line for the harness that failed; run 1 only, as
+        // every other invocation line is.
+        if ctx.announce && matches!(report.outcome, Outcome::Fail | Outcome::BuildFailed) {
+            output::error(&format!("failing command: cargo {}", args.join(" ")));
+        }
+        // A blown budget stops everything, the remaining harnesses included.
+        let stop = report.timed_out;
+        parts.push(report);
+        if stop {
+            break;
+        }
+    }
+    Ok(RunReport::merge(parts))
+}
+
+/// How one invocation is labelled and bounded.
+struct OneRun<'a> {
+    tag: &'a str,
+    /// The harness, for attributing failures; empty for a whole-package run.
+    target: &'a str,
+    ceilings: test_runner::Ceilings,
+    /// Print the "test binaries built" framing line.
+    announce: bool,
+    /// A split run's harness that matched nothing is the normal case: say
+    /// nothing, and let the sweep print one SKIP when no harness matched.
+    quiet_no_match: bool,
 }
 
 /// One sweep's cargo environment, plus the `--config` args that must ride its
@@ -813,7 +1181,31 @@ fn resolve_debug(
 ///      over implicit per-project heuristic)
 ///   3. `Project::cli_package()` (built-in knowledge for pbfhogg/nidhogg)
 ///   4. Error with a message pointing the user at options 1/2
+///
+/// Whatever the source, the spec must name ONE package: cargo accepts globs in
+/// `-p`, and a glob selecting several packages would put several packages'
+/// harnesses back into one invocation - the shape `run_split` exists to
+/// dissolve - and change the feature graph between the prebuild and each run.
 fn resolve_package(
+    cli_package: Option<&str>,
+    dev_config: &DevConfig,
+    project: Project,
+) -> Result<String, DevError> {
+    single_package(resolve_package_spec(cli_package, dev_config, project)?)
+}
+
+/// Refuse a package spec cargo would treat as a glob.
+fn single_package(pkg: String) -> Result<String, DevError> {
+    if pkg.contains(['*', '?', '[']) {
+        return Err(DevError::Config(format!(
+            "'brokkr test' runs one package, and `{pkg}` is a glob that cargo may expand to \
+             several. Name the package."
+        )));
+    }
+    Ok(pkg)
+}
+
+fn resolve_package_spec(
     cli_package: Option<&str>,
     dev_config: &DevConfig,
     project: Project,
@@ -968,32 +1360,33 @@ fn select_sweep(
 }
 
 /// Run one `cargo test` invocation. Prints the `[test]` footer and returns
-/// the run report. Err only on spawn failure. `announce` gates the
+/// the run report. Err only on spawn failure. `shape.announce` gates the
 /// "test binaries built in Xs" framing line - false for `-N` repeats
-/// after the first, where the build is cached and the line is noise.
+/// after the first, where the build is cached and the line is noise, and
+/// for a split run, whose prebuild already said it.
 /// `buffered` (repeats only) routes the streamed display into a buffer
 /// that is flushed once the outcome is known - and dropped entirely when
-/// the failure signature was already shown by an earlier run, leaving
+/// the failure set was already shown by an earlier run, leaving
 /// just the footer.
-#[allow(clippy::too_many_arguments)]
 fn run_one(
     args: &[&str],
     project_root: &Path,
     state_root: &Path,
     env: &[(&str, &str)],
-    tag: &str,
-    ceilings: test_runner::Ceilings,
-    announce: bool,
+    shape: &OneRun<'_>,
     repeat_state: &RepeatState,
     buffered: bool,
 ) -> Result<RunReport, DevError> {
+    let tag = shape.tag;
+    let target = shape.target;
+    let announce = shape.announce;
     let sink: Option<LineSink> = buffered.then(LineSink::default);
     let run = test_runner::streaming_run_libtest(
         args,
         project_root,
         state_root,
         env,
-        ceilings,
+        shape.ceilings.clone(),
         make_stdout_forwarder(sink.clone()),
         make_stderr_forwarder(sink.clone()),
         move |elapsed| {
@@ -1026,7 +1419,7 @@ fn run_one(
     let wall = format!("{:.2}s", test_wall.as_secs_f64());
 
     if let LibtestOutcome::HungTest(hung) = &run.outcome {
-        let first = repeat_state.first_sighting(&format!("hung {}", hung.test));
+        let first = repeat_state.first_sighting(&format!("{target}|hung {}", hung.test));
         flush_sink(sink, !first);
         if first {
             output::error(&test_runner::format_hung_test(hung, project_root));
@@ -1036,10 +1429,10 @@ fn run_one(
             hung.ceiling.as_secs()
         );
         std::io::stdout().flush().ok();
-        return Ok(RunReport::timed_out(format!(
-            "hung test exceeded {}s",
-            hung.ceiling.as_secs()
-        )));
+        return Ok(RunReport::timed_out(
+            target,
+            format!("hung test exceeded {}s", hung.ceiling.as_secs()),
+        ));
     }
 
     if !has_test_result && has_compile_error {
@@ -1051,37 +1444,43 @@ fn run_one(
         return Ok(report_build_failure(tag, &wall, first, stderr_text.as_ref()));
     }
 
-    if let Some(fail) = parsed.failures.first() {
-        let msg = fail.message.as_deref().unwrap_or("<no panic message>");
-        let loc = fail.location.as_deref().unwrap_or("<unknown location>");
-        // Suppress the streamed block when this failure signature already
-        // printed in full on an earlier run - the footer carries msg@loc.
-        let sig = fail
-            .location
-            .clone()
-            .or_else(|| fail.message.clone())
-            .unwrap_or_else(|| "unknown failure".to_owned());
-        let first = repeat_state.first_sighting(&sig);
+    // Every failure this harness reported, not the first: the footer is how a
+    // mutation check reads which tests went red, and a list cut to one entry
+    // reads as "only this one".
+    let mut failures: Vec<Failure> = parsed
+        .failures
+        .iter()
+        .map(|f| Failure {
+            target: target.to_owned(),
+            what: f.name.clone(),
+            loc: f.location.clone(),
+            msg: f.message.clone(),
+        })
+        .collect();
+    // A harness that exited non-zero without finishing its report - or with
+    // nothing on the roster to account for the exit - failed at the harness
+    // level: a crash, an abort, a panic outside any test. It is a failure of
+    // its own, beside whatever tests it had already failed.
+    if !run.captured.status.success() && (!parsed.is_complete() || failures.is_empty()) {
+        failures.push(harness_failure(target, &run.captured.status, &stderr_lines, &run.in_flight));
+    }
+    if !failures.is_empty() {
+        // Suppress the streamed block when this exact failure set already
+        // printed in full on an earlier run - the footer carries the list.
+        let first = repeat_state.first_sighting(&failure_set_key(&failures));
         flush_sink(sink, !first);
-        println!("[test]    FAIL {tag} ({wall}) - {msg} @ {loc}");
-        std::io::stdout().flush().ok();
-        return Ok(RunReport {
-            outcome: Outcome::Fail,
-            timed_out: false,
-            fail_loc: fail.location.clone(),
-            fail_msg: fail.message.clone(),
-        });
+        print_fail_footer(tag, &wall, &failures);
+        return Ok(RunReport { outcome: Outcome::Fail, timed_out: false, failures });
     }
 
-    if !run.captured.status.success() {
-        // No parsed failure to key a signature on - always show the block.
+    // A split run's harness that exited cleanly without ever announcing a
+    // libtest suite is a target that does not speak libtest (`harness =
+    // false`): it ran, and matched nothing brokkr can count. The single
+    // invocation it used to share printed nothing for it either. A whole-
+    // package run keeps the stricter reading below, where silence fails.
+    if shape.quiet_no_match && parsed.started == 0 {
         flush_sink(sink, false);
-        println!(
-            "[test]    FAIL {tag} ({wall}) - exit {:?}",
-            run.captured.status.code()
-        );
-        std::io::stdout().flush().ok();
-        return Ok(RunReport::bare(Outcome::Fail));
+        return Ok(RunReport::bare(Outcome::NoMatch));
     }
 
     // Zero tests ran: the name didn't match anything in this sweep. Print
@@ -1103,10 +1502,12 @@ fn run_one(
     //   say what it means rather than rely on a flag elsewhere staying put.
     if parsed.is_complete() && parsed.accounted() == 0 {
         flush_sink(sink, false);
-        println!(
-            "[test]    SKIP {tag} ({wall}) - no tests matched (likely feature-gated out of this sweep)"
-        );
-        std::io::stdout().flush().ok();
+        if !shape.quiet_no_match {
+            println!(
+                "[test]    SKIP {tag} ({wall}) - no tests matched (likely feature-gated out of this sweep)"
+            );
+            std::io::stdout().flush().ok();
+        }
         return Ok(RunReport::bare(Outcome::NoMatch));
     }
 
@@ -1121,7 +1522,7 @@ fn run_one(
     // message - a partial report is useful, it just is not a pass.
     if let cargo_filter::Completeness::Incomplete { reason } = &parsed.completeness {
         flush_sink(sink, false);
-        return Ok(report_incomplete(tag, &wall, reason, &parsed));
+        return Ok(report_incomplete(tag, target, &wall, reason, &parsed));
     }
 
     flush_sink(sink, false);
@@ -1194,6 +1595,7 @@ fn report_build_failure(
 /// is useful - it just is not a pass.
 fn report_incomplete(
     tag: &str,
+    target: &str,
     wall: &str,
     reason: &str,
     parsed: &cargo_filter::ParsedTestResults,
@@ -1208,9 +1610,67 @@ fn report_incomplete(
     RunReport {
         outcome: Outcome::Fail,
         timed_out: false,
-        fail_loc: None,
-        fail_msg: Some(format!("incomplete test stream: {reason}")),
+        failures: vec![Failure {
+            target: target.to_owned(),
+            what: "incomplete test stream".to_owned(),
+            loc: None,
+            msg: Some(reason.to_owned()),
+        }],
     }
+}
+
+/// A harness that failed as a process rather than through a test verdict.
+///
+/// The exit detail comes from cargo's own `process didn't exit successfully:
+/// ... (signal: 6, SIGABRT: process abort signal)` line when there is one,
+/// since the status brokkr holds is cargo's (101), not the harness's. The last
+/// test the tracker saw start is named as the SUSPECT only: it is read from the
+/// stream the test itself writes to, so a lost start record or a record a test
+/// printed can move it, and a crash before the first start names nothing.
+fn harness_failure(
+    target: &str,
+    status: &std::process::ExitStatus,
+    stderr_lines: &[&str],
+    in_flight: &[String],
+) -> Failure {
+    let detail = stderr_lines
+        .iter()
+        .rev()
+        .find(|l| l.contains("process didn't exit successfully:"))
+        .and_then(|l| {
+            let open = l.rfind(" (")?;
+            l[open + 2..].strip_suffix(')').map(str::to_owned)
+        })
+        .unwrap_or_else(|| match status.code() {
+            Some(code) => format!("cargo exited with code {code}"),
+            None => "cargo was killed by a signal".to_owned(),
+        });
+    let msg = (!in_flight.is_empty()).then(|| {
+        format!(
+            "last test seen starting: {} (a suspect - named by the harness's own output)",
+            in_flight.join(", ")
+        )
+    });
+    Failure {
+        target: target.to_owned(),
+        what: format!("test harness failed ({detail})"),
+        loc: None,
+        msg,
+    }
+}
+
+/// The FAIL footer: one line for a single failure, a counted header and one
+/// line per failure otherwise.
+fn print_fail_footer(tag: &str, wall: &str, failures: &[Failure]) {
+    if let [only] = failures {
+        println!("[test]    FAIL {tag} ({wall}) - {}", only.describe());
+    } else {
+        println!("[test]    FAIL {tag} ({wall}) - {} failures:", failures.len());
+        for f in failures {
+            println!("[test]      {}", f.describe());
+        }
+    }
+    std::io::stdout().flush().ok();
 }
 
 /// Flush a repeat-run display buffer to stdout, or drop it when the
@@ -1527,39 +1987,142 @@ mod tests {
         assert!(state.first_sighting("src/b.rs:2:2"));
     }
 
-    fn report(outcome: Outcome, msg: Option<&str>, loc: Option<&str>) -> RunReport {
-        RunReport {
-            outcome,
-            timed_out: false,
-            fail_msg: msg.map(str::to_owned),
-            fail_loc: loc.map(str::to_owned),
+    fn failure(target: &str, what: &str, msg: Option<&str>, loc: Option<&str>) -> Failure {
+        Failure {
+            target: target.to_owned(),
+            what: what.to_owned(),
+            msg: msg.map(str::to_owned),
+            loc: loc.map(str::to_owned),
         }
+    }
+
+    fn report(outcome: Outcome, failures: Vec<Failure>) -> RunReport {
+        RunReport { outcome, timed_out: false, failures }
     }
 
     #[test]
     fn repeat_summary_counts_and_groups_by_location() {
+        let at = |msg: &str, loc: &str| vec![failure("test:t", "flaky", Some(msg), Some(loc))];
         let reports = vec![
-            report(Outcome::Pass, None, None),
-            report(Outcome::Fail, Some("rolled 0"), Some("src/a.rs:7:9")),
-            report(Outcome::Pass, None, None),
+            report(Outcome::Pass, vec![]),
+            report(Outcome::Fail, at("rolled 0", "src/a.rs:7:9")),
+            report(Outcome::Pass, vec![]),
             // Same location, different message - groups with the first,
             // whose message represents the group.
-            report(Outcome::Fail, Some("rolled 2"), Some("src/a.rs:7:9")),
-            report(Outcome::Fail, Some("boom"), Some("src/b.rs:1:1")),
+            report(Outcome::Fail, at("rolled 2", "src/a.rs:7:9")),
+            report(Outcome::Fail, at("boom", "src/b.rs:1:1")),
         ];
         let lines = format_repeat_summary(&reports);
         assert_eq!(lines[0], "[test]    summary: 5 runs - 2 PASS, 3 FAIL");
-        assert_eq!(lines[1], "[test]      2x rolled 0 @ src/a.rs:7:9");
-        assert_eq!(lines[2], "[test]      1x boom @ src/b.rs:1:1");
+        assert_eq!(lines[1], "[test]      2x [test:t] flaky: rolled 0 @ src/a.rs:7:9");
+        assert_eq!(lines[2], "[test]      1x [test:t] flaky: boom @ src/b.rs:1:1");
         assert_eq!(lines.len(), 3);
+    }
+
+    /// Runs group on their WHOLE failure set. Keying on the first failure
+    /// folded a run that failed A and B into the group of a run that failed A
+    /// alone, and the summary never mentioned B.
+    #[test]
+    fn repeat_summary_groups_on_the_full_failure_set() {
+        let a = failure("lib:p", "a", Some("x"), Some("src/a.rs:1:1"));
+        let b = failure("test:cli", "b", Some("y"), Some("tests/cli.rs:2:2"));
+        let reports = vec![
+            report(Outcome::Fail, vec![a.clone()]),
+            report(Outcome::Fail, vec![a.clone(), b.clone()]),
+            // Same set, reported in the other order: the same group.
+            report(Outcome::Fail, vec![b, a]),
+        ];
+        let lines = format_repeat_summary(&reports);
+        assert_eq!(lines[1], "[test]      1x [lib:p] a: x @ src/a.rs:1:1");
+        assert_eq!(lines[2], "[test]      2x [lib:p] a: x @ src/a.rs:1:1");
+        assert_eq!(lines[3], "[test]         + [test:cli] b: y @ tests/cli.rs:2:2");
+        assert_eq!(lines.len(), 4);
+    }
+
+    /// The same test name failing in two harnesses is two failures.
+    #[test]
+    fn a_failure_key_carries_its_harness() {
+        let lib = failure("lib:p", "tests::works", None, Some("src/lib.rs:9:9"));
+        let cli = failure("test:cli", "tests::works", None, Some("src/lib.rs:9:9"));
+        assert_ne!(lib.key(), cli.key());
+        assert_ne!(failure_set_key(std::slice::from_ref(&lib)), failure_set_key(&[lib, cli]));
+    }
+
+    /// A sweep's iteration fails if any harness failed, and is a SKIP only when
+    /// no harness matched - a harness matching nothing is the normal case.
+    #[test]
+    fn merging_harness_reports_follows_the_worst_outcome() {
+        let merged = RunReport::merge(vec![
+            report(Outcome::NoMatch, vec![]),
+            report(Outcome::Pass, vec![]),
+            report(Outcome::NoMatch, vec![]),
+        ]);
+        assert!(merged.outcome == Outcome::Pass);
+        let merged = RunReport::merge(vec![
+            report(Outcome::Pass, vec![]),
+            report(Outcome::Fail, vec![failure("test:a", "x", None, None)]),
+            report(Outcome::BuildFailed, vec![]),
+            report(Outcome::Fail, vec![failure("test:b", "y", None, None)]),
+        ]);
+        assert!(merged.outcome == Outcome::Fail);
+        assert_eq!(merged.failures.len(), 2, "every harness's failures survive the merge");
+        let merged = RunReport::merge(vec![report(Outcome::NoMatch, vec![])]);
+        assert!(merged.outcome == Outcome::NoMatch);
+        assert!(RunReport::merge(Vec::new()).outcome == Outcome::NoMatch);
+    }
+
+    /// The exit detail is the harness's, from cargo's own line - cargo's 101
+    /// says nothing about how the harness died - and the in-flight test is
+    /// offered as a suspect, never filed as the failure itself.
+    #[test]
+    fn a_harness_failure_names_the_signal_and_only_suspects_a_test() {
+        use std::os::unix::process::ExitStatusExt;
+        let status = std::process::ExitStatus::from_raw(101 << 8);
+        let stderr = [
+            "error: test failed, to rerun pass `-p pkg --test cli`",
+            "",
+            "Caused by:",
+            "  process didn't exit successfully: `/t/deps/cli-1 x` (signal: 6, SIGABRT: process abort signal)",
+        ];
+        let f = harness_failure("test:cli", &status, &stderr, &["cli::overflows".to_owned()]);
+        assert_eq!(f.what, "test harness failed (signal: 6, SIGABRT: process abort signal)");
+        let msg = f.msg.expect("a suspect");
+        assert!(msg.contains("cli::overflows") && msg.contains("suspect"), "{msg}");
+
+        let bare = harness_failure("test:cli", &status, &[], &[]);
+        assert_eq!(bare.what, "test harness failed (cargo exited with code 101)");
+        assert!(bare.msg.is_none(), "no start seen, no suspect");
+    }
+
+    /// Only a single package is ever selected.
+    #[test]
+    fn a_package_glob_is_refused() {
+        assert!(single_package("*".into()).is_err());
+        assert!(single_package("pkg-?".into()).is_err());
+        assert!(single_package("pkg-[ab]".into()).is_err());
+        assert_eq!(single_package("pkg".into()).unwrap(), "pkg");
+    }
+
+    /// The prebuild compiles what a named `cargo test -p PKG NAME` compiles -
+    /// every test target, not cargo's default set, which would also build
+    /// every example - and each run selects exactly one harness.
+    #[test]
+    fn the_prebuild_selects_the_test_targets_and_each_run_one_harness() {
+        let sweep = ResolvedSweep::default();
+        let shape = BuildShape { sweep: &sweep, allow_args: &[], pkg: "pkg", jobs: None, debug: true };
+        let pre = prebuild_argv(&shape);
+        assert_eq!(
+            pre,
+            ["test", "--no-run", "--message-format=json-render-diagnostics", "-p", "pkg", "--tests"]
+        );
+        let run = test_argv(&sweep, &[], "pkg", &["--test".into(), "cli".into()], "x", None, true, false);
+        let sep = run.iter().position(|a| a == "--").expect("separator");
+        assert_eq!(&run[..sep], ["test", "-p", "pkg", "--test", "cli", "x"]);
     }
 
     #[test]
     fn repeat_summary_all_pass_has_no_group_lines() {
-        let reports = vec![
-            report(Outcome::Pass, None, None),
-            report(Outcome::Pass, None, None),
-        ];
+        let reports = vec![report(Outcome::Pass, vec![]), report(Outcome::Pass, vec![])];
         let lines = format_repeat_summary(&reports);
         assert_eq!(lines, vec!["[test]    summary: 2 runs - 2 PASS, 0 FAIL"]);
     }
@@ -1567,11 +2130,11 @@ mod tests {
     #[test]
     fn repeat_summary_includes_skip_and_build_failed_when_present() {
         let reports = vec![
-            report(Outcome::Pass, None, None),
-            report(Outcome::BuildFailed, None, None),
-            report(Outcome::NoMatch, None, None),
-            // Exit-code failure with no parsed panic.
-            report(Outcome::Fail, None, None),
+            report(Outcome::Pass, vec![]),
+            report(Outcome::BuildFailed, vec![]),
+            report(Outcome::NoMatch, vec![]),
+            // Exit-code failure with nothing attributed.
+            report(Outcome::Fail, vec![]),
         ];
         let lines = format_repeat_summary(&reports);
         assert_eq!(
@@ -2050,9 +2613,9 @@ benches::throughput: benchmark
     #[test]
     fn exact_is_only_added_when_requested() {
         let sweep = ResolvedSweep::default();
-        let plain = test_argv(&sweep, &[], "pkg", "some::test", None, true, false);
+        let plain = test_argv(&sweep, &[], "pkg", &[], "some::test", None, true, false);
         assert!(!plain.iter().any(|a| a == "--exact"), "{plain:?}");
-        let exact = test_argv(&sweep, &[], "pkg", "some::test", None, true, true);
+        let exact = test_argv(&sweep, &[], "pkg", &[], "some::test", None, true, true);
         assert!(exact.iter().any(|a| a == "--exact"), "{exact:?}");
         // And it lands after the libtest separator, not among cargo's own args.
         let sep = exact.iter().position(|a| a == "--").expect("separator");

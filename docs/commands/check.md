@@ -3,8 +3,8 @@
 Both commands share the sweep + profile machinery in `src/profile.rs` and the
 test-phase logic in `src/check_cmd.rs`. They differ in scope: `check` is the
 full validation pass (gremlins + header + textlint + manifest + script checks +
-dependency rules + publish cycle + clippy + tests); `test` runs one named cargo
-test against the same sweep set.
+dependency rules + publish cycle + clippy + tests); `test` runs the cargo tests
+matching one name against the same sweep set.
 
 For the underlying config (`[[check]]`, `[[dependency_rule]]`, `[test]`
 section, profiles) see `docs/brokkr.toml.md`.
@@ -1353,11 +1353,29 @@ short list and mis-attributed which test carried a mutation's coverage):
   bug, and it was never actually wired. `brokkr check` is a whole-tree gate,
   so it enumerates every failure it can reach in one run. A caller that
   passes its own `--no-fail-fast` is not double-flagged.
+
+  One shape it does not survive cleanly: a harness that dies mid-test (an
+  abort, a stack overflow) while later harnesses of the same invocation are
+  still to run. The dead suite never closes, so the next harness's
+  `suite/started` arrives inside an open suite and is ignored - by design,
+  since a live test can print that record - and the per-test clock keeps
+  billing the dead test. If the next harness is still running when that clock
+  expires, it is killed and reported as the dead test's hang. The run is red
+  either way, but the name is wrong and the harnesses after it do not run.
+  Nothing in one shared libtest stream can tell a dead suite from a forged
+  boundary. `brokkr test` avoids it by construction, with one invocation per
+  harness (below). The serial lane does not split that way: cargo cannot
+  address one harness of a workspace selection without `-p`, and `-p` changes
+  the package set and with it the feature graph.
 - **The `failures:` name list is the authoritative roster.** The captured
   detail blocks are best-effort - an aborted suite can truncate the stream,
   and a detail block can hide inside another test's captured output. Any name
   the roster lists that the detail pass missed is appended bare (name, no
-  location) rather than dropped.
+  location) rather than dropped. A suite that never summarised - its harness
+  crashed after failing some tests - printed no name list at all, so for that
+  one unclosed suite its `test NAME ... FAILED` verdicts stand in for one.
+  Only for it: a verdict-shaped line a passing test prints into a suite that
+  finished adds nothing.
 - **libtest's `test result:` tally outranks the parsed roster for the
   headline count.** `cargo test: N failures` reports
   `max(tally, roster.len())`, and when the tally is larger the report says how
@@ -2373,7 +2391,7 @@ Both `brokkr check` (test phase) and `brokkr test` set the following on every
 
 `brokkr test [-p <PKG>] <NAME>`. (Any cargo project.)
 
-Run one specific cargo test. Defaults to release; pass `--debug` to run the
+Run the cargo tests matching `<NAME>`. Defaults to release; pass `--debug` to run the
 dev profile instead (faster compile, useful when the failing test isn't
 profile-sensitive). Setting `[test] debug = true` in `brokkr.toml` flips the
 default to dev; `--release` forces release back. A `[[check]]` entry may pin
@@ -2386,13 +2404,37 @@ can take `[test] debug = true` for the fast inner loop without the documented
 `brokkr test <a release-only timing test>` quietly switching to dev and failing
 on the build profile rather than on the code.
 
-Invokes `cargo test -p <pkg> <name>` (no `--test`), so both unit tests and
-integration tests are matched by the name substring within the selected
-package.
+Unit tests and integration tests are both matched by the name substring within
+the selected package, **in every test harness of the package**. Each sweep
+builds once - `cargo test --no-run -p <pkg> --tests`, the same selection a
+named `cargo test -p <pkg> <name>` compiles, so examples are not built merely
+to check they compile - and then runs **one cargo invocation per harness**
+(`--lib`, `--bin X`, `--test X`, and examples or benches with `test = true`),
+in cargo's own order.
+
+Why per harness rather than one invocation: a single `cargo test` stops at the
+first harness with a failing test, so the harnesses after it never run and a
+mutation check reads a short list of what went red. `--no-fail-fast` alone is
+not the fix, for the reason described under the sweep's `--no-fail-fast`
+above: a harness that dies mid-test leaves one shared libtest stream with an
+open suite, and the next harness gets killed as the dead test's hang. One
+invocation per harness makes every stream one process. A crash ends only its
+own run, and every failure belongs to the harness that printed it, so the same
+test name in two harnesses is two failures. With the package fixed, cargo
+resolves the same feature graph whichever target is selected, so each run
+executes the harness the build produced.
 
 Package resolution: explicit `-p/--package` > `[test] default_package` in
 `brokkr.toml` > `Project::cli_package()` (pbfhogg-cli, nidhogg); workspaces
-(e.g. ratatoskr) must pass `-p` or set `default_package`.
+(e.g. ratatoskr) must pass `-p` or set `default_package`. Whatever the source,
+it must name one package: a glob (`*`, `?`, `[`) is refused, since cargo could
+expand it to several packages - several packages' harnesses in one invocation,
+and a different feature graph.
+
+`--timeout` and `doc_only` sweeps keep a single invocation: `--timeout` has
+already resolved one exact test, and a doc-only sweep is one rustdoc run
+(`cargo test -p <pkg> --doc <name>`). A named `cargo test` runs no doctests
+otherwise, and neither does the split.
 
 Always adds `--include-ignored --nocapture --test-threads=1`, plus
 `-Z unstable-options --format json` to drive libtest's event stream (see "The
@@ -2418,27 +2460,47 @@ Streams the test's own stdout/stderr live (cargo/test-harness framing lines
 are stripped, including the per-suite `Running <target> (<binary path>)`
 launch lines, standalone `ok`/`FAILED` verdict lines, the duplicate
 empty `failures:` header, the `RUST_BACKTRACE` hint, and cargo's
-`to rerun pass ...` suggestion), then prints a `[test]` footer per run: `PASS`,
-`FAIL`, `BUILD FAILED`, or `SKIP`. A sweep `SKIP`s either because the name
-didn't match in it (usually `#[cfg(feature = "...")]`-gated) or because the
-`-p` target is out of the sweep's package scope - the sweep declares a
-`packages` list the target isn't in, or lists the target in
-`test_exclude_packages`. The latter is decided *before* the build, so a
-target that doesn't carry the sweep's features is skipped rather than
-force-built into a guaranteed `BUILD FAILED`. The `FAIL` footer cites the panic message
-and location, recovered from the stderr stream since `--nocapture` produces
-no captured failure blocks. Exit code: non-zero if any run was
+`to rerun pass ...` suggestion), then prints a `[test]` footer per harness that
+ran the name - `PASS` or `FAIL`, tagged with the harness (`[test:cli_sort]`,
+`[lib:pkg]`) - and `BUILD FAILED` for a sweep whose build failed. A harness the
+name matched nothing in is the normal case and prints nothing; a sweep `SKIP`s
+when the name matched in none of its harnesses (usually
+`#[cfg(feature = "...")]`-gated), or because the `-p` target is out of the
+sweep's package scope - the sweep declares a `packages` list the target isn't
+in, or lists the target in `test_exclude_packages`. The latter is decided
+*before* the build, so a target that doesn't carry the sweep's features is
+skipped rather than force-built into a guaranteed `BUILD FAILED`.
+
+The `FAIL` footer lists **every** failure the harness reported, one per line
+when there are several, each with its panic message and location (recovered
+from the stderr stream, since `--nocapture` produces no captured failure
+blocks). A harness that dies (a signal, a non-zero exit with nothing on the
+roster to explain it) is a failure of its own, `test harness failed (<how>)`,
+where `<how>` is cargo's own `process didn't exit successfully` detail, since
+cargo's exit code says nothing about how the harness died. It sits beside
+whatever tests that harness had already failed. Those survive the crash: the
+failed verdicts of a suite that never summarised stand in for the name list
+it never printed. The last test seen starting is offered as a **suspect**,
+never as the failure itself: it is read from the harness's own output, so a
+lost or printed record can move it, and a crash before the first test names
+nothing. Each failing harness also reprints its copy-pasteable
+`failing command:` line. Exit code: non-zero if any run was
 `FAIL`/`BUILD FAILED`, or if *every* sweep was `SKIP` (bad name); `SKIP` mixed
 with at least one `PASS` exits `0`. A fired `test` phase ceiling exits 124 and a
 graceful `brokkr kill` / Ctrl-C exits 130 (see "Time ceilings").
 
 Flags:
-- `-N <n>` - repeat the test (per sweep) for flaky-test hunting. The
-  `[run] cargo ...` invocation and build-time lines print for run 1 only.
-  The first occurrence of each distinct failure (keyed by panic location)
-  prints its full block; repeats of the same failure collapse to their
-  `[test] FAIL` footer alone. A closing `[test] summary:` line gives
-  PASS/FAIL counts plus one `Nx <msg> @ <loc>` line per distinct failure
+- `-N <n>` - repeat the test (per sweep) for flaky-test hunting. The sweep
+  builds once; each iteration re-runs every harness. The `[run] cargo ...`
+  invocation and build-time lines print for run 1 only. The first occurrence
+  of each distinct failure set prints its full block; repeats of the same set
+  collapse to their `[test] FAIL` footer alone. A closing `[test] summary:`
+  line gives PASS/FAIL counts plus one `Nx` group per distinct failure SET -
+  every failure of an iteration across all harnesses, each keyed by harness,
+  test and panic location (the message when there is no location), with its
+  further members on `+` lines. Keyed on the whole set rather than the first
+  failure, so an iteration that failed A and B never folds into one that
+  failed A alone
 - `-j <n>` - cargo `-j N` for parallel compile
 - `--debug` - dev profile instead of release (overrides both `[test] debug` and
   a sweep's `[[check]] profile`)

@@ -219,6 +219,11 @@ pub struct ParsedTestResults {
     /// die inside suite two, and a count of started suites would make that look
     /// finished. See [`Completeness`] for the part this number cannot carry.
     pub suites: usize,
+    /// Number of suites that announced themselves (`running N tests`). Zero
+    /// with a successful exit is a process that never spoke libtest at all - a
+    /// `harness = false` target - which [`Completeness`] alone reports the same
+    /// way as a suite that started and then went silent.
+    pub started: usize,
     pub duration: Option<f64>,
     /// Whether the numbers above describe a run that actually finished
     /// reporting.
@@ -306,7 +311,7 @@ fn judge_completeness(started: usize, summarised: usize) -> Completeness {
 /// captured `---- name stdout ----` blocks) the failure location and
 /// message are only recoverable from there. The `failures:` name list
 /// on stdout still vets which panics belong to actual failures.
-#[allow(clippy::too_many_lines)] // state-machine parser - splitting hurts clarity
+#[allow(clippy::too_many_lines, clippy::cognitive_complexity)] // state-machine parser - splitting hurts clarity
 pub fn parse_test_output_with_stderr(
     lines: &[&str],
     stderr_lines: &[&str],
@@ -333,6 +338,14 @@ pub fn parse_test_output_with_stderr(
     // Suites that announced themselves. Compared against the number that
     // summarised, to tell a finished run from a truncated one.
     let mut started_suites: usize = 0;
+    // `test NAME ... FAILED` verdicts of the suite currently open, cleared at
+    // every suite boundary and summary. What survives to the end belongs to a
+    // suite that never summarised - a harness that crashed after failing some
+    // tests. Its failures block was never rendered (the reconstructor holds it
+    // for the summary), so these verdicts are the only record that those tests
+    // failed. Consulted only for that unclosed suite: a verdict-shaped line a
+    // passing test prints cannot add a failure to a run that finished.
+    let mut open_suite_verdicts: Vec<String> = Vec::new();
 
     for line in lines {
         // Start of a new test binary. Cargo concatenates every suite's
@@ -361,6 +374,16 @@ pub fn parse_test_output_with_stderr(
             current_panic_msg.clear();
             seen_failure_section = false;
             in_name_list = false;
+            open_suite_verdicts.clear();
+        }
+        if line.starts_with("test result:") {
+            open_suite_verdicts.clear();
+        } else if !in_failure_detail
+            && let Some(name) = line
+                .strip_prefix("test ")
+                .and_then(|rest| rest.strip_suffix(" ... FAILED"))
+        {
+            open_suite_verdicts.push(name.to_owned());
         }
 
         let trimmed = line.trim_start();
@@ -491,14 +514,27 @@ pub fn parse_test_output_with_stderr(
         }
     }
 
+    // The suite still open at the end never summarised, so its failed tests
+    // reached no name list: its verdicts stand in for one. See
+    // `open_suite_verdicts` for why nothing else consults them.
+    let unclosed_failures = started_suites > suites && !open_suite_verdicts.is_empty();
+    if unclosed_failures {
+        for name in open_suite_verdicts {
+            if !failed_names.contains(&name) {
+                failed_names.push(name);
+            }
+        }
+    }
+
     // --nocapture fallback: no `---- name stdout ----` blocks, so the
     // detail section yielded nothing, but the stream carried inline
-    // panics. Gated on `failed > 0` because a *passing* test can print
+    // panics. Gated on a failure being on record - a summary's count or an
+    // unclosed suite's verdict - because a *passing* test can print
     // panic lines too (`catch_unwind`). When the name-list section is
     // present, vet by name and take the *last* panic per failing test
     // (a caught panic may precede the fatal one); fall back to the raw
     // inline list only if no name matched (thread-name mismatch).
-    if failures.is_empty() && failed > 0 {
+    if failures.is_empty() && (failed > 0 || unclosed_failures) {
         // Panic lines live on stderr; run them through their own
         // collector (the message line follows its panic line within the
         // same stream) and pool with any stdout-side hits before vetting.
@@ -529,6 +565,7 @@ pub fn parse_test_output_with_stderr(
         ignored,
         filtered_out,
         suites,
+        started: started_suites,
         duration: if has_duration { Some(duration) } else { None },
         completeness,
     }
@@ -1908,7 +1945,7 @@ warning: unused variable: `x` [unused_variables]
 #[cfg(test)]
 mod failure_completeness_tests {
     #![allow(clippy::unwrap_used)]
-    use super::{filter_test, parse_test_output};
+    use super::{filter_test, parse_test_output, parse_test_output_with_stderr};
 
     /// Two tests down, but only one produced a `---- name stdout ----`
     /// detail block the parser could read. The `failures:` name list is the
@@ -1969,5 +2006,46 @@ test result: FAILED. 1 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; 
         // failures, and no hint may point at a flag that does not exist.
         assert!(out.contains("-p a --test b"), "got: {out}");
         assert!(!out.contains("--raw"), "got: {out}");
+    }
+
+    /// A harness that fails one test and then aborts in the next never
+    /// summarises, so its failures block is never rendered. The failed
+    /// verdict of that unclosed suite is the only record of the first failure,
+    /// and the stderr panic still supplies its message.
+    #[test]
+    fn a_crashed_suite_keeps_the_failures_it_reported_before_dying() {
+        let stdout = "\
+running 3 tests
+test a::first ... FAILED
+";
+        let stderr = "\
+thread 'a::first' panicked at src/a.rs:3:5:
+boom
+";
+        let lines: Vec<&str> = stdout.lines().collect();
+        let err: Vec<&str> = stderr.lines().collect();
+        let parsed = parse_test_output_with_stderr(&lines, &err);
+        assert!(!parsed.is_complete());
+        assert_eq!(parsed.started, 1);
+        assert_eq!(parsed.failures.len(), 1);
+        assert_eq!(parsed.failures[0].name, "a::first");
+        assert_eq!(parsed.failures[0].message.as_deref(), Some("boom"));
+        assert_eq!(parsed.failures[0].location.as_deref(), Some("src/a.rs:3:5"));
+    }
+
+    /// The verdicts stand in for a name list only for a suite that never
+    /// summarised. A passing test printing a verdict-shaped line into a suite
+    /// that finished adds nothing.
+    #[test]
+    fn a_verdict_line_in_a_finished_suite_adds_no_failure() {
+        let stdout = "\
+running 1 test
+test fake::name ... FAILED
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+";
+        let lines: Vec<&str> = stdout.lines().collect();
+        let parsed = parse_test_output(&lines);
+        assert!(parsed.is_complete());
+        assert!(parsed.failures.is_empty());
     }
 }

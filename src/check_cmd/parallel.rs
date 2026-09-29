@@ -397,21 +397,22 @@ pub(crate) fn reject_forwarded_selectors(
 /// across a workspace.
 fn binary_selector(binary: &TestBinary) -> Vec<String> {
     let mut args = vec!["-p".to_owned(), binary.package.clone()];
-    match binary.kind.as_str() {
-        "test" => {
-            args.push("--test".to_owned());
-            args.push(binary.target.clone());
-        }
-        "bin" => {
-            args.push("--bin".to_owned());
-            args.push(binary.target.clone());
-        }
-        // "lib", and anything cargo grows later that is neither an integration
-        // target nor a bin: the lib harness is the only remaining place a unit
-        // test can live.
-        _ => args.push("--lib".to_owned()),
-    }
+    args.extend(target_selector(&binary.kind, &binary.target));
     args
+}
+
+/// The cargo target selector for one test harness of a known package.
+///
+/// The four named kinds select themselves (an example or bench only reaches
+/// the artifact stream as a test executable when its manifest sets
+/// `test = true`); everything else - `lib`, and the library crate types
+/// (`rlib`, `proc-macro`, ...) cargo reports in its place - is the lib
+/// harness, the only remaining place a unit test can live.
+pub(crate) fn target_selector(kind: &str, target: &str) -> Vec<String> {
+    match kind {
+        "test" | "bin" | "example" | "bench" => vec![format!("--{kind}"), target.to_owned()],
+        _ => vec!["--lib".to_owned()],
+    }
 }
 
 /// The libtest argv one binary of a parallel sweep is executed with,

@@ -206,6 +206,42 @@ would churn every litehtml/sluggrs invocation in CI and docs.
 
 ## Backlog
 
+### Test-runner gaps found while splitting `brokkr test` per harness (2026-09-29)
+
+Found during the `brokkr test` per-harness work and sparred with codex; none
+fixed there, all real.
+
+- **`check` serial lane: crash in a multi-harness invocation.** Documented in
+  `docs/commands/check.md` under the sweep's `--no-fail-fast`. A harness that
+  dies mid-test leaves its suite open; the next harness's `suite/started` is
+  ignored, the dead test keeps billing, and a still-running next harness is
+  killed as its hang. Six designs were rejected on correctness (stdout-only
+  inference cannot tell a dead suite from a forged boundary; pid sampling,
+  birth-time and ancestry `/proc` proofs all leak; an in-band runner shim's
+  token is readable). The one surviving shape is a runner shim that `exec`s
+  into the harness after handing brokkr a per-harness stdout pipe over a unix
+  socket (`SO_PEERCRED` + parent is the root cargo + `/proc/<pid>/exe` is
+  brokkr at connect + one connection per pid), with a run-level idle clock and
+  per-harness stderr. Its open questions: the threat model (project code that
+  deliberately execs brokkr is out of scope?), the fallback when a runner is
+  configured (drop `--no-fail-fast` and say so), and a descendant holding the
+  pipe open past its harness.
+- **Inter-suite no-progress gap.** `TestTracker`'s no-progress clock keeps
+  running after a `suite/ok` (`executing` never resets), so more than 20s
+  between one suite's summary and the next suite's start - rustdoc compiling
+  doctests after the last harness, under `[test] doctests = true` - is killed
+  as `NO_COMPLETION`. Scoping the clock to an open suite reopens the
+  lost-start-record escape (a live test printing a forged `suite/ok`), so the
+  fix needs a signal that the closed suite's process is gone.
+- **Isolate lane dedupes by bare name.** `IsolatedPlan` plans one
+  `cargo test <selection> -- --exact NAME` per bare name, so a name present in
+  two harnesses runs twice in one invocation under `Ceilings::one_test`'s 20s
+  wall - two 15s tests kill the second - and without `--no-fail-fast` the first
+  harness's failure hides the second's.
+- **nextest lane runner resolution fails open.** `nextest_lane.rs` falls back
+  to `TargetRunner::empty()` on a resolution error, running binaries directly
+  where a configured runner should wrap them.
+
 ### `--regex` for anchors / alternation (separate from `--grep`)
 
 `--grep` is now repeatable with AND semantics (`--grep apply-changes

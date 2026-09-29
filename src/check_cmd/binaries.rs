@@ -282,6 +282,64 @@ fn parse_test_binaries(stdout: &str) -> (Vec<TestBinary>, BuildRuntimeIndex, boo
     (out, index, saw_build_finished)
 }
 
+/// One test harness of a package, as `brokkr test` addresses it: the target's
+/// kind and name, which is all [`target_selector`] needs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TestTarget {
+    pub(crate) kind: String,
+    pub(crate) target: String,
+}
+
+impl TestTarget {
+    /// The cargo selector that runs this harness alone.
+    pub(crate) fn selector(&self) -> Vec<String> {
+        target_selector(&self.kind, &self.target)
+    }
+
+    /// `kind:target`, how a failure names the harness it came from.
+    pub(crate) fn label(&self) -> String {
+        format!("{}:{}", selector_kind_of(&self.kind), self.target)
+    }
+}
+
+/// The unit kind a harness answers to under cargo's selectors: its own kind for
+/// the four named kinds, and `lib` for everything else (`rlib`, `proc-macro`,
+/// `cdylib`, ... are all the library harness).
+fn selector_kind_of(kind: &str) -> &str {
+    match kind {
+        k @ ("test" | "bin" | "example" | "bench") => k,
+        _ => "lib",
+    }
+}
+
+/// The test harnesses in a `cargo test --no-run --message-format=json`
+/// artifact stream, in the order cargo runs them: by target kind (lib, bin,
+/// test, example, bench), then by name. For a one-package selection these are
+/// all that package's - dependencies never reach the stream as test-profile
+/// executables. `None` when the stream was not recognisably cargo's - see
+/// [`parse_test_binaries`] for why that is not the same answer as "no
+/// harnesses".
+pub(crate) fn test_targets(stdout: &str) -> Option<Vec<TestTarget>> {
+    let (binaries, _, recognised) = parse_test_binaries(stdout);
+    if !recognised {
+        return None;
+    }
+    let rank = |k: &str| match selector_kind_of(k) {
+        "lib" => 0,
+        "bin" => 1,
+        "test" => 2,
+        "example" => 3,
+        _ => 4,
+    };
+    let mut out: Vec<TestTarget> = binaries
+        .into_iter()
+        .map(|b| TestTarget { kind: b.kind, target: b.target })
+        .collect();
+    out.sort_by(|a, b| rank(&a.kind).cmp(&rank(&b.kind)).then_with(|| a.target.cmp(&b.target)));
+    out.dedup();
+    Some(out)
+}
+
 /// Extract the package name from a cargo `package_id`, across the
 /// formats cargo has used:
 /// - spec URL: `path+file:///…/crates/infrastructure#nautilus-infrastructure@0.1.0`
@@ -472,14 +530,9 @@ enum TargetSelector {
     Nothing,
 }
 
-/// The unit kind a binary answers to under cargo's selectors: its own kind
-/// for the four named kinds, and `lib` for everything else (`rlib`,
-/// `proc-macro`, `cdylib`, ... are all the library harness).
+/// [`selector_kind_of`] for an enumerated binary.
 fn selector_kind(binary: &TestBinary) -> &str {
-    match binary.kind.as_str() {
-        k @ ("test" | "bin" | "example" | "bench") => k,
-        _ => "lib",
-    }
+    selector_kind_of(&binary.kind)
 }
 
 /// Whether `target` matches a selector's `name`, with cargo's glob support.
@@ -676,6 +729,35 @@ mod binaries_tests {
             executable: exe.into(),
             manifest_dir: std::path::PathBuf::from(format!("/x/{package}")),
         }
+    }
+
+    // `brokkr test` runs each harness of its package in its own cargo
+    // invocation, in cargo's own order, and selects each by the selector that
+    // actually reaches it - including examples and benches with `test = true`,
+    // which `--lib` would silently miss.
+    #[test]
+    fn package_targets_come_back_in_cargo_order_with_their_selectors() {
+        let art = |pkg: &str, name: &str, kind: &str| {
+            format!(
+                r#"{{"reason":"compiler-artifact","package_id":"path+file:///x/{pkg}#{pkg}@0.1.0","manifest_path":"/x/{pkg}/Cargo.toml","target":{{"name":"{name}","kind":["{kind}"]}},"profile":{{"test":true}},"executable":"/t/deps/{name}-1"}}"#
+            )
+        };
+        let stdout = [
+            art("a", "zeta", "test"),
+            art("a", "demo", "example"),
+            art("a", "a", "rlib"),
+            art("a", "alpha", "test"),
+            art("a", "tool", "bin"),
+            r#"{"reason":"build-finished","success":true}"#.to_owned(),
+        ]
+        .join("\n");
+        let targets = super::test_targets(&stdout).unwrap();
+        let labels: Vec<String> = targets.iter().map(super::TestTarget::label).collect();
+        assert_eq!(labels, vec!["lib:a", "bin:tool", "test:alpha", "test:zeta", "example:demo"]);
+        assert_eq!(targets[0].selector(), vec!["--lib"]);
+        assert_eq!(targets[4].selector(), vec!["--example", "demo"]);
+
+        assert!(super::test_targets("").is_none(), "silence is not a stream");
     }
 
     #[test]
