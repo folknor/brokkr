@@ -1,8 +1,8 @@
 // The launch envelope for executing prebuilt test binaries directly.
 //
-// The parallel lane's fan-out no longer re-enters cargo (see parallel.rs's
-// module header for why the cargo re-entry was structurally unsound): after
-// the one prebuild, each test binary is executed directly. Cargo does more
+// The parallel and process-isolated lanes do not re-enter cargo (see
+// parallel.rs's module header for why cargo re-entry is unsound): after
+// the prebuild, each test binary is executed directly. Cargo does more
 // than exec a test binary, though - it launches it with a contract of cwd and
 // environment that real tests depend on - and this module is that contract,
 // reconstructed from the same sources cargo derives it from:
@@ -32,7 +32,7 @@
 //   runtime reads are not part of the documented execution environment.
 // - Target runners (`[target.<triple>].runner`): a configured runner means
 //   direct execution would silently bypass a wrapper (qemu, wine, valgrind),
-//   so the lane REFUSES at resolution time instead - see
+//   so the direct-execution lanes REFUSE at resolution time instead - see
 //   [`refuse_configured_runner`].
 
 /// One workspace package's manifest facts, the source for the `CARGO_PKG_*`
@@ -378,9 +378,9 @@ fn refuse_configured_runner(project_root: &Path) -> Result<(), DevError> {
         );
         if std::env::var_os(&var).is_some() {
             return Err(DevError::Config(format!(
-                "{var} is set: cargo would run test binaries through that runner, and the \
-                 parallel lane's direct execution would bypass it. Unset it, or drop \
-                 `parallel` from the [[check]] entry."
+                "{var} is set: cargo would run test binaries through that runner, and direct \
+                 execution would bypass it. Unset it, or drop `parallel` or \
+                 `isolation = \"process\"` from the [[check]] entry."
             )));
         }
     }
@@ -411,9 +411,9 @@ fn refuse_configured_runner(project_root: &Path) -> Result<(), DevError> {
             if applies {
                 return Err(DevError::Config(format!(
                     "{} configures a runner for target `{}`: cargo would run test binaries \
-                     through it, and the parallel lane's direct execution would bypass it. \
-                     Remove the runner for this host, or drop `parallel` from the [[check]] \
-                     entry.",
+                     through it, and direct execution would bypass it. Remove the runner for \
+                     this host, or drop `parallel` or `isolation = \"process\"` from the \
+                     [[check]] entry.",
                     path.display(),
                     selector
                 )));

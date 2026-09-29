@@ -9,8 +9,8 @@
 // package, and each binary then runs `--list` *directly* (from the
 // owning package's root, since a custom harness can observe cwd while
 // listing). The parallel lane's *execution* is direct too, under the
-// full cargo launch envelope - see direct_runtime.rs; the sequential
-// and process-isolated lanes still execute through cargo.
+// full cargo launch envelope - see direct_runtime.rs - and so is the
+// process-isolated lane's; the sequential lane still executes through cargo.
 
 /// One test executable and its owning package, from the build's artifact
 /// stream.
@@ -103,7 +103,7 @@ fn test_binaries(
 }
 
 /// [`test_binaries`] plus the [`BuildRuntimeIndex`] the same stream carries.
-/// The parallel lane needs both; the listing-only callers drop the index.
+/// Both direct-execution lanes need it; listing-only callers drop the index.
 fn test_binaries_with_runtime(
     project_root: &Path,
     selection: &[String],

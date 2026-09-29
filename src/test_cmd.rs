@@ -1387,6 +1387,8 @@ fn run_one(
         state_root,
         env,
         shape.ceilings.clone(),
+        // One harness per invocation already: nothing to isolate.
+        false,
         make_stdout_forwarder(sink.clone()),
         make_stderr_forwarder(sink.clone()),
         move |elapsed| {

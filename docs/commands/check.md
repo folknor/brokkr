@@ -1311,7 +1311,7 @@ phase compiles rather than reads diagnostics:
 The flags reach **every call site in the run that compiles**, not only the
 `cargo test` invocation: the sweep pre-build (which would otherwise fail on the
 unsuppressed lint before `cargo test` was ever reached), the process-isolated
-lane's enumeration and per-test invocations, and the coverage audit's
+lane's prebuild, and the coverage audit's
 `cargo test --no-run` enumeration. `brokkr test`'s own `build_packages`
 pre-build carries them too. Both pre-builds also carry the sweep's pinned
 `feature_unification`, like every other compiling path, so the binaries a
@@ -1354,19 +1354,42 @@ short list and mis-attributed which test carried a mutation's coverage):
   so it enumerates every failure it can reach in one run. A caller that
   passes its own `--no-fail-fast` is not double-flagged.
 
-  One shape it does not survive cleanly: a harness that dies mid-test (an
-  abort, a stack overflow) while later harnesses of the same invocation are
-  still to run. The dead suite never closes, so the next harness's
-  `suite/started` arrives inside an open suite and is ignored - by design,
-  since a live test can print that record - and the per-test clock keeps
-  billing the dead test. If the next harness is still running when that clock
-  expires, it is killed and reported as the dead test's hang. The run is red
-  either way, but the name is wrong and the harnesses after it do not run.
-  Nothing in one shared libtest stream can tell a dead suite from a forged
-  boundary. `brokkr test` avoids it by construction, with one invocation per
-  harness (below). The serial lane does not split that way: cargo cannot
-  address one harness of a workspace selection without `-p`, and `-p` changes
-  the package set and with it the feature graph.
+  `--no-fail-fast` needs **harness isolation** to be safe, and the serial
+  lane provides it. In one shared libtest stream, a harness that dies mid-test
+  (an abort, a stack overflow - what a mutation produces) leaves its suite
+  open; the next harness's `suite/started` then arrives inside it and must be
+  ignored, since a live test can print that record, and the per-test clock
+  keeps billing the dead test until it kills the next, healthy harness as its
+  hang. Nothing in the shared stream can tell a dead suite from a forged
+  boundary, so brokkr stops sharing it: it installs itself as cargo's host
+  target runner and as rustdoc (`src/test_runner/harness_shim.rs`). Each
+  harness cargo launches is brokkr first - it hands brokkr the read end of a
+  fresh pipe over a unix socket, puts the write end on its stdout and execs
+  the real harness, keeping its pid and parent. brokkr authenticates each
+  connection from the kernel (`SO_PEERCRED`'s pid, whose parent must be the
+  root cargo and whose executable must be brokkr, once per process identity)
+  and drains every pipe into its own reconstructor and tracker. A pidfd
+  decides liveness: a dead harness stops being billed even if a leaked
+  descendant holds its pipe open, while a live test that merely closed stdout
+  is still billed. A run-level idle clock covers the gaps between harnesses
+  (rustdoc compiling doctests after the last one included), so a gap is no
+  longer charged to the previous suite. A harness that died with its suite
+  open has that suite closed for it - its real failures rendered, the
+  in-flight test printed as a **suspect** only - and cargo's own signal line
+  becomes a `CRASHED <harness> (signal: ...)` entry in the failure list. A
+  connection that fails authentication (the doctest runtool under rustdoc,
+  anything nested) runs unisolated, as before; the shim scrubs its
+  environment from the program it execs, so a test that runs cargo itself
+  gets the toolchain's own.
+
+  Where the runner cannot be installed without overriding something - a
+  runner already configured for the host, a configured rustdoc, an effective
+  target other than the host (`CARGO_BUILD_TARGET`, `build.target`), a
+  forwarded `--config` or `--target`, a brokkr binary whose path contains
+  whitespace - the sweep drops `--no-fail-fast` instead, warns why, and stops
+  at the first failing harness: an honest short list rather than a wrong
+  name. The threat model is accidents and misbehaving tests; project code
+  that deliberately attacks this IPC is out of scope.
 - **The `failures:` name list is the authoritative roster.** The captured
   detail blocks are best-effort - an aborted suite can truncate the stream,
   and a detail block can hide inside another test's captured output. Any name
@@ -1520,22 +1543,31 @@ is unaffected - it is always serial regardless of the profile's `test_threads`.
 ### Process isolation (`isolation = "process"`)
 
 A profile may set `isolation = "process"` (see `docs/brokkr.toml.md`): the
-sweep's filtered test set is enumerated per test binary (attribution from
-`cargo test --no-run --message-format=json`; the binaries run `--list`
-directly under the lane's real filter argv - no reimplementation of
-libtest filter semantics), package-qualified skips are filtered out of the
-enumerated set (with a hard error on a name that exists in both a skipped
-and an unskipped package), then each test runs in its own
-`cargo test <selection> -- --exact <name> --test-threads=1` invocation.
-`--test-threads=1` alone serializes tests within one process per test
-binary; it does not isolate them, and tests touching process-global state
-(a global logger) need the fresh-process guarantee CI's nextest provides.
-Reusing the sweep's selection argv verbatim keeps the build fingerprint
-identical across invocations and lets cargo provide the test env
-(`CARGO_MANIFEST_DIR`, `OUT_DIR`, …). Each invocation runs under the
-standard per-test watchdog. Every test runs even after failures (the
-per-test failure list is the point); the sweep fails if any test failed or
-if zero tests were enumerated. Shape lines carry `process-isolated`.
+lane prebuilds each cargo resolution of the sweep (`cargo test --no-run
+--message-format=json`, the sweep's own selection and feature graph),
+enumerates the filtered tests per test binary (the binaries run `--list`
+directly under the lane's real filter argv - no reimplementation of libtest
+filter semantics), drops package-qualified skipped pairs, and then **executes
+each prebuilt binary once per selected test** with
+`--exact <name> --test-threads=1`, under the same reconstructed cargo launch
+contract as the parallel lane (below). `--test-threads=1` alone serializes
+tests within one process per test binary; it does not isolate them, and tests
+touching process-global state (a global logger) need the fresh-process
+guarantee CI's nextest provides.
+
+The unit is the **(binary, test) pair**, not the name. It used to be the name:
+one `cargo test <selection> -- --exact <name>` per name, which ran a name
+present in two binaries twice in one invocation under one 20s wall - two 15s
+tests killed the second with neither over its cap - and let the first binary's
+failure hide the second's. Re-entering cargo narrowed to one binary is not the
+fix either, since `-p` changes the feature graph. Now each pair is one process
+with its own 20s wall, the kill is named by the caller's selection, and a
+package-qualified skip applies per pair, so a skipped copy never blocks an
+unskipped one (the old name-level collision refusal is gone). A configured
+target runner refuses the lane, as it does the parallel one. Every test runs
+even after failures (the per-test failure list is the point); a blown budget
+stops the lane; the sweep fails if any test failed or if zero tests were
+enumerated. Shape lines carry `process-isolated`.
 
 This lane - and only this lane - keeps a **roll-call**: the pre-run plan
 line, one `PASS <name> (<secs>)` per test, and a `SKIP` line per `#[ignore]`d
@@ -1616,9 +1648,11 @@ package's own bins, and `CARGO`. Cargo-owned values are applied last, so a
 sweep's `env` cannot forge them. Two refusals keep the direct launch honest:
 a configured target runner (`[target.<triple>].runner` or
 `CARGO_TARGET_<TRIPLE>_RUNNER` - a qemu/wine/valgrind wrapper direct
-execution would silently bypass) refuses the lane at resolution time, and
-forwarded cargo args only cargo-mediated execution can honour (`--no-run`,
-`--target`, `--config`, `--manifest-path`, `--target-dir`) are rejected.
+execution would silently bypass) refuses both direct-execution lanes (this one
+and the process-isolated one) at resolution time, and on this lane forwarded
+cargo args only cargo-mediated execution can honour (`--no-run`, `--target`,
+`--config`, `--manifest-path`, `--target-dir`) are rejected. The
+process-isolated lane refuses forwarded args altogether.
 `CARGO_TARGET_TMPDIR` is deliberately not reproduced at runtime - cargo's
 contract makes it compile-time (`env!`) only.
 
@@ -1711,7 +1745,7 @@ serial entry, are in `docs/brokkr.toml.md`.
 brokkr-configured sweep - the reason is speed, the same reason `parallel`
 exists: process-per-test dissolves per-test serialization, most dramatically
 for a sweep that needs the `isolation = "process"` guarantee, which on the
-libtest path is N sequential `cargo test -- --exact` spawns and here is the
+libtest path is N sequential prebuilt-binary spawns and here is the
 same guarantee executed concurrently. Linking rather than shelling out means
 no per-host install step and typed `list::TestList` values with no JSON
 round-trip; the engine version is brokkr's `Cargo.toml` pin, printed on the
@@ -1736,7 +1770,16 @@ A `[[check]]` entry selects the lane with `harness = "nextest"`
   cargo profile, `[lints]` allows and env - streamed into nextest's
   `BinaryListBuilder` - so a nextest lane and a libtest lane with equal
   compile inputs share the target dir and dedupe in clippy. `harness` is
-  execution policy, never part of the build shape.
+  execution policy, never part of the build shape. The build's artifact
+  stream must end in a `build-finished` record, for the run as for the
+  coverage listing; a stream without one fails the lane rather than yielding
+  an empty binary set.
+- **Cargo's target runner is honoured, and a failure to resolve it fails the
+  lane.** The engine resolves `[target.<triple>].runner` from the cargo
+  config chain; when that resolution errors, the lane stops with the error
+  rather than falling back to no runner, which would execute binaries
+  directly where cargo would have wrapped them (qemu, wine, valgrind) - a
+  wrong run whose output reveals nothing.
 - **Brokkr owns the test env.** The sweep env the libtest lanes set on
   `cargo test` (`[[check]] env`, a profile's `env`, `BROKKR_TEST_BIN_DIR`,
   host-specific values like nidhogg's `CARGO_TARGET_TMPDIR`) reaches every

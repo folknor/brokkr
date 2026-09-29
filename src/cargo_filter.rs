@@ -792,8 +792,51 @@ pub fn filter_test(stdout: &str, stderr: &str) -> String {
         }
     }
 
-    // Failures present - format as one-liners.
-    format_test_failures(&parsed, stderr)
+    // Failures present - format as one-liners. A harness killed by a signal
+    // is named beside them: its failures before the crash are on the roster,
+    // but the crash itself is a verdict line of cargo's on stderr that no
+    // roster carries, and a list that omits it reads as "these tests failed"
+    // when a whole harness died mid-run.
+    let mut out = format_test_failures(&parsed, stderr);
+    for crash in harness_crashes(stdout, stderr) {
+        out.push_str("\n  ");
+        out.push_str(&crash);
+    }
+    out
+}
+
+/// The harnesses a run lost to a signal, from cargo's own "process didn't
+/// exit successfully" lines whose tail is `(signal: N, NAME: ...)` - an exit
+/// status is an ordinary failing harness and stays out - followed by the
+/// suspect line the isolated runner writes for a suite it had to close.
+fn harness_crashes(stdout: &str, stderr: &str) -> Vec<String> {
+    let mut out: Vec<String> = stderr
+        .lines()
+        .filter_map(|l| {
+            let rest = l.trim_start().strip_prefix("process didn't exit successfully: `")?;
+            let (cmd, tail) = rest.split_once('`')?;
+            let signal = tail.trim().strip_prefix("(signal: ")?.strip_suffix(')')?;
+            let mut words = cmd.split_whitespace();
+            let mut exe = words.next()?;
+            // Under harness isolation cargo names its runner - brokkr, then
+            // the shim marker (`test_runner::harness_shim::RUNNER_ARG`) -
+            // and the harness comes after it.
+            if words.next() == Some("__brokkr_harness_shim") {
+                exe = words.next()?;
+            }
+            let name = Path::new(exe).file_name()?.to_str()?;
+            // Cargo names test executables `<target>-<hash>`.
+            let target = name.rsplit_once('-').map_or(name, |(t, _)| t);
+            Some(format!("CRASHED {target} (signal: {signal})"))
+        })
+        .collect();
+    out.extend(
+        stdout
+            .lines()
+            .filter(|l| l.starts_with("brokkr: this test harness ended with its suite still open"))
+            .map(str::to_owned),
+    );
+    out
 }
 
 /// Format a `cargo test` run that died in the build phase: the clippy-style
@@ -2031,6 +2074,37 @@ boom
         assert_eq!(parsed.failures[0].name, "a::first");
         assert_eq!(parsed.failures[0].message.as_deref(), Some("boom"));
         assert_eq!(parsed.failures[0].location.as_deref(), Some("src/a.rs:3:5"));
+    }
+
+    /// A harness lost to a signal is named in the report, beside the failures
+    /// it reported before dying; a harness that merely failed (an exit status)
+    /// is not, since its failures already are.
+    #[test]
+    fn a_signal_death_is_named_beside_the_failures() {
+        let stdout = "\
+running 1 test
+test a_fails ... FAILED
+
+failures:
+    a_fails
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+brokkr: this test harness ended with its suite still open; last test seen starting: b_aborts (a suspect - named by the harness's own output)
+";
+        let stderr = "\
+error: test failed, to rerun pass `--test a_crash`
+
+Caused by:
+  process didn't exit successfully: `/usr/bin/brokkr __brokkr_harness_shim /t/debug/deps/a_crash-2527e25b x --format json` (signal: 6, SIGABRT: process abort signal)
+error: test failed, to rerun pass `--test c_fail`
+
+Caused by:
+  process didn't exit successfully: `/t/debug/deps/c_fail-99aa x` (exit status: 101)
+";
+        let out = filter_test(stdout, stderr);
+        assert!(out.contains("CRASHED a_crash (signal: 6, SIGABRT: process abort signal)"), "{out}");
+        assert!(!out.contains("CRASHED c_fail"), "an exit status is not a crash: {out}");
+        assert!(out.contains("last test seen starting: b_aborts"), "{out}");
     }
 
     /// The verdicts stand in for a name list only for a suite that never

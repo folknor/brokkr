@@ -1,8 +1,8 @@
 //! Shared streaming runner for cargo libtest invocations.
 //!
-//! The runner keeps the captured stdout/stderr buffers used by the existing
-//! cargo parsers, while also watching libtest's partial `test name ... `
-//! progress marker before the terminating newline arrives.
+//! The runner keeps captured stdout/stderr for the cargo parsers and watches
+//! libtest's JSON lifecycle records. Eligible serial check sweeps isolate each
+//! harness and rustdoc stdout stream through exec shims (`harness_shim`).
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -19,6 +19,15 @@ use serde_json::Value;
 use crate::error::DevError;
 use crate::output::CapturedOutput;
 use crate::ratatoskr::process::snapshot_proc;
+
+#[path = "test_runner/harness_shim.rs"]
+mod harness_shim;
+
+/// Run as the harness shim when this process was launched as one; `None`
+/// otherwise. Checked first thing in `main`, before any CLI parsing.
+pub(crate) fn maybe_run_harness_shim() -> Option<i32> {
+    harness_shim::maybe_run()
+}
 
 /// **The hard cap.** Every test brokkr runs gets this much wall time and no more;
 /// exceeding it fails the run and stops it. The single exception is
@@ -434,6 +443,16 @@ impl TestTracker {
     }
 }
 
+/// Run one cargo libtest invocation under the watchdog.
+///
+/// `shim` isolates each harness (and rustdoc) the invocation runs onto its own
+/// stdout pipe and tracker, through `harness_shim`: brokkr is installed as the
+/// host target runner and as rustdoc, each harness hands brokkr its pipe and
+/// then execs itself. A crashed harness then ends its own stream and cannot
+/// leave the shared one with an open suite that bills the next harness for the
+/// dead test. The caller decides when that is safe (see
+/// `check_cmd::serial_shim_fallback`); without it every harness shares one
+/// stream, as before.
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 pub(crate) fn streaming_run_libtest<Out, Err, Fin>(
     args: &[&str],
@@ -441,6 +460,7 @@ pub(crate) fn streaming_run_libtest<Out, Err, Fin>(
     state_root: &Path,
     env: &[(&str, &str)],
     ceilings: Ceilings,
+    shim: bool,
     forward_stdout_line: Out,
     forward_stderr_line: Err,
     on_build_finished: Fin,
@@ -453,8 +473,38 @@ where
     enforce_single_threaded(args)?;
 
     let start = Instant::now();
-    let mut child = spawn_cargo_process_group(args, cwd, env)?;
+    // Created before the spawn: an isolated harness's reconstructed text lands
+    // in the same buffer the shared stream does.
+    let stdout_buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+    let session = shim.then(|| harness_shim::Session::new(Arc::clone(&stdout_buf))).transpose()?;
+    let runner_env;
+    let socket_env;
+    let rustdoc_env;
+    let mut cargo_env = env.to_vec();
+    if let Some(session) = &session {
+        let host = crate::rustflags::host_triple().ok_or_else(|| {
+            DevError::Config("cannot determine host triple for harness runner".into())
+        })?;
+        let exe = std::env::current_exe().map_err(DevError::Io)?;
+        // Cargo splits a string-form runner on whitespace and strips no
+        // quotes, so the path goes in bare; the caller refuses isolation for
+        // a path with whitespace in it (`check_cmd::serial_shim_fallback`).
+        runner_env = (
+            format!("CARGO_TARGET_{}_RUNNER", host.to_uppercase().replace('-', "_")),
+            format!("{} {}", exe.display(), harness_shim::RUNNER_ARG),
+        );
+        socket_env = session.socket();
+        rustdoc_env = session.rustdoc();
+        cargo_env.push((&runner_env.0, &runner_env.1));
+        cargo_env.push(("BROKKR_HARNESS_SOCKET", &socket_env));
+        cargo_env.push(("RUSTDOC", &rustdoc_env));
+    }
+    let mut child = spawn_cargo_process_group(args, cwd, &cargo_env)?;
     let cargo_pid = child.id();
+    if let Some(session) = &session {
+        session.set_cargo_pid(cargo_pid);
+    }
+    let acceptor = session.as_ref().map(harness_shim::Session::run_acceptor).transpose()?;
     // Ctrl-C / `brokkr kill` take this group down with brokkr. Released right
     // after the leader is reaped. See `shutdown::GroupReaper`.
     let reaper = crate::shutdown::GroupReaper::register(cargo_pid);
@@ -466,7 +516,6 @@ where
         return Err(DevError::Build("cargo stderr was not piped".into()));
     };
 
-    let stdout_buf = Arc::new(Mutex::new(Vec::<u8>::new()));
     let stderr_buf = Arc::new(Mutex::new(Vec::<u8>::new()));
     let tracker = Arc::new(Mutex::new(TestTracker::default()));
     let done = Arc::new(AtomicBool::new(false));
@@ -503,22 +552,40 @@ where
     let tracker_t = Arc::clone(&tracker);
     let done_t = Arc::clone(&done);
     let hung_t = Arc::clone(&hung);
-    let watchdog_thread = thread::spawn(move || {
-        watchdog_loop(state_root_t, cargo_pid, tracker_t, done_t, hung_t, ceilings, start);
-    });
+    // An isolated run ages every harness's tracker, plus a run-level idle
+    // clock for the gaps between them; see `harness_shim::Session::watchdog`.
+    let watchdog_thread = if let Some(session) = &session {
+        session.watchdog(state_root_t, cargo_pid, tracker_t, hung_t, &ceilings, start)
+    } else {
+        thread::spawn(move || {
+            watchdog_loop(state_root_t, cargo_pid, tracker_t, done_t, hung_t, ceilings, start);
+        })
+    };
 
     let waited = child.wait().map_err(|error| DevError::Spawn {
         program: "cargo".into(),
         error,
     });
+    if let Some(session) = &session {
+        session.stop_watchdog();
+    }
     drop(reaper);
+    if let Some(session) = &session {
+        session.settle();
+    }
     // Before any early return, so the watchdog thread never outlives the
     // group whose id it would signal.
     done.store(true, Ordering::SeqCst);
+    if let Some(session) = &session {
+        session.finish();
+    }
 
     stdout_thread.join().ok();
     stderr_thread.join().ok();
     watchdog_thread.join().ok();
+    if let Some(acceptor) = acceptor {
+        acceptor.join().ok();
+    }
     let status = waited?;
 
     // A `brokkr kill` / Ctrl-C under the command's `SigtermGuard` (or the
@@ -536,7 +603,7 @@ where
         .lock()
         .map_err(|_| DevError::Build("build_elapsed mutex poisoned".into()))?
         .take();
-    let (completed, in_flight) = tracker
+    let (mut completed, mut in_flight) = tracker
         .lock()
         .map(|mut t| {
             let mut in_flight: Vec<String> = t.current.keys().cloned().collect();
@@ -544,6 +611,11 @@ where
             (std::mem::take(&mut t.completed), in_flight)
         })
         .map_err(|_| DevError::Build("test tracker mutex poisoned".into()))?;
+    if let Some(session) = &session {
+        let (harness_completed, harness_in_flight) = session.totals();
+        completed.extend(harness_completed);
+        in_flight.extend(harness_in_flight);
+    }
 
     Ok(LibtestRun {
         captured: CapturedOutput {
@@ -1881,6 +1953,19 @@ mod tests {
             fresh.timed_out(TEST_TIMEOUT).is_none_or(|(n, _)| n == IDLE_WEDGE),
             "before execution begins only the idle ceiling applies"
         );
+    }
+
+    /// A summary alone must not disarm the no-progress clock: a live test can
+    /// print `suite/ok`. Only a process boundary (an isolated harness's exit)
+    /// retires a tracker.
+    #[test]
+    fn suite_summary_alone_cannot_disarm_a_live_process_clock() {
+        let mut tracker = TestTracker::default();
+        tracker.observe_suite_start();
+        tracker.observe_suite_end();
+        tracker.last_progress = Instant::now() - TEST_TIMEOUT;
+        let (name, _) = tracker.timed_out(TEST_TIMEOUT).expect("live process remains bounded");
+        assert_eq!(name, NO_COMPLETION);
     }
 
     /// A suite that is slow to reach its first test has broken no budget. Arming

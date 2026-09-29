@@ -270,6 +270,7 @@ fn run_nextest_sweep(
         output::error(&String::from_utf8_lossy(&build.stderr));
         return Ok(false);
     }
+    require_build_finished(&build.stdout, &args)?;
     let mut builder = BinaryListBuilder::new(&graph, build_platforms.clone());
     for line in String::from_utf8_lossy(&build.stdout).lines() {
         builder
@@ -312,8 +313,8 @@ fn run_nextest_sweep(
     // the cost is a narrow unix signal race around spawn, not correctness of
     // results.
     let double_spawn = DoubleSpawnInfo::disabled();
-    let target_runner =
-        TargetRunner::new(&cargo_configs, &build_platforms).unwrap_or_else(|_| TargetRunner::empty());
+    let target_runner = TargetRunner::new(&cargo_configs, &build_platforms)
+        .map_err(|e| DevError::Config(format!("nextest target runner resolution failed: {e}")))?;
     let run_id = nextest_runner::helpers::force_or_new_run_id();
     let version_env_vars = VersionEnvVars {
         current_version: NEXTEST_ENGINE_VERSION
@@ -528,21 +529,7 @@ fn nextest_shape_cases(
     // success - so an unparsed stream let the audit certify nothing. The
     // ordinary enumerator was fixed for this; this is the engine's separate
     // parser and it had the same hole.
-    let build_stdout = String::from_utf8_lossy(&build.stdout);
-    if !build_stdout
-        .lines()
-        .any(|l| l.contains(r#""reason":"build-finished""#))
-    {
-        output::error(&format!(
-            "cargo exited successfully but produced no recognisable artifact stream \
-             (no build-finished record) for: cargo {}. The coverage audit certifies over the \
-             enumerated set, so an unparsed stream would certify nothing - hard stop.",
-            args.join(" ")
-        ));
-        return Err(DevError::Build(
-            "coverage enumeration produced no recognisable artifact stream".into(),
-        ));
-    }
+    require_build_finished(&build.stdout, &args)?;
     let mut builder = BinaryListBuilder::new(&graph, build_platforms.clone());
     for line in String::from_utf8_lossy(&build.stdout).lines() {
         builder
@@ -570,7 +557,7 @@ fn nextest_shape_cases(
     let test_filter = sweep_engine_filter(sweep, &pcx, &known_groups)?;
     let double_spawn = DoubleSpawnInfo::disabled();
     let target_runner = TargetRunner::new(&cargo_configs, &build_platforms)
-        .unwrap_or_else(|_| TargetRunner::empty());
+        .map_err(|e| DevError::Config(format!("nextest target runner resolution failed: {e}")))?;
     let run_id = nextest_runner::helpers::force_or_new_run_id();
     let version_env_vars = VersionEnvVars {
         current_version: NEXTEST_ENGINE_VERSION
@@ -625,6 +612,22 @@ fn nextest_shape_cases(
             disposition: nextest_disposition(&t.test_info.filter_match),
         })
         .collect())
+}
+
+/// A successful cargo status alone cannot establish which binaries were built.
+/// Both execution and coverage enumeration need the completed artifact stream.
+fn require_build_finished(stdout: &[u8], args: &[String]) -> Result<(), DevError> {
+    if String::from_utf8_lossy(stdout)
+        .lines()
+        .any(|line| line.contains(r#""reason":"build-finished""#))
+    {
+        return Ok(());
+    }
+    Err(DevError::Build(format!(
+        "cargo exited successfully but produced no recognisable artifact stream \
+         (no build-finished record) for: cargo {}",
+        args.join(" ")
+    )))
 }
 
 /// The sweep's filters compiled onto the engine's own surfaces - shared by
@@ -699,6 +702,19 @@ mod nextest_lane_tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
 
+    #[test]
+    fn artifact_stream_requires_build_finished() {
+        let args = vec!["test".to_owned(), "--no-run".to_owned()];
+        let incomplete = br#"{"reason":"compiler-artifact"}"#;
+        let err = require_build_finished(incomplete, &args).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("no build-finished record"), "{message}");
+        assert!(message.contains("cargo test --no-run"), "{message}");
+
+        let complete = b"{\"reason\":\"compiler-artifact\"}\n{\"reason\":\"build-finished\",\"success\":true}\n";
+        assert!(require_build_finished(complete, &args).is_ok());
+    }
+
     // The sweep env must reach the engine's test processes, which only read
     // cargo's `[env]` table. Every entry is forced (a sweep value beats an
     // inherited one, as `Command::env` does on the libtest lanes), awkward
@@ -723,4 +739,3 @@ mod nextest_lane_tests {
         assert!(!env.contains_key(crate::test_orphans::MARKER_ENV), "{body}");
     }
 }
-

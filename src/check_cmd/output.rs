@@ -429,6 +429,113 @@ fn has_target_selector(args: &[String]) -> bool {
     })
 }
 
+/// Why a serial sweep cannot isolate its harnesses, or `None` when it can.
+///
+/// The isolation installs brokkr as cargo's host target runner and rustdoc (see
+/// `test_runner::harness_shim`), which is only safe when cargo would execute host
+/// binaries directly: an override would silently drop a configured runner or
+/// rustdoc, and a non-host target never reaches a host runner at all. Anything
+/// ambiguous takes the first-failure path rather than guessing.
+fn serial_shim_fallback(
+    root: &Path,
+    forwarded: &[String],
+    project_env: &[(String, String)],
+    sweep_env: &std::collections::BTreeMap<String, String>,
+) -> Option<String> {
+    let env_has = |key: &str| {
+        project_env.iter().any(|(name, _)| name == key) || sweep_env.contains_key(key)
+    };
+    if forwarded.iter().any(|arg| {
+        arg == "--config" || arg.starts_with("--config=") || arg == "--target" || arg.starts_with("--target=")
+    }) {
+        return Some("forwarded --config or --target".into());
+    }
+    if std::env::var_os("CARGO_BUILD_TARGET").is_some() || env_has("CARGO_BUILD_TARGET") {
+        return Some("CARGO_BUILD_TARGET is set".into());
+    }
+    if std::env::var_os("RUSTDOC").is_some()
+        || std::env::var_os("CARGO_BUILD_RUSTDOC").is_some()
+        || env_has("RUSTDOC")
+        || env_has("CARGO_BUILD_RUSTDOC")
+    {
+        return Some("rustdoc executable is configured".into());
+    }
+    // The runner goes to cargo as a whitespace-split string, which cannot
+    // carry a path with whitespace in it.
+    match std::env::current_exe() {
+        Ok(exe) if !exe.to_string_lossy().contains(char::is_whitespace) => {}
+        Ok(_) => return Some("the brokkr binary's path contains whitespace".into()),
+        Err(_) => return Some("the brokkr binary's path could not be read".into()),
+    }
+    let Some(host) = crate::rustflags::host_triple() else {
+        return Some("host target could not be determined".into());
+    };
+    let runner_var = format!("CARGO_TARGET_{}_RUNNER", host.to_uppercase().replace('-', "_"));
+    if std::env::var_os(&runner_var).is_some() || env_has(&runner_var) {
+        return Some(format!("{runner_var} is set"));
+    }
+    for path in crate::rustflags::config_paths(root) {
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(doc) = text.parse::<toml::Table>() else {
+            continue;
+        };
+        if let Some(build) = doc.get("build").and_then(toml::Value::as_table) {
+            if build.contains_key("target") {
+                return Some(format!("{} sets build.target", path.display()));
+            }
+            if build.contains_key("rustdoc") {
+                return Some(format!("{} sets build.rustdoc", path.display()));
+            }
+        }
+        if let Some(targets) = doc.get("target").and_then(toml::Value::as_table) {
+            for (selector, value) in targets {
+                if !value.as_table().is_some_and(|table| table.contains_key("runner")) {
+                    continue;
+                }
+                // An undecidable cfg counts as applying: overriding a real
+                // runner is the destructive direction.
+                let applies = selector
+                    .strip_prefix("cfg(")
+                    .and_then(|s| s.strip_suffix(')'))
+                    .map_or(selector == &host, |expr| crate::rustflags::eval_cfg(expr) != Some(false));
+                if applies {
+                    return Some(format!("{} configures a target runner", path.display()));
+                }
+            }
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod serial_shim_tests {
+    use super::serial_shim_fallback;
+
+    #[test]
+    fn forwarded_target_and_config_force_first_failure_mode() {
+        let root = std::path::Path::new("/nonexistent");
+        for arg in ["--target", "--target=other", "--config", "--config=target.x.runner=tool"] {
+            let reason = serial_shim_fallback(root, &[arg.into()], &[], &Default::default())
+                .expect("forwarded override must disable shim");
+            assert!(reason.contains("forwarded"));
+        }
+    }
+
+    #[test]
+    fn explicit_target_env_forces_first_failure_mode() {
+        let reason = serial_shim_fallback(
+            std::path::Path::new("/nonexistent"),
+            &[],
+            &[("CARGO_BUILD_TARGET".into(), "other".into())],
+            &Default::default(),
+        )
+        .expect("target env must disable shim");
+        assert!(reason.contains("CARGO_BUILD_TARGET"));
+    }
+}
+
 /// The cargo profile-selection fragment for one sweep (`--release`, or
 /// nothing). Empty for a sweep that names no `profile`, which is every
 /// sweep in a repo that never sets the key: `brokkr check` compiles dev,
@@ -517,6 +624,15 @@ fn run_one_test_sweep(
     timings: Option<&mut Vec<TestTiming>>,
 ) -> Result<bool, DevError> {
     let (cargo_extra, libtest_extra) = split_extra_args(extra_args);
+    // A parallel sweep (test_threads != 1) takes the parallel runner below and
+    // never isolates; a serial one isolates its harnesses unless it cannot.
+    let parallel_threads = matches!(sweep.test_threads, Some(n) if n != 1);
+    let shim_reason = if parallel_threads {
+        None
+    } else {
+        serial_shim_fallback(project_root, cargo_extra, project_env, &sweep.env)
+    };
+    let use_shim = !parallel_threads && shim_reason.is_none();
 
     let mut args: Vec<String> = vec!["test".into()];
     // Before the selection and the `--` split: `--config` is a cargo option,
@@ -530,10 +646,19 @@ fn run_one_test_sweep(
     // list, sees one entry, and concludes the wrong test carried the coverage.
     // `brokkr check` is a whole-tree gate - it must enumerate every failure it
     // can reach in one run. Skipped when the caller already asked for it.
-    if !cargo_extra.iter().any(|c| c == "--no-fail-fast") {
+    //
+    // But only with harness isolation. Without it every harness shares one
+    // libtest stream, a harness that dies mid-test leaves its suite open, and
+    // the next harness would be billed for the dead test - so a sweep that
+    // cannot isolate stops at the first failing harness instead, and says so
+    // below. Dropping a forwarded --no-fail-fast too, for the same reason.
+    if shim_reason.is_none() && !cargo_extra.iter().any(|c| c == "--no-fail-fast") {
         args.push("--no-fail-fast".into());
     }
     for c in cargo_extra {
+        if shim_reason.is_some() && c == "--no-fail-fast" {
+            continue;
+        }
         args.push(c.clone());
     }
     // A doc-only sweep runs doctests and nothing else - `--doc` is cargo's
@@ -622,6 +747,13 @@ fn run_one_test_sweep(
         Some(&command),
         commands,
     );
+    if let Some(reason) = &shim_reason {
+        output::warn(&format!(
+            "test {}: harness isolation unavailable ({reason}); this run stops at the first \
+             failing test harness",
+            sweep.label
+        ));
+    }
     // What the grouped test line and a zero-test note call this execution
     // unit: the sweep, qualified by its package when one sweep runs as
     // several resolutions.
@@ -678,6 +810,7 @@ fn run_one_test_sweep(
             // Many tests in one process: the per-test clock can only name a
             // suspect, so the wall clock is what actually bounds the sweep.
             test_runner::Ceilings::shared_harness(),
+            use_shim,
             |_| {},
             |_| {},
             {

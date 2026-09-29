@@ -109,6 +109,9 @@ fn parse_cli() -> Cli {
 }
 
 fn main() {
+    if let Some(code) = test_runner::maybe_run_harness_shim() {
+        process::exit(code);
+    }
     let raw_args: String = std::env::args().skip(1).collect::<Vec<_>>().join(" ");
     let start = Instant::now();
 

@@ -5,20 +5,14 @@
 // global logger) pass under CI's nextest - which runs process-per-test -
 // and fail in any shared-process libtest lane, because the first test's
 // init is still resident for the ninth. This path provides the guarantee
-// the tests actually need: enumerate the sweep's filtered set with
-// `--list`, then run one `cargo test <selection> -- --exact <name>
-// --test-threads=1` per test.
-//
-// Every per-test invocation reuses the sweep's selection argv verbatim.
-// That keeps the build fingerprint identical (no rebuild between tests)
-// and lets cargo provide the test environment (CARGO_MANIFEST_DIR,
-// OUT_DIR, CARGO_PKG_*, …) that running the binaries directly would have
-// to replicate by hand - replicating it is nextest's whole job, not
-// brokkr's. The cost is one cargo spawn plus one spawn of every selected
-// test binary per test: negligible at the family scale this exists for
-// (a dozen serial tests), and a lane that wants it for thousands of
-// tests wants nextest, not brokkr.
+// the tests actually need: prebuild the sweep's selection, enumerate each
+// binary, then run that exact binary once per selected test. Re-entering
+// cargo with -p changes the feature graph; re-entering with the whole
+// selection runs same-named tests in other binaries under one wall cap.
+// DirectRuntime supplies cargo's launch environment for the prebuilt binary.
 
+// Not used here any more, but every check_cmd/*.rs shares one module
+// (include!'d into check_cmd.rs), and binary_timings.rs reads this import.
 use std::collections::BTreeMap;
 
 /// Enumerate and run one process-isolated sweep. Runs every test even
@@ -57,11 +51,6 @@ fn run_isolated_sweep(
         ));
     }
 
-    // Prepended to the selection rather than to each argv: the selection is
-    // what both the enumeration pass and every per-test invocation are built
-    // from, so a lint allow that lives here cannot be dropped by one of them.
-    let mut selection = allow_args.to_vec();
-    selection.extend(sweep_selection_args(sweep, packages));
     let env_full = merged_env(&sweep.env, project_env);
     let env_refs: Vec<(&str, &str)> = env_full
         .iter()
@@ -73,7 +62,8 @@ fn run_isolated_sweep(
         None,
         commands,
     );
-    let Some(plan) = enumerate_isolated(project_root, sweep, &selection, &env_refs, commands)?
+    let Some((plan, runtime)) =
+        enumerate_isolated(project_root, sweep, packages, allow_args, &env_refs, commands)?
     else {
         return Ok(false);
     };
@@ -85,20 +75,22 @@ fn run_isolated_sweep(
     let runnable_count = runnable.len();
     let mut failed = 0usize;
     let mut ignored = 0usize;
-    for name in &runnable {
-        if !plan.include_ignored && plan.ignored.contains(name) {
+    for case in &runnable {
+        let name = &case.name;
+        if case.ignored && !plan.include_ignored {
             ignored += 1;
             output::detail(&format!(
                 "SKIP {name} (#[ignore], lane runs without --include-ignored)"
             ));
             continue;
         }
-        output::status(&format!("test {}: {name}", sweep.label));
+        // The harness too: the same name in two harnesses is two runs now.
+        output::status(&format!("test {}: {}/{} {name}", sweep.label, case.binary.package, case.binary.target));
         let outcome = run_one_isolated_test(
             project_root,
             state_root,
-            &selection,
-            name,
+            case,
+            &runtime,
             plan.include_ignored,
             &env_refs,
             commands,
@@ -112,8 +104,8 @@ fn run_isolated_sweep(
             // inherit, and the contract says stop.
             IsolatedOutcome::TimedOut => {
                 return Err(DevError::Verify(format!(
-                    "test '{name}' exceeded its time budget in sweep '{}' - stopping",
-                    sweep.label
+                    "test '{name}' in {}/{} exceeded its time budget in sweep '{}' - stopping",
+                    case.binary.package, case.binary.target, sweep.label
                 )));
             }
             IsolatedOutcome::Failed => failed += 1,
@@ -183,38 +175,10 @@ enum IsolatedOutcome {
     TimedOut,
 }
 
-/// The plan's runnable name list plus the package-qualified-skipped
-/// count; `None` after reporting a qualified-skip collision or a
-/// zero-runnable enumeration. The plan is announced before the run - see the
-/// roll-call note in `run_one_isolated_test`.
-fn plan_runnable(plan: &IsolatedPlan, label: &str) -> Option<(Vec<String>, usize)> {
-    // A name present in both a qualified-skipped and an unskipped package
-    // cannot be split by one `cargo test -- --exact` invocation: error
-    // rather than half-obey the skip.
-    let collisions: Vec<&str> = plan
-        .names
-        .iter()
-        .filter(|(_, f)| f.0 && f.1)
-        .map(|(n, _)| n.as_str())
-        .collect();
-
-    if !collisions.is_empty() {
-        output::error(&format!(
-            "package-qualified skip collision ({}): the name exists in both a \
-             skipped and an unskipped package, and one `cargo test -- --exact` \
-             invocation cannot split them. Rename the test(s) or adjust the skip.",
-            collisions.join(", ")
-        ));
-        return None;
-    }
-
-    let runnable: Vec<String> = plan
-        .names
-        .iter()
-        .filter(|(_, f)| f.0)
-        .map(|(n, _)| n.clone())
-        .collect();
-    let pkg_skipped = plan.names.values().filter(|f| f.1 && !f.0).count();
+/// The runnable binary/test pairs and the package-qualified-skipped count.
+fn plan_runnable(plan: &IsolatedPlan, label: &str) -> Option<(Vec<IsolatedCase>, usize)> {
+    let runnable = plan.cases.clone();
+    let pkg_skipped = plan.pkg_skipped;
 
     if runnable.is_empty() {
         output::error(&format!(
@@ -241,14 +205,18 @@ fn skip_note(n: usize) -> String {
     }
 }
 
+/// One test in one prebuilt harness.
+#[derive(Clone)]
+struct IsolatedCase {
+    binary: TestBinary,
+    name: String,
+    ignored: bool,
+}
+
 /// What a process-isolated sweep will run, from per-binary enumeration.
 struct IsolatedPlan {
-    /// name -> (present in an unskipped binary, present in a
-    /// package-qualified-skipped binary). Both true = collision.
-    names: BTreeMap<String, (bool, bool)>,
-    /// Names `#[ignore]`d at the source (from `--list --ignored`; plain
-    /// `--list` includes ignored names, verified empirically).
-    ignored: BTreeSet<String>,
+    cases: Vec<IsolatedCase>,
+    pkg_skipped: usize,
     include_ignored: bool,
 }
 
@@ -259,28 +227,44 @@ struct IsolatedPlan {
 fn enumerate_isolated(
     project_root: &Path,
     sweep: &ResolvedSweep,
-    selection: &[String],
+    packages: &[&str],
+    allow_args: &[String],
     env_refs: &[(&str, &str)],
     commands: bool,
-) -> Result<Option<IsolatedPlan>, DevError> {
-    let Some(binaries) = test_binaries(project_root, selection, env_refs, commands)? else {
-        return Ok(None);
-    };
-    let binaries = filter_binaries(&binaries, &sweep.cargo_test_filters);
+) -> Result<Option<(IsolatedPlan, DirectRuntime)>, DevError> {
+    // Direct execution would bypass a configured runner; refuse before building.
+    refuse_configured_runner(project_root)?;
+    let cli_scope: Vec<String> = packages.iter().map(|p| (*p).to_owned()).collect();
+    let mut all = Vec::new();
+    let mut runtime_index = BuildRuntimeIndex::default();
+    for resolution in sweep.resolutions(&cli_scope) {
+        let mut selection = allow_args.to_vec();
+        match resolution {
+            Some(pkg) => {
+                selection.extend(sweep_profile_args(sweep));
+                selection.extend(sweep.unification_args());
+                selection.extend(["-p".to_owned(), pkg]);
+                selection.extend(sweep.cargo_feature_args.iter().cloned());
+            }
+            None => selection.extend(sweep_selection_args(sweep, packages)),
+        }
+        let Some((binaries, index)) =
+            test_binaries_with_runtime(project_root, &selection, env_refs, commands)?
+        else {
+            return Ok(None);
+        };
+        all.extend(binaries);
+        runtime_index.merge(index);
+    }
+    let runtime = DirectRuntime::load(project_root, env_refs, runtime_index)?;
+    let binaries = filter_binaries(&all, &sweep.cargo_test_filters);
     let libdir = toolchain_libdir(project_root, env_refs)?;
     let include_ignored = sweep.libtest_args.iter().any(|a| a == "--include-ignored");
     let mut filter_args: Vec<&str> = sweep.name_filters.iter().map(String::as_str).collect();
     filter_args.extend(sweep.libtest_args.iter().map(String::as_str));
 
-    let mut names: BTreeMap<String, (bool, bool)> = BTreeMap::new();
-    let mut ignored: BTreeSet<String> = BTreeSet::new();
-    // Names seen live (not `#[ignore]`d) in at least one unskipped binary.
-    // The same bare name can be `#[ignore]`d in one package's binary and
-    // live in another's; the single `--exact <name>` invocation runs both
-    // binaries, skipping the ignored copy and running the live one, so a
-    // name is a real skip only when it is ignored in every binary that
-    // carries it - live nowhere.
-    let mut live: BTreeSet<String> = BTreeSet::new();
+    let mut cases = Vec::new();
+    let mut pkg_skipped = 0;
     for b in binaries {
         let Some(listed) = binary_list(b, project_root, &filter_args, env_refs, &libdir)? else {
             return Ok(None);
@@ -297,89 +281,96 @@ fn enumerate_isolated(
         };
         for t in listed {
             if sweep.qualified_skips.iter().any(|q| q.matches(&b.package, &t)) {
-                names.entry(t).or_insert((false, false)).1 = true;
+                pkg_skipped += 1;
                 continue;
             }
-
-            if b_ignored.contains(&t) {
-                ignored.insert(t.clone());
-            } else {
-                live.insert(t.clone());
-            }
-            names.entry(t).or_insert((false, false)).0 = true;
+            cases.push(IsolatedCase {
+                binary: b.clone(),
+                ignored: b_ignored.contains(&t),
+                name: t,
+            });
         }
     }
-    // A name live in any binary must run; drop it from the ignore set even
-    // if another binary listed it as `#[ignore]`d.
-    for n in &live {
-        ignored.remove(n);
-    }
-    Ok(Some(IsolatedPlan {
-        names,
-        ignored,
-        include_ignored,
-    }))
+    Ok(Some((
+        IsolatedPlan {
+            cases,
+            pkg_skipped,
+            include_ignored,
+        },
+        runtime,
+    )))
 }
 
-/// One `cargo test <selection> -- --exact <name>` invocation: a fresh
-/// process for exactly one test, under the standard per-test watchdog.
+/// One prebuilt binary with one exact test, under the standard per-test cap.
+fn isolated_args(name: &str, include_ignored: bool) -> Vec<&str> {
+    let mut args = vec![
+        "--exact",
+        name,
+        "--test-threads=1",
+        "-Z",
+        "unstable-options",
+        "--format",
+        "json",
+    ];
+    if include_ignored {
+        args.push("--include-ignored");
+    }
+    args
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_one_isolated_test(
     project_root: &Path,
     state_root: &Path,
-    selection: &[String],
-    name: &str,
+    case: &IsolatedCase,
+    runtime: &DirectRuntime,
     include_ignored: bool,
     env_refs: &[(&str, &str)],
     commands: bool,
 ) -> Result<IsolatedOutcome, DevError> {
-    let mut args: Vec<String> = vec!["test".into()];
-    args.extend(selection.iter().cloned());
-    // `--tests` selects lib+bins+integration but not doctests (which this
-    // lane never runs). A selection that already carries a target selector
-    // (a profile's `--test <name>`) must not be broadened by it - cargo
-    // unions selection flags, so `--test foo --tests` would run every
-    // harness, defeating the lane's target scope.
-    if !has_target_selector(&args) {
-        args.push("--tests".into());
-    }
-    args.push("--".into());
-    args.push("--exact".into());
-    args.push(name.into());
-    args.push("--test-threads=1".into());
+    let name = &case.name;
+    let args = isolated_args(name, include_ignored);
 
-    if include_ignored {
-        args.push("--include-ignored".into());
-    }
-
-    cargo_line(commands, &format!("cargo {}", args.join(" ")));
-    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let run = test_runner::streaming_run_libtest(
-        &arg_refs,
-        project_root,
+    let command = format!("{} {}", case.binary.executable, args.join(" "));
+    cargo_line(commands, &command);
+    let (cwd, env) = runtime.envelope(&case.binary, env_refs);
+    let cwd = if cwd.as_os_str() == "." {
+        project_root.to_path_buf()
+    } else {
+        cwd
+    };
+    let env_pairs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    let run = test_runner::run_libtest_parallel(
+        &case.binary.executable,
+        &args,
+        &cwd,
         state_root,
-        env_refs,
-        // This invocation runs exactly one test, named by `--exact`, so the wall
-        // clock IS the per-test ceiling and it needs no announced event to
-        // enforce it. That is the whole reason a per-test guarantee is honest
-        // here and only advisory on a shared-harness sweep: attribution comes
-        // from the selection, not from anything the process printed.
-        test_runner::Ceilings::one_test(test_runner::TEST_TIMEOUT, name),
+        &env_pairs,
+        test_runner::TEST_TIMEOUT,
+        test_runner::TEST_TIMEOUT,
+        None,
         |_| {},
         |_| {},
         |_| {},
     )?;
 
-    if let LibtestOutcome::HungTest(h) = run.outcome {
-        output::error(&test_runner::format_hung_test(&h, project_root));
-        output::error(&format!("failing command: cargo {}", args.join(" ")));
+    if run.timed_out {
+        output::error(&format!("test '{name}' exceeded its time budget"));
+        output::error(&format!("failing command: {command}"));
+        return Ok(IsolatedOutcome::TimedOut);
+    }
+    if let LibtestOutcome::HungTest(_) = run.outcome {
+        // This process has exactly one selected test. Attribute the watchdog
+        // kill from the selection, even if its output hid a JSON event.
+        output::error(&format!("test '{name}' exceeded its time budget"));
+        output::error(&format!("failing command: {command}"));
         return Ok(IsolatedOutcome::TimedOut);
     }
     let stdout = String::from_utf8_lossy(&run.captured.stdout);
 
     if !run.captured.status.success() {
         output::error(&format!("FAIL {name}"));
-        output::error(&format!("failing command: cargo {}", args.join(" ")));
+        output::error(&format!("failing command: {command}"));
         let stderr = String::from_utf8_lossy(&run.captured.stderr);
         output::error(&cargo_filter::filter_test(&stdout, &stderr));
         return Ok(IsolatedOutcome::Failed);
@@ -395,7 +386,7 @@ fn run_one_isolated_test(
         output::error(&format!(
             "FAIL {name}: invocation ran zero tests (name no longer matches?)"
         ));
-        output::error(&format!("failing command: cargo {}", args.join(" ")));
+        output::error(&format!("failing command: {command}"));
         return Ok(IsolatedOutcome::Failed);
     }
 
@@ -409,7 +400,7 @@ fn run_one_isolated_test(
             "FAIL {name}: the test stream did not finish reporting: {reason}. The process exited \
              successfully, but nothing reported this test's result, so there is no pass to record."
         ));
-        output::error(&format!("failing command: cargo {}", args.join(" ")));
+        output::error(&format!("failing command: {command}"));
         return Ok(IsolatedOutcome::Failed);
     }
 
@@ -428,9 +419,7 @@ fn run_one_isolated_test(
 
 /// Parse libtest `--list` output: one `module::name: test` line per test
 /// (interleaved with cargo status lines and per-binary summaries, which
-/// don't match the suffix). Sorted + deduped: the same name in two test
-/// binaries is still one `--exact` invocation, and each binary runs it in
-/// its own process anyway.
+/// don't match the suffix). Sorted + deduped within this binary only.
 ///
 /// `None` means the output is **not a libtest listing at all**, which is a
 /// different fact from "a libtest listing containing no tests" and must not be
@@ -478,13 +467,68 @@ fn is_list_tally(line: &str) -> bool {
 mod isolate_tests {
     #![allow(clippy::unwrap_used)]
 
-    use super::{is_list_tally, parse_list_output};
+    use super::{
+        IsolatedCase, IsolatedPlan, TestBinary, is_list_tally, isolated_args, parse_list_output,
+        plan_runnable,
+    };
+    use std::path::PathBuf;
+
+    fn case(package: &str, executable: &str, ignored: bool) -> IsolatedCase {
+        IsolatedCase {
+            binary: TestBinary {
+                package: package.into(),
+                package_id: package.into(),
+                target: "suite".into(),
+                kind: "test".into(),
+                executable: executable.into(),
+                manifest_dir: PathBuf::from("/workspace"),
+            },
+            name: "same_name".into(),
+            ignored,
+        }
+    }
+
+    #[test]
+    fn plan_keeps_same_named_tests_in_distinct_harnesses() {
+        let plan = IsolatedPlan {
+            cases: vec![case("a", "/a/suite", false), case("b", "/b/suite", true)],
+            pkg_skipped: 1,
+            include_ignored: false,
+        };
+        let (runnable, skipped) = plan_runnable(&plan, "sweep").expect("runnable plan");
+        assert_eq!(runnable.len(), 2);
+        assert_eq!(runnable[0].binary.executable, "/a/suite");
+        assert_eq!(runnable[1].binary.executable, "/b/suite");
+        assert!(!runnable[0].ignored);
+        assert!(runnable[1].ignored);
+        assert_eq!(skipped, 1);
+    }
+
+    #[test]
+    fn one_case_selects_exactly_one_test_in_its_binary() {
+        assert_eq!(
+            isolated_args("module::case", false),
+            [
+                "--exact",
+                "module::case",
+                "--test-threads=1",
+                "-Z",
+                "unstable-options",
+                "--format",
+                "json"
+            ]
+        );
+        assert_eq!(
+            isolated_args("module::case", true).last(),
+            Some(&"--include-ignored")
+        );
+    }
 
     #[test]
     fn list_output_keeps_test_names_only() {
         // Interleaved cargo status lines, per-binary summaries, and
-        // benchmark listings must all fall away; duplicate names across
-        // two binaries collapse to one --exact invocation.
+        // benchmark listings must all fall away; duplicate names inside
+        // one listing are counted once.
         let stdout = "\
 serial_tests::test_logging_to_file: test
 serial_tests::test_module_level_filtering: test
