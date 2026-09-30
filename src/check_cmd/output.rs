@@ -2486,19 +2486,25 @@ warning: z [too_many_lines]
     }
 
     /// A `cargo::` `allow_exact` entry never reaches a build, so the verdict
-    /// line does not claim it widens there.
+    /// line does not claim it widens there - not even beside entries that do.
     #[test]
     fn the_verdict_line_calls_cargo_allow_exact_entries_sited() {
         let sited = |s: &str| SitedAllow::parse(s).unwrap();
         let cargo_only = verdict_context(&None, 1, &[], &[sited("cargo::unused_dependencies@a/Cargo.toml")]);
-        assert!(cargo_only.contains("(sited)"), "{cargo_only}");
+        assert!(cargo_only.contains("allow_exact: cargo::unused_dependencies (sited)"), "{cargo_only}");
         let mixed = verdict_context(
             &None,
             1,
             &[],
             &[sited("cargo::unused_dependencies@a/Cargo.toml"), sited("dead_code@src/a.rs")],
         );
-        assert!(mixed.contains("build-wide in test"), "{mixed}");
+        assert!(
+            mixed.contains(
+                "allow_exact: dead_code (sited in clippy/rustdoc; build-wide in test, coverage and install builds), \
+                 cargo::unused_dependencies (sited)"
+            ),
+            "{mixed}"
+        );
     }
 
     #[test]

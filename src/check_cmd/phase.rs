@@ -1238,20 +1238,27 @@ fn verdict_context(
         parts.push(format!("lints allowed: {}", allow.join(", ")));
     }
     if !allow_exact.is_empty() {
-        let mut lints: Vec<&str> = Vec::new();
+        // `cargo::` entries never reach a build (`test_phase_allow_flags`),
+        // so only the others widen there - each group gets its own scope.
+        let mut widened: Vec<&str> = Vec::new();
+        let mut sited: Vec<&str> = Vec::new();
         for s in allow_exact {
-            if !lints.contains(&s.lint.as_str()) {
-                lints.push(s.lint.as_str());
+            let group = if crate::config::is_cargo_lint(&s.lint) { &mut sited } else { &mut widened };
+            if !group.contains(&s.lint.as_str()) {
+                group.push(s.lint.as_str());
             }
         }
-        // `cargo::` entries never reach a build (`test_phase_allow_flags`),
-        // so only the others widen there.
-        let scope = if lints.iter().all(|l| crate::config::is_cargo_lint(l)) {
-            "sited"
-        } else {
-            "sited in clippy/rustdoc; build-wide in test, coverage and install builds"
-        };
-        parts.push(format!("allow_exact: {} ({scope})", lints.join(", ")));
+        let mut groups: Vec<String> = Vec::new();
+        if !widened.is_empty() {
+            groups.push(format!(
+                "{} (sited in clippy/rustdoc; build-wide in test, coverage and install builds)",
+                widened.join(", ")
+            ));
+        }
+        if !sited.is_empty() {
+            groups.push(format!("{} (sited)", sited.join(", ")));
+        }
+        parts.push(format!("allow_exact: {}", groups.join(", ")));
     }
     if parts.is_empty() {
         String::new()

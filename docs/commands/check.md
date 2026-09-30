@@ -116,8 +116,10 @@ Output:
   ingestion) and every compiling phase (test, coverage, install-feature,
   through rustflags) alike; `allow_exact` adds where it is sited and where it
   is not (`sited in clippy/rustdoc; build-wide in test, coverage and install
-  builds`, or just `sited` when every entry is a `cargo::` lint, which never
-  reaches a build). The verdict prints on a red run too, so the context does.
+  builds`). `cargo::` lints are listed in a separate `(sited)` group, because
+  brokkr never passes them to a build. A script that builds its own `-A` list
+  from `[lints]` has to skip them too, or rustc fails every crate with E0602.
+  The verdict prints on a red run too, so the context does.
 - **Warnings print once.** A cargo warning from a passing test sweep is held
   until the phase ends and merged with the identical block from every other
   sweep - keyed by the whole block, never split - then printed once with the
