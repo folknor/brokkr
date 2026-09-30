@@ -8,6 +8,7 @@
 
 /// A parsed compiler/clippy diagnostic. Field set mirrors the parts of cargo's
 /// JSON the text renderer consumes.
+#[derive(Clone)]
 pub struct DiagnosticEvent {
     pub level: String,
     pub code: Option<String>,
@@ -24,6 +25,7 @@ pub struct DiagnosticEvent {
     pub package_id: Option<String>,
 }
 
+#[derive(Clone)]
 pub struct ChildDiagnostic {
     pub message: String,
 }
@@ -152,6 +154,154 @@ pub fn parse_cargo_diagnostics(stdout: &str) -> Vec<DiagnosticEvent> {
     events
 }
 
+/// Cargo's own manifest lints (`[lints.cargo]`: `unused_dependencies`,
+/// `unused_workspace_dependencies`, ...) among a run's stderr `blocks`
+/// (split by `script_check::rustc_blocks`), each with its block index - so a
+/// renderer can tell which blocks a diagnostic list already carries.
+///
+/// Cargo renders these as text on stderr even under `--message-format=json` -
+/// they never reach the JSON stream [`parse_cargo_diagnostics`] reads, which is
+/// why a green `check` used to be silent about them. A manifest lint is a
+/// rustc-shaped block whose `-->` arrow points at a `Cargo.toml` (rustc's own
+/// diagnostics travel as JSON on stdout, so its arrows never appear here).
+///
+/// A block is a manifest lint only with a lint identity, not by its arrow
+/// alone: cargo's ordinary manifest errors (a bad TOML string, an invalid
+/// version) carry the same `--> Cargo.toml:L:C` arrow, and swallowing one as a
+/// one-line diagnostic would hide the excerpt that explains it. The identity
+/// is the lint cargo names (`` `cargo::unused_dependencies` is set to `warn` ``),
+/// which it does only on the first hit per lint per manifest. Any other hit
+/// takes the code of a named block in the *same* manifest with the same
+/// message shape (the message with its backticked spans emptied), and only
+/// when that shape names exactly one lint there; an unnamed block with no such
+/// sibling, or an ambiguous one, stays in the stream.
+///
+/// Every event has `package_id: None` - stderr text names no package. The
+/// `check` clippy phase attributes each one by its manifest path
+/// (`attribute_manifest_lints`), since cargo's parsing lints also cover
+/// path-sourced packages that are not members. The path is as cargo printed
+/// it: relative to the workspace root, whatever directory cargo ran in.
+pub fn manifest_lints_by_block(blocks: &[crate::script_check::Block]) -> Vec<(usize, DiagnosticEvent)> {
+    struct Candidate<'a> {
+        index: usize,
+        level: &'static str,
+        message: &'a str,
+        file: &'a str,
+        line: Option<u64>,
+        column: Option<u64>,
+        shape: String,
+        code: Option<String>,
+    }
+    let candidates: Vec<Candidate<'_>> = blocks
+        .iter()
+        .enumerate()
+        .filter_map(|(index, block)| {
+            let (level, message) = manifest_lint_header(block)?;
+            let (file, line, column) = manifest_lint_location(&block.text)?;
+            Some(Candidate {
+                index,
+                level,
+                message,
+                file,
+                line,
+                column,
+                shape: message_shape(message),
+                code: block.text.lines().find_map(named_cargo_lint),
+            })
+        })
+        .collect();
+
+    // Every lint each (manifest, shape) pair names, in either direction of the
+    // stream: a named hit may follow the unnamed one it vouches for.
+    let mut named: std::collections::HashMap<(&str, &str), std::collections::BTreeSet<&str>> =
+        std::collections::HashMap::new();
+    for c in &candidates {
+        if let Some(code) = &c.code {
+            named.entry((c.file, c.shape.as_str())).or_default().insert(code.as_str());
+        }
+    }
+
+    candidates
+        .iter()
+        .filter_map(|c| {
+            let code = match &c.code {
+                Some(code) => code.clone(),
+                None => {
+                    let codes = named.get(&(c.file, c.shape.as_str()))?;
+                    if codes.len() != 1 {
+                        return None;
+                    }
+                    (*codes.first()?).to_owned()
+                }
+            };
+            Some((
+                c.index,
+                DiagnosticEvent {
+                    level: c.level.to_owned(),
+                    code: Some(code),
+                    message: c.message.to_owned(),
+                    file: Some(c.file.to_owned()),
+                    line: c.line,
+                    column: c.column,
+                    primary_label: None,
+                    children: Vec::new(),
+                    package_id: None,
+                },
+            ))
+        })
+        .collect()
+}
+
+/// The level and message of a block's header line (`warning: unused
+/// dependency `x``, `error[code]: ...`).
+fn manifest_lint_header(block: &crate::script_check::Block) -> Option<(&'static str, &str)> {
+    use crate::script_check::Level;
+    let level = match block.level {
+        Level::Error => "error",
+        Level::Warning => "warning",
+        Level::Other => return None,
+    };
+    let header = block.text.lines().next()?;
+    let (_, message) = header.split_once(": ")?;
+    Some((level, message))
+}
+
+/// The location of the block's first `-->` arrow, when it names a
+/// `Cargo.toml`: `path:line:col`, or a bare `path` - cargo falls back to the
+/// manifest alone when it has no span for the offending entry.
+fn manifest_lint_location(text: &str) -> Option<(&str, Option<u64>, Option<u64>)> {
+    let arrow = text.lines().find_map(|l| l.trim_start().strip_prefix("--> "))?.trim_end();
+    let mut parts = arrow.rsplitn(3, ':');
+    let spanned = match (parts.next(), parts.next(), parts.next()) {
+        (Some(col), Some(line), Some(file)) => match (line.parse().ok(), col.parse().ok()) {
+            (Some(line), Some(col)) => Some((file, Some(line), Some(col))),
+            _ => None,
+        },
+        _ => None,
+    };
+    let (file, line, column) = spanned.unwrap_or((arrow, None, None));
+    (std::path::Path::new(file).file_name()? == "Cargo.toml").then_some((file, line, column))
+}
+
+/// The lint a `= note: `cargo::NAME` is set to ...` line names.
+fn named_cargo_lint(line: &str) -> Option<String> {
+    let rest = line.trim_start().strip_prefix("= note: `")?;
+    let (name, tail) = rest.split_once('`')?;
+    (name.starts_with("cargo::") && tail.starts_with(" is set to")).then(|| name.to_owned())
+}
+
+/// A message with every backticked span emptied: `unused dependency `toml``
+/// and `unused dependency `anyhow`` share the shape `unused dependency ```.
+fn message_shape(message: &str) -> String {
+    message
+        .split('`')
+        .enumerate()
+        .filter(|(i, _)| i % 2 == 0)
+        .map(|(_, s)| s)
+        .collect::<Vec<_>>()
+        .join("``")
+}
+
 /// Classify a compiler-message as a rustc/cargo summary or meta-noise line
 /// that should not become a real diagnostic.
 ///
@@ -197,6 +347,12 @@ mod tests {
         clippy::panic
     )]
     use super::*;
+
+    /// [`manifest_lints_by_block`] over a whole stderr, block indices dropped.
+    fn parse_manifest_lints(stderr: &str) -> Vec<DiagnosticEvent> {
+        let blocks = crate::script_check::rustc_blocks(stderr);
+        manifest_lints_by_block(&blocks).into_iter().map(|(_, e)| e).collect()
+    }
 
     fn sample_compiler_message(level: &str, code: &str, message: &str, file: &str, line: u64) -> String {
         format!(
@@ -290,5 +446,155 @@ mod tests {
         input.push_str(&sample_compiler_message("warning", "unused_variables", "unused var", "src/b.rs", 2));
         let events = parse_cargo_diagnostics(&input);
         assert_eq!(events.len(), 2);
+    }
+
+    /// Cargo's stderr from a real failing run: two manifest lints on one
+    /// manifest (only the first names its lint), a workspace-level one, the
+    /// per-manifest tallies, and a build-script failure that is not a manifest
+    /// lint at all.
+    const MANIFEST_STDERR: &str = "\
+warning: unused workspace dependency `config`
+   --> Cargo.toml:150:1
+    |
+150 | config = \"0.15.27\"
+    | ^^^^^^
+    |
+    = note: `cargo::unused_workspace_dependencies` is set to `warn` by default
+help: consider removing the workspace dependency `config`
+warning: workspace (manifest) generated 1 warning
+   Compiling yeslogic-fontconfig-sys v6.0.1
+error: failed to run custom build command for `yeslogic-fontconfig-sys v6.0.1`
+
+Caused by:
+  process didn't exit successfully: `target/debug/build/x/build_script_build` (exit status: 101)
+warning: unused dependency `anyhow`
+  --> crates/shared/jaerlogg-test/Cargo.toml:25:1
+   |
+25 | anyhow = { workspace = true }
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `cargo::unused_dependencies` is set to `warn` by default
+help: consider removing the dependency on `anyhow`
+warning: unused dependency `toml`
+  --> crates/shared/jaerlogg-test/Cargo.toml:19:1
+   |
+19 | toml = { workspace = true }
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: consider removing the dependency on `toml`
+warning: `jaerlogg-test` (manifest) generated 2 warnings
+";
+
+    #[test]
+    fn manifest_lints_parse_from_stderr() {
+        let events = parse_manifest_lints(MANIFEST_STDERR);
+        let got: Vec<String> = events
+            .iter()
+            .map(|e| {
+                format!(
+                    "{} {} {}:{}:{} {}",
+                    e.level,
+                    e.code.as_deref().unwrap_or("-"),
+                    e.file.as_deref().unwrap_or("-"),
+                    e.line.unwrap_or(0),
+                    e.column.unwrap_or(0),
+                    e.message
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            [
+                "warning cargo::unused_workspace_dependencies Cargo.toml:150:1 unused workspace dependency `config`",
+                "warning cargo::unused_dependencies crates/shared/jaerlogg-test/Cargo.toml:25:1 unused dependency `anyhow`",
+                // No note of its own: the code comes from `anyhow`'s block.
+                "warning cargo::unused_dependencies crates/shared/jaerlogg-test/Cargo.toml:19:1 unused dependency `toml`",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_non_manifest_arrow_is_not_a_manifest_lint() {
+        let stderr = "warning: something\n  --> src/lib.rs:3:1\n   |\n";
+        assert!(parse_manifest_lints(stderr).is_empty());
+    }
+
+    /// Cargo's ordinary manifest errors carry the same arrow, but name no
+    /// lint: left in the stream, where their excerpt explains them.
+    #[test]
+    fn a_manifest_parse_error_is_not_a_manifest_lint() {
+        let stderr = "\
+error: invalid string
+expected `\"`, `'`
+ --> Cargo.toml:3:8
+  |
+3 | name = foo
+  |        ^
+";
+        assert!(parse_manifest_lints(stderr).is_empty());
+    }
+
+    fn codes(stderr: &str) -> Vec<(String, Option<String>)> {
+        parse_manifest_lints(stderr)
+            .into_iter()
+            .map(|e| (e.message, e.code))
+            .collect()
+    }
+
+    /// The named hit may come after the unnamed one it vouches for.
+    #[test]
+    fn a_later_named_hit_names_an_earlier_one() {
+        let stderr = "\
+warning: unused dependency `toml`
+  --> a/Cargo.toml:19:1
+warning: unused dependency `anyhow`
+  --> a/Cargo.toml:25:1
+   = note: `cargo::unused_dependencies` is set to `warn` by default
+";
+        let unused = Some("cargo::unused_dependencies".to_owned());
+        assert_eq!(
+            codes(stderr),
+            [
+                ("unused dependency `toml`".to_owned(), unused.clone()),
+                ("unused dependency `anyhow`".to_owned(), unused),
+            ]
+        );
+    }
+
+    /// Borrowing stays within one manifest, and a shape naming two lints
+    /// there names neither.
+    #[test]
+    fn borrowing_is_per_manifest_and_unambiguous() {
+        let stderr = "\
+warning: unused dependency `anyhow`
+  --> a/Cargo.toml:25:1
+   = note: `cargo::unused_dependencies` is set to `warn` by default
+warning: unused dependency `toml`
+  --> b/Cargo.toml:19:1
+warning: odd entry `x`
+  --> c/Cargo.toml:1:1
+   = note: `cargo::lint_one` is set to `warn` by default
+warning: odd entry `y`
+  --> c/Cargo.toml:2:1
+   = note: `cargo::lint_two` is set to `warn` by default
+warning: odd entry `z`
+  --> c/Cargo.toml:3:1
+";
+        let got: Vec<String> = codes(stderr).into_iter().map(|(m, _)| m).collect();
+        assert_eq!(got, ["unused dependency `anyhow`", "odd entry `x`", "odd entry `y`"]);
+    }
+
+    /// Cargo falls back to the manifest alone when it has no span.
+    #[test]
+    fn a_path_only_arrow_is_a_location() {
+        let stderr = "\
+warning: unused dependency `toml`
+  --> a/Cargo.toml
+   = note: `cargo::unused_dependencies` is set to `warn` by default
+";
+        let events = parse_manifest_lints(stderr);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].file.as_deref(), Some("a/Cargo.toml"));
+        assert_eq!((events[0].line, events[0].column), (None, None));
     }
 }

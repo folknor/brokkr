@@ -163,10 +163,14 @@ pub struct Block {
 /// - An indented occurrence of the word never opens one, so source context
 ///   quoting `error` (or a `--> path/error.rs` arrow) cannot forge a block.
 ///
-/// This is a *renderer's* parse, reached only on a failure of an entry that
-/// declared `diagnostics = "rustc"`. It never feeds the pass/fail decision -
-/// that stays [`evaluate`]'s sentinel match - so a misparse costs display
-/// quality and nothing else.
+/// For `script_check` this is a *renderer's* parse, reached only on a failure
+/// of an entry that declared `diagnostics = "rustc"`; its pass/fail decision
+/// stays [`evaluate`]'s sentinel match. Two other readers lean on it harder:
+/// `check`'s clippy phase finds cargo's manifest lints among these blocks
+/// (`cargo_json::manifest_lints_by_block`), and those DO fail the check - which is
+/// why that parser demands a lint identity rather than trusting a block's
+/// shape - and a failed cargo run's report withholds blocks by level
+/// (`check_cmd::phase::failed_run_streams`).
 pub fn rustc_blocks(text: &str) -> Vec<Block> {
     let mut blocks: Vec<Block> = Vec::new();
     for line in text.lines() {

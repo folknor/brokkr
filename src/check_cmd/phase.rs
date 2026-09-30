@@ -1244,10 +1244,14 @@ fn verdict_context(
                 lints.push(s.lint.as_str());
             }
         }
-        parts.push(format!(
-            "allow_exact: {} (sited in clippy/rustdoc; build-wide in test, coverage and install builds)",
-            lints.join(", ")
-        ));
+        // `cargo::` entries never reach a build (`test_phase_allow_flags`),
+        // so only the others widen there.
+        let scope = if lints.iter().all(|l| crate::config::is_cargo_lint(l)) {
+            "sited"
+        } else {
+            "sited in clippy/rustdoc; build-wide in test, coverage and install builds"
+        };
+        parts.push(format!("allow_exact: {} ({scope})", lints.join(", ")));
     }
     if parts.is_empty() {
         String::new()
@@ -2010,7 +2014,9 @@ fn clippy_args(sweep: &ResolvedSweep, scope: &[&str], allow: &[String]) -> Vec<S
     args.extend(sweep.cargo_feature_args.iter().cloned());
     args.push("--".into());
     args.push("--cap-lints=warn".into());
-    for lint in allow {
+    // Cargo's own lints are allowed at ingestion instead (`code_allowed`):
+    // rustc knows no `cargo` lint tool.
+    for lint in allow.iter().filter(|l| !crate::config::is_cargo_lint(l)) {
         args.push("-A".into());
         args.push(lint.clone());
     }
@@ -2045,7 +2051,7 @@ fn run_one_clippy(
 /// past a denied lint, and `--keep-going` already does that for doc. No `-A`
 /// either - rustdoc takes rustc flags only through `RUSTDOCFLAGS`, which would
 /// change the doc fingerprint - so `[lints] allow` is applied at ingestion
-/// instead ([`rustdoc_allowed`]).
+/// instead ([`code_allowed`]).
 fn doc_args(sweep: &ResolvedSweep, scope: &[&str], cfg: &RustdocConfig) -> Vec<String> {
     let mut args: Vec<String> = vec![
         "doc".into(),
@@ -2130,6 +2136,7 @@ fn run_one_diagnostic_cargo(
         } else {
             None
         },
+        manifest: Vec::new(),
     })
 }
 
@@ -2155,9 +2162,12 @@ fn run_clippy_phase(
     announce_allows(allow, allow_exact, commands || !report_active());
 
     let info = build::project_info(Some(project_root))?;
-    let results = run_per_build_shape("clippy", &info, sweeps, packages, clippy_ran, |_| None, |sweep, run_scope, dir| {
+    let mut results = run_per_build_shape("clippy", &info, sweeps, packages, clippy_ran, |_| None, |sweep, run_scope, dir| {
         run_one_clippy(project_root, sweep, run_scope, allow, dir, commands)
     })?;
+    for r in &mut results {
+        r.manifest = attribute_manifest_lints(r, &info);
+    }
 
     report_stale_sited_allows(
         "clippy",
@@ -2171,10 +2181,76 @@ fn run_clippy_phase(
     // whatever its (capped) level, except a dependency's warning. A failed run
     // with nothing parseable still fails.
     let members = Some(&info.workspace_members);
+    // Cargo's manifest lints never saw clippy's `-A` flags, so `[lints] allow`
+    // reaches them here.
     let keep = |d: &cargo_json::DiagnosticEvent| {
-        !is_dependency_warning(d, members) && !sited_allowed(d, allow_exact)
+        !is_dependency_warning(d, members)
+            && !sited_allowed(d, allow_exact)
+            && !(d.code.as_deref().is_some_and(crate::config::is_cargo_lint) && code_allowed(d, allow))
     };
     report_diagnostic_phase("clippy", &results, &info, project_root, &keep, multi, commands)
+}
+
+/// Cargo's manifest lints from a clippy run's stderr
+/// ([`cargo_json::manifest_lints_by_block`]), each attributed to the package
+/// whose `Cargo.toml` it names, and narrowed to what the run selected.
+///
+/// Cargo prints the path relative to the workspace root whatever directory it
+/// ran in (observed: a run from a member's parent directory printed
+/// `crates/a/Cargo.toml`, not `../crates/a/Cargo.toml`), so it resolves
+/// against `workspace_root`. Three owners:
+///
+/// - a member's manifest: that member's package id, so the lint follows the
+///   run's selection like any other diagnostic - a `-p a` run reports `a`'s
+///   manifest and nobody else's.
+/// - the workspace root's `Cargo.toml`: every run reports it, whatever it
+///   selected - it holds the workspace's own tables, the ones
+///   `unused_workspace_dependencies` is about. No id in a virtual workspace;
+///   the root package's id in a non-virtual one.
+/// - anything else: cargo runs its manifest-parsing lints over every
+///   path-sourced package it loads, members or not - a sibling checkout, a
+///   `[patch]`ed or `exclude`d crate. Its id is the non-member marker
+///   `manifest+<path>`, which no member carries, so [`is_dependency_warning`]
+///   treats its warnings as a dependency's.
+fn attribute_manifest_lints(
+    r: &SweepResult,
+    info: &build::ProjectInfo,
+) -> Vec<(usize, cargo_json::DiagnosticEvent)> {
+    let blocks = crate::script_check::rustc_blocks(&r.stderr);
+    let root_manifest = info.workspace_root.join("Cargo.toml");
+    cargo_json::manifest_lints_by_block(&blocks)
+        .into_iter()
+        .filter_map(|(i, mut e)| {
+            let path = lexical_normalize(&info.workspace_root.join(e.file.as_deref()?));
+            match info.member_manifests.get(&path) {
+                // A non-virtual root is a member too, but its manifest still
+                // holds the workspace's tables: reported by every run.
+                Some(id) if path == root_manifest => e.package_id = Some(id.clone()),
+                Some(id) if r.selects(id, info) => e.package_id = Some(id.clone()),
+                Some(_) => return None,
+                None if path == root_manifest => {}
+                None => e.package_id = Some(format!("manifest+{}", path.display())),
+            }
+            Some((i, e))
+        })
+        .collect()
+}
+
+/// `path` with `.` and `..` components folded away, without touching the
+/// filesystem - a manifest path climbing out of the workspace must compare
+/// equal to the absolute one `cargo metadata` reports.
+fn lexical_normalize(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for c in path.components() {
+        match c {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 /// The `rustdoc` phase: `cargo doc --no-deps` per build shape, failing on any
@@ -2214,7 +2290,7 @@ fn run_rustdoc_phase(
     let members = Some(&info.workspace_members);
     let keep = |d: &cargo_json::DiagnosticEvent| {
         !is_dependency_warning(d, members)
-            && !rustdoc_allowed(d, allow)
+            && !code_allowed(d, allow)
             && !sited_allowed(d, allow_exact)
     };
     let multi = results.len() > 1;
@@ -2222,9 +2298,12 @@ fn run_rustdoc_phase(
 }
 
 /// Whether `[lints] allow` names this diagnostic's lint. Matched on the exact
-/// code cargo reports (`rustdoc::broken_intra_doc_links`); a lint group name
-/// matches nothing here, since diagnostics carry the member lint's code.
-fn rustdoc_allowed(d: &cargo_json::DiagnosticEvent, allow: &[String]) -> bool {
+/// code cargo reports (`rustdoc::broken_intra_doc_links`,
+/// `cargo::unused_dependencies`); a lint group name matches nothing here,
+/// since diagnostics carry the member lint's code. The ingestion-side allow
+/// for the lints no `-A` flag can reach: rustdoc's (no `-A` without changing
+/// the doc fingerprint) and cargo's own (no `-A` at all).
+fn code_allowed(d: &cargo_json::DiagnosticEvent, allow: &[String]) -> bool {
     d.code.as_deref().is_some_and(|c| allow.iter().any(|a| a == c))
 }
 
@@ -2247,7 +2326,7 @@ fn report_diagnostic_phase(
     commands: bool,
 ) -> Result<(), DevError> {
     let run_failed = |r: &SweepResult| {
-        !r.success || cargo_json::parse_cargo_diagnostics(&r.stdout).iter().any(keep)
+        !r.success || r.diagnostics().iter().any(keep)
     };
     if !results.iter().any(run_failed) {
         // The phase's one green line. Only inside `check`: `brokkr clippy`
@@ -2433,7 +2512,8 @@ fn announce_test_allows(
     // One clause, not a second line: that a sited entry widens here is a
     // property of the phase, not news about any particular entry, so it does
     // not earn a line of its own - let alone one per entry.
-    let widened = if allow_exact.is_empty() {
+    // A `cargo::` entry never reaches the build (`test_phase_allow_flags`).
+    let widened = if allow_exact.iter().all(|s| crate::config::is_cargo_lint(&s.lint)) {
         ""
     } else {
         "; allow_exact applies build-wide here"
@@ -2554,7 +2634,7 @@ fn report_stale_sited_allows(
     }
     let mut matched = vec![false; judged.len()];
     for r in results {
-        for d in cargo_json::parse_cargo_diagnostics(&r.stdout) {
+        for d in r.diagnostics() {
             for (i, s) in judged.iter().enumerate() {
                 if sited_match(s, &d) {
                     matched[i] = true;
@@ -2860,9 +2940,23 @@ struct SweepResult {
     /// which builds the workspace's default members. What the run covered,
     /// for deciding whether a diagnostic it did not report is news.
     selected: Option<Vec<String>>,
+    /// Cargo's manifest lints from this run's stderr, attributed to their
+    /// packages, each with the index of the stderr block it came from
+    /// ([`attribute_manifest_lints`]). Filled by the clippy phase only: clippy
+    /// and rustdoc runs both emit them, and reading them twice would report
+    /// each one twice. Empty everywhere else.
+    manifest: Vec<(usize, cargo_json::DiagnosticEvent)>,
 }
 
 impl SweepResult {
+    /// Every diagnostic the run produced: the JSON stream on stdout, plus
+    /// cargo's manifest lints, which only ever reach stderr as text.
+    fn diagnostics(&self) -> Vec<cargo_json::DiagnosticEvent> {
+        let mut events = cargo_json::parse_cargo_diagnostics(&self.stdout);
+        events.extend(self.manifest.iter().map(|(_, e)| e.clone()));
+        events
+    }
+
     /// Whether this run selected the package `id`.
     fn selects(&self, id: &str, info: &build::ProjectInfo) -> bool {
         match &self.selected {
@@ -2975,12 +3069,12 @@ fn coverage_tag(
     sweep_tag(reported_by, results.len())
 }
 
-/// Multi-sweep version of the text formatter: parses each sweep's stdout
-/// JSON, merges + dedups diagnostics, orders them by scope, and when `multi`
-/// tags a line with the sweeps that reported it - only where some sweep
-/// covering its package did not ([`coverage_tag`]). Falls back to per-sweep
-/// raw streams when cargo failed but emitted no compiler-message events
-/// (e.g. cargo itself crashed before reaching the diagnostic phase).
+/// Multi-sweep version of the text formatter: gathers each sweep's
+/// diagnostics ([`SweepResult::diagnostics`]), merges + dedups them, orders
+/// them by scope, and when `multi` tags a line with the sweeps that reported
+/// it - only where some sweep covering its package did not ([`coverage_tag`]).
+/// A sweep whose cargo failed with no error-level diagnostic also gets its
+/// captured streams after the list ([`failed_run_streams`]).
 #[allow(clippy::too_many_arguments)]
 fn format_clippy_multi(
     tool: &str,
@@ -2997,7 +3091,7 @@ fn format_clippy_multi(
     let parses: Vec<(String, cargo_filter::ClippyParse)> = results
         .iter()
         .map(|r| {
-            let mut events = cargo_json::parse_cargo_diagnostics(&r.stdout);
+            let mut events = r.diagnostics();
             events.retain(|d| keep(d));
             let parse = clippy_parse_from_events(&events, !r.success);
             for (d, e) in parse.diagnostics.iter().zip(&events) {
@@ -3009,25 +3103,32 @@ fn format_clippy_multi(
         })
         .collect();
 
-    // Any sweep with parse_failed: fall back to raw aggregated streams.
-    if parses.iter().any(|(_, p)| p.parse_failed) {
-        let mut out = String::new();
-        for r in results {
-            if multi {
-                if !out.is_empty() {
-                    out.push('\n');
-                }
-                out.push_str(&format!("[{}]\n", r.label));
-            }
-            out.push_str(&r.stderr);
-            out.push_str(&r.stdout);
+    // A run that failed for a reason the list cannot name gets its captured
+    // streams after the list: no error-level diagnostic at all, or an error on
+    // stderr the list does not carry - under `--keep-going` a build script can
+    // panic in the same run that reports another crate's rustc error, and
+    // hiding it until that error is fixed is the one-failure-per-run loop
+    // `--keep-going` exists to break.
+    let mut streams = String::new();
+    for (r, (_, p)) in results.iter().zip(&parses) {
+        if r.success || !(p.parse_failed || has_unlisted_stderr_error(r, keep)) {
+            continue;
         }
-        return out;
+        if multi {
+            if !streams.is_empty() {
+                streams.push('\n');
+            }
+            streams.push_str(&format!("[{}]\n", r.label));
+        }
+        streams.push_str(&failed_run_streams(r, keep));
     }
 
     let merged = merge_clippy(&parses);
 
     if merged.is_empty() {
+        if !streams.is_empty() {
+            return streams;
+        }
         return format!("{tool}: no issues");
     }
 
@@ -3066,7 +3167,213 @@ fn format_clippy_multi(
         out.push_str(&m.diag.format_one());
         out.push('\n');
     }
+    if !streams.is_empty() {
+        out.push('\n');
+        out.push_str(&streams);
+    }
     out.trim_end().to_string()
+}
+
+/// The stderr blocks the diagnostic list already carries: the manifest lints
+/// the phase's `keep` admitted. Printing them again would say each twice.
+fn listed_blocks(
+    r: &SweepResult,
+    keep: &dyn Fn(&cargo_json::DiagnosticEvent) -> bool,
+) -> std::collections::HashSet<usize> {
+    r.manifest.iter().filter(|(_, e)| keep(e)).map(|(i, _)| *i).collect()
+}
+
+/// Whether a failed run's stderr holds an `error` block the list does not
+/// explain: anything but a listed manifest lint and cargo's own summaries of
+/// a failure reported elsewhere ([`is_failure_summary`]).
+fn has_unlisted_stderr_error(r: &SweepResult, keep: &dyn Fn(&cargo_json::DiagnosticEvent) -> bool) -> bool {
+    let listed = listed_blocks(r, keep);
+    crate::script_check::rustc_blocks(&r.stderr)
+        .iter()
+        .enumerate()
+        .any(|(i, b)| b.level == Level::Error && !listed.contains(&i) && !is_failure_summary(&b.text))
+}
+
+/// cargo's closing lines for a failure it has already reported:
+/// `could not compile `x` (lib) due to N previous errors`, `build failed`.
+fn is_failure_summary(text: &str) -> bool {
+    let header = text.lines().next().unwrap_or("");
+    header.starts_with("error: could not compile ") || header == "error: build failed"
+}
+
+/// The captured streams of a failed cargo run whose failure the diagnostic
+/// list does not explain - a build script that panicked, a manifest cargo
+/// refused, an error an allow filtered. Narrowed by kind, never by a line
+/// budget:
+///
+/// - stdout is cargo's `--message-format=json` event stream, so its records
+///   are dropped - they are the bulk of the stream (one `compiler-artifact`
+///   record per unit, some tens of KB long; measured on a slint workspace
+///   whose fontconfig build script failed: 1118 JSON lines, about 850 KB,
+///   beside around 130 lines of cargo's own words). The exception is an
+///   error-level `compiler-message` the phase's `keep` rejected, kept as its
+///   `rendered` text: an allow filtered it from the list, and it is still a
+///   reason cargo failed. Any non-JSON line stays.
+/// - stderr, when it holds an `error` block, prints its error blocks and
+///   withholds the rest, with a trailer counting the warnings withheld -
+///   `append_rustc_errors`'s rule, for the same reason: the same run printed a
+///   slint build script's warnings by the hundred beside the one panic that
+///   mattered. Every `error` block prints except those the list carries
+///   ([`listed_blocks`]), and a build script's `--- stdout` inside one loses
+///   its `cargo:` directives ([`drop_build_directives`]). Any other block is
+///   withheld only when it is self-contained ([`is_self_contained`]); one that
+///   swallowed unindented text after its header prints whole, since that text
+///   may be the failure's cause - that check comes before any other reason to
+///   drop a block. Not counted as withheld: listed warnings, cargo's
+///   `generated N warnings` tallies and its `build failed, waiting` status.
+///   With no `error` block, stderr is the evidence and prints verbatim.
+fn failed_run_streams(r: &SweepResult, keep: &dyn Fn(&cargo_json::DiagnosticEvent) -> bool) -> String {
+    let mut out = String::new();
+    let blocks = crate::script_check::rustc_blocks(&r.stderr);
+    if blocks.iter().any(|b| b.level == Level::Error) {
+        let listed = listed_blocks(r, keep);
+        let mut withheld = 0usize;
+        for (i, block) in blocks.iter().enumerate() {
+            let print = match block.level {
+                Level::Error => !listed.contains(&i),
+                Level::Warning => {
+                    let contained = is_self_contained(&block.text, true);
+                    if contained && !listed.contains(&i) && !is_cargo_status(&block.text) {
+                        withheld += 1;
+                    }
+                    !contained
+                }
+                // cargo's `Compiling` progress is indented; anything else
+                // ahead of the first header is kept.
+                Level::Other => !is_self_contained(&block.text, false),
+            };
+            if print {
+                let text = if block.level == Level::Error {
+                    drop_build_directives(&block.text)
+                } else {
+                    block.text.clone()
+                };
+                out.push_str(&text);
+                out.push('\n');
+            }
+        }
+        if withheld > 0 {
+            out.push_str(&format!("{} not shown\n", output::count(withheld, "warning")));
+        }
+    } else {
+        out.push_str(&r.stderr);
+    }
+    for text in r.stdout.lines().filter_map(|l| failed_stdout_line(l, keep)) {
+        out.push_str(&text);
+        out.push('\n');
+    }
+    out
+}
+
+/// A failed build script's report with the `cargo:` directives in its
+/// `--- stdout` section dropped and counted. Those lines are instructions to
+/// cargo - one `cargo:rerun-if-env-changed=` per variable a `-sys` crate
+/// probes, dozens before the panic that matters - not an account of the
+/// failure. `cargo:warning=` and `cargo::error=` lines are messages and stay,
+/// as does everything in `--- stderr` and any non-directive stdout.
+fn drop_build_directives(text: &str) -> String {
+    let mut out = String::new();
+    let mut in_stdout = false;
+    let mut dropped = 0usize;
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        match trimmed {
+            "--- stdout" => in_stdout = true,
+            "--- stderr" => in_stdout = false,
+            _ => {}
+        }
+        let directive = trimmed
+            .strip_prefix("cargo::")
+            .or_else(|| trimmed.strip_prefix("cargo:"))
+            .is_some_and(|rest| !rest.starts_with("warning=") && !rest.starts_with("error="));
+        if in_stdout && directive {
+            dropped += 1;
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    if dropped > 0 {
+        out.push_str(&format!(
+            "  ({} not shown)\n",
+            output::count(dropped, "build-script directive")
+        ));
+    }
+    out.trim_end().to_owned()
+}
+
+/// Whether a warning block is cargo's bookkeeping rather than a warning: a
+/// per-package tally (``warning: `pkg` (lib) generated 3 warnings (1
+/// duplicate)``, `... (run `cargo clippy --fix ...` to apply 2 suggestions)`)
+/// or the `build failed, waiting for other jobs to finish...` status.
+fn is_cargo_status(text: &str) -> bool {
+    let header = text.lines().next().unwrap_or("");
+    if header.starts_with("warning: build failed, waiting for other jobs") {
+        return true;
+    }
+    header.split_once(") generated ").is_some_and(|(_, rest)| {
+        let digits = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+        digits > 0 && rest[digits..].starts_with(" warning")
+    })
+}
+
+/// Whether a stderr block holds nothing but its own diagnostic: every line
+/// (after the header, when `has_header`) blank, indented, a column-zero
+/// `help:`/`note:`/`= ` continuation, or a source-excerpt line whose line
+/// number reaches column zero (`150 | config = "0.15"`) - the lines rustc and
+/// cargo attach to a diagnostic. Text that fails this is something
+/// `rustc_blocks` merged into the block only because no header came between.
+fn is_self_contained(text: &str, has_header: bool) -> bool {
+    text.lines().skip(usize::from(has_header)).all(|l| {
+        let after_number = l.trim_start_matches(|c: char| c.is_ascii_digit());
+        l.is_empty()
+            || l.starts_with(char::is_whitespace)
+            || l.starts_with("help:")
+            || l.starts_with("note:")
+            || l.starts_with("= ")
+            || (after_number.len() < l.len() && after_number.starts_with(" |"))
+    })
+}
+
+/// What one line of a failed run's stdout contributes to its report
+/// ([`failed_run_streams`]): a non-JSON line itself, an error-level
+/// `compiler-message` that `keep` rejected its `rendered` text, any other
+/// cargo record nothing.
+/// Parsed rather than prefix-matched, so a tool line that merely starts with
+/// `{` survives.
+fn failed_stdout_line(line: &str, keep: &dyn Fn(&cargo_json::DiagnosticEvent) -> bool) -> Option<String> {
+    use serde_json::Value;
+    let record = line
+        .starts_with('{')
+        .then(|| serde_json::from_str::<Value>(line).ok())
+        .flatten()
+        .filter(|v| v.get("reason").is_some_and(Value::is_string));
+    let Some(record) = record else {
+        return Some(line.to_owned());
+    };
+    if record.get("reason").and_then(Value::as_str) != Some("compiler-message") {
+        return None;
+    }
+    // The list's own reading of the record: an event it keeps is already
+    // shown, and one it parses to nothing is summary noise (`aborting due
+    // to ...`).
+    let event = cargo_json::parse_cargo_diagnostics(line).into_iter().next()?;
+    if !is_error_level(&event) || keep(&event) {
+        return None;
+    }
+    let message = record.get("message")?;
+    message.get("rendered").and_then(Value::as_str).map(|s| s.trim_end().to_owned())
+}
+
+/// Whether a diagnostic is at error level. rustc spells an ICE `error:
+/// internal compiler error`, so a prefix, not an equality.
+fn is_error_level(d: &cargo_json::DiagnosticEvent) -> bool {
+    d.level.starts_with("error")
 }
 
 /// Parse cargo's `--message-format=json` stdout into a
@@ -3074,8 +3381,7 @@ fn format_clippy_multi(
 ///
 /// Walks each compiler-message JSON event and maps it to the formatter
 /// primitive used by `merge_clippy` and `format_one()`, in discovery order.
-/// When cargo failed and emitted no compiler-message events, sets
-/// `parse_failed` so callers can fall back to dumping the raw streams.
+/// `parse_failed` follows [`clippy_parse_from_events`]'s rule.
 #[cfg(test)]
 fn parse_clippy_from_json(
     stdout: &str,
@@ -3086,15 +3392,18 @@ fn parse_clippy_from_json(
 }
 
 /// Map already-filtered diagnostic events to the formatter primitive, in
-/// discovery order. `parse_failed` is set when cargo failed and left no event,
-/// so callers can fall back to dumping the raw streams.
+/// discovery order. `parse_failed` is set when cargo failed and left no
+/// `error`-level event, so callers also print the captured streams: under
+/// `--cap-lints=warn` a lint never fails cargo, so a failed run with warnings
+/// alone failed for a reason no diagnostic names - a build script's panic
+/// beside some crate's lints, which the old "no event at all" rule hid.
 fn clippy_parse_from_events(
     events: &[cargo_json::DiagnosticEvent],
     sweep_failed: bool,
 ) -> cargo_filter::ClippyParse {
     let diagnostics: Vec<cargo_filter::ClippyDiagnostic> =
         events.iter().map(event_to_clippy).collect();
-    let parse_failed = sweep_failed && diagnostics.is_empty();
+    let parse_failed = sweep_failed && !events.iter().any(is_error_level);
     cargo_filter::ClippyParse {
         diagnostics,
         parse_failed,
@@ -3121,6 +3430,8 @@ fn event_to_clippy(d: &cargo_json::DiagnosticEvent) -> cargo_filter::ClippyDiagn
     };
     let location = match (&d.file, d.line, d.column) {
         (Some(f), Some(l), Some(c)) => Some(format!("{f}:{l}:{c}")),
+        // A manifest lint cargo could not place within its `Cargo.toml`.
+        (Some(f), None, None) => Some(f.clone()),
         _ => None,
     };
     let detail = extract_detail_from_event(d);
@@ -3141,7 +3452,9 @@ fn event_to_clippy(d: &cargo_json::DiagnosticEvent) -> cargo_filter::ClippyDiagn
 /// whoever owns the line.
 ///
 /// A diagnostic with no `package_id`, or a run whose workspace members are
-/// unknown, is treated as the workspace's own.
+/// unknown, is treated as the workspace's own. Cargo's manifest lints get
+/// their id from [`attribute_manifest_lints`], a non-member's included, so the
+/// same rule places them.
 fn is_dependency_warning(
     d: &cargo_json::DiagnosticEvent,
     members: Option<&HashMap<String, String>>,

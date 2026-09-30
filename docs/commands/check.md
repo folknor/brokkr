@@ -116,7 +116,8 @@ Output:
   ingestion) and every compiling phase (test, coverage, install-feature,
   through rustflags) alike; `allow_exact` adds where it is sited and where it
   is not (`sited in clippy/rustdoc; build-wide in test, coverage and install
-  builds`). The verdict prints on a red run too, so the context does.
+  builds`, or just `sited` when every entry is a `cargo::` lint, which never
+  reaches a build). The verdict prints on a red run too, so the context does.
 - **Warnings print once.** A cargo warning from a passing test sweep is held
   until the phase ends and merged with the identical block from every other
   sweep - keyed by the whole block, never split - then printed once with the
@@ -1130,7 +1131,8 @@ formatter converts each `DiagnosticEvent` into a `ClippyDiagnostic` so every
 warning keeps its lint code in the header, even for repeats of the same rule
 (cargo's pretty-printed text only annotates the first occurrence per crate,
 which is why the JSON ingestion path was needed; see `src/cargo_filter.rs`
-module header).
+module header). Cargo's own manifest lints are the one exception - they reach
+stderr only, as text, and are read from there (below).
 
 The invocation is `cargo clippy --keep-going --all-targets
 --message-format=json <sweep features> -- --cap-lints=warn`. The last two
@@ -1154,6 +1156,93 @@ graph:
   clippy's `warning:` wording in the underlying JSON; brokkr reports it as the
   error it is, and no view shows the original wording.
 
+### Cargo's manifest lints
+
+Cargo's own lints (`[lints.cargo]` in `Cargo.toml`: `unused_dependencies`,
+`unused_workspace_dependencies`, ...) never reach the JSON stream - cargo
+prints them to stderr as text even under `--message-format=json`. The clippy
+phase reads them from there (`cargo_json::manifest_lints_by_block`) and lists
+them beside clippy's, under the same any-diagnostic-fails rule:
+
+```text
+error[cargo::unused_dependencies] crates/t/Cargo.toml:25:1 unused dependency `anyhow`
+```
+
+A stderr block is taken for a manifest lint only when its `-->` arrow points
+at a `Cargo.toml` *and* it has a lint identity. The arrow alone is not enough:
+cargo's ordinary manifest errors (a bad TOML string, an invalid version) carry
+the same arrow, and they stay in the captured stream, where their excerpt
+explains them. Cargo names the lint (`` `cargo::unused_dependencies` is set to
+`warn` ``) only on its first hit per manifest; another hit takes the code of a
+named block in the same manifest with the same message shape (its backticked
+names emptied), and only when that shape names exactly one lint there. An arrow
+with no `line:col` - cargo's fallback when it has no span - still locates the
+lint, by manifest alone.
+
+Only clippy reads them: clippy and rustdoc runs both emit them, and the
+rustdoc phase reading them too would report each one twice.
+
+Stderr text names no package, so each lint is attributed by the `Cargo.toml`
+it names (`attribute_manifest_lints`). Cargo prints that path relative to the
+workspace root whatever directory it ran in (a run from a member's parent
+directory still prints `crates/a/Cargo.toml`), so it resolves against
+`cargo metadata`'s `workspace_root` and is looked up among the members'
+manifests:
+
+- **A member's manifest** gets that member's package id and follows the run's
+  selection like any other diagnostic: `check -p a` reports `a`'s manifest and
+  no other member's.
+- **The workspace root's `Cargo.toml`** is reported by every run, whatever it
+  selected - it holds the workspace's own tables, which
+  `unused_workspace_dependencies` is about.
+- **Any other manifest** - cargo runs its manifest-parsing lints over every
+  path-sourced package it loads, members or not: a sibling checkout, a
+  `[patch]`ed or `exclude`d crate - is a dependency's. Its warning, like any
+  dependency's, does not fail the gate; an error fails whoever owns the
+  manifest.
+
+Allowing one: the project's own `[lints.cargo]` in `Cargo.toml`, or brokkr's
+`[lints] allow` / `allow_exact`
+(`cargo::unused_dependencies@crates/t/Cargo.toml`). brokkr applies a
+`cargo::` allow where it ingests the diagnostic, never as a `-A` flag - rustc
+knows no `cargo` lint tool, so the flag would itself raise a diagnostic - and
+leaves `cargo::` names out of the test phase's rustflags for the same reason.
+
+### A failure no diagnostic explains
+
+A failed clippy (or rustdoc) run whose failure the diagnostic list does not
+explain gets its captured streams after the list, narrowed by kind but never
+capped by line count (`failed_run_streams`). Two cases qualify: the run left
+no `error`-level diagnostic at all (a build script that panicked, an error an
+allow filtered), or its stderr holds an error the list does not carry - under
+`--keep-going` one run can report a rustc error in one crate and a build
+script's panic in another, and hiding the panic until the rustc error is fixed
+is the one-failure-per-run loop `--keep-going` exists to break. cargo's own
+summaries of a failure reported elsewhere (`could not compile ...`,
+`build failed`) do not qualify.
+
+- stdout loses cargo's JSON records (a workspace emits one `compiler-artifact`
+  record per unit, the bulk of the stream), except an error-level
+  `compiler-message` the allow lists removed from the list, which keeps its
+  rendered text - it is still a reason cargo failed.
+- stderr, when it holds an `error` block, prints every error block the list
+  does not already carry, and a trailer counting the warnings withheld
+  (`script_check`'s `rustc` rule). A failed build script's `--- stdout`
+  inside an error block loses its `cargo:` directives (one
+  `cargo:rerun-if-env-changed=` per variable a `-sys` crate probes), counted
+  on a `(N build-script directives not shown)` line; `cargo:warning=` and
+  `cargo::error=` lines and the script's `--- stderr` stay whole. Any other
+  block is withheld only when it is self-contained - every line after the
+  header indented, blank, or a `help:`/`note:`/`=` continuation - and that
+  test comes first, for listed manifest lints and cargo's bookkeeping lines
+  too. A block that swallowed unindented text (relayed tool output with no
+  header of its own) prints whole, since that text may be the cause. The
+  trailer counts neither listed lints nor cargo's bookkeeping - the
+  `generated N warnings` tallies, whatever their suffix, and `build failed,
+  waiting for other jobs`. With no `error` block, stderr prints verbatim.
+  Containment is a heuristic: foreign text that happens to be indented is
+  still withheld with the block it follows.
+
 ### `[lints] allow`
 
 A `[lints]` section (spelled `[clippy]` historically; the two are unioned)
@@ -1167,7 +1256,9 @@ CI cannot see and its code cannot be expected to satisfy. The phase announces
 the allowed lints up front (`clippy: allowing clippy::unused_async ([lints]
 allow)`) so a narrowed gate never reads as a full one, and the `-A` flags ride
 in the reprinted failing command. Entries must be bare lint names
-(`clippy::`-qualified or plain rustc names); flags are rejected at parse time.
+(`clippy::`-qualified, `cargo::`-qualified, or plain rustc names); flags are
+rejected at parse time. A `cargo::` entry is the exception to the `-A` route:
+it acts at ingestion (see Cargo's manifest lints, above).
 
 **Known limit of `allow`:** the injected `-A` flags act at the CLI lint
 level, and a source site that carries its own lint-level attribute can
@@ -1298,7 +1389,9 @@ phase compiles rather than reads diagnostics:
 - **`allow_exact` loses its file scope here.** The build fails during
   compilation, before any diagnostic reaches brokkr to be filtered, and `-A`
   has no path-scoped form - so each entry contributes its lint name build-wide.
-  The run says so on its notice line.
+  The run says so on its notice line. A `cargo::` entry contributes nothing
+  here: rustc knows no `cargo` lint tool, and cargo's manifest lints are read
+  by the clippy phase alone.
 - **The flags travel through cargo's rustflags,** since `cargo test` has no
   `-- <rustc flags>` passthrough. Cargo picks exactly one rustflags source, so
   brokkr finds the layer already live for this build and adds to *that* one

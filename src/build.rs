@@ -160,6 +160,13 @@ pub struct ProjectInfo {
     pub workspace_members: std::collections::HashMap<String, String>,
     /// Package ids a bare (no `-p`) selection builds.
     pub default_members: std::collections::HashSet<String>,
+    /// The workspace root: what cargo's manifest-lint paths are relative to,
+    /// whichever directory it ran in.
+    pub workspace_root: PathBuf,
+    /// Every member's `Cargo.toml` (absolute, as `cargo metadata` reports it)
+    /// -> its package id. How a manifest lint, which names a file and no
+    /// package, is attributed to one.
+    pub member_manifests: std::collections::HashMap<PathBuf, String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -204,7 +211,24 @@ pub fn project_info(cwd: Option<&Path>) -> Result<ProjectInfo, DevError> {
             .and_then(serde_json::Value::as_array)
             .map(|ids| ids.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect())
             .unwrap_or_default(),
+        workspace_root: PathBuf::from(extract_string(&val, "workspace_root")?),
+        member_manifests: member_manifests(&val),
     })
+}
+
+/// Each member's manifest path -> package id, from the same `packages` array
+/// [`member_names`] reads.
+fn member_manifests(metadata: &serde_json::Value) -> std::collections::HashMap<PathBuf, String> {
+    let names = member_names(metadata);
+    metadata
+        .get("packages")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|p| Some((p.get("id")?.as_str()?, p.get("manifest_path")?.as_str()?)))
+        .filter(|(id, _)| names.contains_key(*id))
+        .map(|(id, path)| (PathBuf::from(path), id.to_owned()))
+        .collect()
 }
 
 /// `workspace_members` ids mapped to their package names, from the

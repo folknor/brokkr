@@ -151,6 +151,22 @@ mod tests {
         );
     }
 
+    /// rustc knows no `cargo` lint tool: a cargo lint's allow, in either list,
+    /// never becomes a build flag.
+    #[test]
+    fn test_phase_flags_leave_out_cargo_lints() {
+        let table: toml::map::Map<String, toml::Value> = toml::from_str(
+            "[lints]\nallow = [\"cargo::unused_dependencies\", \"deprecated\"]\n\
+             allow_exact = [\"cargo::unused_workspace_dependencies@Cargo.toml\"]",
+        )
+        .unwrap();
+        let cfg = parse_lints(&table).unwrap().unwrap();
+        assert_eq!(
+            test_phase_allow_flags(&cfg.allow, &cfg.allow_exact),
+            vec!["-A", "deprecated"]
+        );
+    }
+
     #[test]
     fn test_phase_flags_empty_without_config() {
         assert!(test_phase_allow_flags(&[], &[]).is_empty());

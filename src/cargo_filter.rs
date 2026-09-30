@@ -45,7 +45,9 @@ impl ClippyDiagnostic {
     /// Extract the file portion of `location` for scope matching.
     pub fn path(&self) -> Option<&Path> {
         let loc = self.location.as_deref()?;
-        let (file, _) = loc.split_once(':')?;
+        // A bare path is a location too: a manifest lint cargo could not
+        // place within its `Cargo.toml`.
+        let file = loc.split_once(':').map_or(loc, |(file, _)| file);
         Some(Path::new(file))
     }
 
@@ -85,10 +87,12 @@ impl ClippyDiagnostic {
 
 /// Parsed clippy output.
 ///
-/// Diagnostics are ordered errors-first, then warnings (stable within each).
-/// When cargo emitted `error:`/`warning:` markers but the parser extracted
-/// nothing, `parse_failed` is `true` and callers should print the raw output
-/// instead of the parsed list.
+/// `parse_failed` means the parsed list cannot explain the failure, and each
+/// producer says when: the legacy text parser here sets it when cargo emitted
+/// `error:`/`warning:` markers but nothing was extracted, and callers print
+/// the raw output instead of the list; `check`'s JSON path sets it when a
+/// failed run left no error-level diagnostic, and prints the captured streams
+/// after the list (`check_cmd::phase::clippy_parse_from_events`).
 pub struct ClippyParse {
     pub diagnostics: Vec<ClippyDiagnostic>,
     pub parse_failed: bool,

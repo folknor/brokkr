@@ -1494,7 +1494,256 @@ skip = ["edit_only::"]
             stderr: String::new(),
             success: true,
             selected: selected.map(|s| s.iter().map(|p| (*p).to_owned()).collect()),
+            manifest: Vec::new(),
         }
+    }
+
+    /// `r` with its manifest lints attributed, as the clippy phase does.
+    fn attributed(mut r: SweepResult, info: &crate::build::ProjectInfo) -> SweepResult {
+        r.manifest = attribute_manifest_lints(&r, info);
+        r
+    }
+
+    /// A clippy run that failed in a build script, as cargo reports it: stdout
+    /// is JSON records only, stderr carries a manifest lint, its tally, a
+    /// build-script error, cargo's status line and a build script's own
+    /// warnings. The report lists the manifest lint as a diagnostic, keeps the
+    /// error block minus the build script's directives, drops every JSON
+    /// record, and counts only the warnings it really withheld.
+    #[test]
+    fn failed_build_script_run_reports_manifest_lints_and_the_error() {
+        let info = two_member_info();
+        let mut r = run("default", None);
+        r.success = false;
+        r.stdout = [
+            r#"{"reason":"compiler-artifact","package_id":"registry+https://github.com/rust-lang/crates.io-index#regex@1.13.1","filenames":["a"]}"#,
+            r#"{"reason":"build-script-executed","package_id":"registry+https://github.com/rust-lang/crates.io-index#libm@0.2.15"}"#,
+            r#"{"reason":"build-finished","success":false}"#,
+        ]
+        .join("\n");
+        r.stderr = "\
+warning: unused dependency `anyhow`
+  --> core/Cargo.toml:25:1
+   |
+25 | anyhow = { workspace = true }
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `cargo::unused_dependencies` is set to `warn` by default
+help: consider removing the dependency on `anyhow`
+warning: `core` (manifest) generated 1 warning
+   Compiling fontconfig-sys v6.0.1
+error: failed to run custom build command for `fontconfig-sys v6.0.1`
+
+Caused by:
+  process didn't exit successfully: `build_script_build` (exit status: 101)
+  --- stdout
+  cargo:rerun-if-env-changed=PKG_CONFIG
+  cargo:rerun-if-env-changed=PKG_CONFIG_PATH
+  cargo:warning=probing fontconfig
+
+  --- stderr
+  The system library `fontconfig` required by crate `fontconfig-sys` was not found.
+warning: build failed, waiting for other jobs to finish...
+warning: desktop: Exported component 'A' doesn't inherit Window
+warning: desktop: Exported component 'B' doesn't inherit Window
+"
+        .to_owned();
+        let r = attributed(r, &info);
+
+        let root = crate::test_scratch::scratch("check-output", "failed_build_script_run");
+        let out = format_clippy_multi("cargo clippy", &[r], Some(&info), &root, false, &|_| true);
+
+        assert!(out.starts_with("cargo clippy: 1 error\n"), "{out}");
+        assert!(
+            out.contains("error[cargo::unused_dependencies] core/Cargo.toml:25:1 unused dependency `anyhow`"),
+            "{out}"
+        );
+        assert!(out.contains("error: failed to run custom build command"), "{out}");
+        assert!(out.contains("`fontconfig` required by crate"), "{out}");
+        assert!(!out.contains("\"reason\""), "{out}");
+        // The listed lint is not repeated from the stream: its excerpt's
+        // column-zero line number (`25 | ...`) is part of the diagnostic, not
+        // foreign text that would force the block to print.
+        assert!(!out.contains("consider removing"), "{out}");
+        // A build script's directives go; its messages stay.
+        assert!(!out.contains("rerun-if-env-changed"), "{out}");
+        assert!(out.contains("cargo:warning=probing fontconfig"), "{out}");
+        assert!(out.contains("(2 build-script directives not shown)"), "{out}");
+        // Withheld: the two build-script warnings. Not the listed manifest
+        // lint, not the tally, not cargo's `build failed` status.
+        assert!(out.contains("2 warnings not shown"), "{out}");
+        assert!(!out.contains("Exported component"), "{out}");
+    }
+
+    /// Under `--keep-going` one run can carry a rustc error the list shows and
+    /// a build-script panic it cannot: the panic prints too, and the listed
+    /// error is not repeated. A run whose only stderr error is cargo's
+    /// `could not compile` summary prints nothing beyond the list.
+    #[test]
+    fn a_build_script_panic_beside_a_listed_error_is_shown() {
+        let error = r#"{"reason":"compiler-message","package_id":"id-core","message":{"level":"error","code":{"code":"E0425"},"message":"cannot find value `x`","spans":[{"file_name":"core/src/a.rs","line_start":1,"column_start":1,"line_end":1,"column_end":2,"is_primary":true}],"children":[],"rendered":"RENDERED-E0425"}}"#;
+        let root = crate::test_scratch::scratch("check-output", "a_build_script_panic_beside");
+
+        let mut r = run("default", None);
+        r.success = false;
+        r.stdout = error.to_owned();
+        r.stderr = "\
+error: failed to run custom build command for `x-sys v1.0.0`
+
+Caused by:
+  boom
+error: could not compile `core` (lib) due to 1 previous error
+"
+        .to_owned();
+        let out = format_clippy_multi("cargo clippy", &[r], None, &root, false, &|_| true);
+        assert!(out.contains("error[E0425] core/src/a.rs:1:1 cannot find value `x`"), "{out}");
+        assert!(out.contains("failed to run custom build command for `x-sys"), "{out}");
+        assert!(!out.contains("RENDERED-E0425"), "{out}");
+
+        let mut r = run("default", None);
+        r.success = false;
+        r.stdout = error.to_owned();
+        r.stderr = "error: could not compile `core` (lib) due to 1 previous error\n".to_owned();
+        let out = format_clippy_multi("cargo clippy", &[r], None, &root, false, &|_| true);
+        assert!(!out.contains("could not compile"), "{out}");
+    }
+
+    #[test]
+    fn cargo_status_lines_are_not_warnings() {
+        for status in [
+            "warning: `a` (lib) generated 3 warnings",
+            "warning: `a` (lib) generated 1 warning",
+            "warning: `a` (lib) generated 3 warnings (1 duplicate)",
+            "warning: `a` (lib test) generated 2 warnings (run `cargo clippy --fix --lib -p a --tests` to apply 2 suggestions)",
+            "warning: `a` (manifest) generated 2 warnings",
+            "warning: build failed, waiting for other jobs to finish...",
+        ] {
+            assert!(is_cargo_status(status), "{status}");
+        }
+        for warning in [
+            "warning: unused dependency `a`",
+            "warning: desktop: the build (x) generated output",
+        ] {
+            assert!(!is_cargo_status(warning), "{warning}");
+        }
+    }
+
+    /// An error an allow filtered from the list is still why cargo failed: the
+    /// report carries its rendered text, not an empty stream.
+    #[test]
+    fn a_filtered_error_still_explains_the_failure() {
+        let mut r = run("default", None);
+        r.success = false;
+        r.stdout = [
+            r#"{"reason":"compiler-message","package_id":"p","message":{"level":"error","code":{"code":"E0425"},"message":"cannot find value `x`","spans":[],"children":[],"rendered":"error[E0425]: cannot find value `x` in this scope\n --> src/a.rs:1:1\n"}}"#,
+            r#"{"reason":"compiler-artifact","package_id":"q","filenames":["a"]}"#,
+        ]
+        .join("\n");
+        let root = crate::test_scratch::scratch("check-output", "a_filtered_error");
+        let out = format_clippy_multi("cargo clippy", &[r], None, &root, false, &|_| false);
+        assert!(out.contains("error[E0425]: cannot find value `x` in this scope"), "{out}");
+        assert!(!out.contains("compiler-artifact"), "{out}");
+    }
+
+    /// Text a warning header swallowed only because no header followed it is
+    /// printed, not withheld with the warning.
+    #[test]
+    fn a_warning_block_with_foreign_text_is_printed() {
+        let mut r = run("default", None);
+        r.success = false;
+        r.stderr = "\
+warning: relaying tool output
+TOOL CRASHED: out of disk
+error: could not compile `a`
+warning: plain one-liner
+"
+        .to_owned();
+        let root = crate::test_scratch::scratch("check-output", "a_warning_block_with_foreign_text");
+        let out = format_clippy_multi("cargo clippy", &[r], None, &root, false, &|_| true);
+        assert!(out.contains("TOOL CRASHED: out of disk"), "{out}");
+        assert!(out.contains("error: could not compile"), "{out}");
+        assert!(!out.contains("plain one-liner"), "{out}");
+        assert!(out.contains("1 warning not shown"), "{out}");
+    }
+
+    /// A denied cargo lint an allow filtered is cargo's reason for failing: its
+    /// error block prints. And a tally that swallowed foreign text prints
+    /// whole, like any other warning block.
+    #[test]
+    fn a_filtered_manifest_error_and_a_swallowing_tally_both_print() {
+        let mut r = run("default", None);
+        r.success = false;
+        r.stderr = "\
+error: unused dependency `anyhow`
+  --> a/Cargo.toml:25:1
+   = note: `cargo::unused_dependencies` is set to `deny` in `[lints]`
+warning: `a` (manifest) generated 1 warning
+TOOL CRASHED: out of disk
+warning: `b` (manifest) generated 1 warning
+"
+        .to_owned();
+        let r = attributed(r, &two_member_info());
+        let root = crate::test_scratch::scratch("check-output", "a_filtered_manifest_error");
+        let out = format_clippy_multi("cargo clippy", &[r], None, &root, false, &|_| false);
+        assert!(out.contains("error: unused dependency `anyhow`"), "{out}");
+        assert!(out.contains("TOOL CRASHED: out of disk"), "{out}");
+        // The self-contained tally is dropped, and never counted.
+        assert!(!out.contains("`b` (manifest)"), "{out}");
+        assert!(!out.contains("not shown"), "{out}");
+    }
+
+    /// A manifest lint is attributed by the `Cargo.toml` it names, resolved
+    /// against the workspace root: a member's follows the run's selection,
+    /// the root manifest's is every run's, and any other manifest - outside
+    /// the tree or inside it but not a member - is a dependency's, whose
+    /// warning does not fail the gate.
+    #[test]
+    fn manifest_lints_are_attributed_by_manifest() {
+        let info = two_member_info();
+        let lint = |file: &str| {
+            format!("warning: unused dependency `x`\n  --> {file}:1:1\n   = note: `cargo::unused_dependencies` is set to `warn` by default\n")
+        };
+        let stderr = ["core/Cargo.toml", "./daemon/../core/Cargo.toml", "Cargo.toml", "../sibling/Cargo.toml", "vendor/x/Cargo.toml"]
+            .map(lint)
+            .concat();
+        let owners = |selected: Option<&[&str]>| -> Vec<(String, Option<String>)> {
+            let mut r = run("r", selected);
+            r.stderr.clone_from(&stderr);
+            attribute_manifest_lints(&r, &info)
+                .into_iter()
+                .map(|(_, e)| (e.file.unwrap_or_default(), e.package_id))
+                .collect()
+        };
+        let id = |s: &str| Some(s.to_owned());
+        assert_eq!(
+            owners(None),
+            [
+                ("core/Cargo.toml".to_owned(), id("id-core")),
+                ("./daemon/../core/Cargo.toml".to_owned(), id("id-core")),
+                ("Cargo.toml".to_owned(), None),
+                ("../sibling/Cargo.toml".to_owned(), id("manifest+/sibling/Cargo.toml")),
+                ("vendor/x/Cargo.toml".to_owned(), id("manifest+/ws/vendor/x/Cargo.toml")),
+            ]
+        );
+        // `-p daemon`: core's manifest is not this run's; the root's still is.
+        let narrowed: Vec<String> = owners(Some(&["daemon"])).into_iter().map(|(f, _)| f).collect();
+        assert_eq!(narrowed, ["Cargo.toml", "../sibling/Cargo.toml", "vendor/x/Cargo.toml"]);
+
+        let members = Some(&info.workspace_members);
+        let dependency = |file: &str| {
+            let r = attributed(
+                SweepResult {
+                    stderr: lint(file),
+                    ..run("r", None)
+                },
+                &info,
+            );
+            is_dependency_warning(&r.manifest[0].1, members)
+        };
+        assert!(!dependency("core/Cargo.toml"));
+        assert!(!dependency("Cargo.toml"));
+        assert!(dependency("../sibling/Cargo.toml"));
+        assert!(dependency("vendor/x/Cargo.toml"));
     }
 
     /// Two members, both default: `core` and `daemon`.
@@ -1508,6 +1757,12 @@ skip = ["edit_only::"]
             ]
             .into(),
             default_members: ["id-core".to_owned(), "id-daemon".to_owned()].into(),
+            workspace_root: std::path::PathBuf::from("/ws"),
+            member_manifests: [
+                (std::path::PathBuf::from("/ws/core/Cargo.toml"), "id-core".to_owned()),
+                (std::path::PathBuf::from("/ws/daemon/Cargo.toml"), "id-daemon".to_owned()),
+            ]
+            .into(),
         }
     }
 
@@ -2218,6 +2473,32 @@ warning: z [too_many_lines]
         ] {
             assert!(!args.iter().any(|a| a == "-Zfeature-unification"), "got: {args:?}");
         }
+    }
+
+    /// rustc knows no `cargo` lint tool: a `cargo::` allow is applied at
+    /// ingestion, never passed to clippy as `-A`.
+    #[test]
+    fn clippy_args_leave_cargo_lints_out_of_the_allow_flags() {
+        let allow = ["clippy::unused_async".to_owned(), "cargo::unused_dependencies".to_owned()];
+        let args = clippy_args(&ResolvedSweep::default(), &[], &allow);
+        assert!(args.iter().any(|a| a == "clippy::unused_async"), "{args:?}");
+        assert!(!args.iter().any(|a| a.starts_with("cargo::")), "{args:?}");
+    }
+
+    /// A `cargo::` `allow_exact` entry never reaches a build, so the verdict
+    /// line does not claim it widens there.
+    #[test]
+    fn the_verdict_line_calls_cargo_allow_exact_entries_sited() {
+        let sited = |s: &str| SitedAllow::parse(s).unwrap();
+        let cargo_only = verdict_context(&None, 1, &[], &[sited("cargo::unused_dependencies@a/Cargo.toml")]);
+        assert!(cargo_only.contains("(sited)"), "{cargo_only}");
+        let mixed = verdict_context(
+            &None,
+            1,
+            &[],
+            &[sited("cargo::unused_dependencies@a/Cargo.toml"), sited("dead_code@src/a.rs")],
+        );
+        assert!(mixed.contains("build-wide in test"), "{mixed}");
     }
 
     #[test]

@@ -197,13 +197,17 @@ impl LintsConfig {
 /// A free function taking the two slices because that is how the check phases
 /// carry them - unbundled, straight off the config - so there is one definition
 /// of which lints reach a build rather than one per caller shape.
+///
+/// Cargo's own lints ([`is_cargo_lint`]) are left out: rustc knows no `cargo`
+/// lint tool, so `-A cargo::...` would itself raise a diagnostic.
 pub fn test_phase_allow_flags(allow: &[String], allow_exact: &[SitedAllow]) -> Vec<String> {
     let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
     let mut out = Vec::new();
     let names = allow
         .iter()
         .map(String::as_str)
-        .chain(allow_exact.iter().map(|s| s.lint.as_str()));
+        .chain(allow_exact.iter().map(|s| s.lint.as_str()))
+        .filter(|name| !is_cargo_lint(name));
     for name in names {
         if seen.insert(name) {
             out.push("-A".to_string());
@@ -211,6 +215,14 @@ pub fn test_phase_allow_flags(allow: &[String], allow_exact: &[SitedAllow]) -> V
         }
     }
     out
+}
+
+/// Whether a lint name belongs to cargo's own namespace (`[lints.cargo]`:
+/// `cargo::unused_dependencies`, ...). Cargo reports these itself, on stderr,
+/// so an allow for one acts only where brokkr ingests diagnostics, never as a
+/// rustc `-A` flag.
+pub fn is_cargo_lint(name: &str) -> bool {
+    name.starts_with("cargo::")
 }
 
 /// One `[lints] allow_exact` entry: a lint suppressed in one file only.
