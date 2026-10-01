@@ -125,6 +125,7 @@ pub(crate) fn cmd(req: &MeasureRequest, target: &str) -> Result<(), DevError> {
         example: Some(example),
         features,
         default_features: true,
+        all_features: false,
         profile: "release",
     };
 

@@ -15,7 +15,7 @@ leaves ambiguous - see `docs/brokkr.toml.md` (`brokkr man config bin`).
 
 ```
 brokkr run [NAME] [--debug|--release] [--features LIST] [--all-features]
-           [--no-default-features] [-- ARGS...]
+           [--no-default-features] [--commit REF] [-- ARGS...]
 ```
 
 Resolves `NAME` to a discovered target and runs
@@ -59,6 +59,37 @@ visible in the invocation that produced the number.
 
 The feature flags belong to `run` only. `install` ships the project's
 binaries as configured, and has no feature surface (see below).
+
+## `--commit`: running an older build
+
+```
+brokkr run --commit a5cc1f8 bench -- --preset mtf --repeat 3
+brokkr run bench -- --preset mtf --repeat 3
+```
+
+is an A/B of two builds of the same target. `--commit REF` builds the target
+in a persistent worktree of `REF` (the one `bench` and the measured commands
+use - sibling of the build root, its own `target/`, LRU-retained by
+`worktree_keep`, removed by `brokkr clean --worktrees`), then runs the binary
+**from the directory `brokkr run` was invoked in**.
+
+That split is the point. The build happens in the worktree, so the commit's
+own manifests, lockfile and `.cargo` config decide what is compiled. The
+program runs in the live tree, so relative paths in its arguments, and any
+cache or data it reads relative to its working directory, resolve exactly as
+they do for the plain `run` it is being compared against. The pair varies the
+code and nothing else.
+
+Without it the A/B gets hand-rolled - a second `CARGO_TARGET_DIR`, a tarball of
+the old source - and those leftovers pile up in the tree, unknown to `clean`.
+
+Under `--commit` the build is a `cargo build` followed by running the
+executable it produced, not a `cargo run`, since the two halves happen in
+different trees. The flags mean the same thing: profile, `--features`,
+`--all-features`, `--no-default-features` and the target name all carry
+over. Targets are discovered in the worktree, since the commit may predate a
+target or carry one the live tree has dropped. The cargo build's output is
+captured and printed only on failure.
 
 ## Target discovery
 
@@ -109,8 +140,9 @@ target name can collide with it. `brokkr run NAME -- ARGS` is left untouched,
 as is every other command's argv.
 
 Walking past the leading flags means the pre-pass has to know which of them
-take a **separate value**: `RUN_VALUE_FLAGS` lists `--features` / `-F`, so
-`brokkr run --features a,b -- --help` skips the `a,b` and still finds the `--`.
+take a **separate value**: `RUN_VALUE_FLAGS` lists `--features` / `-F` and
+`--commit`, so `brokkr run --features a,b -- --help` skips the `a,b` and still
+finds the `--`.
 A value-taking flag added to `run` and not to that list would silently
 reintroduce the swallowed-first-argument bug.
 

@@ -106,6 +106,7 @@ fn build_snapshot_binary(build_root: &Path) -> Result<PathBuf, DevError> {
         example: Some("snapshot".into()),
         features: Vec::new(),
         default_features: true,
+        all_features: false,
         profile: "release",
     };
     build::cargo_build(&config, build_root)

@@ -71,6 +71,9 @@ pub struct BuildConfig {
     pub example: Option<String>,
     pub features: Vec<String>,
     pub default_features: bool,
+    /// `--all-features`. Only `brokkr run --commit` sets it, forwarding the
+    /// flag a plain `run` hands to `cargo run`.
+    pub all_features: bool,
     pub profile: &'static str,
 }
 
@@ -82,6 +85,7 @@ impl BuildConfig {
             example: None,
             features: Vec::new(),
             default_features: true,
+            all_features: false,
             profile: "release",
         }
     }
@@ -93,6 +97,7 @@ impl BuildConfig {
             example: None,
             features: features.iter().map(|s| (*s).to_owned()).collect(),
             default_features: true,
+            all_features: false,
             profile: "release",
         }
     }
@@ -105,6 +110,7 @@ impl BuildConfig {
             example: None,
             features: features.to_vec(),
             default_features: true,
+            all_features: false,
             profile: "release",
         }
     }
@@ -116,6 +122,7 @@ impl BuildConfig {
             example: None,
             features: features.iter().map(|s| (*s).to_owned()).collect(),
             default_features: false,
+            all_features: false,
             profile: "release",
         }
     }
@@ -134,6 +141,7 @@ impl BuildConfig {
             example: None,
             features: harness_cfg.features.clone(),
             default_features: true,
+            all_features: false,
             profile: if debug { "dev" } else { "release" },
         }
     }
@@ -501,6 +509,10 @@ fn build_args(config: &BuildConfig) -> Vec<String> {
 
     if !config.default_features {
         args.push("--no-default-features".into());
+    }
+
+    if config.all_features {
+        args.push("--all-features".into());
     }
 
     if !config.features.is_empty() {

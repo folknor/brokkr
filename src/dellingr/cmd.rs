@@ -64,6 +64,7 @@ pub(crate) fn run(req: &MeasureRequest, lua: &str) -> Result<(), DevError> {
         example: Some(example),
         features,
         default_features: true,
+        all_features: false,
         profile: "release",
     };
 

@@ -27,7 +27,7 @@ pub const NO_NAME: &str = "\u{0}brokkr-bare-run";
 /// Flags of `brokkr run` that take a separate value argument. The
 /// pre-pass has to know them, or `run --features x -- ARGS` stops its scan
 /// on `x` and never sees the `--` it was looking for.
-const RUN_VALUE_FLAGS: [&str; 2] = ["--features", "-F"];
+const RUN_VALUE_FLAGS: [&str; 3] = ["--features", "-F", "--commit"];
 
 /// Rewrite `run [flags] -- ARGS...` so the `--` no longer lands in the
 /// name position. Returns the argv unchanged in every other shape,
@@ -192,20 +192,13 @@ fn index_line(r: &Runnable) -> String {
     }
 }
 
-/// `brokkr run [NAME]`: resolve the runnable, then exec
-/// `cargo run [--release] -p <pkg> [--example <name>] [-- <args>]`.
-#[allow(clippy::too_many_arguments)]
-pub fn cmd_run(
-    project_root: &Path,
+/// Resolve `run`'s target: `name` > `[bin] default` > the sole runnable.
+/// `None` means the bare index was printed and there is nothing to run.
+fn resolve_target<'a>(
+    runnables: &'a [Runnable],
     cfg: Option<&BinConfig>,
     name: Option<&str>,
-    debug: bool,
-    release: bool,
-    feat: &FeatureArgs<'_>,
-    args: &[String],
-    lock: Option<&crate::lockfile::LockGuard>,
-) -> Result<(), DevError> {
-    let runnables = discover(project_root)?;
+) -> Result<Option<&'a Runnable>, DevError> {
     if runnables.is_empty() {
         return Err(DevError::Build(
             "no bin or example targets in this workspace - nothing to run".into(),
@@ -243,14 +236,34 @@ pub fn cmd_run(
             // Bare-is-an-index: several candidates and no default is a
             // listing, not an error (the sync/service shape).
             let mut msg = format!("{} runnable targets:\n", runnables.len());
-            for r in &runnables {
+            for r in runnables {
                 msg.push_str(&index_line(r));
                 msg.push('\n');
             }
             msg.push_str("run one with `brokkr run <name>`, or set [bin] default");
             output::run_msg(msg.trim_end());
-            return Ok(());
+            return Ok(None);
         }
+    };
+    Ok(Some(target))
+}
+
+/// `brokkr run [NAME]`: resolve the runnable, then exec
+/// `cargo run [--release] -p <pkg> [--example <name>] [-- <args>]`.
+#[allow(clippy::too_many_arguments)]
+pub fn cmd_run(
+    project_root: &Path,
+    cfg: Option<&BinConfig>,
+    name: Option<&str>,
+    debug: bool,
+    release: bool,
+    feat: &FeatureArgs<'_>,
+    args: &[String],
+    lock: Option<&crate::lockfile::LockGuard>,
+) -> Result<(), DevError> {
+    let runnables = discover(project_root)?;
+    let Some(target) = resolve_target(&runnables, cfg, name)? else {
+        return Ok(());
     };
 
     let mut cargo_args: Vec<String> = vec!["run".into()];
@@ -269,6 +282,62 @@ pub fn cmd_run(
         cargo_args.extend(args.iter().cloned());
     }
     forward_cargo(&cargo_args, lock)
+}
+
+/// `brokkr run --commit REF [NAME]`: build the target in the commit's
+/// worktree, then run it from `run_dir` - the directory `brokkr run` was
+/// invoked from.
+///
+/// Building and running are split here, unlike [`cmd_run`]'s single `cargo
+/// run`, because the two must happen in different trees. The build belongs in
+/// the worktree, so the commit's own manifests, lockfile and `.cargo` config
+/// decide what gets compiled, into the worktree's own `target/`
+/// ([`crate::build::cargo_build`] isolates it). The program belongs in the live
+/// tree, so relative paths in `args` and any cache or data the program reads
+/// relative to its working directory resolve exactly as they do for a plain
+/// `brokkr run`. An A/B pair - `run --commit A NAME -- ARGS` against `run NAME
+/// -- ARGS` - then varies the code and nothing else, with no hand-made target
+/// dirs or source copies.
+///
+/// Targets are discovered in the worktree: the commit may predate a target, or
+/// carry one the live tree has since dropped.
+#[allow(clippy::too_many_arguments)]
+pub fn cmd_run_commit(
+    worktree: &Path,
+    run_dir: &Path,
+    cfg: Option<&BinConfig>,
+    name: Option<&str>,
+    debug: bool,
+    release: bool,
+    feat: &FeatureArgs<'_>,
+    args: &[String],
+    lock: &crate::lockfile::LockGuard,
+) -> Result<(), DevError> {
+    let runnables = discover(worktree)?;
+    let Some(target) = resolve_target(&runnables, cfg, name)? else {
+        return Ok(());
+    };
+    let build = crate::build::BuildConfig {
+        package: Some(target.package.clone()),
+        bin: (!target.example).then(|| target.name.clone()),
+        example: target.example.then(|| target.name.clone()),
+        features: feat.features.to_vec(),
+        default_features: !feat.no_default,
+        all_features: feat.all,
+        profile: if resolve_debug(cfg, debug, release) { "dev" } else { "release" },
+    };
+    let exe = crate::build::cargo_build(&build, worktree)?;
+    let exe_str = exe.display().to_string();
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let out = output::run_passthrough_in(&exe_str, &arg_refs, Some(run_dir), &[], Some(lock))?;
+    if out.code == 0 {
+        return Ok(());
+    }
+    Err(DevError::Subprocess {
+        program: target.name.clone(),
+        code: Some(out.code),
+        stderr: String::new(),
+    })
 }
 
 /// The `[bin] install` packages with their bin target names, through the
@@ -468,6 +537,14 @@ mod tests {
         assert_eq!(
             rewrite(&["brokkr", "run", "--features=a", "--", "--help"]),
             vec!["brokkr", "run", "--features=a", NO_NAME, "--help"]
+        );
+    }
+
+    #[test]
+    fn commit_value_does_not_end_the_scan() {
+        assert_eq!(
+            rewrite(&["brokkr", "run", "--commit", "a5cc1f8", "--", "--preset", "mtf"]),
+            vec!["brokkr", "run", "--commit", "a5cc1f8", NO_NAME, "--preset", "mtf"]
         );
     }
 

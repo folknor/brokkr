@@ -298,6 +298,12 @@ In depth: `brokkr man clippy`."
         #[arg(long)]
         no_default_features: bool,
 
+        /// Build this commit in a persistent worktree, then run it from the
+        /// current directory - the A/B partner of a plain `run`. Remove the
+        /// worktrees with `brokkr clean --worktrees`.
+        #[arg(long, value_name = "REF")]
+        commit: Option<String>,
+
         /// Raw arguments forwarded to the program (after `--`)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,

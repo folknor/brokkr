@@ -265,6 +265,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
         features,
         all_features,
         no_default_features,
+        commit,
         args,
     } = &cli.command
     {
@@ -272,24 +273,76 @@ fn run(cli: Cli) -> Result<(), DevError> {
         // (cwd). Detection also supplies the `[bin]` section - target
         // resolution itself comes from cargo metadata, so `run` still works
         // with no brokkr.toml at all.
-        let (project, bin_cfg, project_root) = match project::detect_optional()? {
-            Some(d) => (Some(d.project), d.config.bin, d.build_root),
-            None => (None, None, std::env::current_dir()?),
+        let detected = project::detect_optional()?;
+        let feat = runnables::FeatureArgs {
+            features,
+            all: *all_features,
+            no_default: *no_default_features,
         };
-        let _lock = acquire_cmd_lock_opt(project, &project_root, "run")?;
-        return runnables::cmd_run(
+        let Some(commit) = commit.as_deref() else {
+            let (project, bin_cfg, project_root) = match detected {
+                Some(d) => (Some(d.project), d.config.bin, d.build_root),
+                None => (None, None, std::env::current_dir()?),
+            };
+            let _lock = acquire_cmd_lock_opt(project, &project_root, "run")?;
+            return runnables::cmd_run(
+                &project_root,
+                bin_cfg.as_ref(),
+                name.as_deref(),
+                *debug,
+                *release,
+                &feat,
+                args,
+                Some(&_lock),
+            );
+        };
+        // `--commit`: `bench`'s shape. The worktree is cut from the build
+        // root, its bookkeeping lives under the project root, and the lock is
+        // taken inside the closure so the toolchain-disable lands on the
+        // worktree rather than the live tree.
+        let (project, bin_cfg, project_root, build_root, disable_toolchain, keep) = match detected
+        {
+            Some(d) => {
+                let keep = d.config.worktree_keep(&config::hostname()?);
+                (
+                    Some(d.project),
+                    d.config.bin,
+                    d.project_root,
+                    d.build_root,
+                    d.config.disable_toolchain,
+                    keep,
+                )
+            }
+            None => {
+                let cwd = std::env::current_dir()?;
+                (None, None, cwd.clone(), cwd, false, crate::worktree_record::DEFAULT_KEEP)
+            }
+        };
+        let parent_build_root = (build_root != project_root).then_some(build_root.as_path());
+        return context::with_worktree(
             &project_root,
-            bin_cfg.as_ref(),
-            name.as_deref(),
-            *debug,
-            *release,
-            &runnables::FeatureArgs {
-                features,
-                all: *all_features,
-                no_default: *no_default_features,
+            parent_build_root,
+            Some(commit),
+            false,
+            disable_toolchain,
+            keep,
+            |wt| {
+                let worktree = wt.ok_or_else(|| {
+                    DevError::Config("internal error: --commit produced no worktree".into())
+                })?;
+                let lock = acquire_cmd_lock_opt(project, &project_root, "run")?;
+                runnables::cmd_run_commit(
+                    worktree,
+                    &build_root,
+                    bin_cfg.as_ref(),
+                    name.as_deref(),
+                    *debug,
+                    *release,
+                    &feat,
+                    args,
+                    &lock,
+                )
             },
-            args,
-            Some(&_lock),
         );
     }
     if let Command::Install {

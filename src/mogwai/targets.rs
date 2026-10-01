@@ -56,6 +56,7 @@ pub(crate) fn resolve(
                 example: None,
                 features: extra_features.to_vec(),
                 default_features: true,
+                all_features: false,
                 profile: "release",
             },
         });
@@ -85,6 +86,7 @@ pub(crate) fn resolve(
             example: Some(entry.example.clone()),
             features,
             default_features: true,
+            all_features: false,
             profile: "release",
         },
     })

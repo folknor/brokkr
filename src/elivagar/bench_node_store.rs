@@ -28,6 +28,7 @@ pub fn run(
             example: Some("bench_node_store".into()),
             features: vec![],
             default_features: true,
+            all_features: false,
             profile: "release",
         },
         project_root,
