@@ -1,15 +1,19 @@
 //! The free-space gate: a fresh hold on the brokkr lock is refused when a
-//! filesystem the command will write to has less than [`MIN_FREE_PERCENT`]
+//! filesystem the build will write to has less than [`MIN_FREE_PERCENT`]
 //! of its size available - a fast `df`, not a size walk.
 //!
-//! Two filesystems are checked, deduplicated by mount: the project root's
-//! (results.db, `.brokkr/`, data) and `target`'s. The target is probed as
-//! `<project_root>/target` with symlinks resolved, which is what makes one
-//! rule cover every host: a plain per-project dir reports its own disk, a
-//! `target` symlinked into a shared directory reports the shared one. A
-//! `CARGO_TARGET_DIR` in the environment is probed too. A target moved by
-//! `build.target-dir` in a cargo config is not - finding it takes `cargo
-//! metadata`, too slow for every lock acquisition.
+//! Only the build's filesystem is checked, since that is where the bulk
+//! lands. The project root's is not: `.brokkr/` and the results stores are
+//! small, and a root on a full disk with `target` symlinked onto a roomy one
+//! must not be refused for a build that writes nothing to the root's disk.
+//! The target is probed as `<project_root>/target` with symlinks resolved,
+//! which is what makes one rule cover every host: a plain per-project dir
+//! (or a `target` not created yet, which resolves to its nearest existing
+//! ancestor) reports the project's disk, a `target` symlinked into a shared
+//! directory reports the shared one. A `CARGO_TARGET_DIR` in the environment
+//! is probed too, deduplicated by mount. A target moved by `build.target-dir`
+//! in a cargo config is not - finding it takes `cargo metadata`, too slow for
+//! every lock acquisition.
 //!
 //! "Available" is `statvfs`' `f_bavail`, df's `Avail` column: the space an
 //! unprivileged process can still write, so an ext4 root reserve does not
@@ -72,7 +76,7 @@ pub(crate) fn check(ctx: &LockContext<'_>) -> Result<(), DevError> {
 
 /// The paths whose filesystems the gate probes, in report order.
 fn candidates(root: &Path, cargo_target_dir: Option<&std::ffi::OsStr>) -> Vec<(&'static str, PathBuf)> {
-    let mut out = vec![("project", root.to_path_buf()), ("target", root.join("target"))];
+    let mut out = vec![("target", root.join("target"))];
     if let Some(dir) = cargo_target_dir {
         out.push(("CARGO_TARGET_DIR", root.join(dir)));
     }
@@ -106,19 +110,16 @@ mod tests {
     }
 
     #[test]
-    fn candidates_cover_root_target_and_env_override() {
+    fn candidates_cover_target_and_env_override_but_not_the_root() {
         let root = Path::new("/p");
         let plain = candidates(root, None);
-        assert_eq!(
-            plain,
-            vec![("project", PathBuf::from("/p")), ("target", PathBuf::from("/p/target"))]
-        );
+        assert_eq!(plain, vec![("target", PathBuf::from("/p/target"))]);
         // A relative CARGO_TARGET_DIR resolves against the project; an
         // absolute one replaces it (Path::join semantics).
         let rel = candidates(root, Some(std::ffi::OsStr::new("t")));
-        assert_eq!(rel[2], ("CARGO_TARGET_DIR", PathBuf::from("/p/t")));
+        assert_eq!(rel[1], ("CARGO_TARGET_DIR", PathBuf::from("/p/t")));
         let abs = candidates(root, Some(std::ffi::OsStr::new("/shared/cargo")));
-        assert_eq!(abs[2], ("CARGO_TARGET_DIR", PathBuf::from("/shared/cargo")));
+        assert_eq!(abs[1], ("CARGO_TARGET_DIR", PathBuf::from("/shared/cargo")));
     }
 
     #[test]
