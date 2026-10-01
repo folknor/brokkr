@@ -19,6 +19,12 @@
 //! unprivileged process can still write, so an ext4 root reserve does not
 //! count as headroom. A filesystem whose size cannot be read fails open.
 //!
+//! Cutting a `--commit` worktree gates one more disk, the worktree container's
+//! (`~/.brokkr/worktrees`), through [`check_paths`]: the checkout is written
+//! there, which need not be the target's disk. Only at the cut - the per-hold
+//! check would otherwise refuse every command on a full home disk, including
+//! builds that write nothing to it.
+//!
 //! `clean` is exempt, since it is the remedy, and so is `env`, which reports
 //! free space and is how you look: its storage rows show each disk's free
 //! share and flag one under the floor by this module's rule.
@@ -40,11 +46,18 @@ pub(crate) fn check(ctx: &LockContext<'_>) -> Result<(), DevError> {
         return Ok(());
     }
     let cargo_target_dir = std::env::var_os("CARGO_TARGET_DIR").filter(|d| !d.is_empty());
-    let candidates = candidates(Path::new(ctx.project_root), cargo_target_dir.as_deref());
+    check_paths(&candidates(Path::new(ctx.project_root), cargo_target_dir.as_deref()))
+}
+
+/// The gate over an explicit list of `(label, path)`s, deduplicated by mount.
+/// Also called when a `--commit` worktree is cut, for the container the
+/// checkout is written to ([`crate::worktree::Worktree::create`]) - a disk the
+/// per-hold check does not cover, since it is not the target's.
+pub(crate) fn check_paths(paths: &[(&str, PathBuf)]) -> Result<(), DevError> {
     let mut seen: Vec<String> = Vec::new();
     let mut low: Vec<String> = Vec::new();
-    for (label, path) in candidates {
-        let Some(fs) = crate::env::probe_path(label, &path) else {
+    for (label, path) in paths {
+        let Some(fs) = crate::env::probe_path(label, path) else {
             continue;
         };
         if seen.contains(&fs.mount_point) {

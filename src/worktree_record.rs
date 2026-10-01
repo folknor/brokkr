@@ -28,10 +28,12 @@
 //! trip the dirty-tree refusal, the same way brokkr's own toolchain sidecar
 //! did.
 //!
-//! One project root can govern several checkouts (the config-one-level-up
-//! layout), each a separate git root with its own worktrees. They share this
-//! one file, so everything that walks it is scoped to one checkout's names
-//! ([`crate::worktree::is_worktree_name`]): pruning drops only *this*
+//! Records are keyed `<checkout key>/<short hash>`
+//! ([`crate::worktree::record_name`]). One project root can govern several
+//! checkouts (the config-one-level-up layout), each a separate git root with
+//! its own worktrees. They share this one file, so everything that walks it is
+//! scoped to one checkout's names ([`crate::worktree::is_worktree_name`] under
+//! [`crate::worktree::record_prefix`]): pruning drops only *this*
 //! checkout's vanished records, and another checkout's records - which look
 //! missing from here only because they live under a different prefix - are
 //! left alone rather than deleted, which would make that checkout's worktrees
@@ -186,7 +188,7 @@ impl Store {
 /// growing therefore never shrinks on its own; `brokkr clean --worktrees` is
 /// the explicit hammer for that.
 ///
-/// `cutting` is the directory about to be (re)created. It is excluded from the
+/// `cutting` is the slot about to be (re)created. It is excluded from the
 /// victims and from the count, and room is made for it: the other worktrees are
 /// brought down to `keep - 1`, so the steady state is `keep`, not `keep + 1`.
 ///
@@ -210,19 +212,20 @@ pub fn enforce(
     keep: usize,
     cutting: &Path,
 ) -> Result<(), DevError> {
-    let listed: Vec<String> = crate::worktree::list(git_root)?
+    let slots = crate::worktree::list(git_root)?;
+    let listed: Vec<String> = slots
         .iter()
-        .filter_map(|p| p.file_name().and_then(|n| n.to_str()).map(str::to_owned))
+        .filter_map(|p| crate::worktree::record_name(p))
         .collect();
-    let prefix = crate::worktree::name_prefix(git_root);
+    let prefix = crate::worktree::record_prefix(git_root);
 
     let mut store = Store::load(project_root)?;
     store.prune_missing(&prefix, &listed);
 
-    let cutting_name = cutting.file_name().and_then(|n| n.to_str());
+    let cutting_name = crate::worktree::record_name(cutting);
     let existing: Vec<String> = listed
         .into_iter()
-        .filter(|n| Some(n.as_str()) != cutting_name)
+        .filter(|n| Some(n) != cutting_name.as_ref())
         .collect();
 
     // Room for the one about to be cut. `keep` is at least 1 in practice
@@ -239,16 +242,18 @@ pub fn enforce(
         if over == 0 {
             break;
         }
-        let path = git_root
-            .parent()
-            .map(|p| p.join(&name))
-            .unwrap_or_else(|| PathBuf::from(&name));
+        let Some(slot) = slots
+            .iter()
+            .find(|s| crate::worktree::record_name(s).as_ref() == Some(&name))
+        else {
+            continue;
+        };
 
-        if crate::worktree::is_dirty(&path) {
+        if crate::worktree::is_dirty(&crate::worktree::checkout_in(git_root, slot)) {
             skipped.push(format!("{name} (uncommitted work)"));
             continue;
         }
-        match crate::worktree::remove_one(git_root, &path) {
+        match crate::worktree::remove_one(git_root, slot) {
             Ok(()) => {
                 output::run_msg(&format!("evicted least-recently-used worktree {name}"));
                 store.entries.remove(&name);
@@ -302,7 +307,7 @@ mod tests {
         assert_eq!(store.lru_order(&existing), vec!["unrecorded", "known"]);
     }
 
-    const P: &str = ".brokkr-worktree-foo-";
+    const P: &str = "foo-0a1b2c3d/";
 
     #[test]
     fn prune_missing_drops_records_for_vanished_worktrees() {
@@ -328,13 +333,15 @@ mod tests {
     fn prune_missing_leaves_another_checkouts_records_alone() {
         // One project root governing checkouts `foo` and `foo-bar`: `foo`'s
         // listing cannot see `foo-bar`'s worktrees, and must not read that as
-        // their having vanished.
+        // their having vanished. A pre-container record is likewise left alone.
         let mine = format!("{P}0001");
-        let theirs = ".brokkr-worktree-foo-bar-0001";
-        let mut store = store_with(&[(mine.as_str(), 1), (theirs, 2)]);
+        let theirs = "foo-bar-4e5f6a7b/0001";
+        let legacy = ".brokkr-worktree-foo-0001";
+        let mut store = store_with(&[(mine.as_str(), 1), (theirs, 2), (legacy, 3)]);
         store.prune_missing(P, &[]);
         assert!(!store.entries.contains_key(&mine));
         assert!(store.entries.contains_key(theirs));
+        assert!(store.entries.contains_key(legacy));
     }
 
     #[test]

@@ -69,9 +69,18 @@ brokkr run bench -- --preset mtf --repeat 3
 
 is an A/B of two builds of the same target. `--commit REF` builds the target
 in a persistent worktree of `REF` (the one `bench` and the measured commands
-use - sibling of the build root, its own `target/`, LRU-retained by
-`worktree_keep`, removed by `brokkr clean --worktrees`), then runs the binary
-**from the directory `brokkr run` was invoked in**.
+use - LRU-retained by `worktree_keep`, removed by `brokkr clean --worktrees`),
+then runs the binary **from the directory `brokkr run` was invoked in**.
+
+Worktrees live in one container, `~/.brokkr/worktrees/<checkout key>/<short
+hash>/`, which holds the checkout plus a symlink for each path dependency that
+leaves the repo (`../pbfhogg` resolves to the live sibling). Their isolated
+target dirs live under the project's own effective target dir
+(`<target>/brokkr-worktrees/...`), so a worktree build lands on the same disk
+as any other build of the project and the free-space gate covers it. One
+pre-existing directory is the only shape a sandboxed agent's writable roots can
+grant, which is why worktrees are no longer cut as siblings of the checkout.
+The design is in `src/worktree.rs`.
 
 That split is the point. The build happens in the worktree, so the commit's
 own manifests, lockfile and `.cargo` config decide what is compiled. The

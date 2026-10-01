@@ -274,8 +274,15 @@ empty and overwritten; delete it to recover.
 
 Where one project root governs several checkouts (the config-one-level-up
 layout), they share that one file. Each checkout's eviction and pruning touch
-only records named for its own worktrees (`.brokkr-worktree-<checkout>-<short
-hash>`, matched by construction, so checkout `foo` never claims `foo-bar`'s).
+only records named for its own worktrees (`<checkout key>/<short hash>`, the
+key being the checkout's name plus a hash of its path, matched by construction,
+so checkout `foo` never claims `foo-bar`'s).
+
+A worktree is never *reused* unless its checkout is exactly its commit. The
+worktree container (`~/.brokkr/worktrees`) is writable to sandboxed agents, so
+one can be edited between runs, and reusing it would measure the edit under
+the commit's name. Such a run fails with the worktree's path; `brokkr clean
+--worktrees` clears it.
 
 ## `disable_toolchain`
 

@@ -394,10 +394,12 @@ fn cargo_build_locked(
     // post-date the main tree's source mtimes, a later main-tree build then
     // judges everything "up to date" and re-links the stale worktree binary -
     // benchmarking old code under the new commit's hash. Pinning
-    // `CARGO_TARGET_DIR` to a worktree-local path keeps the two builds' target
+    // `CARGO_TARGET_DIR` to a per-worktree dir keeps the two builds' target
     // trees apart; the env var overrides any inherited `build.target-dir`.
-    let target_override = crate::worktree::is_brokkr_worktree(project_root)
-        .then(|| project_root.join("target").display().to_string());
+    // That dir sits under the live project's target, on its disk (`worktree`'s
+    // module doc).
+    let target_override = crate::worktree::isolated_target_dir(project_root)
+        .map(|dir| dir.display().to_string());
     let env: Vec<(&str, &str)> = match target_override.as_deref() {
         Some(dir) => {
             output::build_msg(&format!("isolating worktree build target dir -> {dir}"));

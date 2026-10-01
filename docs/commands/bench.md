@@ -162,8 +162,10 @@ being built rather than the live root's.
 ## Worktree isolation
 
 A `--commit` run builds in a persistent worktree, and that build is pinned to a
-worktree-local `CARGO_TARGET_DIR` - the same rule every other brokkr build path
-applies.
+per-worktree `CARGO_TARGET_DIR` - the same rule every other brokkr build path
+applies. The dir sits under the project's own target
+(`<target>/brokkr-worktrees/<checkout key>/<short hash>`), reached through the
+worktree slot's `.brokkr-target` link.
 
 This is load-bearing, not tidiness. On a host pointing every checkout at one
 shared target dir, the artifact path does not encode which worktree produced it,

@@ -275,7 +275,7 @@ impl BenchContext {
 /// locks `f` takes re-enter that hold. A closure must therefore not wait on
 /// another *process* that needs the brokkr lock.
 ///
-/// Worktrees persist across runs so the cargo `target/` inside survives.
+/// Worktrees persist across runs so their isolated target dir survives.
 /// Reuse is automatic when the same commit is requested again. Run
 /// `brokkr clean --worktrees` to garbage collect.
 pub(crate) fn with_worktree<F, T>(
@@ -336,9 +336,7 @@ where
                     output::error(&format!("worktree retention: {e}"));
                 }
             })?;
-            if let Some(name) = wt.path.file_name().and_then(|n| n.to_str())
-                && let Err(e) = crate::worktree_record::Store::touch(project_root, name)
-            {
+            if let Err(e) = crate::worktree_record::Store::touch(project_root, &wt.record_name) {
                 output::error(&format!("worktree bookkeeping: {e}"));
             }
             output::bench_msg(&format!(

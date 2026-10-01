@@ -124,10 +124,20 @@ and pre-rename `<dataset>-<commit>` archives all survive untouched.
 
 ## `--worktrees`
 
-Purge every persistent benchmark worktree (the sibling
-`.brokkr-worktree-<project>-<short hash>` dirs that `--commit` creates). The
-name is matched by construction - the prefix followed by a bare hex hash - so a
-checkout named `foo` never claims a sibling checkout `foo-bar`'s worktrees.
+Purge every persistent `--commit` worktree of this checkout: each slot under
+`~/.brokkr/worktrees/<checkout key>/`, together with its isolated target dir
+(`<target>/brokkr-worktrees/<checkout key>/<short hash>`, followed through the
+slot's `.brokkr-target` link only when the link still points at that
+constructed name). The dependency symlinks in a slot are removed as links; the
+live checkouts they point at are untouched. Placement is described under
+`--commit` in `brokkr man run`, and in `src/worktree.rs`.
+
+Worktrees cut before the container existed - the sibling
+`.brokkr-worktree-<project>-<short hash>` directories next to the checkout -
+are found and purged too, so the move orphans nothing. That name is matched by
+construction - the prefix followed by a bare hex hash - so a checkout named
+`foo` never claims a sibling checkout `foo-bar`'s worktrees.
+
 Unlike retention eviction, the purge does not spare a worktree with
 uncommitted work: it is asked for by name, and a purge that quietly kept some
 would misreport what was reclaimed.
@@ -140,17 +150,16 @@ stopped growing never shrinks by itself, which is exactly what `--worktrees` is
 for. It also cannot promise the disk stays clear, since the count is per
 project.
 
-Worktrees are siblings of the **build** root, since that is the git repo they
-are cut from and the directory name that goes into their prefix. Discovery is
+Worktrees are keyed by the **build** root, since that is the git repo they are
+cut from and the checkout whose path names their directory. Discovery is
 anchored there for the same reason, and the root is threaded in from the
 dispatch layer rather than re-derived from cwd here - the two must agree, and a
 function that recomputes a root it was not given is stating an invariant it
-cannot enforce. Under the config-one-level-up layout the
-project root would give both the wrong parent directory *and* the wrong prefix,
-so a purge would report zero and reclaim nothing - which is why the count now
-reads `removed N of M worktree(s) found` whenever those differ. "Removed 0" and
-"looked in the wrong place" are otherwise the same message, and these
-directories carry an isolated `target/` each: on the nautilus workload, ~1.3G
+cannot enforce. Under the config-one-level-up layout the project root would
+give the wrong key, so a purge would report zero and reclaim nothing - which is
+why the count reads `removed N of M worktree(s) found` whenever those differ.
+"Removed 0" and "looked in the wrong place" are otherwise the same message, and
+each worktree carries an isolated target dir: on the nautilus workload, ~1.3G
 apiece.
 
 On elivagar this also empties the durable output store - every canonical

@@ -217,8 +217,8 @@ harness cannot hold the global lock through a `--gate all` sweep.
 
 Builds and measures the harness from a persistent git worktree at `REF`
 instead of the current tree, for retroactively benchmarking an older sync
-implementation. Worktrees are reused across runs (the cargo `target/`
-inside survives) and removed by `brokkr clean --worktrees`.
+implementation. Worktrees are reused across runs (their isolated target dir
+survives) and removed by `brokkr clean --worktrees`.
 
 **Only the harness build moves.** The script, the fixture, sæhrimnir, the
 artefact dir, `results.db` and `gate.db` all stay anchored to the main

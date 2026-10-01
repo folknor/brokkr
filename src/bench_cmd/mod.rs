@@ -484,8 +484,8 @@ fn cargo_bench(
     // artifact a later commit built, so cargo calls it fresh, skips the rebuild,
     // and the run measures the wrong commit's code under the right commit's
     // baseline name. It reports success, and the number looks entirely ordinary.
-    let target_dir = crate::worktree::is_brokkr_worktree(build_root)
-        .then(|| build_root.join("target").display().to_string());
+    let target_dir = crate::worktree::isolated_target_dir(build_root)
+        .map(|dir| dir.display().to_string());
     if let Some(dir) = &target_dir {
         output::build_msg(&format!("isolating worktree build target dir -> {dir}"));
     }
