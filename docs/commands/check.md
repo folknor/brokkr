@@ -2542,6 +2542,11 @@ can take `[test] debug = true` for the fast inner loop without the documented
 `brokkr test <a release-only timing test>` quietly switching to dev and failing
 on the build profile rather than on the code.
 
+A blank `<NAME>` (`""`, or whitespace only) is refused at parse time: as a
+substring filter it matches every test in the package, a whole-suite run under
+`--nocapture` that floods the terminal with every test's output. The whole
+suite is `brokkr check -p <pkg>`'s job.
+
 Unit tests and integration tests are both matched by the name substring within
 the selected package, **in every test harness of the package**. Each sweep
 builds once - `cargo test --no-run -p <pkg> --tests`, the same selection a

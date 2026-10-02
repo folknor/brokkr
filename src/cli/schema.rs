@@ -2013,7 +2013,9 @@ In depth: `brokkr man nidhogg`."
     /// In depth: `brokkr man check brokkr-test`.
     #[command(display_order = 10)]
     Test {
-        /// Exact test name to run (substring filter, case-sensitive)
+        /// Exact test name to run (substring filter, case-sensitive).
+        /// A blank name is refused - it would match every test.
+        #[arg(value_parser = validate_test_name)]
         name: String,
         /// Cargo package to test (`cargo test -p <pkg>`). Overrides the
         /// project default and any `[test] default_package` in brokkr.toml.

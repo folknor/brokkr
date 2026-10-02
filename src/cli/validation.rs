@@ -30,6 +30,20 @@ fn validate_env_kv(s: &str) -> Result<String, String> {
     }
 }
 
+/// Validate `brokkr test <NAME>`: a blank name is refused. libtest treats the
+/// name as a substring filter, so `""` matches every test in the package -
+/// a whole-suite run under `--nocapture`, which is `brokkr check`'s job.
+fn validate_test_name(s: &str) -> Result<String, String> {
+    if s.trim().is_empty() {
+        return Err(
+            "test name must not be blank: an empty filter matches every test \
+             (run the whole suite with `brokkr check -p <pkg>`)"
+                .to_owned(),
+        );
+    }
+    Ok(s.to_owned())
+}
+
 fn validate_compression(s: &str) -> Result<String, String> {
     if s == "none" {
         return Ok(s.to_owned());
@@ -368,6 +382,17 @@ mod tests {
             Cli::try_parse_from(["brokkr", "clippy", "--all-features", "--no-default-features"])
                 .is_err()
         );
+    }
+
+    #[test]
+    fn test_rejects_blank_name() {
+        for blank in ["", " ", "\t"] {
+            assert!(
+                Cli::try_parse_from(["brokkr", "test", blank]).is_err(),
+                "blank name {blank:?} must be refused"
+            );
+        }
+        assert!(Cli::try_parse_from(["brokkr", "test", "some_test"]).is_ok());
     }
 
     #[test]
