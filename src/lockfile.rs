@@ -422,52 +422,9 @@ fn acquire_at(
     if ret != 0 {
         let err = std::io::Error::last_os_error();
         if err.raw_os_error() == Some(libc::EWOULDBLOCK) {
-            let wait_start = std::time::Instant::now();
-            // Lead with the rule, not the wait: the holder is the reason
-            // brokkr serializes, not competing load. An agent reading this
-            // must come away with "the lock protected my measurement", never
-            // "the machine was congested so my numbers are suspect".
-            crate::output::lock_msg(
-                "waiting for the previous brokkr command to finish - brokkr runs one command at a time so measurements never overlap",
-            );
-            let info = read_lock_contents(fd);
-            let mut showed_stats = false;
-            match &info {
-                Some(i) => {
-                    let invocation = if i.args.is_empty() {
-                        i.command.clone()
-                    } else {
-                        i.args.clone()
-                    };
-                    // No PID in this line: it was written in the holder's
-                    // PID namespace and is the one number a reader could
-                    // anchor a wrong story to. `brokkr lock` shows it, with
-                    // the same verification gate.
-                    crate::output::lock_msg(&format!(
-                        "holder: {} {} in {}",
-                        i.project, invocation, i.project_root
-                    ));
-                    if let Some(summary) = verified_summary(i.pid, &i.starttime, &i.boot_id) {
-                        crate::output::lock_msg(&format!("holder is {summary}"));
-                        showed_stats = true;
-                    } else {
-                        crate::output::lock_msg(
-                            "process details unavailable - holder identity could not be verified from this namespace",
-                        );
-                    }
-                }
-                None => crate::output::lock_msg("holder: unknown (lock metadata unreadable)"),
-            }
-            if showed_stats {
-                // The lines above are a one-shot snapshot: we block in a single
-                // flock() below and never re-read the holder's stats while waiting.
-                // Point at `brokkr lock`, which re-samples (live progress, child
-                // PID, mock servers, last marker) on every invocation, so a waiter
-                // who wants a fresh view has an honest place to get one.
-                crate::output::lock_msg(
-                    "these numbers won't update here - run 'brokkr lock' in another shell for a live view",
-                );
-            }
+            // Deliberately terse: who holds the lock and how busy it is lives
+            // in `brokkr lock`, which re-samples on every invocation.
+            crate::output::lock_msg("waiting for the brokkr lock ...");
 
             // Block until the lock is released. Retry on EINTR.
             loop {
@@ -482,11 +439,9 @@ fn acquire_at(
                 let _close = unsafe { OwnedFd::from_raw_fd(fd) };
                 return Err(DevError::Lock(format!("blocking flock failed: {err}")));
             }
-            let waited = wait_start.elapsed().as_secs();
-            crate::output::lock_msg(&format!(
-                "lock acquired after {} - the previous brokkr command has finished. The wait happened before this command's work and measurements began, so it has no effect on their timings or results",
-                format_duration(waited),
-            ));
+            crate::output::lock_msg(
+                "acquired - you now hold the global brokkr lock for the duration of this command",
+            );
         } else {
             let _close = unsafe { OwnedFd::from_raw_fd(fd) };
             return Err(DevError::Lock(format!("flock failed: {err}")));

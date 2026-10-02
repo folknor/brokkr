@@ -39,14 +39,14 @@ nags.
 
 Like every locked brokkr command, `check` and `test` acquire the global
 per-user lock **blocking**: if another brokkr invocation (e.g. a bench run)
-holds it, the command prints `[lock] waiting for the previous brokkr command
-to finish …` and waits until released, then proceeds - rather than failing
-with `lock: already locked`. So a concurrent lock never produces an error to
+holds it, the command prints `[lock] waiting for the brokkr lock ...` and
+waits until released, then proceeds - rather than failing with
+`lock: already locked`. So a concurrent lock never produces an error to
 handle; just let the command wait. The wait is the serialization working, not
 machine congestion: the lock exists so brokkr commands never overlap, and the
-`lock acquired after …` line marks the point after which this command had the
+`[lock] acquired - ...` line marks the point after which this command had the
 lock to itself - the wait has no effect on any timing or result measured
-after it.
+after it. `brokkr lock` shows who holds the lock and what it is doing.
 
 Flags:
 - `-p/--package <PKG>` (repeatable) - scope every sweep's cargo invocation
