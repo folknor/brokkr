@@ -2014,7 +2014,8 @@ In depth: `brokkr man nidhogg`."
     #[command(display_order = 10)]
     Test {
         /// Exact test name to run (substring filter, case-sensitive).
-        /// A blank name is refused - it would match every test.
+        /// A name matching every test in the package (blank, `_`, ...) is
+        /// refused - run the whole suite with `brokkr check -p`.
         #[arg(value_parser = validate_test_name)]
         name: String,
         /// Cargo package to test (`cargo test -p <pkg>`). Overrides the

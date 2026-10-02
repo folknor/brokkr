@@ -2542,10 +2542,25 @@ can take `[test] debug = true` for the fast inner loop without the documented
 `brokkr test <a release-only timing test>` quietly switching to dev and failing
 on the build profile rather than on the code.
 
-A blank `<NAME>` (`""`, or whitespace only) is refused at parse time: as a
-substring filter it matches every test in the package, a whole-suite run under
-`--nocapture` that floods the terminal with every test's output. The whole
-suite is `brokkr check -p <pkg>`'s job.
+A `<NAME>` that matches every test in the package is refused. As a substring
+filter, `""`, `_` or a single letter turns `brokkr test` into a whole-suite
+run under `--nocapture` that floods the terminal with every test's output;
+the whole suite is `brokkr check -p <pkg>`'s job. Two layers:
+
+- A blank name (`""`, or whitespace only) is refused at parse time, before
+  anything builds.
+- Every other spelling is judged by what it matches, not how it looks: after
+  a split sweep's prebuild, one unfiltered `cargo test --tests -- --list` over
+  the same build shape (nothing recompiles) enumerates the package, and a name
+  every listed test contains is refused before any test runs. Packages under
+  five tests are exempt - there a match-everything name is as likely a
+  deliberate "run this crate's tests" - and so are `--timeout` runs (already
+  one test) and doc-only sweeps (not enumerated). A listing that fails, or is
+  not a libtest listing, refuses the run, as `--timeout`'s enumeration does.
+
+It is a package-wide rule, so a name that leaves even one test out runs:
+`::` passes in a package whose integration tests sit at the top level of
+their files.
 
 Unit tests and integration tests are both matched by the name substring within
 the selected package, **in every test harness of the package**. Each sweep

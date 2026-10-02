@@ -35,6 +35,10 @@
 //! sweep is enumerated with libtest `--list` first, and `<NAME>` matching
 //! more than one test in any sweep is a hard error before anything runs.
 //!
+//! Without `--timeout`, each split sweep is enumerated too, unfiltered, and a
+//! `<NAME>` matching every test in the package is refused (see
+//! `refuse_whole_suite_filter`) - a whole-suite run is `brokkr check`'s job.
+//!
 //! `--sweep <LABEL>` narrows the resolved profile's sweep set to the one
 //! matching sweep (e.g. `--sweep all`), instead of running every sweep the
 //! profile lists. An unknown label is a hard error listing the available
@@ -371,6 +375,7 @@ fn run_sweeps(
                 reports.push(RunReport::bare(Outcome::BuildFailed));
                 continue;
             };
+            refuse_whole_suite_filter(&shape, name, &env_refs, project_root)?;
             Some(targets)
         } else {
             None
@@ -824,6 +829,83 @@ fn prebuild_targets(
         if targets.len() == 1 { "harness" } else { "harnesses" }
     );
     Ok(Some(targets))
+}
+
+/// The smallest package the whole-suite refusal applies to. Below it, a name
+/// matching every test is as likely a deliberate "run this small crate's
+/// tests" as a degenerate filter, and the flood it would cause is small.
+const WHOLE_SUITE_FLOOR: usize = 5;
+
+/// Refuse a `<NAME>` that matches every test in the package.
+///
+/// `brokkr test` streams each test's output live under `--nocapture`; it is
+/// the tool for one test or a few. A substring every test name contains -
+/// `::`, `_`, a single letter - turns it into a whole-suite run that buries the
+/// verdicts under every test's prints, which is `brokkr check -p`'s job. The
+/// parse-time blank check catches `""`; this catches every other spelling of
+/// it, judged by what the filter matches rather than how it looks.
+///
+/// One unfiltered `--list` over the prebuild's exact selection and shape (so
+/// nothing recompiles), then libtest's own non-exact rule - the test's full
+/// name contains the filter - applied here. A listing that fails or is not a
+/// libtest listing refuses the run, as `--timeout`'s enumeration does: the
+/// split run that follows would execute those same harnesses anyway.
+fn refuse_whole_suite_filter(
+    shape: &BuildShape<'_>,
+    name: &str,
+    env: &[(&str, &str)],
+    project_root: &Path,
+) -> Result<(), DevError> {
+    let args = whole_suite_list_argv(shape);
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let captured = cargo_with_deadline(&arg_refs, project_root, env, "test enumeration")?;
+    if !captured.status.success() {
+        let stderr = String::from_utf8_lossy(&captured.stderr);
+        return Err(DevError::Build(format!(
+            "could not enumerate tests in sweep '{}' to check how broad `{name}` is - the listing \
+             command failed (cargo {})\n{}",
+            shape.sweep.label,
+            args.join(" "),
+            stderr.trim_end()
+        )));
+    }
+    let Some(listed) = listed_test_names(&String::from_utf8_lossy(&captured.stdout)) else {
+        return Err(DevError::Config(format!(
+            "could not enumerate tests in sweep '{}' to check how broad `{name}` is: the listing \
+             carried no `N tests, M benchmarks` tally (a `harness = false` target, or a custom \
+             harness, in package `{}`)",
+            shape.sweep.label, shape.pkg
+        )));
+    };
+    if matches_whole_suite(&listed, name) {
+        return Err(DevError::Config(format!(
+            "`{name}` matches all {} tests in package `{}` (sweep '{}'): brokkr test is for one \
+             test or a few, and streams every match's output live. Run the whole suite with \
+             `brokkr check -p {}`, or narrow the name.",
+            listed.len(),
+            shape.pkg,
+            shape.sweep.label,
+            shape.pkg
+        )));
+    }
+    Ok(())
+}
+
+/// The unfiltered listing over a split sweep's harnesses: the prebuild's head
+/// and `--tests` selection, so cargo finds every artifact already built.
+fn whole_suite_list_argv(shape: &BuildShape<'_>) -> Vec<String> {
+    let mut args = cargo_head(shape, &["test"]);
+    args.push("--tests".into());
+    args.push("--".into());
+    args.push("--include-ignored".into());
+    args.push("--list".into());
+    args
+}
+
+/// Whether `name`, as libtest's substring filter, selects every listed test of
+/// a package at or above [`WHOLE_SUITE_FLOOR`].
+fn matches_whole_suite(listed: &[String], name: &str) -> bool {
+    listed.len() >= WHOLE_SUITE_FLOOR && listed.iter().all(|t| t.contains(name))
 }
 
 /// What a split run needs beyond the build shape.
@@ -2609,6 +2691,57 @@ benches::throughput: benchmark
         assert_eq!(listed_test_names(""), None);
         assert_eq!(listed_test_names("my own harness ran fine\n"), None);
         assert_eq!(listed_test_names("foo::bar: test\n"), None, "no tally: truncated");
+    }
+
+    fn names(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    /// A filter every test name contains is a whole-suite run in disguise; one
+    /// that leaves even a single test out is a selection.
+    #[test]
+    fn a_filter_matching_every_test_is_whole_suite() {
+        let listed = names(&[
+            "disclose::tests::mutes_a",
+            "disclose::tests::mutes_b",
+            "market::tests::routes_c",
+            "market::tests::routes_d",
+            "run_prep_e",
+        ]);
+        for broad in ["_", "e", ""] {
+            assert!(matches_whole_suite(&listed, broad), "{broad:?} matches every test");
+        }
+        for narrow in ["::", "tests::", "market::", "run_prep_e", "nothing"] {
+            assert!(!matches_whole_suite(&listed, narrow), "{narrow:?} is a selection");
+        }
+    }
+
+    /// Below the floor a match-everything name is a plausible "run this small
+    /// crate's tests", so it runs.
+    #[test]
+    fn a_package_below_the_floor_is_never_whole_suite() {
+        let listed = names(&["a::x", "a::y", "a::z", "a::w"]);
+        assert!(listed.len() < WHOLE_SUITE_FLOOR);
+        assert!(!matches_whole_suite(&listed, "a::"));
+        assert!(!matches_whole_suite(&[], "anything"), "an empty package matches nothing");
+    }
+
+    /// The breadth listing addresses exactly what the prebuild built - same
+    /// head, `--tests` - and carries no filter, so it sees the whole package.
+    #[test]
+    fn the_whole_suite_listing_mirrors_the_prebuild_selection() {
+        let sweep = ResolvedSweep::default();
+        let shape = BuildShape { sweep: &sweep, allow_args: &[], pkg: "pkg", jobs: None, debug: true };
+        let list = whole_suite_list_argv(&shape);
+        let built = prebuild_argv(&shape);
+        let sep = list.iter().position(|a| a == "--").expect("separator");
+        assert_eq!(&list[sep + 1..], ["--include-ignored", "--list"]);
+        assert!(list[..sep].iter().any(|a| a == "--tests"), "{list:?}");
+        // Everything cargo-side but the build-only flags is shared with the prebuild.
+        let cargo_side: Vec<&String> = list[1..sep].iter().collect();
+        let built_side: Vec<&String> =
+            built[1..].iter().filter(|a| !a.starts_with("--no-run") && !a.starts_with("--message-format")).collect();
+        assert_eq!(cargo_side, built_side);
     }
 
     /// `--exact` only rides along when the caller resolved a full name.
