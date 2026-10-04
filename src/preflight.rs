@@ -700,18 +700,11 @@ mod tree_hash_tests {
     use super::*;
     use std::path::PathBuf;
 
-    /// Scratch dir under the crate's gitignored `target/` (project rules
-    /// forbid `/tmp`).
+    /// Through the shared allocator, whose fixed per-test path is cleared on
+    /// reuse - a pid-and-time-stamped name never repeats, so it is never
+    /// cleared, and every run used to leave six more dirs in `target/`.
     fn tmpdir(name: &str) -> PathBuf {
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("target")
-            .join(format!("tree-{name}-{}-{stamp}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+        crate::test_scratch::scratch("preflight-tree", name)
     }
 
     /// Build a delivery-shaped tree: two archives beside their descriptors.
