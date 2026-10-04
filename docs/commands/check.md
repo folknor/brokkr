@@ -1335,6 +1335,37 @@ another sweep's diagnostics under a second label - and cannot always be
 deduped, since a carrier that inherits feature unification from
 `.cargo/config.toml` differs on argv from a sibling that passes it.
 
+### Lint-only mode
+
+The phase reads rustdoc's diagnostics and never the site it renders, and
+rendering - pages, search index, static files - is most of a `cargo doc`'s
+time. When the rustdoc cargo will run lists `--check` in its
+`-Z unstable-options --help` (a nightly; probed once per run,
+`src/rustdoc_check.rs`), the phase adds `-Zunstable-options --check`, which
+runs the same analysis and lints and writes nothing. A toolchain without it
+renders as before; there is no key to set either way. The lints reported are
+the same: a probe carrying one each of the default-on `rustdoc::` lints got the
+identical warnings from both modes.
+
+The flags ride cargo's rustdocflags, which, like rustflags, come from exactly
+one source. A set `CARGO_ENCODED_RUSTDOCFLAGS` or `RUSTDOCFLAGS` is appended
+to, never replaced; otherwise they go in as `--config build.rustdocflags`,
+merged after the project's own entries. If a matching `target.*.rustdocflags`
+outranks that layer the injection is inert - the phase renders, slower but
+correct. `--commands` shows the placement either way.
+
+Cargo judges a doc unit up to date by its output, `target/doc/<crate>/index.html`,
+which `--check` never writes - so on its own every run would re-document every
+member, changed or not. After each run the phase creates a placeholder there
+(only if absent) for each unit cargo ran and sets its mtime to the moment
+before cargo was launched, so an unchanged member stays fresh and a source
+edited mid-run is still newer. A fresh unit's diagnostics are replayed from
+cargo's cache, so a warning keeps failing the phase on an unchanged rerun. A
+plain `cargo doc` carries different rustdocflags, so its fingerprint differs
+and it renders over the placeholder. A wrong path guess (a `build.target` triple
+moves docs under `<target>/<triple>/doc`) leaves the unit dirty - slow, never
+wrong.
+
 Sweep tags follow coverage, for clippy and rustdoc alike. A diagnostic is
 tagged with the sweeps that reported it only when some run that selected its
 package (by `-p`, or the default members for a bare selection; matched through
@@ -1351,8 +1382,8 @@ sorted by lint with changed files first and nothing capped.
 applies, and for the same reason. Rustdoc's lints are warn-by-default, so a
 gate that failed only on `error` would pass every broken link unless the
 project also set `-D warnings`. No `-D warnings` is injected: rustdoc takes
-rustc flags only through `RUSTDOCFLAGS`, which would change the doc
-fingerprint and replace a project's own rustdocflags.
+lint flags only through rustdocflags, where each change re-fingerprints the doc
+units, and brokkr's own gate already fails on warnings.
 
 For the same reason suppression happens at ingestion, not on argv:
 

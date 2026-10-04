@@ -49,6 +49,7 @@ mod request;
 mod resolve;
 mod results_cmd;
 mod runnables;
+mod rustdoc_check;
 mod rustflags;
 mod scope;
 mod script_check;

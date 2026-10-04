@@ -2056,9 +2056,11 @@ fn run_one_clippy(
 ///
 /// No `--cap-lints`, unlike clippy: that flag exists there to finish the graph
 /// past a denied lint, and `--keep-going` already does that for doc. No `-A`
-/// either - rustdoc takes rustc flags only through `RUSTDOCFLAGS`, which would
-/// change the doc fingerprint - so `[lints] allow` is applied at ingestion
-/// instead ([`code_allowed`]).
+/// either - rustdoc takes lint flags only through rustdocflags, where every
+/// change re-fingerprints the doc units - so `[lints] allow` is applied at
+/// ingestion instead ([`code_allowed`]). The lint-only `--check` flags do go
+/// through rustdocflags, added in [`run_one_diagnostic_cargo`]
+/// (`crate::rustdoc_check`).
 fn doc_args(sweep: &ResolvedSweep, scope: &[&str], cfg: &RustdocConfig) -> Vec<String> {
     let mut args: Vec<String> = vec![
         "doc".into(),
@@ -2099,11 +2101,6 @@ fn run_one_diagnostic_cargo(
     meta_target_dir: Option<&Path>,
     commands: bool,
 ) -> Result<SweepResult, DevError> {
-    let shape = describe_sweep(sweep, false, run_scope);
-    let command = format!("cargo {}", args.join(" "));
-    announce_sweep(&format!("{phase} {}: {shape}", sweep.label), Some(&command), commands);
-
-    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     // Apply the sweep's env to the clippy build too, so a build-affecting
     // var (codegen toggle, etc.) is set consistently across every phase -
     // clippy, the test pre-build, and the test run - not just the tests.
@@ -2123,17 +2120,52 @@ fn run_one_diagnostic_cargo(
     // and profile env, so a collision only arises from `brokkr clippy --env`,
     // which is documented to win over every other source - appending brokkr's
     // pair after it used to silently undo the override.
-    let env_owned = merged_env(&sweep.env, &brokkr_env);
+    let mut env_owned = merged_env(&sweep.env, &brokkr_env);
+    let mut args = args.to_vec();
+    // rustdoc's lint-only mode when the toolchain has it: the phase reads the
+    // diagnostics and never the rendered site (`rustdoc_check`). An env
+    // placement is shown on the command line, since it changes what ran.
+    let mut env_prefix = String::new();
+    let doc_check = phase == "rustdoc" && crate::rustdoc_check::supported(project_root, &env_owned);
+    if doc_check {
+        match crate::rustdoc_check::place(&env_owned) {
+            crate::rustdoc_check::Placement::Env { key, value } => {
+                env_prefix = format!("{key}={value:?} ");
+                env_owned.retain(|(k, _)| k != key);
+                env_owned.push((key.to_owned(), value));
+            }
+            crate::rustdoc_check::Placement::Config(extra) => args.extend(extra),
+        }
+    }
+    let shape = describe_sweep(sweep, false, run_scope);
+    let command = format!("{env_prefix}cargo {}", args.join(" "));
+    announce_sweep(&format!("{phase} {}: {shape}", sweep.label), Some(&command), commands);
+
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     let env_refs: Vec<(&str, &str)> = env_owned
         .iter()
         .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect();
+    let started = std::time::SystemTime::now();
     let captured = output::run_captured_with_env("cargo", &arg_refs, project_root, &env_refs)?;
+    let stdout = String::from_utf8_lossy(&captured.stdout).into_owned();
+    if doc_check {
+        // The sweep's isolated target dir when it has one (its env points
+        // cargo there), else the one cargo metadata reports. A lookup failure
+        // only costs the stamp: the next run re-documents.
+        let target_dir = match meta_target_dir {
+            Some(dir) => Some(dir.to_path_buf()),
+            None => build::project_info(Some(project_root)).ok().map(|i| i.target_dir),
+        };
+        if let Some(dir) = target_dir {
+            crate::rustdoc_check::stamp_outputs(&stdout, &dir.join("doc"), started);
+        }
+    }
     Ok(SweepResult {
         label: sweep.label.clone(),
         shape,
         command,
-        stdout: String::from_utf8_lossy(&captured.stdout).into_owned(),
+        stdout,
         stderr: String::from_utf8_lossy(&captured.stderr).into_owned(),
         success: captured.status.success(),
         selected: if !run_scope.is_empty() {

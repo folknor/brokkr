@@ -705,7 +705,8 @@ See `src/manifest.rs`.
 Turns on `brokkr check`'s `rustdoc` phase: `cargo doc --no-deps
 --message-format=json` per build shape, failing on any rustdoc diagnostic and
 rendering it like clippy's. The table's presence is the opt-in; absent, the
-phase is inert.
+phase is inert. On a nightly rustdoc the phase lints without rendering
+(`--check`), detected automatically - see `brokkr man check rustdoc`.
 
 ```toml
 [rustdoc]
