@@ -17,7 +17,7 @@
 //! - `--dispositions …`    -> the same shaping over `disposition`, including
 //!   the harness diagnostics the run-detail view omits
 //! - `--runtimes [--over S]` -> per-probe most-recent runtime, slowest first
-//! - `--trend X`           -> X's disposition/tier/p90, anchor and shift
+//! - `--trend X`           -> X's disposition/count_tier/p90, anchor and shift
 //!   census over recent runs
 //! - `--sql Q`             -> read-only `SELECT`/`WITH` escape hatch
 //!

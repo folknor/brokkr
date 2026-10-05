@@ -193,7 +193,7 @@ pub fn dispositions_table(rows: &[DispositionRow]) -> String {
     grid(
         &[
             "probe", "outcome", "disposition", "expected", "gate", "matched", "ours", "tv",
-            "b_ours", "b_tv", "tier", "p90_en", "p90_ex", "p90_pnl", "signature", "error",
+            "b_ours", "b_tv", "count_tier", "p90_en", "p90_ex", "p90_pnl", "signature", "error",
         ],
         &cells,
     )
@@ -286,7 +286,7 @@ pub fn trend_table(rows: &[TrendRow]) -> String {
         .collect();
     grid(
         &[
-            "run", "started_at", "disposition", "tier", "gate", "matched", "ours", "tv", "b_ours",
+            "run", "started_at", "disposition", "count_tier", "gate", "matched", "ours", "tv", "b_ours",
             "b_tv", "p90_ex", "anchor", "ts_entry", "ts_exit",
         ],
         &cells,

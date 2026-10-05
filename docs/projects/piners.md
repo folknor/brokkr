@@ -263,7 +263,7 @@ struct, no benchmark filters to reject. The corpus views:
   sum, several times the real run wall. The ceiling estimates from the measured
   `run.wall_ms` of a superset-covering run instead (`estimated_wall_ms`).
   `--over 269` shows what single probe nears the wall on its own.
-- `brokkr corpus-results --trend <probe>` - disposition/tier/p90 over recent
+- `brokkr corpus-results --trend <probe>` - disposition/count_tier/p90 over recent
   runs, plus the `anchor` (suffixed `+` when it granted a discount) and the
   entry/exit timestamp-shift census as `shifted/considered share%` - the
   census was added to be trended even when it does not breach. On a row

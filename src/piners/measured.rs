@@ -88,6 +88,7 @@ pub(crate) fn run(req: &MeasureRequest, args: &CorpusArgs) -> Result<(), DevErro
         verified.push(registry::verify_probe(id, pin, config, &corpus_root, req.project_root)?);
     }
     crate::piners::cmd::verify_selected_feeds(&ids, &reg, &corpus_root, req.project_root)?;
+    registry::verify_harness_files(&reg, &corpus_root, req.project_root)?;
 
     // Measured runs default to release (meaningful timing); `--debug` profiles
     // the dev build instead. Parity runs default debug - see `cmd.rs`.

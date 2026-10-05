@@ -365,14 +365,45 @@ pub fn resolve_columns(table: Shaped, requested: &[String]) -> Result<Vec<String
         }
         if !table.columns().contains(&c.as_str()) {
             return Err(DevError::Config(format!(
-                "corpus-results --columns: unknown {} column '{c}'. Valid columns:\n  {}",
+                "corpus-results --columns: unknown {} column '{c}'.{}\nValid columns:\n  {}",
                 table.table(),
+                column_hint(table, c),
                 table.columns().join(", ")
             )));
         }
         out.push(c.clone());
     }
     Ok(out)
+}
+
+/// The near misses for an unknown `--columns` name: the valid columns that
+/// contain it. `tier` is the case this exists for - the acceptance tier the
+/// gate compares is stored as `disposition`, and `count_tier`/`acc_tier`
+/// both contain the word, so the guess lands on none of them.
+fn column_hint(table: Shaped, unknown: &str) -> String {
+    let tier_guess = matches!(table, Shaped::Dispositions) && unknown == "tier";
+    let near: Vec<&str> = tier_guess
+        .then_some("disposition")
+        .into_iter()
+        .chain(
+            table
+                .columns()
+                .iter()
+                .copied()
+                .filter(|col| !unknown.is_empty() && col.contains(unknown)),
+        )
+        .collect();
+    if near.is_empty() {
+        return String::new();
+    }
+    let mut hint = format!(" Did you mean: {}?", near.join(", "));
+    if tier_guess {
+        hint.push_str(
+            " (`disposition` is the acceptance tier the gate compares; `count_tier` is \
+             the diagnostic exact/near/drift count tier)",
+        );
+    }
+    hint
 }
 
 impl CorpusDb {
@@ -925,6 +956,12 @@ mod tests {
         assert_eq!(t.rows, vec![vec!["a".to_owned(), "carry_tv".to_owned()]]);
         let err = resolve_columns(Shaped::Dispositions, &owned(&["our_qty"])).unwrap_err();
         assert!(err.to_string().contains("unknown disposition column 'our_qty'"));
+        // The canned views' old `tier` header sent agents here first.
+        let err = resolve_columns(Shaped::Dispositions, &owned(&["tier"])).unwrap_err();
+        assert!(
+            err.to_string().contains("Did you mean: disposition, count_tier, acc_tier?"),
+            "{err}"
+        );
     }
 
     #[test]

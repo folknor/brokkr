@@ -24,8 +24,9 @@
 //! - `--reseed --probe <id>` (repeatable) - upsert the named probe(s),
 //!   leaving the rest intact.
 //!
-//! Reseed touches the pinned *content* only: it re-hashes the probe files
-//! and the `[feeds]` group files, preserves `[probe_config]` verbatim, and
+//! Reseed touches the pinned *content* only: it re-hashes the probe files,
+//! the `[feeds]` group files and the `[harness_files]` (on every reseed,
+//! `--probe` included), preserves `[probe_config]` verbatim, and
 //! carries each surviving probe's blessed `expected` forward. It decides
 //! nothing about how a probe runs - feed, budget, start and CSV timezone are
 //! resolved from `[probe_config]` at run time - so a probe entry lost and
@@ -49,8 +50,8 @@ use crate::output;
 use crate::piners::cmd::CorpusArgs;
 use crate::piners::pins_write;
 use crate::piners::registry::{
-    self, CSV_FILE, FeedGroup, FilePin, INPUTS_FILE, PINE_FILE, Pin, PinsData, ProbeFiles,
-    RECORD_FILE,
+    self, CSV_FILE, FeedGroup, FilePin, HarnessFile, INPUTS_FILE, PINE_FILE, Pin, PinsData,
+    ProbeFiles, RECORD_FILE,
 };
 use crate::piners::registry_io;
 use crate::preflight;
@@ -188,8 +189,9 @@ fn plan(
     carry_expected(&mut new_pins, &existing.probes);
 
     let feeds = restamp_feeds(&existing.feeds, corpus_root)?;
+    let files = restamp_harness_files(&existing.harness_files, corpus_root)?;
     let diff = Diff::compute(&existing.probes, &new_pins);
-    let text = pins_write::render_pins(existing_text, &feeds, &new_pins)?;
+    let text = pins_write::render_pins(existing_text, &feeds, &files, &new_pins)?;
 
     Ok(Plan {
         text,
@@ -412,6 +414,34 @@ fn restamp_feeds(
             pin.xxh128 = preflight::compute_xxh128(&abs)?;
         }
         out.insert(name.clone(), stamped);
+    }
+    Ok(out)
+}
+
+/// Re-stamp every `[harness_files]` hash from the corpus filesystem, the
+/// way [`restamp_feeds`] does the feeds: paths preserved, a hand-declared
+/// path-only entry gets its first hash, a missing file is a hard error.
+fn restamp_harness_files(
+    files: &BTreeMap<String, HarnessFile>,
+    corpus_root: &Path,
+) -> Result<BTreeMap<String, HarnessFile>, DevError> {
+    let mut out = BTreeMap::new();
+    for (name, file) in files {
+        let abs = corpus_root.join(&file.path);
+        if !abs.is_file() {
+            return Err(DevError::Config(format!(
+                "corpus --reseed: harness file '{name}' is missing or not a regular file: {}",
+                abs.display()
+            )));
+        }
+        crate::piners::lfs::ensure_materialized(&abs)?;
+        out.insert(
+            name.clone(),
+            HarnessFile {
+                path: file.path.clone(),
+                xxh128: Some(preflight::compute_xxh128(&abs)?),
+            },
+        );
     }
     Ok(out)
 }
@@ -830,6 +860,28 @@ bar_budget = 20200
         }
         let err = restamp_feeds(&feeds, &root).unwrap_err();
         assert!(format!("{err:?}").contains("missing.csv"));
+    }
+
+    #[test]
+    fn restamp_harness_files_stamps_a_path_only_entry_and_errors_on_missing_file() {
+        let root = crate::test_scratch::scratch("piners_reseed", "restamp_harness_files");
+        std::fs::create_dir_all(root.join("facts")).unwrap();
+        std::fs::write(root.join("facts/probe-facts.toml"), b"[probes]\n").unwrap();
+
+        let mut files = BTreeMap::new();
+        files.insert(
+            "probe-facts".to_owned(),
+            HarnessFile {
+                path: "facts/probe-facts.toml".into(),
+                xxh128: None,
+            },
+        );
+        let stamped = restamp_harness_files(&files, &root).unwrap();
+        assert_eq!(stamped["probe-facts"].xxh128.as_ref().unwrap().len(), 32);
+
+        files.get_mut("probe-facts").unwrap().path = "facts/gone.toml".into();
+        let err = restamp_harness_files(&files, &root).unwrap_err();
+        assert!(format!("{err:?}").contains("gone.toml"));
     }
 
     #[test]

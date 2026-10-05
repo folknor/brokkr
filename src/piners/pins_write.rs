@@ -13,7 +13,8 @@
 //! probe entries these writers own).
 //!
 //! Layout stays deterministic: `[feeds.<name>]` sorted, then
-//! `[probe_config]`, then `[probes.<id>]` sorted (the `BTreeMap` order), one
+//! `[harness_files.<name>]` sorted, then `[probe_config]`, then
+//! `[probes.<id>]` sorted (the `BTreeMap` order), one
 //! blank line between blocks, fields in contract-first order (`expected`
 //! before the volatile file hashes). Every render is parsed back through the
 //! loader before it is returned (see [`render_pins`]).
@@ -24,7 +25,7 @@ use std::path::Path;
 use toml_edit::{DocumentMut, Item, RawString, Table, Value};
 
 use crate::error::DevError;
-use crate::piners::registry::{self, FeedGroup, FilePin, Pin};
+use crate::piners::registry::{self, FeedGroup, FilePin, HarnessFile, Pin};
 
 /// Field order inside a `[probes.<id>]` entry: the blessed contract first,
 /// then the volatile hashes.
@@ -34,6 +35,9 @@ const PROBE_FIELDS: [&str; 5] = ["expected", "pine", "inputs", "csv", "record"];
 /// form; `primary`/`warmup`/`lower` the role form. The two forms never
 /// coexist, so this ordering only ever sorts one of them.
 const FEED_FIELDS: [&str; 4] = ["base", "primary", "warmup", "lower"];
+
+/// Field order inside a `[harness_files.<name>]` entry.
+const HARNESS_FILE_FIELDS: [&str; 2] = ["path", "xxh128"];
 
 /// Render the new pin state into `existing` (the current `pins.toml` text;
 /// `None` on bootstrap), preserving comments and formatting of everything
@@ -49,6 +53,7 @@ const FEED_FIELDS: [&str; 4] = ["base", "primary", "warmup", "lower"];
 pub fn render_pins(
     existing: Option<&str>,
     feeds: &BTreeMap<String, FeedGroup>,
+    files: &BTreeMap<String, HarnessFile>,
     probes: &BTreeMap<String, Pin>,
 ) -> Result<String, DevError> {
     let mut doc: DocumentMut = existing
@@ -56,8 +61,9 @@ pub fn render_pins(
         .parse()
         .map_err(|e| DevError::Config(format!("piners: pins.toml: {e}")))?;
     sync_section(&mut doc, "feeds", feeds, fill_feed)?;
+    sync_section(&mut doc, "harness_files", files, fill_harness_file)?;
     sync_section(&mut doc, "probes", probes, fill_probe)?;
-    finalize_layout(&mut doc, feeds, probes);
+    finalize_layout(&mut doc, feeds, files, probes);
     let text = doc.to_string();
     registry::parse_pins(&text, Path::new("pins.toml (as rendered, not written)"))?;
     Ok(text)
@@ -134,6 +140,14 @@ fn fill_feed(table: &mut Table, group: &FeedGroup) -> Result<(), DevError> {
     Ok(())
 }
 
+/// Stamp a `[harness_files.<name>]` entry's fields in place.
+fn fill_harness_file(table: &mut Table, file: &HarnessFile) -> Result<(), DevError> {
+    set_value(table, "path", Value::from(file.path.to_string_lossy().into_owned()));
+    sync_opt(table, "xxh128", file.xxh128.as_deref().map(Value::from));
+    sort_fields(table, &HARNESS_FILE_FIELDS);
+    Ok(())
+}
+
 /// Stamp a `[probes.<id>]` entry's fields in place.
 fn fill_probe(table: &mut Table, pin: &Pin) -> Result<(), DevError> {
     sync_opt(table, "expected", pin.expected.as_deref().map(Value::from));
@@ -145,8 +159,8 @@ fn fill_probe(table: &mut Table, pin: &Pin) -> Result<(), DevError> {
     Ok(())
 }
 
-/// Walk the canonical block order (feeds sorted, `[probe_config]` as
-/// written, probes sorted),
+/// Walk the canonical block order (feeds sorted, harness files sorted,
+/// `[probe_config]` as written, probes sorted),
 /// pinning each table's render position and its block spacing: one blank
 /// line before every block but the first. Existing prefix decor that
 /// carries a comment is left alone - only missing/whitespace-only prefixes
@@ -154,6 +168,7 @@ fn fill_probe(table: &mut Table, pin: &Pin) -> Result<(), DevError> {
 fn finalize_layout(
     doc: &mut DocumentMut,
     feeds: &BTreeMap<String, FeedGroup>,
+    files: &BTreeMap<String, HarnessFile>,
     probes: &BTreeMap<String, Pin>,
 ) {
     let mut pos = 0isize;
@@ -164,6 +179,13 @@ fn finalize_layout(
     };
     if let Some(parent) = doc.get_mut("feeds").and_then(Item::as_table_mut) {
         for name in feeds.keys() {
+            if let Some(t) = parent.get_mut(name).and_then(Item::as_table_mut) {
+                place(t);
+            }
+        }
+    }
+    if let Some(parent) = doc.get_mut("harness_files").and_then(Item::as_table_mut) {
+        for name in files.keys() {
             if let Some(t) = parent.get_mut(name).and_then(Item::as_table_mut) {
                 place(t);
             }
@@ -323,7 +345,7 @@ mod tests {
         p.expected = Some("accepted".to_owned());
         probes.insert("alpha-01".to_owned(), p);
 
-        let text = render_pins(None, &feeds, &probes).unwrap();
+        let text = render_pins(None, &feeds, &BTreeMap::new(), &probes).unwrap();
 
         // No leading blank line; sections in order; blank line between blocks.
         assert!(text.starts_with("[feeds.eth-15m]"));
@@ -393,7 +415,7 @@ csv = { path = \"validation/zulu-09/tv_trades.csv\", xxh128 = \"zz\" }
         probes.insert("mid-05".to_owned(), pin("mid-05", "mm")); // newly discovered
         // zulu-09 vanished from the corpus.
 
-        let text = render_pins(Some(COMMENTED), &feeds, &probes).unwrap();
+        let text = render_pins(Some(COMMENTED), &feeds, &BTreeMap::new(), &probes).unwrap();
 
         // Comments survive: file header, block comment, both trailing ones.
         assert!(text.contains("# top-of-file commentary"));
@@ -434,7 +456,7 @@ csv = { path = \"validation/zulu-09/tv_trades.csv\", xxh128 = \"zz\" }
         let feeds = commented_feeds();
         let mut probes = BTreeMap::new();
         probes.insert("zulu-09".to_owned(), pin("zulu-09", "zz"));
-        let err = render_pins(Some(COMMENTED), &feeds, &probes).unwrap_err();
+        let err = render_pins(Some(COMMENTED), &feeds, &BTreeMap::new(), &probes).unwrap_err();
         assert!(format!("{err:?}").contains("validation/alpha-01\\\"]: `bar_budget` governs no"));
     }
 
@@ -449,7 +471,7 @@ csv = { path = \"validation/zulu-09/tv_trades.csv\", xxh128 = \"zz\" }
         zulu.expected = Some("compile_fail".to_owned()); // first bless
         probes.insert("zulu-09".to_owned(), zulu);
 
-        let text = render_pins(Some(COMMENTED), &feeds, &probes).unwrap();
+        let text = render_pins(Some(COMMENTED), &feeds, &BTreeMap::new(), &probes).unwrap();
 
         let zulu_at = text.find("[probes.zulu-09]").unwrap();
         let block = &text[zulu_at..];
@@ -469,7 +491,7 @@ csv = { path = \"validation/zulu-09/tv_trades.csv\", xxh128 = \"zz\" }
             },
         );
         let text =
-            render_pins(None, &feeds, &BTreeMap::new()).unwrap();
+            render_pins(None, &feeds, &BTreeMap::new(), &BTreeMap::new()).unwrap();
         assert!(text.contains("base = { path ="));
         assert!(!text.contains("primary"));
         match &reparse(&text).feeds["eth-15m-2025"] {
@@ -495,7 +517,7 @@ warmup = { path = \"data/15m_warmup.csv\", xxh128 = \"f1\" }
             },
         );
         let text =
-            render_pins(Some(existing), &feeds, &BTreeMap::new()).unwrap();
+            render_pins(Some(existing), &feeds, &BTreeMap::new(), &BTreeMap::new()).unwrap();
         assert!(!text.contains("primary"));
         assert!(!text.contains("warmup"));
         assert!(text.contains("base = { path ="));
@@ -518,7 +540,7 @@ csv = { path = \"validation/alpha-01/tv_trades.csv\", xxh128 = \"aa\" } # the ol
         p.record = Some(file_pin("validation/alpha-01/tv_record.json", "rr"));
         let mut probes = BTreeMap::new();
         probes.insert("alpha-01".to_owned(), p);
-        let text = render_pins(Some(existing), &BTreeMap::new(), &probes)
+        let text = render_pins(Some(existing), &BTreeMap::new(), &BTreeMap::new(), &probes)
             .unwrap();
         assert!(!text.contains("tv_trades.csv"));
         assert!(text.contains("record = { path = \"validation/alpha-01/tv_record.json\""));
@@ -547,10 +569,77 @@ csv = { path = \"validation/zulu-09/tv_trades.csv\", xxh128 = \"zz\" }
         for (id, h) in [("alpha-01", "aa"), ("mid-05", "mm"), ("zulu-09", "zz")] {
             probes.insert(id.to_owned(), pin(id, h));
         }
-        let text = render_pins(Some(existing), &BTreeMap::new(), &probes).unwrap();
+        let text = render_pins(Some(existing), &BTreeMap::new(), &BTreeMap::new(), &probes).unwrap();
         assert!(!text.contains("\n\n\n"), "stray blank line: {text:?}");
         assert!(text.contains("\n\n[probes.mid-05]"));
         assert!(text.contains("\n\n[probes.zulu-09]"));
+    }
+
+    #[test]
+    fn a_harness_file_is_stamped_in_place_between_feeds_and_probe_config() {
+        let existing = "\
+[feeds.eth-15m]
+primary = { path = \"data/15m.csv\", xxh128 = \"f0\" }
+
+# capture facts the harness reads beside the manifest
+[harness_files.probe-facts]
+path = \"facts/probe-facts.toml\" # hand-declared, reseed stamps the hash
+
+[probe_config.\"validation\"]
+feed = \"eth-15m\"
+
+[probes.alpha-01]
+pine = { path = \"validation/alpha-01/strategy.pine\", xxh128 = \"aa\" }
+csv = { path = \"validation/alpha-01/tv_trades.csv\", xxh128 = \"aa\" }
+";
+        let mut feeds = BTreeMap::new();
+        feeds.insert(
+            "eth-15m".to_owned(),
+            FeedGroup::Roles {
+                primary: file_pin("data/15m.csv", "f0"),
+                warmup: None,
+                lower: None,
+            },
+        );
+        let mut files = BTreeMap::new();
+        files.insert(
+            "probe-facts".to_owned(),
+            HarnessFile {
+                path: PathBuf::from("facts/probe-facts.toml"),
+                xxh128: Some("ff".to_owned()),
+            },
+        );
+        let mut probes = BTreeMap::new();
+        probes.insert("alpha-01".to_owned(), pin("alpha-01", "aa"));
+
+        let text = render_pins(Some(existing), &feeds, &files, &probes).unwrap();
+
+        assert!(text.contains("# capture facts the harness reads beside the manifest"));
+        assert!(text.contains(
+            "path = \"facts/probe-facts.toml\" # hand-declared, reseed stamps the hash\n\
+             xxh128 = \"ff\"\n"
+        ));
+        let at = |s: &str| text.find(s).unwrap();
+        assert!(at("[feeds.eth-15m]") < at("[harness_files.probe-facts]"));
+        assert!(at("[harness_files.probe-facts]") < at("[probe_config"));
+        assert_eq!(
+            reparse(&text).harness_files["probe-facts"].xxh128.as_deref(),
+            Some("ff")
+        );
+    }
+
+    #[test]
+    fn render_refuses_an_unstamped_harness_file() {
+        let mut files = BTreeMap::new();
+        files.insert(
+            "facts".to_owned(),
+            HarnessFile {
+                path: PathBuf::from("facts/probe-facts.toml"),
+                xxh128: None,
+            },
+        );
+        let err = render_pins(None, &BTreeMap::new(), &files, &BTreeMap::new()).unwrap_err();
+        assert!(format!("{err:?}").contains("[harness_files.facts]: no `xxh128`"));
     }
 
     #[test]
@@ -559,7 +648,7 @@ csv = { path = \"validation/zulu-09/tv_trades.csv\", xxh128 = \"zz\" }
         p.csv = None; // no oracle left
         let mut probes = BTreeMap::new();
         probes.insert("alpha-01".to_owned(), p);
-        let err = render_pins(None, &BTreeMap::new(), &probes).unwrap_err();
+        let err = render_pins(None, &BTreeMap::new(), &BTreeMap::new(), &probes).unwrap_err();
         assert!(format!("{err:?}").contains("pins no oracle"));
     }
 }

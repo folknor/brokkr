@@ -136,10 +136,12 @@ pub fn corpus(
         verified.push(registry::verify_probe(id, pin, config, &corpus_root, project_root)?);
     }
     let feed_count = verify_selected_feeds(&ids, &registry, &corpus_root, project_root)?;
+    let file_count = registry::verify_harness_files(&registry, &corpus_root, project_root)?;
 
     if args.verify_only {
         output::corpus_msg(&format!(
-            "verify-only: {} probe(s) + {feed_count} feed group(s) OK",
+            "verify-only: {} probe(s) + {feed_count} feed group(s) + {file_count} harness \
+             file(s) OK",
             verified.len()
         ));
         return Ok(());

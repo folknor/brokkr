@@ -6,9 +6,11 @@
 //! - `pins.toml` - the canonical, verified universe. One entry per probe
 //!   id, each pinning `strategy.pine` (input) and its TradingView oracle -
 //!   a `tv_trades.csv` export, a `tv_record.json` tvr capture, or both - by
-//!   path + xxh128, plus three top-level tables: `[feeds.<name>]`
+//!   path + xxh128, plus four top-level tables: `[feeds.<name>]`
 //!   (hash-pinned OHLCV feed groups - the feed is part of a probe's oracle
 //!   identity now that universes with different feeds coexist),
+//!   `[harness_files.<name>]` (any other file the harness reads that moves a
+//!   verdict - see [`PinsData::harness_files`]),
 //!   `[probe_config."<prefix>"]` (the hand-declared execution facts - feed,
 //!   bar budget, start, CSV timezone - scoped by directory prefix), and
 //!   `[probes.<id>]`. This is the single source of truth; `--probe`,
@@ -86,6 +88,20 @@ pub struct FilePin {
     pub path: PathBuf,
     /// Expected xxh128 hex digest (brokkr's standard file hash).
     pub xxh128: String,
+}
+
+/// One `[harness_files.<name>]` entry: a [`FilePin`] whose hash may be
+/// absent. A hand-declared entry names only its `path`, and reseed stamps
+/// the hash; loading refuses one still unstamped, so nothing ever runs
+/// against an unverified file.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HarnessFile {
+    /// Path relative to `[piners] corpus_root`.
+    pub path: PathBuf,
+    /// Expected xxh128 hex digest; `None` until reseed stamps it.
+    #[serde(default)]
+    pub xxh128: Option<String>,
 }
 
 /// One hash-pinned OHLCV feed group. A probe's TV oracle was taken against
@@ -408,14 +424,25 @@ impl Pin {
     }
 }
 
-/// The full `pins.toml` shape: `[feeds.<name>]`, `[probe_config."<prefix>"]`
-/// and `[probes.<id>]`. Public because reseed loads and rewrites the whole
-/// file (feed hashes re-stamped, `[probe_config]` preserved verbatim).
+/// The full `pins.toml` shape: `[feeds.<name>]`, `[harness_files.<name>]`,
+/// `[probe_config."<prefix>"]` and `[probes.<id>]`. Public because reseed
+/// loads and rewrites the whole file (feed and harness-file hashes
+/// re-stamped, `[probe_config]` preserved verbatim).
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PinsData {
     #[serde(default)]
     pub feeds: BTreeMap<String, FeedGroup>,
+    /// Files the harness reads beyond the probe dirs and the feeds - a
+    /// piners-owned facts table, say - keyed by a name of the project's
+    /// choosing. brokkr knows nothing of their contents; it only holds them
+    /// to their pinned hash before every run, whatever the selection, since
+    /// the harness may consult one for any probe. Without this a file that
+    /// moves verdicts sits outside the content gate, the same hole an
+    /// unpinned `inputs.json` would be. The harness keeps finding the file
+    /// by its own path; the pin names that path so the two agree.
+    #[serde(default)]
+    pub harness_files: BTreeMap<String, HarnessFile>,
     #[serde(default)]
     pub probe_config: BTreeMap<String, ProbeConfig>,
     #[serde(default)]
@@ -437,6 +464,9 @@ pub struct Registry {
     pub pins: BTreeMap<String, Pin>,
     /// Hash-pinned feed groups, keyed by group name.
     pub feeds: BTreeMap<String, FeedGroup>,
+    /// Hash-pinned harness files, keyed by name (see
+    /// [`PinsData::harness_files`]).
+    pub harness_files: BTreeMap<String, HarnessFile>,
     /// Prefix -> declared execution facts; read through [`Registry::config`].
     pub probe_config: BTreeMap<String, ProbeConfig>,
     /// keyword -> probe ids, built from the `<keyword>.toml` files.
@@ -461,6 +491,7 @@ pub fn load_pins(pins_path: &Path) -> Result<PinsData, DevError> {
 pub fn parse_pins(text: &str, origin: &Path) -> Result<PinsData, DevError> {
     let data = parse_pins_unchecked(text, origin)?;
     let mut problems = check_pins(&data.probes);
+    problems.extend(check_harness_files(&data.harness_files));
     problems.extend(check_probe_config(&data.probe_config, &data.probes));
     if !problems.is_empty() {
         return Err(DevError::Config(format!(
@@ -535,6 +566,35 @@ fn check_pins(probes: &BTreeMap<String, Pin>) -> Vec<String> {
                     want.display()
                 ));
             }
+        }
+    }
+    problems
+}
+
+/// The rules every `[harness_files]` entry obeys: a path below the corpus
+/// root in plain relative components, so the file verified is the one under
+/// the root the harness was handed and no `..` can reach outside it; and a
+/// stamped hash. Reseed reads the file without these rules, which is how a
+/// hand-declared, path-only entry gets its hash.
+fn check_harness_files(files: &BTreeMap<String, HarnessFile>) -> Vec<String> {
+    let mut problems = Vec::new();
+    for (name, file) in files {
+        let plain = file
+            .path
+            .components()
+            .all(|c| matches!(c, std::path::Component::Normal(_)));
+        if !plain || file.path.as_os_str().is_empty() {
+            problems.push(format!(
+                "[harness_files.{name}]: pins {} - a harness file is a path below the \
+                 corpus root, named by plain relative components",
+                file.path.display()
+            ));
+        } else if file.xxh128.is_none() {
+            problems.push(format!(
+                "[harness_files.{name}]: no `xxh128` - stamp it with `brokkr corpus \
+                 --reseed --all` (or `--probe <id>`; every reseed re-stamps the harness \
+                 files)"
+            ));
         }
     }
     problems
@@ -685,6 +745,7 @@ impl Registry {
         Ok(Self {
             pins: data.probes,
             feeds: data.feeds,
+            harness_files: data.harness_files,
             probe_config: data.probe_config,
             keywords,
         })
@@ -883,6 +944,30 @@ pub fn verify_feed_group(
     Ok(())
 }
 
+/// Hard-verify every `[harness_files]` pin against `corpus_root`, same
+/// no-bypass policy as the probe files. All of them, not the selection's:
+/// brokkr cannot know which probes a harness file governs. Returns the
+/// number verified.
+pub fn verify_harness_files(
+    registry: &Registry,
+    corpus_root: &Path,
+    project_root: &Path,
+) -> Result<usize, DevError> {
+    for (name, file) in &registry.harness_files {
+        let subject = format!("harness file '{name}'");
+        // The loader refuses an unstamped entry; this is belt-and-braces.
+        let xxh128 = file.xxh128.clone().ok_or_else(|| {
+            DevError::Preflight(vec![format!("piners: {subject} has no pinned xxh128")])
+        })?;
+        let pin = FilePin {
+            path: file.path.clone(),
+            xxh128,
+        };
+        verify_one(&subject, "file", &pin, corpus_root, project_root)?;
+    }
+    Ok(registry.harness_files.len())
+}
+
 fn verify_one(
     subject: &str,
     label: &str,
@@ -894,6 +979,15 @@ fn verify_one(
     if !abs.exists() {
         return Err(DevError::Preflight(vec![format!(
             "piners: {subject} pins a {label} path that is missing from the corpus:\n  {}\n  (registry is lying or the corpus drifted)",
+            abs.display()
+        )]));
+    }
+    // Every pin names a file the harness reads as one. Checked before the
+    // LFS sniff opens it: a FIFO there would block verification forever,
+    // and a directory would hash as a tree digest nothing consumes.
+    if !abs.is_file() {
+        return Err(DevError::Preflight(vec![format!(
+            "piners: {subject} pins a {label} path that is not a regular file:\n  {}",
             abs.display()
         )]));
     }
@@ -943,6 +1037,7 @@ mod tests {
         Registry {
             pins,
             feeds,
+            harness_files: BTreeMap::new(),
             probe_config,
             keywords,
         }
@@ -1378,6 +1473,33 @@ pine = { path = "p/bare/strategy.pine", xxh128 = "aa" }
         });
         let err = verify("probe", &drifted, &root).unwrap_err();
         assert!(format!("{err:?}").contains("hash mismatch"));
+    }
+
+    #[test]
+    fn verify_holds_every_harness_file_to_its_pin() {
+        let root = crate::test_scratch::scratch("piners_registry", "verify_harness_files");
+        let facts = write_file(&root, Path::new("facts"), "probe-facts.toml", b"[probes]\n");
+        let mut registry = Registry::default();
+        registry.harness_files.insert(
+            "probe-facts".to_owned(),
+            HarnessFile {
+                path: facts.path.clone(),
+                xxh128: Some(facts.xxh128.clone()),
+            },
+        );
+        assert_eq!(verify_harness_files(&registry, &root, &root).unwrap(), 1);
+
+        // An edit the pin does not know about is refused before any run.
+        std::fs::write(root.join(&facts.path), b"[probes.x]\ncapture_origin_ms = 1\n").unwrap();
+        let err = verify_harness_files(&registry, &root, &root).unwrap_err();
+        assert!(format!("{err:?}").contains("harness file 'probe-facts'"));
+    }
+
+    #[test]
+    fn a_harness_file_outside_the_corpus_root_is_refused() {
+        let text = "[harness_files.facts]\npath = \"../facts.toml\"\nxxh128 = \"00\"\n";
+        let err = parse_pins(text, Path::new("pins.toml")).unwrap_err();
+        assert!(format!("{err:?}").contains("[harness_files.facts]: pins ../facts.toml"));
     }
 
     #[test]

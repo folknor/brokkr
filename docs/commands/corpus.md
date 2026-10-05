@@ -55,7 +55,9 @@ pinned like the oracle.
 Probes are pinned in the registry (`registry_dir`), two file kinds:
 
 - `pins.toml` - the canonical, verified universe. `[feeds.<name>]` groups
-  (hash-pinned OHLCV feeds, two forms below), `[probe_config."<prefix>"]`
+  (hash-pinned OHLCV feeds, two forms below), `[harness_files.<name>]`
+  (any other file the harness reads that moves a verdict - below),
+  `[probe_config."<prefix>"]`
   (each probe's execution facts, declared by directory prefix - below), and
   one `[probes.<id>]` table per probe:
 
@@ -69,6 +71,10 @@ Probes are pinned in the registry (`registry_dir`), two file kinds:
   [feeds.eth-15m-bench]
   primary = { path = "vendor/pineforge-benchmarks-assets/..ETHUSDT_15.csv", xxh128 = "<hex>" }
   warmup  = { path = "vendor/pineforge-benchmarks-assets/..warmup6m.csv", xxh128 = "<hex>" }
+
+  [harness_files.probe-facts]
+  path = "facts/probe-facts.toml"  # declare the path; reseed stamps xxh128
+  xxh128 = "<hex>"
 
   [probe_config."vendor/pineforge-engine"]
   feed = "eth-15m-2025"          # the [feeds] group (oracle identity)
@@ -112,7 +118,20 @@ Probes are pinned in the registry (`registry_dir`), two file kinds:
   brokkr carries the base path+hash into the manifest (as a `base` role) and
   bumps the manifest version; all chart-TF aggregation stays harness-side.
 
-  All `path`s (probe and feed) are relative to `corpus_root`. `xxh128` is
+  **`[harness_files.<name>]` - what else the harness reads.** A file outside
+  the probe dirs and the feeds that still moves verdicts (a piners-owned
+  facts table carrying capture origins or captured strategy properties, say)
+  is pinned here by `path` + `xxh128`, under a name of the project's
+  choosing. brokkr knows nothing of its contents and passes nothing new to
+  the harness: the harness keeps reading the file by its own path, and the
+  pin holds that file to its hash. Every run verifies **every** harness file,
+  whatever the selection, since brokkr cannot tell which probes one governs.
+  Without the pin such a file sits outside the content gate, the same hole an
+  unpinned `inputs.json` would be. Declare an entry with `path` alone and
+  reseed stamps the hash; loading refuses an entry still unstamped, or one
+  whose path is not plain relative components below `corpus_root`.
+
+  All `path`s (probe, feed and harness file) are relative to `corpus_root`. `xxh128` is
   brokkr's standard file hash (`preflight::compute_xxh128`, 32 lowercase hex,
   case-insensitive). `expected` is one disposition label (see the gate,
   below); absent until the probe is blessed. A probe entry holds nothing
@@ -190,7 +209,8 @@ full-corpus pass never runs by accident.
   of the named pinned probes.
 - `--all` - the whole pinned universe (slow characterization pass).
 - `--verify-only` - verify every pinned probe (and every referenced feed
-  group) against the corpus tree and exit, without building or running.
+  group, and every harness file) against the corpus tree and exit, without
+  building or running.
   Use after a submodule re-pin.
 - `--reseed` - stamp `pins.toml` hashes from the corpus filesystem (below).
 - `--bless` - run the selection, then stamp current dispositions (below).
@@ -252,8 +272,9 @@ real wall (a ~60s full corpus summed to ~320s), producing false refusals.
 
 Each selected probe's pinned files (`pine`, its `csv` and/or `record`, and
 `inputs` when pinned) - plus every role (`primary`/`warmup`/`lower`, or the
-single `base`) of every feed group the selection references - are resolved
-under `corpus_root` and hashed before any build. A missing path or hash
+single `base`) of every feed group the selection references, and every
+`[harness_files]` entry - are resolved under `corpus_root` and hashed before
+any build. A missing path or hash
 mismatch is a hard error (registry lying or the corpus drifted) - no
 `--allow-drift`; re-stamp with `--reseed` or fix the tree.
 
@@ -343,7 +364,9 @@ when present, and a file that has left the dir drops out of the pin.
   the dir exists with `strategy.pine` but no oracle.
 
 Prints `added/changed/removed`. Touches the pinned *content* only:
-re-hashes the probe files and the `[feeds]` group files, preserves
+re-hashes the probe files, the `[feeds]` group files and every
+`[harness_files]` entry (`--probe` included - an edited facts file is
+re-stamped by any reseed), preserves
 `[probe_config]` verbatim, and carries each surviving probe's `expected`
 forward. It decides nothing about how a probe runs, so a newly discovered or
 re-added probe runs under whatever `[probe_config]` declares for its
@@ -367,8 +390,9 @@ exit 2, any other code, a signal, the hang backstop, or a repeated record
 leaves `pins.toml` untouched. The run row records `gated = no` - bless
 ignores the gate verdict.
 
-Bootstrap: `--reseed --all` → hand-write `[feeds]` groups and the
-`[probe_config]` declarations → `--reseed --all` again (stamps feed hashes)
+Bootstrap: `--reseed --all` → hand-write `[feeds]` groups, any
+`[harness_files]` paths and the `[probe_config]` declarations → `--reseed
+--all` again (stamps feed and harness-file hashes)
 → commit → write keyword files → `--bless --all` → commit → runs are gated.
 
 ## Exit codes
@@ -380,8 +404,8 @@ code, a signal, or the hang backstop - on a repeated harness record, **or** on
 an active gate deviation. Hash mismatch fails earlier (before build); the
 runtime-ceiling refusal after verification but before the build. `--no-gate`
 and `--bless` never fail on gate diffs; `--bless` fails (and stamps nothing)
-on a failed harness. `--verify-only` exits 0 once all pins (and feeds)
-verify.
+on a failed harness. `--verify-only` exits 0 once all pins (and feeds and
+harness files) verify.
 
 ## Artefacts
 
