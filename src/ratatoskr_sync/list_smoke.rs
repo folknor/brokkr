@@ -255,7 +255,7 @@ pub fn run_sync_all(req: &SyncAllRequest<'_>) -> Result<(), DevError> {
     }
 
     if any_preserved {
-        artefacts::emit_clean_hint();
+        artefacts::emit_clean_hint(output::ratatoskr_msg);
     }
     if let Some(idx) = interrupted_at {
         output::ratatoskr_msg(&format!(
@@ -377,7 +377,7 @@ pub fn run_sync_smoke(req: &SyncSmokeRequest<'_>) -> Result<(), DevError> {
             output::ratatoskr_msg(&format!("FAIL{}: {e}", outcome.summary));
             if let Some(path) = outcome.preserved {
                 output::ratatoskr_msg(&format!("artefacts preserved at {}", path.display()));
-                artefacts::emit_clean_hint();
+                artefacts::emit_clean_hint(output::ratatoskr_msg);
             }
             Err(e)
         }

@@ -216,7 +216,7 @@ pub fn service_suite(
     output::ratatoskr_msg(&format_suite_summary(&results, total, cycles, bailed));
 
     if results.iter().any(|r| !r.result.succeeded) {
-        artefacts::emit_clean_hint();
+        artefacts::emit_clean_hint(output::ratatoskr_msg);
         Err(DevError::ExitCode(1))
     } else {
         Ok(())

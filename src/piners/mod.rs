@@ -17,3 +17,4 @@ pub mod registry_io;
 pub mod report;
 pub mod reseed;
 pub mod select;
+pub mod time;

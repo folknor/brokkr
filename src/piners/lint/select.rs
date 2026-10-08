@@ -101,7 +101,11 @@ mod tests {
         let mut keywords = BTreeMap::new();
         keywords.insert("x".to_owned(), vec!["a".to_owned(), "b".to_owned()]);
         keywords.insert("y".to_owned(), vec!["b".to_owned(), "c".to_owned()]);
-        LintRegistry { pins, keywords }
+        LintRegistry {
+            pins,
+            keywords,
+            lints_text: String::new(),
+        }
     }
 
     #[test]

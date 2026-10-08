@@ -128,6 +128,13 @@ struct KeywordFile {
 pub struct LintRegistry {
     pub pins: BTreeMap<String, LintPin>,
     pub keywords: BTreeMap<String, Vec<String>>,
+    /// The exact `lints.toml` text `pins` was parsed from. The writers
+    /// (bless, reanchor) edit this text, not a fresh read, and refuse to
+    /// replace a file whose bytes no longer match it: the load and the write
+    /// are both under the global lock, so a difference is a hand edit the
+    /// write would revert. A successful write stores what it wrote here, so
+    /// a later write in the same process compares against that.
+    pub lints_text: String,
 }
 
 /// Parse `lints.toml` text in hand (the comment-preserving writer keeps the
@@ -184,6 +191,7 @@ impl LintRegistry {
         Ok(Self {
             pins: data.probes,
             keywords,
+            lints_text: text,
         })
     }
 
@@ -274,7 +282,11 @@ mod tests {
         for (k, ids) in keyword_ids {
             keywords.insert((*k).to_owned(), ids.iter().map(|s| (*s).to_owned()).collect());
         }
-        LintRegistry { pins, keywords }
+        LintRegistry {
+            pins,
+            keywords,
+            lints_text: String::new(),
+        }
     }
 
     #[test]
@@ -345,6 +357,7 @@ pine = { path = "lint/clean-01.pine", xxh128 = "bbb" }
         let r = LintRegistry::load(&dir).unwrap();
         std::fs::remove_dir_all(&dir).ok();
 
+        assert!(r.lints_text.contains("[probes.clean-01]"));
         assert_eq!(r.pins.len(), 2);
         assert_eq!(r.pins["unterminated-01"].pine.xxh128, "aaa");
         assert_eq!(r.pins["unterminated-01"].expected.as_deref(), Some("agree_flagged"));

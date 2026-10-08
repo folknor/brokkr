@@ -544,7 +544,7 @@ pub(crate) struct RunStart {
 impl RunStart {
     pub(crate) fn capture(project_root: &Path) -> Self {
         Self {
-            started_at: crate::piners::lint::now_sqlite_utc(),
+            started_at: crate::piners::time::now_sqlite_utc(),
             commit_sha: crate::git::resolve_commit(project_root, "HEAD").ok().map(|c| c.full),
             dirty: crate::git::has_uncommitted(project_root),
         }
@@ -605,7 +605,9 @@ fn reserve_run_id(db_path: &Path, run_dirs: &Path) -> Result<i64, DevError> {
 /// (interrupted, failed to spawn, could not write its manifest), so its id
 /// names a row and not only a dir. The dir is preserved either way. Returns
 /// the error the command fails with - always `original`; a failure to
-/// record is reported beside it, never in its place.
+/// record is reported beside it, never in its place. Prints where the
+/// preserved artefacts are, then the `brokkr clean` hint
+/// ([`crate::artefacts::emit_clean_hint`], through the corpus printer).
 fn record_unfinished(
     db_path: &Path,
     envelope: &Envelope<'_>,
@@ -629,6 +631,7 @@ fn record_unfinished(
         ));
     }
     output::corpus_msg(&format!("artefacts preserved: {}", artefacts.path().display()));
+    crate::artefacts::emit_clean_hint(output::corpus_msg);
     artefacts.finalize_failure();
     original
 }
@@ -645,4 +648,184 @@ fn ingest_run(
     let db = CorpusDb::open(db_path)?;
     db.record_run(record, report, expected, gate_diffs)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use std::fs;
+    use std::path::PathBuf;
+
+    use super::*;
+
+    fn scratch(name: &str) -> PathBuf {
+        crate::test_scratch::scratch("piners_cmd", name)
+    }
+
+    fn record_with_id(run_id: i64, result: &str) -> RunRecord<'_> {
+        RunRecord {
+            run_id: Some(run_id),
+            started_at: None,
+            commit_sha: None,
+            dirty: None,
+            selector: "{}",
+            gated: true,
+            result,
+            fail_reason: None,
+            harness_exit_code: None,
+            stderr: "",
+            wall_ms: None,
+        }
+    }
+
+    /// Create a store at `db_path` holding one row under `run_id`.
+    fn store_run(db_path: &Path, run_id: i64) {
+        let db = CorpusDb::open(db_path).unwrap();
+        let rec = record_with_id(run_id, "pass");
+        db.record_run(&rec, &report::HarnessReport::default(), &BTreeMap::new(), &[])
+            .unwrap();
+    }
+
+    fn start() -> RunStart {
+        RunStart {
+            started_at: "2026-01-02 03:04:05".to_owned(),
+            commit_sha: Some("abc123".to_owned()),
+            dirty: Some(true),
+        }
+    }
+
+    #[test]
+    fn reserve_missing_db_and_missing_dir_is_1() {
+        let root = scratch("reserve_missing");
+        let id = reserve_run_id(&root.join("runs.db"), &root.join("corpus")).unwrap();
+        assert_eq!(id, 1);
+    }
+
+    #[test]
+    fn reserve_empty_db_and_empty_dir_is_1() {
+        let root = scratch("reserve_empty");
+        let db_path = root.join("runs.db");
+        drop(CorpusDb::open(&db_path).unwrap());
+        let dirs = root.join("corpus");
+        fs::create_dir_all(&dirs).unwrap();
+        assert_eq!(reserve_run_id(&db_path, &dirs).unwrap(), 1);
+    }
+
+    #[test]
+    fn reserve_db_max_above_dir_max() {
+        let root = scratch("reserve_db_higher");
+        let db_path = root.join("runs.db");
+        store_run(&db_path, 9);
+        let dirs = root.join("corpus");
+        fs::create_dir_all(dirs.join("run-3")).unwrap();
+        assert_eq!(reserve_run_id(&db_path, &dirs).unwrap(), 10);
+    }
+
+    #[test]
+    fn reserve_dir_max_above_db_max() {
+        let root = scratch("reserve_dir_higher");
+        let db_path = root.join("runs.db");
+        store_run(&db_path, 2);
+        let dirs = root.join("corpus");
+        fs::create_dir_all(dirs.join("run-7")).unwrap();
+        assert_eq!(reserve_run_id(&db_path, &dirs).unwrap(), 8);
+    }
+
+    #[test]
+    fn reserve_counts_a_file_named_like_a_run_dir() {
+        let root = scratch("reserve_file_counts");
+        let dirs = root.join("corpus");
+        fs::create_dir_all(&dirs).unwrap();
+        fs::write(dirs.join("run-42"), "not a dir").unwrap();
+        assert_eq!(reserve_run_id(&root.join("runs.db"), &dirs).unwrap(), 43);
+    }
+
+    #[test]
+    fn reserve_errors_instead_of_overflowing() {
+        let root = scratch("reserve_overflow");
+        let db_path = root.join("runs.db");
+        store_run(&db_path, i64::MAX);
+        let result = reserve_run_id(&db_path, &root.join("corpus"));
+        assert!(matches!(result, Err(DevError::Database(_))), "{result:?}");
+    }
+
+    #[test]
+    fn envelope_record_carries_the_run_identity() {
+        let start = start();
+        let envelope = Envelope {
+            run_id: 17,
+            start: &start,
+            selector: r#"{"all":true}"#,
+            gated: false,
+        };
+        let rec = envelope.record("fail", Some("why"), Some(2), "err", Some(1.5));
+        assert_eq!(rec.run_id, Some(17));
+        assert_eq!(rec.started_at, Some("2026-01-02 03:04:05"));
+        assert_eq!(rec.commit_sha, Some("abc123"));
+        assert_eq!(rec.dirty, Some(true));
+        assert_eq!(rec.selector, r#"{"all":true}"#);
+        assert!(!rec.gated);
+        assert_eq!(rec.result, "fail");
+        assert_eq!(rec.fail_reason, Some("why"));
+        assert_eq!(rec.harness_exit_code, Some(2));
+        assert_eq!(rec.stderr, "err");
+        assert_eq!(rec.wall_ms, Some(1.5));
+    }
+
+    #[test]
+    fn record_unfinished_failed_ingest_returns_original_and_keeps_dir() {
+        let root = scratch("unfinished_ingest_fails");
+        // A regular file as the db's parent: opening the store must fail.
+        let blocker = root.join("blocker");
+        fs::write(&blocker, "file").unwrap();
+        let db_path = blocker.join("runs.db");
+
+        let parent = root.join("artefacts");
+        let artefacts = ArtefactDir::allocate_at(&parent, ARTEFACT_TEST_ID, 4, false).unwrap();
+        let sentinel = artefacts.path().join("sentinel.txt");
+        fs::write(&sentinel, "evidence").unwrap();
+
+        let start = start();
+        let envelope = Envelope { run_id: 4, start: &start, selector: "{}", gated: true };
+        let err = record_unfinished(
+            &db_path,
+            &envelope,
+            artefacts,
+            DevError::Config("sentinel-error".into()),
+            "error",
+            None,
+        );
+        assert!(matches!(&err, DevError::Config(m) if m == "sentinel-error"), "{err:?}");
+        assert!(sentinel.exists(), "preserved dir lost its contents");
+    }
+
+    #[test]
+    fn record_unfinished_success_stores_the_row_and_keeps_dir() {
+        let root = scratch("unfinished_ingest_ok");
+        let db_path = root.join("runs.db");
+        let parent = root.join("artefacts");
+        let artefacts = ArtefactDir::allocate_at(&parent, ARTEFACT_TEST_ID, 6, false).unwrap();
+        let dir = artefacts.path().to_owned();
+        fs::write(dir.join("manifest.json"), "{}").unwrap();
+
+        let start = start();
+        let envelope = Envelope { run_id: 6, start: &start, selector: "{}", gated: true };
+        let err = record_unfinished(
+            &db_path,
+            &envelope,
+            artefacts,
+            DevError::Config("sentinel-error".into()),
+            "fail",
+            Some(("harness failed to spawn", "boom")),
+        );
+        assert!(matches!(&err, DevError::Config(m) if m == "sentinel-error"), "{err:?}");
+
+        let db = CorpusDb::open_readonly(&db_path).unwrap();
+        let row = db.run(6).unwrap().unwrap();
+        assert_eq!(row.result, "fail");
+        assert_eq!(row.fail_reason.as_deref(), Some("harness failed to spawn"));
+        assert_eq!(row.commit_sha.as_deref(), Some("abc123"));
+        assert!(dir.join("manifest.json").exists(), "dir must be preserved");
+    }
 }

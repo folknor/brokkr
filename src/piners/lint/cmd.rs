@@ -26,7 +26,8 @@ use crate::piners::lint::db::{LintDb, RunMeta};
 use crate::piners::lint::diff::classify;
 use crate::piners::lint::registry::{self, LintPin, LintRegistry, TvDiag};
 use crate::piners::lint::select::{self, SelectArgs};
-use crate::piners::lint::{self, now_rfc3339, validators, DiagSet, ProbeResult};
+use crate::piners::lint::{self, validators, DiagSet, ProbeResult};
+use crate::piners::time::now_rfc3339;
 use crate::piners::registry_io;
 use crate::ratatoskr::build;
 use crate::resolve::lint_runs_db_path;
@@ -122,7 +123,7 @@ pub fn lint_corpus(
     let _sigterm = crate::shutdown::SigtermGuard::install();
 
     let registry_dir = project_root.join(lint_cfg.registry_dir());
-    let registry = LintRegistry::load(&registry_dir)?;
+    let mut registry = LintRegistry::load(&registry_dir)?;
     registry.lint()?;
 
     let sel = SelectArgs {
@@ -189,6 +190,7 @@ pub fn lint_corpus(
     if args.reanchor {
         return reanchor(
             &registry_dir,
+            &mut registry,
             &ids,
             &abs_paths,
             lint_cfg.pine_lint_bin(),
@@ -298,13 +300,13 @@ pub fn lint_corpus(
         let recorded_scope = scope.recorded_label();
         let mut blessed = 0usize;
         let mut changed = 0usize;
-        write_registry(&registry_dir, |pins| {
+        write_registry(&registry_dir, &mut registry, true, |pins| {
             for r in &results {
                 if is_tool_error(&r.disposition) || !lint::is_disposition(&r.disposition) {
                     continue;
                 }
                 let Some(pin) = pins.get_mut(&r.probe) else {
-                    continue; // dropped from lints.toml by a reseed since the run loaded it
+                    continue; // unreachable: results come from the loaded pins being edited
                 };
                 blessed += 1;
                 if pin.expected.as_deref() != Some(r.disposition.as_str())
@@ -389,6 +391,7 @@ fn build_result(
 /// reported, not fatal; the run succeeds unless every probe failed.
 fn reanchor(
     registry_dir: &Path,
+    registry: &mut LintRegistry,
     ids: &[String],
     abs_paths: &BTreeMap<String, String>,
     pine_lint: &str,
@@ -420,7 +423,7 @@ fn reanchor(
     }
     let anchored = fresh.len();
     if anchored > 0 {
-        write_registry(registry_dir, |pins| {
+        write_registry(registry_dir, registry, false, |pins| {
             for (id, tv) in &fresh {
                 if let Some(pin) = pins.get_mut(id) {
                     pin.tv = tv.clone();
@@ -449,28 +452,55 @@ fn diag_to_tv(key: &lint::DiagKey) -> TvDiag {
     }
 }
 
-/// Read-modify-write `lints.toml`: parse the file as it is on disk now, let
-/// `apply` change the fields this writer owns, and write it back atomically,
-/// preserving comments.
+/// Edit the `lints.toml` text the run loaded: let `apply` change the fields
+/// this writer owns on a copy of the loaded pins, render that into
+/// [`LintRegistry::lints_text`] (preserving comments), and replace the file
+/// atomically.
 ///
 /// The command holds the lock from before its load, so no brokkr writer can
-/// have touched the file since; it is still re-read here rather than taken
-/// from the startup registry, so a hand edit made during the run is carried
-/// into the write instead of reverted. A read failure propagates - the file
-/// was loaded at startup, so failing to read it now is an error, and treating
-/// it as absent would rewrite it without its comments.
+/// have touched the file since. If the bytes on disk no longer equal the
+/// loaded text, a hand edit landed during the run: the write is refused
+/// rather than revert it, or stamp a disposition or TV fingerprint measured
+/// against a snippet pin that is no longer the file's. `run_recorded` only
+/// shapes the message (a bless run is already in the run store when this is
+/// called; a reanchor records none). The check is not atomic with the
+/// replace - an edit landing between the two is still overwritten.
+///
+/// A read failure propagates (the file was readable at load; treating it as
+/// absent would rewrite it without its comments). On success the registry's
+/// pins and text become what was written, so a later write in this process
+/// compares against it.
 fn write_registry(
     registry_dir: &Path,
+    registry: &mut LintRegistry,
+    run_recorded: bool,
     apply: impl FnOnce(&mut BTreeMap<String, LintPin>),
 ) -> Result<(), DevError> {
     let path = registry_dir.join("lints.toml");
-    let existing = std::fs::read_to_string(&path).map_err(|e| {
+    let on_disk = std::fs::read_to_string(&path).map_err(|e| {
         DevError::Config(format!("piners lint: failed to re-read {}: {e}", path.display()))
     })?;
-    let mut pins = registry::parse_lints(&existing, &path)?.probes;
+    if on_disk != registry.lints_text {
+        let tail = if run_recorded {
+            "the run is recorded; re-run the bless against the file as it is now"
+        } else {
+            "re-run the reanchor against the file as it is now"
+        };
+        return Err(DevError::Config(format!(
+            "piners lint: {} changed during the run - nothing written ({tail})",
+            path.display()
+        )));
+    }
+    let mut pins = registry.pins.clone();
     apply(&mut pins);
-    let rendered = lint::lints_write::render_lints(Some(&existing), &pins)?;
-    registry_io::write_atomic(&path, &rendered)
+    let rendered = lint::lints_write::render_lints(Some(&registry.lints_text), &pins)?;
+    // Parse our own output against the loader's rules before replacing, so a
+    // write can never produce a file the next load refuses.
+    registry::parse_lints(&rendered, &path)?;
+    registry_io::write_atomic(&path, &rendered)?;
+    registry.pins = pins;
+    registry.lints_text = rendered;
+    Ok(())
 }
 
 /// Render the run: a disposition summary, the surviving deviation lines (a
@@ -555,4 +585,63 @@ fn selector_json(args: &LintArgs, ids: &[String]) -> String {
         "ids": ids,
     })
     .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::*;
+
+    const LOADED: &str = "# keep me\n[probes.a]\npine = { path = \"lint/a.pine\", xxh128 = \"00\" }\n";
+
+    fn loaded(dir: &Path, on_disk: &str) -> LintRegistry {
+        std::fs::write(dir.join("lints.toml"), LOADED).unwrap();
+        let mut reg = LintRegistry::load(dir).unwrap();
+        std::fs::write(dir.join("lints.toml"), on_disk).unwrap();
+        reg.lints_text = LOADED.to_owned();
+        reg
+    }
+
+    #[test]
+    fn write_succeeds_on_unchanged_file_and_keeps_comments() {
+        let dir = crate::test_scratch::scratch("piners_lint_cmd", "write_unchanged");
+        let mut reg = loaded(&dir, LOADED);
+        write_registry(&dir, &mut reg, true, |pins| {
+            pins.get_mut("a").unwrap().expected = Some("agree_clean".to_owned());
+        })
+        .unwrap();
+
+        let written = std::fs::read_to_string(dir.join("lints.toml")).unwrap();
+        assert!(written.contains("# keep me"));
+        let data = registry::parse_lints(&written, &dir).unwrap();
+        assert_eq!(data.probes["a"].expected.as_deref(), Some("agree_clean"));
+        assert_eq!(reg.lints_text, written);
+        assert_eq!(reg.pins["a"].expected.as_deref(), Some("agree_clean"));
+
+        // A second write in the same process compares against the first.
+        write_registry(&dir, &mut reg, true, |pins| {
+            pins.get_mut("a").unwrap().expected = Some("divergent".to_owned());
+        })
+        .unwrap();
+        let again = std::fs::read_to_string(dir.join("lints.toml")).unwrap();
+        assert!(again.contains("divergent"));
+    }
+
+    #[test]
+    fn write_refuses_and_leaves_file_untouched_when_it_changed() {
+        let dir = crate::test_scratch::scratch("piners_lint_cmd", "write_changed");
+        let edited = LOADED.replace("lint/a.pine", "lint/b.pine");
+        let mut reg = loaded(&dir, &edited);
+        let err = write_registry(&dir, &mut reg, true, |pins| {
+            pins.get_mut("a").unwrap().expected = Some("agree_clean".to_owned());
+        })
+        .unwrap_err();
+
+        let msg = format!("{err:?}");
+        assert!(msg.contains("changed during the run"), "{msg}");
+        assert!(msg.contains("lints.toml"), "{msg}");
+        assert_eq!(std::fs::read_to_string(dir.join("lints.toml")).unwrap(), edited);
+        assert_eq!(reg.lints_text, LOADED);
+        assert!(reg.pins["a"].expected.is_none());
+    }
 }

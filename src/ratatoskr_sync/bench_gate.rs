@@ -401,7 +401,7 @@ pub fn run_sync_bench(req: &SyncBenchRequest<'_>) -> Result<(), DevError> {
                 "FAIL: {e} (artefacts preserved at {})",
                 path.display()
             ));
-            artefacts::emit_clean_hint();
+            artefacts::emit_clean_hint(output::ratatoskr_msg);
             Err(e)
         }
     }

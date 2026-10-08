@@ -261,7 +261,7 @@ fn run_single(
             "FAIL {} in {}ms (artefacts: {dir})",
             result.exit_label, result.elapsed_ms
         ));
-        artefacts::emit_clean_hint();
+        artefacts::emit_clean_hint(output::ratatoskr_msg);
         Err(DevError::ExitCode(1))
     }
 }
@@ -305,7 +305,7 @@ fn run_soak(
     output::ratatoskr_msg(&format_soak_summary(&results, repeat));
 
     if results.iter().any(|(_, r)| !r.succeeded) {
-        artefacts::emit_clean_hint();
+        artefacts::emit_clean_hint(output::ratatoskr_msg);
         Err(DevError::ExitCode(1))
     } else {
         Ok(())

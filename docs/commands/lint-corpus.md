@@ -132,9 +132,19 @@ forward. No build, no run. Bootstrap order: `--reseed --all` -> write keyword
 files -> `--bless --all` -> runs are gated.
 
 Every `lints.toml` writer (`--reseed`, `--bless`, `--reanchor`) holds the
-global brokkr lock across its read-modify-write and re-reads the file under
-it, so none can revert another's change; the file is replaced atomically
-(temp file + rename), so a kill mid-write leaves the old file intact.
+global brokkr lock across its read-modify-write, so none can revert
+another's change. Every mode except `--reseed` takes the lock **before** it
+loads `lints.toml` (verify-only included), so the pins a run verifies are the
+pins it runs against. `--bless` and `--reanchor` edit the text the run
+loaded and refuse (writing nothing) if, just before the replace, the file on
+disk no longer matches it: that is a hand edit made during the run, and
+stamping onto it could attach a disposition or TV fingerprint measured
+against a snippet pin the file no longer holds. A refused `--bless` leaves
+its run recorded; `--reanchor` records no run. The check is not atomic with
+the replace - an edit landing between the two is still overwritten, which is
+the lock's limit on non-brokkr writers (the lock binds brokkr only). The
+file is replaced atomically (temp file + rename), so a kill mid-write leaves
+the old file intact. `--reseed` reads and writes under its own lock hold.
 
 ## The diff and the disposition
 
@@ -188,7 +198,9 @@ then stamps each probe's current disposition, and the run's scope
 (`expected_scope`), into `expected`. Records reality including divergences a
 snippet legitimately pins. Never gates (the run row records `gated = no`).
 Prints `blessed N (changed M)`, where changed counts pins whose `expected` or
-scope actually moved. A tool-error probe is **not** stamped - with
+scope actually moved. The run is recorded before the registry is written, so
+a bless refused for a mid-run edit of `lints.toml` still leaves its run row.
+A tool-error probe is **not** stamped - with
 `pine-lint` missing every probe would otherwise be blessed as `lint_error` -
 and makes bless exit non-zero after stamping the rest, naming the skipped
 probes. Excludes `--verify-only`/`--reanchor`.
