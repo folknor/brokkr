@@ -511,6 +511,16 @@ Two further clocks bound what the per-test cap cannot charge to any test:
   `brokkr test`'s per sweep and per iteration - always fires first, so this is
   the bound only for a caller that arms no phase watchdog.
 
+One more bound sits after the clocks stop: **output drain grace** (2 s,
+`DRAIN_GRACE`). Once cargo (or a directly run test binary) has exited, its
+stdout and stderr drains get that long to reach EOF. A process the tests left
+running that inherited either pipe keeps them open indefinitely, and the
+unbounded join that used to follow hung brokkr with the lock held. Past the
+grace the drains are cancelled and joined, a warning says capture stopped,
+and the run goes on with what arrived. Nothing is signalled - the run's
+process group may already be gone and its id reused; a leaked process carrying
+the run token is reaped at the next hold (see Strays).
+
 The limits are constants in `src/check_cmd/watchdog.rs` (`CHECK_CEILING` and
 `phase_ceiling`) and `src/test_runner.rs` (`IDLE_TIMEOUT`, `TEST_TIMEOUT`,
 `SWEEP_WALL_TIMEOUT`, `PARALLEL_SWEEP_TIMEOUT`); there is no config key or flag.

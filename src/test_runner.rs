@@ -519,22 +519,26 @@ where
     let done = Arc::new(AtomicBool::new(false));
     let hung = Arc::new(Mutex::new(None::<HungTest>));
 
+    let cancel = Arc::new(AtomicBool::new(false));
     let stdout_buf_t = Arc::clone(&stdout_buf);
     let tracker_t = Arc::clone(&tracker);
+    let cancel_t = Arc::clone(&cancel);
     let stdout_thread = thread::spawn(move || {
         // The same JSON drain the parallel lane uses. Both lanes read libtest's
         // event stream now; the reconstructor renders it back to human text, so
         // the downstream parsers and forwarded output see what they always saw.
-        drain_libtest_json(stdout_pipe, &stdout_buf_t, &tracker_t, forward_stdout_line);
+        drain_libtest_json(stdout_pipe, &stdout_buf_t, &tracker_t, &cancel_t, forward_stdout_line);
     });
 
     let stderr_buf_t = Arc::clone(&stderr_buf);
     let build_elapsed = Arc::new(Mutex::new(None::<Duration>));
     let build_elapsed_t = Arc::clone(&build_elapsed);
+    let cancel_t = Arc::clone(&cancel);
     let stderr_thread = thread::spawn(move || {
         drain_stderr(
             stderr_pipe,
             &stderr_buf_t,
+            &cancel_t,
             forward_stderr_line,
             start,
             move |elapsed| {
@@ -578,8 +582,7 @@ where
         session.finish();
     }
 
-    stdout_thread.join().ok();
-    stderr_thread.join().ok();
+    join_drains(vec![stdout_thread, stderr_thread], &cancel);
     watchdog_thread.join().ok();
     if let Some(acceptor) = acceptor {
         acceptor.join().ok();
@@ -709,16 +712,20 @@ where
     let done = Arc::new(AtomicBool::new(false));
     let hung = Arc::new(Mutex::new(None::<HungTest>));
 
+    let cancel = Arc::new(AtomicBool::new(false));
     let stdout_buf_t = Arc::clone(&stdout_buf);
     let tracker_t = Arc::clone(&tracker);
+    let cancel_t = Arc::clone(&cancel);
     let stdout_thread = thread::spawn(move || {
-        drain_libtest_json(stdout_pipe, &stdout_buf_t, &tracker_t, forward_stdout_line);
+        drain_libtest_json(stdout_pipe, &stdout_buf_t, &tracker_t, &cancel_t, forward_stdout_line);
     });
     let stderr_buf_t = Arc::clone(&stderr_buf);
+    let cancel_t = Arc::clone(&cancel);
     let stderr_thread = thread::spawn(move || {
         drain_stderr(
             stderr_pipe,
             &stderr_buf_t,
+            &cancel_t,
             forward_stderr_line,
             start,
             on_build_finished,
@@ -752,8 +759,7 @@ where
     // group's id can be recycled, or it could later signal a stranger.
     done.store(true, Ordering::SeqCst);
 
-    stdout_thread.join().ok();
-    stderr_thread.join().ok();
+    join_drains(vec![stdout_thread, stderr_thread], &cancel);
     watchdog_thread.join().ok();
 
     let (status, timed_out) = match waited? {
@@ -857,6 +863,7 @@ fn drain_libtest_json<F>(
     mut pipe: ChildStdout,
     buf: &Mutex<Vec<u8>>,
     tracker: &Mutex<TestTracker>,
+    cancel: &AtomicBool,
     mut forward_line: F,
 ) where
     F: FnMut(&str),
@@ -874,10 +881,7 @@ fn drain_libtest_json<F>(
 
     let mut read_buf = [0_u8; 4096];
     let mut line = Vec::<u8>::new();
-    while let Ok(n) = pipe.read(&mut read_buf) {
-        if n == 0 {
-            break;
-        }
+    while let Some(n) = read_unless_cancelled(&mut pipe, &mut read_buf, cancel) {
         for &byte in &read_buf[..n] {
             if byte == b'\n' {
                 if line.last() == Some(&b'\r') {
@@ -1219,6 +1223,7 @@ fn clone_hung(hung: &Arc<Mutex<Option<HungTest>>>) -> Result<Option<HungTest>, D
 fn drain_stderr<F, G>(
     mut pipe: ChildStderr,
     buf: &Mutex<Vec<u8>>,
+    cancel: &AtomicBool,
     mut forward_line: F,
     start: Instant,
     on_build_finished: G,
@@ -1230,10 +1235,7 @@ fn drain_stderr<F, G>(
     let mut read_buf = [0_u8; 4096];
     let mut line = Vec::<u8>::new();
 
-    while let Ok(n) = pipe.read(&mut read_buf) {
-        if n == 0 {
-            break;
-        }
+    while let Some(n) = read_unless_cancelled(&mut pipe, &mut read_buf, cancel) {
         if let Ok(mut out) = buf.lock() {
             out.extend_from_slice(&read_buf[..n]);
         }
@@ -1260,6 +1262,72 @@ fn drain_stderr<F, G>(
         let text = String::from_utf8_lossy(&line).into_owned();
         forward_line(&text);
     }
+}
+
+/// One read from a child's output pipe, or `None` at EOF, on a read error, or
+/// once `cancel` is set. Waits in `poll` with a short timeout rather than in a
+/// blocking `read`, so cancellation is observed within one interval whether the
+/// pipe is idle or streaming.
+fn read_unless_cancelled<R: Read + std::os::fd::AsRawFd>(
+    pipe: &mut R,
+    buf: &mut [u8],
+    cancel: &AtomicBool,
+) -> Option<usize> {
+    loop {
+        if cancel.load(Ordering::Acquire) {
+            return None;
+        }
+        let mut pfd = libc::pollfd { fd: pipe.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+        // SAFETY: one valid pollfd for an fd we own, for the call's duration.
+        let ready = unsafe { libc::poll(&mut pfd, 1, 100) };
+        if ready == 0 {
+            continue;
+        }
+        if ready < 0 {
+            if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return None;
+        }
+        return match pipe.read(buf) {
+            Ok(0) | Err(_) => None,
+            Ok(n) => Some(n),
+        };
+    }
+}
+
+/// How long the output drains get to reach EOF on their own once the child
+/// has exited.
+const DRAIN_GRACE: Duration = Duration::from_secs(2);
+
+/// Join a run's output drains after its child exited. They normally reach EOF
+/// at once; a process that inherited the child's stdout or stderr (a daemon a
+/// test leaked) keeps them open forever, and an unbounded join then hangs
+/// brokkr with the lock held. So after [`DRAIN_GRACE`] the drains are told to
+/// stop and joined - always joined, so no thread outlives the run to append to
+/// its buffers or print into the next one. No signal is sent: the run's
+/// process group may be gone and its id reused. A leaked process that keeps
+/// writing gets `EPIPE`; one carrying the run token is reaped at the next hold
+/// (`crate::test_orphans`). Returns whether capture was cut short.
+fn join_drains(drains: Vec<thread::JoinHandle<()>>, cancel: &AtomicBool) -> bool {
+    let until = Instant::now() + DRAIN_GRACE;
+    while Instant::now() < until && !drains.iter().all(thread::JoinHandle::is_finished) {
+        thread::sleep(Duration::from_millis(10));
+    }
+    let cut = !drains.iter().all(thread::JoinHandle::is_finished);
+    if cut {
+        cancel.store(true, Ordering::Release);
+        crate::output::warn(&format!(
+            "the test output did not close within {}s of the test process exiting; capture \
+             stopped there. A process the tests started (a leaked daemon, say) may still hold \
+             the output pipe",
+            DRAIN_GRACE.as_secs()
+        ));
+    }
+    for d in drains {
+        d.join().ok();
+    }
+    cut
 }
 
 fn is_cargo_finished_line(line: &str) -> bool {
@@ -1768,6 +1836,35 @@ mod tests {
     use std::process::{Command, Stdio};
     use std::sync::atomic::AtomicBool;
     use std::sync::{Arc, Mutex};
+
+    /// A child that exits while a background process it started still holds
+    /// its stdout: the drain is cut after the grace period instead of waiting
+    /// for that process, and what arrived before the exit is kept.
+    #[test]
+    fn a_leaked_pipe_holder_does_not_hang_the_drain_join() {
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg("sleep 15 & echo $!; echo captured")
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("spawn sh");
+        let pipe = child.stdout.take().expect("piped stdout");
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let tracker = Arc::new(Mutex::new(TestTracker::default()));
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (b, t, c) = (Arc::clone(&buf), Arc::clone(&tracker), Arc::clone(&cancel));
+        let drain = thread::spawn(move || drain_libtest_json(pipe, &b, &t, &c, |_| {}));
+        child.wait().expect("sh exits");
+        let started = Instant::now();
+        assert!(join_drains(vec![drain], &cancel), "the leaked holder kept the pipe open");
+        assert!(started.elapsed() < DRAIN_GRACE + Duration::from_secs(2));
+        let text = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+        assert!(text.contains("captured"), "{text}");
+        if let Some(pid) = text.lines().next().and_then(|l| l.trim().parse::<i32>().ok()) {
+            // SAFETY: the sleep this test started; ESRCH is fine.
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+        }
+    }
 
     #[test]
     fn a_forged_suite_start_cannot_reset_the_anti_forgery_guard() {
