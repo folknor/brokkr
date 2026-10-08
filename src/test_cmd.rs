@@ -253,7 +253,26 @@ pub fn run(
     result
 }
 
-#[allow(clippy::too_many_arguments)]
+/// The whole run's shape, printed up front: a PASS in the first sweep is not
+/// the end of the command, and nothing else would say so.
+fn sweep_plan_line(sweeps: &[ResolvedSweep], pkg: &str) -> String {
+    let (running, scoped_out): (Vec<&ResolvedSweep>, Vec<&ResolvedSweep>) =
+        sweeps.iter().partition(|s| sweep_skip_reason(s, pkg).is_none());
+    let names =
+        |v: &[&ResolvedSweep]| v.iter().map(|s| s.label.as_str()).collect::<Vec<_>>().join(", ");
+    let mut line = format!(
+        "[test]    {} for {pkg}: {}",
+        output::count(running.len(), "sweep"),
+        names(&running)
+    );
+    if !scoped_out.is_empty() {
+        line.push_str(&format!(" (not this package: {})", names(&scoped_out)));
+    }
+    line.push_str(" - each runs every harness; the run ends at its summary, not its first PASS");
+    line
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn run_sweeps(
     dev_config: &DevConfig,
     project: Project,
@@ -288,6 +307,10 @@ fn run_sweeps(
 
     let mut reports: Vec<RunReport> = Vec::new();
     let repeat_state = RepeatState::default();
+
+    if multi {
+        println!("{}", sweep_plan_line(&sweeps, &pkg));
+    }
 
     for sweep in &sweeps {
         if multi {
@@ -970,8 +993,21 @@ fn run_split(
         ));
     }
     let mut parts = Vec::new();
-    for target in targets {
+    // Most harnesses contain no match and print nothing, so a split run can be
+    // silent for minutes after its only PASS - long enough to read as a hang.
+    // Say where the run is whenever it has been quiet for a while.
+    let mut quiet_since = std::time::Instant::now();
+    for (i, target) in targets.iter().enumerate() {
         let label = target.label();
+        if ctx.announce && quiet_since.elapsed() >= SPLIT_HEARTBEAT {
+            println!(
+                "[test]    still running: harness {}/{} ({})",
+                i + 1,
+                targets.len(),
+                (ctx.tag)(Some(&label))
+            );
+            quiet_since = std::time::Instant::now();
+        }
         let args = test_argv(
             shape.sweep,
             shape.allow_args,
@@ -1003,6 +1039,9 @@ fn run_split(
         if ctx.announce && matches!(report.outcome, Outcome::Fail | Outcome::BuildFailed) {
             output::error(&format!("failing command: cargo {}", args.join(" ")));
         }
+        if report.outcome != Outcome::NoMatch {
+            quiet_since = std::time::Instant::now();
+        }
         // A blown budget stops everything, the remaining harnesses included.
         let stop = report.timed_out;
         parts.push(report);
@@ -1012,6 +1051,10 @@ fn run_split(
     }
     Ok(RunReport::merge(parts))
 }
+
+/// How long a split run may go without printing before it says which harness
+/// it has reached.
+const SPLIT_HEARTBEAT: Duration = Duration::from_secs(10);
 
 /// How one invocation is labelled and bounded.
 struct OneRun<'a> {

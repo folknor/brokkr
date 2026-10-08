@@ -2670,7 +2670,15 @@ empty `failures:` header, the `RUST_BACKTRACE` hint, and cargo's
 `to rerun pass ...` suggestion), then prints a `[test]` footer per harness that
 ran the name - `PASS` or `FAIL`, tagged with the harness (`[test:cli_sort]`,
 `[lib:pkg]`) - and `BUILD FAILED` for a sweep whose build failed. A harness the
-name matched nothing in is the normal case and prints nothing; a sweep `SKIP`s
+name matched nothing in is the normal case and prints nothing, which in a
+package with many harnesses means minutes of silence after the one `PASS`. So
+a multi-sweep run opens with one line naming the sweeps that will run (and
+those out of the package's scope), and a split run that has printed nothing for
+10 seconds says `still running: harness i/N` with the harness it reached. Every
+harness still runs: listing first and running only the harnesses that contain a
+match was considered and rejected, because a listing cannot prove what a
+harness will execute (`custom_test_frameworks` runs arbitrary code under
+`harness = true`, and cargo metadata does not expose `harness` at all). A sweep `SKIP`s
 when the name matched in none of its harnesses (usually
 `#[cfg(feature = "...")]`-gated), or because the `-p` target is out of the
 sweep's package scope - the sweep declares a `packages` list the target isn't
