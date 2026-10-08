@@ -145,6 +145,7 @@ fn main() {
         Err(DevError::ExitCode(code)) => process::exit(code),
         Err(DevError::Interrupted) => {
             output::lock_msg("interrupted - running scratch cleanup");
+            crate::shutdown::admit_exit_cleanup();
             // Best-effort cleanup; if project detection fails here, the
             // user already has `brokkr clean` as a follow-up.
             if let Ok(d) = project::detect()

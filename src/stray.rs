@@ -122,26 +122,69 @@ struct Ownership {
     /// Unverifiable now means unprotected - except for `me`, which is what the
     /// fallback was really protecting.
     holder: Option<u32>,
+    /// The holder's PID namespace, when it runs sandboxed relative to this
+    /// process (its namespace is not ours). Then its PID cannot be verified
+    /// from here, so `holder` is `None`, and the namespace stands in for it:
+    /// every process in that namespace or below it is the holder's. A sandbox
+    /// that gives each command its own PID namespace (codex) holds exactly the
+    /// holder's workload there. Never set when the holder shares our namespace
+    /// - that would exempt every process on the host.
+    foreign_ns: Option<u64>,
 }
 
 impl Ownership {
-    /// Whether an ancestor PID marks the tree below it as brokkr's own.
+    /// Whether a PID marks the tree below it, and itself, as brokkr's own.
     fn owns(&self, pid: u32) -> bool {
-        pid == self.me || self.holder == Some(pid)
+        pid == self.me
+            || self.holder == Some(pid)
+            || self.foreign_ns.is_some_and(|ns| within_ns(pid, ns))
     }
+}
+
+/// Whether `pid` lives in PID namespace `ns` or one nested below it. Walks
+/// `NS_GET_PARENT` up from the process's own namespace; the walk ends with
+/// `EPERM` at this process's namespace, which means "not within". Any other
+/// failure to inspect the process answers `true`: exempting a process we
+/// cannot classify is the conservative direction for a reaper.
+fn within_ns(pid: u32, ns: u64) -> bool {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    // _IO(0xb7, 0x2)
+    const NS_GET_PARENT: libc::c_ulong = 0xb702;
+    let Ok(file) = std::fs::File::open(format!("/proc/{pid}/ns/pid")) else {
+        return true;
+    };
+    let mut current: OwnedFd = file.into();
+    // Bounded: the kernel nests PID namespaces at most 32 deep.
+    for _ in 0..33 {
+        // SAFETY: fstat on an fd we own into a zeroed stat buffer.
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        if unsafe { libc::fstat(current.as_raw_fd(), &mut st) } != 0 {
+            return true;
+        }
+        if st.st_ino == ns {
+            return true;
+        }
+        // SAFETY: an ioctl on an fd we own; it returns a fresh fd or -1.
+        let parent = unsafe { libc::ioctl(current.as_raw_fd(), NS_GET_PARENT) };
+        if parent < 0 {
+            return std::io::Error::last_os_error().raw_os_error() != Some(libc::EPERM);
+        }
+        // SAFETY: a successful NS_GET_PARENT returns a new fd we own.
+        current = unsafe { OwnedFd::from_raw_fd(parent) };
+    }
+    true
 }
 
 /// The ownership rule in force right now, read from the lock file.
 fn current_ownership() -> Ownership {
-    let holder = match crate::lockfile::status() {
-        Ok(Some(info))
-            if crate::lockfile::verify_identity(info.pid, &info.starttime, &info.boot_id) =>
-        {
-            Some(info.pid)
-        }
-        _ => None,
-    };
-    Ownership { me: std::process::id(), holder }
+    let info = crate::lockfile::status().ok().flatten();
+    let holder = info.as_ref().and_then(|info| {
+        (crate::lockfile::shares_namespaces(info)
+            && crate::lockfile::verify_identity(info.pid, &info.starttime, &info.boot_id))
+        .then_some(info.pid)
+    });
+    let foreign_ns = info.as_ref().and_then(crate::lockfile::foreign_holder_ns);
+    Ownership { me: std::process::id(), holder, foreign_ns }
 }
 
 struct ProcEntry {
@@ -188,7 +231,7 @@ fn read_proc() -> HashMap<u32, ProcEntry> {
 fn classify(table: &HashMap<u32, ProcEntry>, ownership: Ownership) -> Vec<Stray> {
     let mut strays = Vec::new();
     for (&pid, entry) in table {
-        if !is_cargo_family(&entry.comm) {
+        if !is_cargo_family(&entry.comm) || ownership.owns(pid) {
             continue;
         }
         let mut under_brokkr = false;
@@ -286,7 +329,9 @@ pub fn kill(strays: &[Stray]) -> (usize, usize) {
     // process can exit and the number be reused, and then this signals something
     // it never classified.
     let sigkill = |pid: u32, expect: &str| {
-        if expect.is_empty() {
+        // Every target, descendants and starters included, not just the
+        // classified strays: an owned process is never signalled.
+        if expect.is_empty() || ownership.owns(pid) {
             return false;
         }
         match crate::lockfile::proc_starttime(pid) {
@@ -469,16 +514,29 @@ mod tests {
     }
 
     /// No hold, and nothing of ours in the tree.
+    /// A process is within its own PID namespace, and the parent walk stops at
+    /// this process's namespace with "not within" for any other inode.
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn namespace_containment_walks_to_our_own_namespace() {
+        let me = std::process::id();
+        let own = crate::lockfile::ns_inode("/proc/self/ns/pid").unwrap();
+        assert!(within_ns(me, own));
+        assert!(!within_ns(me, own.wrapping_add(1)));
+        let o = Ownership { me: 1, holder: None, foreign_ns: Some(own) };
+        assert!(o.owns(me));
+    }
+
     fn foreign() -> Ownership {
-        Ownership { me: 999_999, holder: None }
+        Ownership { me: 999_999, holder: None, foreign_ns: None }
     }
 
     #[test]
     fn cargo_under_the_holder_is_not_a_stray() {
         let t = table(&[(1, 0, "systemd"), (10, 1, "zsh"), (20, 10, "brokkr"), (30, 20, "cargo"), (40, 30, "rustc")]);
-        assert!(classify(&t, Ownership { me: 999_999, holder: Some(20) }).is_empty());
+        assert!(classify(&t, Ownership { me: 999_999, holder: Some(20), foreign_ns: None }).is_empty());
         // And when the holder *is* this process.
-        assert!(classify(&t, Ownership { me: 20, holder: Some(20) }).is_empty());
+        assert!(classify(&t, Ownership { me: 20, holder: Some(20), foreign_ns: None }).is_empty());
     }
 
     /// The impersonation the `comm` rule could not see: a shell copied to a file
@@ -497,7 +555,7 @@ mod tests {
         ]);
         let pids: Vec<u32> = classify(&t, foreign()).iter().map(|s| s.pid).collect();
         assert_eq!(pids, vec![40, 30]);
-        let unverifiable: Vec<u32> = classify(&t, Ownership { me: 999_999, holder: None })
+        let unverifiable: Vec<u32> = classify(&t, Ownership { me: 999_999, holder: None, foreign_ns: None })
             .iter()
             .map(|s| s.pid)
             .collect();
@@ -516,7 +574,7 @@ mod tests {
             (30, 20, "cargo"),  // our own work
             (40, 30, "rustc"),
         ]);
-        let own = Ownership { me: 20, holder: Some(20) };
+        let own = Ownership { me: 20, holder: Some(20), foreign_ns: None };
         // The outer cargo is a stray; ours is not.
         let pids: Vec<u32> = classify(&t, own).iter().map(|s| s.pid).collect();
         assert_eq!(pids, vec![10]);

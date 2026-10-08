@@ -324,7 +324,23 @@ switches to fixed-width tables. Rendering lives in `src/sidecar_fmt.rs`.
   ratatoskr sync bench uses the script's `ceiling:`; measured `corpus` uses the
   parity path's hang backstop. Paths with no deadline run until the child
   exits or `brokkr kill`.
-- **`brokkr kill` (SIGTERM) and Ctrl-C (SIGINT)** are caught by a
+- **`brokkr kill` asks the holder over its control socket.** Every fresh
+  hold binds `~/.brokkr/lock/<acquisition id>.sock` (`src/lock_service.rs`),
+  the id recorded in the lock file. A stop request naming the live
+  acquisition is accepted by the holder itself: it sets a sticky stop flag
+  that no guard clears and that refuses every further lock acquisition and
+  build admission, then sends itself SIGTERM. "Accepted" means that
+  commitment, not completed termination. Because nothing crosses a PID
+  namespace, this works from the host against a sandboxed holder and between
+  sibling sandboxes (codex runs each command in its own PID namespace). Only
+  when the socket does not answer (an older brokkr, a stopped holder) does
+  `kill` fall back to a numeric SIGTERM, and only when the holder's recorded
+  PID and time namespaces match the caller's and `/proc` numbers processes
+  for the caller's own namespace. `brokkr lock` asks the same socket for the
+  holder's own account of itself (invocation, how long it has held, CPU, RSS,
+  progress), and both it and the lock wait print an advisory line when the
+  holder recorded the caller's own `CODEX_THREAD_ID`.
+- **SIGTERM and Ctrl-C (SIGINT)** are caught by a
   `SigtermGuard` (`src/shutdown.rs`), installed for every tracked-child
   window: each sidecar run, a passthrough child, an orchestrator's whole run
   (the ratatoskr sync bench holds one across all its iterations), and the
@@ -340,7 +356,13 @@ switches to fixed-width tables. Rendering lives in `src/sidecar_fmt.rs`.
   `Interrupted`; `main` runs the scratch cleanup and exits 130.
 - **`brokkr kill --hard`** runs no handler: it SIGKILLs the recorded child,
   mock servers and every identity-checked descendant of brokkr, then brokkr.
-  Nothing is flushed; follow up with `brokkr clean`. A brokkr SIGKILLed by
+  Nothing is flushed; follow up with `brokkr clean`. It signals by PID, so it
+  refuses unless the holder shares the caller's PID and time namespaces (the
+  same check as the fallback above); against a sandboxed holder, use the
+  graceful `kill` or stop the session that owns it. Delivery failures (EPERM)
+  are reported, never counted as sent. Known gaps, unchanged: a process
+  group is signalled with `kill(-pid)` after a starttime re-check, and
+  starttime is a clock-tick token, not a unique generation number. A brokkr SIGKILLed by
   anything else (the OOM killer) gets no walk at all; only the test runners'
   processes have a backstop for that case (a parent-death signal, and the
   orphan reap at the next locked command - see `brokkr man check strays`).

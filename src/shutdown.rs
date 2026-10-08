@@ -4,7 +4,11 @@
 //!
 //! The protocol:
 //!
-//! 1. `brokkr kill` reads the lockfile and sends `SIGTERM` to the brokkr PID.
+//! 1. `brokkr kill` reads the lockfile and asks the holder to stop over its
+//!    control socket (`crate::lock_service`): the holder commits a sticky stop
+//!    ([`commit_stop`]) and sends itself `SIGTERM`. Only when the socket does
+//!    not answer, and the holder's identity verifies from the caller's own
+//!    namespaces, does `kill` send that `SIGTERM` to the brokkr PID itself.
 //! 2. A [`SigtermGuard`] is installed for the lifetime of each tracked-child
 //!    window - a sidecar run, a passthrough child, an orchestrator's whole
 //!    run, and the whole of `brokkr check` / `brokkr test` / `brokkr clippy`.
@@ -123,10 +127,41 @@ fn terminal_foreground_pgrp() -> Option<libc::pid_t> {
     if fg < 0 { None } else { Some(fg) }
 }
 
+/// Set once a `brokkr kill` arriving over the lock socket has been accepted
+/// (`crate::lock_service`), and never cleared. Unlike [`SHUTDOWN_REQUESTED`],
+/// which each outermost [`SigtermGuard`] resets, an accepted stop must survive
+/// guard transitions: the requester was told the command is stopping, so a
+/// guard that drops without having polled the flag must not quietly forget it.
+/// [`is_shutdown_requested`] reports it, and lock acquisition and
+/// `lockfile::current_hold` refuse while it is set, so no new work is admitted.
+static STOP_COMMITTED: AtomicBool = AtomicBool::new(false);
+
+/// Commit this process to stopping. See [`STOP_COMMITTED`].
+pub fn commit_stop() {
+    STOP_COMMITTED.store(true, Ordering::SeqCst);
+}
+
+/// Whether [`commit_stop`] has run in this process and still bars new work.
+/// [`admit_exit_cleanup`] lifts the bar for the one thing a stopped command
+/// still does: its scratch cleanup on the way out.
+pub fn stop_committed() -> bool {
+    STOP_COMMITTED.load(Ordering::SeqCst) && !EXIT_CLEANUP.load(Ordering::SeqCst)
+}
+
+static EXIT_CLEANUP: AtomicBool = AtomicBool::new(false);
+
+/// Called by `main`'s interrupt path immediately before the scratch cleanup,
+/// which takes the lock like any `brokkr clean`. Nothing but that cleanup and
+/// the process exit follow it.
+pub fn admit_exit_cleanup() {
+    EXIT_CLEANUP.store(true, Ordering::SeqCst);
+}
+
 /// Whether a shutdown has been requested via SIGTERM/SIGINT (or
-/// [`request_shutdown`]) since the outermost `SigtermGuard` was installed.
+/// [`request_shutdown`]) since the outermost `SigtermGuard` was installed, or
+/// a stop was committed over the lock socket at any point.
 pub fn is_shutdown_requested() -> bool {
-    SHUTDOWN_REQUESTED.load(Ordering::SeqCst)
+    SHUTDOWN_REQUESTED.load(Ordering::SeqCst) || stop_committed()
 }
 
 /// Raise the shutdown flag from inside brokkr, exactly as a `brokkr kill`

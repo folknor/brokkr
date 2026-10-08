@@ -912,12 +912,58 @@ fn cmd_lock() -> Result<(), DevError> {
         return Ok(());
     };
 
-    // Line 1: brokkr orchestrator + the invocation it was asked to run.
+    let invocation = if info.args.is_empty() {
+        format!("{} {}", info.project, info.command)
+    } else {
+        format!("{} {}", info.project, info.args)
+    };
+
+    // First ask the holder itself, over its control socket. It answers about
+    // its own process, so no PID crosses a namespace boundary - this works
+    // from the host, from a sibling sandbox, from anywhere the socket is.
+    if !info.acq_id.is_empty() {
+        match crate::lock_service::request(&info.acq_id, "status") {
+            crate::lock_service::Reply::Status(s) => {
+                print_holder_status(&info, &invocation, &s);
+                return Ok(());
+            }
+            crate::lock_service::Reply::Busy => {
+                output::lock_msg(&invocation);
+                output::lock_msg("the holder was mid-update; run `brokkr lock` again for details");
+                output::lock_msg(&format!("root: {}", info.project_root));
+                return Ok(());
+            }
+            // Released between the flock probe and the request, or stale
+            // metadata: say what the file says, then try the local view.
+            crate::lock_service::Reply::Gone
+            | crate::lock_service::Reply::Accepted { .. }
+            | crate::lock_service::Reply::NoAnswer(_) => {}
+        }
+    }
+    if let Some(hint) = lockfile::same_agent_hint(&info) {
+        output::lock_msg(&hint);
+    }
+
+    // The holder did not answer (an older brokkr, or one that is stopped).
     // Every PID in the lock file was written in the HOLDER's PID namespace
     // (a sandboxed holder writes pid=2, which is kthreadd here), so each
-    // one is shown only after its identity tokens verify against this
-    // namespace's /proc - an unverified PID's stats belong to some other
-    // process and are suppressed wholesale.
+    // one is shown only when the namespaces match and its identity tokens
+    // verify against this namespace's /proc - an unverified PID's stats
+    // belong to some other process and are suppressed wholesale.
+    if !lockfile::shares_namespaces(&info) {
+        output::lock_msg(&invocation);
+        output::lock_msg(&format!(
+            "the holder did not answer its control socket, and it runs in {} - its process cannot \
+             be inspected from here",
+            if lockfile::foreign_holder_ns(&info).is_some() {
+                "another PID namespace (a sandboxed command)"
+            } else {
+                "a PID or time namespace this process cannot verify"
+            }
+        ));
+        output::lock_msg(&format!("root: {}", info.project_root));
+        return Ok(());
+    }
     let holder_verified = lockfile::verify_identity(info.pid, &info.starttime, &info.boot_id);
     let uptime_suffix = if holder_verified {
         lockfile::verified_uptime(info.pid, &info.starttime, &info.boot_id)
@@ -925,11 +971,6 @@ fn cmd_lock() -> Result<(), DevError> {
             .unwrap_or_default()
     } else {
         String::new()
-    };
-    let invocation = if info.args.is_empty() {
-        format!("{} {}", info.project, info.command)
-    } else {
-        format!("{} {}", info.project, info.args)
     };
     if holder_verified {
         output::lock_msg(&format!(
@@ -977,6 +1018,63 @@ fn cmd_lock() -> Result<(), DevError> {
     }
 
     Ok(())
+}
+
+/// Render the holder's own answer. Everything here is the holder speaking
+/// about itself; the one PID-keyed line (the sidecar marker) is printed only
+/// when the PID means the same thing here as it did to the holder.
+fn print_holder_status(
+    info: &lockfile::LockInfo,
+    invocation: &str,
+    s: &crate::lock_service::HolderStatus,
+) {
+    let mut facts = Vec::new();
+    if let Ok(secs) = s.get("held_secs").parse::<u64>() {
+        facts.push(format!("holding {}", lockfile::format_duration(secs)));
+    }
+    if let Ok(secs) = s.get("cpu_secs").parse::<u64>() {
+        facts.push(format!("{} CPU", lockfile::format_duration(secs)));
+    }
+    if let Ok(kb) = s.get("rss_kb").parse::<u64>() {
+        facts.push(format!("RSS {} MB", kb / 1024));
+    }
+    if s.get("draining") == "1" {
+        facts.push("draining earlier compilers".into());
+    }
+    let facts = if facts.is_empty() { String::new() } else { format!(" ({})", facts.join(", ")) };
+    output::lock_msg(&format!("brokkr{facts}: {invocation}"));
+    output::lock_msg(&format!("root: {}", info.project_root));
+
+    let mut work = Vec::new();
+    if !s.get("progress").is_empty() {
+        work.push(format!("run {}", s.get("progress")));
+    }
+    if s.get("child") == "1" {
+        work.push("a child process is running".into());
+    }
+    match s.get("mocks") {
+        "" | "0" => {}
+        n => work.push(format!("{n} mock server(s)")),
+    }
+    if !work.is_empty() {
+        output::lock_msg(&work.join(", "));
+    }
+
+    if lockfile::foreign_holder_ns(info).is_some() {
+        output::lock_msg(
+            "the holder runs in another PID namespace (a sandboxed command); `brokkr kill` asks it \
+             to stop over its control socket, `brokkr kill --hard` cannot reach it from here",
+        );
+    }
+    if let Some(hint) = lockfile::same_agent_hint(info) {
+        output::lock_msg(&hint);
+    }
+    if lockfile::shares_namespaces(info)
+        && info.pid > 0
+        && let Some(marker) = crate::sidecar::read_status(info.pid)
+    {
+        output::lock_msg(&format!("last marker: {marker}"));
+    }
 }
 
 /// Forward one cargo subcommand with raw args, inheriting stdio, mapping a
@@ -1080,21 +1178,77 @@ fn cmd_kill(hard: bool) -> Result<(), DevError> {
     }
 
     if !hard {
-        let holder = preflight_holder(&info).map_err(|why| refuse_kill(&why))?;
-        if signal_target(&holder, libc::SIGTERM) {
-            output::lock_msg(&format!(
-                "SIGTERM sent to brokkr PID {} - cleanup in progress",
-                info.pid,
-            ));
-        } else {
-            output::lock_msg(&format!(
-                "brokkr PID {} exited before the signal landed; nothing to kill",
-                info.pid,
-            ));
-        }
-        return Ok(());
+        return kill_graceful(&info);
     }
 
+    // Hard kill signals by number, so every recorded PID must mean the same
+    // thing here as it did to the holder.
+    if !lockfile::shares_namespaces(&info) {
+        return Err(refuse_kill(
+            "the holder runs in another PID or time namespace (a sandboxed command); `brokkr kill` \
+             without --hard asks it to stop over its control socket, or stop the session that owns \
+             it",
+        ));
+    }
+    hard_kill(&info)
+}
+
+/// The cooperative stop. The control socket first: the holder validates the
+/// request against its live acquisition and stops itself, so this works
+/// across PID namespaces and cannot reach a later holder.
+fn kill_graceful(info: &lockfile::LockInfo) -> Result<(), DevError> {
+    use crate::lock_service::Reply;
+    let unanswered = if info.acq_id.is_empty() {
+        "the holder records no control socket (an older brokkr)".to_owned()
+    } else {
+        match crate::lock_service::request(&info.acq_id, "stop") {
+            Reply::Accepted { signal_error: None } => {
+                output::lock_msg("stop accepted by the holder - cleanup in progress");
+                return Ok(());
+            }
+            Reply::Accepted { signal_error: Some(e) } => {
+                output::lock_msg(&format!(
+                    "stop committed by the holder, but its SIGTERM to itself failed ({e}); it \
+                     stops at its next check"
+                ));
+                return Ok(());
+            }
+            Reply::Gone => {
+                output::lock_msg("the holder had already released the lock; nothing to kill");
+                return Ok(());
+            }
+            Reply::Busy | Reply::Status(_) => "the holder gave an unexpected answer".to_owned(),
+            Reply::NoAnswer(why) => why,
+        }
+    };
+    // No answer (an older brokkr, or a stopped holder): the numeric path,
+    // only where the recorded PID means the same thing here.
+    if !lockfile::shares_namespaces(info) {
+        return Err(refuse_kill(&format!(
+            "{unanswered}, and the holder runs in a PID or time namespace this process cannot \
+             verify"
+        )));
+    }
+    let holder = preflight_holder(info).map_err(|why| refuse_kill(&why))?;
+    match signal_target(&holder, libc::SIGTERM) {
+        Ok(true) => output::lock_msg(&format!(
+            "SIGTERM sent to brokkr PID {} - cleanup in progress",
+            info.pid,
+        )),
+        Ok(false) => output::lock_msg(&format!(
+            "brokkr PID {} exited before the signal landed; nothing to kill",
+            info.pid,
+        )),
+        Err(e) => {
+            return Err(DevError::Lock(format!("SIGTERM to brokkr PID {} failed: {e}", info.pid)));
+        }
+    }
+    Ok(())
+}
+
+/// SIGSTOP the holder, SIGKILL its recorded children, everything beneath it,
+/// then the holder. Callers have checked `shares_namespaces`.
+fn hard_kill(info: &lockfile::LockInfo) -> Result<(), DevError> {
     // Preflight every advertised target: verify identity, open and retain a
     // pidfd (pinning the process generation for the whole operation, PG
     // leaders included), re-verify. Any failure refuses the whole hard kill
@@ -1112,24 +1266,25 @@ fn cmd_kill(hard: bool) -> Result<(), DevError> {
                 .map_err(|why| refuse_kill(&why))?,
         );
     }
-    let holder = preflight_holder(&info).map_err(|why| refuse_kill(&why))?;
+    let holder = preflight_holder(info).map_err(|why| refuse_kill(&why))?;
 
     // Freeze brokkr first, so it cannot start anything new (the next sweep,
     // a respawned mock) while its tree is being taken down.
-    signal_target(&holder, libc::SIGSTOP);
+    if let Err(e) = signal_target(&holder, libc::SIGSTOP) {
+        output::lock_msg(&format!("SIGSTOP brokkr PID {}: failed ({e})", info.pid));
+    }
 
     // Kill children first, then brokkr - otherwise there's a brief window
     // where brokkr is dead but the tool it was measuring is still alive
     // (and anyone peeking at `brokkr lock` sees stale state pointing at a
     // live child with no owner).
     for target in &targets {
-        let sent = signal_target(target, libc::SIGKILL);
         output::lock_msg(&format!(
             "SIGKILL {} {} {}: {}",
             target.role,
             if target.pg_leader { "PG" } else { "PID" },
             target.pid,
-            if sent { "sent" } else { "not running" },
+            describe_delivery(&signal_target(target, libc::SIGKILL)),
         ));
     }
     // Then everything else beneath brokkr. The recorded child is only the
@@ -1147,11 +1302,10 @@ fn cmd_kill(hard: bool) -> Result<(), DevError> {
             output::count(swept, "process")
         ));
     }
-    let brokkr_sent = signal_target(&holder, libc::SIGKILL);
     output::lock_msg(&format!(
         "SIGKILL brokkr PID {}: {}",
         info.pid,
-        if brokkr_sent { "sent" } else { "not running" },
+        describe_delivery(&signal_target(&holder, libc::SIGKILL)),
     ));
     output::lock_msg("follow up with `brokkr clean` to wipe scratch");
     Ok(())
@@ -1227,7 +1381,9 @@ fn preflight_target(
     })
 }
 
-/// Signal a preflighted target. Returns `true` if the target still existed.
+/// Signal a preflighted target. `Ok(true)` delivered, `Ok(false)` the target
+/// was already gone, `Err` a real failure (EPERM, say) - reported, never
+/// counted as delivered.
 ///
 /// Non-leaders are signalled through the pidfd, which is race-free against
 /// PID recycling. PG leaders need `kill(-pid, ...)` to sweep the group and
@@ -1235,19 +1391,30 @@ fn preflight_target(
 /// re-verified immediately before the group kill (starttime unchanged, i.e.
 /// same generation); the sliver between that check and the kill is a
 /// documented residual race we accept.
-fn signal_target(target: &KillTarget, signal: libc::c_int) -> bool {
+fn signal_target(target: &KillTarget, signal: libc::c_int) -> std::io::Result<bool> {
     if target.pg_leader {
         if lockfile::proc_starttime(target.pid).as_deref() != Some(target.starttime.as_str()) {
-            return false;
+            return Ok(false);
         }
         let ret = unsafe { libc::kill(-target.pid.cast_signed(), signal) };
         if ret == 0 {
-            return true;
+            return Ok(true);
         }
-        return std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH);
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::ESRCH) {
+            return Ok(false);
+        }
+        return Err(err);
     }
-    // Anything but ESRCH counts as "still existed", as before.
-    lockfile::pidfd_send_signal(&target.pidfd, signal).unwrap_or(true)
+    lockfile::pidfd_send_signal(&target.pidfd, signal)
+}
+
+fn describe_delivery(result: &std::io::Result<bool>) -> String {
+    match result {
+        Ok(true) => "sent".into(),
+        Ok(false) => "not running".into(),
+        Err(e) => format!("FAILED ({e})"),
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -46,7 +46,11 @@ handle; just let the command wait. The wait is the serialization working, not
 machine congestion: the lock exists so brokkr commands never overlap, and the
 `[lock] acquired - ...` line marks the point after which this command had the
 lock to itself - the wait has no effect on any timing or result measured
-after it. `brokkr lock` shows who holds the lock and what it is doing.
+after it. `brokkr lock` shows who holds the lock and what it is doing - asked
+of the holder itself over its control socket, so it works across sandboxes.
+When the holder recorded the same `CODEX_THREAD_ID` as the waiting command, the
+wait says so: the holder is almost certainly the agent's own earlier command,
+still running in another exec session.
 
 Flags:
 - `-p/--package <PKG>` (repeatable) - scope every sweep's cargo invocation
@@ -544,6 +548,16 @@ rustc beneath it, with no reference to whether it held anything. The rule now
 exempts a tree whose ancestor is either **this process** (`std::process::id()`)
 or **the verified current lock holder** (checked through the lock file's
 starttime and boot-id tokens).
+
+A holder in **another PID namespace** (a sandboxed command, seen from the host)
+cannot be verified by pid at all, so its namespace stands in for it: while it
+holds, every process in that namespace or nested below it is treated as its own
+(`NS_GET_PARENT` walk; a process that cannot be inspected is exempted). This
+applies only when the holder's namespace differs from the reaper's - for a
+holder sharing it, the rule would exempt every process on the host - and it
+guards every target the reap would signal, descendants and starters included.
+Without it, a hand-run `brokkr strays` on the host killed a sandboxed holder's
+own cargo.
 
 There is no name fallback. The case that argued for keeping one - never SIGKILL
 brokkr's own build - needs no lock file at all, because the reaper runs *inside*

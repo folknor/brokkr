@@ -30,6 +30,7 @@ mod hotpath_fmt;
 mod invalidate_cmd;
 mod litehtml;
 mod lex;
+mod lock_service;
 mod lockfile;
 mod man;
 mod manifest;

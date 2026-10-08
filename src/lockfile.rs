@@ -28,6 +28,22 @@ struct LockState {
     /// starttime from a previous boot could coincidentally match an
     /// unrelated process in this one.
     boot_id: String,
+    /// This acquisition's public id, naming its control socket
+    /// (`crate::lock_service`). Empty for a hold that runs no service (tests).
+    acq_id: String,
+    /// The holder's PID-namespace inode and the time-namespace inode of the
+    /// thread that read `starttime`. A reader compares both with its own
+    /// before trusting any recorded PID or starttime: the PID is numbered in
+    /// the holder's PID namespace, and the starttime is offset by the
+    /// *reading* thread's time namespace. Empty when unreadable, which makes
+    /// every namespace comparison fail closed.
+    pid_ns: String,
+    time_ns: String,
+    /// `CODEX_THREAD_ID` / `CODEX_SESSION_ID` from the holder's environment,
+    /// when set. Advisory attribution only ("the holder reports the same codex
+    /// thread as you"); never an identity anything is authorised on.
+    codex_thread: String,
+    codex_session: String,
     /// Hash of this acquisition's capability nonce (`crate::hold`), or empty
     /// while the hold is still draining and has not minted one. Empty is what
     /// makes the drain safe: a guard that reads an empty `auth` refuses, so no
@@ -78,10 +94,35 @@ struct LockInner {
     /// clear it: a test hold on a scratch path must not wipe a capability it
     /// never owned.
     owns_capability: bool,
+    /// This acquisition's control socket. Dropped first on release, while the
+    /// flock is still held: a stop that has not committed by then is refused.
+    service: Option<crate::lock_service::Service>,
+}
+
+impl LockInner {
+    /// Rewrite the lock file and the service's status snapshot from `state`.
+    fn publish(&self, state: &LockState) {
+        publish(self.fd.as_raw_fd(), state);
+        if let Some(service) = &self.service {
+            service.update(snapshot_of(state));
+        }
+    }
+}
+
+fn snapshot_of(state: &LockState) -> crate::lock_service::Snapshot {
+    crate::lock_service::Snapshot {
+        draining: state.draining,
+        progress: state.progress,
+        has_child: state.child.is_some(),
+        mocks: state.mocks.len(),
+    }
 }
 
 impl Drop for LockInner {
     fn drop(&mut self) {
+        // End the control service first: after this no stop can commit
+        // against this acquisition, and the socket path is gone.
+        drop(self.service.take());
         // Invalidate the metadata while we still hold the flock. A reader
         // during the release/re-acquire handoff then sees an empty file and
         // fails closed, instead of a complete, still-verifiable record of a
@@ -143,7 +184,7 @@ impl LockGuard {
     pub fn set_child_pid(&self, pid: u32) {
         if let Ok(mut state) = self.inner.state.lock() {
             state.child = Some((pid, proc_starttime(pid).unwrap_or_default()));
-            publish(self.inner.fd.as_raw_fd(), &state);
+            self.inner.publish(&state);
         }
     }
 
@@ -159,7 +200,7 @@ impl LockGuard {
                     .mocks
                     .push((pid, proc_starttime(pid).unwrap_or_default()));
             }
-            publish(self.inner.fd.as_raw_fd(), &state);
+            self.inner.publish(&state);
         }
     }
 
@@ -169,7 +210,7 @@ impl LockGuard {
     pub fn remove_mock_pid(&self, pid: u32) {
         if let Ok(mut state) = self.inner.state.lock() {
             state.mocks.retain(|(p, _)| *p != pid);
-            publish(self.inner.fd.as_raw_fd(), &state);
+            self.inner.publish(&state);
         }
     }
 
@@ -178,7 +219,7 @@ impl LockGuard {
     pub fn clear_mock_pids(&self) {
         if let Ok(mut state) = self.inner.state.lock() {
             state.mocks.clear();
-            publish(self.inner.fd.as_raw_fd(), &state);
+            self.inner.publish(&state);
         }
     }
 
@@ -188,7 +229,7 @@ impl LockGuard {
     pub fn clear_child_pid(&self) {
         if let Ok(mut state) = self.inner.state.lock() {
             state.child = None;
-            publish(self.inner.fd.as_raw_fd(), &state);
+            self.inner.publish(&state);
         }
     }
 
@@ -201,7 +242,7 @@ impl LockGuard {
         }
         if let Ok(mut state) = self.inner.state.lock() {
             state.progress = Some((run, total));
-            publish(self.inner.fd.as_raw_fd(), &state);
+            self.inner.publish(&state);
         }
     }
 }
@@ -221,6 +262,13 @@ pub struct LockInfo {
     pub pid: u32,
     pub starttime: String,
     pub boot_id: String,
+    /// The holder's public acquisition id (its control socket), PID and time
+    /// namespace inodes, and advisory codex thread id. Empty when the holder did not
+    /// record them (an older brokkr) or they were unreadable.
+    pub acq_id: String,
+    pub pid_ns: String,
+    pub time_ns: String,
+    pub codex_thread: String,
     pub project: String,
     pub command: String,
     pub args: String,
@@ -306,6 +354,10 @@ pub fn acquire(ctx: &LockContext<'_>) -> Result<LockGuard, DevError> {
 /// layers below the command that took the lock. The returned guard shares the
 /// hold (like a nested [`acquire`]), so it cannot outlive or split it.
 pub fn current_hold() -> Option<LockGuard> {
+    // A committed stop admits no further work under the hold it stopped.
+    if crate::shutdown::stop_committed() {
+        return None;
+    }
     let path = lock_path().ok()?;
     let mut held = held_registry();
     held.retain(|w| w.strong_count() > 0);
@@ -339,6 +391,8 @@ struct HoldEffects {
     /// Refuse the hold when the disks the command writes to are nearly full
     /// ([`crate::disk_gate`]).
     disk_gate: fn(&LockContext<'_>) -> Result<(), DevError>,
+    /// Run this acquisition's control socket (`crate::lock_service`).
+    service: bool,
 }
 
 /// The effects a real acquisition has.
@@ -348,7 +402,18 @@ const HOST_EFFECTS: HoldEffects = HoldEffects {
     publish_capability: true,
     after_fresh_hold: host_after_fresh_hold,
     disk_gate: crate::disk_gate::check,
+    service: true,
 };
+
+/// Refuse to start or continue an acquisition once this process has committed
+/// to stopping. Checked before re-entry, after the flock wait and after the
+/// drain, so no path into a hold can bypass an accepted `brokkr kill`.
+fn refuse_if_stopping() -> Result<(), DevError> {
+    if crate::shutdown::stop_committed() {
+        return Err(DevError::Interrupted);
+    }
+    Ok(())
+}
 
 fn host_drain() -> Result<Option<OwnedFd>, DevError> {
     drain_compile_leases().map(Some)
@@ -380,6 +445,7 @@ fn acquire_at(
     ctx: &LockContext<'_>,
     effects: &HoldEffects,
 ) -> Result<LockGuard, DevError> {
+    refuse_if_stopping()?;
     {
         let mut held = held_registry();
         held.retain(|w| w.strong_count() > 0);
@@ -425,6 +491,9 @@ fn acquire_at(
             // Deliberately terse: who holds the lock and how busy it is lives
             // in `brokkr lock`, which re-samples on every invocation.
             crate::output::lock_msg("waiting for the brokkr lock ...");
+            if let Some(hint) = read_lock_contents(fd).and_then(|info| same_agent_hint(&info)) {
+                crate::output::lock_msg(&hint);
+            }
 
             // Block until the lock is released. Retry on EINTR.
             loop {
@@ -449,6 +518,25 @@ fn acquire_at(
     }
 
     let owned = unsafe { OwnedFd::from_raw_fd(fd) };
+    // A stop accepted while this thread waited on the flock.
+    refuse_if_stopping()?;
+    // The control socket exists before the drain, so a hold that is clearing
+    // compilers can already be asked about and stopped. Holding the flock
+    // proves every other acquisition is over, so their leftover sockets go
+    // first. Declared after `owned`, so on any error below it drops (refusing
+    // further stops) before the flock is released.
+    let service = if effects.service {
+        crate::lock_service::sweep_leftovers();
+        let id = crate::lock_service::mint_id().ok_or_else(|| {
+            DevError::Lock("could not read /dev/urandom to mint a lock acquisition id".into())
+        })?;
+        let identity = identity_of(ctx);
+        Some((id.clone(), crate::lock_service::Service::start(&id, identity)?))
+    } else {
+        None
+    };
+    let acq_id = service.as_ref().map(|(id, _)| id.clone()).unwrap_or_default();
+    let service = service.map(|(_, s)| s);
     // The free-space gate. After the flock, not before: the wait may have been
     // behind a `brokkr clean` that freed the space, or a build that used it.
     // Before the drain, so a refusal costs nothing but the release, which
@@ -460,7 +548,13 @@ fn acquire_at(
     // alongside a compiler we failed to clear is the one outcome worse than not
     // measuring at all.
     let Authorized { state, nonce, toolchain } =
-        drain_and_authorize(owned.as_raw_fd(), ctx, effects)?;
+        drain_and_authorize(owned.as_raw_fd(), ctx, effects, &acq_id)?;
+    // A stop accepted during the drain: never authorise work after it.
+    // `toolchain` drops here, restoring the moved-aside toolchain.
+    refuse_if_stopping()?;
+    if let Some(service) = &service {
+        service.update(snapshot_of(&state));
+    }
 
     // Construct the owner first, then hand the process registry the nonce.
     // Nothing fallible may sit between these two statements: an error there
@@ -471,6 +565,7 @@ fn acquire_at(
         state: Mutex::new(state),
         toolchain,
         owns_capability: effects.publish_capability,
+        service,
     });
     if effects.publish_capability {
         crate::hold::publish_capability(&nonce);
@@ -514,6 +609,15 @@ pub fn status() -> Result<Option<LockInfo>, DevError> {
         return Ok(None);
     }
 
+    // Only contention means held. Any other flock failure is infrastructure,
+    // and reporting it as a holder would invent one.
+    let err = std::io::Error::last_os_error();
+    if err.raw_os_error() != Some(libc::EWOULDBLOCK) {
+        // SAFETY: valid fd from open_lock_file, unique ownership.
+        let _close = unsafe { OwnedFd::from_raw_fd(fd) };
+        return Err(DevError::Lock(format!("could not probe the lock: {err}")));
+    }
+
     // Someone holds it. Read the contents.
     let info = read_lock_contents(fd);
     // SAFETY: valid fd from open_lock_file, unique ownership.
@@ -525,6 +629,10 @@ pub fn status() -> Result<Option<LockInfo>, DevError> {
             pid: 0,
             starttime: String::new(),
             boot_id: String::new(),
+            acq_id: String::new(),
+            pid_ns: String::new(),
+            time_ns: String::new(),
+            codex_thread: String::new(),
             project: "unknown".into(),
             command: "unknown".into(),
             args: String::new(),
@@ -955,8 +1063,9 @@ fn drain_and_authorize(
     fd: RawFd,
     ctx: &LockContext<'_>,
     effects: &HoldEffects,
+    acq_id: &str,
 ) -> Result<Authorized, DevError> {
-    let mut state = build_state(ctx);
+    let mut state = build_state(ctx, acq_id);
     rewrite_from_state(fd, &state)
         .map_err(|e| DevError::Lock(format!("failed to publish lock metadata: {e}")))?;
 
@@ -1003,20 +1112,107 @@ struct Authorized {
 /// current brokkr invocation args (argv minus `argv[0]`) so `brokkr lock`
 /// can show exactly what the user typed, plus the identity tokens readers
 /// verify before trusting the PID.
-fn build_state(ctx: &LockContext<'_>) -> LockState {
+fn build_state(ctx: &LockContext<'_>, acq_id: &str) -> LockState {
+    let identity = identity_of(ctx);
     LockState {
-        project: ctx.project.to_owned(),
-        command: ctx.command.to_owned(),
-        args: current_invocation_args(),
-        project_root: ctx.project_root.to_owned(),
-        starttime: proc_starttime(std::process::id()).unwrap_or_default(),
+        project: identity.project,
+        command: identity.command,
+        args: identity.args,
+        project_root: identity.root,
+        // `/proc/self`, not `/proc/<getpid()>`: under a procfs mounted for an
+        // ancestor namespace the numeric path names some other process.
+        starttime: self_starttime().unwrap_or_default(),
         boot_id: local_boot_id().unwrap_or_default(),
+        acq_id: acq_id.to_owned(),
+        pid_ns: identity.pid_ns,
+        time_ns: identity.time_ns,
+        codex_thread: identity.codex_thread,
+        codex_session: identity.codex_session,
         auth: String::new(),
         draining: true,
         child: None,
         mocks: Vec::new(),
         progress: None,
     }
+}
+
+/// What this process states about itself as a lock holder, for the lock file
+/// and the control socket alike.
+fn identity_of(ctx: &LockContext<'_>) -> crate::lock_service::Identity {
+    let ns = |n: Option<u64>| n.map(|v| v.to_string()).unwrap_or_default();
+    crate::lock_service::Identity {
+        project: ctx.project.to_owned(),
+        command: ctx.command.to_owned(),
+        args: current_invocation_args(),
+        root: ctx.project_root.to_owned(),
+        pid_ns: ns(ns_inode("/proc/self/ns/pid")),
+        // The thread reading `starttime` is this one, and its time namespace
+        // is what offsets the value it reads.
+        time_ns: ns(ns_inode("/proc/thread-self/ns/time")),
+        codex_thread: std::env::var("CODEX_THREAD_ID").unwrap_or_default(),
+        codex_session: std::env::var("CODEX_SESSION_ID").unwrap_or_default(),
+    }
+}
+
+/// The inode of a namespace link (`/proc/self/ns/pid` and kin).
+pub fn ns_inode(path: &str) -> Option<u64> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path).ok().map(|m| m.ino())
+}
+
+/// This process's starttime token, read through `/proc/self`.
+fn self_starttime() -> Option<String> {
+    let stat = std::fs::read_to_string("/proc/self/stat").ok()?;
+    let comm_end = stat.rfind(')')?;
+    let fields: Vec<&str> = stat.get(comm_end + 2..)?.split_whitespace().collect();
+    let ticks: u64 = fields.get(19)?.parse().ok()?;
+    Some(ticks.to_string())
+}
+
+/// Whether recorded PIDs and starttimes mean the same thing here as they did
+/// to the holder: its PID namespace is ours, the thread that read its
+/// starttime shared our time namespace, and this `/proc` numbers processes for
+/// our own PID namespace (`/proc/1` is our namespace's init). Every numeric
+/// verification and signal is gated on this; anything unreadable is `false`.
+///
+/// A holder that recorded no namespaces (an older brokkr) is judged by the
+/// procfs check alone, which is what verification relied on before.
+pub fn shares_namespaces(info: &LockInfo) -> bool {
+    let own_pid = ns_inode("/proc/self/ns/pid");
+    if own_pid.is_none() || ns_inode("/proc/1/ns/pid") != own_pid {
+        return false;
+    }
+    if info.pid_ns.is_empty() && info.time_ns.is_empty() {
+        return true;
+    }
+    let own_time = ns_inode("/proc/thread-self/ns/time");
+    own_pid.map(|v| v.to_string()).as_deref() == Some(info.pid_ns.as_str())
+        && own_time.map(|v| v.to_string()).as_deref() == Some(info.time_ns.as_str())
+}
+
+/// The holder's PID namespace inode when it differs from this process's, i.e.
+/// the holder runs sandboxed relative to us. `None` when it is ours, or when
+/// either side is unknown.
+pub fn foreign_holder_ns(info: &LockInfo) -> Option<u64> {
+    let holder: u64 = info.pid_ns.parse().ok()?;
+    let own = ns_inode("/proc/self/ns/pid")?;
+    (holder != own).then_some(holder)
+}
+
+/// One advisory line when the holder recorded the same codex thread id as
+/// this process carries: almost always an earlier exec session of this very
+/// agent, which an agent otherwise has no way to recognise from inside its
+/// own sandbox. Advisory, because the id is an environment variable.
+pub fn same_agent_hint(info: &LockInfo) -> Option<String> {
+    let mine = std::env::var("CODEX_THREAD_ID").ok()?;
+    if mine.is_empty() || mine != info.codex_thread {
+        return None;
+    }
+    Some(format!(
+        "the holder reports the same codex thread as this shell ({mine}): it is very likely one of \
+         your own earlier commands, still running in another exec session. Wait for it, stop that \
+         session, or run `brokkr kill`"
+    ))
 }
 
 /// Publish updated state to the lock file, degrading safely on failure: a
@@ -1055,6 +1251,11 @@ fn invalidate_mutable_metadata(fd: RawFd, state: &LockState) {
         project_root: state.project_root.clone(),
         starttime: state.starttime.clone(),
         boot_id: state.boot_id.clone(),
+        acq_id: state.acq_id.clone(),
+        pid_ns: state.pid_ns.clone(),
+        time_ns: state.time_ns.clone(),
+        codex_thread: state.codex_thread.clone(),
+        codex_session: state.codex_session.clone(),
         auth: state.auth.clone(),
         draining: state.draining,
         child: None,
@@ -1098,10 +1299,16 @@ fn rewrite_from_state(fd: RawFd, state: &LockState) -> std::io::Result<()> {
     // truncation sacrifices, and it must be byte-identical across a holder's
     // rewrites so a torn read cannot blend two holders' capabilities.
     let mut contents = format!(
-        "pid={}\nstarttime={}\nboot_id={}\nauth={}\ndraining={}\n",
+        "pid={}\nstarttime={}\nboot_id={}\nacq={}\npid_ns={}\ntime_ns={}\ncodex_thread={}\n\
+         codex_session={}\nauth={}\ndraining={}\n",
         std::process::id(),
         state.starttime,
         state.boot_id,
+        state.acq_id,
+        state.pid_ns,
+        state.time_ns,
+        escape_value(&state.codex_thread),
+        escape_value(&state.codex_session),
         state.auth,
         u8::from(state.draining),
     );
@@ -1337,6 +1544,10 @@ fn parse_lock_contents(text: &str) -> Option<LockInfo> {
         pid,
         starttime: raw("starttime").to_owned(),
         boot_id: raw("boot_id").to_owned(),
+        acq_id: raw("acq").to_owned(),
+        pid_ns: raw("pid_ns").to_owned(),
+        time_ns: raw("time_ns").to_owned(),
+        codex_thread: escaped("codex_thread"),
         project,
         command: escaped("command"),
         args: escaped("args"),
@@ -1395,6 +1606,7 @@ mod tests {
         publish_capability: false,
         after_fresh_hold: nothing_after,
         disk_gate: no_disk_gate,
+        service: false,
     };
 
     /// A refused gate releases the lock: the next acquirer takes it at once.
