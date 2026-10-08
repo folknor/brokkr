@@ -13,8 +13,9 @@
 // process-isolated lane's; the sequential lane still executes through cargo.
 
 /// One test executable and its owning package, from the build's artifact
-/// stream.
-#[derive(Debug, Clone)]
+/// stream. Serializable because a plan's replay recipe holds the binaries it
+/// launches.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct TestBinary {
     pub(crate) package: String,
     /// The full cargo package id - the key the runtime index is filed under,
@@ -163,7 +164,7 @@ impl BuildRuntimeIndex {
 /// carries - every listing and direct execution runs under the launch
 /// envelope built from it. `Ok(None)` means the build failed and was already
 /// reported.
-fn test_binaries_with_runtime(
+pub(crate) fn test_binaries_with_runtime(
     project_root: &Path,
     selection: &[String],
     env_refs: &[(&str, &str)],

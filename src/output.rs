@@ -329,10 +329,35 @@ pub fn wc_msg(msg: &str) {
     println!("[wc]      {msg}");
 }
 
+thread_local! {
+    /// The errors this thread is holding back instead of printing, while a
+    /// [`capture_errors`] call is in progress.
+    static HELD_ERRORS: std::cell::RefCell<Option<Vec<String>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Run `f`, holding back every [`error`] it prints on this thread, and return
+/// them beside its result. For work whose failure is not yet a failure of the
+/// command: a preparation that may degrade to "no inventory" and then be
+/// retried by the step that actually needs it, which prints its own error once.
+/// Calls nest: an inner call's errors are returned to it and the outer call's
+/// holding resumes where it was.
+pub fn capture_errors<T>(f: impl FnOnce() -> T) -> (T, Vec<String>) {
+    let outer = HELD_ERRORS.with(|h| h.borrow_mut().replace(Vec::new()));
+    let out = f();
+    let held = HELD_ERRORS.with(|h| std::mem::replace(&mut *h.borrow_mut(), outer)).unwrap_or_default();
+    (out, held)
+}
+
 /// Print an error message. Multi-line messages get each line prefixed.
 /// Errors are NEVER suppressed by quiet mode.
 pub fn error(msg: &str) {
-    if !msg.is_empty() {
+    if msg.is_empty() {
+        return;
+    }
+    let held = HELD_ERRORS.with(|h| {
+        h.borrow_mut().as_mut().map(|v| v.push(msg.to_owned())).is_some()
+    });
+    if !held {
         emit("[error]   ", msg);
     }
 }
@@ -1080,3 +1105,32 @@ mod tests {
         assert_eq!(result.captured.stdout, b"hello world\n");
     }
 }
+
+#[cfg(test)]
+mod capture_tests {
+    use super::*;
+
+    /// Errors printed inside a capture are returned, not printed; the capture
+    /// nests (an inner call gets its own, the outer's resumes); and nothing is
+    /// held after it ends.
+    #[test]
+    fn capture_errors_holds_back_and_nests() {
+        let (value, held) = capture_errors(|| {
+            error("outer one");
+            let (inner, inner_held) = capture_errors(|| {
+                error("inner");
+                7
+            });
+            assert_eq!((inner, inner_held), (7, vec!["inner".to_owned()]));
+            error("outer two");
+            "done"
+        });
+        assert_eq!(value, "done");
+        assert_eq!(held, vec!["outer one".to_owned(), "outer two".to_owned()]);
+        // Outside any capture the thread holds nothing back.
+        assert!(HELD_ERRORS.with(|h| h.borrow().is_none()));
+        let (_, nothing) = capture_errors(|| ());
+        assert!(nothing.is_empty());
+    }
+}
+

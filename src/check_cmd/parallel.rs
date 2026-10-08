@@ -140,20 +140,20 @@ impl BinaryRun {
 /// Claims are clamped to the whole budget by the caller, so a binary can
 /// always eventually be admitted and the wait cannot deadlock on a claim
 /// larger than the pool.
-struct Budget {
+pub(crate) struct Budget {
     free: Mutex<u32>,
     released: Condvar,
 }
 
 impl Budget {
-    fn new(total: u32) -> Self {
+    pub(crate) fn new(total: u32) -> Self {
         Self {
             free: Mutex::new(total),
             released: Condvar::new(),
         }
     }
 
-    fn acquire(&self, n: u32) -> Result<(), DevError> {
+    pub(crate) fn acquire(&self, n: u32) -> Result<(), DevError> {
         let mut free = self
             .free
             .lock()
@@ -168,7 +168,7 @@ impl Budget {
         Ok(())
     }
 
-    fn release(&self, n: u32) {
+    pub(crate) fn release(&self, n: u32) {
         if let Ok(mut free) = self.free.lock() {
             *free += n;
             self.released.notify_all();
@@ -274,7 +274,7 @@ fn partition_target_selectors(args: &[String]) -> (Vec<String>, Vec<String>) {
 /// - **Never more than its own test count**, which only binds when the budget
 ///   exceeds the whole suite - a binary asking for more threads than it has
 ///   tests would idle slots another binary could use.
-fn claim_slots(weight_ms: u64, total_ms: u64, budget: u32, count: u32) -> u32 {
+pub(crate) fn claim_slots(weight_ms: u64, total_ms: u64, budget: u32, count: u32) -> u32 {
     if total_ms == 0 {
         return 1;
     }
@@ -744,6 +744,15 @@ fn run_parallel_sweep(
     warn_serialized_claims(sweep, budget, &claims);
     let fanout_started = Instant::now();
 
+    // The thread count each binary will run with comes from measured costs the
+    // recipe cannot hold, so it is journaled here, for EVERY planned binary and
+    // before any launches: a replay of the binaries a stop never reached needs
+    // the same allocation the original run gave them.
+    journal_thread_allocations(
+        tap,
+        planned.iter().map(|(run, slots)| (run.resolution, &run.planned.unit, *slots)),
+    );
+
     let pool = Budget::new(budget);
     let mut runs: Vec<Result<BinaryRun, DevError>> = Vec::new();
     // Set the moment any binary blows its budget. Every thread is created up
@@ -838,6 +847,22 @@ fn run_parallel_sweep(
     timings_record(state_root, &sweep.entry_name, &measured);
 
     report_runs(project_root, sweep, runs, fanout_started, build_elapsed, timings)
+}
+
+/// Journal the thread allocation of each (resolution, binary) as the executor
+/// decided it; read back by `thread_allocations` for a replay.
+fn journal_thread_allocations<'a>(
+    tap: &LaneTap,
+    claims: impl IntoIterator<Item = (&'a Option<String>, &'a BinaryUnit, u32)>,
+) {
+    for (resolution, unit, threads) in claims {
+        tap.record(JournalRecord::ThreadAllocation {
+            lane: tap.lane(),
+            resolution: resolution.clone(),
+            unit: unit.clone(),
+            threads,
+        });
+    }
 }
 
 /// Warn when the plan put binaries beyond each other's reach: two binaries

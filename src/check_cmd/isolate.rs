@@ -537,18 +537,9 @@ mod isolate_tests {
             run_id: "t".into(),
             complete: true,
             lanes: vec![LaneRecord {
-                lane: 0,
-                label: "isolated".into(),
-                kind: LaneKind::Isolated,
-                shape: "s".into(),
                 prepared: true,
-                include_ignored: false,
-                doc_carrier: false,
-                doc_streams_required: false,
                 executions: vec![pair(&a), pair(&b)],
-                ignored_selected: Vec::new(),
-                outside_claim: Vec::new(),
-                artifacts: Vec::new(),
+                ..LaneRecord::empty(0, "isolated".into(), LaneKind::Isolated, "s".into())
             }],
             ..AccountingPlan::default()
         };

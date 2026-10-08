@@ -92,13 +92,15 @@ impl ManifestHarness {
 }
 
 /// The harnesses a focused run may discover, and the ones it excludes.
-pub(super) struct Eligibility<'a> {
-    pub(super) eligible: Vec<&'a TestBinary>,
-    pub(super) excluded: Vec<&'a TestBinary>,
+pub(crate) struct Eligibility<'a> {
+    pub(crate) eligible: Vec<&'a TestBinary>,
+    pub(crate) excluded: Vec<&'a TestBinary>,
 }
 
 /// Split `binaries` by the `harness` flag their owning manifests declare.
-pub(super) fn eligibility(binaries: &[TestBinary]) -> Result<Eligibility<'_>, DevError> {
+/// Also what `check`'s preparation asks before it would run a binary to list
+/// it: an excluded one is never executed for that.
+pub(crate) fn eligibility(binaries: &[TestBinary]) -> Result<Eligibility<'_>, DevError> {
     let mut manifests: HashMap<PathBuf, ManifestHarness> = HashMap::new();
     let mut out = Eligibility { eligible: Vec::new(), excluded: Vec::new() };
     for b in binaries {

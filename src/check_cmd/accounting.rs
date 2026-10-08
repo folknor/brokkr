@@ -1,5 +1,8 @@
-// Execution accounting - the record of what a `certifies = "complete"` run
-// actually executed, kept apart from what it was supposed to cover.
+// Execution accounting - the record of what a run actually executed, kept apart
+// from what it was supposed to cover. Every run that runs tests keeps one (the
+// execution inventory and its journal); only a `certifies = "complete"` run is
+// held to it as a gate, and every run's record is what the diagnostic
+// continuation (continuation.rs) reads.
 //
 // Two claims, which the coverage audit used to mix:
 //
@@ -155,13 +158,38 @@ pub(crate) struct ShapeRecord {
 }
 
 /// One lane's selection and the executions it implies.
+///
+/// Persisted through [`LaneRecordWire`]: a lane's pairs all share its shape,
+/// and a pair repeats its whole binary unit (a package id URL, a kind, a
+/// target) for every test, so the flat form of a workspace's plan was
+/// megabytes per lane, per run - and every run, certifying or not, now keeps
+/// one. The wire form groups the pairs by (resolution, binary) and drops the
+/// shape.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(from = "LaneRecordWire", into = "LaneRecordWire")]
 pub(crate) struct LaneRecord {
     pub(crate) lane: usize,
     pub(crate) label: String,
     pub(crate) kind: LaneKind,
     pub(crate) shape: String,
+    /// The lane's inventory was prepared: its executions are known. False
+    /// for a lane that could not be prepared and for one whose streams
+    /// cannot be attributed to binaries ([`Self::unavailable`] says which).
     pub(crate) prepared: bool,
+    /// Why this lane has no inventory, when it has none. Set for a lane a
+    /// certifying claim would have refused (cargo-mediated parallelism, a
+    /// serial lane with no harness shim) and for one whose preparation
+    /// failed under a claim that does not require it: the lane still runs,
+    /// and what it observed is reported as such, never as a made-up
+    /// selection.
+    pub(crate) unavailable: Option<String>,
+    /// The lane did not run in this invocation by choice (a CLI `-p` its
+    /// config rules out), so it expects nothing.
+    pub(crate) skipped: Option<String>,
+    /// Binaries of the lane that answer no libtest listing, so the tests
+    /// they hold are outside the inventory: `(binary id, why)`. Never present
+    /// on a certifying lane, which refuses them.
+    pub(crate) unlisted: Vec<(String, String)>,
     pub(crate) include_ignored: bool,
     /// Will run doctests: a `doc_only` lane, or a serial lane under `[test]
     /// doctests = true` whose selection carries no target selector (one
@@ -175,7 +203,6 @@ pub(crate) struct LaneRecord {
     /// inferred from a library harness, which `test`/`doctest` set
     /// independently). The count beyond one is not knowable - doctests have no
     /// inventory - so one is the floor that tells "ran" from "never ran".
-    #[serde(default)]
     pub(crate) doc_streams_required: bool,
     /// Every pair this lane is expected to execute.
     pub(crate) executions: Vec<PairId>,
@@ -186,9 +213,148 @@ pub(crate) struct LaneRecord {
     /// `#[bench]` functions the lane's filters admit: outside the claim, but a
     /// `cargo test` run executes each once in test mode and reports it like a
     /// test, so its records are neither accounted nor unplanned.
-    #[serde(default)]
     pub(crate) outside_claim: Vec<PairId>,
     pub(crate) artifacts: Vec<PlannedArtifact>,
+    /// How to launch this lane's executions again: see [`LaneReplay`]. `None`
+    /// for a lane with no inventory and for a doctest-only lane.
+    pub(crate) replay: Option<LaneReplay>,
+}
+
+impl LaneRecord {
+    /// A lane with nothing planned yet.
+    pub(crate) fn empty(lane: usize, label: String, kind: LaneKind, shape: String) -> Self {
+        Self {
+            lane,
+            label,
+            kind,
+            shape,
+            prepared: false,
+            unavailable: None,
+            skipped: None,
+            unlisted: Vec::new(),
+            include_ignored: false,
+            doc_carrier: false,
+            doc_streams_required: false,
+            executions: Vec::new(),
+            ignored_selected: Vec::new(),
+            outside_claim: Vec::new(),
+            artifacts: Vec::new(),
+            replay: None,
+        }
+    }
+}
+
+/// One binary's tests of a lane, as persisted.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct PairGroup {
+    resolution: Option<String>,
+    unit: BinaryUnit,
+    tests: Vec<String>,
+}
+
+/// Group pairs by (resolution, binary) in first-seen order.
+fn group_pairs(pairs: &[PairId]) -> Vec<PairGroup> {
+    let mut out: Vec<PairGroup> = Vec::new();
+    for p in pairs {
+        match out.iter_mut().rev().find(|g| g.resolution == p.resolution && g.unit == p.unit) {
+            Some(g) => g.tests.push(p.test.clone()),
+            None => out.push(PairGroup {
+                resolution: p.resolution.clone(),
+                unit: p.unit.clone(),
+                tests: vec![p.test.clone()],
+            }),
+        }
+    }
+    out
+}
+
+fn ungroup_pairs(shape: &str, groups: Vec<PairGroup>) -> Vec<PairId> {
+    groups
+        .into_iter()
+        .flat_map(|g| {
+            let PairGroup { resolution, unit, tests } = g;
+            tests.into_iter().map(move |test| PairId {
+                shape: shape.to_owned(),
+                resolution: resolution.clone(),
+                unit: unit.clone(),
+                test,
+            })
+        })
+        .collect()
+}
+
+/// [`LaneRecord`] as it sits on disk. The defaulted fields are the ones a
+/// reader of an older record may not find.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct LaneRecordWire {
+    lane: usize,
+    label: String,
+    kind: LaneKind,
+    shape: String,
+    prepared: bool,
+    #[serde(default)]
+    unavailable: Option<String>,
+    #[serde(default)]
+    skipped: Option<String>,
+    #[serde(default)]
+    unlisted: Vec<(String, String)>,
+    include_ignored: bool,
+    doc_carrier: bool,
+    #[serde(default)]
+    doc_streams_required: bool,
+    executions: Vec<PairGroup>,
+    ignored_selected: Vec<PairGroup>,
+    #[serde(default)]
+    outside_claim: Vec<PairGroup>,
+    artifacts: Vec<PlannedArtifact>,
+    #[serde(default)]
+    replay: Option<LaneReplay>,
+}
+
+impl From<LaneRecord> for LaneRecordWire {
+    fn from(l: LaneRecord) -> Self {
+        Self {
+            executions: group_pairs(&l.executions),
+            ignored_selected: group_pairs(&l.ignored_selected),
+            outside_claim: group_pairs(&l.outside_claim),
+            lane: l.lane,
+            label: l.label,
+            kind: l.kind,
+            shape: l.shape,
+            prepared: l.prepared,
+            unavailable: l.unavailable,
+            skipped: l.skipped,
+            unlisted: l.unlisted,
+            include_ignored: l.include_ignored,
+            doc_carrier: l.doc_carrier,
+            doc_streams_required: l.doc_streams_required,
+            artifacts: l.artifacts,
+            replay: l.replay,
+        }
+    }
+}
+
+impl From<LaneRecordWire> for LaneRecord {
+    fn from(w: LaneRecordWire) -> Self {
+        Self {
+            executions: ungroup_pairs(&w.shape, w.executions),
+            ignored_selected: ungroup_pairs(&w.shape, w.ignored_selected),
+            outside_claim: ungroup_pairs(&w.shape, w.outside_claim),
+            lane: w.lane,
+            label: w.label,
+            kind: w.kind,
+            shape: w.shape,
+            prepared: w.prepared,
+            unavailable: w.unavailable,
+            skipped: w.skipped,
+            unlisted: w.unlisted,
+            include_ignored: w.include_ignored,
+            doc_carrier: w.doc_carrier,
+            doc_streams_required: w.doc_streams_required,
+            artifacts: w.artifacts,
+            replay: w.replay,
+        }
+    }
 }
 
 /// A dead `skip`/`only` filter found during preparation.
@@ -199,16 +365,56 @@ pub(crate) struct DeadFilterRecord {
     pub(crate) label: String,
 }
 
-/// The whole profile, prepared: written to disk before the first test runs.
+/// Where an invocation ran, so a command printed for it can be run from the
+/// same place.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct Invocation {
+    /// The directory brokkr was started in: where a `brokkr` command finds
+    /// its `brokkr.toml`.
+    pub(crate) cwd: String,
+    /// The code tree cargo ran in. A replay refuses to run against another.
+    pub(crate) project_root: String,
+}
+
+/// What a continuation continues: the run it was made from and the original
+/// executions it selected. A continuation's own plan carries this, so its
+/// record says what it is a record OF without a second file.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct ContinuationOf {
+    pub(crate) source_run_id: String,
+    /// The original `ExecutionId`s, as the source run named them.
+    pub(crate) selected: Vec<ExecutionId>,
+}
+
+/// The whole invocation, prepared: written to disk before the first test runs.
+///
+/// Two products live here and are kept apart. The EXECUTION INVENTORY - each
+/// lane's selected executions, the binaries they live in, the artifacts'
+/// identity and the recipe to launch them again - is prepared for every
+/// enumerable lane of every run and journaled against, certifying or not.
+/// The POLICY UNIVERSE (`shapes`, `dead_filters`) is prepared only under a
+/// certifying claim, because only that claim is about what the profile does
+/// not select.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub(crate) struct AccountingPlan {
     pub(crate) run_id: String,
+    /// The run is held to a `certifies = "complete"` claim: its policy
+    /// universe was prepared, its lanes were held to the attribution rules
+    /// that claim needs, and its executions are held to the green invariant.
+    /// A plan without it is an inventory and nothing more.
+    #[serde(default)]
+    pub(crate) certifying: bool,
     /// False when anything could not be prepared; `incomplete` says what.
     pub(crate) complete: bool,
     pub(crate) incomplete: Vec<String>,
     pub(crate) shapes: Vec<ShapeRecord>,
     pub(crate) lanes: Vec<LaneRecord>,
     pub(crate) dead_filters: Vec<DeadFilterRecord>,
+    #[serde(default)]
+    pub(crate) invocation: Option<Invocation>,
+    /// Set on a continuation's own plan.
+    #[serde(default)]
+    pub(crate) continuation: Option<ContinuationOf>,
 }
 
 impl AccountingPlan {
@@ -418,6 +624,28 @@ pub(crate) enum JournalRecord {
         lane: usize,
         passed: bool,
     },
+    /// The `--test-threads` a parallel lane allocated to one binary, journaled
+    /// for every binary in the plan BEFORE any of them launches (so a binary
+    /// the lane never reached still has its allocation). The parallel executor
+    /// allocates from measured costs the recipe cannot hold, so this is where
+    /// the thread policy that actually ran is kept; a replay reads it back and
+    /// uses exactly that, never a recomputation from the remaining tests.
+    ThreadAllocation {
+        lane: usize,
+        resolution: Option<String>,
+        unit: BinaryUnit,
+        threads: u32,
+    },
+    /// The lane's plan stopped describing what it ran: an earlier lane's build
+    /// replaced its artifacts between the plan and the lane (only a run that
+    /// is not certifying survives this - a certifying one refuses the lane).
+    /// The lane was prepared again and ran that; its observations answer to
+    /// a selection the plan does not hold, so reconciliation drops them and
+    /// the lane's inventory is reported unavailable, with this reason.
+    LaneSuperseded {
+        lane: usize,
+        reason: String,
+    },
     /// The test phase is over. A journal without this line was cut short.
     Closed,
 }
@@ -537,6 +765,11 @@ pub(crate) fn journal_watchdog_fired() {
     }
 }
 
+/// The journal is one per process, so two tests that open one would write
+/// into each other's file. They take this first.
+#[cfg(test)]
+pub(crate) static JOURNAL_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 struct JournalFile {
     file: std::fs::File,
     /// The first write that failed. Nothing after it is trusted, so nothing
@@ -552,8 +785,23 @@ pub(crate) struct AccountingPaths {
     pub(crate) journal: PathBuf,
 }
 
-/// How many runs' accounting directories are kept.
-const ACCOUNTING_RUNS_KEPT: usize = 10;
+// Retention. Every invocation that runs tests keeps a run now - an inventory
+// is kept for the runs nothing certifies too, and the command a failed run
+// prints is only worth printing while its run is still there. A bound of "the
+// newest ten" was a few hours of ordinary use. A run is pruned only once it is
+// BOTH beyond the newest [`ACCOUNTING_RUNS_KEPT`] and older than
+// [`ACCOUNTING_RUN_TTL`], so a burst of runs does not flush yesterday's, and
+// a day-old one does not live forever; [`ACCOUNTING_RUNS_MAX`] bounds the disk
+// whatever the ages are.
+
+/// Runs always kept, newest first.
+const ACCOUNTING_RUNS_KEPT: usize = 50;
+
+/// How long a run beyond [`ACCOUNTING_RUNS_KEPT`] survives.
+const ACCOUNTING_RUN_TTL: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 3600);
+
+/// The most runs kept, whatever their age.
+const ACCOUNTING_RUNS_MAX: usize = 300;
 
 /// A new run id: wall-clock milliseconds and pid, sortable by start.
 pub(crate) fn new_run_id() -> String {
@@ -563,12 +811,34 @@ pub(crate) fn new_run_id() -> String {
     format!("{ms}-{}", std::process::id())
 }
 
-/// Persist the plan and open the journal, before the first test runs.
-pub(crate) fn accounting_open(state_root: &Path, plan: &AccountingPlan) -> Result<AccountingPaths, DevError> {
-    let base = state_root.join(".brokkr").join("accounting");
+/// Where the runs live.
+pub(crate) fn accounting_base(state_root: &Path) -> PathBuf {
+    state_root.join(".brokkr").join("accounting")
+}
+
+/// A run id is `<ms>-<pid>`; anything else is not a run directory (and, as a
+/// path component, must never be able to name another directory).
+pub(crate) fn is_run_id(name: &str) -> bool {
+    name.split_once('-').is_some_and(|(a, b)| {
+        !a.is_empty()
+            && a.bytes().all(|c| c.is_ascii_digit())
+            && !b.is_empty()
+            && b.bytes().all(|c| c.is_ascii_digit())
+    })
+}
+
+/// Persist the plan and open the journal, before the first test runs. `keep`
+/// is a run the pruning must not touch: a continuation's source, which it
+/// loaded before it opened its own record and may be asked for again.
+pub(crate) fn accounting_open(
+    state_root: &Path,
+    plan: &AccountingPlan,
+    keep: Option<&str>,
+) -> Result<AccountingPaths, DevError> {
+    let base = accounting_base(state_root);
     let dir = base.join(&plan.run_id);
     std::fs::create_dir_all(&dir)?;
-    prune_accounting_runs(&base);
+    prune_accounting_runs(&base, keep, &plan.run_id, std::time::SystemTime::now());
     let plan_path = dir.join("plan.json");
     // Compact: a workspace's plan names every pair of every lane, and the
     // file is read by the audit and by tools, not by eye.
@@ -590,38 +860,68 @@ pub(crate) fn accounting_open(state_root: &Path, plan: &AccountingPlan) -> Resul
     Ok(AccountingPaths { plan: plan_path, journal: journal_path })
 }
 
-/// Keep the newest run directories, by their sortable names.
-fn prune_accounting_runs(base: &Path) {
+/// The wall-clock milliseconds a run id starts with.
+fn run_id_millis(name: &str) -> u128 {
+    name.split_once('-').and_then(|(ms, _)| ms.parse::<u128>().ok()).unwrap_or(0)
+}
+
+/// Which of `names` (run ids, any order) retention removes at `now_ms`:
+/// everything beyond the newest [`ACCOUNTING_RUNS_MAX`], and everything beyond
+/// the newest [`ACCOUNTING_RUNS_KEPT`] that is older than
+/// [`ACCOUNTING_RUN_TTL`]. `protect` names never go (the run being opened,
+/// and a continuation's source). The bound is exact: a protected run beyond
+/// the newest [`ACCOUNTING_RUNS_MAX`] survives, so it displaces the oldest
+/// unprotected survivor rather than adding a run past the bound.
+fn runs_to_prune(names: &[String], now_ms: u128, protect: &[&str]) -> Vec<String> {
+    let mut sorted: Vec<&String> = names.iter().collect();
+    sorted.sort_by_key(|n| std::cmp::Reverse((run_id_millis(n), n.as_str())));
+    let ttl_ms = ACCOUNTING_RUN_TTL.as_millis();
+    let mut pruned: Vec<String> = Vec::new();
+    let mut kept: Vec<&String> = Vec::new();
+    for (rank, name) in sorted.into_iter().enumerate() {
+        let age = now_ms.saturating_sub(run_id_millis(name));
+        let doomed = (rank >= ACCOUNTING_RUNS_MAX || (rank >= ACCOUNTING_RUNS_KEPT && age > ttl_ms))
+            && !protect.contains(&name.as_str());
+        if doomed {
+            pruned.push(name.clone());
+        } else {
+            kept.push(name);
+        }
+    }
+    let mut excess = kept.len().saturating_sub(ACCOUNTING_RUNS_MAX);
+    for name in kept.iter().rev() {
+        if excess == 0 {
+            break;
+        }
+        if !protect.contains(&name.as_str()) {
+            pruned.push((*name).clone());
+            excess -= 1;
+        }
+    }
+    pruned
+}
+
+/// Apply the retention rule to the run directories under `base`.
+fn prune_accounting_runs(base: &Path, keep: Option<&str>, opening: &str, now: std::time::SystemTime) {
     let Ok(entries) = std::fs::read_dir(base) else {
         return;
     };
-    let mut runs: Vec<PathBuf> = entries
+    let names: Vec<String> = entries
         .filter_map(Result::ok)
-        .map(|e| e.path())
-        .filter(|p| {
-            p.is_dir()
-                && p.file_name()
-                    .and_then(|n| n.to_str())
-                    .is_some_and(|n| n.split_once('-').is_some_and(|(a, b)| {
-                        !a.is_empty() && a.bytes().all(|c| c.is_ascii_digit()) && b.bytes().all(|c| c.is_ascii_digit())
-                    }))
-        })
+        .filter(|e| e.path().is_dir())
+        .filter_map(|e| e.file_name().to_str().map(str::to_owned))
+        .filter(|n| is_run_id(n))
         .collect();
-    runs.sort_by_key(|p| {
-        p.file_name()
-            .and_then(|n| n.to_str())
-            .and_then(|n| n.split_once('-'))
-            .and_then(|(ms, _)| ms.parse::<u128>().ok())
-            .unwrap_or(0)
-    });
-    while runs.len() > ACCOUNTING_RUNS_KEPT {
-        let oldest = runs.remove(0);
-        std::fs::remove_dir_all(oldest).ok();
+    let now_ms = now.duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis());
+    let mut protect = vec![opening];
+    protect.extend(keep);
+    for name in runs_to_prune(&names, now_ms, &protect) {
+        std::fs::remove_dir_all(base.join(name)).ok();
     }
 }
 
 /// Append one record to the open journal; a no-op when none is open (a run
-/// that certifies nothing keeps no journal).
+/// that never reached the point of opening one keeps no journal).
 pub(crate) fn journal_append(rec: &JournalRecord) {
     let Ok(mut slot) = JOURNAL.lock() else {
         return;
@@ -693,6 +993,56 @@ pub(crate) fn read_journal(path: &Path) -> (Vec<JournalRecord>, bool, Vec<String
     (records, closed, errors)
 }
 
+/// One recorded run, read back from disk.
+pub(crate) struct LoadedRun {
+    pub(crate) plan: AccountingPlan,
+    pub(crate) records: Vec<JournalRecord>,
+    pub(crate) journal_closed: bool,
+    pub(crate) journal_errors: Vec<String>,
+}
+
+/// Read run `run_id`'s plan and journal. A run that is not there says why it
+/// may not be: retention removed it, or it never existed under this config
+/// dir. The directory is looked up by a validated id, never a path.
+pub(crate) fn load_run(state_root: &Path, run_id: &str) -> Result<LoadedRun, DevError> {
+    if !is_run_id(run_id) {
+        return Err(DevError::Config(format!(
+            "`{run_id}` is not a run id: a run id is `<milliseconds>-<pid>`, as printed by the failed \
+             run's continuation report"
+        )));
+    }
+    let base = accounting_base(state_root);
+    let dir = base.join(run_id);
+    if !dir.is_dir() {
+        return Err(DevError::Config(format!(
+            "run {run_id} is gone: there is no record of it under {}. Retention keeps the newest \
+             {ACCOUNTING_RUNS_KEPT} runs and every run younger than {} days, up to \
+             {ACCOUNTING_RUNS_MAX}; an older one is removed, and a run recorded under another config \
+             dir is not here.",
+            base.display(),
+            ACCOUNTING_RUN_TTL.as_secs() / 86_400
+        )));
+    }
+    let plan_path = dir.join("plan.json");
+    let body = std::fs::read(&plan_path).map_err(|e| {
+        DevError::Config(format!("run {run_id} has no readable plan ({}): {e}", plan_path.display()))
+    })?;
+    let plan: AccountingPlan = serde_json::from_slice(&body).map_err(|e| {
+        DevError::Config(format!(
+            "run {run_id}'s plan ({}) does not parse: {e}. It may have been written by another brokkr.",
+            plan_path.display()
+        ))
+    })?;
+    if plan.run_id != run_id {
+        return Err(DevError::Config(format!(
+            "run {run_id}'s plan names run {}: the record was moved or edited",
+            plan.run_id
+        )));
+    }
+    let (records, journal_closed, journal_errors) = read_journal(&dir.join("journal.jsonl"));
+    Ok(LoadedRun { plan, records, journal_closed, journal_errors })
+}
+
 /// The cause a cooperative stop is: the phase watchdog when it fired, an
 /// interrupt otherwise. Decided here, where the watchdog is known, so the
 /// runner never has to.
@@ -704,12 +1054,33 @@ pub(crate) fn stop_cause() -> TerminationCause {
     }
 }
 
+/// Record why a run ended early with `error`, and return the termination that
+/// decided it: a stop (interrupt, phase watchdog) is the run's, and anything
+/// else that ends it - a blown budget, a refusal - is the run's too, carrying
+/// the lane's own `decisive` termination when it recorded one (a per-test
+/// timeout stops brokkr, and everything after it is unobserved because of
+/// that timeout). Journaled run-wide, so every execution the run never
+/// reached reads as unobserved for a stated reason.
+pub(crate) fn record_run_stop(error: &DevError, decisive: Option<Termination>) -> Option<Termination> {
+    let run = |cause| {
+        let t = Termination { scope: TerminationScope::Run, lane: None, stream: None, cause, test: None, charged: None };
+        journal_append(&JournalRecord::Terminated(t.clone()));
+        t
+    };
+    let stop = match error {
+        DevError::Interrupted => run(stop_cause()),
+        _ if crate::shutdown::is_shutdown_requested() => run(stop_cause()),
+        _ => run(decisive.as_ref().map_or(TerminationCause::FailFast, |t| t.cause)),
+    };
+    decisive.or(Some(stop))
+}
+
 /// One lane's handle on the journal. Every record goes to the journal (a
 /// no-op when none is open); the tap itself keeps only the two facts the lane
 /// reads back - the first termination, which decided the lane, and which
-/// planned binaries presented a stream - so a run that certifies nothing, and
-/// keeps no journal, holds a bounded amount however many records its tests
-/// produce. The evidence is the journal, never this.
+/// planned binaries presented a stream - so a run holds a bounded amount
+/// however many records its tests produce. The evidence is the journal, never
+/// this.
 #[derive(Clone)]
 pub(crate) struct LaneTap {
     lane: usize,
@@ -931,6 +1302,12 @@ pub(crate) enum AnomalyKind {
     /// Test records on a stream nothing in the plan accounts for.
     UnattributedEvents,
     AttributionError,
+    /// A harness process exited nonzero, or by a signal, though every test it
+    /// reported passed, nothing recorded stopped it and it left no test
+    /// unfinished: a teardown abort, an `exit(1)` after the last test. The
+    /// tests' own results are whole and green; the process they ran in is not,
+    /// and a pass that ignored that would be the pass of a crashed run.
+    UncleanExit,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -1004,6 +1381,10 @@ pub(crate) struct Reconciliation {
     pub(crate) journal_closed: bool,
     pub(crate) journal_errors: Vec<String>,
     pub(crate) first_termination: Option<Termination>,
+    /// Lanes whose plan stopped describing what they ran, by index, with the
+    /// reason ([`JournalRecord::LaneSuperseded`]). Their executions are not
+    /// in `accounted` and their observations were not read.
+    pub(crate) superseded: BTreeMap<usize, String>,
     /// Streams whose records may not all have been read: brokkr stopped
     /// reading with the pipe open, a read failed, or the stream never said
     /// how it ended. What was lost cannot be known - a later duplicate, an
@@ -1070,6 +1451,8 @@ struct StreamState {
     origin: Option<StreamOrigin>,
     suite_open: bool,
     suite_counts: (u64, u64, u64),
+    /// Terminal records that were neither a pass nor an ignore.
+    bad_terminals: u64,
     names: BTreeMap<(Option<BinaryUnit>, String), NameState>,
     end: Option<StreamEnd>,
     exit: Option<(Option<i32>, Option<i32>)>,
@@ -1121,7 +1504,16 @@ pub(crate) fn reconcile(
     let mut expected: BTreeMap<ExecKey, PairId> = BTreeMap::new();
     let mut ignored_selected: BTreeSet<ExecKey> = BTreeSet::new();
     let mut outside_claim: BTreeSet<ExecKey> = BTreeSet::new();
-    for lane in &plan.lanes {
+    // A superseded lane answers to a selection the plan does not hold, so it
+    // expects nothing and what it observed is not read.
+    let superseded: BTreeMap<usize, String> = records
+        .iter()
+        .filter_map(|r| match r {
+            JournalRecord::LaneSuperseded { lane, reason } => Some((*lane, reason.clone())),
+            _ => None,
+        })
+        .collect();
+    for lane in plan.lanes.iter().filter(|l| !superseded.contains_key(&l.lane)) {
         for pair in &lane.executions {
             expected.insert(
                 (lane.lane, pair.resolution.clone(), pair.unit.clone(), pair.test.clone()),
@@ -1167,6 +1559,7 @@ pub(crate) fn reconcile(
 
     for rec in records {
         match rec {
+            JournalRecord::Observed { lane, .. } if superseded.contains_key(lane) => {}
             JournalRecord::Observed { lane, stream, origin, event } => {
                 let st = streams.entry(*stream).or_default();
                 st.lane = *lane;
@@ -1282,6 +1675,9 @@ pub(crate) fn reconcile(
                             );
                         }
                         ns.terminal = true;
+                        if !matches!(result, TestResult::Ok | TestResult::Ignored) {
+                            st.bad_terminals += 1;
+                        }
                         if libtest && st.suite_open {
                             match result {
                                 TestResult::Ok => st.suite_counts.0 += 1,
@@ -1371,7 +1767,11 @@ pub(crate) fn reconcile(
                     || streams.values().any(|s| s.lane == *lane && !s.kills.is_empty());
                 lane_finished_clean.insert(*lane, !stopped);
             }
-            JournalRecord::Opened { .. } | JournalRecord::LaneStarted { .. } | JournalRecord::Closed => {}
+            JournalRecord::Opened { .. }
+            | JournalRecord::LaneStarted { .. }
+            | JournalRecord::LaneSuperseded { .. }
+            | JournalRecord::ThreadAllocation { .. }
+            | JournalRecord::Closed => {}
         }
     }
 
@@ -1392,6 +1792,38 @@ pub(crate) fn reconcile(
                 AnomalyKind::MissingSuiteClosure,
                 Some(st.lane),
                 format!("{}: the stream ended with its suite still open", unit.id()),
+            );
+        }
+    }
+
+    // A harness process that ended badly with every test it reported green and
+    // nothing recorded to explain it. A failed test, a kill, a stop, or a test
+    // left unfinished already says why the process ended as it did; this is
+    // the exit nothing else accounts for.
+    for st in streams.values() {
+        let Some(StreamOrigin::Binary { unit, .. }) = &st.origin else {
+            continue;
+        };
+        let Some((code, signal)) = st.exit else {
+            continue;
+        };
+        let explained = !st.kills.is_empty() || lane_terms.contains_key(&st.lane) || !run_terms.is_empty();
+        let unclean = signal.is_some() || code.is_some_and(|c| c != 0);
+        if unclean
+            && !explained
+            && st.bad_terminals == 0
+            && !st.names.is_empty()
+            && st.names.values().all(|n| n.terminal)
+        {
+            let how = match (code, signal) {
+                (_, Some(s)) => format!("was killed by signal {s}"),
+                (Some(c), None) => format!("exited with code {c}"),
+                (None, None) => "exited uncleanly".to_owned(),
+            };
+            anomaly(
+                AnomalyKind::UncleanExit,
+                Some(st.lane),
+                format!("{}: the harness process {how} though every test it reported passed", unit.id()),
             );
         }
     }
@@ -1543,6 +1975,7 @@ pub(crate) fn reconcile(
         journal_closed,
         journal_errors,
         first_termination,
+        superseded,
         truncated_streams,
     }
 }
@@ -1653,18 +2086,9 @@ mod accounting_tests {
 
     fn lane(idx: usize, executions: Vec<PairId>) -> LaneRecord {
         LaneRecord {
-            lane: idx,
-            label: format!("lane{idx}"),
-            kind: LaneKind::Parallel,
-            shape: "s".into(),
             prepared: true,
-            include_ignored: false,
-            doc_carrier: false,
-            doc_streams_required: false,
             executions,
-            ignored_selected: Vec::new(),
-            outside_claim: Vec::new(),
-            artifacts: Vec::new(),
+            ..LaneRecord::empty(idx, format!("lane{idx}"), LaneKind::Parallel, "s".into())
         }
     }
 
@@ -1725,6 +2149,63 @@ mod accounting_tests {
         assert_eq!(r.count(Outcome::Passed), 2);
         assert_eq!(r.status(), AccountingStatus::Complete);
         assert!(r.green());
+    }
+
+    /// Validation case: a harness that passes every test and then exits
+    /// nonzero (or dies by a signal) during teardown is not a pass. The tests'
+    /// own records are whole and green; the process is not, and nothing else
+    /// on the record explains it - an anomaly, so the run is neither green
+    /// nor a completed continuation. A nonzero exit that a failed test, a kill
+    /// or a stop explains is not double-counted, and a clean exit is clean.
+    #[test]
+    fn a_harness_exiting_badly_after_every_test_passed_is_an_anomaly() {
+        let u = unit("core", "lib", "core");
+        let p = plan(vec![lane(0, vec![pair(&u, "a")])]);
+        let exited = |code: Option<i32>, signal: Option<i32>| JournalRecord::ProcessExited { lane: 0, stream: 1, code, signal };
+        let run = |extra: JournalRecord| {
+            let mut records = clean_run(0, 1, &u, &["a"]);
+            records.push(extra);
+            records.push(JournalRecord::Closed);
+            reconcile(&p, &records, true, Vec::new())
+        };
+
+        let clean = run(exited(Some(0), None));
+        assert!(clean.anomalies.is_empty() && clean.green());
+
+        for bad in [exited(Some(101), None), exited(None, Some(6))] {
+            let r = run(bad);
+            assert_eq!(outcome_of(&r, 0, "a").0, Outcome::Passed, "the test itself passed");
+            assert_eq!(r.anomalies.len(), 1, "{:?}", r.anomalies);
+            assert_eq!(r.anomalies[0].kind, AnomalyKind::UncleanExit);
+            assert_eq!(r.status(), AccountingStatus::Violated);
+            assert!(!r.green());
+        }
+
+        // A failed test already explains the nonzero exit.
+        let mut failing = vec![
+            obs(0, 1, &u, ObsEvent::SuiteStarted { test_count: 1 }),
+            obs(0, 1, &u, started("a")),
+            obs(0, 1, &u, finished("a", TestResult::Failed)),
+            obs(0, 1, &u, ObsEvent::SuiteFinished { passed: 0, failed: 1, ignored: 0 }),
+            obs(0, 1, &u, ObsEvent::StreamEnded { end: StreamEnd::Eof }),
+        ];
+        failing.push(exited(Some(101), None));
+        let r = reconcile(&p, &failing, true, Vec::new());
+        assert!(r.anomalies.is_empty(), "{:?}", r.anomalies);
+
+        // So does a stop the run recorded.
+        let mut stopped = clean_run(0, 1, &u, &["a"]);
+        stopped.push(exited(None, Some(9)));
+        stopped.push(JournalRecord::Terminated(Termination {
+            scope: TerminationScope::Run,
+            lane: None,
+            stream: None,
+            cause: TerminationCause::PhaseDeadline,
+            test: None,
+            charged: None,
+        }));
+        let r = reconcile(&p, &stopped, true, Vec::new());
+        assert!(r.anomalies.is_empty(), "{:?}", r.anomalies);
     }
 
     /// Validation case: two same-named tests in different binaries of one
@@ -2297,5 +2778,154 @@ mod accounting_tests {
         ];
         let r = reconcile(&p, &records, true, Vec::new());
         assert!(r.doctests.carriers[0].completed);
+    }
+
+    /// The plan persists a lane's pairs grouped by binary and reads them back
+    /// as the flat pairs reconciliation works on - same pairs, same order -
+    /// without repeating the binary unit for every test.
+    #[test]
+    fn a_plan_round_trips_through_its_compact_form() {
+        let a = unit("core", "lib", "core");
+        let b = unit("core", "test", "suite");
+        let mut l = lane(0, vec![pair(&a, "x"), pair(&a, "y"), pair(&b, "x")]);
+        l.ignored_selected = vec![pair(&b, "slow")];
+        l.unavailable = Some("why".into());
+        l.unlisted = vec![("core::custom".into(), "no listing".into())];
+        let p = AccountingPlan { certifying: true, invocation: Some(Invocation { cwd: "/c".into(), project_root: "/r".into() }), ..plan(vec![l]) };
+        let json = serde_json::to_string(&p).unwrap();
+        // The unit's package id is written once per binary, not once per test.
+        assert_eq!(json.matches("path+file:///x/core#core@0.1.0").count(), 2 + 1, "{json}");
+        let back: AccountingPlan = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.lanes[0].executions, p.lanes[0].executions);
+        assert_eq!(back.lanes[0].ignored_selected, p.lanes[0].ignored_selected);
+        assert_eq!(back.lanes[0].unavailable.as_deref(), Some("why"));
+        assert_eq!(back.lanes[0].unlisted, p.lanes[0].unlisted);
+        assert!(back.certifying);
+        assert_eq!(back.invocation, p.invocation);
+    }
+
+    /// Retention: nothing is pruned inside the newest fifty, a run beyond them
+    /// goes only once it is a week old, the hard bound holds whatever the ages,
+    /// and a protected run (the one being opened, a continuation's source)
+    /// survives all of it.
+    #[test]
+    fn retention_keeps_recent_runs_and_bounds_the_rest() {
+        let day = 24 * 3600 * 1000_u128;
+        let now = 1_000 * day;
+        let name = |age_ms: u128, pid: u32| format!("{}-{pid}", now - age_ms);
+        // 60 runs, an hour apart: all young, so only the cap of 50 does not
+        // matter - the age rule keeps them.
+        let young: Vec<String> = (0..60_u32).map(|i| name(u128::from(i) * 3_600_000, i)).collect();
+        assert!(runs_to_prune(&young, now, &[]).is_empty());
+        // 60 runs a day apart: those past the newest 50 and older than 7
+        // days are pruned.
+        let sparse: Vec<String> = (0..60_u32).map(|i| name(u128::from(i) * day, i)).collect();
+        let pruned = runs_to_prune(&sparse, now, &[]);
+        assert_eq!(pruned.len(), 10, "{pruned:?}");
+        assert!(pruned.iter().all(|n| sparse.iter().position(|s| s == n).unwrap() >= 50));
+        // A protected run keeps its place and is not removed, however old.
+        let source = sparse[59].clone();
+        assert!(!runs_to_prune(&sparse, now, &[&source]).contains(&source));
+        // The hard bound: 400 runs a minute apart.
+        let burst: Vec<String> = (0..400_u32).map(|i| name(u128::from(i) * 60_000, i)).collect();
+        assert_eq!(runs_to_prune(&burst, now, &[]).len(), 100);
+        // And the bound is exact even when a protected source lies beyond the
+        // newest 300: it survives, and the oldest unprotected run makes room,
+        // so 300 remain - not 301.
+        let oldest = burst[399].clone();
+        let pruned = runs_to_prune(&burst, now, &[&oldest]);
+        assert!(!pruned.contains(&oldest), "the protected source survives");
+        assert_eq!(burst.len() - pruned.len(), ACCOUNTING_RUNS_MAX, "exactly the bound remains");
+        assert!(pruned.contains(&burst[299]), "the oldest unprotected survivor made room");
+        assert!(is_run_id("1700000000000-42"));
+        for bad in ["", "-", "1-", "-1", "../x", "1-2/../3", "a-b", "1-2-3"] {
+            assert!(!is_run_id(bad), "{bad}");
+        }
+    }
+
+    /// Validation case: a pruned (or never recorded) source run is a clear
+    /// error that says the run is gone and why that can happen, and a name
+    /// that is not a run id never becomes a path.
+    #[test]
+    fn a_pruned_source_run_is_a_clear_error() {
+        let dir = crate::test_scratch::scratch("accounting", "pruned_source");
+        let gone = load_run(&dir, "1700000000000-42").err().unwrap().to_string();
+        assert!(gone.contains("run 1700000000000-42 is gone"), "{gone}");
+        assert!(gone.contains("Retention keeps the newest"), "{gone}");
+        let bad = load_run(&dir, "../../etc").err().unwrap().to_string();
+        assert!(bad.contains("is not a run id"), "{bad}");
+    }
+
+    /// The parallel executor's allocation survives the journal: journaled for
+    /// every planned binary through the real writer, it reads back as the
+    /// thread counts a replay is held to.
+    #[test]
+    fn thread_allocations_round_trip_through_the_journal() {
+        let _journal = JOURNAL_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = crate::test_scratch::scratch("accounting", "thread_allocations");
+        let (one, two) = (unit("core", "lib", "core"), unit("core", "test", "suite"));
+        let mut src = plan(vec![lane(31_002, vec![pair(&one, "a"), pair(&two, "b")])]);
+        src.run_id = "1000000000000-2".into();
+        let paths = accounting_open(&dir, &src, None).unwrap();
+        let tap = LaneTap::new(31_002);
+        let none = None;
+        journal_thread_allocations(&tap, [(&none, &one, 1), (&none, &two, 5)]);
+        journal_close();
+        let loaded = load_run(&dir, &src.run_id).unwrap();
+        assert!(paths.journal.exists());
+        let allocs = thread_allocations(&loaded.records);
+        assert_eq!(allocs.get(&(31_002, None, one)), Some(&1));
+        assert_eq!(allocs.get(&(31_002, None, two)), Some(&5));
+    }
+
+    /// Validation case: a continuation writes its own record and never
+    /// touches its source's - not the plan, not the journal - and opening it
+    /// does not prune the source, even when retention would have.
+    #[test]
+    fn a_continuation_record_leaves_its_source_untouched() {
+        let _journal = JOURNAL_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = crate::test_scratch::scratch("accounting", "continuation_record");
+        let u = unit("core", "lib", "core");
+        let mut src = plan(vec![lane(31_001, vec![pair(&u, "a"), pair(&u, "b")])]);
+        src.run_id = "1000000000000-1".into();
+        let src_paths = {
+            let paths = accounting_open(&dir, &src, None).unwrap();
+            journal_append(&JournalRecord::LaneStarted { lane: 31_001 });
+            journal_append(&obs(31_001, 1, &u, ObsEvent::Started { name: "a".into() }));
+            journal_close();
+            paths
+        };
+        let plan_before = std::fs::read(&src_paths.plan).unwrap();
+        let journal_before = std::fs::read(&src_paths.journal).unwrap();
+
+        // Sixty younger runs: the source is the oldest and by now beyond both
+        // bounds, so retention would take it - but it is protected.
+        let base = accounting_base(&dir);
+        for i in 0..60_u32 {
+            std::fs::create_dir_all(base.join(format!("{}-{i}", 2_000_000_000_000_u64 + u64::from(i)))).unwrap();
+        }
+        let mut cont = plan(vec![lane(31_001, vec![pair(&u, "a")])]);
+        cont.run_id = "2000000000100-9".into();
+        cont.continuation = Some(ContinuationOf {
+            source_run_id: src.run_id.clone(),
+            selected: vec![ExecutionId { lane: 31_001, attempt: 1, pair: pair(&u, "a") }],
+        });
+        let cont_paths = accounting_open(&dir, &cont, Some(&src.run_id)).unwrap();
+        journal_append(&JournalRecord::LaneStarted { lane: 31_001 });
+        journal_close();
+
+        assert!(src_paths.plan.exists() && src_paths.journal.exists(), "the source survived pruning");
+        assert_eq!(std::fs::read(&src_paths.plan).unwrap(), plan_before);
+        assert_eq!(std::fs::read(&src_paths.journal).unwrap(), journal_before);
+        let loaded = load_run(&dir, &cont.run_id).unwrap();
+        assert_eq!(loaded.plan.continuation.as_ref().unwrap().source_run_id, src.run_id);
+        assert_eq!(loaded.plan.continuation.unwrap().selected.len(), 1);
+        assert!(cont_paths.journal.exists());
+        // The source's verdict is a function of its own record alone: the
+        // same reconciliation, before and after, says the same.
+        let reread = load_run(&dir, &src.run_id).unwrap();
+        let r = reconcile(&reread.plan, &reread.records, reread.journal_closed, reread.journal_errors);
+        assert_eq!(outcome_of(&r, 31_001, "a").0, Outcome::Interrupted);
+        assert_eq!(outcome_of(&r, 31_001, "b").0, Outcome::Unobserved);
     }
 }

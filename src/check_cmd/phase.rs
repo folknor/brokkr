@@ -548,6 +548,10 @@ struct RunReport {
     /// Under a complete claim: the policy, execution-accounting and doctest
     /// blocks, present even when the run failed.
     accounting: Option<AccountingBlocks>,
+    /// What the run left unresolved, and the command that replays it. Built
+    /// from the plan and journal of ANY run that has an inventory; reported
+    /// when the run failed.
+    continuation: Option<ContinuationReport>,
 }
 
 /// The prepared profile and where its record lives on disk.
@@ -556,6 +560,10 @@ struct Prepared {
     /// `None` when the plan could not be persisted; the audit then reports a
     /// record that does not exist rather than one it never read.
     paths: Option<AccountingPaths>,
+    /// The test phase started. A run that stopped in preparation executed
+    /// nothing, so its plan's executions are unobserved because nothing ran,
+    /// not because a stop interrupted them - there is nothing to continue.
+    test_phase_ran: bool,
 }
 
 /// Run clippy, the test phase and - under a `complete` claim - the `prepare`
@@ -584,23 +592,33 @@ fn run_build_phases(
         run_script_checks(a.project_root, a.script_checks, Stage::PreTest)?;
     }
 
-    let complete = a.certifies == Some(Certifies::Complete);
+    let certifying = a.certifies == Some(Certifies::Complete);
     let mut test_failure: Option<DevError> = None;
     let mut prepared: Option<Prepared> = None;
     if !skip("test") {
-        if complete {
-            begin_phase(failing_phase, "prepare");
-            let p = run_prepare_phase(a)?;
-            let ok = p.prep.error.is_none() && p.prep.plan.complete && p.paths.is_some();
-            if !ok {
-                // Nothing runs on an incomplete plan: a test phase that ran
-                // anyway would produce a record nothing could certify. The
-                // audit below still reports what the plan knows.
-                test_failure = Some(DevError::Reported("preparation failed".into()));
-            }
-            prepared = Some(p);
+        // Every run prepares: the execution inventory is what a stop is
+        // reported against, certifying or not. Only the certifying claim
+        // makes a preparation failure fatal.
+        begin_phase(failing_phase, "prepare");
+        let p = run_prepare_phase(a, certifying)?;
+        let proceed = if certifying {
+            p.prep.error.is_none() && p.prep.plan.complete && p.paths.is_some()
+        } else {
+            // A lane without an inventory still runs. Only a stop ends the
+            // run here.
+            !crate::shutdown::is_shutdown_requested()
+        };
+        if !proceed {
+            // Nothing runs on an incomplete plan under a claim: a test phase
+            // that ran anyway would produce a record nothing could certify.
+            // The audit below still reports what the plan knows.
+            test_failure = Some(DevError::Reported("preparation failed".into()));
         }
+        prepared = Some(p);
         if test_failure.is_none() {
+            if let Some(p) = prepared.as_mut() {
+                p.test_phase_ran = true;
+            }
             begin_phase(failing_phase, "test");
             let lanes = prepared.as_ref().map(|p| p.prep.lanes.as_slice());
             test_failure = run_test_phase(
@@ -615,6 +633,7 @@ fn run_build_phases(
                     extra_args: a.extra_args,
                     allow: a.clippy_allow,
                     allow_exact: a.clippy_allow_exact,
+                    certifying,
                 },
                 lanes,
                 collected_timings,
@@ -632,10 +651,15 @@ fn run_build_phases(
     finish_build_phases(a, skip, failing_phase, prepared, run_report, test_failure)
 }
 
-/// The `prepare` phase: plan the whole profile, persist the plan, open the
+/// The `prepare` phase: plan the whole invocation, persist the plan, open the
 /// journal. A lane that cannot be prepared is reported here, in full, and
 /// the plan comes back incomplete rather than not at all.
-fn run_prepare_phase(a: &BuildPhaseArgs<'_>) -> Result<Prepared, DevError> {
+///
+/// Under a certifying claim that is a failure (the markers print as errors and
+/// the test phase does not run). Otherwise it is a lane without an inventory:
+/// the markers go to the run log, since a lane that is unavailable by design
+/// would otherwise warn on every run, and the lane still runs.
+fn run_prepare_phase(a: &BuildPhaseArgs<'_>, certifying: bool) -> Result<Prepared, DevError> {
     let target_dir = build::project_info(Some(a.project_root))?.target_dir;
     let allow_flags = crate::config::test_phase_allow_flags(a.clippy_allow, a.clippy_allow_exact);
     let mut preparer = CargoPreparer {
@@ -646,37 +670,57 @@ fn run_prepare_phase(a: &BuildPhaseArgs<'_>) -> Result<Prepared, DevError> {
             target_dir: &target_dir,
             allow_flags: &allow_flags,
             commands: a.commands,
-            complete: true,
+            certifying,
         },
+        packages: a.packages,
+        extra_args: a.extra_args,
     };
-    let prep = prepare_profile(a.active_sweeps, a.doctests, &mut preparer);
+    let mut prep = prepare_profile(a.active_sweeps, a.doctests, certifying, &mut preparer);
+    prep.plan.invocation = Some(Invocation {
+        cwd: std::env::current_dir().map_or_else(|_| ".".to_owned(), |p| p.to_string_lossy().into_owned()),
+        project_root: a.project_root.to_string_lossy().into_owned(),
+    });
     for marker in &prep.plan.incomplete {
-        output::error(&format!("prepare: {marker}"));
+        if certifying {
+            output::error(&format!("prepare: {marker}"));
+        } else {
+            output::detail(&format!("prepare: {marker}"));
+        }
     }
-    let paths = match accounting_open(a.state_root, &prep.plan) {
+    let paths = match accounting_open(a.state_root, &prep.plan, None) {
         Ok(p) => {
             output::detail(&format!(
-                "prepare: plan {}, journal {}",
+                "prepare: run {}, plan {}, journal {}",
+                prep.plan.run_id,
                 p.plan.display(),
                 p.journal.display()
             ));
             Some(p)
         }
         Err(e) => {
+            // The run goes on without a record, and says so: its stop, if it
+            // has one, cannot be continued from.
             output::error(&format!("prepare: the plan could not be persisted: {e}"));
             None
         }
     };
     if prep.error.is_none() && prep.plan.complete {
         let executions: usize = prep.plan.lanes.iter().map(|l| l.executions.len()).sum();
-        output::run_msg(&format!(
+        let line = format!(
             "prepare: {}, {} in {}",
             output::count(prep.plan.lanes.len(), "lane"),
             output::count(executions, "expected execution"),
             fmt_wall(phase_elapsed())
-        ));
+        );
+        // A certifying run states what it planned; any other run's inventory
+        // is bookkeeping, for the log.
+        if certifying {
+            output::run_msg(&line);
+        } else {
+            output::detail(&line);
+        }
     }
-    Ok(Prepared { prep, paths })
+    Ok(Prepared { prep, paths, test_phase_ran: false })
 }
 
 /// The two per-build-shape diagnostic phases: clippy, then rustdoc. Rustdoc
@@ -734,19 +778,26 @@ fn finish_build_phases(
     // needs no process the shutdown flag would refuse, and the worksheet is
     // most needed exactly on the unhealthy runs.
     if let Some(prepared) = prepared {
-        // Stays on the phase that failed - the audit only contributes its
-        // findings and counts there.
-        if test_failure.is_none() {
-            begin_phase(failing_phase, "coverage");
+        if a.certifies == Some(Certifies::Complete) {
+            // Stays on the phase that failed - the audit only contributes its
+            // findings and counts there.
+            if test_failure.is_none() {
+                begin_phase(failing_phase, "coverage");
+            }
+            let audit = audit_coverage(&prepared, a.active_sweeps, a.quarantine, test_failure.is_none());
+            // Counts first, verdict second: the summary carries them even when
+            // the audit is what failed.
+            if run_report.termination.is_none() {
+                run_report.termination = audit.termination;
+            }
+            run_report.accounting = Some(audit.blocks);
+            run_report.continuation = audit.continuation;
+            audit.result?;
+        } else {
+            // No claim to audit, but the inventory and the journal are as real:
+            // what a stop left unresolved is read from them the same way.
+            run_report.continuation = continuation_of(&prepared);
         }
-        let audit = audit_coverage(&prepared, a.active_sweeps, a.quarantine, test_failure.is_none());
-        // Counts first, verdict second: the summary carries them even when
-        // the audit is what failed.
-        if run_report.termination.is_none() {
-            run_report.termination = audit.termination;
-        }
-        run_report.accounting = Some(audit.blocks);
-        audit.result?;
     }
 
     if let Some(e) = test_failure {
@@ -899,7 +950,26 @@ fn verify_doc_only_rules(a: &BuildPhaseArgs<'_>) -> Result<(), DevError> {
 struct AuditOutcome {
     blocks: AccountingBlocks,
     termination: Option<TerminationSummary>,
+    /// What the run left unresolved, when anything.
+    continuation: Option<ContinuationReport>,
     result: Result<(), DevError>,
+}
+
+/// Read a prepared run's journal back and reconcile the plan against it.
+/// Pure: spawns nothing, builds nothing, arms no deadline.
+fn reconcile_prepared(prepared: &Prepared) -> (Vec<JournalRecord>, Reconciliation) {
+    reconcile_run(&prepared.prep.plan, prepared.paths.as_ref().map(|p| p.journal.as_path()))
+}
+
+/// The continuation report of a run no claim audits. `None` when the run left
+/// nothing unresolved - or left no record to continue from.
+fn continuation_of(prepared: &Prepared) -> Option<ContinuationReport> {
+    prepared.paths.as_ref()?;
+    if !prepared.test_phase_ran {
+        return None;
+    }
+    let (records, recon) = reconcile_prepared(prepared);
+    build_continuation(&prepared.prep.plan, &recon, &records)
 }
 
 /// The coverage audit for a complete claim: pure reconciliation of the plan
@@ -919,14 +989,7 @@ fn audit_coverage(
     tests_green: bool,
 ) -> AuditOutcome {
     let plan = &prepared.prep.plan;
-    let (records, closed, mut errors) = match &prepared.paths {
-        Some(paths) => read_journal(&paths.journal),
-        None => (Vec::new(), false, vec!["the plan was never persisted, so no journal exists".into()]),
-    };
-    if journal_unlocked_write_failed() {
-        errors.push("the watchdog's deadline record could not be written whole".into());
-    }
-    let recon = reconcile(plan, &records, closed, errors);
+    let (records, recon) = reconcile_prepared(prepared);
     let (policy, policy_failed) = report_policy(plan, sweeps, quarantine);
     let accounting = ExecutionAccounting::of(&recon);
     report_accounting(plan, &recon, &accounting, tests_green);
@@ -953,6 +1016,13 @@ fn audit_coverage(
             },
         },
         termination,
+        // The same reconciliation the verdict used, so the list of what is
+        // unresolved can never disagree with the counts above it.
+        continuation: if prepared.test_phase_ran {
+            prepared.paths.as_ref().and_then(|_| build_continuation(plan, &recon, &records))
+        } else {
+            None
+        },
         result,
     }
 }
@@ -1079,8 +1149,8 @@ fn run_sequential_resolutions(
     scope: &[&str],
     extra_args: &[String],
     env: &LaneEnv,
-    // (doctests, multi, commands)
-    flags: (bool, bool, bool),
+    // (doctests, multi, commands, certifying)
+    flags: (bool, bool, bool, bool),
     mut timings: Option<&mut Vec<TestTiming>>,
     prepared: Option<&PreparedLane>,
     tap: &LaneTap,
@@ -1097,6 +1167,7 @@ fn run_sequential_resolutions(
             units: p.units_by_path(&resolution),
             hashes: p.hashes_by_path(&resolution),
             rustdoc: lane_runs_doctests(sweep, flags.0),
+            strict: flags.3,
             expected: p
                 .resolutions
                 .iter()
@@ -1330,6 +1401,8 @@ fn finish_check(
     };
     match failure {
         None => {
+            // A run that passed has nothing to continue.
+            report.continuation = None;
             let (word, scope, suffix, result) = match certifies {
                 // A shortened run must not sign off in the same words a full
                 // one does - the announcement at the top has scrolled away by
@@ -1409,6 +1482,12 @@ fn finish_check(
                 "check {word} in {}{context}",
                 fmt_wall(started.elapsed())
             ));
+            // After the verdict, before the trailer: what the failed run left
+            // unresolved, and the command that runs it again. Said for every
+            // way a run fails - a kill, a timeout, a fail-fast, an interrupt.
+            if let Some(c) = &report.continuation {
+                output::error(&render_continuation(c).join("\n"));
+            }
             if json {
                 emit_json_summary(
                     "failed",
@@ -1545,6 +1624,13 @@ struct CheckSummary<'a> {
     /// Complete profiles only: what the doctest streams said. No inventory,
     /// so no accounting.
     doctests: Option<DoctestAccounting>,
+    /// Failed runs that have an inventory, certifying or not: what the run
+    /// left unresolved (every candidate's full execution identity, outcome
+    /// and detail), whether the inventory is whole, and the command that
+    /// replays the candidates - or why none can. Diagnostic: it certifies
+    /// nothing, and says so. `null` on a run that passed, one that left
+    /// nothing unresolved, and one that failed before `prepare`.
+    diagnostic_continuation: Option<ContinuationReport>,
     elapsed_ms: u64,
 }
 
@@ -1580,6 +1666,7 @@ fn emit_json_summary(
         policy_coverage,
         execution_accounting,
         doctests,
+        diagnostic_continuation: report.continuation,
         elapsed_ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
     };
     match serde_json::to_string(&summary) {
@@ -3859,6 +3946,8 @@ struct TestPhaseArgs<'a> {
     extra_args: &'a [String],
     allow: &'a [String],
     allow_exact: &'a [SitedAllow],
+    /// The run is held to a `certifies = "complete"` claim.
+    certifying: bool,
 }
 
 /// Iterate `sweeps`, pre-building each sweep's `build_packages` and
@@ -3889,6 +3978,7 @@ fn run_test_phase(
         extra_args,
         allow,
         allow_exact,
+        certifying,
     } = *t;
     let multi = sweeps.len() > 1;
     let allow_flags = crate::config::test_phase_allow_flags(allow, allow_exact);
@@ -3943,6 +4033,7 @@ fn run_test_phase(
                 doctests,
                 multi,
                 commands,
+                certifying,
             },
             prepared.and_then(|p| p.get(i)).and_then(Option::as_ref),
             &tap,
@@ -4002,12 +4093,7 @@ fn run_test_phase(
 ///   unobserved because of that timeout.
 fn record_phase_stop(failed: usize, lanes: usize, e: &DevError, tap: &LaneTap) -> Option<Termination> {
     let own = tap.decisive_termination();
-    let run = |cause| {
-        let t = Termination { scope: TerminationScope::Run, lane: None, stream: None, cause, test: None, charged: None };
-        journal_append(&JournalRecord::Terminated(t.clone()));
-        t
-    };
-    let run_stop = match e {
+    match e {
         DevError::Build(m) if m == TESTS_FAILED => {
             let mut first = None;
             for lane in failed + 1..lanes {
@@ -4022,13 +4108,10 @@ fn record_phase_stop(failed: usize, lanes: usize, e: &DevError, tap: &LaneTap) -
                 journal_append(&JournalRecord::Terminated(t.clone()));
                 first.get_or_insert(t);
             }
-            return own.or(first);
+            own.or(first)
         }
-        DevError::Interrupted => run(stop_cause()),
-        _ if crate::shutdown::is_shutdown_requested() => run(stop_cause()),
-        _ => run(own.as_ref().map_or(TerminationCause::FailFast, |t| t.cause)),
-    };
-    own.or(Some(run_stop))
+        other => record_run_stop(other, own),
+    }
 }
 
 /// What one test lane needs from the phase, bundled so the lane body can be
@@ -4046,15 +4129,18 @@ struct LaneArgs<'a> {
     doctests: bool,
     multi: bool,
     commands: bool,
+    certifying: bool,
 }
 
 /// Run one sweep's test lane: its pre-builds, then whichever harness it
 /// names. `Ok(false)` is a failure already reported.
 ///
-/// `prepared` is the lane's plan under a complete claim: its artifacts are
-/// verified against it before anything runs, and the lane executes exactly
-/// what it lists. Outside one, the lanes that need a selection to execute
-/// prepare their own here, through the same code.
+/// `prepared` is the lane's plan: its artifacts are verified against it before
+/// anything runs, and the lane executes exactly what it lists. Where the
+/// up-front preparation failed, the lane reports that failure once (the
+/// lanes that need a selection) or runs without an inventory (serial); it is
+/// never prepared again. Only an inventory gone stale (artifacts replaced by
+/// another lane's build) re-prepares.
 fn run_test_lane(
     a: &LaneArgs<'_>,
     prepared: Option<&PreparedLane>,
@@ -4062,6 +4148,25 @@ fn run_test_lane(
     timings: Option<&mut Vec<TestTiming>>,
 ) -> Result<bool, DevError> {
     let sweep = a.sweep;
+    // A lane whose up-front preparation failed has no inventory and is not
+    // prepared a second time: preparing lists (executes) every binary, so a
+    // retry would run each listing twice in one invocation. A lane that needs a
+    // selection to execute reports the recorded failure; a serial lane runs
+    // through cargo, as it does with any other lane without an inventory.
+    let prepared = match prepared {
+        Some(p) if p.prepare_failed.is_some() => {
+            if let Some(f) = &p.prepare_failed
+                && matches!(lane_kind(sweep), LaneKind::Parallel | LaneKind::Isolated | LaneKind::Nextest)
+            {
+                for line in &f.held {
+                    output::error(line);
+                }
+                return Err(DevError::Reported(f.message.clone()));
+            }
+            None
+        }
+        other => other,
+    };
     let inputs = LaneInputs {
         project: a.project,
         project_root: a.project_root,
@@ -4069,7 +4174,7 @@ fn run_test_lane(
         target_dir: a.target_dir,
         allow_flags: a.allow_flags,
         commands: a.commands,
-        complete: prepared.is_some(),
+        certifying: a.certifying,
     };
     // Per-sweep: a sweep carrying `rustflags` runs in its own isolated
     // target dir with a matching BROKKR_TEST_BIN_DIR + RUSTFLAGS, so a
@@ -4086,17 +4191,46 @@ fn run_test_lane(
     reject_conflicting_lanes(sweep)?;
 
     let kind = lane_kind(sweep);
+    let needs_selection = matches!(kind, LaneKind::Parallel | LaneKind::Isolated | LaneKind::Nextest);
     let own;
     let prepared = match prepared {
+        // A serial lane whose harnesses cannot be attributed: it runs through
+        // cargo, as it always has, with no plan to hold it to.
+        Some(p) if p.unavailable.is_some() => None,
+        Some(p) if !p.verify => Some(p),
         Some(p) => {
             // Other lanes have built since the plan was taken: prove this one
             // is about to run what was enumerated.
-            if p.verify {
-                verify_lane_artifacts(&inputs, sweep, p, &support)?;
+            let drift = lane_drift_of(&inputs, sweep, p, &support)?;
+            if drift.is_empty() {
+                Some(p)
+            } else if a.certifying {
+                // Never a silent re-plan: a plan that follows the artifacts
+                // around certifies whatever happens to be on disk.
+                return Err(drift_error(&sweep.label, &drift));
+            } else {
+                // Nothing is certified here, so the lane is not refused for a
+                // plan that went stale - an earlier lane's build can replace
+                // an artifact in place, and before there was an inventory
+                // every lane prepared just before it ran. It runs what it
+                // builds now, and the record says its inventory no longer
+                // describes it: its observations are not read against a
+                // selection it did not run.
+                let reason = format!("artifacts changed since the plan - {}", drift.join("; "));
+                tap.record(JournalRecord::LaneSuperseded { lane: tap.lane(), reason: reason.clone() });
+                output::detail(&format!(
+                    "test {}: {reason}; the lane runs what it builds now, and its inventory is unavailable",
+                    sweep.label
+                ));
+                if needs_selection {
+                    own = prepare_lane(&inputs, sweep, a.scope, a.extra_args)?;
+                    Some(&own)
+                } else {
+                    None
+                }
             }
-            Some(p)
         }
-        None if matches!(kind, LaneKind::Parallel | LaneKind::Isolated | LaneKind::Nextest) => {
+        None if needs_selection => {
             own = prepare_lane(&inputs, sweep, a.scope, a.extra_args)?;
             Some(&own)
         }
@@ -4134,7 +4268,7 @@ fn run_test_lane(
             a.scope,
             a.extra_args,
             &env,
-            (a.doctests, a.multi, a.commands),
+            (a.doctests, a.multi, a.commands, a.certifying),
             timings,
             prepared,
             tap,
@@ -4464,6 +4598,7 @@ mod json_summary_tests {
             policy_coverage: None,
             execution_accounting: None,
             doctests: None,
+            diagnostic_continuation: None,
             elapsed_ms: 1234,
         }
     }
@@ -4783,3 +4918,59 @@ mod failure_exit_tests {
         ));
     }
 }
+
+#[cfg(test)]
+mod continuation_gate_tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+
+    /// A prepared run whose lane expects two tests and whose journal holds
+    /// `records`.
+    fn prepared(name: &str, ran: bool, records: &[JournalRecord]) -> Prepared {
+        let dir = crate::test_scratch::scratch("phase", name);
+        let journal = dir.join("journal.jsonl");
+        let body: String = records.iter().map(|r| serde_json::to_string(r).unwrap() + "\n").collect();
+        std::fs::write(&journal, body).unwrap();
+        let b = test_binary_for_tests("core", "test", "suite");
+        let unit = BinaryUnit::of(&b);
+        let pair = |t: &str| PairId { shape: "s".into(), resolution: None, unit: unit.clone(), test: t.into() };
+        let lane = LaneRecord {
+            prepared: true,
+            executions: vec![pair("a"), pair("b")],
+            ..LaneRecord::empty(0, "default".into(), LaneKind::Serial, "s".into())
+        };
+        let plan = AccountingPlan { run_id: "1700000000000-1".into(), complete: true, lanes: vec![lane], ..AccountingPlan::default() };
+        Prepared {
+            prep: ProfilePrep { plan, lanes: vec![None], error: None },
+            paths: Some(AccountingPaths { plan: dir.join("plan.json"), journal }),
+            test_phase_ran: ran,
+        }
+    }
+
+    /// A run that stopped in preparation executed nothing: its executions are
+    /// unobserved because nothing ran, so it has no continuation. One whose
+    /// test phase started and was killed does.
+    #[test]
+    fn only_a_run_whose_test_phase_started_has_a_continuation() {
+        let killed = [JournalRecord::LaneStarted { lane: 0 }, JournalRecord::Terminated(Termination {
+            scope: TerminationScope::Run,
+            lane: None,
+            stream: None,
+            cause: TerminationCause::PhaseDeadline,
+            test: None,
+            charged: None,
+        })];
+        assert!(continuation_of(&prepared("gate_ran", true, &killed)).is_some());
+        assert!(continuation_of(&prepared("gate_not_ran", false, &killed)).is_none());
+    }
+
+    /// A run that persisted no plan has no record to continue from.
+    #[test]
+    fn a_run_without_a_persisted_plan_has_no_continuation() {
+        let mut p = prepared("gate_no_plan", true, &[]);
+        p.paths = None;
+        assert!(continuation_of(&p).is_none());
+    }
+}
+

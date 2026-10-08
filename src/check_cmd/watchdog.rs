@@ -345,6 +345,7 @@ mod watchdog_tests {
     /// journal read back would say nothing about why its execution stopped.
     #[test]
     fn a_firing_journals_its_deadline_without_the_journal_lock() {
+        let _journal = JOURNAL_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let root = crate::test_scratch::scratch("watchdog", "firing_journal");
         let unit = BinaryUnit::of(&test_binary_for_tests("core", "lib", "core"));
         let pair = PairId { shape: "s".into(), resolution: None, unit, test: "queued".into() };
@@ -354,22 +355,13 @@ mod watchdog_tests {
             // A lane index no other test's tap uses: the journal is process-wide,
             // and a concurrently running test's records may land in it too.
             lanes: vec![LaneRecord {
-                lane: 7_777,
-                label: "lane".into(),
-                kind: LaneKind::Parallel,
-                shape: "s".into(),
                 prepared: true,
-                include_ignored: false,
-                doc_carrier: false,
-                doc_streams_required: false,
                 executions: vec![pair],
-                ignored_selected: Vec::new(),
-                outside_claim: Vec::new(),
-                artifacts: Vec::new(),
+                ..LaneRecord::empty(7_777, "lane".into(), LaneKind::Parallel, "s".into())
             }],
             ..AccountingPlan::default()
         };
-        let paths = accounting_open(&root, &plan).expect("open the journal");
+        let paths = accounting_open(&root, &plan, None).expect("open the journal");
 
         let (locked_tx, locked_rx) = std::sync::mpsc::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();

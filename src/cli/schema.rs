@@ -2017,8 +2017,8 @@ In depth: `brokkr man nidhogg`."
         /// Exact test name to run (substring filter, case-sensitive).
         /// A name matching every test in the package (blank, `_`, ...) is
         /// refused - run the whole suite with `brokkr check -p`.
-        #[arg(value_parser = validate_test_name)]
-        name: String,
+        #[arg(value_parser = validate_test_name, required_unless_present = "from_run")]
+        name: Option<String>,
         /// Cargo package to test (`cargo test -p <pkg>`). Overrides the
         /// project default and any `[test] default_package` in brokkr.toml.
         #[arg(short = 'p', long = "package")]
@@ -2057,6 +2057,29 @@ In depth: `brokkr man nidhogg`."
         /// sweep the profile lists. Errors if no sweep carries that label.
         #[arg(long, value_name = "LABEL")]
         sweep: Option<String>,
+        /// Run again the executions a recorded run left interrupted or
+        /// unobserved (its watchdog kill, per-test timeout, interrupt or
+        /// fail-fast): the command a failed `check` or `test` prints under
+        /// "diagnostic continuation". A diagnostic, not a retry - it
+        /// certifies nothing and never changes the verdict of the run it
+        /// continues. The recorded build shape is rebuilt and every
+        /// executable, runtime and support fingerprint is held to the
+        /// original's before anything runs; a difference refuses the replay.
+        /// Replays in a new process against the current external state, with
+        /// the recorded environment additions over the ambient environment.
+        /// Takes no selection, feature, profile, `-p`, `--sweep`, `-N` or
+        /// `--timeout` of its own: the record is the selection.
+        #[arg(
+            long = "from-run",
+            value_name = "RUN_ID",
+            conflicts_with_all = ["name", "package", "repeat", "jobs", "debug", "release", "timeout", "sweep"]
+        )]
+        from_run: Option<String>,
+        /// With `--from-run`: print the continuation report from the
+        /// persisted evidence and execute nothing. The recovery path when a
+        /// hard exit stopped the original run from printing it.
+        #[arg(long, requires = "from_run", conflicts_with = "name")]
+        list: bool,
     },
     /// [litehtml/sluggrs] List fixtures/snapshots and approval state
     #[command(display_order = 50)]

@@ -99,8 +99,9 @@ Output:
   [result]  check passed in 7m01s (profile standard, 5 sweeps; lints allowed: rustdoc::private_intra_doc_links)
   ```
   The convention phases (gremlins through publish cycle) share one line with
-  their counts; each build phase (clippy, rustdoc, prepare, test, coverage -
-  which adds the accounting line - and install-feature) prints one line with
+  their counts; each build phase (clippy, rustdoc, prepare - a complete
+  profile's line; any other run's goes to the log - test, coverage - which adds
+  the accounting line - and install-feature) prints one line with
   its wall time as it completes -
   streamed per phase, not rendered at the end, so a run the watchdog kills
   still shows which phases finished. A pre-test or post-test script-check
@@ -208,7 +209,9 @@ Output:
   (how the run stopped, when something stopped it - `{kind, scope}`, see
   "Termination" under the `coverage` phase), `policy_coverage`,
   `execution_accounting` and `doctests` (complete profiles whose `prepare`
-  phase ran, `null` otherwise - see the `coverage` phase), `elapsed_ms`. The object is
+  phase ran, `null` otherwise - see the `coverage` phase),
+  `diagnostic_continuation` (a failed run that left executions unresolved, any
+  profile - see "Diagnostic continuation"), `elapsed_ms`. The object is
   versioned and additive within a version: fields are only ever added,
   consumers must tolerate unknown fields, and a bump is reserved for renames
   or semantic changes. Schema 2 was one: it replaced schema 1's `coverage`
@@ -294,11 +297,12 @@ each phase has its own ceiling on top of that:
 | `coverage`, `install_feature`, `script_check` | 5 min |
 | every other phase (`gremlins`, `header`, `textlint`, `manifest`, `dependency_rules`, `publish_cycle`) | 2 min |
 
-`prepare` (complete profiles only, see the `coverage` phase) gets the test
-phase's fifteen minutes because it does the test phase's builds - every
-lane's `cargo test --no-run`, cold on a fresh store - plus every listing. A
-ceiling that fires there leaves an explicitly incomplete plan
-(`plan_complete = false`), never a partial one passed off as whole.
+`prepare` (every run that runs tests; see the `coverage` phase and
+"Diagnostic continuation") gets the test phase's fifteen minutes because it
+does the test phase's builds - every lane's `cargo test --no-run`, cold on a
+fresh store - plus every listing. A ceiling that fires there leaves an
+explicitly incomplete plan (`plan_complete = false`), never a partial one
+passed off as whole.
 
 The per-child deadlines - the 20s hung-test watchdog, the captured runner's
 deadline - bound one invocation each; nothing bounded a phase or the run as a
@@ -2039,9 +2043,12 @@ A `[[check]]` entry selects the lane with `harness = "nextest"`
 - **Brokkr owns the filters.** The sweep's `only` and unqualified `skip`
   entries ride nextest's own libtest pattern emulation (identical substring
   semantics, nothing to escape); `include_ignored` maps to nextest's
-  run-ignored policy; a package-qualified skip compiles to the filterset
+  run-ignored policy; a package-qualified skip compiles to the term
   `not (package(P) & test(~X))` - folding the one predicate brokkr used to
-  evaluate itself back into the tool. Filterset interpolation is restricted
+  evaluate itself back into the tool. All of a sweep's qualified skips are
+  ONE filterset, the conjunction of their terms: the engine ORs the filtersets
+  it is handed (a test is admitted if any admits it), so one filterset per skip
+  made disjoint skips admit everything. Filterset interpolation is restricted
   to identifier-ish characters and refuses anything else, because a
   wrongly-escaped filter silently changes which tests run. (`test(=X)`
   matches the **full** test path, which is why the translation uses `~`
@@ -2124,10 +2131,12 @@ sites):
 
 ## `coverage` phase (complete profiles)
 
-Under `certifies = "complete"` the test phase is bracketed by two more
-phases: `prepare` before it plans the whole profile, and `coverage` after it
-reconciles the plan against what was observed. Two claims come out, and they
-are kept apart because they are different claims:
+Every run that runs tests prepares the whole invocation before its first test
+(the execution inventory, see "Diagnostic continuation"); under
+`certifies = "complete"` the test phase is bracketed by `prepare`, which also
+plans the policy universe, and `coverage` after it, which reconciles the plan
+against what was observed. Two claims come out, and they are kept apart
+because they are different claims:
 
 - **Policy coverage**: every (shape, test) pair the profile could run is
   *selected* by some lane, or legitimately excluded (ignored, quarantined,
@@ -2188,7 +2197,7 @@ ignored-only listing is its filter argv with `--ignored` in place of any
 `--include-ignored` (libtest refuses the two together).
 
 The plan is written to `.brokkr/accounting/<run id>/plan.json` (under the
-config dir; the newest ten runs are kept) before the first test executes,
+config dir; retention is below) before the first test executes,
 and a journal beside it, `journal.jsonl`, receives every observation as it
 happens - one JSON line each, written straight through - so it survives
 anything short of the machine going down, the watchdog's backstop exit
@@ -2200,7 +2209,9 @@ and preparation goes on with the rest, so every refusal is reported in one
 run. A stop (an interrupt, the phase ceiling) ends preparation at once. Either
 way an incomplete plan comes back (`plan_complete = false`) and **the test
 phase does not run**: a record taken against an incomplete plan could certify
-nothing. `failed_phase` is then `"prepare"`.
+nothing. `failed_phase` is then `"prepare"`. (Under a profile that does not
+certify, a lane that cannot be prepared is a lane with no inventory and still
+runs - see "Diagnostic continuation".)
 
 Before each lane executes, its support builds and its shape are built again
 (a no-op normally, and it re-uplifts the support binaries a later lane's
@@ -2211,9 +2222,12 @@ the runtime-index fingerprint against the planned one, and the support
 builds' executables against theirs. A shape whose
 difference cargo does not hash into the file name (an env var a build script
 reads) rebuilds the same path in place, so only the content can see that the
-binary there is another shape's. Any difference is a hard error for the lane
-- "artifacts changed since the plan" - never a silent re-plan. Nothing builds
-between that check and a direct lane's launches. The serial lane's `cargo
+binary there is another shape's. Under a complete claim any difference is a
+hard error for the lane - "artifacts changed since the plan" - never a silent
+re-plan. Nothing builds between that check and a direct lane's launches. (A
+run that certifies nothing is not refused for a plan that went stale: the lane
+runs what it builds now, the journal records the lane as superseded, and its
+inventory reads unavailable with the reason.) The serial lane's `cargo
 test` builds once more on its own, so each of its harnesses is hashed again
 at its shim handshake, immediately before it runs, and refused if it is not
 the planned content. Not verified: the contents of link-search directories
@@ -2228,7 +2242,8 @@ installed (a configured runner, a cross target, a configured rustdoc - see
 "The failure list"), and cargo-mediated parallelism (`test_threads` 0 or
 above 1), which shares one stream across tests and harnesses - use
 `parallel = { budget = N }`, which runs the binaries concurrently and
-attributably.
+attributably. (A profile that certifies nothing keeps both lane shapes; their
+inventory is unavailable.)
 
 ### Policy coverage
 
@@ -2438,12 +2453,326 @@ gate sees the worksheet's numbers, not `null`. They are `null` outside a
 complete profile, and on a complete-profile run that failed before `prepare`
 (a gremlin, a clippy error, a pre-test script check): no plan exists there,
 and a block of zeros would read as an empty plan rather than no plan.
+`execution_accounting` is deliberately not populated for a run that certifies
+nothing, though it has an inventory too: its scope there would need stating on
+every field, and `diagnostic_continuation.inventory` states it once.
 
 **Termination** - `{kind, scope}`, `null` when nothing stopped the run - is
 how the run stopped: `phase_deadline` (scope: the phase), `interrupt`,
 `per_test_timeout`, `run_deadline`, `sibling_timeout`, `fail_fast` or
 `engine_error`, with the lane it happened in as the scope where it was a
 lane's. Present outside complete profiles too.
+
+## Diagnostic continuation
+
+After a watchdog kill, a per-test timeout, an interrupt or a fail-fast, `check`
+and `brokkr test` name every test the run left without a verdict and print the
+exact command that runs those executions again. Nothing reruns by itself, and a
+failed run never turns green because of it. The motivating case: a downstream
+merged its integration tests into one binary per crate, so one hang in a
+serial lane under a *partial* profile - the bare `brokkr check` - hid a whole
+crate's results.
+
+### Inventory and certification are separate
+
+Two products come out of preparation, kept apart in code (`LaneInputs::certifying`
+is a different switch from preparing at all):
+
+- The **execution inventory**: the selected executions, the binary each lives
+  in, a content hash (xxh3) of every test executable, the launch recipe (below),
+  and the journal the lane's observations land in. Prepared for **every
+  enumerable lane of every run** - serial, parallel, isolated, nextest - before
+  its first test executes, and for `brokkr test` (below). The whole invocation
+  is prepared up front, so a timeout in one binary can name the tests of the
+  binaries and lanes after it. Doctests are not enumerable and stay outside it.
+- The **policy universe** (every test of each required shape, exclusions, dead
+  filters): only under `certifies = "complete"`, whose claim it is.
+
+A run that certifies nothing therefore keeps the execution modes a complete
+claim refuses, and says what that costs. A serial lane under cargo-mediated
+parallelism (`test_threads` other than 1) or with no harness shim cannot be
+attributed to binaries: its inventory is **unavailable**, with the reason, no
+execution is invented for it, and the only test names it can offer are the
+suspects its shared stream blamed at a stop - listed as such, with no binary,
+never replayable. A binary that answers no libtest `--list` is kept as
+**unenumerable** with the reason: its lane's inventory is `partial` and the
+tests in it are outside the inventory the way doctests are.
+
+Which binaries preparation executes with `--list` follows what listed them
+before preparation existed. The parallel, isolated and nextest lanes, a
+complete profile's serial lanes and its policy universe list **every** binary
+by executing it, a `harness = false` target included: a custom harness that
+answers with a valid libtest listing (libtest-mimic and its kin) is enumerated
+and its tests run like any other, and one that does not fails the lane or the
+enumeration cleanly ("did not produce a complete libtest listing"), never
+contributing an empty set. The one new exposure is a **serial lane under a
+partial profile**, which ran its binaries only through cargo and now has an
+inventory: there a `harness = false` target is recognised from its package
+manifest (the classification `brokkr test` uses to leave such targets out of
+a focused run) and is **never executed** to ask, since it is arbitrary code
+that may ignore `--list` and run its real workload; it is kept as unenumerable
+with the reason, and cargo runs it as it always did. A manifest that cannot be
+read leaves the same unknown, and the binary is likewise not run.
+
+A lane that fails to prepare outside a complete claim is a lane with no
+inventory rather than a refusal, and its failure is recorded, not retried:
+what preparation printed is held back for the log, and when the lane's turn
+comes a serial lane runs through cargo as it always has, while a parallel,
+isolated or nextest lane (which needs a selection to execute) reports the
+recorded failure instead of preparing again. Preparing again would execute
+every binary's `--list` a second time in one invocation. The one re-preparation
+left is a lane whose inventory went stale because another lane's build replaced
+an artifact after a *successful* preparation. The shim stays permissive: the
+plan attributes the harness streams, it does not fail closed.
+
+What preparing costs on a partial check, per serial lane, on top of the lane
+itself: the lane's `build_packages` support builds; one `cargo metadata`; one
+`cargo test --no-run` build per cargo resolution; two `--list` executions of
+every listable binary (the selection, then the ignored-only subset); a content
+hash of every executable. Then, when the lane's turn comes, the support builds
+run **again**, the same `--no-run` build runs again and every executable is
+hashed again (the verification that proves the lane is about to run what was
+planned - each is a no-op build when nothing changed, and a support-bin
+re-uplift when another lane's build replaced one), before the lane's own `cargo
+test` builds a third time. Every run writes a record.
+
+The ignored mode (exclude, include, only-ignored) is resolved from the lane's
+**complete** launch argv: the sweep's own libtest args and whatever was
+forwarded after `--`. `brokkr check -- -- --ignored` lists ignored tests only,
+and they are expected to run; the sweep's args alone said "exclude" and dropped
+every one of them from the inventory.
+
+The journal is written for every run that has an inventory, a closed one
+(`journal.jsonl` ends with its closing line) when the test phase ends; a
+journal without it was cut short, and the report says so.
+
+### The report
+
+On the final reporting path, after the failure verdict and before the `--json`
+trailer, every unresolved execution (`interrupted` or `unobserved`; failed,
+timed-out, passed and ignored stand as the results they are) is named - no cap
+- grouped lane, resolution, binary, with its outcome and detail:
+
+```
+diagnostic continuation: 3 unresolved executions
+
+default / crate-a / test:integration
+  interrupted  detector::alpha  phase deadline
+  unobserved   detector::beta   phase deadline
+  unobserved   detector::gamma  phase deadline
+
+rerun these recorded executions:
+  brokkr test --from-run 123456-2
+```
+
+Later lanes skipped by a fail-fast or a deadline are included and told apart
+from the binary actually killed: a binary of which nothing was observed is
+marked `(not reached)`. A lane whose inventory is unavailable or partial says
+so under the list. When a run cannot be replayed from its record the command is
+withheld and the concrete reasons print instead: a lane without a recipe, an
+unknown recipe version, a launch environment that was not recorded, an argv that
+would not fit, a test name the engine filterset cannot carry.
+
+`--json` (schema 2, additive) gains `diagnostic_continuation`, `null` on a run
+that passed, left nothing unresolved, or failed before `prepare`:
+
+```json
+"diagnostic_continuation": {
+  "source_run_id": "123456-2",
+  "certifies": false,
+  "statement": "diagnostic only: ...",
+  "inventory": {
+    "scope": "binary_tests", "availability": "complete | partial | unavailable",
+    "plan_complete": true, "journal_closed": false,
+    "expected_executions": 0, "unresolved": 3, "anomalies": 0,
+    "lanes": [ { "lane": 0, "label": "default", "kind": "serial",
+                 "availability": "complete | partial | unavailable | skipped | doctests",
+                 "reason": null, "expected_executions": 0 } ],
+    "suspects": []
+  },
+  "candidates": [ { "lane": "default", "resolution": null, "package": "crate-a",
+                    "binary": "test:integration", "test": "detector::alpha",
+                    "outcome": "interrupted", "detail": "phase_deadline",
+                    "execution": { "lane": 0, "attempt": 1, "pair": { } } } ],
+  "replay": { "available": true, "refusals": [],
+              "command": { "argv": ["brokkr", "test", "--from-run", "123456-2"],
+                           "cwd": "/path/to/run/from", "display": "brokkr test --from-run 123456-2" },
+              "environment": "..." }
+}
+```
+
+`policy_coverage` stays `null` for a run that certifies nothing, and
+`execution_accounting` is not populated there either (see "The summary
+objects"): the inventory's scope is stated once, here.
+
+What the words mean, and no more:
+
+- `timed_out`: the execution exceeded its attributed budget - not proven to be
+  the cause of a hang.
+- `interrupted`: a start was observed without an acceptable terminal.
+- `unobserved`: no start and no terminal were recorded. It may have run if
+  records were lost; missing evidence is not proof of non-execution.
+- A continuation that passes: those executions passed in a **new process**
+  against the **current** external state. The original run stays failed. A
+  replay restores neither process history (the globals earlier tests
+  initialised) nor the external state the killed tests left (files, services,
+  locks).
+
+### The replay recipe
+
+The plan stores not only the inventory and the artifacts' identity but how to
+launch them again, per lane and resolution, as a versioned recipe: the cargo
+selection each resolution was built with and the lane's build env; the
+`build_packages` support builds as commands; each binary's cwd and complete
+environment additions (the launch envelope plus the sweep env, including
+`BROKKR_TEST_BIN_DIR`); the runtime and support fingerprints; the execution
+model (serial shared process, parallel, isolated, nextest), the effective thread
+policy or budget (a parallel lane's per-binary thread counts are journaled by
+the executor instead, see below), the effective ignored mode (exclude, include or only-ignored,
+from the complete launch argv), the libtest execution options kept
+(`--nocapture`, `--show-output`, forwarded ones included), and the per-test cap
+the lane ran under. Replay never resolves any of this from today's
+`brokkr.toml`.
+
+The environment boundary: a replay applies the recorded additions over the
+**ambient** environment of the replaying process. It is not a snapshot of the
+original environment, and the report says so. A fresh hold capability and a
+fresh orphan-reap token are minted for the new invocation, as for every spawn.
+The plan therefore holds the lane's environment in plain text under
+`.brokkr/accounting/`: it is `brokkr.toml`'s `env`, cargo's config `[env]` and
+the loader path, not a snapshot of the shell.
+
+The nextest engine builds its own child processes, so brokkr cannot record its
+environment by value. What it records is the sweep env (the same recorded
+additions, written to a generated config on replay) and a **fingerprint** of
+what the engine resolves from cargo configuration when it launches: the
+`[env]` tables of the discovered config files and the target runner. A replay
+resolves both again and **refuses** if either differs from the recording; it
+never launches under today's configuration in place of the recorded one. (The
+fingerprint is a rendering of the pinned engine version's types; a brokkr built
+against another engine version refuses the replay with a mismatch rather than
+guessing.)
+
+### `brokkr test --from-run <run-id>`
+
+Selects exactly the original executions whose reconciled outcome is
+`interrupted` or `unobserved`. No deduplication by name or pair: the same test
+selected by two lanes is two executions, each replayed under its own lane's
+recipe. Launches are grouped lane, resolution, binary. clap refuses it beside
+any ordinary selection, feature, profile, filter, `-p`, `--sweep`, `-N` or
+`--timeout`: the record is the selection.
+
+- **No configuration.** The command is dispatched before `brokkr.toml` is
+  parsed: the record is the selection and carries its own recipe, so a config
+  that no longer parses blocks neither `--from-run ID --list` nor the replay
+  (the replay reads the config only, best-effort, for `disable_toolchain`). Only
+  the directories that locate the record are resolved - the working directory
+  as the code tree, and as the state root the directory holding `brokkr.toml`
+  (here or one level up) or, in a tree with none, the working directory itself,
+  which is where `check` wrote the record there. The command `check` prints
+  therefore reaches its record in a Rust repo that has no `brokkr.toml`.
+- **Artifacts, twice.** The recorded shape and support builds are rebuilt, and
+  every executable (path and content), the runtime-index fingerprint, the
+  support fingerprint and (nextest) the engine launch fingerprint are held to
+  the original record. A difference refuses the replay with what differs -
+  changed source is a new experiment for an ordinary invocation. This happens
+  twice. First a **preflight** of every lane before anything executes, so a
+  replay that cannot be proven refuses without having run anything. Then each
+  lane is built and verified again **immediately before it launches**, with
+  nothing built between that verification and the launch: lanes of one
+  invocation can share an output path, so a later lane's build can replace an
+  earlier lane's support executable after the preflight passed. The support
+  builds run first and re-uplift what the lane's tests spawn; a nextest lane
+  launches the very listing it was verified from. A lane that no longer
+  verifies when its turn comes refuses the rest of the replay (journaled as a
+  run-wide stop, so what it did not reach reads as unobserved), and the lanes
+  already run stand. Replay also refuses a checkout other than the one the run
+  was recorded in.
+- **Execution model preserved.** A serial shared-process lane's unresolved
+  subset runs together in **one** harness process per binary with the recorded
+  thread policy - never auto-isolated, which would hide the interaction being
+  chased. Parallel lanes run their binaries concurrently under the recorded
+  budget, each binary with **exactly the `--test-threads` the original executor
+  allocated it**. That allocation comes from measured serial costs capped at
+  each binary's slowest test, which the recipe cannot hold, so the executor
+  journals it for every planned binary before any launches (a `thread_allocation`
+  record) and a replay reads it back; it is never recomputed from the remaining
+  test counts, which would change how many tests share a process at once (a
+  binary that ran with one thread replays its two unresolved tests with one). A
+  binary the journal holds no allocation for - a record from before this was
+  journaled, or a truncated one - refuses the replay with that reason; isolated
+  lanes one process per test; nextest lanes through the engine, with a filterset
+  of exact `binary_id(=ID) & test(=NAME)` pairs.
+- **Selection.** libtest runs are by full name with `--exact`; every original
+  selection predicate, `--skip` included, is dropped once the selection is
+  resolved to names, and `--exact` is built into the argv, never appended to an
+  original one. Zero selected names never launches (an empty positive filter
+  runs the whole harness). An argv past the system limit (half of `ARG_MAX`,
+  environment included) refuses the replay with the measured size rather than
+  splitting a shared process, which would change what is replayed. The same
+  bound is checked for every isolated launch, up front, so no replay is cut
+  short by a launch refused after earlier tests ran.
+- **A timeout stops the replay**, on every lane kind - the nextest engine's
+  structured timeout disposition included - exactly as it stops an ordinary
+  run: the later lanes are not launched against the state the timeout left.
+- **`--list`** prints the report from the persisted evidence and executes
+  nothing: no lock, no cargo, no record written. It is the recovery path when a
+  hard exit (the watchdog's backstop) stopped the original run from printing it.
+- **The record.** Each continuation writes its own immutable record under a new
+  run id: a plan naming `source_run_id` and the original `ExecutionId`s it
+  selected, and its own journal. It never appends to or edits the source's
+  files, never changes the source's verdict, and never certifies. A
+  continuation killed again prints its own report, so it can itself be
+  continued. A continuation reports `diagnostic_completed` and exits zero only
+  when ALL of: no executor reported a failure, every selected execution passed,
+  and its own record is whole - journal closed with no error, every stream read
+  to its end, no anomaly, nothing recorded that stopped it. A harness that
+  passes every test and then exits nonzero (or dies by a signal) with nothing
+  else to explain it is an `unclean_exit` anomaly, so it is not a pass; this is
+  reconciliation's rule, and it holds for `check`'s own accounting too.
+  `diagnostic_completed` is not success of the original. Anything else
+  exits non-zero (124 for a fired ceiling, 130 for an interrupt).
+- **A source that is gone.** A pruned or never-recorded run is an error that
+  says so and why that happens.
+
+### Retention
+
+Every run now keeps a record, so the old bound of the newest ten was a few
+hours of use. A run is pruned only when it is beyond the newest 50 **and** older
+than 7 days; at most 300 are kept whatever their age - exactly: the run being
+opened and a continuation's source are never pruned by the pass that opens the
+continuation, and a source older than the newest 300 displaces the oldest
+unprotected run rather than adding a 301st. A plan stores each lane's pairs grouped by binary, not repeated
+per test, to keep the per-run cost proportional to the tests rather than to
+their package ids.
+
+### `brokkr test`
+
+`brokkr test <NAME>` prepares the same way: every sweep is built and its
+harnesses discovered before the first test runs (a sweep's discovery used to
+wait for the sweeps before it to finish), then one lane per sweep and `-N`
+iteration records the matched executions in its journal. A doc-only sweep's
+lane expects nothing. A timeout, a watchdog kill or an interrupt prints the same
+report, and `--from-run` replays a `brokkr test` run exactly as a `check` run.
+
+Preparing every sweep up front must not let one sweep's build stand in for
+another's (two feature sweeps sharing a `build_packages` executable would
+otherwise run the first sweep's tests against the second sweep's CLI). So each
+sweep is built **again** immediately before it runs - its support builds, then
+its test build, a no-op that re-uplifts its support binaries - and held to its
+prepared record: harness content, runtime index, support executables. If it
+differs the plan is superseded, as a partial `check` lane's is: the sweep is
+prepared anew and runs what is built now, its lanes are journaled as superseded
+(so the report reads that inventory as unavailable, with the reason, instead of
+reading its observations against a selection it did not run), and it is said on
+the log. The cost, per sweep, on top of the sweep itself: one extra run of each
+of its support builds, one extra `cargo test --no-run` build (a no-op rebuild
+when nothing changed, and it re-reads the whole artifact stream), and a full
+content hash of **every test executable the build produced** - hashed once when
+the sweep is prepared and once more at the recheck, not only the harnesses
+holding a match, and `harness = false` targets included. On a package with many
+large harnesses the hashing is read time proportional to their total size,
+paid twice per sweep.
 
 ## Feature unification
 
@@ -2936,7 +3265,8 @@ Both `brokkr check` (test phase) and `brokkr test` set the following on every
 
 ## `brokkr test`
 
-`brokkr test [-p <PKG>] <NAME>`. (Any cargo project.)
+`brokkr test [-p <PKG>] <NAME>`, or `brokkr test --from-run <RUN_ID> [--list]`
+(the continuation of a recorded run, below). (Any cargo project.)
 
 Run the cargo tests matching `<NAME>`. Defaults to release; pass `--debug` to run the
 dev profile instead (faster compile, useful when the failing test isn't
@@ -3110,6 +3440,11 @@ Flags:
 - `--release` - force release, overriding `[test] debug = true` and a sweep's
   `profile = "dev"` (mutually exclusive with `--debug`)
 - `--timeout <SECS>` - raise the per-test watchdog ceiling (1-280s)
+- `--from-run <RUN_ID>` - run again the executions a recorded run left
+  interrupted or unobserved (its watchdog kill, timeout, interrupt or
+  fail-fast); takes no `<NAME>` and conflicts with every flag above. `--list`
+  beside it prints the report and executes nothing. See "Diagnostic
+  continuation".
 
 Because `cargo test <name>` is a substring filter, identically-named tests in
 different modules of the same package all run; use a more qualified name

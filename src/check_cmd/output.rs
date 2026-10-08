@@ -380,7 +380,7 @@ pub(crate) struct SupportArtifact {
 
 /// The executables in a pre-build's artifact stream (non-test artifacts that
 /// carry an `executable`), attributed to the pre-built package.
-fn support_artifacts(stdout: &str, package: &str) -> Vec<SupportArtifact> {
+pub(crate) fn support_artifacts(stdout: &str, package: &str) -> Vec<SupportArtifact> {
     #[derive(serde::Deserialize)]
     struct Artifact {
         reason: String,
@@ -668,8 +668,8 @@ fn sweep_selection_args(sweep: &ResolvedSweep, packages: &[&str]) -> Vec<String>
     args
 }
 
-/// One serial resolution's share of the plan, under a complete profile: the
-/// executables its harnesses may present, and the ones that must.
+/// One serial resolution's share of the plan: the executables its harnesses
+/// may present, and the ones that must.
 pub(crate) struct SerialPlan {
     pub(crate) resolution: Option<String>,
     /// Executable path -> unit: what a harness handshake resolves against.
@@ -684,12 +684,21 @@ pub(crate) struct SerialPlan {
     /// This lane is a planned doctest carrier ([`lane_runs_doctests`]): only
     /// then may a rustdoc stream connect.
     pub(crate) rustdoc: bool,
+    /// The run is certifying: the harness shim fails closed - a harness it
+    /// cannot attribute to a planned binary, or whose content is not the
+    /// planned one, is refused rather than run - and a planned harness that
+    /// never connects is an attribution error. Otherwise the plan only
+    /// attributes: the shim stays permissive, as it was before any lane had a
+    /// plan, and an unknown harness is an unattributed stream, not a refusal.
+    pub(crate) strict: bool,
 }
 
 /// How a serial run reports what it saw.
 pub(crate) struct SerialObserve<'a> {
     pub(crate) tap: &'a LaneTap,
-    /// `Some` under a complete profile: the harness shim is then strict.
+    /// `Some` where the lane has an inventory: harness streams attribute to
+    /// its binaries. Strict (the shim fails closed) only when
+    /// [`SerialPlan::strict`].
     pub(crate) plan: Option<SerialPlan>,
 }
 
@@ -724,7 +733,7 @@ impl SerialObserve<'_> {
     /// binary while one never presented itself is an attribution failure, not
     /// a pass the plan can take on trust.
     fn missing_streams(&self) {
-        let Some(plan) = &self.plan else {
+        let Some(plan) = self.plan.as_ref().filter(|p| p.strict) else {
             return;
         };
         let seen: BTreeSet<BinaryUnit> = self.tap.seen_units();
@@ -785,11 +794,13 @@ fn run_one_test_sweep(
         sink: Some(std::sync::Arc::clone(&sink)),
         shim: match (&observe.plan, use_shim) {
             (_, false) => crate::test_runner::ShimMode::Off,
-            (Some(plan), true) => crate::test_runner::ShimMode::Strict(crate::test_runner::StrictPlan {
-                known: plan.hashes.clone(),
-                rustdoc: plan.rustdoc,
-            }),
-            (None, true) => crate::test_runner::ShimMode::Permissive,
+            (Some(plan), true) if plan.strict => {
+                crate::test_runner::ShimMode::Strict(crate::test_runner::StrictPlan {
+                    known: plan.hashes.clone(),
+                    rustdoc: plan.rustdoc,
+                })
+            }
+            (_, true) => crate::test_runner::ShimMode::Permissive,
         },
     };
 
@@ -3007,3 +3018,50 @@ warning: z [too_many_lines]
     }
 
 }
+
+#[cfg(test)]
+mod serial_observe_tests {
+    use super::*;
+    use crate::test_runner::{ObsEvent, Observation, StreamSource};
+
+    fn plan(strict: bool) -> (SerialPlan, BinaryUnit) {
+        let b = test_binary_for_tests("core", "test", "suite");
+        let unit = BinaryUnit::of(&b);
+        let plan = SerialPlan {
+            resolution: None,
+            units: HashMap::from([(b.executable.clone(), unit.clone())]),
+            hashes: HashMap::new(),
+            expected: Vec::new(),
+            rustdoc: false,
+            strict,
+        };
+        (plan, unit)
+    }
+
+    fn hear(observe: &SerialObserve<'_>, executable: &str) {
+        (observe.sink())(Observation {
+            stream: 1,
+            source: StreamSource::Harness { executable: executable.into() },
+            event: ObsEvent::Started { name: "t".into() },
+        });
+    }
+
+    /// A lane with an inventory attributes its harness streams to the planned
+    /// binaries whether or not the run is certifying: the plan attributes, and
+    /// only a strict plan also refuses. A harness the plan does not hold is an
+    /// unattributed stream, not an attribution to the wrong binary.
+    #[test]
+    fn a_plan_attributes_harness_streams_without_being_strict() {
+        let tap = LaneTap::new(41_001);
+        let (p, unit) = plan(false);
+        let observe = SerialObserve { tap: &tap, plan: Some(p) };
+        hear(&observe, "/t/debug/deps/suite-1");
+        assert!(tap.seen_units().contains(&unit), "the planned harness is attributed to its binary");
+        let other = LaneTap::new(41_002);
+        let (p, _) = plan(false);
+        let observe = SerialObserve { tap: &other, plan: Some(p) };
+        hear(&observe, "/t/debug/deps/unknown-9");
+        assert!(other.seen_units().is_empty(), "an unplanned harness is not attributed");
+    }
+}
+
