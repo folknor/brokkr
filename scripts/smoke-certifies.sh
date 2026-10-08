@@ -144,6 +144,32 @@ mod shared {
 }
 EOF
 
+# The diagnostic-continuation fixture: one integration binary whose first test
+# (libtest runs in name order) hangs only when SMOKE_HANG is set, followed by
+# two ordinary tests that, under --test-threads=1, are still queued when the
+# per-test cap kills the hang. Without the variable every test passes
+# instantly, so every other scenario is unaffected. Names avoid the substrings
+# the profiles' skip and only filters use (skipme, shared::, tests::adds).
+mkdir -p "$smoke/tests"
+cat > "$smoke/tests/hang.rs" <<'EOF'
+#[test]
+fn hang_probe() {
+    if std::env::var_os("SMOKE_HANG").is_some() {
+        std::thread::sleep(std::time::Duration::from_secs(60));
+    }
+}
+
+#[test]
+fn zz_queued_one() {
+    assert_eq!(2 + 2, 4);
+}
+
+#[test]
+fn zz_queued_two() {
+    assert_eq!(3 + 3, 6);
+}
+EOF
+
 cat > "$smoke/brokkr.toml" <<'EOF'
 project = "brokkr"
 
@@ -180,9 +206,20 @@ sweeps = ["default"]
 isolation = "process"
 skip = ["skipme", { package = "member", pattern = "shared::" }]
 
+# The diagnostic-continuation case: a PARTIAL profile whose serial lane sets
+# SMOKE_HANG, so tests/hang.rs's first test outlives the per-test cap. Serial
+# (test_threads = 1) so the later tests of that binary are still queued, and
+# the other binaries still ahead of the kill, when it fires.
+[test.profiles.hang-partial]
+certifies = "partial"
+skip_phases = ["clippy"]
+sweeps = ["default"]
+test_threads = 1
+env = { SMOKE_HANG = "1" }
+
 [test.profiles.gate]
 certifies = "complete"
-lanes = ["lane-serial", "lane-iso"]
+lanes =["lane-serial", "lane-iso"]
 
 # The same two lanes lifting `#[ignore]`. Preparation lists each binary's
 # ignored subset with `--ignored`, and libtest refuses that beside
@@ -436,6 +473,124 @@ expect "dead only = exit 1" 1 $rc
 # land in `coverage`, with exactly one of the two filters named.
 expect_json "gate-dead-only failed on coverage with one dead filter" \
   '.failed_phase == "coverage" and .policy_coverage.dead_filters == 1'
+
+echo "=== --profile hang-partial: a watchdog kill names what it left, and the replay works ==="
+# Proves the downstream's real case end to end: a hang on a serial lane under
+# a partial profile (no policy universe, nothing certified) must still name
+# every test the kill left without a verdict, print a command that reaches
+# them, and that command must run exactly them. Takes about the per-test cap
+# (20s) because the hang is real.
+check_json check --profile hang-partial --json
+if [ "$rc" -ne 0 ]; then
+  echo "ok   hang-partial fails (exit $rc)"
+else
+  echo "FAIL hang-partial fails: want nonzero exit, got 0"
+  fail=1
+fi
+expect_json "hang-partial carries a continuation, certifying nothing" \
+  '.diagnostic_continuation != null and .diagnostic_continuation.certifies == false
+   and .termination != null and .policy_coverage == null'
+# The queued tests never started, so they are unobserved. The test that timed
+# out stands as its own result and is NOT a candidate; nothing may be both.
+expect_json "queued tests are unobserved candidates" \
+  '.diagnostic_continuation.candidates as $c
+   | ["zz_queued_one", "zz_queued_two"]
+   | all(. as $n | $c | any(.test == $n and .outcome == "unobserved"))'
+expect_json "the timed-out test is not a candidate; every candidate is unresolved" \
+  '.diagnostic_continuation.candidates
+   | all(.test != "hang_probe" and (.outcome == "unobserved" or .outcome == "interrupted"))'
+expect_json "the replay command is test --from-run with the run id" \
+  '.diagnostic_continuation as $d
+   | ($d.source_run_id | test("^[0-9]+-[0-9]+$"))
+     and $d.replay.available == true
+     and $d.replay.command.argv == ["brokkr", "test", "--from-run", $d.source_run_id]
+     and $d.replay.command.display == "brokkr test --from-run \($d.source_run_id)"'
+
+run_id="$(printf '%s' "$summary" | jq -r '.diagnostic_continuation.source_run_id')"
+want_names="$(printf '%s' "$summary" | jq -r '.diagnostic_continuation.candidates[].test' | sort)"
+want_count="$(printf '%s' "$summary" | jq -r '.diagnostic_continuation.candidates | length')"
+# The recovery path: the original run's captured output is gone (here
+# deleted; in life a hard exit that never printed it), and only the persisted
+# record remains.
+rm -f "$smoke/check.stdout"
+
+# Candidate lines of the text report: after the optional output prefix, two
+# spaces, the outcome word, then the test name. The closing notes also say
+# "unobserved" but never start that way.
+candidate_re='^(\[[a-z]+\] +)?  (unobserved|interrupted) +([^ ]+)'
+list_names() {
+  local line
+  while IFS= read -r line; do
+    if [[ "$line" =~ $candidate_re ]]; then
+      printf '%s\n' "${BASH_REMATCH[3]}"
+    fi
+  done <"$1" | sort
+}
+
+echo "--- replay --list: executes nothing, same candidates, from the record alone ---"
+cp -r ".brokkr/accounting/$run_id" "$smoke/source-record"
+list1="$smoke/replay-list1.out"
+"$brokkr_bin" test --from-run "$run_id" --list >"$list1" 2>&1
+expect "--from-run --list = exit 0" 0 $?
+cat "$list1"
+got_names="$(list_names "$list1")"
+if [ -n "$want_names" ] && [ "$got_names" = "$want_names" ]; then
+  echo "ok   --list prints the summary's candidates ($want_count)"
+else
+  echo "FAIL --list prints the summary's candidates: want [$want_names], got [$got_names]"
+  fail=1
+fi
+# --list writes no record of its own: the run count is the baseline the
+# replay's single new record is measured against below.
+runs=(.brokkr/accounting/*)
+runs_before_replay="${#runs[@]}"
+
+echo "--- replay: runs exactly the unresolved tests, diagnostic_completed ---"
+replay_out="$smoke/replay.out"
+"$brokkr_bin" test --from-run "$run_id" >"$replay_out" 2>&1
+expect "replay = exit 0" 0 $?
+cat "$replay_out"
+if [[ "$(<"$replay_out")" =~ diagnostic_completed\ -\ ([0-9]+)\ execution ]] \
+   && [ "${BASH_REMATCH[1]}" -eq "$want_count" ]; then
+  echo "ok   replay reported diagnostic_completed over exactly $want_count executions"
+else
+  echo "FAIL replay reported diagnostic_completed over $want_count executions"
+  fail=1
+fi
+# SMOKE_HANG rides the recorded environment, so re-running the timed-out test
+# would have hung again: the zero exit above already says it was not
+# selected. This is the same fact read off the output.
+if grep -q hang_probe "$replay_out"; then
+  echo "FAIL replay did not re-run the timed-out test: hang_probe appears in its output"
+  fail=1
+else
+  echo "ok   replay did not re-run the timed-out test"
+fi
+# The continuation wrote its own record, and the source's is byte-identical
+# (plan and journal) and still reports the same candidates.
+runs=(.brokkr/accounting/*)
+runs_after_replay="${#runs[@]}"
+if [ "$runs_after_replay" -eq $((runs_before_replay + 1)) ]; then
+  echo "ok   the continuation wrote its own record"
+else
+  echo "FAIL the continuation wrote its own record: $runs_before_replay runs before, $runs_after_replay after"
+  fail=1
+fi
+if cmp -s "$smoke/source-record/plan.json" ".brokkr/accounting/$run_id/plan.json" \
+   && cmp -s "$smoke/source-record/journal.jsonl" ".brokkr/accounting/$run_id/journal.jsonl"; then
+  echo "ok   the source run's plan and journal are unchanged"
+else
+  echo "FAIL the source run's plan or journal changed under the replay"
+  fail=1
+fi
+list2="$smoke/replay-list2.out"
+"$brokkr_bin" test --from-run "$run_id" --list >"$list2" 2>&1
+if cmp -s "$list1" "$list2"; then
+  echo "ok   the source run still reports the same continuation"
+else
+  echo "FAIL the source run's --list report changed after the replay"
+  fail=1
+fi
 
 echo "=== a filter under the length floor is a load-time error ==="
 cp brokkr.toml brokkr.toml.bak

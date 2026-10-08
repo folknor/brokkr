@@ -515,7 +515,10 @@ fn run_lane(state_root: &Path, sel: &LaneSelection, armed: Armed, tap: &LaneTap)
         sel.record.label,
         output::count(sel.groups.iter().map(|g| g.tests.len()).sum::<usize>(), "execution"),
         replay.model.as_str(),
-        output::count(sel.groups.len(), "binary")
+        match sel.groups.len() {
+            1 => "1 binary".to_owned(),
+            n => format!("{n} binaries"),
+        }
     ));
     match (replay.model, armed) {
         (ReplayModel::SerialShared, _) => run_shared(state_root, sel, tap, ceiling),
