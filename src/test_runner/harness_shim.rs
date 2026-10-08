@@ -62,6 +62,27 @@ pub(super) const RUNNER_ARG: &str = "__brokkr_harness_shim";
 /// The name the rustdoc entry point is linked under; `argv[0]` selects it.
 const RUSTDOC_LINK: &str = "rustdoc-shim";
 
+/// This process's executable as cargo should exec it: `/proc/<pid>/exe`, not
+/// `current_exe()`. Cargo splits a string-form runner on whitespace, and
+/// `current_exe()` reads `<path> (deleted)` once the binary is replaced under a
+/// running brokkr (a `brokkr install` from another session) - whitespace, and
+/// a path that no longer exists. The magic link has neither problem: it never
+/// contains whitespace and still execs the replaced inode. Children share
+/// brokkr's PID namespace, so the pid resolves for them too.
+pub(crate) fn own_exe() -> PathBuf {
+    PathBuf::from(format!("/proc/{}/exe", std::process::id()))
+}
+
+/// Whether `pid` runs the same executable inode as this process. Compared by
+/// device and inode rather than by link text, which reads `<path> (deleted)`
+/// once the binary is replaced and so says nothing reliable about identity.
+fn same_exe(pid: u32) -> io::Result<bool> {
+    use std::os::unix::fs::MetadataExt;
+    let peer = fs::metadata(format!("/proc/{pid}/exe"))?;
+    let own = fs::metadata("/proc/self/exe")?;
+    Ok(peer.dev() == own.dev() && peer.ino() == own.ino())
+}
+
 /// `size_of::<RawFd>()` in the `u32` the `CMSG_*` macros take. Four bytes on
 /// every target; the cast cannot truncate.
 #[allow(clippy::cast_possible_truncation)]
@@ -107,11 +128,7 @@ impl Session {
             NEXT.fetch_add(1, Ordering::Relaxed),
         ));
         fs::create_dir(&dir).map_err(DevError::Io)?;
-        symlink(
-            std::env::current_exe().map_err(DevError::Io)?,
-            dir.join(RUSTDOC_LINK),
-        )
-        .map_err(DevError::Io)?;
+        symlink(own_exe(), dir.join(RUSTDOC_LINK)).map_err(DevError::Io)?;
         let listener = UnixListener::bind(dir.join("socket")).map_err(DevError::Io)?;
         listener.set_nonblocking(true).map_err(DevError::Io)?;
         Ok(Self {
@@ -355,7 +372,7 @@ fn accept_one(stream: &UnixStream, s: &Shared<'_>) -> Result<(), Refusal> {
     if root == 0 || proc_parent(pid)? != root {
         return Err(Refusal::NotCargoChild);
     }
-    if fs::read_link(format!("/proc/{pid}/exe"))? != std::env::current_exe()? {
+    if !same_exe(pid)? {
         return Err(Refusal::Unexpected(io::Error::other(
             "the runner is not this brokkr binary",
         )));
@@ -711,8 +728,10 @@ mod tests {
         assert_ne!(first.socket(), second.socket());
         assert_eq!(
             fs::read_link(first.rustdoc()).expect("rustdoc symlink"),
-            std::env::current_exe().expect("current exe")
+            own_exe()
         );
+        assert!(!own_exe().to_string_lossy().contains(char::is_whitespace));
+        assert!(same_exe(std::process::id()).expect("own exe readable"));
     }
 
     #[test]

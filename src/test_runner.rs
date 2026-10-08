@@ -485,13 +485,11 @@ where
         let host = crate::rustflags::host_triple().ok_or_else(|| {
             DevError::Config("cannot determine host triple for harness runner".into())
         })?;
-        let exe = std::env::current_exe().map_err(DevError::Io)?;
         // Cargo splits a string-form runner on whitespace and strips no
-        // quotes, so the path goes in bare; the caller refuses isolation for
-        // a path with whitespace in it (`check_cmd::serial_shim_fallback`).
+        // quotes; `own_exe` is a `/proc` path that cannot contain any.
         runner_env = (
             format!("CARGO_TARGET_{}_RUNNER", host.to_uppercase().replace('-', "_")),
-            format!("{} {}", exe.display(), harness_shim::RUNNER_ARG),
+            format!("{} {}", harness_shim::own_exe().display(), harness_shim::RUNNER_ARG),
         );
         socket_env = session.socket();
         rustdoc_env = session.rustdoc();

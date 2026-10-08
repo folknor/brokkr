@@ -460,12 +460,10 @@ fn serial_shim_fallback(
     {
         return Some("rustdoc executable is configured".into());
     }
-    // The runner goes to cargo as a whitespace-split string, which cannot
-    // carry a path with whitespace in it.
-    match std::env::current_exe() {
-        Ok(exe) if !exe.to_string_lossy().contains(char::is_whitespace) => {}
-        Ok(_) => return Some("the brokkr binary's path contains whitespace".into()),
-        Err(_) => return Some("the brokkr binary's path could not be read".into()),
+    // The runner execs brokkr through `/proc/<pid>/exe` (see
+    // `harness_shim::own_exe`), so only a missing `/proc` rules it out.
+    if std::fs::metadata("/proc/self/exe").is_err() {
+        return Some("/proc/self/exe is unreadable, so cargo cannot exec brokkr as the runner".into());
     }
     let Some(host) = crate::rustflags::host_triple() else {
         return Some("host target could not be determined".into());

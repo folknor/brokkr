@@ -1511,10 +1511,14 @@ short list and mis-attributed which test carried a mutation's coverage):
   Where the runner cannot be installed without overriding something - a
   runner already configured for the host, a configured rustdoc, an effective
   target other than the host (`CARGO_BUILD_TARGET`, `build.target`), a
-  forwarded `--config` or `--target`, a brokkr binary whose path contains
-  whitespace - the sweep drops `--no-fail-fast` instead, warns why, and stops
-  at the first failing harness: an honest short list rather than a wrong
-  name. The threat model is accidents and misbehaving tests; project code
+  forwarded `--config` or `--target` - the sweep drops `--no-fail-fast`
+  instead, warns why, and stops at the first failing harness: an honest short
+  list rather than a wrong name. The runner names brokkr as
+  `/proc/<pid>/exe`, not its install path: cargo splits a runner string on
+  whitespace, and a binary replaced mid-run (a `brokkr install` elsewhere)
+  reads back as `<path> (deleted)`, which has a space and no longer exists.
+  The magic link has no whitespace and still execs the replaced inode, and the
+  shim authenticates its peer by inode rather than by link text. The threat model is accidents and misbehaving tests; project code
   that deliberately attacks this IPC is out of scope.
 - **The `failures:` name list is the authoritative roster.** The captured
   detail blocks are best-effort - an aborted suite can truncate the stream,
