@@ -55,7 +55,11 @@ use nextest_runner::{
     },
     platform::{BuildPlatforms, HostPlatform, PlatformLibdir},
     helpers::{ShowTerminalProgress, ThemeCharacters},
-    reporter::{ReporterBuilder, ReporterOutput, ShowProgress, structured::StructuredReporter},
+    reporter::{
+        ReporterBuilder, ReporterOutput, ShowProgress,
+        events::{ReporterEvent, RunFinishedStats, RunOutcome, RunStats, TestEventKind},
+        structured::StructuredReporter,
+    },
     reuse_build::PathMapper,
     run_mode::NextestRunMode,
     runner::{TestRunnerBuilder, VersionEnvVars, configure_handle_inheritance},
@@ -68,7 +72,7 @@ use nextest_runner::{
 /// names the engine that produced it. Must track Cargo.toml's pin - there is
 /// no runtime accessor on the crate, and a compile-time drift here would
 /// only mislabel output, never change behaviour.
-const NEXTEST_ENGINE_VERSION: &str = "0.124.0";
+const NEXTEST_ENGINE_VERSION: &str = "0.126.0";
 
 /// The engine config brokkr synthesizes for one run. Written under the
 /// brokkr-owned state dir (never into the code tree) and handed to the
@@ -432,8 +436,19 @@ fn run_nextest_sweep(
 
     configure_handle_inheritance(false)
         .map_err(|e| DevError::Build(format!("nextest handle setup: {e}")))?;
-    let run_stats = runner
-        .try_execute(|event| reporter.report_event(event))
+    // The run's outcome carries no counts; they ride the engine's own
+    // `RunFinished` event, which every completed run emits once.
+    let mut finished: Option<RunStats> = None;
+    let outcome = runner
+        .try_execute(|event| {
+            if let ReporterEvent::Test(e) = &event
+                && let TestEventKind::RunFinished { run_stats: RunFinishedStats::Single(s), .. } =
+                    &e.kind
+            {
+                finished = Some(*s);
+            }
+            reporter.report_event(event)
+        })
         .map_err(|e| DevError::Build(format!("nextest run failed to execute: {e}")))?;
     // Nothing is swallowed here: `Reporter::finish` is infallible and returns
     // only `ReporterStats` (recording sizes, run-finished info), which this
@@ -442,11 +457,15 @@ fn run_nextest_sweep(
     // above.
     let _ = reporter.finish();
 
-    let passed = matches!(
-        run_stats.summarize_final(),
-        nextest_runner::reporter::events::FinalRunStats::Success
-    );
+    let passed = matches!(outcome, RunOutcome::Success);
     if passed {
+        // A success with no `RunFinished` would be a run brokkr cannot count,
+        // so it is not passed off as one with zero tests.
+        let Some(run_stats) = finished else {
+            return Err(DevError::Build(
+                "nextest reported success without a run-finished event".into(),
+            ));
+        };
         // Into the grouped test line like every other lane. The engine's
         // `skipped` folds filtered-out and ignored tests into one number, so
         // it goes to the log rather than being passed off as either.
