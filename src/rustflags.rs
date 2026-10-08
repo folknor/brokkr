@@ -175,11 +175,32 @@ fn toml_string(s: &str) -> String {
 /// the ancestor walk, then `$CARGO_HOME`. Order does not matter here - the
 /// question is only whether *any* of them contributes a matching target entry.
 pub(crate) fn config_paths(build_root: &Path) -> Vec<PathBuf> {
+    config_paths_under(build_root, &[])
+}
+
+/// [`config_paths`] for a cargo launched with `env` over brokkr's own
+/// environment: a `CARGO_HOME` there moves the home cargo reads, so the chain
+/// must follow it (relative to `build_root`, where that cargo starts) or a
+/// runner or target configured in the other home goes unseen.
+pub(crate) fn config_paths_under(build_root: &Path, env: &[(&str, &str)]) -> Vec<PathBuf> {
     let mut out = Vec::new();
     for dir in build_root.ancestors() {
         push_config(&mut out, &dir.join(".cargo"));
     }
-    if let Some(home) = crate::user_dirs::cargo_home() {
+    // The value cargo sees: the sweep's (even an empty one) over brokkr's own.
+    // Then cargo's rule - empty means unset, so `$HOME/.cargo`, and a relative
+    // value is taken against where that cargo starts.
+    let effective = env
+        .iter()
+        .rev()
+        .find(|(k, _)| *k == "CARGO_HOME")
+        .map(|(_, v)| (*v).to_owned())
+        .or_else(|| std::env::var("CARGO_HOME").ok());
+    let home = match effective.filter(|v| !v.is_empty()) {
+        Some(v) => Some(build_root.join(v)),
+        None => crate::user_dirs::home().map(|h| h.join(".cargo")),
+    };
+    if let Some(home) = home {
         push_config(&mut out, &home);
     }
     out

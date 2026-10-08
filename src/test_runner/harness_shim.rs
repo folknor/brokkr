@@ -319,7 +319,14 @@ impl Session {
                     }
                     super::stop_process_group(cargo_pid).ok();
                     let report =
-                        super::capture_hung_test(&state_root, cargo_pid, reason, elapsed, ceiling);
+                        super::capture_hung_test(
+                            &state_root,
+                            cargo_pid,
+                            super::Leader::Cargo,
+                            reason,
+                            elapsed,
+                            ceiling,
+                        );
                     if let Ok(mut slot) = hung.lock() {
                         *slot = Some(report);
                     }

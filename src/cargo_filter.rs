@@ -223,11 +223,6 @@ pub struct ParsedTestResults {
     /// die inside suite two, and a count of started suites would make that look
     /// finished. See [`Completeness`] for the part this number cannot carry.
     pub suites: usize,
-    /// Number of suites that announced themselves (`running N tests`). Zero
-    /// with a successful exit is a process that never spoke libtest at all - a
-    /// `harness = false` target - which [`Completeness`] alone reports the same
-    /// way as a suite that started and then went silent.
-    pub started: usize,
     pub duration: Option<f64>,
     /// Whether the numbers above describe a run that actually finished
     /// reporting.
@@ -569,7 +564,6 @@ pub fn parse_test_output_with_stderr(
         ignored,
         filtered_out,
         suites,
-        started: started_suites,
         duration: if has_duration { Some(duration) } else { None },
         completeness,
     }
@@ -2073,7 +2067,6 @@ boom
         let err: Vec<&str> = stderr.lines().collect();
         let parsed = parse_test_output_with_stderr(&lines, &err);
         assert!(!parsed.is_complete());
-        assert_eq!(parsed.started, 1);
         assert_eq!(parsed.failures.len(), 1);
         assert_eq!(parsed.failures[0].name, "a::first");
         assert_eq!(parsed.failures[0].message.as_deref(), Some("boom"));

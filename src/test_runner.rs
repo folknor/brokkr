@@ -79,6 +79,15 @@ pub(crate) const WALL_WEDGE: &str = "(sweep wall deadline)";
 /// is the bound only for a caller that arms no phase watchdog.
 pub(crate) const SWEEP_WALL_TIMEOUT: Duration = Duration::from_secs(1800);
 
+/// What [`streaming_run_libtest`] spawns.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Launch<'a> {
+    /// `cargo` with the caller's args.
+    Cargo,
+    /// A prebuilt test binary, executed directly with the caller's args.
+    Direct { program: &'a str },
+}
+
 /// The ceilings one libtest run is subject to.
 ///
 /// `per_test` is the hard cap and it terminates. `wall` is a backstop for a wedge
@@ -453,8 +462,14 @@ impl TestTracker {
 /// dead test. The caller decides when that is safe (see
 /// `check_cmd::serial_shim_fallback`); without it every harness shares one
 /// stream, as before.
+///
+/// `launch` says what is spawned: `cargo` with `args`, or a prebuilt test
+/// binary executed directly (no cargo, so no build phase and no
+/// `on_build_finished`). The harness shim is a cargo runner, so it applies to
+/// the cargo launch only.
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 pub(crate) fn streaming_run_libtest<Out, Err, Fin>(
+    launch: Launch<'_>,
     args: &[&str],
     cwd: &Path,
     state_root: &Path,
@@ -471,6 +486,12 @@ where
     Fin: FnOnce(Duration) + Send + 'static,
 {
     enforce_single_threaded(args)?;
+    if shim && launch != Launch::Cargo {
+        return Err(DevError::Build(
+            "the harness shim is a cargo runner and cannot isolate a directly executed binary"
+                .into(),
+        ));
+    }
 
     let start = Instant::now();
     // Created before the spawn: an isolated harness's reconstructed text lands
@@ -497,7 +518,12 @@ where
         cargo_env.push(("BROKKR_HARNESS_SOCKET", &socket_env));
         cargo_env.push(("RUSTDOC", &rustdoc_env));
     }
-    let mut child = spawn_cargo_process_group(args, cwd, &cargo_env)?;
+    let (mut child, leader) = match launch {
+        Launch::Cargo => (spawn_cargo_process_group(args, cwd, &cargo_env)?, Leader::Cargo),
+        Launch::Direct { program } => {
+            (spawn_process_group(program, args, cwd, &cargo_env)?, Leader::TestBinary)
+        }
+    };
     let cargo_pid = child.id();
     if let Some(session) = &session {
         session.set_cargo_pid(cargo_pid);
@@ -560,7 +586,16 @@ where
         session.watchdog(state_root_t, cargo_pid, tracker_t, hung_t, &ceilings, start)
     } else {
         thread::spawn(move || {
-            watchdog_loop(state_root_t, cargo_pid, tracker_t, done_t, hung_t, ceilings, start);
+            watchdog_loop(
+                state_root_t,
+                cargo_pid,
+                leader,
+                tracker_t,
+                done_t,
+                hung_t,
+                ceilings,
+                start,
+            );
         })
     };
 
@@ -745,6 +780,7 @@ where
         watchdog_loop(
             state_root_t,
             cargo_pid,
+            Leader::TestBinary,
             tracker_w,
             done_w,
             hung_w,
@@ -1131,6 +1167,107 @@ impl JsonReconstructor {
     }
 }
 
+/// One listing run of a prebuilt test binary: its exit status, its output, and
+/// the two ways it can have failed to finish.
+pub(crate) struct ListingRun {
+    pub(crate) status: std::process::ExitStatus,
+    pub(crate) stdout: Vec<u8>,
+    pub(crate) stderr: Vec<u8>,
+    /// Killed at the wall deadline. Whatever it printed is not a listing.
+    pub(crate) timed_out: bool,
+    /// The leader exited but its output did not close within [`DRAIN_GRACE`]
+    /// (something it started still holds a pipe), so capture was cut short and
+    /// the output may be truncated.
+    pub(crate) unsettled: bool,
+}
+
+/// Run a prebuilt test binary to list its tests, under a wall deadline.
+///
+/// The listing is the binary's own code - static constructors run before
+/// `main`, and a custom harness may do anything - so it is launched the way a
+/// test run is: own process group, the run token, the hold capability, death
+/// with brokkr (see [`spawn_process_group`]). The wall deadline bounds the
+/// whole process, and once it exits its output gets [`DRAIN_GRACE`] to close,
+/// so neither a hang nor a leaked descendant holding a pipe can stall the
+/// caller. A cooperative shutdown kills the group and is `Interrupted`.
+pub(crate) fn run_listing(
+    program: &str,
+    args: &[&str],
+    cwd: &Path,
+    env: &[(&str, &str)],
+    wall: Duration,
+) -> Result<ListingRun, DevError> {
+    let start = Instant::now();
+    let mut child = spawn_process_group(program, args, cwd, env)?;
+    let pgid = child.id();
+    let reaper = crate::shutdown::GroupReaper::register(pgid);
+    let (Some(stdout_pipe), Some(stderr_pipe)) = (child.stdout.take(), child.stderr.take()) else {
+        kill_process_group(pgid).ok();
+        child.wait().ok();
+        return Err(DevError::Build(format!("{program} output was not piped")));
+    };
+    let cancel = Arc::new(AtomicBool::new(false));
+    let (out_buf, out_thread) = drain_to_buffer(stdout_pipe, Arc::clone(&cancel));
+    let (err_buf, err_thread) = drain_to_buffer(stderr_pipe, Arc::clone(&cancel));
+
+    let spawn_err = |error: std::io::Error| DevError::Spawn { program: program.into(), error };
+    let mut timed_out = false;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                if crate::shutdown::is_shutdown_requested() {
+                    kill_process_group(pgid).ok();
+                    child.wait().ok();
+                    drop(reaper);
+                    cancel.store(true, Ordering::Release);
+                    out_thread.join().ok();
+                    err_thread.join().ok();
+                    return Err(DevError::Interrupted);
+                }
+                if start.elapsed() >= wall {
+                    kill_process_group(pgid).ok();
+                    timed_out = true;
+                    break child.wait().map_err(spawn_err)?;
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(e) => return Err(spawn_err(e)),
+        }
+    };
+    drop(reaper);
+    let unsettled = join_drains(vec![out_thread, err_thread], &cancel);
+    // The signal handler may have killed the group itself, which ends the
+    // wait above with an ordinary-looking status; and a shutdown can land
+    // while the drains settle. Either way this was a stop, not a listing.
+    if crate::shutdown::is_shutdown_requested() {
+        return Err(DevError::Interrupted);
+    }
+    let take = |b: &Arc<Mutex<Vec<u8>>>| b.lock().map(|v| v.clone()).unwrap_or_default();
+    Ok(ListingRun { status, stdout: take(&out_buf), stderr: take(&err_buf), timed_out, unsettled })
+}
+
+/// Read `pipe` into a shared buffer on a new thread until EOF or `cancel`.
+fn drain_to_buffer<R>(
+    mut pipe: R,
+    cancel: Arc<AtomicBool>,
+) -> (Arc<Mutex<Vec<u8>>>, thread::JoinHandle<()>)
+where
+    R: Read + std::os::fd::AsRawFd + Send + 'static,
+{
+    let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+    let buf_t = Arc::clone(&buf);
+    let handle = thread::spawn(move || {
+        let mut chunk = [0_u8; 8192];
+        while let Some(n) = read_unless_cancelled(&mut pipe, &mut chunk, &cancel) {
+            if let Ok(mut b) = buf_t.lock() {
+                b.extend_from_slice(&chunk[..n]);
+            }
+        }
+    });
+    (buf, handle)
+}
+
 fn spawn_cargo_process_group(
     args: &[&str],
     cwd: &Path,
@@ -1268,7 +1405,7 @@ fn drain_stderr<F, G>(
 /// once `cancel` is set. Waits in `poll` with a short timeout rather than in a
 /// blocking `read`, so cancellation is observed within one interval whether the
 /// pipe is idle or streaming.
-fn read_unless_cancelled<R: Read + std::os::fd::AsRawFd>(
+pub(crate) fn read_unless_cancelled<R: Read + std::os::fd::AsRawFd>(
     pipe: &mut R,
     buf: &mut [u8],
     cancel: &AtomicBool,
@@ -1359,10 +1496,24 @@ pub(crate) fn is_bare_status_line(line: &str) -> bool {
     }
 }
 
+/// What the process a run launched is, which decides where a hang snapshot is
+/// taken from.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Leader {
+    /// cargo, whose first child is the test harness.
+    Cargo,
+    /// The test binary itself, executed directly. Its children are whatever the
+    /// tests spawned - snapshotting the first of them examined a test's
+    /// subprocess instead of the hung harness.
+    TestBinary,
+}
+
 #[allow(clippy::needless_pass_by_value)] // The Arcs are moved into a spawned thread.
+#[allow(clippy::too_many_arguments)]
 fn watchdog_loop(
     state_root: PathBuf,
-    cargo_pid: u32,
+    leader_pid: u32,
+    leader: Leader,
     tracker: Arc<Mutex<TestTracker>>,
     done: Arc<AtomicBool>,
     hung: Arc<Mutex<Option<HungTest>>>,
@@ -1371,7 +1522,8 @@ fn watchdog_loop(
 ) {
     watchdog_loop_with_timing(
         state_root,
-        cargo_pid,
+        leader_pid,
+        leader,
         tracker,
         done,
         hung,
@@ -1386,6 +1538,7 @@ fn watchdog_loop(
 fn watchdog_loop_with_timing(
     state_root: PathBuf,
     cargo_pid: u32,
+    leader: Leader,
     tracker: Arc<Mutex<TestTracker>>,
     done: Arc<AtomicBool>,
     hung: Arc<Mutex<Option<HungTest>>>,
@@ -1526,7 +1679,7 @@ fn watchdog_loop_with_timing(
         // further test time is consumed, while `/proc` stays readable for the
         // snapshot. SIGKILL then lands on already-stopped processes.
         stop_process_group(cargo_pid).ok();
-        let hung_test = capture_hung_test(&state_root, cargo_pid, reason, elapsed, ceiling);
+        let hung_test = capture_hung_test(&state_root, cargo_pid, leader, reason, elapsed, ceiling);
         if let Ok(mut slot) = hung.lock() {
             *slot = Some(hung_test);
         }
@@ -1538,6 +1691,7 @@ fn watchdog_loop_with_timing(
 fn capture_hung_test(
     state_root: &Path,
     cargo_pid: u32,
+    leader: Leader,
     reason: TimeoutReason,
     elapsed: Duration,
     ceiling: Duration,
@@ -1545,7 +1699,10 @@ fn capture_hung_test(
     let test = reason.label();
     let test = test.as_str();
     let test_pids = direct_child_pids(cargo_pid);
-    let snapshot_pid = test_pids.first().copied().or(Some(cargo_pid));
+    let snapshot_pid = match leader {
+        Leader::Cargo => test_pids.first().copied().or(Some(cargo_pid)),
+        Leader::TestBinary => Some(cargo_pid),
+    };
     // Diagnostic snapshots are brokkr-owned state, so they live under the
     // config-dir `project_root` (`state_root`), not the code tree cargo runs
     // in - the two differ when brokkr.toml is one level above a foreign
@@ -1988,6 +2145,7 @@ mod tests {
         watchdog_loop_with_timing(
             root.clone(),
             cargo_pid,
+            Leader::Cargo,
             Arc::clone(&tracker),
             Arc::clone(&done),
             Arc::clone(&hung),
@@ -2151,6 +2309,7 @@ mod tests {
         watchdog_loop_with_timing(
             root.clone(),
             cargo_pid,
+            Leader::Cargo,
             Arc::clone(&tracker),
             Arc::clone(&done),
             Arc::clone(&hung),
@@ -2216,6 +2375,7 @@ mod tests {
         watchdog_loop_with_timing(
             root.clone(),
             cargo_pid,
+            Leader::Cargo,
             Arc::clone(&tracker),
             Arc::clone(&done),
             Arc::clone(&hung),
@@ -2238,6 +2398,39 @@ mod tests {
             wait_for_process_group_exit(cargo_pid),
             "process group {cargo_pid} survived watchdog kill"
         );
+    }
+
+    // A directly executed test binary is the hung harness itself; its children
+    // are whatever the tests spawned. The snapshot must examine the leader,
+    // where under cargo it examines cargo's first child.
+    #[test]
+    fn a_direct_launch_snapshots_the_leader_not_its_child() {
+        use std::os::unix::process::CommandExt;
+
+        let root = test_root("direct_leader_snapshot");
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg("sleep 60 & wait")
+            .current_dir(&root)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0)
+            .spawn()
+            .expect("spawn shell");
+        let leader = child.id();
+        let children = wait_for_direct_children(leader);
+        assert!(!children.is_empty(), "shell did not spawn sleep child");
+
+        let reason = TimeoutReason::PerTest { name: "direct::hangs".to_owned() };
+        let tick = Duration::from_millis(1);
+        let direct = capture_hung_test(&root, leader, Leader::TestBinary, reason.clone(), tick, tick);
+        let cargo = capture_hung_test(&root, leader, Leader::Cargo, reason, tick, tick);
+        kill_process_group(leader).ok();
+        child.wait().ok();
+
+        assert_eq!(direct.snapshot_pid, Some(leader));
+        assert_eq!(cargo.snapshot_pid, children.first().copied());
     }
 
     /// Drive a JSON event stream through the reconstructor, returning the

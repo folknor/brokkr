@@ -233,7 +233,7 @@ fn enumerate_isolated(
     commands: bool,
 ) -> Result<Option<(IsolatedPlan, DirectRuntime)>, DevError> {
     // Direct execution would bypass a configured runner; refuse before building.
-    refuse_configured_runner(project_root)?;
+    refuse_configured_runner(project_root, env_refs)?;
     let cli_scope: Vec<String> = packages.iter().map(|p| (*p).to_owned()).collect();
     let mut all = Vec::new();
     let mut runtime_index = BuildRuntimeIndex::default();
@@ -333,7 +333,7 @@ fn run_one_isolated_test(
 
     let command = format!("{} {}", case.binary.executable, args.join(" "));
     cargo_line(commands, &command);
-    let (cwd, env) = runtime.envelope(&case.binary, env_refs);
+    let (cwd, env) = runtime.envelope(&case.binary, env_refs)?;
     let cwd = if cwd.as_os_str() == "." {
         project_root.to_path_buf()
     } else {
@@ -430,18 +430,34 @@ fn run_one_isolated_test(
 /// the coverage audit certifies - the audit would pass while attesting to
 /// nothing, which is worse than failing, because a green audit is taken as
 /// evidence.
+///
+/// A tally is also checked against what was listed: the tallies' tests and
+/// benchmarks must equal the `: test` and `: benchmark` entries counted. A
+/// listing cut short keeps a valid-looking tally only if the tally itself
+/// survived, and then it disagrees with the entries above it - which, unchecked,
+/// certified a partial universe.
 fn parse_list_output(stdout: &str) -> Option<Vec<String>> {
-    if !stdout.lines().any(|l| is_list_tally(l.trim())) {
+    let mut tallied = (0_u64, 0_u64);
+    let mut saw_tally = false;
+    let mut listed = (0_u64, 0_u64);
+    let mut out: Vec<String> = Vec::new();
+    for line in stdout.lines().map(str::trim) {
+        if let Some((tests, benches)) = list_tally(line) {
+            saw_tally = true;
+            tallied.0 += tests;
+            tallied.1 += benches;
+        } else if let Some(name) = line.strip_suffix(": test") {
+            listed.0 += 1;
+            if !name.is_empty() {
+                out.push(name.to_owned());
+            }
+        } else if line.ends_with(": benchmark") {
+            listed.1 += 1;
+        }
+    }
+    if !saw_tally || tallied != listed {
         return None;
     }
-    let mut out: Vec<String> = stdout
-        .lines()
-        .filter_map(|line| {
-            let line = line.trim();
-            let name = line.strip_suffix(": test")?;
-            (!name.is_empty()).then(|| name.to_owned())
-        })
-        .collect();
     out.sort();
     out.dedup();
     Some(out)
@@ -449,18 +465,16 @@ fn parse_list_output(stdout: &str) -> Option<Vec<String>> {
 
 /// The tally line libtest closes a `--list` with: `N tests, M benchmarks`,
 /// singularised at 1. Its presence is what distinguishes a real (possibly empty)
-/// listing from a binary that never understood `--list`.
-fn is_list_tally(line: &str) -> bool {
-    let Some((tests, benches)) = line.split_once(", ") else {
-        return false;
-    };
+/// listing from a binary that never understood `--list`. Returns the
+/// `(tests, benchmarks)` it states, or `None` for any other line.
+fn list_tally(line: &str) -> Option<(u64, u64)> {
+    let (tests, benches) = line.split_once(", ")?;
     let counted = |part: &str, noun: &str| {
-        let Some((n, word)) = part.split_once(' ') else {
-            return false;
-        };
-        n.parse::<u64>().is_ok() && (word == noun || word == format!("{noun}s"))
+        let (n, word) = part.split_once(' ')?;
+        let n = n.parse::<u64>().ok()?;
+        (word == noun || word == format!("{noun}s")).then_some(n)
     };
-    counted(tests, "test") && counted(benches, "benchmark")
+    Some((counted(tests, "test")?, counted(benches, "benchmark")?))
 }
 
 #[cfg(test)]
@@ -468,7 +482,7 @@ mod isolate_tests {
     #![allow(clippy::unwrap_used)]
 
     use super::{
-        IsolatedCase, IsolatedPlan, TestBinary, is_list_tally, isolated_args, parse_list_output,
+        IsolatedCase, IsolatedPlan, TestBinary, isolated_args, list_tally, parse_list_output,
         plan_runnable,
     };
     use std::path::PathBuf;
@@ -537,7 +551,7 @@ serial_tests::test_module_level_filtering: test
 logging::macros::tests::test_colored_logging_macros: test
 serial_tests::test_logging_to_file: test
 some_bench: benchmark
-1 test, 1 benchmark
+2 tests, 1 benchmark
 ";
         let names = parse_list_output(stdout).expect("a real libtest listing");
         assert_eq!(
@@ -558,7 +572,20 @@ some_bench: benchmark
             Some(Vec::new()),
             "an empty libtest listing is still a listing"
         );
-        assert_eq!(parse_list_output("1 test, 1 benchmark\n"), Some(Vec::new()));
+        // Benchmarks are counted but are not test names.
+        assert_eq!(parse_list_output("b: benchmark\n0 tests, 1 benchmark\n"), Some(Vec::new()));
+    }
+
+    /// A tally that disagrees with the entries above it is a listing cut
+    /// short, not a smaller one - accepting it certified a partial universe.
+    #[test]
+    fn a_tally_that_disagrees_with_the_entries_is_not_a_listing() {
+        assert_eq!(parse_list_output("a: test\n2 tests, 0 benchmarks\n"), None);
+        assert_eq!(parse_list_output("1 test, 1 benchmark\n"), None);
+        assert_eq!(
+            parse_list_output("a: test\nb: test\n2 tests, 0 benchmarks\n"),
+            Some(vec!["a".to_owned(), "b".to_owned()])
+        );
     }
 
     /// Output that is not a libtest listing at all must be distinguishable from
@@ -579,11 +606,11 @@ some_bench: benchmark
 
     #[test]
     fn the_tally_line_is_recognised_in_both_singular_and_plural() {
-        assert!(is_list_tally("0 tests, 0 benchmarks"));
-        assert!(is_list_tally("1 test, 1 benchmark"));
-        assert!(is_list_tally("12 tests, 3 benchmarks"));
-        assert!(!is_list_tally("2 tests"));
-        assert!(!is_list_tally("some tests, some benchmarks"));
-        assert!(!is_list_tally("a::b: test"));
+        assert_eq!(list_tally("0 tests, 0 benchmarks"), Some((0, 0)));
+        assert_eq!(list_tally("1 test, 1 benchmark"), Some((1, 1)));
+        assert_eq!(list_tally("12 tests, 3 benchmarks"), Some((12, 3)));
+        assert_eq!(list_tally("2 tests"), None);
+        assert_eq!(list_tally("some tests, some benchmarks"), None);
+        assert_eq!(list_tally("a::b: test"), None);
     }
 }

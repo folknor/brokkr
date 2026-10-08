@@ -1597,6 +1597,7 @@ mod tests {
                 elapsed: Duration::from_millis(42),
             },
             killed_on_deadline: true,
+            output_cut: false,
         };
         let mock = MockOutcome {
             exit_code: None,

@@ -9,19 +9,26 @@
 //
 // - cwd = the owning package's root (a fixture test opening
 //   `tests/fixtures/x.json` passes under cargo, fails from the workspace root)
-// - the dynamic-loader path (build-script link-search dirs, the exe's deps
-//   dir, the profile dir, the toolchain libdir, then the inherited value - in
-//   that order, because ordering decides which same-named .so loads)
+// - the dynamic-loader path, in cargo's own order (`Compilation::fill_env`):
+//   the build-script link-search dirs that lie inside the output dir, sorted;
+//   the output dir (`target/<profile>`); the deps dirs; the toolchain libdir;
+//   then the inherited value. Ordering decides which same-named .so loads, and
+//   a link-search dir outside the output tree is left out, as cargo leaves it
+//   out, because it is likely to shadow a system library (cargo issue 3366)
 // - `[env]` from the cargo config chain, with cargo's `force` and `relative`
 //   semantics
 // - `CARGO_PKG_*` / `CARGO_MANIFEST_DIR` / `CARGO_MANIFEST_PATH` from cargo
 //   metadata (unset manifest fields are EMPTY strings, not absent vars -
 //   cargo's documented behaviour)
-// - `OUT_DIR` and `cargo::rustc-env` values from the prebuild's
-//   `build-script-executed` messages, keyed by full package id
+// - `cargo::rustc-env` values from the prebuild's `build-script-executed`
+//   messages, keyed by full package id. Not `OUT_DIR`: cargo exports it to
+//   build scripts and rustdoc only, never to a test process it launches, so a
+//   runtime `std::env::var("OUT_DIR")` is an error under cargo and must be one
+//   here (the compile-time `env!("OUT_DIR")` is baked into the binary anyway)
 // - runtime `CARGO_BIN_EXE_<name>` for the package's own bins (cargo 1.94+
 //   exposes these to the test process at runtime, not only via `env!`)
-// - `CARGO` = the cargo brokkr itself invoked
+// - `CARGO` = the cargo executable itself, resolved through rustup when rustup
+//   is the `cargo` on PATH: cargo exports its own resolved path, not the proxy
 //
 // Cargo-owned values are applied LAST, so a sweep's `[[check]] env` cannot
 // forge `CARGO_PKG_NAME` or `OUT_DIR` - matching cargo, where the caller's
@@ -100,14 +107,15 @@ struct ConfigEnvEntry {
 /// The assembled per-sweep runtime: everything [`Self::envelope`] needs that
 /// does not vary per binary.
 #[derive(Debug)]
-struct DirectRuntime {
+pub(crate) struct DirectRuntime {
     /// Full package id -> manifest facts, for `CARGO_PKG_*`.
     packages: HashMap<String, PkgRuntimeMeta>,
     index: BuildRuntimeIndex,
-    /// Union of every build script's link-search dirs, the loader-path head.
+    /// Union of every build script's link-search dirs, sorted. Filtered per
+    /// binary against its output dir, the way cargo filters them.
     linked_paths: Vec<String>,
     libdir: String,
-    /// What `CARGO` is set to: the cargo this brokkr invocation runs.
+    /// What `CARGO` is set to: the cargo executable this brokkr runs.
     cargo: String,
     /// `[env]` from the config chain, highest-precedence file first.
     config_env: Vec<ConfigEnvEntry>,
@@ -116,7 +124,7 @@ struct DirectRuntime {
 impl DirectRuntime {
     /// Assemble the runtime for one sweep: cargo metadata for the package
     /// facts, the prebuild's artifact index, and the cargo config chain.
-    fn load(
+    pub(crate) fn load(
         project_root: &Path,
         env_refs: &[(&str, &str)],
         index: BuildRuntimeIndex,
@@ -127,19 +135,24 @@ impl DirectRuntime {
             linked_paths,
             index,
             libdir: toolchain_libdir(project_root, env_refs)?,
-            cargo: cargo_program(),
-            config_env: cargo_config_env(project_root),
+            cargo: cargo_program(project_root, env_refs),
+            config_env: cargo_config_env(project_root, env_refs),
         })
     }
 
     /// The cwd and environment for one test binary, layered onto `env_refs`
     /// (the sweep/project env). Returned env is complete: pass it as the
     /// child's explicit env additions over brokkr's inherited environment.
-    fn envelope(
+    ///
+    /// Fails when the package's build script ran more than once in this build
+    /// with different `rustc-env` output: the stream does not say which run the
+    /// executable linked against, and guessing would hand the test another
+    /// build's environment.
+    pub(crate) fn envelope(
         &self,
         binary: &TestBinary,
         env_refs: &[(&str, &str)],
-    ) -> (PathBuf, Vec<(String, String)>) {
+    ) -> Result<(PathBuf, Vec<(String, String)>), DevError> {
         let cwd = if binary.manifest_dir.as_os_str().is_empty() {
             PathBuf::from(".")
         } else {
@@ -180,11 +193,19 @@ impl DirectRuntime {
             env.push(("CARGO_MANIFEST_PATH".into(), meta.manifest_path.clone()));
             env.extend(meta.pkg_env());
         }
-        if let Some(bs) = self.index.build_scripts.get(&binary.package_id) {
-            if let Some(out_dir) = &bs.out_dir {
-                env.push(("OUT_DIR".into(), out_dir.clone()));
+        if let Some(runs) = self.index.build_scripts.get(&binary.package_id) {
+            let first = runs.first().map(|r| &r.env);
+            if runs.iter().any(|r| Some(&r.env) != first) {
+                return Err(DevError::Config(format!(
+                    "package `{}` ran its build script {} times in this build with different \
+                     `rustc-env` output, and cargo's artifact stream does not say which run `{}` \
+                     links against - brokkr will not run it directly with a guessed environment",
+                    binary.package,
+                    runs.len(),
+                    binary.label()
+                )));
             }
-            for (k, v) in &bs.env {
+            for (k, v) in first.into_iter().flatten() {
                 env.push((k.clone(), v.clone()));
             }
         }
@@ -194,51 +215,145 @@ impl DirectRuntime {
             }
         }
 
-        // The loader path: linked paths first, then the exe's dirs, the
-        // toolchain libdir, and whatever the run already carried - cargo's
-        // ordering, which decides which same-named library loads.
         let existing = env
             .iter()
             .rev()
             .find(|(k, _)| k == "LD_LIBRARY_PATH")
             .map(|(_, v)| v.clone())
             .or_else(|| std::env::var("LD_LIBRARY_PATH").ok());
-        let mut paths: Vec<String> = self.linked_paths.clone();
-        if let Some(deps) = Path::new(&binary.executable).parent() {
-            paths.push(deps.display().to_string());
-            if let Some(profile_dir) = deps.parent() {
-                paths.push(profile_dir.display().to_string());
-            }
-        }
-        paths.push(self.libdir.clone());
-        if let Some(existing) = existing.filter(|e| !e.is_empty()) {
-            paths.push(existing);
-        }
-        env.push(("LD_LIBRARY_PATH".into(), paths.join(":")));
+        let search = cargo_search_path(binary, &self.linked_paths, &self.libdir);
+        env.push(("LD_LIBRARY_PATH".into(), join_dylib_path(search, existing.as_deref())));
 
-        (cwd, env)
+        Ok((cwd, env))
     }
 }
 
-/// The cargo executable this brokkr run uses, for the child's `CARGO` var.
-/// An inherited `CARGO` (brokkr itself launched under cargo, or a caller's
-/// override) wins; otherwise the literal `cargo` brokkr spawns, resolved
-/// against PATH so the value is an executable path rather than a bare name.
-fn cargo_program() -> String {
-    if let Ok(c) = std::env::var("CARGO")
-        && !c.trim().is_empty()
-    {
-        return c;
-    }
-    if let Some(paths) = std::env::var_os("PATH") {
-        for dir in std::env::split_paths(&paths) {
-            let candidate = dir.join("cargo");
-            if candidate.is_file() {
-                return candidate.display().to_string();
-            }
+/// The output dir a test executable was built into (`target/<profile>`):
+/// cargo's `root_output`, which anchors both the loader path and the filter on
+/// build-script link-search dirs. Read from where the executable sits - under
+/// `<root>/deps/`, or under `<root>/build/<pkg>/<hash>/...` in the newer
+/// build-dir layout - rather than assumed to be its grandparent.
+fn root_output(executable: &Path) -> PathBuf {
+    for dir in executable.ancestors().skip(1) {
+        if let (Some(name), Some(parent)) = (dir.file_name(), dir.parent())
+            && (name == "deps" || name == "build")
+        {
+            return parent.to_path_buf();
         }
     }
-    "cargo".into()
+    executable.parent().map_or_else(PathBuf::new, Path::to_path_buf)
+}
+
+/// The loader path cargo builds for a test executable, before the inherited
+/// value: link-search dirs inside the output dir (sorted), the output dir, the
+/// deps dirs, the toolchain libdir.
+fn cargo_search_path(binary: &TestBinary, linked_paths: &[String], libdir: &str) -> Vec<String> {
+    let exe = Path::new(&binary.executable);
+    let root = root_output(exe);
+    let mut search: Vec<String> = linked_paths
+        .iter()
+        .filter(|p| Path::new(p.as_str()).starts_with(&root))
+        .cloned()
+        .collect();
+    search.push(root.display().to_string());
+    let mut deps: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    deps.insert(root.join("deps").display().to_string());
+    if let Some(dir) = exe.parent() {
+        deps.insert(dir.display().to_string());
+    }
+    search.extend(deps.into_iter().filter(|d| !search.contains(d)).collect::<Vec<_>>());
+    search.push(libdir.to_owned());
+    search
+}
+
+/// Append the inherited loader path, as cargo does - except that an inherited
+/// value already starting with cargo's own entries (brokkr run under cargo, or
+/// a nested run) is used as is, rather than doubled.
+fn join_dylib_path(search: Vec<String>, existing: Option<&str>) -> String {
+    let existing: Vec<String> = existing
+        .filter(|e| !e.is_empty())
+        .map(|e| e.split(':').map(str::to_owned).collect())
+        .unwrap_or_default();
+    if !existing.is_empty() && existing.starts_with(&search) {
+        return existing.join(":");
+    }
+    let mut out = search;
+    out.extend(existing);
+    out.join(":")
+}
+
+/// The cargo executable this brokkr run uses, for the child's `CARGO` var.
+///
+/// brokkr spawns the literal `cargo` from PATH - the sweep's PATH when its
+/// `env` sets one. Cargo exports its own resolved executable, so that cargo is
+/// what this names: the PATH hit itself, unless the hit is the rustup proxy
+/// (the same file as the `rustup` beside it), in which case it is resolved the
+/// way the proxy resolves it - from the project root, under the sweep's env, so
+/// a toolchain file or a `RUSTUP_TOOLCHAIN` the build saw is the one named. An
+/// inherited `CARGO` is not trusted: it names whatever cargo launched brokkr,
+/// which is not the one brokkr runs.
+fn cargo_program(project_root: &Path, env: &[(&str, &str)]) -> String {
+    let path_var = env
+        .iter()
+        .rev()
+        .find(|(k, _)| *k == "PATH")
+        .map(|(_, v)| std::ffi::OsString::from(v))
+        .or_else(|| std::env::var_os("PATH"));
+    // The search `Command` does: the first EXECUTABLE `cargo`, a relative
+    // entry taken against where cargo is launched (`project_root`), and the
+    // result made absolute - a harness runs from its package directory, where
+    // a relative `CARGO` would name another file or none.
+    let Some(hit) = path_var.as_deref().and_then(|paths| {
+        std::env::split_paths(paths)
+            .map(|dir| project_root.join(dir).join("cargo"))
+            .find(|c| is_executable_file(c))
+    }) else {
+        return "cargo".into();
+    };
+    // The rustup proven to be the proxy is the one asked - not whichever
+    // `rustup` PATH happens to reach first.
+    let rustup = hit.with_file_name("rustup");
+    if is_rustup_proxy(&hit)
+        && let Some(rustup) = rustup.to_str()
+        && let Ok(out) = output::run_captured_with_env(rustup, &["which", "cargo"], project_root, env)
+        && out.status.success()
+    {
+        let resolved = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+        if !resolved.is_empty() {
+            return resolved;
+        }
+    }
+    hit.display().to_string()
+}
+
+/// A regular file this process may execute, which is what process launch
+/// requires of a PATH candidate before it moves on to the next. `access(2)`
+/// rather than the mode bits: an execute bit for someone else (`0641` on a
+/// file this user owns) is not one for this user.
+fn is_executable_file(path: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    if !std::fs::metadata(path).is_ok_and(|m| m.is_file()) {
+        return false;
+    }
+    let Ok(c) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+        return false;
+    };
+    // SAFETY: a valid NUL-terminated path for the call's duration.
+    unsafe { libc::access(c.as_ptr(), libc::X_OK) == 0 }
+}
+
+/// Whether `cargo` is rustup's proxy: the same file (device and inode, through
+/// any symlink) as the `rustup` in its directory. rustup installs its proxies
+/// as hard links to itself.
+fn is_rustup_proxy(cargo: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let Some(rustup) = cargo.parent().map(|d| d.join("rustup")) else {
+        return false;
+    };
+    match (std::fs::metadata(cargo), std::fs::metadata(rustup)) {
+        (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
+        _ => false,
+    }
 }
 
 /// Every workspace member's manifest facts, keyed by full package id.
@@ -306,9 +421,9 @@ fn workspace_pkg_meta(project_root: &Path) -> Result<HashMap<String, PkgRuntimeM
 ///
 /// Cargo's `relative = true` resolves the value against the directory
 /// CONTAINING the `.cargo` directory the entry was read from.
-fn cargo_config_env(project_root: &Path) -> Vec<ConfigEnvEntry> {
+fn cargo_config_env(project_root: &Path, env: &[(&str, &str)]) -> Vec<ConfigEnvEntry> {
     let mut out = Vec::new();
-    for path in rustflags::config_paths(project_root) {
+    for path in rustflags::config_paths_under(project_root, env) {
         let Ok(text) = std::fs::read_to_string(&path) else {
             continue;
         };
@@ -369,14 +484,58 @@ fn cargo_config_env(project_root: &Path) -> Vec<ConfigEnvEntry> {
 /// configured: the destructive direction is bypassing a real runner, so
 /// unknown fails closed (unlike the rustflags evaluator, whose inert
 /// direction is the opposite).
-fn refuse_configured_runner(project_root: &Path) -> Result<(), DevError> {
+///
+/// A configured build target (`build.target` or `CARGO_BUILD_TARGET`) refuses
+/// too. The runner check above is keyed on the host triple and the envelope's
+/// loader path on the host toolchain, and both are wrong for an artifact
+/// cargo built for another target - a cross build is exactly where a runner
+/// would be configured, under a triple this check would never look at. Any
+/// configured target refuses, the host's included: the setting changes where
+/// cargo puts the artifacts, which the envelope does not model.
+///
+/// The environment checked is the one cargo builds under: `env` (the sweep's,
+/// which reaches cargo as its process environment) over brokkr's own. A sweep
+/// `env` setting a runner or a target is as configured as a shell export.
+pub(crate) fn refuse_configured_runner(
+    project_root: &Path,
+    env: &[(&str, &str)],
+) -> Result<(), DevError> {
+    let effective = |key: &str| -> Option<String> {
+        env.iter()
+            .rev()
+            .find(|(k, _)| *k == key)
+            .map(|(_, v)| (*v).to_owned())
+            .or_else(|| std::env::var(key).ok())
+            .filter(|v| !v.is_empty())
+    };
+    if let Some(target) = effective("CARGO_BUILD_TARGET") {
+        return Err(DevError::Config(format!(
+            "CARGO_BUILD_TARGET={target} is set: cargo builds the tests for that target, and \
+             brokkr executes prebuilt test binaries only for the host. Unset it for this run."
+        )));
+    }
+    for path in rustflags::config_paths_under(project_root, env) {
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(doc) = text.parse::<toml::Table>() else {
+            continue;
+        };
+        if doc.get("build").and_then(|b| b.get("target")).is_some() {
+            return Err(DevError::Config(format!(
+                "{} sets `build.target`: cargo builds the tests for that target, and brokkr \
+                 executes prebuilt test binaries only for the host.",
+                path.display()
+            )));
+        }
+    }
     let triple = rustflags::host_triple();
     if let Some(t) = &triple {
         let var = format!(
             "CARGO_TARGET_{}_RUNNER",
             t.to_uppercase().replace('-', "_")
         );
-        if std::env::var_os(&var).is_some() {
+        if effective(&var).is_some() {
             return Err(DevError::Config(format!(
                 "{var} is set: cargo would run test binaries through that runner, and direct \
                  execution would bypass it. Unset it, or drop `parallel` or \
@@ -384,7 +543,7 @@ fn refuse_configured_runner(project_root: &Path) -> Result<(), DevError> {
             )));
         }
     }
-    for path in rustflags::config_paths(project_root) {
+    for path in rustflags::config_paths_under(project_root, env) {
         let Ok(text) = std::fs::read_to_string(&path) else {
             continue;
         };
@@ -497,11 +656,13 @@ mod direct_runtime_tests {
         let mut index = BuildRuntimeIndex::default();
         index.build_scripts.insert(
             "path+file:///x/a#pkg-a@0.1.0".into(),
-            BuildScriptOut {
-                out_dir: Some("/t/build/a/out".into()),
+            vec![BuildScriptOut {
+                out_dir: Some("/t/debug/build/a/out".into()),
                 env: vec![("GENERATED_ENDPOINT".into(), "svc".into())],
-                linked_paths: vec!["/t/build/a/out".into()],
-            },
+                // One inside the output tree, one outside it: cargo keeps only
+                // the first on the loader path.
+                linked_paths: vec!["/t/debug/build/a/out".into(), "/usr/lib/elsewhere".into()],
+            }],
         );
         index
             .bin_exes
@@ -520,7 +681,8 @@ mod direct_runtime_tests {
         );
         let rt = runtime_with(index, packages);
 
-        let (cwd, env) = rt.envelope(&test_binary(), &[("BROKKR_TEST_BIN_DIR", "/t/debug")]);
+        let (cwd, env) =
+            rt.envelope(&test_binary(), &[("BROKKR_TEST_BIN_DIR", "/t/debug")]).unwrap();
         assert_eq!(cwd, PathBuf::from("/x/a"));
         let get = |k: &str| {
             env.iter()
@@ -533,15 +695,60 @@ mod direct_runtime_tests {
         assert_eq!(get("CARGO_MANIFEST_DIR"), Some("/x/a"));
         assert_eq!(get("CARGO_MANIFEST_PATH"), Some("/x/a/Cargo.toml"));
         assert_eq!(get("CARGO_PKG_NAME"), Some("pkg-a"));
-        assert_eq!(get("OUT_DIR"), Some("/t/build/a/out"));
+        // Cargo exports OUT_DIR to build scripts and rustdoc, never to a test.
+        assert_eq!(get("OUT_DIR"), None);
         assert_eq!(get("GENERATED_ENDPOINT"), Some("svc"));
         assert_eq!(get("CARGO_BIN_EXE_serve-bin"), Some("/t/debug/serve-bin"));
         let ld = get("LD_LIBRARY_PATH").unwrap();
         let parts: Vec<&str> = ld.split(':').collect();
+        // Cargo's order: in-tree link-search dirs, the output dir, the deps
+        // dir, the toolchain libdir. The out-of-tree link dir is dropped.
         assert_eq!(
             &parts[..4],
-            &["/t/build/a/out", "/t/debug/deps", "/t/debug", "/toolchain/lib"]
+            &["/t/debug/build/a/out", "/t/debug", "/t/debug/deps", "/toolchain/lib"]
         );
+        assert!(!parts.contains(&"/usr/lib/elsewhere"), "{ld}");
+    }
+
+    // The newer build-dir layout puts test executables under
+    // `<root>/build/<pkg>/<hash>/`, where "the grandparent" is not the output
+    // dir.
+    #[test]
+    fn the_output_dir_is_found_in_both_executable_layouts() {
+        assert_eq!(root_output(Path::new("/t/debug/deps/cli-1")), PathBuf::from("/t/debug"));
+        assert_eq!(
+            root_output(Path::new("/t/debug/build/pkg/abc123/out/cli-1")),
+            PathBuf::from("/t/debug")
+        );
+    }
+
+    // An inherited loader path that already begins with cargo's entries is
+    // a nested run, and is not doubled.
+    #[test]
+    fn an_inherited_loader_path_with_cargos_prefix_is_not_doubled() {
+        let search = vec!["/t/debug".to_owned(), "/lib".to_owned()];
+        assert_eq!(join_dylib_path(search.clone(), Some("/t/debug:/lib:/usr/x")), "/t/debug:/lib:/usr/x");
+        assert_eq!(join_dylib_path(search.clone(), Some("/usr/x")), "/t/debug:/lib:/usr/x");
+        assert_eq!(join_dylib_path(search, None), "/t/debug:/lib");
+    }
+
+    // Two runs of one package's build script that disagree leave the
+    // executable's environment unknowable, so the envelope refuses rather than
+    // letting whichever run was parsed last win.
+    #[test]
+    fn disagreeing_build_script_runs_refuse_the_envelope() {
+        let mut index = BuildRuntimeIndex::default();
+        let run = |v: &str| BuildScriptOut {
+            out_dir: Some(format!("/t/debug/build/a-{v}/out")),
+            env: vec![("MODE".into(), v.into())],
+            linked_paths: Vec::new(),
+        };
+        index
+            .build_scripts
+            .insert("path+file:///x/a#pkg-a@0.1.0".into(), vec![run("host"), run("target")]);
+        let rt = runtime_with(index, HashMap::new());
+        let err = rt.envelope(&test_binary(), &[]).unwrap_err().to_string();
+        assert!(err.contains("ran its build script 2 times"), "{err}");
     }
 
     // A sweep's `[[check]] env` must not forge cargo-owned values: cargo
@@ -559,7 +766,7 @@ mod direct_runtime_tests {
             },
         );
         let rt = runtime_with(BuildRuntimeIndex::default(), packages);
-        let (_, env) = rt.envelope(&test_binary(), &[("CARGO_PKG_NAME", "forged")]);
+        let (_, env) = rt.envelope(&test_binary(), &[("CARGO_PKG_NAME", "forged")]).unwrap();
         // Later entries win when the env is applied in order, so the LAST
         // occurrence is the effective value.
         let last = env
@@ -587,10 +794,9 @@ mod direct_runtime_tests {
                 force: true,
             },
         ];
-        let (_, env) = rt.envelope(
-            &test_binary(),
-            &[("FIXTURE_ROOT", "/sweep/fixtures"), ("FORCED", "sweep")],
-        );
+        let (_, env) = rt
+            .envelope(&test_binary(), &[("FIXTURE_ROOT", "/sweep/fixtures"), ("FORCED", "sweep")])
+            .unwrap();
         let last = |k: &str| {
             env.iter()
                 .rev()

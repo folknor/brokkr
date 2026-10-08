@@ -494,6 +494,11 @@ pub struct DeadlineCapture {
     /// the SIGKILL (signal=9 on Linux); this flag is what callers should
     /// branch on to surface "ceiling exceeded" in user output.
     pub killed_on_deadline: bool,
+    /// `true` when the child exited but its output did not close in time and
+    /// capture was stopped (see `settle_drains`): `stdout`/`stderr` may be
+    /// truncated, whatever `status` says. A caller whose verdict reads the
+    /// output must not trust it when this is set.
+    pub output_cut: bool,
 }
 
 /// How often to poll `Child::try_wait` while waiting for a deadline-bounded
@@ -565,31 +570,78 @@ enum Limit {
     Idle(Duration),
 }
 
-/// Read `pipe` to its end on a new thread, stamping `last_output_ms` (millis
-/// since `start`) on every chunk - the progress signal [`Limit::Idle`] reads.
-fn drain_stamped(
-    pipe: impl std::io::Read + Send + 'static,
-    start: Instant,
-    last_output_ms: std::sync::Arc<std::sync::atomic::AtomicU64>,
-) -> std::thread::JoinHandle<Vec<u8>> {
-    std::thread::spawn(move || {
-        let mut buf = Vec::new();
+/// Read `pipe` on a new thread until EOF or until the drain is cancelled,
+/// stamping `last_output_ms` (millis since `start`) on every chunk - the
+/// progress signal [`Limit::Idle`] reads.
+///
+/// The bytes land in a shared buffer rather than the thread's return value,
+/// and the read polls rather than blocks, so [`settle_drains`] can stop a drain
+/// that will never reach EOF, join it, and keep what it already read.
+fn drain_stamped<R>(pipe: R, start: Instant, last_output_ms: std::sync::Arc<std::sync::atomic::AtomicU64>) -> Drain
+where
+    R: std::io::Read + std::os::fd::AsRawFd + Send + 'static,
+{
+    let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (buf_t, cancel_t) = (std::sync::Arc::clone(&buf), std::sync::Arc::clone(&cancel));
+    let handle = std::thread::spawn(move || {
         let mut reader = pipe;
         let mut chunk = [0u8; 8192];
-        loop {
-            match reader.read(&mut chunk) {
-                Ok(0) => break,
-                Ok(n) => {
-                    buf.extend_from_slice(chunk.get(..n).unwrap_or_default());
-                    let now = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
-                    last_output_ms.store(now, Ordering::Relaxed);
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-                Err(_) => break,
+        while let Some(n) = crate::test_runner::read_unless_cancelled(&mut reader, &mut chunk, &cancel_t)
+        {
+            if let Ok(mut b) = buf_t.lock() {
+                b.extend_from_slice(chunk.get(..n).unwrap_or_default());
             }
+            let now = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+            last_output_ms.store(now, Ordering::Relaxed);
         }
-        buf
-    })
+        // `reader` drops here, closing brokkr's end of the pipe: a process
+        // still holding the other end gets EPIPE rather than an unbounded
+        // reader behind it.
+    });
+    Drain { buf, cancel, handle }
+}
+
+/// One output drain: the buffer it fills, its stop switch, and its thread.
+struct Drain {
+    buf: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    handle: std::thread::JoinHandle<()>,
+}
+
+/// How long a captured child's output gets to close once the child exited.
+const DRAIN_SETTLE: Duration = Duration::from_secs(2);
+
+/// Wait up to [`DRAIN_SETTLE`] for the drains to reach EOF, then stop any
+/// still open, join them all, and return what they read plus whether capture
+/// was cut short.
+///
+/// A process the child started (a daemon, a build-script helper) that
+/// inherited a pipe keeps it open forever, and the unbounded join that used to
+/// stand here hung brokkr with the lock held. A stopped drain closes its end,
+/// so nothing keeps reading - or buffering - after the run is over.
+fn settle_drains(drains: Vec<Drain>, program: &str) -> (Vec<Vec<u8>>, bool) {
+    let until = Instant::now() + DRAIN_SETTLE;
+    while Instant::now() < until && !drains.iter().all(|d| d.handle.is_finished()) {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let cut = !drains.iter().all(|d| d.handle.is_finished());
+    if cut {
+        warn(&format!(
+            "{program} exited but its output did not close within {}s - something it started \
+             still holds the pipe; capture stopped there",
+            DRAIN_SETTLE.as_secs()
+        ));
+    }
+    let bufs = drains
+        .into_iter()
+        .map(|d| {
+            d.cancel.store(true, Ordering::Release);
+            d.handle.join().ok();
+            d.buf.lock().map(|b| b.clone()).unwrap_or_default()
+        })
+        .collect();
+    (bufs, cut)
 }
 
 /// Shared body of the captured runners; see
@@ -700,19 +752,17 @@ fn run_captured_limited(
             }
         }
     };
+    let drains: Vec<_> = stdout_thread.into_iter().chain(stderr_thread).collect();
     if interrupted {
-        // Drain pipes so the threads exit cleanly before we return.
-        drop(stdout_thread.and_then(|h| h.join().ok()));
-        drop(stderr_thread.and_then(|h| h.join().ok()));
+        // Bounded like the ordinary path, so an interrupt cannot hang either.
+        settle_drains(drains, program);
         return Err(DevError::Interrupted);
     }
 
-    let stdout = stdout_thread
-        .and_then(|h| h.join().ok())
-        .unwrap_or_default();
-    let stderr = stderr_thread
-        .and_then(|h| h.join().ok())
-        .unwrap_or_default();
+    let (bufs, output_cut) = settle_drains(drains, program);
+    let mut bufs = bufs.into_iter();
+    let stdout = bufs.next().unwrap_or_default();
+    let stderr = bufs.next().unwrap_or_default();
     let elapsed = start.elapsed();
 
     Ok(DeadlineCapture {
@@ -723,6 +773,7 @@ fn run_captured_limited(
             elapsed,
         },
         killed_on_deadline,
+        output_cut,
     })
 }
 

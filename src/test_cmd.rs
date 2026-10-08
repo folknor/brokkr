@@ -1,10 +1,15 @@
 //! `brokkr test <NAME>` - named-test cargo runner.
 //!
-//! Runs the cargo tests matching `<NAME>` with the host/check features and
-//! `--include-ignored --nocapture --test-threads=1`, in every test harness of
-//! the package: one prebuild per sweep, then one cargo invocation per harness,
-//! so a failing or crashing harness never hides the ones after it (see
-//! `run_split`). Defaults to release;
+//! Runs the tests matching `<NAME>` with the host/check features and
+//! `--include-ignored --nocapture --test-threads=1`. Per sweep: one prebuild,
+//! then every prebuilt harness lists itself directly (libtest's JSON
+//! discovery, see `focused`), and only the harnesses holding a match run -
+//! each one directly, as its own process, under cargo's reconstructed launch
+//! envelope (`check_cmd::DirectRuntime`). A failing or crashing harness never
+//! hides the ones after it, and one with no match costs a listing, not a cargo
+//! invocation. `harness = false` targets are excluded and named. A doc-only
+//! sweep is still one `cargo test --doc`, since ordinary discovery cannot see
+//! doctests. Defaults to release;
 //! `--debug` switches to the dev profile, `--release` forces it back, and
 //! when neither is passed the `[test] debug` toml field decides. Streams
 //! the test's own
@@ -23,21 +28,19 @@
 //!
 //! Every test gets a 20s hard cap; exceeding it fails the run and stops it,
 //! between `-N` iterations included. `--timeout <SECS>` (1-280) is the only
-//! exception anywhere in brokkr, and it also makes the *attribution* exact: the
-//! flag already refuses more than one match, so enumeration resolves `<NAME>` to
-//! the one full test name and the run is invoked with libtest `--exact`, making
-//! the process the unit of one test. Resolving the full name matters - `--exact`
-//! on the user's substring would match nothing and silently run zero tests. What
-//! it bounds is the whole cargo invocation, not the test body: lock wait,
-//! residual compilation, startup, the test, teardown.
-//! Because a higher
-//! ceiling only makes sense for one isolated test, it is gated: each
-//! sweep is enumerated with libtest `--list` first, and `<NAME>` matching
-//! more than one test in any sweep is a hard error before anything runs.
+//! exception anywhere in brokkr, and it also makes the *attribution* exact:
+//! discovery resolves `<NAME>` to one (harness, full test name), and that one
+//! binary is run with libtest `--exact`, making the process the unit of one
+//! test. Resolving the full name matters - `--exact` on the user's substring
+//! would match nothing and silently run zero tests. What it bounds is that
+//! process from spawn to exit: its static constructors, the test, teardown.
+//! The build and every other harness's listing fall outside it. Because a
+//! higher ceiling only makes sense for one isolated test, it is gated: a
+//! `<NAME>` matching more than one test in a sweep - two harnesses holding the
+//! same name count twice - is a hard error before anything runs.
 //!
-//! Without `--timeout`, each split sweep is enumerated too, unfiltered, and a
-//! `<NAME>` matching every test in the package is refused (see
-//! `refuse_whole_suite_filter`) - a whole-suite run is `brokkr check`'s job.
+//! A `<NAME>` matching every discovered test of the package is refused (see
+//! `matches_whole_suite`) - a whole-suite run is `brokkr check`'s job.
 //!
 //! `--sweep <LABEL>` narrows the resolved profile's sweep set to the one
 //! matching sweep (e.g. `--sweep all`), instead of running every sweep the
@@ -45,8 +48,10 @@
 //! ones. Combined with `--timeout`, this is the usual way to iterate on a
 //! single hung test without paying for the other sweeps' rebuilds.
 
+mod focused;
+
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::build;
@@ -268,7 +273,7 @@ fn sweep_plan_line(sweeps: &[ResolvedSweep], pkg: &str) -> String {
     if !scoped_out.is_empty() {
         line.push_str(&format!(" (not this package: {})", names(&scoped_out)));
     }
-    line.push_str(" - each runs every harness; the run ends at its summary, not its first PASS");
+    line.push_str(" - the run ends at its summary, not its first PASS");
     line
 }
 
@@ -368,45 +373,28 @@ fn run_sweeps(
             continue;
         }
 
-        // `--timeout` promises a per-test ceiling, so under it the process must
-        // be the unit of exactly one test - otherwise the promise is false, since
-        // a per-test clock read from libtest's output can only name a suspect
-        // (see `test_runner::Ceilings`). Enumerate up front and resolve the
-        // *full* name: adding `--exact` to the user's substring would run zero
-        // tests, so the resolved identity is what gets invoked.
-        //
-        // Sweeps matching zero (feature-gated out) are fine and still SKIP.
-        let exact = resolve_exact_for_timeout(
-            timeout,
-            &pkg,
-            name,
-            sweep,
-            &env_refs,
-            &allow_args,
-            project_root,
-            debug,
-        )?;
-
-        // Every other run splits per test harness: one prebuild for the sweep,
-        // then one cargo invocation per harness, each running exactly one
-        // libtest process. `--timeout` already refuses more than one match, and
-        // a doc-only sweep is one rustdoc run, so both stay single invocations.
-        // See `run_split` for why the split is the fix and not `--no-fail-fast`.
+        // A doc-only sweep is one rustdoc run, unchanged: ordinary discovery
+        // cannot see doctests. Every other sweep prebuilds, has each harness
+        // list itself, and runs only the harnesses holding a match - see
+        // `plan_focused`.
         let shape = BuildShape { sweep, allow_args: &allow_args, pkg: &pkg, jobs, debug };
-        let targets = if exact.is_none() && !sweep.doc_only {
-            let Some(targets) = prebuild_targets(&shape, &env_refs, project_root)? else {
+        let focused = if sweep.doc_only {
+            if timeout.is_some() {
+                return Err(doc_only_timeout_refusal(sweep));
+            }
+            None
+        } else {
+            let Some((binaries, index)) = prebuild_targets(&shape, &env_refs, project_root)? else {
                 reports.push(RunReport::bare(Outcome::BuildFailed));
                 continue;
             };
-            refuse_whole_suite_filter(&shape, name, &env_refs, project_root)?;
-            Some(targets)
-        } else {
-            None
+            Some(plan_focused(&shape, name, timeout.is_some(), &binaries, index, &env_refs, project_root)?)
         };
+        let exact = focused.as_ref().and_then(|f| f.exact.clone());
         let plan = SweepPlan {
             shape,
             name,
-            targets,
+            focused,
             exact,
             env: &env_refs,
             project_root,
@@ -450,9 +438,9 @@ fn run_sweeps(
 struct SweepPlan<'a> {
     shape: BuildShape<'a>,
     name: &'a str,
-    /// The sweep's test harnesses when it runs split; `None` for a single
-    /// whole-package invocation (`--timeout`, a doc-only sweep).
-    targets: Option<Vec<check_cmd::TestTarget>>,
+    /// The harnesses holding a match, run directly; `None` for a doc-only
+    /// sweep's single `cargo test --doc`.
+    focused: Option<FocusedPlan>,
     /// The resolved full name `--timeout` runs with `--exact`.
     exact: Option<String>,
     env: &'a [(&'a str, &'a str)],
@@ -480,18 +468,17 @@ fn run_iteration(plan: &SweepPlan<'_>, n: u32) -> Result<RunReport, DevError> {
     // PASS/FAIL footer line.
     let announce = n == 1;
 
-    let Some(targets) = &plan.targets else {
-        // Under `--timeout`, run the resolved name exactly; otherwise the
-        // user's substring, unchanged.
+    let Some(focused) = &plan.focused else {
+        // A doc-only sweep: one rustdoc run over the package, the user's
+        // substring unchanged.
         let s = &plan.shape;
-        let filter = plan.exact.as_deref().unwrap_or(name);
-        let args =
-            test_argv(s.sweep, s.allow_args, pkg, &[], filter, s.jobs, s.debug, plan.exact.is_some());
+        let args = test_argv(s.sweep, s.allow_args, pkg, name, s.jobs, s.debug);
         let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
         if announce {
             output::run_msg(&format!("cargo {}", arg_refs.join(" ")));
         }
         return run_one(
+            test_runner::Launch::Cargo,
             &arg_refs,
             plan.project_root,
             plan.state_root,
@@ -499,40 +486,262 @@ fn run_iteration(plan: &SweepPlan<'_>, n: u32) -> Result<RunReport, DevError> {
             &OneRun {
                 tag: &tag(None),
                 target: "",
-                ceilings: ceilings_for(&plan.exact, plan.ceiling),
+                ceilings: ceilings_for(&None, plan.ceiling),
                 announce,
-                quiet_no_match: false,
+                expected: None,
             },
             plan.repeat_state,
             n > 1,
         );
     };
 
-    let report = run_split(
-        &plan.shape,
-        name,
-        targets,
-        &SplitRun {
-            project_root: plan.project_root,
-            state_root: plan.state_root,
-            env: plan.env,
-            ceiling: plan.ceiling,
-            announce,
-            repeat_state: plan.repeat_state,
-            buffered: n > 1,
-            tag: &tag,
-        },
-    )?;
-    if report.outcome == Outcome::NoMatch {
+    if focused.runs.is_empty() {
         println!(
-            "[test]    SKIP {} - no tests matched in any of {} test {} (likely feature-gated out \
-             of this sweep)",
+            "[test]    SKIP {} - no test matched in any of {} (likely feature-gated out of this \
+             sweep)",
             tag(None),
-            targets.len(),
-            if targets.len() == 1 { "harness" } else { "harnesses" }
+            output::count(focused.searched, "searched harness")
+        );
+        return Ok(RunReport::bare(Outcome::NoMatch));
+    }
+
+    // Under `--timeout`, the resolved name exactly; otherwise the user's
+    // substring, unchanged.
+    let filter = plan.exact.as_deref().unwrap_or(name);
+    let args = direct_libtest_args(filter, plan.exact.is_some());
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let mut parts = Vec::new();
+    for run in &focused.runs {
+        let command = format!("{} {}", run.program, arg_refs.join(" "));
+        if announce {
+            output::run_msg(&command);
+        }
+        let env: Vec<(&str, &str)> = run.env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        let report = run_one(
+            test_runner::Launch::Direct { program: &run.program },
+            &arg_refs,
+            &run.cwd,
+            plan.state_root,
+            &env,
+            &OneRun {
+                tag: &tag(Some(&run.label)),
+                target: &run.label,
+                ceilings: ceilings_for(&plan.exact, plan.ceiling),
+                announce: false,
+                expected: Some(run.matched),
+            },
+            plan.repeat_state,
+            n > 1,
+        )?;
+        // The copy-pasteable line for the harness that failed; run 1 only, as
+        // every other invocation line is. It runs outside cargo, so it needs
+        // the envelope's cwd and environment to reproduce exactly.
+        if announce && report.outcome == Outcome::Fail {
+            output::error(&format!("failing command (cwd {}): {command}", run.cwd.display()));
+        }
+        // A blown budget stops everything, the remaining harnesses included.
+        let stop = report.timed_out;
+        parts.push(report);
+        if stop {
+            break;
+        }
+    }
+    Ok(RunReport::merge(parts))
+}
+
+/// One sweep's focused run: the harnesses holding a match, ready to execute.
+///
+/// Each harness is its own process, which is load-bearing, not incidental.
+/// One `cargo test -p PKG NAME` stops at the first harness with a failing test,
+/// so a mutation check reading "these tests went red" would read an incomplete
+/// list; and `--no-fail-fast` keeps every harness in ONE libtest stream, where
+/// a harness that dies mid-test (an abort, a stack overflow - what a mutation
+/// produces) leaves its suite open, the next harness's `suite/started` looks
+/// forged, and the per-test clock bills the dead test to the next, healthy
+/// harness. One process per harness gives each a fresh tracker, and every
+/// failure belongs to the harness that printed it - the same test name in two
+/// harnesses is two failures, not one.
+struct FocusedPlan {
+    runs: Vec<HarnessRun>,
+    /// How many harnesses were listed, for the SKIP line when none matched.
+    searched: usize,
+    /// Under `--timeout`, the one full test name the run is invoked with.
+    exact: Option<String>,
+}
+
+/// One harness to execute directly, with the launch envelope cargo would
+/// have given it.
+struct HarnessRun {
+    label: String,
+    program: String,
+    cwd: PathBuf,
+    env: Vec<(String, String)>,
+    /// How many of its discovered tests matched - what its run must report.
+    matched: usize,
+}
+
+/// Discover every eligible harness of the sweep and keep the ones holding a
+/// match.
+///
+/// Discovery runs one harness at a time, in cargo's run order, as the cargo
+/// invocations it replaces did: concurrent listing would run every harness's
+/// static constructors at once, which no earlier run did. Every listing must
+/// prove itself complete (see `focused::discover`) - a failed one stops the
+/// run rather than reading as a harness with no match.
+///
+/// Also where the two breadth rules are judged, both over what discovery
+/// listed (benchmarks included, since `cargo test` runs them): a `<NAME>`
+/// matching every test of the package is refused, and under `--timeout` a
+/// `<NAME>` matching more than one (harness, test) is.
+#[allow(clippy::too_many_arguments)]
+fn plan_focused(
+    shape: &BuildShape<'_>,
+    name: &str,
+    timeout: bool,
+    binaries: &[check_cmd::TestBinary],
+    index: check_cmd::BuildRuntimeIndex,
+    env: &[(&str, &str)],
+    project_root: &Path,
+) -> Result<FocusedPlan, DevError> {
+    // Direct execution would bypass a configured runner or misread a cross
+    // build; refuse before running anything.
+    check_cmd::refuse_configured_runner(project_root, env)?;
+    let runtime = check_cmd::DirectRuntime::load(project_root, env, index)?;
+    let split = focused::eligibility(binaries)?;
+    for b in &split.excluded {
+        println!(
+            "[test]    not searched: {} - `harness = false` targets are excluded from a focused \
+             run, which selects libtest test names",
+            b.label()
         );
     }
-    Ok(report)
+    let mut listed: Vec<(&check_cmd::TestBinary, Vec<String>)> = Vec::new();
+    for b in &split.eligible {
+        let names = focused::discover(b, &runtime, env, project_root)?
+            .into_iter()
+            .map(|l| l.name)
+            .collect();
+        listed.push((b, names));
+    }
+
+    let every: Vec<String> = listed.iter().flat_map(|(_, n)| n.iter().cloned()).collect();
+    if matches_whole_suite(&every, name) {
+        return Err(DevError::Config(format!(
+            "`{name}` matches all {} tests in package `{}` (sweep '{}'): brokkr test is for one \
+             test or a few, and streams every match's output live. Run the whole suite with \
+             `brokkr check -p {}`, or narrow the name.",
+            every.len(),
+            shape.pkg,
+            shape.sweep.label,
+            shape.pkg
+        )));
+    }
+
+    let searched = listed.len();
+    let hits: Vec<(&check_cmd::TestBinary, Vec<String>)> = listed
+        .into_iter()
+        .filter_map(|(b, names)| {
+            let m: Vec<String> =
+                names.into_iter().filter(|t| focused::matches(t, name, false)).collect();
+            (!m.is_empty()).then_some((b, m))
+        })
+        .collect();
+
+    let exact = if timeout {
+        let occurrences: Vec<String> = hits
+            .iter()
+            .flat_map(|(b, m)| m.iter().map(move |t| format!("{} {t}", b.label())))
+            .collect();
+        if occurrences.len() > 1 {
+            return Err(DevError::Config(format!(
+                "--timeout only applies to a single test, but `{name}` matches {} in sweep `{}`: \
+                 {}. Narrow it to one fully-qualified test name, or drop --timeout to run them \
+                 all at the 20s ceiling.",
+                output::count(occurrences.len(), "test"),
+                shape.sweep.label,
+                occurrences.join(", ")
+            )));
+        }
+        hits.first().and_then(|(_, m)| m.first().cloned())
+    } else {
+        None
+    };
+
+    let mut runs = Vec::with_capacity(hits.len());
+    for (b, m) in &hits {
+        let (cwd, envelope) = runtime.envelope(b, env)?;
+        let cwd = if cwd.as_os_str() == "." { project_root.to_path_buf() } else { cwd };
+        runs.push(HarnessRun {
+            label: b.label(),
+            program: b.executable.clone(),
+            cwd,
+            env: envelope,
+            matched: m.len(),
+        });
+    }
+    if !runs.is_empty() {
+        let labels: Vec<&str> = runs.iter().map(|r| r.label.as_str()).collect();
+        println!(
+            "[test]    {} of {} {} a match: {}",
+            runs.len(),
+            output::count(searched, "harness"),
+            if runs.len() == 1 { "holds" } else { "hold" },
+            labels.join(", ")
+        );
+    }
+    Ok(FocusedPlan { runs, searched, exact })
+}
+
+/// The libtest argv one directly executed harness runs with.
+///
+/// `--include-ignored --nocapture --test-threads=1` is what a focused run has
+/// always meant. The JSON event stream is what the per-test budget is charged
+/// from (records libtest states, not a `test NAME ... ` marker reconstructed
+/// out of whatever the test printed); the reconstructor renders it back to
+/// human text, so streamed output looks as it always did. `--exact` turns the
+/// filter into an identity, which is what makes the process one test - the
+/// only shape in which a per-test ceiling is a guarantee rather than a guess.
+/// The caller must have resolved `filter` to a full name first; `--exact` on a
+/// user's substring would match nothing.
+fn direct_libtest_args(filter: &str, exact: bool) -> Vec<String> {
+    let mut args: Vec<String> = [
+        filter,
+        "--include-ignored",
+        "--nocapture",
+        "--test-threads=1",
+        "-Z",
+        "unstable-options",
+        "--format",
+        "json",
+    ]
+    .iter()
+    .map(|s| (*s).to_owned())
+    .collect();
+    if exact {
+        args.push("--exact".into());
+    }
+    args
+}
+
+/// `--timeout` within a doc-only sweep: refused, because the single-test
+/// precondition needs doctest enumeration brokkr does not wire up.
+///
+/// The claim this refusal used to make - that doctests cannot be enumerated
+/// because `--list` is a libtest flag and rustdoc has no listing contract - is
+/// false on a current nightly: rustdoc forwards its test arguments into
+/// libtest, which supports both `--list` and `--exact`, so a doc-only sweep can
+/// be enumerated once merging is disabled (rustdoc's own
+/// `--merge-doctests=no`, which reaches rustdoc through RUSTDOCFLAGS rather
+/// than through cargo's `--` split). Until that plumbing exists, refuse - but
+/// say which it is, so the next reader does not inherit a wrong reason for a
+/// right refusal.
+fn doc_only_timeout_refusal(sweep: &ResolvedSweep) -> DevError {
+    DevError::Config(format!(
+        "--timeout cannot apply within doc-only sweep '{}': brokkr does not enumerate doctests \
+         yet, so the single-test precondition cannot be checked. Drop --timeout, or use --sweep \
+         to run a non-doc sweep.",
+        sweep.label
+    ))
 }
 
 /// The `-N` closing summary: one counts line, then one group per distinct
@@ -677,6 +886,15 @@ fn cargo_with_deadline(
             stderr.trim_end()
         )));
     }
+    // The prebuild's artifact stream is what names the harnesses; one cut off
+    // mid-stream could name fewer than were built.
+    if run.output_cut {
+        return Err(DevError::Build(format!(
+            "{what} (`cargo {}`) exited, but its output did not close - something it started \
+             still holds the pipe - so what it reported may be truncated and is not used",
+            args.join(" ")
+        )));
+    }
     Ok(run.captured)
 }
 
@@ -758,56 +976,32 @@ fn prebuild_argv(shape: &BuildShape<'_>) -> Vec<String> {
     args
 }
 
-/// The `cargo test` argv for one run of `name` in one sweep, over the harness
-/// `selector` names (`--test cli`, `--lib`), or over the whole package when it
-/// is empty (`--timeout`, a doc-only sweep).
-#[allow(clippy::too_many_arguments)]
+/// The `cargo test --doc` argv for one doc-only sweep's run of `name`. The
+/// libtest half is [`direct_libtest_args`]'s, minus the filter, which cargo
+/// takes positionally.
 fn test_argv(
     sweep: &ResolvedSweep,
     allow_args: &[String],
     pkg: &str,
-    selector: &[String],
     name: &str,
     jobs: Option<u32>,
     debug: bool,
-    exact: bool,
 ) -> Vec<String> {
     let shape = BuildShape { sweep, allow_args, pkg, jobs, debug };
     let mut args = cargo_head(&shape, &["test"]);
-    args.extend(selector.iter().cloned());
     // A doc-only sweep runs doctests and nothing else, here as everywhere:
     // <NAME> filters within the `--doc` pseudo-target, and a name matching
     // no doctest SKIPs like any feature-gated miss.
-    if sweep.doc_only {
-        args.push("--doc".into());
-    }
+    args.push("--doc".into());
     args.push(name.into());
     args.push("--".into());
-    args.push("--include-ignored".into());
-    args.push("--nocapture".into());
-    args.push("--test-threads=1".into());
-    // Drive libtest's JSON event stream: the per-test budget is charged from
-    // records libtest states, not from a partial `test NAME ... ` marker
-    // reconstructed out of whatever the test printed alongside it. The
-    // reconstructor renders the events back to human text, so streamed output
-    // looks exactly as it did. Native on nightly.
-    args.push("-Z".into());
-    args.push("unstable-options".into());
-    args.push("--format".into());
-    args.push("json".into());
-    // `--exact` turns the filter from a substring into an identity, which is what
-    // makes the invocation one process running one test - the only shape in which
-    // a per-test ceiling is a guarantee rather than a guess. The caller must have
-    // resolved `name` to a full test name first; `--exact` on a user's substring
-    // would match nothing.
-    if exact {
-        args.push("--exact".into());
-    }
+    args.extend(direct_libtest_args(name, false).into_iter().skip(1));
     args
 }
 
-/// Build a split sweep's test harnesses once and list them in cargo's run
-/// order. `Ok(None)` is a build failure, already reported.
+/// Build a sweep's test harnesses once and list them in cargo's run order,
+/// with the runtime index direct execution reconstructs cargo's launch
+/// environment from. `Ok(None)` is a build failure, already reported.
 ///
 /// Bounded like the sweep pre-build, by the idle ceiling: a cold build of any
 /// length that keeps printing runs to completion, a cargo parked on a lock
@@ -816,7 +1010,7 @@ fn prebuild_targets(
     shape: &BuildShape<'_>,
     env: &[(&str, &str)],
     project_root: &Path,
-) -> Result<Option<Vec<check_cmd::TestTarget>>, DevError> {
+) -> Result<Option<(Vec<check_cmd::TestBinary>, check_cmd::BuildRuntimeIndex)>, DevError> {
     let args = prebuild_argv(shape);
     output::run_msg(&format!("cargo {}", args.join(" ")));
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -837,7 +1031,7 @@ fn prebuild_targets(
     // An unrecognised stream is not an empty one: treating it as "no harnesses"
     // would SKIP every sweep and report a bad test name for what is really a
     // cargo whose output brokkr could not read.
-    let Some(targets) = check_cmd::test_targets(&String::from_utf8_lossy(&captured.stdout))
+    let Some(built) = check_cmd::prebuilt_harnesses(&String::from_utf8_lossy(&captured.stdout))
     else {
         return Err(DevError::Build(format!(
             "cargo exited successfully but produced no recognisable artifact stream for: cargo {} \
@@ -846,12 +1040,11 @@ fn prebuild_targets(
         )));
     };
     println!(
-        "[test]    test binaries built in {:.1}s; {} test {}",
+        "[test]    test binaries built in {:.1}s; {}",
         started.elapsed().as_secs_f64(),
-        targets.len(),
-        if targets.len() == 1 { "harness" } else { "harnesses" }
+        output::count(built.0.len(), "test harness")
     );
-    Ok(Some(targets))
+    Ok(Some(built))
 }
 
 /// The smallest package the whole-suite refusal applies to. Below it, a name
@@ -859,202 +1052,20 @@ fn prebuild_targets(
 /// tests" as a degenerate filter, and the flood it would cause is small.
 const WHOLE_SUITE_FLOOR: usize = 5;
 
-/// Refuse a `<NAME>` that matches every test in the package.
+/// Whether `name`, as libtest's substring filter, selects every listed test of
+/// a package at or above [`WHOLE_SUITE_FLOOR`] - the test for refusing it.
 ///
 /// `brokkr test` streams each test's output live under `--nocapture`; it is
 /// the tool for one test or a few. A substring every test name contains -
 /// `::`, `_`, a single letter - turns it into a whole-suite run that buries the
 /// verdicts under every test's prints, which is `brokkr check -p`'s job. The
 /// parse-time blank check catches `""`; this catches every other spelling of
-/// it, judged by what the filter matches rather than how it looks.
-///
-/// One unfiltered `--list` over the prebuild's exact selection and shape (so
-/// nothing recompiles), then libtest's own non-exact rule - the test's full
-/// name contains the filter - applied here. A listing that fails or is not a
-/// libtest listing refuses the run, as `--timeout`'s enumeration does: the
-/// split run that follows would execute those same harnesses anyway.
-fn refuse_whole_suite_filter(
-    shape: &BuildShape<'_>,
-    name: &str,
-    env: &[(&str, &str)],
-    project_root: &Path,
-) -> Result<(), DevError> {
-    let args = whole_suite_list_argv(shape);
-    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let captured = cargo_with_deadline(&arg_refs, project_root, env, "test enumeration")?;
-    if !captured.status.success() {
-        let stderr = String::from_utf8_lossy(&captured.stderr);
-        return Err(DevError::Build(format!(
-            "could not enumerate tests in sweep '{}' to check how broad `{name}` is - the listing \
-             command failed (cargo {})\n{}",
-            shape.sweep.label,
-            args.join(" "),
-            stderr.trim_end()
-        )));
-    }
-    let Some(listed) = listed_test_names(&String::from_utf8_lossy(&captured.stdout)) else {
-        return Err(DevError::Config(format!(
-            "could not enumerate tests in sweep '{}' to check how broad `{name}` is: the listing \
-             carried no `N tests, M benchmarks` tally (a `harness = false` target, or a custom \
-             harness, in package `{}`)",
-            shape.sweep.label, shape.pkg
-        )));
-    };
-    if matches_whole_suite(&listed, name) {
-        return Err(DevError::Config(format!(
-            "`{name}` matches all {} tests in package `{}` (sweep '{}'): brokkr test is for one \
-             test or a few, and streams every match's output live. Run the whole suite with \
-             `brokkr check -p {}`, or narrow the name.",
-            listed.len(),
-            shape.pkg,
-            shape.sweep.label,
-            shape.pkg
-        )));
-    }
-    Ok(())
-}
-
-/// The unfiltered listing over a split sweep's harnesses: the prebuild's head
-/// and `--tests` selection, so cargo finds every artifact already built.
-fn whole_suite_list_argv(shape: &BuildShape<'_>) -> Vec<String> {
-    let mut args = cargo_head(shape, &["test"]);
-    args.push("--tests".into());
-    args.push("--".into());
-    args.push("--include-ignored".into());
-    args.push("--list".into());
-    args
-}
-
-/// Whether `name`, as libtest's substring filter, selects every listed test of
-/// a package at or above [`WHOLE_SUITE_FLOOR`].
+/// it, judged by what the filter matches rather than how it looks. `listed` is
+/// what discovery found across the package's eligible harnesses, benchmarks
+/// included.
 fn matches_whole_suite(listed: &[String], name: &str) -> bool {
     listed.len() >= WHOLE_SUITE_FLOOR && listed.iter().all(|t| t.contains(name))
 }
-
-/// What a split run needs beyond the build shape.
-struct SplitRun<'a> {
-    project_root: &'a Path,
-    state_root: &'a Path,
-    env: &'a [(&'a str, &'a str)],
-    ceiling: Duration,
-    announce: bool,
-    repeat_state: &'a RepeatState,
-    buffered: bool,
-    /// The run's tag, qualified by the harness when given one.
-    tag: &'a dyn Fn(Option<&str>) -> String,
-}
-
-/// Run `name` in every test harness of the sweep, one cargo invocation each,
-/// and fold the results.
-///
-/// # Why one invocation per harness
-///
-/// One `cargo test -p PKG NAME` stops at the first harness with a failing test:
-/// the harnesses after it never run, and a mutation check reading "these tests
-/// went red" reads an incomplete list. `--no-fail-fast` is not the fix on its
-/// own. It keeps every harness in ONE libtest stream, and a harness that dies
-/// mid-test (an abort, a stack overflow - what a mutation produces) leaves its
-/// suite open with that test in flight. The next harness's `suite/started` is
-/// then indistinguishable from one a live test forged, so the per-test clock
-/// keeps billing the dead test and kills the next, healthy harness as its hang.
-///
-/// Running each harness in its own invocation makes every stream one process:
-/// a crash ends its own run, the next harness starts with a fresh tracker, and
-/// every failure (stdout verdicts and the `--nocapture` panics on stderr alike)
-/// belongs to the harness that printed it, so the same test name in two
-/// harnesses is two failures, not one.
-///
-/// The package set never changes (`-p PKG`, one package - see
-/// [`resolve_package`]), and with it fixed cargo resolves the same feature graph
-/// whichever target is selected: the harness each invocation runs is the one
-/// the prebuild compiled.
-fn run_split(
-    shape: &BuildShape<'_>,
-    name: &str,
-    targets: &[check_cmd::TestTarget],
-    ctx: &SplitRun<'_>,
-) -> Result<RunReport, DevError> {
-    if ctx.announce && !targets.is_empty() {
-        let template = test_argv(
-            shape.sweep,
-            shape.allow_args,
-            shape.pkg,
-            &["<HARNESS>".to_owned()],
-            name,
-            shape.jobs,
-            shape.debug,
-            false,
-        );
-        let labels: Vec<String> = targets.iter().map(check_cmd::TestTarget::label).collect();
-        output::run_msg(&format!(
-            "cargo {} (once per harness: {})",
-            template.join(" "),
-            labels.join(", ")
-        ));
-    }
-    let mut parts = Vec::new();
-    // Most harnesses contain no match and print nothing, so a split run can be
-    // silent for minutes after its only PASS - long enough to read as a hang.
-    // Say where the run is whenever it has been quiet for a while.
-    let mut quiet_since = std::time::Instant::now();
-    for (i, target) in targets.iter().enumerate() {
-        let label = target.label();
-        if ctx.announce && quiet_since.elapsed() >= SPLIT_HEARTBEAT {
-            println!(
-                "[test]    still running: harness {}/{} ({})",
-                i + 1,
-                targets.len(),
-                (ctx.tag)(Some(&label))
-            );
-            quiet_since = std::time::Instant::now();
-        }
-        let args = test_argv(
-            shape.sweep,
-            shape.allow_args,
-            shape.pkg,
-            &target.selector(),
-            name,
-            shape.jobs,
-            shape.debug,
-            false,
-        );
-        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-        let report = run_one(
-            &arg_refs,
-            ctx.project_root,
-            ctx.state_root,
-            ctx.env,
-            &OneRun {
-                tag: &(ctx.tag)(Some(&label)),
-                target: &label,
-                ceilings: ceilings_for(&None, ctx.ceiling),
-                announce: false,
-                quiet_no_match: true,
-            },
-            ctx.repeat_state,
-            ctx.buffered,
-        )?;
-        // The copy-pasteable line for the harness that failed; run 1 only, as
-        // every other invocation line is.
-        if ctx.announce && matches!(report.outcome, Outcome::Fail | Outcome::BuildFailed) {
-            output::error(&format!("failing command: cargo {}", args.join(" ")));
-        }
-        if report.outcome != Outcome::NoMatch {
-            quiet_since = std::time::Instant::now();
-        }
-        // A blown budget stops everything, the remaining harnesses included.
-        let stop = report.timed_out;
-        parts.push(report);
-        if stop {
-            break;
-        }
-    }
-    Ok(RunReport::merge(parts))
-}
-
-/// How long a split run may go without printing before it says which harness
-/// it has reached.
-const SPLIT_HEARTBEAT: Duration = Duration::from_secs(10);
 
 /// How one invocation is labelled and bounded.
 struct OneRun<'a> {
@@ -1064,9 +1075,10 @@ struct OneRun<'a> {
     ceilings: test_runner::Ceilings,
     /// Print the "test binaries built" framing line.
     announce: bool,
-    /// A split run's harness that matched nothing is the normal case: say
-    /// nothing, and let the sweep print one SKIP when no harness matched.
-    quiet_no_match: bool,
+    /// For a directly executed harness, how many tests discovery listed as
+    /// matching: the run must account for exactly that many. `None` for the
+    /// doc-only cargo run, which nothing enumerated.
+    expected: Option<usize>,
 }
 
 /// One sweep's cargo environment, plus the `--config` args that must ride its
@@ -1115,163 +1127,6 @@ fn lint_allow_flags(dev_config: &DevConfig) -> Vec<String> {
     dev_config.lints.as_ref().map_or_else(Vec::new, |l| {
         config::test_phase_allow_flags(&l.allow, &l.allow_exact)
     })
-}
-
-/// Resolve `<NAME>` to the one full test name `--timeout` will run exactly, or
-/// `None` when no `--timeout` was given (or this sweep matches nothing).
-///
-/// `--timeout` promises a per-test ceiling, so under it the process must be the
-/// unit of exactly one test - otherwise the promise is false, because a per-test
-/// clock read from libtest's output can only ever name a suspect (see
-/// `test_runner::Ceilings`). Resolving the *full* name is the load-bearing part:
-/// `--exact` applied to the substring the user typed would match nothing.
-///
-/// A sweep matching zero tests (feature-gated out) resolves to `None` and goes on
-/// to SKIP through the normal path.
-#[allow(clippy::too_many_arguments)]
-fn resolve_exact_for_timeout(
-    timeout: Option<u64>,
-    pkg: &str,
-    name: &str,
-    sweep: &ResolvedSweep,
-    env: &[(&str, &str)],
-    allow_args: &[String],
-    project_root: &Path,
-    debug: bool,
-) -> Result<Option<String>, DevError> {
-    if timeout.is_none() {
-        return Ok(None);
-    }
-    let matched = matching_test_names(pkg, name, sweep, env, allow_args, project_root, debug)?;
-    if matched.len() > 1 {
-        return Err(DevError::Config(format!(
-            "--timeout only applies to a single test, but `{name}` matches {} tests in sweep \
-             `{}`. Narrow it to one fully-qualified test name (e.g. `my_module::my_test`), or \
-             drop --timeout to run them all at the 20s ceiling.",
-            matched.len(),
-            sweep.label
-        )));
-    }
-    Ok(matched.into_iter().next())
-}
-
-fn matching_test_names(
-    pkg: &str,
-    name: &str,
-    sweep: &ResolvedSweep,
-    env: &[(&str, &str)],
-    allow_args: &[String],
-    project_root: &Path,
-    debug: bool,
-) -> Result<Vec<String>, DevError> {
-    // Doctest enumeration is possible but not wired up here yet. The claim
-    // this refusal used to make - that doctests cannot be enumerated because
-    // `--list` is a libtest flag and rustdoc has no listing contract - is
-    // false on a current nightly: rustdoc forwards its test arguments into
-    // libtest, which supports both `--list` and `--exact`, so a doc-only
-    // sweep can be enumerated once merging is disabled (rustdoc's own
-    // `--merge-doctests=no`, which reaches rustdoc through RUSTDOCFLAGS
-    // rather than through cargo's `--` split). Until that plumbing exists,
-    // refuse - but say which it is, so the next reader does not inherit a
-    // wrong reason for a right refusal.
-    if sweep.doc_only {
-        return Err(DevError::Config(format!(
-            "--timeout cannot apply within doc-only sweep '{}': brokkr does not enumerate \
-             doctests yet, so the single-test precondition cannot be checked. Drop --timeout, \
-             or use --sweep to run a non-doc sweep.",
-            sweep.label
-        )));
-    }
-    let mut args: Vec<String> = vec!["test".into()];
-    // The lane's pinned resolution, same as every cargo command `check`
-    // builds. This path is already one package per invocation (`-p pkg`
-    // below), so package mode's one-resolution-per-package rule is satisfied
-    // by construction and needs no loop here.
-    args.extend(sweep.unification_args());
-    args.extend(allow_args.iter().cloned());
-    if !debug {
-        args.push("--release".into());
-    }
-    args.extend(sweep.cargo_feature_args.iter().cloned());
-    args.push("-p".into());
-    args.push(pkg.into());
-    args.push(name.into());
-    args.push("--".into());
-    args.push("--include-ignored".into());
-    args.push("--list".into());
-
-    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let captured = cargo_with_deadline(&arg_refs, project_root, env, "test enumeration")?;
-    // A listing command that failed proves nothing about how many tests match.
-    // Returning an empty vec conflated "the build or the harness failed" with
-    // "enumeration succeeded and found nothing", so a compile error during the
-    // `--timeout` precondition check surfaced later as a puzzling "test not
-    // found" instead of the build failure that actually happened.
-    if !captured.status.success() {
-        let stderr = String::from_utf8_lossy(&captured.stderr);
-        return Err(DevError::Build(format!(
-            "could not enumerate tests in sweep '{}' - the listing command failed, so the \
-             single-test precondition --timeout needs cannot be established. This is a build or \
-             harness failure, not a missing test.\n{}",
-            sweep.label,
-            stderr.trim_end()
-        )));
-    }
-    // A listing that is not a libtest listing cannot establish the
-    // single-test precondition `--timeout` rides on. Refusing beats guessing:
-    // treating unrecognised output as "zero matches" would resolve to no exact
-    // name, silently fall back to the substring, and hand the user an
-    // authoritative-looking ceiling over an invocation that may run many tests.
-    let stdout = String::from_utf8_lossy(&captured.stdout);
-    listed_test_names(&stdout).ok_or_else(|| {
-        DevError::Config(format!(
-            "could not enumerate tests in sweep '{}': the listing carried no \
-             `N tests, M benchmarks` tally, so this target does not speak libtest's `--list` \
-             (a `harness = false` target, or a custom harness). --timeout needs enumeration to \
-             prove `{name}` names exactly one test. Drop --timeout, or use --sweep to pick a \
-             sweep whose targets are libtest harnesses.",
-            sweep.label
-        ))
-    })
-}
-
-/// The libtest `--list` entries that are runnable tests, by full name.
-///
-/// The list format is one `name: kind` line per entry, `kind` being `test` or
-/// `benchmark`. Names rather than a count, because the caller needs the resolved
-/// identity: a user's `--timeout` run is invoked with `--exact`, and `--exact`
-/// applied to the substring they typed would match nothing.
-///
-/// `None` when the output is not a libtest listing at all - no
-/// `N tests, M benchmarks` tally - which is a different fact from a listing with
-/// no matches. See `check_cmd::isolate::parse_list_output`, which draws the same
-/// distinction for the same reason.
-fn listed_test_names(stdout: &str) -> Option<Vec<String>> {
-    if !stdout.lines().any(|l| is_list_tally(l.trim())) {
-        return None;
-    }
-    Some(
-        stdout
-            .lines()
-            .filter_map(|l| l.trim_end().strip_suffix(": test"))
-            .map(str::to_owned)
-            .collect(),
-    )
-}
-
-/// The tally line libtest closes a `--list` with: `N tests, M benchmarks`,
-/// singularised at 1.
-fn is_list_tally(line: &str) -> bool {
-    let Some((tests, benches)) = line.split_once(", ") else {
-        return false;
-    };
-    let counted = |part: &str, noun: &str| {
-        let Some((n, word)) = part.split_once(' ') else {
-            return false;
-        };
-        n.parse::<u64>().is_ok() && (word == noun || word == format!("{noun}s"))
-    };
-    counted(tests, "test") && counted(benches, "benchmark")
 }
 
 /// Resolve one sweep's cargo profile for `brokkr test` to a `debug` bool,
@@ -1493,9 +1348,11 @@ fn select_sweep(
 /// that is flushed once the outcome is known - and dropped entirely when
 /// the failure set was already shown by an earlier run, leaving
 /// just the footer.
+#[allow(clippy::too_many_arguments)]
 fn run_one(
+    launch: test_runner::Launch<'_>,
     args: &[&str],
-    project_root: &Path,
+    cwd: &Path,
     state_root: &Path,
     env: &[(&str, &str)],
     shape: &OneRun<'_>,
@@ -1505,17 +1362,21 @@ fn run_one(
     let tag = shape.tag;
     let target = shape.target;
     let announce = shape.announce;
+    let direct = launch != test_runner::Launch::Cargo;
     let sink: Option<LineSink> = buffered.then(LineSink::default);
     let run = test_runner::streaming_run_libtest(
+        launch,
         args,
-        project_root,
+        cwd,
         state_root,
         env,
         shape.ceilings.clone(),
         // One harness per invocation already: nothing to isolate.
         false,
         make_stdout_forwarder(sink.clone()),
-        make_stderr_forwarder(sink.clone()),
+        // A direct run has no cargo compile phase: everything on its stderr
+        // is the test talking.
+        make_stderr_forwarder(sink.clone(), direct),
         move |elapsed| {
             if announce {
                 println!(
@@ -1535,7 +1396,10 @@ fn run_one(
     let parsed = cargo_filter::parse_test_output_with_stderr(&stdout_lines, &stderr_lines);
 
     let has_test_result = stdout_lines.iter().any(|l| l.starts_with("test result:"));
-    let has_compile_error = stderr_lines.iter().any(|l| stderr_indicates_compile_error(l));
+    // Only cargo compiles; a directly run harness printing `error: ...` is a
+    // test talking, never a build failure.
+    let has_compile_error =
+        !direct && stderr_lines.iter().any(|l| stderr_indicates_compile_error(l));
 
     // Display the test-runtime wall: total minus the cargo build phase
     // (which the `[test] test binaries built in ...s` line already
@@ -1546,20 +1410,7 @@ fn run_one(
     let wall = format!("{:.2}s", test_wall.as_secs_f64());
 
     if let LibtestOutcome::HungTest(hung) = &run.outcome {
-        let first = repeat_state.first_sighting(&format!("{target}|hung {}", hung.test));
-        flush_sink(sink, !first);
-        if first {
-            output::error(&test_runner::format_hung_test(hung, project_root));
-        }
-        println!(
-            "[test]    FAIL {tag} ({wall}) - hung test exceeded {}s",
-            hung.ceiling.as_secs()
-        );
-        std::io::stdout().flush().ok();
-        return Ok(RunReport::timed_out(
-            target,
-            format!("hung test exceeded {}s", hung.ceiling.as_secs()),
-        ));
+        return Ok(report_hung(shape, hung, &wall, cwd, repeat_state, sink));
     }
 
     if !has_test_result && has_compile_error {
@@ -1589,7 +1440,23 @@ fn run_one(
     // level: a crash, an abort, a panic outside any test. It is a failure of
     // its own, beside whatever tests it had already failed.
     if !run.captured.status.success() && (!parsed.is_complete() || failures.is_empty()) {
-        failures.push(harness_failure(target, &run.captured.status, &stderr_lines, &run.in_flight));
+        failures.push(harness_failure(
+            target,
+            &run.captured.status,
+            direct,
+            &stderr_lines,
+            &run.in_flight,
+        ));
+    }
+    // A failing harness is still held to its listing: three matched and one
+    // reported failing, in a complete stream, means two went missing - which a
+    // mutation check reading "what went red" needs to see beside the failure.
+    if !failures.is_empty()
+        && let Some(want) = shape.expected
+        && parsed.is_complete()
+        && parsed.accounted() != want
+    {
+        failures.push(discovery_mismatch(target, want, parsed.accounted()));
     }
     if !failures.is_empty() {
         // Suppress the streamed block when this exact failure set already
@@ -1600,19 +1467,17 @@ fn run_one(
         return Ok(RunReport { outcome: Outcome::Fail, timed_out: false, failures });
     }
 
-    // A split run's harness that exited cleanly without ever announcing a
-    // libtest suite is a target that does not speak libtest (`harness =
-    // false`): it ran, and matched nothing brokkr can count. The single
-    // invocation it used to share printed nothing for it either. A whole-
-    // package run keeps the stricter reading below, where silence fails.
-    if shape.quiet_no_match && parsed.started == 0 {
+    if let Some(want) = shape.expected
+        && let Some(report) = disagrees_with_discovery(tag, target, &wall, want, &parsed)
+    {
         flush_sink(sink, false);
-        return Ok(RunReport::bare(Outcome::NoMatch));
+        return Ok(report);
     }
 
-    // Zero tests ran: the name didn't match anything in this sweep. Print
-    // an informational SKIP; the caller decides whether this is a real
-    // error (all sweeps missed) or fine (feature-gated out of this one).
+    // Zero tests ran in the doc-only run (a directly run harness answered
+    // above): the name matched no doctest in this sweep. Print an
+    // informational SKIP; the caller decides whether this is a real error (all
+    // sweeps missed) or fine (feature-gated out of this one).
     //
     // Three guards, each for a way a zero can lie:
     //
@@ -1629,12 +1494,10 @@ fn run_one(
     //   say what it means rather than rely on a flag elsewhere staying put.
     if parsed.is_complete() && parsed.accounted() == 0 {
         flush_sink(sink, false);
-        if !shape.quiet_no_match {
-            println!(
-                "[test]    SKIP {tag} ({wall}) - no tests matched (likely feature-gated out of this sweep)"
-            );
-            std::io::stdout().flush().ok();
-        }
+        println!(
+            "[test]    SKIP {tag} ({wall}) - no tests matched (likely feature-gated out of this sweep)"
+        );
+        std::io::stdout().flush().ok();
         return Ok(RunReport::bare(Outcome::NoMatch));
     }
 
@@ -1656,6 +1519,72 @@ fn run_one(
     println!("[test]    PASS {tag} ({wall})");
     std::io::stdout().flush().ok();
     Ok(RunReport::bare(Outcome::Pass))
+}
+
+/// Report a run the watchdog killed for blowing its budget. The hang's
+/// diagnosis prints once per signature across `-N` repeats.
+fn report_hung(
+    shape: &OneRun<'_>,
+    hung: &test_runner::HungTest,
+    wall: &str,
+    cwd: &Path,
+    repeat_state: &RepeatState,
+    sink: Option<LineSink>,
+) -> RunReport {
+    let first = repeat_state.first_sighting(&format!("{}|hung {}", shape.target, hung.test));
+    flush_sink(sink, !first);
+    if first {
+        output::error(&test_runner::format_hung_test(hung, cwd));
+    }
+    println!(
+        "[test]    FAIL {} ({wall}) - hung test exceeded {}s",
+        shape.tag,
+        hung.ceiling.as_secs()
+    );
+    std::io::stdout().flush().ok();
+    RunReport::timed_out(shape.target, format!("hung test exceeded {}s", hung.ceiling.as_secs()))
+}
+
+/// The verdict for a directly run harness whose run does not account for
+/// exactly the `want` tests discovery listed as matching it, or `None` when it
+/// does.
+///
+/// The harness was chosen because discovery found the name in it, so zero is
+/// not a SKIP here: a run that then reports none - or a different number -
+/// disagrees with its own listing, and no verdict can rest on that. A stream
+/// that never finished reporting says so in its own words.
+fn disagrees_with_discovery(
+    tag: &str,
+    target: &str,
+    wall: &str,
+    want: usize,
+    parsed: &cargo_filter::ParsedTestResults,
+) -> Option<RunReport> {
+    if let cargo_filter::Completeness::Incomplete { reason } = &parsed.completeness {
+        return Some(report_incomplete(tag, target, wall, reason, parsed));
+    }
+    let got = parsed.accounted();
+    if got == want {
+        return None;
+    }
+    let failure = discovery_mismatch(target, want, got);
+    println!("[test]    FAIL {tag} ({wall}) - {}", failure.describe());
+    std::io::stdout().flush().ok();
+    Some(RunReport { outcome: Outcome::Fail, timed_out: false, failures: vec![failure] })
+}
+
+/// The failure a harness files when its run accounts for `got` tests where
+/// discovery matched `want` in it.
+fn discovery_mismatch(target: &str, want: usize, got: usize) -> Failure {
+    Failure {
+        target: target.to_owned(),
+        what: "run disagrees with discovery".to_owned(),
+        loc: None,
+        msg: Some(format!(
+            "discovery listed {} matching here, the run reported {got}",
+            output::count(want, "test")
+        )),
+    }
 }
 
 /// End the command because a test blew its time budget.
@@ -1748,30 +1677,37 @@ fn report_incomplete(
 
 /// A harness that failed as a process rather than through a test verdict.
 ///
-/// The exit detail comes from cargo's own `process didn't exit successfully:
-/// ... (signal: 6, SIGABRT: process abort signal)` line when there is one,
-/// since the status brokkr holds is cargo's (101), not the harness's. The last
-/// test the tracker saw start is named as the SUSPECT only: it is read from the
-/// stream the test itself writes to, so a lost start record or a record a test
-/// printed can move it, and a crash before the first start names nothing.
+/// For a directly run harness (`direct`) the status brokkr holds is the
+/// harness's own, so the detail is read from it. Under cargo the status is
+/// cargo's (101), so the detail comes from cargo's `process didn't exit
+/// successfully: ... (signal: 6, SIGABRT: process abort signal)` line when
+/// there is one. The last test the tracker saw start is named as the SUSPECT
+/// only: it is read from the stream the test itself writes to, so a lost start
+/// record or a record a test printed can move it, and a crash before the first
+/// start names nothing.
 fn harness_failure(
     target: &str,
     status: &std::process::ExitStatus,
+    direct: bool,
     stderr_lines: &[&str],
     in_flight: &[String],
 ) -> Failure {
-    let detail = stderr_lines
-        .iter()
-        .rev()
-        .find(|l| l.contains("process didn't exit successfully:"))
-        .and_then(|l| {
-            let open = l.rfind(" (")?;
-            l[open + 2..].strip_suffix(')').map(str::to_owned)
-        })
-        .unwrap_or_else(|| match status.code() {
-            Some(code) => format!("cargo exited with code {code}"),
-            None => "cargo was killed by a signal".to_owned(),
-        });
+    let detail = if direct {
+        describe_harness_status(status)
+    } else {
+        stderr_lines
+            .iter()
+            .rev()
+            .find(|l| l.contains("process didn't exit successfully:"))
+            .and_then(|l| {
+                let open = l.rfind(" (")?;
+                l[open + 2..].strip_suffix(')').map(str::to_owned)
+            })
+            .unwrap_or_else(|| match status.code() {
+                Some(code) => format!("cargo exited with code {code}"),
+                None => "cargo was killed by a signal".to_owned(),
+            })
+    };
     let msg = (!in_flight.is_empty()).then(|| {
         format!(
             "last test seen starting: {} (a suspect - named by the harness's own output)",
@@ -1783,6 +1719,30 @@ fn harness_failure(
         what: format!("test harness failed ({detail})"),
         loc: None,
         msg,
+    }
+}
+
+/// A directly run harness's exit status in cargo's words (`signal: 6,
+/// SIGABRT`, `exit status: 101`), so a crash reads the same whichever way the
+/// harness was launched.
+fn describe_harness_status(status: &std::process::ExitStatus) -> String {
+    use std::os::unix::process::ExitStatusExt;
+    if let Some(sig) = status.signal() {
+        let name = match sig {
+            libc::SIGABRT => ", SIGABRT",
+            libc::SIGSEGV => ", SIGSEGV",
+            libc::SIGBUS => ", SIGBUS",
+            libc::SIGILL => ", SIGILL",
+            libc::SIGFPE => ", SIGFPE",
+            libc::SIGKILL => ", SIGKILL",
+            libc::SIGTERM => ", SIGTERM",
+            _ => "",
+        };
+        return format!("signal: {sig}{name}");
+    }
+    match status.code() {
+        Some(code) => format!("exit status: {code}"),
+        None => "ended without an exit status".to_owned(),
     }
 }
 
@@ -1893,7 +1853,14 @@ impl StdoutCondenser {
     }
 }
 
-fn make_stderr_forwarder(sink: Option<LineSink>) -> impl FnMut(&str) + Send + 'static {
+/// `direct` starts the forwarder in the test phase: a directly executed
+/// harness has no cargo in front of it, so no compile chatter and no
+/// `Running ...` line will ever arrive to switch it over - without this its
+/// whole stderr was filtered as compile output.
+fn make_stderr_forwarder(
+    sink: Option<LineSink>,
+    direct: bool,
+) -> impl FnMut(&str) + Send + 'static {
     // Cargo emits compile noise (warnings, errors, progress) on stderr before
     // launching the test binary. The test's own eprintln! also lands here
     // once the binary runs. Split on the first "Running tests/..." line:
@@ -1904,7 +1871,7 @@ fn make_stderr_forwarder(sink: Option<LineSink>) -> impl FnMut(&str) + Send + 's
     // and the test-phase noise lines (`note: run with RUST_BACKTRACE`,
     // cargo's `error: test failed, to rerun pass ...` - brokkr *is* the
     // rerun tool).
-    let mut in_test_phase = false;
+    let mut in_test_phase = direct;
     let mut in_compile_block = false;
     let mut prev_blank = true;
     move |line| {
@@ -2211,14 +2178,28 @@ mod tests {
             "Caused by:",
             "  process didn't exit successfully: `/t/deps/cli-1 x` (signal: 6, SIGABRT: process abort signal)",
         ];
-        let f = harness_failure("test:cli", &status, &stderr, &["cli::overflows".to_owned()]);
+        let f =
+            harness_failure("test:cli", &status, false, &stderr, &["cli::overflows".to_owned()]);
         assert_eq!(f.what, "test harness failed (signal: 6, SIGABRT: process abort signal)");
         let msg = f.msg.expect("a suspect");
         assert!(msg.contains("cli::overflows") && msg.contains("suspect"), "{msg}");
 
-        let bare = harness_failure("test:cli", &status, &[], &[]);
+        let bare = harness_failure("test:cli", &status, false, &[], &[]);
         assert_eq!(bare.what, "test harness failed (cargo exited with code 101)");
         assert!(bare.msg.is_none(), "no start seen, no suspect");
+    }
+
+    /// A directly run harness's status is its own, so the detail is read
+    /// from it - never from cargo lines that a direct run does not have.
+    #[test]
+    fn a_direct_harness_failure_reads_its_own_status() {
+        use std::os::unix::process::ExitStatusExt;
+        let aborted = std::process::ExitStatus::from_raw(libc::SIGABRT);
+        let f = harness_failure("test:cli", &aborted, true, &[], &[]);
+        assert_eq!(f.what, "test harness failed (signal: 6, SIGABRT)");
+        let exited = std::process::ExitStatus::from_raw(101 << 8);
+        let f = harness_failure("test:cli", &exited, true, &[], &[]);
+        assert_eq!(f.what, "test harness failed (exit status: 101)");
     }
 
     /// Only a single package is ever selected.
@@ -2232,9 +2213,9 @@ mod tests {
 
     /// The prebuild compiles what a named `cargo test -p PKG NAME` compiles -
     /// every test target, not cargo's default set, which would also build
-    /// every example - and each run selects exactly one harness.
+    /// every example.
     #[test]
-    fn the_prebuild_selects_the_test_targets_and_each_run_one_harness() {
+    fn the_prebuild_selects_the_test_targets() {
         let sweep = ResolvedSweep::default();
         let shape = BuildShape { sweep: &sweep, allow_args: &[], pkg: "pkg", jobs: None, debug: true };
         let pre = prebuild_argv(&shape);
@@ -2242,9 +2223,38 @@ mod tests {
             pre,
             ["test", "--no-run", "--message-format=json-render-diagnostics", "-p", "pkg", "--tests"]
         );
-        let run = test_argv(&sweep, &[], "pkg", &["--test".into(), "cli".into()], "x", None, true, false);
+    }
+
+    /// A directly run harness gets the filter first and the focused-run flags;
+    /// `--exact` only when the caller resolved a full name.
+    #[test]
+    fn direct_args_carry_the_filter_and_exact_only_on_request() {
+        let plain = direct_libtest_args("some::test", false);
+        assert_eq!(
+            plain,
+            [
+                "some::test",
+                "--include-ignored",
+                "--nocapture",
+                "--test-threads=1",
+                "-Z",
+                "unstable-options",
+                "--format",
+                "json"
+            ]
+        );
+        let exact = direct_libtest_args("some::test", true);
+        assert_eq!(exact.last().map(String::as_str), Some("--exact"));
+    }
+
+    /// The doc-only run is `cargo test --doc NAME` with the same libtest half.
+    #[test]
+    fn the_doc_only_run_shares_the_libtest_half() {
+        let sweep = ResolvedSweep { doc_only: true, ..ResolvedSweep::default() };
+        let run = test_argv(&sweep, &[], "pkg", "x", None, true);
         let sep = run.iter().position(|a| a == "--").expect("separator");
-        assert_eq!(&run[..sep], ["test", "-p", "pkg", "--test", "cli", "x"]);
+        assert_eq!(&run[..sep], ["test", "-p", "pkg", "--doc", "x"]);
+        assert_eq!(&run[sep + 1..], &direct_libtest_args("x", false)[1..]);
     }
 
     #[test]
@@ -2698,44 +2708,6 @@ include_ignored = false
         assert_eq!(sweeps[0].label, "all");
     }
 
-    #[test]
-    fn count_listed_tests_counts_only_tests() {
-        // libtest --list output: one `name: kind` line per entry, then a
-        // trailing summary line we must not count.
-        let listing = "\
-foo::bar: test
-foo::baz: test
-benches::throughput: benchmark
-3 tests, 1 benchmark
-";
-        // Names, not a count: `--timeout` invokes the resolved identity with
-        // `--exact`, and `--exact` on the substring the user typed matches
-        // nothing.
-        assert_eq!(
-            listed_test_names(listing).expect("a real libtest listing"),
-            vec!["foo::bar", "foo::baz"]
-        );
-    }
-
-    #[test]
-    fn listed_test_names_empty_when_no_matches() {
-        assert_eq!(
-            listed_test_names("0 tests, 0 benchmarks\n"),
-            Some(Vec::new()),
-            "an empty libtest listing is still a listing"
-        );
-    }
-
-    /// Not a listing at all must not read as a listing with no matches: the
-    /// first cannot establish `--timeout`'s single-test precondition, the second
-    /// legitimately means "feature-gated out of this sweep".
-    #[test]
-    fn listed_test_names_rejects_output_that_is_not_a_listing() {
-        assert_eq!(listed_test_names(""), None);
-        assert_eq!(listed_test_names("my own harness ran fine\n"), None);
-        assert_eq!(listed_test_names("foo::bar: test\n"), None, "no tally: truncated");
-    }
-
     fn names(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| (*s).to_owned()).collect()
     }
@@ -2767,38 +2739,6 @@ benches::throughput: benchmark
         assert!(listed.len() < WHOLE_SUITE_FLOOR);
         assert!(!matches_whole_suite(&listed, "a::"));
         assert!(!matches_whole_suite(&[], "anything"), "an empty package matches nothing");
-    }
-
-    /// The breadth listing addresses exactly what the prebuild built - same
-    /// head, `--tests` - and carries no filter, so it sees the whole package.
-    #[test]
-    fn the_whole_suite_listing_mirrors_the_prebuild_selection() {
-        let sweep = ResolvedSweep::default();
-        let shape = BuildShape { sweep: &sweep, allow_args: &[], pkg: "pkg", jobs: None, debug: true };
-        let list = whole_suite_list_argv(&shape);
-        let built = prebuild_argv(&shape);
-        let sep = list.iter().position(|a| a == "--").expect("separator");
-        assert_eq!(&list[sep + 1..], ["--include-ignored", "--list"]);
-        assert!(list[..sep].iter().any(|a| a == "--tests"), "{list:?}");
-        // Everything cargo-side but the build-only flags is shared with the prebuild.
-        let cargo_side: Vec<&String> = list[1..sep].iter().collect();
-        let built_side: Vec<&String> =
-            built[1..].iter().filter(|a| !a.starts_with("--no-run") && !a.starts_with("--message-format")).collect();
-        assert_eq!(cargo_side, built_side);
-    }
-
-    /// `--exact` only rides along when the caller resolved a full name.
-    #[test]
-    fn exact_is_only_added_when_requested() {
-        let sweep = ResolvedSweep::default();
-        let plain = test_argv(&sweep, &[], "pkg", &[], "some::test", None, true, false);
-        assert!(!plain.iter().any(|a| a == "--exact"), "{plain:?}");
-        let exact = test_argv(&sweep, &[], "pkg", &[], "some::test", None, true, true);
-        assert!(exact.iter().any(|a| a == "--exact"), "{exact:?}");
-        // And it lands after the libtest separator, not among cargo's own args.
-        let sep = exact.iter().position(|a| a == "--").expect("separator");
-        let at = exact.iter().position(|a| a == "--exact").expect("exact");
-        assert!(at > sep, "--exact must be a libtest arg: {exact:?}");
     }
 
     /// The pre-build compiles the lane like the test run does: the pinned

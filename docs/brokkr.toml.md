@@ -1129,13 +1129,13 @@ the binaries concurrently collapses that sum to a maximum.
 
 **The fan-out executes the prebuilt binaries directly** - one prebuild, then
 each test executable runs under brokkr's reconstruction of cargo's launch
-contract (package-root cwd, loader path, `[env]` config, `OUT_DIR`,
-`CARGO_PKG_*`, runtime `CARGO_BIN_EXE_*`; see `brokkr man check` on parallel
-test binaries). No cargo re-entry means the lane is sound on every selection
-shape, `test_exclude_packages` included, and touches cargo's build lock only
-once. Two consequences: a configured target runner
-(`[target.<triple>].runner`) refuses the lane rather than being silently
-bypassed, and forwarded cargo args that only cargo-mediated execution can
+contract (package-root cwd, loader path, `[env]` config, build-script
+`rustc-env`, `CARGO_PKG_*`, runtime `CARGO_BIN_EXE_*` - not `OUT_DIR`, which
+cargo gives build scripts and rustdoc, never a test; see `brokkr man check` on direct execution). No
+cargo re-entry means the lane is sound on every selection shape,
+`test_exclude_packages` included, and touches cargo's build lock only once. Two
+consequences: a configured target runner (`[target.<triple>].runner`) or build
+target refuses the lane rather than being silently bypassed, and forwarded cargo args that only cargo-mediated execution can
 honour (`--no-run`, `--target`, `--config`, `--manifest-path`,
 `--target-dir`) are rejected on a parallel sweep.
 

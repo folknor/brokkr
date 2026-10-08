@@ -52,6 +52,16 @@ dropping a guard:
 If done, it wants an explicit "protected execution" path for measurement users
 rather than a quiet change to `run`.
 
+## Open: should a focused `brokkr test` skip package-pinned sweeps by default? (2026-10-08)
+
+Reported from broadarrow once focused runs stopped paying a cargo invocation per
+harness: a focused daemon test still pays a second full build (about 35s) for
+its `feature_unification = "package"` install-shape sweep, now most of the run's
+wall time. The rebuild is correct - that sweep exists to test that build shape.
+Skipping it by default would make a focused run silently cover fewer shapes than
+`check` does, so this is a policy question, not a fix. Today `--sweep LABEL`
+already narrows a run to one sweep.
+
 ## Structural debt (last audited 2026-04-17.)
 
 The high-impact items have been worked off. What's listed below is

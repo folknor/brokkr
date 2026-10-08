@@ -801,6 +801,7 @@ fn run_one_test_sweep(
         (run.captured, hung, run.timed_out, run.completed)
     } else {
         let run = test_runner::streaming_run_libtest(
+            test_runner::Launch::Cargo,
             &arg_refs,
             project_root,
             state_root,
@@ -2524,7 +2525,6 @@ warning: z [too_many_lines]
             ignored,
             filtered_out,
             suites,
-            started: suites,
             duration: None,
             completeness: cargo_filter::Completeness::Complete,
         }

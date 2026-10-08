@@ -15,28 +15,59 @@
 /// One test executable and its owning package, from the build's artifact
 /// stream.
 #[derive(Debug, Clone)]
-struct TestBinary {
-    package: String,
+pub(crate) struct TestBinary {
+    pub(crate) package: String,
     /// The full cargo package id - the key the runtime index is filed under,
     /// because package *names* are ambiguous across sources and versions.
     package_id: String,
     /// Target name (`--test <target>` filterable for integration tests).
-    target: String,
+    pub(crate) target: String,
     /// `"test"` for integration targets, `"lib"`/`"bin"` for unit-test
     /// harnesses.
     kind: String,
-    executable: String,
+    pub(crate) executable: String,
     /// The owning package's root (its `Cargo.toml`'s directory). Cargo runs
     /// test binaries with this as cwd, so direct execution and listing must
     /// too - a fixture test doing `Path::new("tests/fixtures/x")` passes
     /// under cargo and fails from the workspace root.
-    manifest_dir: PathBuf,
+    pub(crate) manifest_dir: PathBuf,
+}
+
+/// A `TestBinary` for other modules' unit tests, which cannot name the
+/// private fields.
+#[cfg(test)]
+pub(crate) fn test_binary_for_tests(package: &str, kind: &str, target: &str) -> TestBinary {
+    TestBinary {
+        package: package.into(),
+        package_id: format!("path+file:///x/{package}#{package}@0.1.0"),
+        target: target.into(),
+        kind: kind.into(),
+        executable: format!("/t/debug/deps/{target}-1"),
+        manifest_dir: PathBuf::from(format!("/x/{package}")),
+    }
+}
+
+impl TestBinary {
+    /// The target kind cargo's selectors answer to: `lib` for every library
+    /// flavour (`rlib`, `proc-macro`, ...), else the kind itself.
+    pub(crate) fn selector_kind(&self) -> &str {
+        selector_kind_of(&self.kind)
+    }
+
+    /// `kind:target`, how a failure names the harness it came from.
+    pub(crate) fn label(&self) -> String {
+        format!("{}:{}", self.selector_kind(), self.target)
+    }
 }
 
 /// What one package's build script contributed, from the prebuild's
 /// `build-script-executed` messages. Cargo supplies all three to the test
 /// processes it launches; direct execution reconstructs them from here.
-#[derive(Debug, Clone, Default)]
+///
+/// `out_dir` is kept for identity only - it is what tells two runs of one
+/// package's build script apart - and is never exported: cargo sets `OUT_DIR`
+/// for build scripts and rustdoc, not for the test processes it launches.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct BuildScriptOut {
     out_dir: Option<String>,
     /// `cargo::rustc-env=K=V` pairs, exported to the test process.
@@ -49,8 +80,13 @@ struct BuildScriptOut {
 /// themselves, keyed by full package id: build-script output and the
 /// non-test bin executables that back runtime `CARGO_BIN_EXE_<name>` reads.
 #[derive(Debug, Clone, Default)]
-struct BuildRuntimeIndex {
-    build_scripts: std::collections::HashMap<String, BuildScriptOut>,
+pub(crate) struct BuildRuntimeIndex {
+    /// Every distinct run of each package's build script. Usually one; a
+    /// package built twice in one stream (for the host and for the target, or
+    /// under two feature sets) has one per build, and the stream does not say
+    /// which one a test executable linked against - so the envelope uses them
+    /// only where they agree, rather than letting the last one silently win.
+    build_scripts: std::collections::HashMap<String, Vec<BuildScriptOut>>,
     /// package id -> (bin target name, executable path). Cargo 1.94+ exposes
     /// `CARGO_BIN_EXE_<name>` to test processes at *runtime*, not only via
     /// `env!`, so the fan-out must be able to reproduce it.
@@ -62,7 +98,14 @@ impl BuildRuntimeIndex {
     /// package; their indexes union, and a duplicate key carries the same
     /// facts, so last-wins is harmless).
     fn merge(&mut self, other: BuildRuntimeIndex) {
-        self.build_scripts.extend(other.build_scripts);
+        for (k, runs) in other.build_scripts {
+            let slot = self.build_scripts.entry(k).or_default();
+            for run in runs {
+                if !slot.contains(&run) {
+                    slot.push(run);
+                }
+            }
+        }
         for (k, v) in other.bin_exes {
             let slot = self.bin_exes.entry(k).or_default();
             for pair in v {
@@ -73,19 +116,17 @@ impl BuildRuntimeIndex {
         }
     }
 
-    /// Every `rustc-link-search` directory any build script emitted, in
-    /// stream order - the loader-path head, matching what cargo adds when it
-    /// runs test binaries itself.
+    /// Every `rustc-link-search` directory any build script emitted, sorted
+    /// and deduplicated - cargo keeps these in a `BTreeSet`, so its loader
+    /// path is ordered by path, not by which build script ran first.
     fn all_linked_paths(&self) -> Vec<String> {
-        let mut out = Vec::new();
-        for bs in self.build_scripts.values() {
-            for p in &bs.linked_paths {
-                if !out.contains(p) {
-                    out.push(p.clone());
-                }
-            }
-        }
-        out
+        let set: std::collections::BTreeSet<&String> = self
+            .build_scripts
+            .values()
+            .flatten()
+            .flat_map(|bs| bs.linked_paths.iter())
+            .collect();
+        set.into_iter().cloned().collect()
     }
 }
 
@@ -234,16 +275,21 @@ fn parse_test_binaries(stdout: &str) -> (Vec<TestBinary>, BuildRuntimeIndex, boo
         };
 
         if a.reason == "build-script-executed" {
+            let run = BuildScriptOut {
+                out_dir: a.out_dir,
+                env: a.env,
+                // `linked_paths` entries may carry a `KIND=` prefix
+                // (`native=/path`); the loader path wants the bare directory.
+                linked_paths: a
+                    .linked_paths
+                    .iter()
+                    .map(|p| p.split_once('=').map_or(p.as_str(), |(_, path)| path).to_owned())
+                    .collect(),
+            };
             let slot = index.build_scripts.entry(a.package_id).or_default();
-            slot.out_dir = a.out_dir;
-            slot.env = a.env;
-            // `linked_paths` entries may carry a `KIND=` prefix
-            // (`native=/path`); the loader path wants the bare directory.
-            slot.linked_paths = a
-                .linked_paths
-                .iter()
-                .map(|p| p.split_once('=').map_or(p.as_str(), |(_, path)| path).to_owned())
-                .collect();
+            if !slot.contains(&run) {
+                slot.push(run);
+            }
             continue;
         }
         if a.reason != "compiler-artifact" {
@@ -282,26 +328,6 @@ fn parse_test_binaries(stdout: &str) -> (Vec<TestBinary>, BuildRuntimeIndex, boo
     (out, index, saw_build_finished)
 }
 
-/// One test harness of a package, as `brokkr test` addresses it: the target's
-/// kind and name, which is all [`target_selector`] needs.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct TestTarget {
-    pub(crate) kind: String,
-    pub(crate) target: String,
-}
-
-impl TestTarget {
-    /// The cargo selector that runs this harness alone.
-    pub(crate) fn selector(&self) -> Vec<String> {
-        target_selector(&self.kind, &self.target)
-    }
-
-    /// `kind:target`, how a failure names the harness it came from.
-    pub(crate) fn label(&self) -> String {
-        format!("{}:{}", selector_kind_of(&self.kind), self.target)
-    }
-}
-
 /// The unit kind a harness answers to under cargo's selectors: its own kind for
 /// the four named kinds, and `lib` for everything else (`rlib`, `proc-macro`,
 /// `cdylib`, ... are all the library harness).
@@ -313,31 +339,28 @@ fn selector_kind_of(kind: &str) -> &str {
 }
 
 /// The test harnesses in a `cargo test --no-run --message-format=json`
-/// artifact stream, in the order cargo runs them: by target kind (lib, bin,
-/// test, example, bench), then by name. For a one-package selection these are
-/// all that package's - dependencies never reach the stream as test-profile
-/// executables. `None` when the stream was not recognisably cargo's - see
-/// [`parse_test_binaries`] for why that is not the same answer as "no
-/// harnesses".
-pub(crate) fn test_targets(stdout: &str) -> Option<Vec<TestTarget>> {
-    let (binaries, _, recognised) = parse_test_binaries(stdout);
+/// artifact stream, in the order cargo runs them (by target kind - lib, bin,
+/// test, example, bench - then by name), plus the runtime index the same
+/// stream carries for executing them directly. For a one-package selection
+/// these are all that package's - dependencies never reach the stream as
+/// test-profile executables. `None` when the stream was not recognisably
+/// cargo's - see [`parse_test_binaries`] for why that is not the same answer
+/// as "no harnesses".
+pub(crate) fn prebuilt_harnesses(stdout: &str) -> Option<(Vec<TestBinary>, BuildRuntimeIndex)> {
+    let (mut binaries, index, recognised) = parse_test_binaries(stdout);
     if !recognised {
         return None;
     }
-    let rank = |k: &str| match selector_kind_of(k) {
+    let rank = |b: &TestBinary| match b.selector_kind() {
         "lib" => 0,
         "bin" => 1,
         "test" => 2,
         "example" => 3,
         _ => 4,
     };
-    let mut out: Vec<TestTarget> = binaries
-        .into_iter()
-        .map(|b| TestTarget { kind: b.kind, target: b.target })
-        .collect();
-    out.sort_by(|a, b| rank(&a.kind).cmp(&rank(&b.kind)).then_with(|| a.target.cmp(&b.target)));
-    out.dedup();
-    Some(out)
+    binaries.sort_by(|a, b| rank(a).cmp(&rank(b)).then_with(|| a.target.cmp(&b.target)));
+    binaries.dedup_by(|a, b| a.executable == b.executable);
+    Some((binaries, index))
 }
 
 /// Extract the package name from a cargo `package_id`, across the
@@ -458,19 +481,29 @@ fn binary_list(
     } else {
         binary.manifest_dir.as_path()
     };
-    // Own process group, so a deadline kill takes anything the binary started
-    // with it; the command's `SigtermGuard` forwards an interrupt to the group.
-    let run = output::run_captured_with_env_and_deadline(
+    // Launched as a test run is (own process group, run token, hold
+    // capability), with its output bounded after exit: see `run_listing`.
+    let run = crate::test_runner::run_listing(
         &binary.executable,
         &args,
         cwd,
         &env,
         crate::test_runner::TEST_TIMEOUT,
-        None,
-        true,
     )?;
-    let captured = run.captured;
-    if run.killed_on_deadline {
+    if run.unsettled {
+        output::error(&format!(
+            "failing command: {} {}",
+            binary.executable,
+            args.join(" ")
+        ));
+        output::error(
+            "the listing's output did not close after it exited - something it started still \
+             holds the pipe - so the listing may be truncated and is not used",
+        );
+        return Ok(None);
+    }
+    let captured = run;
+    if captured.timed_out {
         output::error(&format!(
             "failing command: {} {}",
             binary.executable,
@@ -499,7 +532,8 @@ fn binary_list(
     // universe it never saw - and a green audit is taken as evidence.
     let Some(names) = parse_list_output(&String::from_utf8_lossy(&captured.stdout)) else {
         output::error(&format!(
-            "{} did not produce a libtest listing (no `N tests, M benchmarks` tally). A target \
+            "{} did not produce a complete libtest listing (no `N tests, M benchmarks` tally, or \
+             one that disagrees with the entries listed above it). A target \
              built with `harness = false`, or any custom harness that ignores `--list`, cannot be \
              enumerated - so it cannot be audited or run through the isolated lane. Exclude the \
              target from this sweep, or give it a libtest harness.",
@@ -709,7 +743,9 @@ mod binaries_tests {
         );
         let (bins, index, _) = parse_test_binaries(stdout);
         assert!(bins.is_empty());
-        let bs = index.build_scripts.get("path+file:///x/a#pkg-a@0.1.0").unwrap();
+        let runs = index.build_scripts.get("path+file:///x/a#pkg-a@0.1.0").unwrap();
+        assert_eq!(runs.len(), 1);
+        let bs = &runs[0];
         assert_eq!(bs.out_dir.as_deref(), Some("/t/build/pkg-a/out"));
         assert_eq!(bs.env, vec![("GENERATED_ENDPOINT".to_owned(), "svc".to_owned())]);
         // The `native=` prefix is stripped; a bare path passes through.
@@ -731,12 +767,11 @@ mod binaries_tests {
         }
     }
 
-    // `brokkr test` runs each harness of its package in its own cargo
-    // invocation, in cargo's own order, and selects each by the selector that
-    // actually reaches it - including examples and benches with `test = true`,
-    // which `--lib` would silently miss.
+    // `brokkr test` runs the harnesses of its package in cargo's own order -
+    // including examples and benches with `test = true`, which a lib-only view
+    // would silently miss.
     #[test]
-    fn package_targets_come_back_in_cargo_order_with_their_selectors() {
+    fn package_harnesses_come_back_in_cargo_order() {
         let art = |pkg: &str, name: &str, kind: &str| {
             format!(
                 r#"{{"reason":"compiler-artifact","package_id":"path+file:///x/{pkg}#{pkg}@0.1.0","manifest_path":"/x/{pkg}/Cargo.toml","target":{{"name":"{name}","kind":["{kind}"]}},"profile":{{"test":true}},"executable":"/t/deps/{name}-1"}}"#
@@ -751,13 +786,11 @@ mod binaries_tests {
             r#"{"reason":"build-finished","success":true}"#.to_owned(),
         ]
         .join("\n");
-        let targets = super::test_targets(&stdout).unwrap();
-        let labels: Vec<String> = targets.iter().map(super::TestTarget::label).collect();
+        let (harnesses, _) = super::prebuilt_harnesses(&stdout).unwrap();
+        let labels: Vec<String> = harnesses.iter().map(TestBinary::label).collect();
         assert_eq!(labels, vec!["lib:a", "bin:tool", "test:alpha", "test:zeta", "example:demo"]);
-        assert_eq!(targets[0].selector(), vec!["--lib"]);
-        assert_eq!(targets[4].selector(), vec!["--example", "demo"]);
 
-        assert!(super::test_targets("").is_none(), "silence is not a stream");
+        assert!(super::prebuilt_harnesses("").is_none(), "silence is not a stream");
     }
 
     #[test]

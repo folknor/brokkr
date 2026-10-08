@@ -548,7 +548,7 @@ fn run_one_binary(
 ) -> Result<BinaryRun, DevError> {
     let args = direct_libtest_args(sweep, slots, libtest_extra)?;
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let (cwd, env) = runtime.envelope(binary, env_refs);
+    let (cwd, env) = runtime.envelope(binary, env_refs)?;
     let cwd = if cwd.as_os_str() == "." { project_root.to_path_buf() } else { cwd };
     let env_pairs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
     let started = Instant::now();
@@ -651,7 +651,7 @@ fn run_parallel_sweep(
     // A configured target runner means cargo would wrap the executables;
     // direct execution would silently bypass the wrapper, so the lane
     // refuses before anything runs.
-    refuse_configured_runner(project_root)?;
+    refuse_configured_runner(project_root, &env_refs)?;
     let cli_scope: Vec<String> = packages.iter().map(|p| (*p).to_owned()).collect();
     let mut all: Vec<TestBinary> = Vec::new();
     let mut runtime_index = BuildRuntimeIndex::default();

@@ -1709,8 +1709,11 @@ a marker the test's own output glued itself onto. `print!("hi")` arrived as
 and the watchdog blamed the wrong test; `println!("ok")` did the mirror image,
 clearing pending early and hiding a hang. Events state what that had to guess.
 
-The whole-sweep ceiling (30 min) is a backstop for a wedge the per-test cap cannot
-charge to any test; it kills the process group and stops the run. Both are hard:
+The whole-sweep wall backstop (`PARALLEL_SWEEP_TIMEOUT`) covers a wedge the
+per-test cap cannot charge to any test; it kills the process group and stops the
+run. It is the bound only for a caller that arms no phase watchdog: under
+`check` and `brokkr test` the `test` phase ceiling always fires first (see
+"Time ceilings"). Both are hard:
 see "What the cap can and cannot prove" for why a lost record can blur the *name*
 without weakening the cap. This lane is for large workspaces where serial execution is
 dominated by a few wall-clock-heavy tests (live/network/multi-second lifecycle)
@@ -1816,21 +1819,38 @@ recompile a second variant of the graph serialized on cargo's build lock, and
 run a different build than the plan described. Direct execution makes graph
 identity structural: the executables the prebuild emitted are what run.
 
+#### Direct execution
+
 Cargo does more than exec a test binary, so brokkr reproduces its launch
-contract per binary (`src/check_cmd/direct_runtime.rs`): cwd = the owning
-package's root, the dynamic-loader path in cargo's order (build-script
-link-search dirs, the exe's deps and profile dirs, the toolchain libdir, the
-inherited tail), `[env]` from the cargo config chain with `force`/`relative`
+contract per binary (`src/check_cmd/direct_runtime.rs`, read against cargo's
+`Compilation::fill_env`): cwd = the owning package's root; the dynamic-loader
+path in cargo's order - the build-script link-search dirs that lie inside the
+output dir (`target/<profile>`, found from where the executable sits, in either
+the `deps/` or the newer `build/<pkg>/<hash>/` layout), sorted; the output dir;
+the deps dirs; the toolchain libdir; then the inherited value (used alone when
+it already starts with cargo's entries). A link-search dir outside the output
+tree is left out, as cargo leaves it out, because it is likely to shadow a
+system library. Then `[env]` from the cargo config chain with `force`/`relative`
 semantics, `CARGO_PKG_*` / `CARGO_MANIFEST_DIR` / `CARGO_MANIFEST_PATH` from
 cargo metadata (absent manifest fields export as empty, matching cargo),
-`OUT_DIR` and build-script `rustc-env` values from the prebuild's
-`build-script-executed` messages, runtime `CARGO_BIN_EXE_<name>` for the
-package's own bins, and `CARGO`. Cargo-owned values are applied last, so a
-sweep's `env` cannot forge them. Two refusals keep the direct launch honest:
-a configured target runner (`[target.<triple>].runner` or
-`CARGO_TARGET_<TRIPLE>_RUNNER` - a qemu/wine/valgrind wrapper direct
-execution would silently bypass) refuses both direct-execution lanes (this one
-and the process-isolated one) at resolution time, and on this lane forwarded
+build-script `rustc-env` values from the prebuild's `build-script-executed`
+messages, runtime `CARGO_BIN_EXE_<name>` for the package's own bins, and
+`CARGO` - the cargo executable itself, resolved through rustup when rustup is
+the `cargo` on PATH, since cargo exports its own path, not the proxy's. **Not**
+`OUT_DIR`: cargo exports it to build scripts and rustdoc only, never to a test
+process it launches, so a runtime read of it fails under cargo and must fail
+here too. A package whose build script ran more than once in the build with
+different `rustc-env` output (built for two targets, or under two feature sets)
+refuses the envelope, since the stream does not say which run the executable
+linked against. Cargo-owned values are applied last, so a sweep's `env` cannot
+forge them. Two refusals keep the direct launch honest: a configured target
+runner (`[target.<triple>].runner` or `CARGO_TARGET_<TRIPLE>_RUNNER` - a
+qemu/wine/valgrind wrapper direct execution would silently bypass), or any
+configured build target (`build.target`, `CARGO_BUILD_TARGET` - the host's
+included, since setting one moves the artifacts), refuses
+every direct-execution path (this lane, the process-isolated one, and `brokkr
+test`) at resolution time - read from the environment cargo builds under, so a
+sweep `env` setting either counts - and on this lane forwarded
 cargo args only cargo-mediated execution can honour (`--no-run`, `--target`,
 `--config`, `--manifest-path`, `--target-dir`) are rejected. The
 process-isolated lane refuses forwarded args altogether.
@@ -2635,38 +2655,70 @@ the whole suite is `brokkr check -p <pkg>`'s job. Two layers:
 
 - A blank name (`""`, or whitespace only) is refused at parse time, before
   anything builds.
-- Every other spelling is judged by what it matches, not how it looks: after
-  a split sweep's prebuild, one unfiltered `cargo test --tests -- --list` over
-  the same build shape (nothing recompiles) enumerates the package, and a name
-  every listed test contains is refused before any test runs. Packages under
+- Every other spelling is judged by what it matches, not how it looks: a name
+  every test discovery listed for the package contains (benchmarks included,
+  since `cargo test` runs them) is refused before any test runs. Packages under
   five tests are exempt - there a match-everything name is as likely a
-  deliberate "run this crate's tests" - and so are `--timeout` runs (already
-  one test) and doc-only sweeps (not enumerated). A listing that fails, or is
-  not a libtest listing, refuses the run, as `--timeout`'s enumeration does.
+  deliberate "run this crate's tests" - and so are doc-only sweeps (not
+  enumerated).
 
 It is a package-wide rule, so a name that leaves even one test out runs:
 `::` passes in a package whose integration tests sit at the top level of
 their files.
 
 Unit tests and integration tests are both matched by the name substring within
-the selected package, **in every test harness of the package**. Each sweep
+the selected package, across every test harness of the package (`lib`, bins,
+integration tests, and examples or benches with `test = true`). Each sweep
 builds once - `cargo test --no-run -p <pkg> --tests`, the same selection a
 named `cargo test -p <pkg> <name>` compiles, so examples are not built merely
-to check they compile - and then runs **one cargo invocation per harness**
-(`--lib`, `--bin X`, `--test X`, and examples or benches with `test = true`),
-in cargo's own order.
+to check they compile. Then:
 
-Why per harness rather than one invocation: a single `cargo test` stops at the
-first harness with a failing test, so the harnesses after it never run and a
-mutation check reads a short list of what went red. `--no-fail-fast` alone is
-not the fix, for the reason described under the sweep's `--no-fail-fast`
-above: a harness that dies mid-test leaves one shared libtest stream with an
-open suite, and the next harness gets killed as the dead test's hang. One
-invocation per harness makes every stream one process. A crash ends only its
-own run, and every failure belongs to the harness that printed it, so the same
-test name in two harnesses is two failures. With the package fixed, cargo
-resolves the same feature graph whichever target is selected, so each run
-executes the harness the build produced.
+1. **Discovery.** Every prebuilt harness lists itself, directly and one at a
+   time in cargo's run order, with libtest's JSON discovery (`--list --format
+   json`). JSON rather than the terse listing because terse output has no start
+   or end marker: a binary that ignored `--list` and exited 0, or a listing cut
+   short after a few lines, reads exactly like a real, smaller listing. A JSON
+   listing opens with a `discovery` record and closes with a `completed` record
+   whose counts must agree with what it listed. A listing that fails, times out
+   (20s), leaves its output open after exiting, or never completes stops the
+   run with the command that produced it - it is never read as a harness with
+   no match. One at a time, because concurrent listing would run every
+   harness's static constructors at once, which no earlier run did.
+2. **Matching.** libtest's own rule, applied to the discovered names: the full
+   name contains `<NAME>` (equals it under `--exact`).
+3. **Execution.** Only the harnesses holding a match run, each directly as its
+   own process (`<binary> <NAME> --include-ignored --nocapture
+   --test-threads=1 -Z unstable-options --format json`) under cargo's
+   reconstructed launch envelope - package-root cwd, `CARGO_PKG_*`,
+   `CARGO_MANIFEST_*`, build-script `rustc-env`, runtime `CARGO_BIN_EXE_*`,
+   `[env]` config and cargo's loader path (see "Direct execution" under the
+   parallel lane). A configured target runner or build target refuses the run,
+   since direct execution would bypass the one and misread the other.
+   A harness with no match costs one listing, where it used to cost a cargo
+   invocation - on a package of 85 harnesses that was 17 minutes of lock around
+   a test that passed in 0.16s.
+
+`harness = false` targets are excluded and each is named on a `not searched:`
+line. They are identified from the owning package's manifest, since cargo's
+metadata and artifact records carry no harness flag; such a binary is arbitrary
+code with no libtest listing to read, and a focused run selects libtest names.
+
+`harness = true` is not proof of libtest, though - a `custom_test_frameworks`
+runner keeps it - which is why every eligible listing must prove itself
+complete, and why each executed harness must then **account for exactly the
+tests its listing matched**: a run reporting a different number than discovery
+listed (none, say) fails as `run disagrees with discovery`, never as a `SKIP`
+or a pass. A listing therefore never has to be trusted on its own word; a
+harness whose listing and execution disagree cannot produce a verdict.
+
+Why one process per harness: a single `cargo test` stops at the first harness
+with a failing test, so the harnesses after it never run and a mutation check
+reads a short list of what went red. `--no-fail-fast` alone is not the fix, for
+the reason described under the sweep's `--no-fail-fast` above: a harness that
+dies mid-test leaves one shared libtest stream with an open suite, and the next
+harness gets killed as the dead test's hang. One process per harness makes every
+stream its own. A crash ends only its own run, and every failure belongs to the
+harness that printed it, so the same test name in two harnesses is two failures.
 
 Package resolution: explicit `-p/--package` > `[test] default_package` in
 `brokkr.toml` > `Project::cli_package()` (pbfhogg-cli, nidhogg); workspaces
@@ -2675,10 +2727,9 @@ it must name one package: a glob (`*`, `?`, `[`) is refused, since cargo could
 expand it to several packages - several packages' harnesses in one invocation,
 and a different feature graph.
 
-`--timeout` and `doc_only` sweeps keep a single invocation: `--timeout` has
-already resolved one exact test, and a doc-only sweep is one rustdoc run
-(`cargo test -p <pkg> --doc <name>`). A named `cargo test` runs no doctests
-otherwise, and neither does the split.
+A `doc_only` sweep keeps a single cargo invocation, `cargo test -p <pkg> --doc
+<name>`: ordinary discovery cannot see doctests, and a named `cargo test` runs
+none otherwise.
 
 Always adds `--include-ignored --nocapture --test-threads=1`, plus
 `-Z unstable-options --format json` to drive libtest's event stream (see "The
@@ -2700,23 +2751,16 @@ sweep. Each sweep's `build_packages` are rebuilt with the matching feature
 flags before the test phase, so `tests/cli_*.rs` invocations get a CLI binary
 with the same feature set the test crate sees.
 
-Streams the test's own stdout/stderr live (cargo/test-harness framing lines
-are stripped, including the per-suite `Running <target> (<binary path>)`
-launch lines, standalone `ok`/`FAILED` verdict lines, the duplicate
-empty `failures:` header, the `RUST_BACKTRACE` hint, and cargo's
-`to rerun pass ...` suggestion), then prints a `[test]` footer per harness that
-ran the name - `PASS` or `FAIL`, tagged with the harness (`[test:cli_sort]`,
-`[lib:pkg]`) - and `BUILD FAILED` for a sweep whose build failed. A harness the
-name matched nothing in is the normal case and prints nothing, which in a
-package with many harnesses means minutes of silence after the one `PASS`. So
-a multi-sweep run opens with one line naming the sweeps that will run (and
-those out of the package's scope), and a split run that has printed nothing for
-10 seconds says `still running: harness i/N` with the harness it reached. Every
-harness still runs: listing first and running only the harnesses that contain a
-match was considered and rejected, because a listing cannot prove what a
-harness will execute (`custom_test_frameworks` runs arbitrary code under
-`harness = true`, and cargo metadata does not expose `harness` at all). A sweep `SKIP`s
-when the name matched in none of its harnesses (usually
+Streams the test's own stdout/stderr live (test-harness framing lines are
+stripped, including standalone `ok`/`FAILED` verdict lines, the duplicate empty
+`failures:` header, the `RUST_BACKTRACE` hint, and for the doc-only cargo run
+cargo's `Running` launch lines and `to rerun pass ...` suggestion), then prints
+a `[test]` footer per harness that ran the name - `PASS` or `FAIL`, tagged with
+the harness (`[test:cli_sort]`, `[lib:pkg]`) - and `BUILD FAILED` for a sweep
+whose build failed. Before running, each sweep says which harnesses hold a match
+(`1 of 85 harnesses holds a match: test:cli_sort`), and a multi-sweep run opens
+with one line naming the sweeps that will run (and those out of the package's
+scope). A sweep `SKIP`s when the name matched in none of its harnesses (usually
 `#[cfg(feature = "...")]`-gated), or because the `-p` target is out of the
 sweep's package scope - the sweep declares a `packages` list the target isn't
 in, or lists the target in `test_exclude_packages`. The latter is decided
@@ -2728,23 +2772,27 @@ when there are several, each with its panic message and location (recovered
 from the stderr stream, since `--nocapture` produces no captured failure
 blocks). A harness that dies (a signal, a non-zero exit with nothing on the
 roster to explain it) is a failure of its own, `test harness failed (<how>)`,
-where `<how>` is cargo's own `process didn't exit successfully` detail, since
-cargo's exit code says nothing about how the harness died. It sits beside
+where `<how>` is the harness's own exit status (`signal: 6, SIGABRT`, `exit
+status: 101`) - or, for the doc-only cargo run, cargo's `process didn't exit
+successfully` detail, since cargo's exit code says nothing about how the
+harness died. It sits beside
 whatever tests that harness had already failed. Those survive the crash: the
 failed verdicts of a suite that never summarised stand in for the name list
 it never printed. The last test seen starting is offered as a **suspect**,
 never as the failure itself: it is read from the harness's own output, so a
 lost or printed record can move it, and a crash before the first test names
 nothing. Each failing harness also reprints its copy-pasteable
-`failing command:` line. Exit code: non-zero if any run was
+`failing command (cwd <dir>):` line - the binary and its argv, run from that
+directory; it reproduces exactly only with the launch envelope's environment,
+which the line does not carry. Exit code: non-zero if any run was
 `FAIL`/`BUILD FAILED`, or if *every* sweep was `SKIP` (bad name); `SKIP` mixed
 with at least one `PASS` exits `0`. A fired `test` phase ceiling exits 124 and a
 graceful `brokkr kill` / Ctrl-C exits 130 (see "Time ceilings").
 
 Flags:
 - `-N <n>` - repeat the test (per sweep) for flaky-test hunting. The sweep
-  builds once; each iteration re-runs every harness. The `[run] cargo ...`
-  invocation and build-time lines print for run 1 only. The first occurrence
+  builds and discovers once; each iteration re-runs every matching harness.
+  The invocation and build-time lines print for run 1 only. The first occurrence
   of each distinct failure set prints its full block; repeats of the same set
   collapse to their `[test] FAIL` footer alone. A closing `[test] summary:`
   line gives PASS/FAIL counts plus one `Nx` group per distinct failure SET -
@@ -2766,27 +2814,29 @@ different modules of the same package all run; use a more qualified name
 
 A per-test watchdog (shared with `brokkr check`'s test phase) names any test that
 runs longer than 20s and reports it as a hung test. `--timeout <SECS>` raises
-that ceiling for `brokkr test` only, and only for a genuinely single test: each
-sweep is enumerated with libtest `--list` first, and if `<NAME>` matches more
-than one test in any sweep the command errors before running anything. Sweeps
-where the name matches zero tests (feature-gated out) are fine and still `SKIP`.
-There is no way to disable the ceiling entirely - 280s is the cap.
+that ceiling for `brokkr test` only, and only for a genuinely single test: if
+`<NAME>` matches more than one (harness, test) in any sweep's discovery - the
+same name in two harnesses counts twice - the command errors before running
+anything, listing them. Sweeps where the name matches zero tests (feature-gated
+out) are fine and still `SKIP`. There is no way to disable the ceiling entirely
+- 280s is the cap.
 
 `--timeout` is the **only** exception to the 20s cap anywhere in brokkr, and
 280s is its hard limit. Exceeding the cap - raised or not - fails the run and
 stops it, including between `-N` iterations.
 
 Because it promises a per-test ceiling and already refuses more than one match,
-`--timeout` also makes the *attribution* exact: enumeration resolves `<NAME>` to
-the one **full test name** and the run is invoked with libtest `--exact`, so the
-process is the unit of one test and the kill is named by the caller's selection
-rather than by anything parsed. Resolving the full name is load-bearing - `--exact`
-applied to the substring you typed would match nothing, so the run would silently
-execute zero tests.
+`--timeout` also makes the *attribution* exact: discovery resolves `<NAME>` to
+the one **full test name** in its one harness, and that binary is invoked with
+libtest `--exact`, so the process is the unit of one test and the kill is named
+by the caller's selection rather than by anything parsed. Resolving the full
+name is load-bearing - `--exact` applied to the substring you typed would match
+nothing, so the run would silently execute zero tests.
 
 One honest caveat about what `--timeout <SECS>` bounds: it is a **process
-ceiling**, not a test-body ceiling. It covers the whole cargo invocation - lock
-wait, any residual compilation, harness startup, the test itself, and teardown.
-Enumeration has already prebuilt the target by the time the timed run starts, so
-in practice compilation is warm, but the number you pass is not a stopwatch on
-the test body alone.
+ceiling**, not a test-body ceiling. It runs from the harness process's spawn to
+its exit - static constructors, the test itself, teardown - so a constructor
+can spend the budget without the test body hanging, and the report says the
+invocation selected for the test exceeded it. The build and every other
+harness's listing fall outside it, and so does the output drain grace after
+exit (see "output drain grace").
