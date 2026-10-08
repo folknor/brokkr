@@ -58,7 +58,8 @@ Probes are pinned in the registry (`registry_dir`), two file kinds:
   (hash-pinned OHLCV feeds, two forms below), `[harness_files.<name>]`
   (any other file the harness reads that moves a verdict - below),
   `[probe_config."<prefix>"]`
-  (each probe's execution facts, declared by directory prefix - below), and
+  (each probe's execution facts, declared by directory prefix - below),
+  `[pending]` (probes registered ahead of their pins - below), and
   one `[probes.<id>]` table per probe:
 
   ```toml
@@ -150,8 +151,9 @@ Probes are pinned in the registry (`registry_dir`), two file kinds:
   directory that sets it: a root declares the shared feed and budget, one
   probe dir beneath it declares only what it differs by. Coverage is by
   whole path components (`piners/a` does not cover `piners/ab`) and is
-  structural - it reads the pinned paths, never the filesystem, so a
-  declaration over an uninitialized submodule still covers its probes.
+  structural - it reads the pinned and `[pending]` paths, never the
+  filesystem, so a declaration over an uninitialized submodule still covers
+  its probes.
   Against the probe's own `inputs.json` the precedence is the harness's and
   is per field: a resolved `ohlcv_start_ms` **outranks** an `inputs.json`
   start (a registry start corrects an upstream window guess), while an
@@ -168,14 +170,12 @@ Probes are pinned in the registry (`registry_dir`), two file kinds:
 
   - a prefix is canonical (plain components joined by `/`; no `.`, `..` or
     stray slashes), and a declaration sets at least one field;
-  - every declared field **governs** at least one pinned probe - one
-    covering none, or shadowed for every probe it covers, is stale (so a
-    reseed dropping the last probe under an exact-dir declaration is refused
-    until the declaration leaves in the same diff). The same rule means a
-    declaration written ahead of its probe fails every load - `--verify-only`
-    included - until `--reseed --probe <id>` pins the probe: reseed reads the
-    file without the rules and writes it back satisfying them. Declare, then
-    reseed;
+  - every declared field **governs** at least one pinned or `[pending]`
+    probe - one covering none, or shadowed for every probe it covers, is
+    stale (so a reseed dropping the last probe under an exact-dir
+    declaration is refused until the declaration leaves in the same diff). A
+    declaration written ahead of its probe is valid once the probe is
+    registered in `[pending]`; unregistered, it fails every load;
   - no field **restates** the value it would inherit from an ancestor - a
     copy would silently keep the old value when the ancestor changes. An
     explicit value where no ancestor sets one is not a restatement, even if
@@ -184,11 +184,41 @@ Probes are pinned in the registry (`registry_dir`), two file kinds:
   - no probe with a `record` resolves a `tv_trades_csv_tz` (the harness then
     never reads the CSV, so the value is dead). There is no way to clear an
     inherited field, so declare a timezone only on prefixes covering CSV
-    probes alone.
+    probes alone. A pending probe's oracle kind is unknown until it is
+    pinned, so for it this rule is enforced by the reseed that pins it.
 
   A prefix-level `bar_budget` can move many probes in a one-line diff. That
   weakens only the review surface, not the gate: every run re-validates each
   selected probe's `expected` against what it actually did.
+
+  **`[pending]` - probes declared before they are pinned.** Registering a
+  new probe means writing its `[probe_config]` first (its feed, budget,
+  start), then pinning it. A declaration that governs no probe is stale, so
+  the registration names the probe ahead of its pin:
+
+  ```toml
+  [pending]
+  live-02 = "piners/live-02"   # id = the directory's name
+  live-03 = "piners/live-03"
+  ```
+
+  A pending probe counts for the structural rules - a declaration written
+  for it governs, a keyword may list it, and the registry lint refuses one
+  that would resolve no feed - but it is never selected or run, since
+  nothing about it is verified: `--all` and keywords skip it with a notice,
+  `--probe <id>` on it is refused, and `--verify-only` names it beside its
+  OK. `--reseed --probe <id>` pins it and removes the entry in the same
+  write; other pending entries are untouched, so several new probes can be
+  declared together and pinned one at a time, each step a valid file. The
+  loader refuses an entry no reseed could complete: a path that is not
+  plain relative components or that passes through a dot-dir (discovery
+  skips those), an id that is not the path's last component, an id already
+  pinned, two entries on one path, and a path nested in (or around) another
+  pending or pinned probe dir - discovery stops at a probe dir, so only the
+  outer of two nested ones is ever found - and a path inside the registry
+  dir, which discovery never walks. Whether the probe is actually on
+  disk is the reseed's check, and it refuses to pin a pending probe found
+  anywhere but its registered path.
 
 - `<keyword>.toml` (any other `*.toml`) - a pure selection grouping. Keyword
   = file stem; body is `probes = ["id", ...]`. Ids only - the volatile
@@ -199,9 +229,19 @@ upstream can re-pin and change a probe's bytes under the same name.
 
 ## Selection
 
-Selection is over the pinned universe. No selection (and no `--all` /
-`--verify-only`) is a hard error listing the available keywords - the slow
-full-corpus pass never runs by accident.
+Selection is over the pinned universe (`[pending]` probes are skipped, see
+above). No selection (and no `--all` / `--verify-only`) is a hard error
+listing the available keywords - the slow full-corpus pass never runs by
+accident.
+
+Every mode except `--reseed` takes the global brokkr lock **before** it
+reads `pins.toml`, `--verify-only` included, and holds it through the run,
+the ingest and any bless write. The registry's writers run under the same
+lock, so the pins a run verifies are the pins it runs and blesses against:
+a run that loaded and verified first, then waited out a reseed for the
+lock, would otherwise have run on hashes the file no longer held. The lock
+binds brokkr only - a hand edit or a git checkout during the run is not
+excluded, and the harness opens live paths.
 
 - `--keyword <k>` (repeatable or comma-separated) - union of the listed
   groupings.
@@ -338,8 +378,13 @@ Independent deliberate acts, reviewed via `git diff pins.toml`: reseed
 adopts new *content*, bless adopts new *dispositions*. Both edit the file
 in place (`toml_edit`), so hand-written TOML comments survive - a comment
 on a removed probe goes with it. Both hold the global brokkr lock across
-their read-modify-write, and bless stamps into the file as it is on disk at
-write time (not the copy the run loaded), so neither can revert the other.
+their read-modify-write - bless from before the run's load to its write -
+so neither can revert the other. Bless edits the text the run loaded, and
+refuses (stamping nothing; the run stays recorded) if, just before it
+writes, the file on disk no longer matches it: that is a hand edit made
+during the run, which the write would otherwise revert. The check is not
+atomic with the replace - an edit landing between the two is still
+overwritten, which is the lock's limit on non-brokkr writers again.
 The file is replaced atomically (temp file + rename), so a kill mid-write
 leaves the old file, never a truncated one. Before the replace, each writer
 parses its own output against the loader's rules, so a write can never
@@ -362,6 +407,10 @@ when present, and a file that has left the dir drops out of the pin.
 - `--reseed --probe <id>` (repeatable) - upsert each named probe. Hard-errors
   when no dir named `<id>` carries the marker, and says so specifically when
   the dir exists with `strategy.pine` but no oracle.
+
+Either form completes the `[pending]` registrations it pins (`--all`: every
+one, refusing if one is not on disk at its registered path; `--probe`: the
+named ones), removing them in the same write.
 
 Prints `added/changed/removed`. Touches the pinned *content* only:
 re-hashes the probe files, the `[feeds]` group files and every
@@ -409,12 +458,20 @@ harness files) verify.
 
 ## Artefacts
 
-Each invocation gets `.brokkr/piners/corpus/run-N/` holding `manifest.json`
-plus captured `harness.stdout` / `harness.stderr`. Every run's NDJSON is
-then ingested into the corpus run store (`runs.db`), so the dir is **always**
-dropped once ingest commits - unless `--keep-artefacts`, or on the
-`DevError::Interrupted` / spawn-error paths. `brokkr clean` removes the
-`run-N/` dirs but spares `runs.db`.
+Each run is numbered once: its dir is `.brokkr/piners/corpus/run-<id>/` and
+its row in the corpus run store (`runs.db`) has the same `run_id`, so the
+number a run prints (`run <id> -> <dir>`) is the one `corpus-results`
+takes. The id is reserved under the lock, one past both the highest stored
+run and the highest `run-<id>/` dir on disk. The dir holds `manifest.json`
+plus captured `harness.stdout` / `harness.stderr`; every run's NDJSON is
+ingested into `runs.db`, so the dir is dropped once ingest commits - unless
+`--keep-artefacts`. A run that ends before its output can be ingested
+(interrupted, the harness failed to spawn, the manifest could not be
+written) is still recorded under its id (`result` `interrupted`, `fail` or
+`error`) and keeps its dir. Only a run killed outright (SIGKILL, a crash) or
+whose ingest itself failed leaves a dir with no row - which keeps its number
+taken until `brokkr clean` removes it. Clean removes the `run-*/` dirs but
+spares `runs.db`.
 
 ## See also
 

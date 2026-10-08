@@ -1166,6 +1166,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             where_expr,
             sql,
             full,
+            compare,
         } => {
             project::require(project, Project::Piners, "corpus-results")?;
             let cq = CorpusQuery {
@@ -1182,6 +1183,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 where_expr,
                 sql,
                 full,
+                compare: compare.map(|ids| (ids[0], ids[1])),
             };
             piners::corpus_query::cmd(&project_root, &cq)
         }

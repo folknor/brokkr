@@ -49,6 +49,86 @@ pub fn resolve_commit(repo: &Path, rev: &str) -> Result<CommitId, DevError> {
     Ok(CommitId { full, short })
 }
 
+/// Whether `repo` has any uncommitted change - staged, unstaged or untracked
+/// (gitignored files excluded) - outside `.brokkr/`. Unlike the measured-run
+/// clean check, nothing else is exempt: markdown and `brokkr.toml` count. A
+/// run record that says "clean" must mean `HEAD` describes the whole
+/// invocation. Callers ask under the lock, which may have moved a toolchain
+/// file aside (see [`toolchain_exclusions`]): git sees that move as dirt, so
+/// it is excluded from the status and the moved bytes are compared with
+/// `HEAD`'s instead - a user's own edit to the file still counts, whoever
+/// moved it. `None` when git cannot answer (not a repo, git failed).
+pub fn has_uncommitted(repo: &Path) -> Option<bool> {
+    let output = Command::new("git")
+        .args(["status", "--porcelain", "--", ".", ":(exclude).brokkr"])
+        .args(toolchain_exclusions(repo))
+        .current_dir(repo)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    if !output.stdout.is_empty() {
+        return Some(true);
+    }
+    for name in crate::toolchain::FILES {
+        let sidecar = repo.join(format!("{name}{}", crate::toolchain::SUFFIX));
+        if !sidecar.exists() {
+            continue;
+        }
+        // Unreadable moved bytes are unknown, never clean.
+        let moved = std::fs::read(&sidecar).ok()?;
+        // The status above excluded the path, so a staged change to it is
+        // checked here: the index against HEAD.
+        let staged = Command::new("git")
+            .args(["diff", "--cached", "--quiet", "HEAD", "--", name])
+            .current_dir(repo)
+            .status()
+            .ok()?;
+        match staged.code() {
+            Some(0) => {}
+            Some(1) => return Some(true),
+            _ => return None,
+        }
+        // HEAD's entry: `<mode> blob <sha>\t<name>`, or nothing when the file
+        // is not in HEAD (it was untracked - uncommitted either way). A git
+        // failure is unknown.
+        let tree = Command::new("git")
+            .args(["ls-tree", "HEAD", "--", name])
+            .current_dir(repo)
+            .output()
+            .ok()?;
+        if !tree.status.success() {
+            return None;
+        }
+        let entry = String::from_utf8_lossy(&tree.stdout);
+        let Some(mode) = entry.split_whitespace().next() else {
+            return Some(true);
+        };
+        // The mode git would record for the moved file: a mode-only change
+        // is a change.
+        let executable = {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::metadata(&sidecar).ok()?.permissions().mode() & 0o111 != 0
+        };
+        if (mode == "100755") != executable {
+            return Some(true);
+        }
+        let at_head = Command::new("git")
+            .args(["show", &format!("HEAD:./{name}")])
+            .current_dir(repo)
+            .output()
+            .ok()?;
+        if !at_head.status.success() {
+            return None;
+        }
+        if at_head.stdout != moved {
+            return Some(true);
+        }
+    }
+    Some(false)
+}
+
 /// Structured git state for the benchmark harness.
 pub struct GitInfo {
     /// `HEAD`'s hash, abbreviated by [`short_of`].

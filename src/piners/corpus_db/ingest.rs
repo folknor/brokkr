@@ -22,6 +22,20 @@ use crate::piners::report::{HarnessReport, ProbeLine, TradeDiffLine};
 
 /// The run-envelope fields that aren't derivable from the parsed report.
 pub struct RunRecord<'a> {
+    /// The id the run was allocated under the lock (its artefact dir is
+    /// `run-<id>`), so the dir and the row carry one number. A plain INSERT:
+    /// a collision fails the ingest rather than replacing a row. `None` lets
+    /// SQLite pick (tests only).
+    pub run_id: Option<i64>,
+    /// When the run started (`YYYY-MM-DD HH:MM:SS`, UTC), captured before the
+    /// build; `None` stamps ingest time (tests only).
+    pub started_at: Option<&'a str>,
+    /// Full `HEAD` hash of the project checkout at run start, `None` when it
+    /// could not be read (not a git repo, git failed).
+    pub commit_sha: Option<&'a str>,
+    /// Uncommitted changes outside `.brokkr/` at run start (see
+    /// `crate::piners::cmd::RunStart`), `None` when unknown.
+    pub dirty: Option<bool>,
     /// JSON describing what was selected (resolved ids + raw flags).
     pub selector: &'a str,
     /// Was the per-probe gate enforced (`!--no-gate`)?
@@ -81,9 +95,9 @@ fn record_inner(
 ) -> Result<i64, DevError> {
     conn.execute(
         "INSERT INTO run \
-         (started_at, selector, gated, result, fail_reason, harness_exit_code, \
-          probe_count, harness_stderr, wall_ms) \
-         VALUES (datetime('now'), ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+         (run_id, started_at, selector, gated, result, fail_reason, harness_exit_code, \
+          probe_count, harness_stderr, wall_ms, commit_sha, dirty) \
+         VALUES (?9, COALESCE(?10, datetime('now')), ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?11, ?12)",
         params![
             run.selector,
             i64::from(run.gated),
@@ -93,6 +107,10 @@ fn record_inner(
             as_i64(report.probes.len()),
             run.stderr,
             run.wall_ms,
+            run.run_id,
+            run.started_at,
+            run.commit_sha,
+            run.dirty.map(i64::from),
         ],
     )?;
     let run_id = conn.last_insert_rowid();
@@ -257,6 +275,10 @@ mod tests {
 
         let db = CorpusDb::open_in_memory().unwrap();
         let run = RunRecord {
+            run_id: None,
+            started_at: None,
+            commit_sha: None,
+            dirty: None,
             selector: r#"{"keywords":["magnifier"]}"#,
             gated: true,
             result: "fail",
@@ -316,6 +338,10 @@ mod tests {
         );
         let db = CorpusDb::open_in_memory().unwrap();
         let run = RunRecord {
+            run_id: None,
+            started_at: None,
+            commit_sha: None,
+            dirty: None,
             selector: "{}",
             gated: true,
             result: "pass",
@@ -354,6 +380,10 @@ mod tests {
         }];
         let db = CorpusDb::open_in_memory().unwrap();
         let run = RunRecord {
+            run_id: None,
+            started_at: None,
+            commit_sha: None,
+            dirty: None,
             selector: "{}",
             gated: true,
             result: "fail",

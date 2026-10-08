@@ -24,6 +24,14 @@
 //! - `--reseed --probe <id>` (repeatable) - upsert the named probe(s),
 //!   leaving the rest intact.
 //!
+//! A probe registered in `[pending]` (declared ahead of its pin, so its
+//! `[probe_config]` can be written first) is completed by the reseed that
+//! pins it: the entry leaves `[pending]` in the same write, and must have
+//! been found at exactly the registered path. `--all` completes every
+//! pending entry and refuses if one is not on disk. Other pending entries
+//! survive a `--probe` reseed untouched, which is what lets several new
+//! probes be declared together and pinned one at a time.
+//!
 //! Reseed touches the pinned *content* only: it re-hashes the probe files,
 //! the `[feeds]` group files and the `[harness_files]` (on every reseed,
 //! `--probe` included), preserves `[probe_config]` verbatim, and
@@ -166,6 +174,40 @@ fn plan(
 
     let discovered = discover(corpus_root, registry_dir)?;
 
+    // A [pending] registration is completed by the reseed that pins it, at
+    // exactly the path it registered; `--all` completes every one, and
+    // refuses rather than let a registration silently vanish.
+    let mut pending = existing.pending.clone();
+    let completing: Vec<&String> = if args.all {
+        existing.pending.keys().collect()
+    } else {
+        args.probe.iter().filter(|id| existing.pending.contains_key(*id)).collect()
+    };
+    for id in completing {
+        let registered = &existing.pending[id];
+        match discovered.probes.get(id) {
+            Some(found) if found == registered => {
+                pending.remove(id);
+            }
+            Some(found) => {
+                return Err(DevError::Config(format!(
+                    "corpus --reseed: probe '{id}' is [pending] at {} but was found at {} - \
+                     fix the [pending] entry",
+                    registered.display(),
+                    found.display()
+                )));
+            }
+            None => {
+                return Err(DevError::Config(format!(
+                    "corpus --reseed: [pending] probe '{id}' was not found as a probe at {} \
+                     (a directory holding {PINE_FILE} plus {CSV_FILE} or {RECORD_FILE}, outside \
+                     dot-dirs and the registry dir)",
+                    corpus_root.join(registered).display()
+                )));
+            }
+        }
+    }
+
     let mut new_pins = if args.all {
         let mut pins = BTreeMap::new();
         for (id, rel_dir) in &discovered.probes {
@@ -191,7 +233,8 @@ fn plan(
     let feeds = restamp_feeds(&existing.feeds, corpus_root)?;
     let files = restamp_harness_files(&existing.harness_files, corpus_root)?;
     let diff = Diff::compute(&existing.probes, &new_pins);
-    let text = pins_write::render_pins(existing_text, &feeds, &files, &new_pins)?;
+    let text = pins_write::render_pins(existing_text, &feeds, &files, &pending, &new_pins)?;
+    registry::check_pending_location(&pending, pins_path, registry_dir, corpus_root)?;
 
     Ok(Plan {
         text,
@@ -590,6 +633,48 @@ bar_budget = 20200
         // The declarations were not rewritten.
         assert!(p.text.contains("[probe_config.\"piners/live-01\"]\nfeed = \"eth-15m-live\""));
         assert!(!p.text.contains("\n\n\n"), "stray blank line:\n{}", p.text);
+    }
+
+    #[test]
+    fn pending_probes_are_pinned_one_at_a_time() {
+        // Two live captures declared ahead of their pins, both registered.
+        let (root, registry, pins_path) = declared_tree("pending_one_at_a_time");
+        write_probe(&root.join("piners/live-02"));
+        let declared = format!(
+            "{DECLARED}\n[probe_config.\"piners/live-02\"]\nfeed = \"eth-15m-live\"\n\n\
+             [pending]\nlive-01 = \"piners/live-01\"\nlive-02 = \"piners/live-02\"\n\n\
+             [probes.old-01]\n\
+             pine = {{ path = \"piners/old-01/strategy.pine\", xxh128 = \"00\" }}\n\
+             csv = {{ path = \"piners/old-01/tv_trades.csv\", xxh128 = \"00\" }}\n"
+        );
+        // The file as written loads: both declarations govern a pending probe.
+        registry::parse_pins(&declared, &pins_path).unwrap();
+
+        let first =
+            plan(Some(&declared), &pins_path, &root, &registry, &args_probe(&["live-01"])).unwrap();
+        let data = registry::parse_pins(&first.text, &pins_path).unwrap();
+        assert!(data.probes.contains_key("live-01"));
+        assert!(!data.pending.contains_key("live-01"));
+        assert_eq!(data.pending["live-02"], PathBuf::from("piners/live-02"));
+
+        let second =
+            plan(Some(&first.text), &pins_path, &root, &registry, &args_probe(&["live-02"])).unwrap();
+        let data = registry::parse_pins(&second.text, &pins_path).unwrap();
+        assert!(data.pending.is_empty());
+        assert!(!second.text.contains("[pending]"));
+    }
+
+    #[test]
+    fn a_pending_entry_at_the_wrong_path_or_absent_is_refused() {
+        let (root, registry, pins_path) = declared_tree("pending_wrong_path");
+        let wrong = format!("{DECLARED}\n[pending]\nlive-01 = \"other/live-01\"\n");
+        let err = plan(Some(&wrong), &pins_path, &root, &registry, &args_probe(&["live-01"]))
+            .unwrap_err();
+        assert!(format!("{err:?}").contains("was found at piners/live-01"));
+        // --all refuses a registration with nothing on disk.
+        let absent = format!("{DECLARED}\n[pending]\nghost = \"piners/ghost\"\n");
+        let err = plan(Some(&absent), &pins_path, &root, &registry, &args_all()).unwrap_err();
+        assert!(format!("{err:?}").contains("[pending] probe 'ghost' was not found"));
     }
 
     #[test]

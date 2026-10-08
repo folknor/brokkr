@@ -109,6 +109,18 @@ pub fn lint_corpus(
         return crate::piners::lint::reseed::run(project_root, &piners_cfg, lint_cfg, args);
     }
 
+    // Locked before the registry is read: the lint registry's writers
+    // (reseed, bless, reanchor) write under this lock, so verification must
+    // judge the pins and bytes the run will use, not ones a writer replaced
+    // while this waited. Verify-only included.
+    let project_root_str = project_root.display().to_string();
+    let _lock = lockfile::acquire(&LockContext {
+        project: "piners",
+        command: if args.reanchor { "lint-reanchor" } else { "lint-corpus" },
+        project_root: &project_root_str,
+    })?;
+    let _sigterm = crate::shutdown::SigtermGuard::install();
+
     let registry_dir = project_root.join(lint_cfg.registry_dir());
     let registry = LintRegistry::load(&registry_dir)?;
     registry.lint()?;
@@ -142,14 +154,6 @@ pub fn lint_corpus(
         output::lint_msg(&format!("verify-only: {} snippet(s) OK", ids.len()));
         return Ok(());
     }
-
-    let project_root_str = project_root.display().to_string();
-    let _lock = lockfile::acquire(&LockContext {
-        project: "piners",
-        command: if args.reanchor { "lint-reanchor" } else { "lint-corpus" },
-        project_root: &project_root_str,
-    })?;
-    let _sigterm = crate::shutdown::SigtermGuard::install();
 
     // A captured subprocess run, PID-tracked so `brokkr kill` reaches it, and
     // killed at `deadline` (reported as an error naming the limit).
@@ -449,12 +453,12 @@ fn diag_to_tv(key: &lint::DiagKey) -> TvDiag {
 /// `apply` change the fields this writer owns, and write it back atomically,
 /// preserving comments.
 ///
-/// The pins are re-read here rather than taken from the registry the command
-/// loaded at startup: that load happened before the lock was taken, so a
-/// reseed landing in between would otherwise be reverted by this write. The
-/// caller holds the lock. A read failure propagates - the file was loaded at
-/// startup, so failing to read it now is an error, and treating it as absent
-/// would rewrite it without its comments.
+/// The command holds the lock from before its load, so no brokkr writer can
+/// have touched the file since; it is still re-read here rather than taken
+/// from the startup registry, so a hand edit made during the run is carried
+/// into the write instead of reverted. A read failure propagates - the file
+/// was loaded at startup, so failing to read it now is an error, and treating
+/// it as absent would rewrite it without its comments.
 fn write_registry(
     registry_dir: &Path,
     apply: impl FnOnce(&mut BTreeMap<String, LintPin>),

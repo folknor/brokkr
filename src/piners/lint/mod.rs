@@ -118,6 +118,20 @@ pub fn now_rfc3339() -> String {
     format!("{year:04}-{month:02}-{day:02}T{hh:02}:{mm:02}:{ss:02}Z")
 }
 
+/// Current UTC time as `YYYY-MM-DD hh:mm:ss`, what SQLite's `datetime('now')`
+/// writes - the corpus run store's `started_at` format, kept so rows recorded
+/// before brokkr stamped the start itself sort and compare with newer ones.
+pub fn now_sqlite_utc() -> String {
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let (days, rem) = (secs / 86_400, secs % 86_400);
+    let (hh, mm, ss) = (rem / 3600, (rem % 3600) / 60, rem % 60);
+    let (year, month, day) = civil_from_days(i64::try_from(days).unwrap_or(0));
+    format!("{year:04}-{month:02}-{day:02} {hh:02}:{mm:02}:{ss:02}")
+}
+
 /// Howard Hinnant's days-from-civil inverse: epoch-day count -> (y, m, d).
 fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let z = z + 719_468;

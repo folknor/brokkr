@@ -12,15 +12,18 @@
 //! (see `registry` for why the execution facts live there and not on the
 //! probe entries these writers own).
 //!
+//! `[pending]` is hand-written too, but reseed shrinks it: pinning a pending
+//! probe moves it to `[probes]` in the same write.
+//!
 //! Layout stays deterministic: `[feeds.<name>]` sorted, then
-//! `[harness_files.<name>]` sorted, then `[probe_config]`, then
-//! `[probes.<id>]` sorted (the `BTreeMap` order), one
+//! `[harness_files.<name>]` sorted, then `[probe_config]`, then `[pending]`,
+//! then `[probes.<id>]` sorted (the `BTreeMap` order), one
 //! blank line between blocks, fields in contract-first order (`expected`
 //! before the volatile file hashes). Every render is parsed back through the
 //! loader before it is returned (see [`render_pins`]).
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use toml_edit::{DocumentMut, Item, RawString, Table, Value};
 
@@ -54,6 +57,7 @@ pub fn render_pins(
     existing: Option<&str>,
     feeds: &BTreeMap<String, FeedGroup>,
     files: &BTreeMap<String, HarnessFile>,
+    pending: &BTreeMap<String, PathBuf>,
     probes: &BTreeMap<String, Pin>,
 ) -> Result<String, DevError> {
     let mut doc: DocumentMut = existing
@@ -62,6 +66,7 @@ pub fn render_pins(
         .map_err(|e| DevError::Config(format!("piners: pins.toml: {e}")))?;
     sync_section(&mut doc, "feeds", feeds, fill_feed)?;
     sync_section(&mut doc, "harness_files", files, fill_harness_file)?;
+    sync_pending(&mut doc, pending)?;
     sync_section(&mut doc, "probes", probes, fill_probe)?;
     finalize_layout(&mut doc, feeds, files, probes);
     let text = doc.to_string();
@@ -110,6 +115,37 @@ fn sync_section<T>(
             ))
         })?;
         fill(table, entry)?;
+    }
+    Ok(())
+}
+
+/// Sync the `[pending]` table (`id = "dir"` pairs) to `pending`. Writers only
+/// ever shrink it - a reseed that pins a pending probe removes its entry -
+/// so surviving entries keep their bytes and comments; an entry missing from
+/// the document is appended. An emptied table is removed whole.
+fn sync_pending(doc: &mut DocumentMut, pending: &BTreeMap<String, PathBuf>) -> Result<(), DevError> {
+    if pending.is_empty() {
+        doc.remove("pending");
+        return Ok(());
+    }
+    if !doc.contains_key("pending") {
+        doc.insert("pending", Item::Table(Table::new()));
+    }
+    let table = doc.get_mut("pending").and_then(Item::as_table_mut).ok_or_else(|| {
+        DevError::Config("piners: pins.toml: [pending] is not a table".to_owned())
+    })?;
+    let stale: Vec<String> = table
+        .iter()
+        .map(|(k, _)| k.to_owned())
+        .filter(|k| !pending.contains_key(k))
+        .collect();
+    for key in &stale {
+        table.remove(key);
+    }
+    for (id, dir) in pending {
+        if !table.contains_key(id) {
+            table.insert(id, Item::Value(Value::from(dir.to_string_lossy().into_owned())));
+        }
     }
     Ok(())
 }
@@ -212,6 +248,11 @@ fn finalize_layout(
                 place(child);
             }
         }
+    }
+    // `[pending]` is one block: registrations waiting on their first reseed,
+    // just above the probes they will become.
+    if let Some(t) = doc.get_mut("pending").and_then(Item::as_table_mut) {
+        place(t);
     }
     if let Some(parent) = doc.get_mut("probes").and_then(Item::as_table_mut) {
         for id in probes.keys() {
@@ -331,6 +372,55 @@ mod tests {
         toml::from_str(text).unwrap()
     }
 
+    /// [`render_pins`] with no `[pending]` entries.
+    fn render(
+        existing: Option<&str>,
+        feeds: &BTreeMap<String, FeedGroup>,
+        files: &BTreeMap<String, HarnessFile>,
+        probes: &BTreeMap<String, Pin>,
+    ) -> Result<String, DevError> {
+        render_pins(existing, feeds, files, &BTreeMap::new(), probes)
+    }
+
+    #[test]
+    fn pinning_one_pending_probe_keeps_the_others_and_their_declarations() {
+        // Two probes declared ahead of their pins; the first is pinned.
+        let existing = "\
+[probe_config.\"piners\"]
+feed = \"f\"
+
+[probe_config.\"piners/b\"]
+bar_budget = 100 # b's own budget
+
+[pending]
+a = \"piners/a\" # registered first
+b = \"piners/b\"
+";
+        let mut pending = BTreeMap::new();
+        pending.insert("b".to_owned(), PathBuf::from("piners/b"));
+        let mut probes = BTreeMap::new();
+        probes.insert(
+            "a".to_owned(),
+            Pin::new(file_pin("piners/a/strategy.pine", "aa"), file_pin("piners/a/tv_trades.csv", "aa")),
+        );
+        let text = render_pins(Some(existing), &BTreeMap::new(), &BTreeMap::new(), &pending, &probes)
+            .unwrap();
+        let data = reparse(&text);
+        assert!(!data.pending.contains_key("a"));
+        assert_eq!(data.pending["b"], PathBuf::from("piners/b"));
+        assert!(text.contains("bar_budget = 100 # b's own budget"));
+        assert!(text.find("[pending]").unwrap() < text.find("[probes.a]").unwrap());
+
+        // Pinning the last one removes the table.
+        probes.insert(
+            "b".to_owned(),
+            Pin::new(file_pin("piners/b/strategy.pine", "bb"), file_pin("piners/b/tv_trades.csv", "bb")),
+        );
+        let text = render_pins(Some(&text), &BTreeMap::new(), &BTreeMap::new(), &BTreeMap::new(), &probes)
+            .unwrap();
+        assert!(!text.contains("[pending]"), "{text}");
+    }
+
     #[test]
     fn fresh_render_is_canonical_and_round_trips() {
         let mut feeds = BTreeMap::new();
@@ -345,7 +435,7 @@ mod tests {
         p.expected = Some("accepted".to_owned());
         probes.insert("alpha-01".to_owned(), p);
 
-        let text = render_pins(None, &feeds, &BTreeMap::new(), &probes).unwrap();
+        let text = render(None, &feeds, &BTreeMap::new(), &probes).unwrap();
 
         // No leading blank line; sections in order; blank line between blocks.
         assert!(text.starts_with("[feeds.eth-15m]"));
@@ -415,7 +505,7 @@ csv = { path = \"validation/zulu-09/tv_trades.csv\", xxh128 = \"zz\" }
         probes.insert("mid-05".to_owned(), pin("mid-05", "mm")); // newly discovered
         // zulu-09 vanished from the corpus.
 
-        let text = render_pins(Some(COMMENTED), &feeds, &BTreeMap::new(), &probes).unwrap();
+        let text = render(Some(COMMENTED), &feeds, &BTreeMap::new(), &probes).unwrap();
 
         // Comments survive: file header, block comment, both trailing ones.
         assert!(text.contains("# top-of-file commentary"));
@@ -456,7 +546,7 @@ csv = { path = \"validation/zulu-09/tv_trades.csv\", xxh128 = \"zz\" }
         let feeds = commented_feeds();
         let mut probes = BTreeMap::new();
         probes.insert("zulu-09".to_owned(), pin("zulu-09", "zz"));
-        let err = render_pins(Some(COMMENTED), &feeds, &BTreeMap::new(), &probes).unwrap_err();
+        let err = render(Some(COMMENTED), &feeds, &BTreeMap::new(), &probes).unwrap_err();
         assert!(format!("{err:?}").contains("validation/alpha-01\\\"]: `bar_budget` governs no"));
     }
 
@@ -471,7 +561,7 @@ csv = { path = \"validation/zulu-09/tv_trades.csv\", xxh128 = \"zz\" }
         zulu.expected = Some("compile_fail".to_owned()); // first bless
         probes.insert("zulu-09".to_owned(), zulu);
 
-        let text = render_pins(Some(COMMENTED), &feeds, &BTreeMap::new(), &probes).unwrap();
+        let text = render(Some(COMMENTED), &feeds, &BTreeMap::new(), &probes).unwrap();
 
         let zulu_at = text.find("[probes.zulu-09]").unwrap();
         let block = &text[zulu_at..];
@@ -491,7 +581,7 @@ csv = { path = \"validation/zulu-09/tv_trades.csv\", xxh128 = \"zz\" }
             },
         );
         let text =
-            render_pins(None, &feeds, &BTreeMap::new(), &BTreeMap::new()).unwrap();
+            render(None, &feeds, &BTreeMap::new(), &BTreeMap::new()).unwrap();
         assert!(text.contains("base = { path ="));
         assert!(!text.contains("primary"));
         match &reparse(&text).feeds["eth-15m-2025"] {
@@ -517,7 +607,7 @@ warmup = { path = \"data/15m_warmup.csv\", xxh128 = \"f1\" }
             },
         );
         let text =
-            render_pins(Some(existing), &feeds, &BTreeMap::new(), &BTreeMap::new()).unwrap();
+            render(Some(existing), &feeds, &BTreeMap::new(), &BTreeMap::new()).unwrap();
         assert!(!text.contains("primary"));
         assert!(!text.contains("warmup"));
         assert!(text.contains("base = { path ="));
@@ -540,7 +630,7 @@ csv = { path = \"validation/alpha-01/tv_trades.csv\", xxh128 = \"aa\" } # the ol
         p.record = Some(file_pin("validation/alpha-01/tv_record.json", "rr"));
         let mut probes = BTreeMap::new();
         probes.insert("alpha-01".to_owned(), p);
-        let text = render_pins(Some(existing), &BTreeMap::new(), &BTreeMap::new(), &probes)
+        let text = render(Some(existing), &BTreeMap::new(), &BTreeMap::new(), &probes)
             .unwrap();
         assert!(!text.contains("tv_trades.csv"));
         assert!(text.contains("record = { path = \"validation/alpha-01/tv_record.json\""));
@@ -569,7 +659,7 @@ csv = { path = \"validation/zulu-09/tv_trades.csv\", xxh128 = \"zz\" }
         for (id, h) in [("alpha-01", "aa"), ("mid-05", "mm"), ("zulu-09", "zz")] {
             probes.insert(id.to_owned(), pin(id, h));
         }
-        let text = render_pins(Some(existing), &BTreeMap::new(), &BTreeMap::new(), &probes).unwrap();
+        let text = render(Some(existing), &BTreeMap::new(), &BTreeMap::new(), &probes).unwrap();
         assert!(!text.contains("\n\n\n"), "stray blank line: {text:?}");
         assert!(text.contains("\n\n[probes.mid-05]"));
         assert!(text.contains("\n\n[probes.zulu-09]"));
@@ -612,7 +702,7 @@ csv = { path = \"validation/alpha-01/tv_trades.csv\", xxh128 = \"aa\" }
         let mut probes = BTreeMap::new();
         probes.insert("alpha-01".to_owned(), pin("alpha-01", "aa"));
 
-        let text = render_pins(Some(existing), &feeds, &files, &probes).unwrap();
+        let text = render(Some(existing), &feeds, &files, &probes).unwrap();
 
         assert!(text.contains("# capture facts the harness reads beside the manifest"));
         assert!(text.contains(
@@ -638,7 +728,7 @@ csv = { path = \"validation/alpha-01/tv_trades.csv\", xxh128 = \"aa\" }
                 xxh128: None,
             },
         );
-        let err = render_pins(None, &BTreeMap::new(), &files, &BTreeMap::new()).unwrap_err();
+        let err = render(None, &BTreeMap::new(), &files, &BTreeMap::new()).unwrap_err();
         assert!(format!("{err:?}").contains("[harness_files.facts]: no `xxh128`"));
     }
 
@@ -648,7 +738,7 @@ csv = { path = \"validation/alpha-01/tv_trades.csv\", xxh128 = \"aa\" }
         p.csv = None; // no oracle left
         let mut probes = BTreeMap::new();
         probes.insert("alpha-01".to_owned(), p);
-        let err = render_pins(None, &BTreeMap::new(), &BTreeMap::new(), &probes).unwrap_err();
+        let err = render(None, &BTreeMap::new(), &BTreeMap::new(), &probes).unwrap_err();
         assert!(format!("{err:?}").contains("pins no oracle"));
     }
 }

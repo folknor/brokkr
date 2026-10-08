@@ -23,6 +23,9 @@ pub struct RunRow {
     pub fail_reason: Option<String>,
     pub harness_exit_code: Option<i64>,
     pub probe_count: i64,
+    /// Full `HEAD` hash at run start; `None` before v6 or outside git.
+    pub commit_sha: Option<String>,
+    pub dirty: Option<bool>,
 }
 
 /// One per-probe disposition row (the rendered subset of the column set).
@@ -134,8 +137,14 @@ fn run_row(row: &Row<'_>) -> rusqlite::Result<RunRow> {
         fail_reason: row.get("fail_reason")?,
         harness_exit_code: row.get("harness_exit_code")?,
         probe_count: row.get("probe_count")?,
+        commit_sha: row.get("commit_sha")?,
+        dirty: row.get::<_, Option<i64>>("dirty")?.map(|v| v != 0),
     })
 }
+
+const RUN_COLS: &str = "\
+run_id, started_at, selector, gated, result, fail_reason, harness_exit_code, probe_count, \
+commit_sha, dirty";
 
 fn disposition_row(row: &Row<'_>) -> rusqlite::Result<DispositionRow> {
     Ok(DispositionRow {
@@ -419,13 +428,21 @@ impl CorpusDb {
 
     /// The most recent `limit` runs, newest first.
     pub fn recent_runs(&self, limit: usize) -> Result<Vec<RunRow>, DevError> {
-        let mut stmt = self.conn().prepare(
-            "SELECT run_id, started_at, selector, gated, result, fail_reason, \
-                    harness_exit_code, probe_count \
-             FROM run ORDER BY run_id DESC LIMIT ?1",
-        )?;
+        let sql = format!("SELECT {RUN_COLS} FROM run ORDER BY run_id DESC LIMIT ?1");
+        let mut stmt = self.conn().prepare(&sql)?;
         let rows = stmt.query_map([clamp(limit)], run_row)?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// One run's envelope, `None` when no run has that id.
+    pub fn run(&self, run_id: i64) -> Result<Option<RunRow>, DevError> {
+        let sql = format!("SELECT {RUN_COLS} FROM run WHERE run_id = ?1");
+        let mut stmt = self.conn().prepare(&sql)?;
+        let mut rows = stmt.query_map([run_id], run_row)?;
+        match rows.next() {
+            Some(r) => Ok(Some(r?)),
+            None => Ok(None),
+        }
     }
 
     /// The captured stderr for a run (for the detail view of a failure).
@@ -791,6 +808,10 @@ mod tests {
     ) {
         let report = parse(nd);
         let run = crate::piners::corpus_db::RunRecord {
+            run_id: None,
+            started_at: None,
+            commit_sha: None,
+            dirty: None,
             selector,
             gated: true,
             result,

@@ -19,6 +19,8 @@
 //! - `--runtimes [--over S]` -> per-probe most-recent runtime, slowest first
 //! - `--trend X`           -> X's disposition/count_tier/p90, anchor and shift
 //!   census over recent runs
+//! - `--compare A B`       -> per-probe count/tier/disposition moves between
+//!   two runs (see [`super::corpus_db::compare`])
 //! - `--sql Q`             -> read-only `SELECT`/`WITH` escape hatch
 //!
 //! The canned views are `?N`-parameterized; `--columns` interpolates only
@@ -38,10 +40,23 @@ use crate::resolve::corpus_runs_db_path;
 pub fn cmd(project_root: &Path, q: &CorpusQuery) -> Result<(), DevError> {
     let db_path = corpus_runs_db_path(project_root);
     if !db_path.exists() {
+        // A view naming a run (compare, `<id>`, `--run`) asked for one that
+        // cannot exist; only the "latest"/listing views have nothing to show.
+        if let Some(id) = q.compare.map(|(a, _)| a).or(q.run).or(q.run_id) {
+            return Err(no_run(id));
+        }
         output::result_msg("no corpus runs yet (run `brokkr corpus ...` first)");
         return Ok(());
     }
     let db = CorpusDb::open_readonly(&db_path)?;
+
+    // --compare A B: per-probe count moves, B read against A. clap refuses
+    // every other view flag beside it.
+    if let Some((a, b)) = q.compare {
+        let comparison = db.compare_runs(a, b)?;
+        println!("{}", corpus_db::compare_report(&comparison, q.full));
+        return Ok(());
+    }
 
     // `--columns`/`--where` only shape the `--diffs`/`--dispositions` tables;
     // refuse them anywhere else rather than silently ignore them, and refuse
@@ -169,10 +184,17 @@ fn resolve_run(db: &CorpusDb, q: &CorpusQuery) -> Result<Option<i64>, DevError> 
     db.latest_run_id()
 }
 
+fn no_run(run_id: i64) -> DevError {
+    DevError::Config(format!(
+        "corpus-results: no run {run_id} in runs.db (bare `brokkr corpus-results` lists the runs)"
+    ))
+}
+
 fn render_probe(db: &CorpusDb, run_id: i64, probe: &str) -> Result<(), DevError> {
+    let run = db.run(run_id)?.ok_or_else(|| no_run(run_id))?;
     match db.disposition_for_probe(run_id, probe)? {
         Some(d) => {
-            println!("run {run_id}");
+            println!("{}", corpus_db::run_header(&run));
             println!("{}", corpus_db::dispositions_table(std::slice::from_ref(&d)));
             let diffs = db.trade_diffs_for_probe(run_id, probe)?;
             if diffs.is_empty() {
@@ -188,6 +210,11 @@ fn render_probe(db: &CorpusDb, run_id: i64, probe: &str) -> Result<(), DevError>
 }
 
 fn render_run_detail(db: &CorpusDb, run_id: i64, full: bool) -> Result<(), DevError> {
+    let run = db.run(run_id)?.ok_or_else(|| no_run(run_id))?;
+    println!("{}", corpus_db::run_header(&run));
+    if let Some(reason) = &run.fail_reason {
+        println!("reason: {reason}");
+    }
     let disps = db.dispositions_for_run(run_id)?;
     if disps.is_empty() {
         output::result_msg(&format!("run {run_id}: no per-probe dispositions recorded"));
@@ -204,7 +231,6 @@ fn render_run_detail(db: &CorpusDb, run_id: i64, full: bool) -> Result<(), DevEr
             disps.iter().filter(|d| !d.gate_ok).cloned().collect()
         };
         let hidden = total - shown.len();
-        println!("run {run_id}");
         if shown.is_empty() {
             output::result_msg(&format!(
                 "all {total} probe(s) match their pin - pass --full to show"

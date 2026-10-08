@@ -32,10 +32,20 @@ pub struct SelectArgs {
 /// keywords, mirroring the dataset-resolver error style.
 pub fn resolve(registry: &Registry, args: &SelectArgs) -> Result<Vec<String>, DevError> {
     if args.verify_only || args.all {
+        // The whole universe leaves every [pending] probe out: name them.
+        let pending: Vec<String> = registry.pending.keys().cloned().collect();
+        if !pending.is_empty() {
+            crate::output::corpus_msg(&pending_notice(&pending));
+        }
         if registry.pins.is_empty() {
-            return Err(DevError::Config(
-                "piners: pins.toml is empty - nothing to select".into(),
-            ));
+            return Err(DevError::Config(if pending.is_empty() {
+                "piners: pins.toml is empty - nothing to select".into()
+            } else {
+                format!(
+                    "piners: nothing pinned yet - every probe is [pending]: {}",
+                    pending.join(", ")
+                )
+            }));
         }
         return Ok(registry.pins.keys().cloned().collect());
     }
@@ -43,6 +53,9 @@ pub fn resolve(registry: &Registry, args: &SelectArgs) -> Result<Vec<String>, De
     let mut selected: Vec<String> = Vec::new();
     let mut seen = std::collections::HashSet::new();
 
+    // A keyword may list a [pending] probe; it is skipped (it has no hashes to
+    // verify), and named so the gap is visible.
+    let mut pending: Vec<String> = Vec::new();
     for keyword in &args.keywords {
         let ids = registry.keywords.get(keyword).ok_or_else(|| {
             DevError::Config(format!(
@@ -51,6 +64,12 @@ pub fn resolve(registry: &Registry, args: &SelectArgs) -> Result<Vec<String>, De
             ))
         })?;
         for id in ids {
+            if registry.pending.contains_key(id) {
+                if !pending.contains(id) {
+                    pending.push(id.clone());
+                }
+                continue;
+            }
             if seen.insert(id.clone()) {
                 selected.push(id.clone());
             }
@@ -58,6 +77,12 @@ pub fn resolve(registry: &Registry, args: &SelectArgs) -> Result<Vec<String>, De
     }
 
     for probe in &args.probe {
+        if registry.pending.contains_key(probe) {
+            return Err(DevError::Config(format!(
+                "piners: probe '{probe}' is [pending], not pinned - pin it with `brokkr corpus \
+                 --reseed --probe {probe}`"
+            )));
+        }
         if !registry.pins.contains_key(probe) {
             return Err(DevError::Config(format!(
                 "piners: unknown probe '{probe}' - not pinned in pins.toml"
@@ -68,6 +93,15 @@ pub fn resolve(registry: &Registry, args: &SelectArgs) -> Result<Vec<String>, De
         }
     }
 
+    if !pending.is_empty() {
+        crate::output::corpus_msg(&pending_notice(&pending));
+    }
+    if selected.is_empty() && !pending.is_empty() {
+        return Err(DevError::Config(format!(
+            "piners: nothing runnable - every selected probe is [pending]: {}",
+            pending.join(", ")
+        )));
+    }
     if selected.is_empty() {
         return Err(DevError::Config(format!(
             "piners: no probes selected. Pass --keyword <k> (repeatable), \
@@ -77,6 +111,17 @@ pub fn resolve(registry: &Registry, args: &SelectArgs) -> Result<Vec<String>, De
     }
 
     Ok(selected)
+}
+
+/// The one-line notice for registered-but-unpinned probes left out of a
+/// selection or a verification.
+pub fn pending_notice(ids: &[String]) -> String {
+    format!(
+        "{} [pending] probe(s) registered but not pinned, skipped: {} (pin each with `brokkr \
+         corpus --reseed --probe <id>`)",
+        ids.len(),
+        ids.join(", ")
+    )
 }
 
 fn available(registry: &Registry) -> String {
@@ -197,6 +242,31 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(resolve(&registry(), &args).unwrap(), vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn a_pending_probe_is_skipped_by_a_keyword_and_refused_by_name() {
+        let mut reg = registry();
+        reg.pending.insert("d".to_owned(), PathBuf::from("p/d"));
+        reg.keywords.insert("z".to_owned(), vec!["a".to_owned(), "d".to_owned()]);
+        reg.keywords.insert("only".to_owned(), vec!["d".to_owned()]);
+        let kw = |k: &str| SelectArgs {
+            keywords: vec![k.to_owned()],
+            ..Default::default()
+        };
+        assert_eq!(resolve(&reg, &kw("z")).unwrap(), vec!["a"]);
+        let err = resolve(&reg, &kw("only")).unwrap_err();
+        assert!(format!("{err:?}").contains("nothing runnable"));
+        let by_name = SelectArgs {
+            probe: vec!["d".to_owned()],
+            ..Default::default()
+        };
+        assert!(format!("{:?}", resolve(&reg, &by_name).unwrap_err()).contains("[pending]"));
+        let all = SelectArgs {
+            all: true,
+            ..Default::default()
+        };
+        assert_eq!(resolve(&reg, &all).unwrap(), vec!["a", "b", "c"]);
     }
 
     #[test]

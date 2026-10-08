@@ -43,8 +43,9 @@ use crate::ratatoskr::build;
 use crate::resolve::corpus_runs_db_path;
 
 /// Where corpus run dirs live, relative to the project root:
-/// `<this>/corpus/run-N/`.
+/// `<this>/corpus/run-<run id>/`.
 const ARTEFACT_PARENT: &str = ".brokkr/piners";
+const ARTEFACT_TEST_ID: &str = "corpus";
 
 /// Pre-run runtime wall, in milliseconds (~270s). A selection whose estimated
 /// runtime (the measured wall of a comparable covering run - see
@@ -109,8 +110,23 @@ pub fn corpus(
         return crate::piners::reseed::run(project_root, &cfg, args);
     }
 
+    // The lock comes before anything is read. Reseed and bless write
+    // pins.toml under it, so a run that loaded and verified first could wait
+    // out a reseed and then run - and bless - against pins and hashes that
+    // are no longer the file's. Verify-only too: it would report drift for
+    // bytes a reseed had just adopted. Held to the end, through ingest and
+    // the bless write.
+    let project_root_str = project_root.display().to_string();
+    let lock = lockfile::acquire(&LockContext {
+        project: "piners",
+        command: "corpus",
+        project_root: &project_root_str,
+    })?;
+    let _sigterm = crate::shutdown::SigtermGuard::install();
+
     let registry_dir = project_root.join(cfg.registry_dir());
-    let mut registry = Registry::load(&registry_dir)?;
+    let corpus_root = project_root.join(cfg.corpus_root());
+    let mut registry = Registry::load(&registry_dir, &corpus_root)?;
     registry.lint()?;
 
     let sel_args = SelectArgs {
@@ -122,7 +138,6 @@ pub fn corpus(
     let ids = select::resolve(&registry, &sel_args)?;
 
     // Hard correctness gate: verify every selected pin before running.
-    let corpus_root = project_root.join(cfg.corpus_root());
     output::corpus_msg(&format!(
         "verifying {} probe(s) against {}",
         ids.len(),
@@ -147,6 +162,17 @@ pub fn corpus(
         return Ok(());
     }
 
+    // Required only once something is to be built: verification needs no
+    // harness, so a registry-only checkout can still `--verify-only`.
+    let harness_cfg = cfg.harness.as_ref().ok_or_else(|| {
+        DevError::Config(
+            "corpus: no [piners.harness] section in brokkr.toml. \
+             Declare `[piners.harness]` with `package = \"<crate>\"` \
+             (and optional `binary`, `features`, `debug`)."
+                .into(),
+        )
+    })?;
+
     // Default profile is debug: parity is opt-level-independent, and the
     // debug build keeps the edit/run loop inside the cache-warm window.
     // Resolved before the ceiling, which only estimates from same-profile runs.
@@ -169,34 +195,21 @@ pub fn corpus(
     // run. The ceiling above does it on its way to a read, but `--force` skips
     // the ceiling, and a store that refuses to migrate would otherwise be
     // found only at ingest - after the whole harness run it was meant to keep.
-    let db_path = corpus_runs_db_path(project_root);
-    if db_path.exists() {
-        drop(CorpusDb::open(&db_path)?);
+    let corpus_db_path = corpus_runs_db_path(project_root);
+    if corpus_db_path.exists() {
+        drop(CorpusDb::open(&corpus_db_path)?);
     }
 
-    let harness_cfg = cfg.harness.as_ref().ok_or_else(|| {
-        DevError::Config(
-            "corpus: no [piners.harness] section in brokkr.toml. \
-             Declare `[piners.harness]` with `package = \"<crate>\"` \
-             (and optional `binary`, `features`, `debug`)."
-                .into(),
-        )
-    })?;
-
-    let project_root_str = project_root.display().to_string();
-    let _lock = lockfile::acquire(&LockContext {
-        project: "piners",
-        command: "corpus",
-        project_root: &project_root_str,
-    })?;
-    let _sigterm = crate::shutdown::SigtermGuard::install();
+    // The run's provenance, taken before the build: what HEAD was, whether
+    // the tree carried uncommitted work, and when the run began.
+    let start = RunStart::capture(project_root);
 
     let built = build::build_for_harness(
         project_root,
         harness_cfg,
         debug,
-        Some(&|pid| _lock.set_child_pid(pid)),
-        Some(&|| _lock.clear_child_pid()),
+        Some(&|pid| lock.set_child_pid(pid)),
+        Some(&|| lock.clear_child_pid()),
         true,
     )?;
     output::corpus_msg(&format!(
@@ -205,13 +218,28 @@ pub fn corpus(
         built.binary.display()
     ));
 
+    // One number per run: the dir is `run-<id>` and the row is stored under
+    // the same id. Reserved under the lock, past both every stored run and
+    // every dir on disk (an unrecorded run - a SIGKILL, a failed ingest -
+    // leaves its dir, which holds the number until a clean removes it).
     let artefact_parent = project_root.join(ARTEFACT_PARENT);
-    let artefacts = ArtefactDir::allocate(&artefact_parent, "corpus", args.keep_artefacts)?;
-    let corpus_db_path = corpus_runs_db_path(project_root);
+    let run_id = reserve_run_id(&corpus_db_path, &artefact_parent.join(ARTEFACT_TEST_ID))?;
+    let artefacts =
+        ArtefactDir::allocate_at(&artefact_parent, ARTEFACT_TEST_ID, run_id, args.keep_artefacts)?;
+    output::corpus_msg(&format!("run {run_id} -> {}", artefacts.path().display()));
+    let selector = selector_json(args, &ids, debug);
+    let envelope = Envelope {
+        run_id,
+        start: &start,
+        selector: &selector,
+        gated: !args.no_gate && !args.bless,
+    };
 
     let manifest_path = artefacts.path().join("manifest.json");
     let manifest = Manifest::build(&corpus_root, &verified, &registry);
-    manifest.write(&manifest_path)?;
+    if let Err(e) = manifest.write(&manifest_path) {
+        return Err(record_unfinished(&corpus_db_path, &envelope, artefacts, e, "error", None));
+    }
     output::corpus_msg(&format!(
         "manifest: {} probe(s) -> {}",
         verified.len(),
@@ -245,45 +273,39 @@ pub fn corpus(
         project_root,
         &env_pairs,
         HARNESS_HANG_BACKSTOP,
-        Some(&|pid| _lock.set_child_pid(pid)),
+        Some(&|pid| lock.set_child_pid(pid)),
         true,
     ) {
         Ok(c) => c,
         Err(DevError::Interrupted) => {
-            _lock.clear_child_pid();
-            artefacts.finalize_failure();
-            return Err(DevError::Interrupted);
+            lock.clear_child_pid();
+            return Err(record_unfinished(
+                &corpus_db_path,
+                &envelope,
+                artefacts,
+                DevError::Interrupted,
+                "interrupted",
+                None,
+            ));
         }
         Err(e) => {
+            lock.clear_child_pid();
             let msg = format!("failed to spawn {}: {e}\n", built.binary.display());
             std::fs::write(artefacts.path().join("spawn-error.txt"), &msg).ok();
-            // Record the failed run so it surfaces in `brokkr corpus-results`, then
-            // still preserve the dir - a spawn failure is exactly when on-disk
-            // forensics matter most, and the DB row is a convenience index.
-            let selector = selector_json(args, &ids, debug);
-            let record = RunRecord {
-                selector: &selector,
-                gated: !args.no_gate && !args.bless,
-                result: "fail",
-                fail_reason: Some("harness failed to spawn"),
-                harness_exit_code: None,
-                stderr: &msg,
-                // Never ran -> no measured wall.
-                wall_ms: None,
-            };
-            ingest_run(
+            // Recorded so it surfaces in `brokkr corpus-results`; the dir is
+            // still preserved - a spawn failure is exactly when on-disk
+            // forensics matter most, and the row is a convenience index.
+            return Err(record_unfinished(
                 &corpus_db_path,
-                &record,
-                &report::HarnessReport::default(),
-                &BTreeMap::new(),
-                &[],
-            )
-            .ok();
-            artefacts.finalize_failure();
-            return Err(e);
+                &envelope,
+                artefacts,
+                e,
+                "fail",
+                Some(("harness failed to spawn", &msg)),
+            ));
         }
     };
-    _lock.clear_child_pid();
+    lock.clear_child_pid();
 
     let killed_on_backstop = capture.killed_on_deadline;
     let captured = capture.captured;
@@ -369,20 +391,19 @@ pub fn corpus(
             (id.clone(), exp)
         })
         .collect();
-    let selector = selector_json(args, &ids, debug);
     let stderr_text = String::from_utf8_lossy(&captured.stderr);
-    let record = RunRecord {
-        selector: &selector,
-        // A bless run ignores the gate verdict, so it is not a gated run.
-        gated: !args.no_gate && !args.bless,
-        result: if run_pass { "pass" } else { "fail" },
-        fail_reason: fail_reason.as_deref(),
-        harness_exit_code: harness_code,
-        stderr: &stderr_text,
+    let record = envelope.record(
+        if run_pass { "pass" } else { "fail" },
+        fail_reason.as_deref(),
+        harness_code,
+        &stderr_text,
         // brokkr's own measurement of the whole harness subprocess - the real
         // wall the ceiling estimates future runs from.
-        wall_ms: Some(elapsed_ms as f64),
-    };
+        Some(elapsed_ms as f64),
+    );
+    // From here the run is recorded exactly once: a later failure (a bless
+    // refusing a changed pins.toml, a finalize error) is the command's error,
+    // not a second row under this id.
     if let Err(e) = ingest_run(&corpus_db_path, &record, &report, &expected, &gate_diffs) {
         output::corpus_msg(&format!(
             "warning: failed to persist run to {}: {e}",
@@ -509,8 +530,111 @@ fn selector_json(args: &CorpusArgs, ids: &[String], debug: bool) -> String {
     .to_string()
 }
 
-/// Open the corpus DB and persist one run. Separate so both the spawn-error
-/// path and the normal path share the open+record sequence.
+/// What a run knows about itself before it executes: when it started, and
+/// the checkout it was taken from.
+pub(crate) struct RunStart {
+    /// `YYYY-MM-DD HH:MM:SS`, UTC - the store's `started_at` convention.
+    pub started_at: String,
+    /// Full `HEAD` hash; `None` outside git or when git fails.
+    pub commit_sha: Option<String>,
+    /// Uncommitted changes outside `.brokkr/` ([`crate::git::has_uncommitted`]).
+    pub dirty: Option<bool>,
+}
+
+impl RunStart {
+    pub(crate) fn capture(project_root: &Path) -> Self {
+        Self {
+            started_at: crate::piners::lint::now_sqlite_utc(),
+            commit_sha: crate::git::resolve_commit(project_root, "HEAD").ok().map(|c| c.full),
+            dirty: crate::git::has_uncommitted(project_root),
+        }
+    }
+}
+
+/// The run-row fields fixed before the harness runs, shared by the normal
+/// ingest and the unfinished-run record so both store the same identity.
+struct Envelope<'a> {
+    run_id: i64,
+    start: &'a RunStart,
+    selector: &'a str,
+    gated: bool,
+}
+
+impl<'a> Envelope<'a> {
+    fn record(
+        &self,
+        result: &'a str,
+        fail_reason: Option<&'a str>,
+        harness_exit_code: Option<i32>,
+        stderr: &'a str,
+        wall_ms: Option<f64>,
+    ) -> RunRecord<'a> {
+        RunRecord {
+            run_id: Some(self.run_id),
+            started_at: Some(&self.start.started_at),
+            commit_sha: self.start.commit_sha.as_deref(),
+            dirty: self.start.dirty,
+            selector: self.selector,
+            gated: self.gated,
+            result,
+            fail_reason,
+            harness_exit_code,
+            stderr,
+            wall_ms,
+        }
+    }
+}
+
+/// The next run id: one past the highest of every stored run and every
+/// `run-N` dir on disk. Called under the lock, so no other corpus run can
+/// take the same number between this read and the dir's creation.
+fn reserve_run_id(db_path: &Path, run_dirs: &Path) -> Result<i64, DevError> {
+    let stored = if db_path.exists() {
+        CorpusDb::open_readonly(db_path)?.latest_run_id()?.unwrap_or(0)
+    } else {
+        0
+    };
+    let on_disk = crate::artefacts::highest_run_number(run_dirs)?;
+    stored
+        .max(on_disk)
+        .checked_add(1)
+        .ok_or_else(|| DevError::Database("corpus: run ids exhausted".to_owned()))
+}
+
+/// Record a run that ended before its harness output could be ingested
+/// (interrupted, failed to spawn, could not write its manifest), so its id
+/// names a row and not only a dir. The dir is preserved either way. Returns
+/// the error the command fails with - always `original`; a failure to
+/// record is reported beside it, never in its place.
+fn record_unfinished(
+    db_path: &Path,
+    envelope: &Envelope<'_>,
+    artefacts: ArtefactDir,
+    original: DevError,
+    result: &str,
+    detail: Option<(&str, &str)>,
+) -> DevError {
+    let reason = match detail {
+        Some((reason, _)) => reason.to_owned(),
+        None => original.to_string(),
+    };
+    let stderr = detail.map_or("", |(_, stderr)| stderr);
+    // Never ran -> no measured wall, no exit code.
+    let record = envelope.record(result, Some(&reason), None, stderr, None);
+    if let Err(e) = ingest_run(db_path, &record, &report::HarnessReport::default(), &BTreeMap::new(), &[]) {
+        output::corpus_msg(&format!(
+            "warning: run {} could not be recorded in {}: {e}",
+            envelope.run_id,
+            db_path.display()
+        ));
+    }
+    output::corpus_msg(&format!("artefacts preserved: {}", artefacts.path().display()));
+    artefacts.finalize_failure();
+    original
+}
+
+/// Open the corpus DB and persist one run. Shared by the normal path and the
+/// unfinished-run record.
 fn ingest_run(
     db_path: &Path,
     record: &RunRecord<'_>,

@@ -7,6 +7,7 @@
 
 use serde_json::Value;
 
+use super::compare::{self, Comparison, Presence, ProbeDelta};
 use super::query::{
     DispositionRow, GateMissRow, RawTable, RunRow, RuntimeRow, ShiftCensus, TradeDiffRow,
     TrendRow,
@@ -145,6 +146,7 @@ pub fn runs_table(rows: &[RunRow]) -> String {
             vec![
                 r.run_id.to_string(),
                 r.started_at.clone(),
+                commit_cell(r),
                 r.result.clone(),
                 if r.gated { "yes".to_owned() } else { "no".to_owned() },
                 r.probe_count.to_string(),
@@ -155,9 +157,136 @@ pub fn runs_table(rows: &[RunRow]) -> String {
         })
         .collect();
     grid(
-        &["run", "started_at", "result", "gated", "probes", "exit", "reason", "selector"],
+        &[
+            "run", "started_at", "commit", "result", "gated", "probes", "exit", "reason",
+            "selector",
+        ],
         &cells,
     )
+}
+
+/// The run's checkout as a short hash, `*` when the tree had uncommitted
+/// changes, `?` when whether it did is unknown (never rendered as clean),
+/// `-` when the commit itself is unknown (a pre-v6 row, or no git).
+pub fn commit_cell(r: &RunRow) -> String {
+    match &r.commit_sha {
+        Some(sha) => {
+            let dirty = match r.dirty {
+                Some(true) => "*",
+                Some(false) => "",
+                None => "?",
+            };
+            format!("{}{dirty}", crate::git::short_of(sha))
+        }
+        None => "-".to_owned(),
+    }
+}
+
+/// The one-line header a single-run view opens with: id, start (UTC) and
+/// checkout, so a cited run can be paired with its commit.
+pub fn run_header(r: &RunRow) -> String {
+    format!(
+        "run {}  started {} UTC  commit {}  {}",
+        r.run_id,
+        r.started_at,
+        commit_cell(r),
+        r.result
+    )
+}
+
+/// `--compare A B`: the two run headers, a context warning when the runs were
+/// not executed alike, the moved probes, and a closing count. `full` also
+/// lists the probes that did not move.
+pub fn compare_report(c: &Comparison, full: bool) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("A: {}\nB: {}\n", run_header(&c.run_a), run_header(&c.run_b)));
+    let ctx_a = compare::context_of(&c.run_a.selector);
+    let ctx_b = compare::context_of(&c.run_b.selector);
+    if ctx_a != ctx_b {
+        let show = |(debug, args): &(bool, Vec<String>)| {
+            let profile = if *debug { "debug" } else { "release" };
+            if args.is_empty() {
+                profile.to_owned()
+            } else {
+                format!("{profile} -- {}", args.join(" "))
+            }
+        };
+        out.push_str(&format!(
+            "note: the runs differ in execution context (A: {}, B: {}) - counts may not be \
+             comparable\n",
+            show(&ctx_a),
+            show(&ctx_b)
+        ));
+    }
+
+    let shown: Vec<&ProbeDelta> = c.probes.iter().filter(|d| full || d.moved()).collect();
+    let cells: Vec<Vec<String>> = shown.iter().map(|d| compare_cells(d)).collect();
+    out.push('\n');
+    out.push_str(&grid(
+        &["probe", "tier", "outcome/disposition", "matched", "ours", "tv", "movement"],
+        &cells,
+    ));
+    let moved = c.probes.iter().filter(|d| d.moved()).count();
+    out.push_str(&format!(
+        "\n\n{moved} of {} probe(s) moved{}",
+        c.probes.len(),
+        if full || moved == c.probes.len() { "" } else { " (pass --full to list the rest)" }
+    ));
+    out
+}
+
+/// `outcome/disposition`, marked when the run emitted the line unasked.
+fn side_label(s: &compare::Side) -> String {
+    let unselected = if s.selected { "" } else { " (report-only)" };
+    format!("{}/{}{unselected}", s.outcome, s.disposition)
+}
+
+fn compare_cells(d: &ProbeDelta) -> Vec<String> {
+    let arrow = |a: String, b: String| if a == b { a } else { format!("{a} -> {b}") };
+    let count = |a: i64, b: i64| {
+        if a == b { a.to_string() } else { format!("{a} -> {b} ({:+})", b - a) }
+    };
+    match (&d.a, &d.b) {
+        (Presence::Ran(a), Presence::Ran(b)) => {
+            let label = side_label;
+            let counts = a.has_counts && b.has_counts;
+            let side_counts = |s: &compare::Side, v: i64| {
+                if s.has_counts { v.to_string() } else { "no counts".to_owned() }
+            };
+            let cell = |va: i64, vb: i64| {
+                if counts {
+                    count(va, vb)
+                } else {
+                    arrow(side_counts(a, va), side_counts(b, vb))
+                }
+            };
+            vec![
+                d.probe.clone(),
+                arrow(fs(&a.count_tier), fs(&b.count_tier)),
+                arrow(label(a), label(b)),
+                cell(a.matched, b.matched),
+                cell(a.ours_only, b.ours_only),
+                cell(a.tv_only, b.tv_only),
+                compare::direction(a, b).unwrap_or("-").to_owned(),
+            ]
+        }
+        (a, b) => {
+            let name = |p: &Presence| match p {
+                Presence::Ran(s) => side_label(s),
+                Presence::NoLine => "selected, no line".to_owned(),
+                Presence::NotSelected => "not selected".to_owned(),
+            };
+            vec![
+                d.probe.clone(),
+                "-".to_owned(),
+                arrow(name(a), name(b)),
+                "-".to_owned(),
+                "-".to_owned(),
+                "-".to_owned(),
+                "-".to_owned(),
+            ]
+        }
+    }
 }
 
 /// The per-probe disposition table (run detail / `--probe`).

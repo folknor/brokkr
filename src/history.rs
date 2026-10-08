@@ -45,25 +45,100 @@ pub struct HistoryDb {
     conn: Connection,
 }
 
+/// Why the history store could not be opened or written, kept typed so the
+/// automatic recorder can tell an environment that simply has no writable
+/// history store (a sandbox with a read-only data dir) from a real fault.
+#[derive(Debug)]
+pub enum StoreError {
+    Io(std::io::Error),
+    Sqlite(rusqlite::Error),
+    Other(DevError),
+}
+
+impl StoreError {
+    /// The store is unreachable from this environment, not broken: the data
+    /// dir cannot be created or written, or the file opened read-only. Every
+    /// brokkr invocation in such an environment would hit it, so the
+    /// recorder stays quiet about it.
+    pub fn is_environmental(&self) -> bool {
+        use rusqlite::ErrorCode;
+        match self {
+            StoreError::Io(e) => matches!(
+                e.kind(),
+                std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::ReadOnlyFilesystem
+            ),
+            StoreError::Sqlite(rusqlite::Error::SqliteFailure(f, _)) => matches!(
+                f.code,
+                ErrorCode::CannotOpen | ErrorCode::ReadOnly | ErrorCode::PermissionDenied
+            ),
+            _ => false,
+        }
+    }
+}
+
+impl From<std::io::Error> for StoreError {
+    fn from(e: std::io::Error) -> Self {
+        StoreError::Io(e)
+    }
+}
+
+impl From<rusqlite::Error> for StoreError {
+    fn from(e: rusqlite::Error) -> Self {
+        StoreError::Sqlite(e)
+    }
+}
+
+impl From<StoreError> for DevError {
+    fn from(e: StoreError) -> Self {
+        match e {
+            StoreError::Io(e) => DevError::Io(e),
+            StoreError::Sqlite(e) => e.into(),
+            StoreError::Other(e) => e,
+        }
+    }
+}
+
+impl std::fmt::Display for StoreError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            StoreError::Io(e) => write!(f, "{e}"),
+            StoreError::Sqlite(e) => write!(f, "{e}"),
+            StoreError::Other(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+/// How long a connection waits on another process's write lock before
+/// giving up with `SQLITE_BUSY`. Every brokkr invocation records a row, so
+/// concurrent invocations (parallel agents) contend for the file routinely.
+const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 impl HistoryDb {
     /// Open (or create) the history database at the XDG data path.
     pub fn open() -> Result<Self, DevError> {
-        let path = db_path()?;
+        Ok(Self::open_typed()?)
+    }
+
+    /// [`Self::open`] with the failure kept typed (see [`StoreError`]).
+    pub fn open_typed() -> Result<Self, StoreError> {
+        let path = db_path().map_err(StoreError::Other)?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let conn = Connection::open(&path)?;
+        // Before anything that writes - WAL setup and migration included -
+        // so a concurrent invocation waits rather than failing busy.
+        conn.busy_timeout(BUSY_TIMEOUT)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         run_migrations(&conn)?;
         conn.execute_batch(CREATE_TABLE)?;
         conn.execute_batch(CREATE_INDEXES)?;
-        conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         Ok(Self { conn })
     }
 
     /// Insert a history row.
     #[allow(clippy::too_many_arguments)]
-    pub fn insert(&self, row: &HistoryRow) -> Result<(), DevError> {
+    pub fn insert(&self, row: &HistoryRow) -> Result<(), StoreError> {
         self.conn.execute(
             "INSERT INTO history (project, cwd, command, elapsed_ms, exit_status, \
                 hostname, commit_hash, dirty, kernel, avail_memory_mb) \
@@ -362,21 +437,37 @@ fn db_path() -> Result<PathBuf, DevError> {
 // Migrations
 // ---------------------------------------------------------------------------
 
-fn run_migrations(conn: &Connection) -> Result<(), DevError> {
-    if !has_table(conn, "history") {
+/// Bring the store to [`SCHEMA_VERSION`]. A fresh file gets its table and
+/// version stamp; an older one its pending steps. Either way under one
+/// `IMMEDIATE` transaction with the version re-read inside it: every brokkr
+/// invocation opens this file, so two of them routinely race to initialise
+/// or migrate it, and the loser must see the winner's work rather than
+/// repeat it. A store stamped newer than this binary is left alone - its
+/// table is a superset this binary's inserts still fit.
+fn run_migrations(conn: &Connection) -> Result<(), StoreError> {
+    let read_version =
+        |conn: &Connection| conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0));
+    if read_version(conn)? >= SCHEMA_VERSION && has_table(conn, "history") {
         return Ok(());
     }
-
-    let current: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
-
-    if current >= SCHEMA_VERSION {
-        return Ok(());
+    conn.execute_batch("BEGIN IMMEDIATE")?;
+    let migrated = (|| -> Result<(), rusqlite::Error> {
+        if read_version(conn)? >= SCHEMA_VERSION && has_table(conn, "history") {
+            return Ok(());
+        }
+        conn.execute_batch(CREATE_TABLE)?;
+        // Future migrations go here, gated on the version read above:
+        // if current < 2 { migrate_v1_to_v2(conn)?; }
+        conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        Ok(())
+    })();
+    match migrated {
+        Ok(()) => conn.execute_batch("COMMIT")?,
+        Err(e) => {
+            conn.execute_batch("ROLLBACK").ok();
+            return Err(e.into());
+        }
     }
-
-    // Future migrations go here:
-    // if current < 2 { migrate_v1_to_v2(conn)?; }
-
-    conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     Ok(())
 }
 
@@ -414,6 +505,30 @@ mod tests {
         clippy::useless_vec
     )]
     use super::*;
+
+    #[test]
+    fn an_unwritable_store_is_environmental_and_a_fault_is_not() {
+        let io = |k| StoreError::Io(std::io::Error::from(k));
+        assert!(io(std::io::ErrorKind::PermissionDenied).is_environmental());
+        assert!(io(std::io::ErrorKind::ReadOnlyFilesystem).is_environmental());
+        assert!(!io(std::io::ErrorKind::NotFound).is_environmental());
+        let sqlite = |code| {
+            StoreError::Sqlite(rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(code), None))
+        };
+        assert!(sqlite(rusqlite::ffi::SQLITE_READONLY).is_environmental());
+        assert!(sqlite(rusqlite::ffi::SQLITE_CANTOPEN).is_environmental());
+        assert!(!sqlite(rusqlite::ffi::SQLITE_CORRUPT).is_environmental());
+    }
+
+    #[test]
+    fn migration_initialises_once_and_is_idempotent() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        assert!(has_table(&conn, "history"));
+        run_migrations(&conn).unwrap();
+        let v: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
+        assert_eq!(v, SCHEMA_VERSION);
+    }
 
     /// Open an in-memory history DB for testing.
     fn test_db() -> HistoryDb {

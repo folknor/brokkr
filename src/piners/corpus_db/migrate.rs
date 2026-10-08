@@ -7,7 +7,8 @@
 //! harness wall (the pre-run runtime ceiling estimates from these, not from
 //! summing the harness's overlapping per-probe `runtime_ms`); version 5
 //! rebuilds `disposition` around the stored harness record (`raw_json`, every
-//! harness column generated from it - see `schema.rs`). On a fresh database
+//! harness column generated from it - see `schema.rs`); version 6 adds
+//! `run.commit_sha`/`run.dirty`, the checkout the run was taken from. On a fresh database
 //! the schema DDL in `schema.rs` creates the current tables (columns
 //! included) and stamps the version, so the migration steps below only run for
 //! an older db on disk. The `has_table` helper lives here so a future column
@@ -20,7 +21,7 @@ use super::schema::disposition_ddl;
 use crate::error::DevError;
 
 /// Current schema version. Increment when adding a migration below.
-pub(super) const SCHEMA_VERSION: i64 = 5;
+pub(super) const SCHEMA_VERSION: i64 = 6;
 
 /// Run all pending migrations based on `PRAGMA user_version`. On a fresh
 /// database the schema DDL in `schema.rs` creates the current tables and
@@ -138,6 +139,18 @@ fn migrate_from(conn: &rusqlite::Connection, current: i64) -> Result<(), DevErro
     if current < 5 && has_table(conn, "disposition") && !has_column(conn, "disposition", "raw_json")
     {
         rebuild_disposition(conn)?;
+    }
+
+    // v5 -> v6: the checkout a run was taken from. Nullable with no default:
+    // an older run never recorded it, and neither does a run outside a git
+    // repo, so NULL is "unknown", never "clean".
+    if current < 6 {
+        if !has_column(conn, "run", "commit_sha") {
+            conn.execute("ALTER TABLE run ADD COLUMN commit_sha TEXT", [])?;
+        }
+        if !has_column(conn, "run", "dirty") {
+            conn.execute("ALTER TABLE run ADD COLUMN dirty INTEGER", [])?;
+        }
     }
 
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;

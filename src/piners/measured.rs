@@ -60,11 +60,24 @@ pub(crate) fn run(req: &MeasureRequest, args: &CorpusArgs) -> Result<(), DevErro
         )
     })?;
 
+    let lock_command = if alloc { "corpus --alloc" } else { "corpus --hotpath" };
+    // Locked before the registry is read, as the parity path is (see
+    // `cmd.rs`): verification must judge the pins and bytes the run uses.
+    // `BenchContext` acquires again below; acquisition is re-entrant within
+    // the process, so the hold is one and spans both.
+    let project_root_str = req.project_root.display().to_string();
+    let _lock = crate::lockfile::acquire(&crate::lockfile::LockContext {
+        project: "piners",
+        command: lock_command,
+        project_root: &project_root_str,
+    })?;
+
     // Selection + hard verification, shared with the parity path. No gate,
     // bless, reseed, or runtime ceiling apply to a measured run (those are
     // dispatch-rejected as conflicting flags).
     let registry_dir = req.project_root.join(cfg.registry_dir());
-    let reg = Registry::load(&registry_dir)?;
+    let corpus_root = req.project_root.join(cfg.corpus_root());
+    let reg = Registry::load(&registry_dir, &corpus_root)?;
     reg.lint()?;
     let sel = SelectArgs {
         keywords: args.keywords.clone(),
@@ -74,7 +87,6 @@ pub(crate) fn run(req: &MeasureRequest, args: &CorpusArgs) -> Result<(), DevErro
     };
     let ids = select::resolve(&reg, &sel)?;
 
-    let corpus_root = req.project_root.join(cfg.corpus_root());
     output::corpus_msg(&format!(
         "verifying {} probe(s) against {}",
         ids.len(),
@@ -106,7 +118,6 @@ pub(crate) fn run(req: &MeasureRequest, args: &CorpusArgs) -> Result<(), DevErro
         .features
         .push(harness::hotpath_feature(alloc).to_owned());
 
-    let lock_command = if alloc { "corpus --alloc" } else { "corpus --hotpath" };
     let ctx = BenchContext::with_build_config(
         req.dev_config,
         req.project,

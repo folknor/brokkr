@@ -5,9 +5,10 @@
 //! generic parent path, so each caller supplies its own `.brokkr/<proj>`
 //! root.
 //!
-//! Each run gets `<parent>/<test_id>/run-N/`,
-//! where N is the smallest positive integer such that `run-N/` does not
-//! already exist. Callers populate the directory while the run executes
+//! Each run gets `<parent>/<test_id>/run-N/`, where N is one past the
+//! highest `run-N/` present ([`ArtefactDir::allocate`]) - so a number frees
+//! up again once its dir is removed - or a number the caller reserved
+//! ([`ArtefactDir::allocate_at`], piners' run-store id). Callers populate the directory while the run executes
 //! (frame log, event log, /proc snapshots, data-dir copies); when the
 //! run finishes they call [`ArtefactDir::finalize_success`] or
 //! [`ArtefactDir::finalize_failure`] to drive the retention policy:
@@ -55,10 +56,10 @@ pub struct ArtefactDir {
 impl ArtefactDir {
     /// Allocate `<parent>/<test_id>/run-N/`.
     ///
-    /// `<parent>/<test_id>/` is created on demand. N is the smallest
-    /// positive integer for which `run-N/` does not yet exist; gaps in
-    /// the existing numbering are NOT filled (so chronological order is
-    /// preserved when listing).
+    /// `<parent>/<test_id>/` is created on demand. N is one past the
+    /// highest existing `run-N/`; gaps in the existing numbering are NOT
+    /// filled (so chronological order is preserved when listing), but a
+    /// removed highest dir's number is handed out again.
     ///
     /// `test_id` is validated to be a single path component (no `/`,
     /// `\`, `..`, leading `.`, or empty). Anything else is rejected as
@@ -75,10 +76,41 @@ impl ArtefactDir {
         let test_dir = parent.join(test_id);
         fs::create_dir_all(&test_dir)?;
 
-        let n = next_run_number(&test_dir)?;
-        let run_dir = test_dir.join(format!("run-{n}"));
-        fs::create_dir(&run_dir)?;
+        let n = highest_run_number(&test_dir)?
+            .checked_add(1)
+            .ok_or_else(|| DevError::Config(format!("{}: run numbers exhausted", test_dir.display())))?;
+        Self::create(&test_dir, n, keep_on_success)
+    }
 
+    /// Allocate `<parent>/<test_id>/run-<n>/` for a number the caller
+    /// reserved (piners numbers its dirs by the run-store id, so the dir
+    /// and the row carry one number). Refuses an `n` below 1 and a
+    /// `run-<n>/` that already exists - the creation is exclusive, never a
+    /// reuse.
+    pub fn allocate_at(
+        parent: &Path,
+        test_id: &str,
+        n: i64,
+        keep_on_success: bool,
+    ) -> Result<Self, DevError> {
+        validate_test_id(test_id)?;
+        if n < 1 {
+            return Err(DevError::Config(format!("artefact run number must be positive (got {n})")));
+        }
+        let test_dir = parent.join(test_id);
+        fs::create_dir_all(&test_dir)?;
+        Self::create(&test_dir, n, keep_on_success)
+    }
+
+    fn create(test_dir: &Path, n: i64, keep_on_success: bool) -> Result<Self, DevError> {
+        let run_dir = test_dir.join(format!("run-{n}"));
+        fs::create_dir(&run_dir).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::AlreadyExists {
+                DevError::Config(format!("artefact dir {} already exists", run_dir.display()))
+            } else {
+                DevError::Io(e)
+            }
+        })?;
         Ok(Self {
             path: run_dir,
             keep_on_success,
@@ -148,11 +180,13 @@ fn validate_test_id(test_id: &str) -> Result<(), DevError> {
     Ok(())
 }
 
-fn next_run_number(test_dir: &Path) -> Result<u32, DevError> {
-    let mut highest: u32 = 0;
+/// The highest `N` among `<test_dir>/run-N` entries, 0 when there are none
+/// (or the dir does not exist).
+pub fn highest_run_number(test_dir: &Path) -> Result<i64, DevError> {
+    let mut highest: i64 = 0;
     let read = match fs::read_dir(test_dir) {
         Ok(read) => read,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(1),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(0),
         Err(err) => return Err(DevError::Io(err)),
     };
     for entry in read {
@@ -164,13 +198,13 @@ fn next_run_number(test_dir: &Path) -> Result<u32, DevError> {
         let Some(rest) = name.strip_prefix("run-") else {
             continue;
         };
-        if let Ok(n) = rest.parse::<u32>()
+        if let Ok(n) = rest.parse::<i64>()
             && n > highest
         {
             highest = n;
         }
     }
-    Ok(highest + 1)
+    Ok(highest)
 }
 
 #[cfg(test)]
@@ -207,6 +241,18 @@ mod tests {
         let dir = ArtefactDir::allocate(&parent, "test_beta", false).unwrap();
         assert_eq!(dir.path().file_name().unwrap(), "run-4");
         dir.finalize_failure();
+    }
+
+    #[test]
+    fn allocate_at_takes_the_given_number_and_refuses_an_existing_one() {
+        let parent = tmpdir("artefacts_allocate_at");
+        let dir = ArtefactDir::allocate_at(&parent, "corpus", 2403, false).unwrap();
+        assert_eq!(dir.path().file_name().unwrap(), "run-2403");
+        assert_eq!(highest_run_number(&parent.join("corpus")).unwrap(), 2403);
+        dir.finalize_failure();
+        let again = ArtefactDir::allocate_at(&parent, "corpus", 2403, false);
+        assert!(matches!(again, Err(DevError::Config(_))), "{again:?}");
+        assert!(ArtefactDir::allocate_at(&parent, "corpus", 0, false).is_err());
     }
 
     #[test]

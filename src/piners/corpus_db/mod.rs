@@ -14,6 +14,7 @@
 //! ([`query`]/[`mod@format`]) - but is piners-specific and append-only: it never
 //! deletes, so it carries no FK-cascade machinery.
 
+pub mod compare;
 pub mod format;
 pub mod ingest;
 mod migrate;
@@ -21,8 +22,8 @@ pub mod query;
 mod schema;
 
 pub use format::{
-    dispositions_table, gate_misses_block, raw_records, raw_table, runs_table, runtimes_table,
-    trade_diffs_table, trend_table,
+    compare_report, dispositions_table, gate_misses_block, raw_records, raw_table, run_header,
+    runs_table, runtimes_table, trade_diffs_table, trend_table,
 };
 pub use ingest::RunRecord;
 pub use query::{Shaped, resolve_columns};

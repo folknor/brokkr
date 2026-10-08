@@ -2675,9 +2675,20 @@ In depth: `brokkr man piners`."
         sql: Option<String>,
 
         /// In the run-detail view (`--run`/bare id), show every probe instead
-        /// of only the ones that deviate from their pin.
+        /// of only the ones that deviate from their pin. With `--compare`, list
+        /// the probes that did not move too.
         #[arg(long)]
         full: bool,
+
+        /// Compare two runs probe by probe, reading B against A: every probe
+        /// whose matched / ours-only / TradingView-only counts, count tier,
+        /// outcome or disposition moved - including count moves inside one
+        /// tier, which the gate does not see - plus the probes only one side
+        /// ran. Informational; exits 0.
+        #[arg(long, num_args = 2, value_names = ["RUN_A", "RUN_B"],
+              conflicts_with_all = ["run_id", "run", "probe", "diffs", "dispositions",
+                                    "columns", "runtimes", "over", "trend", "where_expr", "sql"])]
+        compare: Option<Vec<i64>>,
     },
 
     /// [piners] Differential-lint corpus: piners vs pine-lint over .pine snippets

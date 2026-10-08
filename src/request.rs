@@ -54,8 +54,10 @@ pub(crate) struct CorpusQuery {
     pub(crate) where_expr: Option<String>,
     pub(crate) sql: Option<String>,
     /// Run-detail view: show every probe, not just the ones deviating from
-    /// their pin. Ignored by the other views.
+    /// their pin. With `compare`, also list the probes that did not move.
     pub(crate) full: bool,
+    /// `--compare A B`: the per-probe count comparison, B read against A.
+    pub(crate) compare: Option<(i64, i64)>,
 }
 
 /// Query parameters for the `sidecar` command.

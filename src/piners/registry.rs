@@ -445,6 +445,16 @@ pub struct PinsData {
     pub harness_files: BTreeMap<String, HarnessFile>,
     #[serde(default)]
     pub probe_config: BTreeMap<String, ProbeConfig>,
+    /// Probes registered ahead of their pins: id -> probe dir relative to the
+    /// corpus root, hand-written (`[pending]` / `live-02 = "piners/live-02"`).
+    /// A pending probe is part of the structural universe - a `[probe_config]`
+    /// declaration written for it is not stale, a keyword may list it - but it
+    /// is never selected or run: it has no hashes, so nothing about it is
+    /// verified. `brokkr corpus --reseed --probe <id>` moves it from here to
+    /// `[probes]` in one write, so declaring several new probes and pinning
+    /// them one at a time is a sequence of valid files. See [`check_pending`].
+    #[serde(default)]
+    pub pending: BTreeMap<String, PathBuf>,
     #[serde(default)]
     pub probes: BTreeMap<String, Pin>,
 }
@@ -469,19 +479,15 @@ pub struct Registry {
     pub harness_files: BTreeMap<String, HarnessFile>,
     /// Prefix -> declared execution facts; read through [`Registry::config`].
     pub probe_config: BTreeMap<String, ProbeConfig>,
+    /// Registered-but-unpinned probes (see [`PinsData::pending`]).
+    pub pending: BTreeMap<String, PathBuf>,
     /// keyword -> probe ids, built from the `<keyword>.toml` files.
     pub keywords: BTreeMap<String, Vec<String>>,
-}
-
-/// Parse `pins.toml` into its full [`PinsData`]. Shared by
-/// [`Registry::load`] and `brokkr corpus --reseed` (which reads the
-/// existing file to compute its added/changed/removed diff, merge a single
-/// `--probe` upsert, and round-trip `[feeds]`/`[roots]`).
-pub fn load_pins(pins_path: &Path) -> Result<PinsData, DevError> {
-    let text = std::fs::read_to_string(pins_path).map_err(|e| {
-        DevError::Config(format!("piners: failed to read {}: {e}", pins_path.display()))
-    })?;
-    parse_pins(&text, pins_path)
+    /// The `pins.toml` text this registry was parsed from. A writer that
+    /// runs after the load (bless) edits this text and refuses to replace a
+    /// file whose bytes have changed since: the load and the write are both
+    /// under the lock, so a change means a hand edit the write would revert.
+    pub pins_text: String,
 }
 
 /// Parse `pins.toml` text already in hand, and hold every pin to the
@@ -492,7 +498,8 @@ pub fn parse_pins(text: &str, origin: &Path) -> Result<PinsData, DevError> {
     let data = parse_pins_unchecked(text, origin)?;
     let mut problems = check_pins(&data.probes);
     problems.extend(check_harness_files(&data.harness_files));
-    problems.extend(check_probe_config(&data.probe_config, &data.probes));
+    problems.extend(check_pending(&data.pending, &data.probes));
+    problems.extend(check_probe_config(&data.probe_config, &data.probes, &data.pending));
     if !problems.is_empty() {
         return Err(DevError::Config(format!(
             "piners: {}: invalid registry:\n  {}",
@@ -600,15 +607,113 @@ fn check_harness_files(files: &BTreeMap<String, HarnessFile>) -> Vec<String> {
     problems
 }
 
+/// The rules `[pending]` obeys: each entry must be a registration a reseed
+/// can complete, so none of them names a probe `--reseed --probe <id>` could
+/// never discover at that path.
+///
+/// - The path is a directory below the corpus root in canonical plain
+///   components, none starting with `.` - discovery skips dot-dirs.
+/// - The id is the path's basename: discovery derives ids that way.
+/// - The id is not also pinned, and no two entries share a path.
+/// - No pending path is equal to, inside, or above another pending path or a
+///   pinned probe's dir: discovery stops at a probe dir, so of two nested
+///   probe dirs only the outer one is ever found.
+///
+/// That the path lies outside the registry dir, and that the probe is
+/// actually on disk, are the reseed's to check - it is the one place that
+/// walks the corpus, and it refuses a pending entry it cannot find.
+fn check_pending(pending: &BTreeMap<String, PathBuf>, probes: &BTreeMap<String, Pin>) -> Vec<String> {
+    let mut problems = Vec::new();
+    let mut dirs: Vec<(&str, &Path)> = probes.iter().map(|(id, p)| (id.as_str(), p.probe_dir())).collect();
+    for (id, path) in pending {
+        let parts: Option<Vec<String>> = path
+            .components()
+            .map(|c| match c {
+                std::path::Component::Normal(s) => Some(s.to_string_lossy().into_owned()),
+                _ => None,
+            })
+            .collect();
+        let canonical = parts.as_ref().is_some_and(|parts| {
+            !parts.is_empty()
+                && parts.join("/") == path.to_string_lossy()
+                && parts.iter().all(|p| !p.starts_with('.'))
+        });
+        if !canonical {
+            problems.push(format!(
+                "[pending] {id} = {}: a pending probe is a directory below the corpus root, \
+                 named by plain relative components joined by `/`, none starting with `.`",
+                path.display()
+            ));
+            continue;
+        }
+        if path.file_name().and_then(|n| n.to_str()) != Some(id.as_str()) {
+            problems.push(format!(
+                "[pending] {id} = {}: the id must be the directory's name (reseed derives ids \
+                 from it, so this entry could never be pinned)",
+                path.display()
+            ));
+        }
+        if probes.contains_key(id) {
+            problems.push(format!(
+                "[pending] {id}: already pinned in [probes] - remove the pending entry"
+            ));
+        }
+        for (other, dir) in &dirs {
+            if path.starts_with(dir) || dir.starts_with(path) {
+                problems.push(format!(
+                    "[pending] {id} = {}: {} {other}'s directory {} - discovery stops at a \
+                     probe directory, so nested probe dirs cannot both be pinned",
+                    path.display(),
+                    if path == dir { "is" } else { "nests with" },
+                    dir.display()
+                ));
+            }
+        }
+        dirs.push((id.as_str(), path.as_path()));
+    }
+    problems
+}
+
+/// The one `[pending]` rule the file alone cannot settle: a pending path at
+/// or inside the registry dir names a probe discovery never walks into, so
+/// no reseed could ever pin it. Run by [`Registry::load`] and on reseed's
+/// output, so a writer cannot produce a file the next load refuses.
+pub fn check_pending_location(
+    pending: &BTreeMap<String, PathBuf>,
+    pins_path: &Path,
+    registry_dir: &Path,
+    corpus_root: &Path,
+) -> Result<(), DevError> {
+    let in_registry: Vec<String> = pending
+        .iter()
+        .filter(|(_, dir)| corpus_root.join(dir).starts_with(registry_dir))
+        .map(|(id, dir)| format!("[pending] {id} = {}", dir.display()))
+        .collect();
+    if in_registry.is_empty() {
+        return Ok(());
+    }
+    Err(DevError::Config(format!(
+        "piners: {}: a pending probe inside the registry dir can never be pinned (reseed \
+         does not walk {}):\n  {}",
+        pins_path.display(),
+        registry_dir.display(),
+        in_registry.join("\n  ")
+    )))
+}
+
 /// The rules `[probe_config]` obeys, over the declarations and the pinned
-/// universe together. Returns every violation, one per line.
+/// universe (pinned plus [pending](PinsData::pending)) together. Returns
+/// every violation, one per line.
 ///
 /// - A prefix is a relative directory path in canonical spelling - plain
 ///   components joined by `/`, no `.`/`..`, no leading or trailing or doubled
 ///   `/` - so two keys can never name one directory.
 /// - A declaration sets at least one field.
-/// - Every declared field wins for at least one pinned probe, i.e. some
-///   probe resolves it from this prefix. A declaration covering no probe, or
+/// - Every declared field wins for at least one pinned or pending probe, i.e.
+///   some probe resolves it from this prefix - so a declaration written ahead
+///   of its probe is valid once the probe is registered in `[pending]`, and
+///   pinning one of several pending probes leaves the others' declarations
+///   valid. A declaration covering no probe, or
 ///   one entirely shadowed by narrower ones, is stale: it reads as a fact
 ///   about the corpus while governing nothing. Coverage is structural (the
 ///   pinned paths), so an uninitialized submodule does not make it stale.
@@ -617,6 +722,8 @@ fn check_harness_files(files: &BTreeMap<String, HarnessFile>) -> Vec<String> {
 ///   the copy silently keeps the old value.
 /// - No probe with a `record` resolves a `tv_trades_csv_tz`: the harness then
 ///   judges against the record and never reads the CSV, so the value is dead.
+///   A pending probe's oracle kind is unknown until it is pinned, so this one
+///   is settled by the reseed that pins it (whose output passes through here).
 ///
 /// Whether every probe resolves a feed, and whether that feed exists, is
 /// [`Registry::lint`]'s: the writers run this check on their output, and a
@@ -624,6 +731,7 @@ fn check_harness_files(files: &BTreeMap<String, HarnessFile>) -> Vec<String> {
 fn check_probe_config(
     config: &BTreeMap<String, ProbeConfig>,
     probes: &BTreeMap<String, Pin>,
+    pending: &BTreeMap<String, PathBuf>,
 ) -> Vec<String> {
     let mut problems: Vec<String> = Vec::new();
     for (prefix, entry) in config {
@@ -684,15 +792,23 @@ fn check_probe_config(
             ));
         }
     }
+    for dir in pending.values() {
+        let chain = covering(config, dir);
+        for i in 0..CONFIG_FIELDS.len() {
+            if let Some((prefix, _)) = chain.iter().find(|(_, c)| c.setting(i).is_some()) {
+                winners.insert((prefix, i));
+            }
+        }
+    }
     for (prefix, entry) in config {
         for (i, name) in CONFIG_FIELDS.iter().enumerate() {
             if entry.setting(i).is_some() && !winners.contains(&(prefix.as_str(), i)) {
                 problems.push(format!(
-                    "[probe_config.\"{prefix}\"]: `{name}` governs no pinned probe (it covers \
-                     none, or narrower declarations override it for all it covers); remove \
-                     it, or - if it was written ahead of the probe it is for - pin that probe \
-                     with `brokkr corpus --reseed --probe <id>`, which reads the file without \
-                     this rule and writes it back satisfying it"
+                    "[probe_config.\"{prefix}\"]: `{name}` governs no pinned or pending probe \
+                     (it covers none, or narrower declarations override it for all it covers); \
+                     remove it, or - if it was written ahead of the probe it is for - register \
+                     that probe under [pending] (`<id> = \"<dir>\"`) until `brokkr corpus \
+                     --reseed --probe <id>` pins it"
                 ));
             }
         }
@@ -704,7 +820,11 @@ impl Registry {
     /// Load `pins.toml` and every sibling `<keyword>.toml` from
     /// `registry_dir`. Does not touch the corpus; call
     /// [`Registry::lint`] (and per-probe verification) for that.
-    pub fn load(registry_dir: &Path) -> Result<Self, DevError> {
+    ///
+    /// `corpus_root` is needed for the one `[pending]` rule the file alone
+    /// cannot settle: a pending path at or inside the registry dir names a
+    /// probe discovery never walks into, so no reseed could ever pin it.
+    pub fn load(registry_dir: &Path, corpus_root: &Path) -> Result<Self, DevError> {
         if !registry_dir.is_dir() {
             return Err(DevError::Config(format!(
                 "piners: registry directory not found: {}",
@@ -712,7 +832,12 @@ impl Registry {
             )));
         }
 
-        let data = load_pins(&registry_dir.join(PINS_FILE))?;
+        let pins_path = registry_dir.join(PINS_FILE);
+        let pins_text = std::fs::read_to_string(&pins_path).map_err(|e| {
+            DevError::Config(format!("piners: failed to read {}: {e}", pins_path.display()))
+        })?;
+        let data = parse_pins(&pins_text, &pins_path)?;
+        check_pending_location(&data.pending, &pins_path, registry_dir, corpus_root)?;
 
         let mut keywords = BTreeMap::new();
         let mut entries: Vec<PathBuf> = std::fs::read_dir(registry_dir)
@@ -747,7 +872,9 @@ impl Registry {
             feeds: data.feeds,
             harness_files: data.harness_files,
             probe_config: data.probe_config,
+            pending: data.pending,
             keywords,
+            pins_text,
         })
     }
 
@@ -771,7 +898,7 @@ impl Registry {
         let mut dangling: Vec<String> = Vec::new();
         for (keyword, ids) in &self.keywords {
             for id in ids {
-                if !self.pins.contains_key(id) {
+                if !self.pins.contains_key(id) && !self.pending.contains_key(id) {
                     dangling.push(format!("{keyword}.toml -> {id}"));
                 }
             }
@@ -792,16 +919,21 @@ impl Registry {
                 bad_feed.push(format!("[probe_config.\"{prefix}\"] -> feed = \"{feed}\""));
             }
         }
+        // Pending probes too: the feed is an execution fact, settled by the
+        // declarations alone, so a pending probe that would run feedless is
+        // refused now rather than at the reseed that pins it.
         let feedless: Vec<String> = self
             .pins
             .iter()
-            .filter(|(_, pin)| resolve(&self.probe_config, pin.probe_dir()).feed.is_none())
-            .map(|(id, pin)| format!("{id} ({})", pin.probe_dir().display()))
+            .map(|(id, pin)| (id, pin.probe_dir()))
+            .chain(self.pending.iter().map(|(id, dir)| (id, dir.as_path())))
+            .filter(|(_, dir)| resolve(&self.probe_config, dir).feed.is_none())
+            .map(|(id, dir)| format!("{id} ({})", dir.display()))
             .collect();
         let mut errs: Vec<String> = Vec::new();
         if !dangling.is_empty() {
             errs.push(format!(
-                "keyword file(s) reference ids absent from {PINS_FILE}:\n  {}",
+                "keyword file(s) reference ids neither pinned nor [pending] in {PINS_FILE}:\n  {}",
                 dangling.join("\n  ")
             ));
         }
@@ -1040,6 +1172,7 @@ mod tests {
             harness_files: BTreeMap::new(),
             probe_config,
             keywords,
+            ..Registry::default()
         }
     }
 
@@ -1154,7 +1287,7 @@ mod tests {
         config.insert("piners".to_owned(), feed_decl("eth-15m-2025"));
         config.insert("piners/live-01".to_owned(), feed_decl("eth-15m-live"));
         let pins = pins_of(&[("live-01", "piners/live-01"), ("old-01", "piners/old-01")]);
-        assert!(check_probe_config(&config, &pins).is_empty());
+        assert!(check_probe_config(&config, &pins, &BTreeMap::new()).is_empty());
         let fresh = Pin::content(ProbeFiles {
             pine: file("piners/live-01/strategy.pine"),
             inputs: None,
@@ -1173,7 +1306,7 @@ mod tests {
         for bad in ["p/", "./p", "p//a", "/p", "p/../p", ""] {
             let mut config = BTreeMap::new();
             config.insert(bad.to_owned(), feed_decl("f"));
-            let problems = check_probe_config(&config, &pins);
+            let problems = check_probe_config(&config, &pins, &BTreeMap::new());
             assert!(
                 problems.iter().any(|p| p.contains("relative directory path")),
                 "{bad:?} accepted: {problems:?}"
@@ -1181,7 +1314,55 @@ mod tests {
         }
         let mut config = BTreeMap::new();
         config.insert("p".to_owned(), ProbeConfig::default());
-        assert!(check_probe_config(&config, &pins)[0].contains("declares no field"));
+        assert!(check_probe_config(&config, &pins, &BTreeMap::new())[0].contains("declares no field"));
+    }
+
+    #[test]
+    fn a_declaration_written_for_a_pending_probe_loads() {
+        let text = "\
+[probe_config.\"p\"]
+feed = \"f\"
+
+[probe_config.\"p/new\"]
+bar_budget = 10
+
+[pending]
+new = \"p/new\"
+
+[probes.old]
+pine = { path = \"p/old/strategy.pine\", xxh128 = \"aa\" }
+csv = { path = \"p/old/tv_trades.csv\", xxh128 = \"bb\" }
+";
+        let data = parse_pins(text, Path::new("pins.toml")).unwrap();
+        assert_eq!(data.pending["new"], PathBuf::from("p/new"));
+        // Without the registration the same declaration is stale.
+        let bare = text.replace("[pending]\nnew = \"p/new\"\n", "");
+        let err = parse_pins(&bare, Path::new("pins.toml")).unwrap_err();
+        assert!(format!("{err:?}").contains("governs no pinned or pending probe"));
+    }
+
+    #[test]
+    fn a_pending_entry_reseed_could_never_complete_is_refused() {
+        let pin = |dir: &str| {
+            Pin::new(
+                FilePin { path: PathBuf::from(format!("{dir}/strategy.pine")), xxh128: "aa".into() },
+                FilePin { path: PathBuf::from(format!("{dir}/tv_trades.csv")), xxh128: "bb".into() },
+            )
+        };
+        let mut probes = BTreeMap::new();
+        probes.insert("old".to_owned(), pin("p/old"));
+        let check = |entries: &[(&str, &str)]| {
+            let pending: BTreeMap<String, PathBuf> =
+                entries.iter().map(|(k, v)| ((*k).to_owned(), PathBuf::from(v))).collect();
+            check_pending(&pending, &probes)
+        };
+        assert!(check(&[("new", "p/new")]).is_empty());
+        assert!(check(&[("other", "p/new")])[0].contains("must be the directory's name"));
+        assert!(check(&[("x", ".hidden/x")])[0].contains("none starting with `.`"));
+        assert!(check(&[("x", "p/../x")])[0].contains("plain relative components"));
+        assert!(check(&[("old", "q/old")]).iter().any(|p| p.contains("already pinned")));
+        assert!(check(&[("inner", "p/old/inner")])[0].contains("nests with"));
+        assert!(check(&[("a", "p/a"), ("b", "p/a/b")]).iter().any(|p| p.contains("nests with")));
     }
 
     #[test]
@@ -1209,7 +1390,7 @@ mod tests {
         }
         // And a declaration over a directory no probe is pinned in.
         config.insert("q".to_owned(), feed_decl("f"));
-        let problems = check_probe_config(&config, &pins);
+        let problems = check_probe_config(&config, &pins, &BTreeMap::new());
         assert_eq!(problems.len(), 2, "{problems:?}");
         assert!(problems.iter().any(|p| p.contains("\"p\"]: `bar_budget` governs no")));
         assert!(problems.iter().any(|p| p.contains("\"q\"]: `feed` governs no")));
@@ -1222,7 +1403,7 @@ mod tests {
         config.insert("p".to_owned(), feed_decl("f"));
         // A family-level copy is as stale-prone as an exact-dir one.
         config.insert("p/fam".to_owned(), feed_decl("f"));
-        let problems = check_probe_config(&config, &pins);
+        let problems = check_probe_config(&config, &pins, &BTreeMap::new());
         assert!(problems.iter().any(|p| p.contains("\"p/fam\"]: `feed` restates")));
         // An explicit value where the ancestor declares none is not a
         // restatement, even when it equals the harness default.
@@ -1235,7 +1416,7 @@ mod tests {
                 ..ProbeConfig::default()
             },
         );
-        assert!(check_probe_config(&config, &pins).is_empty());
+        assert!(check_probe_config(&config, &pins, &BTreeMap::new()).is_empty());
     }
 
     #[test]
@@ -1253,7 +1434,7 @@ mod tests {
                 ..ProbeConfig::default()
             },
         );
-        let problems = check_probe_config(&config, &pins);
+        let problems = check_probe_config(&config, &pins, &BTreeMap::new());
         assert_eq!(problems.len(), 1, "{problems:?}");
         assert!(problems[0].contains("rec: resolves `tv_trades_csv_tz`"));
         // Scoped to the CSV probe alone, it is fine.
@@ -1265,7 +1446,7 @@ mod tests {
                 ..ProbeConfig::default()
             },
         );
-        assert!(check_probe_config(&config, &pins).is_empty());
+        assert!(check_probe_config(&config, &pins, &BTreeMap::new()).is_empty());
     }
 
     #[test]
@@ -1305,7 +1486,7 @@ csv  = { path = "piners/beta-02/tv_trades.csv", xxh128 = "ddd" }
         .unwrap();
         std::fs::write(dir.join("ema.toml"), "probes = [\"alpha-01\"]\n").unwrap();
 
-        let r = Registry::load(&dir).unwrap();
+        let r = Registry::load(&dir, dir.parent().unwrap()).unwrap();
 
         assert_eq!(r.pins.len(), 2);
         assert_eq!(r.pins["alpha-01"].pine.xxh128, "aaa");
@@ -1325,6 +1506,21 @@ csv  = { path = "piners/beta-02/tv_trades.csv", xxh128 = "ddd" }
         assert_eq!(roles[1].1.xxh128, "f1");
         assert_eq!(r.keywords["ema"], vec!["alpha-01".to_owned()]);
         assert!(r.lint().is_ok());
+    }
+
+    #[test]
+    fn load_refuses_a_pending_probe_inside_the_registry_dir() {
+        let root = crate::test_scratch::scratch("piners_registry", "pending_in_registry");
+        let registry = root.join("registry");
+        std::fs::create_dir_all(&registry).unwrap();
+        std::fs::write(
+            registry.join("pins.toml"),
+            "[feeds.f]\nbase = { path = \"d.csv\", xxh128 = \"00\" }\n\n\
+             [probe_config.\"registry\"]\nfeed = \"f\"\n\n[pending]\nnew = \"registry/new\"\n",
+        )
+        .unwrap();
+        let err = Registry::load(&registry, &root).unwrap_err();
+        assert!(format!("{err:?}").contains("can never be pinned"));
     }
 
     #[test]

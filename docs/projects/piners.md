@@ -148,11 +148,21 @@ history). One transaction after the harness exits: a `run` row plus child
 first), per-db `PRAGMA user_version` migrations, WAL - mirroring `src/db`
 (`ResultsDb`). Code: `src/piners/corpus_db/`.
 
-- `run` - `started_at`, `selector` (JSON: resolved ids + raw flags, forwarded
+- `run` - `run_id` (the number the run's artefact dir carries - see
+  `docs/commands/corpus.md`), `started_at` (UTC, `YYYY-MM-DD HH:MM:SS`,
+  taken before the build; rows older than v6 carry their ingest time
+  instead), `commit_sha` + `dirty` (v6: the project checkout's full `HEAD`
+  hash at run start, and whether it had any uncommitted change outside
+  `.brokkr/` - markdown and `brokkr.toml` included, so clean means `HEAD`
+  describes the whole invocation; a toolchain file the lock moved aside is
+  judged by its moved bytes against `HEAD`'s; each `NULL` when unknown,
+  never a guessed clean), `selector` (JSON: resolved ids + raw flags, forwarded
   harness flags, and the build profile as `debug`), `gated` (neither
-  `--no-gate` nor `--bless`), `result` (pass/fail), `fail_reason`, `harness_exit_code`,
+  `--no-gate` nor `--bless`), `result` (`pass`/`fail`, or `interrupted`/
+  `error` for a run that ended before its output could be ingested),
+  `fail_reason`, `harness_exit_code`,
   `probe_count`, `harness_stderr`, `wall_ms` (brokkr's own measured whole-run
-  harness wall; `NULL` on a spawn failure or pre-v4 rows). The exit/reason/stderr
+  harness wall; `NULL` for a run whose harness never finished or pre-v4 rows). The exit/reason/stderr
   make a failed run self-contained; `wall_ms` + `selector` are what the
   pre-run runtime ceiling estimates the next run from (a comparable
   superset-covering run's measured wall - see `docs/commands/corpus.md`).
@@ -204,10 +214,12 @@ first), per-db `PRAGMA user_version` migrations, WAL - mirroring `src/db`
 - `dense_na_site` - one row per dense-`na` call site (`name`, `call_site`,
   `na_count`).
 
-Because the DB is the source of truth, the run dir is **always** dropped (pass
-or fail) once ingest commits - only `DevError::Interrupted` and the spawn-error
-path preserve it (and `--keep-artefacts`). `brokkr clean` removes the `run-N/`
-dirs but spares `runs.db`. An ingest failure preserves the dir and propagates.
+Because the DB is the source of truth, the run dir is dropped (pass or fail)
+once ingest commits, unless `--keep-artefacts`. A run that ends before its
+output is ingested - interrupted, a spawn failure, an unwritable manifest -
+records a row under its id and keeps its dir. An ingest failure preserves the
+dir and propagates. `brokkr clean` removes the `run-<id>/` dirs but spares
+`runs.db`.
 
 ## Querying via `brokkr corpus-results`
 
@@ -219,14 +231,17 @@ broke once piners gained hotpath/alloc support - those runs land in the shared
 meaning and the corpus store moved to a dedicated command. No overloaded query
 struct, no benchmark filters to reject. The corpus views:
 
-- `brokkr corpus-results` - table of recent runs. The `selector` column renders
+- `brokkr corpus-results` - table of recent runs, each with its `commit`
+  (short hash, `*` when the tree was dirty, `?` when its dirtiness is
+  unknown, `-` when the commit is). The `selector` column renders
   the selection *intent* (`all` / `kw=…` / `probe=…` / `+bless`, plus
   `release` for a non-default profile and `-- <flags>` for forwarded harness
   flags), not the full
   resolved id list it stores - that would be 200+ ids wide for an `--all` run.
   The id list stays reachable via the run-detail view or `--sql`.
-- `brokkr corpus-results <id>` / `--run <id>` - that run's per-probe dispositions (+
-  gate misses + stderr). Default is the latest run. Only the **deviations**
+- `brokkr corpus-results <id>` / `--run <id>` - a `run <id>  started ... UTC
+  commit ...` header, then that run's per-probe dispositions (+ gate misses +
+  stderr). An id with no run is an error. Only the **deviations**
   (rows where the stored disposition misses its pin, `gate_ok = 0`) are shown;
   the pin-matchers fold into a `N probe(s) match their pin (hidden)` line - a
   200-probe `--all` run otherwise buries the few that moved. `--full` shows the
@@ -268,6 +283,25 @@ struct, no benchmark filters to reject. The corpus views:
   entry/exit timestamp-shift census as `shifted/considered share%` - the
   census was added to be trended even when it does not breach. On a row
   migrated from the typed schema those cells read `n/r` (not retained).
+- `brokkr corpus-results --compare <A> <B> [--full]` - two runs probe by probe,
+  B read against A. Lists every probe whose `matched`/`ours_only`/`tv_only`
+  counts, `count_tier`, outcome or disposition moved, as `a -> b (+delta)` -
+  including count moves inside one tier, which the gate (tier against pin)
+  cannot see; `--full` lists the unmoved probes too. A probe on one side only
+  is classified, not dropped: `not selected` there, or `selected, no line`
+  (from the stored selection and `gate_miss`); a line the harness emitted
+  for a probe the run did not select is marked `(report-only)`. A line not
+  carrying all three counts as numbers (a compile failure) reads `no counts`
+  rather than a fall to zero, and a tier
+  appearing or vanishing is a move. The `movement` column (`more divergent` /
+  `less divergent` / `mixed`: matched down or either unmatched count up, the
+  reverse, or both - each axis judged on its own, so one unmatched count's
+  rise never cancels the other's fall) is a heuristic for comparable executions, not a verdict - a shorter
+  window also lowers `matched`, and raw unmatched counts include the boundary
+  artifacts the label discounts. Both run headers (start, commit) are printed,
+  with a note when the runs differ in build profile or forwarded harness
+  flags. Either id missing is an error. Informational: exits 0. This was the
+  `--sql` query every round reached for.
 - `brokkr corpus-results --sql "<SELECT…>"` - read-only escape hatch, for the genuinely
   ad-hoc query no view covers. The standing rule: when an ad-hoc query recurs,
   promote it to a named view rather than keep reaching through this door.

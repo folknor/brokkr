@@ -192,7 +192,9 @@ CREATE TABLE IF NOT EXISTS run (
     harness_exit_code INTEGER,
     probe_count       INTEGER NOT NULL,
     harness_stderr    TEXT,
-    wall_ms           REAL
+    wall_ms           REAL,
+    commit_sha        TEXT,
+    dirty             INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_run_started ON run(started_at);
 

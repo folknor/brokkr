@@ -2,7 +2,6 @@
 
 use crate::config;
 use crate::env;
-use crate::error;
 use crate::error::DevError;
 use crate::git;
 use crate::history;
@@ -49,7 +48,7 @@ pub(crate) fn cmd_history(q: HistoryQuery) -> Result<(), DevError> {
     Ok(())
 }
 
-/// Best-effort recording of command history. Warns once on failure.
+/// Best-effort recording of command history. Warns once on a real failure.
 pub(crate) fn record_history(raw_args: &str, elapsed_ms: u64, exit_code: i32) {
     // Sandboxes (and other minimal envs) may have neither XDG_DATA_HOME nor
     // HOME set - there's nowhere to put history.db, and emitting a warning
@@ -58,8 +57,8 @@ pub(crate) fn record_history(raw_args: &str, elapsed_ms: u64, exit_code: i32) {
         return;
     }
 
-    let inner = || -> Result<(), error::DevError> {
-        let db = history::HistoryDb::open()?;
+    let inner = || -> Result<(), history::StoreError> {
+        let db = history::HistoryDb::open_typed()?;
 
         // Best-effort metadata collection. Each item can fail independently.
         let hostname = config::hostname().unwrap_or_else(|_| "unknown".into());
@@ -110,7 +109,13 @@ pub(crate) fn record_history(raw_args: &str, elapsed_ms: u64, exit_code: i32) {
         Ok(())
     };
 
-    if let Err(e) = inner() {
-        eprintln!("[history] warning: failed to write history: {e}");
+    // A store this environment cannot write (a sandbox whose data dir is
+    // read-only) would warn on every invocation for nothing anyone can act
+    // on, so it is skipped silently; anything else is a real fault and says
+    // so. `brokkr history` itself still reports every open failure.
+    match inner() {
+        Ok(()) => {}
+        Err(e) if e.is_environmental() => {}
+        Err(e) => eprintln!("[history] warning: failed to write history: {e}"),
     }
 }
