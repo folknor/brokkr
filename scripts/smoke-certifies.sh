@@ -2,27 +2,35 @@
 # Smoke test: certifies + skip_phases + --gate.
 #
 # Generates a throwaway crate under scratch/certifies-smoke and drives
-# brokkr check through the partial/complete/gate paths. The three verdict
+# brokkr check through the partial/complete/gate paths. The verdict
 # scenarios assert on exit codes (the 0/10/1 contract, clap's 2 for flag
-# conflicts). The two coverage-failure scenarios can't: exit 1 is brokkr's
-# universal failure code (config, gremlin, clippy, build, test all produce
-# it), so they additionally parse the `--json` summary and assert on
-# `failed_phase`/`coverage.*` - proving each fails IN the coverage phase for
-# the right reason, not for some unrelated reason that never ran the audit.
-# Requires `jq`. Run from the brokkr repo root after installing the binary
-# under test:
+# conflicts). The coverage-failure scenarios cannot stop there: exit 1 is
+# brokkr's universal failure code (config, gremlin, clippy, build, test all
+# produce it), so they additionally parse the `--json` summary (schema 2) and
+# assert on `failed_phase`, `policy_coverage.*` and `execution_accounting.*` -
+# proving each fails IN the phase it should, for the right reason, not for
+# some unrelated reason that never ran the audit. Requires `jq`.
+#
+# The binary under test is `$BROKKR_BIN` (default: `brokkr` on PATH), so a
+# fresh build can be smoke-tested without installing it. Run from the brokkr
+# repo root:
 #
 #   bash scripts/smoke-certifies.sh
+#   BROKKR_BIN=/path/to/brokkr bash scripts/smoke-certifies.sh
 #
 # The generated directory is left behind for inspection; it is disposable
 # and regenerated on every run.
 set -u
 
 root="$(cd "$(dirname "$0")/.."; pwd)"
+brokkr_bin="${BROKKR_BIN:-brokkr}"
 smoke="$root/scratch/certifies-smoke"
 rm -rf "$smoke"
 mkdir -p "$smoke/src"
 
+# Every member a default member, so the bare selection IS the workspace: a
+# complete profile under `doctests = true` needs a workspace-shaped doctest
+# carrier (`packages` empty and the bare selection the whole workspace).
 cat > "$smoke/Cargo.toml" <<'EOF'
 [package]
 name = "certifies-smoke"
@@ -31,6 +39,7 @@ edition = "2021"
 
 [workspace]
 members = ["member", "pm"]
+default-members = [".", "member", "pm"]
 resolver = "2"
 EOF
 
@@ -138,9 +147,10 @@ EOF
 cat > "$smoke/brokkr.toml" <<'EOF'
 project = "brokkr"
 
+# Workspace-shaped (no `packages`): the doctest carrier a complete profile
+# under `doctests = true` requires.
 [[check]]
 name = "default"
-packages = ["certifies-smoke", "member", "pm"]
 
 [test]
 doctests = true
@@ -156,21 +166,52 @@ sweeps = ["default"]
 # The gate: `brokkr check --gate`. Complete via two lanes sharing the
 # default sweep - clippy dedupes on build shape, the test phase runs both,
 # and the coverage phase audits the skipme skip against [[quarantine]].
-[test.profiles.lane-par]
+# The serial lane runs every harness through the strict shim (attributable,
+# so a complete profile accepts it - cargo-mediated `test_threads = 0` is
+# refused, see gate-threaded) and is the doctest carrier.
+[test.profiles.lane-serial]
 sweeps = ["default"]
-test_threads = 0
 skip = ["skipme", "shared::"]
 
 # The isolated lane runs root's shared:: but package-skips member's -
 # a name-based skip cannot make that distinction (feature 11).
-[test.profiles.lane-ser]
+[test.profiles.lane-iso]
 sweeps = ["default"]
 isolation = "process"
 skip = ["skipme", { package = "member", pattern = "shared::" }]
 
 [test.profiles.gate]
 certifies = "complete"
-lanes = ["lane-par", "lane-ser"]
+lanes = ["lane-serial", "lane-iso"]
+
+# The same two lanes lifting `#[ignore]`. Preparation lists each binary's
+# ignored subset with `--ignored`, and libtest refuses that beside
+# `--include-ignored` - so an include-ignored lane once could not be
+# prepared at all, serial or isolated. Spelled out rather than `extends`:
+# a complete claim refuses a lane that inherits its filters.
+[test.profiles.lane-serial-ig]
+sweeps = ["default"]
+skip = ["skipme", "shared::"]
+include_ignored = true
+
+[test.profiles.lane-iso-ig]
+sweeps = ["default"]
+isolation = "process"
+skip = ["skipme", { package = "member", pattern = "shared::" }]
+include_ignored = true
+
+[test.profiles.gate-ignored]
+certifies = "complete"
+lanes = ["lane-serial-ig", "lane-iso-ig"]
+
+# Cargo-mediated parallelism shares one stream across tests and harnesses,
+# so no execution on it can be attributed: a complete profile refuses it in
+# `prepare`, pointing at `parallel = { budget = N }`.
+[test.profiles.gate-threaded]
+certifies = "complete"
+sweeps = ["default"]
+test_threads = 0
+skip = ["skipme", "shared::"]
 
 # Coverage failure modes, driven below: an unjustified skip (orphan) and
 # a quarantine entry justifying nothing (stale).
@@ -260,18 +301,18 @@ expect() {
   fi
 }
 
-# Runs `brokkr "$@"` capturing stdout - whose LAST line, under --json, is the
-# machine-readable summary - to a file so a scenario can assert on the
-# summary's discriminating fields. stderr streams live; stdout is echoed
-# afterwards so the run is still visible. Sets `rc` (exit code) and `summary`
-# (the JSON trailer). A resolve-time error emits no summary, so `summary` is
-# then a human line and jq fails to parse it - which correctly fails the
-# assertion rather than passing vacuously.
+# Runs the brokkr under test with "$@", capturing stdout - whose LAST line,
+# under --json, is the machine-readable summary - to a file so a scenario can
+# assert on the summary's discriminating fields. stderr streams live; stdout
+# is echoed afterwards so the run is still visible. Sets `rc` (exit code) and
+# `summary` (the JSON trailer). A resolve-time error emits no summary, so
+# `summary` is then a human line and jq fails to parse it - which correctly
+# fails the assertion rather than passing vacuously.
 summary=""
 rc=0
 check_json() {
   local out="$smoke/check.stdout"
-  brokkr "$@" >"$out"
+  "$brokkr_bin" "$@" >"$out"
   rc=$?
   cat "$out"
   summary="$(tail -n 1 "$out")"
@@ -292,17 +333,60 @@ expect_json() {
   fi
 }
 
+# A green complete run: schema 2, both claims passed, every expected
+# execution passed with nothing anomalous, and every planned doctest carrier
+# known to have completed (each presented at least one rustdoc stream).
+green='.schema == 2 and .failed_phase == null and .termination == null
+  and .policy_coverage.status == "passed" and .policy_coverage.plan_complete
+  and .policy_coverage.orphaned == 0 and .policy_coverage.dead_filters == 0
+  and .execution_accounting.scope == "binary_tests"
+  and .execution_accounting.status == "complete"
+  and .execution_accounting.expected_executions > 0
+  and .execution_accounting.passed == .execution_accounting.expected_executions
+  and .execution_accounting.anomalies == 0
+  and .doctests.inventory == "unavailable" and .doctests.accounting == "unknown"
+  and (.doctests.observed.carriers | length) >= 1
+  and (.doctests.observed.carriers | all(.completed and .streams >= 1))'
+
 echo "=== bare check: partial default profile ==="
-brokkr check --json
+"$brokkr_bin" check --json
 expect "bare check = partial" 10 $?
 
 echo "=== --gate: complete profile ==="
 check_json check --gate --json
 expect "--gate = complete" 0 $rc
-# The point of a complete gate is that the audit RAN: a green exit with a null
-# coverage object would be a pass that certified nothing.
-expect_json "--gate ran the coverage phase" \
-  '.failed_phase == null and .coverage != null and .coverage.orphaned == 0'
+# The point of a complete gate is that the audit RAN: a green exit with null
+# accounting blocks would be a pass that certified nothing. Two lanes over
+# one sweep, the quarantine, the package-qualified skip and the proc-macro
+# member are all inside this one green.
+expect_json "--gate certified policy and execution" "$green"
+# The quarantine and the source-level #[ignore] are policy facts, never
+# execution outcomes: the lanes do not lift #[ignore], so nothing expected is
+# ignored. Two lanes over one sweep select shared pairs twice, so there are
+# more expected executions than selected pairs.
+expect_json "--gate keeps policy and execution apart" \
+  '.policy_coverage.quarantined > 0 and .policy_coverage.ignored > 0
+   and .execution_accounting.ignored == 0 and .execution_accounting.unobserved == 0
+   and .execution_accounting.expected_executions > .policy_coverage.selected'
+
+echo "=== --profile gate-ignored: include_ignored lanes under a complete claim ==="
+check_json check --profile gate-ignored --json
+expect "include_ignored complete = exit 0" 0 $rc
+# Preparation lists the ignored subset with `--ignored` minus the lane's
+# `--include-ignored`; with both, libtest refused the listing and the plan
+# could not be prepared (failed_phase "prepare"). `ignored_manual` is now an
+# expected execution on both lanes, and it passed.
+expect_json "gate-ignored prepared, ran and certified" "$green"
+
+echo "=== --profile gate-threaded: cargo-mediated parallelism is refused ==="
+check_json check --profile gate-threaded --json
+expect "test_threads = 0 under complete = exit 1" 1 $rc
+# Refused in `prepare`, before any test runs: the plan is incomplete, and the
+# accounting blocks still report it rather than going null.
+expect_json "gate-threaded refused in prepare with an incomplete plan" \
+  '.failed_phase == "prepare" and .policy_coverage.plan_complete == false
+   and .policy_coverage.status == "incomplete"
+   and .execution_accounting.status == "incomplete"'
 
 echo "=== --profile gate-orphan: unjustified skip fails coverage ==="
 check_json check --profile gate-orphan --json
@@ -310,16 +394,19 @@ expect "orphaned pair = exit 1" 1 $rc
 # Must fail IN the coverage phase with orphaned pairs - not at load, not in
 # build/test. `adds` and root's `shared::` are skipped but unquarantined.
 expect_json "gate-orphan failed on coverage with orphans" \
-  '.failed_phase == "coverage" and .coverage.orphaned > 0'
+  '.failed_phase == "coverage" and .policy_coverage.status == "failed"
+   and .policy_coverage.orphaned > 0'
 
 echo "=== --profile gate-stale: quarantine justifying nothing fails ==="
 check_json check --profile gate-stale --json
 expect "stale quarantine = exit 1" 1 $rc
-# The stale signature: coverage failed with zero orphans (every test ran, so
-# the two [[quarantine]] entries justify nothing). Distinguishes stale from
-# orphan, and both from any non-coverage failure.
+# The stale signature: policy failed with zero orphans (every test ran, so
+# the two [[quarantine]] entries justify nothing) while every execution
+# passed. Distinguishes stale from orphan, and both from any non-coverage
+# failure.
 expect_json "gate-stale failed on coverage with no orphans" \
-  '.failed_phase == "coverage" and .coverage != null and .coverage.orphaned == 0'
+  '.failed_phase == "coverage" and .policy_coverage.status == "failed"
+   and .policy_coverage.orphaned == 0 and .execution_accounting.status == "complete"'
 
 echo "=== --profile gate-scoped: a profile filter spans its sweeps ==="
 check_json check --profile gate-scoped --json
@@ -328,16 +415,16 @@ check_json check --profile gate-scoped --json
 # live in the unscoped sweep and dead in the scoped one, which is the shape
 # that per-sweep judging turned into a false gate failure.
 expect_json "gate-scoped reports no dead filters" \
-  '.coverage != null and .coverage.dead_filters == 0'
+  '.policy_coverage != null and .policy_coverage.dead_filters == 0'
 
 echo "=== --profile gate-dead-skip: a skip matching nothing fails ==="
 check_json check --profile gate-dead-skip --json
 expect "dead skip = exit 1" 1 $rc
 # Exactly one filter is dead - the other two match. A dead filter moves no
-# pair between buckets (the lane's counts are lane-par's), which is exactly
-# why the orphan audit cannot see it and this count has to exist.
+# pair between buckets, which is exactly why the orphan audit cannot see it
+# and this count has to exist.
 expect_json "gate-dead-skip failed on coverage with one dead filter" \
-  '.failed_phase == "coverage" and .coverage.dead_filters == 1'
+  '.failed_phase == "coverage" and .policy_coverage.dead_filters == 1'
 
 echo "=== --profile gate-dead-only: an only selecting nothing fails ==="
 check_json check --profile gate-dead-only --json
@@ -348,25 +435,25 @@ expect "dead only = exit 1" 1 $rc
 # is the whole reason a folded assertion would miss this: the failure has to
 # land in `coverage`, with exactly one of the two filters named.
 expect_json "gate-dead-only failed on coverage with one dead filter" \
-  '.failed_phase == "coverage" and .coverage.dead_filters == 1'
+  '.failed_phase == "coverage" and .policy_coverage.dead_filters == 1'
 
 echo "=== a filter under the length floor is a load-time error ==="
 cp brokkr.toml brokkr.toml.bak
 printf '\n[test.profiles.degenerate]\nsweeps = ["default"]\nskip = ["ser"]\n' >> brokkr.toml
-brokkr check --profile edit
+"$brokkr_bin" check --profile edit
 expect "three-character filter = config error" 1 $?
 mv brokkr.toml.bak brokkr.toml
 
 echo "=== --gate -p: rejected by clap ==="
-brokkr check --gate -p certifies-smoke
+"$brokkr_bin" check --gate -p certifies-smoke
 expect "--gate -p = usage error" 2 $?
 
 echo "=== --profile gate -p: rejected at resolve time ==="
-brokkr check --profile gate -p certifies-smoke
+"$brokkr_bin" check --profile gate -p certifies-smoke
 expect "complete + -p = config error" 1 $?
 
 echo "=== --profile edit -p: scoped partial ==="
-brokkr check --profile edit -p certifies-smoke --json
+"$brokkr_bin" check --profile edit -p certifies-smoke --json
 expect "partial + -p = exit 10" 10 $?
 
 if [ "$fail" -eq 0 ]; then

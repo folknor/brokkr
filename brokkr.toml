@@ -6,6 +6,7 @@ default = "brokkr"
 
 [test]
 debug = true
+default_package = "brokkr"
 # Rustdoc is the one compiler pass clippy and the tests never run, so a broken
 # intra-doc link in a module header rots unseen. brokkr is a binary crate whose
 # doc comments are written for its own developers, so private items are

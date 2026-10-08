@@ -99,8 +99,9 @@ Output:
   [result]  check passed in 7m01s (profile standard, 5 sweeps; lints allowed: rustdoc::private_intra_doc_links)
   ```
   The convention phases (gremlins through publish cycle) share one line with
-  their counts; each build phase (clippy, rustdoc, test, coverage,
-  install-feature) prints one line with its wall time as it completes -
+  their counts; each build phase (clippy, rustdoc, prepare, test, coverage -
+  which adds the accounting line - and install-feature) prints one line with
+  its wall time as it completes -
   streamed per phase, not rendered at the end, so a run the watchdog kills
   still shows which phases finished. A pre-test or post-test script-check
   stage keeps its own line. What a green run no longer prints - each sweep's
@@ -193,22 +194,28 @@ Output:
      See `src/scope.rs`.
 - `--json` appends one summary object as the **last line of stdout**, leaving
   the human output untouched (the old NDJSON per-event mode is gone; this is
-  the result contract). Fields: `schema` (currently
-  1), `certifies` (the resolved profile's claim, `null` for unclaimed
-  profiles), `verdict` (`"passed"`/`"complete"`/`"partial"`/`"failed"`),
-  `profile` (the profile that drove sweep selection; `null` for ad-hoc and
-  legacy runs), `sweeps` (labels), `package` (the CLI `-p` scope, `null`
-  when the run was not scoped; multiple `-p` packages comma-joined), `failed_phase` (`null` on success, else one
-  of `gremlins`/`header`/`textlint`/`manifest`/`script_check`/
-  `dependency_rules`/`publish_cycle`/`clippy`/`rustdoc`/`test`/`coverage`/`install_feature`),
-  `scope` (`"prose_only"` when the markdown-only shortcut skipped the build
-  phases, `null` on a full run - without it a shortened `passed` reads as a
-  full one), `elapsed_ms`. The object is versioned
-  and additive: fields are only ever added under `schema: 1`, consumers must
-  tolerate unknown fields, and a bump is reserved for renames or semantic
-  changes. A config error before the phases run (bad profile name,
-  conflicting flags, a certifies violation) emits no summary - resolve-time
-  errors are not run verdicts.
+  the result contract). Fields: `schema` (currently 2), `certifies` (the
+  resolved profile's claim, `null` for unclaimed profiles), `verdict`
+  (`"passed"`/`"complete"`/`"partial"`/`"failed"`), `profile` (the profile
+  that drove sweep selection; `null` for ad-hoc and legacy runs), `sweeps`
+  (labels), `package` (the CLI `-p` scope, `null` when the run was not
+  scoped; multiple `-p` packages comma-joined), `failed_phase` (`null` on
+  success, else one of `gremlins`/`header`/`textlint`/`manifest`/
+  `script_check`/`dependency_rules`/`publish_cycle`/`clippy`/`rustdoc`/
+  `prepare`/`test`/`coverage`/`install_feature`), `scope` (`"prose_only"`
+  when the markdown-only shortcut skipped the build phases, `null` on a full
+  run - without it a shortened `passed` reads as a full one), `termination`
+  (how the run stopped, when something stopped it - `{kind, scope}`, see
+  "Termination" under the `coverage` phase), `policy_coverage`,
+  `execution_accounting` and `doctests` (complete profiles whose `prepare`
+  phase ran, `null` otherwise - see the `coverage` phase), `elapsed_ms`. The object is
+  versioned and additive within a version: fields are only ever added,
+  consumers must tolerate unknown fields, and a bump is reserved for renames
+  or semantic changes. Schema 2 was one: it replaced schema 1's `coverage`
+  object, whose `run` count meant "a lane the test phase reached listed it",
+  with the separate policy and execution objects. A config error before the
+  phases run (bad profile name, conflicting flags, a certifies violation)
+  emits no summary - resolve-time errors are not run verdicts.
 
 ## Running one textlint rule or script check
 
@@ -283,9 +290,15 @@ each phase has its own ceiling on top of that:
 | Phase | Ceiling |
 |---|---|
 | `clippy`, `rustdoc` | 5 min |
-| `test` | 15 min |
+| `prepare`, `test` | 15 min |
 | `coverage`, `install_feature`, `script_check` | 5 min |
 | every other phase (`gremlins`, `header`, `textlint`, `manifest`, `dependency_rules`, `publish_cycle`) | 2 min |
+
+`prepare` (complete profiles only, see the `coverage` phase) gets the test
+phase's fifteen minutes because it does the test phase's builds - every
+lane's `cargo test --no-run`, cold on a fresh store - plus every listing. A
+ceiling that fires there leaves an explicitly incomplete plan
+(`plan_complete = false`), never a partial one passed off as whole.
 
 The per-child deadlines - the 20s hung-test watchdog, the captured runner's
 deadline - bound one invocation each; nothing bounded a phase or the run as a
@@ -1099,8 +1112,9 @@ omission is brokkr's choice rather than the command's: without it a
 
 `post-test` entries are skipped when the test phase failed: it fails fast, so
 its later lanes never ran and there is no partial-run reading for a sentinel
-gate (the coverage audit, which deliberately does run there, wants built
-binaries rather than green tests). All three stages share the one
+gate (the coverage audit, which deliberately does run there, reconciles the
+plan against the journal, which a failed run has as surely as a green one).
+All three stages share the one
 `script_check` phase name for `skip_phases` and the JSON `failed_phase`; the
 failing entry is named in the output regardless.
 
@@ -1487,19 +1501,20 @@ phase compiles rather than reads diagnostics:
 
 The flags reach **every call site in the run that compiles**, not only the
 `cargo test` invocation: the sweep pre-build (which would otherwise fail on the
-unsuppressed lint before `cargo test` was ever reached), the process-isolated
-lane's prebuild, and the coverage audit's
-`cargo test --no-run` enumeration. `brokkr test`'s own `build_packages`
+unsuppressed lint before `cargo test` was ever reached), every lane's
+prebuild, and the `prepare` phase's `cargo test --no-run` builds - each
+lane's and each shape's universe. `brokkr test`'s own `build_packages`
 pre-build carries them too. Both pre-builds also carry the sweep's pinned
 `feature_unification`, like every other compiling path, so the binaries a
 lane's tests spawn come from the same feature graph as the tests.
 
-That last one is worth stating because it is where the rule was learned. The
-audit runs last, so a call site missing the injection turns a run whose every
-lane went green into a failure with no verdict - from the caller's side
-indistinguishable from a real one until you read which phase the error came
-from. The test that guards it asserts the property rather than the call site:
-enumeration is assembled from the same selection the allows are prepended to.
+The universe build is worth naming because it is where the rule was learned.
+When the enumeration ran last (it used to follow the test phase), a call site
+missing the injection turned a run whose every lane went green into a failure
+with no verdict - from the caller's side indistinguishable from a real one
+until you read which phase the error came from. The test that guards it
+asserts the property rather than the call site: enumeration is assembled from
+the same selection the allows are prepended to.
 
 ### The failure list
 
@@ -1553,18 +1568,37 @@ short list and mis-attributed which test carried a mutation's coverage):
   longer charged to the previous suite. A harness that died with its suite
   open has that suite closed for it - its real failures rendered, the
   in-flight test printed as a **suspect** only - and cargo's own signal line
-  becomes a `CRASHED <harness> (signal: ...)` entry in the failure list. A
-  connection that fails authentication (the doctest runtool under rustdoc,
-  anything nested) runs unisolated, as before; the shim scrubs its
-  environment from the program it execs, so a test that runs cargo itself
-  gets the toolchain's own.
+  becomes a `CRASHED <harness> (signal: ...)` entry in the failure list. That
+  closure is display only: it never reaches the execution accounting, which
+  reads the records the harness actually wrote. A connection that is not
+  cargo's direct child (the doctest runtool under rustdoc, anything nested)
+  runs unisolated, as before; the shim scrubs its environment from the program
+  it execs, so a test that runs cargo itself gets the toolchain's own.
+
+  Before it gets its pipe the shim says what it is: a one-message handshake
+  carrying its role - `harness` or `rustdoc` - and, for a harness, the
+  executable cargo asked the runner to run. Cargo runs `RUNNER <exe> <args>`,
+  so the runner argv is the one place it states which test binary a harness
+  process is, and the stream is attributed to that executable. Under a
+  `certifies = "complete"` profile the session is **strict**: the executable
+  must resolve against this lane and resolution's planned artifacts (a path
+  planned for another lane does not satisfy it), a cargo child that fails the
+  handshake or names an unplanned executable is refused and the refusal
+  recorded as an attribution error, and the shim **fails closed** - it exits
+  instead of exec'ing a harness on the shared stream. After a run cargo
+  reports green, a planned harness with expected executions that never
+  presented its stream is an attribution error too. Outside a complete profile
+  the session stays permissive: a harness that cannot be isolated runs on the
+  shared stream with a warning, as it always has.
 
   Where the runner cannot be installed without overriding something - a
   runner already configured for the host, a configured rustdoc, an effective
   target other than the host (`CARGO_BUILD_TARGET`, `build.target`), a
   forwarded `--config` or `--target` - the sweep drops `--no-fail-fast`
   instead, warns why, and stops at the first failing harness: an honest short
-  list rather than a wrong name. The runner names brokkr as
+  list rather than a wrong name. A complete profile refuses such a lane during
+  `prepare`, with the reason: every harness would share one stream, and an
+  unattributable stream cannot be accounted. The runner names brokkr as
   `/proc/<pid>/exe`, not its install path: cargo splits a runner string on
   whitespace, and a binary replaced mid-run (a `brokkr install` elsewhere)
   reads back as `<path> (deleted)`, which has a space and no longer exists.
@@ -1724,15 +1758,23 @@ multi-second tests off the parallel lane. A profile must not set `--format` in
 its `libtest_args` on a parallel lane (the sweep owns that flag). `brokkr test`
 is unaffected - it is always serial regardless of the profile's `test_threads`.
 
+A `certifies = "complete"` profile refuses this cargo-mediated parallelism
+during `prepare`: many tests and harnesses share one stream with no harness
+isolation, so its executions cannot be attributed. `parallel = { budget = N }`
+(below) runs the binaries concurrently with each one on its own stream, and is
+the lane to use there.
+
 ### Process isolation (`isolation = "process"`)
 
 A profile may set `isolation = "process"` (see `docs/brokkr.toml.md`): the
-lane prebuilds each cargo resolution of the sweep (`cargo test --no-run
---message-format=json`, the sweep's own selection and feature graph),
+lane's preparation prebuilds each cargo resolution of the sweep (`cargo test
+--no-run --message-format=json`, the sweep's own selection and feature graph),
 enumerates the filtered tests per test binary (the binaries run `--list`
-directly under the lane's real filter argv - no reimplementation of libtest
-filter semantics), drops package-qualified skipped pairs, and then **executes
-each prebuilt binary once per selected test** with
+directly, under the launch envelope execution uses and the lane's real filter
+argv - no reimplementation of libtest filter semantics) and drops
+package-qualified skipped pairs - in the `prepare` phase under a complete
+profile, just before the lane otherwise. The lane then **executes each
+prebuilt binary once per selected test** with
 `--exact <name> --test-threads=1`, under the same reconstructed cargo launch
 contract as the parallel lane (below). `--test-threads=1` alone serializes
 tests within one process per test binary; it does not isolate them, and tests
@@ -1808,8 +1850,12 @@ binaries sequentially and `--test-threads` parallelizes only within one, so a
 sweep cannot finish faster than the sum, over binaries, of each binary's slowest
 test - a floor `test_threads` cannot move.
 
-The sweep builds once, then fans out **by executing the prebuilt test
-binaries directly** - the fan-out never re-enters cargo. That is what makes
+The sweep builds once - in its preparation, the `prepare` phase under a
+complete profile - then fans out **by executing the prebuilt test binaries
+directly** over the counts its listing produced - the fan-out never re-enters
+cargo. Under package mode the per-package prebuild carries the sweep's
+profile and features like every other compiling path (it used to drop both,
+building a shape no other phase compiled). That is what makes
 the lane sound on *every* selection shape, `test_exclude_packages` sweeps
 included: cargo's feature resolution follows the root unit set, so any cargo
 re-entry narrower than the prebuild (the old `cargo test -p <pkg> --test <t>`
@@ -2008,7 +2054,16 @@ A `[[check]]` entry selects the lane with `harness = "nextest"`
   concurrency.
 - **The engine owns execution and rendering** - process-per-test scheduling
   and its reporter. Brokkr adds the sweep bookends and decides pass/fail
-  from the run stats.
+  from the run's outcome. Every engine event - a start, a finish, a retry, the
+  cancellation - is recorded for the execution accounting before the
+  reporter sees it, so a reporter that fails cannot take the record with it.
+  A death the lane's own fail-fast caused (a signal after the cancellation
+  began) is recorded as `interrupted`, not as the test's failure; an
+  exit-code failure stays the test's own; any engine timeout is `timed_out`,
+  whatever the engine config would have made of it.
+- **One listing, kept.** The `TestList` the lane's preparation builds is the
+  one it executes; a second listing at run time could disagree with the plan
+  about what the lane selects.
 
 Refusals: trailing `-- -- <libtest args>` (the engine takes no raw libtest
 argv; use the sweep's filters), the same forwarded cargo args the parallel
@@ -2038,31 +2093,23 @@ narrowing only ever comes from `brokkr.toml` skips and quarantines. How the
 pieces fit (measured against cargo-nextest 0.9.143, recorded at the code
 sites):
 
-- **A nextest lane's ran-set comes from the engine's own listing** under the
-  sweep's real filters (`nextest_shape_cases`), compiled by the same
-  function that shapes its run - audit and execution cannot disagree about
-  what a sweep selects. `Selected` is the only crediting verdict; pattern
-  mismatches (`skip`/`only`) report `string` and filterset mismatches
-  (qualified skips) report `expression`, both the ordinary
-  needs-a-lane-or-a-quarantine verdict. A verdict the ledger has no policy
-  for refuses the audit, `default-filter` included - under the synthesized
-  config it cannot occur, so its appearance means a foreign config got a
-  vote.
-- **The pair unit is `(binary-id, test)` for any shape with a nextest lane**
-  - and the finer key wins *shape-wide*, because the projection between
-  keyings is non-injective: two binaries in one package can define the same
-  test path (measured: seven such collisions inside nautilus-infrastructure,
-  all `serial_tests::` members), so a mixed shape keyed coarse would merge
-  pairs one lane distinguishes. The libtest lanes' claims attribute cleanly
-  because their enumeration was per test binary all along; the unit is
-  constructed through nextest's own `RustBinaryId::from_parts`, so the two
-  sides can never drift. Libtest-only shapes keep `(package, test)`
-  untouched. Package-qualified `[[quarantine]]` and skip entries keep their
-  meaning across both keyings - `package(X)` spans every binary id in X, via
-  the id's package prefix. Consequence, once, on migrating an entry:
-  per-entry quarantine counts can rise by exactly the number of duplicated
-  paths the entry spans (nautilus' B51: +7), which is the acceptance check
-  for the first migrated gate run.
+- **A nextest lane's selection comes from the engine's own listing** under the
+  sweep's real filters - the very `TestList` the lane executes, so plan and
+  execution cannot disagree about what a sweep selects. `Selected` is the only
+  executing verdict; pattern mismatches (`skip`/`only`) report `string` and
+  filterset mismatches (qualified skips) report `expression`, both the
+  ordinary needs-a-lane-or-a-quarantine verdict. A verdict the ledger has no
+  policy for refuses the lane's preparation, `default-filter` included - under
+  the synthesized config it cannot occur, so its appearance means a foreign
+  config got a vote. The engine's binary ids are mapped onto brokkr's binary
+  units through the lane's own artifact index; an id the index does not hold
+  refuses the lane too.
+- **Pairs are per binary on every lane**, nextest or not (see the `coverage`
+  phase): two binaries in one package can define the same test path
+  (measured: seven such collisions inside nautilus-infrastructure, all
+  `serial_tests::` members), and the binary unit is what tells them apart.
+  Package-qualified `[[quarantine]]` and skip entries mean "every binary of
+  package X".
 - **`MismatchReason` is priority-ordered, not a partition.** A test that is both
   `#[ignore]`d and unmatched by a lane's filterset reports `ignored`, so on a
   single listing it cannot be detected as an orphan. brokkr takes one listing and
@@ -2077,18 +2124,123 @@ sites):
 
 ## `coverage` phase (complete profiles)
 
-Under `certifies = "complete"` a tenth phase, `coverage`, runs after the
-test phase - including when the tests **failed**, since the audit needs
-built binaries rather than green ones and the orphan worksheet is most
-needed on exactly the unhealthy runs. On a failing test phase the audit is
-best-effort: its findings print, its counts ride in the JSON, and
-`failed_phase` stays `"test"`. Because the test phase fails fast, a lane it
-never reached credits **nothing** to the ran-set - the shape still counts
-in the universe, so its pairs surface as non-run rather than being counted
-as run they never were. The unit of coverage is the **(build shape, package, test)
-pair** - or **(build shape, binary-id, test)** for a shape any of whose
-lanes runs under the nextest engine; see the nextest section above for the
-finer-key-wins rule and its one-time count consequence. `curated = true` entries are the declared narrowing of the
+Under `certifies = "complete"` the test phase is bracketed by two more
+phases: `prepare` before it plans the whole profile, and `coverage` after it
+reconciles the plan against what was observed. Two claims come out, and they
+are kept apart because they are different claims:
+
+- **Policy coverage**: every (shape, test) pair the profile could run is
+  *selected* by some lane, or legitimately excluded (ignored, quarantined,
+  curated). A property of the configuration, read from the plan.
+- **Execution accounting**: every execution the plan expects ends as exactly
+  one outcome - `passed`, `failed`, `timed_out`, `interrupted`, `ignored`,
+  `unobserved` - taken from the typed observations the runners stream.
+
+A timeout is an accounted failure, never coverage passed. `interrupted` and
+`unobserved` are unresolved. A record that is complete after a timeout
+certifies only that the failed run's record is complete, never the gate.
+
+### Identities
+
+- A **binary unit** is (package id, normalized target kind, target name) -
+  the kind normalized the way cargo's selectors read it, `lib` for every
+  library flavour (`rlib`, `cdylib`, `proc-macro`, ...). The executable path
+  is launch metadata, not identity. nextest's binary ids map onto units
+  through the lane's artifact index; reports name a unit by its nextest-style
+  id (`pkg`, `pkg::target`, `pkg::bin/name`).
+- A **pair** is (build shape, cargo resolution, binary unit, test). There is
+  no conditional keying: two binaries of one package defining the same test
+  path are two pairs on every lane (the old audit keyed libtest-only shapes by
+  package and merged them).
+- An **expected execution** is (lane, pair, attempt). The same pair selected
+  by two lanes is two executions, each accounted on its own. No lane retries,
+  so the attempt is always 1. The harness invocation is not part of the key
+  but is enforced: within a lane a pair must run in exactly one harness
+  process, and an execution belongs to the first stream that reports it - a
+  start or terminal for it on any other stream is a `duplicate_execution`
+  anomaly, and that stream's result (pass or fail) is never taken.
+
+### The plan (`prepare`)
+
+Before any test runs, every active lane is prepared: its declared support
+builds (`build_packages`) run first, so a listing whose static constructor or
+custom harness reads a support binary sees the one the lane runs with; then
+its shape is built with the same `cargo test --no-run` the lane itself uses,
+and every binary listed - under
+the launch envelope execution will use (`DirectRuntime::envelope`: cwd,
+loader path, `[env]`, `CARGO_PKG_*`, build-script env), since a listing is
+the binary's own code and a custom harness may read its environment - and
+each shape resolution's universe enumerated. The plan records, per shape
+resolution, its universe and `#[ignore]`d subset; per lane, its selected
+pairs and the executions they imply (ignored names excluded unless the lane
+lifts `#[ignore]`; filtered-out names and `#[bench]` functions are outside the
+claim); the dead-filter findings (below); a content hash (xxh3) of every test
+executable; the fingerprint of the runtime index the launch envelope is
+built from (build-script env, out dirs and link-search dirs, and every
+support bin behind `CARGO_BIN_EXE_<name>` by path and content hash) - on
+every lane kind that executes binaries, the nextest engine lane included; the
+executables each `build_packages` pre-build produced, by package, target,
+path and content hash, hashed after the lane's own build (a support package
+outside the test selection reaches the tests through `BROKKR_TEST_BIN_DIR`,
+which no test build's artifact stream names); and an explicit marker for
+anything that could not be prepared. A lane's
+ignored-only listing is its filter argv with `--ignored` in place of any
+`--include-ignored` (libtest refuses the two together).
+
+The plan is written to `.brokkr/accounting/<run id>/plan.json` (under the
+config dir; the newest ten runs are kept) before the first test executes,
+and a journal beside it, `journal.jsonl`, receives every observation as it
+happens - one JSON line each, written straight through - so it survives
+anything short of the machine going down, the watchdog's backstop exit
+included. The journal's closing line is written when the test phase ends; a
+journal without it was cut short, and the audit says so.
+
+A lane that cannot be prepared - a build failure, a refusal - is a marker,
+and preparation goes on with the rest, so every refusal is reported in one
+run. A stop (an interrupt, the phase ceiling) ends preparation at once. Either
+way an incomplete plan comes back (`plan_complete = false`) and **the test
+phase does not run**: a record taken against an incomplete plan could certify
+nothing. `failed_phase` is then `"prepare"`.
+
+Before each lane executes, its support builds and its shape are built again
+(a no-op normally, and it re-uplifts the support binaries a later lane's
+build may have replaced) and, once **every** resolution of the lane is
+rebuilt - one resolution's build can rewrite another's binary in place - its
+test executables are checked against the plan by path **and** content hash,
+the runtime-index fingerprint against the planned one, and the support
+builds' executables against theirs. A shape whose
+difference cargo does not hash into the file name (an env var a build script
+reads) rebuilds the same path in place, so only the content can see that the
+binary there is another shape's. Any difference is a hard error for the lane
+- "artifacts changed since the plan" - never a silent re-plan. Nothing builds
+between that check and a direct lane's launches. The serial lane's `cargo
+test` builds once more on its own, so each of its harnesses is hashed again
+at its shim handshake, immediately before it runs, and refused if it is not
+the planned content. Not verified: the contents of link-search directories
+(a dylib a build script dropped there), which no artifact stream names. The
+lanes then **consume** the prepared selection: the parallel lane
+claims slots from the plan's counts, the isolated lane runs the plan's cases,
+the engine lane executes the very `TestList` it was prepared with.
+
+Two lane shapes cannot be attributed, so a complete profile refuses them
+during `prepare`, with the reason: a serial lane whose harness shim cannot be
+installed (a configured runner, a cross target, a configured rustdoc - see
+"The failure list"), and cargo-mediated parallelism (`test_threads` 0 or
+above 1), which shares one stream across tests and harnesses - use
+`parallel = { budget = N }`, which runs the binaries concurrently and
+attributably.
+
+### Policy coverage
+
+Classification reads the plan: a shape resolution's selection is the union of
+its lanes' executions. That deliberately changes how a failing run is
+classified - a lane the fail-fast never reached still selects its pairs, so
+they are not orphaned; its executions are `unobserved` in the accounting. An
+incomplete plan reports what it knows - the orphans of shapes whose every
+lane was prepared, the dead filters whose every sweep was listed - with
+status `incomplete`, never a pass; stale quarantine entries are not judged
+there, since an entry matching nothing may be matching in a shape that could
+not be prepared. `curated = true` entries are the declared narrowing of the
 universe (below); package-level `test_exclude_packages` is the other.
 
 The universe is **every `[[check]]` entry**, not the profile's own sweep
@@ -2097,34 +2249,33 @@ shrink the certified set. A `complete` profile that leaves a `[[check]]`
 entry referenced by no sweep or lane is therefore a **load-time error**
 (the entry would be enumerated nowhere, so the audit would print `0
 orphaned` over tests that never ran) - **unless the entry declares
-`curated = true`** (see `docs/brokkr.toml.md`): a curated entry's non-run
-pairs are outside the universe by declaration, so leaving it unreferenced
-certifies nothing without running, and the entry may live in its own
-deliberately-run profile instead. When a gate lane does run a curated
-entry, its build shape's non-run pairs are exempted rather than audited -
-counted and trailer-reported like `test_exclude_packages`, never orphaned,
+`curated = true`** (see `docs/brokkr.toml.md`): a curated entry's
+non-selected pairs are outside the universe by declaration, so leaving it
+unreferenced certifies nothing without running, and the entry may live in
+its own deliberately-run profile instead. When a gate lane does run a curated
+entry, its build shape's non-selected pairs are exempted rather than audited
+- counted and trailer-reported like `test_exclude_packages`, never orphaned,
 never credited to a `[[quarantine]]` entry. The exemption is keyed on the
 sweeps, not the shape: a non-curated entry sharing a build shape with a
-curated one keeps that shape fully audited. Enumeration is per test binary: `cargo test --no-run
---message-format=json` yields each binary with its owning package, then
-each binary runs `--list` directly (env-safe: listing executes no test
-code). The universe is `--list --include-ignored` with no filters, each
-lane's ran-set is `--list` under the lane's real filter argv (libtest
-itself decides what an argv admits), package-qualified skips are
-subtracted from the lane's claim, and the `#[ignore]`d set comes from
-`--list --ignored` (plain `--list` includes ignored names, so a lane
-without `include_ignored` has them subtracted from its ran-set). Every
-non-run pair must be quarantined (`[[quarantine]]` pattern match,
-optionally package-scoped, counted per entry - the **most-specific**
-matching pattern takes the pair, so a narrow entry is never starved by a
-broad one it nests under) or ignored at the source
-(counted, reported, not fatal); anything else is **orphaned** and fails
-the check, listed in full as `shape/package/test`. A pattern
-entry justifying zero pairs is stale and fails the check. A run with
-stale entries, orphans and dead filters (below) prints **all** the
-worksheets before failing. Package-level
-`test_exclude_packages` is outside the pair audit (those binaries cannot
-build) and is called out in the trailer.
+curated one keeps that shape fully audited. Enumeration is per test binary:
+`cargo test --no-run --message-format=json` yields each binary with its
+owning package, then each binary runs `--list` directly under its launch
+envelope. The universe is `--list --include-ignored` with no filters, each
+lane's selection is `--list` under the lane's real filter argv (libtest
+itself decides what an argv admits), package-qualified skips are subtracted
+from the lane's selection, and the `#[ignore]`d set comes from `--list
+--ignored` (plain `--list` includes ignored names, so a lane without
+`include_ignored` selects them without executing them). Every non-selected
+pair must be quarantined (`[[quarantine]]` pattern match, optionally
+package-scoped - meaning every binary of that package - counted per entry -
+the **most-specific** matching pattern takes the pair, so a narrow entry is
+never starved by a broad one it nests under) or ignored at the source
+(counted, reported, not fatal); anything else is **orphaned** and fails the
+check, listed in full as `shape/binary/test`. A pattern entry justifying zero
+pairs is stale and fails the check. A run with stale entries, orphans and
+dead filters (below) prints **all** the worksheets before failing.
+Package-level `test_exclude_packages` is outside the pair audit (those
+binaries cannot build) and is called out in the trailer.
 
 The ledger reports as **one rolled-up line** - entry count, total pairs,
 and the per-issue pair breakdown in descending order (`quarantine: 21
@@ -2132,17 +2283,167 @@ entries, 106 pairs - B51 80, B41 14, B50 10, …`). That keeps both signals
 the per-entry listing carried: the countdown, and the growth warning when a
 substring starts matching more than it used to. It is a summary, not a cap -
 every pair the ledger holds is counted in the line, at the granularity a
-reader acts on (an issue, not the pattern under it). The `--json` summary carries a
-`coverage` object: `pairs`, `run`, `quarantined`, `ignored`, `curated`,
-`orphaned`, `dead_filters`. `dead_filters` counts the dead `skip`/`only`
-filters below; it exists as its own field because a dead filter moves no
-pair between the other buckets - a run that fails on one is otherwise
-indistinguishable from a green one in the counts.
-It is present whenever the audit got as far as classifying pairs - a run
-that fails *on* the audit (stale entries, orphans) still reports its
-counts, so a consumer of a failed gate sees the worksheet's numbers and
-not `null`. Only an enumeration failure, which predates any counts,
-leaves it null.
+reader acts on (an issue, not the pattern under it).
+
+### Execution accounting
+
+The runners report what they see, typed, as they see it: each libtest record
+(suite started and finished, test started, test finished ok / failed /
+ignored, libtest's own `test/timeout` slow warning), how each stream ended,
+each kill and why, each directly launched process's exit, and every
+attribution failure. The runner knows no plan - the lane resolves each
+stream against its own (by the executable a harness's handshake named, or the
+binary a direct lane launched) and journals the result. Text the runner
+synthesizes for display - a dead suite's closure - is never evidence.
+
+| Outcome | Evidence |
+|---|---|
+| `passed` | a terminal `ok` for that execution |
+| `failed` | a terminal `failed`; or an attributable execution failure - a spawn error, the crash of a one-test process |
+| `timed_out` | this execution crossed its own deadline, attributed: a one-test process killed by any clock, or the per-test cap naming a watched in-flight test; any engine timeout |
+| `interrupted` | started, no terminal, ended by a termination it did not cause - the phase deadline, a sibling's timeout, fail-fast, an interrupt - or by a stream that ended without its terminal |
+| `ignored` | an explicit ignored result |
+| `unobserved` | expected, never started, never finished |
+
+Each carries a detail: `assertion`, `signal`, `spawn_error`,
+`per_test_deadline`, `run_deadline`, `phase_deadline`, `sibling_timeout`,
+`fail_fast`, `stream_truncated`, `read_error`, `interrupt`,
+`missing_terminal`, `engine_error`.
+
+The termination rules:
+
+- **Phase deadline**: a run failure; active executions `interrupted`, queued
+  ones `unobserved`.
+- **Per-test timeout**: the attributed execution `timed_out`, the others in
+  its process `interrupted` (`sibling_timeout`), the run stopped - everything
+  after it `unobserved` for that reason (`sibling_timeout`). The deadline is
+  charged to the execution - its test **in its binary** - never to a name:
+  on the isolated lane binary A's `tests::foo` timing out leaves binary B's
+  queued `tests::foo` `unobserved`, not `timed_out`.
+- **Idle, no-completion or wall** with no defensible identity: a run-level
+  timeout (`run_deadline`); the affected executions stay unresolved. No
+  timed-out test is ever invented from a suspect.
+- **Fail-fast**: every lane the test phase never reached is recorded as
+  stopped by it, so its executions are `unobserved` for a stated reason. The
+  parallel lane's sibling cancellation, and the engine lane's, are recorded
+  as what they are - never inferred from a signal status.
+- **A stream brokkr stopped reading** (the drain grace ran out with something
+  still holding the pipe) is told apart from one its writer closed and one a
+  read error ended: the first marks its unfinished executions
+  `stream_truncated`. Either - or an attributed stream that never recorded how
+  it ended - also makes the accounting `incomplete` on its own, whatever its
+  executions' terminals say: what followed the cut (a duplicate, an unplanned
+  test, the suite total) is unknowable, so the record cannot be whole.
+
+Within one stream these transitions are **anomalies**, each failing the green
+invariant and none ever deduplicated away: a duplicate start; a start after a
+terminal; a repeated terminal (even two identical `ok`s); a record for a test
+the plan does not expect from that binary; a suite starting inside an open
+suite; a stream its writer closed with the suite still open and nothing
+recorded to explain it; suite totals that disagree with the individual
+records; libtest's slow-test warning (past 60s, under a 20s cap); test
+records on a stream the plan cannot attribute; an attribution error from the
+shim. Across streams, one more: an execution reported by a second stream
+(`duplicate_execution`, see Identities). A terminal record without a start
+still records its outcome.
+
+**The green invariant**: the plan is complete, every expected execution
+`passed`, nothing anomalous was seen, no termination is on the record, and
+every planned doctest carrier completed (below). `interrupted` fails it, and
+so does `ignored` - an expected execution is one the lane promised to run. A
+recorded termination fails it even when every execution had already passed:
+a stopped run is not a gate. A test phase that went green but violates it is
+a hard failure of the check, with every execution that did not pass listed.
+Exit codes are unchanged: a fired ceiling exits 124, an interrupt 130, any
+other failure non-zero. The verdict reads the stop flags themselves, not the
+phases' result: a ceiling that fires, or an interrupt that arrives, after the
+audit accepted the journal leaves every later phase returning success, and
+the run still ends `failed` with 124 (or 130) - complete claim or not.
+
+The accounting status is `complete` when every expected execution has a
+resolved outcome and nothing anomalous was seen - the record is whole, which
+on a failed run is all it says - `incomplete` when anything is unresolved,
+the plan is incomplete, the journal was cut short or a stream was
+truncated, and `violated` when an
+anomaly makes the record untrustworthy. The audit is pure: it reads the plan
+and the journal back from disk, and spawns, builds and arms nothing - which
+is what lets it run after a watchdog kill, when the shutdown flag refuses
+every new process. A fired phase ceiling writes its own run-wide
+`phase_deadline` termination into the journal the moment it fires, before it
+kills anything and without taking the journal's lock (a wedged thread may
+hold it), so a run whose main thread never unwinds - the backstop exit -
+still records why it stopped. That write is retried on `EINTR` and continued
+after a short write; one that fails is said on the forced error channel and
+counted as a journal error by the audit. Every journal record ends with its
+newline: a trailing segment without one is a write that did not finish, and
+the reader reports it as a journal error rather than parsing it.
+
+**Doctests** have their own block: what the rustdoc streams said (passed,
+failed, ignored) and, per planned doctest carrier, whether it completed and
+how many rustdoc streams it presented. They cannot be enumerated, so there is
+no inventory (`unavailable`) and no accounting (`unknown`) - never reported
+as zero. A lane is a planned carrier only if it will actually run doctests: a
+`doc_only` lane, or a serial libtest lane under `[test] doctests = true` whose
+selection carries no target selector (one turns cargo's doctest pass off).
+On a strict session a rustdoc may connect only on a carrier's run; anywhere
+else it is refused as an attribution error. A carrier **completed** when its
+lane finished with nothing recorded stopping it, every rustdoc stream it
+presented was closed by its writer with its suite closed, and - for a
+`doc_only` lane always, for a serial carrier whose selection reaches a member
+with a doctested target - at least one rustdoc stream presented at all (the
+one floor that tells "ran" from "never ran"; how many more there should have
+been is not knowable). The serial obligation comes from `cargo metadata` (a
+target with `doctest = true` of crate type `lib`, `rlib` or `proc-macro`,
+over the members the lane's `cargo test` selects), never from the harnesses
+the build produced: `[lib] test` and `doctest` are independent, so a library
+harness neither implies doctests nor is implied by them. A
+carrier that did not complete fails certification - the green invariant -
+though it moves no binary accounting count, which is scoped to enumerable
+binary tests; a failing doctest fails the test verdict through its cargo
+status.
+
+### The summary objects
+
+The `--json` summary (schema 2) carries the two claims as separate objects,
+plus the doctest block and the run's termination:
+
+```json
+{
+  "schema": 2,
+  "verdict": "failed",
+  "termination": { "kind": "per_test_timeout", "scope": "serial" },
+  "policy_coverage": {
+    "status": "passed", "plan_complete": true,
+    "pairs": 0, "selected": 0, "ignored": 0, "quarantined": 0,
+    "curated": 0, "orphaned": 0, "dead_filters": 0
+  },
+  "execution_accounting": {
+    "scope": "binary_tests", "status": "incomplete",
+    "expected_executions": 0, "passed": 0, "failed": 0, "timed_out": 0,
+    "interrupted": 0, "ignored": 0, "unobserved": 0, "anomalies": 0
+  },
+  "doctests": { "inventory": "unavailable", "accounting": "unknown",
+                "observed": { "passed": 0, "failed": 0, "ignored": 0,
+                              "carriers": [ { "lane": "doc", "completed": true, "streams": 1 } ] } }
+}
+```
+
+`policy_coverage.status` is `passed`, `failed` (orphans, stale entries or
+dead filters) or `incomplete`; `dead_filters` counts the dead `skip`/`only`
+filters below, a field of its own because a dead filter moves no pair
+between the other buckets. The execution counts partition the expected
+executions; `anomalies` is counted beside them. All three blocks are present
+whenever the `prepare` phase ran - on a failed run too, a consumer of a failed
+gate sees the worksheet's numbers, not `null`. They are `null` outside a
+complete profile, and on a complete-profile run that failed before `prepare`
+(a gremlin, a clippy error, a pre-test script check): no plan exists there,
+and a block of zeros would read as an empty plan rather than no plan.
+
+**Termination** - `{kind, scope}`, `null` when nothing stopped the run - is
+how the run stopped: `phase_deadline` (scope: the phase), `interrupt`,
+`per_test_timeout`, `run_deadline`, `sibling_timeout`, `fail_fast` or
+`engine_error`, with the lane it happened in as the scope where it was a
+lane's. Present outside complete profiles too.
 
 ## Feature unification
 
@@ -2198,7 +2499,7 @@ different questions, and only the first could be derived.
 - **One cargo invocation per package**, never a batched multi-`-p` - the same
   rule, and the same measured reason, as the `install_feature` phase below.
   This applies to clippy, the prebuild, the test run, the parallel fan-out and
-  the coverage enumeration alike.
+  the `prepare` phase's enumeration alike.
 - **Its own target dir** (`<target>/unify-package[-<rustflags hash>]`), because
   a different resolution re-fingerprints units and would otherwise rebuild
   against every ordinary sweep on every run, in both directions. The dir is
@@ -2207,10 +2508,11 @@ different questions, and only the first could be derived.
   single `BROKKR_TEST_BIN_DIR`, so a directory per package would leave a
   multi-package lane with no one place holding the binaries its tests spawn.
 - **Its own coverage shape per resolution.** Under `certifies = "complete"` a
-  two-package package-mode lane audits as two `ShapeCoverage` units, labelled
-  `<entry>/<package>`. It does *not* need `curated = true`: package scoping
-  narrows the universe and the ran-set together, so an unfiltered lane has
-  `ran == universe` and no orphans.
+  two-package package-mode lane audits as two shape resolutions, labelled
+  `<entry>/<package>`, its pairs carrying the resolution. It does *not* need
+  `curated = true`: package scoping narrows the universe and the selection
+  together, so an unfiltered lane selects its whole universe and leaves no
+  orphans.
 - **Forwarded package selectors are refused.** `brokkr check -- -p other` under
   package mode is an error, because cargo unions selection flags and would
   widen a resolution promised to hold exactly one package.
@@ -2320,10 +2622,10 @@ run too. That asymmetry is part of why `gate` is the default.
 
 The same staleness rule the ledger applies to `[[quarantine]]` entries
 applies to the filters themselves: **a filter that matches no test is a
-defect, not a no-op.** During the `coverage` phase every `skip` and every
+defect, not a no-op.** During the `prepare` phase every `skip` and every
 `only` declared on a `[test.profiles.*]` block or a `[[check]]` entry is
 asserted against the enumeration, and one that matched nothing fails the
-check, named with the block it was written in:
+check in the `coverage` phase, named with the block it was written in:
 
 ```
 [error]   dead filter: only "read_market_latency" in [test.profiles.timing] - matches no test in any sweep it applies to (timing)
@@ -2372,9 +2674,11 @@ Four rules decide what "matched nothing" means:
 - **Package-qualified skips match within their package only**, exactly as
   `package = "<pkg>"` scopes a `[[quarantine]]` entry.
 
-Lanes the test phase never reached are exempt, on the same reasoning that
-stops them crediting the ran-set: they ran nothing, so nothing they declare
-can be shown dead.
+Every prepared lane is judged, whether or not the test phase reached it: a
+filter's liveness is a property of what the lane selects, which the plan
+knows before anything runs. A filter one of whose sweeps could not be
+prepared is unknown rather than dead - the sweep nobody listed may be exactly
+where it matches - and is not reported.
 
 Resolving filters against libtest's own enumeration is a correctness
 choice, not only a cheap one. The alternative - deriving test names by
@@ -2456,9 +2760,8 @@ profile skips the named phases and announces them up front; under a
 build's green is not comparable to the full build's - feature unification
 changes with the package set). Trailing `-- …` test args are rejected the
 same way under `complete`: a libtest `--skip` or a cargo `--lib` narrows
-the real run but not the coverage audit, so the audit would count tests
-that never ran. 2 = clap usage errors, 124 = a time ceiling fired, 130 =
-interrupt.
+the real run but not the plan, which is built from the sweeps' own filters.
+2 = clap usage errors, 124 = a time ceiling fired, 130 = interrupt.
 
 ## Per-sweep log lines (run log and failures only)
 

@@ -50,11 +50,13 @@ const UNWIND_GRACE: std::time::Duration = std::time::Duration::from_secs(20);
 /// phases finish in seconds, so two minutes is already generous; the build
 /// phases get what a cold store plausibly needs and no more. Clippy's five
 /// minutes is set against the observed hang, not against its normal cost
-/// (about 20s warm on the largest consuming workspace).
+/// (about 20s warm on the largest consuming workspace). `prepare` gets the
+/// test phase's fifteen: it does the test phase's builds - every lane's
+/// `cargo test --no-run`, cold on a fresh store - plus every listing.
 fn phase_ceiling(phase: &str) -> std::time::Duration {
     let minutes = match phase {
         "clippy" | "rustdoc" => 5,
-        "test" => 15,
+        "prepare" | "test" => 15,
         "coverage" | "install_feature" | "script_check" => 5,
         _ => 2,
     };
@@ -207,9 +209,40 @@ impl Drop for CheckWatchdog {
 /// the command disarms the watchdog (it has unwound); exits the process only
 /// if that has not happened within [`UNWIND_GRACE`].
 fn fire(why: &str, disarm: &std::sync::atomic::AtomicBool) {
-    if let Ok(mut fired) = WATCHDOG_FIRED.lock() {
-        *fired = Some(why.to_owned());
-    }
+    fire_with(why, disarm, &FireEffects::REAL);
+}
+
+/// The process-wide effects of a firing, apart so the firing path itself can
+/// run under test without killing the test binary's children, raising its
+/// shutdown flag or marking it fired for every other test.
+struct FireEffects {
+    mark: fn(&str),
+    shutdown: fn(),
+    kill: fn() -> usize,
+    backstop: fn(),
+}
+
+impl FireEffects {
+    const REAL: Self = Self {
+        mark: |why| {
+            if let Ok(mut fired) = WATCHDOG_FIRED.lock() {
+                *fired = Some(why.to_owned());
+            }
+        },
+        shutdown: crate::shutdown::request_shutdown,
+        kill: || crate::shutdown::kill_descendants(std::process::id()),
+        backstop: || backstop_exit(),
+    };
+}
+
+fn fire_with(why: &str, disarm: &std::sync::atomic::AtomicBool, fx: &FireEffects) {
+    (fx.mark)(why);
+    // The cause, durably, before anything else: if the main thread never
+    // unwinds, `backstop_exit` leaves this process without the journal's
+    // termination the unwind would have written, and the record would hold
+    // observations with nothing saying why they stop. Lock-free - the thread
+    // that would write it may be the wedged one, holding the journal's lock.
+    journal_watchdog_fired();
     // `error_forced`, not `error`: the output locks may be held by a thread
     // that is blocked for good, and nothing may stand between a fired ceiling
     // and the kill. It also lands the kill in the run log, the one record of
@@ -220,12 +253,11 @@ fn fire(why: &str, disarm: &std::sync::atomic::AtomicBool) {
     // Runners polling the flag return `Interrupted`, and no new test group is
     // spawned; the exit path reads `watchdog_fired()` first, so this unwinds
     // as 124, not as an interrupt.
-    crate::shutdown::request_shutdown();
-    let me = std::process::id();
+    (fx.shutdown)();
     // Two sweeps: a descendant killed mid-fork can leave a child that the
     // first walk did not see. Anything spawned after that is caught by the
     // grace loop below.
-    let killed = crate::shutdown::kill_descendants(me) + crate::shutdown::kill_descendants(me);
+    let killed = (fx.kill)() + (fx.kill)();
     output::error_forced(&format!(
         "SIGKILL sent to {}; brokkr exits {WATCHDOG_EXIT_CODE}",
         output::count(killed, "process"),
@@ -237,13 +269,13 @@ fn fire(why: &str, disarm: &std::sync::atomic::AtomicBool) {
         }
         // Whatever the unwinding main thread still starts (the next sweep of
         // a phase that does not poll the flag) dies within one tick.
-        crate::shutdown::kill_descendants(me);
+        (fx.kill)();
         std::thread::park_timeout(std::time::Duration::from_millis(100));
     }
     if disarm.load(std::sync::atomic::Ordering::SeqCst) {
         return;
     }
-    backstop_exit();
+    (fx.backstop)();
 }
 
 /// The main thread did not unwind: do the two things its exit path owed and
@@ -293,6 +325,7 @@ mod watchdog_tests {
     fn clippy_ceiling_is_five_minutes() {
         assert_eq!(phase_ceiling("clippy"), std::time::Duration::from_secs(300));
         assert!(phase_ceiling("test") > phase_ceiling("clippy"));
+        assert_eq!(phase_ceiling("prepare"), phase_ceiling("test"));
         assert!(CHECK_CEILING > phase_ceiling("test"));
     }
 
@@ -303,6 +336,72 @@ mod watchdog_tests {
         assert_eq!(failing, Some("gremlins"));
         let clock = PHASE_CLOCK.lock().expect("clock");
         assert!(matches!(*clock, Some(("gremlins", _))));
+    }
+
+    /// The real firing path journals the deadline itself, before anything is
+    /// killed and without the journal's lock - here held by a "wedged"
+    /// thread for the whole firing. If it waited on that lock this test
+    /// would hang into its cap; if it left the record to the unwind, the
+    /// journal read back would say nothing about why its execution stopped.
+    #[test]
+    fn a_firing_journals_its_deadline_without_the_journal_lock() {
+        let root = crate::test_scratch::scratch("watchdog", "firing_journal");
+        let unit = BinaryUnit::of(&test_binary_for_tests("core", "lib", "core"));
+        let pair = PairId { shape: "s".into(), resolution: None, unit, test: "queued".into() };
+        let plan = AccountingPlan {
+            run_id: new_run_id(),
+            complete: true,
+            // A lane index no other test's tap uses: the journal is process-wide,
+            // and a concurrently running test's records may land in it too.
+            lanes: vec![LaneRecord {
+                lane: 7_777,
+                label: "lane".into(),
+                kind: LaneKind::Parallel,
+                shape: "s".into(),
+                prepared: true,
+                include_ignored: false,
+                doc_carrier: false,
+                doc_streams_required: false,
+                executions: vec![pair],
+                ignored_selected: Vec::new(),
+                outside_claim: Vec::new(),
+                artifacts: Vec::new(),
+            }],
+            ..AccountingPlan::default()
+        };
+        let paths = accounting_open(&root, &plan).expect("open the journal");
+
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let wedged = std::thread::spawn(move || {
+            let guard = JOURNAL.lock().expect("journal lock");
+            locked_tx.send(()).expect("signal");
+            release_rx.recv().ok();
+            drop(guard);
+        });
+        locked_rx.recv().expect("the wedged thread holds the lock");
+        let disarmed = std::sync::atomic::AtomicBool::new(true);
+        fire_with(
+            "test's prepare phase exceeded its ceiling",
+            &disarmed,
+            &FireEffects { mark: |_| {}, shutdown: || {}, kill: || 0, backstop: || {} },
+        );
+        release_tx.send(()).expect("release");
+        wedged.join().expect("wedged thread");
+        journal_close();
+
+        let (records, closed, errors) = read_journal(&paths.journal);
+        let r = reconcile(&plan, &records, closed, errors);
+        assert!(
+            records.iter().any(|rec| matches!(
+                rec,
+                JournalRecord::Terminated(t)
+                    if t.scope == TerminationScope::Run && t.cause == TerminationCause::PhaseDeadline
+            )),
+            "the firing is on the record: {records:?}"
+        );
+        let queued = r.accounted.iter().find(|a| a.id.pair.test == "queued").expect("planned");
+        assert_eq!((queued.outcome, queued.detail), (Outcome::Unobserved, Some(Detail::PhaseDeadline)));
     }
 
     #[test]

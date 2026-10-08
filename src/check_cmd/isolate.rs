@@ -5,40 +5,33 @@
 // global logger) pass under CI's nextest - which runs process-per-test -
 // and fail in any shared-process libtest lane, because the first test's
 // init is still resident for the ninth. This path provides the guarantee
-// the tests actually need: prebuild the sweep's selection, enumerate each
-// binary, then run that exact binary once per selected test. Re-entering
-// cargo with -p changes the feature graph; re-entering with the whole
-// selection runs same-named tests in other binaries under one wall cap.
-// DirectRuntime supplies cargo's launch environment for the prebuilt binary.
+// the tests actually need: the prepared plan holds each binary of the
+// sweep's prebuilt selection and the names its filters select
+// (`prepare_direct`), and the lane runs that exact binary once per selected
+// test. Re-entering cargo with -p changes the feature graph; re-entering
+// with the whole selection runs same-named tests in other binaries under one
+// wall cap. DirectRuntime supplies cargo's launch environment for the
+// prebuilt binary.
 
 // Not used here any more, but every check_cmd/*.rs shares one module
 // (include!'d into check_cmd.rs), and binary_timings.rs reads this import.
 use std::collections::BTreeMap;
 
-/// Enumerate and run one process-isolated sweep. Runs every test even
-/// after failures (the per-test failure list is the point of the mode),
-/// returns Ok(false) when any failed.
-#[allow(clippy::too_many_arguments)]
+/// Run one prepared process-isolated sweep. Runs every test even after
+/// failures (the per-test failure list is the point of the mode), returns
+/// Ok(false) when any failed.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn run_isolated_sweep(
     project_root: &Path,
     state_root: &Path,
     sweep: &ResolvedSweep,
     packages: &[&str],
-    extra_args: &[String],
-    project_env: &[(String, String)],
-    allow_args: &[String],
+    prepared: &PreparedLane,
+    tap: &LaneTap,
     doctests: bool,
     commands: bool,
     mut timings: Option<&mut Vec<TestTiming>>,
 ) -> Result<bool, DevError> {
-    if !extra_args.is_empty() {
-        return Err(DevError::Config(
-            "`brokkr check -- …` extra args are not supported on a sweep with \
-             `isolation = \"process\"` - the per-test invocations own their argv."
-                .into(),
-        ));
-    }
-
     // Doctests cannot be enumerated per test binary (they live in the
     // `--doc` pseudo-target, which has no `--list`-able executable), so a
     // process-isolated lane cannot run them. Announce the omission rather
@@ -51,21 +44,34 @@ fn run_isolated_sweep(
         ));
     }
 
-    let env_full = merged_env(&sweep.env, project_env);
-    let env_refs: Vec<(&str, &str)> = env_full
-        .iter()
-        .map(|(k, v)| (k.as_str(), v.as_str()))
-        .collect();
+    let env_refs = prepared.env.refs();
 
     announce_sweep(
         &format!("test {}: {}", sweep.label, describe_sweep(sweep, true, packages)),
         None,
         commands,
     );
-    let Some((plan, runtime)) =
-        enumerate_isolated(project_root, sweep, packages, allow_args, &env_refs, commands)?
-    else {
-        return Ok(false);
+    let Some(runtime) = prepared.runtime.as_ref() else {
+        return Err(DevError::Build(format!("sweep '{}' reached the isolated lane unprepared", sweep.label)));
+    };
+    let plan = IsolatedPlan {
+        cases: prepared
+            .resolutions
+            .iter()
+            .flat_map(|r| {
+                r.binaries.iter().flat_map(move |b| {
+                    b.selected.iter().map(move |name| IsolatedCase {
+                        binary: b.binary.clone(),
+                        unit: b.unit.clone(),
+                        resolution: r.resolution.clone(),
+                        ignored: b.ignored.contains(name),
+                        name: name.clone(),
+                    })
+                })
+            })
+            .collect(),
+        pkg_skipped: prepared.pkg_skipped,
+        include_ignored: prepared.include_ignored,
     };
 
     let Some((runnable, pkg_skipped)) = plan_runnable(&plan, &sweep.label) else {
@@ -90,9 +96,10 @@ fn run_isolated_sweep(
             project_root,
             state_root,
             case,
-            &runtime,
+            runtime,
             plan.include_ignored,
             &env_refs,
+            tap,
             commands,
         )?;
         match outcome {
@@ -103,6 +110,7 @@ fn run_isolated_sweep(
             // wedged the killed test is still there for its successors to
             // inherit, and the contract says stop.
             IsolatedOutcome::TimedOut => {
+                record_isolated_timeout(tap, case);
                 return Err(DevError::Verify(format!(
                     "test '{name}' in {}/{} exceeded its time budget in sweep '{}' - stopping",
                     case.binary.package, case.binary.target, sweep.label
@@ -143,6 +151,39 @@ fn run_isolated_sweep(
     note_tests(ran, ignored, 0);
     note_pkg_skipped(pkg_skipped);
     Ok(true)
+}
+
+/// Record an isolated case's timeout and the stop it causes. Two records,
+/// because they are two facts: the deadline is charged to that one execution,
+/// its test in its binary, so a same-named test in another binary of the
+/// lane is not touched; and every case the lane will now never run is
+/// stopped by a sibling's timeout, which is not its own.
+fn record_isolated_timeout(tap: &LaneTap, case: &IsolatedCase) {
+    for rec in isolated_timeout_records(tap.lane(), case) {
+        tap.record(rec);
+    }
+}
+
+/// The records [`record_isolated_timeout`] makes, for lane `lane`.
+fn isolated_timeout_records(lane: usize, case: &IsolatedCase) -> [JournalRecord; 2] {
+    [
+        JournalRecord::Terminated(Termination {
+            scope: TerminationScope::Lane,
+            lane: Some(lane),
+            stream: None,
+            cause: TerminationCause::PerTestDeadline,
+            test: Some(case.name.clone()),
+            charged: Some(ChargedTo { resolution: case.resolution.clone(), unit: case.unit.clone() }),
+        }),
+        JournalRecord::Terminated(Termination {
+            scope: TerminationScope::Lane,
+            lane: Some(lane),
+            stream: None,
+            cause: TerminationCause::SiblingTimeout,
+            test: None,
+            charged: None,
+        }),
+    ]
 }
 
 /// `", N ignored"` when any test was skipped as `#[ignore]`d, else empty.
@@ -209,96 +250,17 @@ fn skip_note(n: usize) -> String {
 #[derive(Clone)]
 struct IsolatedCase {
     binary: TestBinary,
+    unit: BinaryUnit,
+    resolution: Option<String>,
     name: String,
     ignored: bool,
 }
 
-/// What a process-isolated sweep will run, from per-binary enumeration.
+/// What a process-isolated sweep will run, from the prepared plan.
 struct IsolatedPlan {
     cases: Vec<IsolatedCase>,
     pkg_skipped: usize,
     include_ignored: bool,
-}
-
-/// Enumerate the sweep per test binary (attribution comes from the
-/// `--no-run` artifact stream; listing runs the binaries directly, which
-/// is env-safe because no test code executes) and apply the
-/// package-qualified skips. `Ok(None)` = failure already reported.
-fn enumerate_isolated(
-    project_root: &Path,
-    sweep: &ResolvedSweep,
-    packages: &[&str],
-    allow_args: &[String],
-    env_refs: &[(&str, &str)],
-    commands: bool,
-) -> Result<Option<(IsolatedPlan, DirectRuntime)>, DevError> {
-    // Direct execution would bypass a configured runner; refuse before building.
-    refuse_configured_runner(project_root, env_refs)?;
-    let cli_scope: Vec<String> = packages.iter().map(|p| (*p).to_owned()).collect();
-    let mut all = Vec::new();
-    let mut runtime_index = BuildRuntimeIndex::default();
-    for resolution in sweep.resolutions(&cli_scope) {
-        let mut selection = allow_args.to_vec();
-        match resolution {
-            Some(pkg) => {
-                selection.extend(sweep_profile_args(sweep));
-                selection.extend(sweep.unification_args());
-                selection.extend(["-p".to_owned(), pkg]);
-                selection.extend(sweep.cargo_feature_args.iter().cloned());
-            }
-            None => selection.extend(sweep_selection_args(sweep, packages)),
-        }
-        let Some((binaries, index)) =
-            test_binaries_with_runtime(project_root, &selection, env_refs, commands)?
-        else {
-            return Ok(None);
-        };
-        all.extend(binaries);
-        runtime_index.merge(index);
-    }
-    let runtime = DirectRuntime::load(project_root, env_refs, runtime_index)?;
-    let binaries = filter_binaries(&all, &sweep.cargo_test_filters);
-    let libdir = toolchain_libdir(project_root, env_refs)?;
-    let include_ignored = sweep.libtest_args.iter().any(|a| a == "--include-ignored");
-    let mut filter_args: Vec<&str> = sweep.name_filters.iter().map(String::as_str).collect();
-    filter_args.extend(sweep.libtest_args.iter().map(String::as_str));
-
-    let mut cases = Vec::new();
-    let mut pkg_skipped = 0;
-    for b in binaries {
-        let Some(listed) = binary_list(b, project_root, &filter_args, env_refs, &libdir)? else {
-            return Ok(None);
-        };
-        let b_ignored: BTreeSet<String> = if include_ignored {
-            BTreeSet::new()
-        } else {
-            let mut ignored_args = filter_args.clone();
-            ignored_args.push("--ignored");
-            let Some(l) = binary_list(b, project_root, &ignored_args, env_refs, &libdir)? else {
-                return Ok(None);
-            };
-            l.into_iter().collect()
-        };
-        for t in listed {
-            if sweep.qualified_skips.iter().any(|q| q.matches(&b.package, &t)) {
-                pkg_skipped += 1;
-                continue;
-            }
-            cases.push(IsolatedCase {
-                binary: b.clone(),
-                ignored: b_ignored.contains(&t),
-                name: t,
-            });
-        }
-    }
-    Ok(Some((
-        IsolatedPlan {
-            cases,
-            pkg_skipped,
-            include_ignored,
-        },
-        runtime,
-    )))
 }
 
 /// One prebuilt binary with one exact test, under the standard per-test cap.
@@ -318,6 +280,8 @@ fn isolated_args(name: &str, include_ignored: bool) -> Vec<&str> {
     args
 }
 
+/// One process for one test. Its stream is attributed to exactly that test,
+/// which is what lets a kill or a crash be charged to it.
 #[allow(clippy::too_many_arguments)]
 fn run_one_isolated_test(
     project_root: &Path,
@@ -326,6 +290,7 @@ fn run_one_isolated_test(
     runtime: &DirectRuntime,
     include_ignored: bool,
     env_refs: &[(&str, &str)],
+    tap: &LaneTap,
     commands: bool,
 ) -> Result<IsolatedOutcome, DevError> {
     let name = &case.name;
@@ -340,6 +305,13 @@ fn run_one_isolated_test(
         cwd
     };
     let env_pairs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    let origin = StreamOrigin::Binary {
+        resolution: case.resolution.clone(),
+        unit: case.unit.clone(),
+        one_test: Some(name.clone()),
+    };
+    let sink_origin = origin.clone();
+    let sink = tap.sink(move |_| sink_origin.clone(), false);
     let run = test_runner::run_libtest_parallel(
         &case.binary.executable,
         &args,
@@ -349,10 +321,15 @@ fn run_one_isolated_test(
         test_runner::TEST_TIMEOUT,
         test_runner::TEST_TIMEOUT,
         None,
+        Some(&sink),
         |_| {},
         |_| {},
         |_| {},
-    )?;
+    );
+    if let Err(DevError::Spawn { error, .. }) = &run {
+        tap.record(JournalRecord::SpawnFailed { lane: tap.lane(), origin, detail: error.to_string() });
+    }
+    let run = run?;
 
     if run.timed_out {
         output::error(&format!("test '{name}' exceeded its time budget"));
@@ -463,6 +440,23 @@ fn parse_list_output(stdout: &str) -> Option<Vec<String>> {
     Some(out)
 }
 
+/// The `#[bench]` names in a libtest `--list` output. Outside the coverage
+/// claim (they are not tests), but a `cargo test` run still executes each once
+/// in test mode and reports it like a test - so the plan must know them, or
+/// their records would read as tests nobody planned.
+fn parse_list_benchmarks(stdout: &str) -> Vec<String> {
+    let mut out: Vec<String> = stdout
+        .lines()
+        .map(str::trim)
+        .filter_map(|l| l.strip_suffix(": benchmark"))
+        .filter(|n| !n.is_empty())
+        .map(str::to_owned)
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
 /// The tally line libtest closes a `--list` with: `N tests, M benchmarks`,
 /// singularised at 1. Its presence is what distinguishes a real (possibly empty)
 /// listing from a binary that never understood `--list`. Returns the
@@ -482,21 +476,24 @@ mod isolate_tests {
     #![allow(clippy::unwrap_used)]
 
     use super::{
-        IsolatedCase, IsolatedPlan, TestBinary, isolated_args, list_tally, parse_list_output,
-        plan_runnable,
+        BinaryUnit, IsolatedCase, IsolatedPlan, TestBinary, isolated_args, list_tally,
+        parse_list_output, plan_runnable,
     };
     use std::path::PathBuf;
 
     fn case(package: &str, executable: &str, ignored: bool) -> IsolatedCase {
+        let binary = TestBinary {
+            package: package.into(),
+            package_id: package.into(),
+            target: "suite".into(),
+            kind: "test".into(),
+            executable: executable.into(),
+            manifest_dir: PathBuf::from("/workspace"),
+        };
         IsolatedCase {
-            binary: TestBinary {
-                package: package.into(),
-                package_id: package.into(),
-                target: "suite".into(),
-                kind: "test".into(),
-                executable: executable.into(),
-                manifest_dir: PathBuf::from("/workspace"),
-            },
+            unit: BinaryUnit::of(&binary),
+            binary,
+            resolution: None,
             name: "same_name".into(),
             ignored,
         }
@@ -516,6 +513,59 @@ mod isolate_tests {
         assert!(!runnable[0].ignored);
         assert!(runnable[1].ignored);
         assert_eq!(skipped, 1);
+    }
+
+    /// Binary A's `same_name` timing out is charged to A's execution alone.
+    /// The lane-wide record used to carry only the test name, and B's queued
+    /// `same_name` - same name, other binary, never started - read as timed
+    /// out too; it is a sibling's timeout, unobserved.
+    #[test]
+    fn an_isolated_timeout_is_charged_to_its_binary_not_to_a_same_named_test() {
+        use super::{
+            AccountingPlan, Detail, JournalRecord, LaneKind, LaneRecord, ObsEvent, Outcome, PairId,
+            StreamOrigin, isolated_timeout_records, reconcile,
+        };
+        let a = case("a", "/a/suite", false);
+        let b = case("b", "/b/suite", false);
+        let pair = |c: &IsolatedCase| PairId {
+            shape: "s".into(),
+            resolution: None,
+            unit: c.unit.clone(),
+            test: c.name.clone(),
+        };
+        let plan = AccountingPlan {
+            run_id: "t".into(),
+            complete: true,
+            lanes: vec![LaneRecord {
+                lane: 0,
+                label: "isolated".into(),
+                kind: LaneKind::Isolated,
+                shape: "s".into(),
+                prepared: true,
+                include_ignored: false,
+                doc_carrier: false,
+                doc_streams_required: false,
+                executions: vec![pair(&a), pair(&b)],
+                ignored_selected: Vec::new(),
+                outside_claim: Vec::new(),
+                artifacts: Vec::new(),
+            }],
+            ..AccountingPlan::default()
+        };
+        let mut records = vec![JournalRecord::Observed {
+            lane: 0,
+            stream: 1,
+            origin: StreamOrigin::Binary { resolution: None, unit: a.unit.clone(), one_test: Some(a.name.clone()) },
+            event: ObsEvent::Started { name: a.name.clone() },
+        }];
+        records.extend(isolated_timeout_records(0, &a));
+        let r = reconcile(&plan, &records, true, Vec::new());
+        let of = |c: &IsolatedCase| {
+            let x = r.accounted.iter().find(|x| x.id.pair.unit == c.unit).expect("planned");
+            (x.outcome, x.detail)
+        };
+        assert_eq!(of(&a), (Outcome::TimedOut, Some(Detail::PerTestDeadline)));
+        assert_eq!(of(&b), (Outcome::Unobserved, Some(Detail::SiblingTimeout)));
     }
 
     #[test]
@@ -602,6 +652,13 @@ some_bench: benchmark
         );
         // Names but no tally: a truncated listing, not a complete empty one.
         assert_eq!(parse_list_output("a::b: test\n"), None);
+    }
+
+    #[test]
+    fn benchmarks_are_listed_apart_from_tests() {
+        let stdout = "a::t: test\nb::parse: benchmark\n1 test, 1 benchmark\n";
+        assert_eq!(parse_list_output(stdout), Some(vec!["a::t".to_owned()]));
+        assert_eq!(super::parse_list_benchmarks(stdout), vec!["b::parse".to_owned()]);
     }
 
     #[test]

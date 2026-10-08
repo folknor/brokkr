@@ -120,10 +120,11 @@ In depth: `brokkr man check` (one section at a time, e.g. `man check clippy`)."
 
         /// Append one machine-readable summary line (a JSON object) as
         /// the last line of stdout: `schema`, `certifies`, `verdict`,
-        /// `profile`, `sweeps`, `failed_phase`, `elapsed_ms`. The object
-        /// is versioned and additive (`schema: 1`) - consumers must
-        /// tolerate unknown fields. Human output is unchanged; parse the
-        /// final stdout line.
+        /// `profile`, `sweeps`, `failed_phase`, `termination`, and under a
+        /// complete profile `policy_coverage` and `execution_accounting`,
+        /// then `elapsed_ms`. The object is versioned (`schema`) and
+        /// additive within a version - consumers must tolerate unknown
+        /// fields. Human output is unchanged; parse the final stdout line.
         #[arg(long)]
         json: bool,
 
@@ -172,8 +173,8 @@ In depth: `brokkr man check` (one section at a time, e.g. `man check clippy`)."
         /// `brokkr check -- --test read_paths` (cargo-level filter),
         /// `brokkr check -- -- --ignored` (libtest-level flag). Rejected
         /// under a `certifies = "complete"` profile: they narrow the test
-        /// run but not the coverage audit, which would then count tests
-        /// that never ran.
+        /// run but not the plan, which would then expect tests that never
+        /// ran.
         ///
         /// The leading `--` is required: tokens after it are raw values
         /// for this positional either way, so neither `trailing_var_arg`

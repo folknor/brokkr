@@ -35,8 +35,13 @@
 // - Brokkr owns CONCURRENCY: the profile's `test_threads` maps onto the
 //   engine's in-flight count (unset = the engine's num-cpus default).
 // - The engine owns execution and rendering: process-per-test scheduling
-//   and its reporter. Brokkr wraps it in the usual sweep lines and decides
-//   pass/fail from RunStats.
+//   and its reporter. Brokkr wraps it in the usual sweep lines, records the
+//   engine's own events (starts, finishes, cancellation) before the reporter
+//   sees them, and decides pass/fail from the run's outcome.
+//
+// One listing, kept: the `TestList` the preparation builds is the one the
+// lane executes. Building a second at run time would let the plan and the run
+// disagree about what the lane selects, which is the one thing a plan is for.
 //
 // The linked engine's version is brokkr's pin, not the host's. It is
 // recorded below and printed on the lane's header line, so a result says
@@ -47,7 +52,7 @@ use guppy::graph::PackageGraph;
 use nextest_filtering::{Filterset, FiltersetKind, ParseContext};
 use nextest_runner::{
     cargo_config::{CargoConfigs, EnvironmentMap},
-    config::core::NextestConfig,
+    config::core::{EvaluatableProfile, NextestConfig},
     double_spawn::DoubleSpawnInfo,
     input::InputHandlerKind,
     list::{
@@ -57,7 +62,10 @@ use nextest_runner::{
     helpers::{ShowTerminalProgress, ThemeCharacters},
     reporter::{
         ReporterBuilder, ReporterOutput, ShowProgress,
-        events::{ReporterEvent, RunFinishedStats, RunOutcome, RunStats, TestEventKind},
+        events::{
+            CancelReason, ExecutionResultDescription, FailureDescription, ReporterEvent,
+            RunFinishedStats, RunOutcome, RunStats, TestEventKind,
+        },
         structured::StructuredReporter,
     },
     reuse_build::PathMapper,
@@ -176,21 +184,68 @@ fn write_sweep_env_config(state_root: &Path, env: &[(&str, &str)]) -> Result<Str
         .ok_or_else(|| DevError::Config(format!("state dir is not UTF-8: {}", path.display())))
 }
 
-/// Run one `harness = "nextest"` sweep. Returns `Ok(false)` when the run
-/// failed, having already reported it. An `Err` leaving this lane carries
-/// its whole diagnostic in the message; `run_test_phase`'s caller voices it
-/// (the summary path prints only the timing line).
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-fn run_nextest_sweep(
-    project_root: &Path,
-    state_root: &Path,
+/// The engine lane, prepared: the listing it will execute, and everything the
+/// runner is built from.
+///
+/// The `TestList` borrows the package graph, and the profile borrows the
+/// config, for as long as either lives - and here that is from the `prepare`
+/// phase to the end of the lane, across every other lane's preparation. Both
+/// are leaked to get that lifetime: a `brokkr check` run is one process, there
+/// is one graph and one config per engine lane, and the alternative - building
+/// the list again at run time - is exactly the second listing a plan must not
+/// have.
+pub(crate) struct NextestPrepared {
+    test_list: TestList<'static>,
+    profile: EvaluatableProfile<'static>,
+    cargo_configs: CargoConfigs,
+    target_runner: TargetRunner,
+    double_spawn: DoubleSpawnInfo,
+    version_env_vars: VersionEnvVars,
+    /// nextest binary id -> unit, through the artifact index: how the engine's
+    /// events are attributed.
+    by_id: HashMap<String, BinaryUnit>,
+}
+
+/// The engine lane's build, read as brokkr's artifact index.
+struct NextestArtifacts {
+    binaries: Vec<TestBinary>,
+    /// nextest binary id -> unit.
+    by_id: HashMap<String, BinaryUnit>,
+    /// Under a complete profile, the runtime index's fingerprint
+    /// ([`BuildRuntimeIndex::fingerprint`]): the build-script facts and
+    /// support bins the engine's launch env is derived from, which the lane's
+    /// re-verification compares against a fresh build. Without it a nextest
+    /// lane's verification checked its test executables only, and a support
+    /// bin rebuilt by another lane since the plan ran unnoticed.
+    runtime_fingerprint: Option<Vec<String>>,
+}
+
+/// Read the engine lane's artifact stream: the units the engine's ids map
+/// onto, the executables the plan hashes, and - under a complete profile -
+/// the runtime fingerprint verification needs.
+fn nextest_lane_artifacts(stdout: &str, complete: bool) -> Result<NextestArtifacts, DevError> {
+    let (binaries, index, _) = parse_test_binaries(stdout);
+    let by_id = binaries
+        .iter()
+        .map(|b| {
+            let u = BinaryUnit::of(b);
+            (u.id(), u)
+        })
+        .collect();
+    let runtime_fingerprint = complete.then(|| index.fingerprint()).transpose()?;
+    Ok(NextestArtifacts { binaries, by_id, runtime_fingerprint })
+}
+
+/// Prepare one `harness = "nextest"` sweep: build its shape, read the artifact
+/// stream into the engine, list under the sweep's filters, and keep the list.
+#[allow(clippy::too_many_lines)]
+fn prepare_nextest(
+    inputs: &LaneInputs<'_>,
     sweep: &ResolvedSweep,
     packages: &[&str],
     extra_args: &[String],
-    project_env: &[(String, String)],
-    allow_args: &[String],
-    commands: bool,
-) -> Result<bool, DevError> {
+    env: &LaneEnv,
+) -> Result<PreparedLane, DevError> {
     let (cargo_extra, libtest_extra) = split_extra_args(extra_args);
     if !libtest_extra.is_empty() {
         return Err(DevError::Config(format!(
@@ -201,22 +256,8 @@ fn run_nextest_sweep(
         )));
     }
     reject_unsupported_forwarded(sweep, cargo_extra)?;
-
-    let env_full = merged_env(&sweep.env, project_env);
-    let env_refs: Vec<(&str, &str)> = env_full
-        .iter()
-        .map(|(k, v)| (k.as_str(), v.as_str()))
-        .collect();
-
-    announce_sweep(
-        &format!(
-            "test {}: {}, nextest engine {NEXTEST_ENGINE_VERSION}, process-per-test, brokkr-owned config",
-            sweep.label,
-            describe_sweep(sweep, true, packages)
-        ),
-        None,
-        commands,
-    );
+    let env_refs = env.refs();
+    let project_root = inputs.project_root;
 
     // The graph feeds config parsing (filterset predicates, test groups) and
     // artifact resolution. `--all-features --filter-platform` mirrors what
@@ -231,13 +272,7 @@ fn run_nextest_sweep(
 
     let metadata = output::run_captured_with_env(
         "cargo",
-        &[
-            "metadata",
-            "--format-version=1",
-            "--all-features",
-            "--filter-platform",
-            &triple,
-        ],
+        &["metadata", "--format-version=1", "--all-features", "--filter-platform", &triple],
         project_root,
         &env_refs,
     )?;
@@ -246,57 +281,66 @@ fn run_nextest_sweep(
         return Err(DevError::Build("cargo metadata failed".into()));
     }
     let metadata_json = String::from_utf8_lossy(&metadata.stdout).into_owned();
-    let graph = PackageGraph::from_json(&metadata_json)
-        .map_err(|e| DevError::Build(format!("cargo metadata unparseable: {e}")))?;
+    let graph: &'static PackageGraph = Box::leak(Box::new(
+        PackageGraph::from_json(&metadata_json)
+            .map_err(|e| DevError::Build(format!("cargo metadata unparseable: {e}")))?,
+    ));
     let workspace_root: Utf8PathBuf = graph.workspace().root().to_owned();
-
-    let cargo_configs = engine_cargo_configs(state_root, &env_refs)?;
+    let cargo_configs = engine_cargo_configs(inputs.state_root, &env_refs)?;
 
     // The build is brokkr's: the same compile-shape argv every other lane
     // uses, streamed into nextest's builder so the artifact facts (binary
     // ids, build meta, dylib paths) are nextest's own reading of it.
+    let mut selection = env.allow_args.clone();
+    selection.extend(sweep_selection_args(sweep, packages));
+    selection.extend(cargo_extra.iter().cloned());
     let mut args: Vec<String> = vec!["test".into(), "--no-run".into(), "--message-format=json".into()];
-    args.extend(sweep_selection_args(sweep, packages));
-    args.extend(allow_args.iter().cloned());
-    args.extend(cargo_extra.iter().cloned());
-    args.extend(sweep.unification_args());
-    if let Some(p) = sweep.profile {
-        args.extend(p.cargo_args().iter().map(|s| (*s).to_owned()));
-    }
+    args.extend(selection.iter().cloned());
     if !has_target_selector(&args) {
         args.push("--tests".into());
     }
-    cargo_line(commands, &format!("cargo {}", args.join(" ")));
+    cargo_line(inputs.commands, &format!("cargo {}", args.join(" ")));
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     let build = output::run_captured_with_env("cargo", &arg_refs, project_root, &env_refs)?;
     if !build.status.success() {
         output::error(&format!("failing command: cargo {}", args.join(" ")));
         output::error(&String::from_utf8_lossy(&build.stderr));
-        return Ok(false);
+        return Err(DevError::Reported(format!("sweep '{}' could not be prepared", sweep.label)));
     }
+    // Cargo exited 0; did it actually say anything? Without a `build-finished`
+    // record this stdout is not cargo's artifact stream, and an empty case set
+    // read from it would be accepted as an empty selection.
     require_build_finished(&build.stdout, &args)?;
-    let mut builder = BinaryListBuilder::new(&graph, build_platforms.clone());
-    for line in String::from_utf8_lossy(&build.stdout).lines() {
+    let stdout = String::from_utf8_lossy(&build.stdout).into_owned();
+    let mut builder = BinaryListBuilder::new(graph, build_platforms.clone());
+    for line in stdout.lines() {
         builder
             .process_message_line(line)
             .map_err(|e| DevError::Build(format!("nextest could not read the build: {e}")))?;
     }
     let binary_list = std::sync::Arc::new(builder.finish());
+    // The same stream, read as brokkr's artifact index: the units the engine's
+    // ids are mapped onto, and the executables the plan hashes.
+    let artifacts = nextest_lane_artifacts(&stdout, inputs.complete)?;
+    let lane_binaries = artifacts.binaries;
+    let by_id = artifacts.by_id;
 
     // The engine's config is brokkr's own synthesized file, passed as the
     // explicit config source so the checkout's `.config/nextest.toml` (if
     // any) is never consulted, and `NEXTEST_PROFILE` is never read: a
     // foreign config gets no vote in what a brokkr sweep runs.
-    let synth = write_synthesized_config(state_root)?;
-    let pcx = ParseContext::new(&graph);
-    let config = NextestConfig::from_sources(
-        workspace_root.clone(),
-        &pcx,
-        Some(synth.as_path()),
-        std::iter::empty::<&nextest_runner::config::core::ToolConfigFile>(),
-        &std::collections::BTreeSet::new(),
-    )
-    .map_err(|e| DevError::Config(format!("nextest engine config: {e}")))?;
+    let synth = write_synthesized_config(inputs.state_root)?;
+    let pcx = ParseContext::new(graph);
+    let config: &'static NextestConfig = Box::leak(Box::new(
+        NextestConfig::from_sources(
+            workspace_root.clone(),
+            &pcx,
+            Some(synth.as_path()),
+            std::iter::empty::<&nextest_runner::config::core::ToolConfigFile>(),
+            &std::collections::BTreeSet::new(),
+        )
+        .map_err(|e| DevError::Config(format!("nextest engine config: {e}")))?,
+    ));
     let early_profile = config
         .profile(NextestConfig::DEFAULT_PROFILE)
         .map_err(|e| DevError::Config(format!("nextest engine profile: {e}")))?;
@@ -305,9 +349,7 @@ fn run_nextest_sweep(
 
     // Filters: `only` and unqualified `skip` ride nextest's own libtest
     // pattern emulation (same substring semantics, nothing to escape);
-    // package-qualified skips become one filterset each. Compiled by the
-    // same function the audit's listing uses, so run and audit can never
-    // disagree about what a sweep selects.
+    // package-qualified skips become one filterset each.
     let test_filter = sweep_engine_filter(sweep, &pcx, &known_groups)?;
 
     // Double-spawn re-invokes the CURRENT executable with a `__double-spawn`
@@ -319,7 +361,6 @@ fn run_nextest_sweep(
     let double_spawn = DoubleSpawnInfo::disabled();
     let target_runner = TargetRunner::new(&cargo_configs, &build_platforms)
         .map_err(|e| DevError::Config(format!("nextest target runner resolution failed: {e}")))?;
-    let run_id = nextest_runner::helpers::force_or_new_run_id();
     let version_env_vars = VersionEnvVars {
         current_version: NEXTEST_ENGINE_VERSION
             .parse()
@@ -328,17 +369,16 @@ fn run_nextest_sweep(
         recommended_version: None,
     };
     let ctx = TestExecuteContext {
-        run_id,
+        run_id: nextest_runner::helpers::force_or_new_run_id(),
         version_env_vars: &version_env_vars,
         profile_name: profile.name(),
         double_spawn: &double_spawn,
         target_runner: &target_runner,
     };
-
     let path_mapper = PathMapper::noop();
     let rust_build_meta = binary_list.rust_build_meta.map_paths(&path_mapper);
     let test_artifacts = RustTestArtifact::from_binary_list(
-        &graph,
+        graph,
         std::sync::Arc::clone(&binary_list),
         &rust_build_meta,
         &path_mapper,
@@ -352,7 +392,7 @@ fn run_nextest_sweep(
         rust_build_meta,
         &test_filter,
         None,
-        workspace_root.clone(),
+        workspace_root,
         env_map,
         &profile,
         // `All`, explicitly: the synthesized config has no default-filter,
@@ -375,6 +415,125 @@ fn run_nextest_sweep(
             sweep.label
         )));
     }
+
+    // The engine's per-testcase verdicts, onto brokkr's units. `Selected` is
+    // the only executing verdict; `Ignored` already encodes the
+    // include-ignored policy; a verdict the ledger has no policy for refuses
+    // the lane - an unaudited reason cannot be accounted.
+    let mut selected: BTreeMap<BinaryUnit, (Vec<String>, BTreeSet<String>)> = BTreeMap::new();
+    for t in test_list.iter_tests() {
+        let id = t.id().binary_id.to_string();
+        let test = t.id().test_name.to_string();
+        let Some(unit) = by_id.get(&id) else {
+            return Err(DevError::Build(format!(
+                "the engine listed binary {id}, which the build's artifact stream does not hold"
+            )));
+        };
+        let slot = selected.entry(unit.clone()).or_default();
+        match nextest_disposition(&t.test_info.filter_match) {
+            Disposition::Selected => slot.0.push(test),
+            Disposition::Ignored => {
+                slot.0.push(test.clone());
+                slot.1.insert(test);
+            }
+            Disposition::Unmatched => {}
+            Disposition::Unclassified => {
+                return Err(DevError::Build(format!(
+                    "the engine reported a filter verdict brokkr has no policy for on {id}::{test} - \
+                     an unaudited reason cannot be accounted, so the lane refuses."
+                )));
+            }
+        }
+    }
+    let mut binaries = Vec::new();
+    for b in &lane_binaries {
+        let unit = BinaryUnit::of(b);
+        let (names, ignored) = selected.remove(&unit).unwrap_or_default();
+        let hash = if inputs.complete {
+            hash_file(Path::new(&b.executable))
+                .map_err(|e| DevError::Build(format!("could not hash {}: {e}", b.executable)))?
+        } else {
+            String::new()
+        };
+        // No benchmarks: the engine never runs `#[bench]` functions in test mode.
+        binaries.push(PreparedBinary {
+            binary: b.clone(),
+            unit,
+            hash,
+            selected: names,
+            ignored,
+            benchmarks: Vec::new(),
+        });
+    }
+
+    let mut prepared = PreparedLane::bare(env.clone());
+    prepared.runtime_fingerprint = artifacts.runtime_fingerprint;
+    prepared.include_ignored = sweep.libtest_args.iter().any(|a| a == "--include-ignored");
+    prepared.enumerated = lane_binaries.len();
+    prepared.resolutions.push(PreparedResolution { resolution: None, selection, binaries });
+    prepared.nextest = Some(NextestPrepared {
+        test_list,
+        profile,
+        cargo_configs,
+        target_runner,
+        double_spawn,
+        version_env_vars,
+        by_id,
+    });
+    Ok(prepared)
+}
+
+/// A finished engine test as a terminal record. A death the lane's own
+/// cancellation caused - the fail-fast stop signals every test still running -
+/// is an interruption, not a failure of that test; an exit-code failure after
+/// the cancellation began is still the test's own. Any timeout is a timeout,
+/// whatever the engine config would have made of it.
+fn engine_result(result: &ExecutionResultDescription, cancelling: bool) -> TestResult {
+    use nextest_runner::config::elements::LeakTimeoutResult;
+    match result {
+        ExecutionResultDescription::Pass
+        | ExecutionResultDescription::Leak { result: LeakTimeoutResult::Pass } => TestResult::Ok,
+        ExecutionResultDescription::Timeout { .. } => TestResult::TimedOut,
+        ExecutionResultDescription::Fail { failure: FailureDescription::Abort { .. }, .. } if cancelling => {
+            TestResult::Interrupted
+        }
+        _ => TestResult::Failed,
+    }
+}
+
+/// What an engine cancellation is, as a termination cause.
+fn cancel_cause(reason: Option<CancelReason>) -> TerminationCause {
+    match reason {
+        Some(CancelReason::ReportError) => TerminationCause::EngineError,
+        Some(CancelReason::GlobalTimeout) => TerminationCause::RunDeadline,
+        Some(CancelReason::Signal | CancelReason::Interrupt | CancelReason::SecondSignal) => stop_cause(),
+        _ => TerminationCause::FailFast,
+    }
+}
+
+/// Run one prepared `harness = "nextest"` sweep. Returns `Ok(false)` when the
+/// run failed, having already reported it. An `Err` leaving this lane carries
+/// its whole diagnostic in the message; `run_test_phase`'s caller voices it.
+#[allow(clippy::too_many_lines)]
+fn run_nextest_sweep(
+    sweep: &ResolvedSweep,
+    packages: &[&str],
+    prepared: &PreparedLane,
+    tap: &LaneTap,
+    commands: bool,
+) -> Result<bool, DevError> {
+    let Some(np) = &prepared.nextest else {
+        return Err(DevError::Build(format!("sweep '{}' reached the engine lane unprepared", sweep.label)));
+    };
+    announce_sweep(
+        &format!(
+            "test {}: {}, nextest engine {NEXTEST_ENGINE_VERSION}, process-per-test, brokkr-owned config",
+            sweep.label,
+            describe_sweep(sweep, true, packages)
+        ),
+        None,
+        commands,
+    );
 
     // Concurrency is brokkr policy: the profile's `test_threads` maps onto
     // the engine's in-flight count. Unset (or 0) leaves the engine's
@@ -412,50 +571,101 @@ fn run_nextest_sweep(
         runner_builder
             .set_test_threads(nextest_runner::config::elements::TestThreads::Count(count));
     }
+    let run_id = nextest_runner::helpers::force_or_new_run_id();
     let runner = runner_builder
         .build(
             run_id,
-            version_env_vars.clone(),
-            &test_list,
-            &profile,
+            np.version_env_vars.clone(),
+            &np.test_list,
+            &np.profile,
             std::env::args().collect(),
             SignalHandlerKind::Standard,
             InputHandlerKind::Noop,
-            double_spawn.clone(),
-            target_runner.clone(),
+            np.double_spawn.clone(),
+            np.target_runner.clone(),
         )
         .map_err(|e| DevError::Build(format!("nextest runner: {e}")))?;
 
     let mut reporter = ReporterBuilder::default().build(
-        &test_list,
-        &profile,
-        ShowTerminalProgress::from_cargo_configs(&cargo_configs, false),
+        &np.test_list,
+        &np.profile,
+        ShowTerminalProgress::from_cargo_configs(&np.cargo_configs, false),
         ReporterOutput::Terminal,
         StructuredReporter::new(),
     );
 
     configure_handle_inheritance(false)
         .map_err(|e| DevError::Build(format!("nextest handle setup: {e}")))?;
+    // One engine stream per lane: every test is its own process, and every
+    // record names its binary, so attribution needs no per-process stream.
+    let stream = crate::test_runner::next_stream_id();
+    let observe = |unit_id: String, event: ObsEvent| {
+        let origin = match np.by_id.get(&unit_id) {
+            Some(unit) => StreamOrigin::Engine { resolution: None, unit: unit.clone() },
+            None => StreamOrigin::Unattributed { detail: format!("engine binary {unit_id}") },
+        };
+        tap.record(JournalRecord::Observed { lane: tap.lane(), stream, origin, event });
+    };
     // The run's outcome carries no counts; they ride the engine's own
     // `RunFinished` event, which every completed run emits once.
     let mut finished: Option<RunStats> = None;
-    let outcome = runner
-        .try_execute(|event| {
-            if let ReporterEvent::Test(e) = &event
-                && let TestEventKind::RunFinished { run_stats: RunFinishedStats::Single(s), .. } =
-                    &e.kind
-            {
-                finished = Some(*s);
+    let mut cancelling = false;
+    let outcome = runner.try_execute(|event| {
+        // Recorded BEFORE the reporter sees it: a reporter that fails must not
+        // take the evidence with it.
+        if let ReporterEvent::Test(e) = &event {
+            match &e.kind {
+                TestEventKind::TestStarted { test_instance, .. }
+                | TestEventKind::TestRetryStarted { test_instance, .. } => observe(
+                    test_instance.binary_id.to_string(),
+                    ObsEvent::Started { name: test_instance.test_name.to_string() },
+                ),
+                TestEventKind::TestFinished { test_instance, run_statuses, .. } => observe(
+                    test_instance.binary_id.to_string(),
+                    ObsEvent::Finished {
+                        name: test_instance.test_name.to_string(),
+                        result: engine_result(&run_statuses.last_status().result, cancelling),
+                    },
+                ),
+                TestEventKind::RunBeginCancel { current_stats, .. }
+                | TestEventKind::RunBeginKill { current_stats, .. } => {
+                    if !cancelling {
+                        cancelling = true;
+                        tap.terminate(
+                            TerminationScope::Lane,
+                            cancel_cause(current_stats.cancel_reason),
+                            None,
+                        );
+                    }
+                }
+                TestEventKind::RunFinished { run_stats: RunFinishedStats::Single(s), .. } => {
+                    finished = Some(*s);
+                }
+                _ => {}
             }
-            reporter.report_event(event)
-        })
-        .map_err(|e| DevError::Build(format!("nextest run failed to execute: {e}")))?;
-    // Nothing is swallowed here: `Reporter::finish` is infallible and returns
-    // only `ReporterStats` (recording sizes, run-finished info), which this
-    // lane does not use. A reporter WRITE error surfaces through
-    // `report_event`'s `Result`, which `try_execute` propagates into the `?`
-    // above.
+        }
+        reporter.report_event(event)
+    });
+    // `Reporter::finish` is infallible and returns only `ReporterStats`, which
+    // this lane does not use.
     let _ = reporter.finish();
+    tap.record(JournalRecord::Observed {
+        lane: tap.lane(),
+        stream,
+        origin: StreamOrigin::Unattributed { detail: "the engine lane's stream".into() },
+        event: ObsEvent::StreamEnded { end: crate::test_runner::StreamEnd::Eof },
+    });
+    let outcome = match outcome {
+        Ok(o) => o,
+        Err(e) => {
+            // The events up to the failure are already recorded; the failure
+            // is recorded as what it is, then voiced.
+            if !cancelling {
+                tap.terminate(TerminationScope::Lane, TerminationCause::EngineError, None);
+            }
+            return Err(DevError::Build(format!("nextest run failed to execute: {e}")));
+        }
+    };
 
     let passed = matches!(outcome, RunOutcome::Success);
     if passed {
@@ -478,161 +688,6 @@ fn run_nextest_sweep(
     Ok(passed)
 }
 
-/// One testcase from an engine listing, as plain data: the audit's view of
-/// what a nextest lane selects. `binary_id` is nextest's own
-/// `RustBinaryId` rendering, the finer half of the (binary-id, test)
-/// coverage pair.
-struct EngineCase {
-    binary_id: String,
-    test: String,
-    disposition: Disposition,
-}
-
-/// List one nextest sweep's testcases through the engine, without running
-/// anything: build (or no-op re-check) the shape, feed the artifact stream
-/// to `BinaryListBuilder`, and read `TestList`'s per-testcase verdicts under
-/// the sweep's real filters. The coverage audit's source for a nextest
-/// lane's ran-set - enumeration is ground truth, so the lane's claim comes
-/// from the same engine that executes it, never from a reimplementation of
-/// its filter semantics.
-#[allow(clippy::too_many_lines)]
-fn nextest_shape_cases(
-    project_root: &Path,
-    state_root: &Path,
-    sweep: &ResolvedSweep,
-    selection: &[String],
-    env_refs: &[(&str, &str)],
-    commands: bool,
-) -> Result<Vec<EngineCase>, DevError> {
-    let host = HostPlatform::detect(PlatformLibdir::from_rustc_stdout(
-        nextest_runner::RustcCli::print_host_libdir().read(),
-    ))
-    .map_err(|e| DevError::Build(format!("nextest host platform detection failed: {e}")))?;
-    let triple = host.platform.triple_str().to_owned();
-    let build_platforms = BuildPlatforms { host, target: None };
-
-    let metadata = output::run_captured_with_env(
-        "cargo",
-        &["metadata", "--format-version=1", "--all-features", "--filter-platform", &triple],
-        project_root,
-        env_refs,
-    )?;
-    if !metadata.status.success() {
-        output::error(&String::from_utf8_lossy(&metadata.stderr));
-        return Err(DevError::Build("cargo metadata failed".into()));
-    }
-    let metadata_json = String::from_utf8_lossy(&metadata.stdout).into_owned();
-    let graph = PackageGraph::from_json(&metadata_json)
-        .map_err(|e| DevError::Build(format!("cargo metadata unparseable: {e}")))?;
-    let workspace_root: Utf8PathBuf = graph.workspace().root().to_owned();
-    let cargo_configs = engine_cargo_configs(state_root, env_refs)?;
-
-    let mut args: Vec<String> =
-        vec!["test".into(), "--no-run".into(), "--message-format=json".into()];
-    args.extend(selection.iter().cloned());
-    if !has_target_selector(&args) {
-        args.push("--tests".into());
-    }
-    cargo_line(commands, &format!("cargo {}", args.join(" ")));
-    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let build = output::run_captured_with_env("cargo", &arg_refs, project_root, env_refs)?;
-    if !build.status.success() {
-        output::error(&format!("failing command: cargo {}", args.join(" ")));
-        output::error(&String::from_utf8_lossy(&build.stderr));
-        return Err(DevError::Build("coverage enumeration failed".into()));
-    }
-    // Cargo exited 0; did it actually say anything? Cargo closes a
-    // `--message-format=json` run with a `build-finished` record, and without one
-    // this stdout is not cargo's artifact stream. Feeding it to the engine's
-    // builder yielded an empty case set, which the coverage ledger accepted as
-    // success - so an unparsed stream let the audit certify nothing. The
-    // ordinary enumerator was fixed for this; this is the engine's separate
-    // parser and it had the same hole.
-    require_build_finished(&build.stdout, &args)?;
-    let mut builder = BinaryListBuilder::new(&graph, build_platforms.clone());
-    for line in String::from_utf8_lossy(&build.stdout).lines() {
-        builder
-            .process_message_line(line)
-            .map_err(|e| DevError::Build(format!("nextest could not read the build: {e}")))?;
-    }
-    let binary_list = std::sync::Arc::new(builder.finish());
-
-    let synth = write_synthesized_config(state_root)?;
-    let pcx = ParseContext::new(&graph);
-    let config = NextestConfig::from_sources(
-        workspace_root.clone(),
-        &pcx,
-        Some(synth.as_path()),
-        std::iter::empty::<&nextest_runner::config::core::ToolConfigFile>(),
-        &std::collections::BTreeSet::new(),
-    )
-    .map_err(|e| DevError::Config(format!("nextest engine config: {e}")))?;
-    let early_profile = config
-        .profile(NextestConfig::DEFAULT_PROFILE)
-        .map_err(|e| DevError::Config(format!("nextest engine profile: {e}")))?;
-    let known_groups = early_profile.known_groups();
-    let profile = early_profile.apply_build_platforms(&build_platforms);
-
-    let test_filter = sweep_engine_filter(sweep, &pcx, &known_groups)?;
-    let double_spawn = DoubleSpawnInfo::disabled();
-    let target_runner = TargetRunner::new(&cargo_configs, &build_platforms)
-        .map_err(|e| DevError::Config(format!("nextest target runner resolution failed: {e}")))?;
-    let run_id = nextest_runner::helpers::force_or_new_run_id();
-    let version_env_vars = VersionEnvVars {
-        current_version: NEXTEST_ENGINE_VERSION
-            .parse()
-            .map_err(|e| DevError::Build(format!("engine version constant: {e}")))?,
-        required_version: None,
-        recommended_version: None,
-    };
-    let ctx = TestExecuteContext {
-        run_id,
-        version_env_vars: &version_env_vars,
-        profile_name: profile.name(),
-        double_spawn: &double_spawn,
-        target_runner: &target_runner,
-    };
-    let path_mapper = PathMapper::noop();
-    let rust_build_meta = binary_list.rust_build_meta.map_paths(&path_mapper);
-    let test_artifacts = RustTestArtifact::from_binary_list(
-        &graph,
-        std::sync::Arc::clone(&binary_list),
-        &rust_build_meta,
-        &path_mapper,
-        None,
-    )
-    .map_err(|e| DevError::Build(format!("nextest artifact resolution: {e}")))?;
-    let env_map = EnvironmentMap::new(&cargo_configs);
-    let test_list = TestList::new(
-        &ctx,
-        test_artifacts,
-        rust_build_meta,
-        &test_filter,
-        None,
-        workspace_root,
-        env_map,
-        &profile,
-        FilterBound::All,
-        nextest_runner::config::core::get_num_cpus(),
-        ListProgressOptions::new(
-            ShowProgress::None,
-            ShowTerminalProgress::from_cargo_configs(&cargo_configs, false),
-            ThemeCharacters::default(),
-            false,
-        ),
-    )
-    .map_err(|e| DevError::Build(format!("nextest listing failed: {e}")))?;
-
-    Ok(test_list
-        .iter_tests()
-        .map(|t| EngineCase {
-            binary_id: t.id().binary_id.to_string(),
-            test: t.id().test_name.to_string(),
-            disposition: nextest_disposition(&t.test_info.filter_match),
-        })
-        .collect())
-}
-
 /// A successful cargo status alone cannot establish which binaries were built.
 /// Both execution and coverage enumeration need the completed artifact stream.
 fn require_build_finished(stdout: &[u8], args: &[String]) -> Result<(), DevError> {
@@ -649,9 +704,9 @@ fn require_build_finished(stdout: &[u8], args: &[String]) -> Result<(), DevError
     )))
 }
 
-/// The sweep's filters compiled onto the engine's own surfaces - shared by
-/// the run lane and the audit listing so the two can never disagree about
-/// what a sweep selects.
+/// The sweep's filters compiled onto the engine's own surfaces - the one
+/// place a sweep's selection is translated for the engine, so preparation and
+/// execution (which runs the prepared list) cannot disagree.
 fn sweep_engine_filter(
     sweep: &ResolvedSweep,
     pcx: &ParseContext<'_>,
@@ -734,6 +789,65 @@ mod nextest_lane_tests {
         assert!(require_build_finished(complete, &args).is_ok());
     }
 
+    /// The engine lane's preparation captures the runtime fingerprint from its
+    /// own artifact stream - the one `prepare_nextest` stores on the lane -
+    /// so a support bin another lane rebuilds since the plan is drift at the
+    /// lane's verification. It used to discard the index and store `None`,
+    /// and verification then never looked past the test executables.
+    #[test]
+    fn the_engine_lane_captures_its_runtime_fingerprint() {
+        let dir = crate::test_scratch::scratch("nextest_lane", "runtime_fingerprint");
+        let support = dir.join("servebin");
+        std::fs::write(&support, b"planned server").unwrap();
+        let exe = dir.join("suite-1");
+        std::fs::write(&exe, b"suite").unwrap();
+        let stdout = format!(
+            "{}\n{}\n{}\n",
+            format_args!(
+                r#"{{"reason":"compiler-artifact","package_id":"path+file:///x/a#pkg-a@0.1.0","manifest_path":"/x/a/Cargo.toml","target":{{"name":"servebin","kind":["bin"]}},"profile":{{"test":false}},"executable":"{}"}}"#,
+                support.display()
+            ),
+            format_args!(
+                r#"{{"reason":"compiler-artifact","package_id":"path+file:///x/a#pkg-a@0.1.0","manifest_path":"/x/a/Cargo.toml","target":{{"name":"suite","kind":["test"]}},"profile":{{"test":true}},"executable":"{}"}}"#,
+                exe.display()
+            ),
+            r#"{"reason":"build-finished","success":true}"#,
+        );
+        let off = nextest_lane_artifacts(&stdout, false).unwrap();
+        assert!(off.runtime_fingerprint.is_none(), "nothing to verify outside a complete claim");
+        let art = nextest_lane_artifacts(&stdout, true).unwrap();
+        let fp = art.runtime_fingerprint.clone().unwrap();
+        assert!(fp.iter().any(|l| l.starts_with("bin ") && l.contains("servebin")), "{fp:?}");
+        assert_eq!(art.binaries.len(), 1);
+
+        // Through the lane's verification: the same stream verifies, and the
+        // support bin rebuilt with other content is drift.
+        let b = art.binaries[0].clone();
+        let mut p = PreparedLane::bare(LaneEnv::default());
+        p.runtime_fingerprint = art.runtime_fingerprint;
+        p.resolutions.push(PreparedResolution {
+            resolution: None,
+            selection: Vec::new(),
+            binaries: vec![PreparedBinary {
+                unit: BinaryUnit::of(&b),
+                hash: hash_file(Path::new(&b.executable)).unwrap(),
+                binary: b,
+                selected: vec!["t".into()],
+                ignored: BTreeSet::new(),
+                benchmarks: Vec::new(),
+            }],
+        });
+        let sweep = ResolvedSweep { label: "engine".into(), ..ResolvedSweep::default() };
+        let rebuild = |_: &PreparedResolution| {
+            let (bins, index, _) = parse_test_binaries(&stdout);
+            Ok(Some((bins, index)))
+        };
+        verify_lane_with(&sweep, &p, rebuild, &[]).unwrap();
+        std::fs::write(&support, b"another lane's server").unwrap();
+        let err = verify_lane_with(&sweep, &p, rebuild, &[]).unwrap_err().to_string();
+        assert!(err.contains("launch envelope"), "{err}");
+    }
+
     // The sweep env must reach the engine's test processes, which only read
     // cargo's `[env]` table. Every entry is forced (a sweep value beats an
     // inherited one, as `Command::env` does on the libtest lanes), awkward
@@ -756,5 +870,33 @@ mod nextest_lane_tests {
         assert_eq!(env["WEIRD.KEY"]["value"].as_str(), Some("a \"quoted\" value"));
         assert!(!env.contains_key(crate::hold::CAPABILITY_ENV), "{body}");
         assert!(!env.contains_key(crate::test_orphans::MARKER_ENV), "{body}");
+    }
+
+    /// The fail-fast stop signals every test still running. Those deaths are
+    /// the cancellation's, so they read as interrupted - never passed, never
+    /// a failure of the test - while an exit-code failure stays the test's
+    /// own, and a timeout stays a timeout whatever the engine config says.
+    #[test]
+    fn engine_deaths_under_cancellation_are_interruptions() {
+        use nextest_runner::config::elements::SlowTimeoutResult;
+        use nextest_runner::reporter::events::AbortDescription;
+        let killed = ExecutionResultDescription::Fail {
+            failure: FailureDescription::Abort {
+                abort: AbortDescription::UnixSignal { signal: 9, name: None },
+            },
+            leaked: false,
+        };
+        assert_eq!(engine_result(&killed, true), TestResult::Interrupted);
+        assert_eq!(engine_result(&killed, false), TestResult::Failed);
+        let exited = ExecutionResultDescription::Fail {
+            failure: FailureDescription::ExitCode { code: 101 },
+            leaked: false,
+        };
+        assert_eq!(engine_result(&exited, true), TestResult::Failed);
+        let lenient = ExecutionResultDescription::Timeout { result: SlowTimeoutResult::Pass };
+        assert_eq!(engine_result(&lenient, false), TestResult::TimedOut);
+        assert_eq!(engine_result(&ExecutionResultDescription::Pass, true), TestResult::Ok);
+        assert_eq!(cancel_cause(Some(CancelReason::TestFailureImmediate)), TerminationCause::FailFast);
+        assert_eq!(cancel_cause(Some(CancelReason::ReportError)), TerminationCause::EngineError);
     }
 }

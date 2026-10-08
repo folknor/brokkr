@@ -726,6 +726,7 @@ preset = ["a", "b"]
             assert!(PHASE_NAMES.contains(&p), "{p} missing from PHASE_NAMES");
         }
         assert!(NON_SKIPPABLE_PHASES.contains(&"coverage"));
+        assert!(NON_SKIPPABLE_PHASES.contains(&"prepare"));
     }
 
     #[test]

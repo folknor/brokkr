@@ -8,8 +8,8 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{ChildStderr, ChildStdout, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::process::{ChildStderr, Command, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -27,6 +27,190 @@ mod harness_shim;
 /// otherwise. Checked first thing in `main`, before any CLI parsing.
 pub(crate) fn maybe_run_harness_shim() -> Option<i32> {
     harness_shim::maybe_run()
+}
+
+// THE OBSERVATION CONTRACT. The runner reports what it saw, typed, as it sees
+// it - one `Observation` per libtest record, stream end and kill - to a sink
+// the caller supplies. It never interprets them: the caller resolves a stream
+// against whatever plan it holds (`check_cmd::accounting`), so nothing here
+// knows a sweep, a policy or an expected test. Delivered live rather than
+// returned, because the interesting runs are the ones that never return
+// normally - an interrupt, a watchdog kill - and a report assembled at the end
+// is exactly what those paths used to drop.
+
+/// Where an observed stream came from, as far as the runner knows.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum StreamSource {
+    /// The launched process's own stdout: a directly executed test binary's,
+    /// or cargo's when no harness is isolated.
+    Process,
+    /// A harness the shim accepted, named by the executable cargo asked the
+    /// runner to run - the shim's handshake carries it before the exec.
+    Harness { executable: String },
+    /// The rustdoc entry point the shim accepted.
+    Rustdoc,
+}
+
+/// How a stream stopped. Three different facts: the writer closed it, a read
+/// failed, or brokkr stopped reading (the drain grace ran out with something
+/// still holding the pipe) - in which case records may have been lost.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum StreamEnd {
+    Eof,
+    ReadError,
+    Cancelled,
+}
+
+/// A test's terminal record. libtest states the first three; the engine lane
+/// also reports a timed-out test and one its own cancellation killed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum TestResult {
+    Ok,
+    Failed,
+    Ignored,
+    TimedOut,
+    Interrupted,
+}
+
+/// Why the runner killed (or stopped waiting for) a process. Structured, so a
+/// consumer never has to read a cause back out of a signal status.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum KillCause {
+    /// A watched test crossed the per-test cap; `test` names it.
+    PerTest,
+    /// Execution under way and nothing completed within the cap.
+    NoCompletion,
+    /// Nothing in flight for the idle window.
+    Idle,
+    /// The run's own wall backstop.
+    Wall,
+    /// A sibling run's failure cancelled this one (the parallel lane's abort).
+    Cancelled,
+    /// A cooperative shutdown: an interrupt or the phase watchdog.
+    Stopped,
+}
+
+/// One thing the runner saw on one stream.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "event", rename_all = "snake_case")]
+pub(crate) enum ObsEvent {
+    SuiteStarted { test_count: u64 },
+    SuiteFinished { passed: u64, failed: u64, ignored: u64 },
+    Started { name: String },
+    Finished { name: String, result: TestResult },
+    /// libtest's `test/timeout`: a test past libtest's own 60s warning. Not a
+    /// terminal record - the test is still running.
+    SlowWarning { name: String },
+    StreamEnded { end: StreamEnd },
+    /// A directly launched process's exit status.
+    Exited { code: Option<i32>, signal: Option<i32> },
+    Killed { cause: KillCause, test: Option<String> },
+    /// The shim could not authenticate or attribute a harness.
+    AttributionError { detail: String },
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct Observation {
+    /// Unique within this brokkr process; one per stream the runner reads.
+    pub(crate) stream: u64,
+    pub(crate) source: StreamSource,
+    pub(crate) event: ObsEvent,
+}
+
+pub(crate) type ObservationSink = Arc<dyn Fn(Observation) + Send + Sync>;
+
+static NEXT_STREAM: AtomicU64 = AtomicU64::new(1);
+
+/// A fresh stream id, for a caller that reports observations of its own (the
+/// engine lane, whose events come from the engine rather than a pipe).
+pub(crate) fn next_stream_id() -> u64 {
+    NEXT_STREAM.fetch_add(1, Ordering::Relaxed)
+}
+
+/// One stream's handle on the sink.
+#[derive(Clone)]
+pub(crate) struct StreamTap {
+    sink: ObservationSink,
+    stream: u64,
+    source: StreamSource,
+}
+
+impl StreamTap {
+    pub(crate) fn new(sink: &ObservationSink, source: StreamSource) -> Self {
+        Self { sink: Arc::clone(sink), stream: next_stream_id(), source }
+    }
+
+    pub(crate) fn emit(&self, event: ObsEvent) {
+        (self.sink)(Observation { stream: self.stream, source: self.source.clone(), event });
+    }
+}
+
+/// xxh3-64 of a file's contents, hex, streamed: the identity a plan records
+/// for an executable, and checks again before it runs.
+pub(crate) fn hash_file(path: &Path) -> std::io::Result<String> {
+    let mut file = fs::File::open(path)?;
+    let mut hasher = xxhash_rust::xxh3::Xxh3::new();
+    let mut buf = vec![0_u8; 1 << 20];
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(format!("{:016x}", hasher.digest()))
+}
+
+/// What a strict session admits.
+#[derive(Clone, Default, Debug)]
+pub(crate) struct StrictPlan {
+    /// Executable path -> content hash: the harnesses this run may attribute.
+    /// A harness is admitted only when its path is here AND the file at that
+    /// path still hashes to the planned value at its handshake - the last
+    /// moment before it runs.
+    pub(crate) known: HashMap<String, String>,
+    /// Whether this run is a planned doctest carrier: only then may a rustdoc
+    /// stream connect.
+    pub(crate) rustdoc: bool,
+}
+
+/// Whether, and how strictly, a cargo-launched run isolates its harnesses.
+#[derive(Clone, Default)]
+pub(crate) enum ShimMode {
+    /// One shared stream.
+    #[default]
+    Off,
+    /// Isolate what can be isolated; a harness that cannot be runs on the
+    /// shared stream, as it always has.
+    Permissive,
+    /// Fail closed: a cargo child that cannot be authenticated, whose
+    /// executable is not in the plan or not the planned content, or a rustdoc
+    /// on a run that carries no doctests, is refused rather than run
+    /// unisolated - an unattributable stream cannot be accounted.
+    Strict(StrictPlan),
+}
+
+/// What a caller wants observed: the sink, and the isolation policy.
+#[derive(Clone, Default)]
+pub(crate) struct Observe {
+    pub(crate) sink: Option<ObservationSink>,
+    pub(crate) shim: ShimMode,
+}
+
+/// A watchdog verdict as a structured kill cause, with the test it names when,
+/// and only when, it names one. A no-completion verdict names nothing: the
+/// budget was blown, but by a test nobody saw.
+pub(crate) fn kill_of(reason: &TimeoutReason) -> (KillCause, Option<String>) {
+    match reason {
+        TimeoutReason::PerTest { name } if name == NO_COMPLETION => (KillCause::NoCompletion, None),
+        TimeoutReason::PerTest { name } => (KillCause::PerTest, Some(name.clone())),
+        TimeoutReason::SweepWall { .. } => (KillCause::Wall, None),
+        TimeoutReason::Idle => (KillCause::Idle, None),
+    }
 }
 
 /// **The hard cap.** Every test brokkr runs gets this much wall time and no more;
@@ -454,14 +638,14 @@ impl TestTracker {
 
 /// Run one cargo libtest invocation under the watchdog.
 ///
-/// `shim` isolates each harness (and rustdoc) the invocation runs onto its own
-/// stdout pipe and tracker, through `harness_shim`: brokkr is installed as the
-/// host target runner and as rustdoc, each harness hands brokkr its pipe and
+/// `obs.shim` isolates each harness (and rustdoc) the invocation runs onto its
+/// own stdout pipe and tracker, through `harness_shim`: brokkr is installed as
+/// the host target runner and as rustdoc, each harness hands brokkr its pipe and
 /// then execs itself. A crashed harness then ends its own stream and cannot
 /// leave the shared one with an open suite that bills the next harness for the
 /// dead test. The caller decides when that is safe (see
 /// `check_cmd::serial_shim_fallback`); without it every harness shares one
-/// stream, as before.
+/// stream, as before. `obs.sink` receives every observation as it happens.
 ///
 /// `launch` says what is spawned: `cargo` with `args`, or a prebuilt test
 /// binary executed directly (no cargo, so no build phase and no
@@ -475,7 +659,7 @@ pub(crate) fn streaming_run_libtest<Out, Err, Fin>(
     state_root: &Path,
     env: &[(&str, &str)],
     ceilings: Ceilings,
-    shim: bool,
+    obs: &Observe,
     forward_stdout_line: Out,
     forward_stderr_line: Err,
     on_build_finished: Fin,
@@ -486,22 +670,35 @@ where
     Fin: FnOnce(Duration) + Send + 'static,
 {
     enforce_single_threaded(args)?;
+    let shim = !matches!(obs.shim, ShimMode::Off);
     if shim && launch != Launch::Cargo {
         return Err(DevError::Build(
             "the harness shim is a cargo runner and cannot isolate a directly executed binary"
                 .into(),
         ));
     }
+    let strict = match &obs.shim {
+        ShimMode::Strict(plan) => Some(plan.clone()),
+        _ => None,
+    };
 
     let start = Instant::now();
     // Created before the spawn: an isolated harness's reconstructed text lands
     // in the same buffer the shared stream does.
     let stdout_buf = Arc::new(Mutex::new(Vec::<u8>::new()));
-    let session = shim.then(|| harness_shim::Session::new(Arc::clone(&stdout_buf))).transpose()?;
+    let primary = obs.sink.as_ref().map(|s| StreamTap::new(s, StreamSource::Process));
+    let session = shim
+        .then(|| harness_shim::Session::new(Arc::clone(&stdout_buf), obs.sink.clone(), strict.clone()))
+        .transpose()?;
     let runner_env;
     let socket_env;
     let rustdoc_env;
     let mut cargo_env = env.to_vec();
+    if strict.is_some() {
+        // The shim reads it to fail closed: under a strict session a harness
+        // that cannot get its own pipe must not run on the shared stream.
+        cargo_env.push((harness_shim::STRICT_ENV, "1"));
+    }
     if let Some(session) = &session {
         let host = crate::rustflags::host_triple().ok_or_else(|| {
             DevError::Config("cannot determine host triple for harness runner".into())
@@ -549,11 +746,19 @@ where
     let stdout_buf_t = Arc::clone(&stdout_buf);
     let tracker_t = Arc::clone(&tracker);
     let cancel_t = Arc::clone(&cancel);
+    let primary_t = primary.clone();
     let stdout_thread = thread::spawn(move || {
         // The same JSON drain the parallel lane uses. Both lanes read libtest's
         // event stream now; the reconstructor renders it back to human text, so
         // the downstream parsers and forwarded output see what they always saw.
-        drain_libtest_json(stdout_pipe, &stdout_buf_t, &tracker_t, &cancel_t, forward_stdout_line);
+        drain_libtest_json(
+            stdout_pipe,
+            &stdout_buf_t,
+            &tracker_t,
+            &cancel_t,
+            primary_t,
+            forward_stdout_line,
+        );
     });
 
     let stderr_buf_t = Arc::clone(&stderr_buf);
@@ -583,8 +788,9 @@ where
     // An isolated run ages every harness's tracker, plus a run-level idle
     // clock for the gaps between them; see `harness_shim::Session::watchdog`.
     let watchdog_thread = if let Some(session) = &session {
-        session.watchdog(state_root_t, cargo_pid, tracker_t, hung_t, &ceilings, start)
+        session.watchdog(state_root_t, cargo_pid, tracker_t, hung_t, &ceilings, start, primary.clone())
     } else {
+        let primary_w = primary.clone();
         thread::spawn(move || {
             watchdog_loop(
                 state_root_t,
@@ -595,6 +801,7 @@ where
                 hung_t,
                 ceilings,
                 start,
+                primary_w,
             );
         })
     };
@@ -627,7 +834,12 @@ where
     // A `brokkr kill` / Ctrl-C under the command's `SigtermGuard` (or the
     // `check` watchdog) killed this group from the signal handler, which is
     // what released the `wait` above. The run did not fail; it was stopped.
+    // Said on the stream first: everything observed so far has already reached
+    // the sink, and the stop is what explains its missing terminals.
     if crate::shutdown::is_shutdown_requested() {
+        if let Some(tap) = &primary {
+            tap.emit(ObsEvent::Killed { cause: KillCause::Stopped, test: None });
+        }
         return Err(DevError::Interrupted);
     }
 
@@ -700,8 +912,9 @@ pub(crate) struct ParallelRun {
 /// The JSON events are reconstructed back into human libtest text in the stdout
 /// buffer, so the downstream cargo parsers see the output shape they expect.
 /// `timeout` is a coarse whole-sweep backstop for a wedge with no test
-/// in-flight; it also honours a cooperative `brokkr kill` / Ctrl-C.
-#[allow(clippy::too_many_arguments)]
+/// in-flight; it also honours a cooperative `brokkr kill` / Ctrl-C. `sink`
+/// receives the stream's observations, the kill that ended it, and the exit.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(crate) fn run_libtest_parallel<Out, Err, Fin>(
     program: &str,
     args: &[&str],
@@ -717,6 +930,7 @@ pub(crate) fn run_libtest_parallel<Out, Err, Fin>(
     // but siblings already running were left to finish, so a timeout was followed
     // by up to another full budget of test execution before the error surfaced.
     abort: Option<&AtomicBool>,
+    sink: Option<&ObservationSink>,
     forward_stdout_line: Out,
     forward_stderr_line: Err,
     on_build_finished: Fin,
@@ -727,6 +941,7 @@ where
     Fin: FnOnce(Duration) + Send + 'static,
 {
     let start = Instant::now();
+    let primary = sink.map(|s| StreamTap::new(s, StreamSource::Process));
     let mut child = spawn_process_group(program, args, cwd, env)?;
     // Spawned with `process_group(0)`, so the child's pid is its pgid.
     let cargo_pid = child.id();
@@ -751,8 +966,16 @@ where
     let stdout_buf_t = Arc::clone(&stdout_buf);
     let tracker_t = Arc::clone(&tracker);
     let cancel_t = Arc::clone(&cancel);
+    let primary_t = primary.clone();
     let stdout_thread = thread::spawn(move || {
-        drain_libtest_json(stdout_pipe, &stdout_buf_t, &tracker_t, &cancel_t, forward_stdout_line);
+        drain_libtest_json(
+            stdout_pipe,
+            &stdout_buf_t,
+            &tracker_t,
+            &cancel_t,
+            primary_t,
+            forward_stdout_line,
+        );
     });
     let stderr_buf_t = Arc::clone(&stderr_buf);
     let cancel_t = Arc::clone(&cancel);
@@ -776,6 +999,7 @@ where
     let tracker_w = Arc::clone(&tracker);
     let done_w = Arc::clone(&done);
     let hung_w = Arc::clone(&hung);
+    let primary_w = primary.clone();
     let watchdog_thread = thread::spawn(move || {
         watchdog_loop(
             state_root_t,
@@ -786,10 +1010,23 @@ where
             hung_w,
             Ceilings { per_test: per_test_timeout, wall: None, shape: WallShape::SharedHarness },
             start,
+            primary_w,
         );
     });
 
     let waited = wait_parallel(&mut child, program, start, timeout, abort);
+    // The kill is recorded as what it was, before the stream end it caused.
+    if let Some(tap) = &primary {
+        let cause = match &waited {
+            Ok(ParallelWait::Exited { timed_out: true, .. }) => Some(KillCause::Wall),
+            Ok(ParallelWait::Exited { cancelled: true, .. }) => Some(KillCause::Cancelled),
+            Ok(ParallelWait::Interrupted) => Some(KillCause::Stopped),
+            _ => None,
+        };
+        if let Some(cause) = cause {
+            tap.emit(ObsEvent::Killed { cause, test: None });
+        }
+    }
     drop(reaper);
     // Before any early return: the watchdog thread must stop before this
     // group's id can be recycled, or it could later signal a stranger.
@@ -798,10 +1035,16 @@ where
     join_drains(vec![stdout_thread, stderr_thread], &cancel);
     watchdog_thread.join().ok();
 
+    // A lane-wide cancellation was reported on the stream above, as what it
+    // was; nothing in the exit status could say it.
     let (status, timed_out) = match waited? {
-        ParallelWait::Exited { status, timed_out } => (status, timed_out),
+        ParallelWait::Exited { status, timed_out, .. } => (status, timed_out),
         ParallelWait::Interrupted => return Err(DevError::Interrupted),
     };
+    if let Some(tap) = &primary {
+        use std::os::unix::process::ExitStatusExt;
+        tap.emit(ObsEvent::Exited { code: status.code(), signal: status.signal() });
+    }
 
     let elapsed = start.elapsed();
     let stdout = clone_buffer(&stdout_buf, "stdout")?;
@@ -831,8 +1074,8 @@ where
 /// How [`wait_parallel`] ended.
 enum ParallelWait {
     /// The leader exited, on its own or killed by the backstop (`timed_out`)
-    /// or a lane-wide abort.
-    Exited { status: std::process::ExitStatus, timed_out: bool },
+    /// or a lane-wide abort (`cancelled`).
+    Exited { status: std::process::ExitStatus, timed_out: bool, cancelled: bool },
     /// A cooperative shutdown (`brokkr kill`, Ctrl-C, the `check` watchdog):
     /// the group was killed and reaped, and the run is not a verdict.
     Interrupted,
@@ -862,7 +1105,7 @@ fn wait_parallel(
                 if crate::shutdown::is_shutdown_requested() {
                     return Ok(ParallelWait::Interrupted);
                 }
-                return Ok(ParallelWait::Exited { status, timed_out: false });
+                return Ok(ParallelWait::Exited { status, timed_out: false, cancelled: false });
             }
             Ok(None) => {
                 let overtime = start.elapsed() >= timeout;
@@ -877,7 +1120,11 @@ fn wait_parallel(
                     if interrupted {
                         return Ok(ParallelWait::Interrupted);
                     }
-                    return Ok(ParallelWait::Exited { status, timed_out: overtime });
+                    return Ok(ParallelWait::Exited {
+                        status,
+                        timed_out: overtime,
+                        cancelled: cancelled && !overtime,
+                    });
                 }
                 thread::sleep(WATCHDOG_POLL);
             }
@@ -895,16 +1142,18 @@ fn wait_parallel(
 /// events back into the human libtest text the downstream cargo parsers expect.
 /// The reconstructed text - not the raw JSON - is what lands in `buf`; cargo
 /// message lines and any non-JSON output pass through verbatim.
-fn drain_libtest_json<F>(
-    mut pipe: ChildStdout,
+fn drain_libtest_json<R, F>(
+    mut pipe: R,
     buf: &Mutex<Vec<u8>>,
     tracker: &Mutex<TestTracker>,
     cancel: &AtomicBool,
+    tap: Option<StreamTap>,
     mut forward_line: F,
 ) where
+    R: Read + std::os::fd::AsRawFd,
     F: FnMut(&str),
 {
-    let mut recon = JsonReconstructor::default();
+    let mut recon = JsonReconstructor { tap, ..JsonReconstructor::default() };
     let emit = |out: &[String], buf: &Mutex<Vec<u8>>, forward_line: &mut F| {
         for text in out {
             if let Ok(mut b) = buf.lock() {
@@ -917,7 +1166,13 @@ fn drain_libtest_json<F>(
 
     let mut read_buf = [0_u8; 4096];
     let mut line = Vec::<u8>::new();
-    while let Some(n) = read_unless_cancelled(&mut pipe, &mut read_buf, cancel) {
+    let end = loop {
+        let n = match read_chunk(&mut pipe, &mut read_buf, cancel) {
+            Chunk::Data(n) => n,
+            Chunk::Eof => break StreamEnd::Eof,
+            Chunk::Error => break StreamEnd::ReadError,
+            Chunk::Cancelled => break StreamEnd::Cancelled,
+        };
         for &byte in &read_buf[..n] {
             if byte == b'\n' {
                 if line.last() == Some(&b'\r') {
@@ -930,11 +1185,12 @@ fn drain_libtest_json<F>(
                 line.push(byte);
             }
         }
-    }
+    };
     if !line.is_empty() {
         let out = recon.observe(&String::from_utf8_lossy(&line), tracker);
         emit(&out, buf, &mut forward_line);
     }
+    recon.report(ObsEvent::StreamEnded { end });
 }
 
 /// Turns libtest's JSON event stream back into the human libtest text the
@@ -957,6 +1213,11 @@ struct JsonReconstructor {
     /// (test name, captured stdout) for failures seen since the last suite
     /// summary, held back so they render as one block in libtest order.
     failures: Vec<(String, Option<String>)>,
+    /// Where each recognised record is reported as a typed observation, when
+    /// the caller asked for them. Only records parsed off the stream are
+    /// reported - text this reconstructor synthesizes (a dead suite's closure)
+    /// is display, never evidence.
+    tap: Option<StreamTap>,
 }
 
 /// Split a stdout line into any leading test output and a trailing libtest
@@ -1058,6 +1319,7 @@ impl JsonReconstructor {
         val: &Value,
         tracker: &Mutex<TestTracker>,
     ) -> Vec<String> {
+        let count = |key: &str| val.get(key).and_then(Value::as_u64).unwrap_or(0);
         match (kind, event) {
             ("suite", "started") => {
                 self.failures.clear();
@@ -1066,8 +1328,9 @@ impl JsonReconstructor {
                 if let Ok(mut t) = tracker.lock() {
                     t.observe_suite_start();
                 }
-                let count = val.get("test_count").and_then(Value::as_u64).unwrap_or(0);
-                vec![String::new(), format!("running {count} tests")]
+                let test_count = count("test_count");
+                self.report(ObsEvent::SuiteStarted { test_count });
+                vec![String::new(), format!("running {test_count} tests")]
             }
             ("suite", _) => {
                 // A summary closes the suite, so the next suite-started record is
@@ -1075,28 +1338,34 @@ impl JsonReconstructor {
                 if let Ok(mut t) = tracker.lock() {
                     t.observe_suite_end();
                 }
+                self.report(ObsEvent::SuiteFinished {
+                    passed: count("passed"),
+                    failed: count("failed"),
+                    ignored: count("ignored"),
+                });
                 self.render_suite_summary(val, event)
             }
             ("test", "started") => {
-                if let Some(name) = val.get("name").and_then(Value::as_str)
-                    && let Ok(mut t) = tracker.lock()
-                {
-                    t.observe_start(name.to_owned());
+                if let Some(name) = val.get("name").and_then(Value::as_str) {
+                    if let Ok(mut t) = tracker.lock() {
+                        t.observe_start(name.to_owned());
+                    }
+                    self.report(ObsEvent::Started { name: name.to_owned() });
                 }
                 Vec::new()
             }
             ("test", "ok") => {
-                let name = self.finish(val, tracker, true);
+                let name = self.finish(val, tracker, TestResult::Ok);
                 name.map(|n| vec![format!("test {n} ... ok")]).unwrap_or_default()
             }
             ("test", "ignored") => {
                 // Not a run: see `TestTracker::observe_result`.
-                let name = self.finish(val, tracker, false);
+                let name = self.finish(val, tracker, TestResult::Ignored);
                 name.map(|n| vec![format!("test {n} ... ignored")])
                     .unwrap_or_default()
             }
             ("test", "failed") => {
-                let Some(name) = self.finish(val, tracker, true) else {
+                let Some(name) = self.finish(val, tracker, TestResult::Failed) else {
                     return Vec::new();
                 };
                 let captured = val
@@ -1106,17 +1375,34 @@ impl JsonReconstructor {
                 self.failures.push((name.clone(), captured));
                 vec![format!("test {name} ... FAILED")]
             }
+            // libtest's slow-test warning. The test is still running, so it
+            // changes nothing in the tracker - but it is reported rather than
+            // dropped: under brokkr's 20s cap a test can only get there by a
+            // budget that was not enforced, which accounting must see.
+            ("test", "timeout") => {
+                if let Some(name) = val.get("name").and_then(Value::as_str) {
+                    self.report(ObsEvent::SlowWarning { name: name.to_owned() });
+                }
+                Vec::new()
+            }
             _ => Vec::new(),
         }
     }
 
-    /// Clear a completed test from the tracker and return its name. `ran` is
-    /// false for an ignored result, which must not count as completed.
-    fn finish(&self, val: &Value, tracker: &Mutex<TestTracker>, ran: bool) -> Option<String> {
+    fn report(&self, event: ObsEvent) {
+        if let Some(tap) = &self.tap {
+            tap.emit(event);
+        }
+    }
+
+    /// Clear a completed test from the tracker, report its terminal record and
+    /// return its name. An ignored result does not count as completed.
+    fn finish(&self, val: &Value, tracker: &Mutex<TestTracker>, result: TestResult) -> Option<String> {
         let name = val.get("name").and_then(Value::as_str)?.to_owned();
         if let Ok(mut t) = tracker.lock() {
-            t.observe_result(&name, ran);
+            t.observe_result(&name, result != TestResult::Ignored);
         }
+        self.report(ObsEvent::Finished { name: name.clone(), result });
         Some(name)
     }
 
@@ -1401,18 +1687,30 @@ fn drain_stderr<F, G>(
     }
 }
 
-/// One read from a child's output pipe, or `None` at EOF, on a read error, or
-/// once `cancel` is set. Waits in `poll` with a short timeout rather than in a
-/// blocking `read`, so cancellation is observed within one interval whether the
-/// pipe is idle or streaming.
-pub(crate) fn read_unless_cancelled<R: Read + std::os::fd::AsRawFd>(
+/// What one read from a child's output pipe produced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Chunk {
+    Data(usize),
+    /// The writer closed the pipe: everything it wrote was read.
+    Eof,
+    /// The read (or the poll before it) failed.
+    Error,
+    /// The caller told the reader to stop, so whatever was still unwritten or
+    /// unread is lost - the one end after which a stream may be truncated.
+    Cancelled,
+}
+
+/// One read from a child's output pipe. Waits in `poll` with a short timeout
+/// rather than in a blocking `read`, so cancellation is observed within one
+/// interval whether the pipe is idle or streaming.
+pub(crate) fn read_chunk<R: Read + std::os::fd::AsRawFd>(
     pipe: &mut R,
     buf: &mut [u8],
     cancel: &AtomicBool,
-) -> Option<usize> {
+) -> Chunk {
     loop {
         if cancel.load(Ordering::Acquire) {
-            return None;
+            return Chunk::Cancelled;
         }
         let mut pfd = libc::pollfd { fd: pipe.as_raw_fd(), events: libc::POLLIN, revents: 0 };
         // SAFETY: one valid pollfd for an fd we own, for the call's duration.
@@ -1424,12 +1722,26 @@ pub(crate) fn read_unless_cancelled<R: Read + std::os::fd::AsRawFd>(
             if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
                 continue;
             }
-            return None;
+            return Chunk::Error;
         }
         return match pipe.read(buf) {
-            Ok(0) | Err(_) => None,
-            Ok(n) => Some(n),
+            Ok(0) => Chunk::Eof,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => Chunk::Error,
+            Ok(n) => Chunk::Data(n),
         };
+    }
+}
+
+/// [`read_chunk`] for a caller that only needs the data: `None` at any end.
+pub(crate) fn read_unless_cancelled<R: Read + std::os::fd::AsRawFd>(
+    pipe: &mut R,
+    buf: &mut [u8],
+    cancel: &AtomicBool,
+) -> Option<usize> {
+    match read_chunk(pipe, buf, cancel) {
+        Chunk::Data(n) => Some(n),
+        Chunk::Eof | Chunk::Error | Chunk::Cancelled => None,
     }
 }
 
@@ -1519,6 +1831,7 @@ fn watchdog_loop(
     hung: Arc<Mutex<Option<HungTest>>>,
     ceilings: Ceilings,
     started: Instant,
+    tap: Option<StreamTap>,
 ) {
     watchdog_loop_with_timing(
         state_root,
@@ -1530,6 +1843,7 @@ fn watchdog_loop(
         ceilings,
         WATCHDOG_POLL,
         started,
+        tap.as_ref(),
     );
 }
 
@@ -1550,6 +1864,8 @@ fn watchdog_loop_with_timing(
     // running, so the bound would silently exclude spawn and thread-start
     // latency while the comments claimed it ran "from spawn".
     started: Instant,
+    // Where the verdict is reported, before the kill it causes.
+    tap: Option<&StreamTap>,
 ) {
     let timeout = ceilings.per_test;
     // Emitted at most once, so a long sweep does not repeat the same guess every
@@ -1679,6 +1995,10 @@ fn watchdog_loop_with_timing(
         // further test time is consumed, while `/proc` stays readable for the
         // snapshot. SIGKILL then lands on already-stopped processes.
         stop_process_group(cargo_pid).ok();
+        if let Some(tap) = tap {
+            let (cause, test) = kill_of(&reason);
+            tap.emit(ObsEvent::Killed { cause, test });
+        }
         let hung_test = capture_hung_test(&state_root, cargo_pid, leader, reason, elapsed, ceiling);
         if let Ok(mut slot) = hung.lock() {
             *slot = Some(hung_test);
@@ -2010,7 +2330,7 @@ mod tests {
         let tracker = Arc::new(Mutex::new(TestTracker::default()));
         let cancel = Arc::new(AtomicBool::new(false));
         let (b, t, c) = (Arc::clone(&buf), Arc::clone(&tracker), Arc::clone(&cancel));
-        let drain = thread::spawn(move || drain_libtest_json(pipe, &b, &t, &c, |_| {}));
+        let drain = thread::spawn(move || drain_libtest_json(pipe, &b, &t, &c, None, |_| {}));
         child.wait().expect("sh exits");
         let started = Instant::now();
         assert!(join_drains(vec![drain], &cancel), "the leaked holder kept the pipe open");
@@ -2021,6 +2341,90 @@ mod tests {
             // SAFETY: the sleep this test started; ESRCH is fine.
             unsafe { libc::kill(pid, libc::SIGKILL) };
         }
+    }
+
+    fn collecting_sink() -> (ObservationSink, Arc<Mutex<Vec<Observation>>>) {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let seen_t = Arc::clone(&seen);
+        let sink: ObservationSink = Arc::new(move |o| seen_t.lock().unwrap().push(o));
+        (sink, seen)
+    }
+
+    fn drained_end(script: &str) -> (Option<StreamEnd>, String) {
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg(script)
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("spawn sh");
+        let pipe = child.stdout.take().expect("piped stdout");
+        let (sink, seen) = collecting_sink();
+        let tap = StreamTap::new(&sink, StreamSource::Process);
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let tracker = Arc::new(Mutex::new(TestTracker::default()));
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (b, t, c) = (Arc::clone(&buf), Arc::clone(&tracker), Arc::clone(&cancel));
+        let drain = thread::spawn(move || drain_libtest_json(pipe, &b, &t, &c, Some(tap), |_| {}));
+        child.wait().expect("sh exits");
+        join_drains(vec![drain], &cancel);
+        let end = seen.lock().unwrap().iter().find_map(|o| match o.event {
+            ObsEvent::StreamEnded { end } => Some(end),
+            _ => None,
+        });
+        let text = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+        (end, text)
+    }
+
+    /// The three ends of a stream are three facts. A drain the grace period
+    /// cancelled - a leaked process still holding the pipe - says so, because
+    /// whatever that stream had not delivered yet is lost; a writer that
+    /// closed says EOF.
+    #[test]
+    fn a_cancelled_drain_is_told_apart_from_an_eof() {
+        let (end, text) = drained_end("sleep 15 & echo $!; echo captured");
+        assert_eq!(end, Some(StreamEnd::Cancelled), "{text}");
+        if let Some(pid) = text.lines().next().and_then(|l| l.trim().parse::<i32>().ok()) {
+            // SAFETY: the sleep this test started; ESRCH is fine.
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+        }
+        let (end, _) = drained_end("echo done");
+        assert_eq!(end, Some(StreamEnd::Eof));
+    }
+
+    /// Every recognised record reaches the sink typed, `test/timeout`
+    /// included, and nothing the reconstructor renders on its own does.
+    #[test]
+    fn recognised_records_reach_the_sink_typed() {
+        let (sink, seen) = collecting_sink();
+        let tracker = Mutex::new(TestTracker::default());
+        let mut recon = JsonReconstructor {
+            tap: Some(StreamTap::new(&sink, StreamSource::Process)),
+            ..JsonReconstructor::default()
+        };
+        for ev in [
+            r#"{"type":"suite","event":"started","test_count":2}"#,
+            r#"{"type":"test","event":"started","name":"a::one"}"#,
+            r#"{"type":"test","event":"timeout","name":"a::one"}"#,
+            r#"{"type":"test","name":"a::one","event":"ok"}"#,
+            r#"{"type":"test","event":"started","name":"a::two"}"#,
+            r#"{"type":"test","name":"a::two","event":"failed","stdout":"boom"}"#,
+            r#"{"type":"suite","event":"failed","passed":1,"failed":1,"ignored":0,"measured":0,"filtered_out":0,"exec_time":0.0}"#,
+        ] {
+            recon.observe(ev, &tracker);
+        }
+        let events: Vec<ObsEvent> = seen.lock().unwrap().iter().map(|o| o.event.clone()).collect();
+        assert_eq!(
+            events,
+            vec![
+                ObsEvent::SuiteStarted { test_count: 2 },
+                ObsEvent::Started { name: "a::one".into() },
+                ObsEvent::SlowWarning { name: "a::one".into() },
+                ObsEvent::Finished { name: "a::one".into(), result: TestResult::Ok },
+                ObsEvent::Started { name: "a::two".into() },
+                ObsEvent::Finished { name: "a::two".into(), result: TestResult::Failed },
+                ObsEvent::SuiteFinished { passed: 1, failed: 1, ignored: 0 },
+            ]
+        );
     }
 
     #[test]
@@ -2156,6 +2560,7 @@ mod tests {
             },
             Duration::from_millis(5),
             Instant::now(),
+            None,
         );
         child.wait().ok();
 
@@ -2320,6 +2725,7 @@ mod tests {
             },
             Duration::from_millis(5),
             Instant::now(),
+            None,
         );
         child.wait().ok();
 
@@ -2386,6 +2792,7 @@ mod tests {
             Ceilings::one_test(Duration::from_millis(20), "watchdog::hangs"),
             Duration::from_millis(5),
             Instant::now(),
+            None,
         );
         child.wait().ok();
 

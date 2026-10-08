@@ -1371,8 +1371,9 @@ fn run_one(
         state_root,
         env,
         shape.ceilings.clone(),
-        // One harness per invocation already: nothing to isolate.
-        false,
+        // One harness per invocation already: nothing to isolate, and `brokkr
+        // test` accounts for nothing beyond its own footer.
+        &test_runner::Observe::default(),
         make_stdout_forwarder(sink.clone()),
         // A direct run has no cargo compile phase: everything on its stderr
         // is the test talking.

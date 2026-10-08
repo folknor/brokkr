@@ -39,7 +39,7 @@ use crate::scope;
 use crate::script_check::Level;
 use crate::test_runner::{self, LibtestOutcome};
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(crate) fn cmd_check(
     project: Option<Project>,
     project_root: &Path,
@@ -104,11 +104,12 @@ pub(crate) fn cmd_check(
     )?;
 
     let mut collected_timings: Vec<TestTiming> = Vec::new();
-    let mut coverage_stats: Option<CoverageStats> = None;
-    // Which active sweeps the test phase actually reached. The phase fails
-    // fast, so on a failing run the later lanes never execute - and the
-    // coverage audit must not credit their ran-set (S3-18). All true on a
-    // green run, so the happy path is unchanged.
+    // What the run reports beyond its verdict: how it stopped, and - under a
+    // complete claim - the policy and execution-accounting blocks.
+    let mut run_report = RunReport::default();
+    // Which active sweeps the test phase actually reached, for the trailer's
+    // `sweeps` list. The phase fails fast, so on a failing run the later lanes
+    // never execute. Policy coverage no longer reads this - it reads the plan.
     let mut executed = vec![false; active_sweeps.len()];
     // Which sweeps the clippy phase actually invoked cargo for - set after its
     // cli_package_scope skips AND build-shape dedupe, so a sweep clippy never
@@ -187,7 +188,7 @@ pub(crate) fn cmd_check(
             &mut clippy_ran,
             &mut executed,
             timings.then_some(&mut collected_timings),
-            &mut coverage_stats,
+            &mut run_report,
         )
     };
     let outcome = run_phases();
@@ -199,11 +200,13 @@ pub(crate) fn cmd_check(
     let ran_labels = ran_sweep_labels(&active_sweeps, &clippy_ran, &executed);
 
     // The summary/trailer scope label: the CLI `-p` set, comma-joined so the
-    // `--json` `package` field stays a string under `schema: 1`.
+    // `--json` `package` field stays a string.
     let package_label = (!packages.is_empty()).then(|| packages.join(","));
 
+    let stop = run_stop(&outcome, watchdog_fired().is_some(), crate::shutdown::is_shutdown_requested());
     finish_check(
         &outcome,
+        stop,
         certifies,
         &profile_label,
         &ran_labels,
@@ -212,10 +215,36 @@ pub(crate) fn cmd_check(
         !prose_skips.is_empty(),
         package_label.as_deref(),
         failing_phase,
-        coverage_stats,
+        run_report,
         json,
         started,
     )
+}
+
+/// How the RUN was stopped, when something stopped it - decided from the
+/// stop flags, independently of what the phases returned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RunStop {
+    /// A time ceiling fired: exit 124.
+    Watchdog,
+    /// A cooperative interrupt (`brokkr kill`, Ctrl-C): exit 130.
+    Interrupt,
+}
+
+/// The stop that decides the verdict. Independent of the phase result on
+/// purpose: a watchdog can fire, or an interrupt arrive, after the last test
+/// finished and the audit accepted the journal, and every phase after it then
+/// spawns nothing that could fail - so the outcome reaching the verdict is
+/// `Ok(())`. Branching on that outcome signed off a stopped run as `complete`
+/// with exit 0.
+fn run_stop(outcome: &Result<(), DevError>, watchdog: bool, shutdown: bool) -> Option<RunStop> {
+    if watchdog {
+        Some(RunStop::Watchdog)
+    } else if shutdown || matches!(outcome, Err(DevError::Interrupted)) {
+        Some(RunStop::Interrupt)
+    } else {
+        None
+    }
 }
 
 /// `check --textlint NAME` / `--script NAME`: run the named `[[textlint]]` rules
@@ -511,11 +540,31 @@ struct BuildPhaseArgs<'a> {
     extra_args: &'a [String],
 }
 
-/// Run clippy, the test phase, and (under a `complete` claim) the coverage
-/// audit. Threads the two ran-tracking masks - `clippy_ran` (set per sweep
-/// after clippy's skip/dedupe) and `executed` (set per lane the test phase
-/// reaches before its fail-fast) - plus the `failing_phase` pointer and the
-/// coverage stats the summary carries even on a failing run.
+/// What a run reports beyond its verdict, for the `--json` trailer.
+#[derive(Default)]
+struct RunReport {
+    /// How the run stopped, when something stopped it.
+    termination: Option<TerminationSummary>,
+    /// Under a complete claim: the policy, execution-accounting and doctest
+    /// blocks, present even when the run failed.
+    accounting: Option<AccountingBlocks>,
+}
+
+/// The prepared profile and where its record lives on disk.
+struct Prepared {
+    prep: ProfilePrep,
+    /// `None` when the plan could not be persisted; the audit then reports a
+    /// record that does not exist rather than one it never read.
+    paths: Option<AccountingPaths>,
+}
+
+/// Run clippy, the test phase and - under a `complete` claim - the `prepare`
+/// phase before the tests and the coverage audit after them. Threads the two
+/// ran-tracking masks - `clippy_ran` (set per sweep after clippy's
+/// skip/dedupe) and `executed` (set per lane the test phase reaches before its
+/// fail-fast) - plus the `failing_phase` pointer and the run report the
+/// summary carries even on a failing run.
+#[allow(clippy::too_many_arguments)]
 fn run_build_phases(
     a: &BuildPhaseArgs<'_>,
     skip: &dyn Fn(&str) -> bool,
@@ -523,7 +572,7 @@ fn run_build_phases(
     clippy_ran: &mut [bool],
     executed: &mut [bool],
     collected_timings: Option<&mut Vec<TestTiming>>,
-    coverage_stats: &mut Option<CoverageStats>,
+    run_report: &mut RunReport,
 ) -> Result<(), DevError> {
     // A refusal here prints through `finish_check`, like every error that is
     // not `DevError::Reported`.
@@ -535,32 +584,99 @@ fn run_build_phases(
         run_script_checks(a.project_root, a.script_checks, Stage::PreTest)?;
     }
 
+    let complete = a.certifies == Some(Certifies::Complete);
     let mut test_failure: Option<DevError> = None;
+    let mut prepared: Option<Prepared> = None;
     if !skip("test") {
-        begin_phase(failing_phase, "test");
-        test_failure = run_test_phase(
-            a.project,
-            a.project_root,
-            a.state_root,
-            a.active_sweeps,
-            a.packages,
-            a.doctests,
-            a.commands,
-            a.extra_args,
-            a.clippy_allow,
-            a.clippy_allow_exact,
-            collected_timings,
-            executed,
-        )
-        .err();
-        // `tests failed` is the one error leaving the test phase whose detail
-        // was already reported (the failure list above); everything else - a
-        // lane refusal, a wrong-run, a config conflict discovered at run time
-        // - carries its whole diagnostic in the message, which `finish_check`
-        // prints. It stays a `Build` sentinel until then because the coverage
-        // audit below keys its best-effort run on it.
+        if complete {
+            begin_phase(failing_phase, "prepare");
+            let p = run_prepare_phase(a)?;
+            let ok = p.prep.error.is_none() && p.prep.plan.complete && p.paths.is_some();
+            if !ok {
+                // Nothing runs on an incomplete plan: a test phase that ran
+                // anyway would produce a record nothing could certify. The
+                // audit below still reports what the plan knows.
+                test_failure = Some(DevError::Reported("preparation failed".into()));
+            }
+            prepared = Some(p);
+        }
+        if test_failure.is_none() {
+            begin_phase(failing_phase, "test");
+            let lanes = prepared.as_ref().map(|p| p.prep.lanes.as_slice());
+            test_failure = run_test_phase(
+                &TestPhaseArgs {
+                    project: a.project,
+                    project_root: a.project_root,
+                    state_root: a.state_root,
+                    sweeps: a.active_sweeps,
+                    packages: a.packages,
+                    doctests: a.doctests,
+                    commands: a.commands,
+                    extra_args: a.extra_args,
+                    allow: a.clippy_allow,
+                    allow_exact: a.clippy_allow_exact,
+                },
+                lanes,
+                collected_timings,
+                executed,
+                &mut run_report.termination,
+            )
+            .err();
+        }
+        // The test phase is over, however it ended: the journal says so. A
+        // journal without this line was cut short.
+        if prepared.as_ref().is_some_and(|p| p.paths.is_some()) {
+            journal_close();
+        }
     }
-    finish_build_phases(a, skip, failing_phase, executed, coverage_stats, test_failure)
+    finish_build_phases(a, skip, failing_phase, prepared, run_report, test_failure)
+}
+
+/// The `prepare` phase: plan the whole profile, persist the plan, open the
+/// journal. A lane that cannot be prepared is reported here, in full, and
+/// the plan comes back incomplete rather than not at all.
+fn run_prepare_phase(a: &BuildPhaseArgs<'_>) -> Result<Prepared, DevError> {
+    let target_dir = build::project_info(Some(a.project_root))?.target_dir;
+    let allow_flags = crate::config::test_phase_allow_flags(a.clippy_allow, a.clippy_allow_exact);
+    let mut preparer = CargoPreparer {
+        inputs: LaneInputs {
+            project: a.project,
+            project_root: a.project_root,
+            state_root: a.state_root,
+            target_dir: &target_dir,
+            allow_flags: &allow_flags,
+            commands: a.commands,
+            complete: true,
+        },
+    };
+    let prep = prepare_profile(a.active_sweeps, a.doctests, &mut preparer);
+    for marker in &prep.plan.incomplete {
+        output::error(&format!("prepare: {marker}"));
+    }
+    let paths = match accounting_open(a.state_root, &prep.plan) {
+        Ok(p) => {
+            output::detail(&format!(
+                "prepare: plan {}, journal {}",
+                p.plan.display(),
+                p.journal.display()
+            ));
+            Some(p)
+        }
+        Err(e) => {
+            output::error(&format!("prepare: the plan could not be persisted: {e}"));
+            None
+        }
+    };
+    if prep.error.is_none() && prep.plan.complete {
+        let executions: usize = prep.plan.lanes.iter().map(|l| l.executions.len()).sum();
+        output::run_msg(&format!(
+            "prepare: {}, {} in {}",
+            output::count(prep.plan.lanes.len(), "lane"),
+            output::count(executions, "expected execution"),
+            fmt_wall(phase_elapsed())
+        ));
+    }
+    Ok(Prepared { prep, paths })
 }
 
 /// The two per-build-shape diagnostic phases: clippy, then rustdoc. Rustdoc
@@ -608,38 +724,29 @@ fn finish_build_phases(
     a: &BuildPhaseArgs<'_>,
     skip: &dyn Fn(&str) -> bool,
     failing_phase: &mut Option<&'static str>,
-    executed: &[bool],
-    coverage_stats: &mut Option<CoverageStats>,
+    prepared: Option<Prepared>,
+    run_report: &mut RunReport,
     test_failure: Option<DevError>,
 ) -> Result<(), DevError> {
-    // Coverage accounting runs only under a complete claim - it is what the
-    // claim buys. It runs on a failing test phase
-    // too: the audit needs built binaries, not green tests, and the orphan
-    // worksheet is most needed exactly on the unhealthy runs.
-    if a.certifies == Some(Certifies::Complete) {
-        // Stays "test" on a failing run - the audit is best-effort there.
-        begin_phase(failing_phase, if test_failure.is_some() { "test" } else { "coverage" });
-        // The audit's enumeration compiles, so it needs the test phase's lint
-        // allows for the same reason the test phase does - derived from the
-        // same source here rather than passed down, so the two cannot drift.
-        let audit = audit_coverage(
-            a.project_root,
-            a.state_root,
-            a.active_sweeps,
-            executed,
-            a.quarantine,
-            a.commands,
-            &crate::config::test_phase_allow_flags(a.clippy_allow, a.clippy_allow_exact),
-            test_failure.as_ref(),
-        );
+    // The audit runs only under a complete claim - it is what the claim buys -
+    // and it runs on every outcome of the test phase, a watchdog kill
+    // included: it is pure reconciliation of the plan and the journal, so it
+    // needs no process the shutdown flag would refuse, and the worksheet is
+    // most needed exactly on the unhealthy runs.
+    if let Some(prepared) = prepared {
+        // Stays on the phase that failed - the audit only contributes its
+        // findings and counts there.
+        if test_failure.is_none() {
+            begin_phase(failing_phase, "coverage");
+        }
+        let audit = audit_coverage(&prepared, a.active_sweeps, a.quarantine, test_failure.is_none());
         // Counts first, verdict second: the summary carries them even when
         // the audit is what failed.
-        *coverage_stats = audit.stats;
-        // `coverage failed` is the sentinel whose detail (worksheets, orphans)
-        // already printed; any other error - an enumeration abort, an engine
-        // failure - carries its whole diagnostic in the message, which
-        // `finish_check` prints.
-        audit.result.map_err(|e| already_reported(e, "coverage failed"))?;
+        if run_report.termination.is_none() {
+            run_report.termination = audit.termination;
+        }
+        run_report.accounting = Some(audit.blocks);
+        audit.result?;
     }
 
     if let Some(e) = test_failure {
@@ -787,52 +894,132 @@ fn verify_doc_only_rules(a: &BuildPhaseArgs<'_>) -> Result<(), DevError> {
     Ok(())
 }
 
-/// Run the coverage audit for a complete claim. On a green test phase an
-/// audit failure fails the run; when the tests themselves failed, the
-/// audit is best-effort (its findings still print - they are the
-/// worksheet) and is skipped entirely when the failure predates built
-/// binaries (anything other than the test phase's own "tests failed").
-///
-/// Either way the counts ride out with the outcome: a failed audit that
-/// reported `coverage: null` was the same died-before-reporting shape the
-/// best-effort path above exists to fix.
-#[allow(clippy::too_many_arguments)]
-fn audit_coverage(
-    project_root: &Path,
-    state_root: &Path,
-    sweeps: &[ResolvedSweep],
-    executed: &[bool],
-    quarantine: &[QuarantineEntry],
-    commands: bool,
-    allow_flags: &[String],
-    test_failure: Option<&DevError>,
-) -> CoverageOutcome {
-    match test_failure {
-        None => run_coverage_phase(
-            project_root,
-            state_root,
-            sweeps,
-            executed,
-            quarantine,
-            allow_flags,
-            commands,
-        ),
-        Some(DevError::Build(msg)) if msg == TESTS_FAILED => {
-            // The test failure is the run's verdict; the audit only
-            // contributes its worksheet and its counts.
-            let outcome = run_coverage_phase(
-                project_root,
-                state_root,
-                sweeps,
-                executed,
-                quarantine,
-                allow_flags,
-                commands,
-            );
+/// What the audit produced: the summary blocks, how the run stopped as the
+/// journal records it, and the audit's own verdict.
+struct AuditOutcome {
+    blocks: AccountingBlocks,
+    termination: Option<TerminationSummary>,
+    result: Result<(), DevError>,
+}
 
-            CoverageOutcome { stats: outcome.stats, result: Ok(()) }
+/// The coverage audit for a complete claim: pure reconciliation of the plan
+/// and the journal it reads back from disk. Spawns nothing, builds nothing,
+/// arms no deadline - so it runs after a watchdog kill, where the shutdown
+/// flag refuses every new process.
+///
+/// On a green test phase the audit can fail the run two ways: policy (an
+/// orphan, a stale quarantine entry, a dead filter) and accounting (an
+/// execution not passed, an anomaly, a journal cut short - the green
+/// invariant). On a failed test phase the failure is the run's verdict and
+/// the audit contributes its worksheet and counts.
+fn audit_coverage(
+    prepared: &Prepared,
+    sweeps: &[ResolvedSweep],
+    quarantine: &[QuarantineEntry],
+    tests_green: bool,
+) -> AuditOutcome {
+    let plan = &prepared.prep.plan;
+    let (records, closed, mut errors) = match &prepared.paths {
+        Some(paths) => read_journal(&paths.journal),
+        None => (Vec::new(), false, vec!["the plan was never persisted, so no journal exists".into()]),
+    };
+    if journal_unlocked_write_failed() {
+        errors.push("the watchdog's deadline record could not be written whole".into());
+    }
+    let recon = reconcile(plan, &records, closed, errors);
+    let (policy, policy_failed) = report_policy(plan, sweeps, quarantine);
+    let accounting = ExecutionAccounting::of(&recon);
+    report_accounting(plan, &recon, &accounting, tests_green);
+
+    let label = |lane: usize| plan.lane(lane).map(|l| l.label.clone());
+    let termination = recon.first_termination.as_ref().map(|t| TerminationSummary::of(t, label));
+    let result = if !tests_green {
+        Ok(())
+    } else if policy_failed {
+        Err(DevError::Reported("coverage failed".into()))
+    } else if !recon.green() {
+        Err(DevError::Reported("execution accounting violated the green invariant".into()))
+    } else {
+        Ok(())
+    };
+    AuditOutcome {
+        blocks: AccountingBlocks {
+            policy_coverage: policy,
+            execution_accounting: accounting,
+            doctests: DoctestAccounting {
+                inventory: "unavailable",
+                accounting: "unknown",
+                observed: recon.doctests.clone(),
+            },
+        },
+        termination,
+        result,
+    }
+}
+
+/// The accounting worksheet: one line of counts, every anomaly, and - when a
+/// green test phase still fails the invariant, which is a hard failure that
+/// must explain itself - every execution that did not pass.
+fn report_accounting(
+    plan: &AccountingPlan,
+    recon: &Reconciliation,
+    counts: &ExecutionAccounting,
+    tests_green: bool,
+) {
+    let line = format!(
+        "accounting: {} - {} passed, {} failed, {} timed out, {} interrupted, {} ignored, {} \
+         unobserved, {} anomalies ({})",
+        output::count(counts.expected_executions, "expected execution"),
+        counts.passed,
+        counts.failed,
+        counts.timed_out,
+        counts.interrupted,
+        counts.ignored,
+        counts.unobserved,
+        counts.anomalies,
+        counts.status
+    );
+    if recon.green() {
+        output::run_msg(&line);
+        return;
+    }
+    output::error(&line);
+    for a in &recon.anomalies {
+        let lane = a
+            .lane
+            .and_then(|l| plan.lane(l))
+            .map_or_else(String::new, |l| format!(" [{}]", l.label));
+        output::error(&format!("anomaly {:?}{lane}: {}", a.kind, a.detail));
+    }
+    if !recon.journal_closed {
+        output::error("accounting: the journal has no closing record - the run's record was cut short");
+    }
+    for e in &recon.journal_errors {
+        output::error(&format!("accounting: {e}"));
+    }
+    for s in &recon.truncated_streams {
+        output::error(&format!("accounting: {s} - its record may be short, so it cannot be whole"));
+    }
+    for c in recon.doctests.carriers.iter().filter(|c| !c.completed) {
+        output::error(&format!(
+            "doctests: carrier {} is not known to have completed ({} rustdoc stream{} seen) - \
+             a planned carrier must run its doctests to the end",
+            c.lane,
+            c.streams,
+            if c.streams == 1 { "" } else { "s" }
+        ));
+    }
+    if tests_green {
+        for x in recon.accounted.iter().filter(|x| x.outcome != Outcome::Passed) {
+            let lane = plan.lane(x.id.lane).map_or("?", |l| l.label.as_str());
+            let detail = x.detail.map_or_else(String::new, |d| format!(" ({})", d.as_str()));
+            output::error(&format!(
+                "{}{detail}: {lane}/{}/{}",
+                x.outcome.as_str(),
+                x.id.pair.unit.id(),
+                x.id.pair.test
+            ));
         }
-        Some(_) => CoverageOutcome { stats: None, result: Ok(()) },
     }
 }
 
@@ -881,6 +1068,9 @@ fn resolve_gate_profile(
 /// multi-`-p` run resolves a graph none of them install under. Every other mode
 /// yields a single unscoped resolution, so this is one iteration and the argv
 /// is what it always was.
+///
+/// Under a complete profile `prepared` is the lane's plan: each resolution's
+/// harnesses are then held to it through the strict shim.
 #[allow(clippy::too_many_arguments)]
 fn run_sequential_resolutions(
     project_root: &Path,
@@ -888,11 +1078,12 @@ fn run_sequential_resolutions(
     sweep: &ResolvedSweep,
     scope: &[&str],
     extra_args: &[String],
-    project_env: &[(String, String)],
-    allow_args: &[String],
+    env: &LaneEnv,
     // (doctests, multi, commands)
     flags: (bool, bool, bool),
     mut timings: Option<&mut Vec<TestTiming>>,
+    prepared: Option<&PreparedLane>,
+    tap: &LaneTap,
 ) -> Result<bool, DevError> {
     let owned: Vec<String> = scope.iter().map(|s| (*s).to_owned()).collect();
     let mut all_passed = true;
@@ -901,18 +1092,33 @@ fn run_sequential_resolutions(
             Some(pkg) => vec![pkg.as_str()],
             None => scope.to_vec(),
         };
+        let plan = prepared.map(|p| SerialPlan {
+            resolution: resolution.clone(),
+            units: p.units_by_path(&resolution),
+            hashes: p.hashes_by_path(&resolution),
+            rustdoc: lane_runs_doctests(sweep, flags.0),
+            expected: p
+                .resolutions
+                .iter()
+                .filter(|r| r.resolution == resolution)
+                .flat_map(|r| r.binaries.iter())
+                .filter(|b| b.executed(p.include_ignored).next().is_some())
+                .map(|b| (b.binary.executable.clone(), b.unit.clone()))
+                .collect(),
+        });
         let passed = run_one_test_sweep(
             project_root,
             state_root,
             sweep,
             &run_scope,
             extra_args,
-            project_env,
-            allow_args,
+            &env.project_env,
+            &env.allow_args,
             flags.0,
             flags.1,
             flags.2,
             timings.as_deref_mut(),
+            &SerialObserve { tap, plan },
         )?;
         // Keep going rather than returning on the first red package: the phase
         // reports every failure it can reach in one run, and stopping here
@@ -1004,10 +1210,11 @@ fn reject_scoped_complete(
 
 /// Trailing `brokkr check -- …` args narrow the real test run - a libtest
 /// `--skip` drops tests, a cargo `--lib` drops integration binaries - but
-/// the coverage audit enumerates each lane's ran-set from the sweep's own
-/// filters alone, without them. Those narrowed-away pairs would land in
-/// `ran`, so the audit would certify `complete` over tests that never
-/// executed. Reject trailing args under a complete claim, exactly like
+/// the plan takes each lane's selection from the sweep's own filters alone,
+/// without them. Those narrowed-away pairs would be selected and expected
+/// while nothing ran them, so the run could never be accounted - and before
+/// the plan existed, the audit certified `complete` over exactly those tests.
+/// Reject trailing args under a complete claim, exactly like
 /// `-p`: this closes the hole for both `--gate` and a `complete`
 /// `default_profile`, and for the ordinary-lane profiles that
 /// `run_isolated_sweep`'s per-sweep guard never covers.
@@ -1019,9 +1226,10 @@ fn reject_extra_args_complete(
         return Err(DevError::Config(
             "trailing `-- …` test args are rejected under `certifies = \
              \"complete\"`: they narrow the test run (a libtest `--skip`, a \
-             cargo `--lib`) but not the coverage audit, so the audit would \
-             count tests that never ran. Use a partial profile for ad-hoc \
-             narrowing, or fold the selection into a `[[check]]` entry."
+             cargo `--lib`) but not the plan built from the sweeps' own \
+             filters, so the plan would expect tests that never ran. Use a \
+             partial profile for ad-hoc narrowing, or fold the selection into \
+             a `[[check]]` entry."
                 .into(),
         ));
     }
@@ -1053,8 +1261,9 @@ fn ran_sweep_labels<'a>(
 }
 
 /// The test phase's "failures already listed" sentinel. A `Build` rather than
-/// a `Reported` until the build phases finish, because the coverage audit
-/// keys its best-effort run on it; [`already_reported`] converts it after.
+/// a `Reported` until the build phases finish, because the phase loop tells a
+/// failing lane (fail-fast for the lanes after it) from every other way out
+/// by it; [`already_reported`] converts it after.
 const TESTS_FAILED: &str = "tests failed";
 
 /// Mark a phase's printed-detail sentinel as [`DevError::Reported`], leaving
@@ -1074,9 +1283,10 @@ fn already_reported(e: DevError, sentinel: &str) -> DevError {
 /// naive `&& git commit` chaining fails closed. Any failure exits 1, except a
 /// cooperative shutdown (`brokkr kill`), which keeps main's exit 130, and a
 /// fired time ceiling, which exits 124.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn finish_check(
     outcome: &Result<(), DevError>,
+    stop: Option<RunStop>,
     certifies: Option<Certifies>,
     profile_label: &Option<String>,
     sweep_labels: &[&str],
@@ -1085,16 +1295,41 @@ fn finish_check(
     prose_only: bool,
     package: Option<&str>,
     failing_phase: Option<&'static str>,
-    coverage: Option<CoverageStats>,
+    mut report: RunReport,
     json: bool,
     started: std::time::Instant,
 ) -> Result<(), DevError> {
     // Nothing is running any more; drop the status line before the verdict so
     // it is not redrawn under it.
     output::disable_status_line();
+    // A fired ceiling or an interrupt is how the RUN stopped, whatever a lane
+    // recorded on its way down: it outranks the lane-level account.
+    match stop {
+        Some(RunStop::Watchdog) => {
+            report.termination = Some(TerminationSummary {
+                kind: TerminationCause::PhaseDeadline.as_str().to_owned(),
+                scope: failing_phase.unwrap_or("run").to_owned(),
+            });
+        }
+        Some(RunStop::Interrupt) => {
+            report.termination = Some(TerminationSummary {
+                kind: TerminationCause::Interrupt.as_str().to_owned(),
+                scope: "run".to_owned(),
+            });
+        }
+        None => {}
+    }
     let context = verdict_context(profile_label, sweep_labels.len(), lints.0, lints.1);
-    match outcome {
-        Ok(()) => {
+    // A stopped run is a failed run whatever its phases returned (see
+    // [`run_stop`]): the stop takes the failure path even from `Ok(())`.
+    let stopped_ok = DevError::Interrupted;
+    let failure = match (outcome, stop) {
+        (Ok(()), None) => None,
+        (Ok(()), Some(_)) => Some(&stopped_ok),
+        (Err(e), _) => Some(e),
+    };
+    match failure {
+        None => {
             let (word, scope, suffix, result) = match certifies {
                 // A shortened run must not sign off in the same words a full
                 // one does - the announcement at the top has scrolled away by
@@ -1137,13 +1372,13 @@ fn finish_check(
                     package,
                     None,
                     prose_only,
-                    coverage,
+                    report,
                     started.elapsed(),
                 );
             }
             result
         }
-        Err(e) => {
+        Some(e) => {
             // A `Reported` failure printed its own detail above. Every other
             // error carries its diagnostic in the message and nobody has shown
             // it yet - this used to assume the former of every failure, and a
@@ -1152,12 +1387,11 @@ fn finish_check(
             // A fired watchdog killed the run's processes and raised the
             // shutdown flag; whatever error that surfaced as (an interrupt, a
             // killed test, a failed build) is its echo, not a cause to print.
-            let stopped = watchdog_fired().is_some();
+            let stopped = stop == Some(RunStop::Watchdog);
             // Under a pending request, a failure is the interrupt's echo too: a
             // child killed by it can surface as a failed build or test before
             // anything polls the flag.
-            let interrupted = !stopped
-                && (matches!(e, DevError::Interrupted) || crate::shutdown::is_shutdown_requested());
+            let interrupted = stop == Some(RunStop::Interrupt);
             if !stopped
                 && !interrupted
                 && !matches!(e, DevError::Reported(_) | DevError::ExitCode(_))
@@ -1184,7 +1418,7 @@ fn finish_check(
                     package,
                     failing_phase,
                     prose_only,
-                    coverage,
+                    report,
                     started.elapsed(),
                 );
             }
@@ -1267,13 +1501,21 @@ fn verdict_context(
     }
 }
 
-/// The `--json` summary object: one line, last on stdout. Versioned
-/// and additive: fields are only ever added under
-/// `schema: 1`, consumers must tolerate unknown ones, and a bump is
-/// reserved for renames or semantic changes. `certifies` mirrors the
-/// resolved profile's claim (`null` for unclaimed profiles); `verdict` is
-/// `passed`/`complete`/`partial`/`failed`, paired with exit codes 0/0/10/1 -
-/// except a cooperatively interrupted run, which reports `failed` and exits 130.
+/// The version of the `--json` summary. 2 split the old `coverage` object
+/// into `policy_coverage` (what the profile selects) and
+/// `execution_accounting` (what ran, execution by execution), added
+/// `termination` and `doctests`, and dropped `coverage` - a semantic change,
+/// since the old `run` count meant "a reached lane listed it".
+const SUMMARY_SCHEMA: u32 = 2;
+
+/// The `--json` summary object: one line, last on stdout. Versioned and
+/// additive within a version: fields are only ever added, consumers must
+/// tolerate unknown ones, and a bump is reserved for renames or semantic
+/// changes. `certifies` mirrors the resolved profile's claim (`null` for
+/// unclaimed profiles); `verdict` is `passed`/`complete`/`partial`/`failed`,
+/// paired with exit codes 0/0/10/1 - except a cooperatively interrupted run,
+/// which reports `failed` and exits 130, and a run its time ceiling stopped,
+/// which reports `failed` and exits 124.
 #[derive(serde::Serialize)]
 struct CheckSummary<'a> {
     schema: u32,
@@ -1283,19 +1525,26 @@ struct CheckSummary<'a> {
     sweeps: Vec<&'a str>,
     /// The CLI `-p` scope, when one narrowed the run - a consumer must be
     /// able to see that a green covered specific packages, not the
-    /// workspace. A multi-package run joins the names with commas (still a
-    /// string, keeping the field additive under `schema: 1`).
+    /// workspace. A multi-package run joins the names with commas.
     package: Option<&'a str>,
     failed_phase: Option<&'a str>,
     /// `"prose_only"` when the markdown-only shortcut skipped the build
     /// phases, `null` on a full run. Without it a shortened run's `passed`
     /// was indistinguishable from a full one to a machine reader, which is
     /// the one reader that never sees the human verdict line's
-    /// "(markdown only - build phases skipped)". Additive under `schema: 1`.
+    /// "(markdown only - build phases skipped)".
     scope: Option<&'a str>,
-    /// Coverage accounting result; present only when the coverage phase
-    /// ran to completion (complete profiles).
-    coverage: Option<CoverageStats>,
+    /// How the run stopped, when something stopped it: a time ceiling, an
+    /// interrupt, a per-test timeout, the fail-fast after a failing lane.
+    termination: Option<TerminationSummary>,
+    /// Complete profiles only: whether every pair the profile could run is
+    /// selected or justified. Present on a failed run too.
+    policy_coverage: Option<PolicyCoverage>,
+    /// Complete profiles only: every expected execution's outcome, counted.
+    execution_accounting: Option<ExecutionAccounting>,
+    /// Complete profiles only: what the doctest streams said. No inventory,
+    /// so no accounting.
+    doctests: Option<DoctestAccounting>,
     elapsed_ms: u64,
 }
 
@@ -1308,11 +1557,15 @@ fn emit_json_summary(
     package: Option<&str>,
     failed_phase: Option<&'static str>,
     prose_only: bool,
-    coverage: Option<CoverageStats>,
+    report: RunReport,
     elapsed: std::time::Duration,
 ) {
+    let (policy_coverage, execution_accounting, doctests) = match report.accounting {
+        Some(b) => (Some(b.policy_coverage), Some(b.execution_accounting), Some(b.doctests)),
+        None => (None, None, None),
+    };
     let summary = CheckSummary {
-        schema: 1,
+        schema: SUMMARY_SCHEMA,
         certifies: certifies.map(|c| match c {
             Certifies::Complete => "complete",
             Certifies::Partial => "partial",
@@ -1323,7 +1576,10 @@ fn emit_json_summary(
         package,
         failed_phase,
         scope: prose_only.then_some("prose_only"),
-        coverage,
+        termination: report.termination,
+        policy_coverage,
+        execution_accounting,
+        doctests,
         elapsed_ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
     };
     match serde_json::to_string(&summary) {
@@ -3591,25 +3847,49 @@ fn reject_conflicting_lanes(sweep: &ResolvedSweep) -> Result<(), DevError> {
     Ok(())
 }
 
+/// The run-wide inputs of the test phase.
+struct TestPhaseArgs<'a> {
+    project: Option<Project>,
+    project_root: &'a Path,
+    state_root: &'a Path,
+    sweeps: &'a [ResolvedSweep],
+    packages: &'a [String],
+    doctests: bool,
+    commands: bool,
+    extra_args: &'a [String],
+    allow: &'a [String],
+    allow_exact: &'a [SitedAllow],
+}
+
 /// Iterate `sweeps`, pre-building each sweep's `build_packages` and
 /// then running `cargo test` for it. Fails fast on the first sweep
 /// that fails (build or test), mirroring how the clippy phase
 /// short-circuits on a non-zero status.
-#[allow(clippy::too_many_arguments)]
+///
+/// `prepared` is the plan's per-lane preparation under a complete claim. Every
+/// lane journals what it observes; a lane the fail-fast never reaches has
+/// that recorded as a termination too, so its planned executions read as
+/// unobserved for a stated reason. `stop` receives the termination that
+/// decided the phase, when one did.
 fn run_test_phase(
-    project: Option<Project>,
-    project_root: &Path,
-    state_root: &Path,
-    sweeps: &[ResolvedSweep],
-    packages: &[String],
-    doctests: bool,
-    commands: bool,
-    extra_args: &[String],
-    allow: &[String],
-    allow_exact: &[SitedAllow],
+    t: &TestPhaseArgs<'_>,
+    prepared: Option<&[Option<PreparedLane>]>,
     mut timings: Option<&mut Vec<TestTiming>>,
     executed: &mut [bool],
+    stop: &mut Option<TerminationSummary>,
 ) -> Result<(), DevError> {
+    let TestPhaseArgs {
+        project,
+        project_root,
+        state_root,
+        sweeps,
+        packages,
+        doctests,
+        commands,
+        extra_args,
+        allow,
+        allow_exact,
+    } = *t;
     let multi = sweeps.len() > 1;
     let allow_flags = crate::config::test_phase_allow_flags(allow, allow_exact);
     announce_test_allows(project_root, sweeps, &allow_flags, allow_exact);
@@ -3644,11 +3924,12 @@ fn run_test_phase(
             output::run_msg(&format!("test {}: {note} (dropped)", sweep.label));
         }
         sweeps_run += 1;
-        // Record before the run: the sweep's tests execute below (pass or
-        // fail), so the coverage audit may credit its ran-set. A sweep the
-        // loop never reaches (an earlier one failed fast) stays false.
+        // Record before the run: the sweep is reached, pass or fail. A sweep
+        // the loop never reaches (an earlier one failed fast) stays false.
         executed[i] = true;
 
+        let tap = LaneTap::new(i);
+        tap.record(JournalRecord::LaneStarted { lane: i });
         let lane = run_test_lane(
             &LaneArgs {
                 project,
@@ -3663,8 +3944,11 @@ fn run_test_phase(
                 multi,
                 commands,
             },
+            prepared.and_then(|p| p.get(i)).and_then(Option::as_ref),
+            &tap,
             timings.as_deref_mut(),
         );
+        tap.record(JournalRecord::LaneFinished { lane: i, passed: matches!(lane, Ok(true)) });
         // A green run never printed this sweep's shape, so a failure leaving
         // the lane - a red test, or any error: a pre-build, a lane refusal, a
         // spawn failure - names it here, once, whatever path it took.
@@ -3679,6 +3963,9 @@ fn run_test_phase(
                 sweep.label,
                 describe_sweep(sweep, true, &scope)
             ));
+            let decisive = record_phase_stop(i, sweeps.len(), &e, &tap);
+            let label = |l: usize| sweeps.get(l).map(|s| s.label.clone());
+            *stop = decisive.as_ref().map(|d| TerminationSummary::of(d, label));
             outcome = Err(e);
             break;
         }
@@ -3702,6 +3989,48 @@ fn run_test_phase(
     Ok(())
 }
 
+/// Record why the test phase stopped at lane `failed`, and return the
+/// termination that decided it.
+///
+/// - A lane whose tests failed stops the phase by fail-fast: every later lane
+///   is recorded as stopped by it, so its planned executions are unobserved
+///   for that stated reason, not for none.
+/// - A stop (interrupt, phase watchdog) is the run's.
+/// - Anything else that ends the phase - a blown budget, a refusal - is the
+///   run's too, carrying the lane's own decisive termination when it recorded
+///   one: a per-test timeout stops brokkr, and everything after it is
+///   unobserved because of that timeout.
+fn record_phase_stop(failed: usize, lanes: usize, e: &DevError, tap: &LaneTap) -> Option<Termination> {
+    let own = tap.decisive_termination();
+    let run = |cause| {
+        let t = Termination { scope: TerminationScope::Run, lane: None, stream: None, cause, test: None, charged: None };
+        journal_append(&JournalRecord::Terminated(t.clone()));
+        t
+    };
+    let run_stop = match e {
+        DevError::Build(m) if m == TESTS_FAILED => {
+            let mut first = None;
+            for lane in failed + 1..lanes {
+                let t = Termination {
+                    scope: TerminationScope::Lane,
+                    lane: Some(lane),
+                    stream: None,
+                    cause: TerminationCause::FailFast,
+                    test: None,
+                    charged: None,
+                };
+                journal_append(&JournalRecord::Terminated(t.clone()));
+                first.get_or_insert(t);
+            }
+            return own.or(first);
+        }
+        DevError::Interrupted => run(stop_cause()),
+        _ if crate::shutdown::is_shutdown_requested() => run(stop_cause()),
+        _ => run(own.as_ref().map_or(TerminationCause::FailFast, |t| t.cause)),
+    };
+    own.or(Some(run_stop))
+}
+
 /// What one test lane needs from the phase, bundled so the lane body can be
 /// its own function - which is what lets the phase attach the sweep's shape
 /// to every way out of it.
@@ -3721,84 +4050,95 @@ struct LaneArgs<'a> {
 
 /// Run one sweep's test lane: its pre-builds, then whichever harness it
 /// names. `Ok(false)` is a failure already reported.
+///
+/// `prepared` is the lane's plan under a complete claim: its artifacts are
+/// verified against it before anything runs, and the lane executes exactly
+/// what it lists. Outside one, the lanes that need a selection to execute
+/// prepare their own here, through the same code.
 fn run_test_lane(
     a: &LaneArgs<'_>,
+    prepared: Option<&PreparedLane>,
+    tap: &LaneTap,
     timings: Option<&mut Vec<TestTiming>>,
 ) -> Result<bool, DevError> {
     let sweep = a.sweep;
+    let inputs = LaneInputs {
+        project: a.project,
+        project_root: a.project_root,
+        state_root: a.state_root,
+        target_dir: a.target_dir,
+        allow_flags: a.allow_flags,
+        commands: a.commands,
+        complete: prepared.is_some(),
+    };
     // Per-sweep: a sweep carrying `rustflags` runs in its own isolated
     // target dir with a matching BROKKR_TEST_BIN_DIR + RUSTFLAGS, so a
-    // global cfg (e.g. `--cfg madsim`) never thrashes the plain sweeps.
-    // A lint allow reaches this build through exactly one layer, and which
-    // one is per sweep: a sweep carrying `rustflags` exports an env var, so
-    // the env is live for it whatever the config chain says. Whichever it
-    // is, it must reach the pre-build and the test run alike - a pre-build
+    // global cfg (e.g. `--cfg madsim`) never thrashes the plain sweeps. The
+    // lint allows reach the pre-build and the test run alike - a pre-build
     // compiling the same crate under the unsuppressed lint fails before
     // `cargo test` is ever reached.
-    let (env_allows, allow_args) =
-        rustflags::plumbing(a.project_root, !sweep.rustflags.is_empty(), a.allow_flags);
-    // Dev unless the sweep pinned a profile: BROKKR_TEST_BIN_DIR must
-    // name the directory this sweep's own pre-build wrote into.
-    let profile_dir = sweep
-        .profile
-        .map_or("debug", crate::config::SweepProfile::target_subdir);
-    let project_env = sweep_runtime_env(sweep, a.project, a.target_dir, profile_dir, env_allows);
+    let env = prepared.map_or_else(|| lane_env(&inputs, sweep), |p| p.env.clone());
+    let mut support: Vec<SupportArtifact> = Vec::new();
     for pkg in &sweep.build_packages {
-        run_sweep_pre_build(a.project_root, sweep, pkg, &project_env, &allow_args, a.commands)?;
+        support.extend(run_sweep_pre_build(a.project_root, sweep, pkg, &env.project_env, &env.allow_args, a.commands)?);
     }
 
     reject_conflicting_lanes(sweep)?;
 
-    if sweep.harness == crate::config::Harness::Nextest {
-        run_nextest_sweep(
+    let kind = lane_kind(sweep);
+    let own;
+    let prepared = match prepared {
+        Some(p) => {
+            // Other lanes have built since the plan was taken: prove this one
+            // is about to run what was enumerated.
+            if p.verify {
+                verify_lane_artifacts(&inputs, sweep, p, &support)?;
+            }
+            Some(p)
+        }
+        None if matches!(kind, LaneKind::Parallel | LaneKind::Isolated | LaneKind::Nextest) => {
+            own = prepare_lane(&inputs, sweep, a.scope, a.extra_args)?;
+            Some(&own)
+        }
+        None => None,
+    };
+
+    match (kind, prepared) {
+        (LaneKind::Nextest, Some(p)) => run_nextest_sweep(sweep, a.scope, p, tap, a.commands),
+        (LaneKind::Parallel, Some(p)) => run_parallel_sweep(
             a.project_root,
             a.state_root,
             sweep,
             a.scope,
-            a.extra_args,
-            &project_env,
-            &allow_args,
+            sweep.parallel_budget.unwrap_or(1),
+            p,
+            tap,
             a.commands,
-        )
-    } else if let Some(budget) = sweep.parallel_budget {
-        run_parallel_sweep(
+            timings,
+        ),
+        (LaneKind::Isolated, Some(p)) => run_isolated_sweep(
             a.project_root,
             a.state_root,
             sweep,
             a.scope,
-            budget,
-            a.extra_args,
-            &project_env,
-            &allow_args,
+            p,
+            tap,
             a.doctests,
             a.commands,
             timings,
-        )
-    } else if sweep.process_isolation {
-        run_isolated_sweep(
+        ),
+        _ => run_sequential_resolutions(
             a.project_root,
             a.state_root,
             sweep,
             a.scope,
             a.extra_args,
-            &project_env,
-            &allow_args,
-            a.doctests,
-            a.commands,
-            timings,
-        )
-    } else {
-        run_sequential_resolutions(
-            a.project_root,
-            a.state_root,
-            sweep,
-            a.scope,
-            a.extra_args,
-            &project_env,
-            &allow_args,
+            &env,
             (a.doctests, a.multi, a.commands),
             timings,
-        )
+            prepared,
+            tap,
+        ),
     }
 }
 
@@ -4105,54 +4445,50 @@ mod ran_labels_tests {
 mod json_summary_tests {
     #![allow(clippy::unwrap_used)]
 
-    use super::{CheckSummary, CoverageStats};
+    use super::{
+        CheckSummary, DoctestAccounting, DoctestObserved, ExecutionAccounting, PolicyCoverage,
+        TerminationSummary, SUMMARY_SCHEMA,
+    };
 
-    #[test]
-    fn summary_carries_schema_and_null_certifies() {
-        let s = CheckSummary {
-            schema: 1,
+    fn summary<'a>(verdict: &'a str, failed_phase: Option<&'a str>) -> CheckSummary<'a> {
+        CheckSummary {
+            schema: SUMMARY_SCHEMA,
             certifies: None,
-            verdict: "passed",
+            verdict,
             profile: Some("tier1"),
             sweeps: vec!["default", "ffi"],
             package: None,
-            failed_phase: None,
-            scope: Some("prose_only"),
-            coverage: None,
+            failed_phase,
+            scope: None,
+            termination: None,
+            policy_coverage: None,
+            execution_accounting: None,
+            doctests: None,
             elapsed_ms: 1234,
-        };
+        }
+    }
+
+    #[test]
+    fn summary_carries_schema_and_null_certifies() {
+        let mut s = summary("passed", None);
+        s.scope = Some("prose_only");
         let line = serde_json::to_string(&s).unwrap();
         assert!(line.contains("\"scope\":\"prose_only\""), "{line}");
         // The two contract-critical fields: the version consumers key on,
         // and `certifies` present-but-null until certification exists.
-        assert!(line.contains("\"schema\":1"), "{line}");
+        assert!(line.contains("\"schema\":2"), "{line}");
         assert!(line.contains("\"certifies\":null"), "{line}");
         assert!(line.contains("\"verdict\":\"passed\""), "{line}");
         assert!(line.contains("\"sweeps\":[\"default\",\"ffi\"]"), "{line}");
+        // Unknown accounting is null, never zero.
+        assert!(line.contains("\"execution_accounting\":null"), "{line}");
     }
 
     #[test]
     fn failed_summary_names_the_phase() {
-        let s = CheckSummary {
-            schema: 1,
-            certifies: None,
-            verdict: "failed",
-            profile: None,
-            sweeps: vec!["all-features"],
-            package: Some("nautilus-betfair"),
-            failed_phase: Some("clippy"),
-            scope: None,
-            coverage: Some(CoverageStats {
-                pairs: 100,
-                run: 90,
-                quarantined: 8,
-                ignored: 2,
-                curated: 0,
-                orphaned: 0,
-                dead_filters: 0,
-            }),
-            elapsed_ms: 10,
-        };
+        let mut s = summary("failed", Some("clippy"));
+        s.profile = None;
+        s.package = Some("nautilus-betfair");
         let line = serde_json::to_string(&s).unwrap();
         assert!(line.contains("\"verdict\":\"failed\""), "{line}");
         assert!(line.contains("\"failed_phase\":\"clippy\""), "{line}");
@@ -4160,6 +4496,50 @@ mod json_summary_tests {
         // The `-p` scope must be visible to consumers - a green that
         // covered one package may not be mistaken for a workspace green.
         assert!(line.contains("\"package\":\"nautilus-betfair\""), "{line}");
+    }
+
+    /// Schema 2's separate objects: policy coverage, execution accounting,
+    /// the doctest block, and the termination - each its own claim.
+    #[test]
+    fn schema_two_keeps_policy_and_execution_apart() {
+        let mut s = summary("failed", Some("test"));
+        s.termination = Some(TerminationSummary { kind: "per_test_timeout".into(), scope: "serial".into() });
+        s.policy_coverage = Some(PolicyCoverage {
+            status: "passed",
+            plan_complete: true,
+            pairs: 10,
+            selected: 9,
+            ignored: 1,
+            quarantined: 0,
+            curated: 0,
+            orphaned: 0,
+            dead_filters: 0,
+        });
+        s.execution_accounting = Some(ExecutionAccounting {
+            scope: "binary_tests",
+            status: "incomplete",
+            expected_executions: 9,
+            passed: 4,
+            failed: 0,
+            timed_out: 1,
+            interrupted: 1,
+            ignored: 0,
+            unobserved: 3,
+            anomalies: 0,
+        });
+        s.doctests = Some(DoctestAccounting {
+            inventory: "unavailable",
+            accounting: "unknown",
+            observed: DoctestObserved::default(),
+        });
+        let v: serde_json::Value = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!(v["termination"]["kind"], "per_test_timeout");
+        assert_eq!(v["policy_coverage"]["status"], "passed");
+        assert_eq!(v["policy_coverage"]["selected"], 9);
+        assert_eq!(v["execution_accounting"]["status"], "incomplete");
+        assert_eq!(v["execution_accounting"]["timed_out"], 1);
+        assert_eq!(v["doctests"]["inventory"], "unavailable");
+        assert!(v.get("coverage").is_none(), "the schema-1 object is gone");
     }
 }
 
@@ -4283,8 +4663,8 @@ mod complete_rejection_tests {
     #[test]
     fn complete_rejects_trailing_args() {
         // S3-13: `--gate -- -- --skip expensive_` (or `-- --lib`) narrows the
-        // real run but not the audit, so the skipped pairs would land in the
-        // audit's ran-set. Rejected before anything compiles.
+        // real run but not the plan, so the skipped pairs would stay expected
+        // with nothing running them. Rejected before anything compiles.
         let args = vec!["--".to_owned(), "--skip".to_owned(), "expensive_".to_owned()];
         let err = reject_extra_args_complete(Some(Certifies::Complete), &args)
             .unwrap_err()
@@ -4317,13 +4697,22 @@ mod complete_rejection_tests {
 
 #[cfg(test)]
 mod failure_exit_tests {
-    use super::{already_reported, finish_check, TESTS_FAILED};
+    use super::{already_reported, finish_check, run_stop, Certifies, RunReport, RunStop, TESTS_FAILED};
     use crate::error::DevError;
 
     fn finish(outcome: &Result<(), DevError>) -> Result<(), DevError> {
+        finish_stopped(outcome, run_stop(outcome, false, false), None)
+    }
+
+    fn finish_stopped(
+        outcome: &Result<(), DevError>,
+        stop: Option<RunStop>,
+        certifies: Option<Certifies>,
+    ) -> Result<(), DevError> {
         finish_check(
             outcome,
-            None,
+            stop,
+            certifies,
             &None,
             &[],
             (&[], &[]),
@@ -4331,7 +4720,7 @@ mod failure_exit_tests {
             false,
             None,
             Some("test"),
-            None,
+            RunReport::default(),
             false,
             std::time::Instant::now(),
         )
@@ -4342,6 +4731,29 @@ mod failure_exit_tests {
     #[test]
     fn an_interrupted_run_keeps_its_exit_path() {
         assert!(matches!(finish(&Err(DevError::Interrupted)), Err(DevError::Interrupted)));
+    }
+
+    /// A watchdog that fires after the last test finished and the audit
+    /// accepted the journal leaves the phases returning `Ok(())`. The stop
+    /// decides the verdict anyway: exit 124, never `complete` with exit 0 -
+    /// and an interrupt the same way, exit 130, complete claim or not.
+    #[test]
+    fn a_late_stop_fails_a_run_whose_phases_succeeded() {
+        let ok: Result<(), DevError> = Ok(());
+        assert_eq!(run_stop(&ok, true, false), Some(RunStop::Watchdog));
+        assert_eq!(run_stop(&ok, false, true), Some(RunStop::Interrupt));
+        assert_eq!(run_stop(&ok, false, false), None);
+        for certifies in [Some(Certifies::Complete), Some(Certifies::Partial), None] {
+            assert!(matches!(
+                finish_stopped(&ok, Some(RunStop::Watchdog), certifies),
+                Err(DevError::ExitCode(124))
+            ));
+            assert!(matches!(
+                finish_stopped(&ok, Some(RunStop::Interrupt), certifies),
+                Err(DevError::Interrupted)
+            ));
+        }
+        assert!(finish_stopped(&ok, None, Some(Certifies::Complete)).is_ok());
     }
 
     #[test]

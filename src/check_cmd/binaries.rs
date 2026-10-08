@@ -116,6 +116,34 @@ impl BuildRuntimeIndex {
         }
     }
 
+    /// What the launch envelope is built from, as sorted lines a plan can
+    /// hold and compare: every build script run's `out_dir`, `rustc-env`
+    /// pairs and link-search dirs, and every support bin behind runtime
+    /// `CARGO_BIN_EXE_<name>` with the xxh3 of its content. Two equal
+    /// fingerprints give the same envelope for every binary. The contents of
+    /// the link-search DIRECTORIES (a dylib a build script dropped there) are
+    /// not hashed - those are files no artifact stream names.
+    pub(crate) fn fingerprint(&self) -> Result<Vec<String>, DevError> {
+        let mut out = Vec::new();
+        for (pkg, runs) in &self.build_scripts {
+            for run in runs {
+                out.push(format!(
+                    "build-script {pkg} out_dir={:?} env={:?} linked={:?}",
+                    run.out_dir, run.env, run.linked_paths
+                ));
+            }
+        }
+        for (pkg, bins) in &self.bin_exes {
+            for (name, exe) in bins {
+                let hash = crate::test_runner::hash_file(Path::new(exe))
+                    .map_err(|e| DevError::Build(format!("could not hash support bin {exe}: {e}")))?;
+                out.push(format!("bin {pkg} {name} {exe} {hash}"));
+            }
+        }
+        out.sort();
+        Ok(out)
+    }
+
     /// Every `rustc-link-search` directory any build script emitted, sorted
     /// and deduplicated - cargo keeps these in a `BTreeSet`, so its loader
     /// path is ordered by path, not by which build script ran first.
@@ -130,21 +158,11 @@ impl BuildRuntimeIndex {
     }
 }
 
-/// Build (or no-op re-check) the selection's test binaries and return
-/// them with package attribution. `Ok(None)` means the build failed and
-/// was already reported.
-fn test_binaries(
-    project_root: &Path,
-    selection: &[String],
-    env_refs: &[(&str, &str)],
-    commands: bool,
-) -> Result<Option<Vec<TestBinary>>, DevError> {
-    Ok(test_binaries_with_runtime(project_root, selection, env_refs, commands)?
-        .map(|(bins, _)| bins))
-}
-
-/// [`test_binaries`] plus the [`BuildRuntimeIndex`] the same stream carries.
-/// Both direct-execution lanes need it; listing-only callers drop the index.
+/// Build (or no-op re-check) the selection's test binaries and return them
+/// with package attribution, plus the [`BuildRuntimeIndex`] the same stream
+/// carries - every listing and direct execution runs under the launch
+/// envelope built from it. `Ok(None)` means the build failed and was already
+/// reported.
 fn test_binaries_with_runtime(
     project_root: &Path,
     selection: &[String],
@@ -405,88 +423,39 @@ fn toolchain_libdir(
     Ok(String::from_utf8_lossy(&captured.stdout).trim().to_owned())
 }
 
-/// The loader path for one binary: toolchain libdir, the exe's own deps
-/// dir and its parent (matching what cargo adds when it runs binaries -
-/// the deps dirs track per-shape isolated target dirs for free), then
-/// `existing` - whatever `LD_LIBRARY_PATH` the run already carried. Loader
-/// path only - this is NOT the test-code env (CARGO_MANIFEST_DIR etc.),
-/// which stays cargo's job; listing runs no test bodies, so loading is
-/// the whole requirement. `existing` is the sweep's own `LD_LIBRARY_PATH`
-/// when it declared one (so a `[[check]] env` shared-object path is
-/// honored during listing, as it is for the cargo-mediated build/test),
-/// otherwise brokkr's inherited value - resolved by the caller.
-///
-/// Why it is needed at all: a `proc-macro = true` crate links libstd
-/// *dynamically* (rustc dlopens it), so direct-exec `--list` on its test
-/// binary dies with `error while loading shared libraries: libstd-….so`.
-/// Cargo supplies the loader path when cargo runs the binary; listing
-/// directly does not, so brokkr supplies it. Two alternatives were
-/// rejected: enumerating through cargo instead, because cargo cannot
-/// address a single lib unit-test harness without `-p` and `-p` changes
-/// feature unification - it can list a *different build* than the lane
-/// actually runs; and skipping proc-macro targets, which is a quiet
-/// shrink of the universe the coverage audit certifies over. The smoke
-/// workspace carries a proc-macro member as the permanent regression
-/// test.
-fn loader_path(libdir: &str, executable: &str, existing: Option<&str>) -> String {
-    let mut paths: Vec<String> = vec![libdir.to_owned()];
-
-    if let Some(deps) = Path::new(executable).parent() {
-        paths.push(deps.display().to_string());
-
-        if let Some(profile_dir) = deps.parent() {
-            paths.push(profile_dir.display().to_string());
-        }
-    }
-
-    if let Some(existing) = existing.filter(|e| !e.is_empty()) {
-        paths.push(existing.to_owned());
-    }
-    paths.join(":")
-}
-
 /// Run one built test binary with `--list` plus the given libtest args.
-/// A libtest listing executes no test *bodies*, so direct execution is
-/// env-safe once the loader path is supplied (see [`loader_path`]). It is not
-/// "no code", though: static constructors run before `main`, and a custom
-/// harness is arbitrary code that may ignore `--list` altogether - so the
-/// listing is bounded like a test, by [`crate::test_runner::TEST_TIMEOUT`],
-/// and one that overruns fails enumeration the way a failed listing does.
-/// `Ok(None)` means the listing failed and was already reported.
+///
+/// Listed under the SAME launch envelope its execution gets
+/// ([`DirectRuntime::envelope`]: cwd, loader path, `[env]`, `CARGO_PKG_*`,
+/// build-script env), not a smaller listing-only one. The listing is the
+/// binary's own code - static constructors run before `main`, and a custom
+/// harness may compute its test set from the environment - so a list taken
+/// under a different env is a list of a different run. The envelope also
+/// carries the loader path a `proc-macro = true` crate's test binary needs
+/// (it links libstd dynamically, and `--list` dies on a missing `libstd-*.so`
+/// without it).
+///
+/// Bounded like a test, by [`crate::test_runner::TEST_TIMEOUT`]; one that
+/// overruns fails enumeration the way a failed listing does. `Ok(None)` means
+/// the listing failed and was already reported.
 fn binary_list(
     binary: &TestBinary,
     project_root: &Path,
     libtest_args: &[&str],
     env_refs: &[(&str, &str)],
-    libdir: &str,
-) -> Result<Option<Vec<String>>, DevError> {
+    runtime: &DirectRuntime,
+) -> Result<Option<Listing>, DevError> {
     let mut args: Vec<&str> = libtest_args.to_vec();
     args.push("--list");
-    // The `LD_LIBRARY_PATH` this run already carries: the sweep's own
-    // (from `[[check]] env`) when it set one, else brokkr's inherited
-    // value. The loader tail folds it in, and the pushed pair below wins
-    // over the env_refs copy - so the sweep's path is honored here too.
-    let existing = env_refs
-        .iter()
-        .find(|(k, _)| *k == "LD_LIBRARY_PATH")
-        .map(|(_, v)| (*v).to_owned())
-        .or_else(|| std::env::var("LD_LIBRARY_PATH").ok());
-    let ld = loader_path(libdir, &binary.executable, existing.as_deref());
-    let mut env: Vec<(&str, &str)> = env_refs.to_vec();
-    env.push(("LD_LIBRARY_PATH", &ld));
-    // cwd is the owning package's root, matching where cargo runs the binary:
-    // a custom harness or ctor can observe cwd before producing its list.
-    let cwd = if binary.manifest_dir.as_os_str().is_empty() {
-        project_root
-    } else {
-        binary.manifest_dir.as_path()
-    };
+    let (cwd, env_owned) = runtime.envelope(binary, env_refs)?;
+    let cwd = if cwd.as_os_str() == "." { project_root.to_path_buf() } else { cwd };
+    let env: Vec<(&str, &str)> = env_owned.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
     // Launched as a test run is (own process group, run token, hold
     // capability), with its output bounded after exit: see `run_listing`.
     let run = crate::test_runner::run_listing(
         &binary.executable,
         &args,
-        cwd,
+        &cwd,
         &env,
         crate::test_runner::TEST_TIMEOUT,
     )?;
@@ -530,7 +499,8 @@ fn binary_list(
     // contribute an empty set. Silently treating "this binary does not speak
     // --list" as "this binary has no tests" is how a coverage audit certifies a
     // universe it never saw - and a green audit is taken as evidence.
-    let Some(names) = parse_list_output(&String::from_utf8_lossy(&captured.stdout)) else {
+    let stdout = String::from_utf8_lossy(&captured.stdout);
+    let Some(names) = parse_list_output(&stdout) else {
         output::error(&format!(
             "{} did not produce a complete libtest listing (no `N tests, M benchmarks` tally, or \
              one that disagrees with the entries listed above it). A target \
@@ -541,7 +511,15 @@ fn binary_list(
         ));
         return Ok(None);
     };
-    Ok(Some(names))
+    Ok(Some(Listing { tests: names, benchmarks: parse_list_benchmarks(&stdout) }))
+}
+
+/// One binary's `--list` answer: its tests, and its `#[bench]` functions -
+/// not tests, but executed once in test mode by a `cargo test` run.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Listing {
+    pub(crate) tests: Vec<String>,
+    pub(crate) benchmarks: Vec<String>,
 }
 
 /// One cargo target selector, as [`filter_binaries`] evaluates it.

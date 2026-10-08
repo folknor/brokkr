@@ -781,9 +781,9 @@ Lint suppressions, applied to **every phase that compiles** - `brokkr check`'s
 clippy phase and its test phase, plus `brokkr clippy` (optional).
 
 "Every phase that compiles" is the literal rule and includes the parts of a
-phase that are not the obvious cargo run: the sweep pre-builds, the
-process-isolated lane's enumeration, and the coverage audit's `cargo test
---no-run`. Anything that invokes the compiler fails on a lint the project's
+phase that are not the obvious cargo run: the sweep pre-builds, every lane's
+prebuild, and the `prepare` phase's `cargo test --no-run` builds (each lane's
+and each shape's universe). Anything that invokes the compiler fails on a lint the project's
 `-Dwarnings` promotes to an error, whether or not brokkr would have read its
 diagnostics.
 
@@ -983,10 +983,10 @@ env = { HIGH_PRECISION = "1" }
   target dir and dedupe in clippy. The natural use is a sweep needing the
   process-isolation guarantee, executed concurrently instead of one cargo
   spawn per test. Legal under a `certifies = "complete"` profile: the
-  coverage audit enumerates nextest lanes through the engine's own listing,
-  keyed `(binary-id, test)` - the finer key applies shape-wide when any lane
-  of a shape is nextest, and a package-scoped `[[quarantine]]` entry spans
-  every binary id in its package. Load errors: combined with `parallel`,
+  `prepare` phase takes a nextest lane's selection from the engine's own
+  listing - the one the lane then executes - keyed per binary like every
+  other lane, and a package-scoped `[[quarantine]]` entry spans every binary
+  of its package. Load errors: combined with `parallel`,
   with `feature_unification = "package"`, or on a profile setting
   `isolation = "process"` (redundant - the engine already isolates). See
   `brokkr man check nextest`.
@@ -1342,7 +1342,7 @@ It fires on every run rather than only under `certifies = "complete"`, which
 makes the coverage gate a third line of defence rather than the first.
 
 Both entries carry the same features, so they share a build shape and there is
-no second compile; the coverage ledger already reconciles multi-sweep ran-sets.
+no second compile; the coverage ledger already reconciles multi-sweep selections.
 
 ## `[[dependency_rule]]` array
 

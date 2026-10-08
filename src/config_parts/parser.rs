@@ -1474,10 +1474,11 @@ fn parse_quarantine(
 
 /// Validate a profile's `skip_phases`: it is a permission the `partial` claim
 /// grants (a profile without `certifies = "partial"` may not skip phases), and
-/// every named phase must be real AND skippable. `coverage` is real (a valid
-/// `failed_phase`) but not skippable - it runs only under a complete claim, the
-/// opposite of the partial one `skip_phases` requires, so skipping it is a
-/// guaranteed no-op and is rejected loudly rather than announced.
+/// every named phase must be real AND skippable. `prepare` and `coverage` are
+/// real (valid `failed_phase`s) but not skippable - they run only under a
+/// complete claim, the opposite of the partial one `skip_phases` requires, so
+/// skipping either is a guaranteed no-op and is rejected loudly rather than
+/// announced.
 fn validate_skip_phases(profile_name: &str, def: &ProfileDef) -> Result<(), DevError> {
     let Some(phases) = &def.skip_phases else {
         return Ok(());

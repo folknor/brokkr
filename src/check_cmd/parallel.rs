@@ -51,9 +51,10 @@
 // construction on both sides; the coverage gate is a third line of defence,
 // not the first.
 
-// THE FAN-OUT EXECUTES THE PREBUILT BINARIES DIRECTLY. The lane prebuilds
-// once with the sweep's whole selection, then runs each enumerated test
-// executable itself, with the libtest argv - it never re-enters cargo. The
+// THE FAN-OUT EXECUTES THE PREBUILT BINARIES DIRECTLY. The lane's
+// preparation (prepare.rs) prebuilds once with the sweep's whole selection
+// and lists every binary; the lane then runs each enumerated test executable
+// itself, with the libtest argv - it never re-enters cargo. The
 // previous shape (`cargo test -p <pkg> --test <t>` per binary) was
 // structurally unsound: cargo's feature resolution follows the ROOT UNIT SET,
 // not just the package selection, so a `-p`-scoped re-entry could resolve
@@ -528,31 +529,52 @@ fn reject_unsupported_forwarded(sweep: &ResolvedSweep, cargo_extra: &[String]) -
     )))
 }
 
+/// One planned binary of a parallel lane, with the resolution it belongs to.
+struct PlannedRun<'a> {
+    resolution: &'a Option<String>,
+    planned: &'a PreparedBinary,
+}
+
+/// The forwarded args every binary of a lane shares.
+struct DirectExtras<'a> {
+    libtest_extra: &'a [String],
+    allow_args: &'a [String],
+    cargo_extra: &'a [String],
+}
+
 /// Run one binary to completion, having already claimed `slots` of the
 /// budget. Executes the prebuilt binary directly under the cargo launch
 /// envelope; `project_root` is the fallback cwd for a binary whose manifest
-/// dir the artifact stream did not carry.
+/// dir the artifact stream did not carry. Everything the binary's stream says
+/// is journaled through `tap` as it arrives, attributed to this binary.
 #[allow(clippy::too_many_arguments)]
 fn run_one_binary(
     project_root: &Path,
     state_root: &Path,
     sweep: &ResolvedSweep,
-    binary: &TestBinary,
+    run: &PlannedRun<'_>,
+    extras: &DirectExtras<'_>,
     runtime: &DirectRuntime,
-    allow_args: &[String],
     env_refs: &[(&str, &str)],
     slots: u32,
-    cargo_extra: &[String],
-    libtest_extra: &[String],
+    tap: &LaneTap,
     abort: &std::sync::atomic::AtomicBool,
 ) -> Result<BinaryRun, DevError> {
-    let args = direct_libtest_args(sweep, slots, libtest_extra)?;
+    let binary = &run.planned.binary;
+    let origin = StreamOrigin::Binary {
+        resolution: run.resolution.clone(),
+        unit: run.planned.unit.clone(),
+        one_test: None,
+    };
+    let args = direct_libtest_args(sweep, slots, extras.libtest_extra)?;
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     let (cwd, env) = runtime.envelope(binary, env_refs)?;
     let cwd = if cwd.as_os_str() == "." { project_root.to_path_buf() } else { cwd };
     let env_pairs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    let sink_origin = origin.clone();
+    let sink = tap.sink(move |_| sink_origin.clone(), false);
     let started = Instant::now();
-    let run = test_runner::run_libtest_parallel(
+    let run_result = test_runner::run_libtest_parallel(
         &binary.executable,
         &arg_refs,
         &cwd,
@@ -563,17 +585,22 @@ fn run_one_binary(
         // Shared with every concurrent binary: the first to blow its budget
         // cancels the rest mid-flight rather than letting them finish.
         Some(abort),
+        Some(&sink),
         |_| {},
         |_| {},
         |_| {},
-    )?;
+    );
+    if let Err(DevError::Spawn { error, .. }) = &run_result {
+        tap.record(JournalRecord::SpawnFailed { lane: tap.lane(), origin, detail: error.to_string() });
+    }
+    let run = run_result?;
     let hung = match run.outcome {
         LibtestOutcome::HungTest(h) => Some(h),
         LibtestOutcome::Completed => None,
     };
     Ok(BinaryRun {
         label: format!("{}/{}", binary.package, binary.target),
-        command: repro_cargo_line(sweep, binary, allow_args, cargo_extra),
+        command: repro_cargo_line(sweep, binary, extras.allow_args, extras.cargo_extra),
         captured: run.captured,
         hung,
         timed_out: run.timed_out,
@@ -583,9 +610,19 @@ fn run_one_binary(
     })
 }
 
-/// Run one sweep with its test binaries executing concurrently under the
-/// entry's in-flight budget. Returns `Ok(false)` when any binary failed,
+/// Run one prepared sweep with its test binaries executing concurrently under
+/// the entry's in-flight budget. Returns `Ok(false)` when any binary failed,
 /// having already reported it.
+///
+/// The prebuild, the launch envelope and the listing all happened in
+/// preparation (`prepare_direct`): this lane runs the binaries it was handed,
+/// and the counts that drive its slot claims are the plan's.
+///
+/// Doctests are not reachable from this lane (they live in the `--doc`
+/// pseudo-target, which has no binary to fan out over), but this is NOT where
+/// that is reported: `[test] doctests = true` alongside a `parallel` entry is
+/// refused at config load. A per-run warning would be printed on every green
+/// run forever for a decision that only needs making once.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn run_parallel_sweep(
     project_root: &Path,
@@ -593,16 +630,9 @@ fn run_parallel_sweep(
     sweep: &ResolvedSweep,
     packages: &[&str],
     budget: u32,
-    extra_args: &[String],
-    project_env: &[(String, String)],
-    allow_args: &[String],
-    doctests: bool,
+    prepared: &PreparedLane,
+    tap: &LaneTap,
     commands: bool,
-    // `whole_workspace` used to be decided here, as the local `unify` flag.
-    // It now feeds `profile::resolve_unification` at the top of the check run,
-    // because the answer has to be one value the clippy phase, the pre-build,
-    // this prebuild, every runner and the coverage audit all read - deciding it
-    // per lane is how those drift.
     timings: Option<&mut Vec<TestTiming>>,
 ) -> Result<bool, DevError> {
     let sweep_started = Instant::now();
@@ -611,77 +641,15 @@ fn run_parallel_sweep(
         None,
         commands,
     );
-    let (cargo_extra, libtest_extra) = split_extra_args(extra_args);
-    // Selectors narrow the PLAN; the rest rides on each per-binary command.
-    // See `partition_target_selectors` for why mixing the two is a real bug
-    // rather than a tidiness question.
-    let (extra_selectors, cargo_extra) = partition_target_selectors(cargo_extra);
-
-    // Doctests are not reachable from this lane (they live in the `--doc`
-    // pseudo-target, which has no binary to fan out over), but this is NOT
-    // where that is reported: `[test] doctests = true` alongside a `parallel`
-    // entry is refused at config load. A per-run warning would be printed on
-    // every green run forever for a decision that only needs making once, and
-    // a gate whose normal output contains a warning has taught its readers to
-    // skip warnings.
-    let _ = doctests;
-
-    let env_full = merged_env(&sweep.env, project_env);
-    let env_refs: Vec<(&str, &str)> = env_full
+    let Some(runtime) = prepared.runtime.as_ref() else {
+        return Err(DevError::Build(format!("sweep '{}' reached the parallel lane unprepared", sweep.label)));
+    };
+    let env_refs = prepared.env.refs();
+    let binaries: Vec<PlannedRun<'_>> = prepared
+        .resolutions
         .iter()
-        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .flat_map(|r| r.binaries.iter().map(move |planned| PlannedRun { resolution: &r.resolution, planned }))
         .collect();
-
-    // One build for the whole sweep, before any fan-out. The per-binary runs
-    // below re-enter cargo, and for them to resolve to a no-op rebuild rather
-    // than N serialized recompiles the prebuild must carry every
-    // compile-affecting argument they will: the lint allows, the forwarded
-    // cargo args (`--release` and kin), and - on a whole-workspace sweep -
-    // the workspace feature-unification pin, without which each `-p`-scoped
-    // runner resolves its own feature graph (see the module header).
-    //
-    // Under package mode the prebuild is one cargo invocation PER PACKAGE, not
-    // one batched multi-`-p` command. The batched graph is observably not the
-    // same as N independent resolutions - that is the whole premise of package
-    // mode - so a batched prebuild would enumerate binaries from a shape no
-    // runner ever uses, and every per-binary re-entry would then rebuild
-    // instead of hitting the cache.
-    reject_forwarded_selectors(sweep, &cargo_extra)?;
-    reject_unsupported_forwarded(sweep, &cargo_extra)?;
-    // A configured target runner means cargo would wrap the executables;
-    // direct execution would silently bypass the wrapper, so the lane
-    // refuses before anything runs.
-    refuse_configured_runner(project_root, &env_refs)?;
-    let cli_scope: Vec<String> = packages.iter().map(|p| (*p).to_owned()).collect();
-    let mut all: Vec<TestBinary> = Vec::new();
-    let mut runtime_index = BuildRuntimeIndex::default();
-    for resolution in sweep.resolutions(&cli_scope) {
-        let mut selection = match &resolution {
-            // Package mode: this package alone, replacing the sweep's own
-            // `-p` list rather than adding to it.
-            Some(pkg) => vec!["-p".to_owned(), pkg.clone()],
-            None => sweep_selection_args(sweep, packages),
-        };
-        selection.extend(extra_selectors.iter().cloned());
-        selection.extend(allow_args.iter().cloned());
-        selection.extend(cargo_extra.iter().cloned());
-        selection.extend(sweep.unification_args());
-        let Some((found, index)) =
-            test_binaries_with_runtime(project_root, &selection, &env_refs, commands)?
-        else {
-            return Ok(false);
-        };
-        all.extend(found);
-        runtime_index.merge(index);
-    }
-    let runtime = DirectRuntime::load(project_root, &env_refs, runtime_index)?;
-    // The sweep's own `--test` filters UNION with any the caller supplied,
-    // matching cargo's own semantics for repeated selection flags - the
-    // enumeration above already unions them, so narrowing to one side here
-    // would drop binaries the build was told to produce.
-    let mut target_filters = sweep.cargo_test_filters.clone();
-    target_filters.extend(extra_selectors.iter().cloned());
-    let binaries = filter_binaries(&all, &target_filters);
     if binaries.is_empty() {
         return Err(DevError::Config(format!(
             "sweep '{}' has `parallel` but its selection matched no test \
@@ -690,21 +658,13 @@ fn run_parallel_sweep(
         )));
     }
 
-    // Test counts drive the slot claims, so the listing is not optional: a
-    // claim of one for every binary would serialize the fan-out down to one
-    // test at a time per binary and give up most of the win. Listing should
-    // cost one cheap spawn per binary; it is bounded like a test all the same
-    // (see `binary_list`), since a ctor or custom harness runs code first.
-    let libdir = toolchain_libdir(project_root, &env_refs)?;
-    let mut filter_args: Vec<&str> = sweep.name_filters.iter().map(String::as_str).collect();
-    filter_args.extend(sweep.libtest_args.iter().map(String::as_str));
-
-    let mut counted: Vec<(&TestBinary, u32)> = Vec::new();
+    // Test counts drive the slot claims: a claim of one for every binary
+    // would serialize the fan-out down to one test at a time per binary and
+    // give up most of the win. A binary whose filters select nothing never
+    // enters the plan.
+    let mut counted: Vec<(PlannedRun<'_>, u32)> = Vec::new();
     for b in binaries {
-        let Some(listed) = binary_list(b, project_root, &filter_args, &env_refs, &libdir)? else {
-            return Ok(false);
-        };
-        let count = u32::try_from(listed.len()).unwrap_or(u32::MAX);
+        let count = u32::try_from(b.planned.selected.len()).unwrap_or(u32::MAX);
         if count == 0 {
             continue;
         }
@@ -725,23 +685,25 @@ fn run_parallel_sweep(
     let cost_of = |b: &TestBinary| recorded.and_then(|m| m.get(&label_of(b))).copied();
     let known: Vec<(f64, u32)> = counted
         .iter()
-        .filter_map(|(b, c)| cost_of(b).filter(|k| k.serial > 0.0).map(|k| (k.serial, *c)))
+        .filter_map(|(b, c)| {
+            cost_of(&b.planned.binary).filter(|k| k.serial > 0.0).map(|k| (k.serial, *c))
+        })
         .collect();
     let mean_cost = mean_cost_per_test(&known);
     let weights: Vec<f64> = counted
         .iter()
-        .map(|(b, c)| timing_weight_for(cost_of(b).map(|k| k.serial), *c, mean_cost))
+        .map(|(b, c)| timing_weight_for(cost_of(&b.planned.binary).map(|k| k.serial), *c, mean_cost))
         .collect();
     let weights: Vec<u64> = weights.iter().copied().map(weight_ms).collect();
     let total_weight: u64 = weights.iter().sum();
-    let mut planned: Vec<(&TestBinary, u32)> = counted
+    let mut planned: Vec<(PlannedRun<'_>, u32)> = counted
         .into_iter()
         .zip(&weights)
         .map(|((b, count), w)| {
             // Capped at what the binary can still use: past `serial/slowest`
             // another thread cannot make it finish sooner, and the slot is
             // worth more to a binary that is not yet at its own floor.
-            let cap = useful_slot_cap(cost_of(b)).unwrap_or(u32::MAX);
+            let cap = useful_slot_cap(cost_of(&b.planned.binary)).unwrap_or(u32::MAX);
             let claim = claim_slots(*w, total_weight, budget, count).min(cap.max(1));
             (b, claim)
         })
@@ -750,15 +712,16 @@ fn run_parallel_sweep(
         return Err(DevError::Config(format!(
             "cargo test: zero tests ran (sweep: {}) - a profile/filter combo \
              collected no work across {} test binaries; treat as a wrong-run.",
-            sweep.label,
-            all.len()
+            sweep.label, prepared.enumerated
         )));
     }
 
     // Largest first. A big binary admitted late would find the budget carved
     // into slices too small to use it, so the long pole goes in while the pool
     // is whole - the ordering that puts the critical path first.
-    planned.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.target.cmp(&b.0.target)));
+    planned.sort_by(|a, b| {
+        b.1.cmp(&a.1).then_with(|| a.0.planned.binary.target.cmp(&b.0.planned.binary.target))
+    });
 
     // Split here on purpose. Everything above is cargo building and listing;
     // everything below is tests actually running. Reporting one number for
@@ -777,7 +740,8 @@ fn run_parallel_sweep(
     );
     output::detail(&plan_line);
     output::status(&plan_line);
-    warn_serialized_claims(sweep, budget, &planned);
+    let claims: Vec<(&TestBinary, u32)> = planned.iter().map(|(b, c)| (&b.planned.binary, *c)).collect();
+    warn_serialized_claims(sweep, budget, &claims);
     let fanout_started = Instant::now();
 
     let pool = Budget::new(budget);
@@ -788,33 +752,35 @@ fn run_parallel_sweep(
     // timeout, which the contract forbids. Threads already executing cannot be
     // recalled (their own watchdogs bound them), but nothing new starts.
     let aborted = std::sync::atomic::AtomicBool::new(false);
+    let extras = DirectExtras {
+        libtest_extra: &prepared.libtest_extra,
+        allow_args: &prepared.env.allow_args,
+        cargo_extra: &prepared.cargo_extra,
+    };
 
     std::thread::scope(|scope| {
         let mut handles = Vec::new();
-        for (binary, slots) in &planned {
+        for (run, slots) in &planned {
             let pool = &pool;
             let env_refs = &env_refs;
-            let cargo_extra = &cargo_extra;
-            let libtest_extra = &libtest_extra;
-            let runtime = &runtime;
             let aborted = &aborted;
+            let extras = &extras;
             handles.push(scope.spawn(move || {
                 pool.acquire(*slots)?;
                 if aborted.load(std::sync::atomic::Ordering::SeqCst) {
                     pool.release(*slots);
-                    return Ok(BinaryRun::skipped_after_abort(binary));
+                    return Ok(BinaryRun::skipped_after_abort(&run.planned.binary));
                 }
                 let out = run_one_binary(
                     project_root,
                     state_root,
                     sweep,
-                    binary,
+                    run,
+                    extras,
                     runtime,
-                    allow_args,
                     env_refs,
                     *slots,
-                    cargo_extra,
-                    libtest_extra,
+                    tap,
                     aborted,
                 );
                 if out.as_ref().is_ok_and(|r| r.timed_out || r.hung.is_some()) {
@@ -838,9 +804,16 @@ fn run_parallel_sweep(
 
     // An interrupt (or the watchdog) killed the in-flight groups and refused
     // the queued ones: the runs are not a verdict and their timings are
-    // truncated, so neither is reported nor recorded.
+    // truncated, so neither is reported nor recorded. What they observed is
+    // already journaled; the stop is what explains the rest.
     if crate::shutdown::is_shutdown_requested() {
+        tap.terminate(TerminationScope::Lane, stop_cause(), None);
         return Err(DevError::Interrupted);
+    }
+    // A blown budget stopped the queued binaries: theirs is a sibling's
+    // timeout, recorded as such rather than left to look like a silence.
+    if aborted.load(std::sync::atomic::Ordering::SeqCst) {
+        tap.terminate(TerminationScope::Lane, TerminationCause::SiblingTimeout, None);
     }
 
     // Recorded before reporting, and for a red sweep too: a binary that

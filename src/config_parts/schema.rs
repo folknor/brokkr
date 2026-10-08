@@ -1357,13 +1357,13 @@ pub enum Isolation {
 /// `failed_phase` field of the `check --json` summary - every phase can be the
 /// one that failed, `coverage` included.
 ///
-/// It is **not** the `skip_phases` universe: `coverage` is not skippable (it
-/// runs only under a `certifies = "complete"` profile, while `skip_phases`
-/// requires `certifies = "partial"`, and it is not gated on the skip predicate
-/// anyway). [`NON_SKIPPABLE_PHASES`] names that exclusion, and the `skip_phases`
-/// validator subtracts it from this list - so the two roles no longer let
-/// `skip_phases = ["coverage"]` load clean and announce a no-op.
-pub const PHASE_NAMES: [&str; 12] = [
+/// It is **not** the `skip_phases` universe: `prepare` and `coverage` are not
+/// skippable (they run only under a `certifies = "complete"` profile, while
+/// `skip_phases` requires `certifies = "partial"`, and they are not gated on
+/// the skip predicate anyway). [`NON_SKIPPABLE_PHASES`] names that exclusion,
+/// and the `skip_phases` validator subtracts it from this list - so the two
+/// roles never let `skip_phases = ["coverage"]` load clean and announce a no-op.
+pub const PHASE_NAMES: [&str; 13] = [
     "gremlins",
     "header",
     "textlint",
@@ -1373,6 +1373,7 @@ pub const PHASE_NAMES: [&str; 12] = [
     "publish_cycle",
     "clippy",
     "rustdoc",
+    "prepare",
     "test",
     "coverage",
     "install_feature",
@@ -1380,9 +1381,9 @@ pub const PHASE_NAMES: [&str; 12] = [
 
 /// Phases that are real (valid `failed_phase` values) but that a `skip_phases`
 /// list may not name. Subtracted from [`PHASE_NAMES`] to form the skippable
-/// universe. Only `coverage` today; kept a named list so the reason travels
-/// with the data.
-pub const NON_SKIPPABLE_PHASES: [&str; 1] = ["coverage"];
+/// universe. Both belong to the complete claim alone; kept a named list so the
+/// reason travels with the data.
+pub const NON_SKIPPABLE_PHASES: [&str; 2] = ["prepare", "coverage"];
 
 /// One `[[quarantine]]` entry: a justified, counted suppression.
 /// `issue` is required, not decorative - it
@@ -1441,8 +1442,8 @@ pub struct ProfileDef {
     /// `header`, `textlint`, `manifest`, `script_check`,
     /// `dependency_rules`, `publish_cycle`, `clippy`, `rustdoc`, `test`,
     /// `install_feature` minus [`NON_SKIPPABLE_PHASES`] -
-    /// `coverage` is not skippable (it runs only under a complete claim). Not
-    /// inherited through `extends`.
+    /// `prepare` and `coverage` are not skippable (they run only under a
+    /// complete claim). Not inherited through `extends`.
     pub skip_phases: Option<Vec<String>>,
     /// Run each of this profile's tests in its own process.
     /// `--test-threads=1` serializes tests

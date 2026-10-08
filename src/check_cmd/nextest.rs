@@ -4,7 +4,7 @@
 // brokkr links nextest (see Cargo.toml) and reads `list::TestList` directly,
 // so nothing here parses JSON. What it does own is the mapping from nextest's
 // per-testcase verdict to the ledger buckets `coverage` already speaks in
-// (run / ignored / quarantined / orphaned), and that mapping is a policy
+// (selected / ignored / quarantined / orphaned), and that mapping is a policy
 // decision rather than a transcription - see `Disposition`.
 //
 // The enumeration-is-ground-truth rule from `coverage` is unchanged and is the
@@ -28,9 +28,10 @@
 // universe silently shrinks by a whole binary, and every pair in it would read
 // as accounted-for rather than orphaned.
 //
-// So: one unfiltered listing per build shape establishes the universe
-// (`FilterBound::All`, no filtersets), and lane listings are only ever read
-// for their selections.
+// So: one unfiltered per-binary listing per build shape resolution
+// establishes the universe (the `prepare` phase's `enumerate_universe`), and
+// lane listings - the engine's included - are only ever read for their
+// selections.
 //
 // Default filters do not exist in this model. The engine runs under a
 // brokkr-synthesized config (see nextest_lane.rs) that declares none, and
@@ -42,38 +43,21 @@
 // lane moved to the synthesized config, because brokkr.toml is the only
 // authority over what a gate runs and claims.
 
-use nextest_metadata::{FilterMatch, MismatchReason, RustBinaryId, TestCaseName};
+use nextest_metadata::{FilterMatch, MismatchReason};
 
-/// The coverage key for a nextest lane: one test in one test binary.
-///
-/// **Finer than the libtest path's `(package, test)`**, deliberately. A package
-/// with several test targets has one `RustBinaryId` per target, so two
-/// integration binaries that both define `serial_tests::test_x` are two pairs
-/// here and one pair under the libtest path. That is not a cosmetic
-/// refinement: nautilus' B51 entry covers five binary ids inside
-/// `nautilus-infrastructure` (four `tests/` binaries plus the lib), which is
-/// exactly the shape where the coarser key merges pairs silently. Package-
-/// qualified `[[quarantine]]` and skip entries keep their meaning across the
-/// change - `package(X)` spans every binary id in X - but per-entry pair counts
-/// shift once, upward, on adoption.
-// NOT YET WIRED: no `[[check]]` entry can select the nextest harness, so
-// nothing constructs this. The classifier and its key land ahead of the lane
-// deliberately - they encode the three measured findings the lane depends on,
-// and the coverage pair is the audit's key type, so it has to be right before
-// there is code shaped around it rather than migrated after.
-#[allow(dead_code)]
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) struct NextestPair {
-    pub(crate) binary_id: RustBinaryId,
-    pub(crate) test: TestCaseName,
-}
+// The pair a nextest lane's testcase becomes is the same as every other
+// lane's - (shape, resolution, binary unit, test), see accounting.rs - with
+// the engine's `RustBinaryId` mapped onto the binary unit through the lane's
+// artifact index. A package with several test targets has one binary per
+// target, so two integration binaries that both define `serial_tests::test_x`
+// are two pairs (nautilus' B51 entry covers five binaries inside
+// `nautilus-infrastructure`, four `tests/` binaries plus the lib).
 
 /// What the ledger does with one testcase under one lane's listing.
 ///
 /// Only [`Disposition::Selected`] and [`Disposition::Ignored`] are terminal on
-/// their own; everything else has to be justified by another lane running the
-/// pair, or by a `[[quarantine]]` entry, or it orphans.
-#[allow(dead_code)] // Not yet wired - see NextestPair.
+/// their own; everything else has to be justified by another lane selecting
+/// the pair, or by a `[[quarantine]]` entry, or it orphans.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Disposition {
     /// The lane runs this pair.
@@ -95,8 +79,8 @@ pub(crate) enum Disposition {
 
 impl Disposition {
     /// Does this disposition settle the pair without needing another lane or a
-    /// quarantine entry?
-    #[allow(dead_code)] // Not yet wired - see NextestPair.
+    /// quarantine entry? Read by the classifier's tests, which pin the policy.
+    #[cfg(test)]
     pub(crate) fn is_terminal(self) -> bool {
         matches!(self, Disposition::Selected | Disposition::Ignored)
     }
@@ -138,12 +122,12 @@ impl Disposition {
 ///    failure mode of guessing is a pair silently accounted as justified. A
 ///    ledger that cannot say why a test did not run has not audited it.
 ///
-/// Feeds `coverage`'s `classify`, which owns the pair-level ledger; this only
-/// says what one testcase's verdict means.
+/// Feeds the nextest lane's preparation (`prepare_nextest`), whose selection
+/// `coverage`'s `classify` reads from the plan; this only says what one
+/// testcase's verdict means.
 // Named for the lane rather than the action: `include!` puts every check_cmd
 // file in one namespace, and `coverage`'s own `classify` is the pair-level
 // ledger classifier this feeds.
-#[allow(dead_code)] // Not yet wired - see NextestPair.
 pub(crate) fn nextest_disposition(filter_match: &FilterMatch) -> Disposition {
     match filter_match {
         FilterMatch::Matches => Disposition::Selected,

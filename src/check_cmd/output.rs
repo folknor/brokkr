@@ -349,7 +349,11 @@ pub(crate) fn describe_sweep(
 /// package-mode lane runs its tests against a binary built under ambient
 /// resolution.
 fn pre_build_args(sweep: &ResolvedSweep, package: &str, allow_args: &[String]) -> Vec<String> {
-    let mut args: Vec<String> = vec!["build".into()];
+    // `json-render-diagnostics`: the artifact stream on stdout (the support
+    // executables the pre-build produced, which a complete plan hashes),
+    // compiler diagnostics still rendered as text on stderr for the failure
+    // path. The message format does not enter cargo's fingerprint.
+    let mut args: Vec<String> = vec!["build".into(), "--message-format=json-render-diagnostics".into()];
     args.extend(allow_args.iter().cloned());
     // The pre-build must land where the tests will look for it: a sweep
     // pinned to a profile builds its binaries into that profile's
@@ -364,9 +368,72 @@ fn pre_build_args(sweep: &ResolvedSweep, package: &str, allow_args: &[String]) -
     args
 }
 
-/// Build one binary package with the sweep's feature flags. Errors
-/// surface compile failures the same way the test phase does: the
-/// stderr filtered through `cargo_filter::filter_clippy`.
+/// One executable a `build_packages` pre-build produced: what a test reaches
+/// through `BROKKR_TEST_BIN_DIR`, which no test build's artifact stream names
+/// when the package sits outside the test selection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SupportArtifact {
+    pub(crate) package: String,
+    pub(crate) target: String,
+    pub(crate) executable: String,
+}
+
+/// The executables in a pre-build's artifact stream (non-test artifacts that
+/// carry an `executable`), attributed to the pre-built package.
+fn support_artifacts(stdout: &str, package: &str) -> Vec<SupportArtifact> {
+    #[derive(serde::Deserialize)]
+    struct Artifact {
+        reason: String,
+        #[serde(default)]
+        target: Option<Target>,
+        #[serde(default)]
+        executable: Option<String>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Target {
+        name: String,
+        #[serde(default)]
+        kind: Vec<String>,
+    }
+    let mut out: Vec<SupportArtifact> = Vec::new();
+    for line in stdout.lines() {
+        let Ok(a) = serde_json::from_str::<Artifact>(line) else { continue };
+        if a.reason != "compiler-artifact" {
+            continue;
+        }
+        let (Some(target), Some(executable)) = (a.target, a.executable) else { continue };
+        // A dependency's build script is the build's machinery, not a
+        // support executable anything at test time reads.
+        if target.kind.iter().any(|k| k == "custom-build") {
+            continue;
+        }
+        let art = SupportArtifact { package: package.to_owned(), target: target.name, executable };
+        if !out.contains(&art) {
+            out.push(art);
+        }
+    }
+    out
+}
+
+/// The support executables' identities as fingerprint lines: package,
+/// target, path and content hash, sorted. Hashed when called - after the
+/// lane's own builds, which can re-uplift a support bin over the pre-build's,
+/// so the file hashed is the one the lane's tests will read.
+pub(crate) fn support_fingerprint(artifacts: &[SupportArtifact]) -> Result<Vec<String>, DevError> {
+    let mut out = Vec::with_capacity(artifacts.len());
+    for a in artifacts {
+        let hash = crate::test_runner::hash_file(Path::new(&a.executable))
+            .map_err(|e| DevError::Build(format!("could not hash support executable {}: {e}", a.executable)))?;
+        out.push(format!("support {} {} {} {hash}", a.package, a.target, a.executable));
+    }
+    out.sort();
+    out.dedup();
+    Ok(out)
+}
+
+/// Build one binary package with the sweep's feature flags, returning the
+/// executables it produced. Errors surface compile failures the same way the
+/// test phase does: the stderr filtered through `cargo_filter::filter_clippy`.
 fn run_sweep_pre_build(
     project_root: &Path,
     sweep: &ResolvedSweep,
@@ -374,7 +441,7 @@ fn run_sweep_pre_build(
     project_env: &[(String, String)],
     allow_args: &[String],
     commands: bool,
-) -> Result<(), DevError> {
+) -> Result<Vec<SupportArtifact>, DevError> {
     let args = pre_build_args(sweep, package, allow_args);
 
     // A pre-build is part of its sweep's shape: logged, shown as the status,
@@ -396,7 +463,7 @@ fn run_sweep_pre_build(
     let captured = output::run_captured_with_env("cargo", &arg_refs, project_root, &env_refs)?;
 
     if captured.status.success() {
-        return Ok(());
+        return Ok(support_artifacts(&String::from_utf8_lossy(&captured.stdout), package));
     }
 
     let stderr = String::from_utf8_lossy(&captured.stderr);
@@ -601,6 +668,85 @@ fn sweep_selection_args(sweep: &ResolvedSweep, packages: &[&str]) -> Vec<String>
     args
 }
 
+/// One serial resolution's share of the plan, under a complete profile: the
+/// executables its harnesses may present, and the ones that must.
+pub(crate) struct SerialPlan {
+    pub(crate) resolution: Option<String>,
+    /// Executable path -> unit: what a harness handshake resolves against.
+    /// Only THIS lane and resolution's artifacts - a path planned for another
+    /// lane does not satisfy it.
+    pub(crate) units: HashMap<String, BinaryUnit>,
+    /// Executable path -> planned content hash: the strict shim re-hashes a
+    /// harness at its handshake, immediately before it runs.
+    pub(crate) hashes: HashMap<String, String>,
+    /// The planned binaries that hold expected executions: each must connect.
+    pub(crate) expected: Vec<(String, BinaryUnit)>,
+    /// This lane is a planned doctest carrier ([`lane_runs_doctests`]): only
+    /// then may a rustdoc stream connect.
+    pub(crate) rustdoc: bool,
+}
+
+/// How a serial run reports what it saw.
+pub(crate) struct SerialObserve<'a> {
+    pub(crate) tap: &'a LaneTap,
+    /// `Some` under a complete profile: the harness shim is then strict.
+    pub(crate) plan: Option<SerialPlan>,
+}
+
+impl SerialObserve<'_> {
+    /// The sink for this run: harness streams attributed by the executable
+    /// their handshake named, rustdoc's to the doctest block, and cargo's own
+    /// stream to nothing - test records there could not be attributed.
+    fn sink(&self) -> crate::test_runner::ObservationSink {
+        let resolution = self.plan.as_ref().and_then(|p| p.resolution.clone());
+        let units = self.plan.as_ref().map(|p| p.units.clone()).unwrap_or_default();
+        self.tap.sink(
+            move |source| match source {
+                crate::test_runner::StreamSource::Harness { executable } => match units.get(executable) {
+                    Some(unit) => StreamOrigin::Binary {
+                        resolution: resolution.clone(),
+                        unit: unit.clone(),
+                        one_test: None,
+                    },
+                    None => StreamOrigin::Unattributed { detail: format!("harness {executable}") },
+                },
+                crate::test_runner::StreamSource::Rustdoc => StreamOrigin::Doctest,
+                crate::test_runner::StreamSource::Process => {
+                    StreamOrigin::Unattributed { detail: "cargo's shared stream".into() }
+                }
+            },
+            true,
+        )
+    }
+
+    /// After a cargo run that exited successfully: every planned harness with
+    /// expected executions must have connected. Cargo saying it ran every
+    /// binary while one never presented itself is an attribution failure, not
+    /// a pass the plan can take on trust.
+    fn missing_streams(&self) {
+        let Some(plan) = &self.plan else {
+            return;
+        };
+        let seen: BTreeSet<BinaryUnit> = self.tap.seen_units();
+        for (exe, unit) in &plan.expected {
+            if !seen.contains(unit) {
+                self.tap.record(JournalRecord::Observed {
+                    lane: self.tap.lane(),
+                    stream: crate::test_runner::next_stream_id(),
+                    origin: StreamOrigin::Unattributed { detail: format!("harness {exe}") },
+                    event: crate::test_runner::ObsEvent::AttributionError {
+                        detail: format!(
+                            "cargo exited successfully but the planned harness {} ({exe}) never \
+                             presented its stream",
+                            unit.id()
+                        ),
+                    },
+                });
+            }
+        }
+    }
+}
+
 /// Run one cargo test invocation for the given sweep. Returns
 /// `Ok(true)` on pass, `Ok(false)` on test failure (already reported),
 /// `Err(...)` on subprocess spawn failure. `multi` controls whether
@@ -620,10 +766,13 @@ fn run_one_test_sweep(
     multi: bool,
     commands: bool,
     timings: Option<&mut Vec<TestTiming>>,
+    observe: &SerialObserve<'_>,
 ) -> Result<bool, DevError> {
     let (cargo_extra, libtest_extra) = split_extra_args(extra_args);
     // A parallel sweep (test_threads != 1) takes the parallel runner below and
     // never isolates; a serial one isolates its harnesses unless it cannot.
+    // (Under a complete profile neither escape exists: preparation refused
+    // both, since neither can be attributed.)
     let parallel_threads = matches!(sweep.test_threads, Some(n) if n != 1);
     let shim_reason = if parallel_threads {
         None
@@ -631,6 +780,18 @@ fn run_one_test_sweep(
         serial_shim_fallback(project_root, cargo_extra, project_env, &sweep.env)
     };
     let use_shim = !parallel_threads && shim_reason.is_none();
+    let sink = observe.sink();
+    let obs = crate::test_runner::Observe {
+        sink: Some(std::sync::Arc::clone(&sink)),
+        shim: match (&observe.plan, use_shim) {
+            (_, false) => crate::test_runner::ShimMode::Off,
+            (Some(plan), true) => crate::test_runner::ShimMode::Strict(crate::test_runner::StrictPlan {
+                known: plan.hashes.clone(),
+                rustdoc: plan.rustdoc,
+            }),
+            (None, true) => crate::test_runner::ShimMode::Permissive,
+        },
+    };
 
     let mut args: Vec<String> = vec!["test".into()];
     // Before the selection and the `--` split: `--config` is a cargo option,
@@ -787,6 +948,7 @@ fn run_one_test_sweep(
             test_runner::TEST_TIMEOUT,
             // One cargo invocation, so there are no siblings to cancel.
             None,
+            Some(&sink),
             |_| {},
             |_| {},
             {
@@ -809,7 +971,7 @@ fn run_one_test_sweep(
             // Many tests in one process: the per-test clock can only name a
             // suspect, so the wall clock is what actually bounds the sweep.
             test_runner::Ceilings::shared_harness(),
-            use_shim,
+            &obs,
             |_| {},
             |_| {},
             {
@@ -881,6 +1043,7 @@ fn run_one_test_sweep(
         output::error(&cargo_filter::filter_test(&stdout, &stderr));
         return Ok(false);
     }
+    observe.missing_streams();
 
     // A green sweep prints no test output. To watch one test run, run it:
     // `brokkr test <NAME>` streams its stdout/stderr live. A gate is not a
@@ -2442,6 +2605,8 @@ warning: z [too_many_lines]
         // sweep too; both once went out without the pin.
         let pre_build = pre_build_args(&pkg, "daemon", &[]);
         assert!(pre_build.iter().any(|a| a == pin), "pre-build: {pre_build:?}");
+        // And it reports what it built, so a complete plan can hash it.
+        assert!(pre_build.iter().any(|a| a == "--message-format=json-render-diagnostics"), "{pre_build:?}");
 
         let doc = doc_args(&pkg, &[], &crate::config::RustdocConfig::default());
         assert!(doc.iter().any(|a| a == pin), "rustdoc: {doc:?}");
@@ -2452,6 +2617,32 @@ warning: z [too_many_lines]
             let z = test_args.iter().position(|a| a == "-Zfeature-unification");
             assert!(z.is_some_and(|i| i < split), "pin after `--`: {test_args:?}");
         }
+    }
+
+    /// A pre-build's stream yields its executables - a dependency's lib and
+    /// build script are not support executables - and their fingerprint
+    /// follows content.
+    #[test]
+    fn a_pre_build_reports_its_executables() {
+        let dir = crate::test_scratch::scratch("output", "support_artifacts");
+        let exe = dir.join("server");
+        std::fs::write(&exe, b"v1").unwrap();
+        let stdout = format!(
+            "{}\n{}\n{}\n{}\n",
+            r#"{"reason":"compiler-artifact","target":{"name":"dep","kind":["lib"]},"executable":null}"#,
+            r#"{"reason":"compiler-artifact","target":{"name":"build-script-build","kind":["custom-build"]},"executable":"/t/build/x/build-script-build"}"#,
+            format_args!(
+                r#"{{"reason":"compiler-artifact","target":{{"name":"server","kind":["bin"]}},"executable":"{}"}}"#,
+                exe.display()
+            ),
+            r#"{"reason":"build-finished","success":true}"#,
+        );
+        let arts = support_artifacts(&stdout, "server-pkg");
+        assert_eq!(arts.len(), 1, "{arts:?}");
+        assert_eq!(arts[0].target, "server");
+        let before = support_fingerprint(&arts).unwrap();
+        std::fs::write(&exe, b"v2").unwrap();
+        assert_ne!(before, support_fingerprint(&arts).unwrap());
     }
 
     #[test]
