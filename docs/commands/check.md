@@ -50,7 +50,9 @@ after it. `brokkr lock` shows who holds the lock and what it is doing - asked
 of the holder itself over its control socket, so it works across sandboxes.
 When the holder recorded the same `CODEX_THREAD_ID` as the waiting command, the
 wait says so: the holder is almost certainly the agent's own earlier command,
-still running in another exec session.
+still running in another exec session. The one holder a command does not wait
+for is its own ancestor - a brokkr started beneath a locked brokkr refuses at
+once instead (see "A descendant of the holder refuses rather than waits").
 
 Flags:
 - `-p/--package <PKG>` (repeatable) - scope every sweep's cargo invocation
@@ -851,6 +853,31 @@ the machine. The mark is a convention, not a kernel fact: scrubbing the
 environment drops it while leaving the descriptor open, and a helper can retain
 it after closing its own - both of which fail toward a refusal rather than a
 hang.
+
+### A descendant of the holder refuses rather than waits
+
+The same shape one level up: a locked brokkr started *beneath* a command that
+holds the lock - `brokkr run brokkr -- test NAME`, a script check or a test that
+shells out to brokkr - would wait on the flock while its ancestor waits for it
+to exit, and the machine-wide lock stays held until someone kills both. So a
+waiting acquisition compares the capability nonce it inherited (`crate::hold`;
+every child of a hold carries that hold's) against the hash the holder
+publishes, and on a match refuses at once, naming the holder and the remedy: run
+the inner command outside the outer one (for brokkr itself, the built
+`target/debug/brokkr`, or an installed one, invoked directly). Process ancestry
+plays no part, so it works where a PID namespace hides the parent.
+
+A match proves descent from the live hold, not that waiting would deadlock - an
+ancestor could release and only then wait - so the refusal says what it knows.
+An unrelated holder, a later hold after the inherited one was released, and a
+holder still draining (which publishes no hash yet) are all waited for as
+before. The wait polls (100 ms) rather than blocking in `flock`, so a record
+that is momentarily unreadable while the holder rewrites it cannot commit the
+waiter to an uninspectable wait, and a shutdown requested while waiting ends it.
+Same-process re-entry is checked first and is unaffected. `brokkr run` keeps
+holding the lock while its program runs - its serialization against benchmarks
+and its `brokkr lock`/`kill` tracking are the point - so a locked brokkr cannot
+run beneath it; that is the case this refusal reports.
 
 The wrapper stays configured for brokkr's own builds too - never bypassed
 by unsetting it - because the wrapper's identity is part of cargo's compile

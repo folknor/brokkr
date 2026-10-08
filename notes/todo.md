@@ -30,6 +30,28 @@ point for work on the check pipeline. 820-line `brokkr.toml`, 36
 [result]  check passed in 8m11s
 ```
 
+## Open: should `brokkr run` release the lock while its program runs? (2026-10-08)
+
+Today `run` holds the global lock through the program's whole run, so a locked
+brokkr cannot run beneath it (it now refuses; it used to deadlock). Releasing
+after the build would let `brokkr run brokkr -- test X` work, but it is not just
+dropping a guard:
+
+- loses serialization against benchmarks (the `run --commit` A/B example is
+  measurement-adjacent), `brokkr lock`/`kill` tracking of the program, and the
+  `disable_toolchain` window during execution;
+- plain `run` is one `cargo run`; releasing first means building, then executing
+  the binary directly under cargo's runtime envelope (`check_cmd::DirectRuntime`
+  has the test-specific half of that);
+- `--commit` runs inside `with_worktree`'s outer hold, which also protects
+  worktree eviction and `clean` - an unlocked run needs a usage lease on the
+  worktree's artifacts first;
+- the passthrough runner does not set `die_with_parent`, so a SIGKILLed brokkr
+  already orphans a `run` workload, lock or not.
+
+If done, it wants an explicit "protected execution" path for measurement users
+rather than a quiet change to `run`.
+
 ## Structural debt (last audited 2026-04-17.)
 
 The high-impact items have been worked off. What's listed below is

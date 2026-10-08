@@ -269,6 +269,10 @@ pub struct LockInfo {
     pub pid_ns: String,
     pub time_ns: String,
     pub codex_thread: String,
+    /// The hash of the holder's capability nonce (`crate::hold`), empty while
+    /// it drains or when unrecorded. What a waiting descendant compares its
+    /// inherited nonce against.
+    pub auth: String,
     pub project: String,
     pub command: String,
     pub args: String,
@@ -483,41 +487,8 @@ fn acquire_at(
     let c_path = path_to_cstring(path)?;
     let fd = open_lock_file(&c_path)?;
 
-    // Try non-blocking first to print a message if waiting.
-    let ret = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
-    if ret != 0 {
-        let err = std::io::Error::last_os_error();
-        if err.raw_os_error() == Some(libc::EWOULDBLOCK) {
-            // Deliberately terse: who holds the lock and how busy it is lives
-            // in `brokkr lock`, which re-samples on every invocation.
-            crate::output::lock_msg("waiting for the brokkr lock ...");
-            if let Some(hint) = read_lock_contents(fd).and_then(|info| same_agent_hint(&info)) {
-                crate::output::lock_msg(&hint);
-            }
-
-            // Block until the lock is released. Retry on EINTR.
-            loop {
-                let ret = unsafe { libc::flock(fd, libc::LOCK_EX) };
-                if ret == 0 {
-                    break;
-                }
-                let err = std::io::Error::last_os_error();
-                if err.raw_os_error() == Some(libc::EINTR) {
-                    continue;
-                }
-                let _close = unsafe { OwnedFd::from_raw_fd(fd) };
-                return Err(DevError::Lock(format!("blocking flock failed: {err}")));
-            }
-            crate::output::lock_msg(
-                "acquired - you now hold the global brokkr lock for the duration of this command",
-            );
-        } else {
-            let _close = unsafe { OwnedFd::from_raw_fd(fd) };
-            return Err(DevError::Lock(format!("flock failed: {err}")));
-        }
-    }
-
     let owned = unsafe { OwnedFd::from_raw_fd(fd) };
+    wait_for_flock(owned.as_raw_fd(), crate::hold::inherited_capability_hash().as_deref())?;
     // A stop accepted while this thread waited on the flock.
     refuse_if_stopping()?;
     // The control socket exists before the drain, so a hold that is clearing
@@ -578,6 +549,92 @@ fn acquire_at(
     Ok(guard)
 }
 
+/// How often a waiting acquisition retries the flock and re-reads the holder.
+const LOCK_POLL: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Take the exclusive flock on `fd`, waiting for the current holder if there is
+/// one - unless that holder is this process's own ancestor.
+///
+/// # Why a waiting descendant refuses
+///
+/// A brokkr started by a command that holds the lock - `brokkr run brokkr --
+/// test NAME`, a script check or a test that shells out to brokkr - would block
+/// on the flock while its ancestor waits for it to exit: neither moves, and the
+/// machine-wide lock stays held until someone kills them (it sat 22 minutes
+/// once). The ancestor is recognisable without any process ancestry, which a
+/// PID namespace hides: every child of a hold inherits that hold's nonce, and
+/// the lock record publishes the nonce's hash (`crate::hold`). `inherited` is
+/// this process's inherited hash; a holder publishing the same one is the hold
+/// this process descends from.
+///
+/// That match proves authorization, not deadlock: an ancestor could release
+/// and only then wait. Refusing that case loses an execution that would have
+/// worked; waiting in the common case loses the machine. The refusal says what
+/// it knows and no more.
+///
+/// # Why poll rather than block
+///
+/// The record can be unreadable for a moment while the holder rewrites it
+/// (child pid, progress), and a single look before a blocking `flock` would
+/// then commit to the very wait this exists to prevent. Each round retries the
+/// flock, then re-reads the holder; acquisition wins over whatever stale record
+/// is on disk (a dead ancestor's flock is gone with it - the descriptor is
+/// close-on-exec). A shutdown requested while waiting ends the wait.
+fn wait_for_flock(fd: RawFd, inherited: Option<&str>) -> Result<(), DevError> {
+    let mut announced = false;
+    loop {
+        let ret = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
+        if ret == 0 {
+            if announced {
+                crate::output::lock_msg(
+                    "acquired - you now hold the global brokkr lock for the duration of this \
+                     command",
+                );
+            }
+            return Ok(());
+        }
+        let err = std::io::Error::last_os_error();
+        match err.raw_os_error() {
+            Some(libc::EWOULDBLOCK) => {}
+            Some(libc::EINTR) => continue,
+            _ => return Err(DevError::Lock(format!("flock failed: {err}"))),
+        }
+        let holder = read_lock_contents(fd);
+        if let (Some(mine), Some(info)) = (inherited, &holder)
+            && !info.auth.is_empty()
+            && info.auth == mine
+        {
+            return Err(DevError::Lock(nested_refusal(info)));
+        }
+        if !announced {
+            announced = true;
+            // Deliberately terse: who holds the lock and how busy it is lives
+            // in `brokkr lock`, which re-samples on every invocation.
+            crate::output::lock_msg("waiting for the brokkr lock ...");
+            if let Some(hint) = holder.as_ref().and_then(same_agent_hint) {
+                crate::output::lock_msg(&hint);
+            }
+        }
+        if crate::shutdown::is_shutdown_requested() || crate::shutdown::stop_committed() {
+            return Err(DevError::Interrupted);
+        }
+        std::thread::sleep(LOCK_POLL);
+    }
+}
+
+/// The refusal for a descendant of the live holder.
+fn nested_refusal(holder: &LockInfo) -> String {
+    format!(
+        "cannot take the brokkr lock independently while the hold you were started under is \
+         active - it is held by your own ancestor (`brokkr {}`), which waiting here would never \
+         let go of. Run the inner command outside the outer one: run the built binary directly \
+         (for brokkr itself, build it and invoke `target/debug/brokkr ...`, or `brokkr install` \
+         and invoke the installed one), or run it before or after the outer command, not \
+         beneath it.",
+        holder.command
+    )
+}
+
 /// Check the global lock status. Returns `None` if no lock is held.
 ///
 /// The flock is the sole authority on held/not-held: the non-blocking probe
@@ -633,6 +690,7 @@ pub fn status() -> Result<Option<LockInfo>, DevError> {
             pid_ns: String::new(),
             time_ns: String::new(),
             codex_thread: String::new(),
+            auth: String::new(),
             project: "unknown".into(),
             command: "unknown".into(),
             args: String::new(),
@@ -1548,6 +1606,7 @@ fn parse_lock_contents(text: &str) -> Option<LockInfo> {
         pid_ns: raw("pid_ns").to_owned(),
         time_ns: raw("time_ns").to_owned(),
         codex_thread: escaped("codex_thread"),
+        auth: raw("auth").to_owned(),
         project,
         command: escaped("command"),
         args: escaped("args"),
@@ -1608,6 +1667,77 @@ mod tests {
         disk_gate: no_disk_gate,
         service: false,
     };
+
+    /// A holder on `path` publishing `auth`, as a second descriptor of this
+    /// process stands in for another process: flock locks are per open file
+    /// description, so the two contend exactly as two processes would.
+    fn foreign_holder(path: &Path, auth: &str) -> OwnedFd {
+        std::fs::write(path, format!("pid=1\nproject=outer\ncommand=run\nauth={auth}\n")).unwrap();
+        let fd = open_lock_file(&path_to_cstring(path).unwrap()).unwrap();
+        assert_eq!(unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) }, 0);
+        unsafe { OwnedFd::from_raw_fd(fd) }
+    }
+
+    fn waiter(path: &Path) -> OwnedFd {
+        let fd = open_lock_file(&path_to_cstring(path).unwrap()).unwrap();
+        unsafe { OwnedFd::from_raw_fd(fd) }
+    }
+
+    // The deadlock this exists for: a brokkr whose inherited nonce is the
+    // live holder's would wait on its own ancestor forever. It refuses at
+    // once instead, naming the holder.
+    #[test]
+    fn a_descendant_of_the_holder_refuses_instead_of_waiting() {
+        let path = tmp_lock("nested_refuses");
+        let _holder = foreign_holder(&path, "abc123");
+        let me = waiter(&path);
+        let started = std::time::Instant::now();
+        let err = wait_for_flock(me.as_raw_fd(), Some("abc123")).unwrap_err().to_string();
+        assert!(err.contains("your own ancestor") && err.contains("brokkr run"), "{err}");
+        assert!(started.elapsed() < LOCK_POLL, "refused without a poll's sleep");
+    }
+
+    // A different hold - an unrelated holder, or a later hold after the one
+    // this process descends from was released - is waited for as before, and
+    // the wait ends when it releases.
+    #[test]
+    fn an_unrelated_holder_is_waited_for() {
+        let path = tmp_lock("unrelated_waits");
+        let holder = foreign_holder(&path, "theirs");
+        let me = waiter(&path);
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            drop(holder);
+        });
+        wait_for_flock(me.as_raw_fd(), Some("mine")).unwrap();
+        release.join().unwrap();
+    }
+
+    // A holder still draining publishes an empty `auth`, which matches no
+    // inherited nonce; and a process that inherited none never refuses.
+    #[test]
+    fn an_empty_or_absent_nonce_never_reads_as_nesting() {
+        let path = tmp_lock("empty_auth_waits");
+        let holder = foreign_holder(&path, "");
+        let me = waiter(&path);
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            drop(holder);
+        });
+        wait_for_flock(me.as_raw_fd(), Some("")).unwrap();
+        release.join().unwrap();
+        drop(me);
+        let _holder = foreign_holder(&path, "abc");
+        let me = waiter(&path);
+        let path_t = path.clone();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            drop(_holder);
+            path_t
+        });
+        wait_for_flock(me.as_raw_fd(), None).unwrap();
+        release.join().unwrap();
+    }
 
     /// A refused gate releases the lock: the next acquirer takes it at once.
     #[test]

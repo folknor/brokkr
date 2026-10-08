@@ -249,6 +249,8 @@ impl MockServer {
         if isolate_pg {
             cmd.process_group(0);
         }
+        // Every child of a hold carries its capability: see `crate::hold`.
+        crate::hold::stamp(&mut cmd);
         let mut child = cmd
             .spawn()
             .map_err(|error| DevError::Spawn {

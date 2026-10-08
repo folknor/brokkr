@@ -242,6 +242,14 @@ for …` rather than an error. Both ride the `disable_toolchain` window, so a
 foreign checkout's pinned `rust-toolchain.toml` is moved aside for the build
 exactly as it is under `check`.
 
+`run` holds the lock for the program's whole run, not just its build: the
+program is serialized against benchmarks and tracked by `brokkr lock` and
+`brokkr kill`. So the program cannot itself be a locked brokkr command -
+`brokkr run brokkr -- test NAME` would wait on its own parent forever. It
+refuses at once instead, naming the remedy: run the built binary
+(`target/debug/brokkr`) or an installed one directly, outside `run`. See `brokkr
+man check` ("A descendant of the holder refuses rather than waits").
+
 With no `brokkr.toml`, the working directory is the project root and there is
 no `[bin]` section - discovery, the bare index, and the sole-runnable and
 sole-package rules all still work. Configuration buys disambiguation, never

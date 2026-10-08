@@ -117,6 +117,22 @@ pub fn capability() -> Option<String> {
     slot().clone()
 }
 
+/// The published hash of the capability this process INHERITED - the nonce
+/// of whatever hold its ancestor owned when it was spawned - or `None` when it
+/// inherited none.
+///
+/// Distinct from [`capability`], which is the hold this process itself owns:
+/// a brokkr that takes its own hold stamps that nonce over the inherited one on
+/// its children, and the inherited value never becomes an owned one. What the
+/// inherited hash is for is recognising, while waiting for the lock, that the
+/// current holder is this process's own ancestor (`lockfile::acquire`).
+pub fn inherited_capability_hash() -> Option<String> {
+    std::env::var(CAPABILITY_ENV)
+        .ok()
+        .filter(|n| !n.is_empty())
+        .map(|n| auth_hash(&n))
+}
+
 /// Stamp the current capability onto a child command.
 ///
 /// Called from the spawn choke points rather than at each of brokkr's ~25 cargo

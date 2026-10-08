@@ -349,14 +349,16 @@ fn spawn_server(
     // server's PID directly (single-PID, may leave helper threads but
     // those are part of the same PG-as-brokkr and will be reaped on
     // brokkr exit).
-    Command::new(binary)
-        .args(["serve", "--data-dir", data_dir, "--tiles", tiles])
+    let mut cmd = Command::new(binary);
+    cmd.args(["serve", "--data-dir", data_dir, "--tiles", tiles])
         .env("PORT", &port_str)
         .current_dir(project_root)
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
-        .stdin(Stdio::null())
-        .spawn()
+        .stdin(Stdio::null());
+    // Every child of a hold carries its capability: see `crate::hold`.
+    crate::hold::stamp(&mut cmd);
+    cmd.spawn()
         .map_err(|error| DevError::Spawn {
             program: binary.display().to_string(),
             error,
