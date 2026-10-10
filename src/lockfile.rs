@@ -583,16 +583,21 @@ const LOCK_POLL: std::time::Duration = std::time::Duration::from_millis(100);
 /// close-on-exec). A shutdown requested while waiting ends the wait.
 fn wait_for_flock(fd: RawFd, inherited: Option<&str>) -> Result<(), DevError> {
     let mut announced = false;
-    let mut rounds = 0u32;
-    let began = Instant::now();
     loop {
         let ret = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
         if ret == 0 {
             if announced {
-                crate::output::lock_msg(&format!(
-                    "acquired after {}",
-                    format_duration(began.elapsed().as_secs())
-                ));
+                // Wording fixed on purpose - do not shorten or "improve" it.
+                // These two lines have been revised many times, and every
+                // terser version was misread by agents: without "you now hold
+                // the global brokkr lock for the duration of this command",
+                // an agent concludes its runs are contested and that other
+                // projects' brokkr commands are loading the machine during
+                // its benchmarks. They are not - the lock excludes them.
+                crate::output::lock_msg(
+                    "acquired - you now hold the global brokkr lock for the duration of this \
+                     command",
+                );
             }
             return Ok(());
         }
@@ -609,15 +614,12 @@ fn wait_for_flock(fd: RawFd, inherited: Option<&str>) -> Result<(), DevError> {
         {
             return Err(DevError::Lock(nested_refusal(info)));
         }
-        rounds += 1;
-        // A record read mid-rewrite is `None`; give it a few rounds to settle
-        // so the announcement can name the holder, then announce regardless.
-        if !announced && (holder.is_some() || rounds >= 5) {
+        if !announced {
             announced = true;
-            // Terse: how busy the holder is lives in `brokkr lock`, which
-            // re-samples on every invocation.
-            let who = holder.as_ref().and_then(holder_blurb);
-            crate::output::lock_msg(&waiting_line(who.as_deref()));
+            // Deliberately terse, and fixed wording (see the acquired line
+            // above): who holds the lock and how busy it is lives in
+            // `brokkr lock`, which re-samples on every invocation.
+            crate::output::lock_msg("waiting for the brokkr lock ...");
             if let Some(hint) = holder.as_ref().and_then(same_agent_hint) {
                 crate::output::lock_msg(&hint);
             }
@@ -626,32 +628,6 @@ fn wait_for_flock(fd: RawFd, inherited: Option<&str>) -> Result<(), DevError> {
             return Err(DevError::Interrupted);
         }
         std::thread::sleep(LOCK_POLL);
-    }
-}
-
-/// `held by brokkr check (pbfhogg), 4m` - the holder's command, project and
-/// how long its process has run. `None` unless the holder's identity verifies
-/// from this namespace ([`shares_namespaces`] and [`verify_identity`]): an
-/// unverifiable record may belong to a recycled PID or another boot, and the
-/// wait message then says only that the lock is busy.
-fn holder_blurb(info: &LockInfo) -> Option<String> {
-    if info.command.is_empty() || !shares_namespaces(info) {
-        return None;
-    }
-    let up = verified_uptime(info.pid, &info.starttime, &info.boot_id)?;
-    let project = match info.project.as_str() {
-        // "brokkr" is the no-project placeholder (`acquire_cmd_lock_opt`).
-        "" | "unknown" | "brokkr" => String::new(),
-        p => format!(" ({p})"),
-    };
-    Some(format!("held by brokkr {}{project}, {up}", info.command))
-}
-
-/// The wait announcement, with the holder blurb when one could be verified.
-fn waiting_line(who: Option<&str>) -> String {
-    match who {
-        Some(who) => format!("waiting for the brokkr lock ({who}) ..."),
-        None => "waiting for the brokkr lock ...".to_owned(),
     }
 }
 
@@ -2018,27 +1994,6 @@ mod tests {
             "self-identity must verify: starttime={} boot_id={}",
             info.starttime,
             info.boot_id
-        );
-    }
-
-    /// The wait line names the holder only when its identity verifies; a record
-    /// with wrong tokens falls back to the plain wording.
-    #[test]
-    fn wait_line_names_a_verified_holder_and_fails_closed() {
-        let path = tmp_lock("blurb.lock");
-        let _guard = acquire_at(&path, &ctx(), &INERT).unwrap();
-        let contents = std::fs::read_to_string(&path).unwrap();
-        let mut info = parse_lock_contents(&contents).unwrap();
-        if shares_namespaces(&info) {
-            let blurb = holder_blurb(&info).unwrap();
-            assert!(blurb.starts_with("held by brokkr "), "{blurb}");
-        }
-        info.starttime = "1".into();
-        assert_eq!(holder_blurb(&info), None);
-        assert_eq!(waiting_line(None), "waiting for the brokkr lock ...");
-        assert_eq!(
-            waiting_line(Some("held by brokkr check (p), 4m00s")),
-            "waiting for the brokkr lock (held by brokkr check (p), 4m00s) ..."
         );
     }
 
