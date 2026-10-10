@@ -241,7 +241,7 @@ fn nextest_lane_artifacts(stdout: &str) -> Result<NextestArtifacts, DevError> {
 fn prepare_nextest(
     inputs: &LaneInputs<'_>,
     sweep: &ResolvedSweep,
-    packages: &[&str],
+    attempt: &Attempt,
     extra_args: &[String],
     env: &LaneEnv,
 ) -> Result<PreparedLane, DevError> {
@@ -256,7 +256,9 @@ fn prepare_nextest(
     }
     reject_unsupported_forwarded(sweep, cargo_extra)?;
     let mut selection = env.allow_args.clone();
-    selection.extend(sweep_selection_args(sweep, packages));
+    // The engine lane is one cargo build over the whole selection: it does not
+    // run per-package resolutions.
+    selection.extend(sweep_selection_args(sweep, attempt.selection()));
     selection.extend(cargo_extra.iter().cloned());
     build_nextest_lane(inputs, sweep, selection, env)
         .inspect_err(|e| {
@@ -266,7 +268,7 @@ fn prepare_nextest(
             // failure of this lane and gets no failure shape.
             if inputs.certifying && !matches!(e, DevError::Interrupted) {
                 output::error(&format!(
-                    "test {}: {}", sweep.label, describe_sweep(sweep, true, packages)
+                    "test {}: {}", sweep.label, describe_sweep(sweep, true, attempt.selection())
                 ));
             }
         })
@@ -603,7 +605,7 @@ fn cancel_cause(reason: Option<CancelReason>) -> TerminationCause {
 /// its whole diagnostic in the message; `run_test_phase`'s caller voices it.
 fn run_nextest_sweep(
     sweep: &ResolvedSweep,
-    packages: &[&str],
+    attempt: &Attempt,
     prepared: &PreparedLane,
     tap: &LaneTap,
     commands: bool,
@@ -615,7 +617,7 @@ fn run_nextest_sweep(
         &format!(
             "test {}: {}, nextest engine {NEXTEST_ENGINE_VERSION}, process-per-test, brokkr-owned config",
             sweep.label,
-            describe_sweep(sweep, true, packages)
+            describe_sweep(sweep, true, attempt.selection())
         ),
         None,
         commands,

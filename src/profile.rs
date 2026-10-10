@@ -138,8 +138,8 @@ pub struct ResolvedSweep {
     /// by the phase that happened to catch it - which is not a probe.
     ///
     /// Deliberately absent from [`ResolvedSweep::build_shape_key`]: the key
-    /// serves clippy dedupe, coverage grouping and `brokkr test` dedupe, all of
-    /// which only ever see gate sweeps, and the one sweep that can carry this
+    /// serves clippy/rustdoc dedupe and coverage grouping, all of which only
+    /// ever see gate sweeps, and the one sweep that can carry this
     /// runs alone under `cmd_clippy` with nothing to dedupe against.
     pub lib_only: bool,
 }
@@ -210,9 +210,11 @@ impl ResolvedSweep {
 
     /// The sweep's *build shape*: everything that decides what cargo
     /// compiles, and nothing that only decides which tests run. Two lanes
-    /// referencing the same `[[check]]` entry produce equal keys, so
-    /// clippy (and `brokkr test`, which drops filters) dedupe on this
-    /// while the test phase keeps both entries. `env` is in the key:
+    /// referencing the same `[[check]]` entry produce equal keys, so clippy
+    /// and rustdoc dedupe on this while the test phase keeps both entries.
+    /// (`brokkr test` dedupes on what a lane executes instead -
+    /// `check_cmd`'s `ExecProjection`, which also tells a doctest twin
+    /// apart.) `env` is in the key:
     /// `HIGH_PRECISION=1` on one sweep and not another makes two
     /// otherwise-identical sweeps cache-incompatible. `test_exclude_packages`
     /// is deliberately out - it narrows the test invocation only.
@@ -230,8 +232,8 @@ impl ResolvedSweep {
     /// KNOWN GAP, pre-existing and left alone: `build_packages` is in the key
     /// although clippy never reads it, so two sweeps differing only in their
     /// pre-built binaries get linted twice for provably identical output. That
-    /// is a phase-contract conflation (one key serving clippy dedupe, coverage
-    /// grouping and `brokkr test` dedupe, which want different things), and
+    /// is a phase-contract conflation (one key serving clippy dedupe and
+    /// coverage grouping, which want different things), and
     /// splitting it is orthogonal to feature unification - it would change
     /// dedupe behaviour for configs that have nothing to do with this feature.
     pub fn build_shape_key(&self) -> BuildShapeKey {
@@ -265,44 +267,6 @@ impl ResolvedSweep {
     /// coverage enumeration - or the audit describes a build that never ran.
     pub fn unification_args(&self) -> Vec<String> {
         self.effective_unification.cargo_args()
-    }
-
-    /// The packages this sweep actually builds, given the CLI `-p` narrowing.
-    ///
-    /// An EMPTY `cli_scope` means "the caller did not narrow", not "no
-    /// packages" - `cli_package_scope` returns an empty vec for an unnarrowed
-    /// run and reports a sweep whose intersection is genuinely empty as a skip
-    /// instead. Reading the empty vec as the answer is what silently gave a
-    /// package-mode sweep zero resolutions, so it emitted no cargo command at
-    /// all while still being labelled and counted as a lane.
-    pub fn effective_packages(&self, cli_scope: &[String]) -> Vec<String> {
-        if cli_scope.is_empty() {
-            return self.packages.clone();
-        }
-        cli_scope.to_vec()
-    }
-
-    /// One cargo resolution per package under package mode; one resolution
-    /// over the whole selection otherwise.
-    ///
-    /// `None` in the returned vec means "no `-p` narrowing" - the unscoped
-    /// selection - which is emphatically not the same as an empty vec, which
-    /// would mean no cargo command runs at all.
-    ///
-    /// Package mode therefore never returns an empty plan: the parser refuses
-    /// `package` with an empty `packages`, so the fallback in
-    /// [`Self::effective_packages`] always has something to give. If that
-    /// invariant is ever broken the sweep falls back to one unscoped
-    /// resolution rather than silently running nothing - a wrong command is
-    /// visible, a missing one is not.
-    pub fn resolutions(&self, cli_scope: &[String]) -> Vec<Option<String>> {
-        if self.effective_unification.is_per_package() {
-            let packages = self.effective_packages(cli_scope);
-            if !packages.is_empty() {
-                return packages.into_iter().map(Some).collect();
-            }
-        }
-        vec![None]
     }
 }
 
@@ -1005,54 +969,6 @@ skip = [{ package = "a", pattern = "slow" }]
             resolve_unification(&sweep, false).unwrap(),
             EffectiveUnification::Pinned(CargoUnification::Selected)
         );
-    }
-
-    #[test]
-    fn package_mode_plans_one_resolution_per_package() {
-        let pkg = ResolvedSweep {
-            effective_unification: EffectiveUnification::Pinned(CargoUnification::Package),
-            ..ResolvedSweep::default()
-        };
-        let scope = vec!["daemon".to_owned(), "client".to_owned()];
-        assert_eq!(
-            pkg.resolutions(&scope),
-            vec![Some("daemon".to_owned()), Some("client".to_owned())]
-        );
-        // Every other mode is ONE resolution over the whole selection. `None`
-        // means "no -p narrowing", which is emphatically not an empty plan:
-        // an empty vec would mean no cargo command runs at all.
-        let plain = ResolvedSweep::default();
-        assert_eq!(plain.resolutions(&scope), vec![None]);
-        assert_eq!(plain.resolutions(&[]), vec![None]);
-    }
-
-    #[test]
-    fn a_package_mode_sweep_never_plans_zero_resolutions() {
-        // The shipped bug: callers pass the CLI `-p` set, which is EMPTY on an
-        // unnarrowed run. Reading that as the package list gave a package-mode
-        // sweep zero resolutions, so its loop body never ran - no clippy
-        // command, no pin on the test command, and the lane still labelled and
-        // counted as if it had run. A shape asserted in config that is not the
-        // shape that ran is the exact failure this feature exists to catch.
-        let pkg = ResolvedSweep {
-            packages: vec!["daemon".to_owned()],
-            effective_unification: EffectiveUnification::Pinned(CargoUnification::Package),
-            ..ResolvedSweep::default()
-        };
-        assert_eq!(pkg.resolutions(&[]), vec![Some("daemon".to_owned())]);
-        assert_eq!(pkg.effective_packages(&[]), vec!["daemon".to_owned()]);
-
-        // A CLI `-p` narrows it, and replaces rather than adds - cargo unions
-        // selection flags, so emitting both would widen the resolution.
-        let cli = vec!["client".to_owned()];
-        assert_eq!(pkg.resolutions(&cli), vec![Some("client".to_owned())]);
-
-        // No mode ever plans nothing: an empty plan means no cargo command
-        // runs, which is silence where a lane was promised.
-        for sweep in [&pkg, &ResolvedSweep::default()] {
-            assert!(!sweep.resolutions(&[]).is_empty());
-            assert!(!sweep.resolutions(&cli).is_empty());
-        }
     }
 
     #[test]

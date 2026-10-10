@@ -25,7 +25,7 @@ fn run_isolated_sweep(
     project_root: &Path,
     state_root: &Path,
     sweep: &ResolvedSweep,
-    packages: &[&str],
+    attempt: &Attempt,
     prepared: &PreparedLane,
     tap: &LaneTap,
     doctests: bool,
@@ -47,7 +47,7 @@ fn run_isolated_sweep(
     let env_refs = prepared.env.refs();
 
     announce_sweep(
-        &format!("test {}: {}", sweep.label, describe_sweep(sweep, true, packages)),
+        &format!("test {}: {}", sweep.label, describe_sweep(sweep, true, attempt.selection())),
         None,
         commands,
     );

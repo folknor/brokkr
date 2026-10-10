@@ -1,4 +1,5 @@
 include!("check_cmd/phase.rs");
+include!("check_cmd/selection.rs");
 include!("check_cmd/output.rs");
 include!("check_cmd/isolate.rs");
 include!("check_cmd/binary_timings.rs");

@@ -59,7 +59,7 @@ use std::time::Duration;
 
 use crate::build;
 use crate::cargo_filter;
-use crate::check_cmd;
+use crate::check_cmd::{self, LaneEntry};
 use crate::config::{self, DevConfig};
 use crate::error::DevError;
 use crate::output;
@@ -293,39 +293,67 @@ pub fn run(
     result
 }
 
-/// The whole run's shape, printed up front: the sweeps the run goes through, so
-/// a PASS in the first one is visibly not the end of the command.
+/// The whole run's shape, printed up front: the sweeps the run is eligible to
+/// go through, so a PASS in the first one is visibly not the end of the
+/// command. Rendered from the run's selection.
 ///
-/// It is also the only place a scope-excluded sweep is named - those print no
-/// SKIP line of their own - so it keeps the two reasons apart: a
-/// sweep whose `packages` list leaves the package out, and one that excludes
-/// it by `test_exclude_packages`.
-fn sweep_plan_line(sweeps: &[ResolvedSweep], pkg: &str) -> String {
-    let running: Vec<&ResolvedSweep> =
-        sweeps.iter().filter(|s| sweep_skip_reason(s, pkg).is_none()).collect();
-    let with_reason = |reason: SkipReason| -> Vec<&ResolvedSweep> {
-        sweeps.iter().filter(|s| sweep_skip_reason(s, pkg) == Some(reason)).collect()
-    };
-    let names =
-        |v: &[&ResolvedSweep]| v.iter().map(|s| s.label.as_str()).collect::<Vec<_>>().join(", ");
+/// It is also the only place a scope-excluded or deduped sweep is named -
+/// those print no SKIP line of their own - so it keeps the reasons apart: a
+/// sweep whose `packages` list leaves the package out, one that excludes it by
+/// `test_exclude_packages`, and one that would run exactly what an earlier
+/// sweep runs.
+fn sweep_plan_line(sweeps: &[ResolvedSweep], selection: &check_cmd::PhaseSelection, pkg: &str) -> String {
+    let mut eligible: Vec<&str> = Vec::new();
+    let mut not_listed: Vec<&str> = Vec::new();
+    let mut excluded: Vec<&str> = Vec::new();
+    let mut deduped: Vec<String> = Vec::new();
+    for (s, entry) in sweeps.iter().zip(selection.entries()) {
+        match entry {
+            LaneEntry::Attempt(_) => eligible.push(&s.label),
+            LaneEntry::Excluded(e) => match exclusion_rule(e.notes()) {
+                Some(check_cmd::AdmissionRule::TestExcluded) => excluded.push(&s.label),
+                _ => not_listed.push(&s.label),
+            },
+            LaneEntry::Deduped(d) => {
+                let onto = sweeps.get(d.onto()).map_or("?", |o| o.label.as_str());
+                deduped.push(format!("{} (as {onto})", s.label));
+            }
+            LaneEntry::Disabled(_) | LaneEntry::NotApplicable(_) => {}
+        }
+    }
     let mut line = format!(
         "[test]    {} for {pkg}: {}",
-        output::count(running.len(), "sweep"),
-        names(&running)
+        output::count(eligible.len(), "sweep"),
+        eligible.join(", ")
     );
     let mut out = Vec::new();
-    let not_listed = with_reason(SkipReason::NotListed);
     if !not_listed.is_empty() {
-        out.push(format!("not this package: {}", names(&not_listed)));
+        out.push(format!("not this package: {}", not_listed.join(", ")));
     }
-    let excluded = with_reason(SkipReason::Excluded);
     if !excluded.is_empty() {
-        out.push(format!("excluded by test_exclude_packages: {}", names(&excluded)));
+        out.push(format!("excluded by test_exclude_packages: {}", excluded.join(", ")));
+    }
+    if !deduped.is_empty() {
+        out.push(format!("deduped: {}", deduped.join(", ")));
     }
     if !out.is_empty() {
         line.push_str(&format!(" ({})", out.join("; ")));
     }
     line
+}
+
+/// The rule that excluded `brokkr test`'s one package from a sweep. One
+/// package, so one note.
+fn exclusion_rule(notes: &[check_cmd::AdmissionNote]) -> Option<check_cmd::AdmissionRule> {
+    notes.first().map(|n| n.rule)
+}
+
+/// The lone-sweep SKIP line's wording for an exclusion.
+fn exclusion_describe(notes: &[check_cmd::AdmissionNote]) -> &'static str {
+    match exclusion_rule(notes) {
+        Some(check_cmd::AdmissionRule::TestExcluded) => "package excluded from this sweep (test_exclude_packages)",
+        _ => "package not in this sweep's packages list",
+    }
 }
 
 /// What one sweep came to before any test ran.
@@ -340,6 +368,8 @@ enum SweepOutcome<'s> {
 /// every sweep can be prepared before the first one runs.
 struct ReadySweep<'s> {
     sweep: &'s ResolvedSweep,
+    /// The sweep's attempt in the run's selection: its package selection.
+    attempt: check_cmd::Attempt,
     debug: bool,
     env: Vec<(String, String)>,
     allow_args: Vec<String>,
@@ -352,33 +382,22 @@ struct ReadySweep<'s> {
     runtime_fingerprint: Vec<String>,
 }
 
-/// Build one sweep's support binaries and test harnesses and discover the
-/// harnesses holding a match.
-fn prepare_sweep<'s>(sweep: &'s ResolvedSweep, cx: &SweepContext<'_>) -> Result<SweepOutcome<'s>, DevError> {
-    let (project_root, pkg, name) = (cx.project_root, cx.pkg, cx.name);
+/// Build one attempted sweep's support binaries and test harnesses and
+/// discover the harnesses holding a match. Only an attempt reaches here: a
+/// sweep the selection excludes or dedupes builds nothing.
+fn prepare_sweep<'s>(
+    sweep: &'s ResolvedSweep,
+    attempt: &check_cmd::Attempt,
+    cx: &SweepContext<'_>,
+) -> Result<SweepOutcome<'s>, DevError> {
+    let (project_root, name) = (cx.project_root, cx.name);
     let (profile_override, timeout) = (cx.profile_override, cx.timeout);
     // The sweep's pre-build, enumeration and first run share one phase clock,
     // as a `check` test phase's builds and runs do.
     check_cmd::enter_phase("test");
 
-    // A sweep scopes itself to a package set. When it declares a
-    // `packages` list and the `-p` target isn't in it (or the target is
-    // in the sweep's `test_exclude_packages`), that package doesn't carry
-    // this sweep's features - forcing the build would fail on a foreign
-    // feature (e.g. `-p nautilus-hyperliquid` under an ffi sweep it isn't
-    // a member of). Skip the sweep like the zero-tests-matched case; other
-    // sweeps still get their chance to run the test.
     let debug = resolve_debug(profile_override, cx.test_cfg, sweep.profile);
     let profile_dir = if debug { "debug" } else { "release" };
-
-    if let Some(reason) = sweep_skip_reason(sweep, pkg) {
-        // Under several sweeps the plan line already named this one and why;
-        // a lone sweep has no plan line, so it says so here.
-        if !cx.multi {
-            println!("[test]    SKIP {pkg}::{name} - {}", reason.describe());
-        }
-        return Ok(SweepOutcome::Done(RunReport::bare(Outcome::NoMatch)));
-    }
 
     let (env_owned, allow_args) =
         sweep_env(sweep, cx.project, project_root, cx.target_dir, profile_dir, cx.allow_flags);
@@ -401,7 +420,7 @@ fn prepare_sweep<'s>(sweep: &'s ResolvedSweep, cx: &SweepContext<'_>) -> Result<
     // cannot see doctests. Every other sweep prebuilds, has each harness
     // list itself, and runs only the harnesses holding a match - see
     // `plan_focused`.
-    let shape = BuildShape { sweep, allow_args: &allow_args, pkg, jobs: cx.jobs, debug };
+    let shape = BuildShape { sweep, allow_args: &allow_args, selection: attempt.selection(), jobs: cx.jobs, debug };
     let (focused, runtime_fingerprint) = if sweep.doc_only {
         if timeout.is_some() {
             return Err(doc_only_timeout_refusal(sweep));
@@ -423,6 +442,7 @@ fn prepare_sweep<'s>(sweep: &'s ResolvedSweep, cx: &SweepContext<'_>) -> Result<
     let exact = focused.as_ref().and_then(|f| f.exact.clone());
     Ok(SweepOutcome::Ready(Box::new(ReadySweep {
         sweep,
+        attempt: attempt.clone(),
         debug,
         env: env_owned,
         allow_args,
@@ -441,7 +461,6 @@ struct SweepContext<'a> {
     test_cfg: Option<&'a crate::config::TestConfig>,
     target_dir: &'a Path,
     allow_flags: &'a [String],
-    pkg: &'a str,
     name: &'a str,
     jobs: Option<u32>,
     multi: bool,
@@ -451,7 +470,7 @@ struct SweepContext<'a> {
     timeout: Option<u64>,
 }
 
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines, clippy::cognitive_complexity)]
 fn run_sweeps(
     dev_config: &DevConfig,
     project: Project,
@@ -468,9 +487,18 @@ fn run_sweeps(
     let repeat = repeat.max(1);
     let ceiling = timeout.map_or(test_runner::TEST_TIMEOUT, Duration::from_secs);
     let sweeps = resolve_sweeps(dev_config.test.as_ref(), &dev_config.check, sweep_filter)?;
-    let multi = sweeps.len() > 1;
 
-    let pkg = resolve_package(package, dev_config, project)?;
+    let (pkg, source) = resolve_package(package, dev_config, project)?;
+    // Which sweeps the run is eligible to attempt: the resolved package always
+    // overrides each sweep's own selection, sweeps whose rules leave it out
+    // are excluded, and sweeps that would execute exactly what an earlier one
+    // does are deduped. After `--sweep`, so a lane-qualified label reaches a
+    // sweep the dedupe would otherwise fold away.
+    let test_cfg = dev_config.test.as_ref();
+    let debug_of = |s: &ResolvedSweep| resolve_debug(profile_override, test_cfg, s.profile);
+    let selection = check_cmd::PhaseSelection::for_brokkr_test(&sweeps, &pkg, source, &debug_of)?;
+    // A deduped sweep is not a sweep this run goes through.
+    let multi = selection.entries().iter().filter(|e| !matches!(e, LaneEntry::Deduped(_))).count() > 1;
 
     // `brokkr test` defaults to `cargo test --release` (debug=false ->
     // <target>/release); the dev profile flips both the cargo invocation
@@ -490,7 +518,6 @@ fn run_sweeps(
         test_cfg: dev_config.test.as_ref(),
         target_dir: &target_dir,
         allow_flags: &allow_flags,
-        pkg: &pkg,
         name,
         jobs,
         multi,
@@ -501,7 +528,7 @@ fn run_sweeps(
     let mut reports: Vec<RunReport> = Vec::new();
 
     if multi {
-        println!("{}", sweep_plan_line(&sweeps, &pkg));
+        println!("{}", sweep_plan_line(&sweeps, &selection, &pkg));
     }
     // No per-sweep header lines: every line that belongs to one sweep says
     // which (the build line, the PASS/FAIL tags), when several run.
@@ -512,8 +539,27 @@ fn run_sweeps(
     // named. (A sweep's discovery used to wait for the sweeps before it to
     // finish running.)
     let mut ready: Vec<ReadySweep<'_>> = Vec::new();
-    for sweep in &sweeps {
-        match prepare_sweep(sweep, &cx)? {
+    for (sweep, entry) in sweeps.iter().zip(selection.entries()) {
+        let attempt = match entry {
+            LaneEntry::Attempt(a) => a,
+            // A sweep whose rules leave the package out doesn't carry this
+            // sweep's features - forcing the build would fail on a foreign
+            // feature (e.g. `-p nautilus-hyperliquid` under an ffi sweep it
+            // isn't a member of). SKIP it like the zero-tests-matched case;
+            // other sweeps still get their chance to run the test. Under
+            // several sweeps the plan line already named it and why; a lone
+            // sweep has no plan line, so it says so here.
+            LaneEntry::Excluded(e) => {
+                if !multi {
+                    println!("[test]    SKIP {pkg}::{name} - {}", exclusion_describe(e.notes()));
+                }
+                reports.push(RunReport::bare(Outcome::NoMatch));
+                continue;
+            }
+            // Runs what an earlier sweep runs: named on the plan line, not run.
+            LaneEntry::Deduped(_) | LaneEntry::Disabled(_) | LaneEntry::NotApplicable(_) => continue,
+        };
+        match prepare_sweep(sweep, attempt, &cx)? {
             SweepOutcome::Ready(r) => ready.push(*r),
             SweepOutcome::Done(report) => reports.push(report),
         }
@@ -661,7 +707,13 @@ fn run_ready(
         };
         let env_refs: Vec<(&str, &str)> = r.env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
         let plan = SweepPlan {
-            shape: BuildShape { sweep: r.sweep, allow_args: &r.allow_args, pkg: cx.pkg, jobs: cx.jobs, debug: r.debug },
+            shape: BuildShape {
+                sweep: r.sweep,
+                allow_args: &r.allow_args,
+                selection: r.attempt.selection(),
+                jobs: cx.jobs,
+                debug: r.debug,
+            },
             name: cx.name,
             focused: r.focused.as_ref(),
             exact: r.exact.clone(),
@@ -763,7 +815,7 @@ fn settle_sweep<'s>(
         "test {}: {reason}; the sweep runs what it builds now, and its inventory is unavailable",
         prepared.sweep.label
     ));
-    Ok(match prepare_sweep(prepared.sweep, cx)? {
+    Ok(match prepare_sweep(prepared.sweep, &prepared.attempt, cx)? {
         SweepOutcome::Ready(f) => Settled::Rebuilt(f),
         SweepOutcome::Done(report) => Settled::Failed(report),
     })
@@ -783,7 +835,7 @@ fn recheck_sweep(prepared: &ReadySweep<'_>, cx: &SweepContext<'_>) -> Result<Opt
     let shape = BuildShape {
         sweep: prepared.sweep,
         allow_args: &prepared.allow_args,
-        pkg: cx.pkg,
+        selection: prepared.attempt.selection(),
         jobs: cx.jobs,
         debug: prepared.debug,
     };
@@ -945,7 +997,7 @@ fn run_iteration(
     n: u32,
     tap: Option<&check_cmd::LaneTap>,
 ) -> Result<RunReport, DevError> {
-    let (pkg, name, repeat) = (plan.shape.pkg, plan.name, plan.repeat);
+    let (pkg, name, repeat) = (plan.shape.pkg(), plan.name, plan.repeat);
     let tag = |target: Option<&str>| {
         let quals: Vec<&str> = plan.sweep_label.into_iter().chain(target).collect();
         let quals =
@@ -962,7 +1014,7 @@ fn run_iteration(
         // A doc-only sweep: one rustdoc run over the package, the user's
         // substring unchanged.
         let s = &plan.shape;
-        let args = test_argv(s.sweep, s.allow_args, pkg, name, s.jobs, s.debug);
+        let args = test_argv(s, name);
         let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
         let invocation = format!("cargo {} (sweep: {}; cwd {})", arg_refs.join(" "), s.sweep.label, plan.project_root.display());
         if announce {
@@ -1075,7 +1127,7 @@ fn show_failed_invocation(plan: &SweepPlan<'_>, invocation: &str) {
 /// qualifiers as the filter-led tag, built from the parts rather than by
 /// rewriting that tag. The filter joins the wall time when it differs.
 fn lone_test_tag(plan: &SweepPlan<'_>, harness: &str, n: u32, test: &str, wall: &str) -> String {
-    let (pkg, name, repeat) = (plan.shape.pkg, plan.name, plan.repeat);
+    let (pkg, name, repeat) = (plan.shape.pkg(), plan.name, plan.repeat);
     let quals: Vec<&str> = plan.sweep_label.into_iter().chain(std::iter::once(harness)).collect();
     let run_n = if repeat > 1 { format!(" run {n}/{repeat}") } else { String::new() };
     let filter = if test == name { String::new() } else { format!("; filter: {name}") };
@@ -1178,9 +1230,9 @@ fn plan_focused(
              test or a few, and streams every match's output live. Run the whole suite with \
              `brokkr check -p {}`, or narrow the name.",
             every.len(),
-            shape.pkg,
+            shape.pkg(),
             shape.sweep.label,
-            shape.pkg
+            shape.pkg()
         )));
     }
 
@@ -1493,8 +1545,9 @@ fn pre_build_argv(
         args.push("--release".into());
     }
     args.extend(sweep.cargo_feature_args.iter().cloned());
-    args.push("--package".into());
-    args.push(package.into());
+    // Its own explicit single-package selection, never the run's: a support
+    // package is usually not the package under test.
+    args.extend(check_cmd::package_args(&check_cmd::Selection::Explicit(vec![package.to_owned()])));
     args
 }
 
@@ -1503,9 +1556,18 @@ fn pre_build_argv(
 struct BuildShape<'a> {
     sweep: &'a ResolvedSweep,
     allow_args: &'a [String],
-    pkg: &'a str,
+    /// The sweep's selection in this run: always the resolved package, as an
+    /// override of the sweep's own selection.
+    selection: &'a check_cmd::Selection,
     jobs: Option<u32>,
     debug: bool,
+}
+
+impl BuildShape<'_> {
+    /// The one package this run tests, for messages.
+    fn pkg(&self) -> &str {
+        self.selection.packages().and_then(<[String]>::first).map_or("", String::as_str)
+    }
 }
 
 /// The cargo half every invocation of a sweep shares: subcommand, resolution
@@ -1529,8 +1591,7 @@ fn cargo_head(shape: &BuildShape<'_>, leading: &[&str]) -> Vec<String> {
         args.push("-j".into());
         args.push(j.to_string());
     }
-    args.push("-p".into());
-    args.push(shape.pkg.into());
+    args.extend(check_cmd::package_args(shape.selection));
     args
 }
 
@@ -1552,16 +1613,8 @@ fn prebuild_argv(shape: &BuildShape<'_>) -> Vec<String> {
 /// The `cargo test --doc` argv for one doc-only sweep's run of `name`. The
 /// libtest half is [`direct_libtest_args`]'s, minus the filter, which cargo
 /// takes positionally.
-fn test_argv(
-    sweep: &ResolvedSweep,
-    allow_args: &[String],
-    pkg: &str,
-    name: &str,
-    jobs: Option<u32>,
-    debug: bool,
-) -> Vec<String> {
-    let shape = BuildShape { sweep, allow_args, pkg, jobs, debug };
-    let mut args = cargo_head(&shape, &["test"]);
+fn test_argv(shape: &BuildShape<'_>, name: &str) -> Vec<String> {
+    let mut args = cargo_head(shape, &["test"]);
     // A doc-only sweep runs doctests and nothing else, here as everywhere:
     // <NAME> filters within the `--doc` pseudo-target, and a name matching
     // no doctest SKIPs like any feature-gated miss.
@@ -1606,7 +1659,7 @@ fn prebuild_targets(
         }
         println!(
             "[test]    BUILD FAILED {} (sweep: {})",
-            shape.pkg, shape.sweep.label
+            shape.pkg(), shape.sweep.label
         );
         return Ok(None);
     }
@@ -1766,12 +1819,16 @@ fn resolve_debug(
 /// `-p`, and a glob selecting several packages would put several packages'
 /// harnesses back into one invocation - the shape `run_split` exists to
 /// dissolve - and change the feature graph between the prebuild and each run.
+///
+/// Returns the package and where it came from: the run's selection carries
+/// the source as the override's provenance.
 fn resolve_package(
     cli_package: Option<&str>,
     dev_config: &DevConfig,
     project: Project,
-) -> Result<String, DevError> {
-    single_package(resolve_package_spec(cli_package, dev_config, project)?)
+) -> Result<(String, check_cmd::PackageSource), DevError> {
+    let (spec, source) = resolve_package_spec(cli_package, dev_config, project)?;
+    Ok((single_package(spec)?, source))
 }
 
 /// Refuse a package spec cargo would treat as a glob.
@@ -1789,58 +1846,23 @@ fn resolve_package_spec(
     cli_package: Option<&str>,
     dev_config: &DevConfig,
     project: Project,
-) -> Result<String, DevError> {
+) -> Result<(String, check_cmd::PackageSource), DevError> {
+    use check_cmd::PackageSource;
     if let Some(p) = cli_package {
-        return Ok(p.to_owned());
+        return Ok((p.to_owned(), PackageSource::Cli));
     }
     if let Some(cfg) = &dev_config.test
         && let Some(p) = &cfg.default_package
     {
-        return Ok(p.clone());
+        return Ok((p.clone(), PackageSource::DefaultPackage));
     }
     if let Some(p) = project.cli_package() {
-        return Ok(p.to_owned());
+        return Ok((p.to_owned(), PackageSource::ProjectDefault));
     }
     Err(DevError::Config(format!(
         "'brokkr test' needs a cargo package for '-p'. This project ({project}) has no built-in default. \
          Pass `-p <pkg>` on the command line, or set `[test] default_package = \"...\"` in brokkr.toml."
     )))
-}
-
-/// Whether a sweep should skip the `-p <pkg>` target entirely, and why.
-///
-/// A sweep with a non-empty `packages` list only applies to those packages;
-/// a target outside it doesn't carry the sweep's features, so building it
-/// would fail on a feature it doesn't declare. `test_exclude_packages` carves
-/// a package out of an otherwise-workspace-wide sweep. Either way the sweep is
-/// skipped (SKIP/NoMatch) rather than force-built. `None` means the target is
-/// in scope and the sweep runs.
-fn sweep_skip_reason(sweep: &ResolvedSweep, pkg: &str) -> Option<SkipReason> {
-    if sweep.test_exclude_packages.iter().any(|p| p == pkg) {
-        return Some(SkipReason::Excluded);
-    }
-    if !sweep.packages.is_empty() && !sweep.packages.iter().any(|p| p == pkg) {
-        return Some(SkipReason::NotListed);
-    }
-    None
-}
-
-/// Why a sweep does not apply to the `-p` package.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum SkipReason {
-    /// The sweep's `test_exclude_packages` names it.
-    Excluded,
-    /// The sweep has a `packages` list and it is not on it.
-    NotListed,
-}
-
-impl SkipReason {
-    fn describe(self) -> &'static str {
-        match self {
-            Self::Excluded => "package excluded from this sweep (test_exclude_packages)",
-            Self::NotListed => "package not in this sweep's packages list",
-        }
-    }
 }
 
 fn aggregate_exit(outcomes: &[Outcome], pkg: &str, name: &str, searched: &Searched) -> Result<(), DevError> {
@@ -1881,23 +1903,19 @@ fn aggregate_exit(outcomes: &[Outcome], pkg: &str, name: &str, searched: &Search
 /// fight with the user's `<name>` argument. `env` is preserved (B3:
 /// silent profile-env drop fixed by this consolidation).
 ///
-/// Deduping lane duplicates is deliberately *not* done here - it happens in
-/// [`dedupe_sweeps`], after `--sweep`/`-p` selection, so a lane-qualified
-/// label or a package-scoped run can still reach a sweep that a pure
-/// build-shape collapse would have discarded.
-/// Resolve the profile's sweeps, apply a `--sweep` selection, then collapse
-/// build-shape duplicates. Selection runs on the full lane list (labels are
-/// lane-qualified, `serial/all`) *before* any dedupe, so a documented label
-/// can't resolve to a sweep dedupe already discarded. Dedupe runs on what
-/// survives selection.
+/// Resolve the profile's sweeps and apply a `--sweep` selection. Deduping lane
+/// duplicates is deliberately *not* done here: the run's selection does it
+/// (`PhaseSelection::for_brokkr_test`), after `--sweep` and with the package
+/// known, so a lane-qualified label (`serial/all`) can still reach a sweep a
+/// collapse would have discarded, and the dedupe compares what the sweeps
+/// would actually execute for that package.
 fn resolve_sweeps(
     test_cfg: Option<&crate::config::TestConfig>,
     check_entries: &[crate::config::CheckEntry],
     sweep_filter: Option<&str>,
 ) -> Result<Vec<ResolvedSweep>, DevError> {
     let sweeps = decide_sweeps(test_cfg, check_entries)?;
-    let sweeps = select_sweep(sweeps, sweep_filter)?;
-    Ok(dedupe_sweeps(sweeps))
+    select_sweep(sweeps, sweep_filter)
 }
 
 fn decide_sweeps(
@@ -1925,27 +1943,6 @@ fn decide_sweeps(
         s.effective_unification = crate::profile::resolve_unification(s, false)?;
     }
     Ok(sweeps)
-}
-
-/// Collapse lane-duplicate sweeps that `brokkr test` would run identically.
-///
-/// A `lanes` profile lists the same `[[check]]` entry once per lane; with the
-/// filters dropped those runs build and test the same thing, so only the
-/// first need run. This is called *after* `--sweep`/`-p` selection so it never
-/// hides a sweep the user named or a package a sweep permits.
-///
-/// The key extends the shared `build_shape_key` with `test_exclude_packages`,
-/// which that key deliberately omits (clippy, which shares the key, stays
-/// workspace-wide). For `brokkr test` two sweeps differing only in their test
-/// exclusions are *not* identical runs: one skips the `-p` target, the other
-/// runs it, so collapsing them would let declaration order decide whether a
-/// `-p PKG NAME` run finds its test.
-fn dedupe_sweeps(sweeps: Vec<ResolvedSweep>) -> Vec<ResolvedSweep> {
-    let mut seen = std::collections::HashSet::new();
-    sweeps
-        .into_iter()
-        .filter(|s| seen.insert((s.build_shape_key(), s.test_exclude_packages.clone())))
-        .collect()
 }
 
 /// Narrow the resolved sweep set to a single `--sweep <label>`. Passing
@@ -2705,6 +2702,28 @@ mod tests {
     use super::*;
     use crate::config::{CheckEntry, SweepProfile, TestConfig};
 
+    /// A one-package selection: package flags as the run's override spells
+    /// them.
+    fn one_package(pkg: &str) -> check_cmd::Selection {
+        check_cmd::Selection::Explicit(vec![pkg.to_owned()])
+    }
+
+    /// `brokkr test`'s selection for `pkg`, every sweep resolving to release.
+    fn selection_for(sweeps: &[ResolvedSweep], pkg: &str) -> check_cmd::PhaseSelection {
+        check_cmd::PhaseSelection::for_brokkr_test(sweeps, pkg, check_cmd::PackageSource::Cli, &|_| false).unwrap()
+    }
+
+    /// The sweeps a `brokkr test -p pkg` run would build, in order.
+    fn attempted<'a>(sweeps: &'a [ResolvedSweep], pkg: &str) -> Vec<&'a str> {
+        let sel = selection_for(sweeps, pkg);
+        sweeps
+            .iter()
+            .zip(sel.entries())
+            .filter(|(_, e)| e.attempt().is_some())
+            .map(|(s, _)| s.label.as_str())
+            .collect()
+    }
+
     #[test]
     fn stdout_filter_strips_test_framing() {
         assert!(!keep_stdout_line("running 1 test"));
@@ -2896,7 +2915,8 @@ mod tests {
     #[test]
     fn the_prebuild_selects_the_test_targets() {
         let sweep = ResolvedSweep::default();
-        let shape = BuildShape { sweep: &sweep, allow_args: &[], pkg: "pkg", jobs: None, debug: true };
+        let sel = one_package("pkg");
+        let shape = BuildShape { sweep: &sweep, allow_args: &[], selection: &sel, jobs: None, debug: true };
         let pre = prebuild_argv(&shape);
         assert_eq!(
             pre,
@@ -2930,7 +2950,9 @@ mod tests {
     #[test]
     fn the_doc_only_run_shares_the_libtest_half() {
         let sweep = ResolvedSweep { doc_only: true, ..ResolvedSweep::default() };
-        let run = test_argv(&sweep, &[], "pkg", "x", None, true);
+        let sel = one_package("pkg");
+        let shape = BuildShape { sweep: &sweep, allow_args: &[], selection: &sel, jobs: None, debug: true };
+        let run = test_argv(&shape, "x");
         let sep = run.iter().position(|a| a == "--").expect("separator");
         assert_eq!(&run[..sep], ["test", "-p", "pkg", "--doc", "x"]);
         assert_eq!(&run[sep + 1..], &direct_libtest_args("x", false)[1..]);
@@ -3263,47 +3285,51 @@ lanes = ["tier1", "serial"]
 
     #[test]
     fn decide_sweeps_keeps_every_lane_undeduped() {
-        // decide_sweeps no longer dedupes: it hands `run` the full lane list
-        // so selection can see both lane-qualified labels. The collapse is
-        // dedupe_sweeps' job, run after selection.
+        // decide_sweeps does not dedupe: it hands `run` the full lane list so
+        // `--sweep` can see both lane-qualified labels. The collapse is the
+        // run's selection's job, after `--sweep`.
         let (test_cfg, entries) = lanes_cfg();
         let sweeps = decide_sweeps(Some(&test_cfg), &entries).unwrap();
         assert_eq!(sweeps.len(), 2);
         assert_eq!(sweeps[0].label, "tier1/all");
         assert_eq!(sweeps[1].label, "serial/all");
+        assert_eq!(resolve_sweeps(Some(&test_cfg), &entries, None).unwrap().len(), 2);
     }
 
     #[test]
-    fn dedupe_sweeps_collapses_lanes_by_build_shape() {
+    fn the_selection_collapses_lanes_that_execute_identically() {
         // With the user's <name> as the only filter, the two lanes' runs are
-        // identical, so dedupe_sweeps keeps the first of each build shape.
+        // identical, so the selection attempts the first and dedupes the
+        // second onto it.
         let (test_cfg, entries) = lanes_cfg();
         let sweeps = decide_sweeps(Some(&test_cfg), &entries).unwrap();
-        let sweeps = dedupe_sweeps(sweeps);
-        assert_eq!(sweeps.len(), 1);
-        assert_eq!(sweeps[0].label, "tier1/all");
+        assert_eq!(attempted(&sweeps, "pkg"), vec!["tier1/all"]);
+        let sel = selection_for(&sweeps, "pkg");
+        assert!(matches!(sel.entry(1), Some(LaneEntry::Deduped(d)) if d.onto() == 0));
+        assert_eq!(
+            sweep_plan_line(&sweeps, &sel, "pkg"),
+            "[test]    1 sweep for pkg: tier1/all (deduped: serial/all (as tier1/all))"
+        );
     }
 
     #[test]
     fn select_then_dedupe_resolves_lane_qualified_label() {
         // S3-07: `--sweep serial/all` must resolve even though serial/all
-        // shares a build shape with tier1/all and would be deduped away.
-        // Selecting before deduping is what makes the documented
-        // lane-qualified label reachable.
+        // executes what tier1/all does and would be deduped away. Selecting
+        // before deduping is what makes the documented lane-qualified label
+        // reachable.
         let (test_cfg, entries) = lanes_cfg();
-        let sweeps = decide_sweeps(Some(&test_cfg), &entries).unwrap();
-        let sweeps = select_sweep(sweeps, Some("serial/all")).unwrap();
-        let sweeps = dedupe_sweeps(sweeps);
-        assert_eq!(sweeps.len(), 1);
-        assert_eq!(sweeps[0].label, "serial/all");
+        let sweeps = resolve_sweeps(Some(&test_cfg), &entries, Some("serial/all")).unwrap();
+        assert_eq!(attempted(&sweeps, "pkg"), vec!["serial/all"]);
     }
 
     #[test]
-    fn dedupe_sweeps_spares_sweeps_differing_only_in_test_exclusions() {
+    fn the_selection_spares_sweeps_differing_only_in_test_exclusions() {
         // S3-08: two lanes with the same build shape but different
         // `test_exclude_packages` are NOT identical `brokkr test` runs - one
-        // skips the `-p` target, the other runs it. dedupe must keep both so
-        // declaration order can't decide whether `-p PKG NAME` finds its test.
+        // skips the `-p` target, the other runs it. The selection keeps the
+        // permitting one, so declaration order can't decide whether
+        // `-p PKG NAME` finds its test.
         let excludes = ResolvedSweep {
             label: "tier1/all".into(),
             cargo_feature_args: vec!["--features".into(), "a".into()],
@@ -3316,11 +3342,22 @@ lanes = ["tier1", "serial"]
             test_exclude_packages: Vec::new(),
             ..Default::default()
         };
-        let sweeps = dedupe_sweeps(vec![excludes, permits]);
-        assert_eq!(sweeps.len(), 2);
-        // And the surviving permitting sweep runs pkg-x rather than skipping.
-        let permitting = sweeps.iter().find(|s| s.label == "serial/all").unwrap();
-        assert!(sweep_skip_reason(permitting, "pkg-x").is_none());
+        let sweeps = vec![excludes, permits];
+        assert_eq!(attempted(&sweeps, "pkg-x"), vec!["serial/all"]);
+        let sel = selection_for(&sweeps, "pkg-x");
+        assert!(matches!(sel.entry(0), Some(LaneEntry::Excluded(_))));
+    }
+
+    /// Regression: a sweep and its doctest twin are two runs. The old dedupe
+    /// key was the build shape, which leaves `doc_only` out, so the twin
+    /// collapsed onto its sibling and `brokkr test NAME` never searched the
+    /// doctests.
+    #[test]
+    fn a_doctest_twin_is_not_collapsed_onto_its_sibling() {
+        let lib = ResolvedSweep { label: "default".into(), ..Default::default() };
+        let twin = ResolvedSweep { label: "doctests".into(), doc_only: true, ..Default::default() };
+        let sweeps = vec![lib, twin];
+        assert_eq!(attempted(&sweeps, "pkg"), vec!["default", "doctests"]);
     }
 
     #[test]
@@ -3443,7 +3480,7 @@ include_ignored = false
 
         // An unpinned sweep with no allows stays byte-identical to before.
         let plain = pre_build_argv(&ResolvedSweep::default(), "bin", &[], true);
-        assert_eq!(plain, ["build", "--message-format=json-render-diagnostics", "--package", "bin"]);
+        assert_eq!(plain, ["build", "--message-format=json-render-diagnostics", "-p", "bin"]);
     }
 
     fn ready_sweep<'s>(
@@ -3452,8 +3489,10 @@ include_ignored = false
         support: &[check_cmd::SupportArtifact],
     ) -> ReadySweep<'s> {
         let hash = test_runner::hash_file(Path::new(&harness.executable)).unwrap();
+        let attempt = selection_for(std::slice::from_ref(sweep), "core").attempt(0).unwrap().clone();
         ReadySweep {
             sweep,
+            attempt,
             debug: true,
             env: Vec::new(),
             allow_args: Vec::new(),
@@ -3530,11 +3569,13 @@ include_ignored = false
     /// it executes anything, through the real `settle_sweep` and
     /// `recheck_sweep`. The sweep here is doc-only (so the recheck builds
     /// nothing) with a recorded support fingerprint the rebuild no longer
-    /// produces - drift - and is scoped out of the target package, so the
-    /// re-preparation it triggers ends in a skip without cargo. If `run_ready`
-    /// stopped calling `settle_sweep`, the sweep would go straight to
-    /// `run_iteration` (a `cargo test --doc` in a directory with no project)
-    /// and the report would not be the skip's `NoMatch`.
+    /// produces - drift - and runs under `--timeout`, so the re-preparation it
+    /// triggers ends in the doc-only refusal without cargo. (Only an attempted
+    /// sweep is ever prepared, so the refusal is the cargo-free end of a
+    /// re-preparation; the excluded-sweep skip it used to end in now happens
+    /// before preparation.) If `run_ready` stopped calling `settle_sweep`, the
+    /// sweep would go straight to `run_iteration` (a `cargo test --doc` in a
+    /// directory with no project) and the error would not be the refusal.
     #[test]
     fn run_ready_rechecks_a_sweep_before_it_runs() {
         let dir = crate::test_scratch::scratch("test_cmd", "run_ready_recheck");
@@ -3545,7 +3586,7 @@ include_ignored = false
             target: "server".into(),
             executable: server.to_string_lossy().into_owned(),
         }];
-        let sweep = ResolvedSweep { packages: vec!["other".into()], doc_only: true, ..ResolvedSweep::default() };
+        let sweep = ResolvedSweep { label: "docs".into(), doc_only: true, ..ResolvedSweep::default() };
         let mut harness = check_cmd::test_binary_for_tests("core", "test", "suite");
         harness.executable = server.to_string_lossy().into_owned();
         let mut prepared = ready_sweep(&sweep, &harness, &support);
@@ -3558,18 +3599,19 @@ include_ignored = false
             test_cfg: None,
             target_dir: &target_dir,
             allow_flags: &[],
-            pkg: "core",
             name: "t",
             jobs: None,
             multi: false,
             profile_override: None,
-            timeout: None,
+            timeout: Some(30),
         };
         let mut reports = Vec::new();
         let mut notes = Vec::new();
-        run_ready(std::slice::from_ref(&prepared), &cx, 1, Duration::from_secs(20), None, &mut reports, &mut notes).unwrap();
-        assert_eq!(reports.len(), 1);
-        assert!(reports[0].outcome == Outcome::NoMatch, "the drifted sweep was re-prepared (and skipped), not run");
+        let err = run_ready(std::slice::from_ref(&prepared), &cx, 1, Duration::from_secs(20), None, &mut reports, &mut notes)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("doc-only sweep 'docs'"), "the drifted sweep was re-prepared, not run: {err}");
+        assert!(reports.is_empty());
     }
 
     #[test]
@@ -3679,8 +3721,9 @@ include_ignored = false
     fn only_a_failing_run_shows_its_invocation() {
         let state = RepeatState::default();
         let sweep = ResolvedSweep::default();
+        let sel = one_package("pkg");
         let plan = SweepPlan {
-            shape: BuildShape { sweep: &sweep, allow_args: &[], pkg: "pkg", jobs: None, debug: true },
+            shape: BuildShape { sweep: &sweep, allow_args: &[], selection: &sel, jobs: None, debug: true },
             name: "n",
             focused: None,
             exact: None,
@@ -3780,15 +3823,30 @@ include_ignored = false
         assert!(aggregate_exit(&outcomes, "f", "n", &Searched::default()).is_ok());
     }
 
-    #[test]
-    fn sweep_skip_reason_none_when_no_packages_list() {
-        // A workspace-wide sweep (empty packages) covers every target.
-        let sweep = ResolvedSweep::default();
-        assert!(sweep_skip_reason(&sweep, "nautilus-hyperliquid").is_none());
+    /// The one exclusion note of `sweep` for `pkg`, or `None` when the
+    /// selection attempts it.
+    fn exclusion_of(sweep: &ResolvedSweep, pkg: &str) -> Option<check_cmd::AdmissionRule> {
+        match selection_for(std::slice::from_ref(sweep), pkg).entry(0) {
+            Some(LaneEntry::Excluded(e)) => exclusion_rule(e.notes()),
+            _ => None,
+        }
     }
 
     #[test]
-    fn sweep_skip_reason_skips_target_outside_packages_list() {
+    fn a_sweep_with_no_packages_list_admits_any_target() {
+        // A sweep with no `packages` list covers every target.
+        let sweep = ResolvedSweep::default();
+        assert!(exclusion_of(&sweep, "nautilus-hyperliquid").is_none());
+        // And the target replaces the sweep's own selection.
+        let sel = selection_for(std::slice::from_ref(&sweep), "nautilus-hyperliquid");
+        assert_eq!(
+            check_cmd::package_args(sel.attempt(0).unwrap().selection()),
+            ["-p", "nautilus-hyperliquid"]
+        );
+    }
+
+    #[test]
+    fn a_target_outside_the_packages_list_is_excluded() {
         // The reported case: an ffi/live sweep lists only its member packages;
         // `-p nautilus-hyperliquid` isn't one, so it must SKIP rather than
         // force a build of a feature the package doesn't declare.
@@ -3797,18 +3855,18 @@ include_ignored = false
             ..Default::default()
         };
         assert_eq!(
-            sweep_skip_reason(&sweep, "nautilus-hyperliquid"),
-            Some(SkipReason::NotListed)
+            exclusion_of(&sweep, "nautilus-hyperliquid"),
+            Some(check_cmd::AdmissionRule::NotListed)
         );
     }
 
     #[test]
-    fn sweep_skip_reason_runs_target_inside_packages_list() {
+    fn a_target_inside_the_packages_list_is_attempted() {
         let sweep = ResolvedSweep {
             packages: vec!["nautilus-core".into(), "nautilus-hyperliquid".into()],
             ..Default::default()
         };
-        assert!(sweep_skip_reason(&sweep, "nautilus-hyperliquid").is_none());
+        assert_eq!(attempted(std::slice::from_ref(&sweep), "nautilus-hyperliquid").len(), 1);
     }
 
     #[test]
@@ -3823,22 +3881,29 @@ include_ignored = false
             },
         ];
         assert_eq!(
-            sweep_plan_line(&sweeps, "pkg"),
+            sweep_plan_line(&sweeps, &selection_for(&sweeps, "pkg"), "pkg"),
             "[test]    1 sweep for pkg: default (not this package: vm; excluded by \
              test_exclude_packages: ffi)"
         );
     }
 
     #[test]
-    fn sweep_skip_reason_skips_excluded_target() {
+    fn an_excluded_target_is_excluded_by_test_exclude_packages() {
         // An otherwise-workspace-wide sweep carving the target out.
         let sweep = ResolvedSweep {
             test_exclude_packages: vec!["nautilus-pyo3".into()],
             ..Default::default()
         };
         assert_eq!(
-            sweep_skip_reason(&sweep, "nautilus-pyo3"),
-            Some(SkipReason::Excluded)
+            exclusion_of(&sweep, "nautilus-pyo3"),
+            Some(check_cmd::AdmissionRule::TestExcluded)
+        );
+        assert_eq!(
+            exclusion_describe(&[check_cmd::AdmissionNote {
+                package: "nautilus-pyo3".into(),
+                rule: check_cmd::AdmissionRule::TestExcluded
+            }]),
+            "package excluded from this sweep (test_exclude_packages)"
         );
     }
 }

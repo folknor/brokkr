@@ -39,17 +39,16 @@ nags.
 
 Like every locked brokkr command, `check` and `test` acquire the global
 per-user lock **blocking**: if another brokkr invocation (e.g. a bench run)
-holds it, the command prints `[lock] waiting for the brokkr lock (held by
-brokkr check (pbfhogg), 4m00s) ...` and waits until released, then proceeds -
-rather than failing with `lock: already locked`. The parenthesis (holder's
-command, project, how long its process has run) appears only when the holder's
-identity verifies from the waiter's namespaces; otherwise the line is the plain
-`waiting for the brokkr lock ...`. So a concurrent lock never produces an error
-to handle; just let the command wait. The wait is the serialization working, not
+holds it, the command prints `[lock] waiting for the brokkr lock ...` and
+waits until released, then proceeds - rather than failing with
+`lock: already locked`. So a concurrent lock never produces an error to
+handle; just let the command wait. The wait is the serialization working, not
 machine congestion: the lock exists so brokkr commands never overlap, and the
-`[lock] acquired after 4m00s` line marks the point after which this command had
-the lock to itself - the wait has no effect on any timing or result measured
-after it. `brokkr lock` shows who holds the lock and what it is doing - asked
+`[lock] acquired - you now hold the global brokkr lock for the duration of
+this command` line marks the point after which this command had the lock to
+itself - the wait has no effect on any timing or result measured after it.
+Both lines' wording is fixed on purpose: every terser revision was misread by
+agents as a sign that other brokkr commands were contending for the machine. `brokkr lock` shows who holds the lock and what it is doing - asked
 of the holder itself over its control socket, so it works across sandboxes.
 When the holder recorded the same `CODEX_THREAD_ID` as the waiting command, the
 wait says so: the holder is almost certainly the agent's own earlier command,
@@ -59,25 +58,32 @@ once instead (see "A descendant of the holder refuses rather than waits").
 
 Flags:
 - `-p/--package <PKG>` (repeatable) - scope every sweep's cargo invocation
-  (clippy + test) to the named packages. The set **replaces** each sweep's
-  own package selection - cargo unions selection flags, so composing
-  `--workspace --exclude ...` with `--package` would silently un-scope the
-  run. Per sweep the set is *intersected* with the sweep's scope: a package
-  its `packages` list or (test phase only) `test_exclude_packages` rules out
-  is dropped, a sweep keeping none is skipped (mirroring `brokkr test`'s
-  SKIP) - so `-p a -p b` still reaches `a` in the sweep that admits it when
-  `b` lives in another sweep. If every sweep skips, the phase fails rather
-  than reading as green. The `invocation:` line up front shows `-p <pkg> ...`;
-  right after it, when the sweeps' package rules narrow the selection, one
-  `package rules narrow this selection` announcement groups the sweeps by
-  outcome (`  vm, runner: not admitted - -p x is not in this sweep's packages
-  list`), naming build rules and test rules apart when they differ. It claims
-  admission only: an admitted sweep can still go unrun by a phase (a doctest
-  carrier in rustdoc, build-shape dedupe, a skipped phase, an earlier
-  failure). The per-phase `skipped`/`dropped` lines go to the run log only
-  (`brokkr clippy`, which has no announcement, still prints them). The
-  `--json` summary carries a `package` field (comma-joined for a
-  multi-package run). Rejected under a `certifies = "complete"` profile
+  (clippy, rustdoc, test, install-feature) to the named packages. The set
+  **replaces** each sweep's own package selection - cargo unions selection
+  flags, so composing `--workspace --exclude ...` with `--package` would
+  silently un-scope the run. Per sweep the set is *intersected* with the
+  sweep's scope: a package its `packages` list or (test phase only)
+  `test_exclude_packages` rules out is dropped, a sweep keeping none is
+  excluded from that phase (mirroring `brokkr test`'s SKIP) - so `-p a -p b`
+  still reaches `a` in the sweep that admits it when `b` lives in another
+  sweep. An excluded sweep builds nothing for that phase - its
+  `build_packages` support binaries included. If every applicable sweep is
+  excluded, the phase fails rather than reading as green (see "Invocation
+  selection" for when that refusal fires). The `invocation:` line up front
+  shows `-p <pkg> ...`; right after the phase announcements, when the sweeps'
+  package rules narrow the selection, one `package rules narrow this
+  selection` announcement groups the sweeps by what each phase made of them
+  (`  vm, runner: excluded (not admitted - -p x is not in this sweep's
+  packages list)`), naming the phases apart when they differ (`clippy:
+  eligible | test: eligible with -p b (not admitted - ...)`). Per phase it
+  reports the admission (the dropped packages) and the disposition -
+  eligible, excluded, deduped (and onto which sweep), or not applicable. A
+  phase the run skips is left out. Eligible means planned, never "will run":
+  an earlier failure or a stop can still end the run first. The per-phase
+  `skipped`/`dropped`/`deduped` lines go to the run log only (`brokkr
+  clippy`, which has no announcement, still prints them). The `--json`
+  summary carries a `package` field (comma-joined for a multi-package run).
+  Rejected under a `certifies = "complete"` profile
 - `--features` / `--no-default-features` - ad-hoc sweep, no `build_packages`.
   Overrides sweep *selection* only; the resolved profile's run shaping (skips,
   filters, thread policy) still applies - see "Sweep selection"
@@ -149,8 +155,13 @@ Output:
   sink brokkr chose on a guess (see `src/rustflags.rs`: a `target.*.rustflags`
   selector it cannot evaluate) warns that the allows may be inert.
 - **A failure prints what the green run left out.** Each failing sweep prints
-  its shape (`test threaded/default: workspace, unification workspace,
-  parallel`) and its `failing command:` beside its diagnostics. Every failure
+  its shape (`test threaded/default: default selection, unification
+  workspace, parallel`) and its `failing command:` beside its diagnostics. The
+  shape's package part says what the run selected: `-p a -p b` for an
+  override or a one-package selection, `N pkgs` for a sweep's own list,
+  `workspace -N pkgs` for `test_exclude_packages`, and `default selection`
+  when no package flag is passed - cargo's default members, which is not a
+  claim about the whole workspace. Every failure
   site carries its own context - the diagnostic phases report after all their
   sweeps ran, and a parallel lane after its join, so no ambient "current
   sweep" could say which one a failure belongs to. A failure whose site
@@ -219,7 +230,8 @@ Output:
   resolved profile's claim, `null` for unclaimed profiles), `verdict`
   (`"passed"`/`"complete"`/`"partial"`/`"failed"`), `profile` (the profile
   that drove sweep selection; `null` for ad-hoc and legacy runs), `sweeps`
-  (labels), `package` (the CLI `-p` scope, `null` when the run was not
+  (the labels of the sweeps clippy/rustdoc or the test phase started work on
+  - see "Invocation selection"), `package` (the CLI `-p` scope, `null` when the run was not
   scoped; multiple `-p` packages comma-joined), `failed_phase` (`null` on
   success, else one of `gremlins`/`header`/`textlint`/`manifest`/
   `script_check`/`dependency_rules`/`publish_cycle`/`clippy`/`rustdoc`/
@@ -239,6 +251,84 @@ Output:
   with the separate policy and execution objects. A config error before the
   phases run (bad profile name, conflicting flags, a certifies violation)
   emits no summary - resolve-time errors are not run verdicts.
+
+## Invocation selection
+
+Which lanes each phase of `check` (and `brokkr test`) is eligible to attempt,
+and with which packages, is decided once, before any phase runs
+(`src/check_cmd/selection.rs`), and every consumer reads that answer: clippy
+and rustdoc, the test phase, `prepare`, the lane runners (serial, parallel,
+isolated, nextest), install-feature, `brokkr clippy`, `brokkr test`, and the
+`package rules` and `brokkr test` plan announcements. Nothing re-derives it.
+It is invocation selection only: it never predicts binaries, tests, inventory
+or outcomes. The prepared inventory and the runtime record (journal,
+accounting) keep their own models.
+
+Per phase, one entry per active sweep, in sweep order - the sweep index stays
+the lane's identity everywhere (the plan, the journal, termination labels):
+
+- **Selection**, the effective package selection: the sweep's own `packages`
+  list; `--workspace --exclude` from `test_exclude_packages` (test phase only -
+  the exclusions never narrow clippy or rustdoc); no package flags at all
+  (cargo's default selection); or an override - the CLI `-p` set (`check`,
+  `brokkr clippy`), or `brokkr test`'s resolved package (whatever its source:
+  `-p`, `[test] default_package`, the project default) - holding the packages
+  the sweep's rules admitted. Package flags are spelled by one function of
+  the selection.
+- **Resolutions**: one combined resolution, or one per package under
+  `feature_unification = "package"` - always exactly the selection's
+  packages, in order, each once. Package mode over a selection that names no
+  packages is a configuration error raised before anything runs (no
+  `--json` trailer), never repaired into one unscoped resolution.
+- **Disposition**: *eligible* (an attempt), *excluded* (the rules admit none
+  of the `-p` packages), *deduped* onto an earlier eligible sweep of the
+  same phase, *not applicable* (rustdoc's `doc_only` doctest carriers), or
+  *disabled* (the phase does not run: a profile's `skip_phases`, the
+  markdown-only shortcut, rustdoc without a `[rustdoc]` table - nothing is
+  computed or validated for a disabled phase). Admission is exactly the
+  package rules above, the exclusion list checked before the packages list.
+
+Dedupe differs by phase. Clippy and rustdoc fold a sweep onto an earlier one
+of the same build shape (`build_shape_key`). `check`'s test lanes never
+dedupe: their filters and execution policies differ even where their builds
+do not. `brokkr test` dedupes on what a lane would execute - the package
+selection (its provenance ignored), resolutions, features, unification,
+rustflags, env, `build_packages`, the effective debug answer (`--debug`/
+`--release` over the sweep's pin over `[test] debug`) and `doc_only` - so a
+sweep and its doctest twin stay two runs, and two sweeps narrowed to the same
+package with the same build fold into one.
+
+A lane that is not eligible builds nothing for that phase. In particular
+`prepare` records an excluded test lane as skipped and builds neither its
+support binaries nor its shape; an eligible lane keeps the order support
+builds, then its own build and listing, then the support fingerprint. Support
+builds always use their own single-package selection (each `build_packages`
+entry), never the lane's test selection.
+
+**Nothing reached.** When the CLI `-p` set excludes every applicable sweep of
+an enabled phase, that phase refuses: the refusal is decided with the
+selection and reported at the phase boundary as a failed run with
+`failed_phase` set and the `--json` trailer emitted. Clippy and rustdoc report
+it as they start (`-p x: every sweep's config rules the selection out (a, b);
+nothing reached clippy`). The test phase's refusal (`-p x: every sweep's
+config rules the selection out; zero tests ran`) is reported **before**
+`prepare`, under `failed_phase: "test"`, so a run that will test nothing
+compiles nothing for it - which means it takes precedence over any
+preparation, `cargo metadata` or plan-persistence error that run would
+otherwise have hit. A disabled phase never refuses, nor does rustdoc when
+every sweep is a doctest carrier.
+
+**Reached.** The trailer's `sweeps` list is the union of two per-sweep flags:
+one for the diagnostic phases (clippy and rustdoc share it) and one for the
+test phase, each set when the phase starts work on that sweep - before cargo
+returns, so a sweep whose run failed still counts, and a lane an earlier
+fail-fast never reached does not.
+
+Install-feature has its own selection: not applicable (no `[bin]`, an empty
+install set, `install_feature_check` ruling the claim out, the phase
+skipped), skipped visibly when the `-p` set rules every install package out
+(never a refusal), else the install packages to check. Which of their bins are
+eligible stays cargo's runtime answer.
 
 ## Running one textlint rule or script check
 
@@ -1452,10 +1542,11 @@ plus the sweep's selection exactly as clippy builds it: profile, feature
 unification, packages, features, env and isolated target dir. Rustdoc resolves
 `cfg` like the build does, so documenting under any other shape would judge doc
 comments on code that shape never compiles. It runs once per distinct build
-shape, deduped and `-p`-intersected by the same loop clippy uses
-(`run_per_build_shape`), so the two phases cannot disagree about what a sweep
-covers. A `doc_only` sweep is skipped (`skipped (doctest carrier, no build
-shape of its own)`): it exists to run doctests, so documenting it re-reports
+shape, deduped and `-p`-intersected by the same rules as clippy (see
+"Invocation selection") and through the same loop (`run_per_build_shape`), so
+the two phases cannot disagree about what a sweep covers. A `doc_only` sweep
+is not applicable (`skipped (doctest carrier, no build shape of its own)`):
+it exists to run doctests, so documenting it re-reports
 another sweep's diagnostics under a second label - and cannot always be
 deduped, since a carrier that inherits feature unification from
 `.cargo/config.toml` differs on argv from a sibling that passes it.
@@ -1897,9 +1988,9 @@ doctest still runs (and within a doc-only sweep it runs `--doc <name>`).
 `test_exclude_packages` on a `doc_only` sweep is the supported way to keep a
 package out of the doctest lane (a bin-only crate, say), and it holds under
 `brokkr check -p`: the `-p` intersection drops the excluded package from that
-sweep, and a sweep left with nothing is skipped - `-p <excluded>` never
-becomes `cargo test --doc -p <excluded>`. This is a contract, pinned by
-`cli_package_excluded_from_doc_only_sweep_skips_the_lane`.
+sweep, and a sweep left with nothing is excluded from the test phase -
+`-p <excluded>` never becomes `cargo test --doc -p <excluded>`. This is a
+contract, pinned by `cli_package_excluded_from_doc_only_sweep_skips_the_lane`.
 
 ### Parallel test binaries
 
@@ -2227,7 +2318,9 @@ certifies only that the failed run's record is complete, never the gate.
 
 ### The plan (`prepare`)
 
-Before any test runs, every active lane is prepared: its declared support
+Before any test runs, every lane the test selection attempts is prepared (a
+lane it excludes is recorded as skipped and builds nothing - see "Invocation
+selection"): its declared support
 builds (`build_packages`) run first, so a listing whose static constructor or
 custom harness reads a support binary sees the one the lane runs with; then
 its shape is built with the same `cargo test --no-run` the lane itself uses,
@@ -2794,9 +2887,9 @@ different questions, and only the first could be derived.
 - **Forwarded package selectors are refused.** `brokkr check -- -p other` under
   package mode is an error, because cargo unions selection flags and would
   widen a resolution promised to hold exactly one package.
-- The mode is part of the **build shape**, so a package-mode and a
-  workspace-mode lane never dedupe into each other in clippy, in `brokkr test`,
-  or in the coverage audit.
+- The mode is part of the **build shape** (and of what `brokkr test` dedupes
+  on), so a package-mode and a workspace-mode lane never dedupe into each
+  other in clippy, in `brokkr test`, or in the coverage audit.
 
 ## `install_feature` phase (install-shaped resolve)
 
@@ -3052,13 +3145,16 @@ under it, and to the status line on a terminal:
 
 ```
 [run]     profile tier1: 3 sweeps (default, ffi, live)
-[run]     clippy default: workspace
+[run]     clippy default: default selection
 [run]     cargo clippy --keep-going --all-targets ...
 [run]     clippy ffi: 4 pkgs, +ffi
 [run]     test default: workspace -2 pkgs, 14 skips, parallel
 ```
 
-A failing sweep prints its shape beside its failing command. Resolved facts
+The package part of a shape is the phase's selection for that sweep (see
+"Invocation selection"): the default sweep's clippy line above passes no
+package flag, so it reads `default selection`, while its test line carries the
+`test_exclude_packages` exclusion. A failing sweep prints its shape beside its failing command. Resolved facts
 the config does not spell out - `feature_unification = "auto"` promoting a
 lane, the topology-derived parallel budget - are machine- and tree-stable and
 stay log-only; they are the data for a cross-host comparison, not for
@@ -3190,18 +3286,21 @@ without it a red is indistinguishable from a code failure.
 A profile with `lanes` resolves to the concatenation of its lanes' sweeps,
 labels lane-qualified (`tier1/default`, `serial/default`). The test phase
 runs each lane's entry separately - contradictory filter sets are the point -
-while the clippy phase dedupes sweeps whose build shape (packages, features,
-rustflags, env, build_packages, profile) is identical, logging
-`clippy <label>: deduped`. `profile` is in the shape because
+while the clippy and rustdoc phases dedupe sweeps whose build shape (packages,
+features, rustflags, env, build_packages, profile, effective unification) is
+identical, logging `clippy <label>: deduped`. `profile` is in the shape because
 `cfg(debug_assertions)` decides which code exists: a dev and a release sweep of
 the same features present different lint surfaces, so they are linted
 separately rather than deduped into one.
 
 `brokkr test <name>` follows the same ladder except: filters are dropped (the
 user's `<name>` argument is the filter), there's no CLI ad-hoc path (the
-test runner doesn't accept `--features`), and a lanes profile keeps one
-sweep per build shape (with filters dropped, lane duplicates are identical
-runs). `--sweep` labels under a lanes profile are the lane-qualified form.
+test runner doesn't accept `--features`), and sweeps that would execute
+identically for the resolved package fold into the first (with filters
+dropped, lane duplicates are identical runs) - but a sweep and its `doc_only`
+twin never do, nor two sweeps with different `build_packages` (see
+"Invocation selection"). `--sweep` applies before that fold, and its labels
+under a lanes profile are the lane-qualified form.
 
 Per-project orchestration blocks (today: `[ratatoskr.harness]`) are **not**
 `[[check]]` sweeps and are invisible to both `brokkr check` and `brokkr test`.
@@ -3362,15 +3461,19 @@ the harness (`[test:cli_sort]`, `[lib:pkg]`) - and `BUILD FAILED` for a sweep
 whose build failed. There are no `sweep:` header lines: every line that belongs
 to one sweep names it (`<sweep>: 44 harnesses built in 3.9s`,
 `<sweep>: 1 of 85 harnesses holds a match: test:cli_sort`, the PASS/FAIL tags),
-and a single-sweep run drops the prefix. A multi-sweep run opens with one line
-naming the sweeps that will run, and those out of the package's scope with their
-reason (`not this package:` for a `packages` list the target isn't in,
-`excluded by test_exclude_packages:`). That line is the only place an
-out-of-scope sweep is named: it prints no `SKIP` of its own (a run resolving to
-a single sweep has no plan line, so its out-of-scope `SKIP` still prints). The
-scope decision is made *before* the build, so a target that doesn't carry the
-sweep's features is skipped rather than force-built into a guaranteed `BUILD
-FAILED`.
+and a single-sweep run drops the prefix. A multi-sweep run opens with one plan
+line rendered from the run's selection (see "Invocation selection"), naming the
+sweeps it is eligible to go through, those out of the package's scope with
+their reason (`not this package:` for a `packages` list the target isn't in,
+`excluded by test_exclude_packages:`), and those deduped onto an earlier sweep
+that would execute the same thing (`deduped: serial/all (as tier1/all)`). That
+line is the only place an out-of-scope or deduped sweep is named: it prints no
+`SKIP` of its own (a run resolving to a single sweep has no plan line, so its
+out-of-scope `SKIP` still prints). A deduped sweep does not count toward
+"multi-sweep". The resolved package always replaces each sweep's own
+selection, and the scope decision is made *before* the build, so a target
+that doesn't carry the sweep's features is skipped rather than force-built
+into a guaranteed `BUILD FAILED` - its support builds included.
 
 A sweep in scope whose harnesses hold no match (usually
 `#[cfg(feature = "...")]`-gated) prints a `SKIP` line only when another sweep

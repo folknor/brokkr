@@ -188,9 +188,6 @@ pub(crate) struct PreparedLane {
     /// Why this lane has no inventory, when it has none: its streams cannot be
     /// attributed to binaries. See [`LaneRecord::unavailable`].
     pub(crate) unavailable: Option<String>,
-    /// Why this lane does not run in this invocation (a CLI `-p` its config
-    /// rules out).
-    pub(crate) skipped: Option<String>,
     /// Set when preparing this lane failed outside a certifying claim: what
     /// the attempt printed (held back) and the error's own text. The lane's
     /// run reports this instead of preparing again - a second preparation
@@ -229,7 +226,6 @@ impl PreparedLane {
             support_fingerprint: Vec::new(),
             doc_obligation: false,
             unavailable: None,
-            skipped: None,
             prepare_failed: None,
         }
     }
@@ -237,11 +233,6 @@ impl PreparedLane {
     /// A lane with no inventory, and why.
     fn without_inventory(env: LaneEnv, reason: String) -> Self {
         Self { unavailable: Some(reason), ..Self::bare(env) }
-    }
-
-    /// A lane this invocation does not run.
-    fn skipped(env: LaneEnv, reason: String) -> Self {
-        Self { skipped: Some(reason), ..Self::bare(env) }
     }
 
     /// The executable path -> unit index of one resolution: how a harness's
@@ -282,21 +273,23 @@ impl PreparedLane {
     }
 }
 
-/// A resolution's selection, as the direct-execution lanes and the serial
-/// lane's cargo command spell it: the sweep's whole selection when nothing
-/// narrows it, else the one package REPLACING the sweep's own `-p` list (cargo
-/// unions selection flags) - with the profile, the unification pin and the
-/// features, which the parallel lane's per-package prebuild used to drop.
-fn resolution_selection(sweep: &ResolvedSweep, scope: &[&str], resolution: Option<&str>) -> Vec<String> {
-    match resolution {
-        Some(pkg) => {
+/// A resolution's selection, as the direct-execution lanes spell it: the
+/// lane's whole selection for the combined resolution, else the one package
+/// REPLACING the sweep's own `-p` list (cargo unions selection flags) - with
+/// the profile, the unification pin and the features, which the parallel
+/// lane's per-package prebuild used to drop. The sweep's `--test` filters do
+/// not ride a per-package prebuild (cargo refuses a target a package lacks);
+/// they narrow the listed binaries instead.
+fn resolution_selection(sweep: &ResolvedSweep, run: &ResolutionRun) -> Vec<String> {
+    match &run.resolution {
+        Some(_) => {
             let mut args = sweep_profile_args(sweep);
             args.extend(sweep.unification_args());
-            args.extend(["-p".to_owned(), pkg.to_owned()]);
+            args.extend(package_args(&run.selection));
             args.extend(sweep.cargo_feature_args.iter().cloned());
             args
         }
-        None => sweep_selection_args(sweep, scope),
+        None => sweep_selection_args(sweep, &run.selection),
     }
 }
 
@@ -471,27 +464,28 @@ fn not_prepared(sweep: &ResolvedSweep) -> DevError {
     DevError::Reported(format!("sweep '{}' could not be prepared", sweep.label))
 }
 
-/// Prepare one lane: build its shape and list what it selects. `scope` is the
-/// CLI `-p` intersection, `extra_args` the forwarded `-- ...` (both empty under
-/// a complete profile, which refuses them).
+/// Prepare one attempted lane: build its shape and list what it selects.
+/// `attempt` is the test selection's (the CLI `-p` intersection already
+/// applied), `extra_args` the forwarded `-- ...` (empty under a complete
+/// profile, which refuses it).
 pub(crate) fn prepare_lane(
     inputs: &LaneInputs<'_>,
     sweep: &ResolvedSweep,
-    scope: &[&str],
+    attempt: &Attempt,
     extra_args: &[String],
 ) -> Result<PreparedLane, DevError> {
     let env = lane_env(inputs, sweep);
     let kind = lane_kind(sweep);
     let mut prepared = match kind {
-        LaneKind::Nextest => prepare_nextest(inputs, sweep, scope, extra_args, &env)?,
+        LaneKind::Nextest => prepare_nextest(inputs, sweep, attempt, extra_args, &env)?,
         LaneKind::DocOnly => {
             if inputs.certifying {
                 refuse_unattributable_serial(inputs, sweep, &env, extra_args)?;
             }
             PreparedLane::bare(env)
         }
-        LaneKind::Parallel | LaneKind::Isolated => prepare_direct(inputs, sweep, scope, extra_args, &env, kind)?,
-        LaneKind::Serial => prepare_serial(inputs, sweep, scope, extra_args, &env)?,
+        LaneKind::Parallel | LaneKind::Isolated => prepare_direct(inputs, sweep, attempt, extra_args, &env, kind)?,
+        LaneKind::Serial => prepare_serial(inputs, sweep, attempt, extra_args, &env)?,
     };
     prepared.verify = true;
     Ok(prepared)
@@ -640,29 +634,26 @@ impl DocFacts {
     }
 
     /// The members one resolution of a serial lane runs `cargo test` over -
-    /// the same selection [`sweep_selection_args`] spells.
-    fn selected<'a>(&'a self, sweep: &'a ResolvedSweep, scope: &'a [&'a str]) -> Vec<&'a str> {
-        if !scope.is_empty() {
-            return scope.to_vec();
-        }
-        if !sweep.packages.is_empty() {
-            return sweep.packages.iter().map(String::as_str).collect();
-        }
-        if !sweep.test_exclude_packages.is_empty() {
-            return self
+    /// the same selection [`package_args`] spells.
+    fn selected<'a>(&'a self, selection: &'a Selection) -> Vec<&'a str> {
+        match selection {
+            Selection::Explicit(p) | Selection::Override { packages: p, .. } => {
+                p.iter().map(String::as_str).collect()
+            }
+            Selection::WorkspaceExcluding(excluded) => self
                 .members
                 .iter()
                 .map(String::as_str)
-                .filter(|m| !sweep.test_exclude_packages.iter().any(|x| x == m))
-                .collect();
+                .filter(|m| !excluded.iter().any(|x| x == m))
+                .collect(),
+            Selection::Bare => self.default_members.iter().map(String::as_str).collect(),
         }
-        self.default_members.iter().map(String::as_str).collect()
     }
 
     /// Whether this resolution's `cargo test` is obliged to run a rustdoc
     /// pass: some selected member has a doctested target.
-    pub(crate) fn obliges(&self, sweep: &ResolvedSweep, scope: &[&str]) -> bool {
-        self.selected(sweep, scope).iter().any(|p| self.doctestable.contains(*p))
+    pub(crate) fn obliges(&self, selection: &Selection) -> bool {
+        self.selected(selection).iter().any(|p| self.doctestable.contains(*p))
     }
 }
 
@@ -690,7 +681,7 @@ fn workspace_doc_facts(project_root: &Path, env_refs: &[(&str, &str)]) -> Result
 fn prepare_serial(
     inputs: &LaneInputs<'_>,
     sweep: &ResolvedSweep,
-    scope: &[&str],
+    attempt: &Attempt,
     extra_args: &[String],
     env: &LaneEnv,
 ) -> Result<PreparedLane, DevError> {
@@ -702,21 +693,16 @@ fn prepare_serial(
     }
     let (cargo_extra, libtest_extra) = split_extra_args(extra_args);
     let env_refs = env.refs();
-    let owned: Vec<String> = scope.iter().map(|s| (*s).to_owned()).collect();
     let mut built: Vec<(Option<String>, Vec<String>, Vec<TestBinary>)> = Vec::new();
     let mut index = BuildRuntimeIndex::default();
     let doc_facts = workspace_doc_facts(inputs.project_root, &env_refs)?;
     let mut doc_obligation = false;
-    for resolution in sweep.resolutions(&owned) {
-        let run_scope: Vec<&str> = match &resolution {
-            Some(pkg) => vec![pkg.as_str()],
-            None => scope.to_vec(),
-        };
-        doc_obligation |= doc_facts.obliges(sweep, &run_scope);
+    for run in attempt.runs() {
+        doc_obligation |= doc_facts.obliges(&run.selection);
         // Exactly the cargo-level argv `run_one_test_sweep` hands `cargo test`,
         // so the prebuild names the same units and the run is a no-op rebuild.
         let mut selection = env.allow_args.clone();
-        selection.extend(sweep_selection_args(sweep, &run_scope));
+        selection.extend(sweep_selection_args(sweep, &run.selection));
         selection.extend(cargo_extra.iter().cloned());
         let Some((binaries, idx)) =
             test_binaries_with_runtime(inputs.project_root, &selection, &env_refs, inputs.commands)?
@@ -724,7 +710,7 @@ fn prepare_serial(
             return Err(not_prepared(sweep));
         };
         index.merge(idx);
-        built.push((resolution, selection, binaries));
+        built.push((run.resolution, selection, binaries));
     }
     let fingerprint = Some(index.fingerprint()?);
     let runtime = DirectRuntime::load(inputs.project_root, &env_refs, index)?;
@@ -760,7 +746,7 @@ fn prepare_serial(
 fn prepare_direct(
     inputs: &LaneInputs<'_>,
     sweep: &ResolvedSweep,
-    scope: &[&str],
+    attempt: &Attempt,
     extra_args: &[String],
     env: &LaneEnv,
     kind: LaneKind,
@@ -782,15 +768,14 @@ fn prepare_direct(
     // Direct execution would bypass a configured runner; refuse before building.
     refuse_configured_runner(inputs.project_root, &env_refs)?;
 
-    let owned: Vec<String> = scope.iter().map(|s| (*s).to_owned()).collect();
     let mut built: Vec<(Option<String>, Vec<String>, Vec<TestBinary>)> = Vec::new();
     let mut index = BuildRuntimeIndex::default();
     // Under package mode one prebuild PER PACKAGE, never a batched multi-`-p`:
     // the batched graph is observably not the N independent resolutions the
     // mode exists for, so it would enumerate binaries no run uses.
-    for resolution in sweep.resolutions(&owned) {
+    for run in attempt.runs() {
         let mut selection = env.allow_args.clone();
-        selection.extend(resolution_selection(sweep, scope, resolution.as_deref()));
+        selection.extend(resolution_selection(sweep, &run));
         selection.extend(extra_selectors.iter().cloned());
         selection.extend(cargo_extra.iter().cloned());
         let Some((binaries, idx)) =
@@ -799,7 +784,7 @@ fn prepare_direct(
             return Err(not_prepared(sweep));
         };
         index.merge(idx);
-        built.push((resolution, selection, binaries));
+        built.push((run.resolution, selection, binaries));
     }
     let fingerprint = Some(index.fingerprint()?);
     let runtime = DirectRuntime::load(inputs.project_root, &env_refs, index)?;
@@ -1063,32 +1048,31 @@ fn universe_from_binaries(
 
 /// The two operations preparation is made of, behind a seam so the plan's
 /// assembly - markers, completeness, the stop on a watchdog - is testable
-/// without cargo.
+/// without cargo. Both are only ever asked about a lane the test selection
+/// attempts: a lane it excludes builds nothing, support binaries included.
 pub(crate) trait Preparer {
-    /// Build the lane's declared support binaries (`build_packages`). Runs
-    /// before the lane's listings: a binary whose static constructor or
-    /// custom harness reads a support binary must be listed with the one the
-    /// lane will run with, not a stale one or none. Returns the executables
-    /// they produced, which the plan hashes once the lane is built.
-    fn support(&mut self, sweep: &ResolvedSweep) -> Result<Vec<SupportArtifact>, DevError>;
-    fn lane(&mut self, sweep: &ResolvedSweep) -> Result<PreparedLane, DevError>;
+    /// Build the lane's declared support binaries (`build_packages`), each
+    /// under its own explicit single-package selection - never the lane's
+    /// test selection. Runs before the lane's listings: a binary whose static
+    /// constructor or custom harness reads a support binary must be listed
+    /// with the one the lane will run with, not a stale one or none. Returns
+    /// the executables they produced, which the plan hashes once the lane is
+    /// built.
+    fn support(&mut self, sweep: &ResolvedSweep, attempt: &Attempt) -> Result<Vec<SupportArtifact>, DevError>;
+    fn lane(&mut self, sweep: &ResolvedSweep, attempt: &Attempt) -> Result<PreparedLane, DevError>;
     fn universe(&mut self, sweep: &ResolvedSweep, resolution: Option<&str>, env: &LaneEnv) -> Result<Universe, DevError>;
 }
 
 /// The real preparer: cargo, listings, hashes.
 pub(crate) struct CargoPreparer<'a> {
     pub(crate) inputs: LaneInputs<'a>,
-    /// The CLI `-p` set, which each lane intersects with its own scope as the
-    /// test phase does ([`cli_package_scope`]). Empty under a certifying
-    /// claim, which refuses it.
-    pub(crate) packages: &'a [String],
     /// The forwarded `-- …` args, which narrow what a lane selects and so
     /// what it is expected to execute. Empty under a certifying claim.
     pub(crate) extra_args: &'a [String],
 }
 
 impl Preparer for CargoPreparer<'_> {
-    fn support(&mut self, sweep: &ResolvedSweep) -> Result<Vec<SupportArtifact>, DevError> {
+    fn support(&mut self, sweep: &ResolvedSweep, _attempt: &Attempt) -> Result<Vec<SupportArtifact>, DevError> {
         let env = lane_env(&self.inputs, sweep);
         let mut out = Vec::new();
         for pkg in &sweep.build_packages {
@@ -1104,13 +1088,8 @@ impl Preparer for CargoPreparer<'_> {
         Ok(out)
     }
 
-    fn lane(&mut self, sweep: &ResolvedSweep) -> Result<PreparedLane, DevError> {
-        // The same scope the test phase will hand the lane: a lane the CLI
-        // `-p` rules out does not run, so it expects nothing.
-        match cli_package_scope(sweep, self.packages, true) {
-            Ok((scope, _)) => prepare_lane(&self.inputs, sweep, &scope, self.extra_args),
-            Err(reason) => Ok(PreparedLane::skipped(lane_env(&self.inputs, sweep), reason)),
-        }
+    fn lane(&mut self, sweep: &ResolvedSweep, attempt: &Attempt) -> Result<PreparedLane, DevError> {
+        prepare_lane(&self.inputs, sweep, attempt, self.extra_args)
     }
 
     fn universe(&mut self, sweep: &ResolvedSweep, resolution: Option<&str>, env: &LaneEnv) -> Result<Universe, DevError> {
@@ -1140,9 +1119,16 @@ pub(crate) struct ProfilePrep {
 /// liveness. Every run gets the execution inventory. A lane that fails to
 /// prepare under a claim that does not need it is a lane with no inventory
 /// (its `unavailable` says why), not a refusal: it still runs.
+///
+/// `selection` is the test phase's, aligned with `sweeps`. A lane it does not
+/// attempt is recorded as skipped, expecting nothing, and the preparer is
+/// never asked about it - no support build, no lane build. An attempted lane
+/// keeps the order support build, then lane build and listing, then the
+/// support fingerprint.
 #[allow(clippy::too_many_lines, clippy::cognitive_complexity)]
 pub(crate) fn prepare_profile(
     sweeps: &[ResolvedSweep],
+    selection: &PhaseSelection,
     doctests: bool,
     certifying: bool,
     preparer: &mut dyn Preparer,
@@ -1181,13 +1167,27 @@ pub(crate) fn prepare_profile(
             lanes.push(None);
             continue;
         }
+        let Some(lane_attempt) = selection.attempt(idx) else {
+            // Not attempted by this invocation (a CLI `-p` its config rules
+            // out): nothing expected, nothing to judge, nothing built.
+            record.skipped = Some(
+                selection
+                    .entry(idx)
+                    .and_then(LaneEntry::skip_reason)
+                    .unwrap_or_else(|| "not in this invocation's selection".to_owned()),
+            );
+            record.prepared = true;
+            plan.lanes.push(record);
+            lanes.push(None);
+            continue;
+        };
         // The support executables are hashed AFTER the lane's own build, the
         // order the lane's verification repeats: that build can re-uplift a
         // support bin over the pre-build's, and the file the tests read is
         // whichever landed last.
         let attempt = |preparer: &mut dyn Preparer| {
-            preparer.support(sweep).and_then(|support| {
-                let mut p = preparer.lane(sweep)?;
+            preparer.support(sweep, lane_attempt).and_then(|support| {
+                let mut p = preparer.lane(sweep, lane_attempt)?;
                 p.support_fingerprint = support_fingerprint(&support)?;
                 Ok(p)
             })
@@ -1247,14 +1247,6 @@ pub(crate) fn prepare_profile(
             }
         };
 
-        if let Some(reason) = &prepared.skipped {
-            // Not run by this invocation: nothing expected, nothing to judge.
-            record.skipped = Some(reason.clone());
-            record.prepared = true;
-            plan.lanes.push(record);
-            lanes.push(Some(prepared));
-            continue;
-        }
         if let Some(reason) = &prepared.unavailable {
             // The lane runs, through cargo, with its streams unattributable:
             // no inventory, and the filters it declares cannot be judged.
@@ -1460,8 +1452,23 @@ mod prepare_tests {
         test_binary_for_tests("core", "test", target)
     }
 
+    /// The test selection of a run with CLI `-p` set `cli`.
+    fn selected(sweeps: &[ResolvedSweep], cli: &[&str]) -> PhaseSelection {
+        let cli: Vec<String> = cli.iter().map(|p| (*p).to_owned()).collect();
+        PhaseSelection::for_check(SelectionPhase::Test, sweeps, &cli).unwrap()
+    }
+
+    /// `prepare_profile` over the selection of a run with no `-p`.
+    fn prepare_all(
+        sweeps: &[ResolvedSweep],
+        certifying: bool,
+        preparer: &mut dyn Preparer,
+    ) -> ProfilePrep {
+        prepare_profile(sweeps, &selected(sweeps, &[]), false, certifying, preparer)
+    }
+
     impl Preparer for Fake {
-        fn support(&mut self, sweep: &ResolvedSweep) -> Result<Vec<SupportArtifact>, DevError> {
+        fn support(&mut self, sweep: &ResolvedSweep, _: &Attempt) -> Result<Vec<SupportArtifact>, DevError> {
             if !sweep.build_packages.is_empty() {
                 self.lanes_prepared.push(format!("support:{}", sweep.label));
             }
@@ -1471,7 +1478,7 @@ mod prepare_tests {
             Ok(self.support_artifacts.clone())
         }
 
-        fn lane(&mut self, sweep: &ResolvedSweep) -> Result<PreparedLane, DevError> {
+        fn lane(&mut self, sweep: &ResolvedSweep, _: &Attempt) -> Result<PreparedLane, DevError> {
             if self.stop_at.as_deref() == Some(sweep.label.as_str()) {
                 return Err(DevError::Interrupted);
             }
@@ -1513,7 +1520,7 @@ mod prepare_tests {
     #[test]
     fn a_prepared_profile_plans_executions_and_its_universe() {
         let mut fake = Fake::new(None);
-        let prep = prepare_profile(&[sweep("one")], false, true, &mut fake);
+        let prep = prepare_all(&[sweep("one")], true, &mut fake);
         assert!(prep.plan.complete, "{:?}", prep.plan.incomplete);
         let lane = &prep.plan.lanes[0];
         let tests: Vec<&str> = lane.executions.iter().map(|p| p.test.as_str()).collect();
@@ -1530,7 +1537,7 @@ mod prepare_tests {
     #[test]
     fn a_stop_during_preparation_yields_an_incomplete_plan() {
         let mut fake = Fake::new(Some("two"));
-        let prep = prepare_profile(&[sweep("one"), sweep("two"), sweep("three")], false, true, &mut fake);
+        let prep = prepare_all(&[sweep("one"), sweep("two"), sweep("three")], true, &mut fake);
         assert!(!prep.plan.complete);
         assert!(prep.plan.incomplete.iter().any(|m| m.contains("stopped")), "{:?}", prep.plan.incomplete);
         assert_eq!(fake.lanes_prepared, vec!["one"], "nothing is prepared after the stop");
@@ -1545,17 +1552,17 @@ mod prepare_tests {
     fn a_lane_binary_outside_the_universe_is_a_marker() {
         struct Elsewhere;
         impl Preparer for Elsewhere {
-            fn support(&mut self, _: &ResolvedSweep) -> Result<Vec<SupportArtifact>, DevError> {
+            fn support(&mut self, _: &ResolvedSweep, _: &Attempt) -> Result<Vec<SupportArtifact>, DevError> {
                 Ok(Vec::new())
             }
-            fn lane(&mut self, s: &ResolvedSweep) -> Result<PreparedLane, DevError> {
-                Fake::new(None).lane(s)
+            fn lane(&mut self, s: &ResolvedSweep, a: &Attempt) -> Result<PreparedLane, DevError> {
+                Fake::new(None).lane(s, a)
             }
             fn universe(&mut self, _: &ResolvedSweep, _: Option<&str>, _: &LaneEnv) -> Result<Universe, DevError> {
                 Ok(Universe::default())
             }
         }
-        let prep = prepare_profile(&[sweep("one")], false, true, &mut Elsewhere);
+        let prep = prepare_all(&[sweep("one")], true, &mut Elsewhere);
         assert!(!prep.plan.complete);
         assert!(!prep.plan.lanes[0].prepared);
     }
@@ -1568,15 +1575,42 @@ mod prepare_tests {
     fn support_builds_run_before_the_lanes_listings() {
         let with_support = ResolvedSweep { build_packages: vec!["server".into()], ..sweep("one") };
         let mut fake = Fake::new(None);
-        let prep = prepare_profile(std::slice::from_ref(&with_support), false, true, &mut fake);
+        let prep = prepare_all(std::slice::from_ref(&with_support), true, &mut fake);
         assert!(prep.plan.complete, "{:?}", prep.plan.incomplete);
         assert_eq!(fake.lanes_prepared, vec!["support:one", "one"]);
 
         let mut failing = Fake { support_fails: true, ..Fake::new(None) };
-        let prep = prepare_profile(&[with_support], false, true, &mut failing);
+        let prep = prepare_all(&[with_support], true, &mut failing);
         assert!(!prep.plan.complete);
         assert!(prep.plan.incomplete.iter().any(|m| m.contains("support build failed")), "{:?}", prep.plan.incomplete);
         assert_eq!(failing.lanes_prepared, vec!["support:one"], "nothing is listed past a failed support build");
+    }
+
+    /// Regression: a lane the CLI `-p` rules out of the test phase builds
+    /// nothing in preparation. Its support binaries used to be compiled
+    /// before the package rules were applied, so `-p x` against a sweep
+    /// excluding `x` still built that sweep's `build_packages`.
+    #[test]
+    fn an_excluded_lane_builds_no_support_binaries() {
+        let excluded = ResolvedSweep {
+            build_packages: vec!["server".into()],
+            test_exclude_packages: vec!["x".into()],
+            ..sweep("excluding")
+        };
+        let admitting = ResolvedSweep { build_packages: vec!["server".into()], ..sweep("admitting") };
+        let sweeps = [excluded, admitting];
+        let mut fake = Fake::new(None);
+        let prep = prepare_profile(&sweeps, &selected(&sweeps, &["x"]), false, false, &mut fake);
+        assert_eq!(
+            fake.lanes_prepared,
+            vec!["support:admitting", "admitting"],
+            "the excluded lane's support build never ran"
+        );
+        let skipped = &prep.plan.lanes[0];
+        assert!(skipped.skipped.as_deref().unwrap().contains("test_exclude_packages"), "{:?}", skipped.skipped);
+        assert!(skipped.prepared && skipped.executions.is_empty());
+        assert!(prep.lanes[0].is_none(), "nothing was prepared for it");
+        assert!(prep.plan.lanes[1].skipped.is_none());
     }
 
     /// libtest refuses `--ignored` beside `--include-ignored`, so the
@@ -1827,10 +1861,10 @@ mod prepare_tests {
     fn a_failed_preparation_is_not_retried_when_the_lane_runs() {
         struct Failing(usize);
         impl Preparer for Failing {
-            fn support(&mut self, _: &ResolvedSweep) -> Result<Vec<SupportArtifact>, DevError> {
+            fn support(&mut self, _: &ResolvedSweep, _: &Attempt) -> Result<Vec<SupportArtifact>, DevError> {
                 Ok(Vec::new())
             }
-            fn lane(&mut self, _: &ResolvedSweep) -> Result<PreparedLane, DevError> {
+            fn lane(&mut self, _: &ResolvedSweep, _: &Attempt) -> Result<PreparedLane, DevError> {
                 self.0 += 1;
                 output::error("failing command: ./custom --list");
                 Err(DevError::Reported("sweep 'one' could not be prepared".into()))
@@ -1841,7 +1875,8 @@ mod prepare_tests {
         }
         let mut failing = Failing(0);
         let sweep = sweep("one");
-        let prep = prepare_profile(std::slice::from_ref(&sweep), false, false, &mut failing);
+        let selection = selected(std::slice::from_ref(&sweep), &[]);
+        let prep = prepare_profile(std::slice::from_ref(&sweep), &selection, false, false, &mut failing);
         assert_eq!(failing.0, 1);
         let record = prep.lanes[0].as_ref().expect("the failure is recorded on the lane");
         assert!(record.prepare_failed.as_ref().unwrap().held.iter().any(|l| l.contains("./custom --list")));
@@ -1855,7 +1890,7 @@ mod prepare_tests {
                 state_root: &dir,
                 target_dir: &dir,
                 sweep: &sweep,
-                scope: &[],
+                attempt: selection.attempt(0).unwrap(),
                 extra_args: &[],
                 allow_flags: &[],
                 doctests: false,
@@ -1948,7 +1983,7 @@ mod prepare_tests {
         }];
         let with_support = ResolvedSweep { build_packages: vec!["server".into()], ..sweep("one") };
         let mut fake = Fake { support_artifacts: support.clone(), ..Fake::new(None) };
-        let prep = prepare_profile(std::slice::from_ref(&with_support), false, true, &mut fake);
+        let prep = prepare_all(std::slice::from_ref(&with_support), true, &mut fake);
         let lane = prep.lanes[0].as_ref().unwrap();
         assert_eq!(lane.support_fingerprint.len(), 1, "{:?}", lane.support_fingerprint);
 
@@ -2024,16 +2059,16 @@ mod prepare_tests {
             "workspace_default_members": ["path+file:///x/harness_only#harness_only@0.1.0"],
         });
         let facts = DocFacts::from_metadata(&meta);
-        let only = |pkg: &str| ResolvedSweep { packages: vec![pkg.into()], ..ResolvedSweep::default() };
-        assert!(!facts.obliges(&only("harness_only"), &[]), "a library harness without doctests obliges nothing");
-        assert!(facts.obliges(&only("doc_only"), &[]), "doctests without a library harness oblige a stream");
-        assert!(!facts.obliges(&only("cdy"), &[]), "rustdoc tests no cdylib");
+        let only = |pkg: &str| Selection::Explicit(vec![pkg.into()]);
+        assert!(!facts.obliges(&only("harness_only")), "a library harness without doctests obliges nothing");
+        assert!(facts.obliges(&only("doc_only")), "doctests without a library harness oblige a stream");
+        assert!(!facts.obliges(&only("cdy")), "rustdoc tests no cdylib");
         // The default selection is the default members; an exclusion list is
-        // the whole workspace less it; a resolution's scope replaces both.
-        assert!(!facts.obliges(&ResolvedSweep::default(), &[]));
-        let excl = ResolvedSweep { test_exclude_packages: vec!["cdy".into()], ..ResolvedSweep::default() };
-        assert!(facts.obliges(&excl, &[]));
-        assert!(facts.obliges(&ResolvedSweep::default(), &["doc_only"]));
+        // the whole workspace less it; an override replaces both.
+        assert!(!facts.obliges(&Selection::Bare));
+        assert!(facts.obliges(&Selection::WorkspaceExcluding(vec!["cdy".into()])));
+        let narrowed = selected(&[ResolvedSweep::default()], &["doc_only"]);
+        assert!(facts.obliges(narrowed.attempt(0).unwrap().selection()));
     }
 
     /// Validation case: cargo-mediated parallelism on the serial lane is
@@ -2068,10 +2103,10 @@ mod prepare_tests {
     /// A lane that cannot be attributed to binaries: inventory unavailable.
     struct Blind;
     impl Preparer for Blind {
-        fn support(&mut self, _: &ResolvedSweep) -> Result<Vec<SupportArtifact>, DevError> {
+        fn support(&mut self, _: &ResolvedSweep, _: &Attempt) -> Result<Vec<SupportArtifact>, DevError> {
             Ok(Vec::new())
         }
-        fn lane(&mut self, _: &ResolvedSweep) -> Result<PreparedLane, DevError> {
+        fn lane(&mut self, _: &ResolvedSweep, _: &Attempt) -> Result<PreparedLane, DevError> {
             Ok(PreparedLane::without_inventory(
                 LaneEnv::default(),
                 "cargo-mediated parallelism shares one stream".into(),
@@ -2090,18 +2125,18 @@ mod prepare_tests {
     fn a_partial_run_prepares_an_inventory_without_a_policy_universe() {
         struct NoUniverse(Fake);
         impl Preparer for NoUniverse {
-            fn support(&mut self, s: &ResolvedSweep) -> Result<Vec<SupportArtifact>, DevError> {
-                self.0.support(s)
+            fn support(&mut self, s: &ResolvedSweep, a: &Attempt) -> Result<Vec<SupportArtifact>, DevError> {
+                self.0.support(s, a)
             }
-            fn lane(&mut self, s: &ResolvedSweep) -> Result<PreparedLane, DevError> {
-                self.0.lane(s)
+            fn lane(&mut self, s: &ResolvedSweep, a: &Attempt) -> Result<PreparedLane, DevError> {
+                self.0.lane(s, a)
             }
             fn universe(&mut self, _: &ResolvedSweep, _: Option<&str>, _: &LaneEnv) -> Result<Universe, DevError> {
                 Err(DevError::Build("asked for a universe".into()))
             }
         }
         let serial = ResolvedSweep { label: "serial".into(), ..ResolvedSweep::default() };
-        let prep = prepare_profile(&[serial], false, false, &mut NoUniverse(Fake::new(None)));
+        let prep = prepare_all(&[serial], false, &mut NoUniverse(Fake::new(None)));
         assert!(prep.error.is_none(), "{:?}", prep.error);
         assert!(prep.plan.complete, "{:?}", prep.plan.incomplete);
         assert!(!prep.plan.certifying);
@@ -2119,7 +2154,7 @@ mod prepare_tests {
     #[test]
     fn an_unattributable_lane_has_no_inventory_and_is_not_refused() {
         let threaded = ResolvedSweep { label: "threaded".into(), test_threads: Some(0), ..ResolvedSweep::default() };
-        let prep = prepare_profile(&[threaded], false, false, &mut Blind);
+        let prep = prepare_all(&[threaded], false, &mut Blind);
         assert!(prep.error.is_none(), "unavailable by design is not a failure: {:?}", prep.error);
         let lane = &prep.plan.lanes[0];
         assert!(!lane.prepared);
@@ -2136,10 +2171,10 @@ mod prepare_tests {
     fn a_preparation_failure_degrades_outside_a_claim_and_fails_inside_one() {
         struct Failing;
         impl Preparer for Failing {
-            fn support(&mut self, _: &ResolvedSweep) -> Result<Vec<SupportArtifact>, DevError> {
+            fn support(&mut self, _: &ResolvedSweep, _: &Attempt) -> Result<Vec<SupportArtifact>, DevError> {
                 Ok(Vec::new())
             }
-            fn lane(&mut self, _: &ResolvedSweep) -> Result<PreparedLane, DevError> {
+            fn lane(&mut self, _: &ResolvedSweep, _: &Attempt) -> Result<PreparedLane, DevError> {
                 output::error("failing command: cargo test --no-run");
                 Err(DevError::Reported("sweep 'one' could not be prepared".into()))
             }
@@ -2147,7 +2182,7 @@ mod prepare_tests {
                 Ok(Universe::default())
             }
         }
-        let partial = prepare_profile(&[sweep("one")], false, false, &mut Failing);
+        let partial = prepare_all(&[sweep("one")], false, &mut Failing);
         let lane = &partial.plan.lanes[0];
         assert!(lane.unavailable.as_deref().unwrap().contains("failing command: cargo test --no-run"), "{:?}", lane.unavailable);
         assert!(
@@ -2155,7 +2190,7 @@ mod prepare_tests {
             "the failure is recorded for the lane to report, not prepared again"
         );
         assert!(!partial.plan.complete);
-        let certifying = prepare_profile(&[sweep("one")], false, true, &mut Failing);
+        let certifying = prepare_all(&[sweep("one")], true, &mut Failing);
         assert!(certifying.error.is_some());
     }
 
@@ -2165,11 +2200,11 @@ mod prepare_tests {
     fn an_unlisted_binary_is_recorded_on_the_lane() {
         struct Custom;
         impl Preparer for Custom {
-            fn support(&mut self, _: &ResolvedSweep) -> Result<Vec<SupportArtifact>, DevError> {
+            fn support(&mut self, _: &ResolvedSweep, _: &Attempt) -> Result<Vec<SupportArtifact>, DevError> {
                 Ok(Vec::new())
             }
-            fn lane(&mut self, s: &ResolvedSweep) -> Result<PreparedLane, DevError> {
-                let mut p = Fake::new(None).lane(s)?;
+            fn lane(&mut self, s: &ResolvedSweep, a: &Attempt) -> Result<PreparedLane, DevError> {
+                let mut p = Fake::new(None).lane(s, a)?;
                 let b = test_binary_for_tests("core", "test", "custom");
                 p.resolutions[0].binaries.push(PreparedBinary {
                     unit: BinaryUnit::of(&b),
@@ -2186,7 +2221,7 @@ mod prepare_tests {
                 Ok(Universe::default())
             }
         }
-        let prep = prepare_profile(&[sweep("one")], false, false, &mut Custom);
+        let prep = prepare_all(&[sweep("one")], false, &mut Custom);
         let lane = &prep.plan.lanes[0];
         assert_eq!(lane.unlisted.len(), 1);
         assert_eq!(lane.unlisted[0].0, "core::custom");

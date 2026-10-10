@@ -512,18 +512,9 @@ fn shape_selection_args(sweep: &ResolvedSweep) -> Vec<String> {
     // would list the tests of a build nothing ran, and rebuild the shape in
     // both directions on every audit.
     args.extend(sweep.unification_args());
-    for pkg in &sweep.packages {
-        args.push("-p".into());
-        args.push(pkg.clone());
-    }
-
-    if !sweep.test_exclude_packages.is_empty() {
-        args.push("--workspace".into());
-        for pkg in &sweep.test_exclude_packages {
-            args.push("--exclude".into());
-            args.push(pkg.clone());
-        }
-    }
+    // The shape's own test selection, never an invocation override: a
+    // complete claim (the only one that enumerates a universe) refuses `-p`.
+    args.extend(package_args(&Selection::configured(sweep, SelectionPhase::Test)));
     args.extend(sweep.cargo_feature_args.iter().cloned());
     args
 }
@@ -561,8 +552,7 @@ fn resolution_enumeration_args(
     let mut args = allow_args;
     args.extend(sweep_profile_args(sweep));
     args.extend(sweep.unification_args());
-    args.push("-p".to_owned());
-    args.push(pkg.to_owned());
+    args.extend(package_args(&Selection::Explicit(vec![pkg.to_owned()])));
     args.extend(sweep.cargo_feature_args.iter().cloned());
     args
 }

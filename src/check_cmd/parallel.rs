@@ -628,7 +628,7 @@ fn run_parallel_sweep(
     project_root: &Path,
     state_root: &Path,
     sweep: &ResolvedSweep,
-    packages: &[&str],
+    attempt: &Attempt,
     budget: u32,
     prepared: &PreparedLane,
     tap: &LaneTap,
@@ -637,7 +637,7 @@ fn run_parallel_sweep(
 ) -> Result<bool, DevError> {
     let sweep_started = Instant::now();
     announce_sweep(
-        &format!("test {}: {}", sweep.label, describe_sweep(sweep, true, packages)),
+        &format!("test {}: {}", sweep.label, describe_sweep(sweep, true, attempt.selection())),
         None,
         commands,
     );

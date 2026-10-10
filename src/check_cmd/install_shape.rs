@@ -504,47 +504,34 @@ fn check_one_install_package(
     Ok(true)
 }
 
-/// Run the install-feature phase. `Ok(())` when inapplicable (no explicit
-/// `[bin] install` list, or the mode rules this run out).
+/// Run the install-feature phase over its selection
+/// ([`InstallSelection`]): `Ok(())` when inapplicable (no explicit `[bin]
+/// install` list, or the mode rules this run out), a visible skip when the
+/// CLI `-p` rules every install package out.
 ///
 /// One cargo invocation per install package - the batched multi-`-p` form
 /// is NOT equivalent (see the module header) - so every package is checked
 /// and reported even when an earlier one fails.
 fn run_install_feature_phase(
     project_root: &Path,
-    bin_cfg: Option<&crate::config::BinConfig>,
-    cli_packages: &[String],
-    certifies: Option<Certifies>,
+    selection: &InstallSelection,
     allow_flags: &[String],
     commands: bool,
 ) -> Result<(), DevError> {
-    let Some(cfg) = bin_cfg.filter(|c| !c.install.is_empty()) else {
-        return Ok(());
+    let (selected, configured, debug) = match selection {
+        InstallSelection::NotApplicable(reason) => {
+            output::detail(&format!("install-feature: not applicable ({reason})"));
+            return Ok(());
+        }
+        InstallSelection::Skipped(reason) => {
+            output::run_msg(&format!("install-feature: skipped ({reason})"));
+            return Ok(());
+        }
+        InstallSelection::Eligible { packages, configured, debug } => (packages, *configured, *debug),
     };
-    if !install_feature_applies(cfg.install_feature_check, certifies) {
-        return Ok(());
-    }
-
-    // CLI `-p` intersects, matching every other phase: named install
-    // packages are checked, the rest dropped with a note, and an
-    // intersection that empties skips the phase visibly. (Under the gate
-    // this is unreachable - a complete profile refuses `-p` outright.)
-    let selected: Vec<String> = if cli_packages.is_empty() {
-        cfg.install.clone()
-    } else {
-        cfg.install
-            .iter()
-            .filter(|p| cli_packages.contains(p))
-            .cloned()
-            .collect()
-    };
-    if selected.is_empty() {
-        output::run_msg("install-feature: skipped (-p rules the install set out)");
-        return Ok(());
-    }
     // A `-p` narrowing is folded into the phase's one ok line below (it is
     // named there as "N of M install packages"); the log keeps the names.
-    if selected.len() < cfg.install.len() {
+    if selected.len() < configured {
         output::detail(&format!(
             "install-feature: -p narrows the install set to {}",
             selected.join(", ")
@@ -553,7 +540,7 @@ fn run_install_feature_phase(
 
     // The same resolver `brokkr install` uses: package names against
     // discovered bin targets, unknown names refused in its words.
-    let expected = crate::runnables::install_bin_targets(project_root, &selected)?;
+    let expected = crate::runnables::install_bin_targets(project_root, selected)?;
 
     // Lint allows reach this build the same way they reach the test phase -
     // env or `--config`, whichever layer is live (see `rustflags`).
@@ -570,7 +557,7 @@ fn run_install_feature_phase(
             project_root,
             pkg,
             bins,
-            cfg.debug,
+            debug,
             &allow_args,
             &env_refs,
             commands,
@@ -590,7 +577,7 @@ fn run_install_feature_phase(
     );
     output::run_msg(&format!(
         "install-feature: ok ({}) in {}",
-        install_counts(expected.len(), cfg.install.len(), bins),
+        install_counts(expected.len(), configured, bins),
         fmt_wall(phase_elapsed())
     ));
     Ok(())
