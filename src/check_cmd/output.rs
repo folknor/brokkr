@@ -208,6 +208,22 @@ pub(crate) fn cli_package_scope<'a>(
     packages: &'a [String],
     for_test: bool,
 ) -> Result<(Vec<&'a str>, Vec<String>), String> {
+    let (kept, dropped) = package_admission(sweep, packages, for_test);
+    if kept.is_empty() && !packages.is_empty() {
+        return Err(dropped.join("; "));
+    }
+    Ok((kept, dropped))
+}
+
+/// The package rules alone: which of the CLI `-p` packages `sweep` admits,
+/// and a note per one it does not. [`cli_package_scope`] is this plus the
+/// skip decision; `check`'s up-front `package rules` announcement reads it
+/// directly, so the two cannot disagree about admission.
+pub(crate) fn package_admission<'a>(
+    sweep: &ResolvedSweep,
+    packages: &'a [String],
+    for_test: bool,
+) -> (Vec<&'a str>, Vec<String>) {
     let mut kept: Vec<&str> = Vec::new();
     let mut dropped: Vec<String> = Vec::new();
     for pkg in packages {
@@ -221,10 +237,7 @@ pub(crate) fn cli_package_scope<'a>(
             kept.push(pkg.as_str());
         }
     }
-    if kept.is_empty() && !packages.is_empty() {
-        return Err(dropped.join("; "));
-    }
-    Ok((kept, dropped))
+    (kept, dropped)
 }
 
 pub(crate) fn describe_sweep(
@@ -467,9 +480,9 @@ fn run_sweep_pre_build(
     }
 
     let stderr = String::from_utf8_lossy(&captured.stderr);
-    if !commands {
-        output::error(&format!("failing command: cargo {}", args.join(" ")));
-    }
+    // Printed even under `--commands`: the streamed line is neither adjacent
+    // to this failure nor attributable among several runs.
+    output::error(&format!("failing command: cargo {}", args.join(" ")));
     output::error(&cargo_filter::filter_clippy(&stderr));
     Err(DevError::Build(format!(
         "build failed for package '{package}' in sweep '{}'",
@@ -933,9 +946,9 @@ fn run_one_test_sweep(
         format!("{} ({})", sweep.label, packages.join(", "))
     };
 
-    // Reprinted on any failure below: when a sweep fails, the copy-pasteable
-    // cargo line is the most useful thing in the output, so collapsing applies
-    // to success only.
+    // Reprinted on any failure below, `--commands` or not: when a sweep fails,
+    // the copy-pasteable cargo line is the most useful thing in the output, and
+    // one streamed earlier is neither beside the failure nor attributable.
     let full_command = format!("failing command: cargo {}", args.join(" "));
 
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -1026,9 +1039,7 @@ fn run_one_test_sweep(
             sweep.label,
             test_runner::PARALLEL_SWEEP_TIMEOUT.as_secs(),
         ));
-        if !commands {
-            output::error(&full_command);
-        }
+        output::error(&full_command);
         return Err(DevError::Verify(format!(
             "sweep '{}' exceeded its time budget - stopping",
             sweep.label
@@ -1037,9 +1048,7 @@ fn run_one_test_sweep(
 
     if let Some(hung) = hung {
         output::error(&test_runner::format_hung_test(&hung, project_root));
-        if !commands {
-            output::error(&full_command);
-        }
+        output::error(&full_command);
         return Err(DevError::Verify(format!(
             "a test exceeded its {}s budget in sweep '{}' - stopping",
             hung.ceiling.as_secs(),
@@ -1048,9 +1057,7 @@ fn run_one_test_sweep(
     }
 
     if !captured.status.success() {
-        if !commands {
-            output::error(&full_command);
-        }
+        output::error(&full_command);
         output::error(&cargo_filter::filter_test(&stdout, &stderr));
         return Ok(false);
     }
@@ -1088,9 +1095,7 @@ fn run_one_test_sweep(
             output::count(parsed.suites, "suite"),
             parsed.filtered_out,
         ));
-        if !commands {
-            output::error(&full_command);
-        }
+        output::error(&full_command);
         return Ok(false);
     }
 
@@ -1111,9 +1116,7 @@ fn run_one_test_sweep(
              harness that stopped talking rather than a failing test - treat as a wrong-run.",
             parsed.passed, parsed.failed, parsed.ignored
         ));
-        if !commands {
-            output::error(&full_command);
-        }
+        output::error(&full_command);
         return Ok(false);
     }
 

@@ -61,11 +61,19 @@ Flags:
   `--workspace --exclude …` with `--package` would silently un-scope the
   run. Per sweep the set is *intersected* with the sweep's scope: a package
   its `packages` list or (test phase only) `test_exclude_packages` rules out
-  is dropped with a log line, a sweep keeping none is skipped (mirroring
-  `brokkr test`'s SKIP) - so `-p a -p b` still reaches `a` in the sweep that
-  admits it when `b` lives in another sweep. If every sweep skips, the phase
-  fails rather than reading as green. The `invocation:` line up front shows
-  `-p <pkg> …` and the `--json` summary carries a `package` field (comma-joined for a
+  is dropped, a sweep keeping none is skipped (mirroring `brokkr test`'s
+  SKIP) - so `-p a -p b` still reaches `a` in the sweep that admits it when
+  `b` lives in another sweep. If every sweep skips, the phase fails rather
+  than reading as green. The `invocation:` line up front shows `-p <pkg> …`;
+  right after it, when the sweeps' package rules narrow the selection, one
+  `package rules narrow this selection` announcement groups the sweeps by
+  outcome (`  vm, runner: not admitted - -p x is not in this sweep's packages
+  list`), naming build rules and test rules apart when they differ. It claims
+  admission only: an admitted sweep can still go unrun by a phase (a doctest
+  carrier in rustdoc, build-shape dedupe, a skipped phase, an earlier
+  failure). The per-phase `skipped`/`dropped` lines go to the run log only
+  (`brokkr clippy`, which has no announcement, still prints them). The
+  `--json` summary carries a `package` field (comma-joined for a
   multi-package run). Rejected under a `certifies = "complete"` profile
 - `--features` / `--no-default-features` - ad-hoc sweep, no `build_packages`.
   Overrides sweep *selection* only; the resolved profile's run shaping (skips,
@@ -3141,7 +3149,9 @@ The shape is `<package scope>[, <features>][, rustflags …][, <test bits>]`:
 the copy-pasteable line is the most useful thing in the output. This covers
 clippy and rustdoc failures, test failures, hung tests, parallel-sweep
 timeouts, zero-test runs, `build_packages` pre-build failures, and any error
-leaving a test lane.
+leaving a test lane. `--commands` does not suppress it: the line that flag
+streamed earlier is neither beside the failure nor attributable among several
+runs.
 
 `--commands` prints each cargo command on stdout before it runs - every
 sweep's, the pre-builds', the enumeration and install-feature probes', and the

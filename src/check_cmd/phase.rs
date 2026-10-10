@@ -95,6 +95,7 @@ pub(crate) fn cmd_check(
 
     announce_profile_header(&active_sweeps, &profile_label);
     announce_invocation_shaping(packages, extra_args);
+    announce_package_rules(&active_sweeps, packages);
     announce_adhoc_shaping(
         features,
         no_default_features,
@@ -362,6 +363,71 @@ fn announce_invocation_shaping(packages: &[String], extra_args: &[String]) {
     if !parts.is_empty() {
         output::run_msg(&format!("invocation: {}", parts.join("; ")));
     }
+}
+
+/// Say once, up front, where the sweeps' package rules narrow a CLI `-p`
+/// selection - instead of every phase printing its own `skipped` line for the
+/// same sweep. Silent with no `-p`, or when every sweep admits every package.
+///
+/// Admission only, and it says so: a sweep the rules admit can still go
+/// unrun by a phase (rustdoc's doctest carriers, build-shape dedupe, a phase
+/// the profile skips, an earlier failure). Both rule sets are read through
+/// [`package_admission`], the function every phase scopes with - build rules
+/// (`packages` lists; clippy and rustdoc) and test rules (also
+/// `test_exclude_packages`) - so this cannot disagree with them. Sweeps group
+/// on the structured outcome, never on its rendered text.
+fn announce_package_rules(sweeps: &[ResolvedSweep], packages: &[String]) {
+    for line in package_rules_lines(sweeps, packages) {
+        output::run_msg(&line);
+    }
+}
+
+/// The lines of [`announce_package_rules`]; empty when it is silent.
+fn package_rules_lines(sweeps: &[ResolvedSweep], packages: &[String]) -> Vec<String> {
+    type Outcome = (Vec<String>, Vec<String>);
+    let outcome = |s: &ResolvedSweep, for_test: bool| -> Outcome {
+        let (kept, notes) = package_admission(s, packages, for_test);
+        (kept.into_iter().map(str::to_owned).collect(), notes)
+    };
+    if packages.is_empty() {
+        return Vec::new();
+    }
+    let mut groups: Vec<((Outcome, Outcome), Vec<&str>)> = Vec::new();
+    for s in sweeps {
+        let key = (outcome(s, false), outcome(s, true));
+        if key.0.1.is_empty() && key.1.1.is_empty() {
+            continue;
+        }
+        match groups.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, labels)) => labels.push(&s.label),
+            None => groups.push((key, vec![&s.label])),
+        }
+    }
+    if groups.is_empty() {
+        return Vec::new();
+    }
+    let render = |(kept, notes): &Outcome| -> String {
+        let not = format!("not admitted - {}", notes.join("; "));
+        match (kept.is_empty(), notes.is_empty()) {
+            (_, true) => "admitted".to_owned(),
+            (true, false) => not,
+            (false, false) => {
+                let admits: Vec<String> = kept.iter().map(|p| format!("-p {p}")).collect();
+                format!("admits {}; {not}", admits.join(" "))
+            }
+        }
+    };
+    let mut lines =
+        vec!["package rules narrow this selection (rules only - a phase may still skip or dedupe a sweep):".to_owned()];
+    for ((build, test), labels) in &groups {
+        let text = if build == test {
+            render(build)
+        } else {
+            format!("build rules: {}; test rules: {}", render(build), render(test))
+        };
+        lines.push(format!("  {}: {text}", labels.join(", ")));
+    }
+    lines
 }
 
 /// Name what an ad-hoc CLI-features run inherited, and from where.
@@ -2570,7 +2636,7 @@ fn run_clippy_phase(
             && !sited_allowed(d, allow_exact)
             && !(d.code.as_deref().is_some_and(crate::config::is_cargo_lint) && code_allowed(d, allow))
     };
-    report_diagnostic_phase("clippy", &results, &info, project_root, &keep, multi, commands)
+    report_diagnostic_phase("clippy", &results, &info, project_root, &keep, multi)
 }
 
 /// Cargo's manifest lints from a clippy run's stderr
@@ -2676,7 +2742,7 @@ fn run_rustdoc_phase(
             && !sited_allowed(d, allow_exact)
     };
     let multi = results.len() > 1;
-    report_diagnostic_phase("rustdoc", &results, &info, project_root, &keep, multi, commands)
+    report_diagnostic_phase("rustdoc", &results, &info, project_root, &keep, multi)
 }
 
 /// Whether `[lints] allow` names this diagnostic's lint. Matched on the exact
@@ -2697,7 +2763,6 @@ fn sited_allowed(d: &cargo_json::DiagnosticEvent, allow_exact: &[SitedAllow]) ->
 /// Decide and report a diagnostic phase from its cargo runs: any failed run
 /// or any diagnostic `keep` admits fails it. Prints the failing commands, then
 /// the scoped, cross-sweep summary.
-#[allow(clippy::too_many_arguments)]
 fn report_diagnostic_phase(
     phase: &str,
     results: &[SweepResult],
@@ -2705,7 +2770,6 @@ fn report_diagnostic_phase(
     project_root: &Path,
     keep: &dyn Fn(&cargo_json::DiagnosticEvent) -> bool,
     multi: bool,
-    commands: bool,
 ) -> Result<(), DevError> {
     let run_failed = |r: &SweepResult| {
         !r.success || r.diagnostics().iter().any(keep)
@@ -2726,13 +2790,11 @@ fn report_diagnostic_phase(
     }
 
     // A green run printed neither the shape nor the command; a failing sweep
-    // is exactly where both earn their place. The command is skipped under
-    // `--commands`, which already printed it.
+    // is exactly where both earn their place - under `--commands` too, whose
+    // streamed line is neither beside the failure nor attributable among runs.
     for r in results.iter().filter(|r| run_failed(r)) {
         output::error(&format!("{phase} {}: {}", r.label, r.shape));
-        if !commands {
-            output::error(&format!("failing command: {}", r.command));
-        }
+        output::error(&format!("failing command: {}", r.command));
     }
 
     output::error(&format_clippy_multi(
@@ -2795,15 +2857,19 @@ fn run_per_build_shape(
         // combines, because cargo unions selection flags (cli_package_scope).
         // Ruled-out packages are dropped with a note; a sweep keeping none
         // is skipped entirely.
+        // Log only inside `check`, which announced the package rules once, up
+        // front (`announce_package_rules`) - repeating them per phase was
+        // noise. `brokkr clippy` announces nothing, so there they print.
+        let note = |line: &str| if report_active() { output::detail(line) } else { output::run_msg(line) };
         let (scope, dropped) = match cli_package_scope(sweep, packages, false) {
             Ok(s) => s,
             Err(reason) => {
-                output::run_msg(&format!("{phase} {}: skipped ({reason})", sweep.label));
+                note(&format!("{phase} {}: skipped ({reason})", sweep.label));
                 continue;
             }
         };
-        for note in &dropped {
-            output::run_msg(&format!("{phase} {}: {note} (dropped)", sweep.label));
+        for dropped_note in &dropped {
+            note(&format!("{phase} {}: {dropped_note} (dropped)", sweep.label));
         }
 
         // Config-derived like the skip above: log only.
@@ -4001,17 +4067,18 @@ fn run_test_phase(
     for (i, sweep) in sweeps.iter().enumerate() {
         // The CLI `-p` set intersects with the sweep's selection: ruled-out
         // packages are dropped with a note, and the sweep is skipped only
-        // when nothing survives (cli_package_scope). Printed, unlike the
-        // config-derived skips: `-p` is this invocation's doing.
+        // when nothing survives (cli_package_scope). Logged only: `-p` is
+        // this invocation's doing, so `check` announced it once, up front
+        // (`announce_package_rules`), rather than once per phase.
         let (scope, dropped) = match cli_package_scope(sweep, packages, true) {
             Ok(s) => s,
             Err(reason) => {
-                output::run_msg(&format!("test {}: skipped ({reason})", sweep.label));
+                output::detail(&format!("test {}: skipped ({reason})", sweep.label));
                 continue;
             }
         };
         for note in &dropped {
-            output::run_msg(&format!("test {}: {note} (dropped)", sweep.label));
+            output::detail(&format!("test {}: {note} (dropped)", sweep.label));
         }
         sweeps_run += 1;
         // Record before the run: the sweep is reached, pass or fail. A sweep
@@ -4785,6 +4852,55 @@ mod script_failure_render_tests {
         for line in ["a", "b", "c"] {
             assert!(msg.contains(line));
         }
+    }
+}
+
+#[cfg(test)]
+mod package_rules_tests {
+    use super::package_rules_lines;
+    use crate::profile::ResolvedSweep;
+
+    fn sweep(label: &str, packages: &[&str], excluded: &[&str]) -> ResolvedSweep {
+        ResolvedSweep {
+            label: label.into(),
+            packages: packages.iter().map(|p| (*p).to_owned()).collect(),
+            test_exclude_packages: excluded.iter().map(|p| (*p).to_owned()).collect(),
+            ..Default::default()
+        }
+    }
+
+    fn pkgs(list: &[&str]) -> Vec<String> {
+        list.iter().map(|p| (*p).to_owned()).collect()
+    }
+
+    #[test]
+    fn silent_without_a_cli_selection_or_any_narrowing() {
+        let sweeps = vec![sweep("default", &[], &[]), sweep("vm", &["other"], &[])];
+        assert!(package_rules_lines(&sweeps, &[]).is_empty());
+        assert!(package_rules_lines(&sweeps[..1], &pkgs(&["a"])).is_empty());
+    }
+
+    #[test]
+    fn sweeps_with_one_outcome_share_a_line() {
+        let sweeps = vec![
+            sweep("default", &[], &[]),
+            sweep("vm", &["other"], &[]),
+            sweep("runner", &["other"], &[]),
+        ];
+        assert_eq!(
+            package_rules_lines(&sweeps, &pkgs(&["a"]))[1..],
+            ["  vm, runner: not admitted - -p a is not in this sweep's packages list"]
+        );
+    }
+
+    #[test]
+    fn build_and_test_rules_are_named_apart_when_they_differ() {
+        let sweeps = vec![sweep("default", &[], &["a"])];
+        assert_eq!(
+            package_rules_lines(&sweeps, &pkgs(&["a", "b"]))[1..],
+            ["  default: build rules: admitted; test rules: admits -p b; not admitted - -p a is in \
+              this sweep's test_exclude_packages"]
+        );
     }
 }
 
