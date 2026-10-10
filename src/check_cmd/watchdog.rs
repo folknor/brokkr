@@ -361,7 +361,7 @@ mod watchdog_tests {
             }],
             ..AccountingPlan::default()
         };
-        let paths = accounting_open(&root, &plan, None).expect("open the journal");
+        let paths = accounting_open(&root, &plan).expect("open the journal");
 
         let (locked_tx, locked_rx) = std::sync::mpsc::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();

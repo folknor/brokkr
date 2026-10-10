@@ -632,9 +632,8 @@ struct RunReport {
     /// Under a complete claim: the policy, execution-accounting and doctest
     /// blocks, present even when the run failed.
     accounting: Option<AccountingBlocks>,
-    /// What the run left unresolved, and the command that replays it. Built
-    /// from the plan and journal of ANY run that has an inventory; reported
-    /// when the run failed.
+    /// What the run left unresolved. Built from the plan and journal of ANY
+    /// run that has an inventory; reported when the run failed.
     continuation: Option<ContinuationReport>,
 }
 
@@ -759,11 +758,7 @@ fn run_prepare_phase(a: &BuildPhaseArgs<'_>, certifying: bool) -> Result<Prepare
         packages: a.packages,
         extra_args: a.extra_args,
     };
-    let mut prep = prepare_profile(a.active_sweeps, a.doctests, certifying, &mut preparer);
-    prep.plan.invocation = Some(Invocation {
-        cwd: std::env::current_dir().map_or_else(|_| ".".to_owned(), |p| p.to_string_lossy().into_owned()),
-        project_root: a.project_root.to_string_lossy().into_owned(),
-    });
+    let prep = prepare_profile(a.active_sweeps, a.doctests, certifying, &mut preparer);
     for marker in &prep.plan.incomplete {
         if certifying {
             output::error(&format!("prepare: {marker}"));
@@ -771,7 +766,7 @@ fn run_prepare_phase(a: &BuildPhaseArgs<'_>, certifying: bool) -> Result<Prepare
             output::detail(&format!("prepare: {marker}"));
         }
     }
-    let paths = match accounting_open(a.state_root, &prep.plan, None) {
+    let paths = match accounting_open(a.state_root, &prep.plan) {
         Ok(p) => {
             output::detail(&format!(
                 "prepare: run {}, plan {}, journal {}",
@@ -783,7 +778,7 @@ fn run_prepare_phase(a: &BuildPhaseArgs<'_>, certifying: bool) -> Result<Prepare
         }
         Err(e) => {
             // The run goes on without a record, and says so: its stop, if it
-            // has one, cannot be continued from.
+            // has one, cannot be reported from it.
             output::error(&format!("prepare: the plan could not be persisted: {e}"));
             None
         }
@@ -1725,9 +1720,8 @@ struct CheckSummary<'a> {
     doctests: Option<DoctestAccounting>,
     /// Failed runs that have an inventory, certifying or not: what the run
     /// left unresolved (every candidate's full execution identity, outcome
-    /// and detail), whether the inventory is whole, and the command that
-    /// replays the candidates - or why none can. Diagnostic: it certifies
-    /// nothing, and says so. `null` on a run that passed, one that left
+    /// and detail) and whether the inventory is whole. Diagnostic: it
+    /// certifies nothing, and says so. `null` on a run that passed, one that left
     /// nothing unresolved, and one that failed before `prepare`.
     diagnostic_continuation: Option<ContinuationReport>,
     elapsed_ms: u64,

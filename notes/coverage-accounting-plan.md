@@ -18,7 +18,8 @@ A timeout is an accounted failure, never coverage passed. Interrupted and
 unobserved stay unresolved. Complete accounting after a timeout certifies only
 that the failed run's record is complete, never the gate. Item 3 (later) builds
 on this: after a watchdog kill, name the interrupted and unobserved tests and
-print the exact command to rerun them.
+print the exact command to rerun them. (The naming shipped; the rerun command,
+`brokkr test --from-run`, shipped and was later removed as unwanted.)
 
 ## What is wrong today
 

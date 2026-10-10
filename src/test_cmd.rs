@@ -52,7 +52,6 @@
 //! single hung test without paying for the other sweeps' rebuilds.
 
 pub(crate) mod focused;
-mod replay;
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -215,13 +214,13 @@ impl RunReport {
 #[derive(Default)]
 struct RepeatState {
     seen_failures: std::sync::Mutex<std::collections::HashSet<String>>,
-    /// Investigate lines already printed, so a test failing on every
-    /// iteration names its rerun once.
+    /// Reproduction lines already printed, so a harness failing on every
+    /// iteration names its command once.
     seen_hints: std::sync::Mutex<std::collections::HashSet<String>>,
 }
 
 impl RepeatState {
-    /// Record an investigate line; true if this is its first occurrence.
+    /// Record a reproduction line; true if this is its first occurrence.
     fn first_hint(&self, line: &str) -> bool {
         self.seen_hints
             .lock()
@@ -294,31 +293,6 @@ pub fn run(
     result
 }
 
-/// `--from-run RUN`: run a recorded run's interrupted and unobserved
-/// executions again, or (`list`) print the report that says which and execute
-/// nothing. See [`replay`].
-///
-/// Bounded like any `brokkr test`: the phase watchdog restarts for the
-/// rebuild and for every lane, and a graceful `brokkr kill` ends the command
-/// as `Interrupted`. `--list` reads files and arms nothing.
-pub fn run_from_run(project_root: &Path, state_root: &Path, run_id: &str, list: bool) -> Result<(), DevError> {
-    if list {
-        return replay::from_run(project_root, state_root, run_id, true);
-    }
-    // Declared before the guard, so the guard drops first and the watchdog's
-    // join is the last thing the command does.
-    let _ceiling = check_cmd::CheckWatchdog::arm_for("brokkr test", None);
-    let _interrupts = crate::shutdown::SigtermGuard::install();
-    let result = replay::from_run(project_root, state_root, run_id, false);
-    if check_cmd::watchdog_fired().is_some() {
-        return Err(DevError::ExitCode(check_cmd::WATCHDOG_EXIT_CODE));
-    }
-    if crate::shutdown::is_shutdown_requested() {
-        return Err(DevError::Interrupted);
-    }
-    result
-}
-
 /// The whole run's shape, printed up front: the sweeps the run goes through, so
 /// a PASS in the first one is visibly not the end of the command.
 ///
@@ -374,11 +348,6 @@ struct ReadySweep<'s> {
     focused: Option<FocusedPlan>,
     /// The resolved full name `--timeout` runs with `--exact`.
     exact: Option<String>,
-    /// The cargo selection the harnesses were built with (everything but the
-    /// subcommand and the target selector), for the run's replay recipe.
-    build_args: Vec<String>,
-    /// The support builds the sweep ran, for the run's replay recipe.
-    support_builds: Vec<check_cmd::SupportBuild>,
     support_fingerprint: Vec<String>,
     runtime_fingerprint: Vec<String>,
 }
@@ -421,16 +390,11 @@ fn prepare_sweep<'s>(sweep: &'s ResolvedSweep, cx: &SweepContext<'_>) -> Result<
     // short-circuits the sweep with a BuildFailed outcome so the
     // aggregator marks it as failed.
     let mut support: Vec<check_cmd::SupportArtifact> = Vec::new();
-    let mut support_builds: Vec<check_cmd::SupportBuild> = Vec::new();
     for build_pkg in &sweep.build_packages {
         match run_pre_build(project_root, sweep, build_pkg, &env_refs, &allow_args, debug)? {
             Some(artifacts) => support.extend(artifacts),
             None => return Ok(SweepOutcome::Done(RunReport::bare(Outcome::BuildFailed))),
         }
-        support_builds.push(check_cmd::SupportBuild {
-            package: build_pkg.clone(),
-            args: pre_build_argv(sweep, build_pkg, &allow_args, debug),
-        });
     }
 
     // A doc-only sweep is one rustdoc run, unchanged: ordinary discovery
@@ -457,7 +421,6 @@ fn prepare_sweep<'s>(sweep: &'s ResolvedSweep, cx: &SweepContext<'_>) -> Result<
     // by the test build, and the file the tests read is whichever landed last.
     let support_fingerprint = check_cmd::support_fingerprint(&support)?;
     let exact = focused.as_ref().and_then(|f| f.exact.clone());
-    let build_args = cargo_head(&shape, &[]);
     Ok(SweepOutcome::Ready(Box::new(ReadySweep {
         sweep,
         debug,
@@ -465,8 +428,6 @@ fn prepare_sweep<'s>(sweep: &'s ResolvedSweep, cx: &SweepContext<'_>) -> Result<
         allow_args,
         focused,
         exact,
-        build_args,
-        support_builds,
         support_fingerprint,
         runtime_fingerprint,
     })))
@@ -558,13 +519,12 @@ fn run_sweeps(
         }
     }
 
-    let inventory = TestInventory::open(&ready, &cx, repeat, ceiling);
+    let inventory = TestInventory::open(&ready, &cx, repeat);
     let mut notes: Vec<NoMatchNote> = Vec::new();
     let ran = run_ready(&ready, &cx, repeat, ceiling, inventory.as_ref(), &mut reports, &mut notes);
 
     // The journal says the run is over, however it ended; then what it left
-    // unresolved is read back from disk, exactly as `--from-run ID --list`
-    // will read it later.
+    // unresolved is read back from disk.
     let continuation = inventory.map(TestInventory::close).and_then(|i| i.continuation());
     if let Some(c) = &continuation {
         output::error(&check_cmd::render_continuation(c).join("\n"));
@@ -712,8 +672,6 @@ fn run_ready(
             sweep_label: cx.multi.then_some(r.sweep.label.as_str()),
             repeat,
             repeat_state: &repeat_state,
-            profile_override: cx.profile_override,
-            timeout: cx.timeout,
         };
         for n in 1..=repeat {
             // Each iteration is its own bounded unit, with its own phase clock.
@@ -800,7 +758,7 @@ fn settle_sweep<'s>(
         }
     }
     // On the console: it explains the second build narration that follows and
-    // why this sweep has no `--from-run` inventory.
+    // why this sweep has no inventory.
     output::run_msg(&format!(
         "test {}: {reason}; the sweep runs what it builds now, and its inventory is unavailable",
         prepared.sweep.label
@@ -867,8 +825,8 @@ struct TestInventory {
 impl TestInventory {
     /// Prepare the plan and open the journal, before the first test runs. A
     /// run whose plan cannot be persisted goes on without a record, and says
-    /// so: its stop cannot be continued from.
-    fn open(ready: &[ReadySweep<'_>], cx: &SweepContext<'_>, repeat: u32, ceiling: Duration) -> Option<Self> {
+    /// so: its stop cannot be reported from it.
+    fn open(ready: &[ReadySweep<'_>], cx: &SweepContext<'_>, repeat: u32) -> Option<Self> {
         if ready.is_empty() {
             return None;
         }
@@ -882,7 +840,7 @@ impl TestInventory {
                 } else {
                     r.sweep.label.clone()
                 };
-                lanes.push(test_lane_record(r, lanes.len(), label, ceiling));
+                lanes.push(test_lane_record(r, lanes.len(), label));
             }
         }
         let plan = check_cmd::AccountingPlan {
@@ -890,14 +848,9 @@ impl TestInventory {
             certifying: false,
             complete: true,
             lanes,
-            invocation: Some(check_cmd::Invocation {
-                cwd: std::env::current_dir()
-                    .map_or_else(|_| ".".to_owned(), |p| p.to_string_lossy().into_owned()),
-                project_root: cx.project_root.to_string_lossy().into_owned(),
-            }),
             ..check_cmd::AccountingPlan::default()
         };
-        match check_cmd::accounting_open(cx.state_root, &plan, None) {
+        match check_cmd::accounting_open(cx.state_root, &plan) {
             Ok(paths) => {
                 output::detail(&format!(
                     "test: run {}, plan {}, journal {}",
@@ -941,9 +894,8 @@ impl ClosedInventory {
 }
 
 /// One (sweep, iteration)'s lane in the run's plan: the executions its
-/// harnesses are expected to report, the artifacts' identity, and the recipe
-/// to launch them again.
-fn test_lane_record(r: &ReadySweep<'_>, lane: usize, label: String, ceiling: Duration) -> check_cmd::LaneRecord {
+/// harnesses are expected to report and the artifacts' identity.
+fn test_lane_record(r: &ReadySweep<'_>, lane: usize, label: String) -> check_cmd::LaneRecord {
     use check_cmd::{LaneKind, LaneRecord, PairId};
     let shape = check_cmd::shape_id(r.sweep);
     let Some(focused) = &r.focused else {
@@ -954,7 +906,6 @@ fn test_lane_record(r: &ReadySweep<'_>, lane: usize, label: String, ceiling: Dur
     rec.prepared = true;
     rec.include_ignored = true;
     rec.artifacts = focused.artifacts.clone();
-    let mut binaries = Vec::new();
     for run in &focused.runs {
         for name in &run.names {
             rec.executions.push(PairId {
@@ -964,33 +915,7 @@ fn test_lane_record(r: &ReadySweep<'_>, lane: usize, label: String, ceiling: Dur
                 test: name.clone(),
             });
         }
-        binaries.push(check_cmd::BinaryReplay {
-            binary: run.binary.clone(),
-            cwd: run.cwd.to_string_lossy().into_owned(),
-            env: run.env.clone(),
-        });
     }
-    rec.replay = Some(check_cmd::LaneReplay {
-        version: check_cmd::REPLAY_VERSION,
-        refusal: None,
-        model: check_cmd::ReplayModel::SerialShared,
-        ignored_mode: check_cmd::IgnoredMode::Include,
-        engine_launch: Vec::new(),
-        test_threads: Some(1),
-        parallel_budget: None,
-        harness_args: vec!["--nocapture".to_owned()],
-        per_test_ceiling_secs: ceiling.as_secs(),
-        env: r.env.clone(),
-        support_builds: r.support_builds.clone(),
-        target_filters: Vec::new(),
-        runtime_fingerprint: Some(r.runtime_fingerprint.clone()),
-        support_fingerprint: r.support_fingerprint.clone(),
-        resolutions: vec![check_cmd::ResolutionReplay {
-            resolution: None,
-            build_args: r.build_args.clone(),
-            binaries,
-        }],
-    });
     rec
 }
 
@@ -1011,10 +936,6 @@ struct SweepPlan<'a> {
     sweep_label: Option<&'a str>,
     repeat: u32,
     repeat_state: &'a RepeatState,
-    /// `--debug`/`--release` and `--timeout` as passed, for the investigate
-    /// line to carry.
-    profile_override: Option<bool>,
-    timeout: Option<u64>,
 }
 
 /// Run iteration `n` of a sweep and report it, printing its footers. `tap` is
@@ -1125,7 +1046,6 @@ fn run_iteration(
             n > 1,
         ).inspect_err(|_| show_failed_invocation(plan, &invocation))?;
         show_reproduction(plan, &invocation, &report);
-        print_investigate_hints(plan, &report.failures);
         // A blown budget stops everything, the remaining harnesses included.
         let stop = report.timed_out;
         parts.push(report);
@@ -1162,61 +1082,6 @@ fn lone_test_tag(plan: &SweepPlan<'_>, harness: &str, n: u32, test: &str, wall: 
     format!("{pkg}::{test} [{}]{run_n} ({wall}{filter})", quals.join(", "))
 }
 
-/// After a harness's FAIL footer, one `investigate:` line per failing test: a
-/// `brokkr test` narrowed to that test's full name, carrying the sweep and the
-/// profile/cap overrides this run was given, so it cannot widen to other
-/// sweeps or change profile.
-///
-/// Labelled *investigate*, never replay: the name is still a substring filter
-/// (it can match a longer name, or the same name in another harness), and a
-/// test run alone loses whatever the tests before it in the shared process
-/// did. Replay - recorded selection, envelope, fingerprints - is `--from-run`.
-/// Harness failures have no selectable name and get no line. Each line prints
-/// once per run, whichever iteration first failed that test.
-fn print_investigate_hints(plan: &SweepPlan<'_>, failures: &[Failure]) {
-    for f in failures.iter().filter(|f| f.kind == FailureKind::Test) {
-        let mut argv: Vec<String> = vec![
-            "brokkr".into(),
-            "test".into(),
-            "-p".into(),
-            plan.shape.pkg.into(),
-            "--sweep".into(),
-            plan.shape.sweep.label.clone(),
-        ];
-        match plan.profile_override {
-            Some(true) => argv.push("--debug".into()),
-            Some(false) => argv.push("--release".into()),
-            None => {}
-        }
-        if let Some(secs) = plan.timeout {
-            argv.push("--timeout".into());
-            argv.push(secs.to_string());
-        }
-        // `--`: quoting keeps the name one word, but only this keeps a name
-        // like `-case` from being read as a flag.
-        argv.push("--".into());
-        argv.push(f.what.clone());
-        let command = argv.iter().map(|a| shell_quote(a)).collect::<Vec<_>>().join(" ");
-        let line = format!("investigate (from {}): {command}", shell_quote(&plan.project_root.to_string_lossy()));
-        if plan.repeat_state.first_hint(&line) {
-            println!("[test]    {line}");
-        }
-    }
-}
-
-/// `arg` as one shell word: bare when it is non-empty and made only of
-/// characters no shell treats specially, single-quoted otherwise, with an
-/// embedded `'` closed, escaped and reopened.
-fn shell_quote(arg: &str) -> String {
-    let plain = !arg.is_empty()
-        && arg.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | ':' | '.' | '/' | '-'));
-    if plain {
-        arg.to_owned()
-    } else {
-        format!("'{}'", arg.replace('\'', r"'\''"))
-    }
-}
-
 /// One sweep's focused run: the harnesses holding a match, ready to execute.
 ///
 /// Each harness is its own process, which is load-bearing, not incidental.
@@ -1238,7 +1103,7 @@ struct FocusedPlan {
     exact: Option<String>,
     /// Every harness the prebuild produced - searched, matched or not, and
     /// the `harness = false` ones excluded from the search - by path and
-    /// content: the artifact set a replay's rebuild is held to.
+    /// content: the artifact set a rebuild before the run is held to.
     artifacts: Vec<check_cmd::PlannedArtifact>,
 }
 
@@ -1254,7 +1119,6 @@ struct HarnessRun {
     /// The matched test names: the executions this harness is expected to
     /// report, which the run's inventory records.
     names: Vec<String>,
-    binary: check_cmd::TestBinary,
     unit: check_cmd::BinaryUnit,
 }
 
@@ -1361,7 +1225,6 @@ fn plan_focused(
             env: envelope,
             matched: m.len(),
             names: m.clone(),
-            binary: (*b).clone(),
             unit: check_cmd::BinaryUnit::of(b),
         });
     }
@@ -1798,7 +1661,7 @@ struct OneRun<'a> {
     /// The footer tag a single failing test leads with instead of `tag`,
     /// rendered from the run's structured context given the test's full name
     /// and the wall time; `None` where the run has no such context (a doc-only
-    /// sweep, a replay).
+    /// sweep).
     test_tag: Option<&'a TestTag<'a>>,
     /// The harness, for attributing failures; empty for a whole-package run.
     target: &'a str,
@@ -3606,8 +3469,6 @@ include_ignored = false
                 }],
             }),
             exact: None,
-            build_args: Vec::new(),
-            support_builds: Vec::new(),
             support_fingerprint: check_cmd::support_fingerprint(support).unwrap(),
             runtime_fingerprint: check_cmd::BuildRuntimeIndex::default().fingerprint().unwrap(),
         }
@@ -3830,8 +3691,6 @@ include_ignored = false
             sweep_label: None,
             repeat: 1,
             repeat_state: &state,
-            profile_override: None,
-            timeout: None,
         };
         // The dedupe set is what decides a console print: a pass never enters
         // it, a failure enters it once.
@@ -3888,7 +3747,7 @@ include_ignored = false
         assert!(hung_test_tag(&shape, &hung).is_none());
         hung.reason = TimeoutReason::PerTest { name: "tests::hang".into() };
         shape.test_tag = None;
-        assert!(hung_test_tag(&shape, &hung).is_none(), "no renderer in a replay or doc-only run");
+        assert!(hung_test_tag(&shape, &hung).is_none(), "no renderer in a doc-only run");
     }
 
     #[test]
@@ -3950,16 +3809,6 @@ include_ignored = false
             ..Default::default()
         };
         assert!(sweep_skip_reason(&sweep, "nautilus-hyperliquid").is_none());
-    }
-
-    #[test]
-    fn shell_quote_leaves_plain_words_bare_and_quotes_the_rest() {
-        assert_eq!(shell_quote("csv_ingest::tests::a_b"), "csv_ingest::tests::a_b");
-        assert_eq!(shell_quote("/home/x/piners-data"), "/home/x/piners-data");
-        assert_eq!(shell_quote(""), "''");
-        assert_eq!(shell_quote("a b"), "'a b'");
-        assert_eq!(shell_quote("it's"), r"'it'\''s'");
-        assert_eq!(shell_quote("$(x)"), "'$(x)'");
     }
 
     #[test]

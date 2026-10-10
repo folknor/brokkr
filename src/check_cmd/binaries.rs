@@ -13,9 +13,8 @@
 // process-isolated lane's; the sequential lane still executes through cargo.
 
 /// One test executable and its owning package, from the build's artifact
-/// stream. Serializable because a plan's replay recipe holds the binaries it
-/// launches.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+/// stream.
+#[derive(Debug, Clone)]
 pub(crate) struct TestBinary {
     pub(crate) package: String,
     /// The full cargo package id - the key the runtime index is filed under,

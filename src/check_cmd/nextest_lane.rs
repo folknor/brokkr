@@ -213,8 +213,8 @@ struct NextestArtifacts {
     by_id: HashMap<String, BinaryUnit>,
     /// The runtime index's fingerprint ([`BuildRuntimeIndex::fingerprint`]):
     /// the build-script facts and support bins the engine's launch env is
-    /// derived from, which the lane's re-verification (and a replay's)
-    /// compares against a fresh build. Without it a nextest lane's
+    /// derived from, which the lane's re-verification compares against a
+    /// fresh build. Without it a nextest lane's
     /// verification checked its test executables only, and a support bin
     /// rebuilt by another lane since the plan ran unnoticed.
     runtime_fingerprint: Option<Vec<String>>,
@@ -234,48 +234,6 @@ fn nextest_lane_artifacts(stdout: &str) -> Result<NextestArtifacts, DevError> {
         .collect();
     let runtime_fingerprint = Some(index.fingerprint()?);
     Ok(NextestArtifacts { binaries, by_id, runtime_fingerprint })
-}
-
-/// What the engine's listing selects.
-pub(crate) enum EngineFilter<'a> {
-    /// A sweep's own `only`/`skip`/`include-ignored`.
-    Sweep(&'a ResolvedSweep),
-    /// Exactly these (nextest binary id, test name) executions - a replay's
-    /// selection. Both halves, because two binaries of one package may define
-    /// the same test path, and a name alone would run the one that passed.
-    Exact { pairs: &'a [(String, String)], ignored_mode: IgnoredMode },
-}
-
-/// What the engine resolves from cargo configuration when it launches, as
-/// lines, read from the DISCOVERED config files and environment alone (brokkr's
-/// own generated configs are rebuilt from recorded inputs and are left out):
-/// the `[env]` tables its test processes get and the target runner they are
-/// started through. The engine builds its own children, so this is the part of
-/// the launch environment brokkr cannot record by value; it records it as a
-/// fingerprint and a replay refuses on any difference ([`engine_launch_drift`]).
-/// Debug renderings: the engine's types offer no iteration, and the renderings
-/// are deterministic for the pinned engine version.
-fn engine_launch_fingerprint(target_runner: &TargetRunner) -> Result<Vec<String>, DevError> {
-    let discovered = CargoConfigs::new(std::iter::empty::<&str>())
-        .map_err(|e| DevError::Config(format!("cargo config discovery failed: {e}")))?;
-    let env = EnvironmentMap::new(&discovered);
-    Ok(vec![format!("cargo-env {env:?}"), format!("runner {target_runner:?}")])
-}
-
-/// What differs between the engine launch a run recorded and the one resolved
-/// now. Empty when they agree.
-pub(crate) fn engine_launch_drift(recorded: &[String], now: &[String]) -> Vec<String> {
-    let mut out: Vec<String> = recorded
-        .iter()
-        .filter(|l| !now.contains(l))
-        .map(|l| format!("the engine's launch environment `{l}` no longer holds"))
-        .collect();
-    out.extend(
-        now.iter()
-            .filter(|l| !recorded.contains(l))
-            .map(|l| format!("the engine's launch environment gained `{l}`")),
-    );
-    out
 }
 
 /// Prepare one `harness = "nextest"` sweep: build its shape, read the artifact
@@ -300,8 +258,7 @@ fn prepare_nextest(
     let mut selection = env.allow_args.clone();
     selection.extend(sweep_selection_args(sweep, packages));
     selection.extend(cargo_extra.iter().cloned());
-    let ignored_mode = effective_ignored_mode(sweep.libtest_args.iter().map(String::as_str));
-    build_nextest_lane(inputs, &sweep.label, selection, env, &EngineFilter::Sweep(sweep), ignored_mode)
+    build_nextest_lane(inputs, sweep, selection, env)
         .inspect_err(|e| {
             // A complete profile stops in preparation, before the test phase
             // can print its usual failure shape. Non-certifying runs defer
@@ -324,17 +281,15 @@ fn host_build_platforms() -> Result<BuildPlatforms, DevError> {
     Ok(BuildPlatforms { host, target: None })
 }
 
-/// The engine lane's preparation, from a cargo `selection` and a filter: the
-/// one place the engine is built and its listing taken, for a sweep's own
-/// preparation and for a replay of recorded executions alike.
-pub(crate) fn build_nextest_lane(
+/// The engine lane's preparation, from a cargo `selection`: the one place the
+/// engine is built and its listing taken.
+fn build_nextest_lane(
     inputs: &LaneInputs<'_>,
-    label: &str,
+    sweep: &ResolvedSweep,
     selection: Vec<String>,
     env: &LaneEnv,
-    filter: &EngineFilter<'_>,
-    ignored_mode: IgnoredMode,
 ) -> Result<PreparedLane, DevError> {
+    let label = sweep.label.as_str();
     let env_refs = env.refs();
     let project_root = inputs.project_root;
 
@@ -409,11 +364,9 @@ pub(crate) fn build_nextest_lane(
     let stdout = String::from_utf8_lossy(&build.stdout).into_owned();
     assemble_nextest_lane(
         inputs,
-        label,
+        sweep,
         selection,
         env,
-        filter,
-        ignored_mode,
         &NextestBuild { metadata_json: &metadata_json, stdout: &stdout, build_platforms, ceiling: test_runner::TEST_TIMEOUT },
     )
 }
@@ -430,18 +383,16 @@ pub(crate) struct NextestBuild<'a> {
 
 /// The engine lane's preparation from a build's products: everything
 /// [`build_nextest_lane`] does after cargo has run. Split out so the part that
-/// reads the build into the engine, lists, and captures the launch fingerprint
-/// can be driven without cargo.
+/// reads the build into the engine and lists can be driven without cargo.
 #[allow(clippy::too_many_lines)]
 pub(crate) fn assemble_nextest_lane(
     inputs: &LaneInputs<'_>,
-    label: &str,
+    sweep: &ResolvedSweep,
     selection: Vec<String>,
     env: &LaneEnv,
-    filter: &EngineFilter<'_>,
-    ignored_mode: IgnoredMode,
     build: &NextestBuild<'_>,
 ) -> Result<PreparedLane, DevError> {
+    let label = sweep.label.as_str();
     let env_refs = env.refs();
     let NextestBuild { metadata_json, stdout, build_platforms, ceiling } = build;
     let (stdout, ceiling) = (*stdout, *ceiling);
@@ -490,10 +441,7 @@ pub(crate) fn assemble_nextest_lane(
     // Filters: `only` and unqualified `skip` ride nextest's own libtest
     // pattern emulation (same substring semantics, nothing to escape);
     // package-qualified skips become one filterset each.
-    let test_filter = match filter {
-        EngineFilter::Sweep(sweep) => sweep_engine_filter(sweep, &pcx, &known_groups)?,
-        EngineFilter::Exact { pairs, ignored_mode } => exact_engine_filter(pairs, *ignored_mode, &pcx, &known_groups)?,
-    };
+    let test_filter = sweep_engine_filter(sweep, &pcx, &known_groups)?;
 
     // Double-spawn re-invokes the CURRENT executable with a `__double-spawn`
     // subcommand - a protocol cargo-nextest's own binary implements and
@@ -504,7 +452,6 @@ pub(crate) fn assemble_nextest_lane(
     let double_spawn = DoubleSpawnInfo::disabled();
     let target_runner = TargetRunner::new(&cargo_configs, &build_platforms)
         .map_err(|e| DevError::Config(format!("nextest target runner resolution failed: {e}")))?;
-    let engine_launch = engine_launch_fingerprint(&target_runner)?;
     let version_env_vars = VersionEnvVars {
         current_version: NEXTEST_ENGINE_VERSION
             .parse()
@@ -599,7 +546,6 @@ pub(crate) fn assemble_nextest_lane(
             binary: b.clone(),
             unit,
             hash,
-            envelope: None,
             unlisted: None,
             selected: names,
             ignored,
@@ -609,8 +555,7 @@ pub(crate) fn assemble_nextest_lane(
 
     let mut prepared = PreparedLane::bare(env.clone());
     prepared.runtime_fingerprint = artifacts.runtime_fingerprint;
-    prepared.set_ignored_mode(ignored_mode);
-    prepared.engine_launch = engine_launch;
+    prepared.include_ignored = args_run_ignored(sweep.libtest_args.iter().map(String::as_str));
     prepared.enumerated = lane_binaries.len();
     prepared.resolutions.push(PreparedResolution { resolution: None, selection, binaries });
     prepared.nextest = Some(NextestPrepared {
@@ -675,28 +620,18 @@ fn run_nextest_sweep(
         None,
         commands,
     );
-    run_nextest_engine(&sweep.label, sweep.test_threads, np, tap).map(|r| r.passed)
+    run_nextest_engine(&sweep.label, sweep.test_threads, np, tap)
 }
 
-/// How an engine run ended, structurally: the verdict and whether any test
-/// blew its per-test budget. A timeout is its own disposition - a replay stops
-/// on it - and not something to be recovered from the verdict.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct EngineRun {
-    pub(crate) passed: bool,
-    pub(crate) timed_out: bool,
-}
-
-/// Execute a prepared engine lane under the lane's own policy. The part of
-/// [`run_nextest_sweep`] a replay shares: it needs no sweep, only the label
-/// the lines carry and the recorded in-flight count.
+/// Execute a prepared engine lane under the lane's own policy, returning
+/// whether it passed.
 #[allow(clippy::too_many_lines)]
-pub(crate) fn run_nextest_engine(
+fn run_nextest_engine(
     label: &str,
     test_threads: Option<u32>,
     np: &NextestPrepared,
     tap: &LaneTap,
-) -> Result<EngineRun, DevError> {
+) -> Result<bool, DevError> {
     // Concurrency is brokkr policy: the profile's `test_threads` maps onto
     // the engine's in-flight count. Unset (or 0) leaves the engine's
     // num-cpus default; there is no serial-by-default here, because
@@ -775,7 +710,6 @@ pub(crate) fn run_nextest_engine(
     // `RunFinished` event, which every completed run emits once.
     let mut finished: Option<RunStats> = None;
     let mut cancelling = false;
-    let mut timed_out = false;
     let outcome = runner.try_execute(|event| {
         // Recorded BEFORE the reporter sees it: a reporter that fails must not
         // take the evidence with it.
@@ -788,7 +722,6 @@ pub(crate) fn run_nextest_engine(
                 ),
                 TestEventKind::TestFinished { test_instance, run_statuses, .. } => {
                     let result = engine_result(&run_statuses.last_status().result, cancelling);
-                    timed_out |= result == TestResult::TimedOut;
                     observe(
                         test_instance.binary_id.to_string(),
                         ObsEvent::Finished { name: test_instance.test_name.to_string(), result },
@@ -852,29 +785,7 @@ pub(crate) fn run_nextest_engine(
             run_stats.passed, run_stats.skipped
         ));
     }
-    Ok(EngineRun { passed, timed_out })
-}
-
-/// The engine filter for a replay: exactly the recorded (binary id, test)
-/// executions, as one filterset ([`engine_exact_filterset`]), under the lane's
-/// recorded `#[ignore]` policy. No substring patterns and none of the sweep's
-/// own `skip`s - the selection is already resolved to full names.
-fn exact_engine_filter(
-    pairs: &[(String, String)],
-    ignored_mode: IgnoredMode,
-    pcx: &ParseContext<'_>,
-    known_groups: &nextest_filtering::KnownGroups,
-) -> Result<TestFilter, DevError> {
-    let expr = engine_exact_filterset(pairs).map_err(DevError::Config)?;
-    let parsed = Filterset::parse(expr.clone(), pcx, FiltersetKind::Test, known_groups)
-        .map_err(|e| DevError::Config(format!("replay selection `{expr}` did not compile: {e:?}")))?;
-    let run_ignored = match ignored_mode {
-        IgnoredMode::Exclude => RunIgnored::default(),
-        IgnoredMode::Include => RunIgnored::All,
-        IgnoredMode::Only => RunIgnored::Only,
-    };
-    TestFilter::new(NextestRunMode::Test, run_ignored, TestFilterPatterns::default(), vec![parsed])
-        .map_err(|e| DevError::Config(format!("nextest test filter: {e}")))
+    Ok(passed)
 }
 
 /// A successful cargo status alone cannot establish which binaries were built.
@@ -1030,7 +941,6 @@ mod nextest_lane_tests {
             binaries: vec![PreparedBinary {
                 unit: BinaryUnit::of(&b),
                 hash: hash_file(Path::new(&b.executable)).unwrap(),
-                envelope: None,
                 unlisted: None,
                 binary: b,
                 selected: vec!["t".into()],
@@ -1094,19 +1004,6 @@ mod nextest_lane_tests {
         assert!(qualified_skips_filterset(&[skip("a", "slow"), skip("b", "has space")]).is_err());
     }
 
-    /// A recorded engine launch environment is compared line by line; any
-    /// line that changed, vanished or appeared is a difference to refuse on.
-    #[test]
-    fn engine_launch_drift_names_what_changed() {
-        let recorded = vec!["cargo-env {A}".to_owned(), "runner None".to_owned()];
-        assert!(engine_launch_drift(&recorded, &recorded).is_empty());
-        let now = vec!["cargo-env {A, B}".to_owned(), "runner None".to_owned()];
-        let drift = engine_launch_drift(&recorded, &now);
-        assert_eq!(drift.len(), 2, "{drift:?}");
-        assert!(drift[0].contains("no longer holds") && drift[0].contains("{A}"), "{drift:?}");
-        assert!(drift[1].contains("gained") && drift[1].contains("{A, B}"), "{drift:?}");
-    }
-
     /// A one-package workspace laid out under `root`: its `cargo metadata`
     /// document, the artifact stream a build of its one test target would
     /// emit, and that target's executable - a shell script that lists two
@@ -1157,17 +1054,15 @@ mod nextest_lane_tests {
     }
 
     /// Wiring through the REAL engine: a test that blows the engine's
-    /// per-test cap sets `EngineRun.timed_out` from the `TestFinished` events
-    /// `run_nextest_engine` collects itself (nothing is injected), a lane
-    /// whose tests finish does not, and the preparation that built the lane
-    /// captured the engine's launch fingerprint through the real discovery
-    /// path - which the lane's recipe carries and a replay compares.
+    /// per-test cap fails the run and records the stop on the tap, from the
+    /// events `run_nextest_engine` collects itself (nothing is injected), and
+    /// a lane whose tests finish passes.
     ///
     /// One test, run in sequence: engine preparation writes the per-host
     /// engine env file under `$HOME/.brokkr`, which two concurrent
     /// preparations would race on.
     #[test]
-    fn a_real_engine_run_reports_its_timeout_and_the_launch_fingerprint() {
+    fn a_real_engine_run_reports_its_timeout() {
         let root = crate::test_scratch::scratch("nextest_lane", "real_engine");
         let (metadata, stream) = engine_fixture(&root);
         let inputs = LaneInputs {
@@ -1182,11 +1077,9 @@ mod nextest_lane_tests {
         let assemble = |sweep: &ResolvedSweep| {
             assemble_nextest_lane(
                 &inputs,
-                "engine",
+                sweep,
                 vec!["-p".into(), "core".into()],
                 &LaneEnv::default(),
-                &EngineFilter::Sweep(sweep),
-                IgnoredMode::Exclude,
                 &NextestBuild {
                     metadata_json: &metadata,
                     stdout: &stream,
@@ -1204,28 +1097,16 @@ mod nextest_lane_tests {
         assert_eq!(prepared.resolutions[0].binaries[0].selected, ["fast", "slow"]);
         let np = prepared.nextest.as_ref().expect("an engine lane");
         let tap = LaneTap::new(0);
-        let run = run_nextest_engine("engine", Some(1), np, &tap).unwrap();
-        assert!(run.timed_out, "the TestFinished event of the capped test sets timed_out");
-        assert!(!run.passed);
+        let passed = run_nextest_engine("engine", Some(1), np, &tap).unwrap();
+        assert!(!passed);
         // The engine's cancellation after the timeout was recorded on the tap.
         assert!(tap.decisive_termination().is_some(), "the fail-fast stop was recorded");
 
         // A selection that never reaches the slow test finishes clean.
         let fast = ResolvedSweep { name_filters: vec!["fast".into()], ..sweep.clone() };
         let quick = assemble(&fast);
-        let run = run_nextest_engine("engine", Some(1), quick.nextest.as_ref().unwrap(), &LaneTap::new(0)).unwrap();
-        assert!(run.passed && !run.timed_out, "{run:?}");
-
-        // The launch fingerprint came from the real discovery in preparation,
-        // is what the lane's recipe records, and is what a replay compares.
-        assert!(prepared.engine_launch.iter().any(|l| l.starts_with("cargo-env ")), "{:?}", prepared.engine_launch);
-        assert!(prepared.engine_launch.iter().any(|l| l.starts_with("runner ")), "{:?}", prepared.engine_launch);
-        let recipe = build_lane_replay(&sweep, &prepared).expect("an engine recipe");
-        assert_eq!(recipe.engine_launch, prepared.engine_launch);
-        assert!(engine_launch_drift(&recipe.engine_launch, &quick.engine_launch).is_empty());
-        let mut changed = recipe.engine_launch.clone();
-        changed.push("cargo-env {EXTRA}".into());
-        assert!(!engine_launch_drift(&changed, &quick.engine_launch).is_empty());
+        let passed = run_nextest_engine("engine", Some(1), quick.nextest.as_ref().unwrap(), &LaneTap::new(0)).unwrap();
+        assert!(passed);
     }
 
     /// The fail-fast stop signals every test still running. Those deaths are

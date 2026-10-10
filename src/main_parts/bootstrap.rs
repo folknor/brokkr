@@ -176,43 +176,6 @@ fn main() {
     }
 }
 
-/// The two directories a recorded run is located by, from the working
-/// directory alone - `brokkr.toml` is looked for but never read: `(build_root,
-/// state_root)`. The code tree is the working directory; brokkr's `.brokkr`
-/// state lives in the directory holding `brokkr.toml` (the working directory
-/// or its parent) or, in a tree with none, in the working directory itself -
-/// exactly where `check` wrote the record in each layout.
-fn recorded_run_roots(cwd: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
-    let state_root = project::find_config_dir(cwd).unwrap_or_else(|| cwd.to_path_buf());
-    (cwd.to_path_buf(), state_root)
-}
-
-/// `brokkr test --from-run RUN_ID [--list]`, run without parsing the
-/// configuration. `--list` reads the record and executes nothing: no lock, no
-/// cargo, no toolchain. A replay builds, so it takes the lock and honours
-/// `disable_toolchain` - read best-effort, because a configuration that does
-/// not parse is the case this path exists for, and the replay's fingerprints
-/// refuse anything a differently pinned toolchain would change.
-fn cmd_test_from_run(run_id: &str, list: bool) -> Result<(), DevError> {
-    let cwd = std::env::current_dir()
-        .map_err(|e| DevError::Config(format!("cannot determine current directory: {e}")))?;
-    let (build_root, state_root) = recorded_run_roots(&cwd);
-    if list {
-        return test_cmd::run_from_run(&build_root, &state_root, run_id, true);
-    }
-    let disable_dir = project::detect_optional()
-        .ok()
-        .flatten()
-        .filter(|d| d.config.disable_toolchain)
-        .map(|d| d.build_root);
-    toolchain::arm(disable_dir);
-    // A replay narrates its support builds and its own record to the run log,
-    // like any `brokkr test`; `--list` executes nothing and keeps none.
-    let _log = check_cmd::RunLog::begin(&state_root, check_cmd::run_log_kind::TEST);
-    let _lock = acquire_cmd_lock_opt(None, &state_root, "test")?;
-    test_cmd::run_from_run(&build_root, &state_root, run_id, false)
-}
-
 #[allow(clippy::too_many_lines)]
 fn run(cli: Cli) -> Result<(), DevError> {
     // These commands work without a project root.
@@ -289,16 +252,6 @@ fn run(cli: Cli) -> Result<(), DevError> {
             .flatten()
             .map_or(Project::Other(""), |d| d.project);
         return man::run(topic.as_deref(), sections, *full, project);
-    }
-
-    // Recorded-run recovery (`brokkr test --from-run ID [--list]`) comes
-    // BEFORE any configuration is parsed. The record is the whole selection
-    // and carries its own recipe, so today's brokkr.toml has no say in what is
-    // replayed - and a config that no longer parses must not stand between a
-    // failed run and the command it printed. Only the directories that locate
-    // the record are resolved (see [`recorded_run_roots`]).
-    if let Command::Test { from_run: Some(run_id), list, .. } = &cli.command {
-        return cmd_test_from_run(run_id, *list);
     }
 
     // When `disable_toolchain` is set, arm the build root whose pinned
@@ -1628,7 +1581,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             }
         }
         // ----- cargo single-test runner -----
-        Command::Test { name, package, repeat, jobs, debug, release, timeout, sweep, from_run: _, list: _ } => {
+        Command::Test { name, package, repeat, jobs, debug, release, timeout, sweep } => {
             // The lock lives in the config dir (.brokkr); cargo runs
             // against the code tree (build_root), which differs under
             // the one-level-up layout.
@@ -1637,9 +1590,6 @@ fn run(cli: Cli) -> Result<(), DevError> {
             // a 124 or 130 keeps everything up to the stop.
             let _log = check_cmd::RunLog::begin(&project_root, check_cmd::run_log_kind::TEST);
             let _lock = acquire_cmd_lock(project, &project_root, "test")?;
-            // Clap guarantees a name whenever there is no `--from-run`, and
-            // `--from-run` was dispatched above, before configuration.
-            let name = name.ok_or_else(|| DevError::Config("brokkr test needs a test name".into()))?;
             // cargo runs in the code tree (build_root); brokkr's own
             // `.brokkr` state (hung-test snapshots) belongs under the
             // config dir (project_root), which differs under the
@@ -1972,35 +1922,5 @@ fn run(cli: Cli) -> Result<(), DevError> {
             };
             piners::lint::query::cmd(&project_root, &lq)
         }
-    }
-}
-
-#[cfg(test)]
-mod recorded_run_tests {
-    #![allow(clippy::unwrap_used)]
-    use super::recorded_run_roots;
-
-    /// Validation case: recovery of a recorded run needs no valid
-    /// configuration. The directories that locate the record come from the
-    /// working directory alone: a `brokkr.toml` is found where `check` found it
-    /// (here or one level up) without being parsed - a garbage one resolves -
-    /// and a tree with none (a plain Rust repo `check` ran in) is its own state
-    /// root, so the command `check` printed can reach the record.
-    #[test]
-    fn a_recorded_run_is_located_without_parsing_the_configuration() {
-        let root = crate::test_scratch::scratch("bootstrap", "recorded_roots");
-        let code = root.join("code");
-        std::fs::create_dir_all(&code).unwrap();
-
-        // No brokkr.toml anywhere: the working directory is both roots.
-        assert_eq!(recorded_run_roots(&code), (code.clone(), code.clone()));
-
-        // A brokkr.toml that does not parse, one level up: located, not read.
-        std::fs::write(root.join("brokkr.toml"), "this is = [not valid toml").unwrap();
-        assert_eq!(recorded_run_roots(&code), (code.clone(), root.clone()));
-
-        // And in the working directory itself.
-        std::fs::write(code.join("brokkr.toml"), "\u{0}garbage").unwrap();
-        assert_eq!(recorded_run_roots(&code), (code.clone(), code));
     }
 }

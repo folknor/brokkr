@@ -8,14 +8,13 @@
 //   shape built (the same `cargo test --no-run` the lane itself uses), every
 //   binary listed under the launch envelope execution will use, its selection
 //   and the executions it implies recorded, a content hash of every test
-//   executable taken, and the recipe to launch it again ([`LaneReplay`])
-//   kept. Prepared for EVERY run, not only certifying ones: the whole
-//   invocation up front is what lets a kill in one binary name the tests of
-//   the binaries and lanes after it, and what `brokkr test --from-run`
-//   replays. A lane that cannot be attributed to binaries (cargo-mediated
-//   parallelism, a serial lane with no harness shim) is the one thing a
-//   non-certifying run keeps that a certifying one refuses; its inventory is
-//   reported unavailable, with the reason, and nothing is made up for it.
+//   executable taken. Prepared for EVERY run, not only certifying ones: the
+//   whole invocation up front is what lets a kill in one binary name the
+//   tests of the binaries and lanes after it. A lane that cannot be
+//   attributed to binaries (cargo-mediated parallelism, a serial lane with no
+//   harness shim) is the one thing a non-certifying run keeps that a
+//   certifying one refuses; its inventory is reported unavailable, with the
+//   reason, and nothing is made up for it.
 // - The POLICY UNIVERSE: every test of each required shape, exclusions, filter
 //   liveness. Only under `certifies = "complete"`, whose claim it is.
 //
@@ -109,10 +108,6 @@ pub(crate) struct PreparedBinary {
     pub(crate) unit: BinaryUnit,
     /// Content hash (xxh3-64, hex): the artifact's identity in the plan.
     pub(crate) hash: String,
-    /// The cwd and environment additions this binary is launched with
-    /// ([`DirectRuntime::envelope`]), as the plan records them for a replay.
-    /// `None` on the engine lane, whose launch env is the engine's own.
-    pub(crate) envelope: Option<(String, Vec<(String, String)>)>,
     /// Why this binary could not be listed, when it could not: it answers no
     /// libtest `--list` (a `harness = false` target, a custom harness), so
     /// the tests it holds cannot be named. Only a lane that is not
@@ -143,7 +138,7 @@ impl PreparedBinary {
 #[derive(Debug, Clone)]
 pub(crate) struct PreparedResolution {
     pub(crate) resolution: Option<String>,
-    /// The selection the lane's prebuild ran with, replayed to verify the
+    /// The selection the lane's prebuild ran with, built again to verify the
     /// artifacts before the lane executes.
     pub(crate) selection: Vec<String>,
     pub(crate) binaries: Vec<PreparedBinary>,
@@ -152,15 +147,9 @@ pub(crate) struct PreparedResolution {
 /// Everything a lane needs to execute without enumerating anything.
 pub(crate) struct PreparedLane {
     pub(crate) env: LaneEnv,
-    /// Whether the lane executes the ignored tests it selects: always
-    /// `ignored_mode.runs_ignored()`, kept as a field because the lanes read
-    /// it as a plain flag. Set only through [`Self::set_ignored_mode`].
+    /// Whether the lane executes the ignored tests it selects, resolved from
+    /// the lane's complete launch argv ([`args_run_ignored`]).
     pub(crate) include_ignored: bool,
-    /// The effective ignored mode of the lane's complete launch argv.
-    pub(crate) ignored_mode: IgnoredMode,
-    /// The engine lane's launch environment as resolved at preparation, for
-    /// the recipe ([`LaneReplay::engine_launch`]); empty on every other lane.
-    pub(crate) engine_launch: Vec<String>,
     /// Names a package-qualified skip removed, for the lane's report.
     pub(crate) pkg_skipped: usize,
     pub(crate) resolutions: Vec<PreparedResolution>,
@@ -180,9 +169,9 @@ pub(crate) struct PreparedLane {
     pub(crate) verify: bool,
     /// The runtime index's fingerprint ([`BuildRuntimeIndex::fingerprint`])
     /// the launch envelope was built from, on the lanes that execute binaries
-    /// directly or through the shim. The lane's re-verification - and a
-    /// replay's - compares a fresh one, so a launch envelope built from facts
-    /// that no longer hold is caught, not used.
+    /// directly or through the shim. The lane's re-verification compares a
+    /// fresh one, so a launch envelope built from facts that no longer hold
+    /// is caught, not used.
     pub(crate) runtime_fingerprint: Option<Vec<String>>,
     /// The executables the lane's `build_packages` pre-builds produced, by
     /// package, target, path and content ([`support_fingerprint`]), hashed
@@ -227,8 +216,6 @@ impl PreparedLane {
         Self {
             env,
             include_ignored: false,
-            ignored_mode: IgnoredMode::Exclude,
-            engine_launch: Vec::new(),
             pkg_skipped: 0,
             resolutions: Vec::new(),
             target_filters: Vec::new(),
@@ -245,11 +232,6 @@ impl PreparedLane {
             skipped: None,
             prepare_failed: None,
         }
-    }
-
-    pub(crate) fn set_ignored_mode(&mut self, mode: IgnoredMode) {
-        self.ignored_mode = mode;
-        self.include_ignored = mode.runs_ignored();
     }
 
     /// A lane with no inventory, and why.
@@ -327,14 +309,31 @@ fn lane_filter_args(sweep: &ResolvedSweep, libtest_extra: &[String]) -> Vec<Stri
     args
 }
 
-/// The ignored mode of a lane's complete launch argv: the sweep's positional
-/// filters and libtest args and whatever was forwarded after `--`
-/// ([`lane_filter_args`]). Resolved from all of it, because a forwarded
-/// `--ignored` changes which tests the lane executes exactly as a profile's
-/// `include_ignored` does.
-fn lane_ignored_mode(sweep: &ResolvedSweep, libtest_extra: &[String]) -> IgnoredMode {
+/// Whether a libtest argv executes `#[ignore]`d tests: `--include-ignored`
+/// runs every test, `--ignored` runs only the ignored ones. The value of
+/// `--skip` is never read as a flag.
+fn args_run_ignored<'a>(args: impl IntoIterator<Item = &'a str>) -> bool {
+    let mut it = args.into_iter();
+    while let Some(a) = it.next() {
+        match a {
+            "--skip" => {
+                it.next();
+            }
+            "--include-ignored" | "--ignored" => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Whether a lane executes the ignored tests it selects, from its complete
+/// launch argv: the sweep's positional filters and libtest args and whatever
+/// was forwarded after `--` ([`lane_filter_args`]). Resolved from all of it,
+/// because a forwarded `--ignored` changes which tests the lane executes
+/// exactly as a profile's `include_ignored` does.
+fn lane_runs_ignored(sweep: &ResolvedSweep, libtest_extra: &[String]) -> bool {
     let args = lane_filter_args(sweep, libtest_extra);
-    effective_ignored_mode(args.iter().map(String::as_str))
+    args_run_ignored(args.iter().map(String::as_str))
 }
 
 /// The argv of a lane's ignored-only listing: its filter args with
@@ -385,13 +384,10 @@ fn list_binary(
     }
     let hash = hash_file(Path::new(&binary.executable))
         .map_err(|e| DevError::Build(format!("could not hash {}: {e}", binary.executable)))?;
-    let (cwd, env) = runtime.envelope(binary, env_refs)?;
-    let cwd = if cwd.as_os_str() == "." { inputs.project_root.to_path_buf() } else { cwd };
     Ok(Some(PreparedBinary {
         unit: BinaryUnit::of(binary),
         binary: binary.clone(),
         hash,
-        envelope: Some((cwd.to_string_lossy().into_owned(), env)),
         unlisted: None,
         selected,
         ignored: ignored.tests.into_iter().collect(),
@@ -427,7 +423,7 @@ fn list_binary_or_unlisted(
     // executed to ask - the manifest already answers the question. (Every
     // lane that listed binaries before preparation existed still does.)
     if let Some(why) = custom_harness_reason(binary) {
-        return unlisted_binary(inputs, binary, env_refs, runtime, why);
+        return unlisted_binary(binary, why);
     }
     let (listed, held) = output::capture_errors(|| {
         list_binary(inputs, sweep, binary, filter_args, env_refs, runtime, pkg_skipped)
@@ -435,7 +431,7 @@ fn list_binary_or_unlisted(
     if let Some(p) = listed? {
         return Ok(p);
     }
-    unlisted_binary(inputs, binary, env_refs, runtime, held.join(" - "))
+    unlisted_binary(binary, held.join(" - "))
 }
 
 /// Why `binary` is known not to be a libtest harness from its manifest alone,
@@ -455,23 +451,14 @@ fn custom_harness_reason(binary: &TestBinary) -> Option<String> {
 }
 
 /// A binary kept in the inventory with no tests and the reason: its identity
-/// (content hash) and launch envelope are still recorded.
-fn unlisted_binary(
-    inputs: &LaneInputs<'_>,
-    binary: &TestBinary,
-    env_refs: &[(&str, &str)],
-    runtime: &DirectRuntime,
-    why: String,
-) -> Result<PreparedBinary, DevError> {
+/// (content hash) is still recorded.
+fn unlisted_binary(binary: &TestBinary, why: String) -> Result<PreparedBinary, DevError> {
     let hash = hash_file(Path::new(&binary.executable))
         .map_err(|e| DevError::Build(format!("could not hash {}: {e}", binary.executable)))?;
-    let (cwd, env) = runtime.envelope(binary, env_refs)?;
-    let cwd = if cwd.as_os_str() == "." { inputs.project_root.to_path_buf() } else { cwd };
     Ok(PreparedBinary {
         unit: BinaryUnit::of(binary),
         binary: binary.clone(),
         hash,
-        envelope: Some((cwd.to_string_lossy().into_owned(), env)),
         unlisted: Some(why),
         selected: Vec::new(),
         ignored: BTreeSet::new(),
@@ -745,7 +732,7 @@ fn prepare_serial(
     let mut prepared = PreparedLane::bare(env.clone());
     prepared.runtime_fingerprint = fingerprint;
     prepared.doc_obligation = doc_obligation;
-    prepared.set_ignored_mode(lane_ignored_mode(sweep, libtest_extra));
+    prepared.include_ignored = lane_runs_ignored(sweep, libtest_extra);
     prepared.libtest_extra = libtest_extra.to_vec();
     prepared.target_filters = sweep.cargo_test_filters.clone();
     for (resolution, selection, binaries) in built {
@@ -818,7 +805,7 @@ fn prepare_direct(
     let runtime = DirectRuntime::load(inputs.project_root, &env_refs, index)?;
     let mut prepared = PreparedLane::bare(env.clone());
     prepared.runtime_fingerprint = fingerprint;
-    prepared.set_ignored_mode(lane_ignored_mode(sweep, libtest_extra));
+    prepared.include_ignored = lane_runs_ignored(sweep, libtest_extra);
     // The sweep's own `--test` filters UNION with any the caller supplied,
     // matching cargo's semantics for repeated selection flags. Under package
     // mode the sweep's filters cannot ride the per-package prebuild (cargo
@@ -953,9 +940,8 @@ fn lane_drift_with(
     }
 }
 
-/// What a lane was planned as, to be held against a fresh build of it. The
-/// one comparison both a lane's pre-run verification and a replay's make, so
-/// the two cannot disagree about what "the same artifacts" means.
+/// What a lane was planned as, to be held against a fresh build of it: the
+/// one definition of "the same artifacts" a lane's pre-run verification uses.
 pub(crate) struct DriftCheck<'a> {
     pub(crate) artifacts: Vec<PlannedArtifact>,
     pub(crate) target_filters: &'a [String],
@@ -996,10 +982,8 @@ impl DriftCheck<'_> {
 
     /// Hold what a build produced to what was planned: `current` is every
     /// executable by (resolution, path, content hash), `runtime_now` the
-    /// runtime index's fingerprint, `support_now` the support builds'. For the
-    /// engine lane, whose build is read by the engine's own builder and not
-    /// through [`Self::run`].
-    pub(crate) fn compare(
+    /// runtime index's fingerprint, `support_now` the support builds'.
+    fn compare(
         &self,
         current: &[(Option<String>, String, String)],
         runtime_now: &[String],
@@ -1175,7 +1159,7 @@ pub(crate) fn prepare_profile(
         let kind = lane_kind(sweep);
         let shape = shape_id(sweep);
         let mut record = LaneRecord {
-            include_ignored: effective_ignored_mode(sweep.libtest_args.iter().map(String::as_str)).runs_ignored(),
+            include_ignored: args_run_ignored(sweep.libtest_args.iter().map(String::as_str)),
             doc_carrier: lane_runs_doctests(sweep, doctests),
             // A doc-only lane always; a serial carrier once its binaries are
             // known to hold a library (below).
@@ -1397,7 +1381,6 @@ pub(crate) fn prepare_profile(
             // (`doctest = false`) nor is implied by them (`test = false`).
             record.doc_streams_required = prepared.doc_obligation;
         }
-        record.replay = build_lane_replay(sweep, &prepared);
         record.prepared = lane_ok;
         plan.lanes.push(record);
         lanes.push(Some(prepared));
@@ -1502,7 +1485,6 @@ mod prepare_tests {
                     unit: BinaryUnit::of(&b),
                     binary: b,
                     hash: "h".into(),
-                    envelope: Some(("/x/core".into(), vec![("K".into(), "v".into())])),
                     unlisted: None,
                     selected: vec!["a".into(), "slow".into()],
                     ignored: ["slow".to_owned()].into_iter().collect(),
@@ -1618,20 +1600,21 @@ mod prepare_tests {
     fn forwarded_ignored_flags_reach_the_lane_s_ignored_mode() {
         let plain = ResolvedSweep::default();
         let forwarded = |args: &[&str]| args.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
-        assert_eq!(lane_ignored_mode(&plain, &[]), IgnoredMode::Exclude);
-        assert_eq!(lane_ignored_mode(&plain, &forwarded(&["--ignored"])), IgnoredMode::Only);
-        assert_eq!(lane_ignored_mode(&plain, &forwarded(&["--include-ignored"])), IgnoredMode::Include);
+        assert!(!lane_runs_ignored(&plain, &[]));
+        assert!(lane_runs_ignored(&plain, &forwarded(&["--ignored"])));
+        assert!(lane_runs_ignored(&plain, &forwarded(&["--include-ignored"])));
         let lifting = ResolvedSweep { libtest_args: forwarded(&["--include-ignored"]), ..ResolvedSweep::default() };
-        assert_eq!(lane_ignored_mode(&lifting, &[]), IgnoredMode::Include);
+        assert!(lane_runs_ignored(&lifting, &[]));
+        // `--skip`'s value is never read as a flag.
+        assert!(!args_run_ignored(["--skip", "--ignored", "x"]));
 
         let mut p = PreparedLane::bare(LaneEnv::default());
-        p.set_ignored_mode(lane_ignored_mode(&plain, &forwarded(&["--ignored"])));
+        p.include_ignored = lane_runs_ignored(&plain, &forwarded(&["--ignored"]));
         assert!(p.include_ignored, "the lane executes the ignored tests it lists");
         let b = PreparedBinary {
             binary: binary("suite"),
             unit: BinaryUnit::of(&binary("suite")),
             hash: "h".into(),
-            envelope: None,
             unlisted: None,
             selected: vec!["slow".into()],
             ignored: ["slow".to_owned()].into_iter().collect(),
@@ -1906,7 +1889,6 @@ mod prepare_tests {
                 binaries: vec![PreparedBinary {
                     unit: BinaryUnit::of(&b),
                     hash: hash_file(Path::new(&b.executable)).unwrap(),
-                    envelope: None,
                     unlisted: None,
                     binary: b,
                     selected: vec!["t".into()],
@@ -2101,9 +2083,9 @@ mod prepare_tests {
     }
 
     /// Validation case: every run prepares its inventory - executions,
-    /// artifacts with their content hashes, and the replay recipe - without
-    /// the policy universe, which only a certifying claim enumerates (the
-    /// `Blind` preparer's universe would fail the test if it were asked for).
+    /// artifacts with their content hashes - without the policy universe,
+    /// which only a certifying claim enumerates (the `Blind` preparer's
+    /// universe would fail the test if it were asked for).
     #[test]
     fn a_partial_run_prepares_an_inventory_without_a_policy_universe() {
         struct NoUniverse(Fake);
@@ -2129,16 +2111,10 @@ mod prepare_tests {
         assert_eq!(lane.executions.len(), 1, "the ignored name is selected, not executed");
         assert_eq!(lane.artifacts.len(), 1);
         assert_eq!(lane.artifacts[0].hash, "h", "the artifact's identity is recorded on every run");
-        let replay = lane.replay.as_ref().expect("a recipe for the lane");
-        assert_eq!(replay.model, ReplayModel::SerialShared);
-        assert_eq!(replay.test_threads, Some(1));
-        assert_eq!(replay.resolutions[0].binaries[0].cwd, "/x/core");
-        assert_eq!(replay.resolutions[0].binaries[0].env, vec![("K".to_owned(), "v".to_owned())]);
-        assert_eq!(replay.per_test_ceiling_secs, 20);
     }
 
     /// Validation case: a lane with no attribution reports its inventory
-    /// unavailable - with the reason, no executions and no recipe - instead of
+    /// unavailable - with the reason and no executions - instead of
     /// inventing names, and the run is not refused for it.
     #[test]
     fn an_unattributable_lane_has_no_inventory_and_is_not_refused() {
@@ -2148,7 +2124,7 @@ mod prepare_tests {
         let lane = &prep.plan.lanes[0];
         assert!(!lane.prepared);
         assert!(lane.unavailable.as_deref().unwrap().contains("one stream"));
-        assert!(lane.executions.is_empty() && lane.artifacts.is_empty() && lane.replay.is_none());
+        assert!(lane.executions.is_empty() && lane.artifacts.is_empty());
         assert!(!prep.plan.complete, "a plan with a blind lane is not whole");
         assert!(prep.lanes[0].is_some(), "the lane still runs, through cargo");
     }
@@ -2199,7 +2175,6 @@ mod prepare_tests {
                     unit: BinaryUnit::of(&b),
                     binary: b,
                     hash: "c".into(),
-                    envelope: Some(("/x/core".into(), Vec::new())),
                     unlisted: Some("did not produce a complete libtest listing".into()),
                     selected: Vec::new(),
                     ignored: BTreeSet::new(),

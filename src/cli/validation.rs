@@ -182,48 +182,13 @@ mod tests {
         assert!(parsed.is_err());
     }
 
-    /// Validation case: `test --from-run` takes the record as its whole
-    /// selection, so every ordinary selection, feature, profile, filter,
-    /// package, sweep, repeat and timeout flag is refused at parse time.
+    /// `test` needs a name; its selection flags parse beside it.
     #[test]
-    fn test_from_run_conflicts_with_every_ordinary_selection_flag() {
-        let parsed = Cli::try_parse_from(["brokkr", "test", "--from-run", "1700000000000-42"]).expect("parse");
-        let Command::Test { name, from_run, list, .. } = parsed.command else {
-            panic!("expected Test");
-        };
-        assert_eq!(name, None);
-        assert_eq!(from_run.as_deref(), Some("1700000000000-42"));
-        assert!(!list);
-
-        let with = |extra: &[&str]| {
-            let mut argv = vec!["brokkr", "test", "--from-run", "1-2"];
-            argv.extend_from_slice(extra);
-            Cli::try_parse_from(argv)
-        };
-        for extra in [
-            &["some_test"][..],
-            &["-p", "pkg"],
-            &["-N", "3"],
-            &["-j", "2"],
-            &["--debug"],
-            &["--release"],
-            &["--timeout", "60"],
-            &["--sweep", "all"],
-        ] {
-            assert!(with(extra).is_err(), "--from-run must conflict with {extra:?}");
-        }
-        // `--list` only makes sense beside it, and a test name needs
-        // `--from-run` or a name.
-        assert!(Cli::try_parse_from(["brokkr", "test", "some_test", "--list"]).is_err());
-        assert!(Cli::try_parse_from(["brokkr", "test", "--list"]).is_err());
+    fn test_requires_a_name() {
         assert!(Cli::try_parse_from(["brokkr", "test"]).is_err());
-        let listed = with(&["--list"]).expect("parse");
-        let Command::Test { list, .. } = listed.command else { panic!("expected Test") };
-        assert!(list);
-        // An ordinary run is unchanged.
         let plain = Cli::try_parse_from(["brokkr", "test", "some_test", "-p", "pkg", "-N", "3"]).expect("parse");
         let Command::Test { name, repeat, .. } = plain.command else { panic!("expected Test") };
-        assert_eq!(name.as_deref(), Some("some_test"));
+        assert_eq!(name, "some_test");
         assert_eq!(repeat, 3);
     }
 
