@@ -12,6 +12,10 @@
 //!
 //! What is enforced once the contract is observed:
 //!
+//! - `run_start`. Exactly one, and it is physical line 1 of stdout - before
+//!   any disposition, summary, unknown kind, invalid line or blank line. This
+//!   tightens version 1: a contract stream without one is rejected. A stream
+//!   holding only `run_start` is contract-bearing.
 //! - Terminal records. `run_end` carries `exit` 0 or 1, appears at most once,
 //!   is the last line, and equals the process exit. `run_error` appears at
 //!   most once, never with `run_end`, and means process exit 2 (unless brokkr
@@ -204,6 +208,23 @@ pub fn assess_contract(report: &HarnessReport, selected: &[String], end: Harness
     }
     let selected: HashSet<&str> = selected.iter().map(String::as_str).collect();
     let mut b = Breaches::default();
+
+    // run_start: exactly one, on physical line 1 (nothing before it, not even
+    // a blank line). Counted before version validation, so a bad-version
+    // start is present - it gets its version defect below, never "no
+    // run_start" - and a second start beside it is still a duplicate.
+    let starts: Vec<&ContractLine> = report.contract.iter().filter(|c| c.kind == "run_start").collect();
+    match starts.first() {
+        None => b.add("no run_start (it must be the first line of stdout)", "missing"),
+        Some(first) if first.physical != 1 => b.add(
+            "run_start is not the first line of stdout",
+            format!("physical line {}", first.physical),
+        ),
+        Some(_) => {}
+    }
+    if starts.len() > 1 {
+        b.add("duplicate run_start", format!("{} run_start lines", starts.len()));
+    }
     let mut life: BTreeMap<String, Life> = BTreeMap::new();
     let mut run_end_line: Option<usize> = None;
     let mut run_error_line: Option<usize> = None;
@@ -376,9 +397,14 @@ mod tests {
         format!("{{\"probe\":\"{probe}\",\"outcome\":\"no_tv_data\"}}\n")
     }
 
+    fn start() -> String {
+        line("run_start", "")
+    }
+
     /// A clean completed stream over `probes`, exit `code`.
     fn clean(probes: &[&str], code: i32) -> String {
-        let mut s = line("setup_stage", ",\"stage\":\"manifest\"");
+        let mut s = start();
+        s.push_str(&line("setup_stage", ",\"stage\":\"manifest\""));
         s.push_str(&line("setup_complete", ""));
         for p in probes {
             s.push_str(&line("probe_start", &format!(",\"probe\":\"{p}\"")));
@@ -452,7 +478,7 @@ mod tests {
             a.violations
         );
         // A run_error that is last is clean.
-        let last = line("run_error", ",\"stage\":\"feed_load\",\"error\":\"x\"");
+        let last = start() + &line("run_error", ",\"stage\":\"feed_load\",\"error\":\"x\"");
         assert!(assess(&last, &["a"], HarnessEnd::Code(2)).violations.is_empty());
     }
 
@@ -480,7 +506,8 @@ mod tests {
 
     #[test]
     fn run_error_is_parsed_rendered_and_must_mean_exit_2() {
-        let mut nd = line("setup_stage", ",\"stage\":\"feed_load\",\"feed\":\"eth\"");
+        let mut nd = start();
+        nd.push_str(&line("setup_stage", ",\"stage\":\"feed_load\",\"feed\":\"eth\""));
         nd.push_str(&line(
             "run_error",
             ",\"stage\":\"feed_load\",\"feed\":\"eth\",\"role\":\"base\",\"path\":\"/c/f.csv\",\"error\":\"no such file\"",
@@ -514,7 +541,8 @@ mod tests {
 
     #[test]
     fn an_own_exit_without_a_terminal_breaks_the_contract_a_signal_does_not() {
-        let mut nd = line("setup_complete", "");
+        let mut nd = start();
+        nd.push_str(&line("setup_complete", ""));
         nd.push_str(&line("probe_start", ",\"probe\":\"a\""));
         let a = assess(&nd, &["a", "b"], HarnessEnd::Code(0));
         assert!(a.violations.iter().any(|l| l.starts_with("process exited with neither")));
@@ -534,6 +562,59 @@ mod tests {
         let v = a.violations.join("\n");
         assert!(v.contains("disposition outside its probe_start..probe_end: a"), "{v}");
         assert!(v.contains("run_end claims completion, but no probe_start for: b"), "{v}");
+    }
+
+    #[test]
+    fn a_contract_stream_without_run_start_is_rejected() {
+        let nd = clean(&["a"], 0).replacen(&start(), "", 1);
+        let a = assess(&nd, &["a"], HarnessEnd::Code(0));
+        assert_eq!(a.violations, vec!["no run_start (it must be the first line of stdout): missing".to_owned()]);
+        // Dispositions only: no contract observed, so no run_start needed.
+        assert!(assess(&disp("a"), &["a"], HarnessEnd::Code(0)).violations.is_empty());
+    }
+
+    #[test]
+    fn run_start_must_be_physical_line_one() {
+        // A leading blank line.
+        let a = assess(&format!("\n{}", clean(&["a"], 0)), &["a"], HarnessEnd::Code(0));
+        assert_eq!(a.violations, vec!["run_start is not the first line of stdout: physical line 2".to_owned()]);
+        // After a disposition, a summary, an unknown kind or an invalid line.
+        for before in [disp("zz"), "{\"summary\":true}\n".to_owned(), "{\"kind\":\"future\"}\n".to_owned(), "garbage\n".to_owned()] {
+            let a = assess(&format!("{before}{}", clean(&["a"], 0)), &["a"], HarnessEnd::Code(0));
+            assert!(
+                a.violations.iter().any(|l| l.starts_with("run_start is not the first line of stdout")),
+                "{before}: {:?}",
+                a.violations
+            );
+        }
+    }
+
+    #[test]
+    fn a_bad_version_start_is_present_and_still_counts_as_a_duplicate() {
+        let nd = format!("{{\"kind\":\"run_start\",\"version\":2}}\n{}", clean(&["a"], 0));
+        let a = assess(&nd, &["a"], HarnessEnd::Code(0));
+        let v = a.violations.join("\n");
+        assert!(v.contains("contract line with a bad version: run_start at line 1 (unsupported: 2)"), "{v}");
+        assert!(v.contains("duplicate run_start: 2 run_start lines"), "{v}");
+        assert!(!v.contains("no run_start"), "{v}");
+        // Alone, a bad-version start gives its version defect, not "no run_start".
+        let a = assess("{\"kind\":\"run_start\"}\n", &["a"], HarnessEnd::Signal(9));
+        assert!(a.observed);
+        assert_eq!(a.violations.len(), 1, "{:?}", a.violations);
+        assert!(a.violations[0].starts_with("contract line with a bad version"));
+    }
+
+    #[test]
+    fn a_lone_run_start_is_contract_bearing() {
+        // Killed (spontaneously or by brokkr) with no terminal: incomplete, not a violation.
+        for end in [HarnessEnd::Signal(9), HarnessEnd::Backstop, HarnessEnd::Interrupted] {
+            let a = assess(&start(), &["a"], end);
+            assert!(a.observed);
+            assert!(a.violations.is_empty(), "{end:?}: {:?}", a.violations);
+        }
+        // A natural exit with no terminal record is the existing violation.
+        let a = assess(&start(), &["a"], HarnessEnd::Code(0));
+        assert!(a.violations.iter().any(|l| l.starts_with("process exited with neither")));
     }
 
     #[test]

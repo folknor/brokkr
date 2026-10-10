@@ -35,16 +35,25 @@ pub struct GateDiff {
 /// Compare each selected probe's actual disposition to its pinned `expected`.
 /// Returns the violations; an empty vec means the gate passed.
 pub fn evaluate(ids: &[String], registry: &Registry, report: &HarnessReport) -> Vec<GateDiff> {
-    // Only a valid disposition (`report::valid_label`) can satisfy a pin: an
+    // Only a valid record (`report::record_label`) can satisfy a pin: an
     // invalid line whose derived label happens to equal `expected` - a tier
-    // posing as an outcome - is a deviation, shown as `invalid (...)`.
+    // posing as an outcome - is a deviation, shown as `invalid (...)`. So is
+    // a clean line for a probe any earlier occurrence of which was invalid:
+    // repeats collapse to the last, but an invalid occurrence never
+    // satisfies a pin. The stored `gate_ok` is this verdict, so it carries
+    // the taint to `corpus-results` too.
+    let tainted = report.tainted();
     let actual: BTreeMap<&str, String> = report
         .probes
         .iter()
         .map(|p| {
-            let got = p
-                .valid_disposition()
-                .map_or_else(|| format!("invalid ({})", p.disposition()), str::to_owned);
+            let got = match p.valid_disposition() {
+                None => format!("invalid ({})", p.disposition()),
+                Some(_) if tainted.contains(p.probe.as_str()) => {
+                    format!("invalid (an occurrence was invalid; last {})", p.disposition())
+                }
+                Some(label) => label.to_owned(),
+            };
             (p.probe.as_str(), got)
         })
         .collect();
@@ -73,10 +82,11 @@ pub const BREAK_DISPOSITIONS: [&str; 3] = ["compile_fail", "runtime_fail", "harn
 
 /// Whether the report carries at least one break line (any probe).
 pub fn report_has_break(report: &HarnessReport) -> bool {
-    report
-        .probes
-        .iter()
-        .any(|p| p.valid_disposition().is_some_and(|d| BREAK_DISPOSITIONS.contains(&d)))
+    let tainted = report.tainted();
+    report.probes.iter().any(|p| {
+        !tainted.contains(p.probe.as_str())
+            && p.valid_disposition().is_some_and(|d| BREAK_DISPOSITIONS.contains(&d))
+    })
 }
 
 /// Whether a harness exit of 1 is fully accounted for by pinned breaks: the
@@ -90,13 +100,16 @@ pub fn report_has_break(report: &HarnessReport) -> bool {
 /// exit unexplained, so the exit code stays authoritative for those.
 pub fn breaks_all_pinned(ids: &[String], registry: &Registry, report: &HarnessReport) -> bool {
     let selected: std::collections::HashSet<&str> = ids.iter().map(String::as_str).collect();
+    let tainted = report.tainted();
     let mut any = false;
     for p in &report.probes {
         let Some(disp) = p.valid_disposition().filter(|d| BREAK_DISPOSITIONS.contains(d)) else {
             continue;
         };
         any = true;
-        let pinned = selected.contains(p.probe.as_str())
+        // A probe with an invalid occurrence explains nothing.
+        let pinned = !tainted.contains(p.probe.as_str())
+            && selected.contains(p.probe.as_str())
             && registry.pins.get(&p.probe).and_then(|pin| pin.expected.as_deref())
                 == Some(disp);
         if !pinned {
@@ -227,6 +240,56 @@ mod tests {
         // Nor does a posing break explain exit 1.
         assert!(!report_has_break(&rep));
         assert!(!breaks_all_pinned(&ids, &reg, &rep));
+    }
+
+    #[test]
+    fn a_contradictory_disposition_field_never_satisfies_a_pin_or_explains_a_break() {
+        // Pinned to the field's claim, and to the derived label: neither passes.
+        let rep = report(r#"{"probe":"a","outcome":"compile_fail","disposition":"accepted"}"#);
+        let ids = ["a".to_owned()];
+        for pin in ["accepted", "compile_fail"] {
+            let reg = registry(&[("a", Some(pin))]);
+            assert_eq!(evaluate(&ids, &reg, &rep).len(), 1, "{pin}");
+            assert!(!breaks_all_pinned(&ids, &reg, &rep), "{pin}");
+        }
+        assert!(!report_has_break(&rep));
+    }
+
+    #[test]
+    fn a_contradictory_then_clean_repeat_never_satisfies_its_pin() {
+        let mut rep = report(
+            "{\"probe\":\"a\",\"outcome\":\"compile_fail\",\"disposition\":\"accepted\"}\n{\"probe\":\"a\",\"outcome\":\"compile_fail\"}",
+        );
+        rep.take_duplicates();
+        let ids = ["a".to_owned()];
+        let reg = registry(&[("a", Some("compile_fail"))]);
+        let diffs = evaluate(&ids, &reg, &rep);
+        assert_eq!(diffs.len(), 1);
+        assert!(diffs[0].actual.as_deref().unwrap().starts_with("invalid (an occurrence was invalid"));
+        assert!(!report_has_break(&rep));
+        assert!(!breaks_all_pinned(&ids, &reg, &rep));
+        // The stored verdict follows: ingest marks the row gate_ok = 0.
+        let db_path = crate::test_scratch::scratch_path("piners_gate", "tainted_runs.db");
+        let db = crate::piners::corpus_db::CorpusDb::open(&db_path).unwrap();
+        let run = crate::piners::corpus_db::RunRecord {
+            run_id: None,
+            started_at: None,
+            commit_sha: None,
+            dirty: None,
+            selector: "{}",
+            gated: true,
+            result: "fail",
+            fail_reason: None,
+            harness_exit_code: Some(1),
+            stderr: "",
+            wall_ms: None,
+            protocol_violations: Some(2),
+            run_error: None,
+        };
+        let expected: BTreeMap<String, Option<String>> =
+            [("a".to_owned(), Some("compile_fail".to_owned()))].into_iter().collect();
+        let run_id = db.record_run(&run, &rep, &expected, &diffs).unwrap();
+        assert!(!db.disposition_for_probe(run_id, "a").unwrap().unwrap().gate_ok);
     }
 
     #[test]

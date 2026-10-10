@@ -187,6 +187,34 @@ pub fn valid_label(outcome: &str, tier: Option<&str>) -> Option<&'static str> {
     }
 }
 
+/// The record-level disposition validator: the gate label a disposition
+/// record stands for, or why it stands for none. The outcome and tier must
+/// form a label ([`valid_label`], the primitive), and the harness's own
+/// `disposition` field, when the key is present, must be exactly that label
+/// as a string. A present null, number, object or empty string is a defect;
+/// only a missing key is tolerated (a harness predating the field). An
+/// invalid outcome/tier stays invalid even when the field agrees with the
+/// derived fallback.
+pub fn record_label(
+    outcome: &str,
+    tier: Option<&str>,
+    declared: Option<&serde_json::Value>,
+) -> Result<&'static str, String> {
+    let Some(label) = valid_label(outcome, tier) else {
+        return Err(format!(
+            "outcome '{outcome}' with tier '{}' is not a valid disposition",
+            tier.unwrap_or("")
+        ));
+    };
+    match declared {
+        None => Ok(label),
+        Some(serde_json::Value::String(s)) if s == label => Ok(label),
+        Some(other) => Err(format!(
+            "its disposition field {other} contradicts the derived label \"{label}\""
+        )),
+    }
+}
+
 /// A per-probe disposition line.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ProbeLine {
@@ -236,6 +264,11 @@ pub struct ProbeLine {
     /// Position among the stream's non-blank lines. Set by [`parse`].
     #[serde(skip)]
     pub line: usize,
+    /// The harness's own `disposition` field exactly as sent: `None` when
+    /// the key is missing (the old-harness tolerance), `Some(Value::Null)`
+    /// for a present null. Set by [`parse`]; checked by [`record_label`].
+    #[serde(skip)]
+    pub declared: Option<serde_json::Value>,
 }
 
 impl ProbeLine {
@@ -256,12 +289,26 @@ impl ProbeLine {
         }
     }
 
-    /// The probe's gate label if the line is a *valid* disposition, `None`
-    /// otherwise. The one validator ([`valid_label`]) over the outcome and
-    /// its acceptance tier together; shared by integrity, the gate, bless and
-    /// (over the stored columns) the runtime ceiling.
+    /// The probe's gate label if the record is a *valid* disposition, `None`
+    /// otherwise: the record-level validator ([`record_label`]) - outcome and
+    /// tier together, and the harness's own `disposition` field, when
+    /// present, agreeing with them. Shared by integrity, the gate, the break
+    /// checks, bless and (over the stored record) the runtime ceiling.
     pub fn valid_disposition(&self) -> Option<&'static str> {
-        valid_label(&self.outcome, self.acceptance.as_ref().map(|a| a.tier.as_str()))
+        self.record_check().ok()
+    }
+
+    /// Why the record is not a valid disposition, `None` when it is.
+    pub fn record_defect(&self) -> Option<String> {
+        self.record_check().err()
+    }
+
+    fn record_check(&self) -> Result<&'static str, String> {
+        record_label(
+            &self.outcome,
+            self.acceptance.as_ref().map(|a| a.tier.as_str()),
+            self.declared.as_ref(),
+        )
     }
 
     /// The effective `ours_only` count after discounting window-boundary
@@ -358,13 +405,23 @@ pub struct InvalidRecord {
 /// Recognised by `kind` alone; the version and fields are validated by
 /// [`crate::piners::contract`], never here, so a known kind with a bad
 /// version is still seen and judged rather than skipped.
-pub const CONTRACT_KINDS: [&str; 6] =
-    ["setup_stage", "setup_complete", "probe_start", "probe_end", "run_end", "run_error"];
+pub const CONTRACT_KINDS: [&str; 7] = [
+    "run_start",
+    "setup_stage",
+    "setup_complete",
+    "probe_start",
+    "probe_end",
+    "run_end",
+    "run_error",
+];
 
 /// One contract line, kept whole with its stream position.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ContractLine {
+    /// Position among the non-blank lines (ordering).
     pub line: usize,
+    /// Physical line number, blank lines counted (`run_start` must be 1).
+    pub physical: usize,
     pub kind: String,
     pub value: serde_json::Value,
 }
@@ -391,6 +448,14 @@ pub struct HarnessReport {
 }
 
 impl HarnessReport {
+    /// Probe ids with at least one invalid occurrence in the stream (a
+    /// defective or unparsable record naming them), before or after repeats
+    /// collapsed. Such a probe is never scored and never satisfies a pin,
+    /// whatever its retained line says.
+    pub fn tainted(&self) -> HashSet<&str> {
+        self.invalid.iter().filter_map(|r| r.probe.as_deref()).collect()
+    }
+
     /// Collapse repeated records to the last one emitted, returning a
     /// description of each repeat (sorted, one per affected key).
     ///
@@ -503,7 +568,10 @@ pub fn parse(stdout: &[u8]) -> HarnessReport {
     };
 
     let mut position = 0usize;
-    for line in text.lines() {
+    for (index, line) in text.lines().enumerate() {
+        // The physical line number, blank lines counted: `run_start` must be
+        // physical line 1.
+        let physical = index + 1;
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
@@ -531,12 +599,16 @@ pub fn parse(stdout: &[u8]) -> HarnessReport {
             && CONTRACT_KINDS.contains(&kind)
         {
             let kind = kind.to_owned();
-            report.contract.push(ContractLine { line: position, kind, value });
+            report.contract.push(ContractLine { line: position, physical, kind, value });
             continue;
         }
 
-        // Tolerate (and ignore) a stray legacy summary line.
-        if value.get("summary").and_then(serde_json::Value::as_bool) == Some(true) {
+        // Tolerate (and ignore) a stray legacy summary record, and only that:
+        // `summary: true`, no `probe` key, and no `kind` or a kind other than
+        // `disposition`. A disposition record (no kind or `kind:
+        // "disposition"`, naming a probe) is recognised first whatever flags
+        // it carries, so a `summary` flag can never make one vanish.
+        if is_legacy_summary(&value) {
             continue;
         }
 
@@ -561,10 +633,25 @@ pub fn parse(stdout: &[u8]) -> HarnessReport {
         match value.get("kind").and_then(serde_json::Value::as_str) {
             None | Some("disposition") => {
                 let raw = value.to_string();
+                // Missing key and present null are different facts.
+                let declared = value.get("disposition").cloned();
                 match serde_json::from_value::<ProbeLine>(value) {
                     Ok(mut p) => {
                         p.raw = raw;
                         p.line = position;
+                        p.declared = declared;
+                        // Every occurrence is validated here, before repeats
+                        // collapse, so a later consistent duplicate cannot
+                        // hide an earlier defective record. The record stays
+                        // in `probes` (stored whole), but is never scored.
+                        if let Some(why) = p.record_defect() {
+                            report.invalid.push(InvalidRecord {
+                                probe: Some(p.probe.clone()),
+                                reason: why,
+                                line: position,
+                                not_json: false,
+                            });
+                        }
                         report.probes.push(p);
                     }
                     Err(e) => {
@@ -588,6 +675,14 @@ pub fn parse(stdout: &[u8]) -> HarnessReport {
     }
 
     report
+}
+
+/// The legacy trailing summary record the harness once emitted: `summary:
+/// true`, no `probe` key, and no `kind` or one other than `disposition`.
+fn is_legacy_summary(value: &serde_json::Value) -> bool {
+    value.get("summary").and_then(serde_json::Value::as_bool) == Some(true)
+        && value.get("probe").is_none()
+        && value.get("kind").and_then(serde_json::Value::as_str) != Some("disposition")
 }
 
 /// At most this many characters of a non-JSON line are quoted in its
@@ -1200,6 +1295,47 @@ mod tests {
         assert_eq!(r.last_line, Some(5));
         assert!(r.unterminated);
         assert!(r.invalid.is_empty());
+    }
+
+    #[test]
+    fn only_a_real_legacy_summary_is_skipped() {
+        let r = parse(
+            b"{\"kind\":\"disposition\",\"probe\":\"a\",\"outcome\":\"no_tv_data\",\"disposition\":\"accepted\",\"summary\":true}\n\
+{\"probe\":\"b\",\"outcome\":\"no_tv_data\",\"summary\":true}\n\
+{\"summary\":true,\"total\":2}\n\
+{\"kind\":\"disposition\",\"summary\":true}\n",
+        );
+        // a (flagged, contradictory) and b (flagged, no kind) are dispositions.
+        let ids: Vec<&str> = r.probes.iter().map(|p| p.probe.as_str()).collect();
+        assert_eq!(ids, vec!["a", "b"]);
+        // a's contradiction is listed; the kind:disposition line with no probe
+        // is not a summary either - it is an unparsable disposition.
+        assert_eq!(r.invalid.len(), 2, "{:?}", r.invalid);
+        assert_eq!(r.invalid[0].probe.as_deref(), Some("a"));
+        assert!(r.invalid[1].reason.starts_with("unparsable disposition line"));
+    }
+
+    #[test]
+    fn run_start_is_recognised_with_its_physical_line() {
+        let r = parse(b"\n{\"kind\":\"run_start\",\"version\":1}\n");
+        assert_eq!(r.contract.len(), 1);
+        assert_eq!((r.contract[0].kind.as_str(), r.contract[0].line, r.contract[0].physical), ("run_start", 1, 2));
+    }
+
+    #[test]
+    fn a_missing_disposition_field_is_told_apart_from_a_null_one() {
+        let r = parse(
+            b"{\"probe\":\"a\",\"outcome\":\"no_overlap\"}\n{\"probe\":\"b\",\"outcome\":\"no_overlap\",\"disposition\":null}\n",
+        );
+        assert_eq!(r.probes[0].declared, None);
+        assert_eq!(r.probes[0].valid_disposition(), Some("no_overlap"));
+        assert_eq!(r.probes[1].declared, Some(serde_json::Value::Null));
+        assert_eq!(r.probes[1].valid_disposition(), None);
+        // The defective record is kept whole (stored) and listed invalid.
+        assert_eq!(r.probes.len(), 2);
+        assert!(r.probes[1].raw.contains("\"disposition\":null"));
+        assert_eq!(r.invalid.len(), 1);
+        assert_eq!(r.invalid[0].probe.as_deref(), Some("b"));
     }
 
     #[test]

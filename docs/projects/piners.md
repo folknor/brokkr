@@ -88,8 +88,10 @@ Emits **one NDJSON object per probe, no summary line** (brokkr aggregates):
   tail. A break (exit 1), never retried, gated and blessed like
   `runtime_fail`. brokkr derives the gate label itself (the tier for
   `parity`, else the outcome) and accepts an outcome/tier pair only as a
-  whole (`report::valid_label`); the line's own `disposition` field is not
-  trusted.
+  whole (`report::valid_label`). The line's own `disposition` field is
+  cross-checked, not trusted: when present it must equal that derived label
+  as a string, or the record is invalid (never scored, still stored); a
+  missing key is tolerated, a null is not (`report::record_label`).
 - `count_tier` (`exact|near|drift`) + `acceptance` (tier `byte_exact|accepted|
   actionable_drift|count_divergent`, profile `strict|production`, optional
   `p90{entry,exit,pnl}`): parity only.
@@ -139,6 +141,10 @@ setup, single-threaded) and one forked process per probe, so one dying probe
 costs only its own disposition (`harness_abort`). Beside the dispositions it
 emits contract lines, each with `version` 1:
 
+- `{"kind":"run_start","version":1}`, printed by the monitor as the very
+  first stdout line (physical line 1). Required, exactly once, in any stream
+  carrying contract lines - a tightening of version 1: a contract stream
+  without it is rejected.
 - `{"kind":"setup_stage","version":1,"stage":S,"feed"?:F,"path"?:P}` before
   each shared setup step; `{"kind":"setup_complete","version":1}` when probes
   are about to run.

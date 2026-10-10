@@ -350,7 +350,7 @@ mod tests {
 
     #[test]
     fn a_backstop_kill_after_a_run_error_is_not_a_contract_violation() {
-        let nd = "{\"kind\":\"run_error\",\"version\":1,\"stage\":\"x\",\"error\":\"y\"}\n";
+        let nd = "{\"kind\":\"run_start\",\"version\":1}\n{\"kind\":\"run_error\",\"version\":1,\"stage\":\"x\",\"error\":\"y\"}\n";
         let a = integrity::assess(&ids(), nd.as_bytes(), HarnessEnd::Backstop, false);
         assert!(a.contract.violations.is_empty(), "{:?}", a.contract.violations);
         // The same SIGKILL read as spontaneous would be one.

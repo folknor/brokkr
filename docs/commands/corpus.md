@@ -423,16 +423,31 @@ separate categories:
   Parseable JSON is not enough, nor is a derived label that merely looks
   pinnable: a `parity` line with no tier, `{"outcome":"accepted"}` (a tier
   posing as an outcome) and `parity` with tier `runtime_fail` are all
-  invalid. This one validator (`report::valid_label`) is shared by the gate
-  (an invalid line never satisfies its pin, nor explains exit 1), bless, and
-  the runtime ceiling's reading of stored rows;
+  invalid. The record must also agree with itself: when the harness's own
+  `disposition` field is **present** it must be exactly the derived label, as
+  a string - a different label, a null, a number, an object or an empty
+  string makes the record invalid, and the message prints both values. Only
+  a **missing** key is tolerated (a harness predating the field). Every
+  occurrence is checked before repeats collapse, so a later clean repeat
+  cannot hide an earlier contradiction: the probe stays unscored, never
+  satisfies its pin (the gate shows `invalid (an occurrence was invalid;
+  ...)`), explains no exit-1 break, and is stored with `gate_ok = 0`, so
+  `corpus-results` lists it as a deviation.
+  The record is still stored whole. This one record-level validator
+  (`report::record_label`, over the outcome/tier primitive
+  `report::valid_label`) is shared by the gate (an invalid record never
+  satisfies its pin, nor explains exit 1), bless, and the runtime ceiling,
+  which re-validates each stored row's `raw_json` so a contradictory record
+  stored before the check is no timing evidence either;
 - **missing** - selected ids with no record at all;
 - **invalid** - a line for a selected id whose disposition is not a gate
   label, a disposition line that does not deserialize, or a stdout line that
   is not JSON;
 - **duplicate** - repeated records (above);
 - **report-only extras** - disposition lines for ids that were not selected.
-  Never scored, whatever they say.
+  Never scored, whatever they say. An invalid record naming an unselected id
+  counts as both invalid and an extra, whether it failed to parse or failed
+  the cross-check.
 
 The summary line leads with the reconciliation - `summary: N selected, M
 scored, K missing` plus the invalid/duplicate/extra counts when nonzero - and
@@ -482,15 +497,29 @@ policy: an ordinary run and bless (the failure reasons above), a measured
 iteration, an isolation attempt, and the stored ceiling evidence.
 
 - **Recognition before version.** A line whose `kind` is one of
-  `setup_stage`, `setup_complete`, `probe_start`, `probe_end`, `run_end`,
-  `run_error` is a contract line whatever else it says (a `summary: true`
-  flag included - the legacy-summary skip applies only after this); a missing, malformed
+  `run_start`, `setup_stage`, `setup_complete`, `probe_start`, `probe_end`,
+  `run_end`, `run_error` is a contract line whatever else it says (a `summary: true`
+  flag included). The legacy-summary skip applies only after this, and only
+  to an actual legacy summary record: `summary: true`, no `probe` key, and no
+  `kind` or a kind other than `disposition`. A disposition record carrying a
+  `summary` flag is still a disposition record; a missing, malformed
   or unsupported `version` (anything but integer 1) is a violation, even if
   no valid contract line appeared. Unknown kinds are still skipped.
 - **No contract observed.** With no contract line at all the output says
   `no contract observed` and the run is judged by exit status and selection
   coverage alone, as before the contract existed. Once any contract line is
   seen, the rules below apply.
+- **`run_start`.** Whenever any contract line appears, exactly one
+  `run_start` is required and it must be **physical line 1** of stdout -
+  before any disposition, summary, unknown kind or invalid line, and a
+  leading blank line breaks it too. `run_start` occurrences are counted before
+  version validation: a bad-version start is present (it gets its version
+  defect, never `no run_start`), and a second start beside it is a
+  duplicate. A stream holding `run_start` alone is contract-bearing; ended by
+  a signal or by brokkr with no terminal record it is aborted/incomplete,
+  while a natural exit with no terminal record is the usual violation. This
+  tightens contract version 1: a contract stream without `run_start` is now
+  rejected. A stream of dispositions only is still "no contract observed".
 - **`run_error`** fails the run unconditionally - gated, `--no-gate` and
   bless alike - and leads the `fail_reason` as its readable projection:
   `run_error at stage <stage> (feed F, role R, path P, field X): <error>`,

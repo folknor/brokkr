@@ -223,10 +223,11 @@ pub fn abnormal_reason(end: HarnessEnd, rec: &Reconciliation) -> String {
 pub struct Reconciliation {
     /// How many probes were selected (handed to the harness).
     pub selected: usize,
-    /// Selected ids with a valid disposition: the selected identity plus an
-    /// outcome and tier that together form a gate label
-    /// (`report::valid_label`, the one validator the gate, bless and the
-    /// ceiling share). Only these are scored.
+    /// Selected ids with a valid disposition: the selected identity plus a
+    /// record that passes `report::record_label` (outcome and tier form a
+    /// gate label, and the harness's own `disposition` field, if present,
+    /// agrees) - the one validator the gate, bless and the ceiling share.
+    /// Only these are scored.
     pub valid: BTreeSet<String>,
     /// Selected ids the report carries no record for at all, in selection
     /// order.
@@ -258,14 +259,11 @@ impl Reconciliation {
                 continue;
             }
             seen.insert(p.probe.as_str());
+            // A defective record was already put in `report.invalid` by the
+            // parser, for every occurrence before repeats collapsed; it is
+            // counted there, below, and never scored here.
             if p.valid_disposition().is_some() {
                 valid.insert(p.probe.clone());
-            } else {
-                let tier = p.acceptance.as_ref().map_or("", |a| a.tier.as_str());
-                invalid.push(format!(
-                    "{} (outcome '{}' with tier '{tier}' is not a valid disposition)",
-                    p.probe, p.outcome
-                ));
             }
         }
         for rec in &report.invalid {
@@ -273,7 +271,15 @@ impl Reconciliation {
                 Some(id) => {
                     if selected.contains(id.as_str()) {
                         seen.insert(id.as_str());
+                    } else {
+                        // Every invalid record naming an unselected probe is
+                        // also an extra, parseable or not, so the counts do
+                        // not depend on which way the record was broken.
+                        extras.insert(id.clone());
                     }
+                    // A defective occurrence unscores the probe even when a
+                    // later repeat of it is clean.
+                    valid.remove(id);
                     invalid.push(format!("{id} ({})", rec.reason));
                 }
                 None => invalid.push(rec.reason.clone()),
@@ -668,7 +674,7 @@ not json at all
     const V1: &str = "\"version\":1";
 
     fn clean_stream(probes: &[&str], outcome: &str, code: i32) -> String {
-        let mut s = format!("{{\"kind\":\"setup_complete\",{V1}}}\n");
+        let mut s = format!("{{\"kind\":\"run_start\",{V1}}}\n{{\"kind\":\"setup_complete\",{V1}}}\n");
         for p in probes {
             s.push_str(&format!("{{\"kind\":\"probe_start\",{V1},\"probe\":\"{p}\"}}\n"));
             s.push_str(&format!("{{\"probe\":\"{p}\",\"outcome\":\"{outcome}\"}}\n"));
@@ -695,7 +701,8 @@ not json at all
     #[test]
     fn a_run_error_fails_first_and_names_the_unfinished_work() {
         let nd = format!(
-            "{{\"kind\":\"setup_stage\",{V1},\"stage\":\"feed_load\",\"feed\":\"eth\"}}\n\
+            "{{\"kind\":\"run_start\",{V1}}}\n\
+             {{\"kind\":\"setup_stage\",{V1},\"stage\":\"feed_load\",\"feed\":\"eth\"}}\n\
              {{\"kind\":\"run_error\",{V1},\"stage\":\"feed_load\",\"feed\":\"eth\",\"error\":\"oom\"}}\n"
         );
         let a = assess(&ids(&["a", "b"]), nd.as_bytes(), HarnessEnd::Code(2), false);
@@ -710,7 +717,7 @@ not json at all
 
     #[test]
     fn a_fragment_cut_by_a_signal_is_context_not_a_violation() {
-        let nd = format!("{{\"kind\":\"setup_complete\",{V1}}}\n{{\"kind\":\"probe_start\",{V1},\"probe\":\"a\"}}\n{{\"probe\":\"a\",\"outc");
+        let nd = format!("{{\"kind\":\"run_start\",{V1}}}\n{{\"kind\":\"setup_complete\",{V1}}}\n{{\"kind\":\"probe_start\",{V1},\"probe\":\"a\"}}\n{{\"probe\":\"a\",\"outc");
         let a = assess(&ids(&["a"]), nd.as_bytes(), HarnessEnd::Signal(9), false);
         assert_eq!(a.violations(), 0, "{:?} {:?}", a.rec.invalid, a.contract.violations);
         let ctx = a.context_lines();
@@ -724,6 +731,66 @@ not json at all
         let a = assess(&ids(&["a"]), b"{\"probe\":\"a\"}", HarnessEnd::Code(2), false);
         assert_eq!(a.rec.invalid.len(), 1, "{:?}", a.truncated_tail);
         assert!(a.truncated_tail.is_none());
+    }
+
+    #[test]
+    fn the_harness_disposition_field_must_agree_when_present() {
+        let sel = ids(&["a"]);
+        let base = "\"probe\":\"a\",\"outcome\":\"parity\",\"acceptance\":{\"tier\":\"accepted\"}";
+        // Missing: tolerated. Agreeing: scored.
+        for extra in ["", ",\"disposition\":\"accepted\""] {
+            let nd = format!("{{{base}{extra}}}\n");
+            let a = assess(&sel, nd.as_bytes(), HarnessEnd::Code(0), false);
+            assert!(a.completed(), "{extra}: {:?}", a.rec.invalid);
+        }
+        // Contradicting, null, number, object, empty string: invalid, unscored.
+        for (extra, shown) in [
+            (",\"disposition\":\"byte_exact\"", "\"byte_exact\""),
+            (",\"disposition\":null", "null"),
+            (",\"disposition\":3", "3"),
+            (",\"disposition\":{}", "{}"),
+            (",\"disposition\":\"\"", "\"\""),
+        ] {
+            let nd = format!("{{{base}{extra}}}\n");
+            let a = assess(&sel, nd.as_bytes(), HarnessEnd::Code(0), false);
+            assert!(a.rec.valid.is_empty(), "{extra}");
+            assert_eq!(a.rec.invalid.len(), 1, "{extra}");
+            assert!(
+                a.rec.invalid[0].contains(&format!("its disposition field {shown} contradicts the derived label \"accepted\"")),
+                "{extra}: {:?}",
+                a.rec.invalid
+            );
+            assert!(a.report.probes[0].valid_disposition().is_none());
+        }
+        // An invalid outcome/tier stays invalid even when the field agrees
+        // with the derived fallback.
+        let nd = "{\"probe\":\"a\",\"outcome\":\"parity\",\"disposition\":\"parity\"}\n";
+        assert!(assess(&sel, nd.as_bytes(), HarnessEnd::Code(0), false).rec.valid.is_empty());
+    }
+
+    #[test]
+    fn an_earlier_contradiction_is_not_hidden_by_a_later_clean_repeat() {
+        let sel = ids(&["a"]);
+        let nd = "{\"probe\":\"a\",\"outcome\":\"no_tv_data\",\"disposition\":\"accepted\"}\n\
+                  {\"probe\":\"a\",\"outcome\":\"no_tv_data\",\"disposition\":\"no_tv_data\"}\n";
+        let a = assess(&sel, nd.as_bytes(), HarnessEnd::Code(0), false);
+        assert_eq!(a.rec.invalid.len(), 1, "{:?}", a.rec.invalid);
+        assert_eq!(a.rec.duplicates.len(), 1);
+        assert!(a.rec.valid.is_empty(), "the probe must not be scored");
+        assert!(!a.completed());
+    }
+
+    #[test]
+    fn an_invalid_record_for_an_unselected_probe_is_an_extra_either_way() {
+        let sel = ids(&["a"]);
+        let a_ok = "{\"probe\":\"a\",\"outcome\":\"no_tv_data\"}\n";
+        // Unparsable, and parseable but contradictory: both invalid plus extra.
+        for bad in ["{\"probe\":\"zz\"}\n", "{\"probe\":\"zz\",\"outcome\":\"no_tv_data\",\"disposition\":\"x\"}\n"] {
+            let nd = format!("{a_ok}{bad}");
+            let a = assess(&sel, nd.as_bytes(), HarnessEnd::Code(0), false);
+            assert_eq!(a.rec.invalid.len(), 1, "{bad}");
+            assert_eq!(a.rec.extras, ids(&["zz"]), "{bad}");
+        }
     }
 
     #[test]

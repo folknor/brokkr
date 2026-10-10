@@ -724,7 +724,8 @@ impl CorpusDb {
         // shared validator (`report::valid_label`), and agree with the label
         // stored beside them.
         let mut stmt = self.conn().prepare(
-            "SELECT probe, disposition, outcome, acc_tier FROM disposition WHERE run_id = ?1",
+            "SELECT probe, disposition, outcome, acc_tier, raw_json FROM disposition \
+             WHERE run_id = ?1",
         )?;
         let rows = stmt.query_map([run_id], |r| {
             Ok((
@@ -732,20 +733,29 @@ impl CorpusDb {
                 r.get::<_, String>(1)?,
                 r.get::<_, Option<String>>(2)?,
                 r.get::<_, Option<String>>(3)?,
+                r.get::<_, String>(4)?,
             ))
         })?;
         let mut valid: std::collections::HashSet<String> = std::collections::HashSet::new();
         for row in rows {
-            let (probe, disposition, outcome, tier) = row?;
+            let (probe, disposition, outcome, tier, raw_json) = row?;
+            // The stored record is re-validated with the record-level
+            // validator: a harness `disposition` field that contradicts the
+            // derived label makes the record no evidence, even on a row
+            // stored before brokkr checked it. A missing field is fine (and
+            // a row rebuilt by the v5 migration has none).
+            let declared = serde_json::from_str::<serde_json::Value>(&raw_json)
+                .ok()
+                .and_then(|v| v.get("disposition").cloned());
             // A valid gate disposition is not necessarily a usable timing
             // sample: a run in which a probe process died ran a different
             // workload than one in which it finished.
             if disposition == crate::piners::report::HARNESS_ABORT {
                 return Ok(false);
             }
-            let label = outcome
-                .as_deref()
-                .and_then(|o| crate::piners::report::valid_label(o, tier.as_deref()));
+            let label = outcome.as_deref().and_then(|o| {
+                crate::piners::report::record_label(o, tier.as_deref(), declared.as_ref()).ok()
+            });
             if label == Some(disposition.as_str()) {
                 valid.insert(probe);
             }
@@ -928,6 +938,14 @@ mod tests {
         let mut posing = lines(&["a"]);
         posing.extend_from_slice(b"{\"probe\":\"b\",\"outcome\":\"accepted\"}\n");
         record_full(&db, r#"{"ids":["a","b"]}"#, Some(1_150.0), "fail", &posing);
+        // A record whose own disposition field contradicts its outcome/tier,
+        // stored with a clean count (as a row predating the check would be):
+        // re-validated from raw_json, it is no evidence.
+        let mut contradicted = lines(&["a"]);
+        contradicted.extend_from_slice(
+            b"{\"probe\":\"b\",\"outcome\":\"parity\",\"acceptance\":{\"tier\":\"accepted\"},\"disposition\":\"byte_exact\"}\n",
+        );
+        record_full(&db, r#"{"ids":["a","b"]}"#, Some(1_175.0), "pass", &contradicted);
         // Complete, but it broke protocol (an extra line, say).
         record_protocol(
             &db,

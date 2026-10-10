@@ -230,6 +230,13 @@ mod tests {
         );
         let err = apply(&pins_path, &mut reg, &rep, &["a".to_owned(), "b".to_owned()]).unwrap_err();
         assert!(err.to_string().contains("unstampable disposition for a (accepted)"), "{err}");
+        // A record whose own disposition field contradicts it is unstampable too.
+        let rep = report(
+            "{\"probe\":\"a\",\"outcome\":\"no_tv_data\",\"disposition\":\"no_overlap\"}\n{\"probe\":\"b\",\"outcome\":\"no_tv_data\"}",
+        );
+        let err = apply(&pins_path, &mut reg, &rep, &["a".to_owned(), "b".to_owned()]).unwrap_err();
+        assert!(err.to_string().contains("unstampable disposition for a (no_tv_data)"), "{err}");
+        assert_eq!(reg.pins["a"].expected, None);
         assert_eq!(reg.pins["a"].expected, None);
         assert_eq!(std::fs::read_to_string(&pins_path).unwrap(), LOADED);
     }
