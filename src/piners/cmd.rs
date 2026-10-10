@@ -405,8 +405,8 @@ pub fn corpus(
     // refusing a changed pins.toml, a finalize error) is the command's error,
     // not a second row under this id.
     if let Err(e) = ingest_run(&corpus_db_path, &record, &report, &expected, &gate_diffs) {
-        output::corpus_msg(&format!(
-            "warning: failed to persist run to {}: {e}",
+        output::warn(&format!(
+            "failed to persist run to {}: {e}",
             corpus_db_path.display()
         ));
         artefacts.finalize_failure();
@@ -624,8 +624,8 @@ fn record_unfinished(
     // Never ran -> no measured wall, no exit code.
     let record = envelope.record(result, Some(&reason), None, stderr, None);
     if let Err(e) = ingest_run(db_path, &record, &report::HarnessReport::default(), &BTreeMap::new(), &[]) {
-        output::corpus_msg(&format!(
-            "warning: run {} could not be recorded in {}: {e}",
+        output::warn(&format!(
+            "run {} could not be recorded in {}: {e}",
             envelope.run_id,
             db_path.display()
         ));

@@ -202,7 +202,8 @@ impl Worktree {
                     checkout.display()
                 )));
             }
-            output::run_msg(&format!("reusing worktree for {short} ({subject})"));
+            // The caller names the commit once; reuse vs cut is log narration.
+            output::detail(&format!("reusing worktree for {short} ({subject})"));
             // Idempotent: repairs a slot whose furnishing was interrupted.
             furnish(git_root, &slot, &checkout)?;
             return Ok(Self {
@@ -239,10 +240,9 @@ impl Worktree {
             remove_one(git_root, &slot)?;
         }
 
-        output::run_msg(&format!("creating worktree for {short} ({subject})"));
-        output::run_msg(
-            "  worktree is persistent - run `brokkr clean --worktrees` to remove",
-        );
+        output::detail(&format!(
+            "creating worktree for {short} ({subject}); it is persistent, `brokkr clean --worktrees` removes it"
+        ));
 
         std::fs::create_dir_all(&slot)?;
         let checkout_str = checkout.display().to_string();

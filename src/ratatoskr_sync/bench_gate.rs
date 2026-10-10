@@ -548,7 +548,7 @@ fn bench_loop(
             if phase_guard.requested() {
                 return Err(DevError::Interrupted);
             }
-            output::bench_msg(&format!("run {}/{}", i + 1, req.bench));
+            crate::harness::announce_run(i, req.bench);
             harness.lock().set_progress(
                 u32::try_from(i + 1).unwrap_or(u32::MAX),
                 u32::try_from(req.bench).unwrap_or(u32::MAX),

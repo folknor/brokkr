@@ -109,7 +109,7 @@ fn do_install(config_path: &std::path::Path) -> Result<(), DevError> {
     let mut doc = load_doc(config_path)?;
     if let Some(existing) = configured_wrapper(&doc) {
         if existing == guard.display().to_string() {
-            output::lock_msg("guard already installed");
+            // `status` reports "guard installed: ..." - one line, not two.
             status(config_path)?;
             return Ok(());
         }
@@ -236,7 +236,7 @@ pub fn warn_if_guard_stale() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
         if let Some(warning) = stale_warning() {
-            output::lock_msg(&format!("WARNING: {warning}"));
+            output::warn(&warning);
         }
     });
 }
@@ -248,17 +248,17 @@ fn status(config_path: &std::path::Path) -> Result<(), DevError> {
             let exists = PathBuf::from(&w).exists();
             output::lock_msg(&format!("guard installed: build.{WRAPPER_KEY} = \"{w}\" in {}", config_path.display()));
             if !exists {
-                output::lock_msg("WARNING: the configured guard binary does not exist - cargo will fail until `brokkr install` restores it or `brokkr guard --remove` unsets it");
+                output::warn("the configured guard binary does not exist - cargo will fail until `brokkr install` restores it or `brokkr guard --remove` unsets it");
             } else {
                 match probe_guard(&w) {
                     GuardProbe::Current => {
                         output::lock_msg(&format!("guard protocol {GUARD_PROTOCOL}: current"));
                     }
-                    GuardProbe::Mismatch(proto) => output::lock_msg(&format!(
-                        "WARNING: guard speaks protocol {proto}, this brokkr expects {GUARD_PROTOCOL} - run `brokkr install` in the brokkr repo"
+                    GuardProbe::Mismatch(proto) => output::warn(&format!(
+                        "guard speaks protocol {proto}, this brokkr expects {GUARD_PROTOCOL} - run `brokkr install` in the brokkr repo"
                     )),
-                    GuardProbe::Stale(why) => output::lock_msg(&format!(
-                        "WARNING: guard {why} - run `brokkr install` in the brokkr repo"
+                    GuardProbe::Stale(why) => output::warn(&format!(
+                        "guard {why} - run `brokkr install` in the brokkr repo"
                     )),
                 }
             }

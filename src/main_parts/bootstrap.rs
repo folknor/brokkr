@@ -147,7 +147,7 @@ fn main() {
         Ok(()) => {}
         Err(DevError::ExitCode(code)) => process::exit(code),
         Err(DevError::Interrupted) => {
-            output::lock_msg("interrupted - running scratch cleanup");
+            output::run_msg("interrupted - running scratch cleanup");
             crate::shutdown::admit_exit_cleanup();
             // Best-effort cleanup; if project detection fails here, the
             // user already has `brokkr clean` as a follow-up.
@@ -157,7 +157,7 @@ fn main() {
                     d.project,
                     &d.project_root,
                     &d.build_root,
-                    CleanOpts::routine(),
+                    CleanOpts::after_interrupt(),
                 )
             {
                 output::error(&format!("cleanup failed: {e}"));
@@ -1291,6 +1291,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             let _lock = acquire_cmd_lock(project, &project_root, "clean")?;
             // `--all` folds in the worktrees, archives, and cargo sweeps.
             let cargo = if all { Some(cargo.unwrap_or(None)) } else { cargo };
+            let cargo_swept = cargo.is_some();
             if let Some(pkg) = cargo {
                 let pkg = pkg.unwrap_or_else(|| project.name().to_owned());
                 if dry_run {
@@ -1305,10 +1306,12 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 &project_root,
                 &build_root,
                 CleanOpts {
+                    cargo_swept,
                     worktrees: worktrees || all,
                     archives: archives || all,
                     keep,
                     dry_run,
+                    interrupted: false,
                 },
             )
         }

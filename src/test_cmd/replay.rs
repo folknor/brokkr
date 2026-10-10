@@ -83,7 +83,7 @@ pub(super) fn from_run(
 
     if list {
         match check_cmd::build_continuation(&src.plan, &recon, &src.records) {
-            Some(report) => output::run_msg(&check_cmd::render_continuation(&report).join("\n")),
+            Some(report) => output::run_msg(&check_cmd::render_continuation_full(&report).join("\n")),
             None => output::run_msg(&format!("run {run_id}: nothing is unresolved - no execution is interrupted or unobserved")),
         }
         return Ok(());

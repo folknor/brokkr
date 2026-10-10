@@ -63,12 +63,18 @@ fn render_single_or_multi(
         {
             println!("\n{report}");
         }
-        if has_sidecar(&row.uuid) {
-            output::sidecar_msg(&format!(
-                "use `brokkr sidecar {}` (add --samples/--markers/--durations/--counters for raw views)",
-                &row.uuid[..8.min(row.uuid.len())],
-            ));
-        }
+    }
+    // One hint for the whole set, naming the rows it applies to.
+    let with_sidecar: Vec<&str> = rows
+        .iter()
+        .filter(|r| has_sidecar(&r.uuid))
+        .map(|r| &r.uuid[..8.min(r.uuid.len())])
+        .collect();
+    if !with_sidecar.is_empty() {
+        output::sidecar_msg(&format!(
+            "sidecar data for {}: use `brokkr sidecar <id>` (add --samples/--markers/--durations/--counters for raw views)",
+            with_sidecar.join(", "),
+        ));
     }
 }
 

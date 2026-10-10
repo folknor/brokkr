@@ -416,7 +416,7 @@ pub fn parse(stdout: &[u8]) -> HarnessReport {
         let value = match serde_json::from_str::<serde_json::Value>(trimmed) {
             Ok(v) => v,
             Err(e) => {
-                output::corpus_msg(&format!("warning: unparsable NDJSON line: {e}"));
+                output::warn(&format!("corpus: unparsable NDJSON line: {e}"));
                 continue;
             }
         };
@@ -450,14 +450,14 @@ pub fn parse(stdout: &[u8]) -> HarnessReport {
                         report.probes.push(p);
                     }
                     Err(e) => {
-                        output::corpus_msg(&format!("warning: unparsable probe line{at}: {e}"));
+                        output::warn(&format!("corpus: unparsable probe line{at}: {e}"));
                     }
                 }
             }
             Some("trade_diff") => match serde_json::from_value::<TradeDiffLine>(value) {
                 Ok(t) => report.trade_diffs.push(t),
                 Err(e) => {
-                    output::corpus_msg(&format!("warning: unparsable trade_diff line{at}: {e}"));
+                    output::warn(&format!("corpus: unparsable trade_diff line{at}: {e}"));
                 }
             },
             Some(_) => continue,

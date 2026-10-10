@@ -111,6 +111,13 @@ cargo clippy --keep-going --all-targets --message-format=json <sel> <feat> -- --
 
 (`--lib` replaces `--all-targets` in that line when passed.)
 
+The command is printed exactly once, after the run (including spawn failures,
+interrupts and deadlines): a green run prints the line
+above (this is the investigative runner, so the line is the point), a failing
+run prints the shape and `failing command:` pair beside its diagnostics and does
+not stream the same line beforehand. The ad-hoc sweep is labelled `clippy`, so
+the shape line reads `clippy: <shape>`.
+
 `--cap-lints=warn` lets a deny-level lint produce its `.rmeta` so the whole graph
 is checked in one pass; because a capped lint no longer makes cargo exit
 non-zero, **pass/fail is brokkr's decision: any diagnostic is a failure** and is
@@ -118,7 +125,8 @@ reported as an error, except a warning from a dependency outside the workspace.
 
 A `[lints] allow` list in `brokkr.toml` applies here exactly as in `check`'s
 clippy phase: each entry is appended as `-A <lint>` after `--cap-lints=warn`,
-and the run announces the allowed lints up front. `[lints] allow_exact`
+and the printed command shows them (no separate announcement line on stdout).
+`[lints] allow_exact`
 (`"lint@path"` sited suppressions, filtered on brokkr's side at JSON
 ingestion rather than via `-A`) applies here too. See
 `docs/commands/check.md`. Its `suppressed nothing (stale entry?)` notice fires

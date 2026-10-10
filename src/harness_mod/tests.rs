@@ -20,6 +20,25 @@ mod tests {
     use super::*;
 
     // -----------------------------------------------------------------------
+    // run progress and sidecar summary lines
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn run_progress_line_is_silent_for_a_single_run() {
+        assert_eq!(run_progress_line(0, 1), None);
+        assert_eq!(run_progress_line(0, 3).as_deref(), Some("run 1/3"));
+        assert_eq!(run_progress_line(2, 3).as_deref(), Some("run 3/3"));
+    }
+
+    #[test]
+    fn sidecar_summary_line_names_only_a_dirty_id() {
+        let line = sidecar_summary_line("a1b2c3d4", false, &[], 0);
+        assert_eq!(line, "(sidecar.db)");
+        let dirty = sidecar_summary_line("a1b2c3d4", true, &[], 0);
+        assert_eq!(dirty, "(sidecar.db a1b2c3d4, filed as dirty)");
+    }
+
+    // -----------------------------------------------------------------------
     // run_variants
     // -----------------------------------------------------------------------
 

@@ -120,14 +120,60 @@ fn append_kv_fields(parts: &mut Vec<String>, kv: &[KvPair]) {
     }
 }
 
-/// Extract an exit code from a process `ExitStatus`.
-///
-/// Returns the exit code if the process exited normally, or `128 + signal`
-/// if it was killed by a signal (matching shell convention: 137 = OOM kill).
 fn clamp_u32(n: usize) -> u32 {
     u32::try_from(n).unwrap_or(u32::MAX)
 }
 
+/// The line a harness loop prints before iteration `i` (zero-based) of `runs`.
+/// Silent for a single run: "run 1/1" says nothing.
+fn run_progress_line(i: usize, runs: usize) -> Option<String> {
+    (runs > 1).then(|| format!("run {}/{}", i + 1, runs))
+}
+
+/// The single `[sidecar]` line a stored profile prints: the best run's
+/// sample, marker and counter counts (with the run number when there were
+/// several). `dirty` marks a trajectory filed under the `dirty` alias because
+/// no results row exists for it; only then is the id named here, since
+/// otherwise it is the results row's id, already printed.
+fn sidecar_summary_line(
+    short: &str,
+    dirty: bool,
+    runs: &[crate::sidecar::SidecarData],
+    best_run_idx: usize,
+) -> String {
+    let which = if runs.len() > 1 {
+        format!("best run {}/{}: ", best_run_idx + 1, runs.len())
+    } else {
+        String::new()
+    };
+    let counts = runs.get(best_run_idx).map_or_else(String::new, |d| {
+        format!(
+            "{which}{} samples, {} markers, {} counters ",
+            d.samples.len(),
+            d.markers.len(),
+            d.counters.len()
+        )
+    });
+    // A profile with a results row shares its id, which the `results.db` line
+    // already printed; only a `dirty`-filed one needs its own.
+    if dirty {
+        format!("{counts}(sidecar.db {short}, filed as dirty)")
+    } else {
+        format!("{counts}(sidecar.db)")
+    }
+}
+
+/// Print [`run_progress_line`] as bench narration, if there is one.
+pub(crate) fn announce_run(i: usize, runs: usize) {
+    if let Some(line) = run_progress_line(i, runs) {
+        output::bench_msg(&line);
+    }
+}
+
+/// Extract an exit code from a process `ExitStatus`.
+///
+/// Returns the exit code if the process exited normally, or `128 + signal`
+/// if it was killed by a signal (matching shell convention: 137 = OOM kill).
 fn exit_code_from_status(status: &std::process::ExitStatus) -> i32 {
     if let Some(code) = status.code() {
         return code;

@@ -93,6 +93,45 @@ costs the row, not the measurement.
 
 Results in `.brokkr/results.db` per project (gitignored).
 
+## What a measured run prints
+
+One fact, one place. A run with a clean tree prints, in order:
+
+- `[bench] run i/n` before each iteration, **only when n > 1** (a single run
+  has nothing to count). Quiet-gated.
+- the `[result]` line, the one place the wall time appears (quiet-gated, except
+  when the row could not be stored).
+- `[run] results.db a1b2c3d4`, the stored row's short id - the one line
+  naming it, and not hidden by quiet mode, since it is how the run is found
+  again (`brokkr results a1b2c3d4`, `brokkr sidecar a1b2c3d4`).
+- one `[sidecar]` summary line on stderr (quiet-gated) once the profile is
+  stored: the best run's sample, marker and counter counts, with
+  `best run k/n:` when there were several (`(sidecar.db)`). The profile shares
+  the results row's id, so the line does not repeat it. A trajectory with no
+  results row is filed under the `dirty` alias, and only then does the line
+  name its own id (`sidecar.db a1b2c3d4, filed as dirty`).
+
+Sent to the run-log channel (`detail`) instead of the console: the per-run
+sidecar attach (`sidecar attached to pid P, run k`, one-indexed like `run i/n`)
+and per-run counts with the child's wall time. This channel discards messages
+when no run log is open; ordinary measured commands do not open one.
+
+With `--commit REF`, the worktree's commit is named once
+(`[run] commit abc1234 (subject)`, quiet-gated), by the shared worktree
+lifecycle in `context::with_worktree`, whichever command asked for it. Whether
+the worktree was reused or cut, and the isolated target dir the build is
+pinned to, use the same run-log channel. A stale-replacement or an eviction is
+printed.
+
+A non-fatal problem is a `[warn]` (never hidden by quiet mode), not an
+`[error]` and not a `[sidecar]`/`[lock]` narration line: a failed sidecar
+backup, a stale rustc guard, a lock-metadata write that degraded, a history
+write that failed (history and lock metadata warnings use stderr without
+the console render lock, so late bookkeeping leaves stdout trailers intact),
+a snapshot file that could not be removed after a download.
+An unrecognised `cargo_profile` in the results DB warns once per distinct
+value, not once per row.
+
 ## Per-iteration walls
 
 `--bench N` reports best-of-N, but stores every iteration's wall in the
@@ -309,7 +348,7 @@ switches to fixed-width tables. Rendering lives in `src/sidecar_fmt.rs`.
 ## Run lifecycle: sampling, stop, kill, OOM
 
 - **Sampling cadence** is a fixed 100ms (`SAMPLE_INTERVAL_US`), driven by
-  `clock_nanosleep(TIMER_ABSTIME, CLOCK_MONOTONIC)` so the ~30µs of /proc read
+  `clock_nanosleep(TIMER_ABSTIME, CLOCK_MONOTONIC)` so the ~30us of /proc read
   overhead per tick doesn't accumulate drift. Each tick reads
   `/proc/<pid>/{stat,io,status}`.
 - **`--stop <marker>`** SIGKILLs the whole child **process group**

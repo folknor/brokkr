@@ -542,8 +542,10 @@ fn run_install_feature_phase(
         output::run_msg("install-feature: skipped (-p rules the install set out)");
         return Ok(());
     }
+    // A `-p` narrowing is folded into the phase's one ok line below (it is
+    // named there as "N of M install packages"); the log keeps the names.
     if selected.len() < cfg.install.len() {
-        output::run_msg(&format!(
+        output::detail(&format!(
             "install-feature: -p narrows the install set to {}",
             selected.join(", ")
         ));
@@ -580,14 +582,29 @@ fn run_install_feature_phase(
     }
 
     let bins: usize = expected.iter().map(|(_, b)| b.len()).sum();
+    // The explanation never changes, so it is log-only; the counts are the
+    // run's own facts.
+    output::detail(
+        "install-feature: each install package is resolved on its own like `cargo install`; \
+         shared lockfile, no codegen",
+    );
     output::run_msg(&format!(
-        "install-feature: ok ({}, {}, resolved per package like `cargo install`; \
-         shared lockfile, no codegen) in {}",
-        output::count(expected.len(), "package"),
-        output::count(bins, "bin"),
+        "install-feature: ok ({}) in {}",
+        install_counts(expected.len(), cfg.install.len(), bins),
         fmt_wall(phase_elapsed())
     ));
     Ok(())
+}
+
+/// `1 package, 2 bins`, or `1 of 3 install packages, 2 bins` when a CLI `-p`
+/// narrowed the install set.
+fn install_counts(checked: usize, configured: usize, bins: usize) -> String {
+    let packages = if checked < configured {
+        format!("{checked} of {}", output::count(configured, "install package"))
+    } else {
+        output::count(checked, "package")
+    };
+    format!("{packages}, {}", output::count(bins, "bin"))
 }
 
 #[cfg(test)]
@@ -595,6 +612,12 @@ mod install_shape_tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
     use crate::config::InstallFeatureCheck as M;
+
+    #[test]
+    fn the_ok_line_counts_name_a_narrowed_install_set() {
+        assert_eq!(install_counts(1, 1, 2), "1 package, 2 bins");
+        assert_eq!(install_counts(1, 3, 1), "1 of 3 install packages, 1 bin");
+    }
 
     // Gate-only by default: package mode compiles duplicate dependency
     // variants, which belongs in the pre-landing run.

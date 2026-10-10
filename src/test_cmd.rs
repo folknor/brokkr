@@ -315,8 +315,8 @@ pub fn run_from_run(project_root: &Path, state_root: &Path, run_id: &str, list: 
     result
 }
 
-/// The whole run's shape, printed up front: a PASS in the first sweep is not
-/// the end of the command, and nothing else would say so.
+/// The whole run's shape, printed up front: the sweeps the run goes through, so
+/// a PASS in the first one is visibly not the end of the command.
 ///
 /// It is also the only place a scope-excluded sweep is named - those print no
 /// header and no SKIP line of their own - so it keeps the two reasons apart: a
@@ -347,7 +347,6 @@ fn sweep_plan_line(sweeps: &[ResolvedSweep], pkg: &str) -> String {
     if !out.is_empty() {
         line.push_str(&format!(" ({})", out.join("; ")));
     }
-    line.push_str(" - the run ends at its summary, not its first PASS");
     line
 }
 
@@ -1193,11 +1192,12 @@ fn plan_focused(
     check_cmd::refuse_configured_runner(project_root, env)?;
     let runtime = check_cmd::DirectRuntime::load(project_root, env, index)?;
     let split = focused::eligibility(binaries)?;
-    for b in &split.excluded {
+    if !split.excluded.is_empty() {
+        let labels: Vec<String> = split.excluded.iter().map(|b| b.label()).collect();
         println!(
             "[test]    not searched: {} - `harness = false` targets are excluded from a focused \
              run, which selects libtest test names",
-            b.label()
+            labels.join(", ")
         );
     }
     let mut listed: Vec<(&check_cmd::TestBinary, Vec<String>)> = Vec::new();
@@ -3823,7 +3823,7 @@ include_ignored = false
         assert_eq!(
             sweep_plan_line(&sweeps, "pkg"),
             "[test]    1 sweep for pkg: default (not this package: vm; excluded by \
-             test_exclude_packages: ffi) - the run ends at its summary, not its first PASS"
+             test_exclude_packages: ffi)"
         );
     }
 

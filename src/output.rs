@@ -22,7 +22,8 @@ pub fn is_quiet() -> bool {
 }
 
 // --- Prefixed output ---
-// All output goes to stdout (stderr reserved for panics only).
+// Prefixed output defaults to stdout; sidecar narration and warnings from
+// shutdown/bookkeeping paths use stderr.
 // Prefix column is 10 chars wide: "[tag]" + padding to align the message.
 //
 // Quiet mode split: `run_msg` and `download_msg` always print because they
@@ -290,8 +291,8 @@ pub fn history_msg(msg: &str) {
 pub fn sidecar_msg(msg: &str) {
     if !is_quiet() {
         // Always stderr - every [sidecar] line is narration (run provenance,
-        // "attached to pid X", "showing run N/M"), never the data the caller
-        // is asking for. Keeping them off stdout lets `brokkr sidecar …
+        // the stored-profile summary, "showing run N/M"), never the data the caller
+        // is asking for. Keeping them off stdout lets `brokkr sidecar ...
         // --samples | jq` Just Work.
         eprintln!("[sidecar] {msg}");
     }
@@ -367,6 +368,16 @@ pub fn error(msg: &str) {
 pub fn warn(msg: &str) {
     if !msg.is_empty() {
         emit("[warn]    ", msg);
+    }
+}
+
+/// A warning on stderr, without the console renderer or run-log locks.
+/// For lock metadata and late history writes: shutdown must not wait on a
+/// renderer held by another thread, and stdout may already end in JSON.
+/// This is ordinary thread code, never an async signal handler.
+pub fn warn_stderr(msg: &str) {
+    if !msg.is_empty() {
+        eprint!("{}", prefixed("[warn]    ", msg));
     }
 }
 

@@ -632,7 +632,7 @@ pub fn render_tile(
     let style = style::Style::load(style_path)?;
     let svg = render::render_archive_tile(&view, z, x, y, &style, layers)?;
     for w in &svg.warnings {
-        crate::output::run_msg(&format!("warning: {w}"));
+        crate::output::warn(w);
     }
     match output {
         Some(p) => {

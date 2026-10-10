@@ -23,6 +23,11 @@ Both live under `<db_root>/.brokkr/` and are resolved identically for every
 project by `BenchHarness::new_with_lock` (`src/harness_mod/types_run.rs`).
 See `docs/commands/measure.md` for the sidecar's sampling/marker protocol.
 
+What brokkr itself prints around a measured run (the `run i/n` line, the
+single `[sidecar]` summary, the `[run] results.db <id>` line naming the stored
+row, the `[run] commit` line for `--commit`) is specified in
+`docs/commands/measure.md` ("What a measured run prints").
+
 ## The three transport channels
 
 A running binary can hand data to brokkr three ways:

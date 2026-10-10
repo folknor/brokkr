@@ -3,8 +3,12 @@
 //
 // A run stopped early - a watchdog kill, a per-test timeout, an interrupt, a
 // fail-fast - leaves executions that never reached a verdict. The report names
-// every one of them (no cap), grouped lane -> resolution -> binary, with its
-// outcome and why, and prints the exact command that replays them. It is
+// every killed, hung, interrupted or otherwise unresolved one (no cap),
+// grouped lane -> resolution -> binary, with its outcome and why, and prints
+// the exact command that replays them. The one exception is the plain
+// fail-fast casualty (never started because an earlier failure stopped the
+// run): the text counts those per binary, since listing them buries the
+// failure; `--json` and `--from-run ID --list` still name each. It is
 // built from the plan and the journal alone, by the same reconciliation the
 // audit uses, so it can be rebuilt later from disk (`brokkr test --from-run ID
 // --list`) when a hard exit stopped the original run from printing it.
@@ -363,13 +367,26 @@ pub(crate) fn build_continuation(
     })
 }
 
-/// The report as text, line by line (the caller prefixes them).
+/// The report as text, line by line (the caller prefixes them). Fail-fast
+/// casualties are counted per binary, not listed; see
+/// [`render_continuation_full`].
 pub(crate) fn render_continuation(report: &ContinuationReport) -> Vec<String> {
+    render_lines(report, true)
+}
+
+/// The report as text with every unresolved execution named, fail-fast
+/// casualties included: what `brokkr test --from-run ID --list` prints.
+pub(crate) fn render_continuation_full(report: &ContinuationReport) -> Vec<String> {
+    render_lines(report, false)
+}
+
+fn render_lines(report: &ContinuationReport, collapse: bool) -> Vec<String> {
     let mut out = Vec::new();
     let n = report.candidates.len();
     out.push(format!(
-        "diagnostic continuation: {n} unresolved {}",
-        if n == 1 { "execution" } else { "executions" }
+        "diagnostic continuation: {n} unresolved {} (of {} expected)",
+        if n == 1 { "execution" } else { "executions" },
+        report.inventory.expected_executions
     ));
 
     // lane -> resolution -> binary, in the plan's order. A group none of whose
@@ -394,11 +411,28 @@ pub(crate) fn render_continuation(report: &ContinuationReport) -> Vec<String> {
                     && *unit == c.execution.pair.unit
             })
         });
+        // Fail-fast casualties are summarised by count: the failure that
+        // stopped the run is already reported, and its casualties would bury
+        // it. Every other unresolved execution (killed, hung, interrupted,
+        // deadline) stays named; the full list is in `--json` and
+        // `brokkr test --from-run ID --list`.
+        let (casualties, named): (Vec<&&CandidateOut>, Vec<&&CandidateOut>) =
+            members.iter().partition(|c| collapse && is_fail_fast_casualty(c));
         out.push(String::new());
+        // A binary never reached at all folds into one line; one that ran
+        // (its failure stopped the run) keeps its heading, so the count reads
+        // as the rest of that binary, not as a binary that never started.
+        if named.is_empty() && !seen {
+            out.push(format!("{key}: not reached, {}", output::count(casualties.len(), "test")));
+            continue;
+        }
         out.push(if seen { key.clone() } else { format!("{key} (not reached)") });
-        for c in members {
+        for c in named {
             let detail = c.detail.map_or_else(String::new, |d| format!("  {}", d.replace('_', " ")));
             out.push(format!("  {:<11}  {}{detail}", c.outcome, c.test));
+        }
+        if !casualties.is_empty() {
+            out.push(format!("  not reached: {}", output::count(casualties.len(), "test")));
         }
     }
 
@@ -434,14 +468,33 @@ pub(crate) fn render_continuation(report: &ContinuationReport) -> Vec<String> {
         }
     }
     out.push(String::new());
-    out.push(format!("note: {CONTINUATION_STATEMENT}."));
-    out.push(
-        "note: an unobserved execution may have run if records were lost; missing evidence is not \
-         proof of non-execution. A timed-out test exceeded its budget; that is not proof it caused a hang."
-            .to_owned(),
-    );
-    out.push(format!("note: {REPLAY_ENVIRONMENT}."));
+    // The pointer to `--from-run ID --list` is offered only when the record is
+    // replayable: a lane with no attribution has nothing to rerun, and naming
+    // a `--from-run` command there would read as a replay it cannot give.
+    if collapse && report.replay.command.is_some() {
+        out.push(format!(
+            "note: diagnostic only - a rerun certifies nothing and never changes this run's verdict; \
+             `brokkr test --from-run {} --list` shows the full statement and replay environment.",
+            report.source_run_id
+        ));
+    } else {
+        out.push(format!("note: {}.", report.statement));
+        out.push(
+            "note: an unobserved execution may have run if records were lost; missing evidence is not \
+             proof of non-execution. A timed-out test exceeded its budget; that is not proof it caused a hang."
+                .to_owned(),
+        );
+        if report.replay.command.is_some() {
+            out.push(format!("note: {}.", report.replay.environment));
+        }
+    }
     out
+}
+
+/// An execution that never started only because an earlier failure stopped
+/// the run (fail fast), as opposed to one a kill, hang or interrupt left.
+fn is_fail_fast_casualty(c: &CandidateOut) -> bool {
+    c.outcome == Outcome::Unobserved.as_str() && c.detail == Some(Detail::FailFast.as_str())
 }
 
 #[cfg(test)]
@@ -612,6 +665,9 @@ mod continuation_tests {
         assert!(text.contains("inventory unavailable for threaded"), "{text}");
         assert!(text.contains("suspect"), "{text}");
         assert!(!text.contains("brokkr test --from-run"), "{text}");
+        assert!(text.contains(CONTINUATION_STATEMENT), "{text}");
+        assert!(text.contains("missing evidence is not proof of non-execution"), "{text}");
+        assert!(!text.contains(REPLAY_ENVIRONMENT), "{text}");
     }
 
     /// Validation case: the same test selected by two lanes is two candidates.
@@ -775,6 +831,46 @@ mod continuation_tests {
         let text = render_continuation(&report).join("\n");
         assert!(text.contains("inventory partial for default"), "{text}");
         assert!(text.contains("crate-a::custom (no libtest listing)"), "{text}");
+    }
+
+    /// Fail-fast casualties are counted, not listed; an execution a kill left
+    /// is still named. The full list stays in the `--json` candidates.
+    #[test]
+    fn fail_fast_casualties_are_counted_not_named() {
+        let first = unit("first");
+        let later = unit("second");
+        let p = plan_of(vec![lane(
+            0,
+            "default",
+            LaneKind::Serial,
+            &[(&first, "a"), (&first, "b"), (&later, "c"), (&later, "d")],
+        )]);
+        let records = vec![
+            obs(0, 1, &first, ObsEvent::Started { name: "a".into() }),
+            obs(0, 1, &first, ObsEvent::Finished { name: "a".into(), result: TestResult::Failed }),
+            JournalRecord::Terminated(Termination {
+                scope: TerminationScope::Lane,
+                lane: Some(0),
+                stream: None,
+                cause: TerminationCause::FailFast,
+                test: None,
+                charged: None,
+            }),
+        ];
+        let recon = reconcile(&p, &records, false, Vec::new());
+        let report = build_continuation(&p, &recon, &records).unwrap();
+        assert_eq!(report.candidates.len(), 3, "--json still carries every one");
+        let text = render_continuation(&report).join("\n");
+        assert!(text.contains("default / crate-a / test:first\n  not reached: 1 test"), "{text}");
+        assert!(text.contains("default / crate-a / test:second: not reached, 2 tests"), "{text}");
+        assert!(!text.contains("  unobserved"), "{text}");
+        assert!(!text.contains(" c "), "{text}");
+        let full = render_continuation_full(&report).join("\n");
+        assert!(full.contains("  unobserved   c  fail fast"), "{full}");
+        assert!(full.contains("  unobserved   d  fail fast"), "{full}");
+        assert!(full.contains(REPLAY_ENVIRONMENT), "{full}");
+        assert!(full.contains("missing evidence is not proof of non-execution"), "{full}");
+        assert!(!full.contains("--json trailer"), "{full}");
     }
 
     /// A group of which nothing was observed is "not reached"; the binary a

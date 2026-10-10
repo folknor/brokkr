@@ -276,7 +276,7 @@ impl BenchHarness {
         let total = clamp_u32(config.runs);
 
         for i in 0..config.runs {
-            output::bench_msg(&format!("run {}/{}", i + 1, config.runs));
+            announce_run(i, config.runs);
             self.lock.set_progress(clamp_u32(i + 1), total);
             let result = f(i)?;
             walls.push(result.elapsed_ms);
@@ -323,7 +323,7 @@ impl BenchHarness {
         let total = clamp_u32(config.runs);
 
         for i in 0..config.runs {
-            output::bench_msg(&format!("run {}/{}", i + 1, config.runs));
+            announce_run(i, config.runs);
             self.lock.set_progress(clamp_u32(i + 1), total);
             // A stale parked failure from some earlier, unrelated capture
             // must not be attributed to this iteration.
@@ -460,7 +460,7 @@ impl BenchHarness {
         let total = clamp_u32(config.runs);
 
         for i in 0..config.runs {
-            output::bench_msg(&format!("run {}/{}", i + 1, config.runs));
+            announce_run(i, config.runs);
             self.lock.set_progress(clamp_u32(i + 1), total);
 
             // Reopen FIFO read end between runs so the next child's write
@@ -590,7 +590,7 @@ impl BenchHarness {
         let total = clamp_u32(config.runs);
 
         for i in 0..config.runs {
-            output::bench_msg(&format!("run {}/{}", i + 1, config.runs));
+            announce_run(i, config.runs);
             self.lock.set_progress(clamp_u32(i + 1), total);
             let wall = f(i)?;
             samples_us.push(elapsed_to_us(&wall));
@@ -674,7 +674,7 @@ impl BenchHarness {
         let total = clamp_u32(config.runs);
 
         for i in 0..config.runs {
-            output::bench_msg(&format!("run {}/{}", i + 1, config.runs));
+            announce_run(i, config.runs);
             self.lock.set_progress(clamp_u32(i + 1), total);
 
             if i > 0 {
@@ -762,7 +762,8 @@ impl BenchHarness {
     // -----------------------------------------------------------------------
 
     /// Record a result: always emit to stdout, store in DB if tree is clean.
-    /// Prints the short UUID to stdout (always, regardless of quiet mode).
+    /// Prints the short UUID on a `[run] results.db` line (always, regardless
+    /// of quiet mode).
     /// Returns the full UUID if stored, `None` if the tree was dirty.
     ///
     /// A failed insert still prints the `[result]` line - unconditionally,
@@ -805,8 +806,9 @@ impl BenchHarness {
                 }
             };
             emit_result_lines(config, mode.as_deref(), result, &self.git);
-            output::bench_msg(&format!("stored in results.db ({short})"));
-            println!("{short}");
+            // The one line naming the stored row's id (also the sidecar
+            // profile's). Not quiet-gated: it is how the run is found again.
+            output::run_msg(&format!("results.db {short}"));
             Ok(Some(uuid))
         } else {
             // Dirty tree: no DB insert, no UUID. Always print result line
@@ -928,8 +930,17 @@ impl BenchHarness {
             sidecar_db.set_latest("dirty", &store_uuid)?;
         }
 
+        // The one sidecar summary line: what was stored (and the id, only for
+        // a `dirty`-filed profile - otherwise the results.db line named it).
+        // Per-run attach and sample counts are run-log detail (`run_sidecar`);
+        // the wall time is on the `[result]` line.
         let short = &store_uuid[..8.min(store_uuid.len())];
-        output::sidecar_msg(&format!("profile data stored in sidecar.db ({short})"));
+        output::sidecar_msg(&sidecar_summary_line(
+            short,
+            is_dirty,
+            sidecar_runs,
+            best_run_idx,
+        ));
 
         // Close the writer before backup. The backup API reads the logical
         // DB state regardless, but closing avoids holding two connections.

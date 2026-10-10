@@ -58,13 +58,13 @@ Flags:
 - `-p/--package <PKG>` (repeatable) - scope every sweep's cargo invocation
   (clippy + test) to the named packages. The set **replaces** each sweep's
   own package selection - cargo unions selection flags, so composing
-  `--workspace --exclude …` with `--package` would silently un-scope the
+  `--workspace --exclude ...` with `--package` would silently un-scope the
   run. Per sweep the set is *intersected* with the sweep's scope: a package
   its `packages` list or (test phase only) `test_exclude_packages` rules out
   is dropped, a sweep keeping none is skipped (mirroring `brokkr test`'s
   SKIP) - so `-p a -p b` still reaches `a` in the sweep that admits it when
   `b` lives in another sweep. If every sweep skips, the phase fails rather
-  than reading as green. The `invocation:` line up front shows `-p <pkg> …`;
+  than reading as green. The `invocation:` line up front shows `-p <pkg> ...`;
   right after it, when the sweeps' package rules narrow the selection, one
   `package rules narrow this selection` announcement groups the sweeps by
   outcome (`  vm, runner: not admitted - -p x is not in this sweep's packages
@@ -83,7 +83,7 @@ Flags:
 - `--gate` - run the profile named by `[test] gate_profile` (load-validated
   to certify "complete"). The stable pre-commit invocation. Conflicts with
   `--profile`, `--features`, `--no-default-features`, and `-p`. Trailing
-  `-- …` test args are rejected under any `complete` claim (see `certifies`)
+  `-- ...` test args are rejected under any `complete` claim (see `certifies`)
 - `--json` - append one machine-readable summary line (a JSON object) as the
   last line of stdout; human output is unchanged
 - `--fix-gremlins` - rewrite banned chars in place before scan
@@ -120,7 +120,7 @@ Output:
   moved.
 - **What still prints on green**, because each changes what the verdict
   means: an `invocation:` line up front naming what this run changed about
-  the configured gate (`-p`, forwarded `-- …` args, `RUSTFLAGS` /
+  the configured gate (`-p`, forwarded `-- ...` args, `RUSTFLAGS` /
   `CARGO_ENCODED_RUSTFLAGS` inherited from the environment - set-but-empty
   included, since cargo reads an empty one as a live source that shadows the
   config-file rustflags); the ad-hoc
@@ -976,7 +976,7 @@ untracked-not-gitignored, so new plan docs are caught before staging) - see
 `src/gremlins.rs` for the banned set (invisible/zero-width, non-breaking
 spaces, bidi overrides, em/en dashes, typographic quotes, and emoji /
 pictographs: Misc Symbols, Dingbats, the emoji planes, and emoji variation
-selectors). The Arrows block (`→` and friends) and box-drawing / geometric
+selectors). The Arrows block (`U+2190..=21FF`) and box-drawing / geometric
 shapes (`U+2500..=25FF`) are deliberately spared - both are used legitimately
 in comments, formatter output, and tree/table rendering. `--fix-gremlins`
 rewrites every banned char in place with its ASCII equivalent (or deletes it
@@ -1340,7 +1340,8 @@ driving a foreign checkout under `disable_toolchain`: brokkr lints on the
 host's (newer) clippy, which surfaces lints the project's own pinned-toolchain
 CI cannot see and its code cannot be expected to satisfy. The phase announces
 the allowed lints up front (`clippy: allowing clippy::unused_async ([lints]
-allow)`) so a narrowed gate never reads as a full one, and the `-A` flags ride
+allow)`; under `--commands` and the run log) so a narrowed gate never reads as
+a full one, and the `-A` flags ride
 in the reprinted failing command. Entries must be bare lint names
 (`clippy::`-qualified, `cargo::`-qualified, or plain rustc names); flags are
 rejected at parse time. A `cargo::` entry is the exception to the `-A` route:
@@ -1379,7 +1380,9 @@ deprecated (sited in clippy/rustdoc; build-wide in test, coverage and install
 builds)`); the per-lint file-count summary (`clippy: allowing
 clippy::assert_is_empty (59 files), deprecated (3 files) ([lints]
 allow_exact)`) goes to the run log, and prints under `brokkr clippy` or
-`--commands`. Naming the lints is what keeps a narrowed gate from reading as a
+`--commands`. (The blanket `clippy: allowing ... ([lints] allow)` line is
+log-only under `brokkr clippy`, whose printed command already carries the `-A`
+flags.) Naming the lints is what keeps a narrowed gate from reading as a
 full one; the paths are already in `brokkr.toml`, and one line per entry
 buries the rest of the run once a project has more than a handful. An entry
 that suppressed nothing across the run draws a
@@ -2309,7 +2312,7 @@ binaries cannot build) and is called out in the trailer.
 
 The ledger reports as **one rolled-up line** - entry count, total pairs,
 and the per-issue pair breakdown in descending order (`quarantine: 21
-entries, 106 pairs - B51 80, B41 14, B50 10, …`). That keeps both signals
+entries, 106 pairs - B51 80, B41 14, B50 10, ...`). That keeps both signals
 the per-entry listing carried: the countdown, and the growth warning when a
 substring starts matching more than it used to. It is a summary, not a cap -
 every pair the ledger holds is counted in the line, at the granularity a
@@ -2481,8 +2484,9 @@ lane's. Present outside complete profiles too.
 ## Diagnostic continuation
 
 After a watchdog kill, a per-test timeout, an interrupt or a fail-fast, `check`
-and `brokkr test` name every test the run left without a verdict and print the
-exact command that runs those executions again. Nothing reruns by itself, and a
+and `brokkr test` account for every test the run left without a verdict (naming
+each, except plain fail-fast casualties, which are counted) and print the exact
+command that runs those executions again. Nothing reruns by itself, and a
 failed run never turns green because of it. The motivating case: a downstream
 merged its integration tests into one binary per crate, so one hang in a
 serial lane under a *partial* profile - the bare `brokkr check` - hid a whole
@@ -2565,11 +2569,12 @@ journal without it was cut short, and the report says so.
 
 On the final reporting path, after the failure verdict and before the `--json`
 trailer, every unresolved execution (`interrupted` or `unobserved`; failed,
-timed-out, passed and ignored stand as the results they are) is named - no cap
-- grouped lane, resolution, binary, with its outcome and detail:
+timed-out, passed and ignored stand as the results they are) is counted in the
+header, and every one that a kill, a hang, a deadline or an interrupt left is
+named - no cap - grouped lane, resolution, binary, with its outcome and detail:
 
 ```
-diagnostic continuation: 3 unresolved executions
+diagnostic continuation: 3 unresolved executions (of 3 expected)
 
 default / crate-a / test:integration
   interrupted  detector::alpha  phase deadline
@@ -2578,12 +2583,33 @@ default / crate-a / test:integration
 
 rerun these recorded executions:
   brokkr test --from-run 123456-2
+
+note: diagnostic only - a rerun certifies nothing and never changes this run's verdict; ...
 ```
 
-Later lanes skipped by a fail-fast or a deadline are included and told apart
-from the binary actually killed: a binary of which nothing was observed is
-marked `(not reached)`. A lane whose inventory is unavailable or partial says
-so under the list. When a run cannot be replayed from its record the command is
+The one exception is the plain fail-fast casualty: an execution that never
+started only because an earlier failure stopped the run (`unobserved`, detail
+`fail_fast`). The text prints one line per binary with a count (`default /
+crate-a / test:later: not reached, 40 tests` for a binary that never started,
+or `  not reached: 40 tests` under the heading of a binary that did start or
+also has named executions) instead of the names. The
+motivating case for naming everything was a hang, where each unresolved test is
+a suspect; for an ordinary assertion failure the list is almost entirely
+fail-fast casualties burying the failure that caused them. The full names stay
+in the `--json` `candidates` and in `brokkr test --from-run ID --list`, and a
+fail-fast victim that was *interrupted* (started, then cut down) is still named.
+A binary of which nothing was observed and that has named executions is marked
+`(not reached)`. A lane whose inventory is unavailable or partial says so under
+the list. The text ends with one short note (diagnostic only, certifies nothing,
+never changes the verdict), pointing to `brokkr test --from-run ID --list`
+for the full statement and replay environment. When nothing is replayable (no
+replay command, e.g. a lane with no attribution) the text names no
+`--from-run` command at all and prints the statement and the evidence caveat
+in full instead. They also stay in the `--json`
+trailer's `statement` and `replay.environment`. On a failed run
+whose continuation prints, the `accounting:` counts line is log-only, since the
+header carries the unresolved and expected counts; anomalies and journal
+problems still print. When a run cannot be replayed from its record the command is
 withheld and the concrete reasons print instead: a lane without a recipe, an
 unknown recipe version, a launch environment that was not recorded, an argv that
 would not fit, a test name the engine filterset cannot carry.
@@ -2996,7 +3022,7 @@ Four rules decide what "matched nothing" means:
   the candidate sets of the sweeps it applies to: a `[[check]]` filter
   against the lanes running *that entry*, a `[test.profiles.*]` filter
   against *every sweep the profile runs*. The two claims differ - "this
-  test should not run in this sweep" versus "…in this profile" - and the
+  test should not run in this sweep" versus "...in this profile" - and the
   latter is satisfied by matching anywhere the profile runs. Judging a
   profile filter per sweep is wrong in a way that shows up immediately:
   any profile combining an unscoped sweep with a package-scoped one
@@ -3061,7 +3087,7 @@ A `skip` or `only` substring shorter than **four characters** is a
 `package` half is an exact name):
 
 ```
-[[check]] entry 'unit' has `skip` filter "ser", shorter than 4 characters. …
+[[check]] entry 'unit' has `skip` filter "ser", shorter than 4 characters. ...
 ```
 
 It closes the hazard the alive-check structurally cannot see. A very short
@@ -3102,7 +3128,7 @@ answer. The partial success line lists what was narrowed (skipped phases,
 profile skips the named phases and announces them up front; under a
 `complete` profile, `-p` is rejected before anything compiles (a scoped
 build's green is not comparable to the full build's - feature unification
-changes with the package set). Trailing `-- …` test args are rejected the
+changes with the package set). Trailing `-- ...` test args are rejected the
 same way under `complete`: a libtest `--skip` or a cargo `--lib` narrows
 the real run but not the plan, which is built from the sweeps' own filters.
 2 = clap usage errors, 124 = a time ceiling fired, 130 = interrupt.
@@ -3136,7 +3162,7 @@ on nautilus_trader the three `cargo test` lines are ~1,100 chars each, of which
 the sweep. What actually varies is package scope and features, which is what
 the shape carries.
 
-The shape is `<package scope>[, <features>][, rustflags …][, <test bits>]`:
+The shape is `<package scope>[, <features>][, rustflags ...][, <test bits>]`:
 
 - package scope - `workspace`, `N pkgs` (a `packages` list, emitted as `-p`),
   or `workspace -N pkgs` (`test_exclude_packages`; test phase only, since
@@ -3152,7 +3178,7 @@ The shape is `<package scope>[, <features>][, rustflags …][, <test bits>]`:
   and the lane (`serial` under the per-test watchdog, `parallel` otherwise).
 
 **Failures always print the shape and the full command**, as `[error] <phase>
-<name>: <shape>` and `[error] failing command: cargo …` - when a sweep fails,
+<name>: <shape>` and `[error] failing command: cargo ...` - when a sweep fails,
 the copy-pasteable line is the most useful thing in the output. This covers
 clippy and rustdoc failures, test failures, hung tests, parallel-sweep
 timeouts, zero-test runs, `build_packages` pre-build failures, and any error
@@ -3170,8 +3196,21 @@ sweep's, the pre-builds', the enumeration and install-feature probes', and the
 `cargo metadata` invocations of the dependency-rule and publish-cycle phases.
 Streamed, not collected, so a run the watchdog kills still shows what it was
 running. The grouped green lines are unchanged by it. `brokkr clippy` is
-unaffected and always prints its command: it is the investigative runner,
-invoked precisely to find out what a given target shape does.
+unaffected by the flag and always prints its command, once and after the run:
+it is the investigative runner, invoked precisely to find out what a given
+target shape does. A green run prints the cargo line; a failing one prints the
+shape and `failing command:` pair above (also on spawn failures, interrupts
+and deadlines), and does not stream the line first as
+well. Its ad-hoc sweep is labelled `clippy`, and the pair reads `[error]
+clippy: <shape>` rather than `clippy clippy:`.
+
+Install-feature's green line carries only the run's counts (`install-feature:
+ok (1 package, 2 bins) in 8.1s`, or `1 of 3 install packages, 2 bins` under a
+`-p` that narrowed the set); the constant explanation of the phase (each
+package resolved on its own like `cargo install`, shared lockfile, no codegen)
+is log-only. The shim-fallback warning (`harness isolation unavailable (...)`)
+prints once per sweep per run, not once per cargo resolution of a package-mode
+sweep.
 
 ## Sweep selection
 
@@ -3354,8 +3393,8 @@ to check they compile. Then:
    invocation - on a package of 85 harnesses that was 17 minutes of lock around
    a test that passed in 0.16s.
 
-`harness = false` targets are excluded and each is named on a `not searched:`
-line. They are identified from the owning package's manifest, since cargo's
+`harness = false` targets are excluded and all of a sweep's are named on one
+`not searched:` line. They are identified from the owning package's manifest, since cargo's
 metadata and artifact records carry no harness flag; such a binary is arbitrary
 code with no libtest listing to read, and a focused run selects libtest names.
 

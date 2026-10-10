@@ -116,6 +116,7 @@ pub(crate) fn record_history(raw_args: &str, elapsed_ms: u64, exit_code: i32) {
     match inner() {
         Ok(()) => {}
         Err(e) if e.is_environmental() => {}
-        Err(e) => eprintln!("[history] warning: failed to write history: {e}"),
+        // Keep late bookkeeping off stdout, which may end in a JSON trailer.
+        Err(e) => crate::output::warn_stderr(&format!("history: failed to write history: {e}")),
     }
 }

@@ -110,16 +110,16 @@ pub fn apply(
         pins_path.display()
     ));
     if !missing.is_empty() {
-        output::corpus_msg(&format!(
-            "warning: {} selected probe(s) emitted no disposition, not blessed: {}",
-            missing.len(),
+        output::warn(&format!(
+            "{} emitted no disposition, not blessed: {}",
+            output::count(missing.len(), "selected probe"),
             missing.join(", ")
         ));
     }
     if !rejected.is_empty() {
-        output::corpus_msg(&format!(
-            "warning: {} probe(s) had an unstampable disposition, not blessed: {}",
-            rejected.len(),
+        output::warn(&format!(
+            "{} had an unstampable disposition, not blessed: {}",
+            output::count(rejected.len(), "probe"),
             rejected.join(", ")
         ));
     }

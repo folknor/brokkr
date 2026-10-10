@@ -171,6 +171,27 @@ fn collect_rows(
     Ok(out)
 }
 
+/// Warn about an unrecognised `cargo_profile` value, once per distinct value
+/// per process. The row mapper runs per row, so a DB with many rows carrying
+/// the same typo would otherwise repeat the line for each. A warning, not an
+/// error: the row is still read, as `release`.
+fn warn_unknown_profile_once(raw: &str) {
+    use std::collections::HashSet;
+    use std::sync::{Mutex, OnceLock, PoisonError};
+    static SEEN: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    let seen = SEEN.get_or_init(|| Mutex::new(HashSet::new()));
+    let first = seen
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(raw.to_owned());
+    if first {
+        crate::output::warn(&format!(
+            "unknown cargo_profile {raw:?} in results DB - \
+             treating as 'release' (likely a migration typo)"
+        ));
+    }
+}
+
 fn map_stored_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredRow> {
     Ok(StoredRow {
         id: row.get("id")?,
@@ -197,10 +218,7 @@ fn map_stored_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredRow> {
             .map(|s| match crate::build::CargoProfile::from_db(s) {
                 Ok(p) => p,
                 Err(crate::build::UnknownCargoProfile(raw)) => {
-                    crate::output::error(&format!(
-                        "unknown cargo_profile {raw:?} in results DB - \
-                         treating as 'release' (likely a migration typo)"
-                    ));
+                    warn_unknown_profile_once(&raw);
                     crate::build::CargoProfile::Release
                 }
             }),

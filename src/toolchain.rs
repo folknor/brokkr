@@ -161,12 +161,17 @@ impl DisabledToolchain {
                         orig.display()
                     ))
                 })?;
-                output::build_msg(&format!("toolchain disabled: {name} moved aside"));
+                // Config-derived and identical on every run: run log only.
+                output::detail(&format!("toolchain disabled: {name} moved aside"));
                 moved.push((aside, orig));
             } else if aside.exists() {
                 // Leftover from a hard-killed prior run: adopt so drop restores
                 // it. The file stays disabled for this run (its point), then
-                // returns to normal afterwards.
+                // returns to normal afterwards. Worth saying: it means an
+                // earlier run did not clean up after itself.
+                output::warn(&format!(
+                    "adopting stale {name}{SUFFIX} left by an interrupted run; it is restored when this command ends"
+                ));
                 moved.push((aside, orig));
             }
         }

@@ -767,7 +767,9 @@ pub(crate) fn run_sidecar_with_deadline(
     let interval_ns = SAMPLE_INTERVAL_US * 1_000;
     let mut next_tick_ns = start_ns + interval_ns;
 
-    output::sidecar_msg(&format!("attached to pid {pid}, run {run_idx}"));
+    // Ephemeral: the run log keeps it, the console does not (the run number
+    // is shown one-indexed, like the harness's own `run i/n` line).
+    output::detail(&format!("sidecar attached to pid {pid}, run {}", run_idx + 1));
 
     // The exit status and elapsed time, captured at the moment try_wait
     // detects exit (not after the loop finishes). This avoids including
@@ -913,8 +915,11 @@ pub(crate) fn run_sidecar_with_deadline(
     #[allow(clippy::cast_possible_truncation)]
     let wall_time_ms = child_elapsed.as_millis() as i64;
 
-    output::sidecar_msg(&format!(
-        "{} samples, {} markers, {} counters, {wall_time_ms}ms",
+    // Run-log only: the stored summary line (`store_sidecar`) carries the
+    // counts with the id, and the `[result]` line carries the wall time.
+    output::detail(&format!(
+        "sidecar run {}: {} samples, {} markers, {} counters, {wall_time_ms}ms",
+        run_idx + 1,
         samples.len(),
         markers.len(),
         counters.len(),

@@ -339,10 +339,12 @@ where
             if let Err(e) = crate::worktree_record::Store::touch(project_root, &wt.record_name) {
                 output::warn(&format!("worktree bookkeeping: {e}"));
             }
-            output::bench_msg(&format!(
-                "benchmarking commit {} ({})",
-                wt.commit, wt.subject,
-            ));
+            // The one line naming the commit. Neutral wording: this serves
+            // `run`, `bench` and the measured commands alike. Quiet-gated like
+            // the bench narration it replaces.
+            if !output::is_quiet() {
+                output::run_msg(&format!("commit {} ({})", wt.commit, wt.subject));
+            }
             // The worktree is a checkout of `hash`, which may carry its own
             // committed rust-toolchain pin. Move it aside for the closure. Safe
             // as a bare guard here (unlike the race `toolchain`'s module doc

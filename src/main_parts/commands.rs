@@ -347,33 +347,49 @@ fn cmd_run(
 /// through here.
 #[derive(Clone, Copy)]
 pub(crate) struct CleanOpts {
+    /// The dispatch site already reported the cargo sweep.
+    pub(crate) cargo_swept: bool,
     pub(crate) worktrees: bool,
     pub(crate) archives: bool,
     pub(crate) keep: usize,
     pub(crate) dry_run: bool,
+    /// The sweep runs on the interrupt/kill path: it says nothing beyond what
+    /// it removes (no hints, no "nothing to clean").
+    pub(crate) interrupted: bool,
 }
 
 impl CleanOpts {
-    /// The routine sweep: scratch/tmp only, nothing durable. Used by the
-    /// interrupt/kill cleanup path.
-    pub(crate) fn routine() -> Self {
+    /// Scratch/tmp cleanup after an interrupt or cooperative kill, without
+    /// the hints and empty-sweep notice of an interactive clean.
+    pub(crate) fn after_interrupt() -> Self {
         Self {
+            cargo_swept: false,
             worktrees: false,
             archives: false,
             keep: 2,
             dry_run: false,
+            interrupted: true,
         }
     }
 }
 
 /// Removal helper that honours `--dry-run`: in dry-run it reports the path and
 /// removes nothing; otherwise it deletes best-effort. Returns whether the path
-/// existed (i.e. something was, or would be, removed).
+/// existed (i.e. something was, or would be, removed). Counts those hits so
+/// the caller can tell an empty sweep from a productive one.
 struct Cleaner {
     dry_run: bool,
+    hits: std::cell::Cell<usize>,
 }
 
 impl Cleaner {
+    fn new(dry_run: bool) -> Self {
+        Self {
+            dry_run,
+            hits: std::cell::Cell::new(0),
+        }
+    }
+
     fn dir(&self, path: &Path) -> bool {
         if !path.exists() {
             return false;
@@ -381,6 +397,7 @@ impl Cleaner {
         if !self.dry_run {
             std::fs::remove_dir_all(path).ok();
         }
+        self.hits.set(self.hits.get() + 1);
         true
     }
 
@@ -391,10 +408,11 @@ impl Cleaner {
         if !self.dry_run {
             std::fs::remove_file(path).ok();
         }
+        self.hits.set(self.hits.get() + 1);
         true
     }
 
-    /// Verb for "N file(s)" style messages.
+    /// Verb for "N files" style messages.
     fn verb(&self) -> &'static str {
         if self.dry_run { "would remove" } else { "removed" }
     }
@@ -413,12 +431,14 @@ fn cmd_clean(
     opts: CleanOpts,
 ) -> Result<(), DevError> {
     let CleanOpts {
+        cargo_swept,
         worktrees,
         archives,
         keep,
         dry_run,
+        interrupted,
     } = opts;
-    let c = Cleaner { dry_run };
+    let c = Cleaner::new(dry_run);
     // Worktrees are keyed by the *build* root, because that is the git repo
     // `Worktree::create` cuts them from and the checkout whose path names their
     // directory in the container (and, for legacy siblings, their parent and
@@ -469,6 +489,12 @@ fn cmd_clean(
 
     clean_artefact_trees(project, project_root, &c);
 
+    // An empty routine sweep says so once, instead of printing nothing (which
+    // reads as "did it run?"). Cargo and the deep flags report their own work.
+    if !cargo_swept && !worktrees && !archives && !interrupted && !dry_run && c.hits.get() == 0 {
+        output::run_msg("nothing to clean");
+    }
+
     if worktrees {
         // Deep clean: `--worktrees` reclaims the expensive *persistent* state.
         // The durable tilegen output store is elivagar's analog of piners'
@@ -483,7 +509,10 @@ fn cmd_clean(
         let found = worktree::list(worktree_root)?.len()
             + worktree::list_legacy(worktree_root)?.len();
         if dry_run {
-            output::run_msg(&format!("would remove {found} worktree(s)"));
+            output::run_msg(&format!(
+                "would remove {}",
+                output::count(found, "worktree")
+            ));
         } else {
             let existing = found;
             let removed = worktree::purge_all(worktree_root)?;
@@ -493,24 +522,30 @@ fn cmd_clean(
             // each, so a cleanup that silently reclaims nothing is how the
             // cargo volume fills up. A worktree's target dir goes with it.
             if removed == existing {
-                output::run_msg(&format!("removed {removed} worktree(s)"));
+                output::run_msg(&format!(
+                    "removed {}",
+                    output::count(removed, "worktree")
+                ));
             } else {
                 output::run_msg(&format!(
-                    "removed {removed} of {existing} worktree(s) found"
+                    "removed {removed} of {} found",
+                    output::count(existing, "worktree")
                 ));
             }
         }
-    } else {
+    } else if !interrupted && !dry_run {
+        // A hint for someone running `brokkr clean` by hand; the interrupt
+        // path's cleanup is not a place to advertise a deep clean.
         let existing = worktree::list(worktree_root)?.len()
             + worktree::list_legacy(worktree_root)?.len();
         if existing > 0 {
             output::run_msg(&format!(
-                "{existing} persistent worktree(s); run `brokkr clean --worktrees` to remove",
+                "{} persistent; run `brokkr clean --worktrees` to remove",
+                output::count(existing, "worktree"),
             ));
         }
     }
 
-    output::result_msg("clean done");
     Ok(())
 }
 
@@ -572,7 +607,7 @@ fn clean_scratch(project: Project, project_root: &Path, paths: &config::Resolved
         return;
     }
 
-    let mut removed = 0u32;
+    let mut removed = 0usize;
     if let Ok(entries) = std::fs::read_dir(&paths.scratch_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
@@ -602,7 +637,11 @@ fn clean_scratch(project: Project, project_root: &Path, paths: &config::Resolved
         }
     }
     if removed > 0 {
-        output::run_msg(&format!("{} {removed} scratch file(s)", c.verb()));
+        output::run_msg(&format!(
+            "{} {}",
+            c.verb(),
+            output::count(removed, "scratch file")
+        ));
     }
 }
 
@@ -732,7 +771,11 @@ fn clean_artefact_trees(project: Project, project_root: &Path, c: &Cleaner) {
             }
         }
         if removed > 0 {
-            output::run_msg(&format!("{} {runs} ratatoskr run dir(s)", c.verb()));
+            output::run_msg(&format!(
+                "{} {} in ratatoskr artefacts",
+                c.verb(),
+                output::count(runs, "run dir")
+            ));
         }
     }
 
@@ -749,7 +792,7 @@ fn clean_artefact_trees(project: Project, project_root: &Path, c: &Cleaner) {
 
     if project == Project::Piners {
         let corpus_root = project_root.join(".brokkr/piners/corpus");
-        let mut removed = 0;
+        let mut removed = 0usize;
         if let Ok(entries) = std::fs::read_dir(&corpus_root) {
             for entry in entries.flatten() {
                 let path = entry.path();
@@ -760,7 +803,11 @@ fn clean_artefact_trees(project: Project, project_root: &Path, c: &Cleaner) {
             }
         }
         if removed > 0 {
-            output::run_msg(&format!("{} {removed} piners run dir(s)", c.verb()));
+            output::run_msg(&format!(
+                "{} {} in piners corpus",
+                c.verb(),
+                output::count(removed, "run dir")
+            ));
         }
     }
 }
@@ -823,7 +870,7 @@ fn clean_archives(paths: &config::ResolvedPaths, keep: usize, c: &Cleaner) {
         })
         .collect();
 
-    let mut removed = 0u32;
+    let mut removed = 0usize;
     for (dataset, ds) in &paths.datasets {
         for variant in ds.pbf.keys() {
             let mut archives: Vec<(std::time::SystemTime, &std::path::Path)> = listing
@@ -845,7 +892,7 @@ fn clean_archives(paths: &config::ResolvedPaths, keep: usize, c: &Cleaner) {
         }
     }
     if removed > 0 {
-        output::run_msg(&format!("{} {removed} archive(s)", c.verb()));
+        output::run_msg(&format!("{} {}", c.verb(), output::count(removed, "archive")));
     }
 }
 
@@ -856,7 +903,7 @@ fn clean_archives(paths: &config::ResolvedPaths, keep: usize, c: &Cleaner) {
 /// touches the default target dir, and editing a sweep's `rustflags` orphans the
 /// old hash's tree permanently. A routine `brokkr clean` sweeps them (S3-06).
 fn clean_rustflags_target_dirs(target_dir: &Path, c: &Cleaner) {
-    let mut removed = 0u32;
+    let mut removed = 0usize;
     if let Ok(entries) = std::fs::read_dir(target_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
@@ -873,14 +920,15 @@ fn clean_rustflags_target_dirs(target_dir: &Path, c: &Cleaner) {
     }
     if removed > 0 {
         output::run_msg(&format!(
-            "{} {removed} isolated rustflags target dir(s)",
-            c.verb()
+            "{} {}",
+            c.verb(),
+            output::count(removed, "isolated rustflags target dir")
         ));
     }
 }
 
-fn count_run_dirs(root: &Path) -> u32 {
-    let mut count = 0u32;
+fn count_run_dirs(root: &Path) -> usize {
+    let mut count = 0usize;
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
         let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -1054,7 +1102,10 @@ fn print_holder_status(
     }
     match s.get("mocks") {
         "" | "0" => {}
-        n => work.push(format!("{n} mock server(s)")),
+        n => work.push(match n.parse::<usize>() {
+            Ok(k) => output::count(k, "mock server"),
+            Err(_) => format!("{n} mock servers"),
+        }),
     }
     if !work.is_empty() {
         output::lock_msg(&work.join(", "));
@@ -1123,8 +1174,8 @@ fn cmd_pmtiles_stats(project: Project, files: &[String]) -> Result<(), DevError>
     }
     if failed > 0 {
         return Err(DevError::Reported(format!(
-            "{failed} of {} PMTiles file(s) could not be read",
-            files.len()
+            "{failed} of {} could not be read",
+            output::count(files.len(), "PMTiles file")
         )));
     }
     Ok(())

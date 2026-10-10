@@ -128,11 +128,11 @@ pub fn run(
         plan.diff.removed,
     ));
     if !plan.diff.oracle_switched.is_empty() {
-        output::corpus_msg(&format!(
-            "warning: {} probe(s) now judged against a different oracle ({CSV_FILE} <-> \
+        output::warn(&format!(
+            "{} now judged against a different oracle ({CSV_FILE} <-> \
              {RECORD_FILE}); their `expected` was carried forward from the old one - \
              re-bless: brokkr corpus --bless --probe {}",
-            plan.diff.oracle_switched.len(),
+            output::count(plan.diff.oracle_switched.len(), "probe"),
             plan.diff.oracle_switched.join(",")
         ));
     }

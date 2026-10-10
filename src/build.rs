@@ -402,7 +402,7 @@ fn cargo_build_locked(
         .map(|dir| dir.display().to_string());
     let env: Vec<(&str, &str)> = match target_override.as_deref() {
         Some(dir) => {
-            output::build_msg(&format!("isolating worktree build target dir -> {dir}"));
+            output::detail(&format!("isolating worktree build target dir -> {dir}"));
             vec![("CARGO_TARGET_DIR", dir)]
         }
         None => Vec::new(),

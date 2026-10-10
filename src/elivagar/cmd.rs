@@ -473,7 +473,7 @@ pub(crate) fn corpus(
 fn emit_corpus(outcome: super::corpus::Outcome, report: &super::corpus::CheckReport) -> Result<(), DevError> {
     use super::corpus::Outcome;
     for w in &report.warnings {
-        crate::output::run_msg(&format!("warning: {w}"));
+        crate::output::warn(w);
     }
     for d in &report.contract_diffs {
         crate::output::run_msg(&format!("contract {d}"));

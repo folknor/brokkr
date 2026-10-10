@@ -1282,8 +1282,8 @@ pub fn same_agent_hint(info: &LockInfo) -> Option<String> {
 /// in full, since every rewrite carries the complete state.
 fn publish(fd: RawFd, state: &LockState) {
     if let Err(e) = rewrite_from_state(fd, state) {
-        eprintln!("[lock] warning: failed to write lock metadata: {e}");
         invalidate_mutable_metadata(fd, state);
+        crate::output::warn_stderr(&format!("lock: failed to write lock metadata: {e}"));
     }
 }
 
@@ -1321,8 +1321,8 @@ fn invalidate_mutable_metadata(fd: RawFd, state: &LockState) {
         progress: None,
     };
     if let Err(e) = rewrite_from_state(fd, &cleared) {
-        eprintln!("[lock] warning: failed to preserve lock authorization: {e}");
         invalidate_metadata(fd);
+        crate::output::warn_stderr(&format!("lock: failed to preserve lock authorization: {e}"));
     }
 }
 
@@ -1331,10 +1331,10 @@ fn invalidate_mutable_metadata(fd: RawFd, state: &LockState) {
 fn invalidate_metadata(fd: RawFd) {
     unsafe {
         if libc::ftruncate(fd, 0) == -1 {
-            eprintln!(
-                "[lock] warning: failed to invalidate lock metadata: {}",
+            crate::output::warn_stderr(&format!(
+                "lock: failed to invalidate lock metadata: {}",
                 std::io::Error::last_os_error()
-            );
+            ));
         }
     }
 }

@@ -488,7 +488,7 @@ fn cargo_bench(
     let target_dir = crate::worktree::isolated_target_dir(build_root)
         .map(|dir| dir.display().to_string());
     if let Some(dir) = &target_dir {
-        output::build_msg(&format!("isolating worktree build target dir -> {dir}"));
+        output::detail(&format!("isolating worktree build target dir -> {dir}"));
     }
 
     let mut env: Vec<(&str, &str)> = vec![("CRITERION_HOME", criterion_home.as_str())];

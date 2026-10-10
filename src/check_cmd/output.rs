@@ -771,6 +771,21 @@ impl SerialObserve<'_> {
     }
 }
 
+/// Whether this is the first time the process says a sweep ran without
+/// harness isolation. Stated on a green run too: weaker isolation is part of
+/// what the run was, and a failure would otherwise be the only place it shows.
+fn first_isolation_notice(label: &str) -> bool {
+    static SAID: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+    let Ok(mut said) = SAID.lock() else {
+        return true;
+    };
+    if said.iter().any(|l| l == label) {
+        return false;
+    }
+    said.push(label.to_owned());
+    true
+}
+
 /// Run one cargo test invocation for the given sweep. Returns
 /// `Ok(true)` on pass, `Ok(false)` on test failure (already reported),
 /// `Err(...)` on subprocess spawn failure. `multi` controls whether
@@ -932,7 +947,11 @@ fn run_one_test_sweep(
         Some(&command),
         commands,
     );
-    if let Some(reason) = &shim_reason {
+    // Once per sweep: a package-mode sweep resolves once per package, and the
+    // reason is a property of the sweep's launch shape, not of a resolution.
+    if let Some(reason) = &shim_reason
+        && first_isolation_notice(&sweep.label)
+    {
         output::warn(&format!(
             "test {}: harness isolation unavailable ({reason}); this run stops at the first \
              failing test harness",

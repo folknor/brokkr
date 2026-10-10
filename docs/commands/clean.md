@@ -94,8 +94,11 @@ Bare `brokkr clean`, in order:
 A routine clean **spares the durable tilegen output archives**
 (`<output>/<dataset>-<variant>-<commit>.pmtiles`). They are reproducible but
 expensive, retention already bounds their growth, and they are what `regress`
-diffs. If persistent worktrees exist, a routine clean names them and points at
-`--worktrees` rather than removing them.
+diffs. If persistent worktrees exist, a routine clean run by hand names them
+and points at `--worktrees` rather than removing them; the interrupt/kill
+cleanup does not print that hint. A routine clean that finds nothing prints
+`nothing to clean` unless a cargo sweep already reported its work; a
+`--dry-run` reports only what it would remove.
 
 ## `--cargo [PKG]`
 
@@ -157,7 +160,7 @@ dispatch layer rather than re-derived from cwd here - the two must agree, and a
 function that recomputes a root it was not given is stating an invariant it
 cannot enforce. Under the config-one-level-up layout the project root would
 give the wrong key, so a purge would report zero and reclaim nothing - which is
-why the count reads `removed N of M worktree(s) found` whenever those differ.
+why the count reads `removed N of M worktrees found` whenever those differ.
 "Removed 0" and "looked in the wrong place" are otherwise the same message, and
 each worktree carries an isolated target dir: on the nautilus workload, ~1.3G
 apiece.

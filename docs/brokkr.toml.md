@@ -321,7 +321,10 @@ build alike, or install the pinned toolchain.
 The file is restored when the lock is released - on normal exit, on error, or
 on a cooperative interrupt. A hard kill (`brokkr kill --hard`, SIGKILL) during a
 non-tracked window can leave it moved aside as `rust-toolchain.toml.brokkr-disabled`;
-the next brokkr run in that directory adopts the leftover and restores it.
+the next brokkr run in that directory adopts the leftover and restores it,
+printing a `[warn]` that it did so. The routine move aside prints nothing on
+the console (it is identical on every run); it goes to the run-log channel
+and is discarded when no log is open.
 Worktree builds (`--commit`) run in a separate checkout that may carry its own
 committed pin; brokkr re-points the disable there for the build, so the
 worktree's pin is disabled too rather than honored.
@@ -1526,14 +1529,14 @@ include_ignored = true
   which catches the same defect at run time in any sweep that runs. See
   `docs/commands/check.md`.
 - `isolation = "process"` runs each of the profile's tests in its own
-  `cargo test … -- --exact <name>` process.
+  `cargo test ... -- --exact <name>` process.
   `--test-threads=1` serializes tests inside one process per test binary; it
   does not isolate them, and tests touching process-global state (a global
   logger) need the fresh-process guarantee CI's nextest provides. The sweep's
   selection argv is reused verbatim per test - identical build fingerprint,
   cargo-provided test env - at the cost of one cargo spawn per test, sized
   for a serial family of a dozen tests, not thousands. Requires
-  `test_threads` unset or 1; never runs doctests; `brokkr check -- …` extra
+  `test_threads` unset or 1; never runs doctests; `brokkr check -- ...` extra
   args are rejected on an isolated sweep. Merges through `extends`.
 - `lanes = ["tier1", "serial"]` composes profiles as a *list of runs*:
   each lane resolves independently and the test

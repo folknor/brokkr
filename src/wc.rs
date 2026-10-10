@@ -50,7 +50,7 @@ pub fn run(project_root: &Path, threshold: usize) -> Result<(), DevError> {
     for e in &entries {
         println!("{:>width$}  {}", e.lines, e.path.display());
     }
-    output::wc_msg(&format!("{} file(s) over {threshold} lines", entries.len()));
+    output::wc_msg(&format!("{} over {threshold} lines", output::count(entries.len(), "file")));
 
     Ok(())
 }

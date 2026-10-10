@@ -827,6 +827,7 @@ fn run_diagnostic_phases(
             a.commands,
             ran,
             false,
+            false,
         )?;
     }
 
@@ -1076,7 +1077,17 @@ fn audit_coverage(
     let (records, recon) = reconcile_prepared(prepared);
     let (policy, policy_failed) = report_policy(plan, sweeps, quarantine);
     let accounting = ExecutionAccounting::of(&recon);
-    report_accounting(plan, &recon, &accounting, tests_green);
+    let continuation = if prepared.test_phase_ran {
+        prepared.paths.as_ref().and_then(|_| build_continuation(plan, &recon, &records))
+    } else {
+        None
+    };
+    // A failed run's continuation block opens with the unresolved count and
+    // the expected total; the counts line would restate them.
+    let restated = !tests_green
+        && recon.anomalies.is_empty()
+        && continuation.as_ref().is_some_and(|c| !c.candidates.is_empty());
+    report_accounting(plan, &recon, &accounting, tests_green, restated);
 
     let label = |lane: usize| plan.lane(lane).map(|l| l.label.clone());
     let termination = recon.first_termination.as_ref().map(|t| TerminationSummary::of(t, label));
@@ -1102,11 +1113,7 @@ fn audit_coverage(
         termination,
         // The same reconciliation the verdict used, so the list of what is
         // unresolved can never disagree with the counts above it.
-        continuation: if prepared.test_phase_ran {
-            prepared.paths.as_ref().and_then(|_| build_continuation(plan, &recon, &records))
-        } else {
-            None
-        },
+        continuation,
         result,
     }
 }
@@ -1119,6 +1126,7 @@ fn report_accounting(
     recon: &Reconciliation,
     counts: &ExecutionAccounting,
     tests_green: bool,
+    restated: bool,
 ) {
     let line = format!(
         "accounting: {} - {} passed, {} failed, {} timed out, {} interrupted, {} ignored, {} \
@@ -1137,7 +1145,13 @@ fn report_accounting(
         output::run_msg(&line);
         return;
     }
-    output::error(&line);
+    // `restated`: the continuation block prints the counts that matter
+    // (unresolved of expected); the full worksheet line goes to the run log.
+    if restated {
+        output::detail(&line);
+    } else {
+        output::error(&line);
+    }
     for a in &recon.anomalies {
         let lane = a
             .lane
@@ -2473,7 +2487,14 @@ fn run_one_clippy(
     commands: bool,
 ) -> Result<SweepResult, DevError> {
     let args = clippy_args(sweep, run_scope, allow);
-    run_one_diagnostic_cargo("clippy", project_root, sweep, &args, run_scope, meta_target_dir, commands)
+    let result = run_one_diagnostic_cargo("clippy", project_root, sweep, &args, run_scope, meta_target_dir, commands);
+    // No SweepResult reaches the normal reporter on a spawn error, interrupt
+    // or captured-run deadline. Preserve the investigative command there too.
+    if result.is_err() && !commands && !report_active() {
+        output::error(&format!("{}: {}", phase_sweep_tag("clippy", &sweep.label), describe_sweep(sweep, false, run_scope)));
+        output::error(&format!("failing command: cargo {}", args.join(" ")));
+    }
+    result
 }
 
 /// `cargo doc` argv for one sweep resolution. The selection half is clippy's -
@@ -2566,7 +2587,7 @@ fn run_one_diagnostic_cargo(
     }
     let shape = describe_sweep(sweep, false, run_scope);
     let command = format!("{env_prefix}cargo {}", args.join(" "));
-    announce_sweep(&format!("{phase} {}: {shape}", sweep.label), Some(&command), commands);
+    announce_sweep(&format!("{}: {shape}", phase_sweep_tag(phase, &sweep.label)), Some(&command), commands);
 
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     let env_refs: Vec<(&str, &str)> = env_owned
@@ -2619,13 +2640,19 @@ fn run_clippy_phase(
     // surface, beyond what a CLI `-p` already says (`brokkr clippy`'s probe
     // shapes). Only silences the stale-allow report.
     narrowed: bool,
+    // `brokkr clippy`: the cargo command is printed once, after the run -
+    // on a green run as the command line, on a failure as the failing-command
+    // pair `report_diagnostic_phase` prints - never streamed beforehand too.
+    // The command carries the blanket `-A` flags, so their own line is
+    // log-only.
+    echo_after: bool,
 ) -> Result<(), DevError> {
     let multi = sweeps.len() > 1;
 
     // Inside `check` the verdict line names every suppression once, for all
     // the phases it narrows; `brokkr clippy` (and `--commands`, which asks
     // for the long form) prints them here.
-    announce_allows(allow, allow_exact, commands || !report_active());
+    announce_allows(allow, allow_exact, commands || !report_active(), !echo_after);
 
     let info = build::project_info(Some(project_root))?;
     let mut results = run_per_build_shape("clippy", &info, sweeps, packages, clippy_ran, |_| None, |sweep, run_scope, dir| {
@@ -2654,7 +2681,13 @@ fn run_clippy_phase(
             && !sited_allowed(d, allow_exact)
             && !(d.code.as_deref().is_some_and(crate::config::is_cargo_lint) && code_allowed(d, allow))
     };
-    report_diagnostic_phase("clippy", &results, &info, project_root, &keep, multi)
+    let outcome = report_diagnostic_phase("clippy", &results, &info, project_root, &keep, multi);
+    if echo_after && outcome.is_ok() {
+        for r in &results {
+            output::run_msg(&r.command);
+        }
+    }
+    outcome
 }
 
 /// Cargo's manifest lints from a clippy run's stderr
@@ -2778,6 +2811,17 @@ fn sited_allowed(d: &cargo_json::DiagnosticEvent, allow_exact: &[SitedAllow]) ->
     allow_exact.iter().any(|s| sited_match(s, d))
 }
 
+/// `phase sweep-label`, or just `phase` when the sweep is labelled after it:
+/// `brokkr clippy`'s ad-hoc sweep is labelled "clippy", and `clippy clippy:`
+/// says the one fact twice.
+fn phase_sweep_tag(phase: &str, label: &str) -> String {
+    if label == phase {
+        phase.to_owned()
+    } else {
+        format!("{phase} {label}")
+    }
+}
+
 /// Decide and report a diagnostic phase from its cargo runs: any failed run
 /// or any diagnostic `keep` admits fails it. Prints the failing commands, then
 /// the scoped, cross-sweep summary.
@@ -2811,7 +2855,7 @@ fn report_diagnostic_phase(
     // is exactly where both earn their place - under `--commands` too, whose
     // streamed line is neither beside the failure nor attributable among runs.
     for r in results.iter().filter(|r| run_failed(r)) {
-        output::error(&format!("{phase} {}: {}", r.label, r.shape));
+        output::error(&format!("{}: {}", phase_sweep_tag(phase, &r.label), r.shape));
         output::error(&format!("failing command: {}", r.command));
     }
 
@@ -3023,7 +3067,12 @@ fn announce_test_allows(
 /// nothing - is reported separately by [`report_stale_sited_allows`], and that
 /// one still prints per entry. It is the inverse: rare, actionable, and the
 /// only part of this a reader has to act on.
-fn announce_allows(allow: &[String], allow_exact: &[SitedAllow], to_stdout: bool) {
+///
+/// `blanket_on_stdout` is false when the printed cargo command already shows
+/// the blanket `[lints] allow` set as `-A` flags (`brokkr clippy`): the line
+/// then goes to the run log only, while `allow_exact` - which never reaches the
+/// command line - keeps its stdout line.
+fn announce_allows(allow: &[String], allow_exact: &[SitedAllow], to_stdout: bool, blanket_on_stdout: bool) {
     let say = |msg: &str| {
         if to_stdout {
             output::run_msg(msg);
@@ -3032,7 +3081,12 @@ fn announce_allows(allow: &[String], allow_exact: &[SitedAllow], to_stdout: bool
         }
     };
     if !allow.is_empty() {
-        say(&format!("clippy: allowing {} ([lints] allow)", allow.join(", ")));
+        let msg = format!("clippy: allowing {} ([lints] allow)", allow.join(", "));
+        if blanket_on_stdout {
+            say(&msg);
+        } else {
+            output::detail(&msg);
+        }
     }
     if !allow_exact.is_empty() {
         say(&format!(
@@ -3209,9 +3263,11 @@ pub(crate) fn cmd_clippy(
     // One sweep -> run_clippy_phase runs `multi = false`, so output carries no
     // sweep-label tags. `packages: &[]` because ad-hoc `-p` is already in
     // sweep.packages (emitted as `-p <pkg>`); the extra `--package` slots stay
-    // unused. `commands = true`: this is the *investigative* runner, invoked to
-    // find out what a given target shape actually does, so the full cargo line
-    // is the point - unlike `brokkr check`, where it is per-run noise.
+    // unused. `commands = false, echo_after = true`: this is the *investigative*
+    // runner, invoked to find out what a given target shape actually does, so
+    // the full cargo line is the point - but said once, after the run (the
+    // command line when green, the failing-command pair when not), not
+    // streamed before a failure that then repeats it.
     // The investigative runner has no `--json` trailer, so the ran-mask is
     // write-only here; a single throwaway slot satisfies the shared signature.
     //
@@ -3225,9 +3281,10 @@ pub(crate) fn cmd_clippy(
         &[],
         clippy_allow,
         clippy_allow_exact,
-        true,
+        false,
         &mut clippy_ran,
         probe_is_narrowed(&sweep),
+        true,
     );
     // The watchdog already said why it killed the run; whatever the kill
     // surfaced as is its echo. Checked whatever the outcome: a ceiling that
@@ -5114,6 +5171,13 @@ mod continuation_gate_tests {
         let mut p = prepared("gate_no_plan", true, &[]);
         p.paths = None;
         assert!(continuation_of(&p).is_none());
+    }
+
+    /// A sweep labelled after its phase names the phase once.
+    #[test]
+    fn a_sweep_labelled_after_its_phase_does_not_stutter() {
+        assert_eq!(phase_sweep_tag("clippy", "clippy"), "clippy");
+        assert_eq!(phase_sweep_tag("clippy", "default"), "clippy default");
     }
 }
 

@@ -421,8 +421,8 @@ pub(crate) fn promote_snapshot(
             }
             Err(_) => {
                 if let Err(e) = std::fs::rename(parked, &target_path) {
-                    output::download_msg(&format!(
-                        "  warning: could not restore the replaced snapshot file from {}: {e}",
+                    output::warn(&format!(
+                        "could not restore the replaced snapshot file from {}: {e}",
                         parked.display()
                     ));
                 }
@@ -476,8 +476,8 @@ fn remove_replaced_snapshot_files(
         match std::fs::remove_file(&path) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => output::download_msg(&format!(
-                "  warning: could not remove replaced snapshot file {}: {e}",
+            Err(e) => output::warn(&format!(
+                "could not remove replaced snapshot file {}: {e}",
                 path.display()
             )),
         }
