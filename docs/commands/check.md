@@ -3392,13 +3392,24 @@ a `[test]` footer per harness that ran the name - `PASS` or `FAIL`, tagged with
 the harness (`[test:cli_sort]`, `[lib:pkg]`) - and `BUILD FAILED` for a sweep
 whose build failed. Before running, each sweep says which harnesses hold a match
 (`1 of 85 harnesses holds a match: test:cli_sort`), and a multi-sweep run opens
-with one line naming the sweeps that will run (and those out of the package's
-scope). A sweep `SKIP`s when the name matched in none of its harnesses (usually
-`#[cfg(feature = "...")]`-gated), or because the `-p` target is out of the
-sweep's package scope - the sweep declares a `packages` list the target isn't
-in, or lists the target in `test_exclude_packages`. The latter is decided
-*before* the build, so a target that doesn't carry the sweep's features is
-skipped rather than force-built into a guaranteed `BUILD FAILED`.
+with one line naming the sweeps that will run, and those out of the package's
+scope with their reason (`not this package:` for a `packages` list the target
+isn't in, `excluded by test_exclude_packages:`). That line is the only place an
+out-of-scope sweep is named: it prints no header and no `SKIP` of its own (a
+run resolving to a single sweep has no plan line, so its out-of-scope `SKIP`
+still prints). `sweep:` headers print only when more than one sweep applies to
+the package. The scope decision is made *before* the build, so a target that
+doesn't carry the sweep's features is skipped rather than force-built into a
+guaranteed `BUILD FAILED`. A sweep in scope `SKIP`s when the name matched in
+none of its harnesses (usually `#[cfg(feature = "...")]`-gated).
+
+Every sweep is built and discovered before the first test runs, then built
+again just before it runs and held to that record (another sweep's build may
+have overwritten shared outputs, and discovery itself ran each harness's code).
+That second build is silent unless it fails - then its command (or, for an
+error before cargo reports, the sweep) prints beside the diagnostics - or finds
+drift, which re-prepares the sweep with full narration. Neither build prints
+cargo's warnings on success.
 
 The `FAIL` footer lists **every** failure the harness reported, one per line
 when there are several, each with its panic message and location (recovered
@@ -3414,12 +3425,25 @@ failed verdicts of a suite that never summarised stand in for the name list
 it never printed. The last test seen starting is offered as a **suspect**,
 never as the failure itself: it is read from the harness's own output, so a
 lost or printed record can move it, and a crash before the first test names
-nothing. Each failing harness also reprints its copy-pasteable
-`failing command (cwd <dir>):` line - the binary and its argv, run from that
-directory; it reproduces exactly only with the launch envelope's environment,
-which the line does not carry. Exit code: non-zero if any run was
-`FAIL`/`BUILD FAILED`, or if *every* sweep was `SKIP` (bad name); `SKIP` mixed
-with at least one `PASS` exits `0`. A fired `test` phase ceiling exits 124 and a
+nothing.
+
+When a harness's only failure is one failing test, the footer leads with that
+test's full name rather than the user's filter, which moves into the timing
+parenthesis when it differs (`FAIL pkg::mod::tests::full_name [default,
+lib:pkg] (0.25s; filter: full) - <msg> @ <loc>`); every other failure set keeps
+the filter-led tag. Each harness's `[run]` line names the cwd it runs from.
+A failure counts as a test only when libtest's own verdict names it (a detail
+block or the `failures:` roster, not a panic's thread name, which a test can
+rename) and, where discovery listed the harness, the name is one it listed. After the footer, every
+failing *test* (never a harness failure, never in a doc-only sweep) gets one `investigate (from <root>): brokkr test -p <pkg>
+--sweep <label> [--debug|--release] [--timeout N] -- <full name>` line, carrying
+the overrides the run was given, shell-quoted, printed once per run whichever
+iteration first failed it. It is an investigation, not a replay: the name is
+still a substring filter, and the test runs without whatever ran before it in
+the shared process - recorded replay is `--from-run`. Exit code: non-zero if any
+run was `FAIL`/`BUILD FAILED`, or if *every* sweep was `SKIP` (bad name); `SKIP`
+mixed with at least one `PASS` exits `0`. The closing error line is `test
+failed` (or `no matching test`), the detail having already printed. A fired `test` phase ceiling exits 124 and a
 graceful `brokkr kill` / Ctrl-C exits 130 (see "Time ceilings").
 
 Flags:

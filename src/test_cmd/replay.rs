@@ -177,7 +177,7 @@ pub(super) fn from_run(
             "; the continuation's own record is incomplete"
         },
     ));
-    Err(DevError::Build("test failed".into()))
+    Err(DevError::Reported("test failed".into()))
 }
 
 /// Whether a continuation may call itself `diagnostic_completed`. Every
@@ -583,10 +583,12 @@ fn run_shared(state_root: &Path, sel: &LaneSelection, tap: &LaneTap, ceiling: Du
             &env_pairs(&binary.env),
             &OneRun {
                 tag: &tag,
+                test_tag: None,
                 target: &binary.binary.label(),
                 ceilings,
                 announce: false,
                 expected: Some(group.tests.len()),
+                listed: Some(&group.tests),
                 observe,
             },
             &repeat_state,

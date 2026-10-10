@@ -1,5 +1,14 @@
 # TODO
 
+## `brokkr test`: a superseded sweep loses its continuation coverage
+
+When `settle_sweep` finds drift it journals the sweep's lanes `LaneSuperseded`
+and runs a freshly prepared plan under those same lanes - but reconciliation
+ignores a superseded lane's observations, so whatever the fresh run leaves
+interrupted is not offered to `--from-run`. The fix is a replacement inventory
+(new lanes for the re-prepared plan), not just the supersede marker. Raised in
+the 2026-10-10 spar over the test output cleanup.
+
 ## Baseline: `brokkr check` on nautilus_trader (2026-07-22)
 
 The largest `[[check]]` config in use, recorded verbatim as the reference
