@@ -401,9 +401,10 @@ use crate::test_runner::hash_file;
 pub(crate) fn lane_runs_doctests(sweep: &ResolvedSweep, doctests: bool) -> bool {
     match lane_kind(sweep) {
         LaneKind::DocOnly => true,
-        // The package selection never names a target, so the lane's own
-        // target filters decide it, whatever packages the lane selects.
-        LaneKind::Serial => doctests && !has_target_selector(&sweep_selection_args(sweep, &Selection::Bare)),
+        // The package selection, profile and feature flags never name a
+        // target, so the lane's own target filters decide it, whatever
+        // packages the lane selects.
+        LaneKind::Serial => doctests && !has_target_selector(&sweep.cargo_test_filters),
         LaneKind::Parallel | LaneKind::Isolated | LaneKind::Nextest => false,
     }
 }

@@ -257,8 +257,15 @@ fn prepare_nextest(
     reject_unsupported_forwarded(sweep, cargo_extra)?;
     let mut selection = env.allow_args.clone();
     // The engine lane is one cargo build over the whole selection: it does not
-    // run per-package resolutions.
-    selection.extend(sweep_selection_args(sweep, attempt.selection()));
+    // run per-package resolutions (config refuses package mode on it).
+    let run = attempt.combined_run().ok_or_else(|| {
+        DevError::Config(format!(
+            "sweep '{}' runs under the nextest engine, which runs one build per sweep, but its \
+             selection resolves once per package",
+            sweep.label
+        ))
+    })?;
+    selection.extend(sweep_selection_args(sweep, run));
     selection.extend(cargo_extra.iter().cloned());
     build_nextest_lane(inputs, sweep, selection, env)
         .inspect_err(|e| {
@@ -268,7 +275,9 @@ fn prepare_nextest(
             // failure of this lane and gets no failure shape.
             if inputs.certifying && !matches!(e, DevError::Interrupted) {
                 output::error(&format!(
-                    "test {}: {}", sweep.label, describe_sweep(sweep, true, attempt.selection())
+                    "test {}: {}",
+                    sweep.label,
+                    describe_sweep(sweep, true, attempt.selection(), attempt.described_features())
                 ));
             }
         })
@@ -617,7 +626,7 @@ fn run_nextest_sweep(
         &format!(
             "test {}: {}, nextest engine {NEXTEST_ENGINE_VERSION}, process-per-test, brokkr-owned config",
             sweep.label,
-            describe_sweep(sweep, true, attempt.selection())
+            describe_sweep(sweep, true, attempt.selection(), attempt.described_features())
         ),
         None,
         commands,

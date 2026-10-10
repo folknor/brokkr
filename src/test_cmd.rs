@@ -27,7 +27,10 @@
 //! (the user's `<NAME>` is the filter), and CLI `--features` is not
 //! accepted. Profile-declared `env` vars *are* propagated, so a
 //! profile that gates platform tests behind `BROKKR_TEST_PLATFORM=1`
-//! still works under `brokkr test`.
+//! still works under `brokkr test`. A sweep's configured features are
+//! projected onto the one package the run selects (and its support builds
+//! onto each support package), exactly as `check -p` projects them: a token
+//! only another of the sweep's packages routes is dropped, and said so.
 //!
 //! Every test gets a 20s hard cap; exceeding it fails the run and stops it,
 //! between `-N` iterations included. `--timeout <SECS>` (1-280) is the only
@@ -409,8 +412,8 @@ fn prepare_sweep<'s>(
     // short-circuits the sweep with a BuildFailed outcome so the
     // aggregator marks it as failed.
     let mut support: Vec<check_cmd::SupportArtifact> = Vec::new();
-    for build_pkg in &sweep.build_packages {
-        match run_pre_build(project_root, sweep, build_pkg, &env_refs, &allow_args, debug)? {
+    for req in attempt.support() {
+        match run_pre_build(project_root, sweep, req, &env_refs, &allow_args, debug)? {
             Some(artifacts) => support.extend(artifacts),
             None => return Ok(SweepOutcome::Done(RunReport::bare(Outcome::BuildFailed))),
         }
@@ -420,7 +423,7 @@ fn prepare_sweep<'s>(
     // cannot see doctests. Every other sweep prebuilds, has each harness
     // list itself, and runs only the harnesses holding a match - see
     // `plan_focused`.
-    let shape = BuildShape { sweep, allow_args: &allow_args, selection: attempt.selection(), jobs: cx.jobs, debug };
+    let shape = BuildShape { sweep, allow_args: &allow_args, run: single_run(sweep, attempt)?, jobs: cx.jobs, debug };
     let (focused, runtime_fingerprint) = if sweep.doc_only {
         if timeout.is_some() {
             return Err(doc_only_timeout_refusal(sweep));
@@ -496,7 +499,11 @@ fn run_sweeps(
     // sweep the dedupe would otherwise fold away.
     let test_cfg = dev_config.test.as_ref();
     let debug_of = |s: &ResolvedSweep| resolve_debug(profile_override, test_cfg, s.profile);
-    let selection = check_cmd::PhaseSelection::for_brokkr_test(&sweeps, &pkg, source, &debug_of)?;
+    // Each sweep's features are projected onto the one package: a token only
+    // another of the sweep's packages routes is dropped, and said so.
+    let oracle = check_cmd::FeatureOracle::at(project_root);
+    let selection = check_cmd::PhaseSelection::for_brokkr_test(&sweeps, &pkg, source, &debug_of, &oracle)?;
+    check_cmd::announce_feature_drops(&sweeps, &[&selection]);
     // A deduped sweep is not a sweep this run goes through.
     let multi = selection.entries().iter().filter(|e| !matches!(e, LaneEntry::Deduped(_))).count() > 1;
 
@@ -710,7 +717,7 @@ fn run_ready(
             shape: BuildShape {
                 sweep: r.sweep,
                 allow_args: &r.allow_args,
-                selection: r.attempt.selection(),
+                run: single_run(r.sweep, &r.attempt)?,
                 jobs: cx.jobs,
                 debug: r.debug,
             },
@@ -826,8 +833,8 @@ fn settle_sweep<'s>(
 fn recheck_sweep(prepared: &ReadySweep<'_>, cx: &SweepContext<'_>) -> Result<Option<Vec<String>>, DevError> {
     let env_refs: Vec<(&str, &str)> = prepared.env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
     let mut support: Vec<check_cmd::SupportArtifact> = Vec::new();
-    for build_pkg in &prepared.sweep.build_packages {
-        match run_pre_build(cx.project_root, prepared.sweep, build_pkg, &env_refs, &prepared.allow_args, prepared.debug)? {
+    for req in prepared.attempt.support() {
+        match run_pre_build(cx.project_root, prepared.sweep, req, &env_refs, &prepared.allow_args, prepared.debug)? {
             Some(artifacts) => support.extend(artifacts),
             None => return Ok(None),
         }
@@ -835,7 +842,7 @@ fn recheck_sweep(prepared: &ReadySweep<'_>, cx: &SweepContext<'_>) -> Result<Opt
     let shape = BuildShape {
         sweep: prepared.sweep,
         allow_args: &prepared.allow_args,
-        selection: prepared.attempt.selection(),
+        run: single_run(prepared.sweep, &prepared.attempt)?,
         jobs: cx.jobs,
         debug: prepared.debug,
     };
@@ -1427,12 +1434,13 @@ fn format_repeat_summary(reports: &[RunReport]) -> Vec<String> {
 fn run_pre_build(
     project_root: &Path,
     sweep: &ResolvedSweep,
-    package: &str,
+    req: &check_cmd::SupportRequest,
     env: &[(&str, &str)],
     allow_args: &[String],
     debug: bool,
 ) -> Result<Option<Vec<check_cmd::SupportArtifact>>, DevError> {
-    let args = pre_build_argv(sweep, package, allow_args, debug);
+    let package = req.package();
+    let args = pre_build_argv(sweep, req, allow_args, debug);
     let line = format!("cargo {} (sweep build: {})", args.join(" "), sweep.label);
     output::detail(&line);
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -1530,7 +1538,7 @@ fn cargo_with_deadline(
 /// ever reached. `allow_args` goes before the selection, as in [`test_argv`].
 fn pre_build_argv(
     sweep: &ResolvedSweep,
-    package: &str,
+    req: &check_cmd::SupportRequest,
     allow_args: &[String],
     debug: bool,
 ) -> Vec<String> {
@@ -1544,11 +1552,27 @@ fn pre_build_argv(
     if !debug {
         args.push("--release".into());
     }
-    args.extend(sweep.cargo_feature_args.iter().cloned());
+    // The sweep's features projected onto the support package alone.
+    args.extend(req.feature_args().iter().cloned());
     // Its own explicit single-package selection, never the run's: a support
     // package is usually not the package under test.
-    args.extend(check_cmd::package_args(&check_cmd::Selection::Explicit(vec![package.to_owned()])));
+    args.extend(req.package_args());
     args
+}
+
+/// The one request a `brokkr test` sweep runs as. The resolved package always
+/// overrides the sweep's selection, so there is exactly one resolution under
+/// every unification mode (package mode over one package is one run).
+fn single_run<'a>(sweep: &ResolvedSweep, attempt: &'a check_cmd::Attempt) -> Result<&'a check_cmd::ResolutionRun, DevError> {
+    match attempt.runs() {
+        [one] => Ok(one),
+        runs => Err(DevError::Build(format!(
+            "sweep '{}' planned {} cargo resolutions for one package - a brokkr bug, please report the \
+             `[[check]]` entry",
+            sweep.label,
+            runs.len()
+        ))),
+    }
 }
 
 /// Everything that shapes a sweep's build, shared by its prebuild and every
@@ -1556,9 +1580,10 @@ fn pre_build_argv(
 struct BuildShape<'a> {
     sweep: &'a ResolvedSweep,
     allow_args: &'a [String],
-    /// The sweep's selection in this run: always the resolved package, as an
-    /// override of the sweep's own selection.
-    selection: &'a check_cmd::Selection,
+    /// The sweep's request in this run: always the resolved package, as an
+    /// override of the sweep's own selection, with the sweep's features
+    /// projected onto it.
+    run: &'a check_cmd::ResolutionRun,
     jobs: Option<u32>,
     debug: bool,
 }
@@ -1566,7 +1591,7 @@ struct BuildShape<'a> {
 impl BuildShape<'_> {
     /// The one package this run tests, for messages.
     fn pkg(&self) -> &str {
-        self.selection.packages().and_then(<[String]>::first).map_or("", String::as_str)
+        self.run.selection.packages().and_then(<[String]>::first).map_or("", String::as_str)
     }
 }
 
@@ -1586,12 +1611,12 @@ fn cargo_head(shape: &BuildShape<'_>, leading: &[&str]) -> Vec<String> {
     if !shape.debug {
         args.push("--release".into());
     }
-    args.extend(shape.sweep.cargo_feature_args.iter().cloned());
+    args.extend(shape.run.feature_args().iter().cloned());
     if let Some(j) = shape.jobs {
         args.push("-j".into());
         args.push(j.to_string());
     }
-    args.extend(check_cmd::package_args(shape.selection));
+    args.extend(shape.run.package_args());
     args
 }
 
@@ -2702,15 +2727,26 @@ mod tests {
     use super::*;
     use crate::config::{CheckEntry, SweepProfile, TestConfig};
 
-    /// A one-package selection: package flags as the run's override spells
-    /// them.
-    fn one_package(pkg: &str) -> check_cmd::Selection {
-        check_cmd::Selection::Explicit(vec![pkg.to_owned()])
+    /// `sweep`'s one request under `brokkr test -p pkg`: the package flags
+    /// as the run's override spells them, with the sweep's features.
+    fn one_package(sweep: &ResolvedSweep, pkg: &str) -> check_cmd::ResolutionRun {
+        let sel = selection_for(std::slice::from_ref(sweep), pkg);
+        single_run(sweep, sel.attempt(0).unwrap()).unwrap().clone()
     }
 
     /// `brokkr test`'s selection for `pkg`, every sweep resolving to release.
     fn selection_for(sweeps: &[ResolvedSweep], pkg: &str) -> check_cmd::PhaseSelection {
-        check_cmd::PhaseSelection::for_brokkr_test(sweeps, pkg, check_cmd::PackageSource::Cli, &|_| false).unwrap()
+        check_cmd::PhaseSelection::for_brokkr_test(
+            sweeps,
+            pkg,
+            check_cmd::PackageSource::Cli,
+            &|_| false,
+            // Every package unknown: projection is the identity, so these
+            // tests see the configured features. Routing has its own tests
+            // in `check_cmd`'s selection module.
+            &check_cmd::FeatureOracle::empty(),
+        )
+        .unwrap()
     }
 
     /// The sweeps a `brokkr test -p pkg` run would build, in order.
@@ -2915,8 +2951,8 @@ mod tests {
     #[test]
     fn the_prebuild_selects_the_test_targets() {
         let sweep = ResolvedSweep::default();
-        let sel = one_package("pkg");
-        let shape = BuildShape { sweep: &sweep, allow_args: &[], selection: &sel, jobs: None, debug: true };
+        let run = one_package(&sweep, "pkg");
+        let shape = BuildShape { sweep: &sweep, allow_args: &[], run: &run, jobs: None, debug: true };
         let pre = prebuild_argv(&shape);
         assert_eq!(
             pre,
@@ -2950,8 +2986,8 @@ mod tests {
     #[test]
     fn the_doc_only_run_shares_the_libtest_half() {
         let sweep = ResolvedSweep { doc_only: true, ..ResolvedSweep::default() };
-        let sel = one_package("pkg");
-        let shape = BuildShape { sweep: &sweep, allow_args: &[], selection: &sel, jobs: None, debug: true };
+        let one = one_package(&sweep, "pkg");
+        let shape = BuildShape { sweep: &sweep, allow_args: &[], run: &one, jobs: None, debug: true };
         let run = test_argv(&shape, "x");
         let sep = run.iter().position(|a| a == "--").expect("separator");
         assert_eq!(&run[..sep], ["test", "-p", "pkg", "--doc", "x"]);
@@ -3180,7 +3216,7 @@ mod tests {
         let sweeps = decide_sweeps(None, &[]).unwrap();
         assert_eq!(sweeps.len(), 1);
         assert_eq!(sweeps[0].label, "all-features");
-        assert_eq!(sweeps[0].cargo_feature_args, vec!["--all-features"]);
+        assert_eq!(sweeps[0].features.configured_key(), vec!["--all-features"]);
         assert!(sweeps[0].build_packages.is_empty());
     }
 
@@ -3208,13 +3244,13 @@ mod tests {
         assert_eq!(sweeps.len(), 2);
         assert_eq!(sweeps[0].label, "all");
         assert_eq!(
-            sweeps[0].cargo_feature_args,
+            sweeps[0].features.configured_key(),
             vec!["--features", "test-hooks,linux-direct-io"]
         );
         assert_eq!(sweeps[0].build_packages, vec!["pbfhogg-cli"]);
         assert_eq!(sweeps[1].label, "consumer");
         assert_eq!(
-            sweeps[1].cargo_feature_args,
+            sweeps[1].features.configured_key(),
             vec!["--no-default-features", "--features", "commands"]
         );
     }
@@ -3332,13 +3368,13 @@ lanes = ["tier1", "serial"]
         // `-p PKG NAME` finds its test.
         let excludes = ResolvedSweep {
             label: "tier1/all".into(),
-            cargo_feature_args: vec!["--features".into(), "a".into()],
+            features: crate::profile::FeatureConfig { tokens: vec!["a".into()], ..Default::default() },
             test_exclude_packages: vec!["pkg-x".into()],
             ..Default::default()
         };
         let permits = ResolvedSweep {
             label: "serial/all".into(),
-            cargo_feature_args: vec!["--features".into(), "a".into()],
+            features: crate::profile::FeatureConfig { tokens: vec!["a".into()], ..Default::default() },
             test_exclude_packages: Vec::new(),
             ..Default::default()
         };
@@ -3470,7 +3506,7 @@ include_ignored = false
             ..ResolvedSweep::default()
         };
         let allow = vec!["--config".to_owned(), "build.rustflags=[\"-A\",\"x\"]".to_owned()];
-        let args = pre_build_argv(&sweep, "daemon", &allow, false);
+        let args = pre_build_argv(&sweep, &support_for(&sweep, "daemon", "daemon"), &allow, false);
         assert!(
             args.iter().any(|a| a == "resolver.feature-unification=\"package\""),
             "{args:?}"
@@ -3479,8 +3515,61 @@ include_ignored = false
         assert!(args.iter().any(|a| a == "--release"), "{args:?}");
 
         // An unpinned sweep with no allows stays byte-identical to before.
-        let plain = pre_build_argv(&ResolvedSweep::default(), "bin", &[], true);
+        let plain_sweep = ResolvedSweep::default();
+        let plain = pre_build_argv(&plain_sweep, &support_for(&plain_sweep, "core", "bin"), &[], true);
         assert_eq!(plain, ["build", "--message-format=json-render-diagnostics", "-p", "bin"]);
+    }
+
+    /// The support request the run's selection plans for `support` when
+    /// `brokkr test -p pkg` runs `sweep` with `support` as a build package.
+    fn support_for(sweep: &ResolvedSweep, pkg: &str, support: &str) -> check_cmd::SupportRequest {
+        let with = ResolvedSweep { build_packages: vec![support.to_owned()], ..sweep.clone() };
+        let sel = selection_for(std::slice::from_ref(&with), pkg);
+        sel.attempt(0).unwrap().support()[0].clone()
+    }
+
+    /// `brokkr test -p strategy` projects a sweep's features onto the one
+    /// package, and its support build onto the support package: the bug
+    /// where cargo rejected every token the narrowed package did not define.
+    #[test]
+    fn the_run_and_its_support_build_carry_projected_features() {
+        let ws = check_cmd::feature_fixture::piners();
+        let sweep = ResolvedSweep {
+            label: "piners".into(),
+            packages: vec!["piners-vm".into(), "piners-strategy".into(), "piners-harness".into()],
+            build_packages: vec!["piners-runner".into()],
+            features: crate::profile::FeatureConfig {
+                tokens: vec![
+                    "piners-vm/opcode-counts".into(),
+                    "piners-strategy/hotpath".into(),
+                    "piners-harness/bench".into(),
+                ],
+                ..Default::default()
+            },
+            ..ResolvedSweep::default()
+        };
+        let sel = check_cmd::PhaseSelection::for_brokkr_test(
+            std::slice::from_ref(&sweep),
+            "piners-strategy",
+            check_cmd::PackageSource::Cli,
+            &|_| false,
+            &check_cmd::FeatureOracle::fixed(ws),
+        )
+        .unwrap();
+        let attempt = sel.attempt(0).unwrap();
+        let run = single_run(&sweep, attempt).unwrap();
+        let shape = BuildShape { sweep: &sweep, allow_args: &[], run, jobs: None, debug: true };
+        let pre = prebuild_argv(&shape);
+        assert!(
+            pre.windows(2).any(|w| w == ["--features", "piners-vm/opcode-counts,piners-strategy/hotpath"]),
+            "{pre:?}"
+        );
+        let support = pre_build_argv(&sweep, &attempt.support()[0], &[], true);
+        assert!(
+            support.windows(2).any(|w| w == ["--features", "piners-vm/opcode-counts"]),
+            "{support:?}"
+        );
+        assert!(support.ends_with(&["-p".to_owned(), "piners-runner".to_owned()]), "{support:?}");
     }
 
     fn ready_sweep<'s>(
@@ -3721,9 +3810,9 @@ include_ignored = false
     fn only_a_failing_run_shows_its_invocation() {
         let state = RepeatState::default();
         let sweep = ResolvedSweep::default();
-        let sel = one_package("pkg");
+        let run = one_package(&sweep, "pkg");
         let plan = SweepPlan {
-            shape: BuildShape { sweep: &sweep, allow_args: &[], selection: &sel, jobs: None, debug: true },
+            shape: BuildShape { sweep: &sweep, allow_args: &[], run: &run, jobs: None, debug: true },
             name: "n",
             focused: None,
             exact: None,

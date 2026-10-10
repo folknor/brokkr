@@ -288,15 +288,32 @@ the lane's identity everywhere (the plan, the journal, termination labels):
   computed or validated for a disabled phase). Admission is exactly the
   package rules above, the exclusion list checked before the packages list.
 
+Each eligible lane also carries its cargo **requests**, built with the
+selection and stored on it: one per resolution (its package selection plus the
+sweep's features projected onto it, see [Feature projection](#feature-projection))
+and one per `build_packages` support build. Every cargo argv - clippy,
+rustdoc, the pre-builds, the test runs, the prebuilds and listings, the
+coverage enumeration, `brokkr test` - takes its package and feature flags
+from a request, never from the sweep. The parallel lane's repro line for a
+failing binary is the whole request that built it (its full package
+selection and projected features) plus the binary's target selector, so it
+resolves the prebuild's exact graph; under a multi-package selection a
+`--lib` repro therefore runs every selected package's lib harness.
+
 Dedupe differs by phase. Clippy and rustdoc fold a sweep onto an earlier one
-of the same build shape (`build_shape_key`). `check`'s test lanes never
-dedupe: their filters and execution policies differ even where their builds
-do not. `brokkr test` dedupes on what a lane would execute - the package
-selection (its provenance ignored), resolutions, features, unification,
-rustflags, env, `build_packages`, the effective debug answer (`--debug`/
-`--release` over the sweep's pin over `[test] debug`) and `doc_only` - so a
-sweep and its doctest twin stay two runs, and two sweeps narrowed to the same
-package with the same build fold into one.
+that compiles the same thing: the same compile inputs (profile, rustflags,
+env, unification) and the same requests - every run's selection (provenance
+ignored), resolution boundary and projected features, and every support
+build with its projected features. So two sweeps a `-p` narrows to the same
+package and the same projected features are linted once. `check`'s test lanes
+never dedupe: their filters and execution policies differ even where their
+builds do not. `brokkr test` dedupes on what a lane would execute - the same
+requests and compile inputs, with the effective debug answer (`--debug`/
+`--release` over the sweep's pin over `[test] debug`) in place of the profile,
+plus `doc_only` - so a sweep and its doctest twin stay two runs, and two
+sweeps narrowed to the same package with the same build fold into one. The
+coverage audit still groups by the configured shape (`build_shape_key`): it
+identifies the declared sweep, and a complete profile refuses `-p` anyway.
 
 A lane that is not eligible builds nothing for that phase. In particular
 `prepare` records an excluded test lane as skipped and builds neither its
@@ -329,6 +346,76 @@ install set, `install_feature_check` ruling the claim out, the phase
 skipped), skipped visibly when the `-p` set rules every install package out
 (never a refusal), else the install packages to check. Which of their bins are
 eligible stays cargo's runtime answer.
+
+## Feature projection
+
+A `[[check]]` entry's `features` are written against the entry's own
+selection. An entry over `vm`, `strategy` and `harness` may list
+`vm/opcode-counts` and `strategy/hotpath`, and the full run is fine because
+some selected package routes every token. A run that selects fewer packages
+is a different matter: cargo rejects every token none of its packages routes
+("the package does not contain these features"). Three things narrow a run
+below the entry's selection:
+
+- **`-p`** on `check`, `brokkr clippy`, or `brokkr test`'s resolved package
+  (which always overrides).
+- **Package mode** (`feature_unification = "package"`), which runs one cargo
+  resolution per package with no `-p` at all.
+- **Support builds**: each `build_packages` pre-build selects its one package.
+
+So each request carries the entry's tokens **projected** onto the packages it
+selects. For a token and the run's packages P:
+
+- a bare `f` is routed by a package that has a feature `f`, or an optional
+  dependency (any kind, any target) named `f` - its implicit feature;
+- `x/f` or `x?/f` is routed by a package that declares a dependency (any
+  kind, any target) named `x` - the `rename` when there is one, the manifest
+  spelling, hyphens kept - or by the package `x` itself when it has `f` by
+  the bare rule;
+- anything else (`dep:x`, more than one `/`, an empty half) is malformed and
+  routes nowhere.
+
+A token some package in P routes is **kept**. A token no package in P routes,
+but some member of the entry's **domain** does, is **dropped**. A token nothing
+in the domain routes either is **kept**, so cargo rejects it with its own
+message, exactly as the full run does; malformed tokens are always kept. The
+domain is the entry's own selection for the phase, resolved to workspace
+members before any `-p` or per-package split: its `packages`, or every member
+minus `test_exclude_packages`, or the workspace's default members. A support
+build's domain is that plus every `build_packages` entry. `--all-features`
+and `--no-default-features` are flags, not tokens, and pass through
+unchanged; when every token is dropped, `--features` is omitted.
+
+A package that depends on the others keeps their qualified tokens: under
+`-p harness` (depending on `vm` and `strategy`) the run above carries both
+tokens; under `-p strategy` (depending on `vm`) it carries `vm/opcode-counts`
+and `strategy/hotpath` but not a `runner/...` token.
+
+Every drop is said once per lane, before any phase runs:
+
+```
+sweep piners, -p piners-strategy: dropped piners-runner/trace (applies to piners-runner, piners-harness only)
+sweep bin, build piners-runner: dropped piners-strategy/hotpath (applies to piners-strategy only)
+```
+
+and the sweep's shape line, a failing command and the parallel lane's repro
+line all render the projected features, not the configured list.
+
+**Not projected:** features the invocation names itself - `check --features`
+/ `--no-default-features` and `brokkr clippy`'s ad-hoc flags. The user asked
+cargo for exactly those, and a token cargo rejects is theirs to see.
+`brokkr clippy --sweep NAME` replays an entry, so its features are projected
+like any gate sweep's (an identity over the entry's own selection, but a
+package-mode entry still projects per package).
+
+The routing reads one `cargo metadata --no-deps` per invocation (each
+member's `features` and declared dependencies), fetched without feature
+flags, cached, and only when some request selects something other than its
+domain while carrying tokens - an ordinary full run pays nothing. Note the
+lane's own test runs project against the entry's selection only: a token
+that only a `build_packages` package routes is kept there, and cargo rejects
+it on the lane's run as it always has. Put support-only features on a sweep
+whose selection includes that package.
 
 ## Running one textlint rule or script check
 
@@ -2887,6 +2974,10 @@ different questions, and only the first could be derived.
 - **Forwarded package selectors are refused.** `brokkr check -- -p other` under
   package mode is an error, because cargo unions selection flags and would
   widen a resolution promised to hold exactly one package.
+- **Each resolution carries only its package's features.** An entry's
+  package-qualified tokens are projected onto each resolution's one package,
+  so `strategy/hotpath` does not reach the `vm` resolution - see
+  [Feature projection](#feature-projection).
 - The mode is part of the **build shape** (and of what `brokkr test` dedupes
   on), so a package-mode and a workspace-mode lane never dedupe into each
   other in clippy, in `brokkr test`, or in the coverage audit.
@@ -3171,8 +3262,11 @@ The shape is `<package scope>[, <features>][, rustflags ...][, <test bits>]`:
 - package scope - `workspace`, `N pkgs` (a `packages` list, emitted as `-p`),
   or `workspace -N pkgs` (`test_exclude_packages`; test phase only, since
   clippy stays workspace-wide).
-- features - read back out of the flattened argv, so it cannot drift from what
-  cargo is handed: `all-features`, `no-default`, `+ffi,live`. A fragment that
+- features - read back out of the request's feature argv (the projection, not
+  the configured list - see [Feature projection](#feature-projection)), so it
+  cannot drift from what cargo is handed: `all-features`, `no-default`,
+  `+ffi,live`. A lane-level line shows the tokens some run of the lane
+  carries. A fragment that
   merely restates the sweep's name is dropped (the legacy no-`[[check]]` path
   names its synthesized sweep `all-features`).
 - `rustflags <flags> (isolated target)` - always part of the shape, because
@@ -3286,9 +3380,10 @@ without it a red is indistinguishable from a code failure.
 A profile with `lanes` resolves to the concatenation of its lanes' sweeps,
 labels lane-qualified (`tier1/default`, `serial/default`). The test phase
 runs each lane's entry separately - contradictory filter sets are the point -
-while the clippy and rustdoc phases dedupe sweeps whose build shape (packages,
-features, rustflags, env, build_packages, profile, effective unification) is
-identical, logging `clippy <label>: deduped`. `profile` is in the shape because
+while the clippy and rustdoc phases dedupe sweeps that compile the same thing
+(the same requests - selections, projected features, support builds - and the
+same rustflags, env, profile and effective unification; see "Invocation
+selection"), logging `clippy <label>: deduped`. `profile` is in the key because
 `cfg(debug_assertions)` decides which code exists: a dev and a release sweep of
 the same features present different lint surfaces, so they are linted
 separately rather than deduped into one.

@@ -277,19 +277,19 @@ impl PreparedLane {
 /// lane's whole selection for the combined resolution, else the one package
 /// REPLACING the sweep's own `-p` list (cargo unions selection flags) - with
 /// the profile, the unification pin and the features, which the parallel
-/// lane's per-package prebuild used to drop. The sweep's `--test` filters do
-/// not ride a per-package prebuild (cargo refuses a target a package lacks);
-/// they narrow the listed binaries instead.
+/// lane's per-package prebuild used to drop. The features are the request's
+/// projection onto that one package. The sweep's `--test` filters do not ride
+/// a per-package prebuild (cargo refuses a target a package lacks); they
+/// narrow the listed binaries instead.
 fn resolution_selection(sweep: &ResolvedSweep, run: &ResolutionRun) -> Vec<String> {
     match &run.resolution {
         Some(_) => {
             let mut args = sweep_profile_args(sweep);
             args.extend(sweep.unification_args());
-            args.extend(package_args(&run.selection));
-            args.extend(sweep.cargo_feature_args.iter().cloned());
+            args.extend(run.cargo_args());
             args
         }
-        None => sweep_selection_args(sweep, &run.selection),
+        None => sweep_selection_args(sweep, run),
     }
 }
 
@@ -634,7 +634,7 @@ impl DocFacts {
     }
 
     /// The members one resolution of a serial lane runs `cargo test` over -
-    /// the same selection [`package_args`] spells.
+    /// the same selection [`selection::package_args`] spells.
     fn selected<'a>(&'a self, selection: &'a Selection) -> Vec<&'a str> {
         match selection {
             Selection::Explicit(p) | Selection::Override { packages: p, .. } => {
@@ -702,7 +702,7 @@ fn prepare_serial(
         // Exactly the cargo-level argv `run_one_test_sweep` hands `cargo test`,
         // so the prebuild names the same units and the run is a no-op rebuild.
         let mut selection = env.allow_args.clone();
-        selection.extend(sweep_selection_args(sweep, &run.selection));
+        selection.extend(sweep_selection_args(sweep, run));
         selection.extend(cargo_extra.iter().cloned());
         let Some((binaries, idx)) =
             test_binaries_with_runtime(inputs.project_root, &selection, &env_refs, inputs.commands)?
@@ -710,7 +710,7 @@ fn prepare_serial(
             return Err(not_prepared(sweep));
         };
         index.merge(idx);
-        built.push((run.resolution, selection, binaries));
+        built.push((run.resolution.clone(), selection, binaries));
     }
     let fingerprint = Some(index.fingerprint()?);
     let runtime = DirectRuntime::load(inputs.project_root, &env_refs, index)?;
@@ -775,7 +775,7 @@ fn prepare_direct(
     // mode exists for, so it would enumerate binaries no run uses.
     for run in attempt.runs() {
         let mut selection = env.allow_args.clone();
-        selection.extend(resolution_selection(sweep, &run));
+        selection.extend(resolution_selection(sweep, run));
         selection.extend(extra_selectors.iter().cloned());
         selection.extend(cargo_extra.iter().cloned());
         let Some((binaries, idx)) =
@@ -784,7 +784,7 @@ fn prepare_direct(
             return Err(not_prepared(sweep));
         };
         index.merge(idx);
-        built.push((run.resolution, selection, binaries));
+        built.push((run.resolution.clone(), selection, binaries));
     }
     let fingerprint = Some(index.fingerprint()?);
     let runtime = DirectRuntime::load(inputs.project_root, &env_refs, index)?;
@@ -1007,11 +1007,11 @@ pub(crate) struct Universe {
 pub(crate) fn enumerate_universe(
     inputs: &LaneInputs<'_>,
     sweep: &ResolvedSweep,
-    resolution: Option<&str>,
+    run: &ResolutionRun,
     env: &LaneEnv,
 ) -> Result<Universe, DevError> {
     let env_refs = env.refs();
-    let bare = resolution_enumeration_args(sweep, resolution, env.allow_args.clone());
+    let bare = shape_enumeration_args(sweep, run, env.allow_args.clone());
     let Some((binaries, index)) = test_binaries_with_runtime(inputs.project_root, &bare, &env_refs, inputs.commands)?
     else {
         return Err(DevError::Reported(format!("the universe of sweep '{}' could not be enumerated", sweep.label)));
@@ -1060,7 +1060,9 @@ pub(crate) trait Preparer {
     /// built.
     fn support(&mut self, sweep: &ResolvedSweep, attempt: &Attempt) -> Result<Vec<SupportArtifact>, DevError>;
     fn lane(&mut self, sweep: &ResolvedSweep, attempt: &Attempt) -> Result<PreparedLane, DevError>;
-    fn universe(&mut self, sweep: &ResolvedSweep, resolution: Option<&str>, env: &LaneEnv) -> Result<Universe, DevError>;
+    /// Enumerate one shape resolution's universe from the lane's own planned
+    /// request for it - its selection and projected features.
+    fn universe(&mut self, sweep: &ResolvedSweep, run: &ResolutionRun, env: &LaneEnv) -> Result<Universe, DevError>;
 }
 
 /// The real preparer: cargo, listings, hashes.
@@ -1072,14 +1074,14 @@ pub(crate) struct CargoPreparer<'a> {
 }
 
 impl Preparer for CargoPreparer<'_> {
-    fn support(&mut self, sweep: &ResolvedSweep, _attempt: &Attempt) -> Result<Vec<SupportArtifact>, DevError> {
+    fn support(&mut self, sweep: &ResolvedSweep, attempt: &Attempt) -> Result<Vec<SupportArtifact>, DevError> {
         let env = lane_env(&self.inputs, sweep);
         let mut out = Vec::new();
-        for pkg in &sweep.build_packages {
+        for req in attempt.support() {
             out.extend(run_sweep_pre_build(
                 self.inputs.project_root,
                 sweep,
-                pkg,
+                req,
                 &env.project_env,
                 &env.allow_args,
                 self.inputs.commands,
@@ -1092,8 +1094,8 @@ impl Preparer for CargoPreparer<'_> {
         prepare_lane(&self.inputs, sweep, attempt, self.extra_args)
     }
 
-    fn universe(&mut self, sweep: &ResolvedSweep, resolution: Option<&str>, env: &LaneEnv) -> Result<Universe, DevError> {
-        enumerate_universe(&self.inputs, sweep, resolution, env)
+    fn universe(&mut self, sweep: &ResolvedSweep, run: &ResolutionRun, env: &LaneEnv) -> Result<Universe, DevError> {
+        enumerate_universe(&self.inputs, sweep, run, env)
     }
 }
 
@@ -1270,7 +1272,15 @@ pub(crate) fn prepare_profile(
                 let key = (shape.clone(), r.resolution.clone());
                 if !universes.contains_key(&key) {
                     shape_order.push((shape.clone(), r.resolution.clone(), idx));
-                    let u = match preparer.universe(sweep, r.resolution.as_deref(), &prepared.env) {
+                    // The lane's own planned request for this resolution: the
+                    // universe is enumerated from the build the lane compiled.
+                    let planned = lane_attempt.run_for(r.resolution.as_deref()).ok_or_else(|| {
+                        DevError::Build(format!(
+                            "sweep '{}': no planned request for resolution {:?}",
+                            sweep.label, r.resolution
+                        ))
+                    });
+                    let u = match planned.and_then(|run| preparer.universe(sweep, run, &prepared.env)) {
                         Ok(u) => Some(u),
                         Err(e) => {
                             plan.incomplete.push(format!("sweep '{}': universe: {e}", sweep.label));
@@ -1455,7 +1465,7 @@ mod prepare_tests {
     /// The test selection of a run with CLI `-p` set `cli`.
     fn selected(sweeps: &[ResolvedSweep], cli: &[&str]) -> PhaseSelection {
         let cli: Vec<String> = cli.iter().map(|p| (*p).to_owned()).collect();
-        PhaseSelection::for_check(SelectionPhase::Test, sweeps, &cli).unwrap()
+        PhaseSelection::for_check(SelectionPhase::Test, sweeps, &cli, &FeatureOracle::unavailable()).unwrap()
     }
 
     /// `prepare_profile` over the selection of a run with no `-p`.
@@ -1501,7 +1511,7 @@ mod prepare_tests {
             Ok(p)
         }
 
-        fn universe(&mut self, _: &ResolvedSweep, _: Option<&str>, _: &LaneEnv) -> Result<Universe, DevError> {
+        fn universe(&mut self, _: &ResolvedSweep, _: &ResolutionRun, _: &LaneEnv) -> Result<Universe, DevError> {
             let b = binary("suite");
             Ok(Universe {
                 binaries: vec![(
@@ -1558,7 +1568,7 @@ mod prepare_tests {
             fn lane(&mut self, s: &ResolvedSweep, a: &Attempt) -> Result<PreparedLane, DevError> {
                 Fake::new(None).lane(s, a)
             }
-            fn universe(&mut self, _: &ResolvedSweep, _: Option<&str>, _: &LaneEnv) -> Result<Universe, DevError> {
+            fn universe(&mut self, _: &ResolvedSweep, _: &ResolutionRun, _: &LaneEnv) -> Result<Universe, DevError> {
                 Ok(Universe::default())
             }
         }
@@ -1869,7 +1879,7 @@ mod prepare_tests {
                 output::error("failing command: ./custom --list");
                 Err(DevError::Reported("sweep 'one' could not be prepared".into()))
             }
-            fn universe(&mut self, _: &ResolvedSweep, _: Option<&str>, _: &LaneEnv) -> Result<Universe, DevError> {
+            fn universe(&mut self, _: &ResolvedSweep, _: &ResolutionRun, _: &LaneEnv) -> Result<Universe, DevError> {
                 Ok(Universe::default())
             }
         }
@@ -2112,7 +2122,7 @@ mod prepare_tests {
                 "cargo-mediated parallelism shares one stream".into(),
             ))
         }
-        fn universe(&mut self, _: &ResolvedSweep, _: Option<&str>, _: &LaneEnv) -> Result<Universe, DevError> {
+        fn universe(&mut self, _: &ResolvedSweep, _: &ResolutionRun, _: &LaneEnv) -> Result<Universe, DevError> {
             Err(DevError::Build("a non-certifying run enumerates no universe".into()))
         }
     }
@@ -2131,7 +2141,7 @@ mod prepare_tests {
             fn lane(&mut self, s: &ResolvedSweep, a: &Attempt) -> Result<PreparedLane, DevError> {
                 self.0.lane(s, a)
             }
-            fn universe(&mut self, _: &ResolvedSweep, _: Option<&str>, _: &LaneEnv) -> Result<Universe, DevError> {
+            fn universe(&mut self, _: &ResolvedSweep, _: &ResolutionRun, _: &LaneEnv) -> Result<Universe, DevError> {
                 Err(DevError::Build("asked for a universe".into()))
             }
         }
@@ -2178,7 +2188,7 @@ mod prepare_tests {
                 output::error("failing command: cargo test --no-run");
                 Err(DevError::Reported("sweep 'one' could not be prepared".into()))
             }
-            fn universe(&mut self, _: &ResolvedSweep, _: Option<&str>, _: &LaneEnv) -> Result<Universe, DevError> {
+            fn universe(&mut self, _: &ResolvedSweep, _: &ResolutionRun, _: &LaneEnv) -> Result<Universe, DevError> {
                 Ok(Universe::default())
             }
         }
@@ -2217,7 +2227,7 @@ mod prepare_tests {
                 });
                 Ok(p)
             }
-            fn universe(&mut self, _: &ResolvedSweep, _: Option<&str>, _: &LaneEnv) -> Result<Universe, DevError> {
+            fn universe(&mut self, _: &ResolvedSweep, _: &ResolutionRun, _: &LaneEnv) -> Result<Universe, DevError> {
                 Ok(Universe::default())
             }
         }

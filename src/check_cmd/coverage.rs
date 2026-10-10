@@ -499,9 +499,18 @@ impl FilterLedger {
     }
 }
 
-/// The shape's bare cargo selection: packages/excludes + features, no
-/// target filters (those are lane narrowing, audited via the selections).
-fn shape_selection_args(sweep: &ResolvedSweep) -> Vec<String> {
+/// One shape resolution's bare cargo selection: the planned request's
+/// packages and projected features, no target filters (those are lane
+/// narrowing, audited via the selections).
+///
+/// `run` is the lane's own planned request for the resolution - the same one
+/// its prebuild compiled - so the universe is enumerated from exactly the
+/// build the lane ran. A complete claim (the only one that enumerates a
+/// universe) refuses `-p`, so this is the sweep's own test selection; under
+/// package mode it is one package, which REPLACES the shape's `-p` list
+/// rather than adding to it (cargo unions selection flags) and carries only
+/// the tokens that package routes.
+fn shape_selection_args(sweep: &ResolvedSweep, run: &ResolutionRun) -> Vec<String> {
     // The shape's profile comes first: enumeration compiles
     // (`cargo test --no-run`), and enumerating a release shape in dev would
     // both rebuild the world and list the dev build's tests - a universe for
@@ -512,14 +521,12 @@ fn shape_selection_args(sweep: &ResolvedSweep) -> Vec<String> {
     // would list the tests of a build nothing ran, and rebuild the shape in
     // both directions on every audit.
     args.extend(sweep.unification_args());
-    // The shape's own test selection, never an invocation override: a
-    // complete claim (the only one that enumerates a universe) refuses `-p`.
-    args.extend(package_args(&Selection::configured(sweep, SelectionPhase::Test)));
-    args.extend(sweep.cargo_feature_args.iter().cloned());
+    args.extend(run.cargo_args());
     args
 }
 
-/// The enumeration build's selection: the lint allows first, then the shape.
+/// The enumeration build's selection: the lint allows first, then the shape
+/// resolution's selection.
 ///
 /// Prepended rather than appended, matching the process-isolated lane, and a
 /// named function rather than two lines at the call site so the property is
@@ -528,32 +535,14 @@ fn shape_selection_args(sweep: &ResolvedSweep) -> Vec<String> {
 /// Not optional: enumeration COMPILES (`cargo test --no-run`), and a lint the
 /// project's `-Dwarnings` turns into an error kills the build before any
 /// diagnostic exists to filter.
-fn shape_enumeration_args(sweep: &ResolvedSweep, allow_args: Vec<String>) -> Vec<String> {
-    let mut args = allow_args;
-    args.extend(shape_selection_args(sweep));
-    args
-}
-
-/// The enumeration selection for ONE cargo resolution of a shape.
 ///
-/// `resolution` is `Some(pkg)` only under package mode, where the lane runs one
-/// cargo command per package and the universe must be enumerated the same way:
-/// a batched `-p a -p b` listing would catalogue binaries from a graph no run
-/// produced. The package REPLACES the shape's own `-p` list rather than adding
-/// to it, since cargo unions selection flags.
-fn resolution_enumeration_args(
-    sweep: &ResolvedSweep,
-    resolution: Option<&str>,
-    allow_args: Vec<String>,
-) -> Vec<String> {
-    let Some(pkg) = resolution else {
-        return shape_enumeration_args(sweep, allow_args);
-    };
+/// One call per cargo resolution: under package mode the lane runs one cargo
+/// command per package and the universe must be enumerated the same way - a
+/// batched `-p a -p b` listing would catalogue binaries from a graph no run
+/// produced.
+fn shape_enumeration_args(sweep: &ResolvedSweep, run: &ResolutionRun, allow_args: Vec<String>) -> Vec<String> {
     let mut args = allow_args;
-    args.extend(sweep_profile_args(sweep));
-    args.extend(sweep.unification_args());
-    args.extend(package_args(&Selection::Explicit(vec![pkg.to_owned()])));
-    args.extend(sweep.cargo_feature_args.iter().cloned());
+    args.extend(shape_selection_args(sweep, run));
     args
 }
 
@@ -642,7 +631,8 @@ mod coverage_tests {
 
     use super::{
         classify, filter_liveness, shape_enumeration_args, BinaryUnit, CoverageStats, DeclaredFilter,
-        FilterKind, FilterLedger, QuarantineEntry, ResolvedSweep, ShapeCoverage,
+        FeatureOracle, FilterKind, FilterLedger, PhaseSelection, QuarantineEntry, ResolutionRun, ResolvedSweep,
+        SelectionPhase, ShapeCoverage,
     };
     use crate::config::QualifiedSkip;
     use std::collections::BTreeSet;
@@ -660,16 +650,56 @@ mod coverage_tests {
             "--config".to_owned(),
             "target.\"cfg(all())\".rustflags=[\"-A\",\"deprecated\"]".to_owned(),
         ];
-        let args = shape_enumeration_args(&sweep, allows.clone());
+        let run = planned_run(&sweep, None);
+        let args = shape_enumeration_args(&sweep, &run, allows.clone());
         // Prepended, and the shape survives intact behind it.
         assert_eq!(args[..2], allows[..]);
         assert_eq!(&args[2..], &["-p".to_owned(), "pkg".to_owned()][..]);
         // An env-sink project passes none, and the selection is then the shape
         // alone - no empty-arg residue for cargo to choke on.
         assert_eq!(
-            shape_enumeration_args(&sweep, Vec::new()),
+            shape_enumeration_args(&sweep, &run, Vec::new()),
             vec!["-p".to_owned(), "pkg".to_owned()]
         );
+    }
+
+    /// The lane's planned request for `resolution`, as the test selection
+    /// builds it with no invocation override (a complete claim refuses `-p`).
+    fn planned_run(sweep: &ResolvedSweep, resolution: Option<&str>) -> ResolutionRun {
+        let sel = PhaseSelection::for_check(
+            SelectionPhase::Test,
+            std::slice::from_ref(sweep),
+            &[],
+            &FeatureOracle::fixed(super::features::fixture::piners()),
+        )
+        .unwrap();
+        sel.attempt(0).unwrap().run_for(resolution).unwrap().clone()
+    }
+
+    /// Package mode enumerates one universe per package, each from the
+    /// package's own request: its `-p` alone and only the tokens it routes -
+    /// the same features its prebuild compiled.
+    #[test]
+    fn a_package_mode_universe_is_enumerated_from_the_planned_request() {
+        use crate::config::{CargoUnification, EffectiveUnification};
+        let sweep = ResolvedSweep {
+            packages: vec!["piners-vm".into(), "piners-strategy".into()],
+            features: crate::profile::FeatureConfig {
+                tokens: vec!["piners-vm/opcode-counts".into(), "piners-strategy/hotpath".into()],
+                ..Default::default()
+            },
+            effective_unification: EffectiveUnification::Pinned(CargoUnification::Package),
+            ..ResolvedSweep::default()
+        };
+        let vm = shape_enumeration_args(&sweep, &planned_run(&sweep, Some("piners-vm")), Vec::new());
+        assert!(vm.ends_with(&[
+            "-p".to_owned(),
+            "piners-vm".to_owned(),
+            "--features".to_owned(),
+            "piners-vm/opcode-counts".to_owned()
+        ]));
+        let strategy = shape_enumeration_args(&sweep, &planned_run(&sweep, Some("piners-strategy")), Vec::new());
+        assert!(strategy.ends_with(&["--features".to_owned(), "piners-vm/opcode-counts,piners-strategy/hotpath".to_owned()]));
     }
 
     fn filter(kind: FilterKind, pattern: &str) -> DeclaredFilter {

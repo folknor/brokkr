@@ -2128,6 +2128,9 @@ debug = true
 
     #[test]
     fn check_entry_cargo_feature_args_shapes() {
+        // The configured argv of an entry's features (what a run projects
+        // from; see `profile::FeatureConfig`).
+        let args = |e: &CheckEntry| crate::profile::FeatureConfig::from_entry(e).configured_key();
         // No flags → no args at all (use cargo defaults).
         let bare = CheckEntry {
             name: "bare".into(),
@@ -2136,7 +2139,7 @@ debug = true
             build_packages: Vec::new(),
             ..Default::default()
         };
-        assert!(bare.cargo_feature_args().is_empty());
+        assert!(args(&bare).is_empty());
 
         // --features only.
         let feats = CheckEntry {
@@ -2146,7 +2149,7 @@ debug = true
             build_packages: Vec::new(),
             ..Default::default()
         };
-        assert_eq!(feats.cargo_feature_args(), vec!["--features", "a,b"]);
+        assert_eq!(args(&feats), vec!["--features", "a,b"]);
 
         // --no-default-features only.
         let nd = CheckEntry {
@@ -2156,7 +2159,7 @@ debug = true
             build_packages: Vec::new(),
             ..Default::default()
         };
-        assert_eq!(nd.cargo_feature_args(), vec!["--no-default-features"]);
+        assert_eq!(args(&nd), vec!["--no-default-features"]);
 
         // Both.
         let consumer = CheckEntry {
@@ -2167,7 +2170,7 @@ debug = true
             ..Default::default()
         };
         assert_eq!(
-            consumer.cargo_feature_args(),
+            args(&consumer),
             vec!["--no-default-features", "--features", "commands"]
         );
     }

@@ -865,6 +865,11 @@ where
 /// feature flags before the test phase, so `tests/cli_*.rs`
 /// `CliInvoker` calls hit a binary built for the sweep's feature set
 /// (request 2: CLI binary feature parity).
+///
+/// `features` is a configured list, not an argv: each run projects it onto
+/// the packages that run selects, dropping a token that only a package
+/// outside the run's selection routes (a `-p` narrowing, a package-mode
+/// resolution, a support build). See `check_cmd`'s feature routing.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CheckEntry {
@@ -1161,24 +1166,6 @@ impl SweepProfile {
             Self::Dev => &[],
             Self::Release => &["--release"],
         }
-    }
-}
-
-impl CheckEntry {
-    /// Translate `features` / `no_default_features` into the cargo
-    /// argv fragment used by both `cargo clippy` and `cargo test`.
-    /// Skipped entirely when no flags are set so the cargo defaults
-    /// (the package's default feature set) apply.
-    pub fn cargo_feature_args(&self) -> Vec<String> {
-        let mut args = Vec::new();
-        if self.no_default_features {
-            args.push("--no-default-features".into());
-        }
-        if !self.features.is_empty() {
-            args.push("--features".into());
-            args.push(self.features.join(","));
-        }
-        args
     }
 }
 

@@ -464,20 +464,33 @@ fn direct_libtest_args(
 ///
 /// The lane executes the binary directly, but the command a debugging reader
 /// wants to paste is the cargo one - it rebuilds if needed and supplies the
-/// env without ceremony. The selection is the binary's own selector plus
-/// everything build-shaping the prebuild carried, so it resolves the same
-/// graph.
+/// env without ceremony. `request` is the cargo fragment of the planned
+/// request that built the binary - its whole package selection and the
+/// features projected onto it - kept intact, so the repro resolves exactly
+/// the prebuild's graph and carries only tokens that selection routes.
+/// (Narrowing to `-p <binary's package>` would both re-unify features and
+/// hand cargo tokens only a co-selected package routes.) The target selector
+/// then narrows which targets run; a `--lib` under a multi-package selection
+/// runs every selected package's lib harness, the price of an exact graph.
+/// With no planned request (never expected), it falls back to the binary's
+/// own `-p` selector.
 fn repro_cargo_line(
     sweep: &ResolvedSweep,
     binary: &TestBinary,
+    request: Option<&[String]>,
     allow_args: &[String],
     cargo_extra: &[String],
 ) -> String {
     let mut args: Vec<String> = vec!["test".into()];
     args.extend(sweep.unification_args());
     args.extend(allow_args.iter().cloned());
-    args.extend(sweep.cargo_feature_args.iter().cloned());
-    args.extend(binary_selector(binary));
+    match request {
+        Some(req) => {
+            args.extend(req.iter().cloned());
+            args.extend(target_selector(&binary.kind, &binary.target));
+        }
+        None => args.extend(binary_selector(binary)),
+    }
     if let Some(p) = sweep.profile {
         args.extend(p.cargo_args().iter().map(|s| (*s).to_owned()));
     }
@@ -535,8 +548,10 @@ struct PlannedRun<'a> {
     planned: &'a PreparedBinary,
 }
 
-/// The forwarded args every binary of a lane shares.
+/// The forwarded args every binary of a lane shares, and the lane's planned
+/// requests (a binary's repro line carries its resolution's features).
 struct DirectExtras<'a> {
+    attempt: &'a Attempt,
     libtest_extra: &'a [String],
     allow_args: &'a [String],
     cargo_extra: &'a [String],
@@ -593,18 +608,24 @@ fn run_one_binary(
     if let Err(DevError::Spawn { error, .. }) = &run_result {
         tap.record(JournalRecord::SpawnFailed { lane: tap.lane(), origin, detail: error.to_string() });
     }
-    let run = run_result?;
-    let hung = match run.outcome {
+    let finished = run_result?;
+    let hung = match finished.outcome {
         LibtestOutcome::HungTest(h) => Some(h),
         LibtestOutcome::Completed => None,
     };
     Ok(BinaryRun {
         label: format!("{}/{}", binary.package, binary.target),
-        command: repro_cargo_line(sweep, binary, extras.allow_args, extras.cargo_extra),
-        captured: run.captured,
+        command: repro_cargo_line(
+            sweep,
+            binary,
+            extras.attempt.run_for(run.resolution.as_deref()).map(ResolutionRun::cargo_args).as_deref(),
+            extras.allow_args,
+            extras.cargo_extra,
+        ),
+        captured: finished.captured,
         hung,
-        timed_out: run.timed_out,
-        completed: run.completed,
+        timed_out: finished.timed_out,
+        completed: finished.completed,
         elapsed: started.elapsed(),
         skipped: false,
     })
@@ -637,7 +658,11 @@ fn run_parallel_sweep(
 ) -> Result<bool, DevError> {
     let sweep_started = Instant::now();
     announce_sweep(
-        &format!("test {}: {}", sweep.label, describe_sweep(sweep, true, attempt.selection())),
+        &format!(
+            "test {}: {}",
+            sweep.label,
+            describe_sweep(sweep, true, attempt.selection(), attempt.described_features())
+        ),
         None,
         commands,
     );
@@ -753,6 +778,7 @@ fn run_parallel_sweep(
     // recalled (their own watchdogs bound them), but nothing new starts.
     let aborted = std::sync::atomic::AtomicBool::new(false);
     let extras = DirectExtras {
+        attempt,
         libtest_extra: &prepared.libtest_extra,
         allow_args: &prepared.env.allow_args,
         cargo_extra: &prepared.cargo_extra,
@@ -1398,13 +1424,28 @@ mod parallel_lane_tests {
             effective_unification: EffectiveUnification::Pinned(CargoUnification::Workspace),
             ..bare_sweep()
         };
-        let line = repro_cargo_line(&promoted, &b, &[], &[]);
+        let line = repro_cargo_line(&promoted, &b, None, &[], &[]);
         assert!(line.starts_with("failing command: cargo test"), "{line}");
         assert!(line.contains("-Zfeature-unification"), "{line}");
         assert!(line.contains("-p pkg --test t"), "{line}");
         // Unpinned `auto` reproduces without a pin - the pre-existing shape.
-        let plain = repro_cargo_line(&bare_sweep(), &b, &[], &[]);
+        let plain = repro_cargo_line(&bare_sweep(), &b, None, &[], &[]);
         assert!(!plain.contains("-Zfeature-unification"), "{plain}");
+    }
+
+    // The repro keeps the building request whole: a combined resolution
+    // over independent `a` and `b` carrying `a/fa,b/fb` reproduces as that
+    // selection with those features, the binary narrowing only the target -
+    // `-p a --features a/fa,b/fb` would be rejected by cargo, and `-p a`
+    // alone would re-unify the graph.
+    #[test]
+    fn the_repro_line_keeps_the_planned_requests_selection() {
+        let b = binary("a", "test", "t");
+        let req = v(&["-p", "a", "-p", "b", "--features", "a/fa,b/fb"]);
+        let line = repro_cargo_line(&bare_sweep(), &b, Some(&req), &[], &[]);
+        assert!(line.contains("-p a -p b --features a/fa,b/fb --test t"), "{line}");
+        let lib = repro_cargo_line(&bare_sweep(), &binary("a", "lib", "a"), Some(&req), &[], &[]);
+        assert!(lib.contains("--features a/fa,b/fb --lib"), "{lib}");
     }
 
     // Forwarded cargo args only cargo-mediated execution can honour are

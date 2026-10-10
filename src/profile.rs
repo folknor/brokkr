@@ -27,9 +27,13 @@ use crate::error::DevError;
 pub struct ResolvedSweep {
     /// Display label - the `[[check]]` entry's `name`.
     pub label: String,
-    /// `["--all-features"]`, `["--features", "a,b"]`, etc. Already
-    /// flattened in argv form, derived from the entry's flags.
-    pub cargo_feature_args: Vec<String>,
+    /// The sweep's feature configuration, structured. Deliberately NOT an
+    /// argv: what cargo is handed depends on the package selection each run
+    /// resolves (a `-p` narrowing, a package-mode resolution, a support
+    /// build), so the executable `--features` list is computed per run by
+    /// `check_cmd`'s selection module and nowhere else. See
+    /// [`FeatureConfig`].
+    pub features: FeatureConfig,
     /// Packages to rebuild before running tests, sourced from the
     /// resolved `[[check]]` entry. `cargo build --release -p <pkg>`
     /// with the same feature args.
@@ -144,6 +148,76 @@ pub struct ResolvedSweep {
     pub lib_only: bool,
 }
 
+/// A sweep's feature configuration as declared, before any run projects it
+/// onto the packages that run selects.
+///
+/// `tokens` are the `--features` entries one by one (a configured
+/// `"a,b c"` is three tokens: cargo splits on commas and whitespace, and so
+/// does [`FeatureConfig::split`]). `invocation_explicit` marks features the
+/// INVOCATION named (`brokkr check --features`, `brokkr clippy`'s ad-hoc
+/// sweeps): those are never projected - the user asked cargo for exactly
+/// them, and a token cargo rejects is the user's to see.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub struct FeatureConfig {
+    pub tokens: Vec<String>,
+    pub no_default_features: bool,
+    pub all_features: bool,
+    pub invocation_explicit: bool,
+}
+
+impl FeatureConfig {
+    /// Split configured feature strings into tokens, cargo's way: commas and
+    /// whitespace both separate, and empty pieces are not tokens.
+    pub fn split(features: &[String]) -> Vec<String> {
+        features
+            .iter()
+            .flat_map(|f| f.split(|c: char| c == ',' || c.is_whitespace()))
+            .filter(|t| !t.is_empty())
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// A `[[check]]` entry's features.
+    pub fn from_entry(entry: &CheckEntry) -> Self {
+        Self {
+            tokens: Self::split(&entry.features),
+            no_default_features: entry.no_default_features,
+            all_features: false,
+            invocation_explicit: false,
+        }
+    }
+
+    /// Features the invocation named itself: never projected.
+    pub fn explicit(features: &[String], no_default_features: bool, all_features: bool) -> Self {
+        Self { tokens: Self::split(features), no_default_features, all_features, invocation_explicit: true }
+    }
+
+    /// The cargo argv for this configuration with `tokens` as the feature
+    /// list - the configured tokens, or a run's projection of them. No
+    /// `--features` at all when `tokens` is empty.
+    pub fn argv_with(&self, tokens: &[String]) -> Vec<String> {
+        let mut args = Vec::new();
+        if self.all_features {
+            args.push("--all-features".into());
+        }
+        if self.no_default_features {
+            args.push("--no-default-features".into());
+        }
+        if !tokens.is_empty() {
+            args.push("--features".into());
+            args.push(tokens.join(","));
+        }
+        args
+    }
+
+    /// The configured policy as a key: the flags and every token, in order.
+    /// Identifies the DECLARED sweep (coverage grouping); never what a run
+    /// compiles, which is the projection's business.
+    pub fn configured_key(&self) -> Vec<String> {
+        self.argv_with(&self.tokens)
+    }
+}
+
 /// Which half of the filter surface a [`DeclaredFilter`] is, because the two
 /// are dead for different reasons and are checked against different sets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -236,10 +310,17 @@ impl ResolvedSweep {
     /// coverage grouping, which want different things), and
     /// splitting it is orthogonal to feature unification - it would change
     /// dedupe behaviour for configs that have nothing to do with this feature.
+    ///
+    /// This is the CONFIGURED shape: packages and features as declared. It
+    /// identifies the declared sweep (coverage grouping, the accounting's
+    /// shape id). What a run actually compiles depends on the invocation's
+    /// selection - a `-p` narrowing or a package-mode resolution projects
+    /// the features per run - so clippy/rustdoc dedupe and `brokkr test`'s
+    /// execution dedupe compare the selection module's effective key instead.
     pub fn build_shape_key(&self) -> BuildShapeKey {
         (
             self.packages.clone(),
-            self.cargo_feature_args.clone(),
+            self.features.configured_key(),
             self.rustflags.clone(),
             self.env
                 .iter()
@@ -340,7 +421,7 @@ pub fn sweep_from_check_entry(entry: &CheckEntry) -> ResolvedSweep {
 
     ResolvedSweep {
         label: entry.name.clone(),
-        cargo_feature_args: entry.cargo_feature_args(),
+        features: FeatureConfig::from_entry(entry),
         build_packages: entry.build_packages.clone(),
         packages: entry.packages.clone(),
         test_exclude_packages: entry.test_exclude_packages.clone(),
@@ -759,7 +840,7 @@ fn build_resolved_sweep(
 
     ResolvedSweep {
         label: entry.name.clone(),
-        cargo_feature_args: entry.cargo_feature_args(),
+        features: FeatureConfig::from_entry(entry),
         build_packages: entry.build_packages.clone(),
         packages: entry.packages.clone(),
         test_exclude_packages: entry.test_exclude_packages.clone(),
@@ -1161,7 +1242,7 @@ sweeps = ["sim-live"]
         let s = sweep_from_check_entry(&entry);
         assert_eq!(s.label, "consumer");
         assert_eq!(
-            s.cargo_feature_args,
+            s.features.configured_key(),
             vec!["--no-default-features", "--features", "commands"]
         );
         assert_eq!(s.build_packages, vec!["pbfhogg-cli"]);
@@ -1240,7 +1321,7 @@ include_ignored = false
         assert_eq!(resolved.len(), 1);
         let s = &resolved[0];
         assert_eq!(s.label, "all");
-        assert_eq!(s.cargo_feature_args, vec!["--features", "a,b"]);
+        assert_eq!(s.features.configured_key(), vec!["--features", "a,b"]);
         assert_eq!(s.build_packages, vec!["pbfhogg-cli"]);
         assert_eq!(
             s.libtest_args,
@@ -1281,7 +1362,7 @@ skip = ["platform::", "serial::"]
 
         let s0 = &resolved[0];
         assert_eq!(s0.label, "all");
-        assert_eq!(s0.cargo_feature_args, vec!["--features", "a"]);
+        assert_eq!(s0.features.configured_key(), vec!["--features", "a"]);
         assert_eq!(
             s0.libtest_args,
             vec!["--skip", "platform::", "--skip", "serial::"]
@@ -1291,7 +1372,7 @@ skip = ["platform::", "serial::"]
         let s1 = &resolved[1];
         assert_eq!(s1.label, "consumer");
         assert_eq!(
-            s1.cargo_feature_args,
+            s1.features.configured_key(),
             vec!["--no-default-features", "--features", "commands"]
         );
     }
@@ -1507,10 +1588,26 @@ tests = ["cli_x"]
     }
 
     #[test]
+    fn feature_tokens_split_on_commas_and_whitespace() {
+        let entry = CheckEntry {
+            name: "x".into(),
+            features: vec!["a,b c".into(), " ,d/e ".into()],
+            ..Default::default()
+        };
+        let cfg = FeatureConfig::from_entry(&entry);
+        assert_eq!(cfg.tokens, vec!["a", "b", "c", "d/e"]);
+        assert!(!cfg.invocation_explicit);
+        assert_eq!(cfg.argv_with(&[]), Vec::<String>::new());
+        assert_eq!(cfg.configured_key(), vec!["--features", "a,b,c,d/e"]);
+        let adhoc = FeatureConfig::explicit(&["x".into()], true, false);
+        assert!(adhoc.invocation_explicit);
+        assert_eq!(adhoc.configured_key(), vec!["--no-default-features", "--features", "x"]);
+    }
+
+    #[test]
     fn libtest_argv_concats_args_and_name_filters() {
         let s = ResolvedSweep {
             label: "x".into(),
-            cargo_feature_args: Vec::new(),
             build_packages: Vec::new(),
             packages: Vec::new(),
             libtest_args: vec!["--include-ignored".into()],

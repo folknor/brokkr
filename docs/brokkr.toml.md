@@ -912,11 +912,22 @@ env = { HIGH_PRECISION = "1" }
 - `features` (optional, default `[]`) - explicit list of cargo features. The
   `features = "all"` sentinel (which used to mean `--all-features`) is
   rejected; enumerate features explicitly so adding a new feature to
-  `Cargo.toml` doesn't silently broaden the test sweep.
+  `Cargo.toml` doesn't silently broaden the test sweep. Entries may be
+  package-qualified (`piners-vm/opcode-counts`), and are written against the
+  entry's own selection: a run that selects fewer packages - `brokkr check -p`,
+  `brokkr test`'s one package, each resolution of `feature_unification =
+  "package"`, each `build_packages` pre-build - drops (and announces) exactly
+  the tokens that only packages outside its concrete selection route. Every
+  other token is kept and reaches cargo as written: unrecognized tokens
+  (nothing in the entry's selection routes them), malformed ones (`dep:x`,
+  `a/b/c`), and `dep/feature` requests whose dependency a selected package
+  declares even when that dependency lacks the feature - cargo rejects those
+  with its own message, as the full run would. See `brokkr man check
+  feature-projection` for the routing rule.
 - `no_default_features` (optional, default `false`) - emits
   `--no-default-features`.
 - `build_packages` (optional, default `[]`) - cargo packages rebuilt with the
-  entry's feature flags before the test phase. Required when `tests/cli_*.rs`
+  entry's feature flags (projected onto each package) before the test phase. Required when `tests/cli_*.rs`
   integration tests invoke a separate CLI workspace member, otherwise
   `cargo test -p <lib>` leaves the binary in whatever state it was last built
   and the consumer-sweep contract goes unverified.

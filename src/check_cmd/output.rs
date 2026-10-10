@@ -154,8 +154,8 @@ pub(crate) fn sweep_runtime_env(
 }
 
 /// The feature-shape fragment of [`describe_sweep`], read back out of the
-/// already-flattened `cargo_feature_args` so it can never drift from what
-/// cargo is actually handed.
+/// feature argv a request hands cargo (its projection, not the configured
+/// list) so it can never drift from what cargo is actually handed.
 fn describe_features(args: &[String]) -> Option<String> {
     let mut parts: Vec<String> = Vec::new();
     let mut it = args.iter();
@@ -196,11 +196,14 @@ fn describe_features(args: &[String]) -> Option<String> {
 /// or one resolution of it), so the shape says what actually runs, not what
 /// the config declares: an override names its packages, a one-package
 /// selection names its package, a bare selection is cargo's default one - not
-/// a claim about the workspace.
+/// a claim about the workspace. `features` is the matching feature argv: one
+/// request's projection, or for a lane-level line the tokens some run of the
+/// lane carries ([`Attempt::described_features`]).
 pub(crate) fn describe_sweep(
     sweep: &ResolvedSweep,
     for_test: bool,
     selection: &Selection,
+    features: &[String],
 ) -> String {
     let mut parts: Vec<String> = vec![match selection {
         Selection::Override { packages, .. } => {
@@ -220,7 +223,7 @@ pub(crate) fn describe_sweep(
     // no-`[[check]]` path synthesizes a sweep literally named `all-features`,
     // and `clippy all-features: default selection, all-features` is noise.
     parts.extend(
-        describe_features(&sweep.cargo_feature_args).filter(|feat| *feat != sweep.label),
+        describe_features(features).filter(|feat| *feat != sweep.label),
     );
 
     if !sweep.rustflags.is_empty() {
@@ -309,7 +312,7 @@ pub(crate) fn describe_sweep(
 /// must come from the same feature graph as the tests themselves, or a
 /// package-mode lane runs its tests against a binary built under ambient
 /// resolution.
-fn pre_build_args(sweep: &ResolvedSweep, package: &str, allow_args: &[String]) -> Vec<String> {
+fn pre_build_args(sweep: &ResolvedSweep, req: &SupportRequest, allow_args: &[String]) -> Vec<String> {
     // `json-render-diagnostics`: the artifact stream on stdout (the support
     // executables the pre-build produced, which a complete plan hashes),
     // compiler diagnostics still rendered as text on stderr for the failure
@@ -321,12 +324,12 @@ fn pre_build_args(sweep: &ResolvedSweep, package: &str, allow_args: &[String]) -
     // directory, which is the one BROKKR_TEST_BIN_DIR names.
     args.extend(sweep_profile_args(sweep));
     args.extend(sweep.unification_args());
-    for f in &sweep.cargo_feature_args {
-        args.push(f.clone());
-    }
+    // The sweep's features projected onto the support package: a token only
+    // the lane's packages route would make cargo reject the pre-build.
+    args.extend(req.feature_args().iter().cloned());
     // Its own explicit single-package selection, never the lane's test
     // selection: a support package is often outside what the lane tests.
-    args.extend(package_args(&Selection::Explicit(vec![package.to_owned()])));
+    args.extend(req.package_args());
     args
 }
 
@@ -399,12 +402,13 @@ pub(crate) fn support_fingerprint(artifacts: &[SupportArtifact]) -> Result<Vec<S
 fn run_sweep_pre_build(
     project_root: &Path,
     sweep: &ResolvedSweep,
-    package: &str,
+    req: &SupportRequest,
     project_env: &[(String, String)],
     allow_args: &[String],
     commands: bool,
 ) -> Result<Vec<SupportArtifact>, DevError> {
-    let args = pre_build_args(sweep, package, allow_args);
+    let package = req.package();
+    let args = pre_build_args(sweep, req, allow_args);
 
     // A pre-build is part of its sweep's shape: logged, shown as the status,
     // printed only under `--commands`.
@@ -585,10 +589,10 @@ fn sweep_profile_args(sweep: &ResolvedSweep) -> Vec<String> {
 /// The cargo-level selection + feature args shared by the standard and
 /// process-isolated test paths, so the two can never diverge on what a
 /// sweep selects. The package half is the invocation selection's
-/// ([`package_args`]): a CLI `-p` set already *replaced* the sweep's own
+/// ([`selection::package_args`]): a CLI `-p` set already *replaced* the sweep's own
 /// selection there - cargo unions selection flags, so emitting `--workspace
 /// --exclude ... -p X` would silently run the whole workspace.
-fn sweep_selection_args(sweep: &ResolvedSweep, selection: &Selection) -> Vec<String> {
+fn sweep_selection_args(sweep: &ResolvedSweep, run: &ResolutionRun) -> Vec<String> {
     let mut args: Vec<String> = sweep_profile_args(sweep);
     // The sweep's pinned resolution. This is the ordinary (non-parallel) test
     // path, and it was the one place the pin was never emitted: the lane was
@@ -598,11 +602,8 @@ fn sweep_selection_args(sweep: &ResolvedSweep, selection: &Selection) -> Vec<Str
     // this feature exists to catch, reproduced inside the feature itself.
     args.extend(sweep.unification_args());
     // `-p <pkg>` scoping is also what makes `--features` valid in a virtual
-    // workspace.
-    args.extend(package_args(selection));
-    for f in &sweep.cargo_feature_args {
-        args.push(f.clone());
-    }
+    // workspace. The features are the request's projection onto it.
+    args.extend(run.cargo_args());
     for f in &sweep.cargo_test_filters {
         args.push(f.clone());
     }
@@ -764,7 +765,7 @@ fn run_one_test_sweep(
     // Before the selection and the `--` split: `--config` is a cargo option,
     // and everything past `--` belongs to libtest.
     args.extend(allow_args.iter().cloned());
-    args.extend(sweep_selection_args(sweep, &run.selection));
+    args.extend(sweep_selection_args(sweep, run));
     // Without this, cargo stops after the FIRST test binary that fails, so a
     // red run reports the failures of one target and stays silent about every
     // later one. The exit code is honest either way, which is what made the
@@ -869,7 +870,7 @@ fn run_one_test_sweep(
         format!("cargo {}", args.join(" "))
     };
     announce_sweep(
-        &format!("test {}: {}", sweep.label, describe_sweep(sweep, true, &run.selection)),
+        &format!("test {}: {}", sweep.label, describe_sweep(sweep, true, &run.selection, run.feature_args())),
         Some(&command),
         commands,
     );
@@ -1225,7 +1226,7 @@ mod tests {
         // feature-arg vectors. Don't change without updating
         // `brokkr test` (it relied on this distinction pre-fix).
         assert_eq!(sweeps[0].label, "all-features");
-        assert_eq!(sweeps[0].cargo_feature_args, vec!["--all-features"]);
+        assert_eq!(sweeps[0].features.configured_key(), vec!["--all-features"]);
         assert!(sweeps[0].build_packages.is_empty());
         assert!(sweeps[0].libtest_args.is_empty());
     }
@@ -1252,7 +1253,9 @@ mod tests {
         .unwrap();
         assert_eq!(sweeps.len(), 1);
         assert_eq!(sweeps[0].label, "default");
-        assert_eq!(sweeps[0].cargo_feature_args, vec!["--features", "commands"]);
+        assert_eq!(sweeps[0].features.configured_key(), vec!["--features", "commands"]);
+        // The invocation named them: never projected onto a `-p` selection.
+        assert!(sweeps[0].features.invocation_explicit);
         // No build_packages on ad-hoc - the user is spot-checking.
         assert!(sweeps[0].build_packages.is_empty());
     }
@@ -1269,7 +1272,7 @@ mod tests {
         let sweeps = decide_active_sweeps(&entries, None, None, &[], true).unwrap();
         assert_eq!(sweeps.len(), 1);
         assert_eq!(sweeps[0].label, "default");
-        assert_eq!(sweeps[0].cargo_feature_args, vec!["--no-default-features"]);
+        assert_eq!(sweeps[0].features.configured_key(), vec!["--no-default-features"]);
     }
 
     #[test]
@@ -1293,7 +1296,7 @@ mod tests {
         let sweeps = decide_active_sweeps(&entries, None, None, &[], false).unwrap();
         assert_eq!(sweeps.len(), 2);
         assert_eq!(sweeps[0].label, "all");
-        assert_eq!(sweeps[0].cargo_feature_args, vec!["--features", "a,b"]);
+        assert_eq!(sweeps[0].features.configured_key(), vec!["--features", "a,b"]);
         assert_eq!(sweeps[0].build_packages, vec!["pbfhogg-cli"]);
         assert!(sweeps[0].libtest_args.is_empty());
         assert_eq!(sweeps[1].label, "consumer");
@@ -1387,7 +1390,7 @@ test_threads = 0
         // Sweep selection IS overridden: the ad-hoc feature set, and no
         // `[[check]]` entry (hence no build_packages).
         assert_eq!(sweeps[0].label, "default");
-        assert_eq!(sweeps[0].cargo_feature_args, vec!["--features", "defi"]);
+        assert_eq!(sweeps[0].features.configured_key(), vec!["--features", "defi"]);
         assert!(sweeps[0].build_packages.is_empty());
         // Run shaping is NOT: the profile's filters and thread policy ride along.
         assert_eq!(
@@ -2515,6 +2518,26 @@ warning: z [too_many_lines]
             .contains("-Aclippy::assert_is_empty"));
     }
 
+    /// The one request a sweep's own selection runs as in `phase`.
+    fn only_run(sweep: &ResolvedSweep, phase: SelectionPhase) -> ResolutionRun {
+        let sel = PhaseSelection::for_check(phase, std::slice::from_ref(sweep), &[], &FeatureOracle::unavailable())
+            .unwrap();
+        sel.attempt(0).unwrap().runs()[0].clone()
+    }
+
+    /// The support request for `package`, built as the selection builds it.
+    fn support_req(sweep: &ResolvedSweep, package: &str) -> SupportRequest {
+        let with = ResolvedSweep { build_packages: vec![package.to_owned()], ..sweep.clone() };
+        let sel = PhaseSelection::for_check(
+            SelectionPhase::Test,
+            std::slice::from_ref(&with),
+            &[],
+            &FeatureOracle::unavailable(),
+        )
+        .unwrap();
+        sel.attempt(0).unwrap().support()[0].clone()
+    }
+
     fn release_sweep() -> ResolvedSweep {
         ResolvedSweep {
             label: "timing".into(),
@@ -2532,13 +2555,14 @@ warning: z [too_many_lines]
         let sweep = release_sweep();
         assert_eq!(sweep_profile_args(&sweep), ["--release"]);
 
-        let test_args = sweep_selection_args(&sweep, &Selection::Bare);
+        let run = only_run(&sweep, SelectionPhase::Test);
+        let test_args = sweep_selection_args(&sweep, &run);
         assert_eq!(test_args.first().map(String::as_str), Some("--release"));
 
-        let clippy = clippy_args(&sweep, &Selection::Bare, &[]);
+        let clippy = clippy_args(&sweep, &only_run(&sweep, SelectionPhase::Clippy), &[]);
         assert!(clippy.iter().any(|a| a == "--release"), "got: {clippy:?}");
 
-        let enumeration = shape_selection_args(&sweep);
+        let enumeration = shape_selection_args(&sweep, &run);
         assert_eq!(enumeration.first().map(String::as_str), Some("--release"));
 
         // `--release` must not read as a target selector - that would suppress
@@ -2562,7 +2586,8 @@ warning: z [too_many_lines]
         };
         let pin = "resolver.feature-unification=\"package\"";
 
-        let daemon = Selection::Explicit(vec!["daemon".to_owned()]);
+        let daemon = only_run(&pkg, SelectionPhase::Test);
+        assert_eq!(daemon.selection, Selection::Explicit(vec!["daemon".to_owned()]));
         let test_args = sweep_selection_args(&pkg, &daemon);
         assert!(test_args.iter().any(|a| a == "-Zfeature-unification"), "test: {test_args:?}");
         assert!(test_args.iter().any(|a| a == pin), "test: {test_args:?}");
@@ -2570,12 +2595,12 @@ warning: z [too_many_lines]
         let clippy = clippy_args(&pkg, &daemon, &[]);
         assert!(clippy.iter().any(|a| a == pin), "clippy: {clippy:?}");
 
-        let enumeration = shape_selection_args(&pkg);
+        let enumeration = shape_selection_args(&pkg, &daemon);
         assert!(enumeration.iter().any(|a| a == pin), "audit: {enumeration:?}");
 
         // The `build_packages` pre-build and the rustdoc phase compile the
         // sweep too; both once went out without the pin.
-        let pre_build = pre_build_args(&pkg, "daemon", &[]);
+        let pre_build = pre_build_args(&pkg, &support_req(&pkg, "daemon"), &[]);
         assert!(pre_build.iter().any(|a| a == pin), "pre-build: {pre_build:?}");
         // And it reports what it built, so a complete plan can hash it.
         assert!(pre_build.iter().any(|a| a == "--message-format=json-render-diagnostics"), "{pre_build:?}");
@@ -2622,16 +2647,17 @@ warning: z [too_many_lines]
         // Every repo that never sets the key must produce byte-identical argv
         // to what it produced before the key existed.
         let plain = ResolvedSweep::default();
+        let run = only_run(&plain, SelectionPhase::Test);
         assert!(sweep_profile_args(&plain).is_empty());
-        assert!(!sweep_selection_args(&plain, &Selection::Bare).iter().any(|a| a == "--release"));
-        assert!(!clippy_args(&plain, &Selection::Bare, &[]).iter().any(|a| a == "--release"));
-        assert!(!shape_selection_args(&plain).iter().any(|a| a == "--release"));
+        assert!(!sweep_selection_args(&plain, &run).iter().any(|a| a == "--release"));
+        assert!(!clippy_args(&plain, &run, &[]).iter().any(|a| a == "--release"));
+        assert!(!shape_selection_args(&plain, &run).iter().any(|a| a == "--release"));
         // Same for unification: `auto` un-promoted pins nothing anywhere.
         for args in [
-            sweep_selection_args(&plain, &Selection::Bare),
-            clippy_args(&plain, &Selection::Bare, &[]),
-            shape_selection_args(&plain),
-            pre_build_args(&plain, "bin", &[]),
+            sweep_selection_args(&plain, &run),
+            clippy_args(&plain, &run, &[]),
+            shape_selection_args(&plain, &run),
+            pre_build_args(&plain, &support_req(&plain, "bin"), &[]),
         ] {
             assert!(!args.iter().any(|a| a == "-Zfeature-unification"), "got: {args:?}");
         }
@@ -2642,7 +2668,8 @@ warning: z [too_many_lines]
     #[test]
     fn clippy_args_leave_cargo_lints_out_of_the_allow_flags() {
         let allow = ["clippy::unused_async".to_owned(), "cargo::unused_dependencies".to_owned()];
-        let args = clippy_args(&ResolvedSweep::default(), &Selection::Bare, &allow);
+        let plain = ResolvedSweep::default();
+        let args = clippy_args(&plain, &only_run(&plain, SelectionPhase::Clippy), &allow);
         assert!(args.iter().any(|a| a == "clippy::unused_async"), "{args:?}");
         assert!(!args.iter().any(|a| a.starts_with("cargo::")), "{args:?}");
     }
@@ -2671,10 +2698,10 @@ warning: z [too_many_lines]
         // Same reason `rustflags` is surfaced: it redirects the sweep to
         // another target subdirectory and buys a full recompile there, and an
         // unexplained rebuild is what the collapsed log must not hide.
-        let line = describe_sweep(&release_sweep(), true, &Selection::Bare);
+        let line = describe(&release_sweep(), true, &Selection::Bare);
         assert!(line.contains("profile release"), "got: {line}");
         // An unpinned sweep says nothing - it is the command's default.
-        assert!(!describe_sweep(&ResolvedSweep::default(), true, &Selection::Bare).contains("profile"));
+        assert!(!describe(&ResolvedSweep::default(), true, &Selection::Bare).contains("profile"));
     }
 
     fn parsed(passed: usize, failed: usize, ignored: usize, filtered_out: usize, suites: usize) -> cargo_filter::ParsedTestResults {
@@ -2739,11 +2766,17 @@ warning: z [too_many_lines]
         }
     }
 
+    /// [`describe_sweep`] with the sweep's configured features - what a run
+    /// over the sweep's own selection carries.
+    fn describe(sweep: &ResolvedSweep, for_test: bool, selection: &Selection) -> String {
+        describe_sweep(sweep, for_test, selection, &sweep.features.configured_key())
+    }
+
     #[test]
     fn describe_sweep_reports_package_scope() {
         // No package flags: cargo's default selection, never called the
         // workspace.
-        assert_eq!(describe_sweep(&sweep("default"), false, &Selection::Bare), "default selection");
+        assert_eq!(describe(&sweep("default"), false, &Selection::Bare), "default selection");
 
         // The sweep's own `packages` list; one package is named.
         let scoped = ResolvedSweep {
@@ -2751,8 +2784,8 @@ warning: z [too_many_lines]
             ..sweep("ffi")
         };
         let own = Selection::configured(&scoped, SelectionPhase::Clippy);
-        assert_eq!(describe_sweep(&scoped, false, &own), "2 pkgs");
-        assert_eq!(describe_sweep(&scoped, false, &Selection::Explicit(s(&["nautilus-core"]))), "-p nautilus-core");
+        assert_eq!(describe(&scoped, false, &own), "2 pkgs");
+        assert_eq!(describe(&scoped, false, &Selection::Explicit(s(&["nautilus-core"]))), "-p nautilus-core");
 
         // `--workspace --exclude` is a test-phase-only shape; the clippy line
         // describes the clippy selection, matching what actually runs.
@@ -2761,10 +2794,10 @@ warning: z [too_many_lines]
             ..sweep("default")
         };
         let clippy = Selection::configured(&excluded, SelectionPhase::Clippy);
-        assert_eq!(describe_sweep(&excluded, false, &clippy), "default selection");
+        assert_eq!(describe(&excluded, false, &clippy), "default selection");
         let test = Selection::configured(&excluded, SelectionPhase::Test);
         assert_eq!(
-            describe_sweep(&excluded, true, &test),
+            describe(&excluded, true, &test),
             "workspace -2 pkgs, serial"
         );
     }
@@ -2772,26 +2805,40 @@ warning: z [too_many_lines]
     #[test]
     fn describe_sweep_reads_features_back_out_of_argv() {
         let all = ResolvedSweep {
-            cargo_feature_args: s(&["--all-features"]),
+            features: crate::profile::FeatureConfig { all_features: true, ..Default::default() },
             ..sweep("all")
         };
-        assert_eq!(describe_sweep(&all, false, &Selection::Bare), "default selection, all-features");
+        assert_eq!(describe(&all, false, &Selection::Bare), "default selection, all-features");
 
         let consumer = ResolvedSweep {
-            cargo_feature_args: s(&["--no-default-features", "--features", "commands"]),
+            features: crate::profile::FeatureConfig {
+                tokens: s(&["commands"]),
+                no_default_features: true,
+                ..Default::default()
+            },
             ..sweep("consumer")
         };
         assert_eq!(
-            describe_sweep(&consumer, false, &Selection::Bare),
+            describe(&consumer, false, &Selection::Bare),
             "default selection, no-default +commands"
         );
 
         // The `--features=x,y` spelling is equivalent.
-        let joined = ResolvedSweep {
-            cargo_feature_args: s(&["--features=ffi,live"]),
-            ..sweep("j")
+        assert_eq!(describe_features(&s(&["--features=ffi,live"])).as_deref(), Some("+ffi,live"));
+    }
+
+    /// The line renders the features a run carries, not the configured list:
+    /// a `-p` run that dropped a token does not claim to have built it.
+    #[test]
+    fn describe_sweep_renders_the_projected_features() {
+        let s0 = ResolvedSweep {
+            features: crate::profile::FeatureConfig { tokens: s(&["a/x", "b/y"]), ..Default::default() },
+            ..sweep("two")
         };
-        assert_eq!(describe_sweep(&joined, false, &Selection::Bare), "default selection, +ffi,live");
+        assert_eq!(
+            describe_sweep(&s0, false, &override_of(&["a"]), &s(&["--features", "a/x"])),
+            "-p a, +a/x"
+        );
     }
 
     #[test]
@@ -2799,10 +2846,10 @@ warning: z [too_many_lines]
         // The legacy no-`[[check]]` path names its synthesized sweep after the
         // feature shape, which would otherwise print twice on one line.
         let legacy = ResolvedSweep {
-            cargo_feature_args: s(&["--all-features"]),
+            features: crate::profile::FeatureConfig { all_features: true, ..Default::default() },
             ..sweep("all-features")
         };
-        assert_eq!(describe_sweep(&legacy, false, &Selection::Bare), "default selection");
+        assert_eq!(describe(&legacy, false, &Selection::Bare), "default selection");
     }
 
     #[test]
@@ -2813,8 +2860,8 @@ warning: z [too_many_lines]
             rustflags: s(&["--cfg", "madsim"]),
             ..sweep("sim")
         };
-        assert!(describe_sweep(&sim, false, &Selection::Bare).contains("rustflags --cfg madsim"));
-        assert!(describe_sweep(&sim, false, &Selection::Bare).contains("isolated target"));
+        assert!(describe(&sim, false, &Selection::Bare).contains("rustflags --cfg madsim"));
+        assert!(describe(&sim, false, &Selection::Bare).contains("isolated target"));
     }
 
     #[test]
@@ -2833,11 +2880,11 @@ warning: z [too_many_lines]
             ..sweep("tier1")
         };
         assert_eq!(
-            describe_sweep(&tier, true, &Selection::Bare),
+            describe(&tier, true, &Selection::Bare),
             "default selection, 3 skips, include-ignored, parallel"
         );
         // Clippy never takes libtest filters, so its line omits them.
-        assert_eq!(describe_sweep(&tier, false, &Selection::Bare), "default selection");
+        assert_eq!(describe(&tier, false, &Selection::Bare), "default selection");
     }
 
     #[test]
@@ -2850,7 +2897,7 @@ warning: z [too_many_lines]
             ..sweep("sort")
         };
         assert_eq!(
-            describe_sweep(&one, true, &Selection::Bare),
+            describe(&one, true, &Selection::Bare),
             "default selection, --test cli_sort, serial"
         );
 
@@ -2860,12 +2907,12 @@ warning: z [too_many_lines]
             ..sweep("sort")
         };
         assert_eq!(
-            describe_sweep(&two, true, &Selection::Bare),
+            describe(&two, true, &Selection::Bare),
             "default selection, --test cli_sort, --test cli_env, serial"
         );
 
         // Clippy never takes cargo test filters, so its line omits them.
-        assert_eq!(describe_sweep(&one, false, &Selection::Bare), "default selection");
+        assert_eq!(describe(&one, false, &Selection::Bare), "default selection");
     }
 
     #[test]
@@ -2876,20 +2923,22 @@ warning: z [too_many_lines]
                 test_threads: threads,
                 ..sweep("serial")
             };
-            assert_eq!(describe_sweep(&serial, true, &Selection::Bare), "default selection, serial");
+            assert_eq!(describe(&serial, true, &Selection::Bare), "default selection, serial");
         }
         for threads in [Some(0), Some(4)] {
             let parallel = ResolvedSweep {
                 test_threads: threads,
                 ..sweep("par")
             };
-            assert_eq!(describe_sweep(&parallel, true, &Selection::Bare), "default selection, parallel");
+            assert_eq!(describe(&parallel, true, &Selection::Bare), "default selection, parallel");
         }
     }
 
     /// One sweep's entry in one `check` phase under a CLI `-p` set.
     fn entry(sweep: &ResolvedSweep, phase: SelectionPhase, cli: &[&str]) -> LaneEntry {
-        let sel = PhaseSelection::for_check(phase, std::slice::from_ref(sweep), &s(cli)).unwrap();
+        let sel =
+            PhaseSelection::for_check(phase, std::slice::from_ref(sweep), &s(cli), &FeatureOracle::unavailable())
+                .unwrap();
         sel.entry(0).unwrap().clone()
     }
 
@@ -2975,9 +3024,9 @@ warning: z [too_many_lines]
             test_exclude_packages: s(&["a", "b"]),
             ..sweep("default")
         };
-        assert_eq!(describe_sweep(&excluded, true, &override_of(&["x"])), "-p x, serial");
-        assert_eq!(describe_sweep(&excluded, false, &override_of(&["x"])), "-p x");
-        assert_eq!(describe_sweep(&excluded, false, &override_of(&["x", "y"])), "-p x -p y");
+        assert_eq!(describe(&excluded, true, &override_of(&["x"])), "-p x, serial");
+        assert_eq!(describe(&excluded, false, &override_of(&["x"])), "-p x");
+        assert_eq!(describe(&excluded, false, &override_of(&["x", "y"])), "-p x -p y");
     }
 
 }

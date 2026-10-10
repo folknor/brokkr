@@ -191,21 +191,7 @@ pub fn project_info(cwd: Option<&Path>) -> Result<ProjectInfo, DevError> {
             .map_err(|e| DevError::Build(format!("cannot determine current directory: {e}")))?,
     };
 
-    require_cargo_tree(&project_root)?;
-
-    let captured = output::run_captured(
-        "cargo",
-        &["metadata", "--format-version", "1", "--no-deps"],
-        &project_root,
-    )?;
-
-    if !captured.status.success() {
-        let stderr = String::from_utf8_lossy(&captured.stderr);
-        return Err(DevError::Build(format!("cargo metadata failed: {stderr}")));
-    }
-
-    let stdout = String::from_utf8_lossy(&captured.stdout);
-    let val: serde_json::Value = serde_json::from_str(&stdout)?;
+    let val = metadata_no_deps(&project_root)?;
 
     let target_dir = extract_string(&val, "target_directory")?;
 
@@ -222,6 +208,30 @@ pub fn project_info(cwd: Option<&Path>) -> Result<ProjectInfo, DevError> {
         workspace_root: PathBuf::from(extract_string(&val, "workspace_root")?),
         member_manifests: member_manifests(&val),
     })
+}
+
+/// `cargo metadata --format-version 1 --no-deps` at `project_root`, parsed.
+/// The one spelling of that call: [`project_info`] reads it, and so does
+/// `check`'s feature routing (which needs each member's `features` map and
+/// declared dependencies, both present in the `--no-deps` output). Run
+/// with no feature arguments - metadata's package list does not depend on
+/// them, and a sweep's tokens are exactly what may be invalid here.
+pub fn metadata_no_deps(project_root: &Path) -> Result<serde_json::Value, DevError> {
+    require_cargo_tree(project_root)?;
+
+    let captured = output::run_captured(
+        "cargo",
+        &["metadata", "--format-version", "1", "--no-deps"],
+        project_root,
+    )?;
+
+    if !captured.status.success() {
+        let stderr = String::from_utf8_lossy(&captured.stderr);
+        return Err(DevError::Build(format!("cargo metadata failed: {stderr}")));
+    }
+
+    let stdout = String::from_utf8_lossy(&captured.stdout);
+    Ok(serde_json::from_str(&stdout)?)
 }
 
 /// Each member's manifest path -> package id, from the same `packages` array

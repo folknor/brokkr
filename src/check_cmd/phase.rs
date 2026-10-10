@@ -139,6 +139,10 @@ pub(crate) fn cmd_check(
     // mode over a selection naming no packages) fails before anything runs,
     // with no trailer; a "nothing reached" refusal is stored and reported at
     // its phase's boundary.
+    // Each planned cargo request also carries the sweep's features projected
+    // onto its packages; the metadata snapshot that takes is read at most
+    // once, and only when some projection could drop a token.
+    let oracle = FeatureOracle::at(project_root);
     let selections = CheckSelections::build(
         &active_sweeps,
         packages,
@@ -146,8 +150,10 @@ pub(crate) fn cmd_check(
         rustdoc_cfg.is_some(),
         bin_cfg,
         certifies,
+        &oracle,
     )?;
     announce_package_rules(&active_sweeps, &selections);
+    announce_feature_drops(&active_sweeps, &[&selections.clippy, &selections.rustdoc, &selections.test]);
 
     // Run every phase behind one closure so a failure from *any* of them
     // (not just the test phase) still funnels through the summary line below,
@@ -401,6 +407,16 @@ fn announce_invocation_shaping(packages: &[String], extra_args: &[String]) {
 /// phase.
 fn announce_package_rules(sweeps: &[ResolvedSweep], selections: &CheckSelections) {
     for line in package_rules_lines(sweeps, selections) {
+        output::run_msg(&line);
+    }
+}
+
+/// Say once per lane which configured feature tokens a narrowed run does not
+/// carry, and which members route them - a `-p` run, a package-mode
+/// resolution or a support build compiles fewer features than the sweep
+/// declares, and that must not be silent. Silent when nothing was dropped.
+pub(crate) fn announce_feature_drops(sweeps: &[ResolvedSweep], phases: &[&PhaseSelection]) {
+    for line in feature_drop_lines(sweeps, phases) {
         output::run_msg(&line);
     }
 }
@@ -1317,7 +1333,7 @@ fn run_sequential_resolutions(
             project_root,
             state_root,
             sweep,
-            &run,
+            run,
             extra_args,
             &env.project_env,
             &env.allow_args,
@@ -1873,17 +1889,10 @@ pub(crate) fn decide_active_sweeps(
     //    always excluded, reporting a red indistinguishable from a code
     //    failure. `announce_adhoc_shaping` says which profile was applied.
     if !features.is_empty() || no_default_features {
-        let mut feature_args = Vec::new();
-        if no_default_features {
-            feature_args.push("--no-default-features".into());
-        }
-        if !features.is_empty() {
-            feature_args.push("--features".into());
-            feature_args.push(features.join(","));
-        }
         let mut sweep = ResolvedSweep {
             label: "default".into(),
-            cargo_feature_args: feature_args,
+            // The invocation named these features: never projected.
+            features: profile::FeatureConfig::explicit(features, no_default_features, false),
             build_packages: Vec::new(),
             packages: Vec::new(),
             libtest_args: Vec::new(),
@@ -1951,7 +1960,7 @@ pub(crate) fn decide_active_sweeps(
     //    to special-case-detect this branch by feature-arg shape.
     Ok(vec![ResolvedSweep {
         label: "all-features".into(),
-        cargo_feature_args: vec!["--all-features".into()],
+        features: profile::FeatureConfig { all_features: true, ..Default::default() },
         build_packages: Vec::new(),
         packages: Vec::new(),
         libtest_args: Vec::new(),
@@ -2435,7 +2444,7 @@ fn run_publish_cycle(
 /// surfaced diagnostic as a hard failure at the call site. `allow` is the
 /// `[clippy] allow` list, emitted as `-A <lint>` so the suppressed lints
 /// never reach the diagnostic stream (no carve-outs in the fail decision).
-fn clippy_args(sweep: &ResolvedSweep, selection: &Selection, allow: &[String]) -> Vec<String> {
+fn clippy_args(sweep: &ResolvedSweep, run: &ResolutionRun, allow: &[String]) -> Vec<String> {
     let mut args: Vec<String> = vec![
         "clippy".into(),
         "--keep-going".into(),
@@ -2462,9 +2471,9 @@ fn clippy_args(sweep: &ResolvedSweep, selection: &Selection, allow: &[String]) -
     // exactly the defect class the mode exists to catch.
     args.extend(sweep.unification_args());
     // `-p <pkg>` scoping is also what makes `--features` valid in a virtual
-    // workspace, where cargo rejects features at the root.
-    args.extend(package_args(selection));
-    args.extend(sweep.cargo_feature_args.iter().cloned());
+    // workspace, where cargo rejects features at the root. The features are
+    // the run's projection: only the tokens its packages route.
+    args.extend(run.cargo_args());
     args.push("--".into());
     args.push("--cap-lints=warn".into());
     // Cargo's own lints are allowed at ingestion instead (`code_allowed`):
@@ -2491,16 +2500,15 @@ fn run_one_clippy(
     meta_target_dir: Option<&Path>,
     commands: bool,
 ) -> Result<SweepResult, DevError> {
-    let args = clippy_args(sweep, &run.selection, allow);
-    let result =
-        run_one_diagnostic_cargo("clippy", project_root, sweep, &args, &run.selection, meta_target_dir, commands);
+    let args = clippy_args(sweep, run, allow);
+    let result = run_one_diagnostic_cargo("clippy", project_root, sweep, &args, run, meta_target_dir, commands);
     // No SweepResult reaches the normal reporter on a spawn error, interrupt
     // or captured-run deadline. Preserve the investigative command there too.
     if result.is_err() && !commands && !report_active() {
         output::error(&format!(
             "{}: {}",
             phase_sweep_tag("clippy", &sweep.label),
-            describe_sweep(sweep, false, &run.selection)
+            describe_sweep(sweep, false, &run.selection, run.feature_args())
         ));
         output::error(&format!("failing command: cargo {}", args.join(" ")));
     }
@@ -2519,7 +2527,7 @@ fn run_one_clippy(
 /// ingestion instead ([`code_allowed`]). The lint-only `--check` flags do go
 /// through rustdocflags, added in [`run_one_diagnostic_cargo`]
 /// (`crate::rustdoc_check`).
-fn doc_args(sweep: &ResolvedSweep, selection: &Selection, cfg: &RustdocConfig) -> Vec<String> {
+fn doc_args(sweep: &ResolvedSweep, run: &ResolutionRun, cfg: &RustdocConfig) -> Vec<String> {
     let mut args: Vec<String> = vec![
         "doc".into(),
         "--no-deps".into(),
@@ -2531,8 +2539,7 @@ fn doc_args(sweep: &ResolvedSweep, selection: &Selection, cfg: &RustdocConfig) -
     }
     args.extend(sweep_profile_args(sweep));
     args.extend(sweep.unification_args());
-    args.extend(package_args(selection));
-    args.extend(sweep.cargo_feature_args.iter().cloned());
+    args.extend(run.cargo_args());
     args
 }
 
@@ -2545,10 +2552,11 @@ fn run_one_diagnostic_cargo(
     project_root: &Path,
     sweep: &ResolvedSweep,
     args: &[String],
-    selection: &Selection,
+    run: &ResolutionRun,
     meta_target_dir: Option<&Path>,
     commands: bool,
 ) -> Result<SweepResult, DevError> {
+    let selection = &run.selection;
     // Apply the sweep's env to the clippy build too, so a build-affecting
     // var (codegen toggle, etc.) is set consistently across every phase -
     // clippy, the test pre-build, and the test run - not just the tests.
@@ -2585,7 +2593,7 @@ fn run_one_diagnostic_cargo(
             crate::rustdoc_check::Placement::Config(extra) => args.extend(extra),
         }
     }
-    let shape = describe_sweep(sweep, false, selection);
+    let shape = describe_sweep(sweep, false, selection, run.feature_args());
     let command = format!("{env_prefix}cargo {}", args.join(" "));
     let line_shape = format!("{}: {shape}", phase_sweep_tag(phase, &sweep.label));
     if report_active() {
@@ -2786,8 +2794,8 @@ fn run_rustdoc_phase(
     // second label - and may not dedupe, when it inherits from config what the
     // sibling passes on argv. The selection marks it not applicable.
     let results = run_per_build_shape("rustdoc", &info, sweeps, selection, reach, |sweep, run, dir| {
-        let args = doc_args(sweep, &run.selection, cfg);
-        run_one_diagnostic_cargo("rustdoc", project_root, sweep, &args, &run.selection, dir, commands)
+        let args = doc_args(sweep, run, cfg);
+        run_one_diagnostic_cargo("rustdoc", project_root, sweep, &args, run, dir, commands)
     })?;
     // The `rustdoc::` half of the sited list is judged here, where those lints
     // can actually appear; clippy judges the rest.
@@ -2925,8 +2933,9 @@ fn run_per_build_shape(
         let attempt = match entry {
             LaneEntry::Attempt(a) => a,
             // Diagnostic phases are per-build-shape while tests are per-lane:
-            // two lanes sharing a `[[check]]` entry are linted or documented
-            // once.
+            // two lanes compiling the same requests (a shared `[[check]]`
+            // entry, or two sweeps a `-p` narrows to the same projection) are
+            // linted or documented once.
             LaneEntry::Deduped(_) => {
                 note(&format!("{phase} {}: deduped (build shape already checked)", sweep.label));
                 continue;
@@ -2946,7 +2955,7 @@ fn run_per_build_shape(
         // is not any of the graphs the lane actually builds, so its lint
         // surface belongs to no real compile.
         for run in attempt.runs() {
-            results.push(run_one(sweep, &run, meta_target_dir.as_deref())?);
+            results.push(run_one(sweep, run, meta_target_dir.as_deref())?);
         }
     }
     Ok(results)
@@ -3238,7 +3247,8 @@ pub(crate) fn cmd_clippy(
     // unless it covers everything `check`'s sweeps together would - see
     // `probe_is_narrowed`.
     let sweeps = std::slice::from_ref(&sweep);
-    let selection = PhaseSelection::for_check(SelectionPhase::Clippy, sweeps, &[])?;
+    let oracle = FeatureOracle::at(project_root);
+    let selection = PhaseSelection::for_check(SelectionPhase::Clippy, sweeps, &[], &oracle)?;
     let outcome = run_clippy_phase(
         project_root,
         sweeps,
@@ -3297,7 +3307,7 @@ const CLIPPY_FAILED: &str = "clippy failed";
 fn probe_is_narrowed(sweep: &ResolvedSweep) -> bool {
     !sweep.packages.is_empty()
         || sweep.lib_only
-        || !sweep.cargo_feature_args.iter().any(|a| a == "--all-features")
+        || !sweep.features.all_features
 }
 
 /// Construct the single `ResolvedSweep` a `brokkr clippy` invocation runs.
@@ -3332,22 +3342,16 @@ fn build_clippy_sweep(
         // A single entry's env is unambiguous - no cross-sweep merge needed.
         profile::sweep_from_check_entry(entry)
     } else {
-        let cargo_feature_args = if all_features {
-            vec!["--all-features".into()]
+        // The invocation named these features: never projected (`-p` here is
+        // the sweep's own selection anyway, so there is nothing to narrow).
+        let features = if all_features {
+            profile::FeatureConfig::explicit(&[], false, true)
         } else {
-            let mut a = Vec::new();
-            if no_default_features {
-                a.push("--no-default-features".into());
-            }
-            if !features.is_empty() {
-                a.push("--features".into());
-                a.push(features.join(","));
-            }
-            a
+            profile::FeatureConfig::explicit(features, no_default_features, false)
         };
         ResolvedSweep {
             label: "clippy".into(),
-            cargo_feature_args,
+            features,
             packages: packages.to_vec(),
             env: merge_check_envs(check_entries, &overridden, CLIPPY_ENV_CONFLICT_REMEDY)?,
             ..Default::default()
@@ -4161,7 +4165,7 @@ fn run_test_phase(
             output::error(&format!(
                 "test {}: {}",
                 sweep.label,
-                describe_sweep(sweep, true, attempt.selection())
+                describe_sweep(sweep, true, attempt.selection(), attempt.described_features())
             ));
             let decisive = record_phase_stop(i, sweeps.len(), &e, &tap);
             let label = |l: usize| sweeps.get(l).map(|s| s.label.clone());
@@ -4285,8 +4289,8 @@ fn run_test_lane(
     // `cargo test` is ever reached.
     let env = prepared.map_or_else(|| lane_env(&inputs, sweep), |p| p.env.clone());
     let mut support: Vec<SupportArtifact> = Vec::new();
-    for pkg in &sweep.build_packages {
-        support.extend(run_sweep_pre_build(a.project_root, sweep, pkg, &env.project_env, &env.allow_args, a.commands)?);
+    for req in a.attempt.support() {
+        support.extend(run_sweep_pre_build(a.project_root, sweep, req, &env.project_env, &env.allow_args, a.commands)?);
     }
 
     reject_conflicting_lanes(sweep)?;
@@ -4551,7 +4555,9 @@ mod clippy_sweep_tests {
     #[test]
     fn adhoc_all_features() {
         let s = build_clippy_sweep(&[], &[], true, &[], false, None, &[]).unwrap();
-        assert_eq!(s.cargo_feature_args, vec!["--all-features"]);
+        assert_eq!(s.features.configured_key(), vec!["--all-features"]);
+        // Ad-hoc features are the invocation's own: never projected.
+        assert!(s.features.invocation_explicit);
         assert_eq!(s.label, "clippy");
     }
 
@@ -4560,9 +4566,10 @@ mod clippy_sweep_tests {
         let feats = vec!["x".to_owned(), "y".to_owned()];
         let s = build_clippy_sweep(&[], &[], false, &feats, true, None, &[]).unwrap();
         assert_eq!(
-            s.cargo_feature_args,
+            s.features.configured_key(),
             vec!["--no-default-features", "--features", "x,y"]
         );
+        assert!(s.features.invocation_explicit);
     }
 
     #[test]
@@ -4608,7 +4615,10 @@ mod clippy_sweep_tests {
         e.packages = vec!["nautilus-model".into()];
         let entries = [e];
         let s = build_clippy_sweep(&entries, &[], false, &[], false, Some("ffi"), &[]).unwrap();
-        assert_eq!(s.cargo_feature_args, vec!["--features", "ffi"]);
+        assert_eq!(s.features.configured_key(), vec!["--features", "ffi"]);
+        // A replayed entry's features are the entry's: projected like any
+        // gate sweep's (an identity here, over the entry's own selection).
+        assert!(!s.features.invocation_explicit);
         assert_eq!(s.packages, vec!["nautilus-model"]);
         assert_eq!(s.env.get("HP").map(String::as_str), Some("1"));
     }
@@ -4905,7 +4915,7 @@ mod script_failure_render_tests {
 mod package_rules_tests {
     #![allow(clippy::unwrap_used)]
 
-    use super::{package_rules_lines, CheckSelections};
+    use super::{package_rules_lines, CheckSelections, FeatureOracle};
     use crate::profile::ResolvedSweep;
 
     fn sweep(label: &str, packages: &[&str], excluded: &[&str]) -> ResolvedSweep {
@@ -4921,7 +4931,8 @@ mod package_rules_tests {
     /// rustdoc enabled (no `[rustdoc]` table).
     fn lines(sweeps: &[ResolvedSweep], cli: &[&str]) -> Vec<String> {
         let cli: Vec<String> = cli.iter().map(|p| (*p).to_owned()).collect();
-        let selections = CheckSelections::build(sweeps, &cli, &|_| false, false, None, None).unwrap();
+        let oracle = FeatureOracle::unavailable();
+        let selections = CheckSelections::build(sweeps, &cli, &|_| false, false, None, None, &oracle).unwrap();
         package_rules_lines(sweeps, &selections)
     }
 
