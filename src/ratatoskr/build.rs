@@ -15,7 +15,6 @@ use std::path::{Path, PathBuf};
 use crate::build::{self, BuildConfig};
 use crate::config::HarnessConfig;
 use crate::error::DevError;
-use crate::output;
 
 /// Result of a successful harness build.
 #[derive(Debug)]
@@ -44,14 +43,10 @@ pub fn build_for_harness(
     on_done: Option<&dyn Fn()>,
     isolate_pg: bool,
 ) -> Result<HarnessBuild, DevError> {
-    let profile_name = if debug { "dev" } else { "release" };
     let features_label = feature_summary(&harness_cfg.features);
 
-    output::harness_msg(&format!(
-        "building package '{}' (features: {features_label}, profile: {profile_name})",
-        harness_cfg.package,
-    ));
-
+    // No announcement of its own: the `[build]` lines cargo_build prints
+    // already name the package, features and profile.
     let cfg = BuildConfig::for_harness(harness_cfg, debug);
     let result = build::cargo_build_observed(&cfg, project_root, on_spawn, isolate_pg);
     if let Some(cb) = on_done {

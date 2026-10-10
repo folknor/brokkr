@@ -22,16 +22,24 @@ pub fn is_quiet() -> bool {
 }
 
 // --- Prefixed output ---
-// Prefixed output defaults to stdout; sidecar narration and warnings from
-// shutdown/bookkeeping paths use stderr.
-// Prefix column is 10 chars wide: "[tag]" + padding to align the message.
+// Every prefixed printer goes through `emit_text`, so each line reaches the run
+// log and the renderer (which keeps a drawn status line intact) - none writes
+// to the console directly. Prefixed output defaults to stdout; `sidecar_msg`
+// narration is stderr, and `warn_stderr` is the one deliberate exception that
+// bypasses the renderer (shutdown and late-history paths must not wait on it).
+// Other stderr users are free-standing output (a subcommand's own report, the
+// man pager), not prefixed lines.
 //
-// Quiet mode split: `run_msg` and `download_msg` always print because they
-// represent user-facing actions that should be visible even in non-verbose
-// mode. The others (`build_msg`, `bench_msg`, `result_msg`, `hotpath_msg`)
-// are suppressed in quiet mode because they are internal progress messages.
-// `verify_msg` has its own gate (see `VERIFY_DETAIL`). Errors are never
-// suppressed.
+// The prefix is "[tag]" padded to 10 columns, so messages align for the usual
+// short tags; a longer tag ("[ratatoskr]") is followed by one space and
+// overflows the column rather than being cut.
+//
+// Quiet mode split: `run_msg`, `download_msg` and the lock, strays and guard
+// printers always print because they represent user-facing actions that should
+// be visible even in non-verbose mode. The others (`build_msg`, `bench_msg`,
+// `result_msg`) are suppressed in quiet mode because they are
+// internal progress messages. `verify_msg` has its own gate (the buffer
+// below). Hotpath interpretation notes, errors and warnings are never suppressed.
 
 // --- Verify detail buffer ---
 // `verify_msg` carries the per-subcommand detail (section headers, inspect
@@ -40,7 +48,8 @@ pub fn is_quiet() -> bool {
 // the check fails; on success it's discarded and just a one-line summary
 // prints. `-v`/`--verbose` skips the buffer so detail streams live.
 //
-// `None` = live (print immediately). `Some(vec)` = capturing into the buffer.
+// `None` = live (print immediately). `Some(vec)` = capturing into the buffer,
+// one rendered block (every line prefixed) per call.
 // verify holds an exclusive process lock, so the Mutex is uncontended.
 static VERIFY_BUFFER: Mutex<Option<Vec<String>>> = Mutex::new(None);
 
@@ -60,9 +69,9 @@ pub fn verify_buffer_flush() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .take();
-    if let Some(lines) = buffered {
-        for line in lines {
-            println!("{line}");
+    if let Some(blocks) = buffered {
+        for block in blocks {
+            emit_text(Stream::Out, &block);
         }
     }
 }
@@ -114,7 +123,7 @@ pub fn enable_status_line() {
 pub fn disable_status_line() {
     let mut r = RENDER.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     r.status = None;
-    render(&mut r, "");
+    render(&mut r, Stream::Out, "");
     STATUS_ENABLED.store(false, Ordering::Relaxed);
 }
 
@@ -127,14 +136,32 @@ pub fn status(msg: &str) {
     let line: String = format!("[....]    {msg}").chars().take(STATUS_WIDTH).collect();
     let mut r = RENDER.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     r.status = Some(line);
-    render(&mut r, "");
+    render(&mut r, Stream::Out, "");
 }
 
 /// Narration for the run log only: what a passing run no longer prints but a
 /// reader investigating one (a slow build, a cross-host comparison) needs.
-/// Dropped when no log is open.
+/// Dropped when no log is open - so call it only from code that runs under a
+/// command that opens one (`check`, `test`, measured runs, `bench`); code
+/// shared with commands that do not must use [`detail_or_console`].
 pub fn detail(msg: &str) {
     log_write(&prefixed("[run]     ", msg), false);
+}
+
+/// [`detail`] when a run log is open; otherwise a quiet-gated `[run]` console
+/// line. For narration from shared code (the lock's toolchain move, `--commit`
+/// worktrees) that also runs under commands with no run log, where a
+/// log-only line would vanish.
+pub fn detail_or_console(msg: &str) {
+    let open = RUN_LOG
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .is_some();
+    if open {
+        detail(msg);
+    } else if !is_quiet() {
+        emit("[run]     ", msg);
+    }
 }
 
 /// `prefix` on every line of `msg`, newline-terminated.
@@ -182,17 +209,37 @@ fn lock_patiently<T>(m: &Mutex<T>) -> Option<std::sync::MutexGuard<'_, T>> {
     None
 }
 
-/// Write `text` (whole lines) to stdout under the renderer: clear a drawn
+/// Which console stream a persistent line goes to. The status line lives on
+/// stdout; a stderr line still clears and redraws it, since both share the
+/// terminal.
+#[derive(Clone, Copy)]
+enum Stream {
+    Out,
+    Err,
+}
+
+/// Write `text` (whole lines) to `stream` under the renderer: clear a drawn
 /// status line, write, redraw it. Write errors are ignored - a reader that
 /// closed the pipe must not turn into a panic that stops the run log.
-fn render(r: &mut Renderer, text: &str) {
+fn render(r: &mut Renderer, stream: Stream, text: &str) {
     use std::io::Write;
     let mut out = std::io::stdout().lock();
     if r.drawn {
         out.write_all(b"\r\x1b[2K").ok();
         r.drawn = false;
     }
-    out.write_all(text.as_bytes()).ok();
+    match stream {
+        Stream::Out => {
+            out.write_all(text.as_bytes()).ok();
+        }
+        Stream::Err => {
+            // Order the clear before the stderr write on a shared terminal.
+            out.flush().ok();
+            let mut err = std::io::stderr().lock();
+            err.write_all(text.as_bytes()).ok();
+            err.flush().ok();
+        }
+    }
     if STATUS_ENABLED.load(Ordering::Relaxed)
         && let Some(s) = &r.status
     {
@@ -202,13 +249,28 @@ fn render(r: &mut Renderer, text: &str) {
     out.flush().ok();
 }
 
-/// Print a persistent block (every line prefixed) and tee it to the run log.
+/// Print an already-prefixed block to `stream` and tee it to the run log.
 /// The whole block goes out under one renderer hold, so nothing can split it.
-fn emit(prefix: &str, msg: &str) {
-    let text = prefixed(prefix, msg);
-    log_write(&text, false);
+fn emit_text(stream: Stream, text: &str) {
+    log_write(text, false);
     let mut r = RENDER.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    render(&mut r, &text);
+    render(&mut r, stream, text);
+}
+
+/// Print a persistent block (every line prefixed) and tee it to the run log.
+fn emit(prefix: &str, msg: &str) {
+    emit_text(Stream::Out, &prefixed(prefix, msg));
+}
+
+/// The prefix for `tag` (brackets included): padded to the 10-column prefix
+/// field, and always followed by a space even when the tag is wider.
+fn tag_prefix(tag: &str) -> String {
+    format!("{tag:<9} ")
+}
+
+/// [`emit`] for a bare tag such as `"[lock]"`.
+fn emit_tag(tag: &str, msg: &str) {
+    emit(&tag_prefix(tag), msg);
 }
 
 /// [`error`] for the watchdog: never waits on either lock for long, so the
@@ -220,7 +282,7 @@ pub fn error_forced(msg: &str) {
     let text = prefixed("[error]   ", msg);
     log_write(&text, true);
     if let Some(mut r) = lock_patiently(&RENDER) {
-        render(&mut r, &text);
+        render(&mut r, Stream::Out, &text);
     }
 }
 
@@ -248,44 +310,64 @@ pub fn result_msg(msg: &str) {
 
 pub fn bench_msg(msg: &str) {
     if !is_quiet() {
-        println!("[bench]   {msg}");
+        emit_tag("[bench]", msg);
     }
 }
 
 pub fn verify_msg(msg: &str) {
-    let line = format!("[verify]  {msg}");
+    let text = prefixed(&tag_prefix("[verify]"), msg);
     let mut guard = VERIFY_BUFFER
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     match guard.as_mut() {
-        Some(buf) => buf.push(line),
-        None => println!("{line}"),
+        Some(buf) => buf.push(text),
+        None => {
+            // Release the buffer lock before taking the renderer's.
+            drop(guard);
+            emit_text(Stream::Out, &text);
+        }
     }
 }
 
 /// Verify summary line - always printed immediately, bypassing the detail
 /// buffer (used for each check's one-line PASS/FAIL result and the final tally).
 pub fn verify_summary(msg: &str) {
-    println!("[verify]  {msg}");
+    emit_tag("[verify]", msg);
 }
 
+/// Interpretation notes must remain visible even on a quiet measured run.
 pub fn hotpath_msg(msg: &str) {
-    if !is_quiet() {
-        println!("[hotpath] {msg}");
-    }
+    emit_tag("[hotpath]", msg);
 }
 
 pub fn download_msg(msg: &str) {
-    println!("[download] {msg}");
+    emit_tag("[download]", msg);
 }
 
+/// A planned action under `--dry-run`, tagged `[dry-run]` rather than `[run]`
+/// (it is not a run). Not quiet-gated, like [`run_msg`].
+pub fn dry_run_msg(msg: &str) {
+    emit_tag("[dry-run]", msg);
+}
+
+/// Lock events: acquisition, the wait, `brokkr lock`, `brokkr kill`.
 pub fn lock_msg(msg: &str) {
-    println!("[lock]    {msg}");
+    emit_tag("[lock]", msg);
+}
+
+/// The stray-process reaps and `brokkr strays`.
+pub fn strays_msg(msg: &str) {
+    emit_tag("[strays]", msg);
+}
+
+/// `brokkr guard`: the rustc-wrapper fence.
+pub fn guard_msg(msg: &str) {
+    emit_tag("[guard]", msg);
 }
 
 #[allow(dead_code)]
 pub fn history_msg(msg: &str) {
-    println!("[history] {msg}");
+    emit_tag("[history]", msg);
 }
 
 pub fn sidecar_msg(msg: &str) {
@@ -294,40 +376,36 @@ pub fn sidecar_msg(msg: &str) {
         // the stored-profile summary, "showing run N/M"), never the data the caller
         // is asking for. Keeping them off stdout lets `brokkr sidecar ...
         // --samples | jq` Just Work.
-        eprintln!("[sidecar] {msg}");
+        emit_text(Stream::Err, &prefixed(&tag_prefix("[sidecar]"), msg));
     }
 }
 
 pub fn litehtml_msg(msg: &str) {
-    println!("[litehtml] {msg}");
+    emit_tag("[litehtml]", msg);
 }
 
 pub fn sluggrs_msg(msg: &str) {
-    println!("[sluggrs] {msg}");
+    emit_tag("[sluggrs]", msg);
 }
 
 pub fn ratatoskr_msg(msg: &str) {
-    println!("[ratatoskr] {msg}");
+    emit_tag("[ratatoskr]", msg);
 }
 
 pub fn corpus_msg(msg: &str) {
-    println!("[corpus]  {msg}");
+    emit_tag("[corpus]", msg);
 }
 
 pub fn lint_msg(msg: &str) {
-    println!("[lint]    {msg}");
-}
-
-pub fn harness_msg(msg: &str) {
-    println!("[harness] {msg}");
+    emit_tag("[lint]", msg);
 }
 
 pub fn deps_msg(msg: &str) {
-    println!("[deps]    {msg}");
+    emit_tag("[deps]", msg);
 }
 
 pub fn wc_msg(msg: &str) {
-    println!("[wc]      {msg}");
+    emit_tag("[wc]", msg);
 }
 
 thread_local! {
@@ -342,6 +420,11 @@ thread_local! {
 /// retried by the step that actually needs it, which prints its own error once.
 /// Calls nest: an inner call's errors are returned to it and the outer call's
 /// holding resumes where it was.
+///
+/// Only errors are held. A [`warn`] prints at once: the held vector replays as
+/// errors, so holding a warning would either turn it into one or need a typed
+/// replay at every caller, and a warning is true whether or not the held work
+/// later fails.
 pub fn capture_errors<T>(f: impl FnOnce() -> T) -> (T, Vec<String>) {
     let outer = HELD_ERRORS.with(|h| h.borrow_mut().replace(Vec::new()));
     let out = f();
@@ -404,6 +487,17 @@ mod count_tests {
         assert_eq!(super::count(1, "rule"), "1 rule");
         assert_eq!(super::count(0, "rule"), "0 rules");
         assert_eq!(super::count(5, "workspace package"), "5 workspace packages");
+    }
+
+    /// The prefix field is 10 columns; a wider tag overflows by one space
+    /// instead of being cut or glued to its message.
+    #[test]
+    fn tag_prefix_pads_to_ten_and_never_truncates() {
+        assert_eq!(super::tag_prefix("[build]"), "[build]   ");
+        assert_eq!(super::tag_prefix("[download]"), "[download] ");
+        assert_eq!(super::tag_prefix("[ratatoskr]"), "[ratatoskr] ");
+        assert_eq!(super::tag_prefix("[dry-run]"), "[dry-run] ");
+        assert_eq!(super::prefixed(&super::tag_prefix("[lock]"), "a\nb"), "[lock]    a\n[lock]    b\n");
     }
 }
 

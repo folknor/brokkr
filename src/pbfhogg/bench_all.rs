@@ -201,18 +201,22 @@ fn run_baselines(
     runs: usize,
 ) -> Result<(), DevError> {
     // osmpbf baseline -- build and run
-    output::bench_msg("=== osmpbf baseline ===");
+    // Same shape as the suite's other optional sections: a header only when
+    // the section runs, a one-line reason when it does not.
     let manifest = project_root.join("bench/osmpbf-baseline/Cargo.toml");
     if manifest.exists() {
+        output::bench_msg("=== osmpbf baseline ===");
         skip_on_error(
             "osmpbf baseline",
             run_osmpbf_baseline(harness, &manifest, pbf_path, file_mb, runs, project_root),
         )?;
+    } else {
+        output::bench_msg("=== osmpbf baseline === (skipped, no bench/osmpbf-baseline project)");
     }
 
     // osmium -- if available
-    output::bench_msg("=== osmium baseline ===");
     if super::verify::which_exists("osmium") {
+        output::bench_msg("=== osmium baseline ===");
         skip_on_error(
             "osmium baseline",
             run_osmium_baseline(
@@ -224,9 +228,13 @@ fn run_baselines(
                 project_root,
             ),
         )?;
+    } else {
+        output::bench_msg("=== osmium baseline === (skipped, osmium not found)");
     }
 
-    // planetiler -- if available
+    // planetiler -- always attempted (the tool is fetched on demand), so the
+    // header always prints; a failure to obtain or run it is a warning from
+    // skip_on_error.
     output::bench_msg("=== planetiler baseline ===");
     skip_on_error(
         "planetiler baseline",

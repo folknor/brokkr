@@ -17,6 +17,10 @@ where
     let mm = resolve_mode(mode)?;
     let features = resolve_features(dev_config, &mode.features);
     output::set_quiet(!mode.verbose);
+    // The narration a measured run keeps off the console (per-run sidecar
+    // attach and counts, the hotpath header, worktree and toolchain lines)
+    // goes here; without a log it would be discarded.
+    let _log = check_cmd::RunLog::begin(project_root, check_cmd::run_log_kind::MEASURE);
     // When brokkr.toml lives one level up, `project_root` is the config dir
     // and the code tree is cwd; build/git must run against cwd. `None` in the
     // common case (config in cwd), where behaviour is unchanged.
@@ -24,6 +28,7 @@ where
         .map_err(|e| DevError::Config(format!("cannot determine current directory: {e}")))?;
     let parent_build_root = (cwd != *project_root).then_some(cwd.as_path());
     context::with_worktree(
+        Some(project),
         project_root,
         parent_build_root,
         mode.commit.as_deref(),
@@ -201,6 +206,9 @@ fn cmd_test_from_run(run_id: &str, list: bool) -> Result<(), DevError> {
         .filter(|d| d.config.disable_toolchain)
         .map(|d| d.build_root);
     toolchain::arm(disable_dir);
+    // A replay narrates its support builds and its own record to the run log,
+    // like any `brokkr test`; `--list` executes nothing and keeps none.
+    let _log = check_cmd::RunLog::begin(&state_root, check_cmd::run_log_kind::TEST);
     let _lock = acquire_cmd_lock_opt(None, &state_root, "test")?;
     test_cmd::run_from_run(&build_root, &state_root, run_id, false)
 }
@@ -368,6 +376,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
         };
         let parent_build_root = (build_root != project_root).then_some(build_root.as_path());
         return context::with_worktree(
+            project,
             &project_root,
             parent_build_root,
             Some(commit),
@@ -570,6 +579,10 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 )
             }
         };
+        // The run log is reserved before the lock and opened under it, so its narration
+        // lands in it, and closes after the watchdog's join (declared first,
+        // dropped last).
+        let _log = check_cmd::RunLog::begin(&state_root, check_cmd::run_log_kind::CHECK);
         let _lock = acquire_cmd_lock_opt(project, &state_root, "check")?;
         // The whole-run ceiling, armed once the lock is ours so a wait behind
         // another brokkr command is not charged against it. Fires by
@@ -1352,7 +1365,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             let cwd = std::env::current_dir()
                 .map_err(|e| DevError::Config(format!("cannot determine current directory: {e}")))?;
             let parent_build_root = (cwd != project_root).then_some(cwd.as_path());
-            with_worktree(&project_root, parent_build_root, commit.as_deref(), false, dev_config.disable_toolchain, dev_config.worktree_keep(&config::hostname()?), |build_root| {
+            with_worktree(Some(project), &project_root, parent_build_root, commit.as_deref(), false, dev_config.disable_toolchain, dev_config.worktree_keep(&config::hostname()?), |build_root| {
                 cmd_verify(
                     &dev_config,
                     project,
@@ -1619,6 +1632,10 @@ fn run(cli: Cli) -> Result<(), DevError> {
             // The lock lives in the config dir (.brokkr); cargo runs
             // against the code tree (build_root), which differs under
             // the one-level-up layout.
+            // The run log is reserved before the lock and opened under it (so its narration
+            // lands in it) and outlives the watchdog `test_cmd::run` arms, so
+            // a 124 or 130 keeps everything up to the stop.
+            let _log = check_cmd::RunLog::begin(&project_root, check_cmd::run_log_kind::TEST);
             let _lock = acquire_cmd_lock(project, &project_root, "test")?;
             // Clap guarantees a name whenever there is no `--from-run`, and
             // `--from-run` was dispatched above, before configuration.
@@ -1808,7 +1825,11 @@ fn run(cli: Cli) -> Result<(), DevError> {
             let cwd = std::env::current_dir()
                 .map_err(|e| DevError::Config(format!("cannot determine current directory: {e}")))?;
             let parent_build_root = (cwd != project_root).then_some(cwd.as_path());
+            // A sync bench runs the sidecar, whose per-run narration is
+            // run-log only: give it the measured runs' log.
+            let _log = check_cmd::RunLog::begin(&project_root, check_cmd::run_log_kind::MEASURE);
             with_worktree(
+                Some(project),
                 &project_root,
                 parent_build_root,
                 commit.as_deref(),

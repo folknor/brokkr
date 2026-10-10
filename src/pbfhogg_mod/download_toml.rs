@@ -309,7 +309,7 @@ fn generate_indexed_pbf(
     project_root: &Path,
     build_root: &Path,
 ) -> Result<(), DevError> {
-    output::download_msg("  generating indexed PBF via cat");
+    output::download_msg(&format!("  generating indexed PBF via cat -> {}", dest.display()));
     let binary = build::cargo_build(
         &build::BuildConfig::release(Some("pbfhogg-cli")),
         build_root,

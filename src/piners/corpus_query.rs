@@ -233,13 +233,15 @@ fn render_run_detail(db: &CorpusDb, run_id: i64, full: bool) -> Result<(), DevEr
         let hidden = total - shown.len();
         if shown.is_empty() {
             output::result_msg(&format!(
-                "all {total} probe(s) match their pin - pass --full to show"
+                "all {} matching their pin - pass --full to show",
+                output::count(total, "probe")
             ));
         } else {
             println!("{}", corpus_db::dispositions_table(&shown));
             if hidden > 0 {
                 output::result_msg(&format!(
-                    "{hidden} probe(s) match their pin (hidden) - pass --full to show"
+                    "{} matching their pin (hidden) - pass --full to show",
+                    output::count(hidden, "probe")
                 ));
             }
         }

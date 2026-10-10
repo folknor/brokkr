@@ -239,7 +239,10 @@ impl LintDb {
             &cells,
         );
         if hidden > 0 {
-            out.push_str(&format!("\n{hidden} probe(s) match their pin (hidden)"));
+            out.push_str(&format!(
+                "\n{} matching their pin (hidden)",
+                crate::output::count(hidden, "probe")
+            ));
         }
         Ok(out)
     }
@@ -411,7 +414,7 @@ mod tests {
         let gated = db.run_dispositions(run_id, false).unwrap();
         assert!(gated.contains("diverge_one"));
         assert!(!gated.contains("agree_one"));
-        assert!(gated.contains("2 probe(s) match their pin (hidden)"));
+        assert!(gated.contains("2 probes matching their pin (hidden)"));
 
         std::fs::remove_dir_all(&dir).ok();
     }

@@ -37,8 +37,10 @@ A bare `brokkr hotpath` with no mode flag resolves to `--hotpath 1`, which is
 what it has always meant. Every other measured command would resolve that to
 `Run` (execute once, store nothing); this one does not.
 
-`--alloc` prints a `NOTE: alloc profiling -- wall-clock times are not
-meaningful` banner, because the allocator shim dominates the wall.
+`--alloc` prints a `NOTE: alloc profiling - wall-clock times are not
+meaningful` banner (the one shared `harness::hotpath_alloc_note`, the same
+line every project prints), even without `--verbose`, because the allocator
+shim dominates the wall.
 
 ### `--bench` is on the self-reported timing path
 

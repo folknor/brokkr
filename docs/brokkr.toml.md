@@ -322,9 +322,10 @@ The file is restored when the lock is released - on normal exit, on error, or
 on a cooperative interrupt. A hard kill (`brokkr kill --hard`, SIGKILL) during a
 non-tracked window can leave it moved aside as `rust-toolchain.toml.brokkr-disabled`;
 the next brokkr run in that directory adopts the leftover and restores it,
-printing a `[warn]` that it did so. The routine move aside prints nothing on
-the console (it is identical on every run); it goes to the run-log channel
-and is discarded when no log is open.
+printing a `[warn]` that it did so. The routine move aside is identical on
+every run, so a command that keeps a run log (`check`, `test`, measured runs,
+`bench`) records it there only; any other command prints it as a quiet-gated
+`[run]` line rather than drop it.
 Worktree builds (`--commit`) run in a separate checkout that may carry its own
 committed pin; brokkr re-points the disable there for the build, so the
 worktree's pin is disabled too rather than honored.

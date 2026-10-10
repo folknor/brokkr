@@ -39,13 +39,16 @@ nags.
 
 Like every locked brokkr command, `check` and `test` acquire the global
 per-user lock **blocking**: if another brokkr invocation (e.g. a bench run)
-holds it, the command prints `[lock] waiting for the brokkr lock ...` and
-waits until released, then proceeds - rather than failing with
-`lock: already locked`. So a concurrent lock never produces an error to
-handle; just let the command wait. The wait is the serialization working, not
+holds it, the command prints `[lock] waiting for the brokkr lock (held by
+brokkr check (pbfhogg), 4m00s) ...` and waits until released, then proceeds -
+rather than failing with `lock: already locked`. The parenthesis (holder's
+command, project, how long its process has run) appears only when the holder's
+identity verifies from the waiter's namespaces; otherwise the line is the plain
+`waiting for the brokkr lock ...`. So a concurrent lock never produces an error
+to handle; just let the command wait. The wait is the serialization working, not
 machine congestion: the lock exists so brokkr commands never overlap, and the
-`[lock] acquired - ...` line marks the point after which this command had the
-lock to itself - the wait has no effect on any timing or result measured
+`[lock] acquired after 4m00s` line marks the point after which this command had
+the lock to itself - the wait has no effect on any timing or result measured
 after it. `brokkr lock` shows who holds the lock and what it is doing - asked
 of the holder itself over its control socket, so it works across sandboxes.
 When the holder recorded the same `CODEX_THREAD_ID` as the waiting command, the
@@ -130,10 +133,10 @@ Output:
   `[lints]` suppression. The suppressions sit on the verdict rather than on a
   phase line because they narrow clippy (`-A`), rustdoc (dropped at
   ingestion) and every compiling phase (test, coverage, install-feature,
-  through rustflags) alike; `allow_exact` adds where it is sited and where it
-  is not (`sited in clippy/rustdoc; build-wide in test, coverage and install
-  builds`). `cargo::` lints are listed in a separate `(sited)` group, because
-  brokkr never passes them to a build. A script that builds its own `-A` list
+  through rustflags) alike; `allow_exact` lists its lint names only, its
+  scope being a fixed fact documented under `[lints] allow_exact` below.
+  `cargo::` lints are listed in a separate `(sited)` group, because brokkr
+  never passes them to a build. A script that builds its own `-A` list
   from `[lints]` has to skip them too, or rustc fails every crate with E0602.
   The verdict prints on a red run too, so the context does.
 - **Warnings print once.** A cargo warning from a passing test sweep is held
@@ -167,7 +170,13 @@ Output:
   trailer, with verdict `"failed"`. `brokkr test` and `brokkr clippy` behave
   the same way.
 - **The run log.** Every run writes `.brokkr/check-logs/check-<ms>.log`
-  (under the config dir), the newest ten kept: every line printed, plus the
+  (under the config dir), the newest ten `check-` logs kept (`brokkr test`,
+  measured runs and `brokkr bench` write `test-`, `measure-` and `bench-`
+  logs beside them, each kind pruned only against its own ten). Reserved before
+  the lock and opened under it, before the compile-lease drain and toolchain
+  narration. Waiting commands cannot open or prune logs; a failed open
+  preserves history, and retention protects the current file even after a
+  clock rollback. The log keeps every line printed after opening, plus the
   narration a green run no longer prints - shapes, full cargo argv, the
   `[lints]` sink, per-unit counts, build and fan-out times, the parallel plan
   and per-sweep slowest binary, the roll-call. Written and flushed as each
@@ -422,6 +431,30 @@ Two details decide whether "20 seconds" means 20 seconds:
   and destroy the diagnostic, since a dead process has no `wchan` and no stack.
   SIGSTOP stops execution immediately and leaves `/proc` readable.
 
+### Reading a timeout report
+
+The report names only what varies per occurrence: the clock that fired, the
+time it measured against its limit (one number when the kill was on time, both
+when they differ), the killed process group and test children, whichever of
+`/proc/<pid>/wchan` and `/proc/<pid>/stack` could be read (the stack is
+normally unreadable without root, so its line is simply absent), and the
+snapshot directory. The three clocks mean:
+
+- **Per-test timeout** - a test exceeded its cap (normally 20s), or a suite
+  made no progress for that long after a start record was lost. Cargo build
+  time is excluded. A shared harness's named test is a suspect; only an
+  invocation resolved to one exact test gives a verified name.
+- **Wall deadline** - the run's authoritative bound, measured from a clock
+  nothing the tests print can reach, so unlike the per-test cap it cannot be
+  misled by output that swallows a libtest record. No offender is named, because
+  expiry says nothing about which test caused it; the tests in flight are listed
+  as unverified context ("in flight when the deadline expired" is not "caused
+  the timeout").
+- **Idle ceiling** - no test in flight for the idle window: cargo wedged before
+  the first test or after the last, covering the compile, link and teardown the
+  per-test cap cannot see. A build-directory lock held by another cargo (a
+  rust-analyzer `cargo check`, say) looks exactly like this.
+
 ### What stopping costs, per lane
 
 "Stops" has a price in two lanes and it is worth naming:
@@ -575,10 +608,11 @@ cargo family - `cargo`, `cargo-*`, `rustc`, `rustdoc`, `clippy-driver`, build
 scripts (`build_script_bu` after the kernel's 15-byte truncation) and the
 wrapper itself (`brokkr-rustc-gu`, truncated from `brokkr-rustc-guard`) - that
 brokkr does not own, SIGKILLs them leaves first, and reports the whole reap on
-one line - comm counts plus deduplicated starters, no pids since everything
-named is already dead, e.g. `SIGKILL sent to 3 stray cargo processes
-(build_script_bu x2, cargo) started by rust-analyzer` (`src/stray.rs`;
-live per-process detail is `brokkr strays`' job). The starter is
+one `[strays]` line - comm counts plus deduplicated starters, no pids since
+everything named is already dead, e.g. `[strays] SIGKILL sent to 3 stray cargo
+processes (build_script_bu x2, cargo) started by rust-analyzer` (`src/stray.rs`;
+live per-process detail is `brokkr strays`' job). The line carries no pointer
+to this section; `brokkr strays` ends with one. The starter is
 the nearest ancestor outside the family. When it is rust-analyzer it is killed
 too, because it would only re-run the cargo within seconds and the editor
 restarts it on demand; a shell or editor starter (a hand-typed `cargo`) is
@@ -1376,8 +1410,12 @@ occurrence in that file - file-granular by design, since line numbers drift
 with unrelated edits), never workspace-wide, and no `-A` is injected for it,
 so other sites of the same lint keep failing the check. The entries' distinct
 lints are named on the verdict line (`allow_exact: clippy::assert_is_empty,
-deprecated (sited in clippy/rustdoc; build-wide in test, coverage and install
-builds)`); the per-lint file-count summary (`clippy: allowing
+deprecated`), and the scope is this paragraph's, not the line's: an entry is
+sited per file in the diagnostic phases (clippy and rustdoc), but the
+compiling phases (test, coverage enumeration, install-feature) have no
+per-file mechanism, so there it applies build-wide through rustflags. `cargo::`
+entries never reach a build and are marked `(sited)` on the verdict. The
+per-lint file-count summary (`clippy: allowing
 clippy::assert_is_empty (59 files), deprecated (3 files) ([lints]
 allow_exact)`) goes to the run log, and prints under `brokkr clippy` or
 `--commands`. (The blanket `clippy: allowing ... ([lints] allow)` line is
@@ -2310,9 +2348,12 @@ dead filters (below) prints **all** the worksheets before failing.
 Package-level `test_exclude_packages` is outside the pair audit (those
 binaries cannot build) and is called out in the trailer.
 
-The ledger reports as **one rolled-up line** - entry count, total pairs,
-and the per-issue pair breakdown in descending order (`quarantine: 21
-entries, 106 pairs - B51 80, B41 14, B50 10, ...`). That keeps both signals
+The ledger reports as a per-issue pair breakdown in descending order. On a
+passing audit it rides on the coverage line's `quarantined` field (`106
+quarantined (B51 80, B41 14, B50 10, ...)`), whose count is the same pair
+total; on a failing or incomplete audit, where that line does not print, it is
+one rolled-up line of its own ahead of the findings (`quarantine: 21 entries,
+106 pairs - B51 80, B41 14, B50 10, ...`). That keeps both signals
 the per-entry listing carried: the countdown, and the growth warning when a
 substring starts matching more than it used to. It is a summary, not a cap -
 every pair the ledger holds is counted in the line, at the granularity a
@@ -3452,18 +3493,41 @@ stripped, including standalone `ok`/`FAILED` verdict lines, the duplicate empty
 cargo's `Running` launch lines and `to rerun pass ...` suggestion), then prints
 a `[test]` footer per harness that ran the name - `PASS` or `FAIL`, tagged with
 the harness (`[test:cli_sort]`, `[lib:pkg]`) - and `BUILD FAILED` for a sweep
-whose build failed. Before running, each sweep says which harnesses hold a match
-(`1 of 85 harnesses holds a match: test:cli_sort`), and a multi-sweep run opens
-with one line naming the sweeps that will run, and those out of the package's
-scope with their reason (`not this package:` for a `packages` list the target
-isn't in, `excluded by test_exclude_packages:`). That line is the only place an
-out-of-scope sweep is named: it prints no header and no `SKIP` of its own (a
-run resolving to a single sweep has no plan line, so its out-of-scope `SKIP`
-still prints). `sweep:` headers print only when more than one sweep applies to
-the package. The scope decision is made *before* the build, so a target that
-doesn't carry the sweep's features is skipped rather than force-built into a
-guaranteed `BUILD FAILED`. A sweep in scope `SKIP`s when the name matched in
-none of its harnesses (usually `#[cfg(feature = "...")]`-gated).
+whose build failed. There are no `sweep:` header lines: every line that belongs
+to one sweep names it (`<sweep>: 44 harnesses built in 3.9s`,
+`<sweep>: 1 of 85 harnesses holds a match: test:cli_sort`, the PASS/FAIL tags),
+and a single-sweep run drops the prefix. A multi-sweep run opens with one line
+naming the sweeps that will run, and those out of the package's scope with their
+reason (`not this package:` for a `packages` list the target isn't in,
+`excluded by test_exclude_packages:`). That line is the only place an
+out-of-scope sweep is named: it prints no `SKIP` of its own (a run resolving to
+a single sweep has no plan line, so its out-of-scope `SKIP` still prints). The
+scope decision is made *before* the build, so a target that doesn't carry the
+sweep's features is skipped rather than force-built into a guaranteed `BUILD
+FAILED`.
+
+A sweep in scope whose harnesses hold no match (usually
+`#[cfg(feature = "...")]`-gated) prints a `SKIP` line only when another sweep
+did run the name - then "feature-gated out of this sweep" is real information.
+When no sweep matched, there is no per-sweep line: one closing error says
+`no test matches <NAME> in <pkg> (44 harnesses searched in default and
+strategy-features)`.
+
+Like `check`, `test` opens a run log under `.brokkr/check-logs/`, named
+`test-<ms>.log` and retained ten deep on its own, so a burst of `test` runs
+never prunes the `check` log being investigated. It is reserved before the
+lock, opens once the lock is held, and closes after the watchdog's join, so a run ending 124 or 130 keeps everything
+up to the stop; a `--from-run` replay writes one too (`--list` executes nothing
+and writes none).
+The cargo commands (the support builds, the test prebuild) and each harness's
+invocation line (`<binary> <args> (cwd <dir>)`) go to the run log. The console
+shows a build's command only when the build fails or errors out, beside its
+diagnostics - the rule `brokkr check` follows - and a harness's invocation only
+when that harness fails, after its `FAIL` footer, as the reproduction line (once
+per distinct invocation for the command under `-N`). Spawn and runner errors
+also print the invocation; a doc-only build failure prints its cargo command.
+A passing single test therefore reads as its build line,
+its match line and the `PASS` footer.
 
 Every sweep is built and discovered before the first test runs, then built
 again just before it runs and held to that record (another sweep's build may
@@ -3493,7 +3557,8 @@ When a harness's only failure is one failing test, the footer leads with that
 test's full name rather than the user's filter, which moves into the timing
 parenthesis when it differs (`FAIL pkg::mod::tests::full_name [default,
 lib:pkg] (0.25s; filter: full) - <msg> @ <loc>`); every other failure set keeps
-the filter-led tag. Each harness's `[run]` line names the cwd it runs from.
+the filter-led tag. A failing harness's `[run]` line (printed after its footer)
+names the cwd it runs from.
 A failure counts as a test only when libtest's own verdict names it (a detail
 block or the `failures:` roster, not a panic's thread name, which a test can
 rename) and, where discovery listed the harness, the name is one it listed. After the footer, every
@@ -3510,19 +3575,19 @@ expired. Both are classified as a per-test timeout for that resolved name.
 A shared harness's sweep-wall kill has no verified offender, an idle kill has
 no test to name, and a shared harness's per-test kill names only a suspect,
 so those keep the filter-led form. Exit code:
-non-zero if any run was `FAIL`/`BUILD FAILED`, or if *every* sweep was `SKIP`
-(bad name); `SKIP` mixed with at least one `PASS` exits `0`. The closing error
-line names what failed, the detail having already printed: `test failed` when a
-test failed, `build failed` when only builds did, `test failed and build
-failed` when both, and for a bad name the `no sweep matched` sentence itself,
-printed once. Under `-N`, a sweep whose harnesses hold no match prints its one
-`SKIP` line for run 1 only. A fired `test` phase ceiling exits 124 and a
+non-zero if any run was `FAIL`/`BUILD FAILED`, or if *every* sweep found no
+match (bad name); a no-match sweep mixed with at least one `PASS` exits `0`. The
+closing error line names what failed, the detail having already printed: `test
+failed` when a test failed, `build failed` when only builds did, `test failed
+and build failed` when both, and for a bad name the `no test matches` sentence
+itself, printed once. Under `-N`, a no-match sweep's `SKIP` line (when it
+prints) comes from run 1 only. A fired `test` phase ceiling exits 124 and a
 graceful `brokkr kill` / Ctrl-C exits 130 (see "Time ceilings").
 
 Flags:
 - `-N <n>` - repeat the test (per sweep) for flaky-test hunting. The sweep
   builds and discovers once; each iteration re-runs every matching harness.
-  The invocation and build-time lines print for run 1 only. The first occurrence
+  The build and match lines print for run 1 only. The first occurrence
   of each distinct failure set prints its full block; repeats of the same set
   collapse to their `[test] FAIL` footer alone. A closing `[test] summary:`
   line gives PASS/FAIL counts plus one `Nx` group per distinct failure SET -
@@ -3553,7 +3618,7 @@ that ceiling for `brokkr test` only, and only for a genuinely single test: if
 `<NAME>` matches more than one (harness, test) in any sweep's discovery - the
 same name in two harnesses counts twice - the command errors before running
 anything, listing them. Sweeps where the name matches zero tests (feature-gated
-out) are fine and still `SKIP`. There is no way to disable the ceiling entirely
+out) are fine and are noted by a `SKIP` line when another sweep ran the name. There is no way to disable the ceiling entirely
 - 280s is the cap.
 
 `--timeout` is the **only** exception to the 20s cap anywhere in brokkr, and

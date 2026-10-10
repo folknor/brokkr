@@ -70,7 +70,7 @@ pub(crate) fn cmd_check(
     extra_args: &[String],
 ) -> Result<(), DevError> {
     let started = std::time::Instant::now();
-    let _scope = RunScope::begin(state_root);
+    let _scope = RunScope::begin();
     // A graceful `brokkr kill` / Ctrl-C ends the run as `Interrupted` (exit 130,
     // main's scratch cleanup) rather than killing brokkr on the default action
     // mid-phase. Every runner the phases use either polls the flag or is
@@ -1225,10 +1225,6 @@ fn resolve_gate_profile(
     }
 }
 
-/// The certifies permission table governs CLI flags too: `-p` scopes the
-/// build, and a scoped green is not comparable to the full green (feature
-/// unification changes with the package set - the B41 hazard), so a
-/// complete profile rejects it before anything compiles.
 /// The ordinary (non-parallel, non-isolated) test lane: one `cargo test` per
 /// cargo RESOLUTION.
 ///
@@ -1362,6 +1358,10 @@ fn resolve_sweep_unification(
     Ok(())
 }
 
+/// The certifies permission table governs CLI flags too: `-p` scopes the
+/// build, and a scoped green is not comparable to the full green (feature
+/// unification changes with the package set - the B41 hazard), so a
+/// complete profile rejects it before anything compiles.
 fn reject_scoped_complete(
     certifies: Option<Certifies>,
     packages: &[String],
@@ -1623,9 +1623,11 @@ fn finish_check(
 /// compiling phase (test, coverage enumeration, install-feature, through
 /// rustflags) alike, so a clause on any one phase's line would let the others
 /// read as unsuppressed - and this is the one line every run prints, green or
-/// red. `allow_exact` says where it is sited and where it is not: file-scoped
-/// in the diagnostic phases, but the compiling phases have no per-file
-/// mechanism, so there it applies build-wide.
+/// red. `allow_exact` lists only the lint names: file-scoped in the diagnostic
+/// phases, but the compiling phases have no per-file mechanism, so there it
+/// applies build-wide - a fixed fact that lives in `docs/commands/check.md`,
+/// not on the line. `cargo::` lints never reach a build, so they are marked
+/// `(sited)`.
 ///
 /// Empty when there is nothing to say (no profile, one sweep, no allows).
 fn verdict_context(
@@ -1661,10 +1663,9 @@ fn verdict_context(
         }
         let mut groups: Vec<String> = Vec::new();
         if !widened.is_empty() {
-            groups.push(format!(
-                "{} (sited in clippy/rustdoc; build-wide in test, coverage and install builds)",
-                widened.join(", ")
-            ));
+            // Where each is sited is constant: `brokkr man check` (the
+            // `allow_exact` scope), not worth repeating on every verdict.
+            groups.push(widened.join(", "));
         }
         if !sited.is_empty() {
             groups.push(format!("{} (sited)", sited.join(", ")));
@@ -1818,12 +1819,6 @@ fn emit_timings(timings: &[TestTiming], multi_sweep: bool) {
     output::run_msg(msg.trim_end());
 }
 
-/// Build the list of sweeps both phases iterate, applying the
-/// priority ladder documented at the top of the file.
-///
-/// Returns `Err` only when the user asked for a `--profile` that
-/// doesn't resolve. Every other branch always succeeds with at least
-/// one sweep.
 /// Escape sentences for a cross-entry `env` disagreement. `clippy` can pick a
 /// value (`--env`) or replay one entry (`--sweep`); `check` has neither flag,
 /// so its way out is to stop being ad-hoc.
@@ -1833,6 +1828,12 @@ const CHECK_ENV_CONFLICT_REMEDY: &str = "an ad-hoc `--features` run takes no \
      `[[check]]` entry and can't pick one; run a profile (or `-p` with no \
      `--features`) instead, or reconcile the entries' `env`.";
 
+/// Build the list of sweeps both phases iterate, applying the
+/// priority ladder documented at the top of the file.
+///
+/// Returns `Err` only when the user asked for a `--profile` that
+/// doesn't resolve. Every other branch always succeeds with at least
+/// one sweep.
 pub(crate) fn decide_active_sweeps(
     check_entries: &[CheckEntry],
     test_cfg: Option<&TestConfig>,
@@ -2047,7 +2048,6 @@ fn run_header(
         return Ok(());
     }
 
-    output::run_msg(&format!("header: require `{expected}`"));
     let total = violations.len();
     let displayed = scope_order(violations, project_root, |v| v.file.as_path());
     let mut msg = format!("header: {}\n", output::count(total, "violation"));
@@ -2089,7 +2089,6 @@ fn run_textlint(
         return Ok(());
     }
 
-    output::run_msg(&format!("textlint: {}", output::count(rules.len(), "rule")));
     let total = violations.len();
     let displayed = scope_order(violations, project_root, |v| v.file.as_path());
     let mut msg = format!("textlint: {}\n", output::count(total, "violation"));
@@ -2120,7 +2119,6 @@ fn run_manifest(
         return Ok(());
     }
 
-    output::run_msg("manifest: Cargo.toml conventions");
     let total = violations.len();
     let displayed = scope_order(violations, project_root, |v| v.file.as_path());
     let mut msg = format!("manifest: {}\n", output::count(total, "violation"));
@@ -2587,7 +2585,15 @@ fn run_one_diagnostic_cargo(
     }
     let shape = describe_sweep(sweep, false, run_scope);
     let command = format!("{env_prefix}cargo {}", args.join(" "));
-    announce_sweep(&format!("{}: {shape}", phase_sweep_tag(phase, &sweep.label)), Some(&command), commands);
+    let line_shape = format!("{}: {shape}", phase_sweep_tag(phase, &sweep.label));
+    if report_active() {
+        announce_sweep(&line_shape, Some(&command), commands);
+    } else {
+        // Investigative clippy echoes the command after the run and the shape
+        // on failure. It has no log; avoid silently dropping log-only writes
+        // or printing that same command twice.
+        output::status(&line_shape);
+    }
 
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     let env_refs: Vec<(&str, &str)> = env_owned
@@ -2907,11 +2913,16 @@ fn run_per_build_shape(
 
     let mut results: Vec<SweepResult> = Vec::with_capacity(sweeps.len());
     let mut applicable = 0usize;
+    // Log only inside `check`, whose run log keeps them and which announced
+    // the package rules once, up front (`announce_package_rules`) - repeating
+    // them per phase was noise. `brokkr clippy` keeps no run log and announces
+    // nothing, so there they print.
+    let note = |line: &str| if report_active() { output::detail(line) } else { output::run_msg(line) };
     for (i, sweep) in sweeps.iter().enumerate() {
         // A config-driven skip (a doctest carrier has no build shape) is the
         // same every run, so the log records it and stdout does not.
         if let Some(reason) = skip(sweep) {
-            output::detail(&format!("{phase} {}: skipped ({reason})", sweep.label));
+            note(&format!("{phase} {}: skipped ({reason})", sweep.label));
             continue;
         }
         applicable += 1;
@@ -2919,10 +2930,6 @@ fn run_per_build_shape(
         // combines, because cargo unions selection flags (cli_package_scope).
         // Ruled-out packages are dropped with a note; a sweep keeping none
         // is skipped entirely.
-        // Log only inside `check`, which announced the package rules once, up
-        // front (`announce_package_rules`) - repeating them per phase was
-        // noise. `brokkr clippy` announces nothing, so there they print.
-        let note = |line: &str| if report_active() { output::detail(line) } else { output::run_msg(line) };
         let (scope, dropped) = match cli_package_scope(sweep, packages, false) {
             Ok(s) => s,
             Err(reason) => {
@@ -2936,7 +2943,7 @@ fn run_per_build_shape(
 
         // Config-derived like the skip above: log only.
         if !seen_shapes.insert(sweep.build_shape_key()) {
-            output::detail(&format!(
+            note(&format!(
                 "{phase} {}: deduped (build shape already checked)",
                 sweep.label
             ));
@@ -2989,10 +2996,9 @@ fn run_per_build_shape(
     Ok(results)
 }
 
-/// A suppressed lint narrows what "clippy clean" certifies, so the log must
-/// say so up front - like `skip_phases`, a narrowed run must never read as a
-/// full one. Blanket allows on one line, each sited allow on its own.
-/// Announce the test phase's lint suppressions, and where they were injected.
+/// Record the test phase's lint suppressions, and where they were injected, in
+/// the run log. The verdict line is what names the suppressions on the console;
+/// only an injection point that may be inert (below) earns a printed warning.
 ///
 /// The clippy phase can say "allowing X" and leave it there - it passes `-A` on
 /// its own argv. The test phase cannot: it has no rustc passthrough, so the
@@ -3084,7 +3090,8 @@ fn announce_allows(allow: &[String], allow_exact: &[SitedAllow], to_stdout: bool
         let msg = format!("clippy: allowing {} ([lints] allow)", allow.join(", "));
         if blanket_on_stdout {
             say(&msg);
-        } else {
+        } else if report_active() {
+            // Clippy's console command already carries every blanket -A.
             output::detail(&msg);
         }
     }

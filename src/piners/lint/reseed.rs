@@ -111,8 +111,8 @@ pub fn run(
     )?;
 
     output::lint_msg(&format!(
-        "reseed: {} snippet(s) -> {} (added={added} changed={changed} removed={removed})",
-        new_pins.len(),
+        "reseed: {} -> {} (added={added} changed={changed} removed={removed})",
+        output::count(new_pins.len(), "snippet"),
         lints_path.display(),
     ));
     Ok(())

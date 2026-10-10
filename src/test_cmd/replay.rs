@@ -381,8 +381,12 @@ fn run_support_build(
     env: &[(&str, &str)],
 ) -> Result<Vec<check_cmd::SupportArtifact>, DevError> {
     let args: Vec<&str> = build.args.iter().map(String::as_str).collect();
-    output::detail(&format!("cargo {} (replay support build: {lane})", build.args.join(" ")));
-    let captured = super::cargo_with_deadline(&args, project_root, env, "replay support build")?;
+    let line = format!("cargo {} (replay support build: {lane})", build.args.join(" "));
+    output::detail(&line);
+    // A build that could not start or went idle names what it ran, like one
+    // that failed (below).
+    let captured = super::cargo_with_deadline(&args, project_root, env, "replay support build")
+        .inspect_err(|_| output::run_msg(&line))?;
     if !captured.status.success() {
         // `Reported`: the identity leads, then the command and stderr, so the
         // closing label is not a `build:` restatement of what is above it.

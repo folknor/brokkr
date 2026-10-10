@@ -14,9 +14,12 @@
 //! when neither is passed the `[test] debug` toml field decides. Streams
 //! the test's own
 //! stdout/stderr live (filtering out cargo/test-harness framing noise), then
-//! prints a `[test]` PASS/FAIL footer per sweep with wall time. Under `-N`,
-//! the `[run] cargo ...` and build-time framing prints for run 1 only -
-//! repeats collapse to their footer line.
+//! prints a `[test]` PASS/FAIL footer per sweep with wall time. The cargo and
+//! harness invocations go to the run log; the console shows one only when it
+//! failed (beside its diagnostics, or after a failing harness's footer, as the
+//! reproduction line). No `sweep:` header lines: a line that belongs to one
+//! sweep names it when several run. Under `-N`, the once-only lines print for
+//! run 1 only - repeats collapse to their footer line.
 //!
 //! Feature selection follows the same priority ladder as
 //! `brokkr check`'s test phase, with two intentional differences:
@@ -263,7 +266,8 @@ pub fn run(
     sweep_filter: Option<&str>,
 ) -> Result<(), DevError> {
     // Declared before the guard, so the guard drops first and the watchdog's
-    // join is the last thing the command does.
+    // join is the last thing the command does. The run log is the caller's
+    // (`main`, opened before the lock), so it outlives the join.
     let _ceiling = check_cmd::CheckWatchdog::arm_for("brokkr test", None);
     let _interrupts = crate::shutdown::SigtermGuard::install();
     let result = run_sweeps(
@@ -319,7 +323,7 @@ pub fn run_from_run(project_root: &Path, state_root: &Path, run_id: &str, list: 
 /// a PASS in the first one is visibly not the end of the command.
 ///
 /// It is also the only place a scope-excluded sweep is named - those print no
-/// header and no SKIP line of their own - so it keeps the two reasons apart: a
+/// SKIP line of their own - so it keeps the two reasons apart: a
 /// sweep whose `packages` list leaves the package out, and one that excludes
 /// it by `test_exclude_packages`.
 fn sweep_plan_line(sweeps: &[ResolvedSweep], pkg: &str) -> String {
@@ -419,7 +423,7 @@ fn prepare_sweep<'s>(sweep: &'s ResolvedSweep, cx: &SweepContext<'_>) -> Result<
     let mut support: Vec<check_cmd::SupportArtifact> = Vec::new();
     let mut support_builds: Vec<check_cmd::SupportBuild> = Vec::new();
     for build_pkg in &sweep.build_packages {
-        match run_pre_build(project_root, sweep, build_pkg, &env_refs, &allow_args, debug, false)? {
+        match run_pre_build(project_root, sweep, build_pkg, &env_refs, &allow_args, debug)? {
             Some(artifacts) => support.extend(artifacts),
             None => return Ok(SweepOutcome::Done(RunReport::bare(Outcome::BuildFailed))),
         }
@@ -440,11 +444,13 @@ fn prepare_sweep<'s>(sweep: &'s ResolvedSweep, cx: &SweepContext<'_>) -> Result<
         }
         (None, Vec::new())
     } else {
-        let Some((binaries, index)) = prebuild_targets(&shape, &env_refs, project_root, false)? else {
+        // Lines that belong to one sweep say which, when several run.
+        let label = cx.multi.then_some(sweep.label.as_str());
+        let Some((binaries, index)) = prebuild_targets(&shape, &env_refs, project_root, false, label)? else {
             return Ok(SweepOutcome::Done(RunReport::bare(Outcome::BuildFailed)));
         };
         let fingerprint = index.fingerprint()?;
-        let plan = plan_focused(&shape, name, timeout.is_some(), &binaries, index, &env_refs, project_root)?;
+        let plan = plan_focused(&shape, name, timeout.is_some(), &binaries, index, &env_refs, project_root, label)?;
         (Some(plan), fingerprint)
     };
     // Hashed after every build the sweep did: the pre-builds can be re-uplifted
@@ -536,9 +542,8 @@ fn run_sweeps(
     if multi {
         println!("{}", sweep_plan_line(&sweeps, &pkg));
     }
-    // `sweep:` headers only earn their line when more than one sweep applies
-    // to the package; with one, the plan line has already named it.
-    let headers = sweeps.iter().filter(|s| sweep_skip_reason(s, &pkg).is_none()).count() > 1;
+    // No per-sweep header lines: every line that belongs to one sweep says
+    // which (the build line, the PASS/FAIL tags), when several run.
 
     // Every sweep is built and discovered before the first test runs: the
     // inventory of what this invocation will execute is what a stop in one
@@ -547,9 +552,6 @@ fn run_sweeps(
     // finish running.)
     let mut ready: Vec<ReadySweep<'_>> = Vec::new();
     for sweep in &sweeps {
-        if headers && sweep_skip_reason(sweep, &pkg).is_none() {
-            println!("[test]    sweep: {}", sweep.label);
-        }
         match prepare_sweep(sweep, &cx)? {
             SweepOutcome::Ready(r) => ready.push(*r),
             SweepOutcome::Done(report) => reports.push(report),
@@ -557,7 +559,8 @@ fn run_sweeps(
     }
 
     let inventory = TestInventory::open(&ready, &cx, repeat, ceiling);
-    let ran = run_ready(&ready, &cx, headers, repeat, ceiling, inventory.as_ref(), &mut reports);
+    let mut notes: Vec<NoMatchNote> = Vec::new();
+    let ran = run_ready(&ready, &cx, repeat, ceiling, inventory.as_ref(), &mut reports, &mut notes);
 
     // The journal says the run is over, however it ended; then what it left
     // unresolved is read back from disk, exactly as `--from-run ID --list`
@@ -568,6 +571,15 @@ fn run_sweeps(
     }
     ran?;
 
+    // A sweep that found no match is news only beside a sweep that did: then
+    // "feature-gated out of this sweep" is real information. When none matched,
+    // the closing error says it once.
+    if reports.iter().any(|r| matches!(r.outcome, Outcome::Pass | Outcome::Fail)) {
+        for note in &notes {
+            println!("[test]    SKIP {pkg}::{name} [{}] - {}", note.label, note.detail);
+        }
+    }
+
     if repeat > 1 {
         for line in format_repeat_summary(&reports) {
             println!("{line}");
@@ -575,7 +587,76 @@ fn run_sweeps(
     }
 
     let outcomes: Vec<Outcome> = reports.iter().map(|r| r.outcome).collect();
-    aggregate_exit(&outcomes, &pkg, name)
+    aggregate_exit(&outcomes, &pkg, name, &Searched::of(&ready))
+}
+
+/// A sweep whose search found no match, held until it is known whether another
+/// sweep did.
+struct NoMatchNote {
+    label: String,
+    detail: String,
+}
+
+impl NoMatchNote {
+    fn of(r: &ReadySweep<'_>) -> Self {
+        let what = match &r.focused {
+            Some(f) => format!("no test matched in any of {}", output::count(f.searched, "searched harness")),
+            None => "no doctest matched".to_owned(),
+        };
+        Self {
+            label: r.sweep.label.clone(),
+            detail: format!("{what} (likely feature-gated out of this sweep)"),
+        }
+    }
+}
+
+/// What the run's sweeps searched, for the closing error when nothing matched.
+#[derive(Default)]
+struct Searched {
+    harnesses: usize,
+    /// Sweeps that ran only `cargo test --doc`: their search is not countable.
+    doc_only: usize,
+    labels: Vec<String>,
+}
+
+impl Searched {
+    fn of(ready: &[ReadySweep<'_>]) -> Self {
+        let mut s = Self::default();
+        for r in ready {
+            s.labels.push(r.sweep.label.clone());
+            match &r.focused {
+                Some(f) => s.harnesses += f.searched,
+                None => s.doc_only += 1,
+            }
+        }
+        s
+    }
+
+    /// ` (44 harnesses searched in default and strategy-features)`, or nothing
+    /// when no sweep searched at all (a lone sweep scoped out of the package,
+    /// which printed its own reason).
+    fn describe(&self) -> String {
+        if self.labels.is_empty() {
+            return String::new();
+        }
+        let mut what = Vec::new();
+        if self.harnesses > 0 || self.doc_only == 0 {
+            what.push(output::count(self.harnesses, "harness"));
+        }
+        if self.doc_only > 0 {
+            what.push("doctests".to_owned());
+        }
+        let mut s = format!(" ({} searched", what.join(" and "));
+        if let [rest @ .., last] = self.labels.as_slice() {
+            if rest.is_empty() {
+                s.push_str(&format!(" in {last}"));
+            } else {
+                s.push_str(&format!(" in {} and {last}", rest.join(", ")));
+            }
+        }
+        s.push(')');
+        s
+    }
 }
 
 /// Run every ready sweep's iterations, recording each in its lane's journal.
@@ -584,11 +665,11 @@ fn run_sweeps(
 fn run_ready(
     ready: &[ReadySweep<'_>],
     cx: &SweepContext<'_>,
-    headers: bool,
     repeat: u32,
     ceiling: Duration,
     inventory: Option<&TestInventory>,
     reports: &mut Vec<RunReport>,
+    notes: &mut Vec<NoMatchNote>,
 ) -> Result<(), DevError> {
     let repeat_state = RepeatState::default();
     for (si, prepared) in ready.iter().enumerate() {
@@ -618,9 +699,6 @@ fn run_ready(
                 return Err(e);
             }
         };
-        if headers {
-            println!("[test]    sweep: {}", r.sweep.label);
-        }
         let env_refs: Vec<(&str, &str)> = r.env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
         let plan = SweepPlan {
             shape: BuildShape { sweep: r.sweep, allow_args: &r.allow_args, pkg: cx.pkg, jobs: cx.jobs, debug: r.debug },
@@ -657,6 +735,10 @@ fn run_ready(
             };
             let report = result.map_err(stop)?;
             let timed_out = report.timed_out;
+            // Discovery is the same every iteration: one note per sweep.
+            if n == 1 && report.outcome == Outcome::NoMatch {
+                notes.push(NoMatchNote::of(r));
+            }
             reports.push(report);
             // A blown time budget stops brokkr. Unlike a failing test - where a
             // `-N` run's whole purpose is to keep going and count the flakes -
@@ -695,9 +777,9 @@ fn settle_sweep<'s>(
     sweep_index: usize,
     repeat: u32,
 ) -> Result<Settled<'s>, DevError> {
-    // The re-verification runs quiet and its sweep header prints after it, so
-    // an error out of it (cargo could not start, went idle, a hash failed)
-    // would otherwise arrive with nothing saying which sweep it was.
+    // The re-verification runs quiet, so an error out of it (cargo could not
+    // start, went idle, a hash failed) would otherwise arrive with nothing
+    // saying which sweep it was.
     let rechecked = recheck_sweep(prepared, cx).inspect_err(|_| {
         output::error(&format!(
             "test {}: re-verifying the sweep's build before it runs failed",
@@ -717,7 +799,9 @@ fn settle_sweep<'s>(
             tap.record(check_cmd::JournalRecord::LaneSuperseded { lane: tap.lane(), reason: reason.clone() });
         }
     }
-    output::detail(&format!(
+    // On the console: it explains the second build narration that follows and
+    // why this sweep has no `--from-run` inventory.
+    output::run_msg(&format!(
         "test {}: {reason}; the sweep runs what it builds now, and its inventory is unavailable",
         prepared.sweep.label
     ));
@@ -733,7 +817,7 @@ fn recheck_sweep(prepared: &ReadySweep<'_>, cx: &SweepContext<'_>) -> Result<Opt
     let env_refs: Vec<(&str, &str)> = prepared.env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
     let mut support: Vec<check_cmd::SupportArtifact> = Vec::new();
     for build_pkg in &prepared.sweep.build_packages {
-        match run_pre_build(cx.project_root, prepared.sweep, build_pkg, &env_refs, &prepared.allow_args, prepared.debug, true)? {
+        match run_pre_build(cx.project_root, prepared.sweep, build_pkg, &env_refs, &prepared.allow_args, prepared.debug)? {
             Some(artifacts) => support.extend(artifacts),
             None => return Ok(None),
         }
@@ -745,7 +829,7 @@ fn recheck_sweep(prepared: &ReadySweep<'_>, cx: &SweepContext<'_>) -> Result<Opt
         jobs: cx.jobs,
         debug: prepared.debug,
     };
-    sweep_drift(prepared, |_| prebuild_targets(&shape, &env_refs, cx.project_root, true), &support)
+    sweep_drift(prepared, |_| prebuild_targets(&shape, &env_refs, cx.project_root, true, None), &support)
 }
 
 /// Every way a rebuild differs from the prepared sweep: a harness gone or
@@ -959,10 +1043,11 @@ fn run_iteration(
         let s = &plan.shape;
         let args = test_argv(s.sweep, s.allow_args, pkg, name, s.jobs, s.debug);
         let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        let invocation = format!("cargo {} (sweep: {}; cwd {})", arg_refs.join(" "), s.sweep.label, plan.project_root.display());
         if announce {
-            output::run_msg(&format!("cargo {}", arg_refs.join(" ")));
+            output::detail(&invocation);
         }
-        return run_one(
+        let report = run_one(
             test_runner::Launch::Cargo,
             &arg_refs,
             plan.project_root,
@@ -981,21 +1066,15 @@ fn run_iteration(
             },
             plan.repeat_state,
             n > 1,
-        );
+        ).inspect_err(|_| show_failed_invocation(plan, &invocation))?;
+        show_reproduction(plan, &invocation, &report);
+        return Ok(report);
     };
 
     if focused.runs.is_empty() {
-        // Discovery is the same every iteration, so under `-N` the line prints
-        // for run 1 only; later repeats would restate it verbatim.
-        // The run number would claim it was run 1 alone that found nothing.
-        if announce {
-            let sweep = plan.sweep_label.map(|l| format!(" [{l}]")).unwrap_or_default();
-            println!(
-                "[test]    SKIP {pkg}::{name}{sweep} - no test matched in any of {} (likely \
-                 feature-gated out of this sweep)",
-                output::count(focused.searched, "searched harness")
-            );
-        }
+        // Nothing prints here: whether "no match in this sweep" is news depends
+        // on whether another sweep ran the name, which only the caller knows
+        // (see `NoMatchNote`).
         return Ok(RunReport::bare(Outcome::NoMatch));
     }
 
@@ -1008,13 +1087,11 @@ fn run_iteration(
     for run in &focused.runs {
         // The cwd rides the invocation line: the harness runs outside cargo,
         // under the envelope's cwd, and this is the one place it is named.
+        // It goes to the run log; the console shows it only for a harness
+        // that fails, where it is the reproduction line.
+        let invocation = format!("{} {} (cwd {})", run.program, arg_refs.join(" "), run.cwd.display());
         if announce {
-            output::run_msg(&format!(
-                "{} {} (cwd {})",
-                run.program,
-                arg_refs.join(" "),
-                run.cwd.display()
-            ));
+            output::detail(&invocation);
         }
         let test_tag = |test: &str, wall: &str| lone_test_tag(plan, &run.label, n, test, wall);
         let env: Vec<(&str, &str)> = run.env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
@@ -1046,7 +1123,8 @@ fn run_iteration(
             },
             plan.repeat_state,
             n > 1,
-        )?;
+        ).inspect_err(|_| show_failed_invocation(plan, &invocation))?;
+        show_reproduction(plan, &invocation, &report);
         print_investigate_hints(plan, &report.failures);
         // A blown budget stops everything, the remaining harnesses included.
         let stop = report.timed_out;
@@ -1056,6 +1134,21 @@ fn run_iteration(
         }
     }
     Ok(RunReport::merge(parts))
+}
+
+/// Print a failed run's invocation on the console: the reproduction line. A
+/// passing run's goes to the run log only. Once per distinct line per command,
+/// so a test failing on every `-N` iteration names its invocation once.
+fn show_reproduction(plan: &SweepPlan<'_>, invocation: &str, report: &RunReport) {
+    if matches!(report.outcome, Outcome::Fail | Outcome::BuildFailed) {
+        show_failed_invocation(plan, invocation);
+    }
+}
+
+fn show_failed_invocation(plan: &SweepPlan<'_>, invocation: &str) {
+    if plan.repeat_state.first_hint(invocation) {
+        output::run_msg(invocation);
+    }
 }
 
 /// The footer tag a lone failing test leads with: its full name, then the same
@@ -1138,7 +1231,8 @@ fn shell_quote(arg: &str) -> String {
 /// harnesses is two failures, not one.
 struct FocusedPlan {
     runs: Vec<HarnessRun>,
-    /// How many harnesses were listed, for the SKIP line when none matched.
+    /// How many harnesses were listed, for the no-match note and the closing
+    /// error when none matched.
     searched: usize,
     /// Under `--timeout`, the one full test name the run is invoked with.
     exact: Option<String>,
@@ -1186,6 +1280,7 @@ fn plan_focused(
     index: check_cmd::BuildRuntimeIndex,
     env: &[(&str, &str)],
     project_root: &Path,
+    label: Option<&str>,
 ) -> Result<FocusedPlan, DevError> {
     // Direct execution would bypass a configured runner or misread a cross
     // build; refuse before running anything.
@@ -1195,14 +1290,17 @@ fn plan_focused(
     if !split.excluded.is_empty() {
         let labels: Vec<String> = split.excluded.iter().map(|b| b.label()).collect();
         println!(
-            "[test]    not searched: {} - `harness = false` targets are excluded from a focused \
+            "[test]    {}not searched: {} - `harness = false` targets are excluded from a focused \
              run, which selects libtest test names",
+            sweep_prefix(label),
             labels.join(", ")
         );
     }
     let mut listed: Vec<(&check_cmd::TestBinary, Vec<String>)> = Vec::new();
     for b in &split.eligible {
-        let names = focused::discover(b, &runtime, env, project_root)?
+        let names = focused::discover(b, &runtime, env, project_root).inspect_err(|_| {
+            output::error(&format!("test {}: discovery failed for {}", shape.sweep.label, b.label()));
+        })?
             .into_iter()
             .map(|l| l.name)
             .collect();
@@ -1270,7 +1368,8 @@ fn plan_focused(
     if !runs.is_empty() {
         let labels: Vec<&str> = runs.iter().map(|r| r.label.as_str()).collect();
         println!(
-            "[test]    {} of {} {} a match: {}",
+            "[test]    {}{} of {} {} a match: {}",
+            sweep_prefix(label),
             runs.len(),
             output::count(searched, "harness"),
             if runs.len() == 1 { "holds" } else { "hold" },
@@ -1289,6 +1388,12 @@ fn plan_focused(
         });
     }
     Ok(FocusedPlan { runs, searched, exact, artifacts })
+}
+
+/// `<label>: ` when several sweeps run (a line that belongs to one of them says
+/// which), nothing when there is only one.
+fn sweep_prefix(label: Option<&str>) -> String {
+    label.map_or_else(String::new, |l| format!("{l}: "))
 }
 
 /// The libtest argv one directly executed harness runs with.
@@ -1411,29 +1516,21 @@ fn run_pre_build(
     env: &[(&str, &str)],
     allow_args: &[String],
     debug: bool,
-    quiet: bool,
 ) -> Result<Option<Vec<check_cmd::SupportArtifact>>, DevError> {
     let args = pre_build_argv(sweep, package, allow_args, debug);
-    let announce = || output::run_msg(&format!("cargo {} (sweep build: {})", args.join(" "), sweep.label));
-    if !quiet {
-        announce();
-    }
-
+    let line = format!("cargo {} (sweep build: {})", args.join(" "), sweep.label);
+    output::detail(&line);
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    // Quiet or not, a build that errors out names what it ran.
+    // The command goes to the run log on success; a build that fails or errors
+    // out names what it ran on the console, beside its diagnostics.
     let captured = cargo_with_deadline(&arg_refs, project_root, env, "sweep pre-build").inspect_err(|_| {
-        if quiet {
-            announce();
-        }
+        output::run_msg(&line);
     })?;
 
     if captured.status.success() {
         return Ok(Some(check_cmd::support_artifacts(&String::from_utf8_lossy(&captured.stdout), package)));
     }
-    // A quiet re-verification that fails is no longer routine: name what ran.
-    if quiet {
-        announce();
-    }
+    output::run_msg(&line);
 
     let stderr = String::from_utf8_lossy(&captured.stderr);
     // The diagnostics come out of `filter_clippy`, but the command that
@@ -1624,25 +1721,21 @@ fn prebuild_targets(
     env: &[(&str, &str)],
     project_root: &Path,
     quiet: bool,
+    label: Option<&str>,
 ) -> Result<Option<(Vec<check_cmd::TestBinary>, check_cmd::BuildRuntimeIndex)>, DevError> {
     let args = prebuild_argv(shape);
-    if !quiet {
-        output::run_msg(&format!("cargo {}", args.join(" ")));
-    }
+    output::detail(&format!("cargo {} (sweep: {})", args.join(" "), shape.sweep.label));
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     let started = std::time::Instant::now();
-    let announce = || output::run_msg(&format!("cargo {}", args.join(" ")));
-    // Quiet or not, a build that errors out names what it ran.
+    // The command is routine on success and goes to the run log; a build that
+    // fails or errors out names what it ran on the console, beside its
+    // diagnostics - the rule `brokkr check` follows.
+    let announce = || output::run_msg(&format!("cargo {} (sweep: {})", args.join(" "), shape.sweep.label));
     let captured = cargo_with_deadline(&arg_refs, project_root, env, "test build").inspect_err(|_| {
-        if quiet {
-            announce();
-        }
+        announce();
     })?;
     if !captured.status.success() {
-        // A quiet re-verification that fails is no longer routine: name what ran.
-        if quiet {
-            announce();
-        }
+        announce();
         let stderr = String::from_utf8_lossy(&captured.stderr);
         let filtered = cargo_filter::filter_test_build_failure(&stderr);
         if !filtered.is_empty() {
@@ -1667,9 +1760,10 @@ fn prebuild_targets(
     };
     if !quiet {
         println!(
-            "[test]    test binaries built in {:.1}s; {}",
+            "[test]    {}{} built in {:.1}s",
+            sweep_prefix(label),
+            output::count(built.0.len(), "harness"),
             started.elapsed().as_secs_f64(),
-            output::count(built.0.len(), "test harness")
         );
     }
     Ok(Some(built))
@@ -1709,7 +1803,8 @@ struct OneRun<'a> {
     /// The harness, for attributing failures; empty for a whole-package run.
     target: &'a str,
     ceilings: test_runner::Ceilings,
-    /// Print the "test binaries built" framing line.
+    /// Print the "built in Xs; running tests" framing line (the doc-only
+    /// cargo run's; a directly run harness has no build phase).
     announce: bool,
     /// For a directly executed harness, how many tests discovery listed as
     /// matching: the run must account for exactly that many. `None` for the
@@ -1885,7 +1980,7 @@ impl SkipReason {
     }
 }
 
-fn aggregate_exit(outcomes: &[Outcome], pkg: &str, name: &str) -> Result<(), DevError> {
+fn aggregate_exit(outcomes: &[Outcome], pkg: &str, name: &str, searched: &Searched) -> Result<(), DevError> {
     let test_failed = outcomes.contains(&Outcome::Fail);
     let build_failed = outcomes.contains(&Outcome::BuildFailed);
     // `Reported`: every FAIL and BUILD FAILED already printed its footer, so
@@ -1903,9 +1998,10 @@ fn aggregate_exit(outcomes: &[Outcome], pkg: &str, name: &str) -> Result<(), Dev
     let all_no_match = outcomes.iter().all(|o| *o == Outcome::NoMatch);
     if all_no_match {
         // The one place the fact is stated: the closing `[error]` line carries
-        // it, so a separate `[test]` line would repeat it.
+        // it, with what was searched, so no per-sweep SKIP line repeats it.
         return Err(DevError::Reported(format!(
-            "no sweep matched `{pkg}::{name}` - check the package/name."
+            "no test matches `{name}` in {pkg}{}",
+            searched.describe()
         )));
     }
     // At least one sweep passed; NoMatch in other sweeps is informational
@@ -2035,6 +2131,7 @@ fn run_one(
     let announce = shape.announce;
     let direct = launch != test_runner::Launch::Cargo;
     let sink: Option<LineSink> = buffered.then(LineSink::default);
+    let built_tag = tag.to_owned();
     let run = test_runner::streaming_run_libtest(
         launch,
         args,
@@ -2050,7 +2147,7 @@ fn run_one(
         move |elapsed| {
             if announce {
                 println!(
-                    "[test]    test binaries built in {:.1}s; running tests",
+                    "[test]    {built_tag}: built in {:.1}s; running tests",
                     elapsed.as_secs_f64()
                 );
             }
@@ -2146,9 +2243,10 @@ fn run_one(
     }
 
     // Zero tests ran in the doc-only run (a directly run harness answered
-    // above): the name matched no doctest in this sweep. Print an
-    // informational SKIP; the caller decides whether this is a real error (all
-    // sweeps missed) or fine (feature-gated out of this one).
+    // above): the name matched no doctest in this sweep. Nothing prints here;
+    // the caller decides whether this is a real error (all sweeps missed) or
+    // fine (feature-gated out of this one), and says so once, with the sweeps
+    // that did run the name in view.
     //
     // Three guards, each for a way a zero can lie:
     //
@@ -2165,10 +2263,6 @@ fn run_one(
     //   say what it means rather than rely on a flag elsewhere staying put.
     if parsed.is_complete() && parsed.accounted() == 0 {
         flush_sink(sink, false);
-        println!(
-            "[test]    SKIP {tag} ({wall}) - no tests matched (likely feature-gated out of this sweep)"
-        );
-        std::io::stdout().flush().ok();
         return Ok(RunReport::bare(Outcome::NoMatch));
     }
 
@@ -3611,7 +3705,8 @@ include_ignored = false
             timeout: None,
         };
         let mut reports = Vec::new();
-        run_ready(std::slice::from_ref(&prepared), &cx, false, 1, Duration::from_secs(20), None, &mut reports).unwrap();
+        let mut notes = Vec::new();
+        run_ready(std::slice::from_ref(&prepared), &cx, 1, Duration::from_secs(20), None, &mut reports, &mut notes).unwrap();
         assert_eq!(reports.len(), 1);
         assert!(reports[0].outcome == Outcome::NoMatch, "the drifted sweep was re-prepared (and skipped), not run");
     }
@@ -3677,19 +3772,77 @@ include_ignored = false
     #[test]
     fn aggregate_exit_fails_on_any_fail() {
         let outcomes = [Outcome::Pass, Outcome::Fail];
-        assert!(aggregate_exit(&outcomes, "f", "n").is_err());
+        assert!(aggregate_exit(&outcomes, "f", "n", &Searched::default()).is_err());
     }
 
     #[test]
     fn aggregate_exit_fails_on_any_build_failed() {
         let outcomes = [Outcome::Pass, Outcome::BuildFailed];
-        assert!(aggregate_exit(&outcomes, "f", "n").is_err());
+        assert!(aggregate_exit(&outcomes, "f", "n", &Searched::default()).is_err());
     }
 
     #[test]
     fn aggregate_exit_fails_when_all_no_match() {
         let outcomes = [Outcome::NoMatch, Outcome::NoMatch];
-        assert!(aggregate_exit(&outcomes, "f", "n").is_err());
+        assert!(aggregate_exit(&outcomes, "f", "n", &Searched::default()).is_err());
+    }
+
+    #[test]
+    fn the_no_match_error_names_what_was_searched() {
+        let message = |searched: &Searched| match aggregate_exit(&[Outcome::NoMatch], "pkg", "abc", searched) {
+            Err(DevError::Reported(m)) => m,
+            other => panic!("expected a Reported error, got {other:?}"),
+        };
+        let two = Searched {
+            harnesses: 44,
+            doc_only: 0,
+            labels: vec!["default".into(), "strategy-features".into()],
+        };
+        assert_eq!(
+            message(&two),
+            "no test matches `abc` in pkg (44 harnesses searched in default and strategy-features)"
+        );
+        let three = Searched { labels: vec!["a".into(), "b".into(), "c".into()], ..two };
+        assert!(message(&three).ends_with("(44 harnesses searched in a, b and c)"));
+        // A single sweep has no plan line, so its search must name it too.
+        let one = Searched { harnesses: 1, doc_only: 0, labels: vec!["default".into()] };
+        assert_eq!(message(&one), "no test matches `abc` in pkg (1 harness searched in default)");
+        // A doc-only sweep searches doctests, not countable harnesses.
+        let doc = Searched { harnesses: 0, doc_only: 1, labels: vec!["docs".into()] };
+        assert_eq!(message(&doc), "no test matches `abc` in pkg (doctests searched in docs)");
+        // A lone sweep scoped out of the package searched nothing, and said why itself.
+        assert_eq!(message(&Searched::default()), "no test matches `abc` in pkg");
+    }
+
+    #[test]
+    fn only_a_failing_run_shows_its_invocation() {
+        let state = RepeatState::default();
+        let sweep = ResolvedSweep::default();
+        let plan = SweepPlan {
+            shape: BuildShape { sweep: &sweep, allow_args: &[], pkg: "pkg", jobs: None, debug: true },
+            name: "n",
+            focused: None,
+            exact: None,
+            env: &[],
+            project_root: Path::new("."),
+            state_root: Path::new("."),
+            ceiling: Duration::from_secs(20),
+            sweep_label: None,
+            repeat: 1,
+            repeat_state: &state,
+            profile_override: None,
+            timeout: None,
+        };
+        // The dedupe set is what decides a console print: a pass never enters
+        // it, a failure enters it once.
+        show_reproduction(&plan, "bin args (cwd .)", &RunReport::bare(Outcome::Pass));
+        assert!(state.first_hint("bin args (cwd .)"), "a pass left no mark");
+        show_reproduction(&plan, "other args (cwd .)", &RunReport::bare(Outcome::Fail));
+        assert!(!state.first_hint("other args (cwd .)"), "a failure printed (and was recorded)");
+        show_reproduction(&plan, "cargo test --doc", &RunReport::bare(Outcome::BuildFailed));
+        assert!(!state.first_hint("cargo test --doc"), "a doc-only build failure printed its command");
+        show_failed_invocation(&plan, "missing-bin args (cwd .)");
+        assert!(!state.first_hint("missing-bin args (cwd .)"), "a runner error printed its command");
     }
 
     #[test]
@@ -3740,7 +3893,7 @@ include_ignored = false
 
     #[test]
     fn aggregate_exit_label_names_what_failed() {
-        let label = |outcomes: &[Outcome]| match aggregate_exit(outcomes, "f", "n") {
+        let label = |outcomes: &[Outcome]| match aggregate_exit(outcomes, "f", "n", &Searched::default()) {
             Err(DevError::Reported(label)) => label,
             other => panic!("expected a Reported error, got {other:?}"),
         };
@@ -3751,7 +3904,7 @@ include_ignored = false
             "test failed and build failed"
         );
         // The no-match fact is stated once, by the closing label.
-        assert!(label(&[Outcome::NoMatch]).starts_with("no sweep matched `f::n`"));
+        assert!(label(&[Outcome::NoMatch]).starts_with("no test matches `n` in f"));
     }
 
     #[test]
@@ -3759,13 +3912,13 @@ include_ignored = false
         // The important case: feature-gated test passes in one sweep, SKIPs
         // in the consumer sweep. Exit code should be 0.
         let outcomes = [Outcome::Pass, Outcome::NoMatch];
-        assert!(aggregate_exit(&outcomes, "f", "n").is_ok());
+        assert!(aggregate_exit(&outcomes, "f", "n", &Searched::default()).is_ok());
     }
 
     #[test]
     fn aggregate_exit_passes_on_all_pass() {
         let outcomes = [Outcome::Pass, Outcome::Pass];
-        assert!(aggregate_exit(&outcomes, "f", "n").is_ok());
+        assert!(aggregate_exit(&outcomes, "f", "n", &Searched::default()).is_ok());
     }
 
     #[test]

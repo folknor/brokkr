@@ -464,7 +464,6 @@ fn reap_line(report: &ReapReport) -> String {
             output::count(report.survivors, "process")
         ));
     }
-    line.push_str(" (`brokkr man check strays`)");
     line
 }
 
@@ -484,7 +483,7 @@ pub fn reap_after_lock() {
     if report.killed.is_empty() && report.survivors == 0 {
         return;
     }
-    output::lock_msg(&reap_line(&report));
+    output::strays_msg(&reap_line(&report));
 }
 
 #[cfg(test)]
@@ -671,8 +670,7 @@ mod tests {
         assert_eq!(
             reap_line(&report),
             "SIGKILL sent to 3 orphaned test processes (my_crate-3f2a, sh x2) that outlived the \
-             brokkr run that started them; 1 process still visible, retried at the next hold \
-             (`brokkr man check strays`)"
+             brokkr run that started them; 1 process still visible, retried at the next hold"
         );
     }
 }

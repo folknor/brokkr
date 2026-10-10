@@ -161,8 +161,10 @@ impl DisabledToolchain {
                         orig.display()
                     ))
                 })?;
-                // Config-derived and identical on every run: run log only.
-                output::detail(&format!("toolchain disabled: {name} moved aside"));
+                // Config-derived and identical on every run: the run log when
+                // the command keeps one, else the console (most locked
+                // commands keep none, and a log-only line would vanish).
+                output::detail_or_console(&format!("toolchain disabled: {name} moved aside"));
                 moved.push((aside, orig));
             } else if aside.exists() {
                 // Leftover from a hard-killed prior run: adopt so drop restores

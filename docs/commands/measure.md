@@ -97,6 +97,8 @@ Results in `.brokkr/results.db` per project (gitignored).
 
 One fact, one place. A run with a clean tree prints, in order:
 
+- With `--alloc`, `[hotpath] NOTE: alloc profiling - wall-clock times are not
+  meaningful` before the iterations, even without `--verbose`.
 - `[bench] run i/n` before each iteration, **only when n > 1** (a single run
   has nothing to count). Quiet-gated.
 - the `[result]` line, the one place the wall time appears (quiet-gated, except
@@ -113,14 +115,20 @@ One fact, one place. A run with a clean tree prints, in order:
 
 Sent to the run-log channel (`detail`) instead of the console: the per-run
 sidecar attach (`sidecar attached to pid P, run k`, one-indexed like `run i/n`)
-and per-run counts with the child's wall time. This channel discards messages
-when no run log is open; ordinary measured commands do not open one.
+and per-run counts with the child's wall time, and the `--hotpath`/`--alloc`
+header naming the target and instrument (the command line already says
+both). Every measured run (and `sync --bench`) opens one for this:
+`.brokkr/check-logs/measure-<ms>.log` under the config dir, the newest ten
+kept, apart from `check`'s and `test`'s logs (see `docs/commands/check.md`,
+the run log).
 
 With `--commit REF`, the worktree's commit is named once
 (`[run] commit abc1234 (subject)`, quiet-gated), by the shared worktree
 lifecycle in `context::with_worktree`, whichever command asked for it. Whether
 the worktree was reused or cut, and the isolated target dir the build is
-pinned to, use the same run-log channel. A stale-replacement or an eviction is
+pinned to, use the same run-log channel; under a command that keeps no run
+log (`run`, `verify` or `sync` with `--commit`) they print as `[run]` lines
+instead, quiet-gated, rather than vanish. A stale-replacement or an eviction is
 printed.
 
 A non-fatal problem is a `[warn]` (never hidden by quiet mode), not an

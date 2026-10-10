@@ -228,8 +228,8 @@ pub fn compare_report(c: &Comparison, full: bool) -> String {
     ));
     let moved = c.probes.iter().filter(|d| d.moved()).count();
     out.push_str(&format!(
-        "\n\n{moved} of {} probe(s) moved{}",
-        c.probes.len(),
+        "\n\n{moved} of {} moved{}",
+        crate::output::count(c.probes.len(), "probe"),
         if full || moved == c.probes.len() { "" } else { " (pass --full to list the rest)" }
     ));
     out
@@ -455,7 +455,7 @@ pub fn raw_records(t: &RawTable) -> String {
 /// seconds flattened the sub-second majority of the corpus to `0.1`/`0.0`. A
 /// *diagnostic* view for spotting the heavy probes (trim `bar_budget`, or
 /// disable). `ceiling_ms` is the pre-run wall, shown for reference and to flag a
-/// single probe that on its own clears it. The `Σ(shown)` footer is an explicit
+/// single probe that on its own clears it. The `sum(shown)` footer is an explicit
 /// **per-probe sum, NOT the run wall**: the harness overlaps probes, so this sum
 /// runs several times the real wall - the ceiling estimates from brokkr's own
 /// measured `run.wall_ms`, not from here (see `estimated_wall_ms`).
@@ -475,7 +475,7 @@ pub fn runtimes_table(rows: &[RuntimeRow], ceiling_ms: f64) -> String {
     if !rows.is_empty() {
         let sum_ms: f64 = rows.iter().map(|r| r.runtime_ms).sum();
         out.push_str(&format!(
-            "\n\nΣ(shown) = {:.1}s (per-probe sum; probes overlap, so this is not \
+            "\n\nsum(shown) = {:.1}s (per-probe sum; probes overlap, so this is not \
              the run wall) · pre-run ceiling = {:.0}s",
             sum_ms / 1000.0,
             ceiling_ms / 1000.0,

@@ -96,7 +96,7 @@ Emits **one NDJSON object per probe, no summary line** (brokkr aggregates):
   so a boundary-only probe arrives `accepted` with `boundary_ours == ours_only`.
   brokkr persists raw + discount and renders both; it never re-nets the raw
   counts (the effective-derived signature already drops boundary-only probes
-  from the breakdown). The `boundary_*` ≤ raw invariant is a contract, not
+  from the breakdown). The `boundary_*` <= raw invariant is a contract, not
   enforced; a malformed line saturates `effective` at 0.
 - `signature`: non-exact parity probes. `dense_na_sites`: when non-empty.
 - `*_fail`: carries `error` instead of the parity fields.
@@ -127,13 +127,13 @@ brokkr parses tolerantly (a field it does not model is ignored for rendering,
 and stored with the rest of the line - see the run store below) and renders per-probe lines +
 a computed summary + root-cause breakdown (by `signature` domain/dimension) +
 dense-na breakdown (by builtin: site/na/probe counts). When any probe carried a
-window-boundary discount, a `boundary artifacts: N probe(s), M trade(s)
+window-boundary discount, a `boundary artifacts: N probes, M trades
 discounted` line follows the summary (the "log what was dropped" rule - a probe
 flipping `count_divergent -> accepted` on the discount would otherwise read as a
 fix rather than a reclassification), and each surviving deviation line shows its
 `boundary`/`effective` counts. The per-probe lines are
 trimmed to the **deviations**: a probe sitting exactly on its pinned `expected`
-(the gate's satisfied set) is suppressed and folded into one `N probe(s) match
+(the gate's satisfied set) is suppressed and folded into one `N probes matching
 their pin (hidden)` line, so the surviving lines are the regressions/surprise
 improvements worth reading. On an unblessed corpus everything deviates, so
 nothing is hidden. The summary and both breakdowns always cover the full set.
@@ -234,7 +234,7 @@ struct, no benchmark filters to reject. The corpus views:
 - `brokkr corpus-results` - table of recent runs, each with its `commit`
   (short hash, `*` when the tree was dirty, `?` when its dirtiness is
   unknown, `-` when the commit is). The `selector` column renders
-  the selection *intent* (`all` / `kw=…` / `probe=…` / `+bless`, plus
+  the selection *intent* (`all` / `kw=...` / `probe=...` / `+bless`, plus
   `release` for a non-default profile and `-- <flags>` for forwarded harness
   flags), not the full
   resolved id list it stores - that would be 200+ ids wide for an `--all` run.
@@ -243,7 +243,7 @@ struct, no benchmark filters to reject. The corpus views:
   commit ...` header, then that run's per-probe dispositions (+ gate misses +
   stderr). An id with no run is an error. Only the **deviations**
   (rows where the stored disposition misses its pin, `gate_ok = 0`) are shown;
-  the pin-matchers fold into a `N probe(s) match their pin (hidden)` line - a
+  the pin-matchers fold into a `N probes matching their pin (hidden)` line - a
   200-probe `--all` run otherwise buries the few that moved. `--full` shows the
   complete table. The disposition table carries `b_ours`/`b_tv` columns (the
   window-boundary discount, `-` when none) beside raw `ours`/`tv`, so a probe
@@ -254,7 +254,7 @@ struct, no benchmark filters to reject. The corpus views:
   carries). The curated diff columns cover all four divergence axes -
   time/price/**qty**/pnl; `our_qty`/`tv_qty` were the field the pyramiding
   investigations turned on and used to be missing. A single `--probe` only.
-- `brokkr corpus-results --diffs [--probe <id>…] [--columns …] [--where "<expr>"]` -
+- `brokkr corpus-results --diffs [--probe <id>...] [--columns ...] [--where "<expr>"]` -
   the shapeable `trade_diff` table across the latest run (or `--run N`). `--probe`
   is repeatable here, an `IN`-list filter (not the combo view). `--columns
   a,b,c` projects onto a subset; `--columns all` selects every `trade_diff`
@@ -262,7 +262,7 @@ struct, no benchmark filters to reject. The corpus views:
   a row); an unknown column name errors with the valid set - that error is the
   column-discovery path (there is no `--list-columns`). `--where` still takes a
   raw boolean expression. Default order is `(probe, our_index)`.
-- `brokkr corpus-results --dispositions [--probe <id>…] [--columns …] [--where "<expr>"]` -
+- `brokkr corpus-results --dispositions [--probe <id>...] [--columns ...] [--where "<expr>"]` -
   the same shaping over `disposition`, ordered by probe. The curated default
   is the window-edge diagnostics the run-detail view leaves out: the boundary
   discount, `boundary_anchor` beside `anchor_consumed` (an armed anchor that
@@ -274,7 +274,7 @@ struct, no benchmark filters to reject. The corpus views:
 - `brokkr corpus-results --runtimes [--over <secs>]` - each probe's most-recent
   runtime, slowest first, in milliseconds (the harness's unit). A **diagnostic**
   for spotting heavy probes (trim `bar_budget`, or disable), *not* the ceiling's
-  basis: probes overlap in the harness, so the `Σ(shown)` footer is a per-probe
+  basis: probes overlap in the harness, so the `sum(shown)` footer is a per-probe
   sum, several times the real run wall. The ceiling estimates from the measured
   `run.wall_ms` of a superset-covering run instead (`estimated_wall_ms`).
   `--over 269` shows what single probe nears the wall on its own.
@@ -302,7 +302,7 @@ struct, no benchmark filters to reject. The corpus views:
   with a note when the runs differ in build profile or forwarded harness
   flags. Either id missing is an error. Informational: exits 0. This was the
   `--sql` query every round reached for.
-- `brokkr corpus-results --sql "<SELECT…>"` - read-only escape hatch, for the genuinely
+- `brokkr corpus-results --sql "<SELECT...>"` - read-only escape hatch, for the genuinely
   ad-hoc query no view covers. The standing rule: when an ad-hoc query recurs,
   promote it to a named view rather than keep reaching through this door.
 

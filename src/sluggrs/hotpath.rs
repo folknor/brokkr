@@ -99,12 +99,12 @@ pub(crate) fn cmd(req: &MeasureRequest, target: &str) -> Result<(), DevError> {
     let command_label = command_label(target);
 
     if req.dry_run {
-        // `run_msg`, not the quiet-gated `bench_msg`: `run_measured` sets
-        // quiet unless `--verbose`, and a dry run's output is its whole point.
-        output::run_msg(&format!(
-            "[dry-run] target {target} -> --example {example}, filed as '{command_label}'"
+        // `dry_run_msg` is not quiet-gated: `run_measured` sets quiet unless
+        // `--verbose`, and a dry run's output is its whole point.
+        output::dry_run_msg(&format!(
+            "target {target} -> --example {example}, filed as '{command_label}'"
         ));
-        output::run_msg(&format!("[dry-run] would build ({})", feature_summary(req)));
+        output::dry_run_msg(&format!("would build ({})", feature_summary(req)));
         return Ok(());
     }
 
@@ -194,11 +194,8 @@ fn run(
 
     if uses_hotpath(req) {
         let label = harness::hotpath_feature(req.is_alloc());
-        output::hotpath_msg(&format!("=== sluggrs {label}: {command_label} ==="));
-
-        if req.is_alloc() {
-            output::hotpath_msg("NOTE: alloc profiling -- wall-clock times are not meaningful");
-        }
+        output::detail(&format!("sluggrs {label}: {command_label}"));
+        harness::hotpath_alloc_note(req.is_alloc());
 
         ctx.harness.run_hotpath(&config, &ctx.binary, |_i| {
             let (result, _stderr, sidecar) = harness::run_hotpath_capture(

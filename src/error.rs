@@ -85,6 +85,9 @@ impl fmt::Display for DevError {
                 // signal" here as well doubled it.
                 match code {
                     Some(c) => write!(f, " exited with code {c}")?,
+                    // The constructor named the signal: its sentence is the
+                    // whole account ("X killed by signal 9 (SIGKILL - ...)").
+                    None if stderr.starts_with("killed by signal") => return write!(f, " {stderr}"),
                     None => write!(f, " ended without an exit code")?,
                 }
                 if !stderr.is_empty() {
@@ -171,6 +174,23 @@ mod tests {
         };
         let msg = e.to_string();
         assert_eq!(msg.matches("signal").count(), 1, "{msg}");
+        assert_eq!(msg, "cargo fmt killed by signal 9");
+    }
+
+    #[test]
+    fn a_signal_death_with_output_keeps_the_output_after_the_sentence() {
+        let e = DevError::Subprocess {
+            program: "x".into(),
+            code: None,
+            stderr: "killed by signal 9 (SIGKILL - possible OOM kill)".into(),
+        };
+        assert_eq!(e.to_string(), "x killed by signal 9 (SIGKILL - possible OOM kill)");
+    }
+
+    #[test]
+    fn no_exit_code_and_no_signal_sentence_still_says_so() {
+        let e = DevError::Subprocess { program: "x".into(), code: None, stderr: String::new() };
+        assert_eq!(e.to_string(), "x ended without an exit code");
     }
 
     #[test]

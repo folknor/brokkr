@@ -175,7 +175,7 @@ pub(crate) fn bench_read(
         let paths = dry_run_paths(req)?;
         let _ = resolve_read_pbf_with_size(req, snapshot, &paths)?;
         let _ = super::bench_read::parse_modes(modes_str)?;
-        output::run_msg("[dry-run] ok (bench read)");
+        output::dry_run_msg("ok (bench read)");
         return Ok(());
     }
 
@@ -210,7 +210,7 @@ pub(crate) fn bench_write(req: &MeasureRequest, compression_str: &str) -> Result
         let paths = dry_run_paths(req)?;
         let _ = resolve_pbf_with_size(req.dataset, req.variant, &paths, req.project_root)?;
         let _ = super::parse_compressions(compression_str, true)?;
-        output::run_msg("[dry-run] ok (bench write)");
+        output::dry_run_msg("ok (bench write)");
         return Ok(());
     }
 
@@ -259,9 +259,9 @@ pub(crate) fn bench_merge(
             None => resolve_default_osc_path(req.dataset, &paths, req.project_root)?,
         };
         let _ = super::parse_compressions(compression_str, false)?;
-        output::run_msg(&format!("[dry-run] pbf: {}", pbf_path.display()));
-        output::run_msg(&format!("[dry-run] osc: {}", osc_path.display()));
-        output::run_msg("[dry-run] ok (bench merge)");
+        output::dry_run_msg(&format!("pbf: {}", pbf_path.display()));
+        output::dry_run_msg(&format!("osc: {}", osc_path.display()));
+        output::dry_run_msg("ok (bench merge)");
         return Ok(());
     }
 
@@ -310,7 +310,7 @@ pub(crate) fn bench_all(req: &MeasureRequest) -> Result<(), DevError> {
     if req.dry_run {
         let paths = dry_run_paths(req)?;
         let _ = resolve_pbf_with_size(req.dataset, req.variant, &paths, req.project_root)?;
-        output::run_msg("[dry-run] ok (bench all)");
+        output::dry_run_msg("ok (bench all)");
         return Ok(());
     }
 

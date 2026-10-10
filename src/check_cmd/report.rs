@@ -56,7 +56,9 @@ struct Report {
 static REPORT: std::sync::Mutex<Option<Report>> = std::sync::Mutex::new(None);
 
 fn with_report<R>(f: impl FnOnce(&mut Report) -> R) -> Option<R> {
-    let mut guard = REPORT.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut guard = REPORT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     guard.as_mut().map(f)
 }
 
@@ -68,11 +70,16 @@ fn report_active() -> bool {
 
 /// Start a fresh report. Called once per `cmd_check`.
 fn report_begin() {
-    *REPORT.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Report::default());
+    *REPORT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Report::default());
 }
 
 fn report_end() {
-    REPORT.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
+    REPORT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
 }
 
 /// Record a green phase. Collected into the conventions line while that
@@ -113,7 +120,11 @@ fn conventions_close(passed: bool, elapsed: std::time::Duration) {
             None => p.name.to_owned(),
         })
         .collect();
-    output::run_msg(&format!("{}: ok in {}", parts.join(", "), fmt_wall(elapsed)));
+    output::run_msg(&format!(
+        "{}: ok in {}",
+        parts.join(", "),
+        fmt_wall(elapsed)
+    ));
 }
 
 fn note_tests(passed: usize, ignored: usize, filtered_out: usize) {
@@ -134,7 +145,11 @@ fn note_empty_unit(label: String) {
 
 fn note_parallel_slowest(sweep: &str, binary: &str, wall: std::time::Duration) {
     with_report(|r| {
-        if r.test.slowest_parallel.as_ref().is_none_or(|(_, _, w)| wall > *w) {
+        if r.test
+            .slowest_parallel
+            .as_ref()
+            .is_none_or(|(_, _, w)| wall > *w)
+        {
             r.test.slowest_parallel = Some((sweep.to_owned(), binary.to_owned(), wall));
         }
     });
@@ -143,15 +158,13 @@ fn note_parallel_slowest(sweep: &str, binary: &str, wall: std::time::Duration) {
 /// Hold a warning block for the end of its phase, merged with any identical
 /// block another sweep produced. Printed at once when no report is active.
 fn note_warning(block: &str, sweep: &str) {
-    let held = with_report(|r| {
-        match r.warnings.iter_mut().find(|(b, _)| b == block) {
-            Some((_, sweeps)) => {
-                if !sweeps.iter().any(|s| s == sweep) {
-                    sweeps.push(sweep.to_owned());
-                }
+    let held = with_report(|r| match r.warnings.iter_mut().find(|(b, _)| b == block) {
+        Some((_, sweeps)) => {
+            if !sweeps.iter().any(|s| s == sweep) {
+                sweeps.push(sweep.to_owned());
             }
-            None => r.warnings.push((block.to_owned(), vec![sweep.to_owned()])),
         }
+        None => r.warnings.push((block.to_owned(), vec![sweep.to_owned()])),
     })
     .is_some();
     if !held {
@@ -232,33 +245,20 @@ fn cargo_line(commands: bool, line: &str) {
     }
 }
 
-/// How many recent run logs to keep. Enough that a watchdog-killed run
-/// survives the retries that follow it; bounded so the directory cannot grow
-/// without limit on a machine that runs `check` all day.
+/// How many recent run logs to keep, per kind. Enough that a watchdog-killed
+/// run survives the retries that follow it; bounded so the directory cannot
+/// grow without limit on a machine that runs `check` all day. Per kind, so a
+/// burst of `brokkr test` runs cannot evict the `check` log being investigated.
 const RUN_LOGS_KEPT: usize = 10;
 
-/// Open this run's log under `<state_root>/.brokkr/check-logs/`, pruning the
-/// oldest so that at most [`RUN_LOGS_KEPT`] remain. Best-effort: a log that
-/// cannot be opened costs the record, never the run.
-fn open_run_log(state_root: &Path) {
+/// Open this run's log under `<state_root>/.brokkr/check-logs/` as
+/// `<kind>-<ms>.log`, pruning the oldest of that kind so that at most
+/// [`RUN_LOGS_KEPT`] remain. Best-effort: a log that cannot be opened costs the
+/// record, never the run.
+fn open_run_log(state_root: &Path, kind: &str) {
     let dir = state_root.join(".brokkr").join("check-logs");
     if std::fs::create_dir_all(&dir).is_err() {
         return;
-    }
-    let mut existing: Vec<PathBuf> = std::fs::read_dir(&dir)
-        .map(|rd| {
-            rd.flatten()
-                .map(|e| e.path())
-                .filter(|p| is_run_log_name(p))
-                .collect()
-        })
-        .unwrap_or_default();
-    // The names embed a zero-padded millisecond timestamp, so name order is
-    // age order.
-    existing.sort();
-    while existing.len() >= RUN_LOGS_KEPT {
-        let oldest = existing.remove(0);
-        std::fs::remove_file(oldest).ok();
     }
     let millis = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -267,12 +267,24 @@ fn open_run_log(state_root: &Path) {
     // `create_new`, stepping the stamp past a name already taken: two runs
     // resolving the same millisecond must not truncate one another's log.
     // Stepping (rather than a suffix) keeps the name all digits, so name
-    // order stays age order for the pruning above.
+    // order stays age order for retention.
     let opened = (0..1000u128).find_map(|step| {
-        let path = dir.join(format!("check-{:015}.log", millis + step));
-        std::fs::OpenOptions::new().write(true).create_new(true).open(path).ok()
+        let path = dir.join(format!("{kind}-{:015}.log", millis + step));
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .ok()
+            .map(|file| (path, file))
     });
-    if let Some(file) = opened {
+    if let Some((current, file)) = opened {
+        let existing: Vec<PathBuf> = std::fs::read_dir(&dir)
+            .map(|rd| rd.flatten().map(|e| e.path()).collect())
+            .unwrap_or_default();
+        // Prune only after creating it: a failed open must not evict history.
+        for oldest in logs_to_prune(existing, kind, &current) {
+            std::fs::remove_file(oldest).ok();
+        }
         output::open_run_log(file);
         let argv: Vec<String> = std::env::args().collect();
         output::detail(&format!("argv: {}", argv.join(" ")));
@@ -282,14 +294,99 @@ fn open_run_log(state_root: &Path) {
     }
 }
 
-/// Holds a run's report, log and status line open; dropping it closes all
-/// three, on every return path out of `cmd_check`.
+/// Reserve one retention slot for the current file, even after a clock
+/// rollback. Other kinds never enter this kind's retention budget.
+fn logs_to_prune(mut existing: Vec<PathBuf>, kind: &str, current: &Path) -> Vec<PathBuf> {
+    existing.retain(|p| is_run_log_name(p, kind) && p != current);
+    existing.sort();
+    let count = existing.len().saturating_sub(RUN_LOGS_KEPT - 1);
+    existing.into_iter().take(count).collect()
+}
+
+/// The kinds of run log, one name prefix (and one retention budget) each.
+pub(crate) mod run_log_kind {
+    pub(crate) const CHECK: &str = "check";
+    pub(crate) const TEST: &str = "test";
+    /// Measured runs (`--bench`/`--hotpath`/`--alloc` and plain runs through
+    /// the measurement harness, `sync --bench`).
+    pub(crate) const MEASURE: &str = "measure";
+    /// `brokkr bench`, the criterion runner.
+    pub(crate) const BENCH: &str = "bench";
+}
+
+/// Reserved before the lock, activated under it, and dropped after the
+/// watchdog joins. Reserving touches no files: waiting commands cannot prune
+/// the current holder's log. Nested reservations borrow the outer log.
+pub(crate) struct RunLog {
+    owner: bool,
+}
+
+struct LogReservation {
+    root: PathBuf,
+    kind: String,
+    activated: bool,
+}
+
+static LOG_RESERVATION: std::sync::Mutex<Option<LogReservation>> = std::sync::Mutex::new(None);
+
+impl RunLog {
+    pub(crate) fn begin(state_root: &Path, kind: &str) -> Self {
+        let owner = {
+            let mut reservation = LOG_RESERVATION
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if reservation.is_some() {
+                false
+            } else {
+                *reservation = Some(LogReservation {
+                    root: state_root.to_owned(),
+                    kind: kind.to_owned(),
+                    activated: false,
+                });
+                true
+            }
+        };
+        // A reservation made inside an existing hold needs no fresh acquisition.
+        if crate::lockfile::current_hold().is_some() {
+            activate_run_log();
+        }
+        Self { owner }
+    }
+}
+
+/// Called by the real lock's drain hook, after flock and before any toolchain
+/// narration. Re-entrant acquisitions never reopen or prune the log.
+pub(crate) fn activate_run_log() {
+    let mut reservation = LOG_RESERVATION
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(log) = reservation.as_mut()
+        && !log.activated
+    {
+        log.activated = true;
+        open_run_log(&log.root, &log.kind);
+    }
+}
+
+impl Drop for RunLog {
+    fn drop(&mut self) {
+        if self.owner {
+            let mut reservation = LOG_RESERVATION
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            output::close_run_log();
+            reservation.take();
+        }
+    }
+}
+
+/// Holds a check's report and status line open. The run log is the caller's
+/// ([`RunLog`], reserved before the lock).
 struct RunScope;
 
 impl RunScope {
-    fn begin(state_root: &Path) -> Self {
+    fn begin() -> Self {
         report_begin();
-        open_run_log(state_root);
         output::enable_status_line();
         RunScope
     }
@@ -298,17 +395,17 @@ impl RunScope {
 impl Drop for RunScope {
     fn drop(&mut self) {
         output::disable_status_line();
-        output::close_run_log();
         report_end();
     }
 }
 
-/// `check-<digits>.log`, the only name [`open_run_log`] constructs - and the
-/// only one pruning may delete.
-fn is_run_log_name(p: &Path) -> bool {
+/// `<kind>-<digits>.log`, the only name [`open_run_log`] constructs for `kind`
+/// - and the only one its pruning may delete.
+fn is_run_log_name(p: &Path, kind: &str) -> bool {
     p.file_name()
         .and_then(|n| n.to_str())
-        .and_then(|n| n.strip_prefix("check-"))
+        .and_then(|n| n.strip_prefix(kind))
+        .and_then(|n| n.strip_prefix('-'))
         .and_then(|n| n.strip_suffix(".log"))
         .is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()))
 }
@@ -318,11 +415,56 @@ mod report_tests {
     use super::*;
 
     #[test]
+    fn retention_protects_current_log_and_other_kinds_during_a_burst() {
+        // The current clock has rolled back behind every historical stamp.
+        let current = PathBuf::from("/x/test-000000000000001.log");
+        let mut logs = vec![
+            current.clone(),
+            PathBuf::from("/x/check-000000000000002.log"),
+        ];
+        logs.extend((10..40).map(|stamp| PathBuf::from(format!("/x/test-{stamp:015}.log"))));
+        let pruned = logs_to_prune(logs.clone(), run_log_kind::TEST, &current);
+        assert_eq!(pruned.len(), 21);
+        assert_eq!(
+            pruned.first(),
+            Some(&PathBuf::from("/x/test-000000000000010.log"))
+        );
+        assert_eq!(
+            pruned.last(),
+            Some(&PathBuf::from("/x/test-000000000000030.log"))
+        );
+        assert!(!pruned.contains(&current));
+        let kept: Vec<_> = logs.into_iter().filter(|p| !pruned.contains(p)).collect();
+        assert_eq!(
+            kept.iter()
+                .filter(|p| is_run_log_name(p, run_log_kind::TEST))
+                .count(),
+            RUN_LOGS_KEPT
+        );
+        assert!(kept.contains(&PathBuf::from("/x/check-000000000000002.log")));
+        assert!(logs_to_prune(kept, run_log_kind::TEST, &current).is_empty());
+    }
+
+    #[test]
     fn run_log_names_are_recognised_exactly() {
-        assert!(is_run_log_name(Path::new("/x/check-000001727000000.log")));
-        assert!(!is_run_log_name(Path::new("/x/check-.log")));
-        assert!(!is_run_log_name(Path::new("/x/check-12a.log")));
-        assert!(!is_run_log_name(Path::new("/x/notes.log")));
-        assert!(!is_run_log_name(Path::new("/x/check-12.log.bak")));
+        let check = run_log_kind::CHECK;
+        assert!(is_run_log_name(
+            Path::new("/x/check-000001727000000.log"),
+            check
+        ));
+        assert!(!is_run_log_name(Path::new("/x/check-.log"), check));
+        assert!(!is_run_log_name(Path::new("/x/check-12a.log"), check));
+        assert!(!is_run_log_name(Path::new("/x/notes.log"), check));
+        assert!(!is_run_log_name(Path::new("/x/check-12.log.bak"), check));
+        // Each kind prunes only its own: a test log is not a check log.
+        assert!(!is_run_log_name(
+            Path::new("/x/test-000001727000000.log"),
+            check
+        ));
+        assert!(is_run_log_name(
+            Path::new("/x/test-000001727000000.log"),
+            run_log_kind::TEST
+        ));
+        assert!(!is_run_log_name(Path::new("/x/checkx-12.log"), check));
     }
 }

@@ -83,13 +83,12 @@ struct DeadFilter {
     label: String,
 }
 
-/// One line for the whole ledger: entry count, total pairs, and the
-/// per-issue breakdown in descending pair order. The breakdown is what
-/// carries the countdown and the growth signal that the per-entry listing
-/// used to - an issue whose pair count climbs is visible here too, without
-/// a line per entry. Issues are first-seen ordered within a tie so the
-/// line is stable run to run.
-fn quarantine_rollup(quarantine: &[QuarantineEntry], per_entry: &[usize]) -> String {
+/// The per-issue breakdown of the ledger in descending pair order
+/// (`#12 4, #7 1`). The breakdown is what carries the countdown and the
+/// growth signal that the per-entry listing used to - an issue whose pair
+/// count climbs is visible here too, without a line per entry. Issues are
+/// first-seen ordered within a tie so the text is stable run to run.
+fn quarantine_breakdown(quarantine: &[QuarantineEntry], per_entry: &[usize]) -> String {
     let mut issues: Vec<(&str, usize)> = Vec::new();
     for (entry, count) in quarantine.iter().zip(per_entry) {
         match issues.iter_mut().find(|(i, _)| *i == entry.issue) {
@@ -98,16 +97,24 @@ fn quarantine_rollup(quarantine: &[QuarantineEntry], per_entry: &[usize]) -> Str
         }
     }
     issues.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
-    let pairs: usize = per_entry.iter().sum();
-    let breakdown: Vec<String> = issues
+    issues
         .iter()
         .map(|(issue, n)| format!("{issue} {n}"))
-        .collect();
+        .collect::<Vec<_>>()
+        .join(", ")
+}
 
+/// The ledger as a line of its own - entry count, total pairs, breakdown -
+/// for a run whose green coverage line (which carries the breakdown inline)
+/// will not print.
+fn quarantine_rollup(quarantine: &[QuarantineEntry], per_entry: &[usize]) -> String {
+    let pairs: usize = per_entry.iter().sum();
     format!(
-        "quarantine: {} entries, {pairs} pairs - {}",
+        "quarantine: {} {}, {} - {}",
         quarantine.len(),
-        breakdown.join(", ")
+        if quarantine.len() == 1 { "entry" } else { "entries" },
+        output::count(pairs, "pair"),
+        quarantine_breakdown(quarantine, per_entry)
     )
 }
 
@@ -212,10 +219,10 @@ pub(crate) fn report_policy(
     // The per-entry pair counts are the countdown the ledger exists for, and
     // the growth signal when a substring starts matching more than it used to -
     // but one line per entry is a page of them on a real ledger. Rolled up per
-    // issue, which keeps both signals at the granularity a reader acts on.
-    if !quarantine.is_empty() {
-        output::run_msg(&quarantine_rollup(quarantine, &report.per_entry));
-    }
+    // issue, which keeps both signals at the granularity a reader acts on. On
+    // the green path the breakdown rides on the coverage line's `quarantined`
+    // field (whose count is the same pair total); otherwise it is a line of
+    // its own ahead of the findings.
     outside.extend(declared_narrowing(sweeps, stats.curated));
     let outside_clause = if outside.is_empty() {
         String::new()
@@ -236,6 +243,10 @@ pub(crate) fn report_policy(
     let dead = &plan.dead_filters;
 
     let failing = !report.orphans.is_empty() || !stale.is_empty() || !dead.is_empty();
+    let green = !failing && plan.complete;
+    if !green && !quarantine.is_empty() {
+        output::run_msg(&quarantine_rollup(quarantine, &report.per_entry));
+    }
     if (failing || !plan.complete) && !outside.is_empty() {
         output::run_msg(&format!("coverage:{outside_clause}"));
     }
@@ -286,15 +297,20 @@ pub(crate) fn report_policy(
         ));
     }
 
-    if !failing && plan.complete {
+    if green {
         let curated_frag = if stats.curated > 0 {
             format!("{} curated, ", stats.curated)
         } else {
             String::new()
         };
+        let quarantine_frag = if quarantine.is_empty() || stats.quarantined == 0 {
+            String::new()
+        } else {
+            format!(" ({})", quarantine_breakdown(quarantine, &report.per_entry))
+        };
         output::run_msg(&format!(
-            "coverage: {} shapes, {} pairs - {} selected, {} quarantined, {} ignored, \
-             {curated_frag}0 orphaned{outside_clause}",
+            "coverage: {} shapes, {} pairs - {} selected, {} quarantined{quarantine_frag}, \
+             {} ignored, {curated_frag}0 orphaned{outside_clause}",
             shapes.len(),
             stats.pairs,
             stats.selected,

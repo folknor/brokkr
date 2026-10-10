@@ -10,7 +10,7 @@ Helpers live in `src/piners/`.
 
 `corpus` is a measurable command (`docs/commands/measure.md`): the measurement
 mode is a flag. A **bare** `corpus` is the parity run described in this doc
-(verify → gate → `runs.db`). `corpus --hotpath [N]` / `--alloc [N]` instead
+(verify -> gate -> `runs.db`). `corpus --hotpath [N]` / `--alloc [N]` instead
 builds the `[piners.harness]` crate **with the hotpath feature added**, runs the
 selection through the sidecar + hotpath-capture path, and records to
 `.brokkr/results.db` - queryable with `brokkr results` like every other
@@ -279,7 +279,7 @@ After verification but before building, brokkr estimates the selection's
 wall-clock cost: the **measured whole-run wall** (`run.wall_ms`, brokkr's own
 timing of the harness subprocess) of the most recent run whose selection was a
 **superset** of the current one. Dropping probes can only shorten a run, so
-`wall(subset) ≤ wall(superset)` makes a covering run's real wall a valid upper
+`wall(subset) <= wall(superset)` makes a covering run's real wall a valid upper
 bound - and any `--all` run covers everything, so one full run bounds every
 selection. Only a **comparable** run is a basis: the harness exited 0 or 1 (a
 break is a finished probe; exit 2, a signal, or a spawn failure is not), it
@@ -302,11 +302,11 @@ A `runs.db` written by an older brokkr is migrated to the current schema the
 first time the ceiling (or `corpus-results`) reads it.
 
 This replaced an earlier estimate that **summed** each probe's most recent
-per-probe `runtime_ms`. The harness overlaps probes, so that sum ran ~5× the
+per-probe `runtime_ms`. The harness overlaps probes, so that sum ran ~5x the
 real wall (a ~60s full corpus summed to ~320s), producing false refusals.
 `brokkr corpus-results --runtimes` still lists per-probe runtimes (the slow-probe
 "trim `bar_budget`/disable" workflow reads off it) but is a diagnostic - its
-`Σ(shown)` is a per-probe sum, **not** the run wall the ceiling uses.
+`sum(shown)` is a per-probe sum, **not** the run wall the ceiling uses.
 
 ## Verification (the content gate)
 
@@ -343,7 +343,7 @@ pre-warm that never counts against the 270s wall (`src/piners/lfs.rs`).
 
 ## The expected-disposition gate
 
-Aggregate floors (the old `≥132 exact` thresholds) are gone - a regression
+Aggregate floors (the old `>=132 exact` thresholds) are gone - a regression
 on one probe could hide behind another's improvement. Each probe pins an
 `expected` disposition, one of:
 
@@ -370,7 +370,7 @@ or unselected break still fails the run (gated or `--no-gate` alike).
 **Repeated records.** The contract is one disposition line per probe and one
 `trade_diff` line per `(probe, our_index, tv_index)`. A repeat is kept as its
 last occurrence for display and storage, named in the output, and fails the
-run (`N repeated harness record(s)`).
+run (`N repeated harness records`, `1 repeated harness record` for one).
 
 ## Reseed and bless: the two writers of pins.toml
 
@@ -439,10 +439,10 @@ exit 2, any other code, a signal, the hang backstop, or a repeated record
 leaves `pins.toml` untouched. The run row records `gated = no` - bless
 ignores the gate verdict.
 
-Bootstrap: `--reseed --all` → hand-write `[feeds]` groups, any
-`[harness_files]` paths and the `[probe_config]` declarations → `--reseed
+Bootstrap: `--reseed --all` -> hand-write `[feeds]` groups, any
+`[harness_files]` paths and the `[probe_config]` declarations -> `--reseed
 --all` again (stamps feed and harness-file hashes)
-→ commit → write keyword files → `--bless --all` → commit → runs are gated.
+-> commit -> write keyword files -> `--bless --all` -> commit -> runs are gated.
 
 ## Exit codes
 

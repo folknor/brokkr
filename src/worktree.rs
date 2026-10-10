@@ -203,7 +203,9 @@ impl Worktree {
                 )));
             }
             // The caller names the commit once; reuse vs cut is log narration.
-            output::detail(&format!("reusing worktree for {short} ({subject})"));
+            // `detail_or_console`: `run`, `verify` and `sync` take `--commit`
+            // without opening a run log.
+            output::detail_or_console(&format!("reusing worktree for {short} ({subject})"));
             // Idempotent: repairs a slot whose furnishing was interrupted.
             furnish(git_root, &slot, &checkout)?;
             return Ok(Self {
@@ -240,7 +242,7 @@ impl Worktree {
             remove_one(git_root, &slot)?;
         }
 
-        output::detail(&format!(
+        output::detail_or_console(&format!(
             "creating worktree for {short} ({subject}); it is persistent, `brokkr clean --worktrees` removes it"
         ));
 

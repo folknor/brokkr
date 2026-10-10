@@ -427,7 +427,6 @@ fn reap_line(strays: &[Stray], killed: usize, starters: usize) -> String {
     if starters > 0 {
         line.push_str(&format!(" and to {}", output::count(starters, "rust-analyzer")));
     }
-    line.push_str(" (`brokkr man check strays`)");
     line
 }
 
@@ -447,7 +446,7 @@ pub fn reap_after_lock() {
         return;
     }
     let (killed, starters) = kill(&strays);
-    output::lock_msg(&reap_line(&strays, killed, starters));
+    output::strays_msg(&reap_line(&strays, killed, starters));
 }
 
 /// The reap run from inside lock acquisition, when compilation leases have not
@@ -470,24 +469,24 @@ pub fn reap_for_drain() {
         return;
     }
     let (killed, starters) = kill(&strays);
-    output::lock_msg(&reap_line(&strays, killed, starters));
+    output::strays_msg(&reap_line(&strays, killed, starters));
 }
 
 /// `brokkr strays [--kill]`: bare lists, `--kill` lists then kills.
 pub fn cmd_strays(kill_them: bool) -> Result<(), DevError> {
     let strays = find();
     if strays.is_empty() {
-        output::lock_msg("no stray cargo processes");
+        output::strays_msg("no stray cargo processes");
         return Ok(());
     }
     for s in &strays {
-        output::lock_msg(&describe(s));
+        output::strays_msg(&describe(s));
     }
     if kill_them {
         let (killed, starters) = kill(&strays);
-        output::lock_msg(&killed_line(killed, starters));
+        output::strays_msg(&killed_line(killed, starters));
     } else {
-        output::lock_msg("`brokkr strays --kill` sends SIGKILL; every locked brokkr command does so on its own once it holds the lock");
+        output::strays_msg("`brokkr strays --kill` sends SIGKILL; every locked brokkr command does so on its own once it holds the lock (`brokkr man check strays`)");
     }
     Ok(())
 }
@@ -680,7 +679,7 @@ mod tests {
         assert!(!line.contains('\n'));
         assert_eq!(
             line,
-            "SIGKILL sent to 3 stray cargo processes (build_script_bu x2, cargo) started by rust-analyzer and to 1 rust-analyzer (`brokkr man check strays`)"
+            "SIGKILL sent to 3 stray cargo processes (build_script_bu x2, cargo) started by rust-analyzer and to 1 rust-analyzer"
         );
     }
 

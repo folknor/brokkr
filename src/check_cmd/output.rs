@@ -2732,10 +2732,7 @@ warning: z [too_many_lines]
             &[sited("cargo::unused_dependencies@a/Cargo.toml"), sited("dead_code@src/a.rs")],
         );
         assert!(
-            mixed.contains(
-                "allow_exact: dead_code (sited in clippy/rustdoc; build-wide in test, coverage and install builds), \
-                 cargo::unused_dependencies (sited)"
-            ),
+            mixed.contains("allow_exact: dead_code, cargo::unused_dependencies (sited)"),
             "{mixed}"
         );
     }

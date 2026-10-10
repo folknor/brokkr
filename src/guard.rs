@@ -126,15 +126,15 @@ fn do_install(config_path: &std::path::Path) -> Result<(), DevError> {
         std::fs::create_dir_all(dir)?;
     }
     std::fs::write(config_path, doc.to_string())?;
-    output::lock_msg(&format!("build.{WRAPPER_KEY} = \"{}\" written to {}", guard.display(), config_path.display()));
-    output::lock_msg("every cargo this user runs now routes rustc through the guard; the wrapper change invalidates cargo's fingerprint, so the next build in each target dir is a full rebuild (once)");
+    output::guard_msg(&format!("build.{WRAPPER_KEY} = \"{}\" written to {}", guard.display(), config_path.display()));
+    output::guard_msg("every cargo this user runs now routes rustc through the guard; the wrapper change invalidates cargo's fingerprint, so the next build in each target dir is a full rebuild (once)");
     Ok(())
 }
 
 fn do_remove(config_path: &std::path::Path) -> Result<(), DevError> {
     let mut doc = load_doc(config_path)?;
     let Some(existing) = configured_wrapper(&doc) else {
-        output::lock_msg(&format!("no build.{WRAPPER_KEY} in {} - nothing to remove", config_path.display()));
+        output::guard_msg(&format!("no build.{WRAPPER_KEY} in {} - nothing to remove", config_path.display()));
         return Ok(());
     };
     if !existing.ends_with(GUARD_BIN) {
@@ -149,7 +149,7 @@ fn do_remove(config_path: &std::path::Path) -> Result<(), DevError> {
         }
     }
     std::fs::write(config_path, doc.to_string())?;
-    output::lock_msg(&format!("build.{WRAPPER_KEY} removed from {}", config_path.display()));
+    output::guard_msg(&format!("build.{WRAPPER_KEY} removed from {}", config_path.display()));
     Ok(())
 }
 
@@ -246,13 +246,13 @@ fn status(config_path: &std::path::Path) -> Result<(), DevError> {
     match configured_wrapper(&doc) {
         Some(w) if w.ends_with(GUARD_BIN) => {
             let exists = PathBuf::from(&w).exists();
-            output::lock_msg(&format!("guard installed: build.{WRAPPER_KEY} = \"{w}\" in {}", config_path.display()));
+            output::guard_msg(&format!("guard installed: build.{WRAPPER_KEY} = \"{w}\" in {}", config_path.display()));
             if !exists {
                 output::warn("the configured guard binary does not exist - cargo will fail until `brokkr install` restores it or `brokkr guard --remove` unsets it");
             } else {
                 match probe_guard(&w) {
                     GuardProbe::Current => {
-                        output::lock_msg(&format!("guard protocol {GUARD_PROTOCOL}: current"));
+                        output::guard_msg(&format!("guard protocol {GUARD_PROTOCOL}: current"));
                     }
                     GuardProbe::Mismatch(proto) => output::warn(&format!(
                         "guard speaks protocol {proto}, this brokkr expects {GUARD_PROTOCOL} - run `brokkr install` in the brokkr repo"
@@ -264,10 +264,10 @@ fn status(config_path: &std::path::Path) -> Result<(), DevError> {
             }
         }
         Some(w) => {
-            output::lock_msg(&format!("a different wrapper is configured: build.{WRAPPER_KEY} = \"{w}\" - the guard is NOT active"));
+            output::guard_msg(&format!("a different wrapper is configured: build.{WRAPPER_KEY} = \"{w}\" - the guard is NOT active"));
         }
         None => {
-            output::lock_msg(&format!("guard not installed (no build.{WRAPPER_KEY} in {}) - `brokkr guard --install` enrolls it", config_path.display()));
+            output::guard_msg(&format!("guard not installed (no build.{WRAPPER_KEY} in {}) - `brokkr guard --install` enrolls it", config_path.display()));
         }
     }
     Ok(())

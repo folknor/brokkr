@@ -27,6 +27,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::error::DevError;
 
@@ -36,8 +37,19 @@ use crate::error::DevError;
 /// ..." message. `print` is the caller's prefixed printer (for example
 /// `output::ratatoskr_msg` or `output::corpus_msg`), so each project's
 /// hint carries its own prefix.
+///
+/// Once per process: the hint is about the command's artefact tree, not
+/// about any one failure, so a suite with ten failing scripts says it once.
 pub fn emit_clean_hint(print: fn(&str)) {
-    print("hint: `brokkr clean` removes preserved artefacts");
+    static EMITTED: AtomicBool = AtomicBool::new(false);
+    emit_once(&EMITTED, print);
+}
+
+/// Print the hint unless `emitted` says it already went out.
+fn emit_once(emitted: &AtomicBool, print: fn(&str)) {
+    if !emitted.swap(true, Ordering::Relaxed) {
+        print("hint: `brokkr clean` removes preserved artefacts");
+    }
 }
 
 /// A freshly-allocated `<parent>/<test_id>/run-N/` directory.
@@ -215,6 +227,20 @@ mod tests {
     use std::fs;
 
     use super::*;
+
+    #[test]
+    fn clean_hint_is_emitted_once() {
+        use std::sync::atomic::AtomicUsize;
+        static PRINTED: AtomicUsize = AtomicUsize::new(0);
+        fn count(_: &str) {
+            PRINTED.fetch_add(1, Ordering::Relaxed);
+        }
+        let emitted = AtomicBool::new(false);
+        emit_once(&emitted, count);
+        emit_once(&emitted, count);
+        emit_once(&emitted, count);
+        assert_eq!(PRINTED.load(Ordering::Relaxed), 1);
+    }
 
     /// A fresh scratch dir for one test. `test_name` must be unique within
     /// this module - see `crate::test_scratch`.

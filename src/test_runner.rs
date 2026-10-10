@@ -2205,13 +2205,19 @@ pub(crate) fn format_hung_test(hung: &HungTest, cwd: &Path) -> String {
         .snapshot_pid
         .map(|pid| pid.to_string())
         .unwrap_or_else(|| "?".into());
-    let wchan = hung.wchan.as_deref().unwrap_or("unavailable");
-    let stack = hung.stack.as_deref().unwrap_or("unavailable");
     let snapshot_line = match &hung.snapshot_error {
         Some(err) => format!("snapshot failed: {err}"),
         None => format!("full snapshot: {snapshot_path}"),
     };
+    // The measured time and the limit are one number when the kill is on time
+    // (the usual case), so say it once; both appear only when they differ.
+    let (ran, limit) = (hung.elapsed.as_secs(), hung.ceiling.as_secs());
+    let timing = |what: &str| {
+        if ran == limit { format!("exceeded the {limit}s {what}") } else { format!("ran {ran}s, past the {limit}s {what}") }
+    };
 
+    // What each clock means is in `brokkr man check` (the time ceilings); the
+    // headline carries only what varies per occurrence.
     let headline = if let TimeoutReason::SweepWall { blamed } = &hung.reason {
         // No offender is named, because none is known: the deadline expiring
         // says nothing about which test caused it, and it can just as easily
@@ -2221,39 +2227,35 @@ pub(crate) fn format_hung_test(hung: &HungTest, cwd: &Path) -> String {
             [] => "no test was in flight".to_owned(),
             names => format!("in flight when it expired (unverified): {}", names.join(", ")),
         };
-        format!(
-            "the run exceeded its {}s wall deadline after {}s and was killed\n  \
-             wall deadline: the authoritative bound - it is measured from a clock nothing the \
-             tests print can reach, so unlike the per-test ceiling it cannot be misled by output \
-             that swallows a libtest record\n  {context}\n  \
-             note: \"in flight when the deadline expired\" is not \"caused the timeout\"",
-            hung.ceiling.as_secs(),
-            hung.elapsed.as_secs(),
-        )
+        let run = if ran == limit {
+            format!("the run exceeded its {limit}s wall deadline")
+        } else {
+            format!("the run ran {ran}s, past its {limit}s wall deadline")
+        };
+        format!("{run} and was killed\n  {context}")
     } else if matches!(hung.reason, TimeoutReason::Idle) {
         format!(
-            "no test in flight for {}s, exceeding the {}s idle ceiling - cargo wedged before the first test or after the last (a build-directory lock held by another cargo, e.g. rust-analyzer, looks exactly like this)\n  idle ceiling: covers the compile, link and teardown the per-test timeout cannot see",
-            hung.elapsed.as_secs(),
-            hung.ceiling.as_secs(),
+            "no test in flight for {ran}s ({}) - cargo wedged before the first test or after the last; \
+             a build-directory lock held by another cargo (rust-analyzer) looks exactly like this",
+            if ran == limit { "the idle ceiling".to_owned() } else { format!("past the {limit}s idle ceiling") },
         )
     } else {
-        format!(
-            "test {} ran {}s, exceeding the {}s per-test timeout, after libtest started it\n  per-test timeout: cargo build time excluded",
-            hung.test,
-            hung.elapsed.as_secs(),
-            hung.ceiling.as_secs(),
-        )
+        format!("test {} {}", hung.test, timing("per-test timeout"))
     };
-    format!(
-        "{headline}\n  killed cargo process group (pgid {}) and {}\n  /proc/{}/wchan: {}\n  /proc/{}/stack: {}\n  {}",
+    let mut out = format!(
+        "{headline}\n  killed cargo process group (pgid {}) and {child_text}",
         hung.cargo_pid,
-        child_text,
-        proc_pid,
-        wchan,
-        proc_pid,
-        stack,
-        snapshot_line,
-    )
+    );
+    // Only what was actually read: /proc/<pid>/stack in particular is
+    // unreadable for a non-root brokkr, and a line saying so is noise.
+    if let Some(wchan) = &hung.wchan {
+        out.push_str(&format!("\n  /proc/{proc_pid}/wchan: {wchan}"));
+    }
+    if let Some(stack) = &hung.stack {
+        out.push_str(&format!("\n  /proc/{proc_pid}/stack: {stack}"));
+    }
+    out.push_str(&format!("\n  {snapshot_line}"));
+    out
 }
 
 pub(crate) fn effective_test_threads(args: &[String]) -> Result<Option<u32>, DevError> {
@@ -2313,6 +2315,50 @@ mod tests {
     use std::process::{Command, Stdio};
     use std::sync::atomic::AtomicBool;
     use std::sync::{Arc, Mutex};
+
+    fn hung(reason: TimeoutReason, elapsed: u64, ceiling: u64) -> HungTest {
+        HungTest {
+            test: reason.label(),
+            reason,
+            elapsed: Duration::from_secs(elapsed),
+            ceiling: Duration::from_secs(ceiling),
+            snapshot_dir: PathBuf::from("/snap"),
+            cargo_pid: 7,
+            test_pids: vec![9],
+            snapshot_pid: Some(9),
+            wchan: None,
+            stack: None,
+            snapshot_error: None,
+        }
+    }
+
+    /// The report states each number once, omits /proc lines that were not
+    /// read, and carries no constant explanation.
+    #[test]
+    fn the_hung_test_report_is_terse() {
+        let cwd = Path::new("/");
+        let on_time = format_hung_test(&hung(TimeoutReason::PerTest { name: "t::x".into() }, 20, 20), cwd);
+        assert!(on_time.starts_with("test t::x exceeded the 20s per-test timeout\n"), "{on_time}");
+        assert!(!on_time.contains("wchan") && !on_time.contains("stack"), "{on_time}");
+        assert!(!on_time.contains("build time excluded"), "{on_time}");
+
+        let late = format_hung_test(&hung(TimeoutReason::PerTest { name: "t::x".into() }, 23, 20), cwd);
+        assert!(late.starts_with("test t::x ran 23s, past the 20s per-test timeout\n"), "{late}");
+
+        let mut with_wchan = hung(TimeoutReason::Idle, 300, 300);
+        with_wchan.wchan = Some("futex_wait".into());
+        let idle = format_hung_test(&with_wchan, cwd);
+        assert!(idle.starts_with("no test in flight for 300s (the idle ceiling) - "), "{idle}");
+        assert!(idle.contains("/proc/9/wchan: futex_wait"), "{idle}");
+        assert!(!idle.contains("/stack"), "{idle}");
+
+        let wall = format_hung_test(
+            &hung(TimeoutReason::SweepWall { blamed: vec!["a".into()] }, 1800, 1800),
+            cwd,
+        );
+        assert!(wall.starts_with("the run exceeded its 1800s wall deadline and was killed\n"), "{wall}");
+        assert!(wall.contains("in flight when it expired (unverified): a"), "{wall}");
+    }
 
     /// A child that exits while a background process it started still holds
     /// its stdout: the drain is cut after the grace period instead of waiting

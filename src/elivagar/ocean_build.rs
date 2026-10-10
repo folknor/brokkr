@@ -105,9 +105,9 @@ pub fn run(
     args.push(output_path.display().to_string());
 
     if dry_run {
-        output::run_msg(&format!("[dry-run] elivagar {}", args.join(" ")));
-        output::run_msg(&format!("[dry-run] output: {}", output_path.display()));
-        output::run_msg("[dry-run] ok");
+        output::dry_run_msg(&format!("elivagar {}", args.join(" ")));
+        output::dry_run_msg(&format!("output: {}", output_path.display()));
+        output::dry_run_msg("ok");
         return Ok(());
     }
 

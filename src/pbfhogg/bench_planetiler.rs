@@ -117,8 +117,6 @@ pub fn run(
 
     let (basename, _) = super::path_strs(pbf_path)?;
 
-    output::bench_msg("running planetiler benchmark");
-
     let results =
         run_planetiler_subprocess(&pt.java, &classpath, pbf_path, heap_mb, runs, project_root)?;
 

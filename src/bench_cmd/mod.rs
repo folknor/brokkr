@@ -154,7 +154,10 @@ pub fn run(args: &BenchArgs) -> Result<(), DevError> {
     // differ, so the tree checked out is the code tree rather than the config
     // directory above it.
     let parent_build_root = (build_root != project_root).then_some(build_root.as_path());
+    // Worktree, toolchain and target-dir narration is run-log only.
+    let _log = crate::check_cmd::RunLog::begin(&project_root, crate::check_cmd::run_log_kind::BENCH);
     with_worktree(
+        project,
         &project_root,
         parent_build_root,
         args.commit.as_deref(),

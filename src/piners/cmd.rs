@@ -139,8 +139,8 @@ pub fn corpus(
 
     // Hard correctness gate: verify every selected pin before running.
     output::corpus_msg(&format!(
-        "verifying {} probe(s) against {}",
-        ids.len(),
+        "verifying {} against {}",
+        output::count(ids.len(), "probe"),
         corpus_root.display()
     ));
     let mut verified = Vec::with_capacity(ids.len());
@@ -155,9 +155,10 @@ pub fn corpus(
 
     if args.verify_only {
         output::corpus_msg(&format!(
-            "verify-only: {} probe(s) + {feed_count} feed group(s) + {file_count} harness \
-             file(s) OK",
-            verified.len()
+            "verify-only: {} + {} + {} OK",
+            output::count(verified.len(), "probe"),
+            output::count(feed_count, "feed group"),
+            output::count(file_count, "harness file")
         ));
         return Ok(());
     }
@@ -241,8 +242,8 @@ pub fn corpus(
         return Err(record_unfinished(&corpus_db_path, &envelope, artefacts, e, "error", None));
     }
     output::corpus_msg(&format!(
-        "manifest: {} probe(s) -> {}",
-        verified.len(),
+        "manifest: {} -> {}",
+        output::count(verified.len(), "probe"),
         manifest_path.display()
     ));
 
@@ -320,8 +321,8 @@ pub fn corpus(
     let duplicates = report.take_duplicates();
     if !duplicates.is_empty() {
         output::corpus_msg(&format!(
-            "harness emitted {} repeated record(s), kept the last of each: {}",
-            duplicates.len(),
+            "harness emitted {}, kept the last of each: {}",
+            output::count(duplicates.len(), "repeated record"),
             duplicates.join(", ")
         ));
     }
@@ -364,17 +365,17 @@ pub fn corpus(
     let fail_reason: Option<String> = if run_pass {
         None
     } else if harness_ok {
-        Some(format!("{} gate deviation(s)", gate_diffs.len()))
+        Some(output::count(gate_diffs.len(), "gate deviation"))
     } else if killed_on_backstop {
         Some(format!(
             "harness killed at the {}s hang backstop",
             HARNESS_HANG_BACKSTOP.as_secs()
         ))
     } else if !duplicates.is_empty() {
-        Some(format!("{} repeated harness record(s)", duplicates.len()))
+        Some(output::count(duplicates.len(), "repeated harness record"))
     } else {
         Some(match harness_code {
-            Some(1) => "parity break(s)".to_owned(),
+            Some(1) => "parity breaks".to_owned(),
             Some(2) => "harness error".to_owned(),
             Some(c) => format!("harness exit={c}"),
             None => "harness killed by signal".to_owned(),
@@ -500,11 +501,11 @@ fn enforce_runtime_ceiling(project_root: &Path, ids: &[String], debug: bool) -> 
     };
     if est_ms > RUNTIME_CEILING_MS {
         return Err(DevError::Preflight(vec![format!(
-            "corpus: estimated runtime {:.0}s for {} probe(s) exceeds the {:.0}s ceiling \
+            "corpus: estimated runtime {:.0}s for {} exceeds the {:.0}s ceiling \
              (measured wall of the most recent run covering this selection). \
              Re-run with --force to override.",
             est_ms / 1000.0,
-            ids.len(),
+            output::count(ids.len(), "probe"),
             RUNTIME_CEILING_MS / 1000.0,
         )]));
     }

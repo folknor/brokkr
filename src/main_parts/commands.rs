@@ -1550,11 +1550,8 @@ fn cmd_hotpath_generic(req: &measure::MeasureRequest) -> Result<(), DevError> {
 
     let alloc = req.is_alloc();
     let label = harness::hotpath_feature(alloc);
-    output::hotpath_msg(&format!("=== {} {label} ===", req.project));
-
-    if alloc {
-        output::hotpath_msg("NOTE: alloc profiling -- wall-clock times are not meaningful");
-    }
+    output::detail(&format!("{} {label}", req.project));
+    harness::hotpath_alloc_note(alloc);
 
     let binary_str = ctx.binary.display().to_string();
 

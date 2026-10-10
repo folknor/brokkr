@@ -176,8 +176,8 @@ then measures a different commit's code under the requested commit's baseline
 name, reports success, and produces a number with nothing obviously wrong about
 it. The cost is a full build per worktree; the alternative is baselines that are
 silently attributed to the wrong commit. The isolation is not announced on
-every run (it is the same each time); its narration goes to the run-log
-channel and is discarded when no log is open.
+every run (it is the same each time); its narration goes to `bench`'s
+run log (`.brokkr/check-logs/bench-<ms>.log`, the newest ten kept).
 
 Worktrees persist and are reused, so the cost is one cold build per commit
 rather than per run. They are also expensive to keep - the isolated `target/` is

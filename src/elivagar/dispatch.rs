@@ -62,10 +62,7 @@ fn run_elivagar_dry_run(req: &MeasureRequest, command: &ElivagarCommand) -> Resu
     let pbf_str = if command.needs_pbf() {
         let (pbf_path, file_mb) =
             resolve_pbf_with_size(req.dataset, req.variant, &paths, req.project_root)?;
-        output::run_msg(&format!(
-            "[dry-run] pbf: {} ({file_mb:.0} MB)",
-            pbf_path.display()
-        ));
+        output::dry_run_msg(&format!("pbf: {} ({file_mb:.0} MB)", pbf_path.display()));
         pbf_path
             .to_str()
             .ok_or_else(|| DevError::Config("PBF path is not valid UTF-8".into()))?
@@ -77,22 +74,18 @@ fn run_elivagar_dry_run(req: &MeasureRequest, command: &ElivagarCommand) -> Resu
     // External tools construct their own argv elsewhere; there's nothing to
     // validate here beyond the resolved input.
     if command.is_external() {
-        output::run_msg(&format!(
-            "[dry-run] {} is an external tool (no Rust build)",
+        output::dry_run_msg(&format!(
+            "{} is an external tool (no Rust build)",
             command.id()
         ));
-        output::run_msg("[dry-run] ok");
+        output::dry_run_msg("ok");
         return Ok(());
     }
 
     // Construct the arg vector (catches any build_args failures).
     let args = command.build_args(&pbf_str, &paths.scratch_dir, &paths.data_dir)?;
-    output::run_msg(&format!(
-        "[dry-run] {} args: {}",
-        command.id(),
-        args.join(" ")
-    ));
-    output::run_msg("[dry-run] ok");
+    output::dry_run_msg(&format!("{} args: {}", command.id(), args.join(" ")));
+    output::dry_run_msg("ok");
     Ok(())
 }
 
@@ -377,10 +370,8 @@ fn run_elivagar_hotpath(req: &MeasureRequest, command: &ElivagarCommand) -> Resu
     let alloc = req.is_alloc();
     let feature = harness::hotpath_feature(alloc);
 
-    output::hotpath_msg(&format!("=== {} {feature} ===", command.id()));
-    if alloc {
-        output::hotpath_msg("NOTE: alloc profiling - wall-clock times are not meaningful");
-    }
+    output::detail(&format!("{} {feature}", command.id()));
+    harness::hotpath_alloc_note(alloc);
 
     match command.build_config() {
         BuildKind::MainBinary => {

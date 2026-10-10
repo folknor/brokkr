@@ -58,11 +58,7 @@ pub(crate) fn run(
 
     if req.dry_run {
         // Not quiet-gated: a dry run's output is its whole point.
-        output::run_msg(&format!(
-            "[dry-run] {} -> {}",
-            resolved.name,
-            args.join(" ")
-        ));
+        output::dry_run_msg(&format!("{} -> {}", resolved.name, args.join(" ")));
         return Ok(());
     }
 
@@ -110,10 +106,8 @@ pub(crate) fn run(
         std::fs::create_dir_all(&scratch_dir)?;
 
         let label = harness::hotpath_feature(req.is_alloc());
-        output::hotpath_msg(&format!("=== mogwai {label}: {} ===", resolved.name));
-        if req.is_alloc() {
-            output::hotpath_msg("NOTE: alloc profiling -- wall-clock times are not meaningful");
-        }
+        output::detail(&format!("mogwai {label}: {}", resolved.name));
+        harness::hotpath_alloc_note(req.is_alloc());
 
         ctx.harness.run_hotpath(&config, &ctx.binary, |_i| {
             let (result, _stderr, sidecar) = harness::run_hotpath_capture(

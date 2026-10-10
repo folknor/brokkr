@@ -117,9 +117,9 @@ pub fn resolve(registry: &Registry, args: &SelectArgs) -> Result<Vec<String>, De
 /// selection or a verification.
 pub fn pending_notice(ids: &[String]) -> String {
     format!(
-        "{} [pending] probe(s) registered but not pinned, skipped: {} (pin each with `brokkr \
+        "{} registered but not pinned, skipped: {} (pin each with `brokkr \
          corpus --reseed --probe <id>`)",
-        ids.len(),
+        crate::output::count(ids.len(), "[pending] probe"),
         ids.join(", ")
     )
 }

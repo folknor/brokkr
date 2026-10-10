@@ -285,7 +285,8 @@ look at the report and decide.
 The section is presented as an **exhaustive** answer about crates.io:
 if a direct dep isn't here, it has no newer version available. The
 text renderer phrases the header as
-`N upgrade(s) available on crates.io; no other candidates:` and, when
+`N upgrades available on crates.io; no other candidates:` (`1 upgrade`
+when there is one) and, when
 ccu found nothing, prints `All direct deps are at latest on crates.io.`
 - a colleague reading "duplicate hashbrown" then asking "should I bump
 `reqwest`?" can resolve it from this section alone without running

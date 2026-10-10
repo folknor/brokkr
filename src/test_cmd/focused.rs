@@ -143,14 +143,14 @@ pub(super) fn discover(
     let cwd = if cwd.as_os_str() == "." { project_root.to_path_buf() } else { cwd };
     let env_pairs: Vec<(&str, &str)> =
         envelope.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    let command = format!("{} {} (cwd {})", binary.executable, DISCOVERY_ARGS.join(" "), cwd.display());
     let run = test_runner::run_listing(
         &binary.executable,
         &DISCOVERY_ARGS,
         &cwd,
         &env_pairs,
         test_runner::TEST_TIMEOUT,
-    )?;
-    let command = format!("{} {}", binary.executable, DISCOVERY_ARGS.join(" "));
+    ).inspect_err(|_| crate::output::run_msg(&command))?;
     let fail = |why: String| {
         let stderr = String::from_utf8_lossy(&run.stderr);
         DevError::Build(format!(

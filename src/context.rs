@@ -46,6 +46,17 @@ pub(crate) fn acquire_cmd_lock_opt(
     })
 }
 
+/// The subcommand this process was invoked as (`bench`, `run`, ...): the first
+/// argument that is not a flag, `"brokkr"` if there is none. For a lock taken
+/// on behalf of a command that has not told the callee its name.
+fn invoked_command() -> String {
+    command_from_args(std::env::args().skip(1))
+}
+
+fn command_from_args(args: impl Iterator<Item = String>) -> String {
+    args.into_iter().find(|a| !a.starts_with('-')).unwrap_or_else(|| "brokkr".to_owned())
+}
+
 /// Resolve project info (target_dir) using cargo metadata.
 pub(crate) fn bootstrap(build_root: Option<&Path>) -> Result<build::ProjectInfo, DevError> {
     build::project_info(build_root)
@@ -278,7 +289,9 @@ impl BenchContext {
 /// Worktrees persist across runs so their isolated target dir survives.
 /// Reuse is automatic when the same commit is requested again. Run
 /// `brokkr clean --worktrees` to garbage collect.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn with_worktree<F, T>(
+    project: Option<Project>,
     project_root: &Path,
     parent_build_root: Option<&Path>,
     commit: Option<&str>,
@@ -295,9 +308,7 @@ where
     let git_root = parent_build_root.unwrap_or(project_root);
     match commit {
         Some(hash) if dry_run => {
-            output::run_msg(&format!(
-                "[dry-run] skipping worktree creation for {hash}"
-            ));
+            output::dry_run_msg(&format!("skipping worktree creation for {hash}"));
             f(parent_build_root)
         }
         Some(hash) => {
@@ -318,7 +329,13 @@ where
             // worktree exists - re-arming would do nothing, since every later
             // acquire in this run re-enters this hold and activates nothing.
             let saved_arm = crate::toolchain::arm(None);
-            let lock = acquire_cmd_lock_opt(None, project_root, "worktree");
+            //
+            // The record this acquisition writes is the one `brokkr lock` and a
+            // waiter's message show for the whole run (the closure's re-entrant
+            // acquires never rewrite it), so it carries the caller's project
+            // and the invoked command, not a bookkeeping name.
+            let invoked = invoked_command();
+            let lock = acquire_cmd_lock_opt(project, project_root, &invoked);
             crate::toolchain::arm(saved_arm);
             let lock = lock?;
 
@@ -362,5 +379,17 @@ where
             result
         }
         None => f(parent_build_root),
+    }
+}
+
+#[cfg(test)]
+mod invoked_command_tests {
+    use super::command_from_args;
+
+    #[test]
+    fn the_first_non_flag_argument_names_the_command() {
+        let args = |v: &[&str]| v.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>().into_iter();
+        assert_eq!(command_from_args(args(&["--quiet", "bench", "--commit", "abc"])), "bench");
+        assert_eq!(command_from_args(args(&["--help"])), "brokkr");
     }
 }

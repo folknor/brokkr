@@ -593,7 +593,7 @@ pub fn dense_na_breakdown(probes: &[ProbeLine]) -> Vec<DenseNaGroup> {
 /// unblessed corpus every probe deviates, so nothing is hidden; the summary
 /// and both breakdowns are always computed over the full set regardless.
 pub fn render(report: &HarnessReport, deviating: &HashSet<&str>) {
-    let mut pinned = 0u64;
+    let mut pinned = 0usize;
     for p in &report.probes {
         if deviating.contains(p.probe.as_str()) {
             output::corpus_msg(&format_probe(p));
@@ -602,7 +602,10 @@ pub fn render(report: &HarnessReport, deviating: &HashSet<&str>) {
         }
     }
     if pinned > 0 {
-        output::corpus_msg(&format!("{pinned} probe(s) match their pin (hidden)"));
+        output::corpus_msg(&format!(
+            "{} matching their pin (hidden)",
+            output::count(pinned, "probe")
+        ));
     }
 
     let summary = summarize(&report.probes);
@@ -614,8 +617,9 @@ pub fn render(report: &HarnessReport, deviating: &HashSet<&str>) {
     // only discounted the seam.
     if summary.boundary_probes > 0 {
         output::corpus_msg(&format!(
-            "boundary artifacts: {} probe(s), {} trade(s) discounted (effective parity scored on the interior)",
-            summary.boundary_probes, summary.boundary_trades
+            "boundary artifacts: {}, {} discounted (effective parity scored on the interior)",
+            output::count(usize::try_from(summary.boundary_probes).unwrap_or(usize::MAX), "probe"),
+            output::count(usize::try_from(summary.boundary_trades).unwrap_or(usize::MAX), "trade")
         ));
     }
 
@@ -637,11 +641,11 @@ pub fn render(report: &HarnessReport, deviating: &HashSet<&str>) {
         output::corpus_msg("dense-na breakdown (by builtin):");
         for g in &dense {
             output::corpus_msg(&format!(
-                "  {}: {} site(s), {} na across {} probe(s) (e.g. {})",
+                "  {}: {}, {} na across {} (e.g. {})",
                 g.builtin,
-                g.sites,
+                output::count(g.sites, "site"),
                 g.na_total,
-                g.probes,
+                output::count(g.probes, "probe"),
                 g.examples.join(", ")
             ));
         }

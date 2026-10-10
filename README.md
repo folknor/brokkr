@@ -168,7 +168,7 @@ Per run it renumbers the input PBF with both tools, runs `pbfhogg diff -s -c -v`
 
 Every measurable pbfhogg command accepts `--snapshot <key>` to read its input from a historical snapshot rather than the dataset's primary tables. Producers (`apply-changes`, `merge-changes`, `tags-filter --input-kind osc`, `diff` including `--format osc`, `repack`, `degrade`) consume both PBF and OSC from the snapshot's tables; read-side consumers (`sort`, `cat`, `inspect`, `add-locations-to-ways`, `getid`, `getparents`, `renumber`, `check-refs`, `check-ids`, `time-filter`, `tags-filter`, `extract`, `multi-extract`, `build-geocode-index`) read their PBF input from the snapshot's `pbf.<variant>` table. `--snapshot base` (or omitting the flag) preserves the existing behavior - script-friendly when parameterizing over snapshot keys. The `--snapshot` flag lands verbatim in `cli_args`, so `brokkr results --grep 'snapshot 20260411'` (or just `--grep 20260411`) finds every command run against that snapshot.
 
-Calling plain `brokkr download <region>` against a dataset whose `pbf.raw` is already configured is a SKIP (no auto-refresh), and prints a multi-line message naming both `--refresh` and `--as-snapshot` so the user knows the alternatives without having to read the source.
+Calling plain `brokkr download <region>` against a dataset whose `pbf.raw` is already configured is a SKIP (no auto-refresh), and its one SKIP line names both `--refresh` and `--as-snapshot` so the user knows the alternatives without having to read the source.
 
 ### elivagar
 

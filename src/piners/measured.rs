@@ -88,8 +88,8 @@ pub(crate) fn run(req: &MeasureRequest, args: &CorpusArgs) -> Result<(), DevErro
     let ids = select::resolve(&reg, &sel)?;
 
     output::corpus_msg(&format!(
-        "verifying {} probe(s) against {}",
-        ids.len(),
+        "verifying {} against {}",
+        output::count(ids.len(), "probe"),
         corpus_root.display()
     ));
     let mut verified = Vec::with_capacity(ids.len());
@@ -148,13 +148,11 @@ pub(crate) fn run(req: &MeasureRequest, args: &CorpusArgs) -> Result<(), DevErro
     let bin_dir_str = bin_dir.display().to_string();
 
     let label = harness::hotpath_feature(alloc);
-    output::hotpath_msg(&format!(
-        "=== corpus {label} ({} probe(s)) ===",
-        verified.len()
+    output::detail(&format!(
+        "corpus {label} ({})",
+        output::count(verified.len(), "probe")
     ));
-    if alloc {
-        output::hotpath_msg("NOTE: alloc profiling -- wall-clock times are not meaningful");
-    }
+    harness::hotpath_alloc_note(alloc);
 
     let selector = selector_label(args);
     // The profile lives in the `cargo_profile` column below. Rows recorded

@@ -286,6 +286,15 @@ pub fn hotpath_feature(alloc: bool) -> &'static str {
     if alloc { "hotpath-alloc" } else { "hotpath" }
 }
 
+/// Print the one standing caveat of `--alloc`: the allocation hooks distort
+/// wall time. A no-op when `alloc` is false, so every hotpath/alloc entry point
+/// can call it unconditionally and the wording lives in one place.
+pub fn hotpath_alloc_note(alloc: bool) {
+    if alloc {
+        output::hotpath_msg("NOTE: alloc profiling - wall-clock times are not meaningful");
+    }
+}
+
 /// Convert a `Duration` to milliseconds as `i64`, rounded to nearest.
 ///
 /// Nearest, not floored, for the reason [`us_to_ms`] gives: flooring reads

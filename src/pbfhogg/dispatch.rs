@@ -162,30 +162,26 @@ fn run_pbfhogg_dry_run(
         let _ = command.build_args(&cmd_ctx, ArgMode::Hotpath)?;
     }
 
-    output::run_msg(&format!(
-        "[dry-run] {} args: {}",
-        command.id(),
-        args.join(" ")
-    ));
-    output::run_msg(&format!("[dry-run] pbf: {}", cmd_ctx.pbf_path.display()));
+    output::dry_run_msg(&format!("{} args: {}", command.id(), args.join(" ")));
+    output::dry_run_msg(&format!("pbf: {}", cmd_ctx.pbf_path.display()));
     if let Some(ref p) = cmd_ctx.osc_path {
-        output::run_msg(&format!("[dry-run] osc: {}", p.display()));
+        output::dry_run_msg(&format!("osc: {}", p.display()));
     }
     if cmd_ctx.osc_paths.len() > 1 {
-        output::run_msg(&format!(
-            "[dry-run] osc range: {} files ({} .. {})",
+        output::dry_run_msg(&format!(
+            "osc range: {} files ({} .. {})",
             cmd_ctx.osc_paths.len(),
             cmd_ctx.osc_paths.first().map_or(String::new(), |p| p.display().to_string()),
             cmd_ctx.osc_paths.last().map_or(String::new(), |p| p.display().to_string()),
         ));
     }
     if let Some(ref p) = cmd_ctx.pbf_b_path {
-        output::run_msg(&format!("[dry-run] pbf_b: {}", p.display()));
+        output::dry_run_msg(&format!("pbf_b: {}", p.display()));
     }
     if let Some(ref b) = cmd_ctx.bbox {
-        output::run_msg(&format!("[dry-run] bbox: {b}"));
+        output::dry_run_msg(&format!("bbox: {b}"));
     }
-    output::run_msg("[dry-run] ok");
+    output::dry_run_msg("ok");
     Ok(())
 }
 
@@ -415,12 +411,8 @@ fn run_pbfhogg_hotpath(
         hotpath_args.push(c.clone());
     }
 
-    let label = feature;
-    output::hotpath_msg(&format!("=== {} {label} ===", command.id()));
-
-    if alloc {
-        output::hotpath_msg("NOTE: alloc profiling -- wall-clock times are not meaningful");
-    }
+    output::detail(&format!("{} {feature}", command.id()));
+    harness::hotpath_alloc_note(alloc);
 
     let basename = cmd_ctx.pbf_basename();
     let subprocess_args: Vec<&str> = hotpath_args[1..].iter().map(String::as_str).collect();
@@ -453,7 +445,6 @@ fn run_pbfhogg_hotpath(
 
     let ok_codes = command.ok_exit_codes();
     ctx.harness.run_hotpath(&config, &ctx.binary, |_i| {
-        output::hotpath_msg(command.id());
         let (result, _stderr, sidecar) = harness::run_hotpath_capture(
             &binary_str,
             &subprocess_args,

@@ -114,14 +114,14 @@ pub fn run(
 
     if plan.skipped > 0 {
         output::corpus_msg(&format!(
-            "skipped {} non-parity dir(s) (no {CSV_FILE} or {RECORD_FILE})",
-            plan.skipped
+            "skipped {} (no {CSV_FILE} or {RECORD_FILE})",
+            output::count(plan.skipped, "non-parity dir")
         ));
     }
     output::corpus_msg(&format!(
-        "reseed: {} probe(s), {} feed group(s) -> {} (added={} changed={} removed={})",
-        plan.probes,
-        plan.feeds,
+        "reseed: {}, {} -> {} (added={} changed={} removed={})",
+        output::count(plan.probes, "probe"),
+        output::count(plan.feeds, "feed group"),
         pins_path.display(),
         plan.diff.added,
         plan.diff.changed,

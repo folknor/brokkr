@@ -55,6 +55,8 @@ pub fn run(
 
     std::fs::create_dir_all(data_dir)?;
 
+    // The one line naming the dataset and its upstream; the steps below indent
+    // under it.
     output::download_msg(&format!("=== {dataset_key} ({}) ===", source.display_name()));
 
     let is_new_dataset = dataset.is_none();
@@ -69,23 +71,15 @@ pub fn run(
             .file_name()
             .and_then(|s| s.to_str())
             .unwrap_or_default();
-        output::download_msg(&format!("  SKIP (pbf already configured): {filename}"));
-        output::download_msg(
-            "    └─ `brokkr download` does NOT auto-refresh existing primary data."
-        );
         output::download_msg(&format!(
-            "       To rotate to a newer upstream snapshot: `brokkr download {dataset_key} --refresh`"
-        ));
-        output::download_msg(
-            "         (archives current primary as a snapshot block, downloads new primary).",
-        );
-        output::download_msg(&format!(
-            "       To add a parallel named snapshot without rotating: `brokkr download {dataset_key} --as-snapshot <key>`"
+            "  SKIP (pbf already configured): {filename} - `--refresh` archives it as a \
+             snapshot and downloads a new primary, `--as-snapshot <key>` adds a named snapshot \
+             beside it"
         ));
     } else if is_nonempty(&pbf_dest) {
         output::download_msg(&format!("  SKIP (exists): {}", pbf_dest.display()));
     } else {
-        output::download_msg(&format!("  GET: {pbf_url}"));
+        output::download_msg(&format!("  GET: {pbf_url} -> {}", pbf_dest.display()));
         tools::download_file(&pbf_url, &pbf_dest)?;
         downloaded_pbf = true;
     }
@@ -93,7 +87,6 @@ pub fn run(
     // -- Download OSC diffs --
     // Downloads all missing diffs from (last_configured + 1) through the requested seq.
     let mut osc_downloaded: Vec<(u64, PathBuf)> = Vec::new();
-    let mut osc_last_dest: Option<PathBuf> = None;
 
     if let Some(target_seq) = osc_seq {
         let start_seq = max_osc_seq(dataset).map_or(target_seq, |max| max + 1);
@@ -121,11 +114,10 @@ pub fn run(
                 if dest.exists() && is_nonempty(&dest) {
                     output::download_msg(&format!("  SKIP (exists): {}", dest.display()));
                 } else {
-                    output::download_msg(&format!("  GET: {url}"));
+                    output::download_msg(&format!("  GET: {url} -> {}", dest.display()));
                     tools::download_file(&url, &dest)?;
-                    osc_downloaded.push((seq, dest.clone()));
+                    osc_downloaded.push((seq, dest));
                 }
-                osc_last_dest = Some(dest);
             }
         }
     }
@@ -192,22 +184,8 @@ pub fn run(
         );
     }
 
-    // -- Summary --
-    output::download_msg("=== Summary ===");
-    output::download_msg(&format!("  PBF: {}", pbf_dest.display()));
-    if let Some(ref osc) = osc_last_dest {
-        if osc_downloaded.len() > 1 {
-            output::download_msg(&format!(
-                "  OSC: {} files downloaded ({} new entries in brokkr.toml)",
-                osc_downloaded.len(),
-                osc_downloaded.len(),
-            ));
-        } else {
-            output::download_msg(&format!("  OSC: {}", osc.display()));
-        }
-    }
-    output::download_msg(&format!("  Indexed: {}", indexed_dest.display()));
-
+    // No closing summary: every local path was already printed by its own
+    // GET / SKIP / generate line above.
     Ok(())
 }
 
@@ -273,7 +251,7 @@ fn run_as_snapshot(
         output::download_msg(&format!("  SKIP (exists): {}", pbf_dest.display()));
     } else {
         let url = source.pbf_url();
-        output::download_msg(&format!("  GET: {url}"));
+        output::download_msg(&format!("  GET: {url} -> {}", pbf_dest.display()));
         tools::download_file(&url, &pbf_dest)?;
         downloaded_pbf = true;
     }
@@ -291,7 +269,7 @@ fn run_as_snapshot(
         if is_nonempty(&dest) {
             output::download_msg(&format!("  SKIP (exists): {}", dest.display()));
         } else {
-            output::download_msg(&format!("  GET: {url}"));
+            output::download_msg(&format!("  GET: {url} -> {}", dest.display()));
             tools::download_file(&url, &dest)?;
         }
         osc_downloaded.push((target_seq, dest));
@@ -367,13 +345,8 @@ fn run_as_snapshot(
         ));
     }
 
-    // -- Summary --
-    output::download_msg("=== Summary ===");
-    output::download_msg(&format!("  PBF: {}", pbf_dest.display()));
-    if let Some((_, last)) = osc_downloaded.last() {
-        output::download_msg(&format!("  OSC: {}", last.display()));
-    }
-    output::download_msg(&format!("  Indexed: {}", indexed_dest.display()));
+    // The paths were printed by their own GET / SKIP lines; only the next
+    // step is new.
     output::download_msg(&format!(
         "  Use: brokkr diff-snapshots --dataset {dataset_key} --from base --to {snap_key}"
     ));

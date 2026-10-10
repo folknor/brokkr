@@ -580,10 +580,9 @@ fn render_outdated_section(items: &[&OutdatedEvent], outdated_ran: bool) {
         output::deps_msg("All direct deps are at latest on crates.io.");
         return;
     }
-    let noun = if items.len() == 1 { "upgrade" } else { "upgrades" };
     output::deps_msg(&format!(
-        "{} {noun} available on crates.io; no other candidates:",
-        items.len()
+        "{} available on crates.io; no other candidates:",
+        output::count(items.len(), "upgrade")
     ));
     for item in items {
         render_outdated_text(item);

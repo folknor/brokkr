@@ -138,8 +138,8 @@ pub fn lint_corpus(
     // absolute path for the validator runners.
     let corpus_root = project_root.join(piners_cfg.corpus_root());
     output::lint_msg(&format!(
-        "verifying {} snippet(s) against {}",
-        ids.len(),
+        "verifying {} against {}",
+        output::count(ids.len(), "snippet"),
         corpus_root.display()
     ));
     let mut abs_paths: BTreeMap<String, String> = BTreeMap::new();
@@ -152,7 +152,10 @@ pub fn lint_corpus(
     }
 
     if args.verify_only {
-        output::lint_msg(&format!("verify-only: {} snippet(s) OK", ids.len()));
+        output::lint_msg(&format!(
+            "verify-only: {} OK",
+            output::count(ids.len(), "snippet")
+        ));
         return Ok(());
     }
 
@@ -271,9 +274,9 @@ pub fn lint_corpus(
     let fail_reason: Option<String> = if run_pass {
         None
     } else if tool_error {
-        Some(format!("{} validator error(s)", tool_errors.len()))
+        Some(output::count(tool_errors.len(), "validator error"))
     } else {
-        Some(format!("{deviations} gate deviation(s)"))
+        Some(output::count(deviations, "gate deviation"))
     };
 
     let selector = selector_json(args, &ids);
@@ -324,8 +327,8 @@ pub fn lint_corpus(
         ));
         if tool_error {
             output::lint_msg(&format!(
-                "FAIL: {} probe(s) hit a validator error and were not blessed: {}",
-                tool_errors.len(),
+                "FAIL: {} hit a validator error and were not blessed: {}",
+                output::count(tool_errors.len(), "probe"),
                 tool_errors.join(", ")
             ));
             return Err(DevError::ExitCode(1));
@@ -334,7 +337,7 @@ pub fn lint_corpus(
     }
 
     if run_pass {
-        output::lint_msg(&format!("PASS: {} probe(s)", results.len()));
+        output::lint_msg(&format!("PASS: {}", output::count(results.len(), "probe")));
         Ok(())
     } else {
         let reason = fail_reason.unwrap_or_else(|| "fail".to_owned());
@@ -434,7 +437,8 @@ fn reanchor(
         })?;
     }
     output::lint_msg(&format!(
-        "reanchored {anchored} probe(s) under scope {} ({failed} failed)",
+        "reanchored {} under scope {} ({failed} failed)",
+        output::count(anchored, "probe"),
         scope.label()
     ));
     if anchored == 0 && failed > 0 {
@@ -550,13 +554,17 @@ fn render(
         output::lint_msg(&format!("  {line}"));
     }
     if hidden > 0 {
-        output::lint_msg(&format!("  {hidden} probe(s) match their pin (hidden)"));
+        output::lint_msg(&format!(
+            "  {} matching their pin (hidden)",
+            output::count(hidden, "probe")
+        ));
     }
 
     let tv_div = results.iter().filter(|r| r.tv_divergent == Some(true)).count();
     if tv_div > 0 {
         output::lint_msg(&format!(
-            "TV advisory: {tv_div} probe(s) diverge from their TV anchor (re-investigate or --reanchor)"
+            "TV advisory: {} diverging from their TV anchor (re-investigate or --reanchor)",
+            output::count(tv_div, "probe")
         ));
     }
     // Anchors stamped under another scope are skipped by build_result, not
@@ -568,8 +576,8 @@ fn render(
         .count();
     if other_scope > 0 {
         output::lint_msg(&format!(
-            "TV advisory: {other_scope} anchor(s) were stamped under another scope than {} \
-             and were not compared",
+            "TV advisory: {} stamped under another scope than {} and not compared",
+            output::count(other_scope, "anchor"),
             scope.label()
         ));
     }
