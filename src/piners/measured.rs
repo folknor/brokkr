@@ -26,7 +26,7 @@ use crate::harness::{self, BenchConfig};
 use crate::measure::{MeasureMode, MeasureRequest};
 use crate::output;
 use crate::piners::cmd::CorpusArgs;
-use crate::piners::integrity::{self, Reconciliation};
+use crate::piners::integrity::{self, HarnessEnd};
 use crate::piners::manifest::Manifest;
 use crate::piners::registry::{self, Registry};
 use crate::piners::select::{self, SelectArgs};
@@ -200,8 +200,9 @@ pub(crate) fn run(req: &MeasureRequest, args: &CorpusArgs) -> Result<(), DevErro
     // spawned inside `run_hotpath_capture`, which takes no deadline.
     let _deadline = crate::sidecar::DeadlineScope::enter(crate::piners::cmd::HARNESS_HANG_BACKSTOP);
     ctx.harness.run_hotpath(&config, &ctx.binary, |i| {
-        // A non-zero exit fails inside the capture, as a subprocess error
-        // carrying the whole stderr.
+        // The capture does not reject on the exit status: the stream is read
+        // first, on every status, so a run_error or a partial report is what
+        // the failure names.
         let capture = harness::run_hotpath_capture_with_stdout(
             &binary_str,
             &subprocess_args,
@@ -212,11 +213,16 @@ pub(crate) fn run(req: &MeasureRequest, args: &CorpusArgs) -> Result<(), DevErro
             req.stop_marker,
             Some(ctx.harness.lock()),
         )?;
-        // A stop marker that actually fired ends the run early by design;
-        // every other run, a configured marker that never fired included, is
-        // held to its selection.
+        // A stop marker that actually fired ends the run early by design, and
+        // is not held to its selection or its status; every other run, a
+        // configured marker that never fired included, is.
         if !capture.stopped_by_marker {
-            check_iteration_complete(i, &ids, &capture.stdout, &capture.stderr)?;
+            // A backstop kill is brokkr's, never a spontaneous SIGKILL.
+            let end = HarnessEnd::from_status(&capture.status, capture.stopped_by_deadline);
+            if let Err(e) = check_iteration(i, &ids, end, &capture.stdout, &capture.stderr) {
+                capture.park_failure();
+                return Err(e);
+            }
         }
         Ok((capture.result, capture.sidecar))
     })?;
@@ -224,39 +230,47 @@ pub(crate) fn run(req: &MeasureRequest, args: &CorpusArgs) -> Result<(), DevErro
     Ok(())
 }
 
-/// Fail a measured iteration that exited 0 without reporting exactly its
-/// selection - a probe without a valid disposition, or any invalid, repeated
-/// or report-only extra record: its timing would describe a different
-/// workload. Prints the reconciliation and the whole stderr. No isolation on
-/// this path.
-fn check_iteration_complete(
+/// The measured-iteration acceptance policy over the shared assessment: the
+/// process exited 0 and the run completed (`RunAssessment::completed` - every
+/// selected probe validly reported, no protocol or contract violation, no
+/// `run_error`, and the `run_end` once the contract is observed). Exit 1 is a
+/// break, and a `harness_abort` run is no performance sample, so both fail
+/// too. On failure prints how it ended, the `run_error` when there is one,
+/// the reconciliation, the context and the whole stderr. No isolation on this
+/// path.
+fn check_iteration(
     iteration: usize,
     ids: &[String],
+    end: HarnessEnd,
     stdout: &[u8],
     stderr: &[u8],
 ) -> Result<(), DevError> {
-    let mut report = crate::piners::report::parse(stdout);
-    let duplicates = report.take_duplicates();
-    let rec = Reconciliation::reconcile(ids, &report, duplicates);
-    if rec.complete() && rec.protocol_violations() == 0 {
+    let a = integrity::assess(ids, stdout, end, false);
+    // No harness_abort, explicitly: a complete exit-0 stream carrying one (a
+    // legacy disposition-only stream, or a run_end that says 0) still timed
+    // a different workload.
+    let aborts = a.harness_aborts();
+    if end == HarnessEnd::Code(0) && a.completed() && aborts.is_empty() {
         return Ok(());
     }
-    output::corpus_msg(&format!(
-        "iteration {iteration}: harness exited 0 with {} of {} selected probes unscored \
-         and {} ({})",
-        rec.unscored(),
-        rec.selected,
-        output::count(rec.protocol_violations(), "protocol violation"),
-        rec.summary()
-    ));
-    for line in rec.detail_lines() {
+    let why = match &a.contract.run_error {
+        Some(e) => e.render(),
+        None if !aborts.is_empty() => format!(
+            "harness_abort in the run ({}); a crashed probe is no timing sample",
+            aborts.join(", ")
+        ),
+        None if end != HarnessEnd::Code(0) => {
+            format!("harness {} ({})", end.describe(), a.rec.summary())
+        }
+        None => format!("harness exited 0 without reporting exactly its selection ({})", a.rec.summary()),
+    };
+    output::corpus_msg(&format!("iteration {iteration}: {why}"));
+    for line in a.detail_lines().into_iter().chain(a.context_lines()) {
         output::corpus_msg(&line);
     }
     integrity::print_stderr("harness stderr", &String::from_utf8_lossy(stderr));
     Err(DevError::Verify(format!(
-        "corpus measurement: iteration {iteration} did not report exactly its selection \
-         ({}); the timing is not of the selected workload",
-        rec.summary()
+        "corpus measurement: iteration {iteration}: {why}; the timing is not of the selected workload"
     )))
 }
 
@@ -286,25 +300,72 @@ mod tests {
         vec!["a".to_owned()]
     }
 
+    const OK: HarnessEnd = HarnessEnd::Code(0);
+
     #[test]
     fn a_complete_clean_iteration_passes() {
-        assert!(check_iteration_complete(0, &ids(), A.as_bytes(), b"").is_ok());
+        assert!(check_iteration(0, &ids(), OK, A.as_bytes(), b"").is_ok());
     }
 
     #[test]
     fn a_partial_iteration_fails() {
         let both = vec!["a".to_owned(), "b".to_owned()];
-        assert!(check_iteration_complete(0, &both, A.as_bytes(), b"").is_err());
+        assert!(check_iteration(0, &both, OK, A.as_bytes(), b"").is_err());
     }
 
     #[test]
     fn complete_coverage_with_protocol_violations_fails() {
         let dup = format!("{A}{A}");
-        assert!(check_iteration_complete(0, &ids(), dup.as_bytes(), b"").is_err());
+        assert!(check_iteration(0, &ids(), OK, dup.as_bytes(), b"").is_err());
         let extra = format!("{A}{{\"probe\":\"zz\",\"outcome\":\"no_tv_data\"}}\n");
-        assert!(check_iteration_complete(0, &ids(), extra.as_bytes(), b"").is_err());
+        assert!(check_iteration(0, &ids(), OK, extra.as_bytes(), b"").is_err());
         let invalid = format!("{A}not json\n");
-        let err = check_iteration_complete(0, &ids(), invalid.as_bytes(), b"").unwrap_err();
+        let err = check_iteration(0, &ids(), OK, invalid.as_bytes(), b"").unwrap_err();
         assert!(err.to_string().contains("1 invalid"), "{err}");
+    }
+
+    #[test]
+    fn a_run_error_fails_the_iteration_with_the_rendered_record() {
+        let nd = "{\"kind\":\"run_error\",\"version\":1,\"stage\":\"feed_load\",\"feed\":\"eth\",\"role\":\"base\",\"error\":\"no such file\"}\n";
+        let err = check_iteration(3, &ids(), HarnessEnd::Code(2), nd.as_bytes(), b"").unwrap_err();
+        assert!(
+            err.to_string().contains("iteration 3: run_error at stage feed_load (feed eth, role base): no such file"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_harness_abort_is_never_a_timing_sample_even_on_exit_0() {
+        let crash = "{\"probe\":\"a\",\"outcome\":\"harness_abort\",\"error\":\"signal 11\"}\n";
+        // Legacy disposition-only stream, exit 0.
+        assert!(check_iteration(0, &ids(), OK, crash.as_bytes(), b"").is_err());
+        // A contract stream whose run_end says 0.
+        let v = "\"version\":1";
+        let nd = format!(
+            "{{\"kind\":\"probe_start\",{v},\"probe\":\"a\"}}\n{crash}{{\"kind\":\"probe_end\",{v},\"probe\":\"a\"}}\n{{\"kind\":\"run_end\",{v},\"exit\":0}}\n"
+        );
+        let err = check_iteration(0, &ids(), OK, nd.as_bytes(), b"").unwrap_err();
+        assert!(err.to_string().contains("harness_abort in the run"), "{err}");
+    }
+
+    #[test]
+    fn a_backstop_kill_after_a_run_error_is_not_a_contract_violation() {
+        let nd = "{\"kind\":\"run_error\",\"version\":1,\"stage\":\"x\",\"error\":\"y\"}\n";
+        let a = integrity::assess(&ids(), nd.as_bytes(), HarnessEnd::Backstop, false);
+        assert!(a.contract.violations.is_empty(), "{:?}", a.contract.violations);
+        // The same SIGKILL read as spontaneous would be one.
+        let a = integrity::assess(&ids(), nd.as_bytes(), HarnessEnd::Signal(9), false);
+        assert!(!a.contract.violations.is_empty());
+    }
+
+    #[test]
+    fn a_failed_status_is_read_before_it_is_rejected() {
+        // Exit 1 with a complete stream (a harness_abort) is still no sample.
+        let crash = "{\"probe\":\"a\",\"outcome\":\"harness_abort\",\"error\":\"signal 11\"}\n";
+        let err = check_iteration(0, &ids(), HarnessEnd::Code(1), crash.as_bytes(), b"").unwrap_err();
+        assert!(err.to_string().contains("harness_abort in the run (a)"), "{err}");
+        // A signal names itself and what was reported.
+        let err = check_iteration(0, &ids(), HarnessEnd::Signal(9), b"", b"").unwrap_err();
+        assert!(err.to_string().contains("killed by signal 9 (1 selected, 0 scored, 1 missing)"), "{err}");
     }
 }

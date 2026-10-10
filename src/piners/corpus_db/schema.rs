@@ -196,7 +196,8 @@ CREATE TABLE IF NOT EXISTS run (
     commit_sha        TEXT,
     dirty             INTEGER,
     protocol_violations INTEGER,
-    diagnosis         TEXT
+    diagnosis         TEXT,
+    run_error         TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_run_started ON run(started_at);
 

@@ -158,8 +158,15 @@ where
 pub const PARITY_TIERS: [&str; 4] = ["byte_exact", "accepted", "actionable_drift", "count_divergent"];
 
 /// The outcomes other than `parity`; each is its own gate label and carries
-/// no acceptance tier.
-pub const NON_PARITY_OUTCOMES: [&str; 4] = ["compile_fail", "runtime_fail", "no_tv_data", "no_overlap"];
+/// no acceptance tier. `harness_abort` is the harness supervisor's verdict on
+/// a probe process that died or replied with no complete record set: a
+/// break, pinnable like `runtime_fail`.
+pub const NON_PARITY_OUTCOMES: [&str; 5] =
+    ["compile_fail", "runtime_fail", "no_tv_data", "no_overlap", "harness_abort"];
+
+/// The crash label. Its lines stay visible even when pinned, and a run that
+/// carries one is no performance sample.
+pub const HARNESS_ABORT: &str = "harness_abort";
 
 /// The one disposition validator: the gate label an `outcome` plus its
 /// acceptance `tier` (empty counts as absent) stand for, or `None` when the
@@ -226,6 +233,9 @@ pub struct ProbeLine {
     /// from the same occurrence.
     #[serde(skip)]
     pub raw: String,
+    /// Position among the stream's non-blank lines. Set by [`parse`].
+    #[serde(skip)]
+    pub line: usize,
 }
 
 impl ProbeLine {
@@ -337,6 +347,26 @@ pub struct TradeDiffLine {
 pub struct InvalidRecord {
     pub probe: Option<String>,
     pub reason: String,
+    /// The record's position among the stream's non-blank lines.
+    pub line: usize,
+    /// The line is not JSON at all (a fragment, possibly cut off mid-write),
+    /// as opposed to complete JSON with invalid fields.
+    pub not_json: bool,
+}
+
+/// The harness's versioned contract lines (`docs/projects/piners.md`).
+/// Recognised by `kind` alone; the version and fields are validated by
+/// [`crate::piners::contract`], never here, so a known kind with a bad
+/// version is still seen and judged rather than skipped.
+pub const CONTRACT_KINDS: [&str; 6] =
+    ["setup_stage", "setup_complete", "probe_start", "probe_end", "run_end", "run_error"];
+
+/// One contract line, kept whole with its stream position.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ContractLine {
+    pub line: usize,
+    pub kind: String,
+    pub value: serde_json::Value,
 }
 
 /// Everything parsed out of one harness run.
@@ -349,6 +379,15 @@ pub struct HarnessReport {
     /// Lines that should have been disposition records and could not be
     /// read as one, in emission order. See [`InvalidRecord`].
     pub invalid: Vec<InvalidRecord>,
+    /// Contract lines in emission order.
+    pub contract: Vec<ContractLine>,
+    /// Position of the last non-blank line, `None` for an empty stream.
+    /// Positions are what lifecycle and terminal-order validation read;
+    /// dispositions arrive in completion order, so presentation sorts by id.
+    pub last_line: Option<usize>,
+    /// The stream did not end with a newline: its final line may be a
+    /// fragment cut off mid-write.
+    pub unterminated: bool,
 }
 
 impl HarnessReport {
@@ -414,6 +453,8 @@ pub struct Summary {
     pub runtime_fail: u64,
     pub no_tv_data: u64,
     pub no_overlap: u64,
+    /// Probe processes the harness saw die. Always printed, pinned or not.
+    pub harness_abort: u64,
     /// Outcomes brokkr does not yet model (forward-compat).
     pub other: u64,
     /// Probes on which piners discounted at least one window-boundary artifact.
@@ -456,13 +497,19 @@ const MAX_EXAMPLES: usize = 4;
 /// Unknown *fields* stay tolerated (forward compat; see the module docs).
 pub fn parse(stdout: &[u8]) -> HarnessReport {
     let text = String::from_utf8_lossy(stdout);
-    let mut report = HarnessReport::default();
+    let mut report = HarnessReport {
+        unterminated: !stdout.is_empty() && !stdout.ends_with(b"\n"),
+        ..HarnessReport::default()
+    };
 
+    let mut position = 0usize;
     for line in text.lines() {
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
         }
+        position += 1;
+        report.last_line = Some(position);
         // Peek at the line as a generic value to discriminate record kinds
         // before committing to the ProbeLine shape.
         let value = match serde_json::from_str::<serde_json::Value>(trimmed) {
@@ -471,10 +518,22 @@ pub fn parse(stdout: &[u8]) -> HarnessReport {
                 report.invalid.push(InvalidRecord {
                     probe: None,
                     reason: format!("not JSON ({e}): {}", clip(trimmed)),
+                    line: position,
+                    not_json: true,
                 });
                 continue;
             }
         };
+
+        // Contract kinds first: a contract line is judged whatever else it
+        // carries, so no tolerance below (the legacy summary skip) can hide one.
+        if let Some(kind) = value.get("kind").and_then(serde_json::Value::as_str)
+            && CONTRACT_KINDS.contains(&kind)
+        {
+            let kind = kind.to_owned();
+            report.contract.push(ContractLine { line: position, kind, value });
+            continue;
+        }
 
         // Tolerate (and ignore) a stray legacy summary line.
         if value.get("summary").and_then(serde_json::Value::as_bool) == Some(true) {
@@ -505,12 +564,15 @@ pub fn parse(stdout: &[u8]) -> HarnessReport {
                 match serde_json::from_value::<ProbeLine>(value) {
                     Ok(mut p) => {
                         p.raw = raw;
+                        p.line = position;
                         report.probes.push(p);
                     }
                     Err(e) => {
                         report.invalid.push(InvalidRecord {
                             probe: probe_id,
                             reason: format!("unparsable disposition line: {e}"),
+                            line: position,
+                            not_json: false,
                         });
                     }
                 }
@@ -568,6 +630,7 @@ pub fn summarize(probes: &[ProbeLine]) -> Summary {
             "runtime_fail" => s.runtime_fail += 1,
             "no_tv_data" => s.no_tv_data += 1,
             "no_overlap" => s.no_overlap += 1,
+            HARNESS_ABORT => s.harness_abort += 1,
             _ => s.other += 1,
         }
         // Window-boundary discounting is orthogonal to outcome: tally it for
@@ -610,12 +673,17 @@ pub fn root_cause_breakdown(probes: &[ProbeLine]) -> Vec<RootCauseGroup> {
                 .push(p.probe.clone());
         }
     }
+    // Examples by id, not arrival: dispositions arrive in completion order,
+    // which varies run to run.
     groups
         .into_iter()
-        .map(|(key, ids)| RootCauseGroup {
-            count: ids.len(),
-            examples: ids.into_iter().take(MAX_EXAMPLES).collect(),
-            key,
+        .map(|(key, mut ids)| {
+            ids.sort();
+            RootCauseGroup {
+                count: ids.len(),
+                examples: ids.into_iter().take(MAX_EXAMPLES).collect(),
+                key,
+            }
         })
         .collect()
 }
@@ -642,19 +710,23 @@ pub fn dense_na_breakdown(probes: &[ProbeLine]) -> Vec<DenseNaGroup> {
     }
     groups
         .into_iter()
-        .map(|(builtin, (sites, na_total, ids))| DenseNaGroup {
-            builtin,
-            sites,
-            na_total,
-            probes: ids.len(),
-            examples: ids.into_iter().take(MAX_EXAMPLES).collect(),
+        .map(|(builtin, (sites, na_total, mut ids))| {
+            ids.sort();
+            DenseNaGroup {
+                builtin,
+                sites,
+                na_total,
+                probes: ids.len(),
+                examples: ids.into_iter().take(MAX_EXAMPLES).collect(),
+            }
         })
         .collect()
 }
 
-/// What [`render`] prints: the deviating scored lines, how many scored lines
-/// sit on their pin, and the scored lines themselves (the only input to the
-/// summary and breakdowns).
+/// What [`render`] prints: the deviating scored lines plus every
+/// `harness_abort` line (a crash stays visible even on its pin), how many
+/// scored lines sit quietly on their pin, and the scored lines themselves
+/// (the only input to the summary and breakdowns). Sorted by probe id.
 struct RenderPlan<'a> {
     shown: Vec<&'a ProbeLine>,
     hidden: usize,
@@ -665,13 +737,15 @@ impl<'a> RenderPlan<'a> {
     fn new(report: &'a HarnessReport, scored: &HashSet<&str>, deviating: &HashSet<&str>) -> Self {
         let mut plan = RenderPlan { shown: Vec::new(), hidden: 0, scored: Vec::new() };
         for p in report.probes.iter().filter(|p| scored.contains(p.probe.as_str())) {
-            if deviating.contains(p.probe.as_str()) {
+            if deviating.contains(p.probe.as_str()) || p.outcome == HARNESS_ABORT {
                 plan.shown.push(p);
             } else {
                 plan.hidden += 1;
             }
             plan.scored.push(p.clone());
         }
+        plan.shown.sort_by(|a, b| a.probe.cmp(&b.probe));
+        plan.scored.sort_by(|a, b| a.probe.cmp(&b.probe));
         plan
     }
 }
@@ -800,7 +874,7 @@ fn format_summary(s: &Summary, reconciliation: &str) -> String {
     let mut out = format!(
         "summary: {reconciliation}; {} parity (exact={} near={} drift={}); \
          tiers byte_exact={} accepted={} actionable_drift={} count_divergent={}; \
-         compile_fail={} runtime_fail={} no_tv_data={} no_overlap={}",
+         compile_fail={} runtime_fail={} no_tv_data={} no_overlap={} harness_abort={}",
         s.parity,
         s.exact,
         s.near,
@@ -813,6 +887,7 @@ fn format_summary(s: &Summary, reconciliation: &str) -> String {
         s.runtime_fail,
         s.no_tv_data,
         s.no_overlap,
+        s.harness_abort,
     );
     if s.other > 0 {
         out.push_str(&format!(" other={}", s.other));
@@ -821,9 +896,11 @@ fn format_summary(s: &Summary, reconciliation: &str) -> String {
 }
 
 /// Assert at compile time that brokkr models every disposition label the
-/// gate can pin: the four acceptance tiers plus the four non-parity
+/// gate can pin: the four acceptance tiers plus the five non-parity
 /// outcomes. If `registry` grows a label, the summary tally above must too.
-const _: () = assert!(registry::DISPOSITION_LABELS.len() == 8);
+const _: () = assert!(
+    registry::DISPOSITION_LABELS.len() == PARITY_TIERS.len() + NON_PARITY_OUTCOMES.len()
+);
 
 #[cfg(test)]
 mod tests {
@@ -1097,6 +1174,63 @@ mod tests {
         // A non-parity outcome carrying a tier.
         assert_eq!(valid_label("runtime_fail", Some("accepted")), None);
         assert_eq!(valid_label("weird", None), None);
+    }
+
+    #[test]
+    fn harness_abort_is_a_valid_label_and_the_lists_match_the_registry() {
+        assert_eq!(valid_label("harness_abort", None), Some("harness_abort"));
+        assert_eq!(valid_label("harness_abort", Some("accepted")), None);
+        let joined: Vec<&str> = PARITY_TIERS.iter().chain(NON_PARITY_OUTCOMES.iter()).copied().collect();
+        assert_eq!(joined, registry::DISPOSITION_LABELS.to_vec());
+    }
+
+    #[test]
+    fn contract_lines_are_recognised_by_kind_with_positions() {
+        let r = parse(
+            b"{\"kind\":\"setup_stage\",\"version\":1,\"stage\":\"manifest\"}\n\
+{\"kind\":\"probe_start\",\"probe\":\"a\"}\n\
+{\"probe\":\"a\",\"outcome\":\"harness_abort\",\"error\":\"signal 11\"}\n\
+{\"kind\":\"future\",\"x\":1}\n\
+{\"kind\":\"run_end\",\"version\":\"1\",\"exit\":1}",
+        );
+        let kinds: Vec<(&str, usize)> = r.contract.iter().map(|c| (c.kind.as_str(), c.line)).collect();
+        // A missing or malformed version is still recognised; the unknown kind is not.
+        assert_eq!(kinds, vec![("setup_stage", 1), ("probe_start", 2), ("run_end", 5)]);
+        assert_eq!(r.probes[0].line, 3);
+        assert_eq!(r.last_line, Some(5));
+        assert!(r.unterminated);
+        assert!(r.invalid.is_empty());
+    }
+
+    #[test]
+    fn a_contract_line_flagged_as_a_legacy_summary_is_still_a_contract_line() {
+        let r = parse(b"{\"kind\":\"run_error\",\"version\":2,\"summary\":true}\n{\"summary\":true,\"total\":1}\n");
+        assert_eq!(r.contract.len(), 1);
+        assert_eq!(r.contract[0].kind, "run_error");
+        assert!(r.probes.is_empty() && r.invalid.is_empty());
+    }
+
+    #[test]
+    fn a_pinned_crash_stays_visible_and_output_is_sorted_by_id() {
+        let r = parse(
+            br#"{"probe":"z","outcome":"harness_abort","error":"killed by signal 9"}
+{"probe":"m","outcome":"parity","acceptance":{"tier":"accepted"},"signature":{"domain":"d","dimension":"x"}}
+{"probe":"b","outcome":"parity","acceptance":{"tier":"accepted"},"signature":{"domain":"d","dimension":"x"}}
+"#,
+        );
+        let scored: HashSet<&str> = ["z", "m", "b"].into_iter().collect();
+        // Nothing deviates: z is pinned to its crash, yet still shown.
+        let plan = RenderPlan::new(&r, &scored, &HashSet::new());
+        let shown: Vec<&str> = plan.shown.iter().map(|p| p.probe.as_str()).collect();
+        assert_eq!(shown, vec!["z"]);
+        assert_eq!(plan.hidden, 2);
+        let order: Vec<&str> = plan.scored.iter().map(|p| p.probe.as_str()).collect();
+        assert_eq!(order, vec!["b", "m", "z"]);
+        let s = summarize(&plan.scored);
+        assert_eq!(s.harness_abort, 1);
+        assert!(format_summary(&s, "x").contains("harness_abort=1"));
+        // Breakdown examples sort by id whatever the arrival order.
+        assert_eq!(root_cause_breakdown(&r.probes)[0].examples, vec!["b".to_owned(), "m".to_owned()]);
     }
 
     #[test]

@@ -65,10 +65,11 @@ pub fn evaluate(ids: &[String], registry: &Registry, report: &HarnessReport) -> 
     diffs
 }
 
-/// The dispositions the harness signals with exit code 1 ("compile/runtime
-/// break(s)"). A probe can pin either one: a probe exercising an
-/// unimplemented feature legitimately expects `compile_fail`.
-pub const BREAK_DISPOSITIONS: [&str; 2] = ["compile_fail", "runtime_fail"];
+/// The dispositions the harness signals with exit code 1 ("break(s)"). A
+/// probe can pin any of them: a probe exercising an unimplemented feature
+/// legitimately expects `compile_fail`, and one whose process the harness
+/// saw die is `harness_abort`.
+pub const BREAK_DISPOSITIONS: [&str; 3] = ["compile_fail", "runtime_fail", "harness_abort"];
 
 /// Whether the report carries at least one break line (any probe).
 pub fn report_has_break(report: &HarnessReport) -> bool {
@@ -226,6 +227,20 @@ mod tests {
         // Nor does a posing break explain exit 1.
         assert!(!report_has_break(&rep));
         assert!(!breaks_all_pinned(&ids, &reg, &rep));
+    }
+
+    #[test]
+    fn a_pinned_harness_abort_passes_and_explains_exit_one() {
+        let reg = registry(&[("a", Some("harness_abort"))]);
+        let rep = report(r#"{"probe":"a","outcome":"harness_abort","error":"killed by signal 11"}"#);
+        let ids = ["a".to_owned()];
+        assert!(evaluate(&ids, &reg, &rep).is_empty());
+        assert!(report_has_break(&rep));
+        assert!(breaks_all_pinned(&ids, &reg, &rep));
+        // Unpinned, the crash is a deviation and leaves exit 1 unexplained.
+        let unpinned = registry(&[("a", Some("accepted"))]);
+        assert_eq!(evaluate(&ids, &unpinned, &rep).len(), 1);
+        assert!(!breaks_all_pinned(&ids, &unpinned, &rep));
     }
 
     #[test]

@@ -81,7 +81,15 @@ Emits **one NDJSON object per probe, no summary line** (brokkr aggregates):
  "dense_na_sites":[{"name":"strategy.exit","call_site":"...","na_count":7}]}
 ```
 
-- `outcome`: `parity | compile_fail | runtime_fail | no_tv_data | no_overlap`.
+- `outcome`: `parity | compile_fail | runtime_fail | no_tv_data | no_overlap |
+  harness_abort`. `harness_abort` is the harness supervisor's line for a probe
+  whose process died or replied with no complete record set: its `error`
+  carries the exit status or signal, the reason and the process's stderr
+  tail. A break (exit 1), never retried, gated and blessed like
+  `runtime_fail`. brokkr derives the gate label itself (the tier for
+  `parity`, else the outcome) and accepts an outcome/tier pair only as a
+  whole (`report::valid_label`); the line's own `disposition` field is not
+  trusted.
 - `count_tier` (`exact|near|drift`) + `acceptance` (tier `byte_exact|accepted|
   actionable_drift|count_divergent`, profile `strict|production`, optional
   `p90{entry,exit,pnl}`): parity only.
@@ -121,7 +129,37 @@ kinds without a brokkr change:
   `our_side`/`our_entry_id`/`our_exit_id`, the `tv_*` legs incl.
   `tv_entry_qty`/`tv_pnl`/`tv_entry_signal`/`tv_exit_signal`). brokkr does not
   aggregate these but **persists** them (below).
+- the contract kinds, each carrying `"version": 1` (below).
 - any other `kind` - skipped (forward-compat).
+
+### Contract lines and ordering (crash containment)
+
+The harness runs as a monitor (what brokkr starts), a supervisor (all shared
+setup, single-threaded) and one forked process per probe, so one dying probe
+costs only its own disposition (`harness_abort`). Beside the dispositions it
+emits contract lines, each with `version` 1:
+
+- `{"kind":"setup_stage","version":1,"stage":S,"feed"?:F,"path"?:P}` before
+  each shared setup step; `{"kind":"setup_complete","version":1}` when probes
+  are about to run.
+- `{"kind":"probe_start","version":1,"probe":ID}` once a probe process has
+  bootstrapped; `{"kind":"probe_end","version":1,"probe":ID}` when it is
+  settled. A probe's disposition (and its `trade_diff` lines) come between
+  its start and its end. Probes overlap: these say what was in flight, never
+  what caused anything.
+- `{"kind":"run_error","version":1,"stage":S,"feed"?,"role"?,"path"?,"field"?,"error":E}`:
+  shared setup or the harness itself failed. Names the failing entry, never
+  a probe; at most once; the process exits 2.
+- `{"kind":"run_end","version":1,"exit":0|1}`: last line of a completed run,
+  once every probe is settled; the process exits with that value.
+
+A run carries exactly one terminal record: `run_end` on completion, else one
+`run_error` (the monitor synthesizes it when the supervisor dies without
+finishing). Dispositions arrive in **completion order**, not manifest order.
+brokkr's checks of all of this - version, lifecycle, terminal order, process
+exit - and what each consumer accepts are in `docs/commands/corpus.md` ("The
+harness contract"); a stream with no contract line at all is judged by the
+older exit-and-coverage rules and reported as `no contract observed`.
 
 brokkr parses tolerantly at the *field* level (a field it does not model is
 ignored for rendering, and stored with the rest of the line - see the run
@@ -142,7 +180,11 @@ trimmed to the **deviations**: a probe sitting exactly on its pinned `expected`
 (the gate's satisfied set) is suppressed and folded into one `N probes matching
 their pin (hidden)` line, so the surviving lines are the regressions/surprise
 improvements worth reading. On an unblessed corpus everything deviates, so
-nothing is hidden. The summary and both breakdowns always cover the full set.
+nothing is hidden. A `harness_abort` line is never hidden, pinned or not, and
+the summary always carries `harness_abort=N`. The summary, both breakdowns
+and the hidden count cover the scored set (valid dispositions of selected
+probes) only, and everything is listed sorted by probe id, since
+dispositions arrive in completion order.
 
 ## The corpus run store (`runs.db`)
 
@@ -172,7 +214,8 @@ first), per-db `PRAGMA user_version` migrations, WAL - mirroring `src/db`
   whole-run harness wall of the original attempt, never extended by
   diagnostic isolation; `NULL` for a run whose harness never finished or
   pre-v4 rows), `protocol_violations` (v7: invalid records + repeated records
-  + report-only extras from the report-integrity reconciliation, plus one
+  + report-only extras from the report-integrity reconciliation, plus the
+  harness contract violations, plus one
   when the harness stdout was cut short and one when the run's
   `harness.stdout`/`harness.stderr` could not be written; any nonzero count bars the run from
   being runtime-ceiling evidence; `NULL` when
@@ -180,13 +223,18 @@ first), per-db `PRAGMA user_version` migrations, WAL - mirroring `src/db`
   isolation pass's note - the probes that abort when run alone, the diagnosis
   status, where the attempt artefacts are - appended after the run row
   commits, beside the untouched `fail_reason`; the one write ever made to a
-  stored run). The exit/reason/stderr make a failed run self-contained;
+  stored run), and `run_error` (v8: the harness's `run_error` record stored
+  whole as JSON, exactly the line the harness wrote - `kind`, `version`,
+  `stage`, whichever of `feed`/`role`/`path`/`field` it carried, `error`,
+  explicit nulls and any field brokkr does not model - in the run's own
+  transaction; `fail_reason` is its
+  readable projection, and `corpus-results <id>` renders it). The exit/reason/stderr make a failed run self-contained;
   `wall_ms` + `selector` + the disposition rows are what the pre-run runtime
   ceiling estimates the next run from (a comparable superset-covering run
   whose every selected id has a stored row whose `outcome` and `acc_tier`
-  pass the shared disposition validator and agree with its `disposition` -
-  see
-  `docs/commands/corpus.md`).
+  pass the shared disposition validator and agree with its `disposition`,
+  and with no `harness_abort` row, which is a valid gate disposition but no
+  timing sample - see `docs/commands/corpus.md`).
 - `disposition` (PK `run_id,probe`) - the harness line stored **whole** as
   `raw_json`, the authoritative record, with every harness field a generated
   column projected from it. The harness adds diagnostics faster than brokkr
@@ -267,11 +315,14 @@ struct, no benchmark filters to reject. The corpus views:
   resolved id list it stores - that would be 200+ ids wide for an `--all` run.
   The id list stays reachable via the run-detail view or `--sql`.
 - `brokkr corpus-results <id>` / `--run <id>` - a `run <id>  started ... UTC
-  commit ...` header, its `reason:` and any `diagnosis:` lines, then that
+  commit ...` header, its `reason:`, its rendered `run_error` and any
+  `diagnosis:` lines, then that
   run's per-probe dispositions (+ gate misses + stderr). An id with no run is
   an error. Only the **deviations**
-  (rows where the stored disposition misses its pin, `gate_ok = 0`) are shown;
-  the pin-matchers fold into a `N probes matching their pin (hidden)` line - a
+  (rows where the stored disposition misses its pin, `gate_ok = 0`) are shown,
+  plus every `harness_abort` row even when pinned - a crash is never folded
+  away, as in the live rendering;
+  the other pin-matchers fold into a `N probes matching their pin (hidden)` line - a
   200-probe `--all` run otherwise buries the few that moved. `--full` shows the
   complete table. The disposition table carries `b_ours`/`b_tv` columns (the
   window-boundary discount, `-` when none) beside raw `ours`/`tv`, so a probe

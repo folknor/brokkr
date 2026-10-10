@@ -83,6 +83,9 @@ pub enum StopReason {
     /// An attempt's captured streams could not be stored, so its evidence
     /// would not survive; diagnosis stops rather than claim it.
     EvidenceStorage(String),
+    /// An attempt's harness reported a `run_error` (rendered): a failure of
+    /// its own setup, not of the subset, so there is nothing to bisect.
+    HarnessFailure(String),
 }
 
 impl StopReason {
@@ -98,6 +101,7 @@ impl StopReason {
             StopReason::EvidenceStorage(e) => {
                 format!("an attempt's evidence could not be stored: {e}")
             }
+            StopReason::HarnessFailure(e) => format!("an attempt's harness failed: {e}"),
         }
     }
 
@@ -110,6 +114,7 @@ impl StopReason {
             StopReason::SpawnFailed(_) => "stopped on a spawn failure",
             StopReason::Setup(_) => "stopped on a setup failure",
             StopReason::EvidenceStorage(_) => "stopped on an evidence-storage failure",
+            StopReason::HarnessFailure(_) => "stopped on a harness run_error",
         }
     }
 }
@@ -344,6 +349,12 @@ impl Diagnosis {
                 crate::output::count(self.unresolved.len(), "set")
             ));
         }
+        // A stop that carries a message keeps it in the note.
+        if let Some(reason) = &self.stopped
+            && !matches!(reason, StopReason::Cap | StopReason::Deadline | StopReason::Interrupted)
+        {
+            out.push_str(&format!("; {}", reason.describe()));
+        }
         out.push_str(&format!("; artefacts {}", artefacts.display()));
         out
     }
@@ -515,6 +526,21 @@ mod tests {
             failed_with(HarnessEnd::Code(0), Failure::Incomplete(String::new()), "", n)
         });
         assert!(!all_incomplete.lines().iter().any(|l| l.contains("every tested singleton")));
+    }
+
+    #[test]
+    fn a_harness_run_error_stops_diagnosis_and_is_never_bisected() {
+        let mut calls = 0;
+        let d = bisect(ids(4), |_, _| {
+            calls += 1;
+            AttemptOutcome::Stop(StopReason::HarnessFailure("run_error at stage feed_load: oom".to_owned()))
+        });
+        assert_eq!(calls, 1);
+        assert!(d.failing.is_empty());
+        let note = d.note(std::path::Path::new("r"));
+        assert!(note.starts_with("isolation stopped on a harness run_error"), "{note}");
+        assert!(note.contains("run_error at stage feed_load: oom"), "{note}");
+        assert!(!d.lines().iter().any(|l| l.contains("aborts")));
     }
 
     #[test]

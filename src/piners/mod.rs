@@ -4,6 +4,7 @@
 
 pub mod bless;
 pub mod cmd;
+pub mod contract;
 pub mod corpus_db;
 pub mod corpus_query;
 pub mod gate;

@@ -28,6 +28,8 @@ pub struct RunRow {
     pub dirty: Option<bool>,
     /// The isolation pass's note (v7), attached after the run was recorded.
     pub diagnosis: Option<String>,
+    /// The harness's `run_error` record as stored JSON (v8).
+    pub run_error: Option<String>,
 }
 
 /// One per-probe disposition row (the rendered subset of the column set).
@@ -142,12 +144,13 @@ fn run_row(row: &Row<'_>) -> rusqlite::Result<RunRow> {
         commit_sha: row.get("commit_sha")?,
         dirty: row.get::<_, Option<i64>>("dirty")?.map(|v| v != 0),
         diagnosis: row.get("diagnosis")?,
+        run_error: row.get("run_error")?,
     })
 }
 
 const RUN_COLS: &str = "\
 run_id, started_at, selector, gated, result, fail_reason, harness_exit_code, probe_count, \
-commit_sha, dirty, diagnosis";
+commit_sha, dirty, diagnosis, run_error";
 
 fn disposition_row(row: &Row<'_>) -> rusqlite::Result<DispositionRow> {
     Ok(DispositionRow {
@@ -663,8 +666,9 @@ impl CorpusDb {
     /// a truncated stdout; a row predating v7 has none recorded and is judged
     /// on coverage alone), **every id it selected has a valid stored
     /// disposition** (a row whose stored outcome and tier pass the shared
-    /// validator `report::valid_label` and agree with its label - exact id
-    /// coverage read from the disposition rows, so report-only extras
+    /// validator `report::valid_label` and agree with its label; and none is
+    /// a `harness_abort`, a valid gate disposition but no timing sample -
+    /// exact id coverage read from the disposition rows, so report-only extras
     /// count for nothing and a line count can never stand in for a missing
     /// probe), it ran with no forwarded harness flags, and it was built in the
     /// same profile (`debug`; a row predating the recorded profile counts as
@@ -706,10 +710,12 @@ impl CorpusDb {
         Ok(None)
     }
 
-    /// Does every id the run selected (its `selector` `ids`) have a stored
-    /// disposition whose label is one the gate can use? Read from the
-    /// disposition rows, so an extra line for an unselected probe covers
-    /// nothing.
+    /// Is the run a usable timing sample over its selection? Every id it
+    /// selected (its `selector` `ids`) has a stored disposition whose label is
+    /// one the gate can use, read from the disposition rows (so an extra line
+    /// for an unselected probe covers nothing), and no row is a
+    /// `harness_abort` - a valid gate disposition, but a crashed probe makes
+    /// the wall describe a different workload.
     fn fully_reported(&self, run_id: i64, selector: &str) -> Result<bool, DevError> {
         let Some(asked) = selector_ids(selector) else {
             return Ok(false);
@@ -731,6 +737,12 @@ impl CorpusDb {
         let mut valid: std::collections::HashSet<String> = std::collections::HashSet::new();
         for row in rows {
             let (probe, disposition, outcome, tier) = row?;
+            // A valid gate disposition is not necessarily a usable timing
+            // sample: a run in which a probe process died ran a different
+            // workload than one in which it finished.
+            if disposition == crate::piners::report::HARNESS_ABORT {
+                return Ok(false);
+            }
             let label = outcome
                 .as_deref()
                 .and_then(|o| crate::piners::report::valid_label(o, tier.as_deref()));
@@ -880,6 +892,7 @@ mod tests {
             stderr: "",
             wall_ms,
             protocol_violations,
+            run_error: None,
         };
         db.record_run(&run, &report, &BTreeMap::new(), &[]).unwrap();
     }
@@ -925,6 +938,12 @@ mod tests {
             &lines(&["a", "b", "zz"]),
             Some(1),
         );
+        assert_eq!(db.estimated_wall_ms(&sel, true).unwrap(), Some(50_000.0));
+        // A clean, complete exit-1 run with a pinned crash: valid gate
+        // dispositions, but no timing sample.
+        let mut crashed = lines(&["a"]);
+        crashed.extend_from_slice(b"{\"probe\":\"b\",\"outcome\":\"harness_abort\",\"error\":\"signal 11\"}\n");
+        record_exit(&db, r#"{"ids":["a","b"]}"#, Some(1_250.0), Some(1), "pass", &crashed);
         assert_eq!(db.estimated_wall_ms(&sel, true).unwrap(), Some(50_000.0));
         // A pre-v7 row (no protocol count) with full coverage still counts,
         // and its extra line does not hurt it.

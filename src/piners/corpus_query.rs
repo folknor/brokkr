@@ -209,11 +209,26 @@ fn render_probe(db: &CorpusDb, run_id: i64, probe: &str) -> Result<(), DevError>
     Ok(())
 }
 
+/// Whether the run-detail view lists a row without `--full`: a deviation
+/// from its pin, or a crash. A `harness_abort` stays visible even when pinned,
+/// as in the live rendering, so a crash is never folded into "matching their
+/// pin".
+fn shown_by_default(d: &DispositionRow) -> bool {
+    !d.gate_ok || d.disposition == crate::piners::report::HARNESS_ABORT
+}
+
 fn render_run_detail(db: &CorpusDb, run_id: i64, full: bool) -> Result<(), DevError> {
     let run = db.run(run_id)?.ok_or_else(|| no_run(run_id))?;
     println!("{}", corpus_db::run_header(&run));
     if let Some(reason) = &run.fail_reason {
         println!("reason: {reason}");
+    }
+    // The stored run_error, rendered with every locator it carries.
+    if let Some(json) = run.run_error.as_deref() {
+        match crate::piners::contract::RunErrorRecord::from_json(json) {
+            Some(rec) => println!("harness {}", rec.render()),
+            None => println!("harness run_error (unreadable record): {json}"),
+        }
     }
     // Evidence from the isolation pass, kept beside (never in place of) the
     // reason. Diagnostic attempts are not stored as dispositions.
@@ -235,7 +250,7 @@ fn render_run_detail(db: &CorpusDb, run_id: i64, full: bool) -> Result<(), DevEr
         let shown: Vec<DispositionRow> = if full {
             disps
         } else {
-            disps.iter().filter(|d| !d.gate_ok).cloned().collect()
+            disps.iter().filter(|d| shown_by_default(d)).cloned().collect()
         };
         let hidden = total - shown.len();
         if shown.is_empty() {
@@ -287,4 +302,39 @@ fn guard_sql(input: &str, flag: &str, require_select: bool) -> Result<(), DevErr
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(disposition: &str, gate_ok: bool) -> DispositionRow {
+        DispositionRow {
+            probe: "p".to_owned(),
+            outcome: disposition.to_owned(),
+            disposition: disposition.to_owned(),
+            expected: Some(disposition.to_owned()),
+            gate_ok,
+            matched: 0,
+            ours_only: 0,
+            tv_only: 0,
+            boundary_ours: 0,
+            boundary_tv: 0,
+            count_tier: None,
+            p90_entry: None,
+            p90_exit: None,
+            p90_pnl: None,
+            sig_domain: None,
+            sig_dimension: None,
+            error: None,
+        }
+    }
+
+    #[test]
+    fn a_pinned_crash_stays_visible_in_the_stored_view() {
+        assert!(shown_by_default(&row("harness_abort", true)));
+        assert!(shown_by_default(&row("accepted", false)));
+        assert!(!shown_by_default(&row("accepted", true)));
+        assert!(!shown_by_default(&row("runtime_fail", true)));
+    }
 }

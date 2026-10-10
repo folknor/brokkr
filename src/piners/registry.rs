@@ -62,9 +62,12 @@ pub const INPUTS_FILE: &str = "inputs.json";
 
 /// The canonical per-probe disposition labels. A probe's actual disposition
 /// (and its pinned `expected`) is one of these: the four parity acceptance
-/// tiers, then the four non-`parity` outcomes. This is the single unit the
-/// gate compares - `count_tier` (exact/near/drift) stays diagnostic.
-pub const DISPOSITION_LABELS: [&str; 8] = [
+/// tiers, then the five non-`parity` outcomes (`harness_abort` is a probe
+/// process the harness's supervisor saw die, pinnable like `runtime_fail`).
+/// This is the single unit the gate compares - `count_tier`
+/// (exact/near/drift) stays diagnostic. Must equal `report::PARITY_TIERS`
+/// followed by `report::NON_PARITY_OUTCOMES`; a test holds them together.
+pub const DISPOSITION_LABELS: [&str; 9] = [
     "byte_exact",
     "accepted",
     "actionable_drift",
@@ -73,6 +76,7 @@ pub const DISPOSITION_LABELS: [&str; 8] = [
     "runtime_fail",
     "no_tv_data",
     "no_overlap",
+    "harness_abort",
 ];
 
 /// True if `label` is one of [`DISPOSITION_LABELS`].

@@ -11,7 +11,8 @@
 //! `run.commit_sha`/`run.dirty`, the checkout the run was taken from; version 7
 //! adds `run.protocol_violations` (the report-integrity count the runtime
 //! ceiling refuses a basis on) and `run.diagnosis` (the isolation pass's note,
-//! written after the run row). On a fresh database
+//! written after the run row); version 8 adds `run.run_error`, the harness's
+//! `run_error` record stored whole as JSON. On a fresh database
 //! the schema DDL in `schema.rs` creates the current tables (columns
 //! included) and stamps the version, so the migration steps below only run for
 //! an older db on disk. The `has_table` helper lives here so a future column
@@ -24,7 +25,7 @@ use super::schema::disposition_ddl;
 use crate::error::DevError;
 
 /// Current schema version. Increment when adding a migration below.
-pub(super) const SCHEMA_VERSION: i64 = 7;
+pub(super) const SCHEMA_VERSION: i64 = 8;
 
 /// Run all pending migrations based on `PRAGMA user_version`. On a fresh
 /// database the schema DDL in `schema.rs` creates the current tables and
@@ -167,6 +168,12 @@ fn migrate_from(conn: &rusqlite::Connection, current: i64) -> Result<(), DevErro
         if !has_column(conn, "run", "diagnosis") {
             conn.execute("ALTER TABLE run ADD COLUMN diagnosis TEXT", [])?;
         }
+    }
+
+    // v7 -> v8: the harness's run_error record, whole, as JSON. NULL for a
+    // run that reported none (and for every older run, which could not).
+    if current < 8 && !has_column(conn, "run", "run_error") {
+        conn.execute("ALTER TABLE run ADD COLUMN run_error TEXT", [])?;
     }
 
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -395,6 +402,7 @@ mod tests {
         assert!(has_column(&conn, "run", "wall_ms"));
         assert!(has_column(&conn, "run", "protocol_violations"));
         assert!(has_column(&conn, "run", "diagnosis"));
+        assert!(has_column(&conn, "run", "run_error"));
         let version: i64 = conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();

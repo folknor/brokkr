@@ -60,6 +60,10 @@ pub struct RunRecord<'a> {
     /// the runtime ceiling.
     /// `None` when the harness produced no report to reconcile (it never ran).
     pub protocol_violations: Option<i64>,
+    /// The harness's `run_error` record, whole, as JSON
+    /// (`contract::RunErrorRecord::to_json`), stored in the run's own
+    /// transaction. `fail_reason` carries its readable projection.
+    pub run_error: Option<&'a str>,
 }
 
 impl CorpusDb {
@@ -124,8 +128,8 @@ fn record_inner(
     conn.execute(
         "INSERT INTO run \
          (run_id, started_at, selector, gated, result, fail_reason, harness_exit_code, \
-          probe_count, harness_stderr, wall_ms, commit_sha, dirty, protocol_violations) \
-         VALUES (?9, COALESCE(?10, datetime('now')), ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?11, ?12, ?13)",
+          probe_count, harness_stderr, wall_ms, commit_sha, dirty, protocol_violations, run_error) \
+         VALUES (?9, COALESCE(?10, datetime('now')), ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?11, ?12, ?13, ?14)",
         params![
             run.selector,
             i64::from(run.gated),
@@ -140,6 +144,7 @@ fn record_inner(
             run.commit_sha,
             run.dirty.map(i64::from),
             run.protocol_violations,
+            run.run_error,
         ],
     )?;
     let run_id = conn.last_insert_rowid();
@@ -316,6 +321,7 @@ mod tests {
             stderr: "",
             wall_ms: Some(1234.0),
             protocol_violations: Some(0),
+            run_error: None,
         };
         let run_id = db.record_run(&run, &report, &expected, &gate_diffs).unwrap();
         assert_eq!(run_id, 1);
@@ -380,6 +386,7 @@ mod tests {
             stderr: "",
             wall_ms: None,
             protocol_violations: Some(0),
+            run_error: None,
         };
         db.record_run(&run, &report, &expected_map(&[("p1", Some("accepted"))]), &[])
             .unwrap();
@@ -423,12 +430,39 @@ mod tests {
             stderr: "",
             wall_ms: None,
             protocol_violations: Some(0),
+            run_error: None,
         };
         let run_id = db.record_run(&run, &report, &expected, &gate_diffs).unwrap();
         assert!(!db.disposition_for_probe(run_id, "p1").unwrap().unwrap().gate_ok);
         let stray = db.disposition_for_probe(run_id, "stray").unwrap().unwrap();
         assert!(stray.gate_ok);
         assert_eq!(stray.expected, None);
+    }
+
+    #[test]
+    fn a_run_error_is_stored_whole_in_the_run_transaction() {
+        let db = CorpusDb::open_in_memory().unwrap();
+        let json = r#"{"stage":"feed_load","feed":"eth","role":"base","error":"oom"}"#;
+        let run = RunRecord {
+            run_id: Some(3),
+            started_at: None,
+            commit_sha: None,
+            dirty: None,
+            selector: "{}",
+            gated: true,
+            result: "fail",
+            fail_reason: Some("run_error at stage feed_load (feed eth, role base): oom"),
+            harness_exit_code: Some(2),
+            stderr: "",
+            wall_ms: Some(10.0),
+            protocol_violations: Some(0),
+            run_error: Some(json),
+        };
+        db.record_run(&run, &parse(b""), &BTreeMap::new(), &[]).unwrap();
+        let row = db.run(3).unwrap().unwrap();
+        let rec = crate::piners::contract::RunErrorRecord::from_json(row.run_error.as_deref().unwrap()).unwrap();
+        assert_eq!(rec.role.as_deref(), Some("base"));
+        assert_eq!(rec.render(), "run_error at stage feed_load (feed eth, role base): oom");
     }
 
     #[test]
@@ -447,6 +481,7 @@ mod tests {
             stderr: "boom",
             wall_ms: Some(900.0),
             protocol_violations: Some(0),
+            run_error: None,
         };
         db.record_run(&run, &parse(b""), &BTreeMap::new(), &[]).unwrap();
         db.append_diagnosis(7, "first").unwrap();

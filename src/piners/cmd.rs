@@ -25,8 +25,15 @@
 //! `compile_fail` can pass; any other code or a signal always fails. `--bless`
 //! refuses to stamp anything from a run that failed integrity or its exit.
 //!
+//! All of this reads one shared run assessment
+//! ([`crate::piners::integrity::assess`]): termination, stream integrity, the
+//! harness line contract ([`crate::piners::contract`]) and the exact
+//! reconciliation. A `run_error` fails the run unconditionally and is stored
+//! whole on the run row.
+//!
 //! An abnormal end (exit 2, another unexpected code, a spontaneous signal)
-//! that left selected probes unreported prints the whole harness stderr and,
+//! with no `run_error` that left selected probes unreported prints the whole
+//! harness stderr and,
 //! unless `--no-isolate`, runs the diagnostic isolation pass
 //! ([`crate::piners::isolate`]) over the unreported probes, after the run is
 //! recorded. Its findings are evidence attached to the run, never scored.
@@ -44,6 +51,7 @@ use crate::config::DevConfig;
 use crate::error::DevError;
 use crate::lockfile::{self, LockContext, LockGuard};
 use crate::output;
+use crate::piners::contract::RunErrorRecord;
 use crate::piners::corpus_db::{CorpusDb, RunRecord};
 use crate::piners::integrity::{self, HarnessEnd, Reconciliation, Trigger};
 use crate::piners::isolate::{self, AttemptOutcome, Failure, StopReason};
@@ -343,13 +351,12 @@ pub fn corpus(
     }
     let evidence_failed = !evidence_errors.is_empty();
 
-    let mut report = report::parse(&captured.stdout);
-    // One record per key from here on, for the gate, bless and ingest alike;
-    // a repeat is a harness contract violation the reconciliation counts.
-    let duplicates = report.take_duplicates();
-    // Integrity, independent of the gate: what the report carries against
-    // exactly what was selected.
-    let rec = Reconciliation::reconcile(&ids, &report, duplicates);
+    // The one shared assessment: termination, stream integrity, the contract
+    // and the exact selection reconciliation. Repeats are collapsed in it,
+    // so the gate, bless and ingest all see one record per key.
+    let assessment = integrity::assess(&ids, &captured.stdout, end, output_cut);
+    let report = &assessment.report;
+    let rec = &assessment.rec;
 
     let elapsed_ms = captured.elapsed.as_millis();
     let harness_code = captured.status.code();
@@ -361,18 +368,18 @@ pub fn corpus(
     // deviations. Bless never gates - it ignores the verdict - but the diffs
     // still record and still drive the render filter (what differs from the
     // pins about to be re-stamped).
-    let gate_diffs = crate::piners::gate::evaluate(&ids, &registry, &report);
+    let gate_diffs = crate::piners::gate::evaluate(&ids, &registry, report);
     let gate_blocks = !args.bless && !args.no_gate && !gate_diffs.is_empty();
 
     // Is exit 1 ("break(s)") explained? For a gated run, when every break is
     // one the pins expect; for bless, when the report actually carries the
     // breaks, since recording them is bless's job.
     let exit1_explained = if args.bless {
-        crate::piners::gate::report_has_break(&report)
+        crate::piners::gate::report_has_break(report)
     } else {
-        crate::piners::gate::breaks_all_pinned(&ids, &registry, &report)
+        crate::piners::gate::breaks_all_pinned(&ids, &registry, report)
     };
-    let mut harness_reasons = harness_failures(end, &rec, output_cut, exit1_explained);
+    let mut harness_reasons = assessment.failure_reasons(exit1_explained);
     if evidence_failed {
         harness_reasons.push(evidence_reason(&evidence_errors));
     }
@@ -386,15 +393,23 @@ pub fn corpus(
     let deviating: HashSet<&str> = gate_diffs.iter().map(|d| d.probe.as_str()).collect();
     // Aggregates and the hidden-match count cover the scored set only.
     let scored: HashSet<&str> = rec.valid.iter().map(String::as_str).collect();
-    report::render(&report, &scored, &deviating, &rec.summary());
-    for line in rec.detail_lines() {
+    report::render(report, &scored, &deviating, &rec.summary());
+    for line in assessment.detail_lines() {
         output::corpus_msg(&line);
     }
     let stderr_text = String::from_utf8_lossy(&captured.stderr);
-    if !end.completed_status() || !rec.complete() {
-        // How the harness ended against how much it reported, then its whole
-        // stderr: the only evidence of an abort.
-        output::corpus_msg(&end_line(end, &rec));
+    if let Some(e) = &assessment.contract.run_error {
+        // The harness named its own failure; every locator it supplied.
+        output::corpus_msg(&format!("harness {}", e.render()));
+    }
+    if !end.completed_status() || !rec.complete() || assessment.contract.run_error.is_some() {
+        // How the harness ended against how much it reported, what was in
+        // flight (context, never cause), then its whole stderr: the only
+        // evidence of an abort.
+        output::corpus_msg(&end_line(end, rec));
+        for line in assessment.context_lines() {
+            output::corpus_msg(&line);
+        }
         integrity::print_stderr("harness stderr", &stderr_text);
     }
 
@@ -419,6 +434,9 @@ pub fn corpus(
             (id.clone(), exp)
         })
         .collect();
+    // The run_error is stored whole, as structured JSON, in the run's own
+    // transaction; `fail_reason` above is its readable projection.
+    let run_error_json = assessment.contract.run_error.as_ref().map(RunErrorRecord::to_json);
     let record = envelope.record(
         if run_pass { "pass" } else { "fail" },
         fail_reason.as_deref(),
@@ -428,13 +446,16 @@ pub fn corpus(
         // wall the ceiling estimates future runs from. The original attempt
         // only: diagnosis below never extends it.
         Some(elapsed_ms as f64),
-        Some(stored_violations(&rec, output_cut, evidence_failed)),
+        StoredIntegrity {
+            protocol_violations: Some(stored_violations(&assessment, evidence_failed)),
+            run_error: run_error_json.as_deref(),
+        },
     );
     // From here the run is recorded exactly once: a later failure (a bless
     // refusing a changed pins.toml, a finalize error) is the command's error,
     // not a second row under this id. Recorded BEFORE any diagnosis, so an
     // interrupted diagnosis cannot lose the original record.
-    if let Err(e) = ingest_run(&corpus_db_path, &record, &report, &expected, &gate_diffs) {
+    if let Err(e) = ingest_run(&corpus_db_path, &record, report, &expected, &gate_diffs) {
         output::warn(&format!(
             "failed to persist run to {}: {e}",
             corpus_db_path.display()
@@ -446,7 +467,12 @@ pub fn corpus(
     // Diagnostic isolation: evidence only, attached to the recorded run.
     // Never on top of evidence the run could not keep: that is an explicit
     // evidence-storage stop, recorded on the run like a diagnosis.
-    let trigger = integrity::isolation_trigger(end, &rec, args.no_isolate);
+    let trigger = integrity::isolation_trigger(
+        end,
+        rec,
+        assessment.contract.run_error.is_some(),
+        args.no_isolate,
+    );
     if evidence_failed {
         let note = evidence_note(trigger == Trigger::Isolate, &evidence_errors);
         output::corpus_msg(&note);
@@ -526,7 +552,7 @@ pub fn corpus(
             return Err(DevError::ExitCode(1));
         }
         let pins_path = registry_dir.join("pins.toml");
-        crate::piners::bless::apply(&pins_path, &mut registry, &report, &ids)?;
+        crate::piners::bless::apply(&pins_path, &mut registry, report, &ids)?;
         finish(artefacts)?;
         return Ok(());
     }
@@ -578,61 +604,6 @@ fn diagnose(
     d
 }
 
-/// Every reason the harness side of a run fails, independent of the gate:
-/// how it ended, whether its output was cut, its protocol violations, and
-/// selected probes left without a valid disposition. Empty means the harness
-/// is acceptable. `exit1_explained` is whether an exit of 1 is accounted for
-/// by breaks (see the caller).
-fn harness_failures(
-    end: HarnessEnd,
-    rec: &Reconciliation,
-    output_cut: bool,
-    exit1_explained: bool,
-) -> Vec<String> {
-    let mut reasons = Vec::new();
-    match end {
-        HarnessEnd::Code(0) => {}
-        HarnessEnd::Code(1) if exit1_explained => {}
-        HarnessEnd::Code(1) => reasons.push("parity breaks".to_owned()),
-        HarnessEnd::Backstop => reasons.push(format!(
-            "harness killed at the {}s hang backstop",
-            HARNESS_HANG_BACKSTOP.as_secs()
-        )),
-        other => reasons.push(abnormal_reason(other, rec)),
-    }
-    if output_cut {
-        reasons.push("harness output did not close after exit (stdout may be truncated)".to_owned());
-    }
-    // An abnormal end already counted what it left unreported.
-    if !rec.complete() && (end.completed_status() || end == HarnessEnd::Backstop) {
-        reasons.push(format!(
-            "{} of {} selected probes without a valid disposition",
-            rec.unscored(),
-            rec.selected
-        ));
-    }
-    if !rec.invalid.is_empty() {
-        reasons.push(output::count(rec.invalid.len(), "invalid harness record"));
-    }
-    if !rec.duplicates.is_empty() {
-        reasons.push(output::count(rec.duplicates.len(), "repeated harness record"));
-    }
-    if !rec.extras.is_empty() {
-        reasons.push(output::count(rec.extras.len(), "report-only extra record"));
-    }
-    reasons
-}
-
-/// `harness exited 2 before reporting K of N` / `harness killed by signal 11
-/// after reporting all N` - the short form stored as the fail reason.
-fn abnormal_reason(end: HarnessEnd, rec: &Reconciliation) -> String {
-    if rec.complete() {
-        format!("harness {} after reporting all {}", end.describe(), rec.selected)
-    } else {
-        format!("harness {} before reporting {} of {}", end.describe(), rec.unscored(), rec.selected)
-    }
-}
-
 /// The console line for a run that ended abnormally or left probes
 /// unreported.
 fn end_line(end: HarnessEnd, rec: &Reconciliation) -> String {
@@ -668,8 +639,8 @@ struct AttemptEnv<'a> {
 impl AttemptEnv<'_> {
     /// Run one diagnostic attempt over `subset` in `<run dir>/attempt-<n>/`:
     /// its own manifest (built from the same verified probes), stdout,
-    /// stderr and `BROKKR_HARNESS_ARTEFACT_DIR`. Completed only on exit 0/1
-    /// with a valid disposition for every probe of the subset.
+    /// stderr and `BROKKR_HARNESS_ARTEFACT_DIR`. Judged by the same run
+    /// assessment as the original run; see [`classify_attempt`].
     fn run(&self, subset: &[String], n: usize) -> AttemptOutcome {
         if crate::shutdown::is_shutdown_requested() {
             return AttemptOutcome::Stop(StopReason::Interrupted);
@@ -727,18 +698,18 @@ impl AttemptEnv<'_> {
             return AttemptOutcome::Stop(StopReason::Deadline);
         }
         let end = HarnessEnd::from_status(&capture.captured.status, false);
-        let mut report = report::parse(&capture.captured.stdout);
-        let duplicates = report.take_duplicates();
-        let rec = Reconciliation::reconcile(subset, &report, duplicates);
+        // The same assessment the original run gets, over this subset.
+        let a = integrity::assess(subset, &capture.captured.stdout, end, capture.output_cut);
         output::corpus_msg(&format!(
             "attempt {n}: {} -> {}, {}",
             output::count(subset.len(), "probe"),
             end.short(),
-            rec.summary()
+            a.rec.summary()
         ));
-        match classify_attempt(end, &rec, capture.output_cut) {
-            None => AttemptOutcome::Completed,
-            Some(failure) => AttemptOutcome::Failed {
+        match classify_attempt(&a) {
+            Err(stop) => AttemptOutcome::Stop(stop),
+            Ok(None) => AttemptOutcome::Completed,
+            Ok(Some(failure)) => AttemptOutcome::Failed {
                 end,
                 failure,
                 stderr: String::from_utf8_lossy(&capture.captured.stderr).into_owned(),
@@ -748,30 +719,38 @@ impl AttemptEnv<'_> {
     }
 }
 
-/// How an attempt failed, or `None` when it completed. Completed means exit
-/// 0/1, a valid disposition for every probe of the subset, no protocol
-/// violation and an intact stream. An abnormal end is an abort; a completed
-/// status with a broken protocol or a cut stream is protocol-invalid; a
-/// completed status that simply left probes unreported is incomplete. Only
-/// the first is ever called an abort.
-fn classify_attempt(end: HarnessEnd, rec: &Reconciliation, output_cut: bool) -> Option<Failure> {
-    if !end.completed_status() {
-        return Some(Failure::Aborted);
+/// How an attempt went, from its assessment. A `run_error` is the harness
+/// naming a failure of its own setup, not a failing subset: it stops
+/// diagnosis (`Err`). Otherwise `Ok(None)` is completed - every probe of the
+/// subset validly reported (a `harness_abort` counts: the harness already
+/// attributed that crash), no violation, an intact stream, exit 0/1 and,
+/// under the contract, its `run_end`. A broken report or cut stream is
+/// protocol-invalid whatever the exit, so a malformed stream is never
+/// mistaken for a crash; an abnormal end is an abort; a completed status
+/// that simply left probes unreported is incomplete. Only an abort is ever
+/// called one.
+fn classify_attempt(a: &integrity::RunAssessment) -> Result<Option<Failure>, StopReason> {
+    if let Some(e) = &a.contract.run_error {
+        return Err(StopReason::HarnessFailure(e.render()));
     }
-    if rec.protocol_violations() > 0 || output_cut {
+    if a.completed() {
+        return Ok(None);
+    }
+    if a.violations() > 0 || a.output_cut {
         let mut what = Vec::new();
-        if rec.protocol_violations() > 0 {
-            what.push(rec.summary());
+        if a.rec.protocol_violations() > 0 {
+            what.push(a.rec.summary());
         }
-        if output_cut {
+        what.extend(a.contract.violations.iter().cloned());
+        if a.output_cut {
             what.push("stdout cut short".to_owned());
         }
-        return Some(Failure::ProtocolInvalid(what.join("; ")));
+        return Ok(Some(Failure::ProtocolInvalid(what.join("; "))));
     }
-    if !rec.complete() {
-        return Some(Failure::Incomplete(rec.summary()));
+    if !a.end.completed_status() {
+        return Ok(Some(Failure::Aborted));
     }
-    None
+    Ok(Some(Failure::Incomplete(a.rec.summary())))
 }
 
 /// Write captured streams into `dir` as `harness.stdout`/`harness.stderr`.
@@ -828,12 +807,12 @@ fn store_attempt_streams(dir: &Path, stdout: &[u8], stderr: &[u8]) -> Result<(),
     }
 }
 
-/// The integrity count stored on the run row: reconciliation protocol
+/// The integrity count stored on the run row: reconciliation and contract
 /// violations, plus one for a stdout cut short, plus one when the run's own
 /// stream evidence could not be stored. Any nonzero count bars the run from
 /// the runtime ceiling.
-fn stored_violations(rec: &Reconciliation, output_cut: bool, evidence_failed: bool) -> i64 {
-    let n = rec.protocol_violations() + usize::from(output_cut) + usize::from(evidence_failed);
+fn stored_violations(a: &integrity::RunAssessment, evidence_failed: bool) -> i64 {
+    let n = a.stored_violations() + usize::from(evidence_failed);
     i64::try_from(n).unwrap_or(i64::MAX)
 }
 
@@ -943,6 +922,16 @@ struct Envelope<'a> {
     gated: bool,
 }
 
+/// The integrity fields a run row stores beside its result: the violation
+/// count (the ceiling's bar) and the structured `run_error`. Both `None` for
+/// a run that produced no report.
+#[derive(Default)]
+#[derive(Clone, Copy)]
+struct StoredIntegrity<'a> {
+    protocol_violations: Option<i64>,
+    run_error: Option<&'a str>,
+}
+
 impl<'a> Envelope<'a> {
     fn record(
         &self,
@@ -951,7 +940,7 @@ impl<'a> Envelope<'a> {
         harness_exit_code: Option<i32>,
         stderr: &'a str,
         wall_ms: Option<f64>,
-        protocol_violations: Option<i64>,
+        integrity: StoredIntegrity<'a>,
     ) -> RunRecord<'a> {
         RunRecord {
             run_id: Some(self.run_id),
@@ -965,7 +954,8 @@ impl<'a> Envelope<'a> {
             harness_exit_code,
             stderr,
             wall_ms,
-            protocol_violations,
+            protocol_violations: integrity.protocol_violations,
+            run_error: integrity.run_error,
         }
     }
 }
@@ -1007,7 +997,7 @@ fn record_unfinished(
     };
     let stderr = detail.map_or("", |(_, stderr)| stderr);
     // Never ran -> no measured wall, no exit code.
-    let record = envelope.record(result, Some(&reason), None, stderr, None, None);
+    let record = envelope.record(result, Some(&reason), None, stderr, None, StoredIntegrity::default());
     if let Err(e) = ingest_run(db_path, &record, &report::HarnessReport::default(), &BTreeMap::new(), &[]) {
         output::warn(&format!(
             "run {} could not be recorded in {}: {e}",
@@ -1062,6 +1052,7 @@ mod tests {
             stderr: "",
             wall_ms: None,
             protocol_violations: None,
+            run_error: None,
         }
     }
 
@@ -1145,8 +1136,10 @@ mod tests {
             selector: r#"{"all":true}"#,
             gated: false,
         };
-        let rec = envelope.record("fail", Some("why"), Some(2), "err", Some(1.5), Some(3));
+        let integrity = StoredIntegrity { protocol_violations: Some(3), run_error: Some("{}") };
+        let rec = envelope.record("fail", Some("why"), Some(2), "err", Some(1.5), integrity);
         assert_eq!(rec.protocol_violations, Some(3));
+        assert_eq!(rec.run_error, Some("{}"));
         assert_eq!(rec.run_id, Some(17));
         assert_eq!(rec.started_at, Some("2026-01-02 03:04:05"));
         assert_eq!(rec.commit_sha, Some("abc123"));
@@ -1160,37 +1153,38 @@ mod tests {
         assert_eq!(rec.wall_ms, Some(1.5));
     }
 
-    fn reconciled(ids: &[&str], nd: &str) -> Reconciliation {
+    /// The shared assessment of an NDJSON literal (no contract lines unless
+    /// the literal carries them).
+    fn assessed(ids: &[&str], nd: &str, end: HarnessEnd, cut: bool) -> integrity::RunAssessment {
         let ids: Vec<String> = ids.iter().map(|s| (*s).to_owned()).collect();
-        let mut report = report::parse(nd.as_bytes());
-        let dups = report.take_duplicates();
-        Reconciliation::reconcile(&ids, &report, dups)
+        integrity::assess(&ids, nd.as_bytes(), end, cut)
+    }
+
+    fn reasons(ids: &[&str], nd: &str, end: HarnessEnd, cut: bool, exit1: bool) -> Vec<String> {
+        assessed(ids, nd, end, cut).failure_reasons(exit1)
     }
 
     const A_OK: &str = "{\"probe\":\"a\",\"outcome\":\"parity\",\"acceptance\":{\"tier\":\"accepted\"}}\n";
 
     #[test]
     fn a_clean_exit_with_a_missing_probe_fails() {
-        let rec = reconciled(&["a", "b"], A_OK);
-        let r = harness_failures(HarnessEnd::Code(0), &rec, false, false);
+        let r = reasons(&["a", "b"], A_OK, HarnessEnd::Code(0), false, false);
         assert_eq!(r, vec!["1 of 2 selected probes without a valid disposition".to_owned()]);
-        assert!(harness_failures(HarnessEnd::Code(0), &reconciled(&["a"], A_OK), false, false).is_empty());
+        assert!(reasons(&["a"], A_OK, HarnessEnd::Code(0), false, false).is_empty());
     }
 
     #[test]
     fn an_abnormal_end_names_how_much_went_unreported() {
-        let rec = reconciled(&["a", "b", "c"], A_OK);
-        let r = harness_failures(HarnessEnd::Code(2), &rec, false, false);
+        let r = reasons(&["a", "b", "c"], A_OK, HarnessEnd::Code(2), false, false);
         assert_eq!(r, vec!["harness exited 2 before reporting 2 of 3".to_owned()]);
-        let r = harness_failures(HarnessEnd::Signal(11), &reconciled(&["a"], A_OK), false, false);
+        let r = reasons(&["a"], A_OK, HarnessEnd::Signal(11), false, false);
         assert_eq!(r, vec!["harness killed by signal 11 after reporting all 1".to_owned()]);
     }
 
     #[test]
     fn protocol_violations_fail_a_complete_clean_run() {
         let nd = format!("{A_OK}{A_OK}{{\"probe\":\"zz\",\"outcome\":\"no_tv_data\"}}\nnoise\n");
-        let rec = reconciled(&["a"], &nd);
-        let r = harness_failures(HarnessEnd::Code(0), &rec, false, false);
+        let r = reasons(&["a"], &nd, HarnessEnd::Code(0), false, false);
         assert_eq!(
             r,
             vec![
@@ -1203,21 +1197,32 @@ mod tests {
 
     #[test]
     fn exit_one_needs_explaining_and_a_cut_output_fails() {
-        let rec = reconciled(&["a"], A_OK);
-        assert!(harness_failures(HarnessEnd::Code(1), &rec, false, true).is_empty());
-        assert_eq!(harness_failures(HarnessEnd::Code(1), &rec, false, false), vec!["parity breaks".to_owned()]);
-        assert_eq!(harness_failures(HarnessEnd::Code(0), &rec, true, false).len(), 1);
-        let backstop = harness_failures(HarnessEnd::Backstop, &reconciled(&["a", "b"], A_OK), false, false);
+        assert!(reasons(&["a"], A_OK, HarnessEnd::Code(1), false, true).is_empty());
+        assert_eq!(reasons(&["a"], A_OK, HarnessEnd::Code(1), false, false), vec!["parity breaks".to_owned()]);
+        assert_eq!(reasons(&["a"], A_OK, HarnessEnd::Code(0), true, false).len(), 1);
+        let backstop = reasons(&["a", "b"], A_OK, HarnessEnd::Backstop, false, false);
         assert_eq!(backstop.len(), 2, "{backstop:?}");
     }
 
     #[test]
     fn a_truncated_stream_is_stored_as_an_integrity_violation() {
-        let rec = reconciled(&["a"], A_OK);
-        assert_eq!(stored_violations(&rec, false, false), 0);
-        assert_eq!(stored_violations(&rec, true, false), 1);
-        let dup = reconciled(&["a"], &format!("{A_OK}{A_OK}"));
-        assert_eq!(stored_violations(&dup, true, false), 2);
+        let a = assessed(&["a"], A_OK, HarnessEnd::Code(0), false);
+        assert_eq!(stored_violations(&a, false), 0);
+        let cut = assessed(&["a"], A_OK, HarnessEnd::Code(0), true);
+        assert_eq!(stored_violations(&cut, false), 1);
+        let dup = assessed(&["a"], &format!("{A_OK}{A_OK}"), HarnessEnd::Code(0), true);
+        assert_eq!(stored_violations(&dup, false), 2);
+    }
+
+    #[test]
+    fn contract_violations_are_stored_and_fail_the_run() {
+        // A completion claim with a lifecycle breach.
+        let nd = format!(
+            "{{\"kind\":\"probe_end\",\"version\":1,\"probe\":\"a\"}}\n{A_OK}{{\"kind\":\"run_end\",\"version\":1,\"exit\":0}}\n"
+        );
+        let a = assessed(&["a"], &nd, HarnessEnd::Code(0), false);
+        assert!(stored_violations(&a, false) >= 1);
+        assert!(a.failure_reasons(false).iter().any(|r| r.ends_with("contract violations") || r.ends_with("contract violation")));
     }
 
     #[test]
@@ -1229,7 +1234,7 @@ mod tests {
         let errors = store_streams(&gone, b"out", b"err");
         assert_eq!(errors.len(), 2, "{errors:?}");
         assert!(errors[0].contains("harness.stdout") && errors[1].contains("harness.stderr"));
-        assert_eq!(stored_violations(&reconciled(&["a"], A_OK), false, true), 1);
+        assert_eq!(stored_violations(&assessed(&["a"], A_OK, HarnessEnd::Code(0), false), true), 1);
         assert!(evidence_reason(&errors).starts_with("evidence storage failed: "));
         assert!(evidence_note(true, &errors)
             .starts_with("isolation stopped before its first attempt on an evidence-storage failure: "));
@@ -1242,26 +1247,34 @@ mod tests {
 
     #[test]
     fn attempts_tell_aborts_from_incomplete_and_protocol_invalid() {
-        let ok = reconciled(&["a"], A_OK);
-        assert_eq!(classify_attempt(HarnessEnd::Code(0), &ok, false), None);
-        assert_eq!(classify_attempt(HarnessEnd::Code(1), &ok, false), None);
-        assert_eq!(classify_attempt(HarnessEnd::Code(2), &ok, false), Some(Failure::Aborted));
-        assert_eq!(classify_attempt(HarnessEnd::Signal(11), &ok, false), Some(Failure::Aborted));
-        let missing = reconciled(&["a", "b"], A_OK);
+        let classify = |ids: &[&str], nd: &str, end, cut| classify_attempt(&assessed(ids, nd, end, cut));
+        assert_eq!(classify(&["a"], A_OK, HarnessEnd::Code(0), false), Ok(None));
+        assert_eq!(classify(&["a"], A_OK, HarnessEnd::Code(1), false), Ok(None));
+        assert_eq!(classify(&["a"], A_OK, HarnessEnd::Code(2), false), Ok(Some(Failure::Aborted)));
+        assert_eq!(classify(&["a"], A_OK, HarnessEnd::Signal(11), false), Ok(Some(Failure::Aborted)));
         assert!(matches!(
-            classify_attempt(HarnessEnd::Code(0), &missing, false),
-            Some(Failure::Incomplete(_))
+            classify(&["a", "b"], A_OK, HarnessEnd::Code(0), false),
+            Ok(Some(Failure::Incomplete(_)))
         ));
-        // Complete coverage with an extra line is not a completed attempt.
-        let extra = reconciled(&["a"], &format!("{A_OK}{{\"probe\":\"zz\",\"outcome\":\"no_tv_data\"}}\n"));
+        // Complete coverage with an extra line is not a completed attempt, and
+        // a broken report is protocol-invalid even on an abnormal end - never
+        // classified as a crash first.
+        let extra = format!("{A_OK}{{\"probe\":\"zz\",\"outcome\":\"no_tv_data\"}}\n");
+        assert!(matches!(classify(&["a"], &extra, HarnessEnd::Code(0), false), Ok(Some(Failure::ProtocolInvalid(_)))));
+        assert!(matches!(classify(&["a"], &extra, HarnessEnd::Signal(11), false), Ok(Some(Failure::ProtocolInvalid(_)))));
         assert!(matches!(
-            classify_attempt(HarnessEnd::Code(0), &extra, false),
-            Some(Failure::ProtocolInvalid(_))
+            classify(&["a"], A_OK, HarnessEnd::Code(0), true),
+            Ok(Some(Failure::ProtocolInvalid(w))) if w.contains("cut short")
         ));
-        assert!(matches!(
-            classify_attempt(HarnessEnd::Code(0), &ok, true),
-            Some(Failure::ProtocolInvalid(w)) if w.contains("cut short")
-        ));
+        // A harness_abort the harness attributed counts as a completed attempt.
+        let crash = "{\"probe\":\"a\",\"outcome\":\"harness_abort\",\"error\":\"signal 11\"}\n";
+        assert_eq!(classify(&["a"], crash, HarnessEnd::Code(1), false), Ok(None));
+        // A run_error stops diagnosis with the harness's own failure.
+        let run_error = "{\"kind\":\"run_error\",\"version\":1,\"stage\":\"feed_load\",\"error\":\"oom\"}\n";
+        assert_eq!(
+            classify(&["a"], run_error, HarnessEnd::Code(2), false),
+            Err(StopReason::HarnessFailure("run_error at stage feed_load: oom".to_owned()))
+        );
     }
 
     #[test]

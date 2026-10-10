@@ -230,6 +230,7 @@ mod tests {
             stderr: "",
             wall_ms: None,
             protocol_violations: Some(0),
+            run_error: None,
         };
         let diffs: Vec<GateDiff> = misses
             .iter()

@@ -374,11 +374,16 @@ pub fn run_hotpath_capture(
         stop_marker,
         lock,
     )?;
+    if !c.stopped_by_marker && !c.status_ok {
+        let e = c.status_error(binary, ok_codes);
+        c.park_failure();
+        return Err(e);
+    }
     Ok((c.result, c.stderr, c.sidecar))
 }
 
 /// What [`run_hotpath_capture_with_stdout`] returns: the measured result,
-/// both captured streams, and the sidecar data.
+/// both captured streams, the sidecar data and how the process ended.
 pub struct HotpathCapture {
     pub result: BenchResult,
     pub stdout: Vec<u8>,
@@ -387,13 +392,53 @@ pub struct HotpathCapture {
     /// The run was ended by its stop marker actually firing (not merely
     /// configured), so it did not run to its natural end.
     pub stopped_by_marker: bool,
+    /// The child was killed for outliving the ambient deadline (the hang
+    /// backstop): its SIGKILL status is brokkr's, not a spontaneous death.
+    pub stopped_by_deadline: bool,
+    pub status: std::process::ExitStatus,
+    /// `status` is success or one of the caller's `ok_codes`. When it is not,
+    /// `result.hotpath` is `None` (the report was not read).
+    pub status_ok: bool,
+    pid: u32,
 }
 
-/// [`run_hotpath_capture`], keeping the child's stdout too - for a caller
-/// whose harness reports on stdout what it actually did (the piners corpus
-/// harness emits one disposition line per probe it finished, which is how a
-/// measured iteration that exited 0 having run only part of its selection is
-/// caught).
+impl HotpathCapture {
+    /// The subprocess error a failed status stands for, carrying the whole
+    /// stderr (the signal named when there was one).
+    pub fn status_error(&self, binary: &str, ok_codes: &[i32]) -> crate::error::DevError {
+        let captured = output::CapturedOutput {
+            status: self.status,
+            stdout: Vec::new(),
+            stderr: self.stderr.clone(),
+            elapsed: std::time::Duration::ZERO,
+        };
+        captured.check_success_or(binary, ok_codes).err().unwrap_or_else(|| {
+            crate::error::DevError::Subprocess {
+                program: binary.to_owned(),
+                code: self.status.code(),
+                stderr: String::from_utf8_lossy(&self.stderr).into_owned(),
+            }
+        })
+    }
+
+    /// Park this capture's sidecar data for the enclosing `run_hotpath` loop
+    /// to store under `dirty` (see `FailedCapture`). For a caller about to
+    /// fail the iteration after reading the capture.
+    pub fn park_failure(self) {
+        park_failed_capture(FailedCapture {
+            data: self.sidecar,
+            pid: self.pid,
+            exit_code: exit_code_from_status(&self.status),
+        });
+    }
+}
+
+/// [`run_hotpath_capture`], keeping the child's stdout and NOT rejecting on
+/// the exit status: the caller reads the stream first and decides (the
+/// piners corpus harness reports on stdout what it actually did, including a
+/// `run_error` explaining a failed exit). An interrupt still returns
+/// `Interrupted`. A caller that fails the iteration calls
+/// [`HotpathCapture::park_failure`] so the sidecar data is kept.
 #[allow(clippy::too_many_arguments)]
 pub fn run_hotpath_capture_with_stdout(
     binary: &str,
@@ -431,6 +476,7 @@ pub fn run_hotpath_capture_with_stdout(
     }
     let stopped = sidecar_result.stopped_by_marker;
     let interrupted = sidecar_result.stopped_by_signal;
+    let stopped_by_deadline = sidecar_result.stopped_by_deadline;
 
     drop(fifo);
 
@@ -450,34 +496,34 @@ pub fn run_hotpath_capture_with_stdout(
         });
         return Err(crate::error::DevError::Interrupted);
     }
-    if !stopped && let Err(e) = captured.check_success_or(binary, ok_codes) {
-        park_failed_capture(FailedCapture {
-            data: sidecar_result.data,
-            pid,
-            exit_code: exit_code_from_status(&captured.status),
-        });
-        return Err(e);
-    }
+    let status_ok = captured.check_success_or(binary, ok_codes).is_ok();
 
     let ms = elapsed_to_ms(&captured.elapsed);
     let us = elapsed_to_us(&captured.elapsed);
     let (_stderr_ms, kv) = parse_kv_lines(&captured.stderr);
+    let status = captured.status;
     let stderr = captured.stderr;
 
-    let hotpath = match std::fs::read_to_string(&json_file) {
-        Ok(s) => match serde_json::from_str::<serde_json::Value>(&s) {
-            Ok(v) => db::hotpath_data_from_json(&v),
+    // A failed run's report is not read (it would only warn about a file the
+    // run never wrote); the caller fails the iteration on the status.
+    let hotpath = if !status_ok && !stopped {
+        None
+    } else {
+        match std::fs::read_to_string(&json_file) {
+            Ok(s) => match serde_json::from_str::<serde_json::Value>(&s) {
+                Ok(v) => db::hotpath_data_from_json(&v),
+                Err(e) => {
+                    output::warn(&format!("failed to parse hotpath JSON: {e}"));
+                    None
+                }
+            },
             Err(e) => {
-                output::warn(&format!("failed to parse hotpath JSON: {e}"));
+                output::warn(&format!(
+                    "failed to read hotpath report {}: {e}",
+                    json_file.display()
+                ));
                 None
             }
-        },
-        Err(e) => {
-            output::warn(&format!(
-                "failed to read hotpath report {}: {e}",
-                json_file.display()
-            ));
-            None
         }
     };
     std::fs::remove_file(&json_file).ok();
@@ -496,6 +542,10 @@ pub fn run_hotpath_capture_with_stdout(
         stderr,
         sidecar: sidecar_result.data,
         stopped_by_marker: stopped,
+        stopped_by_deadline,
+        status,
+        status_ok,
+        pid,
     })
 }
 
