@@ -894,6 +894,19 @@ fn warn_serialized_claims(sweep: &ResolvedSweep, budget: u32, planned: &[(&TestB
     }
 }
 
+/// An error's message without its variant prefix, for a line that names the
+/// sweep itself. `Display` leads with `build: ` / `verify: ` for those
+/// variants, which inside `sweep 'x': ...` read as a second, unrelated
+/// scope (`sweep 'x': build: ...`).
+fn error_detail(e: &DevError) -> String {
+    match e {
+        DevError::Build(m) | DevError::Verify(m) | DevError::Config(m) | DevError::Reported(m) => {
+            m.clone()
+        }
+        other => other.to_string(),
+    }
+}
+
 /// Render every binary's buffered output and decide the sweep's verdict.
 ///
 /// Split from the fan-out above so the concurrency and the reporting can be
@@ -1017,14 +1030,14 @@ fn report_runs(
     let mut errors = errors.into_iter();
     let first_error = errors.next();
     for extra in errors {
-        output::error(&format!("sweep '{}': {extra}", sweep.label));
+        output::error(&format!("sweep '{}': {}", sweep.label, error_detail(&extra)));
     }
 
     // A blown budget ends the run rather than failing a sweep. Reported after the
     // loop so every binary that did run has already spoken.
     if let Some(label) = budget_blown {
         if let Some(e) = &first_error {
-            output::error(&format!("sweep '{}': {e}", sweep.label));
+            output::error(&format!("sweep '{}': {}", sweep.label, error_detail(e)));
         }
         if skipped > 0 {
             output::error(&format!(
@@ -1033,7 +1046,8 @@ fn report_runs(
                 sweep.label
             ));
         }
-        return Err(DevError::Verify(format!(
+        // `Reported`: the budget diagnosis and the failing command printed above.
+        return Err(DevError::Reported(format!(
             "binary {label} exceeded its time budget in sweep '{}' - stopping",
             sweep.label
         )));
@@ -1098,6 +1112,13 @@ mod parallel_lane_tests {
             executable: format!("/t/deps/{target}"),
             manifest_dir: std::path::PathBuf::from(format!("/x/{package}")),
         }
+    }
+
+    #[test]
+    fn error_detail_drops_the_variant_prefix() {
+        assert_eq!(error_detail(&DevError::Build("spawn failed".into())), "spawn failed");
+        assert_eq!(error_detail(&DevError::Reported("stopping".into())), "stopping");
+        assert!(error_detail(&DevError::Lock("held".into())).contains("held"));
     }
 
     // `--test <name>` does not select a package's unit tests at all - those

@@ -204,40 +204,59 @@ fn run_baselines(
     output::bench_msg("=== osmpbf baseline ===");
     let manifest = project_root.join("bench/osmpbf-baseline/Cargo.toml");
     if manifest.exists() {
-        match run_osmpbf_baseline(harness, &manifest, pbf_path, file_mb, runs, project_root) {
-            Ok(()) => {}
-            Err(e) => output::bench_msg(&format!("osmpbf baseline skipped: {e}")),
-        }
+        skip_on_error(
+            "osmpbf baseline",
+            run_osmpbf_baseline(harness, &manifest, pbf_path, file_mb, runs, project_root),
+        )?;
     }
 
     // osmium -- if available
     output::bench_msg("=== osmium baseline ===");
     if super::verify::which_exists("osmium") {
-        run_osmium_baseline(
-            harness,
-            pbf_path,
-            file_mb,
-            runs,
-            &paths.scratch_dir,
-            project_root,
+        skip_on_error(
+            "osmium baseline",
+            run_osmium_baseline(
+                harness,
+                pbf_path,
+                file_mb,
+                runs,
+                &paths.scratch_dir,
+                project_root,
+            ),
         )?;
     }
 
     // planetiler -- if available
     output::bench_msg("=== planetiler baseline ===");
-    match bench_planetiler::run(
-        harness,
-        pbf_path,
-        file_mb,
-        runs,
-        &paths.data_dir,
-        project_root,
-    ) {
-        Ok(()) => {}
-        Err(e) => output::bench_msg(&format!("planetiler skipped: {e}")),
-    }
+    skip_on_error(
+        "planetiler baseline",
+        bench_planetiler::run(
+            harness,
+            pbf_path,
+            file_mb,
+            runs,
+            &paths.data_dir,
+            project_root,
+        ),
+    )?;
 
     Ok(())
+}
+
+/// A baseline is a comparison point, not the suite's subject: by the time
+/// `run_baselines` runs, the project's own benchmarks are recorded, and a broken
+/// external tool must not discard the baselines after it. So a failure is a
+/// warning that names the baseline and its cause (a quiet-gated bench line
+/// hid both), not an abort. Only a cooperative shutdown still ends the suite.
+fn skip_on_error(what: &str, result: Result<(), DevError>) -> Result<(), DevError> {
+    match result {
+        Err(DevError::Interrupted) => Err(DevError::Interrupted),
+        Err(e) => {
+            output::warn(&format!("{what} skipped: {e}"));
+            Ok(())
+        }
+        Ok(()) => Ok(()),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -487,4 +506,20 @@ fn build_kv_from_block(block: &HashMap<String, String>) -> Vec<KvPair> {
     }
 
     kv
+}
+
+#[cfg(test)]
+mod skip_on_error_tests {
+    use super::skip_on_error;
+    use crate::error::DevError;
+
+    #[test]
+    fn a_failed_baseline_is_skipped() {
+        assert!(skip_on_error("x", Err(DevError::Refused("boom".into()))).is_ok());
+    }
+
+    #[test]
+    fn a_shutdown_still_ends_the_suite() {
+        assert!(matches!(skip_on_error("x", Err(DevError::Interrupted)), Err(DevError::Interrupted)));
+    }
 }

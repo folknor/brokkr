@@ -165,8 +165,9 @@ pub fn format_cli_args(program: &str, args: &[&str]) -> String {
 /// Run a closure for each variant, collecting failures instead of aborting.
 ///
 /// Each variant runs independently - failure of one does not skip the rest.
-/// On completion, returns `Ok(())` if all succeeded, or a summary error
-/// listing which variants failed and why.
+/// Each failure is printed live with its cause. On completion, returns
+/// `Ok(())` if all succeeded, or a bare summary error naming which variants
+/// failed.
 ///
 /// An empty `variants` list is an error, not a vacuous success. Callers build
 /// the list by filtering a fixed set against a user selector (`--query NAME`,
@@ -186,35 +187,44 @@ where
     F: FnMut(&str) -> Result<(), DevError>,
 {
     if variants.is_empty() {
-        return Err(DevError::Config(format!(
+        return Err(DevError::Refused(format!(
             "no {label} variants selected - nothing to benchmark (check the {label} name)"
         )));
     }
 
-    let mut failures: Vec<(&str, String)> = Vec::new();
+    let mut failures: Vec<&str> = Vec::new();
 
     for &variant in variants {
         output::bench_msg(&format!("{label}: {variant}"));
-        if let Err(e) = run_one(variant) {
-            output::error(&format!("{variant} failed: {e}"));
-            failures.push((variant, e.to_string()));
+        match run_one(variant) {
+            Ok(()) => {}
+            // A cooperative shutdown ends the whole run, not one variant.
+            Err(e @ DevError::Interrupted) => return Err(e),
+            Err(e) => {
+                output::error(&format!("{variant} failed: {e}"));
+                failures.push(variant);
+            }
         }
     }
 
     if failures.is_empty() {
         Ok(())
     } else {
-        let summary: Vec<String> = failures
-            .iter()
-            .map(|(v, e)| format!("{v}: {e}"))
-            .collect();
-        Err(DevError::Verify(format!(
-            "{} of {} variants failed:\n  {}",
-            failures.len(),
-            variants.len(),
-            summary.join("\n  "),
-        )))
+        Err(variants_failed(&failures, variants.len()))
     }
+}
+
+/// The summary error [`run_variants`] ends with. Each failure's cause was
+/// already printed live as `<variant> failed: ...`, so this names the variants
+/// only and renders bare (`Reported`) rather than repeating the causes under a
+/// `verify:` prefix.
+fn variants_failed(failed: &[&str], total: usize) -> DevError {
+    DevError::Reported(format!(
+        "{} of {} variants failed: {}",
+        failed.len(),
+        total,
+        failed.join(", "),
+    ))
 }
 
 fn maybe_quote(s: &str) -> String {
@@ -362,12 +372,12 @@ pub fn run_hotpath_capture(
         Ok(s) => match serde_json::from_str::<serde_json::Value>(&s) {
             Ok(v) => db::hotpath_data_from_json(&v),
             Err(e) => {
-                output::error(&format!("failed to parse hotpath JSON: {e}"));
+                output::warn(&format!("failed to parse hotpath JSON: {e}"));
                 None
             }
         },
         Err(e) => {
-            output::error(&format!(
+            output::warn(&format!(
                 "failed to read hotpath report {}: {e}",
                 json_file.display()
             ));

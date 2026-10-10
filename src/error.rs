@@ -40,6 +40,10 @@ pub enum DevError {
     /// failure where it did not (an IO error, a `cargo metadata` failure, a
     /// config refusal discovered at phase time).
     Reported(String),
+    /// A request refused before execution: an unknown or ambiguous selection,
+    /// a missing baseline, or a modified worktree that cannot safely be reused.
+    /// Renders bare; unlike [`DevError::Reported`], this is its first print.
+    Refused(String),
     /// Lock file conflict (another dev instance is running).
     Lock(String),
     /// Database error (SQLite operations).
@@ -89,7 +93,7 @@ impl fmt::Display for DevError {
                 Ok(())
             }
             DevError::Spawn { program, error } => write!(f, "could not run {program}: {error}"),
-            DevError::Reported(label) => write!(f, "{label}"),
+            DevError::Reported(label) | DevError::Refused(label) => write!(f, "{label}"),
             DevError::Lock(msg) => write!(f, "lock: {msg}"),
             DevError::Database(msg) => write!(f, "database: {msg}"),
             DevError::Verify(msg) => write!(f, "verify: {msg}"),
@@ -111,6 +115,7 @@ impl StdError for DevError {
             | DevError::Database(_)
             | DevError::Verify(_)
             | DevError::Reported(_)
+            | DevError::Refused(_)
             | DevError::ExitCode(_)
             | DevError::Interrupted => None,
         }
@@ -166,6 +171,11 @@ mod tests {
         };
         let msg = e.to_string();
         assert_eq!(msg.matches("signal").count(), 1, "{msg}");
+    }
+
+    #[test]
+    fn refused_renders_its_message_alone() {
+        assert_eq!(DevError::Refused("no bench targets".into()).to_string(), "no bench targets");
     }
 
     #[test]

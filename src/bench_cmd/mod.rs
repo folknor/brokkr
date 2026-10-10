@@ -171,7 +171,7 @@ pub fn run(args: &BenchArgs) -> Result<(), DevError> {
 
             let targets = discover::discover(build_root)?;
             if targets.is_empty() {
-                return Err(DevError::Build(
+                return Err(DevError::Refused(
                     "no bench targets in this workspace - nothing to benchmark".into(),
                 ));
             }
@@ -265,7 +265,7 @@ fn resolve_stored_baseline(home: &Path, build_root: &Path, name: &str) -> Result
         return Ok(name.to_owned());
     }
     let missing = || {
-        DevError::Build(format!(
+        DevError::Refused(format!(
             "no baseline '{name}' recorded; `brokkr bench --baselines` lists what exists"
         ))
     };
@@ -284,7 +284,7 @@ fn resolve_stored_baseline(home: &Path, build_root: &Path, name: &str) -> Result
     match legacy.as_slice() {
         [one] => Ok(one.clone()),
         [] => Err(missing()),
-        many => Err(DevError::Build(format!(
+        many => Err(DevError::Refused(format!(
             "'{name}' matches several recorded baselines ({}); name one exactly",
             many.join(", ")
         ))),
@@ -314,8 +314,9 @@ fn stored_baseline_names(home: &Path) -> Vec<String> {
 fn check_environments(home: &Path, a: &str, b: &str, lenient: bool) -> Result<(), DevError> {
     let read = |name: &str| -> Result<stamp::Stamp, DevError> {
         stamp::read(home, name)?.ok_or_else(|| {
-            DevError::Config(format!(
-                "baseline stamp for '{name}' disappeared before it could be read"
+            DevError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("baseline stamp for '{name}' disappeared before it could be read"),
             ))
         })
     };
@@ -323,7 +324,7 @@ fn check_environments(home: &Path, a: &str, b: &str, lenient: bool) -> Result<()
         (Ok(sa), Ok(sb)) => (sa, sb),
         (Err(e), _) | (_, Err(e)) => {
             if lenient {
-                output::error(&format!(
+                output::warn(&format!(
                     "{e}\ncomparing anyway (--lenient); build environments were not checked"
                 ));
                 return Ok(());
@@ -349,7 +350,7 @@ fn check_environments(home: &Path, a: &str, b: &str, lenient: bool) -> Result<()
     }
     if lenient {
         lines.push("comparing anyway (--lenient); the delta may be an artefact".into());
-        output::error(&lines.join("\n"));
+        output::warn(&lines.join("\n"));
         return Ok(());
     }
     lines.push(
@@ -411,11 +412,11 @@ fn git(dir: &Path, args: &[&str]) -> Result<String, DevError> {
     let captured = output::run_captured("git", args, dir)?;
     if !captured.status.success() {
         let stderr = String::from_utf8_lossy(&captured.stderr);
-        return Err(DevError::Build(format!(
-            "git {}: {}",
-            args.join(" "),
-            stderr.trim()
-        )));
+        return Err(DevError::Subprocess {
+            program: format!("git {}", args.join(" ")),
+            code: captured.status.code(),
+            stderr: stderr.trim().to_owned(),
+        });
     }
     Ok(String::from_utf8_lossy(&captured.stdout).trim().to_owned())
 }
@@ -500,9 +501,7 @@ fn cargo_bench(
     if out.code == 0 {
         return Ok(());
     }
-    Err(DevError::Subprocess {
-        program: "cargo bench".into(),
-        code: Some(out.code),
-        stderr: String::new(),
-    })
+    // Cargo and criterion printed their own diagnostics; echoing the exit code
+    // back as `cargo bench exited with code N` under `[error]` added nothing.
+    Err(DevError::Reported(format!("cargo bench failed (exit code {})", out.code)))
 }

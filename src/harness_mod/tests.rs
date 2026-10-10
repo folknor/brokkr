@@ -32,8 +32,29 @@ mod tests {
             calls += 1;
             Ok(())
         });
-        assert!(matches!(result, Err(DevError::Config(_))));
+        assert!(matches!(result, Err(DevError::Refused(_))));
         assert_eq!(calls, 0);
+    }
+
+    #[test]
+    fn run_variants_summary_names_the_variants_and_renders_bare() {
+        let result = run_variants("query", &["a", "b", "c"], |v| {
+            if v == "c" { Ok(()) } else { Err(DevError::Refused(format!("{v} broke"))) }
+        });
+        let e = result.unwrap_err();
+        assert!(matches!(e, DevError::Reported(_)), "{e:?}");
+        assert_eq!(e.to_string(), "2 of 3 variants failed: a, b");
+    }
+
+    #[test]
+    fn run_variants_stops_at_a_shutdown() {
+        let mut calls = 0;
+        let result = run_variants("query", &["a", "b"], |_| {
+            calls += 1;
+            Err(DevError::Interrupted)
+        });
+        assert!(matches!(result, Err(DevError::Interrupted)));
+        assert_eq!(calls, 1);
     }
 
     // -----------------------------------------------------------------------

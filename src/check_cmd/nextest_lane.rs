@@ -302,6 +302,17 @@ fn prepare_nextest(
     selection.extend(cargo_extra.iter().cloned());
     let ignored_mode = effective_ignored_mode(sweep.libtest_args.iter().map(String::as_str));
     build_nextest_lane(inputs, &sweep.label, selection, env, &EngineFilter::Sweep(sweep), ignored_mode)
+        .inspect_err(|e| {
+            // A complete profile stops in preparation, before the test phase
+            // can print its usual failure shape. Non-certifying runs defer
+            // this to the lane's report in that phase. A stop is not a
+            // failure of this lane and gets no failure shape.
+            if inputs.certifying && !matches!(e, DevError::Interrupted) {
+                output::error(&format!(
+                    "test {}: {}", sweep.label, describe_sweep(sweep, true, packages)
+                ));
+            }
+        })
 }
 
 /// The host as the engine's build platform (no cross target).
@@ -334,15 +345,35 @@ pub(crate) fn build_nextest_lane(
     let build_platforms = host_build_platforms()?;
     let triple = build_platforms.host.platform.triple_str().to_owned();
 
+    let report_launch = |command: &str, e: DevError| {
+        if !matches!(e, DevError::Interrupted) {
+            output::error(&format!("sweep '{label}' could not be prepared: {e}"));
+            output::error(&format!("failing command: {command}"));
+            DevError::Reported(format!("sweep '{label}' could not be prepared"))
+        } else {
+            e
+        }
+    };
+    let metadata_command = format!(
+        "cargo metadata --format-version=1 --all-features --filter-platform {triple}"
+    );
     let metadata = output::run_captured_with_env(
         "cargo",
         &["metadata", "--format-version=1", "--all-features", "--filter-platform", &triple],
         project_root,
         &env_refs,
-    )?;
+    )
+    .map_err(|e| report_launch(&metadata_command, e))?;
     if !metadata.status.success() {
+        // The two-line failure form, for the metadata call as for any other
+        // command a test lane runs. The identity leads, since `check` does not
+        // echo the `Reported` label.
+        let failed = format!("sweep '{label}' could not be prepared: cargo metadata failed");
+        output::error(&failed);
+        output::error(&format!("failing command: {metadata_command}"));
         output::error(&String::from_utf8_lossy(&metadata.stderr));
-        return Err(DevError::Build("cargo metadata failed".into()));
+        // `Reported`, as the build failure below: command and stderr are out.
+        return Err(DevError::Reported(failed));
     }
     let metadata_json = String::from_utf8_lossy(&metadata.stdout).into_owned();
 
@@ -356,11 +387,20 @@ pub(crate) fn build_nextest_lane(
     }
     cargo_line(inputs.commands, &format!("cargo {}", args.join(" ")));
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let build = output::run_captured_with_env("cargo", &arg_refs, project_root, &env_refs)?;
+    let build = output::run_captured_with_env("cargo", &arg_refs, project_root, &env_refs)
+        .map_err(|e| report_launch(&format!("cargo {}", args.join(" ")), e))?;
     if !build.status.success() {
+        let failed = format!("sweep '{label}' could not be prepared: build failed");
+        output::error(&failed);
         output::error(&format!("failing command: cargo {}", args.join(" ")));
+        // Errors only, through the held-aware error channel: outside a
+        // certifying claim this attempt's output is held back and replayed by
+        // the lane, and a warning (never held) would print here, detached
+        // from the failure it belongs to. A failed build's warnings are not
+        // its failure.
+        crate::build::dump_compiler_errors(&build.stdout);
         output::error(&String::from_utf8_lossy(&build.stderr));
-        return Err(DevError::Reported(format!("sweep '{label}' could not be prepared")));
+        return Err(DevError::Reported(failed));
     }
     // Cargo exited 0; did it actually say anything? Without a `build-finished`
     // record this stdout is not cargo's artifact stream, and an empty case set

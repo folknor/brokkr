@@ -194,7 +194,7 @@ impl Worktree {
             && head == full_hash
         {
             if !is_pristine(&checkout) {
-                return Err(DevError::Config(format!(
+                return Err(DevError::Refused(format!(
                     "worktree at {} has been modified since brokkr cut it, so a run would \
                      measure changed code under {short}'s name; refusing to reuse it. Remove \
                      it with `brokkr clean --worktrees` (or move any work out and delete the \
@@ -222,7 +222,7 @@ impl Worktree {
         // somebody's uncommitted work.
         let stale = slot.exists();
         if stale && checkout.exists() && is_dirty(&checkout) {
-            return Err(DevError::Config(format!(
+            return Err(DevError::Refused(format!(
                 "worktree at {} is not checked out at {short} and has uncommitted work \
                  (or git could not read it); refusing to replace it. Commit or move the \
                  work, remove the directory by hand, then rerun",
@@ -327,7 +327,7 @@ fn outside_path_deps(checkout: &Path) -> Result<Vec<String>, DevError> {
                     }
                 }
                 Escape::TooFar => {
-                    return Err(DevError::Config(format!(
+                    return Err(DevError::Refused(format!(
                         "{} has a path dependency '{dep}' reaching more than one level above \
                          the repository; a --commit worktree can only provide siblings of \
                          the checkout",
@@ -524,9 +524,9 @@ pub fn remove_one(git_root: &Path, slot: &Path) -> Result<(), DevError> {
         && dest.exists()
     {
         std::fs::remove_dir_all(&dest).map_err(|e| {
-            DevError::Config(format!(
-                "cannot remove worktree target dir {}: {e}",
-                dest.display()
+            DevError::Io(std::io::Error::new(
+                e.kind(),
+                format!("cannot remove worktree target dir {}: {e}", dest.display()),
             ))
         })?;
     }
@@ -535,7 +535,10 @@ pub fn remove_one(git_root: &Path, slot: &Path) -> Result<(), DevError> {
     // live checkouts they point at stay.
     if slot.symlink_metadata().is_ok() {
         std::fs::remove_dir_all(slot).map_err(|e| {
-            DevError::Config(format!("cannot remove worktree slot {}: {e}", slot.display()))
+            DevError::Io(std::io::Error::new(
+                e.kind(),
+                format!("cannot remove worktree slot {}: {e}", slot.display()),
+            ))
         })?;
     }
     Ok(())
@@ -560,9 +563,9 @@ fn remove_checkout(git_root: &Path, path: &Path) -> Result<(), DevError> {
             Err(g) => format!(" (git worktree remove also failed: {g})"),
             Ok(_) => String::new(),
         };
-        return Err(DevError::Config(format!(
-            "cannot remove worktree at {}: {e}{git_note}",
-            path.display()
+        return Err(DevError::Io(std::io::Error::new(
+            e.kind(),
+            format!("cannot remove worktree at {}: {e}{git_note}", path.display()),
         )));
     }
     drop(run_git(git_root, &["worktree", "prune"]));

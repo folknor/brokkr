@@ -384,12 +384,13 @@ fn run_support_build(
     output::detail(&format!("cargo {} (replay support build: {lane})", build.args.join(" ")));
     let captured = super::cargo_with_deadline(&args, project_root, env, "replay support build")?;
     if !captured.status.success() {
+        // `Reported`: the identity leads, then the command and stderr, so the
+        // closing label is not a `build:` restatement of what is above it.
+        let failed = format!("build failed for package '{}' in lane '{lane}'", build.package);
+        output::error(&failed);
         output::error(&format!("failing command: cargo {}", build.args.join(" ")));
         output::error(&String::from_utf8_lossy(&captured.stderr));
-        return Err(DevError::Build(format!(
-            "build failed for package '{}' in lane '{lane}'",
-            build.package
-        )));
+        return Err(DevError::Reported(failed));
     }
     Ok(check_cmd::support_artifacts(&String::from_utf8_lossy(&captured.stdout), &build.package))
 }
@@ -476,7 +477,9 @@ fn run_selections<A>(
             Ok(r) => {
                 all_passed &= r.passed;
                 if r.timed_out {
-                    let e = DevError::Verify(format!(
+                    // `Reported`: the lane printed the timeout's diagnosis; this
+                    // label closes the replay and names the lane.
+                    let e = DevError::Reported(format!(
                         "a replayed test exceeded its time budget in lane '{}' - stopping",
                         sel.record.label
                     ));
@@ -1154,7 +1157,7 @@ mod tests {
             Ok(LaneResult::from(check_cmd::EngineRun { passed: false, timed_out: true }))
         };
         let err = run_selections(&selections, |_| Ok(()), run).unwrap_err();
-        assert!(matches!(err, DevError::Verify(_)), "{err}");
+        assert!(matches!(err, DevError::Reported(_)), "{err}");
         assert!(err.to_string().contains("exceeded its time budget"), "{err}");
         assert_eq!(*ran.borrow(), ["engine"], "the later lane is not launched against the timeout's state");
     }

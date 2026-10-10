@@ -101,7 +101,6 @@ pub(crate) fn cmd_check(
         no_default_features,
         test_cfg,
         profile_name,
-        commands,
     )?;
 
     let mut collected_timings: Vec<TestTiming> = Vec::new();
@@ -287,17 +286,34 @@ pub(crate) fn cmd_check_selected(
     if watchdog_fired().is_some() {
         return Err(DevError::ExitCode(WATCHDOG_EXIT_CODE));
     }
-    if matches!(scripts, Err(DevError::Interrupted)) {
+    if crate::shutdown::is_shutdown_requested()
+        || matches!(scripts, Err(DevError::Interrupted))
+        || matches!(textlint, Err(DevError::Interrupted))
+    {
         return Err(DevError::Interrupted);
     }
-    // Both halves always run, so the error names every one that failed - not
-    // whichever came first, which would hide a script failure behind textlint's.
-    let failed: Vec<String> = [textlint, scripts].into_iter().filter_map(Result::err).map(|e| e.to_string()).collect();
+    // Both halves always run, so every failure is accounted for - not whichever
+    // came first, which would hide a script failure behind textlint's.
+    let failed: Vec<DevError> = [textlint, scripts].into_iter().filter_map(Result::err).collect();
     if failed.is_empty() {
         output::run_msg(&format!("selection passed ({elapsed:.1}s)"));
         return Ok(());
     }
-    Err(DevError::Build(failed.join("; ")))
+    selection_failure(&failed)
+}
+
+/// How a failed `--textlint`/`--script` selection ends. A `Reported` failure
+/// printed its full report above, so its label is not echoed (`finish_check`
+/// does the same); any other error carries its only diagnostic in its message,
+/// so that is printed here. The exit is plain 1 either way, which `main` does
+/// not decorate with an `[error]` line.
+fn selection_failure(failed: &[DevError]) -> Result<(), DevError> {
+    for e in failed {
+        if !matches!(e, DevError::Reported(_) | DevError::ExitCode(_)) {
+            output::error(&e.to_string());
+        }
+    }
+    Err(DevError::ExitCode(1))
 }
 
 /// The entries whose name is in `names`, in config order. Each requested name
@@ -437,15 +453,17 @@ fn package_rules_lines(sweeps: &[ResolvedSweep], packages: &[String]) -> Vec<Str
 /// way to tell "these tests failed" from "these tests were never meant to
 /// run here" was to stash the diff and run again. One line closes that.
 ///
-/// Silent on the non-ad-hoc path - the profile header already says it.
+/// Silent on the non-ad-hoc path - the profile header already says it. Not
+/// gated on `--commands`: that flag adds the cargo lines and takes nothing away,
+/// and this line is the only statement of which test filters an ad-hoc run
+/// inherited.
 fn announce_adhoc_shaping(
     features: &[String],
     no_default_features: bool,
     test_cfg: Option<&TestConfig>,
     profile_name: Option<&str>,
-    commands: bool,
 ) -> Result<(), DevError> {
-    if commands || (features.is_empty() && !no_default_features) {
+    if features.is_empty() && !no_default_features {
         return Ok(());
     }
     let shaping = match (test_cfg, effective_profile_name(test_cfg, profile_name)?) {
@@ -4366,6 +4384,15 @@ mod select_named_tests {
         let msg = err.to_string();
         assert!(msg.contains("\"zz\""), "{msg}");
         assert!(msg.contains("a, b"), "{msg}");
+    }
+
+    #[test]
+    fn a_failed_selection_exits_one_without_an_error_echo_of_its_reports() {
+        use super::{DevError, selection_failure};
+        let reported = [DevError::Reported("textlint failed".into()), DevError::Reported("script-check failed".into())];
+        assert!(matches!(selection_failure(&reported), Err(DevError::ExitCode(1))));
+        let mixed = [DevError::Reported("textlint failed".into()), DevError::Config("scan failed".into())];
+        assert!(matches!(selection_failure(&mixed), Err(DevError::ExitCode(1))));
     }
 
     #[test]

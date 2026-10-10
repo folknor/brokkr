@@ -601,36 +601,40 @@ fn rename_elivagar_output(
     // by every consumer while the run reported success.
     let commit = crate::git::collect(git_root)
         .map_err(|e| {
-            DevError::Config(format!(
+            DevError::Io(std::io::Error::other(format!(
                 "cannot name the tilegen archive: git commit of {} unavailable ({e}); \
                  output left in {}",
                 git_root.display(),
                 scratch_dir.display(),
-            ))
+            )))
         })?
         .commit;
 
     std::fs::create_dir_all(output_dir).map_err(|e| {
-        DevError::Config(format!(
-            "failed to create output dir {}: {e}; output left in {}",
-            output_dir.display(),
-            scratch_dir.display(),
+        DevError::Io(std::io::Error::new(
+            e.kind(),
+            format!(
+                "failed to create output dir {}: {e}; output left in {}",
+                output_dir.display(), scratch_dir.display(),
+            ),
         ))
     })?;
 
     for path in &output_files {
         if !path.exists() {
-            return Err(DevError::Config(format!(
+            return Err(DevError::Verify(format!(
                 "tilegen exited 0 but wrote no output at {}",
                 path.display()
             )));
         }
         let dest = crate::resolve::pmtiles_archive_name(output_dir, dataset, variant, &commit);
         std::fs::rename(path, &dest).map_err(|e| {
-            DevError::Config(format!(
-                "failed to move {} to {}: {e}; output left in place",
-                path.display(),
-                dest.display(),
+            DevError::Io(std::io::Error::new(
+                e.kind(),
+                format!(
+                    "failed to move {} to {}: {e}; output left in place",
+                    path.display(), dest.display(),
+                ),
             ))
         })?;
         output::run_msg(&format!("output: {}", dest.display()));

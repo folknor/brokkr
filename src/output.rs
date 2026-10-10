@@ -983,6 +983,12 @@ pub fn run_passthrough_in(
         lock.clear_child_pid();
     }
 
+    // A stop may arrive as the child exits, before the polling loop sees it.
+    // It still owns the verdict, including when cargo handled SIGINT itself.
+    if crate::shutdown::is_shutdown_requested() {
+        return Err(DevError::Interrupted);
+    }
+
     let elapsed = start.elapsed();
 
     match status.code() {

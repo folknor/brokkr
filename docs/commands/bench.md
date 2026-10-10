@@ -91,7 +91,7 @@ file can legitimately differ between the sides being compared. `--compare` refus
 downgrades the refusal to a warning, because "these differ and I know why" is a
 legitimate position - what is not legitimate is not being told.
 
-Two limits worth knowing:
+Limits worth knowing:
 
 - Flags set in `~/.cargo/config.toml` are not exposed by any stable cargo
   interface, so the stamp records a **digest of the file** rather than the flags

@@ -414,10 +414,11 @@ fn cargo_build_locked(
     let elapsed = start.elapsed();
 
     if !captured.status.success() {
+        // Everything cargo had to say is printed here, once; the error
+        // returned is a bare label so `main` does not print it a second time.
         dump_compiler_messages(&captured.stdout);
         dump_build_stderr(&captured.stderr);
-        let stderr = String::from_utf8_lossy(&captured.stderr);
-        return Err(DevError::Build(format!("cargo build failed: {stderr}")));
+        return Err(DevError::Reported("cargo build failed".into()));
     }
 
     // An `--example` build names its target as surely as `--bin` does, and
@@ -659,8 +660,33 @@ pub fn find_executable(stdout: &[u8], expected_name: Option<&str>) -> Result<Pat
 /// the rendered messages.  With JSON message format, cargo sends the actual
 /// error details (file, line, message) as JSON to stdout - stderr only contains
 /// the "Compiling…" progress lines and the final summary.
+///
+/// Warnings go through [`output::warn`] and everything else through
+/// [`output::error`]: a failed build's lints are not the failure.
 fn dump_compiler_messages(stdout: &[u8]) {
+    for (is_warning, rendered) in rendered_diagnostics(stdout) {
+        if is_warning {
+            output::warn(&rendered);
+        } else {
+            output::error(&rendered);
+        }
+    }
+}
+
+/// The non-warning rendered diagnostics in cargo's JSON stdout, through
+/// [`output::error`] alone, for a caller whose error output may be held back
+/// (`output::capture_errors`) and replayed: warnings bypass that hold.
+pub(crate) fn dump_compiler_errors(stdout: &[u8]) {
+    for (_, rendered) in rendered_diagnostics(stdout).into_iter().filter(|(w, _)| !w) {
+        output::error(&rendered);
+    }
+}
+
+/// The rendered `compiler-message` diagnostics in cargo's JSON stdout, in
+/// order, each paired with whether its level is `warning`.
+fn rendered_diagnostics(stdout: &[u8]) -> Vec<(bool, String)> {
     let text = String::from_utf8_lossy(stdout);
+    let mut out = Vec::new();
     for line in text.lines() {
         let Ok(val) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
@@ -668,22 +694,69 @@ fn dump_compiler_messages(stdout: &[u8]) {
         if val.get("reason").and_then(serde_json::Value::as_str) != Some("compiler-message") {
             continue;
         }
-        if let Some(rendered) = val
-            .get("message")
-            .and_then(|m| m.get("rendered"))
-            .and_then(serde_json::Value::as_str)
-        {
+        let Some(message) = val.get("message") else {
+            continue;
+        };
+        if let Some(rendered) = message.get("rendered").and_then(serde_json::Value::as_str) {
+            let is_warning = message.get("level").and_then(serde_json::Value::as_str) == Some("warning");
             // rendered already ends with newline; trim to avoid double-spacing
-            output::error(rendered.trim_end());
+            out.push((is_warning, rendered.trim_end().to_owned()));
         }
+    }
+    out
+}
+
+/// Print captured stderr through the error output channel, minus cargo's
+/// progress chatter. This is the only place the cause appears when cargo dies
+/// before it emits any JSON diagnostic (a lockfile or rustc-guard refusal, a
+/// resolver error, a bad manifest), so it is printed whether or not
+/// diagnostics were rendered.
+fn dump_build_stderr(stderr: &[u8]) {
+    let text = filtered_build_stderr(stderr);
+    if !text.is_empty() {
+        output::error(&text);
     }
 }
 
-/// Print captured stderr through the error output channel.
-fn dump_build_stderr(stderr: &[u8]) {
-    let text = String::from_utf8_lossy(stderr);
-    if !text.is_empty() {
-        output::error(&text);
+/// `stderr` without the `Compiling`/`Fresh`/`Finished` progress lines.
+fn filtered_build_stderr(stderr: &[u8]) -> String {
+    String::from_utf8_lossy(stderr)
+        .lines()
+        .filter(|l| {
+            let first = l.split_whitespace().next();
+            !matches!(first, Some("Compiling" | "Fresh" | "Finished"))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim_end()
+        .to_owned()
+}
+
+#[cfg(test)]
+mod failure_report_tests {
+    use super::{filtered_build_stderr, rendered_diagnostics};
+
+    #[test]
+    fn stderr_keeps_the_cause_and_drops_progress_lines() {
+        let stderr = b"   Compiling foo v0.1.0\nerror: failed to parse manifest\n    Finished dev\n";
+        assert_eq!(filtered_build_stderr(stderr), "error: failed to parse manifest");
+    }
+
+    #[test]
+    fn progress_only_stderr_filters_to_nothing() {
+        assert_eq!(filtered_build_stderr(b"   Compiling foo v0.1.0\n"), "");
+    }
+
+    #[test]
+    fn diagnostics_are_split_by_level() {
+        let stdout = concat!(
+            "{\"reason\":\"compiler-message\",\"message\":{\"level\":\"warning\",\"rendered\":\"warning: w\\n\"}}\n",
+            "{\"reason\":\"compiler-message\",\"message\":{\"level\":\"error\",\"rendered\":\"error: e\\n\"}}\n",
+            "{\"reason\":\"compiler-artifact\"}\n",
+            "not json\n",
+        );
+        let d = rendered_diagnostics(stdout.as_bytes());
+        assert_eq!(d, vec![(true, "warning: w".to_owned()), (false, "error: e".to_owned())]);
     }
 }
 

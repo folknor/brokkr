@@ -87,7 +87,7 @@ pub fn resolve<'a>(
 ) -> Result<&'a BenchTarget, DevError> {
     let matches: Vec<&BenchTarget> = targets.iter().filter(|t| t.name == wanted).collect();
     match matches.as_slice() {
-        [] => Err(DevError::Build(format!(
+        [] => Err(DevError::Refused(format!(
             "no bench target named '{wanted}'; bare `brokkr bench` lists what exists"
         ))),
         [one] => Ok(*one),
@@ -97,7 +97,7 @@ pub fn resolve<'a>(
                 msg.push_str(&format!("  {} ({})\n", t.name, t.package));
             }
             msg.push_str("disambiguate the target names in Cargo.toml");
-            Err(DevError::Build(msg))
+            Err(DevError::Refused(msg))
         }
     }
 }

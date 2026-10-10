@@ -284,6 +284,9 @@ pub fn run(
     if check_cmd::watchdog_fired().is_some() {
         return Err(DevError::ExitCode(check_cmd::WATCHDOG_EXIT_CODE));
     }
+    if crate::shutdown::is_shutdown_requested() {
+        return Err(DevError::Interrupted);
+    }
     result
 }
 
@@ -305,6 +308,9 @@ pub fn run_from_run(project_root: &Path, state_root: &Path, run_id: &str, list: 
     let result = replay::from_run(project_root, state_root, run_id, false);
     if check_cmd::watchdog_fired().is_some() {
         return Err(DevError::ExitCode(check_cmd::WATCHDOG_EXIT_CODE));
+    }
+    if crate::shutdown::is_shutdown_requested() {
+        return Err(DevError::Interrupted);
     }
     result
 }
@@ -980,12 +986,17 @@ fn run_iteration(
     };
 
     if focused.runs.is_empty() {
-        println!(
-            "[test]    SKIP {} - no test matched in any of {} (likely feature-gated out of this \
-             sweep)",
-            tag(None),
-            output::count(focused.searched, "searched harness")
-        );
+        // Discovery is the same every iteration, so under `-N` the line prints
+        // for run 1 only; later repeats would restate it verbatim.
+        // The run number would claim it was run 1 alone that found nothing.
+        if announce {
+            let sweep = plan.sweep_label.map(|l| format!(" [{l}]")).unwrap_or_default();
+            println!(
+                "[test]    SKIP {pkg}::{name}{sweep} - no test matched in any of {} (likely \
+                 feature-gated out of this sweep)",
+                output::count(focused.searched, "searched harness")
+            );
+        }
         return Ok(RunReport::bare(Outcome::NoMatch));
     }
 
@@ -1875,19 +1886,27 @@ impl SkipReason {
 }
 
 fn aggregate_exit(outcomes: &[Outcome], pkg: &str, name: &str) -> Result<(), DevError> {
-    let any_fail = outcomes
-        .iter()
-        .any(|o| matches!(o, Outcome::Fail | Outcome::BuildFailed));
-    // `Reported`: every FAIL and BUILD FAILED already printed its footer and
-    // the no-match case prints its line here. `Build` rendered a failing test
-    // as `build: test failed`, sending the reader after a compile error.
-    if any_fail {
-        return Err(DevError::Reported("test failed".into()));
+    let test_failed = outcomes.contains(&Outcome::Fail);
+    let build_failed = outcomes.contains(&Outcome::BuildFailed);
+    // `Reported`: every FAIL and BUILD FAILED already printed its footer, so
+    // the label only closes the run, and it names what failed: a build-only
+    // failure must not close with `test failed`, nor a test failure with a
+    // build error (`Build` once rendered it as `build: test failed`).
+    if test_failed || build_failed {
+        let label = match (test_failed, build_failed) {
+            (true, true) => "test failed and build failed",
+            (true, false) => "test failed",
+            _ => "build failed",
+        };
+        return Err(DevError::Reported(label.into()));
     }
     let all_no_match = outcomes.iter().all(|o| *o == Outcome::NoMatch);
     if all_no_match {
-        println!("[test]    no sweep matched `{pkg}::{name}` - check the package/name.");
-        return Err(DevError::Reported("no matching test".into()));
+        // The one place the fact is stated: the closing `[error]` line carries
+        // it, so a separate `[test]` line would repeat it.
+        return Err(DevError::Reported(format!(
+            "no sweep matched `{pkg}::{name}` - check the package/name."
+        )));
     }
     // At least one sweep passed; NoMatch in other sweeps is informational
     // (the test was feature-gated out of those sweeps).
@@ -2199,13 +2218,27 @@ fn report_hung(
     if first {
         output::error(&test_runner::format_hung_test(hung, cwd));
     }
-    println!(
-        "[test]    FAIL {} ({wall}) - hung test exceeded {}s",
-        shape.tag,
-        hung.ceiling.as_secs()
-    );
+    let secs = hung.ceiling.as_secs();
+    if let Some(test_tag) = hung_test_tag(shape, hung) {
+        println!("[test]    FAIL {} - hung test exceeded {secs}s", test_tag(&hung.test, wall));
+    } else {
+        println!("[test]    FAIL {} ({wall}) - hung test exceeded {secs}s", shape.tag);
+    }
     std::io::stdout().flush().ok();
     RunReport::timed_out(shape.target, format!("hung test exceeded {}s", hung.ceiling.as_secs()))
+}
+
+/// The footer tag renderer a hung test leads with, when its name is a verified
+/// identity: the run held exactly one test, named by the caller
+/// (`WallShape::OneTest`), and the kill charged that test. The runner classifies
+/// both a tracker expiry and this one-test invocation's wall expiry as
+/// `PerTest`, using the caller's resolved name. On a shared harness
+/// the name is the tracker's best-known suspect, and a sweep-wall or idle kill
+/// has no test to name at all, so those keep the filter-led form.
+fn hung_test_tag<'a>(shape: &OneRun<'a>, hung: &test_runner::HungTest) -> Option<&'a TestTag<'a>> {
+    let one_test = matches!(shape.ceilings.shape, test_runner::WallShape::OneTest { .. });
+    let charged = matches!(hung.reason, test_runner::TimeoutReason::PerTest { .. });
+    if one_test && charged { shape.test_tag } else { None }
 }
 
 /// The verdict for a directly run harness whose run does not account for
@@ -3657,6 +3690,68 @@ include_ignored = false
     fn aggregate_exit_fails_when_all_no_match() {
         let outcomes = [Outcome::NoMatch, Outcome::NoMatch];
         assert!(aggregate_exit(&outcomes, "f", "n").is_err());
+    }
+
+    #[test]
+    fn hung_test_tag_requires_a_resolved_test_and_a_per_test_reason() {
+        use test_runner::{Ceilings, HungTest, TimeoutReason};
+
+        let render = |name: &str, wall: &str| format!("pkg::{name} ({wall})");
+        let mut shape = OneRun {
+            tag: "pkg::filter",
+            test_tag: Some(&render),
+            target: "lib",
+            ceilings: Ceilings::one_test(Duration::from_secs(20), "tests::hang"),
+            announce: false,
+            expected: Some(1),
+            listed: None,
+            observe: test_runner::Observe::default(),
+        };
+        let mut hung = HungTest {
+            reason: TimeoutReason::PerTest { name: "tests::hang".into() },
+            test: "tests::hang".into(),
+            elapsed: Duration::from_secs(20),
+            ceiling: Duration::from_secs(20),
+            snapshot_dir: PathBuf::new(),
+            cargo_pid: 0,
+            test_pids: Vec::new(),
+            snapshot_pid: None,
+            wchan: None,
+            stack: None,
+            snapshot_error: None,
+        };
+        // The runner uses PerTest for both the resolved test's tracker expiry
+        // and its invocation's wall expiry, even without a start event.
+        assert_eq!(
+            hung_test_tag(&shape, &hung).map(|tag| tag(&hung.test, "20.00s")),
+            Some("pkg::tests::hang (20.00s)".into())
+        );
+        shape.ceilings = Ceilings::shared_harness();
+        assert!(hung_test_tag(&shape, &hung).is_none(), "a suspect is not a verified name");
+        shape.ceilings = Ceilings::one_test(Duration::from_secs(20), "tests::hang");
+        hung.reason = TimeoutReason::SweepWall { blamed: vec!["tests::hang".into()] };
+        assert!(hung_test_tag(&shape, &hung).is_none());
+        hung.reason = TimeoutReason::Idle;
+        assert!(hung_test_tag(&shape, &hung).is_none());
+        hung.reason = TimeoutReason::PerTest { name: "tests::hang".into() };
+        shape.test_tag = None;
+        assert!(hung_test_tag(&shape, &hung).is_none(), "no renderer in a replay or doc-only run");
+    }
+
+    #[test]
+    fn aggregate_exit_label_names_what_failed() {
+        let label = |outcomes: &[Outcome]| match aggregate_exit(outcomes, "f", "n") {
+            Err(DevError::Reported(label)) => label,
+            other => panic!("expected a Reported error, got {other:?}"),
+        };
+        assert_eq!(label(&[Outcome::Pass, Outcome::BuildFailed]), "build failed");
+        assert_eq!(label(&[Outcome::Fail, Outcome::NoMatch]), "test failed");
+        assert_eq!(
+            label(&[Outcome::Fail, Outcome::BuildFailed]),
+            "test failed and build failed"
+        );
+        // The no-match fact is stated once, by the closing label.
+        assert!(label(&[Outcome::NoMatch]).starts_with("no sweep matched `f::n`"));
     }
 
     #[test]

@@ -101,6 +101,7 @@ fn run_isolated_sweep(
             &env_refs,
             tap,
             commands,
+            &sweep.label,
         )?;
         match outcome {
             // A blown budget stops the lane. Collapsing it into `Failed` made it
@@ -111,7 +112,11 @@ fn run_isolated_sweep(
             // inherit, and the contract says stop.
             IsolatedOutcome::TimedOut => {
                 record_isolated_timeout(tap, case);
-                return Err(DevError::Verify(format!(
+                // `Reported`: run_one_isolated_test printed the diagnosis, which
+                // names the test, its package/target and sweep, and the failing
+                // command. `check` does not echo a `Reported` label, so that
+                // printed line is the only place the sweep appears.
+                return Err(DevError::Reported(format!(
                     "test '{name}' in {}/{} exceeded its time budget in sweep '{}' - stopping",
                     case.binary.package, case.binary.target, sweep.label
                 )));
@@ -292,6 +297,7 @@ fn run_one_isolated_test(
     env_refs: &[(&str, &str)],
     tap: &LaneTap,
     commands: bool,
+    sweep_label: &str,
 ) -> Result<IsolatedOutcome, DevError> {
     let name = &case.name;
     let args = isolated_args(name, include_ignored);
@@ -331,15 +337,14 @@ fn run_one_isolated_test(
     }
     let run = run?;
 
-    if run.timed_out {
-        output::error(&format!("test '{name}' exceeded its time budget"));
-        output::error(&format!("failing command: {command}"));
-        return Ok(IsolatedOutcome::TimedOut);
-    }
-    if let LibtestOutcome::HungTest(_) = run.outcome {
-        // This process has exactly one selected test. Attribute the watchdog
-        // kill from the selection, even if its output hid a JSON event.
-        output::error(&format!("test '{name}' exceeded its time budget"));
+    // A wall kill, or a hung test: this process has exactly one selected test,
+    // so the kill is attributed from the selection even if its output hid a
+    // JSON event.
+    if run.timed_out || matches!(run.outcome, LibtestOutcome::HungTest(_)) {
+        output::error(&format!(
+            "test '{name}' in {}/{} exceeded its time budget in sweep '{sweep_label}' - stopping",
+            case.binary.package, case.binary.target
+        ));
         output::error(&format!("failing command: {command}"));
         return Ok(IsolatedOutcome::TimedOut);
     }

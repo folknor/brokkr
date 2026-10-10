@@ -482,12 +482,14 @@ fn run_sweep_pre_build(
     let stderr = String::from_utf8_lossy(&captured.stderr);
     // Printed even under `--commands`: the streamed line is neither adjacent
     // to this failure nor attributable among several runs.
+    // The identity leads and the error is `Reported`: nothing downstream
+    // restates it, so this line is the only place the package and sweep appear
+    // in the failure output.
+    let failed = format!("build failed for package '{package}' in sweep '{}'", sweep.label);
+    output::error(&failed);
     output::error(&format!("failing command: cargo {}", args.join(" ")));
     output::error(&cargo_filter::filter_clippy(&stderr));
-    Err(DevError::Build(format!(
-        "build failed for package '{package}' in sweep '{}'",
-        sweep.label
-    )))
+    Err(DevError::Reported(failed))
 }
 
 /// True if the cargo-section args already name a build target, in which
@@ -1040,16 +1042,24 @@ fn run_one_test_sweep(
             test_runner::PARALLEL_SWEEP_TIMEOUT.as_secs(),
         ));
         output::error(&full_command);
-        return Err(DevError::Verify(format!(
+        // `Reported`: the diagnosis and the failing command are printed above.
+        return Err(DevError::Reported(format!(
             "sweep '{}' exceeded its time budget - stopping",
             sweep.label
         )));
     }
 
     if let Some(hung) = hung {
+        // The sweep leads: `check` does not echo the `Reported` label below,
+        // and neither the hung-test block nor the cargo line names it.
+        output::error(&format!(
+            "a test exceeded its {}s budget in sweep '{}' - stopping",
+            hung.ceiling.as_secs(),
+            sweep.label
+        ));
         output::error(&test_runner::format_hung_test(&hung, project_root));
         output::error(&full_command);
-        return Err(DevError::Verify(format!(
+        return Err(DevError::Reported(format!(
             "a test exceeded its {}s budget in sweep '{}' - stopping",
             hung.ceiling.as_secs(),
             sweep.label

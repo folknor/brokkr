@@ -181,7 +181,10 @@ Output:
   stdout is a pipe or a file, so captured output is unchanged by it.
 - Each diagnostic becomes one line, compilation noise stripped, passing
   tests aggregated. There is no unfiltered mode: rustc's rendered form -
-  source excerpt, carets, `help:` spans - is not reachable from `check`.
+  source excerpt, carets, `help:` spans - is not used by those renderers.
+  A failed nextest pre-build prints the rendered compiler errors (including
+  their notes and help) instead; warning-level compiler messages from that
+  failed build are omitted.
   The one-line form is what keeps a thirty-error run readable, and a gate
   that can turn into a scroll gets read as one.
 - Which diagnostics a phase shows, in every diagnostic phase (gremlins,
@@ -245,7 +248,11 @@ re-run clippy before reaching it each time. It is never a gate:
   `--commands`, `--fix-gremlins` and forwarded test args. `--json` is refused
   because its trailer is a verdict a machine could read as a pass;
 - a name that matches no entry is an error that lists the known names, so a
-  typo cannot print a green run.
+  typo cannot print a green run;
+- a failing selection ends with exit 1 and no closing `[error]` echo of the
+  phases' own reports (they printed in full). An error that is not a phase
+  report, such as an io error from the scan, is its only diagnostic and is
+  printed.
 
 It selects what runs for a human, never what runs for a gate. That is also why
 there is no per-entry "`-p` applies to me" key: that would let a narrowed run
@@ -3149,7 +3156,12 @@ The shape is `<package scope>[, <features>][, rustflags …][, <test bits>]`:
 the copy-pasteable line is the most useful thing in the output. This covers
 clippy and rustdoc failures, test failures, hung tests, parallel-sweep
 timeouts, zero-test runs, `build_packages` pre-build failures, and any error
-leaving a test lane. `--commands` does not suppress it: the line that flag
+leaving a test lane, the nextest lane's `cargo metadata` call included. A
+failure that has printed its full diagnosis ends in a `Reported` label (a
+blown time budget, a failed pre-build, a lane that could not be prepared): the
+label is suppressed by check's summary, so every fact, including the package,
+sweep or test identity, must appear in the printed block itself. `--commands`
+does not suppress any of this: the line that flag
 streamed earlier is neither beside the failure nor attributable among several
 runs.
 
@@ -3204,7 +3216,8 @@ A `lanes` profile shapes nothing of its own (lanes carry no run-shaping
 fields), so an ad-hoc run under one inherits no filters rather than silently
 borrowing one lane's.
 
-Every ad-hoc run names what it inherited:
+Every ad-hoc run names what it inherited, `--commands` included (that flag adds
+the cargo lines and suppresses nothing):
 
 ```
 [run]     ad-hoc features: sweep selection overridden, run shaping from profile tier1
@@ -3450,10 +3463,21 @@ failing *test* (never a harness failure, never in a doc-only sweep) gets one `in
 the overrides the run was given, shell-quoted, printed once per run whichever
 iteration first failed it. It is an investigation, not a replay: the name is
 still a substring filter, and the test runs without whatever ran before it in
-the shared process - recorded replay is `--from-run`. Exit code: non-zero if any
-run was `FAIL`/`BUILD FAILED`, or if *every* sweep was `SKIP` (bad name); `SKIP`
-mixed with at least one `PASS` exits `0`. The closing error line is `test
-failed` (or `no matching test`), the detail having already printed. A fired `test` phase ceiling exits 124 and a
+the shared process - recorded replay is `--from-run`. A hung test leads its
+`FAIL` line the same way when its name is a verified identity: a run that held
+exactly one test, named by the resolver (`--timeout`), and was killed at that
+test's ceiling, whether the per-test tracker or the invocation's wall clock
+expired. Both are classified as a per-test timeout for that resolved name.
+A shared harness's sweep-wall kill has no verified offender, an idle kill has
+no test to name, and a shared harness's per-test kill names only a suspect,
+so those keep the filter-led form. Exit code:
+non-zero if any run was `FAIL`/`BUILD FAILED`, or if *every* sweep was `SKIP`
+(bad name); `SKIP` mixed with at least one `PASS` exits `0`. The closing error
+line names what failed, the detail having already printed: `test failed` when a
+test failed, `build failed` when only builds did, `test failed and build
+failed` when both, and for a bad name the `no sweep matched` sentence itself,
+printed once. Under `-N`, a sweep whose harnesses hold no match prints its one
+`SKIP` line for run 1 only. A fired `test` phase ceiling exits 124 and a
 graceful `brokkr kill` / Ctrl-C exits 130 (see "Time ceilings").
 
 Flags:

@@ -200,7 +200,7 @@ fn resolve_target<'a>(
     name: Option<&str>,
 ) -> Result<Option<&'a Runnable>, DevError> {
     if runnables.is_empty() {
-        return Err(DevError::Build(
+        return Err(DevError::Refused(
             "no bin or example targets in this workspace - nothing to run".into(),
         ));
     }
@@ -214,7 +214,7 @@ fn resolve_target<'a>(
             match matches.as_slice() {
                 [] => {
                     let origin = if name.is_none() { " ([bin] default)" } else { "" };
-                    return Err(DevError::Build(format!(
+                    return Err(DevError::Refused(format!(
                         "no bin or example target named '{n}'{origin}; bare \
                          `brokkr run` lists what exists"
                     )));
@@ -227,7 +227,7 @@ fn resolve_target<'a>(
                         msg.push('\n');
                     }
                     msg.push_str("disambiguate the target names in Cargo.toml");
-                    return Err(DevError::Build(msg));
+                    return Err(DevError::Refused(msg));
                 }
             }
         }
@@ -281,7 +281,13 @@ pub fn cmd_run(
         cargo_args.push("--".into());
         cargo_args.extend(args.iter().cloned());
     }
-    forward_cargo(&cargo_args, lock)
+    // The program's own exit code is the command's: cargo has nothing of its
+    // own to add once the program ran, so echoing it as a brokkr error and
+    // exiting 1 only lost the code.
+    match run_cargo(&cargo_args, lock)? {
+        0 => Ok(()),
+        code => Err(DevError::ExitCode(code)),
+    }
 }
 
 /// `brokkr run --commit REF [NAME]`: build the target in the commit's
@@ -333,11 +339,8 @@ pub fn cmd_run_commit(
     if out.code == 0 {
         return Ok(());
     }
-    Err(DevError::Subprocess {
-        program: target.name.clone(),
-        code: Some(out.code),
-        stderr: String::new(),
-    })
+    // Same contract as `cmd_run`: the program's code, silently.
+    Err(DevError::ExitCode(out.code))
 }
 
 /// The `[bin] install` packages with their bin target names, through the
@@ -358,7 +361,7 @@ pub fn install_bin_targets(
             .map(|r| r.name.clone())
             .collect();
         if bins.is_empty() {
-            return Err(DevError::Build(format!(
+            return Err(DevError::Refused(format!(
                 "[bin] install names '{pkg}', which has no bin target \
                  in this workspace"
             )));
@@ -402,7 +405,7 @@ pub fn cmd_install(
                 // First bin of the package carries the package_dir; `cargo
                 // install --path` installs every bin the package has.
                 let Some(r) = bins.iter().find(|r| &r.package == pkg) else {
-                    return Err(DevError::Build(format!(
+                    return Err(DevError::Refused(format!(
                         "[bin] install names '{pkg}', which has no bin target \
                          in this workspace"
                     )));
@@ -421,7 +424,7 @@ pub fn cmd_install(
             }
             match pkgs.as_slice() {
                 [] => {
-                    return Err(DevError::Build(
+                    return Err(DevError::Refused(
                         "no bin targets in this workspace - nothing to install".into(),
                     ))
                 }
@@ -433,7 +436,7 @@ pub fn cmd_install(
                         msg.push_str(&format!("  {}\n", r.package));
                     }
                     msg.push_str("list the ones to install under [bin] install");
-                    return Err(DevError::Build(msg));
+                    return Err(DevError::Refused(msg));
                 }
             }
         }
@@ -465,13 +468,22 @@ pub fn cmd_install(
         cargo_args.push("--path".into());
         cargo_args.push(r.package_dir.display().to_string());
         output::run_msg(&format!("cargo {}", cargo_args.join(" ")));
-        forward_cargo(&cargo_args, lock)?;
+        let code = run_cargo(&cargo_args, lock)?;
+        if code != 0 {
+            // Cargo printed its own error; this names which brokkr step died.
+            return Err(DevError::Reported(format!(
+                "cargo install failed for {} (exit code {code})",
+                r.package
+            )));
+        }
     }
     Ok(())
 }
 
-/// Spawn cargo with inherited stdio, mapping a non-zero exit to
-/// `DevError::Subprocess`.
+/// Spawn cargo with inherited stdio and return its exit code. A signal death
+/// is an `Err` (`DevError::Subprocess`, from the passthrough runner); a
+/// non-zero exit is the caller's to map, since `run` propagates it and
+/// `install` reports it.
 ///
 /// Goes through [`output::run_passthrough_timed`] rather than a bare
 /// `Command::status()`. A `brokkr run` child is a real, long-running workload,
@@ -486,20 +498,12 @@ pub fn cmd_install(
 ///
 /// No `current_dir`: `build_root` is cwd by construction, which is where the
 /// caller's `project_root` argument comes from.
-fn forward_cargo(
+pub(crate) fn run_cargo(
     args: &[String],
     lock: Option<&crate::lockfile::LockGuard>,
-) -> Result<(), DevError> {
+) -> Result<i32, DevError> {
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let out = output::run_passthrough_timed("cargo", &arg_refs, lock)?;
-    if out.code == 0 {
-        return Ok(());
-    }
-    Err(DevError::Subprocess {
-        program: format!("cargo {}", args.first().map_or("", String::as_str)),
-        code: Some(out.code),
-        stderr: String::new(),
-    })
+    Ok(output::run_passthrough_timed("cargo", &arg_refs, lock)?.code)
 }
 
 #[cfg(test)]

@@ -199,20 +199,20 @@ fn repo_config_digests(build_root: &Path) -> Vec<(usize, String)> {
 /// Same rule and same reasoning as `artefacts::validate_test_id`.
 pub fn validate_label(label: &str) -> Result<(), DevError> {
     if label.is_empty() {
-        return Err(DevError::Config("baseline name is empty".into()));
+        return Err(DevError::Refused("baseline name is empty".into()));
     }
     if label == "." || label == ".." {
-        return Err(DevError::Config(format!(
+        return Err(DevError::Refused(format!(
             "baseline name must not be '.' or '..' (got {label:?})"
         )));
     }
     if label.starts_with('.') {
-        return Err(DevError::Config(format!(
+        return Err(DevError::Refused(format!(
             "baseline name must not start with '.' (got {label:?})"
         )));
     }
     if label.contains('/') || label.contains('\\') || label.contains('\0') {
-        return Err(DevError::Config(format!(
+        return Err(DevError::Refused(format!(
             "baseline name must be a single path component, no separators (got {label:?})"
         )));
     }
@@ -243,9 +243,9 @@ pub fn read(bench_home: &Path, baseline: &str) -> Result<Option<Stamp>, DevError
     match std::fs::read_to_string(&path) {
         Ok(t) => Ok(Some(Stamp::parse(&t))),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(DevError::Config(format!(
-            "cannot read baseline stamp {}: {e}",
-            path.display()
+        Err(e) => Err(DevError::Io(std::io::Error::new(
+            e.kind(),
+            format!("cannot read baseline stamp {}: {e}", path.display()),
         ))),
     }
 }

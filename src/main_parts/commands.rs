@@ -1077,44 +1077,23 @@ fn print_holder_status(
     }
 }
 
-/// Forward one cargo subcommand with raw args, inheriting stdio, mapping a
-/// non-zero exit (or signal death) to `DevError::Subprocess`. Backs `fmt`;
-/// `run`/`install` moved to `crate::runnables`, which resolves targets from
-/// cargo metadata before spawning.
-fn forward_cargo(subcommand: &str, args: &[String]) -> Result<(), DevError> {
-    use std::os::unix::process::ExitStatusExt;
-    use std::process::Command as ProcCommand;
-
-    let mut cmd = ProcCommand::new("cargo");
-    cmd.arg(subcommand);
-    cmd.args(args);
-    // A raw `Command` outside the `output` helpers, so it needs the capability
-    // stamp explicitly: see `crate::hold`.
-    crate::hold::stamp(&mut cmd);
-    let status = cmd.status().map_err(|error| DevError::Spawn {
-        program: "cargo".into(),
-        error,
-    })?;
-    if status.success() {
-        return Ok(());
+/// `brokkr fmt`: forward `cargo fmt` with raw args, inheriting stdio.
+///
+/// Runs through the same passthrough runner as `brokkr run` (via
+/// [`crate::runnables::run_cargo`]), not a bare `Command::status()`: the runner
+/// installs the SIGTERM guard and publishes cargo's PID into the lock file, so
+/// `brokkr kill` reaches cargo instead of orphaning it. `lock` is the hold
+/// the `disable_toolchain` branch took, `None` when fmt runs lock-free.
+///
+/// A non-zero exit is cargo fmt's own verdict (`--check` reports a diff with
+/// exit 1) and it has already printed it, so the code is propagated silently.
+fn cmd_fmt(args: &[String], lock: Option<&lockfile::LockGuard>) -> Result<(), DevError> {
+    let mut cargo_args: Vec<String> = vec!["fmt".into()];
+    cargo_args.extend(args.iter().cloned());
+    match crate::runnables::run_cargo(&cargo_args, lock)? {
+        0 => Ok(()),
+        code => Err(DevError::ExitCode(code)),
     }
-    let program = format!("cargo {subcommand}");
-    match status.code() {
-        Some(code) => Err(DevError::Subprocess {
-            program,
-            code: Some(code),
-            stderr: String::new(),
-        }),
-        None => Err(DevError::Subprocess {
-            program,
-            code: None,
-            stderr: format!("killed by signal {}", status.signal().unwrap_or(0)),
-        }),
-    }
-}
-
-fn cmd_fmt(args: &[String]) -> Result<(), DevError> {
-    forward_cargo("fmt", args)
 }
 
 

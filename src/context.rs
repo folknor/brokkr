@@ -333,11 +333,11 @@ where
                 if let Err(e) =
                     crate::worktree_record::enforce(project_root, git_root, keep, cutting)
                 {
-                    output::error(&format!("worktree retention: {e}"));
+                    output::warn(&format!("worktree retention: {e}"));
                 }
             })?;
             if let Err(e) = crate::worktree_record::Store::touch(project_root, &wt.record_name) {
-                output::error(&format!("worktree bookkeeping: {e}"));
+                output::warn(&format!("worktree bookkeeping: {e}"));
             }
             output::bench_msg(&format!(
                 "benchmarking commit {} ({})",

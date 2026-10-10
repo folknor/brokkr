@@ -36,8 +36,20 @@ stale default is otherwise indistinguishable from a typo. A name matching
 **several** targets is also an error, listing them; brokkr does not guess
 between two targets that share a name, and the fix belongs in `Cargo.toml`.
 
-A non-zero exit from the program propagates as brokkr's own failure, carrying
-cargo's exit code; a target killed by a signal is reported as such.
+A non-zero exit from the program becomes brokkr's own exit code, silently: the
+program (or cargo, for a build failure) already said what it had to say, so
+brokkr adds no `[error]` line of its own. Under `--commit`, the built program's
+non-zero code propagates silently too; a build failure prints its diagnostics
+and a closing `cargo build failed` line and exits 1. A target
+killed by a signal is reported by cargo and propagates cargo's non-zero code;
+under `--commit`, brokkr reports the signal and exits 1. An accepted interrupt
+or graceful stop exits 130. A failing `cargo install` ends with a one-line `[error]` naming
+the package and cargo's exit code, and exits 1.
+
+Refusals that are about the request rather than the build (no such target, a
+name shared by several targets, no bin targets to install, a `[bin] install`
+entry with no bin) print their message bare, without a `build:` or `config:`
+prefix.
 
 ## Features
 

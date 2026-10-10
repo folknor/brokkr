@@ -126,6 +126,9 @@ fn main() {
     // Don't record `history` itself (avoids recursive noise).
     let is_history = matches!(cli.command, Command::History { .. });
 
+    // Handlers return errors rather than exiting: all command-owned guards
+    // (lock, disabled toolchain, scratch and streams) drop before we record
+    // history and choose the process exit, including propagated child codes.
     let result = run(cli);
     let elapsed_ms = duration_ms(start.elapsed());
 
@@ -258,10 +261,10 @@ fn run(cli: Cli) -> Result<(), DevError> {
         match project::detect_optional()? {
             Some(d) if d.config.disable_toolchain => {
                 toolchain::arm(Some(d.build_root.clone()));
-                let _lock = acquire_cmd_lock(d.project, &d.build_root, "fmt")?;
-                return cmd_fmt(args);
+                let lock = acquire_cmd_lock(d.project, &d.build_root, "fmt")?;
+                return cmd_fmt(args, Some(&lock));
             }
-            _ => return cmd_fmt(args),
+            _ => return cmd_fmt(args, None),
         }
     }
     if let Command::Man { topic, sections, full } = &cli.command {

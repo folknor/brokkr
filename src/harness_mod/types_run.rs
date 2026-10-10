@@ -937,7 +937,9 @@ impl BenchHarness {
 
         // Back up sidecar DB while the lock is still held.
         if let Err(e) = backup_sidecar(&sidecar_db_path, self.project) {
-            output::sidecar_msg(&format!("sidecar backup failed (non-fatal): {e}"));
+            // A warning, not narration: the quiet-gated sidecar line hid a
+            // real loss of the backup.
+            output::warn(&format!("sidecar backup failed (non-fatal): {e}"));
         }
 
         Ok(())
