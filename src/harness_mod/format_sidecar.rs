@@ -364,6 +364,47 @@ pub fn run_hotpath_capture(
     stop_marker: Option<&str>,
     lock: Option<&LockGuard>,
 ) -> Result<(BenchResult, Vec<u8>, crate::sidecar::SidecarData), crate::error::DevError> {
+    let c = run_hotpath_capture_with_stdout(
+        binary,
+        args,
+        scratch_dir,
+        project_root,
+        extra_env,
+        ok_codes,
+        stop_marker,
+        lock,
+    )?;
+    Ok((c.result, c.stderr, c.sidecar))
+}
+
+/// What [`run_hotpath_capture_with_stdout`] returns: the measured result,
+/// both captured streams, and the sidecar data.
+pub struct HotpathCapture {
+    pub result: BenchResult,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+    pub sidecar: crate::sidecar::SidecarData,
+    /// The run was ended by its stop marker actually firing (not merely
+    /// configured), so it did not run to its natural end.
+    pub stopped_by_marker: bool,
+}
+
+/// [`run_hotpath_capture`], keeping the child's stdout too - for a caller
+/// whose harness reports on stdout what it actually did (the piners corpus
+/// harness emits one disposition line per probe it finished, which is how a
+/// measured iteration that exited 0 having run only part of its selection is
+/// caught).
+#[allow(clippy::too_many_arguments)]
+pub fn run_hotpath_capture_with_stdout(
+    binary: &str,
+    args: &[&str],
+    scratch_dir: &std::path::Path,
+    project_root: &std::path::Path,
+    extra_env: &[(&str, &str)],
+    ok_codes: &[i32],
+    stop_marker: Option<&str>,
+    lock: Option<&LockGuard>,
+) -> Result<HotpathCapture, crate::error::DevError> {
     let json_file = scratch_dir.join("hotpath-report.json");
     let json_file_str = json_file.display().to_string();
 
@@ -441,8 +482,8 @@ pub fn run_hotpath_capture(
     };
     std::fs::remove_file(&json_file).ok();
 
-    Ok((
-        BenchResult {
+    Ok(HotpathCapture {
+        result: BenchResult {
             elapsed_ms: ms,
             elapsed_us: Some(us),
             kv,
@@ -451,9 +492,11 @@ pub fn run_hotpath_capture(
             distribution: None,
             hotpath,
         },
+        stdout: captured.stdout,
         stderr,
-        sidecar_result.data,
-    ))
+        sidecar: sidecar_result.data,
+        stopped_by_marker: stopped,
+    })
 }
 
 /// Compute a percentile from a sorted slice using linear interpolation.

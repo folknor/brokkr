@@ -194,7 +194,9 @@ CREATE TABLE IF NOT EXISTS run (
     harness_stderr    TEXT,
     wall_ms           REAL,
     commit_sha        TEXT,
-    dirty             INTEGER
+    dirty             INTEGER,
+    protocol_violations INTEGER,
+    diagnosis         TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_run_started ON run(started_at);
 

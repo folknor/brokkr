@@ -215,6 +215,13 @@ fn render_run_detail(db: &CorpusDb, run_id: i64, full: bool) -> Result<(), DevEr
     if let Some(reason) = &run.fail_reason {
         println!("reason: {reason}");
     }
+    // Evidence from the isolation pass, kept beside (never in place of) the
+    // reason. Diagnostic attempts are not stored as dispositions.
+    if let Some(diagnosis) = run.diagnosis.as_deref().filter(|d| !d.is_empty()) {
+        for line in diagnosis.lines() {
+            println!("diagnosis: {line}");
+        }
+    }
     let disps = db.dispositions_for_run(run_id)?;
     if disps.is_empty() {
         output::result_msg(&format!("run {run_id}: no per-probe dispositions recorded"));

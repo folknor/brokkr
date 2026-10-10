@@ -26,6 +26,8 @@ pub struct RunRow {
     /// Full `HEAD` hash at run start; `None` before v6 or outside git.
     pub commit_sha: Option<String>,
     pub dirty: Option<bool>,
+    /// The isolation pass's note (v7), attached after the run was recorded.
+    pub diagnosis: Option<String>,
 }
 
 /// One per-probe disposition row (the rendered subset of the column set).
@@ -139,12 +141,13 @@ fn run_row(row: &Row<'_>) -> rusqlite::Result<RunRow> {
         probe_count: row.get("probe_count")?,
         commit_sha: row.get("commit_sha")?,
         dirty: row.get::<_, Option<i64>>("dirty")?.map(|v| v != 0),
+        diagnosis: row.get("diagnosis")?,
     })
 }
 
 const RUN_COLS: &str = "\
 run_id, started_at, selector, gated, result, fail_reason, harness_exit_code, probe_count, \
-commit_sha, dirty";
+commit_sha, dirty, diagnosis";
 
 fn disposition_row(row: &Row<'_>) -> rusqlite::Result<DispositionRow> {
     Ok(DispositionRow {
@@ -655,13 +658,19 @@ impl CorpusDb {
     ///
     /// Only a run that actually did the work it was asked to is a valid bound,
     /// so a covering run must also be **comparable**: the harness completed
-    /// (exit 0, or 1 - a break is a finished probe, not an abort), it emitted a
-    /// line for every probe it was given (`probe_count >= ids`), it ran with no
-    /// forwarded harness flags, and it was built in the same profile (`debug`;
-    /// a row predating the recorded profile counts as debug, the parity
-    /// default). Without these, one fast-failing `--all` run - a harness error
-    /// at startup, say - would bound every later selection at a second or two
-    /// and silently disable the ceiling.
+    /// (exit 0, or 1 - a break is a finished probe, not an abort), it broke no
+    /// report or stream integrity (`protocol_violations` 0, which also counts
+    /// a truncated stdout; a row predating v7 has none recorded and is judged
+    /// on coverage alone), **every id it selected has a valid stored
+    /// disposition** (a row whose stored outcome and tier pass the shared
+    /// validator `report::valid_label` and agree with its label - exact id
+    /// coverage read from the disposition rows, so report-only extras
+    /// count for nothing and a line count can never stand in for a missing
+    /// probe), it ran with no forwarded harness flags, and it was built in the
+    /// same profile (`debug`; a row predating the recorded profile counts as
+    /// debug, the parity default). Without these, one fast-failing `--all` run
+    /// (a harness error at startup, say) would bound every later selection
+    /// at a second or two and silently disable the ceiling.
     pub fn estimated_wall_ms(
         &self,
         selection: &[String],
@@ -673,26 +682,63 @@ impl CorpusDb {
         // the selection. The most recent run is often `--all` (covers
         // everything), so this typically returns on the first rows.
         let mut stmt = self.conn().prepare(
-            "SELECT selector, wall_ms, probe_count FROM run \
+            "SELECT run_id, selector, wall_ms FROM run \
              WHERE wall_ms IS NOT NULL AND harness_exit_code IN (0, 1) \
+             AND COALESCE(protocol_violations, 0) = 0 \
              ORDER BY run_id DESC",
         )?;
         let rows = stmt.query_map([], |r| {
             Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, f64>(1)?,
-                r.get::<_, i64>(2)?,
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, f64>(2)?,
             ))
         })?;
         for row in rows {
-            let (selector, wall_ms, probe_count) = row?;
+            let (run_id, selector, wall_ms) = row?;
             if selection_covered(&selector, &want)
-                && comparable_run(&selector, probe_count, debug)
+                && comparable_run(&selector, debug)
+                && self.fully_reported(run_id, &selector)?
             {
                 return Ok(Some(wall_ms));
             }
         }
         Ok(None)
+    }
+
+    /// Does every id the run selected (its `selector` `ids`) have a stored
+    /// disposition whose label is one the gate can use? Read from the
+    /// disposition rows, so an extra line for an unselected probe covers
+    /// nothing.
+    fn fully_reported(&self, run_id: i64, selector: &str) -> Result<bool, DevError> {
+        let Some(asked) = selector_ids(selector) else {
+            return Ok(false);
+        };
+        // The stored outcome and tier must form a valid disposition under the
+        // shared validator (`report::valid_label`), and agree with the label
+        // stored beside them.
+        let mut stmt = self.conn().prepare(
+            "SELECT probe, disposition, outcome, acc_tier FROM disposition WHERE run_id = ?1",
+        )?;
+        let rows = stmt.query_map([run_id], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Option<String>>(2)?,
+                r.get::<_, Option<String>>(3)?,
+            ))
+        })?;
+        let mut valid: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for row in rows {
+            let (probe, disposition, outcome, tier) = row?;
+            let label = outcome
+                .as_deref()
+                .and_then(|o| crate::piners::report::valid_label(o, tier.as_deref()));
+            if label == Some(disposition.as_str()) {
+                valid.insert(probe);
+            }
+        }
+        Ok(asked.iter().all(|id| valid.contains(id)))
     }
 
     /// Run an arbitrary read-only query (the `--sql` escape hatch).
@@ -732,22 +778,27 @@ fn read_raw(
 /// A selector that fails to parse, or carries no `ids`, covers nothing (returns
 /// `false`) - a malformed row is skipped, never treated as a universal bound.
 fn selection_covered(selector: &str, want: &std::collections::HashSet<&str>) -> bool {
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(selector) else {
+    let Some(have) = selector_ids(selector) else {
         return false;
     };
-    let Some(ids) = value.get("ids").and_then(|v| v.as_array()) else {
-        return false;
-    };
-    let have: std::collections::HashSet<&str> =
-        ids.iter().filter_map(serde_json::Value::as_str).collect();
+    let have: std::collections::HashSet<&str> = have.iter().map(String::as_str).collect();
     want.iter().all(|id| have.contains(id))
 }
 
+/// The resolved ids a stored `selector` JSON names, `None` when it does not
+/// parse or carries no `ids` array.
+fn selector_ids(selector: &str) -> Option<Vec<String>> {
+    let value = serde_json::from_str::<serde_json::Value>(selector).ok()?;
+    let ids = value.get("ids")?.as_array()?;
+    Some(ids.iter().filter_map(serde_json::Value::as_str).map(str::to_owned).collect())
+}
+
 /// Is the run whose stored `selector` JSON is `selector` a valid wall basis
-/// for a run built in profile `debug`? See [`CorpusDb::estimated_wall_ms`]:
-/// no forwarded harness flags, the same profile (absent = debug), and a
-/// disposition line for every selected id. Unparsable = not comparable.
-fn comparable_run(selector: &str, probe_count: i64, debug: bool) -> bool {
+/// for a run built in profile `debug`, as far as its selector says? See
+/// [`CorpusDb::estimated_wall_ms`]: no forwarded harness flags and the same
+/// profile (absent = debug). Coverage of its selection is checked separately
+/// against the stored dispositions. Unparsable = not comparable.
+fn comparable_run(selector: &str, debug: bool) -> bool {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(selector) else {
         return false;
     };
@@ -759,12 +810,7 @@ fn comparable_run(selector: &str, probe_count: i64, debug: bool) -> bool {
         .get("debug")
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(true);
-    let asked = value
-        .get("ids")
-        .and_then(serde_json::Value::as_array)
-        .map_or(0, Vec::len);
-    let complete = usize::try_from(probe_count).is_ok_and(|n| n >= asked);
-    !perturbed && run_debug == debug && complete
+    !perturbed && run_debug == debug
 }
 
 fn value_to_string(v: rusqlite::types::ValueRef<'_>) -> String {
@@ -806,6 +852,20 @@ mod tests {
         result: &str,
         nd: &[u8],
     ) {
+        record_protocol(db, selector, wall_ms, exit, result, nd, Some(0));
+    }
+
+    /// [`record_exit`] with an explicit protocol-violation count (`None` =
+    /// a row predating v7).
+    fn record_protocol(
+        db: &CorpusDb,
+        selector: &str,
+        wall_ms: Option<f64>,
+        exit: Option<i32>,
+        result: &str,
+        nd: &[u8],
+        protocol_violations: Option<i64>,
+    ) {
         let report = parse(nd);
         let run = crate::piners::corpus_db::RunRecord {
             run_id: None,
@@ -819,17 +879,65 @@ mod tests {
             harness_exit_code: exit,
             stderr: "",
             wall_ms,
+            protocol_violations,
         };
         db.record_run(&run, &report, &BTreeMap::new(), &[]).unwrap();
     }
 
-    /// One disposition line per id - a run that finished every probe it was
-    /// given, which is what makes it a valid wall basis.
+    /// One valid disposition line per id - a run that finished every probe it
+    /// was given, which is what makes it a valid wall basis.
     fn lines(ids: &[&str]) -> Vec<u8> {
         ids.iter()
-            .map(|id| format!("{{\"probe\":\"{id}\",\"outcome\":\"parity\"}}\n"))
+            .map(|id| {
+                format!(
+                    "{{\"probe\":\"{id}\",\"outcome\":\"parity\",\"acceptance\":{{\"tier\":\"accepted\"}}}}\n"
+                )
+            })
             .collect::<String>()
             .into_bytes()
+    }
+
+    #[test]
+    fn estimated_wall_needs_exact_valid_coverage_and_a_clean_protocol() {
+        let db = CorpusDb::open_in_memory().unwrap();
+        let sel = ["a".to_owned(), "b".to_owned()];
+        // The one real basis.
+        record_full(&db, r#"{"ids":["a","b"]}"#, Some(50_000.0), "pass", &lines(&["a", "b"]));
+        // Two lines, enough for a line count - but `b` is an extra under a
+        // different selection's id, and the selected `b` never reported.
+        record_full(&db, r#"{"ids":["a","b"]}"#, Some(1_000.0), "fail", &lines(&["a", "zz"]));
+        // A line for `b` with no usable label is not a disposition.
+        let mut half_valid = lines(&["a"]);
+        half_valid.extend_from_slice(b"{\"probe\":\"b\",\"outcome\":\"parity\"}\n");
+        record_full(&db, r#"{"ids":["a","b"]}"#, Some(1_100.0), "fail", &half_valid);
+        // Nor is a tier posing as an outcome, though its stored label reads
+        // like a gate label.
+        let mut posing = lines(&["a"]);
+        posing.extend_from_slice(b"{\"probe\":\"b\",\"outcome\":\"accepted\"}\n");
+        record_full(&db, r#"{"ids":["a","b"]}"#, Some(1_150.0), "fail", &posing);
+        // Complete, but it broke protocol (an extra line, say).
+        record_protocol(
+            &db,
+            r#"{"ids":["a","b"]}"#,
+            Some(1_200.0),
+            Some(0),
+            "fail",
+            &lines(&["a", "b", "zz"]),
+            Some(1),
+        );
+        assert_eq!(db.estimated_wall_ms(&sel, true).unwrap(), Some(50_000.0));
+        // A pre-v7 row (no protocol count) with full coverage still counts,
+        // and its extra line does not hurt it.
+        record_protocol(
+            &db,
+            r#"{"ids":["a","b"]}"#,
+            Some(40_000.0),
+            Some(0),
+            "pass",
+            &lines(&["a", "b", "zz"]),
+            None,
+        );
+        assert_eq!(db.estimated_wall_ms(&sel, true).unwrap(), Some(40_000.0));
     }
 
     #[test]

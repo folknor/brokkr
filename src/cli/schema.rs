@@ -2474,7 +2474,11 @@ In depth: `brokkr man nidhogg`."
     /// record/inputs file the pin does not declare is a hard error. Each
     /// probe's disposition is gated against its pinned `expected`: any
     /// deviation fails the run (`--no-gate` reports it instead), as does a
-    /// harness exit the pins do not explain. Default profile is debug.
+    /// harness exit the pins do not explain or a report missing any selected
+    /// probe (with or without `--no-gate`). An abnormal harness end prints
+    /// the whole harness stderr and bisects the unreported probes to find
+    /// which abort alone (`--no-isolate` skips that). Default profile is
+    /// debug.
     ///
     /// In depth: `brokkr man corpus`.
     #[command(name = "corpus", display_order = 70)]
@@ -2530,12 +2534,22 @@ In depth: `brokkr man nidhogg`."
         bless: bool,
 
         /// Run, aggregate, and report the per-probe expected-disposition gate
-        /// diff, but do not fail on it. The harness exit code still governs
-        /// pass/fail. Use during the bless-everything rollout (before
-        /// expectations exist) or for ad-hoc "just show me the breakdown"
-        /// runs.
+        /// diff, but do not fail on it. The harness exit and report
+        /// integrity still govern pass/fail: a selected probe with no valid
+        /// disposition, or a protocol violation, fails the run regardless.
+        /// Use during the bless-everything rollout (before expectations
+        /// exist) or for ad-hoc "just show me the breakdown" runs.
         #[arg(long, conflicts_with_all = ["bench", "hotpath", "alloc"])]
         no_gate: bool,
+
+        /// Skip the diagnostic isolation pass. By default, when the harness
+        /// ends abnormally (exit 2, another unexpected code, or a signal)
+        /// with selected probes unreported, brokkr bisects those probes in
+        /// separate harness invocations to find which abort when run alone.
+        /// Evidence only - nothing it finds is scored. The integrity report
+        /// and the harness stderr are printed either way.
+        #[arg(long, conflicts_with_all = ["verify_only", "reseed", "bench", "hotpath", "alloc"])]
+        no_isolate: bool,
 
         /// Build the harness with the dev profile (`<target>/debug/`).
         /// This is already the default for `corpus`; the flag is here to

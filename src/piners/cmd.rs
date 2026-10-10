@@ -8,18 +8,28 @@
 //! summary line); brokkr aggregates the summary and breakdowns itself (see
 //! [`crate::piners::report`]).
 //!
-//! Two correctness gates apply. First, **verification**: a missing path or a
-//! hash mismatch aborts before anything is built. Second, the **per-probe
-//! expected-disposition gate** ([`crate::piners::gate`]): each probe pins an
-//! `expected` label in `pins.toml`, and any deviation - regression or
-//! surprise improvement - fails the run, as does a probe never blessed.
-//! `--no-gate` downgrades the gate to informational. The run also fails on
-//! any non-zero harness exit the pins do not explain: exit 1 (break(s)) is
-//! acceptable only when every break line is a selected probe pinned to that
-//! break ([`crate::piners::gate::breaks_all_pinned`]), so a probe pinned to
-//! `compile_fail` can pass; any other code, a signal, or a repeated record
-//! always fails. `--bless` refuses to stamp anything from a run that failed
-//! this way.
+//! Three correctness checks apply. First, **verification**: a missing path or
+//! a hash mismatch aborts before anything is built. Second, **report
+//! integrity** ([`crate::piners::integrity`]), independent of the gate and of
+//! `--no-gate`: the report is reconciled against the selected ids exactly,
+//! and a selected probe with no valid disposition, an invalid record, a
+//! repeated record or a line for an unselected probe fails the run - on exit
+//! 0 too. Third, the **per-probe expected-disposition gate**
+//! ([`crate::piners::gate`]): each probe pins an `expected` label in
+//! `pins.toml`, and any deviation - regression or surprise improvement -
+//! fails the run, as does a probe never blessed. `--no-gate` downgrades only
+//! the gate to informational. The run also fails on any non-zero harness exit
+//! the pins do not explain: exit 1 (break(s)) is acceptable only when every
+//! break line is a selected probe pinned to that break
+//! ([`crate::piners::gate::breaks_all_pinned`]), so a probe pinned to
+//! `compile_fail` can pass; any other code or a signal always fails. `--bless`
+//! refuses to stamp anything from a run that failed integrity or its exit.
+//!
+//! An abnormal end (exit 2, another unexpected code, a spontaneous signal)
+//! that left selected probes unreported prints the whole harness stderr and,
+//! unless `--no-isolate`, runs the diagnostic isolation pass
+//! ([`crate::piners::isolate`]) over the unreported probes, after the run is
+//! recorded. Its findings are evidence attached to the run, never scored.
 //!
 //! `--reseed` (re-stamp hashes) and `--bless` (re-stamp dispositions) are the
 //! two deliberate writers of `pins.toml`; see [`crate::piners::reseed`] and
@@ -27,16 +37,18 @@
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::artefacts::ArtefactDir;
 use crate::config::DevConfig;
 use crate::error::DevError;
-use crate::lockfile::{self, LockContext};
+use crate::lockfile::{self, LockContext, LockGuard};
 use crate::output;
 use crate::piners::corpus_db::{CorpusDb, RunRecord};
+use crate::piners::integrity::{self, HarnessEnd, Reconciliation, Trigger};
+use crate::piners::isolate::{self, AttemptOutcome, Failure, StopReason};
 use crate::piners::manifest::Manifest;
-use crate::piners::registry::{self, Registry};
+use crate::piners::registry::{self, Registry, VerifiedProbe};
 use crate::piners::report;
 use crate::piners::select::{self, SelectArgs};
 use crate::ratatoskr::build;
@@ -79,8 +91,11 @@ pub struct CorpusArgs {
     pub bless: bool,
     /// Run + aggregate + report the per-probe gate diff, but never fail on
     /// it. Covers the bless-everything rollout and ad-hoc "just show me"
-    /// runs. The harness exit code still governs pass/fail.
+    /// runs. The harness exit and report integrity still govern pass/fail.
     pub no_gate: bool,
+    /// Skip the diagnostic isolation pass after an abnormal harness end.
+    /// Integrity reporting and the stderr print still apply.
+    pub no_isolate: bool,
     /// `Some(true)` = debug, `Some(false)` = release, `None` = default
     /// (debug for this command).
     pub profile_override: Option<bool>,
@@ -96,7 +111,7 @@ pub struct CorpusArgs {
 }
 
 /// Entry point for `brokkr corpus`.
-#[allow(clippy::too_many_lines)] // linear orchestration: load, select, verify, build, run, report
+#[allow(clippy::too_many_lines, clippy::cognitive_complexity)] // linear orchestration: load, select, verify, build, run, report, diagnose
 pub fn corpus(
     project_root: &Path,
     dev_config: &DevConfig,
@@ -268,6 +283,9 @@ pub fn corpus(
         ));
     }
 
+    // The one deadline: the hang backstop, counted from this launch, bounds
+    // the original attempt and every diagnostic attempt after it together.
+    let launched = Instant::now();
     let capture = match output::run_captured_with_env_and_deadline(
         &binary_str,
         &harness_argv,
@@ -280,6 +298,8 @@ pub fn corpus(
         Ok(c) => c,
         Err(DevError::Interrupted) => {
             lock.clear_child_pid();
+            // A requested stop is never diagnosed: the user asked brokkr to stop.
+            output::corpus_msg(&format!("harness {}; nothing scored, no isolation", HarnessEnd::Interrupted.describe()));
             return Err(record_unfinished(
                 &corpus_db_path,
                 &envelope,
@@ -293,6 +313,7 @@ pub fn corpus(
             lock.clear_child_pid();
             let msg = format!("failed to spawn {}: {e}\n", built.binary.display());
             std::fs::write(artefacts.path().join("spawn-error.txt"), &msg).ok();
+            output::corpus_msg(&format!("harness {}: {e}", HarnessEnd::SpawnFailed.describe()));
             // Recorded so it surfaces in `brokkr corpus-results`; the dir is
             // still preserved - a spawn failure is exactly when on-disk
             // forensics matter most, and the row is a convenience index.
@@ -308,24 +329,27 @@ pub fn corpus(
     };
     lock.clear_child_pid();
 
-    let killed_on_backstop = capture.killed_on_deadline;
+    let end = HarnessEnd::from_status(&capture.captured.status, capture.killed_on_deadline);
+    let output_cut = capture.output_cut;
     let captured = capture.captured;
     // Keep stdout/stderr on disk until ingest commits - the pre-ingest safety
     // net if anything panics between here and the DB write.
-    std::fs::write(artefacts.path().join("harness.stdout"), &captured.stdout).ok();
-    std::fs::write(artefacts.path().join("harness.stderr"), &captured.stderr).ok();
+    // Both writes are attempted; a failure does not stop parsing or ingest
+    // (the capture is in memory), but it fails the run, refuses bless, bars
+    // the run from the ceiling and skips isolation - see `evidence_failed`.
+    let evidence_errors = store_streams(artefacts.path(), &captured.stdout, &captured.stderr);
+    for e in &evidence_errors {
+        output::warn(&format!("harness evidence could not be stored: {e}"));
+    }
+    let evidence_failed = !evidence_errors.is_empty();
 
     let mut report = report::parse(&captured.stdout);
     // One record per key from here on, for the gate, bless and ingest alike;
-    // a repeat is a harness contract violation that fails the run below.
+    // a repeat is a harness contract violation the reconciliation counts.
     let duplicates = report.take_duplicates();
-    if !duplicates.is_empty() {
-        output::corpus_msg(&format!(
-            "harness emitted {}, kept the last of each: {}",
-            output::count(duplicates.len(), "repeated record"),
-            duplicates.join(", ")
-        ));
-    }
+    // Integrity, independent of the gate: what the report carries against
+    // exactly what was selected.
+    let rec = Reconciliation::reconcile(&ids, &report, duplicates);
 
     let elapsed_ms = captured.elapsed.as_millis();
     let harness_code = captured.status.code();
@@ -340,46 +364,49 @@ pub fn corpus(
     let gate_diffs = crate::piners::gate::evaluate(&ids, &registry, &report);
     let gate_blocks = !args.bless && !args.no_gate && !gate_diffs.is_empty();
 
-    // Is the harness exit acceptable? 0 always is. 1 ("break(s)") is when
-    // every break is one the pins expect - or, for bless, when the report
-    // actually carries the breaks, since recording them is bless's job. A
-    // repeated record, 2, any other code, a signal, or the hang backstop is
-    // never acceptable.
-    let harness_ok = duplicates.is_empty()
-        && !killed_on_backstop
-        && match harness_code {
-            Some(0) => true,
-            Some(1) if args.bless => crate::piners::gate::report_has_break(&report),
-            Some(1) => crate::piners::gate::breaks_all_pinned(&ids, &registry, &report),
-            _ => false,
-        };
+    // Is exit 1 ("break(s)") explained? For a gated run, when every break is
+    // one the pins expect; for bless, when the report actually carries the
+    // breaks, since recording them is bless's job.
+    let exit1_explained = if args.bless {
+        crate::piners::gate::report_has_break(&report)
+    } else {
+        crate::piners::gate::breaks_all_pinned(&ids, &registry, &report)
+    };
+    let mut harness_reasons = harness_failures(end, &rec, output_cut, exit1_explained);
+    if evidence_failed {
+        harness_reasons.push(evidence_reason(&evidence_errors));
+    }
+    let harness_ok = harness_reasons.is_empty();
     let run_pass = harness_ok && !gate_blocks;
 
     // Render the body now that the deviation set is known. Probes matching
     // their pin collapse to a single count; the survivors are worth reading.
+    // The summary leads with the reconciliation, so an empty report reads as
+    // "N selected, 0 scored, N missing", never as "0 total".
     let deviating: HashSet<&str> = gate_diffs.iter().map(|d| d.probe.as_str()).collect();
-    report::render(&report, &deviating);
+    // Aggregates and the hidden-match count cover the scored set only.
+    let scored: HashSet<&str> = rec.valid.iter().map(String::as_str).collect();
+    report::render(&report, &scored, &deviating, &rec.summary());
+    for line in rec.detail_lines() {
+        output::corpus_msg(&line);
+    }
+    let stderr_text = String::from_utf8_lossy(&captured.stderr);
+    if !end.completed_status() || !rec.complete() {
+        // How the harness ended against how much it reported, then its whole
+        // stderr: the only evidence of an abort.
+        output::corpus_msg(&end_line(end, &rec));
+        integrity::print_stderr("harness stderr", &stderr_text);
+    }
 
     // One-line failure classification, mirrored into the DB so a discarded run
-    // dir loses nothing. Harness breaks rank ahead of gate deviations.
+    // dir loses nothing. Harness and integrity failures rank ahead of gate
+    // deviations.
     let fail_reason: Option<String> = if run_pass {
         None
     } else if harness_ok {
         Some(output::count(gate_diffs.len(), "gate deviation"))
-    } else if killed_on_backstop {
-        Some(format!(
-            "harness killed at the {}s hang backstop",
-            HARNESS_HANG_BACKSTOP.as_secs()
-        ))
-    } else if !duplicates.is_empty() {
-        Some(output::count(duplicates.len(), "repeated harness record"))
     } else {
-        Some(match harness_code {
-            Some(1) => "parity breaks".to_owned(),
-            Some(2) => "harness error".to_owned(),
-            Some(c) => format!("harness exit={c}"),
-            None => "harness killed by signal".to_owned(),
-        })
+        Some(harness_reasons.join("; "))
     };
 
     // Persist the run BEFORE any pins mutation or finalize, using the pinned
@@ -392,19 +419,21 @@ pub fn corpus(
             (id.clone(), exp)
         })
         .collect();
-    let stderr_text = String::from_utf8_lossy(&captured.stderr);
     let record = envelope.record(
         if run_pass { "pass" } else { "fail" },
         fail_reason.as_deref(),
         harness_code,
         &stderr_text,
         // brokkr's own measurement of the whole harness subprocess - the real
-        // wall the ceiling estimates future runs from.
+        // wall the ceiling estimates future runs from. The original attempt
+        // only: diagnosis below never extends it.
         Some(elapsed_ms as f64),
+        Some(stored_violations(&rec, output_cut, evidence_failed)),
     );
     // From here the run is recorded exactly once: a later failure (a bless
     // refusing a changed pins.toml, a finalize error) is the command's error,
-    // not a second row under this id.
+    // not a second row under this id. Recorded BEFORE any diagnosis, so an
+    // interrupted diagnosis cannot lose the original record.
     if let Err(e) = ingest_run(&corpus_db_path, &record, &report, &expected, &gate_diffs) {
         output::warn(&format!(
             "failed to persist run to {}: {e}",
@@ -414,13 +443,81 @@ pub fn corpus(
         return Err(e);
     }
 
+    // Diagnostic isolation: evidence only, attached to the recorded run.
+    // Never on top of evidence the run could not keep: that is an explicit
+    // evidence-storage stop, recorded on the run like a diagnosis.
+    let trigger = integrity::isolation_trigger(end, &rec, args.no_isolate);
+    if evidence_failed {
+        let note = evidence_note(trigger == Trigger::Isolate, &evidence_errors);
+        output::corpus_msg(&note);
+        let stored = CorpusDb::open(&corpus_db_path).and_then(|db| db.append_diagnosis(run_id, &note));
+        if let Err(e) = stored {
+            output::warn(&format!("run {run_id}: the evidence-storage failure could not be recorded: {e}"));
+        }
+    }
+    let diagnosis = match trigger {
+        _ if evidence_failed => None,
+        Trigger::Isolate => {
+            let attempts = AttemptEnv {
+                run_dir: artefacts.path(),
+                corpus_root: &corpus_root,
+                verified: &verified,
+                registry: &registry,
+                binary: &binary_str,
+                harness_args: &args.harness_args,
+                bin_dir: &bin_dir_str,
+                project_root,
+                lock: &lock,
+                launched,
+            };
+            Some(diagnose(&attempts, rec.unreported(&ids), &corpus_db_path, run_id))
+        }
+        Trigger::Disabled => {
+            output::corpus_msg("isolation skipped (--no-isolate)");
+            None
+        }
+        _ => None,
+    };
+    if diagnosis.is_some() {
+        output::corpus_msg(&format!(
+            "harness wall {elapsed_ms}ms; total elapsed including diagnosis {}ms",
+            launched.elapsed().as_millis()
+        ));
+    }
+    let diagnosis_interrupted = diagnosis
+        .as_ref()
+        .is_some_and(|d| d.stopped == Some(isolate::StopReason::Interrupted));
+    // Whenever diagnosis ran, its attempt dirs are the evidence: keep the
+    // run dir and say where it is. When the run's own streams could not be
+    // written, keep it too and say which evidence it lacks.
+    let finish = |artefacts: ArtefactDir| -> Result<(), DevError> {
+        if evidence_failed {
+            output::corpus_msg(&preserved_incomplete_line(artefacts.path(), &evidence_errors));
+            crate::artefacts::emit_clean_hint(output::corpus_msg);
+            artefacts.finalize_failure();
+            Ok(())
+        } else if diagnosis.is_some() {
+            output::corpus_msg(&format!("artefacts preserved: {}", artefacts.path().display()));
+            crate::artefacts::emit_clean_hint(output::corpus_msg);
+            artefacts.finalize_failure();
+            Ok(())
+        } else {
+            artefacts.finalize_success()
+        }
+    };
+    if diagnosis_interrupted {
+        finish(artefacts)?;
+        return Err(DevError::Interrupted);
+    }
+
     // Bless: stamp current dispositions into pins.toml. The run is already
     // persisted, so the dir drops like any other (unless --keep-artefacts).
-    // A harness that failed (see harness_ok) blesses nothing: its surviving
-    // lines are whatever it emitted before it died, not the dispositions.
+    // A harness that failed or broke the report contract (see harness_ok)
+    // blesses nothing: its surviving lines are whatever it emitted before it
+    // died, not the dispositions.
     if args.bless {
         if !harness_ok {
-            artefacts.finalize_success()?;
+            finish(artefacts)?;
             let reason = fail_reason.unwrap_or_else(|| "harness failed".to_owned());
             output::corpus_msg(&format!(
                 "FAIL: {reason} in {elapsed_ms}ms - nothing blessed, pins.toml untouched \
@@ -430,7 +527,7 @@ pub fn corpus(
         }
         let pins_path = registry_dir.join("pins.toml");
         crate::piners::bless::apply(&pins_path, &mut registry, &report, &ids)?;
-        artefacts.finalize_success()?;
+        finish(artefacts)?;
         return Ok(());
     }
 
@@ -438,21 +535,306 @@ pub fn corpus(
         crate::piners::gate::render_diffs(&gate_diffs);
     }
 
-    // Data is durable in the DB; the dir is always dropped (unless
-    // --keep-artefacts). No preserve-on-failure - `brokkr corpus-results` is the
-    // home for the run's drill-down now.
+    // Data is durable in the DB; the dir is dropped (unless --keep-artefacts)
+    // except when diagnosis ran, whose attempt dirs are not in the DB.
+    // `brokkr corpus-results` is the home for the run's drill-down.
+    finish(artefacts)?;
     if run_pass {
         output::corpus_msg(&format!("PASS in {elapsed_ms}ms"));
-        artefacts.finalize_success()?;
         Ok(())
     } else {
-        artefacts.finalize_success()?;
         let reason = fail_reason.unwrap_or_else(|| "fail".to_owned());
         output::corpus_msg(&format!(
             "FAIL: {reason} in {elapsed_ms}ms (recorded; see `brokkr corpus-results`)"
         ));
         Err(DevError::ExitCode(1))
     }
+}
+
+/// Run the isolation pass over `unreported`, print what it found, and attach
+/// its note to the already-recorded run `run_id`. A failure to record the
+/// note is reported, never fatal: the original row stands either way.
+fn diagnose(
+    attempts: &AttemptEnv<'_>,
+    unreported: Vec<String>,
+    db_path: &Path,
+    run_id: i64,
+) -> isolate::Diagnosis {
+    output::corpus_msg(&format!(
+        "isolating: bisecting only the {} the original run left unreported \
+         (same binary, env, flags and forwarded args; attempt dirs under {})",
+        output::count(unreported.len(), "selected probe"),
+        attempts.run_dir.display()
+    ));
+    let d = isolate::bisect(unreported, |subset, n| attempts.run(subset, n));
+    for line in d.lines() {
+        output::corpus_msg(&line);
+    }
+    let stored = CorpusDb::open(db_path)
+        .and_then(|db| db.append_diagnosis(run_id, &d.note(attempts.run_dir)));
+    if let Err(e) = stored {
+        output::warn(&format!("run {run_id}: the diagnosis could not be recorded: {e}"));
+    }
+    d
+}
+
+/// Every reason the harness side of a run fails, independent of the gate:
+/// how it ended, whether its output was cut, its protocol violations, and
+/// selected probes left without a valid disposition. Empty means the harness
+/// is acceptable. `exit1_explained` is whether an exit of 1 is accounted for
+/// by breaks (see the caller).
+fn harness_failures(
+    end: HarnessEnd,
+    rec: &Reconciliation,
+    output_cut: bool,
+    exit1_explained: bool,
+) -> Vec<String> {
+    let mut reasons = Vec::new();
+    match end {
+        HarnessEnd::Code(0) => {}
+        HarnessEnd::Code(1) if exit1_explained => {}
+        HarnessEnd::Code(1) => reasons.push("parity breaks".to_owned()),
+        HarnessEnd::Backstop => reasons.push(format!(
+            "harness killed at the {}s hang backstop",
+            HARNESS_HANG_BACKSTOP.as_secs()
+        )),
+        other => reasons.push(abnormal_reason(other, rec)),
+    }
+    if output_cut {
+        reasons.push("harness output did not close after exit (stdout may be truncated)".to_owned());
+    }
+    // An abnormal end already counted what it left unreported.
+    if !rec.complete() && (end.completed_status() || end == HarnessEnd::Backstop) {
+        reasons.push(format!(
+            "{} of {} selected probes without a valid disposition",
+            rec.unscored(),
+            rec.selected
+        ));
+    }
+    if !rec.invalid.is_empty() {
+        reasons.push(output::count(rec.invalid.len(), "invalid harness record"));
+    }
+    if !rec.duplicates.is_empty() {
+        reasons.push(output::count(rec.duplicates.len(), "repeated harness record"));
+    }
+    if !rec.extras.is_empty() {
+        reasons.push(output::count(rec.extras.len(), "report-only extra record"));
+    }
+    reasons
+}
+
+/// `harness exited 2 before reporting K of N` / `harness killed by signal 11
+/// after reporting all N` - the short form stored as the fail reason.
+fn abnormal_reason(end: HarnessEnd, rec: &Reconciliation) -> String {
+    if rec.complete() {
+        format!("harness {} after reporting all {}", end.describe(), rec.selected)
+    } else {
+        format!("harness {} before reporting {} of {}", end.describe(), rec.unscored(), rec.selected)
+    }
+}
+
+/// The console line for a run that ended abnormally or left probes
+/// unreported.
+fn end_line(end: HarnessEnd, rec: &Reconciliation) -> String {
+    if end.completed_status() {
+        format!(
+            "harness {} without a valid disposition for {} of {} selected probes",
+            end.describe(),
+            rec.unscored(),
+            rec.selected
+        )
+    } else {
+        integrity::abnormal_end_line(end, rec)
+    }
+}
+
+/// Everything a diagnostic attempt reuses from the original run: the same
+/// built binary, verified probes, env, cwd and forwarded harness args, under
+/// the same lock and the same deadline.
+struct AttemptEnv<'a> {
+    run_dir: &'a Path,
+    corpus_root: &'a Path,
+    verified: &'a [VerifiedProbe],
+    registry: &'a Registry,
+    binary: &'a str,
+    harness_args: &'a [String],
+    bin_dir: &'a str,
+    project_root: &'a Path,
+    lock: &'a LockGuard,
+    /// When the original harness launched; the backstop counts from here.
+    launched: Instant,
+}
+
+impl AttemptEnv<'_> {
+    /// Run one diagnostic attempt over `subset` in `<run dir>/attempt-<n>/`:
+    /// its own manifest (built from the same verified probes), stdout,
+    /// stderr and `BROKKR_HARNESS_ARTEFACT_DIR`. Completed only on exit 0/1
+    /// with a valid disposition for every probe of the subset.
+    fn run(&self, subset: &[String], n: usize) -> AttemptOutcome {
+        if crate::shutdown::is_shutdown_requested() {
+            return AttemptOutcome::Stop(StopReason::Interrupted);
+        }
+        let Some(remaining) = HARNESS_HANG_BACKSTOP
+            .checked_sub(self.launched.elapsed())
+            .filter(|d| !d.is_zero())
+        else {
+            return AttemptOutcome::Stop(StopReason::Deadline);
+        };
+        let dir = self.run_dir.join(format!("attempt-{n}"));
+        let manifest_path = dir.join("manifest.json");
+        let wanted: HashSet<&str> = subset.iter().map(String::as_str).collect();
+        let probes: Vec<VerifiedProbe> =
+            self.verified.iter().filter(|v| wanted.contains(v.id.as_str())).cloned().collect();
+        let prepared = std::fs::create_dir_all(&dir).map_err(DevError::Io).and_then(|()| {
+            Manifest::build(self.corpus_root, &probes, self.registry).write(&manifest_path)
+        });
+        if let Err(e) = prepared {
+            return AttemptOutcome::Stop(StopReason::Setup(format!("{}: {e}", dir.display())));
+        }
+        let manifest_str = manifest_path.display().to_string();
+        let dir_str = dir.display().to_string();
+        let env: [(&str, &str); 2] = [
+            ("BROKKR_HARNESS_ARTEFACT_DIR", &dir_str),
+            ("BROKKR_TEST_BIN_DIR", self.bin_dir),
+        ];
+        let mut argv: Vec<&str> = vec!["--manifest", &manifest_str];
+        argv.extend(self.harness_args.iter().map(String::as_str));
+        let lock = self.lock;
+        let capture = output::run_captured_with_env_and_deadline(
+            self.binary,
+            &argv,
+            self.project_root,
+            &env,
+            remaining,
+            Some(&|pid| lock.set_child_pid(pid)),
+            true,
+        );
+        lock.clear_child_pid();
+        let capture = match capture {
+            Ok(c) => c,
+            Err(DevError::Interrupted) => return AttemptOutcome::Stop(StopReason::Interrupted),
+            Err(e) => return AttemptOutcome::Stop(StopReason::SpawnFailed(e.to_string())),
+        };
+        // The streams are the evidence the run will claim to preserve: a
+        // failure to store them stops diagnosis rather than go on unrecorded.
+        if let Err(reason) =
+            store_attempt_streams(&dir, &capture.captured.stdout, &capture.captured.stderr)
+        {
+            return AttemptOutcome::Stop(reason);
+        }
+        if capture.killed_on_deadline {
+            // Never attributed to a probe: the subset ran out of shared time.
+            return AttemptOutcome::Stop(StopReason::Deadline);
+        }
+        let end = HarnessEnd::from_status(&capture.captured.status, false);
+        let mut report = report::parse(&capture.captured.stdout);
+        let duplicates = report.take_duplicates();
+        let rec = Reconciliation::reconcile(subset, &report, duplicates);
+        output::corpus_msg(&format!(
+            "attempt {n}: {} -> {}, {}",
+            output::count(subset.len(), "probe"),
+            end.short(),
+            rec.summary()
+        ));
+        match classify_attempt(end, &rec, capture.output_cut) {
+            None => AttemptOutcome::Completed,
+            Some(failure) => AttemptOutcome::Failed {
+                end,
+                failure,
+                stderr: String::from_utf8_lossy(&capture.captured.stderr).into_owned(),
+                dir,
+            },
+        }
+    }
+}
+
+/// How an attempt failed, or `None` when it completed. Completed means exit
+/// 0/1, a valid disposition for every probe of the subset, no protocol
+/// violation and an intact stream. An abnormal end is an abort; a completed
+/// status with a broken protocol or a cut stream is protocol-invalid; a
+/// completed status that simply left probes unreported is incomplete. Only
+/// the first is ever called an abort.
+fn classify_attempt(end: HarnessEnd, rec: &Reconciliation, output_cut: bool) -> Option<Failure> {
+    if !end.completed_status() {
+        return Some(Failure::Aborted);
+    }
+    if rec.protocol_violations() > 0 || output_cut {
+        let mut what = Vec::new();
+        if rec.protocol_violations() > 0 {
+            what.push(rec.summary());
+        }
+        if output_cut {
+            what.push("stdout cut short".to_owned());
+        }
+        return Some(Failure::ProtocolInvalid(what.join("; ")));
+    }
+    if !rec.complete() {
+        return Some(Failure::Incomplete(rec.summary()));
+    }
+    None
+}
+
+/// Write captured streams into `dir` as `harness.stdout`/`harness.stderr`.
+/// Both writes are attempted; returns one path-specific message per failure
+/// (empty when both landed). Used for the original run and every attempt.
+fn store_streams(dir: &Path, stdout: &[u8], stderr: &[u8]) -> Vec<String> {
+    let mut failed = Vec::new();
+    for (name, bytes) in [("harness.stdout", stdout), ("harness.stderr", stderr)] {
+        let path = dir.join(name);
+        if let Err(e) = std::fs::write(&path, bytes) {
+            failed.push(format!("{}: {e}", path.display()));
+        }
+    }
+    failed
+}
+
+/// The fail reason for run evidence that could not be stored.
+fn evidence_reason(errors: &[String]) -> String {
+    format!("evidence storage failed: {}", errors.join("; "))
+}
+
+/// The note printed and stored on the run when its own streams could not be
+/// written: an explicit evidence-storage stop in place of isolation.
+fn evidence_note(would_isolate: bool, errors: &[String]) -> String {
+    let what = if would_isolate {
+        "isolation stopped before its first attempt on an evidence-storage failure"
+    } else {
+        "evidence-storage failure"
+    };
+    format!("{what}: {}", errors.join("; "))
+}
+
+/// `artefacts preserved with incomplete evidence (failed: harness.stdout): DIR`.
+fn preserved_incomplete_line(dir: &Path, errors: &[String]) -> String {
+    let failed: Vec<&str> = ["harness.stdout", "harness.stderr"]
+        .into_iter()
+        .filter(|name| errors.iter().any(|e| e.contains(name)))
+        .collect();
+    format!(
+        "artefacts preserved with incomplete evidence (failed: {}): {}",
+        failed.join(", "),
+        dir.display()
+    )
+}
+
+/// [`store_streams`] for a diagnostic attempt: any failure stops diagnosis
+/// with the evidence-storage reason naming every failed path.
+fn store_attempt_streams(dir: &Path, stdout: &[u8], stderr: &[u8]) -> Result<(), StopReason> {
+    let failed = store_streams(dir, stdout, stderr);
+    if failed.is_empty() {
+        Ok(())
+    } else {
+        Err(StopReason::EvidenceStorage(failed.join("; ")))
+    }
+}
+
+/// The integrity count stored on the run row: reconciliation protocol
+/// violations, plus one for a stdout cut short, plus one when the run's own
+/// stream evidence could not be stored. Any nonzero count bars the run from
+/// the runtime ceiling.
+fn stored_violations(rec: &Reconciliation, output_cut: bool, evidence_failed: bool) -> i64 {
+    let n = rec.protocol_violations() + usize::from(output_cut) + usize::from(evidence_failed);
+    i64::try_from(n).unwrap_or(i64::MAX)
 }
 
 /// Hard-verify the feed groups referenced by the selection, the feed leg of
@@ -569,6 +951,7 @@ impl<'a> Envelope<'a> {
         harness_exit_code: Option<i32>,
         stderr: &'a str,
         wall_ms: Option<f64>,
+        protocol_violations: Option<i64>,
     ) -> RunRecord<'a> {
         RunRecord {
             run_id: Some(self.run_id),
@@ -582,6 +965,7 @@ impl<'a> Envelope<'a> {
             harness_exit_code,
             stderr,
             wall_ms,
+            protocol_violations,
         }
     }
 }
@@ -623,7 +1007,7 @@ fn record_unfinished(
     };
     let stderr = detail.map_or("", |(_, stderr)| stderr);
     // Never ran -> no measured wall, no exit code.
-    let record = envelope.record(result, Some(&reason), None, stderr, None);
+    let record = envelope.record(result, Some(&reason), None, stderr, None, None);
     if let Err(e) = ingest_run(db_path, &record, &report::HarnessReport::default(), &BTreeMap::new(), &[]) {
         output::warn(&format!(
             "run {} could not be recorded in {}: {e}",
@@ -677,6 +1061,7 @@ mod tests {
             harness_exit_code: None,
             stderr: "",
             wall_ms: None,
+            protocol_violations: None,
         }
     }
 
@@ -760,7 +1145,8 @@ mod tests {
             selector: r#"{"all":true}"#,
             gated: false,
         };
-        let rec = envelope.record("fail", Some("why"), Some(2), "err", Some(1.5));
+        let rec = envelope.record("fail", Some("why"), Some(2), "err", Some(1.5), Some(3));
+        assert_eq!(rec.protocol_violations, Some(3));
         assert_eq!(rec.run_id, Some(17));
         assert_eq!(rec.started_at, Some("2026-01-02 03:04:05"));
         assert_eq!(rec.commit_sha, Some("abc123"));
@@ -772,6 +1158,123 @@ mod tests {
         assert_eq!(rec.harness_exit_code, Some(2));
         assert_eq!(rec.stderr, "err");
         assert_eq!(rec.wall_ms, Some(1.5));
+    }
+
+    fn reconciled(ids: &[&str], nd: &str) -> Reconciliation {
+        let ids: Vec<String> = ids.iter().map(|s| (*s).to_owned()).collect();
+        let mut report = report::parse(nd.as_bytes());
+        let dups = report.take_duplicates();
+        Reconciliation::reconcile(&ids, &report, dups)
+    }
+
+    const A_OK: &str = "{\"probe\":\"a\",\"outcome\":\"parity\",\"acceptance\":{\"tier\":\"accepted\"}}\n";
+
+    #[test]
+    fn a_clean_exit_with_a_missing_probe_fails() {
+        let rec = reconciled(&["a", "b"], A_OK);
+        let r = harness_failures(HarnessEnd::Code(0), &rec, false, false);
+        assert_eq!(r, vec!["1 of 2 selected probes without a valid disposition".to_owned()]);
+        assert!(harness_failures(HarnessEnd::Code(0), &reconciled(&["a"], A_OK), false, false).is_empty());
+    }
+
+    #[test]
+    fn an_abnormal_end_names_how_much_went_unreported() {
+        let rec = reconciled(&["a", "b", "c"], A_OK);
+        let r = harness_failures(HarnessEnd::Code(2), &rec, false, false);
+        assert_eq!(r, vec!["harness exited 2 before reporting 2 of 3".to_owned()]);
+        let r = harness_failures(HarnessEnd::Signal(11), &reconciled(&["a"], A_OK), false, false);
+        assert_eq!(r, vec!["harness killed by signal 11 after reporting all 1".to_owned()]);
+    }
+
+    #[test]
+    fn protocol_violations_fail_a_complete_clean_run() {
+        let nd = format!("{A_OK}{A_OK}{{\"probe\":\"zz\",\"outcome\":\"no_tv_data\"}}\nnoise\n");
+        let rec = reconciled(&["a"], &nd);
+        let r = harness_failures(HarnessEnd::Code(0), &rec, false, false);
+        assert_eq!(
+            r,
+            vec![
+                "1 invalid harness record".to_owned(),
+                "1 repeated harness record".to_owned(),
+                "1 report-only extra record".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn exit_one_needs_explaining_and_a_cut_output_fails() {
+        let rec = reconciled(&["a"], A_OK);
+        assert!(harness_failures(HarnessEnd::Code(1), &rec, false, true).is_empty());
+        assert_eq!(harness_failures(HarnessEnd::Code(1), &rec, false, false), vec!["parity breaks".to_owned()]);
+        assert_eq!(harness_failures(HarnessEnd::Code(0), &rec, true, false).len(), 1);
+        let backstop = harness_failures(HarnessEnd::Backstop, &reconciled(&["a", "b"], A_OK), false, false);
+        assert_eq!(backstop.len(), 2, "{backstop:?}");
+    }
+
+    #[test]
+    fn a_truncated_stream_is_stored_as_an_integrity_violation() {
+        let rec = reconciled(&["a"], A_OK);
+        assert_eq!(stored_violations(&rec, false, false), 0);
+        assert_eq!(stored_violations(&rec, true, false), 1);
+        let dup = reconciled(&["a"], &format!("{A_OK}{A_OK}"));
+        assert_eq!(stored_violations(&dup, true, false), 2);
+    }
+
+    #[test]
+    fn unstored_run_evidence_names_every_failed_file_and_bars_the_ceiling() {
+        let root = scratch("run_streams");
+        assert!(store_streams(&root, b"out", b"err").is_empty());
+        // Both writes are attempted and both failures named, not just the first.
+        let gone = root.join("no-such-dir");
+        let errors = store_streams(&gone, b"out", b"err");
+        assert_eq!(errors.len(), 2, "{errors:?}");
+        assert!(errors[0].contains("harness.stdout") && errors[1].contains("harness.stderr"));
+        assert_eq!(stored_violations(&reconciled(&["a"], A_OK), false, true), 1);
+        assert!(evidence_reason(&errors).starts_with("evidence storage failed: "));
+        assert!(evidence_note(true, &errors)
+            .starts_with("isolation stopped before its first attempt on an evidence-storage failure: "));
+        let line = preserved_incomplete_line(&gone, &errors[1..]);
+        assert!(
+            line.starts_with("artefacts preserved with incomplete evidence (failed: harness.stderr): "),
+            "{line}"
+        );
+    }
+
+    #[test]
+    fn attempts_tell_aborts_from_incomplete_and_protocol_invalid() {
+        let ok = reconciled(&["a"], A_OK);
+        assert_eq!(classify_attempt(HarnessEnd::Code(0), &ok, false), None);
+        assert_eq!(classify_attempt(HarnessEnd::Code(1), &ok, false), None);
+        assert_eq!(classify_attempt(HarnessEnd::Code(2), &ok, false), Some(Failure::Aborted));
+        assert_eq!(classify_attempt(HarnessEnd::Signal(11), &ok, false), Some(Failure::Aborted));
+        let missing = reconciled(&["a", "b"], A_OK);
+        assert!(matches!(
+            classify_attempt(HarnessEnd::Code(0), &missing, false),
+            Some(Failure::Incomplete(_))
+        ));
+        // Complete coverage with an extra line is not a completed attempt.
+        let extra = reconciled(&["a"], &format!("{A_OK}{{\"probe\":\"zz\",\"outcome\":\"no_tv_data\"}}\n"));
+        assert!(matches!(
+            classify_attempt(HarnessEnd::Code(0), &extra, false),
+            Some(Failure::ProtocolInvalid(_))
+        ));
+        assert!(matches!(
+            classify_attempt(HarnessEnd::Code(0), &ok, true),
+            Some(Failure::ProtocolInvalid(w)) if w.contains("cut short")
+        ));
+    }
+
+    #[test]
+    fn an_unwritable_attempt_dir_stops_diagnosis_with_a_named_failure() {
+        let root = scratch("attempt_streams");
+        assert!(store_attempt_streams(&root, b"out", b"err").is_ok());
+        assert_eq!(fs::read(root.join("harness.stderr")).unwrap(), b"err");
+        let gone = root.join("no-such-dir");
+        let err = store_attempt_streams(&gone, b"out", b"err").unwrap_err();
+        assert!(
+            matches!(&err, StopReason::EvidenceStorage(m) if m.contains("harness.stdout")),
+            "{err:?}"
+        );
     }
 
     #[test]

@@ -7,6 +7,9 @@
 //! grows it (extra tiers, deltas, provenance) ahead of brokkr learning to
 //! render them, the same forward-compat posture as the cargo JSON parser. A
 //! stray legacy `summary` line is skipped rather than mis-parsed as a probe.
+//! Tolerance covers unknown *fields*, not unusable *records*: a stdout line
+//! that is not JSON, or a disposition line that does not deserialize, is kept
+//! as an [`InvalidRecord`] for the integrity check to fail the run on.
 //!
 //! Lines are discriminated by an optional `kind` field. A line with no `kind`
 //! (or `kind == "disposition"`) is a per-probe disposition line: the only kind
@@ -151,6 +154,32 @@ where
         .collect())
 }
 
+/// The acceptance tiers a `parity` outcome may carry.
+pub const PARITY_TIERS: [&str; 4] = ["byte_exact", "accepted", "actionable_drift", "count_divergent"];
+
+/// The outcomes other than `parity`; each is its own gate label and carries
+/// no acceptance tier.
+pub const NON_PARITY_OUTCOMES: [&str; 4] = ["compile_fail", "runtime_fail", "no_tv_data", "no_overlap"];
+
+/// The one disposition validator: the gate label an `outcome` plus its
+/// acceptance `tier` (empty counts as absent) stand for, or `None` when the
+/// pair is not a valid disposition. `parity` needs one of
+/// [`PARITY_TIERS`]; any other outcome must be one of
+/// [`NON_PARITY_OUTCOMES`] and carry no tier. So `{"outcome":"accepted"}`
+/// (a tier posing as an outcome) and `parity` with tier `runtime_fail` are
+/// both invalid, though each derives a label that looks pinnable.
+pub fn valid_label(outcome: &str, tier: Option<&str>) -> Option<&'static str> {
+    let tier = tier.filter(|t| !t.is_empty());
+    if outcome == "parity" {
+        let t = tier?;
+        PARITY_TIERS.iter().copied().find(|p| *p == t)
+    } else if tier.is_none() {
+        NON_PARITY_OUTCOMES.iter().copied().find(|o| *o == outcome)
+    } else {
+        None
+    }
+}
+
 /// A per-probe disposition line.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ProbeLine {
@@ -215,6 +244,14 @@ impl ProbeLine {
         } else {
             self.outcome.clone()
         }
+    }
+
+    /// The probe's gate label if the line is a *valid* disposition, `None`
+    /// otherwise. The one validator ([`valid_label`]) over the outcome and
+    /// its acceptance tier together; shared by integrity, the gate, bless and
+    /// (over the stored columns) the runtime ceiling.
+    pub fn valid_disposition(&self) -> Option<&'static str> {
+        valid_label(&self.outcome, self.acceptance.as_ref().map(|a| a.tier.as_str()))
     }
 
     /// The effective `ours_only` count after discounting window-boundary
@@ -291,6 +328,17 @@ pub struct TradeDiffLine {
     pub tv_exit_signal: Option<String>,
 }
 
+/// A stdout line that should have been a disposition record and is not one
+/// brokkr can use: not JSON at all, or a disposition-kind line that does not
+/// deserialize. A protocol violation - the integrity check
+/// (`crate::piners::integrity`) fails the run on any - and never a scored
+/// probe. `probe` is the id the line named, when it named one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InvalidRecord {
+    pub probe: Option<String>,
+    pub reason: String,
+}
+
 /// Everything parsed out of one harness run.
 #[derive(Debug, Default)]
 pub struct HarnessReport {
@@ -298,6 +346,9 @@ pub struct HarnessReport {
     /// Per-trade drill-down records (`kind == "trade_diff"`), collected for
     /// persistence. Empty for an exact run. Never feeds the summary or gate.
     pub trade_diffs: Vec<TradeDiffLine>,
+    /// Lines that should have been disposition records and could not be
+    /// read as one, in emission order. See [`InvalidRecord`].
+    pub invalid: Vec<InvalidRecord>,
 }
 
 impl HarnessReport {
@@ -348,7 +399,6 @@ impl HarnessReport {
 /// Computed summary tally, replacing the deleted harness-emitted summary.
 #[derive(Debug, Default)]
 pub struct Summary {
-    pub total: u64,
     pub parity: u64,
     // Count tiers (parity only).
     pub exact: u64,
@@ -396,12 +446,14 @@ pub struct DenseNaGroup {
 const MAX_EXAMPLES: usize = 4;
 
 /// Parse NDJSON harness stdout. Blank lines are skipped; a legacy `summary`
-/// line is skipped (the harness no longer emits one); any line whose `kind`
-/// is present and not `"disposition"` (e.g. `trade_diff` drill-down records)
-/// is skipped without parsing; a disposition line that fails to parse is
-/// surfaced as a warning but does not abort - the run's exit status is the
-/// source of truth, and a forward-compat field we cannot model should not
-/// sink the report.
+/// line is skipped (the harness no longer emits one); a `trade_diff` line is
+/// collected, and one that fails to parse is warned about and dropped (it is
+/// a diagnostic, never scored); any other non-disposition `kind` is skipped.
+/// A line that is not JSON, or a disposition line that does not deserialize,
+/// is collected into [`HarnessReport::invalid`] rather than dropped: it is a
+/// protocol violation the integrity check fails the run on, and dropping it
+/// silently is how a probe used to vanish from a run that could still pass.
+/// Unknown *fields* stay tolerated (forward compat; see the module docs).
 pub fn parse(stdout: &[u8]) -> HarnessReport {
     let text = String::from_utf8_lossy(stdout);
     let mut report = HarnessReport::default();
@@ -416,7 +468,10 @@ pub fn parse(stdout: &[u8]) -> HarnessReport {
         let value = match serde_json::from_str::<serde_json::Value>(trimmed) {
             Ok(v) => v,
             Err(e) => {
-                output::warn(&format!("corpus: unparsable NDJSON line: {e}"));
+                report.invalid.push(InvalidRecord {
+                    probe: None,
+                    reason: format!("not JSON ({e}): {}", clip(trimmed)),
+                });
                 continue;
             }
         };
@@ -437,10 +492,13 @@ pub fn parse(stdout: &[u8]) -> HarnessReport {
         // consumes it, so a parse failure names the offending probe instead of
         // surfacing an anonymous `invalid type` error with no way to tell which
         // line it came from.
-        let at = match value.get("probe").and_then(serde_json::Value::as_str) {
-            Some(id) => format!(" (probe {id})"),
-            None => String::new(),
-        };
+        let probe_id = value
+            .get("probe")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+        let at = probe_id
+            .as_deref()
+            .map_or_else(String::new, |id| format!(" (probe {id})"));
         match value.get("kind").and_then(serde_json::Value::as_str) {
             None | Some("disposition") => {
                 let raw = value.to_string();
@@ -450,7 +508,10 @@ pub fn parse(stdout: &[u8]) -> HarnessReport {
                         report.probes.push(p);
                     }
                     Err(e) => {
-                        output::warn(&format!("corpus: unparsable probe line{at}: {e}"));
+                        report.invalid.push(InvalidRecord {
+                            probe: probe_id,
+                            reason: format!("unparsable disposition line: {e}"),
+                        });
                     }
                 }
             }
@@ -467,12 +528,22 @@ pub fn parse(stdout: &[u8]) -> HarnessReport {
     report
 }
 
+/// At most this many characters of a non-JSON line are quoted in its
+/// invalid-record reason: enough to recognise a stray print, not a megabyte
+/// of garbage.
+const CLIP_CHARS: usize = 120;
+
+fn clip(line: &str) -> String {
+    let mut out: String = line.chars().take(CLIP_CHARS).collect();
+    if line.chars().count() > CLIP_CHARS {
+        out.push_str("...");
+    }
+    out
+}
+
 /// Tally the per-probe stream into a [`Summary`].
 pub fn summarize(probes: &[ProbeLine]) -> Summary {
-    let mut s = Summary {
-        total: probes.len() as u64,
-        ..Summary::default()
-    };
+    let mut s = Summary::default();
     for p in probes {
         match p.outcome.as_str() {
             "parity" => {
@@ -581,6 +652,30 @@ pub fn dense_na_breakdown(probes: &[ProbeLine]) -> Vec<DenseNaGroup> {
         .collect()
 }
 
+/// What [`render`] prints: the deviating scored lines, how many scored lines
+/// sit on their pin, and the scored lines themselves (the only input to the
+/// summary and breakdowns).
+struct RenderPlan<'a> {
+    shown: Vec<&'a ProbeLine>,
+    hidden: usize,
+    scored: Vec<ProbeLine>,
+}
+
+impl<'a> RenderPlan<'a> {
+    fn new(report: &'a HarnessReport, scored: &HashSet<&str>, deviating: &HashSet<&str>) -> Self {
+        let mut plan = RenderPlan { shown: Vec::new(), hidden: 0, scored: Vec::new() };
+        for p in report.probes.iter().filter(|p| scored.contains(p.probe.as_str())) {
+            if deviating.contains(p.probe.as_str()) {
+                plan.shown.push(p);
+            } else {
+                plan.hidden += 1;
+            }
+            plan.scored.push(p.clone());
+        }
+        plan
+    }
+}
+
 /// Render the per-probe lines, the computed summary, and the two breakdowns
 /// to the `[corpus]` log.
 ///
@@ -590,26 +685,33 @@ pub fn dense_na_breakdown(probes: &[ProbeLine]) -> Vec<DenseNaGroup> {
 /// be"). A probe sitting exactly on its pin is suppressed and folded into one
 /// trailing count - its disposition is already pinned and reproduced in the
 /// summary, so the surviving lines are the ones worth eyeballing. On an
-/// unblessed corpus every probe deviates, so nothing is hidden; the summary
-/// and both breakdowns are always computed over the full set regardless.
-pub fn render(report: &HarnessReport, deviating: &HashSet<&str>) {
-    let mut pinned = 0usize;
-    for p in &report.probes {
-        if deviating.contains(p.probe.as_str()) {
-            output::corpus_msg(&format_probe(p));
-        } else {
-            pinned += 1;
-        }
+/// unblessed corpus every probe deviates, so nothing is hidden.
+///
+/// Everything here is over the **scored** set only - `scored` is the
+/// reconciliation's valid selected ids. A report-only extra, an invalid line
+/// or a repeat is never a probe "matching its pin" and never feeds the
+/// summary or a breakdown; the reconciliation lines name those instead.
+/// `reconciliation` is the integrity line the summary leads with.
+pub fn render(
+    report: &HarnessReport,
+    scored: &HashSet<&str>,
+    deviating: &HashSet<&str>,
+    reconciliation: &str,
+) {
+    let plan = RenderPlan::new(report, scored, deviating);
+    for p in &plan.shown {
+        output::corpus_msg(&format_probe(p));
     }
-    if pinned > 0 {
+    if plan.hidden > 0 {
         output::corpus_msg(&format!(
             "{} matching their pin (hidden)",
-            output::count(pinned, "probe")
+            output::count(plan.hidden, "probe")
         ));
     }
+    let scored_lines = plan.scored;
 
-    let summary = summarize(&report.probes);
-    output::corpus_msg(&format_summary(&summary));
+    let summary = summarize(&scored_lines);
+    output::corpus_msg(&format_summary(&summary, reconciliation));
 
     // No silent drop: whenever piners reclassified any unmatched trades as
     // window-boundary artifacts, say so. A probe flipping count_divergent ->
@@ -623,7 +725,7 @@ pub fn render(report: &HarnessReport, deviating: &HashSet<&str>) {
         ));
     }
 
-    let root = root_cause_breakdown(&report.probes);
+    let root = root_cause_breakdown(&scored_lines);
     if !root.is_empty() {
         output::corpus_msg("root-cause breakdown (non-exact probes by domain/dimension):");
         for g in &root {
@@ -636,7 +738,7 @@ pub fn render(report: &HarnessReport, deviating: &HashSet<&str>) {
         }
     }
 
-    let dense = dense_na_breakdown(&report.probes);
+    let dense = dense_na_breakdown(&scored_lines);
     if !dense.is_empty() {
         output::corpus_msg("dense-na breakdown (by builtin):");
         for g in &dense {
@@ -689,12 +791,16 @@ fn format_probe(p: &ProbeLine) -> String {
     line
 }
 
-fn format_summary(s: &Summary) -> String {
+/// The summary line. It leads with the reconciliation (`N selected, M scored,
+/// K missing`, see [`crate::piners::integrity::Reconciliation::summary`])
+/// rather than a bare line count, so an empty report reads as what it is - a
+/// selection the harness did not report - and never as "0 total". The tallies
+/// after it count every disposition line the report carries.
+fn format_summary(s: &Summary, reconciliation: &str) -> String {
     let mut out = format!(
-        "summary: {} total, {} parity (exact={} near={} drift={}); \
+        "summary: {reconciliation}; {} parity (exact={} near={} drift={}); \
          tiers byte_exact={} accepted={} actionable_drift={} count_divergent={}; \
          compile_fail={} runtime_fail={} no_tv_data={} no_overlap={}",
-        s.total,
         s.parity,
         s.exact,
         s.near,
@@ -762,7 +868,7 @@ mod tests {
 "#,
         );
         let s = summarize(&r.probes);
-        assert_eq!((s.total, s.parity), (5, 3));
+        assert_eq!(s.parity, 3);
         assert_eq!((s.exact, s.near, s.drift), (1, 1, 1));
         assert_eq!(s.byte_exact, 1);
         assert_eq!(s.actionable_drift, 1);
@@ -833,7 +939,7 @@ mod tests {
         assert!(r.trade_diffs[1].tv_pnl.is_none()); // omitted leg -> None
         assert!(r.trade_diffs[1].entry_price_delta.is_none());
         let s = summarize(&r.probes);
-        assert_eq!((s.total, s.actionable_drift), (1, 1)); // drill-down lines excluded
+        assert_eq!(s.actionable_drift, 1); // drill-down lines excluded
     }
 
     #[test]
@@ -958,6 +1064,68 @@ mod tests {
         assert!((r.trade_diffs[0].our_pnl - 9.0).abs() < f64::EPSILON);
         // A clean report has nothing to report.
         assert!(r.take_duplicates().is_empty());
+    }
+
+    #[test]
+    fn unusable_disposition_records_are_collected_not_dropped() {
+        let r = parse(
+            b"thread 'main' panicked at src/x.rs:1\n\
+{\"probe\":\"a\",\"outcome\":7}\n\
+{\"outcome\":\"parity\"}\n\
+{\"probe\":\"b\",\"outcome\":\"parity\",\"acceptance\":{\"tier\":\"accepted\"}}\n",
+        );
+        assert_eq!(r.probes.len(), 1);
+        assert_eq!(r.invalid.len(), 3);
+        assert_eq!(r.invalid[0].probe, None);
+        assert!(r.invalid[0].reason.starts_with("not JSON"), "{:?}", r.invalid[0]);
+        assert!(r.invalid[0].reason.contains("panicked"));
+        assert_eq!(r.invalid[1].probe.as_deref(), Some("a"));
+        // A disposition line with no probe id cannot be attributed.
+        assert_eq!(r.invalid[2].probe, None);
+    }
+
+    #[test]
+    fn the_validator_checks_outcome_and_tier_together() {
+        assert_eq!(valid_label("parity", Some("accepted")), Some("accepted"));
+        assert_eq!(valid_label("compile_fail", None), Some("compile_fail"));
+        assert_eq!(valid_label("no_overlap", Some("")), Some("no_overlap"));
+        // A tier posing as an outcome.
+        assert_eq!(valid_label("accepted", None), None);
+        // An outcome posing as a tier.
+        assert_eq!(valid_label("parity", Some("runtime_fail")), None);
+        assert_eq!(valid_label("parity", None), None);
+        // A non-parity outcome carrying a tier.
+        assert_eq!(valid_label("runtime_fail", Some("accepted")), None);
+        assert_eq!(valid_label("weird", None), None);
+    }
+
+    #[test]
+    fn render_plan_covers_only_the_scored_set() {
+        let r = parse(
+            br#"{"probe":"a","outcome":"parity","acceptance":{"tier":"accepted"},"signature":{"domain":"d","dimension":"x"}}
+{"probe":"b","outcome":"parity","acceptance":{"tier":"accepted"}}
+{"probe":"extra","outcome":"parity","acceptance":{"tier":"accepted"},"signature":{"domain":"d","dimension":"y"}}
+{"probe":"bad","outcome":"accepted"}
+"#,
+        );
+        let scored: HashSet<&str> = ["a", "b"].into_iter().collect();
+        let deviating: HashSet<&str> = ["a", "bad"].into_iter().collect();
+        let plan = RenderPlan::new(&r, &scored, &deviating);
+        assert_eq!(plan.shown.len(), 1);
+        assert_eq!(plan.shown[0].probe, "a");
+        // `extra` and `bad` are neither hidden matches nor tallied.
+        assert_eq!(plan.hidden, 1);
+        assert_eq!(plan.scored.len(), 2);
+        let root = root_cause_breakdown(&plan.scored);
+        assert_eq!(root.len(), 1);
+        assert_eq!(root[0].key, "d/x");
+    }
+
+    #[test]
+    fn summary_leads_with_the_reconciliation_not_a_bare_total() {
+        let line = format_summary(&Summary::default(), "850 selected, 0 scored, 850 missing");
+        assert!(line.starts_with("summary: 850 selected, 0 scored, 850 missing; 0 parity"), "{line}");
+        assert!(!line.contains("total"), "{line}");
     }
 
     #[test]

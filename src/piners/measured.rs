@@ -4,7 +4,10 @@
 //! measurable command).
 //!
 //! Distinct from the bare parity run ([`crate::piners::cmd::corpus`]): no gate,
-//! no `runs.db` ingest, no pre-run runtime ceiling. Selection + hard
+//! no `runs.db` ingest, no pre-run runtime ceiling, no isolation pass. One
+//! integrity rule does apply: an iteration that exits 0 without reporting
+//! exactly its selection (every probe validly, no protocol violation) fails
+//! the measurement, unless its stop marker actually fired. Selection + hard
 //! verification + manifest construction are shared with the parity path; the
 //! build goes through [`crate::context::BenchContext::with_build_config`] with
 //! the hotpath feature appended, so the run rides the same sidecar + results.db
@@ -23,6 +26,7 @@ use crate::harness::{self, BenchConfig};
 use crate::measure::{MeasureMode, MeasureRequest};
 use crate::output;
 use crate::piners::cmd::CorpusArgs;
+use crate::piners::integrity::{self, Reconciliation};
 use crate::piners::manifest::Manifest;
 use crate::piners::registry::{self, Registry};
 use crate::piners::select::{self, SelectArgs};
@@ -195,8 +199,10 @@ pub(crate) fn run(req: &MeasureRequest, args: &CorpusArgs) -> Result<(), DevErro
     // Applied through the sidecar's ambient scope because the child is
     // spawned inside `run_hotpath_capture`, which takes no deadline.
     let _deadline = crate::sidecar::DeadlineScope::enter(crate::piners::cmd::HARNESS_HANG_BACKSTOP);
-    ctx.harness.run_hotpath(&config, &ctx.binary, |_i| {
-        let (result, _stderr, sidecar) = harness::run_hotpath_capture(
+    ctx.harness.run_hotpath(&config, &ctx.binary, |i| {
+        // A non-zero exit fails inside the capture, as a subprocess error
+        // carrying the whole stderr.
+        let capture = harness::run_hotpath_capture_with_stdout(
             &binary_str,
             &subprocess_args,
             &scratch_dir,
@@ -206,15 +212,57 @@ pub(crate) fn run(req: &MeasureRequest, args: &CorpusArgs) -> Result<(), DevErro
             req.stop_marker,
             Some(ctx.harness.lock()),
         )?;
-        Ok((result, sidecar))
+        // A stop marker that actually fired ends the run early by design;
+        // every other run, a configured marker that never fired included, is
+        // held to its selection.
+        if !capture.stopped_by_marker {
+            check_iteration_complete(i, &ids, &capture.stdout, &capture.stderr)?;
+        }
+        Ok((capture.result, capture.sidecar))
     })?;
 
     Ok(())
 }
 
+/// Fail a measured iteration that exited 0 without reporting exactly its
+/// selection - a probe without a valid disposition, or any invalid, repeated
+/// or report-only extra record: its timing would describe a different
+/// workload. Prints the reconciliation and the whole stderr. No isolation on
+/// this path.
+fn check_iteration_complete(
+    iteration: usize,
+    ids: &[String],
+    stdout: &[u8],
+    stderr: &[u8],
+) -> Result<(), DevError> {
+    let mut report = crate::piners::report::parse(stdout);
+    let duplicates = report.take_duplicates();
+    let rec = Reconciliation::reconcile(ids, &report, duplicates);
+    if rec.complete() && rec.protocol_violations() == 0 {
+        return Ok(());
+    }
+    output::corpus_msg(&format!(
+        "iteration {iteration}: harness exited 0 with {} of {} selected probes unscored \
+         and {} ({})",
+        rec.unscored(),
+        rec.selected,
+        output::count(rec.protocol_violations(), "protocol violation"),
+        rec.summary()
+    ));
+    for line in rec.detail_lines() {
+        output::corpus_msg(&line);
+    }
+    integrity::print_stderr("harness stderr", &String::from_utf8_lossy(stderr));
+    Err(DevError::Verify(format!(
+        "corpus measurement: iteration {iteration} did not report exactly its selection \
+         ({}); the timing is not of the selected workload",
+        rec.summary()
+    )))
+}
+
 /// A compact label for the measured selection, stored in the result row's
 /// `input_file` column and a `selector` metadata key. Mirrors the intent
-/// rendering used by the corpus run-store views (`all` / `kw=…` / `probe=…`).
+/// rendering used by the corpus run-store views (`all` / `kw=...` / `probe=...`).
 fn selector_label(args: &CorpusArgs) -> String {
     if args.all {
         "all".to_owned()
@@ -224,5 +272,39 @@ fn selector_label(args: &CorpusArgs) -> String {
         format!("kw={}", args.keywords.join(","))
     } else {
         "selection".to_owned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::*;
+
+    const A: &str = "{\"probe\":\"a\",\"outcome\":\"no_tv_data\"}\n";
+
+    fn ids() -> Vec<String> {
+        vec!["a".to_owned()]
+    }
+
+    #[test]
+    fn a_complete_clean_iteration_passes() {
+        assert!(check_iteration_complete(0, &ids(), A.as_bytes(), b"").is_ok());
+    }
+
+    #[test]
+    fn a_partial_iteration_fails() {
+        let both = vec!["a".to_owned(), "b".to_owned()];
+        assert!(check_iteration_complete(0, &both, A.as_bytes(), b"").is_err());
+    }
+
+    #[test]
+    fn complete_coverage_with_protocol_violations_fails() {
+        let dup = format!("{A}{A}");
+        assert!(check_iteration_complete(0, &ids(), dup.as_bytes(), b"").is_err());
+        let extra = format!("{A}{{\"probe\":\"zz\",\"outcome\":\"no_tv_data\"}}\n");
+        assert!(check_iteration_complete(0, &ids(), extra.as_bytes(), b"").is_err());
+        let invalid = format!("{A}not json\n");
+        let err = check_iteration_complete(0, &ids(), invalid.as_bytes(), b"").unwrap_err();
+        assert!(err.to_string().contains("1 invalid"), "{err}");
     }
 }

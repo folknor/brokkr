@@ -7,6 +7,8 @@ pub mod cmd;
 pub mod corpus_db;
 pub mod corpus_query;
 pub mod gate;
+pub mod integrity;
+pub mod isolate;
 pub mod lfs;
 pub mod lint;
 pub mod manifest;

@@ -8,7 +8,10 @@
 //! summing the harness's overlapping per-probe `runtime_ms`); version 5
 //! rebuilds `disposition` around the stored harness record (`raw_json`, every
 //! harness column generated from it - see `schema.rs`); version 6 adds
-//! `run.commit_sha`/`run.dirty`, the checkout the run was taken from. On a fresh database
+//! `run.commit_sha`/`run.dirty`, the checkout the run was taken from; version 7
+//! adds `run.protocol_violations` (the report-integrity count the runtime
+//! ceiling refuses a basis on) and `run.diagnosis` (the isolation pass's note,
+//! written after the run row). On a fresh database
 //! the schema DDL in `schema.rs` creates the current tables (columns
 //! included) and stamps the version, so the migration steps below only run for
 //! an older db on disk. The `has_table` helper lives here so a future column
@@ -21,7 +24,7 @@ use super::schema::disposition_ddl;
 use crate::error::DevError;
 
 /// Current schema version. Increment when adding a migration below.
-pub(super) const SCHEMA_VERSION: i64 = 6;
+pub(super) const SCHEMA_VERSION: i64 = 7;
 
 /// Run all pending migrations based on `PRAGMA user_version`. On a fresh
 /// database the schema DDL in `schema.rs` creates the current tables and
@@ -150,6 +153,19 @@ fn migrate_from(conn: &rusqlite::Connection, current: i64) -> Result<(), DevErro
         }
         if !has_column(conn, "run", "dirty") {
             conn.execute("ALTER TABLE run ADD COLUMN dirty INTEGER", [])?;
+        }
+    }
+
+    // v6 -> v7: report integrity and the isolation note. Nullable with no
+    // default: an older run never counted its protocol violations, so NULL
+    // is "not recorded", never "clean" - though the ceiling, which cannot
+    // tell, accepts such a row on its stored id coverage alone.
+    if current < 7 {
+        if !has_column(conn, "run", "protocol_violations") {
+            conn.execute("ALTER TABLE run ADD COLUMN protocol_violations INTEGER", [])?;
+        }
+        if !has_column(conn, "run", "diagnosis") {
+            conn.execute("ALTER TABLE run ADD COLUMN diagnosis TEXT", [])?;
         }
     }
 
@@ -377,6 +393,8 @@ mod tests {
         assert!(has_column(&conn, "disposition", "boundary_ours"));
         assert!(has_column(&conn, "disposition", "ts_entry_share_pct"));
         assert!(has_column(&conn, "run", "wall_ms"));
+        assert!(has_column(&conn, "run", "protocol_violations"));
+        assert!(has_column(&conn, "run", "diagnosis"));
         let version: i64 = conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();

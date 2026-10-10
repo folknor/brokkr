@@ -51,8 +51,15 @@ pub struct RunRecord<'a> {
     /// brokkr's measured whole-run harness wall, in milliseconds. `None` when
     /// the harness never ran (spawn failure). This is the quantity the pre-run
     /// runtime ceiling estimates from - a real wall, not the sum of the
-    /// harness's overlapping per-probe `runtime_ms`.
+    /// harness's overlapping per-probe `runtime_ms`. Always the original
+    /// attempt's wall: diagnostic isolation attempts never extend it.
     pub wall_ms: Option<f64>,
+    /// Report- and stream-integrity violations: invalid records, repeats and
+    /// report-only extras (`integrity::Reconciliation::protocol_violations`),
+    /// plus one for a stdout cut short. Any nonzero count bars the run from
+    /// the runtime ceiling.
+    /// `None` when the harness produced no report to reconcile (it never ran).
+    pub protocol_violations: Option<i64>,
 }
 
 impl CorpusDb {
@@ -78,6 +85,27 @@ impl CorpusDb {
             }
         }
     }
+
+    /// Append `note` to an already-recorded run's `diagnosis` (newline
+    /// separated). The one write to a stored run: the isolation pass runs
+    /// after the run row commits - so an interrupted diagnosis cannot lose
+    /// the original record - and attaches its evidence here, beside the
+    /// untouched `fail_reason`. Errors when no run has that id.
+    pub fn append_diagnosis(&self, run_id: i64, note: &str) -> Result<(), DevError> {
+        let n = self.conn().execute(
+            "UPDATE run SET diagnosis = \
+             CASE WHEN diagnosis IS NULL OR diagnosis = '' THEN ?2 \
+                  ELSE diagnosis || char(10) || ?2 END \
+             WHERE run_id = ?1",
+            params![run_id, note],
+        )?;
+        if n == 0 {
+            return Err(DevError::Database(format!(
+                "cannot attach a diagnosis to run {run_id}: no such run"
+            )));
+        }
+        Ok(())
+    }
 }
 
 /// SQLite stores signed i64; harness counts are `u64`/`usize`. Clamp rather
@@ -96,8 +124,8 @@ fn record_inner(
     conn.execute(
         "INSERT INTO run \
          (run_id, started_at, selector, gated, result, fail_reason, harness_exit_code, \
-          probe_count, harness_stderr, wall_ms, commit_sha, dirty) \
-         VALUES (?9, COALESCE(?10, datetime('now')), ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?11, ?12)",
+          probe_count, harness_stderr, wall_ms, commit_sha, dirty, protocol_violations) \
+         VALUES (?9, COALESCE(?10, datetime('now')), ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?11, ?12, ?13)",
         params![
             run.selector,
             i64::from(run.gated),
@@ -111,6 +139,7 @@ fn record_inner(
             run.started_at,
             run.commit_sha,
             run.dirty.map(i64::from),
+            run.protocol_violations,
         ],
     )?;
     let run_id = conn.last_insert_rowid();
@@ -286,6 +315,7 @@ mod tests {
             harness_exit_code: Some(0),
             stderr: "",
             wall_ms: Some(1234.0),
+            protocol_violations: Some(0),
         };
         let run_id = db.record_run(&run, &report, &expected, &gate_diffs).unwrap();
         assert_eq!(run_id, 1);
@@ -349,6 +379,7 @@ mod tests {
             harness_exit_code: Some(0),
             stderr: "",
             wall_ms: None,
+            protocol_violations: Some(0),
         };
         db.record_run(&run, &report, &expected_map(&[("p1", Some("accepted"))]), &[])
             .unwrap();
@@ -391,11 +422,39 @@ mod tests {
             harness_exit_code: Some(0),
             stderr: "",
             wall_ms: None,
+            protocol_violations: Some(0),
         };
         let run_id = db.record_run(&run, &report, &expected, &gate_diffs).unwrap();
         assert!(!db.disposition_for_probe(run_id, "p1").unwrap().unwrap().gate_ok);
         let stray = db.disposition_for_probe(run_id, "stray").unwrap().unwrap();
         assert!(stray.gate_ok);
         assert_eq!(stray.expected, None);
+    }
+
+    #[test]
+    fn a_diagnosis_is_appended_beside_the_original_reason() {
+        let db = CorpusDb::open_in_memory().unwrap();
+        let run = RunRecord {
+            run_id: Some(7),
+            started_at: None,
+            commit_sha: None,
+            dirty: None,
+            selector: "{}",
+            gated: true,
+            result: "fail",
+            fail_reason: Some("harness exited 2 before reporting 3 of 3"),
+            harness_exit_code: Some(2),
+            stderr: "boom",
+            wall_ms: Some(900.0),
+            protocol_violations: Some(0),
+        };
+        db.record_run(&run, &parse(b""), &BTreeMap::new(), &[]).unwrap();
+        db.append_diagnosis(7, "first").unwrap();
+        db.append_diagnosis(7, "second").unwrap();
+        let row = db.run(7).unwrap().unwrap();
+        assert_eq!(row.diagnosis.as_deref(), Some("first\nsecond"));
+        assert_eq!(row.fail_reason.as_deref(), Some("harness exited 2 before reporting 3 of 3"));
+        assert_eq!(row.result, "fail");
+        assert!(db.append_diagnosis(8, "x").is_err());
     }
 }

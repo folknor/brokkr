@@ -123,9 +123,15 @@ kinds without a brokkr change:
   aggregate these but **persists** them (below).
 - any other `kind` - skipped (forward-compat).
 
-brokkr parses tolerantly (a field it does not model is ignored for rendering,
-and stored with the rest of the line - see the run store below) and renders per-probe lines +
-a computed summary + root-cause breakdown (by `signature` domain/dimension) +
+brokkr parses tolerantly at the *field* level (a field it does not model is
+ignored for rendering, and stored with the rest of the line - see the run
+store below), but not at the *record* level: the stream must carry exactly
+one valid disposition for every manifest probe and nothing for any other id,
+and a stdout line that is not JSON or a disposition line that does not
+deserialize is an invalid record. Any shortfall or violation fails the run
+(report integrity, `docs/commands/corpus.md`), whatever the exit code. brokkr
+renders per-probe lines + a computed summary (led by the reconciliation, `N
+selected, M scored, K missing`) + root-cause breakdown (by `signature` domain/dimension) +
 dense-na breakdown (by builtin: site/na/probe counts). When any probe carried a
 window-boundary discount, a `boundary artifacts: N probes, M trades
 discounted` line follows the summary (the "log what was dropped" rule - a probe
@@ -161,11 +167,26 @@ first), per-db `PRAGMA user_version` migrations, WAL - mirroring `src/db`
   `--no-gate` nor `--bless`), `result` (`pass`/`fail`, or `interrupted`/
   `error` for a run that ended before its output could be ingested),
   `fail_reason`, `harness_exit_code`,
-  `probe_count`, `harness_stderr`, `wall_ms` (brokkr's own measured whole-run
-  harness wall; `NULL` for a run whose harness never finished or pre-v4 rows). The exit/reason/stderr
-  make a failed run self-contained; `wall_ms` + `selector` are what the
-  pre-run runtime ceiling estimates the next run from (a comparable
-  superset-covering run's measured wall - see `docs/commands/corpus.md`).
+  `probe_count` (disposition lines stored, report-only extras included - not
+  a coverage measure), `harness_stderr`, `wall_ms` (brokkr's own measured
+  whole-run harness wall of the original attempt, never extended by
+  diagnostic isolation; `NULL` for a run whose harness never finished or
+  pre-v4 rows), `protocol_violations` (v7: invalid records + repeated records
+  + report-only extras from the report-integrity reconciliation, plus one
+  when the harness stdout was cut short and one when the run's
+  `harness.stdout`/`harness.stderr` could not be written; any nonzero count bars the run from
+  being runtime-ceiling evidence; `NULL` when
+  the harness produced no report, or on older rows), and `diagnosis` (v7: the
+  isolation pass's note - the probes that abort when run alone, the diagnosis
+  status, where the attempt artefacts are - appended after the run row
+  commits, beside the untouched `fail_reason`; the one write ever made to a
+  stored run). The exit/reason/stderr make a failed run self-contained;
+  `wall_ms` + `selector` + the disposition rows are what the pre-run runtime
+  ceiling estimates the next run from (a comparable superset-covering run
+  whose every selected id has a stored row whose `outcome` and `acc_tier`
+  pass the shared disposition validator and agree with its `disposition` -
+  see
+  `docs/commands/corpus.md`).
 - `disposition` (PK `run_id,probe`) - the harness line stored **whole** as
   `raw_json`, the authoritative record, with every harness field a generated
   column projected from it. The harness adds diagnostics faster than brokkr
@@ -201,9 +222,12 @@ first), per-db `PRAGMA user_version` migrations, WAL - mirroring `src/db`
   migration refuses to swap in the rebuilt table unless every projection
   reproduces the column it replaced, row for row.
   Durability covers the disposition lines the parser accepts. One it cannot
-  parse is dropped with a warning; under the gate that probe then fails the
-  run as a gate miss, but under `--no-gate` a clean harness exit can still
-  pass, and the dropped line goes with the run dir.
+  parse is not stored as a row, but it is never silent: it is an invalid
+  record, a protocol violation that fails the run under `--no-gate` too, and
+  its probe counts as unscored (the report-integrity check in
+  `docs/commands/corpus.md`). Its bytes survive in the stored
+  `harness_stderr` only if the harness also wrote them there; the stdout
+  copy goes with the run dir unless the dir is kept.
 - `trade_diff` (PK `run_id,probe,our_index,tv_index`) - all 26 NDJSON fields.
   The volume driver; the PK covers probe-within-run lookups. A harness that
   repeats a disposition or `trade_diff` key has the repeats collapsed to the
@@ -215,7 +239,10 @@ first), per-db `PRAGMA user_version` migrations, WAL - mirroring `src/db`
   `na_count`).
 
 Because the DB is the source of truth, the run dir is dropped (pass or fail)
-once ingest commits, unless `--keep-artefacts`. A run that ends before its
+once ingest commits, unless `--keep-artefacts` or diagnostic isolation ran
+(the `attempt-<n>/` dirs are evidence the DB holds only as the `diagnosis`
+note, so the dir is preserved). Nothing a diagnostic attempt reports is
+ingested. A run that ends before its
 output is ingested - interrupted, a spawn failure, an unwritable manifest -
 records a row under its id and keeps its dir. An ingest failure preserves the
 dir and propagates. `brokkr clean` removes the `run-<id>/` dirs but spares
@@ -240,8 +267,9 @@ struct, no benchmark filters to reject. The corpus views:
   resolved id list it stores - that would be 200+ ids wide for an `--all` run.
   The id list stays reachable via the run-detail view or `--sql`.
 - `brokkr corpus-results <id>` / `--run <id>` - a `run <id>  started ... UTC
-  commit ...` header, then that run's per-probe dispositions (+ gate misses +
-  stderr). An id with no run is an error. Only the **deviations**
+  commit ...` header, its `reason:` and any `diagnosis:` lines, then that
+  run's per-probe dispositions (+ gate misses + stderr). An id with no run is
+  an error. Only the **deviations**
   (rows where the stored disposition misses its pin, `gate_ok = 0`) are shown;
   the pin-matchers fold into a `N probes matching their pin (hidden)` line - a
   200-probe `--all` run otherwise buries the few that moved. `--full` shows the

@@ -229,6 +229,7 @@ mod tests {
             harness_exit_code: Some(0),
             stderr: "",
             wall_ms: None,
+            protocol_violations: Some(0),
         };
         let diffs: Vec<GateDiff> = misses
             .iter()

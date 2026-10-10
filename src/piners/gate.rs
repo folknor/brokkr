@@ -35,10 +35,18 @@ pub struct GateDiff {
 /// Compare each selected probe's actual disposition to its pinned `expected`.
 /// Returns the violations; an empty vec means the gate passed.
 pub fn evaluate(ids: &[String], registry: &Registry, report: &HarnessReport) -> Vec<GateDiff> {
+    // Only a valid disposition (`report::valid_label`) can satisfy a pin: an
+    // invalid line whose derived label happens to equal `expected` - a tier
+    // posing as an outcome - is a deviation, shown as `invalid (...)`.
     let actual: BTreeMap<&str, String> = report
         .probes
         .iter()
-        .map(|p| (p.probe.as_str(), p.disposition()))
+        .map(|p| {
+            let got = p
+                .valid_disposition()
+                .map_or_else(|| format!("invalid ({})", p.disposition()), str::to_owned);
+            (p.probe.as_str(), got)
+        })
         .collect();
 
     let mut diffs = Vec::new();
@@ -67,7 +75,7 @@ pub fn report_has_break(report: &HarnessReport) -> bool {
     report
         .probes
         .iter()
-        .any(|p| BREAK_DISPOSITIONS.contains(&p.disposition().as_str()))
+        .any(|p| p.valid_disposition().is_some_and(|d| BREAK_DISPOSITIONS.contains(&d)))
 }
 
 /// Whether a harness exit of 1 is fully accounted for by pinned breaks: the
@@ -83,14 +91,13 @@ pub fn breaks_all_pinned(ids: &[String], registry: &Registry, report: &HarnessRe
     let selected: std::collections::HashSet<&str> = ids.iter().map(String::as_str).collect();
     let mut any = false;
     for p in &report.probes {
-        let disp = p.disposition();
-        if !BREAK_DISPOSITIONS.contains(&disp.as_str()) {
+        let Some(disp) = p.valid_disposition().filter(|d| BREAK_DISPOSITIONS.contains(d)) else {
             continue;
-        }
+        };
         any = true;
         let pinned = selected.contains(p.probe.as_str())
             && registry.pins.get(&p.probe).and_then(|pin| pin.expected.as_deref())
-                == Some(disp.as_str());
+                == Some(disp);
         if !pinned {
             return false;
         }
@@ -204,6 +211,21 @@ mod tests {
         let rep = report(r#"{"probe":"a","outcome":"parity","acceptance":{"tier":"accepted"}}"#);
         assert!(!breaks_all_pinned(&["a".to_owned()], &reg, &rep));
         assert!(!report_has_break(&rep));
+    }
+
+    #[test]
+    fn an_invalid_line_never_satisfies_its_pin() {
+        let reg = registry(&[("a", Some("accepted")), ("b", Some("runtime_fail"))]);
+        let rep = report(
+            "{\"probe\":\"a\",\"outcome\":\"accepted\"}\n{\"probe\":\"b\",\"outcome\":\"parity\",\"acceptance\":{\"tier\":\"runtime_fail\"}}",
+        );
+        let ids = ["a".to_owned(), "b".to_owned()];
+        let diffs = evaluate(&ids, &reg, &rep);
+        assert_eq!(diffs.len(), 2);
+        assert_eq!(diffs[0].actual.as_deref(), Some("invalid (accepted)"));
+        // Nor does a posing break explain exit 1.
+        assert!(!report_has_break(&rep));
+        assert!(!breaks_all_pinned(&ids, &reg, &rep));
     }
 
     #[test]

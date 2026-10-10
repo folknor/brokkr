@@ -1127,16 +1127,61 @@ fn verify_one(
     // pointer bytes would compare a 134-byte stub against the real feed's
     // digest (a spurious mismatch), or - worse, on reseed - stamp the pointer
     // hash into the pin. Cheap sniff, no-op for plaintext files.
-    crate::piners::lfs::ensure_materialized(&abs)?;
     let origin = format!("{subject} ({label})");
-    preflight::verify_file_hash(&abs, &file.xxh128, project_root, Some(&origin))?;
+    crate::piners::lfs::ensure_materialized(&abs).map_err(|e| with_origin(e, &origin, &abs))?;
+    preflight::verify_file_hash(&abs, &file.xxh128, project_root, Some(&origin))
+        .map_err(|e| with_origin(e, &origin, &abs))?;
     Ok(())
+}
+
+/// Name the probe, feed group or harness file (and the role or file label)
+/// an error on the verify path concerns. The LFS refusal names only the path
+/// and a hash read failure (an I/O error from the hasher) names nothing, so
+/// on a 850-probe selection neither said which pin it was about. A preflight
+/// message that already carries `origin` is left as it is.
+pub(crate) fn with_origin(e: DevError, origin: &str, path: &Path) -> DevError {
+    match e {
+        DevError::Preflight(msgs) => DevError::Preflight(
+            msgs.into_iter()
+                .map(|m| {
+                    if m.contains(origin) {
+                        m
+                    } else {
+                        format!("{m}\n  origin: {origin}")
+                    }
+                })
+                .collect(),
+        ),
+        other => DevError::Preflight(vec![format!(
+            "piners: {origin}: could not verify {}: {other}",
+            path.display()
+        )]),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+
+    #[test]
+    fn verify_errors_name_the_pin_they_concern() {
+        let path = Path::new("/c/data/feed.csv");
+        let origin = "feed group 'eth' (base)";
+        // An I/O error from the hasher said nothing about which pin.
+        let io = DevError::Io(std::io::Error::other("short read"));
+        let msg = with_origin(io, origin, path).to_string();
+        assert!(msg.contains("feed group 'eth' (base)"), "{msg}");
+        assert!(msg.contains("/c/data/feed.csv"), "{msg}");
+        // The LFS refusal named the path only; it gains the origin.
+        let lfs = DevError::Preflight(vec!["piners: /c/data/feed.csv is a pointer".to_owned()]);
+        let DevError::Preflight(m) = with_origin(lfs, origin, path) else { panic!() };
+        assert!(m[0].ends_with("origin: feed group 'eth' (base)"), "{m:?}");
+        // A message already carrying the origin is not doubled.
+        let has = DevError::Preflight(vec![format!("mismatch\n  origin: {origin}")]);
+        let DevError::Preflight(m) = with_origin(has, origin, path) else { panic!() };
+        assert_eq!(m[0].matches("origin:").count(), 1);
+    }
 
     fn registry_with(keyword_ids: &[(&str, &[&str])], pin_ids: &[&str]) -> Registry {
         let mut pins = BTreeMap::new();

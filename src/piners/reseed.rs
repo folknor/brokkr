@@ -414,10 +414,12 @@ fn stamp_file(
     // Probe files are not LFS today, but the guard is cheap insurance: a
     // pointer stamped as a probe hash would poison the pin exactly as a
     // feed pointer would.
-    crate::piners::lfs::ensure_materialized(&abs)?;
+    let origin = format!("probe '{id}' ({name})");
+    let at = |e| crate::piners::registry::with_origin(e, &origin, &abs);
+    crate::piners::lfs::ensure_materialized(&abs).map_err(at)?;
     Ok(Some(FilePin {
         path: rel,
-        xxh128: preflight::compute_xxh128(&abs)?,
+        xxh128: preflight::compute_xxh128(&abs).map_err(at)?,
     }))
 }
 
@@ -453,8 +455,10 @@ fn restamp_feeds(
             // Refuse to stamp a Git-LFS pointer's hash: that would pin the
             // 134-byte stub and poison every future verify. The one LFS feed
             // is the base group; the guard is a no-op for plaintext feeds.
-            crate::piners::lfs::ensure_materialized(&abs)?;
-            pin.xxh128 = preflight::compute_xxh128(&abs)?;
+            let origin = format!("feed group '{name}' ({role})");
+            let at = |e| crate::piners::registry::with_origin(e, &origin, &abs);
+            crate::piners::lfs::ensure_materialized(&abs).map_err(at)?;
+            pin.xxh128 = preflight::compute_xxh128(&abs).map_err(at)?;
         }
         out.insert(name.clone(), stamped);
     }
@@ -477,12 +481,14 @@ fn restamp_harness_files(
                 abs.display()
             )));
         }
-        crate::piners::lfs::ensure_materialized(&abs)?;
+        let origin = format!("harness file '{name}' (file)");
+        let at = |e| crate::piners::registry::with_origin(e, &origin, &abs);
+        crate::piners::lfs::ensure_materialized(&abs).map_err(at)?;
         out.insert(
             name.clone(),
             HarnessFile {
                 path: file.path.clone(),
-                xxh128: Some(preflight::compute_xxh128(&abs)?),
+                xxh128: Some(preflight::compute_xxh128(&abs).map_err(at)?),
             },
         );
     }

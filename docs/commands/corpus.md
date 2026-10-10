@@ -27,6 +27,14 @@ the runtime ceiling, and the `runs.db` ingest are all parity-only and skipped.
   was built (`dev` or `release`).
 - Each iteration is bounded by the parity path's one-hour hang backstop
   (below); a harness still running then is killed and the run fails.
+- Each iteration is held to exactly its selection: one that exits 0 with any
+  selected probe lacking a valid disposition, or with any invalid, repeated
+  or report-only extra record, fails the measurement (its timing is of a
+  different workload), printing the reconciliation and the whole harness
+  stderr. A non-zero exit fails with the whole stderr too. There is no
+  isolation pass on this path. The one exemption is an iteration whose
+  `--stop` marker actually fired (it ends early by design); a configured
+  marker that never fired is held to the selection like any other run.
 - `--force` is dual-purpose: ceiling-bypass in a parity run, dirty-tree in a
   measured run (the ceiling is a parity-only concept).
 - `--bench` is **not** supported - the harness emits NDJSON dispositions,
@@ -255,6 +263,8 @@ excluded, and the harness opens live paths.
 - `--reseed` - stamp `pins.toml` hashes from the corpus filesystem (below).
 - `--bless` - run the selection, then stamp current dispositions (below).
 - `--force` - bypass the pre-run runtime ceiling (below).
+- `--no-isolate` - skip the diagnostic isolation pass after an abnormal
+  harness end (below).
 
 ## Forwarding flags to the harness
 
@@ -283,9 +293,14 @@ timing of the harness subprocess) of the most recent run whose selection was a
 bound - and any `--all` run covers everything, so one full run bounds every
 selection. Only a **comparable** run is a basis: the harness exited 0 or 1 (a
 break is a finished probe; exit 2, a signal, or a spawn failure is not), it
-emitted a disposition line for every probe it was given, it ran with no
-forwarded harness flags, and it was built in the same profile as this run (a
-row predating the recorded profile counts as debug). Otherwise one fast-failing
+broke no report protocol (`run.protocol_violations` is 0; a row predating
+that column is judged on coverage alone), **every id it selected has a valid
+stored disposition** (exact coverage read from its disposition rows, so a
+line for an unselected probe counts for nothing and a line count can never
+stand in for a missing probe), it ran with no forwarded harness flags, and it
+was built in the same profile as this run (a row predating the recorded
+profile counts as debug). Diagnostic isolation attempts never enter the basis:
+the run's `wall_ms` is the original attempt's alone. Otherwise one fast-failing
 `--all` run would bound every later selection at a second or two. With no
 comparable covering run recorded (a fresh DB, or a selection no prior run
 superset-covers) there is no measured basis and the run proceeds. If the
@@ -296,7 +311,8 @@ exempt. The ceiling is a pre-run wall only - a run already underway is never
 killed for exceeding it. The only mid-run limit is a one-hour **hang
 backstop** far above any real run: a harness still running then is killed and
 the run recorded as failed, so a wedged harness cannot hold the global lock
-indefinitely.
+indefinitely. The backstop is one deadline shared by the original attempt and
+any diagnostic isolation after it, counted from the original launch.
 
 A `runs.db` written by an older brokkr is migrated to the current schema the
 first time the ceiling (or `corpus-results`) reads it.
@@ -316,7 +332,10 @@ single `base`) of every feed group the selection references, and every
 `[harness_files]` entry - are resolved under `corpus_root` and hashed before
 any build. A missing path or hash
 mismatch is a hard error (registry lying or the corpus drifted) - no
-`--allow-drift`; re-stamp with `--reseed` or fix the tree.
+`--allow-drift`; re-stamp with `--reseed` or fix the tree. Every error on this
+path names what it concerns - the probe, feed group (with its role) or
+harness file, and the path - including the Git-LFS refusal and a file the
+hasher could not read.
 
 Two more hard errors, both about what the harness will actually do:
 
@@ -358,8 +377,9 @@ else the outcome. brokkr compares actual vs `expected` per selected probe;
 `id: expected X, got Y`. No `expected` yet (freshly reseeded) is a hard
 "must bless"; so is a selected probe the harness emitted no line for.
 `count_tier` is *not* gated (diagnostic only). `--no-gate` downgrades the
-gate to informational (still runs/aggregates/prints; harness exit governs
-breaks) - for rollout or ad-hoc breakdown runs.
+gate to informational (still runs/aggregates/prints) - for rollout or ad-hoc
+breakdown runs. It downgrades the gate only: the harness exit and report
+integrity (below) still fail the run.
 
 **Pinned breaks.** The harness exits 1 whenever any probe breaks, including a
 probe pinned `expected = "compile_fail"` that is doing exactly what its pin
@@ -370,7 +390,132 @@ or unselected break still fails the run (gated or `--no-gate` alike).
 **Repeated records.** The contract is one disposition line per probe and one
 `trade_diff` line per `(probe, our_index, tv_index)`. A repeat is kept as its
 last occurrence for display and storage, named in the output, and fails the
-run (`N repeated harness records`, `1 repeated harness record` for one).
+run (`N repeated harness records`, `1 repeated harness record` for one) as a
+protocol violation (below).
+
+## Report integrity
+
+Independent of the gate and of `--no-gate`, the parsed report is reconciled
+against the selected id set **exactly** (`src/piners/integrity.rs`), in
+separate categories:
+
+- **selected** - the probes handed to the harness;
+- **scored** - selected ids with a *valid* disposition: the selected identity
+  plus an outcome and tier that are valid **together** - `parity` with one of
+  the four acceptance tiers, or one of the four other outcomes with no tier.
+  Parseable JSON is not enough, nor is a derived label that merely looks
+  pinnable: a `parity` line with no tier, `{"outcome":"accepted"}` (a tier
+  posing as an outcome) and `parity` with tier `runtime_fail` are all
+  invalid. This one validator (`report::valid_label`) is shared by the gate
+  (an invalid line never satisfies its pin, nor explains exit 1), bless, and
+  the runtime ceiling's reading of stored rows;
+- **missing** - selected ids with no record at all;
+- **invalid** - a line for a selected id whose disposition is not a gate
+  label, a disposition line that does not deserialize, or a stdout line that
+  is not JSON;
+- **duplicate** - repeated records (above);
+- **report-only extras** - disposition lines for ids that were not selected.
+  Never scored, whatever they say.
+
+The summary line leads with the reconciliation - `summary: N selected, M
+scored, K missing` plus the invalid/duplicate/extra counts when nonzero - and
+the members of each nonempty category are named on the lines after it (the
+missing list capped, with a count). An empty report therefore reads as
+`850 selected, 0 scored, 850 missing`, never as a bare `0 total`. The tallies
+after it, the root-cause and dense-na breakdowns, and the `N probes matching
+their pin (hidden)` count all cover the **scored** set only: an extra or an
+invalid line is stored, but never counted as a match or aggregated.
+
+Invalid records, duplicates and extras are **protocol violations** and fail
+the run. **Any selected probe without a valid disposition fails the run**,
+even on exit 0 and even under `--no-gate`: a probe that vanished is not a
+probe that passed. (A `trade_diff` line that fails to parse is still only
+warned about and dropped: it is a diagnostic, never scored.)
+
+When the harness ends abnormally, or leaves selected probes without a valid
+disposition, brokkr prints how it ended against how much it reported -
+`harness exited 2 before reporting 850 of 850`, `harness killed by signal 11
+before reporting 3 of 40` - and then the **whole** harness stderr (it is the
+only evidence of an abort; it is also stored in `runs.db`). An abort after
+every selected probe was validly reported is told apart: `harness exited 2
+after reporting all N selected probes (an abort after complete reporting,
+e.g. a teardown crash; nothing to isolate)`. Every probe is then scored, but
+the exit still fails the run. A harness whose output did not close after it
+exited (stdout possibly truncated) fails the run too, and the truncation is
+stored in the run's `protocol_violations` count, so the run can never serve
+as runtime-ceiling evidence.
+
+If the run's own `harness.stdout`/`harness.stderr` cannot be written into its
+dir, both writes are still attempted and every failed path is named. The
+captured output is still parsed and ingested (`wall_ms` stays the original
+attempt's), but the run fails with `evidence storage failed: ...` in its
+`fail_reason`, bless is refused, the failure counts in
+`protocol_violations` (barring the run from the ceiling), isolation does not
+run (an explicit evidence-storage stop, recorded in the run's `diagnosis`),
+and the dir is kept and reported as `artefacts preserved with incomplete
+evidence (failed: <files>)`.
+
+## Diagnostic isolation
+
+A harness that crashes on one probe takes the whole selection with it, and
+the probes overlap inside it, so the report alone cannot say which probe it
+was. When the harness ends **abnormally** with selected probes unreported,
+brokkr bisects them in separate harness invocations to find which abort when
+run alone (`src/piners/isolate.rs`). Evidence only, never scoring.
+
+- **Trigger.** Exit 2, any other unexpected code, or a spontaneous signal -
+  *with* selected probes left without a valid disposition. Not exit 0 or 1
+  (1 is the completed-with-breaks status; missing probes there still fail the
+  run, as a contract breach, not a crash), not an interrupt or a requested
+  shutdown, not a spawn failure, not the hang backstop, and not an abort
+  after complete reporting. `--no-isolate` disables it; the integrity report
+  and the stderr print still apply.
+- **Order.** The original run is recorded in `runs.db` first, and stays the
+  authoritative record: its `result`, `fail_reason`, `wall_ms` (the original
+  attempt's wall) and dispositions are its own. Nothing a diagnostic attempt
+  reports enters the dispositions, the gate, bless or the runtime ceiling.
+  Afterwards the run row's `diagnosis` gets a note - the isolated probes, the
+  diagnosis status, and where the artefacts are - beside the untouched
+  `fail_reason`. An interrupt during diagnosis cannot lose the original row.
+- **What is bisected.** Only the original run's *unreported* selected ids
+  (said in the output). Same built binary, same lock, same env, flags, cwd and
+  forwarded harness args. Each attempt gets its own `attempt-<n>/` under the
+  run dir, with its own manifest (built from the same verified probes),
+  `harness.stdout`, `harness.stderr` and `BROKKR_HARNESS_ARTEFACT_DIR`. A
+  subset *completes* only if it exits 0 or 1, validly reports every probe in
+  it, breaks no report protocol and its stdout was not cut short; a failing
+  subset is split in two and each half run alone. A failure is classified:
+  an **abort** (exit 2, another unexpected code, a signal), **incomplete**
+  (exit 0/1, some probe without a valid disposition), or
+  **protocol-invalid** (exit 0/1, an invalid, repeated or extra record, or a
+  cut stream). If an attempt's `harness.stdout`/`harness.stderr` cannot be
+  written, diagnosis stops with that evidence-storage failure named, rather
+  than carry on with evidence it could not keep.
+- **Bounds.** At most 64 attempts (every invocation counts), and one shared
+  deadline - the hang backstop, counted from the original launch - of which
+  each attempt gets only what remains. Diagnosis stops on an interrupt, a
+  requested shutdown, the deadline, or a failure to spawn or prepare an
+  attempt; a diagnostic timeout is never attributed to a probe. On the cap or
+  the deadline it prints the unresolved subsets and why it stopped.
+- **Wording.** It claims only what the attempts showed. A singleton that
+  aborts: `probe X aborts when run alone (exit E / signal S; artefacts
+  <dir>)` followed by its stderr (identical stderr from several singletons is
+  printed once, naming them). A failing set both of whose halves complete:
+  `abort did not reproduce in either half of {...}` (the abort needs probes
+  from both halves, or is not deterministic). Every tested singleton
+  aborting: `every tested singleton aborts (N)` - which is not evidence of a
+  shared cause, and is not called one; it counts aborts only. Only an abort
+  is ever called one, on the console and in the stored note alike: a
+  singleton that exits 0/1 `reported no valid disposition when run alone`
+  or `broke the report protocol when run alone`, with what was wrong, and a
+  failing set that was not an abort reads `incomplete report` / `protocol
+  violation did not reproduce in either half of {...}`.
+- **Artefacts.** Whenever diagnosis ran, the run dir (with every
+  `attempt-<n>/`) is preserved and its location printed, and the harness
+  wall is printed separately from the total elapsed including diagnosis.
+
+The crash containment proper belongs in the harness (a supervisor with
+per-probe workers); this pass is brokkr's evidence for when it is not there.
 
 ## Reseed and bless: the two writers of pins.toml
 
@@ -432,12 +577,15 @@ build + harness), then stamps each probe's current disposition into
 `expected`. Records reality including fails (a probe exercising an
 unimplemented feature legitimately pins `expected = "compile_fail"`; the
 gate then catches it starting to compile). Never gates. Prints `blessed N
-(changed M)`. Excludes `--verify-only`/`--reseed`. A bless run whose harness
-failed stamps nothing and exits non-zero: exit 1 is acceptable only when the
-report carries the break lines it signals (recording them is the point), and
-exit 2, any other code, a signal, the hang backstop, or a repeated record
-leaves `pins.toml` untouched. The run row records `gated = no` - bless
-ignores the gate verdict.
+(changed M)`. Excludes `--verify-only`/`--reseed`. Bless is all or nothing:
+it refuses the **entire** write - before a single pin is touched, in memory
+or on disk - unless the harness exit is acceptable, the report has no
+protocol violation, and every selected id has a valid, stampable
+disposition. Exit 1 is acceptable only when the report carries the break
+lines it signals (recording them is the point); exit 2, any other code, a
+signal, the hang backstop, a missing or invalid record, a repeated record or
+a report-only extra leaves `pins.toml` untouched and exits non-zero, naming
+why. The run row records `gated = no` - bless ignores the gate verdict.
 
 Bootstrap: `--reseed --all` -> hand-write `[feeds]` groups, any
 `[harness_files]` paths and the `[probe_config]` declarations -> `--reseed
@@ -449,12 +597,18 @@ Bootstrap: `--reseed --all` -> hand-write `[feeds]` groups, any
 Harness exit: `0` clean, `1` compile/runtime break(s), `2` harness error.
 brokkr exits non-zero on a harness exit the pins do not explain - `1` with
 any break not pinned to itself (see pinned breaks, above), `2`, any other
-code, a signal, or the hang backstop - on a repeated harness record, **or** on
-an active gate deviation. Hash mismatch fails earlier (before build); the
-runtime-ceiling refusal after verification but before the build. `--no-gate`
-and `--bless` never fail on gate diffs; `--bless` fails (and stamps nothing)
-on a failed harness. `--verify-only` exits 0 once all pins (and feeds and
-harness files) verify.
+code, a signal (an abort after complete reporting included), or the hang
+backstop - on a report-integrity failure (a selected probe without a valid
+disposition, an invalid record, a repeated record, a report-only extra, or
+output cut short), **or** on an active gate deviation. The integrity checks
+apply on exit 0 and under `--no-gate` alike. Hash mismatch fails earlier
+(before build); the runtime-ceiling refusal after verification but before the
+build. `--no-gate` and `--bless` never fail on gate diffs; `--bless` fails
+(and stamps nothing) on a failed harness or an incomplete report. An
+interrupt (before or during diagnosis) exits 130 with the run recorded.
+Diagnostic isolation never changes the exit: the original run's verdict
+stands. `--verify-only` exits 0 once all pins (and feeds and harness files)
+verify.
 
 ## Artefacts
 
@@ -465,7 +619,9 @@ takes. The id is reserved under the lock, one past both the highest stored
 run and the highest `run-<id>/` dir on disk. The dir holds `manifest.json`
 plus captured `harness.stdout` / `harness.stderr`; every run's NDJSON is
 ingested into `runs.db`, so the dir is dropped once ingest commits - unless
-`--keep-artefacts`. A run that ends before its output can be ingested
+`--keep-artefacts`, or diagnostic isolation ran (its `attempt-<n>/` dirs are
+not in `runs.db`, so the dir is preserved and its location printed). A run
+that ends before its output can be ingested
 (interrupted, the harness failed to spawn, the manifest could not be
 written) is still recorded under its id (`result` `interrupted`, `fail` or
 `error`) and keeps its dir. Only a run killed outright (SIGKILL, a crash) or

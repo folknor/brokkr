@@ -21,7 +21,7 @@ use std::path::Path;
 use crate::error::DevError;
 use crate::output;
 use crate::piners::pins_write;
-use crate::piners::registry::{self, Registry};
+use crate::piners::registry::Registry;
 use crate::piners::registry_io;
 use crate::piners::report::HarnessReport;
 
@@ -37,12 +37,13 @@ use crate::piners::report::HarnessReport;
 /// it, or stamp dispositions measured against pins that are no longer the
 /// file's.
 ///
-/// A selected probe the harness emitted no line for is skipped with a
-/// warning (nothing to bless). A disposition that is not a known label (a
-/// malformed `parity` line with no tier) is refused for that probe rather
-/// than written, since it would fail [`Registry::lint`] on the next load.
-/// The caller is responsible for refusing to bless a run whose harness
-/// failed (see `cmd.rs`); this function stamps what it is given.
+/// All or nothing: if any selected probe has no disposition line, or one
+/// that is not a known label (a malformed `parity` line with no tier, which
+/// would fail [`Registry::lint`] on the next load), the whole bless is
+/// refused before a single pin is touched, naming every such probe. Blessing
+/// the rest would leave the file half-adopted with nothing in it saying so.
+/// The caller also refuses a run whose harness failed or broke protocol (see
+/// `cmd.rs`); this is the last line, over exactly the stamps about to land.
 pub fn apply(
     pins_path: &Path,
     registry: &mut Registry,
@@ -64,35 +65,55 @@ pub fn apply(
         )));
     }
 
-    let actual: BTreeMap<&str, String> = report
+    // Each line's derived label (for naming a refusal) and its validated one
+    // (`report::valid_label`, the validator integrity and the gate share).
+    let actual: BTreeMap<&str, (String, Option<&'static str>)> = report
         .probes
         .iter()
-        .map(|p| (p.probe.as_str(), p.disposition()))
+        .map(|p| (p.probe.as_str(), (p.disposition(), p.valid_disposition())))
         .collect();
+
+    // Validate every stamp before mutating anything.
+    let mut missing: Vec<&str> = Vec::new();
+    let mut rejected: Vec<String> = Vec::new();
+    let mut unpinned: Vec<&str> = Vec::new();
+    for id in scope_ids {
+        match actual.get(id.as_str()) {
+            None => missing.push(id),
+            Some((derived, None)) => rejected.push(format!("{id} ({derived})")),
+            Some(_) if !registry.pins.contains_key(id) => unpinned.push(id),
+            Some(_) => {}
+        }
+    }
+    if !missing.is_empty() || !rejected.is_empty() || !unpinned.is_empty() {
+        let mut why = Vec::new();
+        if !missing.is_empty() {
+            why.push(format!("no disposition for {}", missing.join(", ")));
+        }
+        if !rejected.is_empty() {
+            why.push(format!("unstampable disposition for {}", rejected.join(", ")));
+        }
+        if !unpinned.is_empty() {
+            why.push(format!("internal: not pinned: {}", unpinned.join(", ")));
+        }
+        return Err(DevError::Config(format!(
+            "corpus --bless: nothing blessed, pins.toml untouched - every selected probe needs \
+             a stampable disposition ({})",
+            why.join("; ")
+        )));
+    }
 
     let mut blessed = 0usize;
     let mut changed = 0usize;
-    let mut missing: Vec<String> = Vec::new();
-    let mut rejected: Vec<String> = Vec::new();
-
     for id in scope_ids {
-        let Some(disp) = actual.get(id.as_str()) else {
-            missing.push(id.clone());
-            continue;
-        };
-        if !registry::is_disposition(disp) {
-            rejected.push(format!("{id} ({disp})"));
-            continue;
-        }
-        let Some(pin) = registry.pins.get_mut(id) else {
-            return Err(DevError::Config(format!(
-                "corpus --bless: internal: selected probe '{id}' is not pinned"
-            )));
+        let (Some((_, Some(disp))), Some(pin)) = (actual.get(id.as_str()), registry.pins.get_mut(id))
+        else {
+            continue; // unreachable: validated above
         };
         blessed += 1;
-        if pin.expected.as_deref() != Some(disp.as_str()) {
+        if pin.expected.as_deref() != Some(*disp) {
             changed += 1;
-            pin.expected = Some(disp.clone());
+            pin.expected = Some((*disp).to_owned());
         }
     }
 
@@ -109,20 +130,6 @@ pub fn apply(
         "blessed {blessed} (changed {changed}) -> {}",
         pins_path.display()
     ));
-    if !missing.is_empty() {
-        output::warn(&format!(
-            "{} emitted no disposition, not blessed: {}",
-            output::count(missing.len(), "selected probe"),
-            missing.join(", ")
-        ));
-    }
-    if !rejected.is_empty() {
-        output::warn(&format!(
-            "{} had an unstampable disposition, not blessed: {}",
-            output::count(rejected.len(), "probe"),
-            rejected.join(", ")
-        ));
-    }
     Ok(())
 }
 
@@ -130,7 +137,7 @@ pub fn apply(
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
-    use crate::piners::registry::{FilePin, Pin};
+    use crate::piners::registry::{self, FilePin, Pin};
 
     fn pin(expected: Option<&str>) -> Pin {
         let mut p = Pin::new(
@@ -181,17 +188,50 @@ mod tests {
     }
 
     #[test]
-    fn skips_probe_with_no_emitted_disposition() {
-        let dir = crate::test_scratch::scratch("piners_bless", "skips_missing");
+    fn refuses_the_whole_bless_when_a_selected_probe_has_no_disposition() {
+        let dir = crate::test_scratch::scratch("piners_bless", "refuses_missing");
         let pins_path = dir.join("pins.toml");
+        std::fs::write(&pins_path, LOADED).unwrap();
         let mut pins = BTreeMap::new();
-        pins.insert("a".to_owned(), pin(Some("accepted")));
-
+        pins.insert("a".to_owned(), pin(None));
+        pins.insert("b".to_owned(), pin(Some("accepted")));
         let mut reg = registry_of(pins);
-        apply(&pins_path, &mut reg, &report(""), &["a".to_owned()]).unwrap();
+        reg.pins_text = LOADED.to_owned();
+        // `a` reported, `b` did not: nothing may be stamped, `a` included.
+        let rep = report(r#"{"probe":"a","outcome":"parity","acceptance":{"tier":"byte_exact"}}"#);
+        let err = apply(&pins_path, &mut reg, &rep, &["a".to_owned(), "b".to_owned()]).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("nothing blessed"), "{msg}");
+        assert!(msg.contains("no disposition for b"), "{msg}");
+        assert_eq!(reg.pins["a"].expected, None, "in-memory pins mutated");
+        assert_eq!(std::fs::read_to_string(&pins_path).unwrap(), LOADED);
+    }
 
-        // unchanged: no disposition emitted, nothing to bless
-        assert_eq!(reg.pins["a"].expected.as_deref(), Some("accepted"));
+    #[test]
+    fn refuses_the_whole_bless_on_an_unstampable_disposition() {
+        let dir = crate::test_scratch::scratch("piners_bless", "refuses_unstampable");
+        let pins_path = dir.join("pins.toml");
+        std::fs::write(&pins_path, LOADED).unwrap();
+        let mut pins = BTreeMap::new();
+        pins.insert("a".to_owned(), pin(None));
+        pins.insert("b".to_owned(), pin(None));
+        let mut reg = registry_of(pins);
+        reg.pins_text = LOADED.to_owned();
+        let rep = report(
+            "{\"probe\":\"a\",\"outcome\":\"no_tv_data\"}\n{\"probe\":\"b\",\"outcome\":\"parity\"}",
+        );
+        let err = apply(&pins_path, &mut reg, &rep, &["a".to_owned(), "b".to_owned()]).unwrap_err();
+        assert!(err.to_string().contains("unstampable disposition for b (parity)"), "{err}");
+        assert_eq!(reg.pins["a"].expected, None);
+        // A tier posing as an outcome derives a pinnable-looking label and is
+        // still refused.
+        let rep = report(
+            "{\"probe\":\"a\",\"outcome\":\"accepted\"}\n{\"probe\":\"b\",\"outcome\":\"no_tv_data\"}",
+        );
+        let err = apply(&pins_path, &mut reg, &rep, &["a".to_owned(), "b".to_owned()]).unwrap_err();
+        assert!(err.to_string().contains("unstampable disposition for a (accepted)"), "{err}");
+        assert_eq!(reg.pins["a"].expected, None);
+        assert_eq!(std::fs::read_to_string(&pins_path).unwrap(), LOADED);
     }
 
     const LOADED: &str = "# keep me\n[probes.a]\npine = { path = \"p/strategy.pine\", xxh128 = \"00\" }\n\
