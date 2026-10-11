@@ -2478,8 +2478,15 @@ installed (a configured runner, a cross target, a configured rustdoc - see
 "The failure list"), and cargo-mediated parallelism (`test_threads` 0 or
 above 1), which shares one stream across tests and harnesses - use
 `parallel = { budget = N }`, which runs the binaries concurrently and
-attributably. (A profile that certifies nothing keeps both lane shapes; their
-inventory is unavailable.)
+attributably. The second is config-determined, so config load refuses it
+first, naming the profile and entries (`docs/brokkr.toml.md`); the `prepare`
+refusal stays as the backstop. (A profile that certifies nothing keeps both
+lane shapes; their inventory is unavailable.)
+
+A preparation failure under a complete claim runs no tests. The audit then
+says the test phase did not run and how many executions were held back,
+rather than reconciling an empty journal into thousands of `unobserved`
+executions and unfinished doctest carriers.
 
 ### Policy coverage
 

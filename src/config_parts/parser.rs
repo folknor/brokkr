@@ -1706,7 +1706,93 @@ fn validate_check_against_test(
         }
     }
     validate_doctest_ledger(t, check, quarantine)?;
+    validate_complete_test_threads(t, check)?;
     Ok(())
+}
+
+/// A complete claim cannot attribute a plain libtest sweep run with cargo-
+/// mediated parallelism (`test_threads` other than 1): every test shares one
+/// output stream. Preparation refuses such a lane too, but only after clippy
+/// and every build - and then nothing runs. Decided here from the config
+/// alone, naming the profile and entry to change. Parallel-binaries, nextest
+/// and doc-only entries carry their own concurrency and are not affected.
+fn validate_complete_test_threads(t: &TestConfig, check: &[CheckEntry]) -> Result<(), DevError> {
+    for (claim, def) in &t.profiles {
+        if def.certifies != Some(Certifies::Complete) {
+            continue;
+        }
+        let mut runs: BTreeSet<String> = BTreeSet::new();
+        collect_run_profiles(&t.profiles, claim, &mut BTreeSet::new(), &mut runs);
+        for run in &runs {
+            let threads = effective_test_threads(&t.profiles, run);
+            if !matches!(threads, Some(n) if n != 1) {
+                continue;
+            }
+            let mut referenced: BTreeSet<String> = BTreeSet::new();
+            referenced_check_entries(&t.profiles, run, &mut BTreeSet::new(), &mut referenced);
+            let serial: Vec<&str> = check
+                .iter()
+                .filter(|e| referenced.contains(&e.name))
+                .filter(|e| e.parallel.is_none() && e.harness != Harness::Nextest && !e.doc_only)
+                .map(|e| e.name.as_str())
+                .collect();
+            if serial.is_empty() {
+                continue;
+            }
+            return Err(DevError::Config(format!(
+                "[test.profiles.{run}] sets `test_threads = {}` and runs the libtest \
+                 [[check]] entr{} {}, which [test.profiles.{claim}] certifies \"complete\". \
+                 Cargo-mediated parallelism shares one output stream across tests and \
+                 harnesses, so those executions cannot be attributed. Set `parallel = {{ \
+                 budget = N }}` on {}, or move {} to a profile without `test_threads`.",
+                threads.unwrap_or_default(),
+                if serial.len() == 1 { "y" } else { "ies" },
+                serial.iter().map(|s| format!("'{s}'")).collect::<Vec<_>>().join(", "),
+                if serial.len() == 1 { "that entry" } else { "each entry" },
+                if serial.len() == 1 { "it" } else { "them" },
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// The non-lanes profiles `name` runs: itself, or its lanes, recursively.
+fn collect_run_profiles(
+    profiles: &BTreeMap<String, ProfileDef>,
+    name: &str,
+    visited: &mut BTreeSet<String>,
+    out: &mut BTreeSet<String>,
+) {
+    if !visited.insert(name.to_owned()) {
+        return;
+    }
+    match profiles.get(name).and_then(|d| d.lanes.as_ref()) {
+        Some(lanes) => {
+            for lane in lanes {
+                collect_run_profiles(profiles, lane, visited, out);
+            }
+        }
+        None => {
+            out.insert(name.to_owned());
+        }
+    }
+}
+
+/// `test_threads` as the `extends` chain resolves it: the closest declaration.
+fn effective_test_threads(profiles: &BTreeMap<String, ProfileDef>, name: &str) -> Option<u32> {
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    let mut cur = Some(name);
+    while let Some(n) = cur {
+        if !seen.insert(n) {
+            return None;
+        }
+        let d = profiles.get(n)?;
+        if d.test_threads.is_some() {
+            return d.test_threads;
+        }
+        cur = d.extends.as_deref();
+    }
+    None
 }
 
 /// Composition rules for a `lanes` profile,
@@ -2405,5 +2491,52 @@ sweeps = ["default"]
         .unwrap();
         let check = check_entries(&["default", "ffi", "live"]);
         validate_check_against_test(&check, Some(&cfg), &[]).unwrap();
+    }
+
+    /// The broadarrow shape: a lane profile with `test_threads = 8` over a
+    /// parallel entry and a plain libtest entry, composed into the gate. The
+    /// libtest entry cannot be attributed, so the config is refused at load,
+    /// naming the lane and the entry - not minutes later in preparation.
+    #[test]
+    fn complete_claim_refuses_cargo_threaded_libtest_entry() {
+        let cfg: TestConfig = toml::from_str(
+            r#"
+doctests = true
+[profiles.gate]
+certifies = "complete"
+lanes = ["threaded", "serial"]
+[profiles.threaded]
+sweeps = ["default", "telemetry"]
+test_threads = 8
+[profiles.serial]
+sweeps = ["doc-carrier"]
+"#,
+        )
+        .unwrap();
+        let mut check = check_entries(&["default", "telemetry", "doc-carrier"]);
+        check[0].parallel = Some(ParallelBinaries { budget: Some(8) });
+        let err = validate_check_against_test(&check, Some(&cfg), &[])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("[test.profiles.threaded]"), "got: {err}");
+        assert!(err.contains("'telemetry'"), "got: {err}");
+        assert!(!err.contains("'default'"), "got: {err}");
+
+        // Every entry parallel: nothing to attribute through cargo.
+        check[1].parallel = Some(ParallelBinaries { budget: None });
+        validate_check_against_test(&check, Some(&cfg), &[]).unwrap();
+    }
+
+    #[test]
+    fn partial_claim_may_thread_libtest_entries() {
+        let cfg: TestConfig = toml::from_str(
+            r#"
+[profiles.edit]
+sweeps = ["default"]
+test_threads = 8
+"#,
+        )
+        .unwrap();
+        validate_check_against_test(&check_entries(&["default"]), Some(&cfg), &[]).unwrap();
     }
 }

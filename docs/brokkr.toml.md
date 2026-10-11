@@ -1550,6 +1550,12 @@ include_ignored = true
   for a serial family of a dozen tests, not thousands. Requires
   `test_threads` unset or 1; never runs doctests; `brokkr check -- ...` extra
   args are rejected on an isolated sweep. Merges through `extends`.
+- **`test_threads` other than 1 under a `complete` claim** is a load-time
+  error for any plain libtest `[[check]]` entry the profile runs (directly or
+  through a lane): cargo-mediated parallelism shares one output stream, so
+  its executions cannot be attributed. The error names the profile and the
+  entries; give them `parallel = { budget = N }`, or move them to a profile
+  without `test_threads`. Parallel, nextest and doc-only entries are exempt.
 - `lanes = ["tier1", "serial"]` composes profiles as a *list of runs*:
   each lane resolves independently and the test
   phase runs every lane's sweeps in order (labels lane-qualified,

@@ -1149,7 +1149,18 @@ fn audit_coverage(
     let restated = !tests_green
         && recon.anomalies.is_empty()
         && continuation.as_ref().is_some_and(|c| !c.candidates.is_empty());
-    report_accounting(plan, &recon, &accounting, tests_green, restated);
+    if prepared.test_phase_ran {
+        report_accounting(plan, &recon, &accounting, tests_green, restated);
+    } else {
+        // Preparation refused the run: nothing was attempted, so reconciling
+        // would call every planned execution "unobserved" and every doctest
+        // carrier unfinished - failures the run never had. The preparation
+        // markers above are the verdict; this says what was held back.
+        output::error(&format!(
+            "accounting: the test phase did not run (preparation failed) - {} not attempted",
+            output::count(accounting.expected_executions, "expected execution")
+        ));
+    }
 
     let label = |lane: usize| plan.lane(lane).map(|l| l.label.clone());
     let termination = recon.first_termination.as_ref().map(|t| TerminationSummary::of(t, label));

@@ -1998,16 +1998,15 @@ name = "all"
 [test]
 doctests = true
 gate_profile = "gate"
-[test.profiles.lane-par]
+[test.profiles.lane-a]
 sweeps = ["all"]
 include_ignored = true
-test_threads = 0
-[test.profiles.lane-ser]
+[test.profiles.lane-b]
 sweeps = ["all"]
-include_ignored = true
+test_threads = 1
 [test.profiles.gate]
 certifies = "complete"
-lanes = ["lane-par", "lane-ser"]
+lanes = ["lane-a", "lane-b"]
 "#,
         );
         let check = parse_check(&table).unwrap();
