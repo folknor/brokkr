@@ -167,6 +167,19 @@ mod tests {
         );
     }
 
+    /// A clippy or rustdoc lint is never raised by a rustc build, so its allow
+    /// would only split the test build's fingerprint from a plain cargo's.
+    #[test]
+    fn test_phase_flags_leave_out_tool_lints() {
+        let table: toml::map::Map<String, toml::Value> = toml::from_str(
+            "[lints]\nallow = [\"rustdoc::private_intra_doc_links\", \"clippy::too_many_lines\", \"deprecated\"]\n\
+             allow_exact = [\"clippy::unwrap_used@src/a.rs\"]",
+        )
+        .unwrap();
+        let cfg = parse_lints(&table).unwrap().unwrap();
+        assert_eq!(test_phase_allow_flags(&cfg.allow, &cfg.allow_exact), vec!["-A", "deprecated"]);
+    }
+
     #[test]
     fn test_phase_flags_empty_without_config() {
         assert!(test_phase_allow_flags(&[], &[]).is_empty());
@@ -1563,6 +1576,7 @@ features = ["a"]
             gate_profile: None,
             debug: false,
             doctests: false,
+            serial_builds: false,
             profiles,
         };
         let err = validate_check_against_test(&check, Some(&test), &[])

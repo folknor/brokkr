@@ -543,7 +543,7 @@ command = "bash .pre-commit-hooks/check_docs_conventions.sh"
 expect  = "All documentation conventions are valid"
 match   = "last-line"   # exact | last-line | contains   (default: last-line)
 stream  = "stdout"      # stdout | stderr | both          (default: stdout)
-stage   = "pre-clippy"  # pre-clippy | pre-test | post-test (default: pre-clippy)
+stage   = "pre-clippy"  # pre-clippy | pre-test | post-test | background (default: pre-clippy)
 diagnostics = "opaque"  # opaque | rustc                  (default: opaque)
 ```
 
@@ -611,10 +611,28 @@ An entry runs once, at the point its `stage` names:
 | `pre-clippy` (default) | With the other convention phases, before clippy builds anything | Cheap source-level gates - they fail before the run spends time compiling |
 | `pre-test` | After clippy, before the test phase | Gates that want a clippy-clean tree but shouldn't wait on the suite |
 | `post-test` | After the test phase and the coverage audit | Gates that need built binaries or test output |
+| `background` | Started with the convention phases, concurrently with everything up to the prepare phase's builds; joined before any test binary is listed | Slow gates (one that drives its own cargo, say) that should not hold the pipeline up |
 
 Entries at the same stage run in declaration order, and every entry at a stage
 runs even when an earlier one failed, so a run surfaces all broken gates at
 once.
+
+`background` entries are the exception to ordering: each runs on its own, at the
+same time as the others and as the convention phases, clippy, rustdoc and the
+prepare phase's builds. They are joined - and their one `script-check: ok (N
+background checks)` line or failure block printed - after those builds and
+before anything is listed, so a background `cargo` never runs beside a listing
+or a test (both run under wall-clock limits). A run with no listing joins them
+before its verdict, and every run joins them before it ends. Each gets the
+script_check ceiling measured from its own start. A failure fails the run and
+names `script_check` as the failed phase even when a later phase also failed,
+since the entry sits at the front of the pipeline.
+
+The stage is opt-in because brokkr cannot tell from a command what it reads and
+writes. A `background` command must write nothing the convention phases, clippy
+or the build read - sources, generated inputs, the target dirs the run builds
+into - and must not depend on anything they write. A script that runs `cargo`
+should give it a target dir of its own.
 
 `post-test` entries are **skipped entirely when the test phase failed**. The
 test phase fails fast, so its later lanes never ran; a script-check has no
@@ -624,7 +642,7 @@ there. They are also skipped when the test phase **did not run** - a profile's
 `script-check: N post-test checks skipped` line saying so, since there is no
 test phase for them to judge. Leaving `stage` off is exactly the old behaviour.
 
-All three stages share the one `script_check` phase name, so a profile's
+All stages share the one `script_check` phase name, so a profile's
 `skip_phases = ["script_check"]` drops every stage, and a failure is reported
 as `failed_phase: "script_check"` regardless of where it happened - the failing
 entry is named in the output either way.
@@ -839,6 +857,16 @@ allow_exact = ["clippy::unused_async_trait_impl@crates/system/src/kernel.rs"]
   failure it was written for.
 
 ### How the test phase injects them
+
+Only lints rustc itself raises reach the test phase. A `clippy::` or
+`rustdoc::` name is never raised by a rustc build, and a `cargo::` name is not
+a rustc lint at all, so their allows stay out of the build. That is deliberate,
+not tidiness: rustflags are part of every unit's fingerprint, so any flag here
+makes the test phase's artifacts differ from what a plain `cargo build` or
+rust-analyzer builds in the same target dir, and each then rebuilds the whole
+graph over the other's. An allow for a rustc lint (`deprecated`, `dead_code`)
+still pays that cost; where the project can say it in the manifest's `[lints]`
+instead, every build shares one fingerprint.
 
 `cargo test` has no `-- <rustc flags>` passthrough, so the test phase puts the
 `-A` flags into cargo's rustflags. Which layer it uses is decided per sweep,
@@ -1453,9 +1481,9 @@ should be encoded by adding rules for the intermediate crates too.
 
 ## `[test]` section
 
-Optional. Five things live here: a default cargo package, a default
-validation profile, a gate profile, a doctest toggle, and the named profiles
-that selectively reference `[[check]]` entries.
+Optional. Project-wide test settings - a default cargo package, a default
+validation profile, a gate profile, the doctest and build-concurrency toggles -
+and the named profiles that selectively reference `[[check]]` entries.
 
 ```toml
 [test]
@@ -1496,6 +1524,15 @@ include_ignored = true
   restore the full `cargo test` default. Project-wide only (no per-`[[check]]`
   or CLI override); `brokkr test <name>` is unaffected. See
   `docs/commands/check.md`.
+- `serial_builds` (default `false`) runs every cargo invocation of `brokkr
+  check`'s clippy, rustdoc and prepare-build steps one after another. By
+  default they run as one chain per target directory (the shared one, each
+  isolated `unify-*`/`rustflags-*` dir), the chains concurrent. A target dir
+  separates everything cargo writes, but not what a build script writes
+  outside its `OUT_DIR` - into the source tree or a shared directory - so a
+  project whose build scripts do that sets this. A cargo build dir configured
+  anywhere (`CARGO_BUILD_BUILD_DIR`, `build.build-dir`) holds intermediate
+  artifacts across target dirs and forces one chain on its own.
 - `default_profile` is the validation profile `brokkr check` uses when no
   `--profile` is passed. With no profile config, `brokkr check` runs every
   `[[check]]` entry without libtest filters; with no `[[check]]` either, it

@@ -29,7 +29,7 @@
 // as accounted-for rather than orphaned.
 //
 // So: one unfiltered per-binary listing per build shape resolution
-// establishes the universe (the `prepare` phase's `enumerate_universe`), and
+// establishes the universe (the `prepare` phase's `list_universe`), and
 // lane listings - the engine's included - are only ever read for their
 // selections.
 //

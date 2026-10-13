@@ -189,17 +189,21 @@ impl LintsConfig {
 /// rustflags: `allow` plus the lint names behind `allow_exact`, deduped and
 /// order-preserving.
 ///
-/// `clippy::`-qualified names are kept rather than filtered: rustc accepts
-/// tool-qualified lint flags for tools it knows, so they are inert in a plain
-/// `cargo test` build, and dropping them would mean a project could not
-/// suppress a lint that clippy and rustc happen to share a name for.
+/// Only lints rustc itself can raise are kept. Rustflags are part of every
+/// unit's fingerprint, so a flag here makes the test phase's artifacts
+/// different from what a plain `cargo build`, or rust-analyzer, builds in the
+/// same target dir - each then rebuilds the whole graph over the other's. A
+/// flag that cannot change a diagnostic is pure cost, so these are left out:
+///
+/// - `clippy::` and `rustdoc::` names: rustc accepts tool-qualified flags for
+///   tools it knows, but raises none of their lints in a build. (A lint shared
+///   by clippy and rustc is written unqualified.)
+/// - cargo's own lints ([`is_cargo_lint`]): rustc knows no `cargo` lint tool,
+///   so `-A cargo::...` would itself raise a diagnostic.
 ///
 /// A free function taking the two slices because that is how the check phases
 /// carry them - unbundled, straight off the config - so there is one definition
 /// of which lints reach a build rather than one per caller shape.
-///
-/// Cargo's own lints ([`is_cargo_lint`]) are left out: rustc knows no `cargo`
-/// lint tool, so `-A cargo::...` would itself raise a diagnostic.
 pub fn test_phase_allow_flags(allow: &[String], allow_exact: &[SitedAllow]) -> Vec<String> {
     let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
     let mut out = Vec::new();
@@ -207,7 +211,7 @@ pub fn test_phase_allow_flags(allow: &[String], allow_exact: &[SitedAllow]) -> V
         .iter()
         .map(String::as_str)
         .chain(allow_exact.iter().map(|s| s.lint.as_str()))
-        .filter(|name| !is_cargo_lint(name));
+        .filter(|name| reaches_test_build(name));
     for name in names {
         if seen.insert(name) {
             out.push("-A".to_string());
@@ -215,6 +219,12 @@ pub fn test_phase_allow_flags(allow: &[String], allow_exact: &[SitedAllow]) -> V
         }
     }
     out
+}
+
+/// Whether an allow for `name` becomes a test-phase build flag: only a lint
+/// rustc itself raises does ([`test_phase_allow_flags`]).
+pub fn reaches_test_build(name: &str) -> bool {
+    !is_cargo_lint(name) && !name.starts_with("clippy::") && !name.starts_with("rustdoc::")
 }
 
 /// Whether a lint name belongs to cargo's own namespace (`[lints.cargo]`:
@@ -449,6 +459,12 @@ pub enum Stage {
     /// test phase failed - the tests fail fast, so a post-test gate would be
     /// judging a half-run tree.
     PostTest,
+    /// Started with the convention phases and run concurrently with them, with
+    /// clippy, rustdoc and the prepare phase's builds, and with every other
+    /// background entry; joined before any test binary is listed or run. For a
+    /// slow gate that reads nothing the run writes and writes nothing the run
+    /// reads - the project's word, since brokkr cannot tell from a command.
+    Background,
 }
 
 /// The shape a [`ScriptCheck`]'s output is declared to have, which decides how
@@ -1277,6 +1293,13 @@ pub struct TestConfig {
     pub debug: bool,
     #[serde(default)]
     pub doctests: bool,
+    /// Run every cargo invocation of clippy, rustdoc and the prepare phase's
+    /// builds one after another, instead of one chain per target directory
+    /// with the chains concurrent. For a project whose build scripts write
+    /// outside their `OUT_DIR` (into the source tree or a shared directory),
+    /// which no target-dir boundary separates.
+    #[serde(default)]
+    pub serial_builds: bool,
     #[serde(default)]
     pub profiles: BTreeMap<String, ProfileDef>,
 }

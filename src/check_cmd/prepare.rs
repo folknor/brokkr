@@ -188,6 +188,12 @@ pub(crate) struct PreparedLane {
     /// Why this lane has no inventory, when it has none: its streams cannot be
     /// attributed to binaries. See [`LaneRecord::unavailable`].
     pub(crate) unavailable: Option<String>,
+    /// The executables the lane runs or hands its tests, as the plan saw them
+    /// (link-search dylibs are not among them - no artifact stream names one):
+    /// test executables, runtime `CARGO_BIN_EXE_*` bins, support bins. Set on
+    /// a lane listed from the prepare phase's build step; a direct lane whose
+    /// files all still match runs without a cargo invocation.
+    pub(crate) snapshot: Option<Snapshot>,
     /// Set when preparing this lane failed outside a certifying claim: what
     /// the attempt printed (held back) and the error's own text. The lane's
     /// run reports this instead of preparing again - a second preparation
@@ -226,6 +232,7 @@ impl PreparedLane {
             support_fingerprint: Vec::new(),
             doc_obligation: false,
             unavailable: None,
+            snapshot: None,
             prepare_failed: None,
         }
     }
@@ -474,21 +481,118 @@ pub(crate) fn prepare_lane(
     attempt: &Attempt,
     extra_args: &[String],
 ) -> Result<PreparedLane, DevError> {
+    prepare_lane_from(inputs, sweep, attempt, extra_args, None)
+}
+
+/// [`prepare_lane`], listing `prebuilt` when the lane's shape was already
+/// built (the prepare phase's build step) instead of building it here.
+fn prepare_lane_from(
+    inputs: &LaneInputs<'_>,
+    sweep: &ResolvedSweep,
+    attempt: &Attempt,
+    extra_args: &[String],
+    prebuilt: Option<ShapeBuild>,
+) -> Result<PreparedLane, DevError> {
     let env = lane_env(inputs, sweep);
     let kind = lane_kind(sweep);
-    let mut prepared = match kind {
-        LaneKind::Nextest => prepare_nextest(inputs, sweep, attempt, extra_args, &env)?,
-        LaneKind::DocOnly => {
+    let mut prepared = match (kind, prebuilt) {
+        (LaneKind::Nextest, Some(ShapeBuild::Nextest(built))) => {
+            assemble_nextest_lane(inputs, sweep, built.selection.clone(), &env, &built.as_build())
+                .inspect_err(|e| report_certifying_failure(inputs, sweep, attempt, e))?
+        }
+        (LaneKind::Nextest, _) => prepare_nextest(inputs, sweep, attempt, extra_args, &env)?,
+        (LaneKind::DocOnly, _) => {
             if inputs.certifying {
                 refuse_unattributable_serial(inputs, sweep, &env, extra_args)?;
             }
             PreparedLane::bare(env)
         }
-        LaneKind::Parallel | LaneKind::Isolated => prepare_direct(inputs, sweep, attempt, extra_args, &env, kind)?,
-        LaneKind::Serial => prepare_serial(inputs, sweep, attempt, extra_args, &env)?,
+        (LaneKind::Parallel | LaneKind::Isolated, prebuilt) => {
+            prepare_direct(inputs, sweep, attempt, extra_args, &env, kind, prebuilt.and_then(ShapeBuild::cargo))?
+        }
+        (LaneKind::Serial, prebuilt) => {
+            prepare_serial(inputs, sweep, attempt, extra_args, &env, prebuilt.and_then(ShapeBuild::cargo))?
+        }
     };
     prepared.verify = true;
     Ok(prepared)
+}
+
+/// A lane shape built and not yet listed: what the prepare phase's build step
+/// hands its listing step.
+pub(crate) enum ShapeBuild {
+    /// The libtest lanes: every resolution's test binaries and the runtime
+    /// index their stream carried.
+    Cargo(CargoBuilt),
+    /// The engine lane: the metadata document and the artifact stream.
+    Nextest(Box<NextestBuilt>),
+}
+
+impl ShapeBuild {
+    fn cargo(self) -> Option<CargoBuilt> {
+        match self {
+            Self::Cargo(b) => Some(b),
+            Self::Nextest(_) => None,
+        }
+    }
+
+    /// The executables the lane will run or hand its tests, by path: test
+    /// executables and the runtime `CARGO_BIN_EXE_*` bins.
+    fn tracked_paths(&self) -> Vec<String> {
+        match self {
+            Self::Cargo(b) => b.tracked_paths(),
+            Self::Nextest(b) => {
+                let (binaries, index, _) = parse_test_binaries(&b.stdout);
+                let mut out: Vec<String> = binaries.into_iter().map(|t| t.executable).collect();
+                out.extend(index.bin_exe_paths());
+                out
+            }
+        }
+    }
+}
+
+/// `(resolution, selection, binaries)` per cargo resolution of a lane.
+type BuiltResolutions = Vec<(Option<String>, Vec<String>, Vec<TestBinary>)>;
+
+/// The libtest lanes' build: every resolution, and the merged runtime index.
+pub(crate) struct CargoBuilt {
+    built: BuiltResolutions,
+    index: BuildRuntimeIndex,
+}
+
+impl CargoBuilt {
+    fn tracked_paths(&self) -> Vec<String> {
+        let mut out: Vec<String> =
+            self.built.iter().flat_map(|(_, _, bins)| bins.iter().map(|b| b.executable.clone())).collect();
+        out.extend(self.index.bin_exe_paths());
+        out
+    }
+}
+
+/// Build every resolution of a libtest lane. `selection_of` spells one
+/// resolution's cargo selection. `Ok(None)` is a build failure already
+/// reported.
+fn build_resolutions(
+    inputs: &LaneInputs<'_>,
+    attempt: &Attempt,
+    env_refs: &[(&str, &str)],
+    selection_of: &dyn Fn(&ResolutionRun) -> Vec<String>,
+) -> Result<Option<CargoBuilt>, DevError> {
+    let mut built: BuiltResolutions = Vec::new();
+    let mut index = BuildRuntimeIndex::default();
+    // Under package mode one prebuild PER PACKAGE, never a batched multi-`-p`:
+    // the batched graph is observably not the N independent resolutions the
+    // mode exists for, so it would enumerate binaries no run uses.
+    for run in attempt.runs() {
+        let selection = selection_of(run);
+        let Some((binaries, idx)) = test_binaries_with_runtime(inputs.project_root, &selection, env_refs, inputs.commands)?
+        else {
+            return Ok(None);
+        };
+        index.merge(idx);
+        built.push((run.resolution.clone(), selection, binaries));
+    }
+    Ok(Some(CargoBuilt { built, index }))
 }
 
 /// Why a serial lane's harnesses cannot be attributed, as the short reason
@@ -684,6 +788,7 @@ fn prepare_serial(
     attempt: &Attempt,
     extra_args: &[String],
     env: &LaneEnv,
+    prebuilt: Option<CargoBuilt>,
 ) -> Result<PreparedLane, DevError> {
     if let Some(u) = serial_unattributable(inputs, sweep, env, extra_args) {
         if inputs.certifying {
@@ -691,27 +796,15 @@ fn prepare_serial(
         }
         return Ok(PreparedLane::without_inventory(env.clone(), u.short));
     }
-    let (cargo_extra, libtest_extra) = split_extra_args(extra_args);
+    let (_, libtest_extra) = split_extra_args(extra_args);
     let env_refs = env.refs();
-    let mut built: Vec<(Option<String>, Vec<String>, Vec<TestBinary>)> = Vec::new();
-    let mut index = BuildRuntimeIndex::default();
     let doc_facts = workspace_doc_facts(inputs.project_root, &env_refs)?;
-    let mut doc_obligation = false;
-    for run in attempt.runs() {
-        doc_obligation |= doc_facts.obliges(&run.selection);
-        // Exactly the cargo-level argv `run_one_test_sweep` hands `cargo test`,
-        // so the prebuild names the same units and the run is a no-op rebuild.
-        let mut selection = env.allow_args.clone();
-        selection.extend(sweep_selection_args(sweep, run));
-        selection.extend(cargo_extra.iter().cloned());
-        let Some((binaries, idx)) =
-            test_binaries_with_runtime(inputs.project_root, &selection, &env_refs, inputs.commands)?
-        else {
-            return Err(not_prepared(sweep));
-        };
-        index.merge(idx);
-        built.push((run.resolution.clone(), selection, binaries));
-    }
+    let doc_obligation = attempt.runs().iter().any(|run| doc_facts.obliges(&run.selection));
+    let built = match prebuilt {
+        Some(b) => b,
+        None => build_serial(inputs, sweep, attempt, extra_args, env)?.ok_or_else(|| not_prepared(sweep))?,
+    };
+    let CargoBuilt { built, index } = built;
     let fingerprint = Some(index.fingerprint()?);
     let runtime = DirectRuntime::load(inputs.project_root, &env_refs, index)?;
     let filter_args = lane_filter_args(sweep, libtest_extra);
@@ -741,16 +834,44 @@ fn prepare_serial(
     Ok(prepared)
 }
 
-/// The direct-execution lanes' preparation (parallel and isolated): prebuild
-/// each resolution, reconstruct cargo's launch contract, list every binary.
-fn prepare_direct(
+/// The serial lane's build: exactly the cargo-level argv `run_one_test_sweep`
+/// hands `cargo test`, so the prebuild names the same units and the run is a
+/// no-op rebuild. `Ok(None)` is a build failure already reported.
+fn build_serial(
     inputs: &LaneInputs<'_>,
     sweep: &ResolvedSweep,
     attempt: &Attempt,
     extra_args: &[String],
     env: &LaneEnv,
+) -> Result<Option<CargoBuilt>, DevError> {
+    let (cargo_extra, _) = split_extra_args(extra_args);
+    build_resolutions(inputs, attempt, &env.refs(), &|run| {
+        let mut selection = env.allow_args.clone();
+        selection.extend(sweep_selection_args(sweep, run));
+        selection.extend(cargo_extra.iter().cloned());
+        selection
+    })
+}
+
+/// A direct lane's forwarded `-- …` args, split the way they ride.
+struct Forwarded<'x> {
+    /// Target selectors: they narrow the plan.
+    selectors: Vec<String>,
+    /// Everything else cargo-side: it rides the prebuild.
+    cargo: Vec<String>,
+    /// Appended to every direct execution.
+    libtest: &'x [String],
+}
+
+/// What the direct lanes refuse before building anything, and the forwarded
+/// args split the way they ride.
+fn direct_preflight<'x>(
+    inputs: &LaneInputs<'_>,
+    sweep: &ResolvedSweep,
+    extra_args: &'x [String],
+    env: &LaneEnv,
     kind: LaneKind,
-) -> Result<PreparedLane, DevError> {
+) -> Result<Forwarded<'x>, DevError> {
     if kind == LaneKind::Isolated && !extra_args.is_empty() {
         return Err(DevError::Config(
             "`brokkr check -- …` extra args are not supported on a sweep with \
@@ -764,28 +885,51 @@ fn prepare_direct(
     let (extra_selectors, cargo_extra) = partition_target_selectors(cargo_extra);
     reject_forwarded_selectors(sweep, &cargo_extra)?;
     reject_unsupported_forwarded(sweep, &cargo_extra)?;
-    let env_refs = env.refs();
     // Direct execution would bypass a configured runner; refuse before building.
-    refuse_configured_runner(inputs.project_root, &env_refs)?;
+    refuse_configured_runner(inputs.project_root, &env.refs())?;
+    Ok(Forwarded { selectors: extra_selectors, cargo: cargo_extra, libtest: libtest_extra })
+}
 
-    let mut built: Vec<(Option<String>, Vec<String>, Vec<TestBinary>)> = Vec::new();
-    let mut index = BuildRuntimeIndex::default();
-    // Under package mode one prebuild PER PACKAGE, never a batched multi-`-p`:
-    // the batched graph is observably not the N independent resolutions the
-    // mode exists for, so it would enumerate binaries no run uses.
-    for run in attempt.runs() {
+/// The direct lanes' build, after [`direct_preflight`]. `Ok(None)` is a build
+/// failure already reported.
+fn build_direct(
+    inputs: &LaneInputs<'_>,
+    sweep: &ResolvedSweep,
+    attempt: &Attempt,
+    extra_args: &[String],
+    env: &LaneEnv,
+    kind: LaneKind,
+) -> Result<Option<CargoBuilt>, DevError> {
+    let forwarded = direct_preflight(inputs, sweep, extra_args, env, kind)?;
+    build_resolutions(inputs, attempt, &env.refs(), &|run| {
         let mut selection = env.allow_args.clone();
         selection.extend(resolution_selection(sweep, run));
-        selection.extend(extra_selectors.iter().cloned());
-        selection.extend(cargo_extra.iter().cloned());
-        let Some((binaries, idx)) =
-            test_binaries_with_runtime(inputs.project_root, &selection, &env_refs, inputs.commands)?
-        else {
-            return Err(not_prepared(sweep));
-        };
-        index.merge(idx);
-        built.push((run.resolution.clone(), selection, binaries));
-    }
+        selection.extend(forwarded.selectors.iter().cloned());
+        selection.extend(forwarded.cargo.iter().cloned());
+        selection
+    })
+}
+
+/// The direct-execution lanes' preparation (parallel and isolated): prebuild
+/// each resolution (unless `prebuilt` holds the build), reconstruct cargo's
+/// launch contract, list every binary.
+fn prepare_direct(
+    inputs: &LaneInputs<'_>,
+    sweep: &ResolvedSweep,
+    attempt: &Attempt,
+    extra_args: &[String],
+    env: &LaneEnv,
+    kind: LaneKind,
+    prebuilt: Option<CargoBuilt>,
+) -> Result<PreparedLane, DevError> {
+    let Forwarded { selectors: extra_selectors, cargo: cargo_extra, libtest: libtest_extra } =
+        direct_preflight(inputs, sweep, extra_args, env, kind)?;
+    let env_refs = env.refs();
+    let built = match prebuilt {
+        Some(b) => b,
+        None => build_direct(inputs, sweep, attempt, extra_args, env, kind)?.ok_or_else(|| not_prepared(sweep))?,
+    };
+    let CargoBuilt { built, index } = built;
     let fingerprint = Some(index.fingerprint()?);
     let runtime = DirectRuntime::load(inputs.project_root, &env_refs, index)?;
     let mut prepared = PreparedLane::bare(env.clone());
@@ -817,7 +961,7 @@ fn prepare_direct(
 fn list_direct_binaries(
     inputs: &LaneInputs<'_>,
     sweep: &ResolvedSweep,
-    built: Vec<(Option<String>, Vec<String>, Vec<TestBinary>)>,
+    built: BuiltResolutions,
     prepared: &mut PreparedLane,
     libtest_extra: &[String],
     env_refs: &[(&str, &str)],
@@ -1000,27 +1144,51 @@ pub(crate) struct Universe {
     pub(crate) binaries: Vec<(BinaryUnit, Vec<String>, BTreeSet<String>)>,
 }
 
-/// Enumerate a shape resolution's universe: the bare shape selection (no
-/// target filters - those narrow lanes, and are audited through their
-/// selections), listed `--include-ignored` with no filters, and `--ignored`
-/// for the ignored subset.
-pub(crate) fn enumerate_universe(
+/// A shape resolution's universe build: its test binaries and runtime index.
+/// A universe is the bare shape selection (no target filters - those narrow
+/// lanes, and are audited through their selections), listed
+/// `--include-ignored` with no filters, and `--ignored` for the ignored
+/// subset: built by [`build_universe`], listed by [`list_universe`].
+pub(crate) struct UniverseBuilt {
+    binaries: Vec<TestBinary>,
+    index: BuildRuntimeIndex,
+}
+
+impl UniverseBuilt {
+    fn tracked_paths(&self) -> Vec<String> {
+        let mut out: Vec<String> = self.binaries.iter().map(|b| b.executable.clone()).collect();
+        out.extend(self.index.bin_exe_paths());
+        out
+    }
+}
+
+/// The build half of a universe: the bare shape selection.
+fn build_universe(
     inputs: &LaneInputs<'_>,
     sweep: &ResolvedSweep,
     run: &ResolutionRun,
     env: &LaneEnv,
-) -> Result<Universe, DevError> {
-    let env_refs = env.refs();
+) -> Result<UniverseBuilt, DevError> {
     let bare = shape_enumeration_args(sweep, run, env.allow_args.clone());
-    let Some((binaries, index)) = test_binaries_with_runtime(inputs.project_root, &bare, &env_refs, inputs.commands)?
-    else {
-        return Err(DevError::Reported(format!("the universe of sweep '{}' could not be enumerated", sweep.label)));
-    };
-    let runtime = DirectRuntime::load(inputs.project_root, &env_refs, index)?;
-    universe_from_binaries(inputs, sweep, &binaries, &env_refs, &runtime)
+    match test_binaries_with_runtime(inputs.project_root, &bare, &env.refs(), inputs.commands)? {
+        Some((binaries, index)) => Ok(UniverseBuilt { binaries, index }),
+        None => Err(DevError::Reported(format!("the universe of sweep '{}' could not be enumerated", sweep.label))),
+    }
 }
 
-/// The listing half of [`enumerate_universe`], behind a seam so it can be
+/// The listing half of a universe.
+fn list_universe(
+    inputs: &LaneInputs<'_>,
+    sweep: &ResolvedSweep,
+    env: &LaneEnv,
+    built: UniverseBuilt,
+) -> Result<Universe, DevError> {
+    let env_refs = env.refs();
+    let runtime = DirectRuntime::load(inputs.project_root, &env_refs, built.index)?;
+    universe_from_binaries(inputs, sweep, &built.binaries, &env_refs, &runtime)
+}
+
+/// The listing half of [`list_universe`], behind a seam so it can be
 /// driven without a cargo build. A complete profile needs every test of the
 /// shape named, and the only way to name a custom harness's tests is to run
 /// it with `--list`, as enumeration always has: a valid listing is accepted, and
@@ -1065,37 +1233,265 @@ pub(crate) trait Preparer {
     fn universe(&mut self, sweep: &ResolvedSweep, run: &ResolutionRun, env: &LaneEnv) -> Result<Universe, DevError>;
 }
 
-/// The real preparer: cargo, listings, hashes.
+/// File identities taken at one moment: `(path, xxh3 of its content)`,
+/// sorted by path.
+pub(crate) type Snapshot = Vec<(String, String)>;
+
+/// Hash every path once.
+fn take_snapshot(paths: impl IntoIterator<Item = String>) -> Result<Snapshot, DevError> {
+    let set: BTreeSet<String> = paths.into_iter().collect();
+    set.into_iter()
+        .map(|p| {
+            let h = hash_file(Path::new(&p)).map_err(|e| DevError::Build(format!("could not hash {p}: {e}")))?;
+            Ok((p, h))
+        })
+        .collect()
+}
+
+/// What no longer matches `snapshot`, one line per file. Empty when every
+/// file still has the content it was snapshotted with.
+pub(crate) fn snapshot_drift(snapshot: &Snapshot) -> Vec<String> {
+    snapshot
+        .iter()
+        .filter_map(|(p, h)| match hash_file(Path::new(p)) {
+            Ok(now) if &now == h => None,
+            Ok(_) => Some(format!("{p} has other content")),
+            Err(e) => Some(format!("{p} could not be read: {e}")),
+        })
+        .collect()
+}
+
+/// One lane's products from the prepare phase's build step.
+pub(crate) struct LaneBuild {
+    support: Vec<SupportArtifact>,
+    /// `None` for a lane with nothing to compile here (a doc-only lane, a
+    /// serial lane whose harnesses cannot be attributed).
+    shape: Option<ShapeBuild>,
+    /// The executables the lane runs or hands its tests, hashed straight after
+    /// the lane's own build - before the next build in its target dir.
+    snapshot: Snapshot,
+}
+
+/// Universe builds by (shape, resolution), each with its snapshot.
+type UniverseBuilds = HashMap<(String, Option<String>), (UniverseBuilt, Snapshot)>;
+
+/// What the build step produced, consumed by the listing step's preparer.
+#[derive(Default)]
+pub(crate) struct ProfileBuilds {
+    /// By sweep label: the build, or why it failed, with the errors its
+    /// attempt held back (replayed when the lane is prepared).
+    lanes: HashMap<String, (Result<LaneBuild, DevError>, Vec<String>)>,
+    /// By (shape, resolution): a universe build and its snapshot.
+    universes: UniverseBuilds,
+}
+
+/// The prepare phase's build step: every attempted lane's universe builds
+/// (under a certifying claim), support builds and shape build, with the
+/// snapshot of what each produced. One chain per target directory, the chains
+/// concurrent ([`run_grouped`]). Nothing is listed or executed here, so the
+/// listing deadline never runs beside a compile.
+///
+/// A failure is kept for its lane, not raised: the listing step reports it
+/// where it reports every other preparation failure. Only a stop ends a
+/// chain early.
+pub(crate) fn build_profile(
+    inputs: &LaneInputs<'_>,
+    sweeps: &[ResolvedSweep],
+    selection: &PhaseSelection,
+    extra_args: &[String],
+) -> ProfileBuilds {
+    let keyed: Vec<(usize, PathBuf)> = sweeps
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| selection.attempt(*i).is_some())
+        .map(|(i, s)| (i, target_dir_key(s, inputs.target_dir)))
+        .collect();
+    let universes: std::sync::Mutex<UniverseBuilds> = std::sync::Mutex::new(HashMap::new());
+    let outcomes = run_grouped(&keyed, &|i| {
+        let sweep = &sweeps[i];
+        let Some(attempt) = selection.attempt(i) else {
+            return Err(DevError::Build(format!("sweep '{}' is not attempted", sweep.label)));
+        };
+        let (built, held) = output::capture_errors(|| build_lane(inputs, sweep, attempt, extra_args, Some(&universes)));
+        if matches!(built, Err(DevError::Interrupted)) || crate::shutdown::is_shutdown_requested() {
+            return Err(DevError::Interrupted);
+        }
+        Ok((built, held))
+    });
+    let mut out = ProfileBuilds {
+        universes: universes.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner),
+        ..ProfileBuilds::default()
+    };
+    for (i, outcome) in outcomes {
+        if let Some(Ok(entry)) = outcome {
+            out.lanes.insert(sweeps[i].label.clone(), entry);
+        }
+    }
+    out
+}
+
+/// One lane's build step, in the order its verification will see: universe
+/// builds first (so the lane's snapshot is taken after them), then support
+/// builds, then the shape.
+fn build_lane(
+    inputs: &LaneInputs<'_>,
+    sweep: &ResolvedSweep,
+    attempt: &Attempt,
+    extra_args: &[String],
+    universes: Option<&std::sync::Mutex<UniverseBuilds>>,
+) -> Result<LaneBuild, DevError> {
+    let env = lane_env(inputs, sweep);
+    let kind = lane_kind(sweep);
+    if let Some(universes) = universes
+        && inputs.certifying
+        && kind != LaneKind::DocOnly
+    {
+        let shape = shape_id(sweep);
+        for run in attempt.runs() {
+            let key = (shape.clone(), run.resolution.clone());
+            let known = universes.lock().unwrap_or_else(std::sync::PoisonError::into_inner).contains_key(&key);
+            if known {
+                continue;
+            }
+            // A universe that will not build is enumerated again, and its
+            // failure reported, by the listing step.
+            if let Ok(built) = build_universe(inputs, sweep, run, &env) {
+                let snapshot = take_snapshot(built.tracked_paths())?;
+                universes.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(key, (built, snapshot));
+            }
+        }
+    }
+    let mut support = Vec::new();
+    for req in attempt.support() {
+        support.extend(run_sweep_pre_build(
+            inputs.project_root,
+            sweep,
+            req,
+            &env.project_env,
+            &env.allow_args,
+            inputs.commands,
+        )?);
+    }
+    let shape = match kind {
+        LaneKind::DocOnly => None,
+        LaneKind::Nextest => {
+            Some(ShapeBuild::Nextest(Box::new(build_nextest(inputs, sweep, attempt, extra_args, &env)?)))
+        }
+        LaneKind::Parallel | LaneKind::Isolated => Some(ShapeBuild::Cargo(
+            build_direct(inputs, sweep, attempt, extra_args, &env, kind)?.ok_or_else(|| not_prepared(sweep))?,
+        )),
+        LaneKind::Serial if serial_unattributable(inputs, sweep, &env, extra_args).is_some() => None,
+        LaneKind::Serial => Some(ShapeBuild::Cargo(
+            build_serial(inputs, sweep, attempt, extra_args, &env)?.ok_or_else(|| not_prepared(sweep))?,
+        )),
+    };
+    let mut paths: Vec<String> = support.iter().map(|a| a.executable.clone()).collect();
+    if let Some(s) = &shape {
+        paths.extend(s.tracked_paths());
+    }
+    let snapshot = take_snapshot(paths)?;
+    Ok(LaneBuild { support, shape, snapshot })
+}
+
+/// The real preparer: cargo, listings, hashes. Lists what the build step
+/// built ([`build_profile`]), and builds only what it has no build for.
 pub(crate) struct CargoPreparer<'a> {
     pub(crate) inputs: LaneInputs<'a>,
     /// The forwarded `-- …` args, which narrow what a lane selects and so
     /// what it is expected to execute. Empty under a certifying claim.
     pub(crate) extra_args: &'a [String],
+    pub(crate) builds: ProfileBuilds,
+    /// The build `support` handed over, for the `lane` call that follows it.
+    pending: Option<(String, LaneBuild)>,
+}
+
+impl<'a> CargoPreparer<'a> {
+    pub(crate) fn new(inputs: LaneInputs<'a>, extra_args: &'a [String], builds: ProfileBuilds) -> Self {
+        Self { inputs, extra_args, builds, pending: None }
+    }
 }
 
 impl Preparer for CargoPreparer<'_> {
+    /// Hand over the lane's build - the build step's, or a fresh one when it
+    /// has none or a later build in its target dir replaced its files in
+    /// place - and its support executables. Every fact of what `lane` then
+    /// lists comes from this one build.
     fn support(&mut self, sweep: &ResolvedSweep, attempt: &Attempt) -> Result<Vec<SupportArtifact>, DevError> {
-        let env = lane_env(&self.inputs, sweep);
-        let mut out = Vec::new();
-        for req in attempt.support() {
-            out.extend(run_sweep_pre_build(
-                self.inputs.project_root,
-                sweep,
-                req,
-                &env.project_env,
-                &env.allow_args,
-                self.inputs.commands,
-            )?);
-        }
-        Ok(out)
+        let built = match self.builds.lanes.remove(&sweep.label) {
+            Some((built, held)) => {
+                // What the build step's attempt would have printed, printed
+                // now - where this lane's preparation is reported.
+                for line in &held {
+                    output::error(line);
+                }
+                built?
+            }
+            None => build_lane(&self.inputs, sweep, attempt, self.extra_args, None)?,
+        };
+        let drift = snapshot_drift(&built.snapshot);
+        let built = if drift.is_empty() {
+            built
+        } else {
+            output::detail(&format!(
+                "prepare: sweep '{}': rebuilt before listing - {}",
+                sweep.label,
+                drift.join("; ")
+            ));
+            build_lane(&self.inputs, sweep, attempt, self.extra_args, None)?
+        };
+        let support = built.support.clone();
+        self.pending = Some((sweep.label.clone(), built));
+        Ok(support)
     }
 
     fn lane(&mut self, sweep: &ResolvedSweep, attempt: &Attempt) -> Result<PreparedLane, DevError> {
-        prepare_lane(&self.inputs, sweep, attempt, self.extra_args)
+        let Some((label, built)) = self.pending.take() else {
+            return Err(DevError::Build(format!("sweep '{}': listed before it was built", sweep.label)));
+        };
+        if label != sweep.label {
+            return Err(DevError::Build(format!(
+                "sweep '{}': handed the build of sweep '{label}'",
+                sweep.label
+            )));
+        }
+        let mut prepared = prepare_lane_from(&self.inputs, sweep, attempt, self.extra_args, built.shape)?;
+        // The listings ran the lane's own binaries: the inventory belongs to
+        // the snapshot only if they left every file as it was.
+        let changed = snapshot_drift(&built.snapshot);
+        if !changed.is_empty() {
+            return Err(DevError::Build(format!(
+                "sweep '{}': files changed while the lane was listed - {}. Its inventory would describe \
+                 binaries other than the ones it runs.",
+                sweep.label,
+                changed.join("; ")
+            )));
+        }
+        prepared.snapshot = Some(built.snapshot);
+        Ok(prepared)
     }
 
     fn universe(&mut self, sweep: &ResolvedSweep, run: &ResolutionRun, env: &LaneEnv) -> Result<Universe, DevError> {
-        enumerate_universe(&self.inputs, sweep, run, env)
+        let key = (shape_id(sweep), run.resolution.clone());
+        let (built, snapshot) = match self.builds.universes.remove(&key) {
+            Some((built, snapshot)) if snapshot_drift(&snapshot).is_empty() => (built, snapshot),
+            // No build-step build, or one replaced since: build it now (alone,
+            // nothing else compiles here) and list that.
+            _ => {
+                let built = build_universe(&self.inputs, sweep, run, env)?;
+                let snapshot = take_snapshot(built.tracked_paths())?;
+                (built, snapshot)
+            }
+        };
+        let universe = list_universe(&self.inputs, sweep, env, built)?;
+        let changed = snapshot_drift(&snapshot);
+        if !changed.is_empty() {
+            return Err(DevError::Build(format!(
+                "the universe of sweep '{}' changed while it was listed - {}",
+                sweep.label,
+                changed.join("; ")
+            )));
+        }
+        Ok(universe)
     }
 }
 

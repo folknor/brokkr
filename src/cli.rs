@@ -14,6 +14,17 @@ mod visibility_tests {
     use crate::project::Project;
     use clap::CommandFactory;
 
+    /// `Cli::command()` on a thread with the main thread's stack: building the
+    /// whole unoptimized `Command` tree overflows a libtest thread's 2 MiB.
+    fn command() -> clap::Command {
+        std::thread::Builder::new()
+            .stack_size(8 << 20)
+            .spawn(Cli::command)
+            .unwrap()
+            .join()
+            .unwrap()
+    }
+
     /// Every top-level subcommand must appear in the visibility table.
     ///
     /// The table is the one place that knows which commands belong to which
@@ -24,7 +35,7 @@ mod visibility_tests {
     /// intention.
     #[test]
     fn table_covers_every_subcommand() {
-        let cmd = Cli::command();
+        let cmd = command();
         let missing: Vec<String> = cmd
             .get_subcommands()
             .map(|s| s.get_name().to_owned())
@@ -37,7 +48,7 @@ mod visibility_tests {
     /// a stale entry hides nothing and misleads the next reader.
     #[test]
     fn table_has_no_stale_entries() {
-        let cmd = Cli::command();
+        let cmd = command();
         let names: Vec<&str> = cmd.get_subcommands().map(clap::Command::get_name).collect();
         let stale: Vec<&str> = TABLE
             .iter()

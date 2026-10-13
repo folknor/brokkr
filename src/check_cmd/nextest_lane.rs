@@ -245,6 +245,34 @@ fn prepare_nextest(
     extra_args: &[String],
     env: &LaneEnv,
 ) -> Result<PreparedLane, DevError> {
+    let built = build_nextest(inputs, sweep, attempt, extra_args, env)?;
+    assemble_nextest_lane(inputs, sweep, built.selection.clone(), env, &built.as_build())
+        .inspect_err(|e| report_certifying_failure(inputs, sweep, attempt, e))
+}
+
+/// A complete profile stops in preparation, before the test phase can print
+/// its usual failure shape. Non-certifying runs defer this to the lane's report
+/// in that phase. A stop is not a failure of this lane and gets no failure
+/// shape.
+fn report_certifying_failure(inputs: &LaneInputs<'_>, sweep: &ResolvedSweep, attempt: &Attempt, e: &DevError) {
+    if inputs.certifying && !matches!(e, DevError::Interrupted) {
+        output::error(&format!(
+            "test {}: {}",
+            sweep.label,
+            describe_sweep(sweep, true, attempt.selection(), attempt.described_features())
+        ));
+    }
+}
+
+/// The engine lane's build half: its selection, `cargo metadata` and the
+/// `cargo test --no-run` artifact stream. No binary runs here.
+pub(crate) fn build_nextest(
+    inputs: &LaneInputs<'_>,
+    sweep: &ResolvedSweep,
+    attempt: &Attempt,
+    extra_args: &[String],
+    env: &LaneEnv,
+) -> Result<NextestBuilt, DevError> {
     let (cargo_extra, libtest_extra) = split_extra_args(extra_args);
     if !libtest_extra.is_empty() {
         return Err(DevError::Config(format!(
@@ -267,20 +295,8 @@ fn prepare_nextest(
     })?;
     selection.extend(sweep_selection_args(sweep, run));
     selection.extend(cargo_extra.iter().cloned());
-    build_nextest_lane(inputs, sweep, selection, env)
-        .inspect_err(|e| {
-            // A complete profile stops in preparation, before the test phase
-            // can print its usual failure shape. Non-certifying runs defer
-            // this to the lane's report in that phase. A stop is not a
-            // failure of this lane and gets no failure shape.
-            if inputs.certifying && !matches!(e, DevError::Interrupted) {
-                output::error(&format!(
-                    "test {}: {}",
-                    sweep.label,
-                    describe_sweep(sweep, true, attempt.selection(), attempt.described_features())
-                ));
-            }
-        })
+    build_nextest_shape(inputs, sweep, selection, env)
+        .inspect_err(|e| report_certifying_failure(inputs, sweep, attempt, e))
 }
 
 /// The host as the engine's build platform (no cross target).
@@ -292,14 +308,34 @@ fn host_build_platforms() -> Result<BuildPlatforms, DevError> {
     Ok(BuildPlatforms { host, target: None })
 }
 
-/// The engine lane's preparation, from a cargo `selection`: the one place the
-/// engine is built and its listing taken.
-fn build_nextest_lane(
+/// The engine lane's build products, read into the engine by
+/// [`assemble_nextest_lane`] once nothing else compiles.
+pub(crate) struct NextestBuilt {
+    pub(crate) selection: Vec<String>,
+    metadata_json: String,
+    pub(crate) stdout: String,
+    build_platforms: BuildPlatforms,
+}
+
+impl NextestBuilt {
+    pub(crate) fn as_build(&self) -> NextestBuild<'_> {
+        NextestBuild {
+            metadata_json: &self.metadata_json,
+            stdout: &self.stdout,
+            build_platforms: self.build_platforms.clone(),
+            ceiling: test_runner::TEST_TIMEOUT,
+        }
+    }
+}
+
+/// The engine lane's build from a cargo `selection`: the one place the engine
+/// lane is compiled.
+fn build_nextest_shape(
     inputs: &LaneInputs<'_>,
     sweep: &ResolvedSweep,
     selection: Vec<String>,
     env: &LaneEnv,
-) -> Result<PreparedLane, DevError> {
+) -> Result<NextestBuilt, DevError> {
     let label = sweep.label.as_str();
     let env_refs = env.refs();
     let project_root = inputs.project_root;
@@ -373,13 +409,7 @@ fn build_nextest_lane(
     // read from it would be accepted as an empty selection.
     require_build_finished(&build.stdout, &args)?;
     let stdout = String::from_utf8_lossy(&build.stdout).into_owned();
-    assemble_nextest_lane(
-        inputs,
-        sweep,
-        selection,
-        env,
-        &NextestBuild { metadata_json: &metadata_json, stdout: &stdout, build_platforms, ceiling: test_runner::TEST_TIMEOUT },
-    )
+    Ok(NextestBuilt { selection, metadata_json, stdout, build_platforms })
 }
 
 /// What a cargo build handed the engine: the `cargo metadata` document, the
@@ -393,7 +423,7 @@ pub(crate) struct NextestBuild<'a> {
 }
 
 /// The engine lane's preparation from a build's products: everything
-/// [`build_nextest_lane`] does after cargo has run. Split out so the part that
+/// [`prepare_nextest`] does after cargo has run. Split out so the part that
 /// reads the build into the engine and lists can be driven without cargo.
 #[allow(clippy::too_many_lines)]
 pub(crate) fn assemble_nextest_lane(

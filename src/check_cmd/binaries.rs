@@ -144,6 +144,11 @@ impl BuildRuntimeIndex {
         Ok(out)
     }
 
+    /// The executables behind runtime `CARGO_BIN_EXE_<name>`, by path.
+    pub(crate) fn bin_exe_paths(&self) -> Vec<String> {
+        self.bin_exes.values().flatten().map(|(_, exe)| exe.clone()).collect()
+    }
+
     /// Every `rustc-link-search` directory any build script emitted, sorted
     /// and deduplicated - cargo keeps these in a `BTreeSet`, so its loader
     /// path is ordered by path, not by which build script ran first.

@@ -176,17 +176,31 @@ mod tests {
     )]
     use super::*;
 
+    /// `Cli::try_parse_from` on a thread with the main thread's stack. An
+    /// unoptimized parse of the whole `Command` tree needs more than the 2 MiB
+    /// a libtest thread gets, and overflows it - which aborts the harness
+    /// rather than failing the one test.
+    fn parse(argv: impl IntoIterator<Item = &'static str>) -> Result<Cli, clap::Error> {
+        let argv: Vec<&'static str> = argv.into_iter().collect();
+        std::thread::Builder::new()
+            .stack_size(8 << 20)
+            .spawn(move || Cli::try_parse_from(argv))
+            .expect("spawn parser thread")
+            .join()
+            .expect("parser thread")
+    }
+
     #[test]
     fn results_compare_requires_two_commits() {
-        let parsed = Cli::try_parse_from(["brokkr", "results", "--compare", "abc123"]);
+        let parsed = parse(["brokkr", "results", "--compare", "abc123"]);
         assert!(parsed.is_err());
     }
 
     /// `test` needs a name; its selection flags parse beside it.
     #[test]
     fn test_requires_a_name() {
-        assert!(Cli::try_parse_from(["brokkr", "test"]).is_err());
-        let plain = Cli::try_parse_from(["brokkr", "test", "some_test", "-p", "pkg", "-N", "3"]).expect("parse");
+        assert!(parse(["brokkr", "test"]).is_err());
+        let plain = parse(["brokkr", "test", "some_test", "-p", "pkg", "-N", "3"]).expect("parse");
         let Command::Test { name, repeat, .. } = plain.command else { panic!("expected Test") };
         assert_eq!(name, "some_test");
         assert_eq!(repeat, 3);
@@ -194,7 +208,7 @@ mod tests {
 
     #[test]
     fn check_accepts_profile_flag() {
-        let parsed = Cli::try_parse_from(["brokkr", "check", "--profile", "tier1"])
+        let parsed = parse(["brokkr", "check", "--profile", "tier1"])
             .expect("parse");
         let Command::Check { profile, .. } = parsed.command else {
             panic!("expected Check");
@@ -204,7 +218,7 @@ mod tests {
 
     #[test]
     fn check_profile_conflicts_with_features() {
-        let parsed = Cli::try_parse_from([
+        let parsed = parse([
             "brokkr",
             "check",
             "--profile",
@@ -217,7 +231,7 @@ mod tests {
 
     #[test]
     fn check_profile_conflicts_with_no_default_features() {
-        let parsed = Cli::try_parse_from([
+        let parsed = parse([
             "brokkr",
             "check",
             "--profile",
@@ -232,7 +246,7 @@ mod tests {
 
     #[test]
     fn verify_sort_accepts_input_path() {
-        let parsed = Cli::try_parse_from([
+        let parsed = parse([
             "brokkr",
             "verify",
             "sort",
@@ -254,7 +268,7 @@ mod tests {
 
     #[test]
     fn verify_sort_input_conflicts_with_dataset() {
-        let parsed = Cli::try_parse_from([
+        let parsed = parse([
             "brokkr",
             "verify",
             "sort",
@@ -268,7 +282,7 @@ mod tests {
 
     #[test]
     fn verify_sort_input_conflicts_with_variant() {
-        let parsed = Cli::try_parse_from([
+        let parsed = parse([
             "brokkr",
             "verify",
             "sort",
@@ -282,7 +296,7 @@ mod tests {
 
     #[test]
     fn verify_renumber_accepts_input_path() {
-        let parsed = Cli::try_parse_from([
+        let parsed = parse([
             "brokkr",
             "verify",
             "renumber",
@@ -301,13 +315,13 @@ mod tests {
 
     #[test]
     fn pmtiles_stats_requires_at_least_one_file() {
-        let parsed = Cli::try_parse_from(["brokkr", "pmtiles-stats"]);
+        let parsed = parse(["brokkr", "pmtiles-stats"]);
         assert!(parsed.is_err());
     }
 
     #[test]
     fn inspect_tags_accepts_mode_flags() {
-        let parsed = Cli::try_parse_from([
+        let parsed = parse([
             "brokkr",
             "inspect",
             "--tags",
@@ -377,7 +391,7 @@ mod tests {
             let mut argv = vec!["brokkr", "clippy", "--sweep", "s"];
             argv.extend(extra.iter().copied());
             assert!(
-                Cli::try_parse_from(&argv).is_err(),
+                parse(argv.clone()).is_err(),
                 "--sweep must conflict with {extra:?}"
             );
         }
@@ -386,10 +400,10 @@ mod tests {
     #[test]
     fn clippy_all_features_conflicts_with_feature_flags() {
         assert!(
-            Cli::try_parse_from(["brokkr", "clippy", "--all-features", "--features", "z"]).is_err()
+            parse(["brokkr", "clippy", "--all-features", "--features", "z"]).is_err()
         );
         assert!(
-            Cli::try_parse_from(["brokkr", "clippy", "--all-features", "--no-default-features"])
+            parse(["brokkr", "clippy", "--all-features", "--no-default-features"])
                 .is_err()
         );
     }
@@ -398,21 +412,21 @@ mod tests {
     fn test_rejects_blank_name() {
         for blank in ["", " ", "\t"] {
             assert!(
-                Cli::try_parse_from(["brokkr", "test", blank]).is_err(),
+                parse(["brokkr", "test", blank]).is_err(),
                 "blank name {blank:?} must be refused"
             );
         }
-        assert!(Cli::try_parse_from(["brokkr", "test", "some_test"]).is_ok());
+        assert!(parse(["brokkr", "test", "some_test"]).is_ok());
     }
 
     #[test]
     fn clippy_rejects_empty_env_key() {
-        assert!(Cli::try_parse_from(["brokkr", "clippy", "--env", "=oops"]).is_err());
+        assert!(parse(["brokkr", "clippy", "--env", "=oops"]).is_err());
     }
 
     #[test]
     fn clippy_accepts_repeatable_package_and_env() {
-        let parsed = Cli::try_parse_from([
+        let parsed = parse([
             "brokkr", "clippy", "-p", "a", "-p", "b", "--env", "K=V", "--all-features",
         ])
         .expect("parse");

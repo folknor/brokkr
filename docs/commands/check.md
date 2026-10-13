@@ -512,7 +512,10 @@ Clippy's five minutes is set against that hang, not against its normal cost:
 warm, the largest consuming workspace finishes clippy in about 20s. The phase
 clock restarts at every phase entry (`begin_phase`, which also points the
 summary's `failed_phase` at the phase in flight, so the two cannot drift), so a
-`script_check` stage that runs three times gets five minutes each time.
+`script_check` stage that runs three times gets five minutes each time. A
+`background` script check runs across phases, so it is not on the phase clock:
+it gets the `script_check` ceiling measured from its own start, and the run
+ceiling bounds it like everything else.
 
 The same phase ceilings bound the two commands that share `check`'s pipelines,
 with no whole-run ceiling: `brokkr clippy` runs under the `clippy` ceiling, and
@@ -1298,8 +1301,13 @@ formatter conventions - that were previously hand-run before every commit.
   trip the gremlin scan on `brokkr.toml`. Use an ASCII sentinel, or
   `match = "contains"` on an ASCII marker substring of the real success line.
 - `stage` = `pre-clippy` (default - here, with the other convention phases),
-  `pre-test` (after clippy, before the test phase), or `post-test` (after the
-  test phase and the coverage audit). One value per entry; an entry runs once.
+  `pre-test` (after clippy, before the test phase), `post-test` (after the
+  test phase and the coverage audit), or `background` (started with the
+  convention phases and run concurrently with them, clippy, rustdoc and the
+  prepare phase's builds; joined before anything is listed, so it never runs
+  beside a listing or a test - `src/check_cmd/concurrency.rs`, and
+  `docs/brokkr.toml.md` for the precondition the project takes on). One value
+  per entry; an entry runs once.
 - `diagnostics` = `opaque` (default) or `rustc`. What a **failure** prints, not
   what passes.
 
@@ -1452,6 +1460,17 @@ graph:
   this error, try `rustc --explain`") is not. A capped diagnostic keeps
   clippy's `warning:` wording in the underlying JSON; brokkr reports it as the
   error it is, and no view shows the original wording.
+
+The phase's cargo runs - one per build shape, one per package under package
+mode - are grouped by the target directory they write (the shared one, or a
+sweep's isolated `unify-*`/`rustflags-*` dir). Runs sharing a directory go one
+after another in configured order, since cargo would only queue them on its
+build-dir lock; the groups run concurrently. Every run is made and the verdict
+is decided once all of them are in, exactly as for a serial phase - a lint
+found early in one group never cuts another group's runs short. The rustdoc
+phase is grouped the same way. `[test] serial_builds`, or a configured cargo
+build dir, makes it one group (`docs/brokkr.toml.md`;
+`src/check_cmd/concurrency.rs`).
 
 ### Cargo's manifest lints
 
@@ -1725,9 +1744,14 @@ phase compiles rather than reads diagnostics:
 - **`allow_exact` loses its file scope here.** The build fails during
   compilation, before any diagnostic reaches brokkr to be filtered, and `-A`
   has no path-scoped form - so each entry contributes its lint name build-wide.
-  The run says so on its notice line. A `cargo::` entry contributes nothing
-  here: rustc knows no `cargo` lint tool, and cargo's manifest lints are read
-  by the clippy phase alone.
+  The run says so on its notice line.
+- **Only rustc's own lints reach the build.** A `cargo::` entry contributes
+  nothing: rustc knows no `cargo` lint tool, and cargo's manifest lints are
+  read by the clippy phase alone. Nor does a `clippy::` or `rustdoc::` entry:
+  rustc raises neither, and rustflags are part of every unit's fingerprint, so
+  an inert flag would only make the test build differ from a plain cargo's
+  (or rust-analyzer's) in the same target dir - each then rebuilding the whole
+  graph over the other's.
 - **The flags travel through cargo's rustflags,** since `cargo test` has no
   `-- <rustc flags>` passthrough. Cargo picks exactly one rustflags source, so
   brokkr finds the layer already live for this build and adds to *that* one
@@ -2432,6 +2456,35 @@ anything that could not be prepared. A lane's
 ignored-only listing is its filter argv with `--ignored` in place of any
 `--include-ignored` (libtest refuses the two together).
 
+Preparation runs in two steps (`build_profile` and `prepare_profile` in
+`src/check_cmd/prepare.rs`), because a listing is binary execution under the
+same 20s wall limit as a test and must never share the machine with a compile:
+
+1. **Build.** Every attempted lane's builds - under a complete claim its
+   universe builds first, then its `build_packages` support builds, then its
+   shape - grouped by target directory as the clippy phase is: one chain per
+   directory in configured order, the chains concurrent. Straight after each
+   lane's builds, before the next build in its directory, the executables the
+   lane runs or hands its tests are hashed - test executables, the runtime
+   `CARGO_BIN_EXE_*` bins, the support executables. That is the lane's
+   **snapshot**. A dylib a build script placed in a link-search directory is
+   not in it, as no artifact stream names one (the same limit the rebuild
+   comparison below has). Nothing is listed or executed in this step. The `background`
+   script checks are joined at its end.
+2. **List.** Lane by lane in configured order, nothing compiling. A lane whose
+   snapshot still holds is listed from its step-1 build; one that a later build
+   in its directory replaced in place - or that has no step-1 build - is built
+   again, alone, with its support builds, and listed from that build under a
+   fresh snapshot, so every fact of the plan (support executables included)
+   comes from the one build it is listed from. The snapshot is checked again
+   after the listings, whichever build it came from: a file that changed
+   while the lane's own binaries were being listed fails the lane, since its
+   inventory would describe other binaries than the ones it runs. Universes are
+   listed the same way.
+
+Listings must not modify the files they are listed from. Hashing either side of
+a listing catches a net change, not a file replaced and put back while it ran.
+
 The plan is written to `.brokkr/accounting/<run id>/plan.json` (under the
 config dir; retention is below) before the first test executes,
 and a journal beside it, `journal.jsonl`, receives every observation as it
@@ -2449,13 +2502,26 @@ nothing. `failed_phase` is then `"prepare"`. (Under a profile that does not
 certify, a lane that cannot be prepared is a lane with no inventory and still
 runs - see "Diagnostic continuation".)
 
-Before each lane executes, its support builds and its shape are built again
-(a no-op normally, and it re-uplifts the support binaries a later lane's
-build may have replaced) and, once **every** resolution of the lane is
-rebuilt - one resolution's build can rewrite another's binary in place - its
-test executables are checked against the plan by path **and** content hash,
-the runtime-index fingerprint against the planned one, and the support
-builds' executables against theirs. A shape whose
+Before a lane that executes its binaries directly (parallel, isolated, the
+nextest engine) runs, its snapshot is hashed again, with no cargo invocation.
+If every file in it still holds the planned content, the lane runs its prepared
+snapshot: the planned binaries under the envelope they were listed with.
+Rebuilding here would only ask whether building again changes anything, and a
+project whose build scripts rerun on every build answers yes even when nothing
+changed - drift the lane never had, and on a complete claim a hard error. What
+this claims is that the lane's snapshotted executables matched the plan
+immediately before it ran; a test that replaces a support binary while the lane
+runs, a detached process a build script left behind, or a dylib in a
+link-search directory is outside it.
+
+When a file no longer matches - and before every serial lane, and for a lane
+that was prepared without a snapshot - the lane's support builds and its shape
+are built again (re-uplifting the support binaries a later lane's build may
+have replaced) and, once **every** resolution of the lane is rebuilt - one
+resolution's build can rewrite another's binary in place - its test
+executables are checked against the plan by path **and** content hash, the
+runtime-index fingerprint against the planned one, and the support builds'
+executables against theirs. A shape whose
 difference cargo does not hash into the file name (an env var a build script
 reads) rebuilds the same path in place, so only the content can see that the
 binary there is another shape's. Under a complete claim any difference is a
