@@ -273,10 +273,9 @@ impl CorpusDb {
     ///
     /// A store written by an older brokkr is brought to the current schema
     /// first, through a short-lived read-write [`Self::open`]: the read paths
-    /// (the runtime ceiling's `wall_ms`, the `boundary_*` columns) name columns
-    /// only a migrated store has, and a read-only connection cannot migrate -
-    /// so without this step an old `runs.db` failed every query and blocked
-    /// every corpus run short of `--force`. The migrations are column adds
+    /// (`wall_ms`, the `boundary_*` columns) name columns only a migrated
+    /// store has, and a read-only connection cannot migrate - so without this
+    /// step an old `runs.db` failed every query. The migrations are column adds
     /// plus the v5 `disposition` rebuild; the read-only connection the caller
     /// gets is opened afterwards.
     pub fn open_readonly(path: &Path) -> Result<Self, DevError> {
@@ -326,7 +325,7 @@ mod tests {
     #[test]
     fn readonly_open_migrates_an_older_store_first() {
         // A pre-v4 store on disk: `run` has no `wall_ms`, and `disposition`
-        // is the v1 shape. The ceiling's query names `wall_ms`.
+        // is the v1 shape.
         let dir = crate::test_scratch::scratch("piners_corpus_db_schema", "old_store");
         let path = dir.join("runs.db");
         {
@@ -353,7 +352,6 @@ mod tests {
         }
 
         let db = CorpusDb::open_readonly(&path).unwrap();
-        assert_eq!(db.estimated_wall_ms(&["a".to_owned()], true).unwrap(), None);
         // The v1 row survived the v5 rebuild and answers the typed queries.
         let d = db.disposition_for_probe(1, "p").unwrap().unwrap();
         assert_eq!((d.matched, d.disposition.as_str()), (3, "accepted"));

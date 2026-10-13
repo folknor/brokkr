@@ -15,7 +15,7 @@
 //! (it fires only on an actual pointer), so it is safe to call on every pinned
 //! file regardless of which submodule owns it. Because it hard-errors *before*
 //! hashing, the large one-time LFS fetch is an out-of-band pre-warm the user
-//! runs, and never counts against the corpus runtime ceiling.
+//! runs, never part of a corpus run.
 
 use std::io::Read;
 use std::path::Path;
@@ -56,7 +56,7 @@ pub fn ensure_materialized(path: &Path) -> Result<(), DevError> {
         "piners: {} is an unmaterialized Git-LFS pointer, not the real feed bytes.\n  \
          Hashing the pointer would poison the pin, so brokkr refuses. {where_to}, then retry.\n  \
          (the one-time LFS fetch is large; pre-warm it before a gated run - it runs \
-         out-of-band and does not count against the runtime ceiling)",
+         out-of-band, not as part of the run)",
         path.display()
     )]))
 }

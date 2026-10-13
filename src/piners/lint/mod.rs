@@ -8,8 +8,8 @@
 //! TradingView (`pine-lint --tv`) to re-ground the corpus.
 //!
 //! The trade-parity sibling is `brokkr corpus` (`src/piners/`); this
-//! mirrors its structure minus the OHLCV feeds, trade oracle, manifest
-//! harness, and runtime ceiling. See `docs/commands/lint-corpus.md`.
+//! mirrors its structure minus the OHLCV feeds, trade oracle and manifest
+//! harness. See `docs/commands/lint-corpus.md`.
 
 pub mod cmd;
 pub mod db;

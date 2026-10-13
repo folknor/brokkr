@@ -93,16 +93,12 @@ pub fn cmd(project_root: &Path, q: &CorpusQuery) -> Result<(), DevError> {
     }
 
     // --runtimes [--over SECS]: per-probe most-recent runtime, slowest first.
-    // A diagnostic (which probe is heavy), not the ceiling's basis - probes
-    // overlap in the harness, so the per-probe sum is not the run wall; the
-    // ceiling estimates from the measured run.wall_ms instead.
+    // A diagnostic (which probe is heavy) - probes overlap in the harness, so
+    // the per-probe sum is not the run wall.
     if q.runtimes {
         let over_ms = q.over.map(|s| s * 1000.0);
         let rows = db.runtimes(over_ms)?;
-        println!(
-            "{}",
-            corpus_db::runtimes_table(&rows, super::cmd::RUNTIME_CEILING_MS)
-        );
+        println!("{}", corpus_db::runtimes_table(&rows));
         return Ok(());
     }
 

@@ -223,8 +223,7 @@ first), per-db `PRAGMA user_version` migrations, WAL - mirroring `src/db`
   + report-only extras from the report-integrity reconciliation, plus the
   harness contract violations, plus one
   when the harness stdout was cut short and one when the run's
-  `harness.stdout`/`harness.stderr` could not be written; any nonzero count bars the run from
-  being runtime-ceiling evidence; `NULL` when
+  `harness.stdout`/`harness.stderr` could not be written; `NULL` when
   the harness produced no report, or on older rows), and `diagnosis` (v7: the
   isolation pass's note - the probes that abort when run alone, the diagnosis
   status, where the attempt artefacts are - appended after the run row
@@ -234,13 +233,7 @@ first), per-db `PRAGMA user_version` migrations, WAL - mirroring `src/db`
   `stage`, whichever of `feed`/`role`/`path`/`field` it carried, `error`,
   explicit nulls and any field brokkr does not model - in the run's own
   transaction; `fail_reason` is its
-  readable projection, and `corpus-results <id>` renders it). The exit/reason/stderr make a failed run self-contained;
-  `wall_ms` + `selector` + the disposition rows are what the pre-run runtime
-  ceiling estimates the next run from (a comparable superset-covering run
-  whose every selected id has a stored row whose `outcome` and `acc_tier`
-  pass the shared disposition validator and agree with its `disposition`,
-  and with no `harness_abort` row, which is a valid gate disposition but no
-  timing sample - see `docs/commands/corpus.md`).
+  readable projection, and `corpus-results <id>` renders it). The exit/reason/stderr make a failed run self-contained.
 - `disposition` (PK `run_id,probe`) - the harness line stored **whole** as
   `raw_json`, the authoritative record, with every harness field a generated
   column projected from it. The harness adds diagnostics faster than brokkr
@@ -358,11 +351,10 @@ struct, no benchmark filters to reject. The corpus views:
   is either table flag beside `--sql`, `--runtimes` or `--trend`.
 - `brokkr corpus-results --runtimes [--over <secs>]` - each probe's most-recent
   runtime, slowest first, in milliseconds (the harness's unit). A **diagnostic**
-  for spotting heavy probes (trim `bar_budget`, or disable), *not* the ceiling's
-  basis: probes overlap in the harness, so the `sum(shown)` footer is a per-probe
-  sum, several times the real run wall. The ceiling estimates from the measured
-  `run.wall_ms` of a superset-covering run instead (`estimated_wall_ms`).
-  `--over 269` shows what single probe nears the wall on its own.
+  for spotting heavy probes (trim `bar_budget`, or disable): probes overlap in
+  the harness, so the `sum(shown)` footer is a per-probe sum, several times the
+  real run wall (the run row's `wall_ms`). `--over <secs>` keeps only the
+  probes above it.
 - `brokkr corpus-results --trend <probe>` - disposition/count_tier/p90 over recent
   runs, plus the `anchor` (suffixed `+` when it granted a discount) and the
   entry/exit timestamp-shift census as `shifted/considered share%` - the

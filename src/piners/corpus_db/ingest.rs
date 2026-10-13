@@ -49,15 +49,13 @@ pub struct RunRecord<'a> {
     /// Captured harness stderr (or a spawn-error message).
     pub stderr: &'a str,
     /// brokkr's measured whole-run harness wall, in milliseconds. `None` when
-    /// the harness never ran (spawn failure). This is the quantity the pre-run
-    /// runtime ceiling estimates from - a real wall, not the sum of the
-    /// harness's overlapping per-probe `runtime_ms`. Always the original
+    /// the harness never ran (spawn failure). The run's real wall, not the sum
+    /// of the harness's overlapping per-probe `runtime_ms`. Always the original
     /// attempt's wall: diagnostic isolation attempts never extend it.
     pub wall_ms: Option<f64>,
     /// Report- and stream-integrity violations: invalid records, repeats and
     /// report-only extras (`integrity::Reconciliation::protocol_violations`),
-    /// plus one for a stdout cut short. Any nonzero count bars the run from
-    /// the runtime ceiling.
+    /// plus one for a stdout cut short.
     /// `None` when the harness produced no report to reconcile (it never ran).
     pub protocol_violations: Option<i64>,
     /// The harness's `run_error` record, whole, as JSON

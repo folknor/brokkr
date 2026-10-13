@@ -2585,11 +2585,9 @@ In depth: `brokkr man nidhogg`."
         /// Measurement mode (`--hotpath`/`--alloc`) and shared build flags.
         /// With no measurement flag this is a bare parity run (gate +
         /// runs.db); `--hotpath`/`--alloc` build the harness with the hotpath
-        /// feature and record to results.db via `brokkr results`. NOTE:
-        /// `--force` is dual-purpose here - in a parity run it bypasses the
-        /// ~270s pre-run runtime ceiling; in a measured run it carries its
-        /// usual "run on a dirty tree" meaning (the ceiling is a parity-only
-        /// concept). `--bench` is not yet supported for corpus.
+        /// feature and record to results.db via `brokkr results`. `--force`
+        /// (run on a dirty tree) applies to a measured run only; a parity run
+        /// refuses it. `--bench` is not yet supported for corpus.
         #[command(flatten)]
         mode: ModeArgs,
     },
@@ -2853,9 +2851,7 @@ pub(crate) struct ModeArgs {
     #[arg(long, value_delimiter = ',')]
     pub(crate) features: Vec<String>,
 
-    /// Run even if the git tree is dirty (results will not be stored). For
-    /// a `corpus` parity run it instead bypasses the 270s pre-run runtime
-    /// ceiling
+    /// Run even if the git tree is dirty (results will not be stored)
     #[arg(long)]
     pub(crate) force: bool,
 

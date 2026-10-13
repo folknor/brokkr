@@ -17,9 +17,8 @@
 //! [`RunAssessment`] is the one shared judgement of a harness invocation:
 //! process termination, stream integrity, the contract
 //! (`crate::piners::contract`) and the exact selection reconciliation,
-//! built by [`assess`]. Ordinary runs, bless, measured iterations, isolation
-//! attempts and the stored ceiling evidence each read it under their own,
-//! explicit acceptance policy.
+//! built by [`assess`]. Ordinary runs, bless, measured iterations and isolation
+//! attempts each read it under their own, explicit acceptance policy.
 
 use std::collections::{BTreeSet, HashSet};
 
@@ -99,7 +98,7 @@ impl RunAssessment {
     }
 
     /// The integrity count stored on the run row: every violation plus one
-    /// for a cut stream. Any nonzero count bars the run from the ceiling.
+    /// for a cut stream.
     pub fn stored_violations(&self) -> usize {
         self.violations() + usize::from(self.output_cut)
     }
@@ -226,7 +225,7 @@ pub struct Reconciliation {
     /// Selected ids with a valid disposition: the selected identity plus a
     /// record that passes `report::record_label` (outcome and tier form a
     /// gate label, and the harness's own `disposition` field, if present,
-    /// agrees) - the one validator the gate, bless and the ceiling share.
+    /// agrees) - the one validator the gate and bless share.
     /// Only these are scored.
     pub valid: BTreeSet<String>,
     /// Selected ids the report carries no record for at all, in selection

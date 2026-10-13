@@ -1843,10 +1843,17 @@ fn run(cli: Cli) -> Result<(), DevError> {
             mode,
         } => {
             project::require(project, Project::Piners, "corpus")?;
-            // `--force` is dual-purpose: in a parity run it bypasses the
-            // runtime ceiling; in a measured run it carries the dirty-tree
-            // meaning (handled by run_measured/BenchContext). One field, mode
-            // picks the meaning.
+            // `--force` is a measured-run flag (run on a dirty tree, handled
+            // by run_measured/BenchContext). A parity run has nothing for it
+            // to override, and a flag accepted and ignored would read as if
+            // it did something.
+            if mode.force && !mode.is_measured() {
+                return Err(DevError::Config(
+                    "corpus: `--force` applies to a measured run (`--hotpath`/`--alloc`) only; \
+                     a parity run has no runtime limit to bypass"
+                        .into(),
+                ));
+            }
             let args = piners::cmd::CorpusArgs {
                 keywords: keyword,
                 probe,
@@ -1858,7 +1865,6 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 no_isolate,
                 profile_override: profile_override(debug, release),
                 keep_artefacts,
-                force: mode.force,
                 harness_args,
             };
             if mode.is_measured() {

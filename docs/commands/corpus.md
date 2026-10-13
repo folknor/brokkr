@@ -14,8 +14,8 @@ mode is a flag. A **bare** `corpus` is the parity run described in this doc
 builds the `[piners.harness]` crate **with the hotpath feature added**, runs the
 selection through the sidecar + hotpath-capture path, and records to
 `.brokkr/results.db` - queryable with `brokkr results` like every other
-project, *not* `corpus-results` (that stays the parity run store). The gate,
-the runtime ceiling, and the `runs.db` ingest are all parity-only and skipped.
+project, *not* `corpus-results` (that stays the parity run store). The gate
+and the `runs.db` ingest are parity-only and skipped.
 
 - Selection is the same surface (`--keyword`/`--probe`/`--all`); it builds the
   manifest workload, but no disposition is gated.
@@ -42,8 +42,8 @@ the runtime ceiling, and the `runs.db` ingest are all parity-only and skipped.
   saying 0). The one exemption is an iteration whose `--stop` marker
   actually fired (it ends early by design); a configured marker that never
   fired is held to the selection like any other run.
-- `--force` is dual-purpose: ceiling-bypass in a parity run, dirty-tree in a
-  measured run (the ceiling is a parity-only concept).
+- `--force` carries its usual measured-run meaning (run on a dirty tree). A
+  parity run refuses it: there is nothing there for it to override.
 - `--bench` is **not** supported - the harness emits NDJSON dispositions,
   not the `key=value` stderr timing contract `--bench` consumes. Code:
   `src/piners/measured.rs`.
@@ -269,7 +269,6 @@ excluded, and the harness opens live paths.
   Use after a submodule re-pin.
 - `--reseed` - stamp `pins.toml` hashes from the corpus filesystem (below).
 - `--bless` - run the selection, then stamp current dispositions (below).
-- `--force` - bypass the pre-run runtime ceiling (below).
 - `--no-isolate` - skip the diagnostic isolation pass after an abnormal
   harness end (below).
 
@@ -290,49 +289,24 @@ harness runs) and `--bless` (pins must record default-behavior
 dispositions only). The gate stays active - pair with `--no-gate` when
 the flags change dispositions.
 
-## Runtime ceiling (the pre-run wall)
+## Run length
 
-After verification but before building, brokkr estimates the selection's
-wall-clock cost: the **measured whole-run wall** (`run.wall_ms`, brokkr's own
-timing of the harness subprocess) of the most recent run whose selection was a
-**superset** of the current one. Dropping probes can only shorten a run, so
-`wall(subset) <= wall(superset)` makes a covering run's real wall a valid upper
-bound - and any `--all` run covers everything, so one full run bounds every
-selection. Only a **comparable** run is a basis: the harness exited 0 or 1 (a
-break is a finished probe; exit 2, a signal, or a spawn failure is not), it
-broke no report protocol or harness contract (`run.protocol_violations` is
-0; a row predating that column is judged on coverage alone), **every id it
-selected has a valid stored disposition** (exact coverage read from its
-disposition rows, so a line for an unselected probe counts for nothing and a
-line count can never stand in for a missing probe), **no probe in it is a
-`harness_abort`** (a valid gate disposition, but not a usable timing sample:
-the wall then describes a different workload), it ran with no forwarded
-harness flags, and it
-was built in the same profile as this run (a row predating the recorded
-profile counts as debug). Diagnostic isolation attempts never enter the basis:
-the run's `wall_ms` is the original attempt's alone. Otherwise one fast-failing
-`--all` run would bound every later selection at a second or two. With no
-comparable covering run recorded (a fresh DB, or a selection no prior run
-superset-covers) there is no measured basis and the run proceeds. If the
-estimate exceeds **270s**, the run is refused before the build with a preflight
-error naming it; re-run with `--force` to override. Verification runs first, so
-hash drift still surfaces on an over-budget selection; `--verify-only` is
-exempt. The ceiling is a pre-run wall only - a run already underway is never
-killed for exceeding it. The only mid-run limit is a one-hour **hang
-backstop** far above any real run: a harness still running then is killed and
-the run recorded as failed, so a wedged harness cannot hold the global lock
-indefinitely. The backstop is one deadline shared by the original attempt and
-any diagnostic isolation after it, counted from the original launch.
+A selection is never refused for how long it would take, and a run is let
+finish. The one limit is a one-hour **hang backstop** far above any real run:
+a harness still running then is killed and the run recorded as failed, so a
+wedged harness cannot hold the global lock indefinitely. The backstop is one
+deadline shared by the original attempt and any diagnostic isolation after it,
+counted from the original launch.
 
-A `runs.db` written by an older brokkr is migrated to the current schema the
-first time the ceiling (or `corpus-results`) reads it.
+A `runs.db` written by an older brokkr is migrated to the current schema before
+anything is built, so a store that refuses to migrate fails the run up front
+rather than at ingest.
 
-This replaced an earlier estimate that **summed** each probe's most recent
-per-probe `runtime_ms`. The harness overlaps probes, so that sum ran ~5x the
-real wall (a ~60s full corpus summed to ~320s), producing false refusals.
-`brokkr corpus-results --runtimes` still lists per-probe runtimes (the slow-probe
-"trim `bar_budget`/disable" workflow reads off it) but is a diagnostic - its
-`sum(shown)` is a per-probe sum, **not** the run wall the ceiling uses.
+`brokkr corpus-results --runtimes` lists each probe's most recent runtime (the
+slow-probe "trim `bar_budget`/disable" workflow reads off it). Its
+`sum(shown)` is a per-probe sum, **not** the run wall: the harness overlaps
+probes, so the sum runs several times the real wall (`run.wall_ms`, brokkr's
+own timing of the harness subprocess).
 
 ## Verification (the content gate)
 
@@ -367,8 +341,8 @@ and hard-errors on a Git-LFS pointer with a `git lfs pull` instruction naming
 the owning submodule - hashing the pointer would fail verify against the real
 digest, or (on `--reseed`) poison the pin with the 134-byte stub's hash. The
 check is scoped and cheap (a no-op for the plaintext bench feed) and runs
-*before* the runtime ceiling, so the large one-time fetch is an out-of-band
-pre-warm that never counts against the 270s wall (`src/piners/lfs.rs`).
+before anything is built, so the large one-time fetch is an out-of-band
+pre-warm, never part of a run (`src/piners/lfs.rs`).
 
 ## The expected-disposition gate
 
@@ -436,9 +410,7 @@ separate categories:
   The record is still stored whole. This one record-level validator
   (`report::record_label`, over the outcome/tier primitive
   `report::valid_label`) is shared by the gate (an invalid record never
-  satisfies its pin, nor explains exit 1), bless, and the runtime ceiling,
-  which re-validates each stored row's `raw_json` so a contradictory record
-  stored before the check is no timing evidence either;
+  satisfies its pin, nor explains exit 1) and bless;
 - **missing** - selected ids with no record at all;
 - **invalid** - a line for a selected id whose disposition is not a gate
   label, a disposition line that does not deserialize, or a stdout line that
@@ -474,15 +446,14 @@ after reporting all N selected probes (an abort after complete reporting,
 e.g. a teardown crash; nothing to isolate)`. Every probe is then scored, but
 the exit still fails the run. A harness whose output did not close after it
 exited (stdout possibly truncated) fails the run too, and the truncation is
-stored in the run's `protocol_violations` count, so the run can never serve
-as runtime-ceiling evidence.
+stored in the run's `protocol_violations` count.
 
 If the run's own `harness.stdout`/`harness.stderr` cannot be written into its
 dir, both writes are still attempted and every failed path is named. The
 captured output is still parsed and ingested (`wall_ms` stays the original
 attempt's), but the run fails with `evidence storage failed: ...` in its
 `fail_reason`, bless is refused, the failure counts in
-`protocol_violations` (barring the run from the ceiling), isolation does not
+`protocol_violations`, isolation does not
 run (an explicit evidence-storage stop, recorded in the run's `diagnosis`),
 and the dir is kept and reported as `artefacts preserved with incomplete
 evidence (failed: <files>)`.
@@ -494,7 +465,7 @@ are checked in the same one run assessment as the reconciliation
 (`src/piners/integrity.rs` builds it, `src/piners/contract.rs` validates the
 contract). Every consumer reads that one assessment under its own acceptance
 policy: an ordinary run and bless (the failure reasons above), a measured
-iteration, an isolation attempt, and the stored ceiling evidence.
+iteration, and an isolation attempt.
 
 - **Recognition before version.** A line whose `kind` is one of
   `run_start`, `setup_stage`, `setup_complete`, `probe_start`, `probe_end`,
@@ -583,7 +554,7 @@ run alone (`src/piners/isolate.rs`). Evidence only, never scoring.
 - **Order.** The original run is recorded in `runs.db` first, and stays the
   authoritative record: its `result`, `fail_reason`, `wall_ms` (the original
   attempt's wall) and dispositions are its own. Nothing a diagnostic attempt
-  reports enters the dispositions, the gate, bless or the runtime ceiling.
+  reports enters the dispositions, the gate or bless.
   Afterwards the run row's `diagnosis` gets a note - the isolated probes, the
   diagnosis status, and where the artefacts are - beside the untouched
   `fail_reason`. An interrupt during diagnosis cannot lose the original row.
@@ -725,8 +696,7 @@ without a valid disposition, an invalid record, a repeated record, a
 report-only extra, or
 output cut short), **or** on an active gate deviation. The integrity checks
 apply on exit 0 and under `--no-gate` alike. Hash mismatch fails earlier
-(before build); the runtime-ceiling refusal after verification but before the
-build. `--no-gate` and `--bless` never fail on gate diffs; `--bless` fails
+(before build). `--no-gate` and `--bless` never fail on gate diffs; `--bless` fails
 (and stamps nothing) on a failed harness or an incomplete report. An
 interrupt (before or during diagnosis) exits 130 with the run recorded.
 Diagnostic isolation never changes the exit: the original run's verdict

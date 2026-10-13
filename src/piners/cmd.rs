@@ -67,17 +67,10 @@ use crate::resolve::corpus_runs_db_path;
 const ARTEFACT_PARENT: &str = ".brokkr/piners";
 const ARTEFACT_TEST_ID: &str = "corpus";
 
-/// Pre-run runtime wall, in milliseconds (~270s). A selection whose estimated
-/// runtime (the measured wall of a comparable covering run - see
-/// [`CorpusDb::estimated_wall_ms`]) exceeds this is refused before building,
-/// unless `--force`.
-pub(crate) const RUNTIME_CEILING_MS: f64 = 270_000.0;
-
-/// Wall-clock backstop on the harness subprocess. Not a budget - the
-/// ~270s budget is the pre-run [`RUNTIME_CEILING_MS`] wall, and a run that
-/// outgrows it is let finish - but a hang guard: a wedged harness would
-/// otherwise hold the global lock until someone runs `brokkr kill`. Set far
-/// above any real run (a `--force`d full pass included), so only a hang
+/// Wall-clock backstop on the harness subprocess. Not a budget - a run is let
+/// finish however long its selection takes - but a hang guard: a wedged
+/// harness would otherwise hold the global lock until someone runs `brokkr
+/// kill`. Set far above any real run (a full pass included), so only a hang
 /// reaches it; the run is then recorded as failed.
 /// Shared with the measured path (`measured.rs`), which applies it per
 /// iteration through `sidecar::DeadlineScope`.
@@ -108,8 +101,6 @@ pub struct CorpusArgs {
     /// (debug for this command).
     pub profile_override: Option<bool>,
     pub keep_artefacts: bool,
-    /// Bypass the pre-run runtime ceiling (the [`RUNTIME_CEILING_MS`] wall).
-    pub force: bool,
     /// Extra flags forwarded verbatim to the harness binary after
     /// `--manifest <path>` (everything after a literal `--` on the CLI).
     /// CLI-conflicted with `--verify-only`/`--reseed`/`--bless`; recorded
@@ -199,26 +190,15 @@ pub fn corpus(
 
     // Default profile is debug: parity is opt-level-independent, and the
     // debug build keeps the edit/run loop inside the cache-warm window.
-    // Resolved before the ceiling, which only estimates from same-profile runs.
-    //
-    // Pre-run runtime wall: now that the selection has verified, refuse it if
-    // its estimated runtime (the measured wall of a comparable covering run)
-    // blows the ~270s ceiling, unless --force. Placed after verification so a
-    // submodule/hash drift surfaces even on an over-budget selection;
-    // verify_only has already returned, so it's naturally exempt.
     let debug = args.profile_override.unwrap_or_else(|| {
         cfg.harness
             .as_ref()
             .and_then(|h| h.debug)
             .unwrap_or(true)
     });
-    if !args.force {
-        enforce_runtime_ceiling(project_root, &ids, debug)?;
-    }
     // Bring the run store to this binary's schema before anything is built or
-    // run. The ceiling above does it on its way to a read, but `--force` skips
-    // the ceiling, and a store that refuses to migrate would otherwise be
-    // found only at ingest - after the whole harness run it was meant to keep.
+    // run: a store that refuses to migrate would otherwise be found only at
+    // ingest - after the whole harness run it was meant to keep.
     let corpus_db_path = corpus_runs_db_path(project_root);
     if corpus_db_path.exists() {
         drop(CorpusDb::open(&corpus_db_path)?);
@@ -270,9 +250,8 @@ pub fn corpus(
         manifest_path.display()
     ));
 
-    // The ~270s budget is enforced as a pre-run wall (above), not mid-run:
-    // once we commit to a run we let it finish, bounded only by the hang
-    // backstop. PID is tracked so `brokkr kill` reaches the harness.
+    // A run is let finish, bounded only by the hang backstop. PID is tracked
+    // so `brokkr kill` reaches the harness.
     let binary_str = built.binary.display().to_string();
     let manifest_str = manifest_path.display().to_string();
     let artefact_str = artefacts.path().display().to_string();
@@ -343,8 +322,8 @@ pub fn corpus(
     // Keep stdout/stderr on disk until ingest commits - the pre-ingest safety
     // net if anything panics between here and the DB write.
     // Both writes are attempted; a failure does not stop parsing or ingest
-    // (the capture is in memory), but it fails the run, refuses bless, bars
-    // the run from the ceiling and skips isolation - see `evidence_failed`.
+    // (the capture is in memory), but it fails the run, refuses bless, counts
+    // as a stored violation and skips isolation - see `evidence_failed`.
     let evidence_errors = store_streams(artefacts.path(), &captured.stdout, &captured.stderr);
     for e in &evidence_errors {
         output::warn(&format!("harness evidence could not be stored: {e}"));
@@ -443,8 +422,7 @@ pub fn corpus(
         harness_code,
         &stderr_text,
         // brokkr's own measurement of the whole harness subprocess - the real
-        // wall the ceiling estimates future runs from. The original attempt
-        // only: diagnosis below never extends it.
+        // wall. The original attempt only: diagnosis below never extends it.
         Some(elapsed_ms as f64),
         StoredIntegrity {
             protocol_violations: Some(stored_violations(&assessment, evidence_failed)),
@@ -809,8 +787,7 @@ fn store_attempt_streams(dir: &Path, stdout: &[u8], stderr: &[u8]) -> Result<(),
 
 /// The integrity count stored on the run row: reconciliation and contract
 /// violations, plus one for a stdout cut short, plus one when the run's own
-/// stream evidence could not be stored. Any nonzero count bars the run from
-/// the runtime ceiling.
+/// stream evidence could not be stored.
 fn stored_violations(a: &integrity::RunAssessment, evidence_failed: bool) -> i64 {
     let n = a.stored_violations() + usize::from(evidence_failed);
     i64::try_from(n).unwrap_or(i64::MAX)
@@ -844,41 +821,11 @@ pub(crate) fn verify_selected_feeds(
     Ok(referenced.len())
 }
 
-/// Refuse a selection projected to exceed [`RUNTIME_CEILING_MS`]. The estimate
-/// is the measured whole-run wall of the most recent comparable run whose
-/// selection was a superset of `ids` (see [`CorpusDb::estimated_wall_ms`] for
-/// what counts as comparable) - a real wall, not the sum of the harness's
-/// overlapping per-probe runtimes. With no covering run recorded (a fresh DB,
-/// or a selection no prior run superset-covers) there is no measured basis, so
-/// the run proceeds. Opens the DB for reading (an older `runs.db` is migrated
-/// first - see [`CorpusDb::open_readonly`]).
-fn enforce_runtime_ceiling(project_root: &Path, ids: &[String], debug: bool) -> Result<(), DevError> {
-    let db_path = corpus_runs_db_path(project_root);
-    if !db_path.exists() {
-        return Ok(());
-    }
-    let Some(est_ms) = CorpusDb::open_readonly(&db_path)?.estimated_wall_ms(ids, debug)? else {
-        return Ok(());
-    };
-    if est_ms > RUNTIME_CEILING_MS {
-        return Err(DevError::Preflight(vec![format!(
-            "corpus: estimated runtime {:.0}s for {} exceeds the {:.0}s ceiling \
-             (measured wall of the most recent run covering this selection). \
-             Re-run with --force to override.",
-            est_ms / 1000.0,
-            output::count(ids.len(), "probe"),
-            RUNTIME_CEILING_MS / 1000.0,
-        )]));
-    }
-    Ok(())
-}
-
 /// Build the `selector` JSON stored on the run row: the resolved probe ids
 /// plus the raw selection flags - enough to group by and to reproduce.
 /// Forwarded harness flags and the build profile are part of the run's
 /// identity (both change what the harness does and how long it takes), so
-/// they persist here too; the runtime ceiling only estimates from runs that
-/// match on both.
+/// they persist here too.
 fn selector_json(args: &CorpusArgs, ids: &[String], debug: bool) -> String {
     serde_json::json!({
         "all": args.all,
@@ -923,7 +870,7 @@ struct Envelope<'a> {
 }
 
 /// The integrity fields a run row stores beside its result: the violation
-/// count (the ceiling's bar) and the structured `run_error`. Both `None` for
+/// count and the structured `run_error`. Both `None` for
 /// a run that produced no report.
 #[derive(Default)]
 #[derive(Clone, Copy)]
@@ -1226,7 +1173,7 @@ mod tests {
     }
 
     #[test]
-    fn unstored_run_evidence_names_every_failed_file_and_bars_the_ceiling() {
+    fn unstored_run_evidence_names_every_failed_file_and_counts_as_a_violation() {
         let root = scratch("run_streams");
         assert!(store_streams(&root, b"out", b"err").is_empty());
         // Both writes are attempted and both failures named, not just the first.

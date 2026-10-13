@@ -293,7 +293,7 @@ impl ProbeLine {
     /// otherwise: the record-level validator ([`record_label`]) - outcome and
     /// tier together, and the harness's own `disposition` field, when
     /// present, agreeing with them. Shared by integrity, the gate, the break
-    /// checks, bless and (over the stored record) the runtime ceiling.
+    /// checks and bless.
     pub fn valid_disposition(&self) -> Option<&'static str> {
         self.record_check().ok()
     }

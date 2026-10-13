@@ -2,7 +2,7 @@
 //! the original run left unreported to find which ones abort on their own.
 //!
 //! Evidence only, never scoring. Nothing an attempt reports enters the
-//! dispositions, the gate, bless or the runtime ceiling; the original run
+//! dispositions, the gate or bless; the original run
 //! stays the authoritative record, and the diagnosis is attached beside it.
 //!
 //! The planner here is pure: it decides which subsets to run and what the

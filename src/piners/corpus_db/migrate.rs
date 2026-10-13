@@ -4,13 +4,13 @@
 //! adds the per-probe `disposition.runtime_ms` column; version 3 adds the
 //! `disposition.boundary_ours`/`boundary_tv` window-boundary-artifact discount
 //! columns; version 4 adds `run.wall_ms`, brokkr's own measured whole-run
-//! harness wall (the pre-run runtime ceiling estimates from these, not from
-//! summing the harness's overlapping per-probe `runtime_ms`); version 5
+//! harness wall (the real wall, which summing the harness's overlapping
+//! per-probe `runtime_ms` is not); version 5
 //! rebuilds `disposition` around the stored harness record (`raw_json`, every
 //! harness column generated from it - see `schema.rs`); version 6 adds
 //! `run.commit_sha`/`run.dirty`, the checkout the run was taken from; version 7
-//! adds `run.protocol_violations` (the report-integrity count the runtime
-//! ceiling refuses a basis on) and `run.diagnosis` (the isolation pass's note,
+//! adds `run.protocol_violations` (the report-integrity count) and
+//! `run.diagnosis` (the isolation pass's note,
 //! written after the run row); version 8 adds `run.run_error`, the harness's
 //! `run_error` record stored whole as JSON. On a fresh database
 //! the schema DDL in `schema.rs` creates the current tables (columns
@@ -130,8 +130,8 @@ fn migrate_from(conn: &rusqlite::Connection, current: i64) -> Result<(), DevErro
 
     // v3 -> v4: add brokkr's measured whole-run harness wall. Nullable (pre-v4
     // runs never recorded it, and a spawn failure has no wall), so no DEFAULT -
-    // an absent wall reads back as NULL, which the ceiling estimator treats as
-    // "no measured wall for this run". Idempotency guarded by `has_column`.
+    // an absent wall reads back as NULL, "no measured wall for this run".
+    // Idempotency guarded by `has_column`.
     if current < 4 && !has_column(conn, "run", "wall_ms") {
         conn.execute("ALTER TABLE run ADD COLUMN wall_ms REAL", [])?;
     }
@@ -159,8 +159,7 @@ fn migrate_from(conn: &rusqlite::Connection, current: i64) -> Result<(), DevErro
 
     // v6 -> v7: report integrity and the isolation note. Nullable with no
     // default: an older run never counted its protocol violations, so NULL
-    // is "not recorded", never "clean" - though the ceiling, which cannot
-    // tell, accepts such a row on its stored id coverage alone.
+    // is "not recorded", never "clean".
     if current < 7 {
         if !has_column(conn, "run", "protocol_violations") {
             conn.execute("ALTER TABLE run ADD COLUMN protocol_violations INTEGER", [])?;

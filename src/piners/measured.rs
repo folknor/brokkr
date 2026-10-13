@@ -4,7 +4,7 @@
 //! measurable command).
 //!
 //! Distinct from the bare parity run ([`crate::piners::cmd::corpus`]): no gate,
-//! no `runs.db` ingest, no pre-run runtime ceiling, no isolation pass. One
+//! no `runs.db` ingest, no isolation pass. One
 //! integrity rule does apply: an iteration that exits 0 without reporting
 //! exactly its selection (every probe validly, no protocol violation) fails
 //! the measurement, unless its stop marker actually fired. Selection + hard
@@ -77,8 +77,8 @@ pub(crate) fn run(req: &MeasureRequest, args: &CorpusArgs) -> Result<(), DevErro
     })?;
 
     // Selection + hard verification, shared with the parity path. No gate,
-    // bless, reseed, or runtime ceiling apply to a measured run (those are
-    // dispatch-rejected as conflicting flags).
+    // bless or reseed apply to a measured run (those are dispatch-rejected as
+    // conflicting flags).
     let registry_dir = req.project_root.join(cfg.registry_dir());
     let corpus_root = req.project_root.join(cfg.corpus_root());
     let reg = Registry::load(&registry_dir, &corpus_root)?;
