@@ -86,6 +86,9 @@ pub struct DevConfig {
     /// toolchain we don't have or don't want. `false` by default. See
     /// [`crate::toolchain`].
     pub disable_toolchain: bool,
+    /// `[cargo_env]`: variable name -> shell command whose output brokkr sets
+    /// on every cargo it launches. See [`crate::cargo_env`].
+    pub cargo_env: std::collections::BTreeMap<String, String>,
 }
 
 /// `[bin]` section: shared defaults for `brokkr run` and `brokkr install`.

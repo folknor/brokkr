@@ -43,6 +43,7 @@ mod tests {
             lints: None,
             bin: None,
             disable_toolchain: false,
+            cargo_env: std::collections::BTreeMap::new(),
         }
     }
 

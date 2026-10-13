@@ -138,6 +138,7 @@ pub fn detect() -> Result<Detection, DevError> {
     })?;
     let (project, mut config) = config::load(&config_dir)?;
     config.apply_user_layer()?;
+    crate::cargo_env::install(&config.cargo_env);
     Ok(Detection {
         project,
         config,
@@ -160,6 +161,7 @@ pub fn detect_optional() -> Result<Option<Detection>, DevError> {
     };
     let (project, mut config) = config::load(&config_dir)?;
     config.apply_user_layer()?;
+    crate::cargo_env::install(&config.cargo_env);
     Ok(Some(Detection {
         project,
         config,

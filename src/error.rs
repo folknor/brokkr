@@ -54,6 +54,12 @@ pub enum DevError {
     /// Used by passthrough commands (run, elivagar) to propagate exit codes
     /// without calling `process::exit` in handlers.
     ExitCode(i32),
+    /// A `[cargo_env]` command could not produce its variable for a cargo
+    /// invocation, or an earlier one could not and cargo is refused for the
+    /// rest of the run. Like [`DevError::Reported`], the label only: the
+    /// detail (the variable, command, directory and why) was printed once,
+    /// when the failure was recorded. See [`crate::cargo_env`].
+    CargoEnv(String),
     /// `brokkr kill` requested a cooperative shutdown (SIGTERM). The bench
     /// aborted mid-run, partial sidecar data was stored under the `dirty`
     /// alias, and `main` should run scratch cleanup and exit 130.
@@ -100,9 +106,18 @@ impl fmt::Display for DevError {
             DevError::Lock(msg) => write!(f, "lock: {msg}"),
             DevError::Database(msg) => write!(f, "database: {msg}"),
             DevError::Verify(msg) => write!(f, "verify: {msg}"),
+            DevError::CargoEnv(label) => write!(f, "{label}"),
             DevError::ExitCode(_) => Ok(()),
             DevError::Interrupted => write!(f, "interrupted by shutdown request"),
         }
+    }
+}
+
+impl DevError {
+    /// Whether the site that raised this already printed its full detail, so
+    /// a summary prints nothing more for it.
+    pub fn already_printed(&self) -> bool {
+        matches!(self, DevError::Reported(_) | DevError::CargoEnv(_))
     }
 }
 
@@ -117,6 +132,7 @@ impl StdError for DevError {
             | DevError::Lock(_)
             | DevError::Database(_)
             | DevError::Verify(_)
+            | DevError::CargoEnv(_)
             | DevError::Reported(_)
             | DevError::Refused(_)
             | DevError::ExitCode(_)

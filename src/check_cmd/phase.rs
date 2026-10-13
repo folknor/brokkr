@@ -215,11 +215,22 @@ pub(crate) fn cmd_check(
     if background.failed() {
         failing_phase = Some("script_check");
     }
+    // A `[cargo_env]` failure a tolerant path swallowed (a non-certifying
+    // preparation, a universe retry) still fails the run, under the phase it
+    // happened in. It was printed when it happened.
+    if let Some((_, phase)) = crate::cargo_env::failure() {
+        if outcome.is_ok() {
+            outcome = Err(DevError::Reported("cargo_env failed".into()));
+        }
+        if !background.failed() {
+            failing_phase = phase.or(failing_phase);
+        }
+    }
     match joined {
         Err(e) if outcome.is_ok() => outcome = Err(e),
         // The run's own error is the one the summary prints; this one would
         // otherwise go unsaid.
-        Err(e) if !matches!(e, DevError::Reported(_) | DevError::Interrupted) => output::error(&e.to_string()),
+        Err(e) if !e.already_printed() && !matches!(e, DevError::Interrupted) => output::error(&e.to_string()),
         _ => {}
     }
 
@@ -339,7 +350,7 @@ pub(crate) fn cmd_check_selected(
 /// not decorate with an `[error]` line.
 fn selection_failure(failed: &[DevError]) -> Result<(), DevError> {
     for e in failed {
-        if !matches!(e, DevError::Reported(_) | DevError::ExitCode(_)) {
+        if !e.already_printed() && !matches!(e, DevError::ExitCode(_)) {
             output::error(&e.to_string());
         }
     }
@@ -1632,7 +1643,8 @@ fn finish_check(
             let interrupted = stop == Some(RunStop::Interrupt);
             if !stopped
                 && !interrupted
-                && !matches!(e, DevError::Reported(_) | DevError::ExitCode(_))
+                && !e.already_printed()
+                && !matches!(e, DevError::ExitCode(_))
             {
                 output::error(&e.to_string());
             }
@@ -2738,7 +2750,8 @@ fn run_clippy_phase(
             && !sited_allowed(d, allow_exact)
             && !(d.code.as_deref().is_some_and(crate::config::is_cargo_lint) && code_allowed(d, allow))
     };
-    let outcome = ran.verdict(report_diagnostic_phase("clippy", &results, &info, project_root, &keep, multi));
+    let outcome =
+        ran.verdict(|failed| report_diagnostic_phase("clippy", &results, &info, project_root, &keep, multi, failed));
     if echo_after && outcome.is_ok() {
         for r in &results {
             output::run_msg(&r.command);
@@ -2852,7 +2865,7 @@ fn run_rustdoc_phase(
             && !sited_allowed(d, allow_exact)
     };
     let multi = results.len() > 1;
-    ran.verdict(report_diagnostic_phase("rustdoc", &results, &info, project_root, &keep, multi))
+    ran.verdict(|failed| report_diagnostic_phase("rustdoc", &results, &info, project_root, &keep, multi, failed))
 }
 
 /// Whether `[lints] allow` names this diagnostic's lint. Matched on the exact
@@ -2883,7 +2896,10 @@ fn phase_sweep_tag(phase: &str, label: &str) -> String {
 
 /// Decide and report a diagnostic phase from its cargo runs: any failed run
 /// or any diagnostic `keep` admits fails it. Prints the failing commands, then
-/// the scoped, cross-sweep summary.
+/// the scoped, cross-sweep summary. `already_failed`: a run the phase could
+/// not make failed it before these results were read, so a clean set prints
+/// no green line.
+#[allow(clippy::too_many_arguments)]
 fn report_diagnostic_phase(
     phase: &str,
     results: &[SweepResult],
@@ -2891,6 +2907,7 @@ fn report_diagnostic_phase(
     project_root: &Path,
     keep: &dyn Fn(&cargo_json::DiagnosticEvent) -> bool,
     multi: bool,
+    already_failed: bool,
 ) -> Result<(), DevError> {
     let run_failed = |r: &SweepResult| {
         !r.success || r.diagnostics().iter().any(keep)
@@ -2898,7 +2915,7 @@ fn report_diagnostic_phase(
     if !results.iter().any(run_failed) {
         // The phase's one green line. Only inside `check`: `brokkr clippy`
         // closes with its own `clippy clean` verdict.
-        if report_active() {
+        if report_active() && !already_failed {
             let mut sweeps: Vec<&str> = results.iter().map(|r| r.label.as_str()).collect();
             sweeps.dedup();
             output::run_msg(&format!(
@@ -3027,7 +3044,11 @@ fn run_per_build_shape(
             // A run that could not be made is the phase's failure, but not
             // a reason to lose what the other runs found: the first is
             // returned beside the results, any further one printed here.
-            Err(e) if ran.error.is_some() => output::error(&e.to_string()),
+            Err(e) if ran.error.is_some() => {
+                if !e.already_printed() {
+                    output::error(&e.to_string());
+                }
+            }
             Err(e) => ran.error = Some(e),
         }
     }
@@ -3042,9 +3063,12 @@ struct PhaseRuns {
 }
 
 impl PhaseRuns {
-    /// The phase's verdict once its diagnostics are reported: a run that
-    /// could not be made fails it whatever the others found.
-    fn verdict(self, reported: Result<(), DevError>) -> Result<(), DevError> {
+    /// The phase's verdict: a run that could not be made fails it whatever
+    /// the others found. `report` reports the runs that were made, and is
+    /// told whether the phase already failed - a failed phase has no green
+    /// line to print, even when every run it did make was clean.
+    fn verdict(self, report: impl FnOnce(bool) -> Result<(), DevError>) -> Result<(), DevError> {
+        let reported = report(self.error.is_some());
         match self.error {
             Some(e) => Err(e),
             None => reported,

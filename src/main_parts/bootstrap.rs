@@ -134,7 +134,8 @@ fn main() {
     // Handlers return errors rather than exiting: all command-owned guards
     // (lock, disabled toolchain, scratch and streams) drop before we record
     // history and choose the process exit, including propagated child codes.
-    let result = run(cli);
+    // A `[cargo_env]` failure some path tolerated still fails the command.
+    let result = crate::cargo_env::seal(run(cli));
     let elapsed_ms = duration_ms(start.elapsed());
 
     let exit_code = match &result {

@@ -1591,6 +1591,7 @@ fn spawn_process_group(
     for &(key, value) in env {
         cmd.env(key, value);
     }
+    crate::cargo_env::apply(&mut cmd, program, args, Some(cwd), env)?;
     crate::oom::protect_child(&mut cmd);
     // The group is outside brokkr's own, so nothing aimed at brokkr reaches it.
     // Both runners register it with `shutdown::GroupReaper` for SIGINT/SIGTERM;

@@ -798,6 +798,7 @@ fn run_captured_limited(
     for &(key, value) in env {
         cmd.env(key, value);
     }
+    crate::cargo_env::apply(&mut cmd, program, args, Some(cwd), env)?;
     crate::oom::protect_child(&mut cmd);
     // Last, after every caller-supplied env var, so a caller cannot displace
     // the capability that lets this child compile under the hold. See
@@ -968,6 +969,7 @@ pub fn spawn_captured(
     for &(key, value) in env {
         cmd.env(key, value);
     }
+    crate::cargo_env::apply(&mut cmd, program, args, Some(cwd), env)?;
     crate::oom::protect_child(&mut cmd);
     // Last, after every caller-supplied env var, so a caller cannot displace
     // the capability that lets this child compile under the hold. See
@@ -1026,13 +1028,6 @@ pub fn run_passthrough_in(
     for (k, v) in env {
         cmd.env(k, v);
     }
-    crate::oom::protect_child(&mut cmd);
-    // Last, after every caller-supplied env var, so a caller cannot displace
-    // the capability that lets this child compile under the hold. See
-    // `crate::hold` for why the mark is inherited rather than inferred, and why
-    // it is stamped on every child rather than only the ones named cargo.
-    crate::hold::stamp(&mut cmd);
-
     // A passthrough child (elivagar `regress`, elivagar run-mode dispatch) is a
     // real, long-running workload with no sidecar window around it. Historically
     // this used a bare `cmd.status()`, which left brokkr with the default
@@ -1042,7 +1037,15 @@ pub fn run_passthrough_in(
     // ctrl-C) reaches the child. The child stays in brokkr's process group -
     // not isolated - so a terminal SIGINT still hits it directly, and the guard
     // covers the `brokkr kill` case where only brokkr's PID is signalled.
+    // Installed before the `[cargo_env]` evaluation, which polls the flag too.
     let _guard = crate::shutdown::SigtermGuard::install();
+    crate::cargo_env::apply(&mut cmd, program, args, dir, env)?;
+    crate::oom::protect_child(&mut cmd);
+    // Last, after every caller-supplied env var, so a caller cannot displace
+    // the capability that lets this child compile under the hold. See
+    // `crate::hold` for why the mark is inherited rather than inferred, and why
+    // it is stamped on every child rather than only the ones named cargo.
+    crate::hold::stamp(&mut cmd);
     let mut child = cmd.spawn().map_err(|error| DevError::Spawn {
         program: program.to_owned(),
         error,

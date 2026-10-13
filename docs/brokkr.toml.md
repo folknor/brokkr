@@ -202,7 +202,7 @@ Reserved top-level keys (skipped by host parsing): `project`, `include`,
 `litehtml`, `sluggrs`, `ratatoskr`, `piners`, `dellingr`, `mogwai`, `check`,
 `dependency_rule`, `test`, `quarantine`, `capture_env`, `gremlins`, `header`,
 `textlint`, `textlint_preset`, `script_check`, `manifest`, `rustdoc`, `deps`,
-`lints` (and its `clippy` alias), `bin`, `disable_toolchain`.
+`lints` (and its `clippy` alias), `bin`, `disable_toolchain`, `cargo_env`.
 
 ## `worktree_keep`
 
@@ -329,6 +329,63 @@ every run, so a command that keeps a run log (`check`, `test`, measured runs,
 Worktree builds (`--commit`) run in a separate checkout that may carry its own
 committed pin; brokkr re-points the disable there for the build, so the
 worktree's pin is disabled too rather than honored.
+
+## `[cargo_env]` - variables computed per cargo invocation
+
+```toml
+[cargo_env]
+BA_SOURCE_IDENTITY = "python3 scripts/source_identity.py"
+```
+
+Each entry names an environment variable and a shell command. Before every
+cargo brokkr launches, every command runs and its trimmed stdout is set on that
+cargo as the variable. The use it exists for: a build script whose real input
+cargo cannot watch through mtimes (a content-exact source identity, say)
+declares `cargo::rerun-if-env-changed=NAME` instead of rerunning on every
+build. A rerun build script dirties its own package, so the difference is every
+consumer recompiling on every cargo invocation against recompiling only when
+the value changes. A plain `cargo` or rust-analyzer never sets the variable,
+so such a build script should keep rerunning when it is absent.
+
+- **Per invocation, never cached.** An edit between two cargo invocations of one
+  run changes what the second gets. Each evaluation is a point-in-time reading:
+  an edit during the build itself is the command's to detect.
+- **What counts.** Every cargo brokkr launches itself, except invocations that
+  run no build script (`metadata`, `clean`, `tree`, `locate-project`, `pkgid`,
+  `version`, `help`, `fmt`, and cargo's own `--version`/`--help`). A cargo run
+  by a script check, a test or a build script is outside it. A
+  `brokkr check` lane that runs its prepared binaries without invoking cargo
+  evaluates nothing: those binaries carry the value they were built with.
+- **Where it runs.** `sh -c` in the directory cargo is about to run in - the
+  worktree for a `--commit` build, so a relative command runs that tree's own
+  script against that tree. The environment is the one that cargo gets
+  (brokkr's, the sweep's, the hold capability) with every configured name
+  removed, so no command reads a stale value of itself or another entry.
+  Entries are evaluated in name order, independently.
+- **Failure is fatal.** A non-zero exit, 30 seconds without finishing, more than
+  4 KiB of output, output that is empty, not UTF-8, more than one line or
+  carries a control character, or output that did not close - any of these
+  fails that cargo spawn and is printed once, with the command, the directory
+  and its stderr. Every later cargo of the run is refused, and the command exits
+  non-zero even where a path that tolerates a failed build carried on.
+- **Build inputs, not test environment.** The value is set on cargo, so build
+  scripts and rustc see it, and a test `cargo test` runs inherits it; the
+  lanes that execute test binaries directly do not set it. Tests must not read
+  it at runtime.
+- **Refused at load:** a name that is not an environment variable name; one in
+  a namespace brokkr, cargo, rustc or the loader owns (`BROKKR_*`, `CARGO*`,
+  `RUST*`, `LD_*`, `PATH`, `HOME`); a blank command; and a name a
+  [`capture_env`](#top-level-shape) pattern matches - capture reads brokkr's own
+  environment, which never carries the per-invocation value.
+- **Refused per invocation:** a cargo config `[env]` entry for the name, in the
+  chain that cargo reads or a `--config` it is given. `force = true` there
+  would replace what brokkr hands cargo, and a plain entry would be a second
+  source for one input.
+
+The values go to the run log, one line per variable per cargo invocation
+(`cargo_env NAME=value (12ms in <dir>, for cargo test)`). The user-wide config
+layer rejects the table: what a project's build scripts read is the project's
+to say. Code: `src/cargo_env.rs`.
 
 ## `[gremlins]` section
 

@@ -49,6 +49,7 @@ pub fn load(project_root: &Path) -> Result<(Project, DevConfig), DevError> {
     let lints = parse_lints(table)?;
     let bin = parse_bin(table)?;
     let disable_toolchain = parse_disable_toolchain(table)?;
+    let cargo_env = parse_cargo_env(table, &capture_env)?;
     let hosts = parse_hosts(table)?;
     validate_datasets(&hosts)?;
     validate_tilegen(&hosts)?;
@@ -78,8 +79,54 @@ pub fn load(project_root: &Path) -> Result<(Project, DevConfig), DevError> {
             lints,
             bin,
             disable_toolchain,
+            cargo_env,
         },
     ))
+}
+
+/// Parse the optional `[cargo_env]` table: variable name -> shell command.
+///
+/// Refused: a name that is not an environment variable name; one in a
+/// namespace brokkr, cargo, rustc, rustup or the loader owns (the run's own
+/// plumbing would be displaced); a blank command; and a name a `capture_env`
+/// pattern matches - capture reads brokkr's inherited environment, which never
+/// carries the per-invocation value, so it would record a stale one.
+fn parse_cargo_env(
+    table: &toml::map::Map<String, toml::Value>,
+    capture_env: &[String],
+) -> Result<std::collections::BTreeMap<String, String>, DevError> {
+    let mut out = std::collections::BTreeMap::new();
+    let Some(value) = table.get("cargo_env") else {
+        return Ok(out);
+    };
+    let entries = value
+        .as_table()
+        .ok_or_else(|| DevError::Config("[cargo_env] must be a table of NAME = \"command\"".into()))?;
+    for (name, command) in entries {
+        let valid = name.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+        if !valid {
+            return Err(DevError::Config(format!("[cargo_env] {name:?} is not an environment variable name")));
+        }
+        let owned = ["BROKKR_", "CARGO", "RUST", "LD_"].iter().any(|p| name.starts_with(p))
+            || matches!(name.as_str(), "PATH" | "HOME");
+        if owned {
+            return Err(DevError::Config(format!(
+                "[cargo_env] {name}: the name belongs to brokkr, cargo, rustc or the loader - pick a project-owned name"
+            )));
+        }
+        let Some(command) = command.as_str().filter(|c| !c.trim().is_empty()) else {
+            return Err(DevError::Config(format!("[cargo_env] {name}: the value must be a non-blank command string")));
+        };
+        if let Some(pattern) = capture_env.iter().find(|p| matches_capture(name, std::slice::from_ref(*p))) {
+            return Err(DevError::Config(format!(
+                "[cargo_env] {name} is matched by capture_env {pattern:?}: capture reads brokkr's own environment, \
+                 which never carries the value brokkr computes per cargo invocation"
+            )));
+        }
+        out.insert(name.clone(), command.to_owned());
+    }
+    Ok(out)
 }
 
 /// Parse the optional `[bin]` section. Absent -> `None`.
@@ -653,6 +700,7 @@ fn parse_hosts(
             || key == "lints"
             || key == "bin"
             || key == "disable_toolchain"
+            || key == "cargo_env"
         {
             continue;
         }

@@ -91,6 +91,12 @@ pub(crate) fn enter_phase(phase: &'static str) {
     }
 }
 
+/// The phase in flight, if any: what a failure recorded outside the phase's
+/// own error path (`crate::cargo_env`) names as the phase that failed.
+pub(crate) fn current_phase() -> Option<&'static str> {
+    PHASE_CLOCK.lock().ok().and_then(|c| c.map(|(phase, _)| phase))
+}
+
 /// How long the phase in flight has been running - the wall time its grouped
 /// green line reports. Zero outside a phase.
 pub(crate) fn phase_elapsed() -> std::time::Duration {

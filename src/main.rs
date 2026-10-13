@@ -2,6 +2,7 @@ mod artefacts;
 mod atomic_write;
 mod bench_cmd;
 mod build;
+mod cargo_env;
 mod cargo_filter;
 mod cargo_json;
 mod check_cmd;
