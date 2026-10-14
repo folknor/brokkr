@@ -1,13 +1,13 @@
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::config::{Dataset, ResolvedPaths};
+use crate::config::ResolvedPaths;
 use crate::context::{acquire_cmd_lock, bootstrap, bootstrap_config};
 use crate::error::DevError;
 use crate::host::storage::StorageInfo;
 use crate::output;
 use crate::project::Project;
+use crate::resolve::DatasetStatus;
 
 /// Environment information for the `dev env` subcommand.
 pub struct EnvInfo {
@@ -38,25 +38,6 @@ pub struct UserConfigStatus {
     pub error: Option<String>,
 }
 
-/// Whether a dataset path exists on disk and passes hash verification.
-///
-/// Computed values retain their file-or-tree shape as `PathDigest`; configured
-/// pins are parsed digests too, so status comparison never goes through hex text.
-pub enum DatasetStatus {
-    /// File exists and hash matches.
-    Verified,
-    /// File exists but no hash is configured. Contains the computed digest.
-    Present(crate::preflight::PathDigest),
-    /// File exists but hash does not match. Contains the actual digest.
-    HashMismatch(crate::preflight::PathDigest),
-    /// File does not exist.
-    Missing,
-    /// The digest could not be computed. Contains why.
-    HashError(String),
-    /// Dataset has no files configured.
-    NoFiles,
-}
-
 /// Collect all environment information.
 pub fn collect(paths: &ResolvedPaths, project: Project, project_root: &Path) -> EnvInfo {
     let storage_paths: [(&str, &Path); 3] = [
@@ -73,7 +54,7 @@ pub fn collect(paths: &ResolvedPaths, project: Project, project_root: &Path) -> 
         drives: collect_drives(paths),
         storage: crate::host::storage::probe_paths(&storage_paths),
         tools: collect_tools(project, project_root),
-        datasets: check_datasets(&paths.datasets, &paths.data_dir, project_root),
+        datasets: paths.dataset_status(project_root),
         user_config: collect_user_config(project_root),
     }
 }
@@ -337,11 +318,6 @@ fn format_dataset(name: &str, status: &DatasetStatus) -> String {
     }
 }
 
-/// First line of a multi-line error, for the one-line-per-entry status list.
-fn first_line(msg: &str) -> String {
-    msg.lines().next().unwrap_or(msg).trim().to_owned()
-}
-
 // ---------------------------------------------------------------------------
 // Drives
 // ---------------------------------------------------------------------------
@@ -427,101 +403,6 @@ fn read_git_rev(project_root: &Path) -> String {
         .parse::<crate::git::Commit>()
         .map(|commit| commit.short().to_string())
         .unwrap_or_else(|_| "unknown".to_owned())
-}
-
-// ---------------------------------------------------------------------------
-// Datasets
-// ---------------------------------------------------------------------------
-
-fn check_datasets(
-    datasets: &HashMap<String, Dataset>,
-    data_dir: &Path,
-    project_root: &Path,
-) -> Vec<(String, DatasetStatus)> {
-    let mut out: Vec<(String, DatasetStatus)> = Vec::new();
-
-    for (name, ds) in datasets {
-        check_file_entries(&mut out, name, &ds.pbf, "", data_dir, project_root);
-        check_file_entries(&mut out, name, &ds.osc, "osc.", data_dir, project_root);
-        check_file_entries(
-            &mut out,
-            name,
-            &ds.pmtiles,
-            "pmtiles.",
-            data_dir,
-            project_root,
-        );
-
-        // A plain out-of-git input: one path, one digest, no variants. Listing
-        // it here is how its digest gets registered in the first place - brokkr
-        // hashes XXH128 and delivery manifests carry SHA-256, so there is
-        // nothing to transcribe. Register the path, read the digest off this
-        // line, paste it back. Resolves against the project root rather than
-        // `data_dir`: a delivery commonly sits outside the repository.
-        if let Some(path) = ds.resolve_path(project_root) {
-            let status = if path.exists() {
-                check_hash_status(&path, ds.xxh128, project_root)
-            } else {
-                DatasetStatus::Missing
-            };
-            out.push((name.clone(), status));
-            continue;
-        }
-
-        if ds.pbf.is_empty() && ds.osc.is_empty() && ds.pmtiles.is_empty() {
-            out.push((name.clone(), DatasetStatus::NoFiles));
-        }
-    }
-
-    out.sort_by(|a, b| a.0.cmp(&b.0));
-    out
-}
-
-/// Check all entries in a file map and push their status to `out`.
-fn check_file_entries<E: crate::resolve::FileEntry>(
-    out: &mut Vec<(String, DatasetStatus)>,
-    dataset_name: &str,
-    entries: &HashMap<String, E>,
-    prefix: &str,
-    data_dir: &Path,
-    project_root: &Path,
-) {
-    for (key, entry) in entries {
-        let label = format!("{dataset_name}/{prefix}{key}");
-        let path = data_dir.join(entry.file());
-        let status = if !path.exists() {
-            DatasetStatus::Missing
-        } else {
-            check_hash_status(
-                &path,
-                entry.xxhash().map(crate::preflight::FileDigest::value),
-                project_root,
-            )
-        };
-        out.push((label, status));
-    }
-}
-
-fn check_hash_status(
-    path: &Path,
-    expected: Option<crate::preflight::Xxh128>,
-    project_root: &Path,
-) -> DatasetStatus {
-    // A digest that could not be computed is reported WITH its reason. The
-    // previous bare "error" was indistinguishable between an unreadable file,
-    // an empty directory and a permission problem - and `brokkr env` is
-    // precisely where someone goes to find out why a pin will not take.
-    let digest = match crate::preflight::cached_path_digest(path, project_root) {
-        Ok(digest) => digest,
-        Err(e) => return DatasetStatus::HashError(first_line(&e.to_string())),
-    };
-
-    // Typed comparison: hex case and spelling were normalised at parse time.
-    match expected {
-        None => DatasetStatus::Present(digest),
-        Some(pin) if digest.value() == pin => DatasetStatus::Verified,
-        Some(_) => DatasetStatus::HashMismatch(digest),
-    }
 }
 
 #[cfg(test)]

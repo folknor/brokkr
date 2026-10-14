@@ -31,27 +31,6 @@ Enforcement proposed: typed variants; text filters take a tool-label parameter a
 
 Design hunt (check-report): "already reported" travels as message text - `already_reported` converts `DevError::Build(m) if m == TESTS_FAILED` into `Reported`, `record_phase_stop` matches `Build(m) if m == TESTS_FAILED`, `cmd_clippy` matches `Reported(m) if m == CLIPPY_FAILED`; every other phase invents its own `Reported("gremlins found")`, `"header check failed"`, `"textlint failed"`, `"manifest check failed"`, `"cargo_env failed"`, `"{phase} failed"`. The test phase returns `Build` (meaning "not yet printed") for a failure that was printed, then patches it. Proposed: phases return `Result<(), PhaseFailure>` with `Findings { phase }` (detail printed), `Error(DevError)` (not printed) or `Stopped`, converted to `DevError` once at `cmd_check`. The text path's summary line reads `cargo clippy: N errors, M warnings` when rendering a failed `cargo test` build (`output.rs` `filter_clippy_in_tree` on the test build's stderr, `test_cmd`) - operator text naming the wrong command; the earlier hygiene account says that output is relabelled with `replacen`, so the two readings disagree on whether the relabel reaches every path.
 
-## VAL-005 - A sweep's cargo selection argv is built by several independent builders
-
-Reported by: check-core, test-execution.
-
-- `clippy_args`, `doc_args`, `sweep_selection_args`, `shape_selection_args`, `resolution_enumeration_args`, plus a partial copy in `run_sweep_pre_build`, each order profile/unification/packages/excludes/features themselves and mix `--package`/`-p`. BUG-005 is the divergence this produced.
-- `test_cmd` re-derives profile → subdir and `--release` from a bool (`"debug"`/`"release"`) in `run`, `test_argv`, `matching_test_names`, `run_pre_build`, instead of `SweepProfile::target_subdir`/`cargo_args`.
-- `sweep_selection_args` already includes profile args and `unification_args()`; the nextest build and parallel prebuild append `unification_args()` again and nextest appends profile args again (harmless today; `parallel.rs` claims the pin comes "from that one field").
-- `enumeration_selection_carries_the_lint_allows` covers `shape_enumeration_args` but not the package-mode branch of `resolution_enumeration_args`.
-
-Enforcement proposed: one `selection(sweep, scope, Purpose)` / `LibtestInvocation` builder carrying profile, pin, allows and selection, with a test asserting every call site's argv contains its output.
-
-Design hunt (check-plan): `coverage.rs`'s `shape_selection_args`/`shape_enumeration_args` assemble cargo argv (profile, unification, run args, allows) as a second assembly point beside the lanes', each piece justified by a comment saying it is "the same as the lane". Proposed: the argv for "build this lane's shape" is one function on the `ResolutionRun` plus planned sweep, used by both the lane prebuild and the universe enumeration.
-
-## VAL-006 - Feature args and `ResolvedSweep` construction are repeated
-
-Reported by: check-core.
-
-Feature args are built in `CheckEntry::cargo_feature_args`, the ad-hoc branch of `decide_active_sweeps`, and `build_clippy_sweep`. `sweep_from_check_entry` and `build_resolved_sweep` each list all 25 fields (with a duplicated `lib_only` comment); three more partial constructors use `..Default::default()`.
-
-Design hunt (check-plan): `FeatureConfig::configured_key` and `argv_with` are both the identity rendering, and `Attempt.features` ("described features") is a third rendering filtered by "carried in at least one run". The "described" form is what announcements print while `cargo_args` is what runs; the hunter asks the reporting side to check that no path prints `configured_key` where a run dropped tokens.
-
 ## VAL-007 - Cargo/libtest argv classification is re-implemented per lane
 
 Reported by: check-core, test-execution.
@@ -63,16 +42,6 @@ Reported by: check-core, test-execution.
 Enforcement proposed: one `CargoArgv` classifier type with a shared selector table and test.
 
 Design hunt (check-exec): the runner has two preconditions - `--format json -Z unstable-options` on every lane, `--test-threads=1` on the serial runner - and enforces only the second, by scanning argv (`enforce_single_threaded`). Every caller builds the argv by hand: `check_cmd/output.rs` pushes json then calls `reject_format_override` (both spellings); `parallel::direct_libtest_args` pushes json and refuses only an exact `--format`, safe today only because user args precede brokkr's json and libtest takes the last occurrence; `test_cmd::direct_libtest_args` is a hard-coded array; `isolate.rs` and the discovery args in `focused.rs`. The package-selector set is written twice and differs (`narrows_selection`: `-p | --package | --exclude`; `reject_forwarded_selectors` adds `--workspace`), both also remembering the attached `-pfoo` form, and `output.rs`'s `serial_shim_fallback` has its own `--config`/`--target` scan. Proposed: a `LibtestInvocation { filters, exact, include_ignored, nocapture, threads: One | N(u32) | Default, passthrough }` that the runner renders itself, format flags always last, refusing passthrough tokens containing `--format` or `--test-threads` at construction - which also lets the serial/parallel runner choice be typed rather than re-derived from argv - and one `ForwardedCargoArgs::parse` yielding typed groups (`package_selectors`, `target_selectors`, `config`, `target`, `manifest_path`, `target_dir`, `no_run`, `rest`), living with selection rather than in `parallel.rs`.
-
-## VAL-008 - libtest `--list` parsing, loader paths and cwd fallback have multiple owners
-
-Reported by: test-execution.
-
-- `is_list_tally` duplicated verbatim in `test_cmd.rs` and `isolate.rs`; name extraction diverged: `listed_test_names` uses `trim_end` and doesn't dedup, `parse_list_output` trims both ends, sorts and dedups.
-- `binaries::loader_path` (listing) orders libdir, deps, profile, inherited with no build-script link-search paths; `DirectRuntime::envelope` (execution) orders linked, deps, profile, libdir, inherited and says order "decides which same-named .so loads"; they read an existing `LD_LIBRARY_PATH` first-match vs last-match. A binary needing a build-script `.so` can run but fail to list.
-- cwd fallback: `envelope` returns `"."` (and `CARGO_MANIFEST_DIR="."`), `run_one_binary` maps `"."` to `project_root`, `binary_list` falls back to `project_root` itself.
-
-Enforcement proposed: listing goes through `envelope`; a test asserts listing and execution environments are built by one function.
 
 ## VAL-009 - Two owners of `-Zfeature-unification` support; package-mode builds in two target dirs
 

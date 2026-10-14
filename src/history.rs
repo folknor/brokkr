@@ -72,6 +72,16 @@ impl StoreError {
                 f.code,
                 ErrorCode::CannotOpen | ErrorCode::ReadOnly | ErrorCode::PermissionDenied
             ),
+            StoreError::Other(DevError::Io(e)) => matches!(
+                e.kind(),
+                std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::ReadOnlyFilesystem
+            ),
+            StoreError::Other(DevError::Database(message)) => {
+                let message = message.to_ascii_lowercase();
+                message.contains("unable to open database file")
+                    || message.contains("readonly database")
+                    || message.contains("permission denied")
+            }
             _ => false,
         }
     }
@@ -109,15 +119,30 @@ impl std::fmt::Display for StoreError {
     }
 }
 
-/// How long a connection waits on another process's write lock before
-/// giving up with `SQLITE_BUSY`. Every brokkr invocation records a row, so
-/// concurrent invocations (parallel agents) contend for the file routinely.
-const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
-
 impl HistoryDb {
-    /// Open (or create) the history database at the XDG data path.
+    /// Open the history database for queries. An older store is migrated
+    /// before the read-only connection is returned; an absent store is an
+    /// empty in-memory view and does not create a file.
     pub fn open() -> Result<Self, DevError> {
-        Ok(Self::open_typed()?)
+        let path = db_path()?;
+        if !path.exists() {
+            let conn = Connection::open_in_memory()?;
+            conn.execute_batch(CREATE_TABLE)?;
+            conn.execute_batch(CREATE_INDEXES)?;
+            conn.pragma_update(None, "query_only", true)?;
+            return Ok(Self { conn });
+        }
+
+        let conn = crate::db::store::open_read_only_migrating(
+            &path,
+            "command history",
+            SCHEMA_VERSION,
+            || {
+                drop(Self::open_typed()?);
+                Ok(())
+            },
+        )?;
+        Ok(Self { conn })
     }
 
     /// [`Self::open`] with the failure kept typed (see [`StoreError`]).
@@ -126,11 +151,8 @@ impl HistoryDb {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let conn = Connection::open(&path)?;
-        // Before anything that writes - WAL setup and migration included -
-        // so a concurrent invocation waits rather than failing busy.
-        conn.busy_timeout(BUSY_TIMEOUT)?;
-        conn.pragma_update(None, "journal_mode", "WAL")?;
+        let conn = crate::db::store::open_read_write(&path, "command history", SCHEMA_VERSION)
+            .map_err(StoreError::Other)?;
         run_migrations(&conn)?;
         conn.execute_batch(CREATE_TABLE)?;
         conn.execute_batch(CREATE_INDEXES)?;
@@ -451,43 +473,24 @@ fn db_path() -> Result<PathBuf, DevError> {
 /// `IMMEDIATE` transaction with the version re-read inside it: every brokkr
 /// invocation opens this file, so two of them routinely race to initialise
 /// or migrate it, and the loser must see the winner's work rather than
-/// repeat it. A store stamped newer than this binary is left alone - its
-/// table is a superset this binary's inserts still fit.
+/// repeat it. A store stamped newer than this binary is refused by the
+/// shared store policy instead of being stamped down.
 fn run_migrations(conn: &Connection) -> Result<(), StoreError> {
-    let read_version = |conn: &Connection| {
-        conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
-    };
-    if read_version(conn)? >= SCHEMA_VERSION && has_table(conn, "history") {
-        return Ok(());
-    }
-    conn.execute_batch("BEGIN IMMEDIATE")?;
-    let migrated = (|| -> Result<(), rusqlite::Error> {
-        if read_version(conn)? >= SCHEMA_VERSION && has_table(conn, "history") {
-            return Ok(());
-        }
+    crate::db::store::migrate(conn, "command history", SCHEMA_VERSION, |conn, _current| {
         conn.execute_batch(CREATE_TABLE)?;
-        // Future migrations go here, gated on the version read above:
-        // if current < 2 { migrate_v1_to_v2(conn)?; }
-        conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        conn.execute_batch(CREATE_INDEXES)?;
         Ok(())
-    })();
-    match migrated {
-        Ok(()) => conn.execute_batch("COMMIT")?,
-        Err(e) => {
-            conn.execute_batch("ROLLBACK").ok();
-            return Err(e.into());
-        }
-    }
-    Ok(())
+    })
+    .map_err(StoreError::Other)
 }
 
+#[cfg(test)]
 fn has_table(conn: &Connection, table: &str) -> bool {
     conn.query_row(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
         [table],
-        |row| row.get::<_, i64>(0),
+        |row| row.get(0),
     )
-    .map(|count| count > 0)
     .unwrap_or(false)
 }
 

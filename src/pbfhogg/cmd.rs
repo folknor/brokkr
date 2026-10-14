@@ -639,19 +639,19 @@ fn not_a_pbfhogg_verify() -> DevError {
 /// used by `verify all`).
 fn verify_name(verify: &VerifyCommand) -> &'static str {
     match verify {
-        VerifyCommand::Sort { .. } => "sort",
-        VerifyCommand::Cat { .. } => "cat",
-        VerifyCommand::Extract { .. } => "extract",
-        VerifyCommand::MultiExtract { .. } => "multi-extract",
-        VerifyCommand::TagsFilter { .. } => "tags-filter",
-        VerifyCommand::GetidRemoveid { .. } => "getid-removeid",
-        VerifyCommand::AddLocationsToWays { .. } => "add-locations-to-ways",
-        VerifyCommand::CheckRefs { .. } => "check-refs",
-        VerifyCommand::Merge { .. } => "apply-changes",
-        VerifyCommand::DeriveChanges { .. } => "diff --format osc",
-        VerifyCommand::Renumber { .. } => "renumber",
-        VerifyCommand::Diff { .. } => "diff",
-        VerifyCommand::All { .. } => "all",
+        VerifyCommand::Sort { .. } => super::verify::labels::SORT,
+        VerifyCommand::Cat { .. } => super::verify::labels::CAT,
+        VerifyCommand::Extract { .. } => super::verify::labels::EXTRACT,
+        VerifyCommand::MultiExtract { .. } => super::verify::labels::MULTI_EXTRACT,
+        VerifyCommand::TagsFilter { .. } => super::verify::labels::TAGS_FILTER,
+        VerifyCommand::GetidRemoveid { .. } => super::verify::labels::GETID_REMOVEID,
+        VerifyCommand::AddLocationsToWays { .. } => super::verify::labels::ADD_LOCATIONS_TO_WAYS,
+        VerifyCommand::CheckRefs { .. } => super::verify::labels::CHECK_REFS,
+        VerifyCommand::Merge { .. } => super::verify::labels::APPLY_CHANGES,
+        VerifyCommand::DeriveChanges { .. } => super::verify::labels::DIFF_OSC,
+        VerifyCommand::Renumber { .. } => super::verify::labels::RENUMBER,
+        VerifyCommand::Diff { .. } => super::verify::labels::DIFF,
+        VerifyCommand::All { .. } => super::verify::labels::ALL,
         VerifyCommand::ElivVerify { .. }
         | VerifyCommand::Batch { .. }
         | VerifyCommand::NidGeocode { .. }

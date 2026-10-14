@@ -46,6 +46,28 @@ message = "notes/ is transient; a code comment must carry its own context"
 name = "brokkr-state-paths-use-layouts"
 pattern = '"(?:[^"]*[/"])?\.brokkr(?:/|")'
 paths = ["src/**/*.rs"]
-exclude = ["src/clean/layout.rs", "src/user_dirs.rs", "src/user_dirs/paths.rs"]
+exclude = ["src/clean/layout.rs", "src/user_dirs.rs", "src/user_dirs/paths.rs", "src/lock_protocol.rs"]
 region = "string"
 message = "construct .brokkr paths through ProjectState, a project layout, or user_dirs"
+
+# The toolchain probe has one owner, which caches it per invocation. The guard
+# binary's argument classifier recognises the flag; it never runs it.
+[[textlint]]
+name = "rustc-version-probe-has-one-owner"
+pattern = '-vV\b'
+paths = ["src/**/*.rs"]
+exclude = ["src/cargo/rustc.rs", "src/bin/rustc_guard.rs"]
+region = "string"
+message = "query the toolchain through crate::cargo::rustc::load, not a fresh rustc -vV"
+
+# The linked elivagar and protohoggr crates are reached through one seam, so
+# a change in their API touches one file. The crate root and the modules that
+# import brokkr's own `elivagar` module by that bare name are excluded: there
+# `elivagar::` is the local module, not the dependency.
+[[textlint]]
+name = "elivagar-crates-through-the-seam"
+pattern = '(?:^|[^:\w])(?:elivagar|protohoggr)::'
+paths = ["src/**/*.rs"]
+exclude = ["src/elivagar/eliv.rs", "src/main.rs", "src/main_parts/bootstrap.rs", "src/verify_cmd.rs"]
+region = "code"
+message = "reach the elivagar and protohoggr crates through src/elivagar/eliv.rs"

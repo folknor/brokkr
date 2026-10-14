@@ -395,6 +395,16 @@ fn run_sync(
     // every baseline-relative rule at once, and a gated sweep
     // supplies its own scripts.
     ratatoskr::sync::validate_gate_selection(gate.as_deref(), script.is_some(), *as_baseline)?;
+    // A named gate must exist before a `--commit` worktree is cut for it.
+    // (A gate literally named `all` is refused when the config loads.)
+    if let Some(name) = gate.as_deref()
+        && !cohort_gate
+        && !ratatoskr_config.gate.contains_key(name)
+    {
+        return Err(DevError::Config(format!(
+            "sync: gate `{name}` not found in [ratatoskr.gate.*] of brokkr.toml"
+        )));
+    }
 
     // Modes off one shape: --all runs the discovered cohort,
     // --gate all runs the configured gate cohort, no script
@@ -402,6 +412,7 @@ fn run_sync(
     if *all {
         return ratatoskr::sync::run_sync_all(&ratatoskr::sync::SyncAllRequest {
             project_root,
+            build_root: &detection.build_root,
             ratatoskr: ratatoskr_config,
             filter: filter.as_deref(),
             include_ignored: *include_ignored,
@@ -425,6 +436,7 @@ fn run_sync(
         let script = script.as_deref().unwrap_or_default();
         return ratatoskr::sync::run_sync_smoke(&ratatoskr::sync::SyncSmokeRequest {
             project_root,
+            build_root: &detection.build_root,
             ratatoskr: ratatoskr_config,
             script,
             keep_artefacts: *keep_artefacts,
@@ -846,8 +858,10 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
 
     let command = match command.into_route() {
         command_input::RoutedCommand::Pbf { mode, pbf, command, osc, mut params } => {
-            params.direct_io = pbf.direct_io;
-            params.io_uring = pbf.io_uring;
+            params.io = crate::pbfhogg::context::IoMode {
+                direct_io: pbf.direct_io,
+                io_uring: pbf.io_uring,
+            };
             params.compression = pbf.compression.clone();
             return run_measured(&mode, detection, &pbf.dataset, &pbf.variant, &invocation,
                 |req| measure::runner::run(req, &pbfhogg::plan::PbfhoggPlan {
@@ -879,7 +893,7 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
             format,
             jobs,
         } => {
-            let params = crate::measure::CommandParams {
+            let params = crate::pbfhogg::context::CommandParams {
                 from_snapshot: Some(from.clone()),
                 to_snapshot: Some(to.clone()),
                 jobs,
@@ -904,7 +918,7 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
             bbox,
             snapshot,
         } => {
-            let params = crate::measure::CommandParams {
+            let params = crate::pbfhogg::context::CommandParams {
                 bbox: bbox.clone(),
                 snapshot: snapshot.clone(),
                 ..Default::default()
@@ -939,7 +953,7 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
             strategy,
             snapshot,
         } => {
-            let params = crate::measure::CommandParams {
+            let params = crate::pbfhogg::context::CommandParams {
                 bbox: bbox.clone(),
                 snapshot: snapshot.clone(),
                 ..Default::default()
@@ -1550,6 +1564,10 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
             commit,
             file,
         } => {
+            // The lock serializes this with builds: its bootstrap runs
+            // `cargo metadata` against the build tree, which must not run
+            // beside another holder's compile, and the archive read must not
+            // race a `tilegen` mid-write.
             let _lock = context::reenter_command_lock()?;
             elivagar::cmd::inspect(
                 dev_config,
@@ -1870,6 +1888,7 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
                 ratatoskr::cmd::service_suite(
                     &crate::request::ServiceSuiteRequest {
                         project_root,
+                        build_root: &detection.build_root,
                         ratatoskr: project_config.ratatoskr()?,
                         filter: filter.as_deref(),
                         keep_artefacts,
@@ -1883,6 +1902,7 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
                 ratatoskr::cmd::service_test(
                     &crate::request::ServiceTestRequest {
                         project_root,
+                        build_root: &detection.build_root,
                         ratatoskr: project_config.ratatoskr()?,
                         script: &script,
                         keep_artefacts,

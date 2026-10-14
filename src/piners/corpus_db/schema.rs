@@ -232,7 +232,7 @@ CREATE INDEX IF NOT EXISTS idx_{name}_probe ON {name}(probe, run_id);",
     )
 }
 
-const SCHEMA: &str = "\
+pub(super) const SCHEMA: &str = "\
 CREATE TABLE IF NOT EXISTS run (
     run_id            INTEGER PRIMARY KEY,
     started_at        TEXT NOT NULL,
@@ -311,12 +311,11 @@ impl CorpusDb {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let conn = rusqlite::Connection::open(path)?;
-        conn.pragma_update(None, "journal_mode", "WAL")?;
+        let conn =
+            crate::db::store::open_read_write(path, "piners corpus runs", migrate::SCHEMA_VERSION)?;
         migrate::run_migrations(&conn)?;
         conn.execute_batch(SCHEMA)?;
         conn.execute_batch(&disposition_ddl("disposition"))?;
-        conn.pragma_update(None, "user_version", migrate::SCHEMA_VERSION)?;
         Ok(Self { conn })
     }
 
@@ -332,26 +331,16 @@ impl CorpusDb {
     /// plus the v5 `disposition` rebuild; the read-only connection the caller
     /// gets is opened afterwards.
     pub fn open_readonly(path: &Path) -> Result<Self, DevError> {
-        let conn = Self::readonly_conn(path)?;
-        let current: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if current >= migrate::SCHEMA_VERSION {
-            return Ok(Self { conn });
-        }
-        drop(conn);
-        drop(Self::open(path)?);
-        Ok(Self {
-            conn: Self::readonly_conn(path)?,
-        })
-    }
-
-    fn readonly_conn(path: &Path) -> Result<rusqlite::Connection, DevError> {
-        let conn = rusqlite::Connection::open_with_flags(
+        let conn = crate::db::store::open_read_only_migrating(
             path,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            "piners corpus runs",
+            migrate::SCHEMA_VERSION,
+            || {
+                drop(Self::open(path)?);
+                Ok(())
+            },
         )?;
-        // Belt-and-suspenders; read-only open already blocks writes.
-        conn.pragma_update(None, "query_only", "ON").ok();
-        Ok(conn)
+        Ok(Self { conn })
     }
 
     /// Borrow the underlying connection (crate-internal, for sibling modules).

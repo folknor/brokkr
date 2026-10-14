@@ -4,16 +4,18 @@
 //! decisions derive from those fields at the point the report is rendered.
 
 use std::collections::{HashMap, HashSet};
+use std::ops::Deref;
 use std::path::{Component, Path, PathBuf};
 
+use crate::config::check::LintName;
 use crate::rustc_text::Level;
 
 /// A compiler or cargo diagnostic before presentation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Diagnostic {
     pub level: Level,
-    /// The lint or compiler code as emitted by cargo, without display brackets.
-    pub code: Option<String>,
+    /// The emitted code parsed to a lint identity, retaining cargo's spelling.
+    pub code: Option<LintName>,
     pub message: String,
     pub site: Option<Site>,
     /// A compact explanatory detail such as `expected T, found U`.
@@ -140,7 +142,7 @@ impl Diagnostic {
     pub fn new(level: Level, code: Option<String>, message: String) -> Self {
         Self {
             level,
-            code,
+            code: code.map(|code| LintName::parse(&code)),
             message,
             site: None,
             detail: None,
@@ -206,7 +208,7 @@ impl Diagnostic {
     /// Render using a chosen severity while keeping code, site and message
     /// sourced from the structured diagnostic.
     pub fn format_as(&self, level: Level) -> String {
-        let header = match (level, self.code.as_deref()) {
+        let header = match (level, self.code.as_ref().map(LintName::as_str)) {
             (Level::Error, Some(code)) => format!("error[{code}]"),
             (Level::Warning, Some(code)) => format!("warning[{code}]"),
             (Level::Other, Some(code)) => format!("diagnostic[{code}]"),
@@ -234,12 +236,22 @@ impl Diagnostic {
     }
 }
 
+// Keep `Option<LintName>::as_deref()` useful to readers that only need the
+// emitted spelling, while the stored code remains parsed for typed matching.
+impl Deref for LintName {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.as_str()
+    }
+}
+
 /// Stable dedupe identity derived from diagnostic fields rather than rendered
 /// header/location strings.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct DiagnosticKey {
     pub level: Level,
-    pub code: Option<String>,
+    pub code: Option<LintName>,
     pub site: Option<Site>,
     pub message: String,
 }

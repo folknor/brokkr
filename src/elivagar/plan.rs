@@ -39,6 +39,12 @@ impl PlannedCommand for ElivagarPlan<'_, '_> {
         if matches!(self.0, ElivagarCommand::External(_)) {
             return Ok(None);
         }
+        if matches!(
+            self.0,
+            ElivagarCommand::Built(BuiltCommand::MainBinary { .. })
+        ) {
+            super::resolve_tilegen(req.dev_config, super::DEFAULT_TILEGEN)?;
+        }
         let features = if matches!(
             req.mode,
             MeasureMode::Hotpath { .. } | MeasureMode::Alloc { .. }
@@ -59,6 +65,12 @@ impl PlannedCommand for ElivagarPlan<'_, '_> {
         paths: &crate::config::ResolvedPaths,
         _binary: &Path,
     ) -> Result<CommandPlan<Self::State>, DevError> {
+        if matches!(
+            self.0,
+            ElivagarCommand::Built(BuiltCommand::MainBinary { .. })
+        ) {
+            super::resolve_tilegen(req.dev_config, super::DEFAULT_TILEGEN)?;
+        }
         let layout = ElivagarLayout::new(paths);
         let mut state = (std::path::PathBuf::new(), 0.0);
         let mut input_file = None;
@@ -136,6 +148,9 @@ impl PlannedCommand for ElivagarPlan<'_, '_> {
         ctx: &MeasurementSession,
         _plan: &CommandPlan<Self::State>,
     ) -> Result<(), DevError> {
+        // This is the success path: Run/Bench promote their archive, while
+        // Hotpath/Alloc remove scratch outputs. Failed execution does not reach
+        // this callback and needs cleanup at the shared runner boundary.
         if let ElivagarCommand::Built(command @ BuiltCommand::MainBinary { .. }) = self.0 {
             let layout = ElivagarLayout::new(&ctx.paths);
             if matches!(req.mode, MeasureMode::Run | MeasureMode::Bench { .. }) {

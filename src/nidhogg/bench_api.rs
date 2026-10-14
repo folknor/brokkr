@@ -76,10 +76,6 @@ pub fn run(
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Ceiling on one timed request. A request that exceeds it fails the bench
-/// rather than stalling it under the global lock.
-const REQUEST_MAX_TIME_SECS: &str = "60";
-
 /// Run a single curl request and return the HTTP round-trip time.
 ///
 /// Uses curl's `--write-out '%{time_total}'` to measure actual HTTP timing,
@@ -89,13 +85,14 @@ const REQUEST_MAX_TIME_SECS: &str = "60";
 /// (`--fail` rather than `--fail-with-body`: the body goes to `/dev/null`
 /// here either way, and curl's `-S` error line names the status.)
 fn run_curl_timed(url: &str, body: &str) -> Result<std::time::Duration, DevError> {
+    let max_time = super::policy::curl_seconds(super::policy::API_BENCH_REQUEST_TIMEOUT);
     let output = std::process::Command::new("curl")
         .args([
             "-sS",
             "--compressed",
             "--fail",
             "--max-time",
-            REQUEST_MAX_TIME_SECS,
+            &max_time,
             "-o",
             "/dev/null",
             "-w",
@@ -162,13 +159,14 @@ fn parse_time_total(time_str: &str) -> Result<std::time::Duration, DevError> {
 /// "0 elements, 0 bytes response" - indistinguishable from a real empty
 /// result, right after a timing run that may have been measuring errors.
 fn report_response_stats(url: &str, body: &str, name: &str) -> Result<(), DevError> {
+    let max_time = super::policy::curl_seconds(super::policy::API_BENCH_REQUEST_TIMEOUT);
     let output = std::process::Command::new("curl")
         .args([
             "-sS",
             "--compressed",
             "--fail-with-body",
             "--max-time",
-            REQUEST_MAX_TIME_SECS,
+            &max_time,
             "-w",
             "\n%{size_download}",
             "-X",

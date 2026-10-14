@@ -74,16 +74,21 @@ from sample scratch. Tilegen's checkpoint directory remains available for
   sweep-wide too, with a single acquire. Cross-process exclusion is
   unchanged.
 - SQLite result storage with git commit, hostname, env snapshot
-- `run_internal(config, closure)` - in-process timing (N runs, min/avg/max).
-  Does **not** store sidecar data (no store step).
-- `run_hotpath(config, program, closure)` - like `run_internal`, but the
-  closure also returns the `SidecarData` from `run_hotpath_capture`, which is
-  persisted to sidecar.db under the recorded UUID. This is what makes
-  `brokkr sidecar <uuid>` work for `--hotpath`/`--alloc`; the raw
-  `run_hotpath_capture` returns the data but stores nothing. A capture that
-  fails (non-zero exit, signal, `brokkr kill`) parks its payload for the
-  enclosing `run_hotpath` loop, which stores it with the earlier iterations'
-  under `dirty` before returning the error.
+- `measure(config, program, source, sidecar, closure)` collects a `Measurement`
+  through one `MeasurementLoop`. Its `WallSource` is fixed for the whole run:
+  external wall, self-reported stderr timing, closure timing, or a required
+  marker span. Missing span markers fail the measurement; spans and whole
+  process walls are never ranked together. Iterations retain streams, typed
+  endings, optional sidecar data and observer failures. Ties keep the first run.
+- `record(config, measurement, post)` postprocesses the winner and records the
+  results row before its sidecar. Measurement, postprocessing and row-insert
+  failures preserve captured evidence under `dirty`; storage failures are
+  reported. There is no separate sidecar commit for callers to arrange.
+- `run_internal(config, closure)` uses closure timing and best-of-N, without
+  a sidecar. `run_hotpath(config, program, closure)` uses the same loop with a
+  FIFO; `capture_hotpath` receives that FIFO and uses the session's held lock
+  and stop marker. Missing or invalid profile JSON fails the iteration while
+  retaining its captured evidence.
 - `run_external(config, binary, args)` - subprocess timing
 - `run_distribution(config, closure)` - distribution timing
   (min/p50/p95/max). The closure returns each sample as a `Duration`; the
@@ -94,7 +99,7 @@ The mode a row records (`bench`/`hotpath`/`alloc`) comes from the harness,
 set once from the request; the same value prints as `mode=` on the `[result]`
 line and lands in the sidecar provenance, so `brokkr sidecar` shows it.
 
-Where brokkr times the child itself (`run_external`, `run_hotpath_capture`) it
+Where brokkr times the child itself (`run_external`, `capture_hotpath`) it
 keeps the exact wall as `elapsed_us` and picks best-of-N on it; `elapsed_ms`
 is that value rounded to the nearest millisecond, never floored - flooring
 reads every run as up to a millisecond faster than it was. `run_distribution`
@@ -175,11 +180,10 @@ elapsed  592200.412 ms (best of 3: 592200.412 / 611400.090 / 634100.733 ms)
 ```
 
 `elapsed_us` is NULL unless the loop measured every iteration in microseconds
-(`run_external_ok`, `run_distribution`, `run_external_with_kv_raw` - from the
+(`run_external_ok`, `run_distribution`, `measure_external` - from the
 target's self-reported `elapsed_ms=`, the same clock its row records - and
 `run_internal`/`run_hotpath` when each iteration's result carried an
-`elapsed_us`). `run_external_with_kv_raw` defers them in its `PendingSidecar`,
-so its caller records with `record_with_pending`, not `record_result`. A list with a gap is not
+`elapsed_us`). `Measurement` retains them until `record` writes the row and sidecar together. A list with a gap is not
 stored at all rather than stored in part, since a partial list cannot stay
 aligned with the execution order. Rows without it render the integer
 milliseconds.
@@ -196,9 +200,9 @@ Those are opposite diagnoses. This is why the walls do **not** live in
 and a p50 cannot tell the two apart.
 
 Collected by every harness loop (`run_internal`, `run_hotpath`,
-`run_external_ok`, `run_external_with_kv_raw`, `run_distribution`) and attached
-to the best-of-N `BenchResult` before recording. Single-run modes leave it
-empty, and rows recorded before schema v16 have no iteration data - those walls
+`run_external_ok`, `measure_external`, `run_distribution`) and attached
+to the best-of-N `BenchResult` before recording. One-iteration measurements retain that one wall too; rows recorded before
+schema v16 have no iteration data - those walls
 were discarded at measure time and cannot be reconstructed from `elapsed_ms`.
 Rows recorded before schema v19 have no per-iteration microseconds, for the
 same reason.
@@ -231,11 +235,10 @@ markers from a FIFO. All data is buffered in memory during the run and
 bulk-inserted to `.brokkr/sidecar.db` (gitignored) after the child exits.
 Results DB (`.brokkr/results.db`) stays small and git-tracked.
 
-Key files: `src/sidecar.rs` (core), `src/harness.rs` (`run_external`,
-`run_external_with_kv`, `run_hotpath_capture` - all sidecar-enabled; the
-hotpath/alloc data reaches sidecar.db via the `run_hotpath` wrapper, since
-`run_hotpath_capture` itself only returns the payload), `src/db/sidecar.rs`
-(`SidecarDb`).
+Key files: `src/sidecar.rs` (sampler and FIFO),
+`src/harness_mod/measurement_loop.rs` (iteration collection, capture and recording),
+`src/harness_mod/types_run.rs` (session provenance and row construction), and
+`src/db/sidecar.rs` (`SidecarDb`).
 
 The child process receives `BROKKR_MARKER_FIFO` env var pointing to a named
 pipe. The shared supervisor in `src/output/child.rs` polls the child, handles
@@ -288,7 +291,7 @@ tokens accepted by `--fields`, `--where`, and `--stat`.
 | `shmem` | status `RssShmem` | shared-memory RSS (kB) |
 | `swap` | status `VmSwap` | swapped-out (kB) |
 | `hwm` | status `VmHWM` | peak RSS high-water mark (kB), carried monotonically |
-| `vsize` | stat field 22 | virtual size (bytes) |
+| `vsize` | stat field 22 | virtual size (kB) |
 | `utime`/`stime` | stat 14/15 | user/kernel CPU jiffies (decode via `_SC_CLK_TCK`) |
 | `threads` | stat field 20 | live thread count |
 | `minflt`/`majflt` | stat 10/12 | minor/major page faults (cumulative) |
@@ -384,9 +387,10 @@ switches to fixed-width tables. Rendering lives in `src/sidecar_fmt.rs`.
 
 ## Run lifecycle: sampling, stop, kill, OOM
 
-- **Sampling cadence** is a fixed 100ms (`SAMPLE_INTERVAL_US`), driven by
-  `clock_nanosleep(TIMER_ABSTIME, CLOCK_MONOTONIC)` so the ~30us of /proc read
-  overhead per tick doesn't accumulate drift. Each tick reads
+- **Sampling cadence** defaults to 100ms (`MeasurementTunables.sample_interval`)
+  and is injectable per sidecar run. The shared supervisor schedules each tick
+  against monotonic time so the ~30us of /proc read overhead does not accumulate
+  drift. Each tick reads
   `/proc/<pid>/{stat,io,status}`.
 - **`--stop <marker>`** SIGKILLs the whole child **process group**
   (`process::signal_process_group`, so descendants are reaped too) the moment the marker
@@ -400,8 +404,7 @@ switches to fixed-width tables. Rendering lives in `src/sidecar_fmt.rs`.
   moved to `stop_marker_requested` and cleared: whether those stops fired is
   unknown.
 - **Deadlines**: a caller may bound each child's wall time
-  (`run_sidecar_with_deadline`, or a `sidecar::DeadlineScope` around code that
-  reaches the sidecar through a capture helper). Past it the child's process
+  (`run_sidecar_with_deadline`, which the capture helpers pass through). Past it the child's process
   group is SIGKILLed, `stopped_by_deadline` is set, and the run fails. The
   ratatoskr sync bench uses the script's `ceiling:`; measured `corpus` uses the
   parity path's hang backstop. Paths with no deadline run until the child
@@ -451,8 +454,7 @@ switches to fixed-width tables. Rendering lives in `src/sidecar_fmt.rs`.
 - **OOM / crash preservation**: sidecar data is stored even when the child is
   OOM-killed, segfaults, or exits non-zero - the `/proc` trajectory up to the
   kill is the whole point. This holds on every sidecar-enabled harness loop, `--hotpath`/
-  `--alloc` included (via the parked-capture hand-off above), and on the loops
-  that live outside the harness: ratatoskr's sync bench keeps every reaped
+  `--alloc` included. Ratatoskr's marker-span source keeps every reaped
   iteration's data even when the child succeeded and only the step after it
   (log write, `summary.json`) failed. Failed/dirty runs get a random UUID and update the
   `dirty` latest pointer, so `brokkr sidecar dirty` / `brokkr results dirty`
@@ -465,8 +467,9 @@ switches to fixed-width tables. Rendering lives in `src/sidecar_fmt.rs`.
 After each stored run (while the bench lock is still held), `backup_sidecar`
 snapshots sidecar.db to `$XDG_DATA_HOME/brokkr/sidecar-backups/` (falling back
 to `~/.local/share/...`), named `<project>-sidecar.db` with rotation - this is
-the one place the project name enters the sidecar path. It keeps
-`SIDECAR_BACKUP_COPIES` (3) generations: `.db` (newest), `.db.1`, `.db.2`.
+the one place the project name enters the sidecar path. The default
+`MeasurementTunables.sidecar_backup_copies` value is 3, so it keeps `.db`
+(newest), `.db.1`, and `.db.2`.
 
 The sequence is crash-safe: SQLite's **online backup API** writes a
 self-contained DELETE-journal copy to a temp file, runs `quick_check`, fsyncs

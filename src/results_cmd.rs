@@ -62,8 +62,9 @@ fn render_single_or_multi(
         .collect();
     if !with_sidecar.is_empty() {
         output::sidecar_msg(&format!(
-            "sidecar data for {}: use `brokkr sidecar <id>` (add --samples/--markers/--durations/--counters for raw views)",
+            "sidecar data for {}: use `brokkr sidecar <id>` ({})",
             with_sidecar.join(", "),
+            crate::sidecar_cmd::view_selector_hint(),
         ));
     }
 }
@@ -189,7 +190,8 @@ fn show_uuid(
 fn report_sidecar_only(prefix: &str, ids: &[String], prefix_is_unique: bool) {
     if ids.len() == 1 && prefix_is_unique {
         output::result_msg(&format!(
-            "use `brokkr sidecar {prefix}` (default phase summary; add --samples/--markers/--durations/--counters/--stat for raw views)",
+            "use `brokkr sidecar {prefix}` (default phase summary; {})",
+            crate::sidecar_cmd::view_selector_hint(),
         ));
     } else {
         output::sidecar_msg(&format!("sidecar-only UUIDs: {}", ids.join(", ")));

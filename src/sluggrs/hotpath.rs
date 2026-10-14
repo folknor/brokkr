@@ -31,7 +31,7 @@ use crate::build;
 use crate::context::MeasurementSession;
 use crate::error::DevError;
 use crate::harness::{self, BenchConfig};
-use crate::measure::{MeasureMode, MeasureRequest};
+use crate::measure::MeasureRequest;
 use crate::output;
 use crate::project::{self, Project};
 
@@ -64,25 +64,13 @@ fn command_label(target: &str) -> String {
     }
 }
 
-/// Whether this mode builds the example with hotpath instrumentation.
-fn uses_hotpath(req: &MeasureRequest) -> bool {
-    matches!(
-        req.mode,
-        MeasureMode::Hotpath { .. } | MeasureMode::Alloc { .. }
-    )
-}
-
 /// Human-readable feature summary for `--dry-run` output.
 fn feature_summary(req: &MeasureRequest) -> String {
-    if uses_hotpath(req) {
-        format!("--features {}", req.build_features().join(","))
-    } else if req.features.is_empty() {
-        "no hotpath features".to_owned()
+    let features = req.build_features();
+    if features.is_empty() {
+        "no cargo features".to_owned()
     } else {
-        format!(
-            "--features {} (no hotpath features)",
-            req.features.join(",")
-        )
+        format!("--features {}", features.join(","))
     }
 }
 
@@ -113,14 +101,11 @@ pub(crate) fn cmd(req: &MeasureRequest, target: &str) -> Result<(), DevError> {
 
     // `--bench` builds bare; the profiling modes prepend their instrument's
     // feature to the user/host features. See the module header.
-    let features: Vec<String> = if uses_hotpath(req) {
-        req.build_features()
-            .into_iter()
-            .map(str::to_owned)
-            .collect()
-    } else {
-        req.features.to_vec()
-    };
+    let features: Vec<String> = req
+        .build_features()
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
 
     let build_config = build::BuildConfig {
         package: None,
@@ -185,7 +170,7 @@ fn run(
 
     // Keep the child in the same tree as the built example. `--commit` may
     // make this a worktree distinct from the project root that stores results.
-    if uses_hotpath(req) {
+    if req.mode.profiled().is_some() {
         let label = req
             .mode
             .profiled()
@@ -195,18 +180,9 @@ fn run(
             profiling.print_note();
         }
 
-        ctx.harness.run_hotpath(&config, ctx.binary()?, |_i| {
-            let (result, _stderr, sidecar) = harness::run_hotpath_capture(
-                &binary_str,
-                &[],
-                scratch_dir,
-                build_root,
-                &[],
-                &[],
-                req.stop_marker,
-                Some(ctx.harness.lock()),
-            )?;
-            Ok((result, sidecar))
+        ctx.harness.run_hotpath(&config, ctx.binary()?, |i, fifo| {
+            ctx.harness
+                .capture_hotpath(ctx.binary()?, &[], build_root, &[], &[], fifo, i, None)
         })?;
     } else {
         output::bench_msg(&format!("sluggrs {command_label}: {runs} run(s)"));

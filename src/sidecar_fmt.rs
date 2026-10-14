@@ -76,7 +76,7 @@ pub(crate) fn print_run_info(store: &db::RunStore, id: &db::RunId) {
         if let Some(ref dataset) = info.dataset {
             parts.push(format!("dataset: {dataset}"));
         }
-        eprintln!("[sidecar] {}", parts.join("  "));
+        crate::output::console::plain_stderr(&format!("[sidecar] {}", parts.join("  ")));
     }
 
     // Line 2: git commit + wall time from sidecar summary.
@@ -94,28 +94,32 @@ pub(crate) fn print_run_info(store: &db::RunStore, id: &db::RunId) {
     match (&info.git_commit, wall_time) {
         (Some(commit), Some(secs)) => {
             let (m, s) = (secs / 60, secs % 60);
-            eprintln!("[sidecar] commit: {commit}  wall: {m}m{s:02}s");
+            crate::output::console::plain_stderr(&format!(
+                "[sidecar] commit: {commit}  wall: {m}m{s:02}s"
+            ));
         }
         (Some(commit), None) => {
-            eprintln!("[sidecar] commit: {commit}");
+            crate::output::console::plain_stderr(&format!("[sidecar] commit: {commit}"));
         }
         (None, Some(secs)) => {
             let (m, s) = (secs / 60, secs % 60);
-            eprintln!("[sidecar] wall: {m}m{s:02}s");
+            crate::output::console::plain_stderr(&format!("[sidecar] wall: {m}m{s:02}s"));
         }
         (None, None) => {}
     }
 
     // Line 3: how the run ended (only if abnormal).
     if let Some(line) = info.ending.as_ref().and_then(ending_line) {
-        eprintln!("{line}");
+        crate::output::console::plain_stderr(&line);
     }
 
     // Line 4-5: binary path and hash verification.
     if let Some(ref path) = info.binary_path {
         if let Some(ref hash) = info.binary_xxh128 {
             let short = &hash[..12.min(hash.len())];
-            eprintln!("[sidecar] binary: {path} (xxh128: {short}...)");
+            crate::output::console::plain_stderr(&format!(
+                "[sidecar] binary: {path} (xxh128: {short}...)"
+            ));
 
             // Check if current binary on disk still matches.
             match crate::preflight::compute_file_digest(std::path::Path::new(path))
@@ -123,18 +127,24 @@ pub(crate) fn print_run_info(store: &db::RunStore, id: &db::RunId) {
             {
                 Ok(current_hash) => {
                     if current_hash == *hash {
-                        eprintln!("[sidecar] current binary xxh128: match");
+                        crate::output::console::plain_stderr(
+                            "[sidecar] current binary xxh128: match",
+                        );
                     } else {
                         let current_short = &current_hash[..12.min(current_hash.len())];
-                        eprintln!("[error]   current binary differs (xxh128: {current_short}...)");
+                        crate::output::console::plain_stderr(&format!(
+                            "[error]   current binary differs (xxh128: {current_short}...)"
+                        ));
                     }
                 }
                 Err(_) => {
-                    eprintln!("[sidecar] current binary: not found (deleted or moved)");
+                    crate::output::console::plain_stderr(
+                        "[sidecar] current binary: not found (deleted or moved)",
+                    );
                 }
             }
         } else {
-            eprintln!("[sidecar] binary: {path}");
+            crate::output::console::plain_stderr(&format!("[sidecar] binary: {path}"));
         }
     }
 }
@@ -190,18 +200,21 @@ pub(crate) fn parse_time_range(range: &str) -> Result<(i64, i64), DevError> {
     Ok((start_us, end_us))
 }
 
-/// Every name [`sample_field_value`] answers, in output order. `t` (always
-/// emitted) is accepted by `--fields` on top of these.
-const SAMPLE_FIELDS: &[&str] = &[
-    "i", "rss", "anon", "file", "shmem", "swap", "vsize", "hwm", "utime", "stime", "threads",
-    "minflt", "majflt", "rchar", "wchar", "rd", "wr", "cwr", "syscr", "syscw", "vcs", "nvcs",
-];
-
 fn unknown_field(flag: &str, field: &str) -> DevError {
     DevError::Config(format!(
         "{flag}: unknown sample field '{field}' (known: {})",
-        SAMPLE_FIELDS.join(", ")
+        sidecar::SAMPLE_FIELDS
+            .iter()
+            .map(|field| field.name)
+            .collect::<Vec<_>>()
+            .join(", ")
     ))
+}
+
+fn is_sample_field(name: &str) -> bool {
+    sidecar::SAMPLE_FIELDS
+        .iter()
+        .any(|field| field.name == name)
 }
 
 /// Reject a malformed `--where`, or an unknown field in `--where`/`--fields`/
@@ -215,45 +228,16 @@ pub(crate) fn validate_timeline_args(q: &SidecarQuery) -> Result<(), DevError> {
         parse_where_cond(cond)?;
     }
     for f in &q.fields {
-        if f != "t" && !SAMPLE_FIELDS.contains(&f.as_str()) {
+        if f != "t" && !is_sample_field(f) {
             return Err(unknown_field("--fields", f));
         }
     }
     if let Some(ref f) = q.stat
-        && !SAMPLE_FIELDS.contains(&f.as_str())
+        && !is_sample_field(f)
     {
         return Err(unknown_field("--stat", f));
     }
     Ok(())
-}
-
-/// All known sample field names and their accessor functions.
-fn sample_field_value(s: &sidecar::Sample, field: &str) -> Option<i64> {
-    match field {
-        "i" => Some(i64::from(s.sample_idx)),
-        "rss" => Some(s.rss_kb),
-        "anon" => Some(s.anon_kb),
-        "file" => Some(s.file_kb),
-        "shmem" => Some(s.shmem_kb),
-        "swap" => Some(s.swap_kb),
-        "vsize" => Some(s.vsize_kb),
-        "hwm" => Some(s.vm_hwm_kb),
-        "utime" => Some(s.utime),
-        "stime" => Some(s.stime),
-        "threads" => Some(s.num_threads),
-        "minflt" => Some(s.minflt),
-        "majflt" => Some(s.majflt),
-        "rchar" => Some(s.rchar),
-        "wchar" => Some(s.wchar),
-        "rd" => Some(s.read_bytes),
-        "wr" => Some(s.write_bytes),
-        "cwr" => Some(s.cancelled_write_bytes),
-        "syscr" => Some(s.syscr),
-        "syscw" => Some(s.syscw),
-        "vcs" => Some(s.vol_cs),
-        "nvcs" => Some(s.nonvol_cs),
-        _ => None,
-    }
 }
 
 /// Parse a --where condition like "majflt>0" or "anon>100000".
@@ -268,7 +252,7 @@ fn parse_where_cond(cond: &str) -> Result<(&str, &str, i64), DevError> {
             let val: i64 = val_str.parse().map_err(|_| {
                 DevError::Config(format!("--where: cannot parse '{val_str}' as integer"))
             })?;
-            if !SAMPLE_FIELDS.contains(&field) {
+            if !is_sample_field(field) {
                 return Err(unknown_field("--where", field));
             }
             return Ok((field, op, val));
@@ -291,7 +275,7 @@ pub(crate) fn apply_timeline_filter<'a>(
     if let Some(ref cond) = q.where_cond {
         let (field, op, threshold) = parse_where_cond(cond)?;
         result.retain(|s| {
-            if let Some(val) = sample_field_value(s, field) {
+            if let Some(val) = s.field_value(field) {
                 match op {
                     ">" => val > threshold,
                     "<" => val < threshold,
@@ -334,7 +318,7 @@ pub(crate) fn apply_timeline_filter<'a>(
 pub(crate) fn print_field_stat(samples: &[&sidecar::Sample], field: &str) -> Result<(), DevError> {
     let mut values: Vec<i64> = samples
         .iter()
-        .filter_map(|s| sample_field_value(s, field))
+        .filter_map(|s| s.field_value(field))
         .collect();
 
     if values.is_empty() {
@@ -394,75 +378,34 @@ pub(crate) fn sidecar_sample_json_projected(
     #[allow(clippy::cast_precision_loss)]
     let t_sec = s.timestamp_us as f64 / 1_000_000.0;
 
+    let capacity = fields.map_or(sidecar::SAMPLE_FIELDS.len(), Vec::len) + 1;
+    let mut parts = Vec::with_capacity(capacity);
+    parts.push(format!("\"t\":{t_sec:.3}"));
     match fields {
         None => {
-            // All fields.
-            format!(
-                concat!(
-                    "{{",
-                    "\"t\":{:.3},",
-                    "\"rss\":{},",
-                    "\"anon\":{},",
-                    "\"file\":{},",
-                    "\"shmem\":{},",
-                    "\"swap\":{},",
-                    "\"vsize\":{},",
-                    "\"hwm\":{},",
-                    "\"utime\":{},",
-                    "\"stime\":{},",
-                    "\"threads\":{},",
-                    "\"minflt\":{},",
-                    "\"majflt\":{},",
-                    "\"rchar\":{},",
-                    "\"wchar\":{},",
-                    "\"rd\":{},",
-                    "\"wr\":{},",
-                    "\"cwr\":{},",
-                    "\"syscr\":{},",
-                    "\"syscw\":{},",
-                    "\"vcs\":{},",
-                    "\"nvcs\":{}",
-                    "}}",
-                ),
-                t_sec,
-                s.rss_kb,
-                s.anon_kb,
-                s.file_kb,
-                s.shmem_kb,
-                s.swap_kb,
-                s.vsize_kb,
-                s.vm_hwm_kb,
-                s.utime,
-                s.stime,
-                s.num_threads,
-                s.minflt,
-                s.majflt,
-                s.rchar,
-                s.wchar,
-                s.read_bytes,
-                s.write_bytes,
-                s.cancelled_write_bytes,
-                s.syscr,
-                s.syscw,
-                s.vol_cs,
-                s.nonvol_cs,
-            )
-        }
-        Some(field_list) => {
-            // Projected: only requested fields + always t.
-            let mut parts: Vec<String> = Vec::with_capacity(field_list.len() + 1);
-            parts.push(format!("\"t\":{t_sec:.3}"));
-            for f in field_list {
-                if f == "t" {
-                    continue; // already included
-                }
-                if let Some(val) = sample_field_value(s, f) {
-                    parts.push(format!("\"{f}\":{val}"));
+            // `i` is a selectable field, but the unprojected sample has
+            // never carried it.
+            for field in sidecar::SAMPLE_FIELDS
+                .iter()
+                .filter(|field| field.name != "i")
+            {
+                if let Some(value) = s.field_value(field.name) {
+                    parts.push(format!("\"{}\":{value}", field.name));
                 }
             }
-            format!("{{{}}}", parts.join(","))
+        }
+        Some(field_list) => {
+            for field in field_list {
+                if field == "t" {
+                    continue;
+                }
+                if let Some(value) = s.field_value(field) {
+                    parts.push(format!("\"{field}\":{value}"));
+                }
+            }
         }
     }
+    format!("{{{}}}", parts.join(","))
 }
 
 /// Format a sidecar marker as a compact JSON object (single line).
@@ -1401,19 +1344,18 @@ mod timeline_arg_tests {
         }
     }
 
-    // The validation list and the accessor must name the same fields, or a
-    // valid field is refused (or an unknown one accepted and filtered to
-    // nothing, the fail-open this list exists to close).
+    // The shared field table drives both validation and value lookup.
     #[test]
     fn field_list_matches_accessor() {
         let s = zero_sample();
-        for f in SAMPLE_FIELDS {
+        for f in sidecar::SAMPLE_FIELDS {
             assert!(
-                sample_field_value(&s, f).is_some(),
-                "{f} listed but not answered"
+                s.field_value(f.name).is_some(),
+                "{} listed but not answered",
+                f.name
             );
         }
-        assert!(sample_field_value(&s, "nope").is_none());
+        assert!(s.field_value("nope").is_none());
     }
 
     #[test]

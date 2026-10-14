@@ -9,12 +9,12 @@ visual-test surface, different pipeline binary).
   `extract` / `outline` by shelling out to a bundled Node.js script.
 - `src/litehtml/capture.js` - Puppeteer reference capture script, bundled into
   brokkr and materialized in its per-user runtime cache.
-- `src/litehtml/db.rs` - the litehtml adapter and legacy schema migration for
-  `MechanicalDb`; shared SQLite operations live in `src/visual/db.rs`. The
-  `mechanical_*` tables are in
-  `.brokkr/results.db`. That file's `PRAGMA user_version` belongs to
-  `ResultsDb`, so `MechanicalDb` (and sluggrs' `SnapshotDb`) never read or
-  write it; migrations detect the schema directly (column probes).
+- `src/litehtml/db.rs` - the litehtml adapter for `MechanicalDb`; shared
+  versioned SQLite operations and the one-time import from the former shared
+  file live in `src/visual/db.rs`. Its tables now live in
+  `.brokkr/litehtml-visual.db`; existing `mechanical_*` rows are imported from
+  `.brokkr/results.db` on first open. `results.db` keeps its independent schema
+  version, owned by `ResultsDb`.
 - `src/litehtml/compare.rs` - element geometry comparison.
 - `src/visual/` - shared pixel comparison, typed visual statuses, run engine,
   database operations, and common command formatting. Run IDs use the shared
@@ -56,10 +56,13 @@ notes = "narrow mobile layout"       # optional metadata
 ```
 
 `[litehtml]` requires `viewport_width`, `mode`, `pixel_diff_threshold`, and
-`element_match_threshold`. `viewport_width` sets the Chrome capture viewport;
-both thresholds are percentages in percentage points. `mode` is `ahem` (pass
+`element_match_threshold`. `viewport_width` sets the Chrome capture viewport
+and must be greater than zero; both thresholds are percentages in percentage
+points. `mode` is `ahem` (pass
 `--fixture` to the pipeline) or `default` (run the pipeline without that flag).
-The optional `fallback_aspect_ratio` is used only by `prepare`.
+The optional `fallback_aspect_ratio` is used only by `prepare`, must be finite
+and greater than zero, and defaults to `2.0` when omitted. Fixture viewport
+overrides must also be greater than zero.
 
 Each `[[litehtml.fixture]]` requires a unique, path-safe `id`, an HTML `path`,
 and `expected = "pass" | "fail"`. `tags` is an optional list used by

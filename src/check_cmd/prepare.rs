@@ -289,15 +289,12 @@ impl PreparedLane {
 /// a per-package prebuild (cargo refuses a target a package lacks); they
 /// narrow the listed binaries instead.
 fn resolution_selection(sweep: &PlannedSweep, run: &ResolutionRun) -> Vec<String> {
-    match &run.resolution {
-        Some(_) => {
-            let mut args = sweep_profile_args(sweep);
-            args.extend(sweep.unification_args());
-            args.extend(run.cargo_args());
-            args
-        }
-        None => sweep_selection_args(sweep, run),
-    }
+    let purpose = if run.resolution.is_some() {
+        CargoSelectionPurpose::Shape
+    } else {
+        CargoSelectionPurpose::TestLane
+    };
+    cargo_selection_args(sweep, run, sweep.cargo_profile(), purpose)
 }
 
 /// The libtest argv that selects what a lane runs: its positional filters,
@@ -346,7 +343,6 @@ fn ignored_listing_args<'a>(filter_args: &[&'a str]) -> Vec<&'a str> {
 /// out) and its ignored ones. `Ok(None)` = a listing failed, already reported.
 #[allow(clippy::too_many_arguments)]
 fn list_binary(
-    inputs: &LaneInputs<'_>,
     sweep: &PlannedSweep,
     binary: &TestBinary,
     filter_args: &[String],
@@ -355,11 +351,11 @@ fn list_binary(
     pkg_skipped: &mut usize,
 ) -> Result<Option<PreparedBinary>, DevError> {
     let args: Vec<&str> = filter_args.iter().map(String::as_str).collect();
-    let Some(listed) = binary_list(binary, inputs.project_root, &args, env_refs, runtime)? else {
+    let Some(listed) = binary_list(binary, &args, env_refs, runtime)? else {
         return Ok(None);
     };
     let ignored_args = ignored_listing_args(&args);
-    let Some(ignored) = binary_list(binary, inputs.project_root, &ignored_args, env_refs, runtime)? else {
+    let Some(ignored) = binary_list(binary, &ignored_args, env_refs, runtime)? else {
         return Ok(None);
     };
     let mut selected = Vec::new();
@@ -406,7 +402,7 @@ fn list_binary_or_unlisted(
         // A certifying lane cannot keep an unenumerable binary (its tests
         // would be outside the claim): it lists every binary, a custom harness
         // included, and a listing that is not a libtest one fails the lane.
-        return list_binary(inputs, sweep, binary, filter_args, env_refs, runtime, pkg_skipped)?
+        return list_binary(sweep, binary, filter_args, env_refs, runtime, pkg_skipped)?
             .ok_or_else(|| not_prepared(sweep));
     }
     // The one place preparation executes binaries where nothing listed them
@@ -419,7 +415,7 @@ fn list_binary_or_unlisted(
         return unlisted_binary(binary, why);
     }
     let (listed, held) = output::capture_errors(|| {
-        list_binary(inputs, sweep, binary, filter_args, env_refs, runtime, pkg_skipped)
+        list_binary(sweep, binary, filter_args, env_refs, runtime, pkg_skipped)
     });
     if let Some(p) = listed? {
         return Ok(p);
@@ -627,7 +623,7 @@ fn serial_unattributable(
         });
     }
     let forwarded = ForwardedArgs::parse(extra_args);
-    serial_shim_fallback(inputs.project_root, forwarded.cargo(), &env.project_env, &sweep.env).map(
+    serial_shim_fallback(inputs.project_root, &forwarded, &env.project_env, &sweep.env).map(
         |reason| Unattributable {
             reason: UnavailableReason::NoShim(reason.clone()),
             refusal: format!(
@@ -753,17 +749,18 @@ impl DocFacts {
 }
 
 fn workspace_doc_facts(project_root: &Path, env_refs: &[(&str, &str)]) -> Result<DocFacts, DevError> {
-    let captured = run_check_cargo(&["metadata", "--no-deps", "--format-version", "1"],
+    // The shared workspace snapshot, keyed on the lane's env, so preparing
+    // several serial lanes under one env runs `cargo metadata` once.
+    let metadata = crate::cargo::metadata::load(
         project_root,
+        crate::cargo::metadata::Query::workspace(),
         env_refs,
+        current_phase(),
     )?;
-    if !captured.success() {
-        return Err(DevError::Build(format!(
-            "cargo metadata failed: {}",
-            String::from_utf8_lossy(&captured.stderr)
-        )));
-    }
-    let val: serde_json::Value = serde_json::from_slice(&captured.stdout)
+    let raw = metadata
+        .raw_json()
+        .ok_or_else(|| DevError::Internal("cargo metadata snapshot kept no JSON".into()))?;
+    let val: serde_json::Value = serde_json::from_str(raw)
         .map_err(|e| DevError::Build(format!("cargo metadata output unparseable: {e}")))?;
     Ok(DocFacts::from_metadata(&val))
 }
@@ -838,7 +835,12 @@ fn build_serial(
     let cargo_extra = forwarded.cargo();
     build_resolutions(inputs, attempt, &env.refs(), &|run| {
         let mut selection = env.allow_args.clone();
-        selection.extend(sweep_selection_args(sweep, run));
+        selection.extend(cargo_selection_args(
+            sweep,
+            run,
+            sweep.cargo_profile(),
+            CargoSelectionPurpose::TestLane,
+        ));
         selection.extend(cargo_extra.iter().cloned());
         selection
     })
@@ -938,7 +940,7 @@ fn prepare_direct(
     prepared.target_filters.extend(extra_selectors.iter().cloned());
     prepared.cargo_extra = cargo_extra;
     prepared.libtest_extra = libtest_extra.clone();
-    list_direct_binaries(inputs, sweep, built, &mut prepared, &libtest_extra, &env_refs, &runtime)?;
+    list_direct_binaries(sweep, built, &mut prepared, &libtest_extra, &env_refs, &runtime)?;
     prepared.runtime = Some(runtime);
     Ok(prepared)
 }
@@ -954,7 +956,6 @@ fn prepare_direct(
 /// listing returned, so keeping an unlistable binary as unlisted would skip the
 /// target silently.
 fn list_direct_binaries(
-    inputs: &LaneInputs<'_>,
     sweep: &PlannedSweep,
     built: BuiltResolutions,
     prepared: &mut PreparedLane,
@@ -967,7 +968,7 @@ fn list_direct_binaries(
         prepared.enumerated += binaries.len();
         let mut out = Vec::new();
         for b in filter_binaries(&binaries, &prepared.target_filters) {
-            let Some(p) = list_binary(inputs, sweep, b, &filter_args, env_refs, runtime, &mut prepared.pkg_skipped)?
+            let Some(p) = list_binary(sweep, b, &filter_args, env_refs, runtime, &mut prepared.pkg_skipped)?
             else {
                 return Err(not_prepared(sweep));
             };
@@ -1184,7 +1185,7 @@ fn list_universe(
 ) -> Result<Universe, DevError> {
     let env_refs = env.refs();
     let runtime = DirectRuntime::load(inputs.project_root, &env_refs, built.index)?;
-    universe_from_binaries(inputs, sweep, &built.binaries, &env_refs, &runtime)
+    universe_from_binaries(sweep, &built.binaries, &env_refs, &runtime)
 }
 
 /// The listing half of [`list_universe`], behind a seam so it can be
@@ -1194,7 +1195,6 @@ fn list_universe(
 /// anything else fails the enumeration cleanly ([`binary_list`]) rather than
 /// contribute an empty set.
 fn universe_from_binaries(
-    inputs: &LaneInputs<'_>,
     sweep: &PlannedSweep,
     binaries: &[TestBinary],
     env_refs: &[(&str, &str)],
@@ -1202,10 +1202,10 @@ fn universe_from_binaries(
 ) -> Result<Universe, DevError> {
     let mut out = Universe::default();
     for b in binaries {
-        let Some(all) = binary_list(b, inputs.project_root, &["--include-ignored"], env_refs, runtime)? else {
+        let Some(all) = binary_list(b, &["--include-ignored"], env_refs, runtime)? else {
             return Err(DevError::Reported(format!("the universe of sweep '{}' could not be listed", sweep.label)));
         };
-        let Some(ignored) = binary_list(b, inputs.project_root, &["--ignored"], env_refs, runtime)? else {
+        let Some(ignored) = binary_list(b, &["--ignored"], env_refs, runtime)? else {
             return Err(DevError::Reported(format!("the universe of sweep '{}' could not be listed", sweep.label)));
         };
         out.binaries.push((BinaryUnit::of(b), all.tests, ignored.tests.into_iter().collect()));
@@ -1992,6 +1992,7 @@ mod prepare_tests {
             ..test_binary_for_tests("core", "test", "custom")
         };
         let runtime = DirectRuntime {
+            project_root: dir.clone(),
             packages: HashMap::new(),
             linked_paths: Vec::new(),
             index: BuildRuntimeIndex::default(),
@@ -2038,6 +2039,7 @@ mod prepare_tests {
             ..test_binary_for_tests("core", "test", "custom")
         };
         let runtime = DirectRuntime {
+            project_root: dir.clone(),
             packages: HashMap::new(),
             linked_paths: Vec::new(),
             index: BuildRuntimeIndex::default(),
@@ -2099,39 +2101,35 @@ mod prepare_tests {
     /// The parallel and isolated lanes' preparation (the listing half of
     /// `prepare_direct`) lists a `harness = false` target exactly as before
     /// preparation existed - a custom harness with a valid listing is
-    /// enumerated and its tests are the lane's selection - on a partial run
-    /// and a certifying one.
+    /// enumerated and its tests are the lane's selection. The listing does
+    /// not depend on whether the lane certifies.
     #[test]
     fn direct_preparation_lists_a_harness_false_target_with_a_valid_listing() {
-        let (dir, _calls, target, runtime) = listing_harness("direct_valid_harness_listing");
-        for certifying in [false, true] {
-            let mut prepared = PreparedLane::bare(LaneEnv::default());
-            let built = vec![(None, vec!["-p".to_owned(), "core".to_owned()], vec![target.clone()])];
-            list_direct_binaries(
-                &inputs_in(&dir, certifying),
-                &planned(crate::profile::SweepDecl { label: "par".into(), ..Default::default() }),
-                built,
-                &mut prepared,
-                &[],
-                &[],
-                &runtime,
-            )
-            .unwrap();
-            let b = &prepared.resolutions[0].binaries[0];
-            assert_eq!(b.selected, vec!["alpha".to_owned()], "certifying: {certifying}");
-            assert!(b.unlisted.is_none() && b.executed(false).count() == 1);
-        }
+        let (_dir, _calls, target, runtime) = listing_harness("direct_valid_harness_listing");
+        let mut prepared = PreparedLane::bare(LaneEnv::default());
+        let built = vec![(None, vec!["-p".to_owned(), "core".to_owned()], vec![target])];
+        list_direct_binaries(
+            &planned(crate::profile::SweepDecl { label: "par".into(), ..Default::default() }),
+            built,
+            &mut prepared,
+            &[],
+            &[],
+            &runtime,
+        )
+        .unwrap();
+        let b = &prepared.resolutions[0].binaries[0];
+        assert_eq!(b.selected, vec!["alpha".to_owned()]);
+        assert!(b.unlisted.is_none() && b.executed(false).count() == 1);
     }
 
     /// A custom harness that does not answer `--list` with a libtest listing
     /// fails the direct lane's preparation cleanly, as enumeration always has.
     #[test]
     fn direct_preparation_fails_cleanly_on_a_harness_false_target_without_a_listing() {
-        let (dir, marker, target, runtime) = marker_harness("direct_invalid_harness_listing");
+        let (_dir, marker, target, runtime) = marker_harness("direct_invalid_harness_listing");
         let mut prepared = PreparedLane::bare(LaneEnv::default());
         let built = vec![(None, vec!["-p".to_owned(), "core".to_owned()], vec![target])];
         let err = list_direct_binaries(
-            &inputs_in(&dir, false),
             &planned(crate::profile::SweepDecl { label: "par".into(), ..Default::default() }),
             built,
             &mut prepared,
@@ -2169,9 +2167,8 @@ mod prepare_tests {
     /// harness included.
     #[test]
     fn the_universe_lists_a_harness_false_target() {
-        let (dir, _calls, target, runtime) = listing_harness("universe_harness_listing");
+        let (_dir, _calls, target, runtime) = listing_harness("universe_harness_listing");
         let u = universe_from_binaries(
-            &inputs_in(&dir, true),
             &planned(crate::profile::SweepDecl { label: "full".into(), ..Default::default() }),
             std::slice::from_ref(&target),
             &[],

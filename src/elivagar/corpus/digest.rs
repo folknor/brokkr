@@ -15,7 +15,9 @@ use std::path::Path;
 use clap::ValueEnum;
 use xxhash_rust::xxh3::Xxh3;
 
+use super::super::constants::BUCKET_ZOOM;
 use super::super::eliv::{next_zoom_boundary, tile_id_to_zxy, xy_to_tile_id};
+use super::sort::ExternalU128Sorter;
 
 const DIGEST_HEADER: &str = "elivagar-corpus-digest v1";
 const LEAVES_HEADER: &str = "elivagar-corpus-leaves v1";
@@ -88,18 +90,6 @@ pub struct LeafRun {
 // Hash primitives (domains verbatim from elivagar).
 // ---------------------------------------------------------------------------
 
-fn hash(domain: &[u8], items: &[u128]) -> u128 {
-    let mut v = items.to_vec();
-    v.sort_unstable();
-    let mut h = Xxh3::new();
-    h.update(domain);
-    h.update(&(v.len() as u64).to_le_bytes());
-    for x in v {
-        h.update(&x.to_le_bytes());
-    }
-    h.digest128()
-}
-
 fn pair(tile: u64, semantic: u128) -> u128 {
     let mut h = Xxh3::new();
     h.update(b"elivagar-corpus-pair-v1");
@@ -136,48 +126,106 @@ fn bucket_root(buckets: &[BucketDigest]) -> u128 {
 /// committed count and hash: `compute` (from an archive) and the baseline
 /// self-consistency recomputation (from committed `leaves`) both route through
 /// it and cannot drift.
-#[must_use]
-pub fn fold_leaves(leaves: &[LeafRun], mode: DigestMode) -> Digest {
-    let mut zoom_pairs: BTreeMap<u8, Vec<u128>> = BTreeMap::new();
-    let mut bucket_pairs: BTreeMap<(u8, u64), Vec<u128>> = BTreeMap::new();
+///
+/// `sort_scratch` is where the external sort spills once a zoom or bucket
+/// outgrows memory; it is created on demand and each spill is removed again.
+pub fn fold_leaves(leaves: &[LeafRun], mode: DigestMode, sort_scratch: &Path) -> io::Result<Digest> {
     let mut uniques = BTreeSet::new();
     let mut tiles = 0u64;
+    // Every leaf counts toward `unique`, zero-length ones included, as the
+    // in-memory fold always did. A run that crosses a zoom boundary is split
+    // there: each tile id still lands in its own zoom, exactly as the
+    // per-tile walk assigned it. Only overlapping runs are refused - no valid
+    // archive has them, and the streaming bucket fold below relies on each
+    // zoom's ids arriving in increasing order.
+    let mut by_zoom: BTreeMap<u8, Vec<(u64, u64, u128)>> = BTreeMap::new();
     for leaf in leaves {
         uniques.insert(leaf.hash);
-        for id in leaf.tile_id..leaf.tile_id + u64::from(leaf.run_length) {
-            let (z, x, y) = tile_id_to_zxy(id);
-            let p = pair(id, leaf.hash);
-            zoom_pairs.entry(z).or_default().push(p);
-            if mode == DigestMode::Buckets {
-                let cell = if z <= 7 {
-                    id
-                } else {
-                    xy_to_tile_id(7, x >> (z - 7), y >> (z - 7))
-                };
-                bucket_pairs.entry((z, cell)).or_default().push(p);
-            }
-            tiles += 1;
+        let mut start = leaf.tile_id;
+        let end = start
+            .checked_add(u64::from(leaf.run_length))
+            .ok_or_else(|| invalid("leaf run end overflows"))?;
+        while start < end {
+            let segment_end = end.min(next_zoom_boundary(start));
+            let (zoom, _, _) = tile_id_to_zxy(start);
+            by_zoom
+                .entry(zoom)
+                .or_default()
+                .push((start, segment_end, leaf.hash));
+            start = segment_end;
         }
     }
-    let zooms: Vec<_> = zoom_pairs
-        .into_iter()
-        .map(|(z, v)| ZoomDigest {
+
+    let mut zooms = Vec::with_capacity(by_zoom.len());
+    let mut buckets = Vec::new();
+    for (z, mut runs) in by_zoom {
+        runs.sort_unstable_by_key(|&(start, _, _)| start);
+        let mut sorter = ExternalU128Sorter::new(sort_scratch);
+        let mut zoom_tiles = 0u64;
+        let mut previous_end = None;
+        let mut bucket_cell = None;
+        let mut bucket_tiles = 0u64;
+        let mut bucket_values = ExternalU128Sorter::new(sort_scratch);
+        for (start, end, leaf_hash) in runs {
+            if previous_end.is_some_and(|previous| start < previous) {
+                return Err(invalid("leaf runs overlap"));
+            }
+            previous_end = Some(end);
+            for id in start..end {
+                let (_, x, y) = tile_id_to_zxy(id);
+                let value = pair(id, leaf_hash);
+                sorter.push(value)?;
+                zoom_tiles = zoom_tiles
+                    .checked_add(1)
+                    .ok_or_else(|| invalid("leaf tile count overflows"))?;
+                if mode == DigestMode::Buckets {
+                    // PMTiles tile ids follow the Hilbert order. Descendants of
+                    // one z7 cell are contiguous, so one external sorter can
+                    // hash the cell without retaining an expanded tile vector.
+                    let cell = if z <= BUCKET_ZOOM {
+                        id
+                    } else {
+                        xy_to_tile_id(BUCKET_ZOOM, x >> (z - BUCKET_ZOOM), y >> (z - BUCKET_ZOOM))
+                    };
+                    if bucket_cell.is_some_and(|previous| previous != cell) {
+                        finish_bucket(
+                            z,
+                            bucket_cell,
+                            bucket_tiles,
+                            &mut bucket_values,
+                            &mut buckets,
+                        )?;
+                        bucket_values = ExternalU128Sorter::new(sort_scratch);
+                        bucket_tiles = 0;
+                    }
+                    bucket_cell = Some(cell);
+                    bucket_values.push(value)?;
+                    bucket_tiles = bucket_tiles
+                        .checked_add(1)
+                        .ok_or_else(|| invalid("leaf bucket tile count overflows"))?;
+                }
+            }
+        }
+        finish_bucket(
             z,
-            tiles: v.len() as u64,
-            hash: hash(b"corpus-zoom", &v),
-        })
-        .collect();
-    let buckets: Vec<_> = bucket_pairs
-        .into_iter()
-        .map(|((z, cell), v)| BucketDigest {
+            bucket_cell,
+            bucket_tiles,
+            &mut bucket_values,
+            &mut buckets,
+        )?;
+        let hash = sorter.finish_hash(b"corpus-zoom", zoom_tiles)?;
+        tiles = tiles
+            .checked_add(zoom_tiles)
+            .ok_or_else(|| invalid("leaf tile count overflows"))?;
+        zooms.push(ZoomDigest {
             z,
-            cell,
-            tiles: v.len() as u64,
-            hash: hash(b"corpus-bucket", &v),
-        })
-        .collect();
+            tiles: zoom_tiles,
+            hash,
+        });
+    }
+    buckets.sort_unstable_by_key(|bucket| (bucket.z, bucket.cell));
     let broot = (mode == DigestMode::Buckets).then(|| bucket_root(&buckets));
-    Digest {
+    Ok(Digest {
         mode,
         root: root(&zooms),
         broot,
@@ -186,7 +234,30 @@ pub fn fold_leaves(leaves: &[LeafRun], mode: DigestMode) -> Digest {
         unique: uniques.len() as u64,
         zooms,
         buckets,
+    })
+}
+
+fn finish_bucket(
+    zoom: u8,
+    cell: Option<u64>,
+    tiles: u64,
+    values: &mut ExternalU128Sorter,
+    buckets: &mut Vec<BucketDigest>,
+) -> io::Result<()> {
+    let Some(cell) = cell else {
+        return Ok(());
+    };
+    if tiles == 0 {
+        return Err(invalid("leaf bucket has no tiles"));
     }
+    let hash = values.finish_hash(b"corpus-bucket", tiles)?;
+    buckets.push(BucketDigest {
+        z: zoom,
+        cell,
+        tiles,
+        hash,
+    });
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -397,37 +468,40 @@ fn parse_leaves_text(text: &str) -> io::Result<Vec<LeafRun>> {
 /// Closes the hand-edit / merge-damage hole, invisible otherwise in the opaque
 /// bucket mode. In buckets mode this is a weaker guard (no full leaves exist to
 /// recompute from - `brokkr.md`, step 1).
-#[must_use]
-pub fn baseline_inconsistency(base: &Baseline, leaves: Option<&[LeafRun]>) -> Option<String> {
+pub fn baseline_inconsistency(
+    base: &Baseline,
+    leaves: Option<&[LeafRun]>,
+    sort_scratch: &Path,
+) -> io::Result<Option<String>> {
     if root(&base.zooms) != base.root {
-        return Some("root does not match committed zoom rows".into());
+        return Ok(Some("root does not match committed zoom rows".into()));
     }
     if base.mode == DigestMode::Buckets {
         match base.broot {
-            None => return Some("bucket mode is missing broot".into()),
+            None => return Ok(Some("bucket mode is missing broot".into())),
             Some(br) if bucket_root(&base.buckets) != br => {
-                return Some("broot does not match committed bucket rows".into());
+                return Ok(Some("broot does not match committed bucket rows".into()));
             }
             Some(_) => {}
         }
     } else if base.broot.is_some() {
-        return Some("leaves mode carries an unexpected broot".into());
+        return Ok(Some("leaves mode carries an unexpected broot".into()));
     }
     if let Some(leaves) = leaves {
-        let recomputed = fold_leaves(leaves, base.mode);
+        let recomputed = fold_leaves(leaves, base.mode, sort_scratch)?;
         if recomputed.root != base.root {
-            return Some("committed leaves do not reproduce root".into());
+            return Ok(Some("committed leaves do not reproduce root".into()));
         }
         if !zooms_equal(&recomputed.zooms, &base.zooms) {
-            return Some("committed leaves do not reproduce zoom rows".into());
+            return Ok(Some("committed leaves do not reproduce zoom rows".into()));
         }
         if (recomputed.tiles, recomputed.entries, recomputed.unique)
             != (base.tiles, base.entries, base.unique)
         {
-            return Some("committed leaves do not reproduce counts".into());
+            return Ok(Some("committed leaves do not reproduce counts".into()));
         }
     }
-    None
+    Ok(None)
 }
 
 fn zooms_equal(a: &[ZoomDigest], b: &[ZoomDigest]) -> bool {
@@ -503,17 +577,19 @@ mod tests {
     //! reader/writer (they need real archives).
     #![allow(clippy::unwrap_used)]
 
+    use super::super::fixture::TestDir;
     use super::*;
 
     #[test]
     fn committed_digest_domains_and_text_have_frozen_values() {
+        let scratch = TestDir::new("digest-frozen-values");
         let leaves = [LeafRun {
             tile_id: 0,
             run_length: 1,
             hash: 0xf009_d6ca_413d_6a83_596d_8ad9_b611_1e24,
         }];
 
-        let leaf_digest = fold_leaves(&leaves, DigestMode::Leaves);
+        let leaf_digest = fold_leaves(&leaves, DigestMode::Leaves, &scratch.path).unwrap();
         assert_eq!(
             hex(leaf_digest.zooms[0].hash),
             "ae8de239a0984a01ee78f7c2852ab8f0"
@@ -537,7 +613,7 @@ mod tests {
             )
         );
 
-        let bucket_digest = fold_leaves(&leaves, DigestMode::Buckets);
+        let bucket_digest = fold_leaves(&leaves, DigestMode::Buckets, &scratch.path).unwrap();
         assert_eq!(
             hex(bucket_digest.zooms[0].hash),
             "ae8de239a0984a01ee78f7c2852ab8f0"
@@ -567,6 +643,7 @@ mod tests {
 
     #[test]
     fn leaves_digest_round_trips_and_self_checks() {
+        let scratch = TestDir::new("digest-round-trip");
         let leaves = vec![
             LeafRun {
                 tile_id: xy_to_tile_id(3, 0, 0),
@@ -580,17 +657,22 @@ mod tests {
             },
         ];
         assert!(leaves[0].tile_id < leaves[1].tile_id);
-        let dg = fold_leaves(&leaves, DigestMode::Leaves);
+        let dg = fold_leaves(&leaves, DigestMode::Leaves, &scratch.path).unwrap();
         let base = parse_baseline_text(&digest_text(&dg)).unwrap();
         let parsed = parse_leaves_text(&leaves_text(&leaves)).unwrap();
         assert_eq!(parsed, leaves);
         assert_eq!(base.root, dg.root);
         assert!(base.broot.is_none());
-        assert!(baseline_inconsistency(&base, Some(&parsed)).is_none());
+        assert!(
+            baseline_inconsistency(&base, Some(&parsed), &scratch.path)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
     fn bucket_mode_groups_by_z7_ancestor_and_round_trips_broot() {
+        let scratch = TestDir::new("digest-bucket-groups");
         let z5 = xy_to_tile_id(5, 3, 4);
         let z8 = xy_to_tile_id(8, 100, 100);
         assert!(z5 < z8);
@@ -606,7 +688,7 @@ mod tests {
                 hash: 0xBBBB,
             },
         ];
-        let dg = fold_leaves(&leaves, DigestMode::Buckets);
+        let dg = fold_leaves(&leaves, DigestMode::Buckets, &scratch.path).unwrap();
         assert!(dg.broot.is_some());
         assert!(dg.buckets.iter().any(|b| b.z == 5 && b.cell == z5));
         let ancestor = xy_to_tile_id(7, 100 >> 1, 100 >> 1);
@@ -614,30 +696,36 @@ mod tests {
         let base = parse_baseline_text(&digest_text(&dg)).unwrap();
         assert_eq!(base.broot, dg.broot);
         // The z7-vs-z<=7 cell label must round-trip through parse.
-        assert!(baseline_inconsistency(&base, None).is_none());
+        assert!(baseline_inconsistency(&base, None, &scratch.path).unwrap().is_none());
     }
 
     #[test]
     fn self_consistency_rejects_a_tampered_root() {
+        let scratch = TestDir::new("digest-tampered-root");
         let leaves = vec![LeafRun {
             tile_id: xy_to_tile_id(2, 1, 1),
             run_length: 1,
             hash: 7,
         }];
-        let dg = fold_leaves(&leaves, DigestMode::Leaves);
+        let dg = fold_leaves(&leaves, DigestMode::Leaves, &scratch.path).unwrap();
         let text = digest_text(&dg).replace(&hex(dg.root), &format!("{:032x}", dg.root ^ 1));
         let base = parse_baseline_text(&text).unwrap();
-        assert!(baseline_inconsistency(&base, Some(&leaves)).is_some());
+        assert!(
+            baseline_inconsistency(&base, Some(&leaves), &scratch.path)
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]
     fn digest_header_is_mandatory_and_version_checked() {
+        let scratch = TestDir::new("digest-header");
         let leaves = vec![LeafRun {
             tile_id: xy_to_tile_id(2, 1, 1),
             run_length: 1,
             hash: 5,
         }];
-        let text = digest_text(&fold_leaves(&leaves, DigestMode::Leaves));
+        let text = digest_text(&fold_leaves(&leaves, DigestMode::Leaves, &scratch.path).unwrap());
         assert!(parse_baseline_text(&text).is_ok());
         // Truncated first line (the shape merge damage takes).
         let headerless = text.split_once('\n').unwrap().1.to_string();
@@ -664,15 +752,20 @@ mod tests {
 
     #[test]
     fn leaves_mode_rejects_a_stray_broot() {
+        let scratch = TestDir::new("digest-stray-broot");
         let leaves = vec![LeafRun {
             tile_id: xy_to_tile_id(2, 1, 1),
             run_length: 1,
             hash: 9,
         }];
-        let dg = fold_leaves(&leaves, DigestMode::Leaves);
+        let dg = fold_leaves(&leaves, DigestMode::Leaves, &scratch.path).unwrap();
         let mut text = digest_text(&dg);
         text.push_str(&format!("broot {}\n", hex(123)));
         let base = parse_baseline_text(&text).unwrap();
-        assert!(baseline_inconsistency(&base, Some(&leaves)).is_some());
+        assert!(
+            baseline_inconsistency(&base, Some(&leaves), &scratch.path)
+                .unwrap()
+                .is_some()
+        );
     }
 }

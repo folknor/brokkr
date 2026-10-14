@@ -30,6 +30,7 @@ pub(crate) mod layout;
 pub mod manifest;
 pub mod mutate;
 pub mod render;
+pub(crate) mod sort;
 pub mod style;
 
 use std::collections::{BTreeSet, HashMap};
@@ -144,10 +145,10 @@ pub(crate) fn corpus_style_path(corpus_dir: &Path) -> std::path::PathBuf {
 }
 
 fn format_guard(a: &ArchiveView) -> Option<String> {
-    if a.tile_type() != 1 {
+    if a.tile_type() != super::constants::pmtiles::TILE_TYPE_MVT {
         return Some(format!("archive tile type {} is not MVT", a.tile_type()));
     }
-    if a.tile_compression() != 2 {
+    if a.tile_compression() != super::constants::pmtiles::TILE_COMPRESSION_GZIP {
         return Some(format!(
             "archive tile compression {} is not gzip",
             a.tile_compression()
@@ -163,7 +164,14 @@ fn format_guard(a: &ArchiveView) -> Option<String> {
 /// maximal span WITHIN one zoom sharing one hash, so a shared blob straddling a
 /// zoom boundary stays two runs. (Sequential in this scaffold; elivagar's
 /// original parallelized the per-blob decode.)
-pub fn compute(archive: &ArchiveView, mode: DigestMode) -> io::Result<(Digest, Vec<LeafRun>)> {
+///
+/// `sort_scratch` is the directory the digest's external sort may spill into
+/// (`ProjectState::corpus_sort_dir`).
+pub fn compute(
+    archive: &ArchiveView,
+    mode: DigestMode,
+    sort_scratch: &Path,
+) -> io::Result<(Digest, Vec<LeafRun>)> {
     let runs = archive.read_all_runs()?;
     let mut blobs = Vec::new();
     let mut seen = BTreeSet::new();
@@ -215,7 +223,7 @@ pub fn compute(archive: &ArchiveView, mode: DigestMode) -> io::Result<(Digest, V
             at = n;
         }
     }
-    let d = digest::fold_leaves(&leaves, mode);
+    let d = digest::fold_leaves(&leaves, mode, sort_scratch)?;
     Ok((d, leaves))
 }
 
@@ -271,7 +279,7 @@ struct Passed {
 }
 
 #[allow(clippy::too_many_lines)]
-fn gate_through_walk(archive: &Path, corpus_dir: &Path) -> io::Result<Gate> {
+fn gate_through_walk(archive: &Path, corpus_dir: &Path, sort_scratch: &Path) -> io::Result<Gate> {
     let layout = layout::CorpusLayout::new(corpus_dir);
     // STEP 1 - baseline integrity (subject: the baseline; exit 3 on damage).
     // Every read here goes through `baseline_material`, so an absent or
@@ -290,7 +298,9 @@ fn gate_through_walk(archive: &Path, corpus_dir: &Path) -> io::Result<Gate> {
     } else {
         None
     };
-    if let Some(msg) = digest::baseline_inconsistency(&base, committed_leaves.as_deref()) {
+    if let Some(msg) =
+        digest::baseline_inconsistency(&base, committed_leaves.as_deref(), sort_scratch)?
+    {
         return Ok(refused(baseline_trouble(format!(
             "baseline internally inconsistent: {msg}"
         ))));
@@ -331,7 +341,7 @@ fn gate_through_walk(archive: &Path, corpus_dir: &Path) -> io::Result<Gate> {
 
     // STEP 3 - the walk (subject: content; exit 1 on mismatch). Always runs for
     // a comparable archive against an intact baseline; style state is irrelevant.
-    let (d, current_leaves) = compute(&view, base.mode)?;
+    let (d, current_leaves) = compute(&view, base.mode, sort_scratch)?;
     let content_ok =
         d.root == base.root && (base.mode != DigestMode::Buckets || d.broot == base.broot);
     if !content_ok {
@@ -374,11 +384,16 @@ fn gate_through_walk(archive: &Path, corpus_dir: &Path) -> io::Result<Gate> {
 // ---------------------------------------------------------------------------
 
 /// The full verdict pipeline. See module header for the ordering guarantee.
-pub fn check(archive: &Path, corpus_dir: &Path) -> io::Result<(Outcome, CheckReport)> {
-    let (view, base, mut warnings, tiles, unique) = match gate_through_walk(archive, corpus_dir)? {
-        Gate::Refused(o, r) => return Ok((o, r)),
-        Gate::Passed(p) => (p.view, p.base, p.warnings, p.tiles, p.unique),
-    };
+pub fn check(
+    archive: &Path,
+    corpus_dir: &Path,
+    sort_scratch: &Path,
+) -> io::Result<(Outcome, CheckReport)> {
+    let (view, base, mut warnings, tiles, unique) =
+        match gate_through_walk(archive, corpus_dir, sort_scratch)? {
+            Gate::Refused(o, r) => return Ok((o, r)),
+            Gate::Passed(p) => (p.view, p.base, p.warnings, p.tiles, p.unique),
+        };
 
     // STEP 4 - staleness (subject: the baseline; exit 3, strictly subordinate).
     // Only reached with a passing content walk, so it can never mask a mismatch.
@@ -480,14 +495,16 @@ fn svg_staleness(
         Ok(m) => m,
         Err(msg) => return Ok(Err(msg)),
     };
+    let runs = view.read_all_runs()?;
     let tiles = layout.tiles();
     let mut expected = BTreeSet::new();
     let mut stale = Vec::new();
     for entry in &manifest.tile {
         let name = manifest::file_name(entry);
         expected.insert(name.clone());
-        let svg = render::render_archive_tile(
+        let svg = render::render_archive_tile_from_runs(
             view,
+            &runs,
             entry.z,
             entry.x,
             entry.y,
@@ -537,8 +554,9 @@ pub fn render_manifest(
     archive: &Path,
     corpus_dir: &Path,
     style_path: &Path,
+    sort_scratch: &Path,
 ) -> io::Result<(Outcome, CheckReport)> {
-    let view = match gate_through_walk(archive, corpus_dir)? {
+    let view = match gate_through_walk(archive, corpus_dir, sort_scratch)? {
         Gate::Refused(o, r) => return Ok((o, r)),
         Gate::Passed(p) => p.view,
     };
@@ -555,6 +573,7 @@ pub fn render_manifest(
         Ok(s) => s,
         Err(msg) => return Ok(baseline_trouble(msg)),
     };
+    let runs = view.read_all_runs()?;
     let mut warnings = Vec::new();
     // `check` judges staleness against the canonical style alone
     // (`corpus_style_path`); rendering with any other records a hash check
@@ -579,8 +598,9 @@ pub fn render_manifest(
     for entry in &manifest.tile {
         let name = manifest::file_name(entry);
         wanted.insert(name.clone());
-        let svg = render::render_archive_tile(
+        let svg = render::render_archive_tile_from_runs(
             &view,
+            &runs,
             entry.z,
             entry.x,
             entry.y,
@@ -703,6 +723,7 @@ pub fn bless(
     corpus_dir: &Path,
     mode: DigestMode,
     rotate: bool,
+    sort_scratch: &Path,
 ) -> io::Result<(Outcome, CheckReport)> {
     let layout = layout::CorpusLayout::new(corpus_dir);
     let a = ArchiveView::open(archive)?;
@@ -755,7 +776,7 @@ pub fn bless(
         } else {
             None
         };
-        let (d, current_leaves) = compute(&a, base.mode)?;
+        let (d, current_leaves) = compute(&a, base.mode, sort_scratch)?;
         let mut lines = vec!["rotation requires --rotate".to_string()];
         if let Ok(Ok(base_contract)) = contract_from_file(&layout.contract()) {
             for path in contract::contract_diff(&base_contract, &contract) {
@@ -783,7 +804,7 @@ pub fn bless(
             },
         ));
     }
-    let (d, l) = compute(&a, mode)?;
+    let (d, l) = compute(&a, mode, sort_scratch)?;
     std::fs::create_dir_all(corpus_dir)?;
     let digest_path = layout.digest();
     let contract_path = layout.contract();
@@ -796,7 +817,12 @@ pub fn bless(
         std::fs::remove_file(&leaves_path)?;
     }
     if layout.manifest().exists() {
-        let (verdict, r) = render_manifest(archive, corpus_dir, &corpus_style_path(corpus_dir))?;
+        let (verdict, r) = render_manifest(
+            archive,
+            corpus_dir,
+            &corpus_style_path(corpus_dir),
+            sort_scratch,
+        )?;
         if verdict != Outcome::Pass {
             return Ok((verdict, r));
         }
@@ -860,14 +886,18 @@ mod baseline_verdict_tests {
             run_length: 1,
             hash: 0xABCD,
         }];
-        let d = fold_leaves(&leaves, DigestMode::Leaves);
+        let d = fold_leaves(&leaves, DigestMode::Leaves, &dir.join("sort-scratch")).unwrap();
         std::fs::write(layout.digest(), digest_text(&d)).unwrap();
         std::fs::write(layout.leaves(), leaves_text(&leaves)).unwrap();
     }
 
     fn verdict(corpus_dir: &Path) -> Outcome {
-        check(&corpus_dir.join("no-such-archive.pmtiles"), corpus_dir)
-            .expect("baseline damage is a verdict, not an escaping io::Error")
+        check(
+            &corpus_dir.join("no-such-archive.pmtiles"),
+            corpus_dir,
+            &corpus_dir.join("sort-scratch"),
+        )
+        .expect("baseline damage is a verdict, not an escaping io::Error")
             .0
     }
 
@@ -907,6 +937,13 @@ mod baseline_verdict_tests {
         // still propagates as an error rather than becoming a content verdict.
         let dir = TestDir::new("corpus-baseline-intact");
         intact_baseline(&dir.path);
-        assert!(check(&dir.path.join("no-such-archive.pmtiles"), &dir.path).is_err());
+        assert!(
+            check(
+                &dir.path.join("no-such-archive.pmtiles"),
+                &dir.path,
+                &dir.path.join("sort-scratch"),
+            )
+            .is_err()
+        );
     }
 }

@@ -11,6 +11,7 @@ use crate::lockfile;
 use crate::output;
 use crate::ratatoskr::build::{self, HarnessBuild};
 use crate::ratatoskr::discover::{self, PreserveDataDir};
+use crate::ratatoskr::saehrimnir::MockPaths;
 use crate::ratatoskr::timing::format_duration;
 
 use super::suite::{FixtureSession, directory_filter, service_suite, write_artefacts};
@@ -18,8 +19,8 @@ use super::suite::{FixtureSession, directory_filter, service_suite, write_artefa
 /// Run one or more service-script iterations through the harness binary
 /// built via `[ratatoskr.harness]`.
 ///
-/// Acquires the global lockfile, builds the configured `[[check]]`
-/// sweep once, then for each of `repeat` iterations allocates a fresh
+/// Acquires the global lockfile, builds the configured harness binary
+/// once from `[ratatoskr.harness]`, then for each of `repeat` iterations allocates a fresh
 /// `<artefact_parent>/<test_id>/run-N/`, spawns
 /// `<binary> --test-harness <SCRIPT>` with `BROKKR_HARNESS_ARTEFACT_DIR`
 /// and `BROKKR_TEST_BIN_DIR` set, captures stdout/stderr, writes them
@@ -42,6 +43,7 @@ use super::suite::{FixtureSession, directory_filter, service_suite, write_artefa
 pub(crate) fn service_test(req: &crate::request::ServiceTestRequest<'_>) -> Result<(), DevError> {
     let crate::request::ServiceTestRequest {
         project_root,
+        build_root,
         ratatoskr,
         script,
         keep_artefacts,
@@ -66,6 +68,7 @@ pub(crate) fn service_test(req: &crate::request::ServiceTestRequest<'_>) -> Resu
         let filter = directory_filter(project_root, script_path)?;
         return service_suite(&crate::request::ServiceSuiteRequest {
             project_root,
+            build_root,
             ratatoskr,
             filter: Some(&filter),
             keep_artefacts,
@@ -97,20 +100,28 @@ pub(crate) fn service_test(req: &crate::request::ServiceTestRequest<'_>) -> Resu
 
     // Parse the script's frontmatter once: the ceiling and the
     // preserve-data-dir override apply to every iteration of a soak.
-    let parsed = discover::parse_script(&script_abs, &test_id)
+    let parsed = discover::parse_service_script(&script_abs, &test_id)
         .map_err(|e| DevError::Config(format!("service: failed to read script {script}: {e}")))?;
     let ceiling = parsed.ceiling;
     let keep_on_success =
         keep_artefacts || parsed.preserve_data_dir == PreserveDataDir::OnSuccessToo;
+    let mock_setup = if let Some(fixture_name) = parsed.fixture() {
+        let paths = MockPaths::resolve(ratatoskr, project_root).map_err(|error| {
+            DevError::Config(format!(
+                "service: script {test_id} needs a mock fixture but {error}"
+            ))
+        })?;
+        let fixture_path = paths.fixture(fixture_name).map_err(|error| {
+            DevError::Config(format!(
+                "service: script {test_id} declares fixture `{fixture_name}` but {error}"
+            ))
+        })?;
+        Some((paths, fixture_path))
+    } else {
+        None
+    };
 
-    let harness_cfg = ratatoskr.harness.as_ref().ok_or_else(|| {
-        DevError::Config(
-            "service: no [ratatoskr.harness] section in brokkr.toml. \
-                 Declare `[ratatoskr.harness]` with `package = \"<crate>\"` \
-                 (and optional `binary`, `features`, `debug`)."
-                .into(),
-        )
-    })?;
+    let harness_cfg = crate::ratatoskr::require_harness_config(ratatoskr, "service")?;
 
     let _lock = crate::context::reenter_command_lock()?;
     // Cooperative SIGTERM for `brokkr kill`. See run_sync_smoke for rationale.
@@ -118,7 +129,7 @@ pub(crate) fn service_test(req: &crate::request::ServiceTestRequest<'_>) -> Resu
 
     let debug = profile_override.unwrap_or_else(|| harness_cfg.debug.unwrap_or(false));
     let built = build::build_for_harness(
-        project_root,
+        build_root.as_path(),
         harness_cfg,
         debug,
         Some(&|pid| _lock.set_child_pid(pid)),
@@ -134,12 +145,15 @@ pub(crate) fn service_test(req: &crate::request::ServiceTestRequest<'_>) -> Resu
     // once before iteration starts and inject the per-protocol endpoint
     // env vars. The mock is reused across all soak iterations and torn
     // down after the run finishes (success, failure, or error).
-    let mock_session = if let Some(fixture_name) = parsed.fixture.as_deref() {
+    let mock_session = if let (Some(fixture_name), Some((paths, fixture_path))) =
+        (parsed.fixture(), mock_setup.as_ref())
+    {
         Some(FixtureSession::start(
             project_root,
             ratatoskr,
-            &test_id,
             fixture_name,
+            paths,
+            fixture_path,
             &_lock,
         )?)
     } else {
@@ -167,10 +181,18 @@ pub(crate) fn service_test(req: &crate::request::ServiceTestRequest<'_>) -> Resu
         run_soak(&invocation, repeat, keep_going)
     };
 
-    if let Some(session) = mock_session {
-        session.shutdown(&_lock);
+    let shutdown = mock_session.map(FixtureSession::shutdown).transpose();
+    match (outcome, shutdown) {
+        (Err(run_error), Err(shutdown_error)) => {
+            output::ratatoskr_msg(&format!(
+                "mock-server shutdown also failed: {shutdown_error}"
+            ));
+            Err(run_error)
+        }
+        (Err(run_error), _) => Err(run_error),
+        (Ok(()), Err(shutdown_error)) => Err(shutdown_error),
+        (Ok(()), Ok(_)) => Ok(()),
     }
-    outcome
 }
 
 /// Outcome of one harness-binary invocation.
@@ -230,7 +252,7 @@ fn run_single(run: &ServiceRun<'_>) -> Result<(), DevError> {
             result.exit_label, result.elapsed_ms
         ));
         artefacts::emit_clean_hint(output::ratatoskr_msg);
-        Err(DevError::ExitCode(1))
+        Err(DevError::Reported("service harness failed".into()))
     }
 }
 
@@ -271,7 +293,7 @@ fn run_soak(run: &ServiceRun<'_>, repeat: u32, keep_going: bool) -> Result<(), D
 
     if results.iter().any(|(_, r)| !r.succeeded) {
         artefacts::emit_clean_hint(output::ratatoskr_msg);
-        Err(DevError::ExitCode(1))
+        Err(DevError::Reported("service soak failed".into()))
     } else {
         Ok(())
     }

@@ -1,6 +1,6 @@
 //! Shared SQLite operations for the two visual result stores.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, Row};
 
@@ -15,6 +15,8 @@ pub(crate) enum DbSubject {
 }
 
 struct Layout {
+    store_name: &'static str,
+    file_name: &'static str,
     runs: &'static str,
     results: &'static str,
     approvals: &'static str,
@@ -27,6 +29,8 @@ impl Layout {
     fn for_subject(subject: DbSubject) -> Self {
         match subject {
             DbSubject::Litehtml => Self {
+                store_name: "litehtml visual store",
+                file_name: "litehtml-visual.db",
                 runs: "mechanical_runs",
                 results: "mechanical_results",
                 approvals: "mechanical_approvals",
@@ -35,6 +39,8 @@ impl Layout {
                 adapter: false,
             },
             DbSubject::Sluggrs => Self {
+                store_name: "sluggrs visual store",
+                file_name: "sluggrs-visual.db",
                 runs: "snapshot_runs",
                 results: "snapshot_results",
                 approvals: "snapshot_approvals",
@@ -50,6 +56,16 @@ impl Layout {
             "element_match_pct"
         } else {
             "NULL"
+        }
+    }
+
+    /// The element column read through a table alias; the `NULL` stand-in
+    /// for a store without one is a literal, so it takes no qualifier.
+    fn qualified_element_column(&self, alias: &str) -> String {
+        if self.element {
+            format!("{alias}.element_match_pct")
+        } else {
+            "NULL".to_owned()
         }
     }
 
@@ -91,67 +107,62 @@ pub(crate) struct VisualDb {
 }
 
 impl VisualDb {
-    pub(crate) fn open(path: &Path, subject: DbSubject) -> Result<Self, DevError> {
+    /// Open the subject's versioned visual store. `legacy_results_path` is
+    /// retained as the source for a one-time import of the former shared
+    /// `results.db` tables.
+    pub(crate) fn open(legacy_results_path: &Path, subject: DbSubject) -> Result<Self, DevError> {
         let layout = Layout::for_subject(subject);
-        let conn = Connection::open(path)?;
-        conn.pragma_update(None, "journal_mode", "WAL")?;
-        let adapter_column = if layout.adapter {
-            ", adapter_name TEXT"
-        } else {
-            ""
-        };
-        let result_element = if layout.element {
-            ", element_match_pct REAL"
-        } else {
-            ""
-        };
-        let approval_element = if layout.element {
-            ", element_match_pct REAL"
-        } else {
-            ""
-        };
-        conn.execute(
-            &format!(
-                "CREATE TABLE IF NOT EXISTS {} (\
-                    run_id TEXT PRIMARY KEY, \
-                    timestamp TEXT NOT NULL DEFAULT (datetime('now')), \
-                    [commit] TEXT NOT NULL, \
-                    dirty INTEGER NOT NULL DEFAULT 0{adapter_column}\
-                )",
-                layout.runs,
-            ),
-            [],
-        )?;
-        conn.execute(
-            &format!(
-                "CREATE TABLE IF NOT EXISTS {} (\
-                    run_id TEXT NOT NULL REFERENCES {}(run_id), \
-                    {} TEXT NOT NULL, \
-                    pixel_diff_pct REAL{result_element}, \
-                    status TEXT NOT NULL, \
-                    PRIMARY KEY (run_id, {})\
-                )",
-                layout.results, layout.runs, layout.id, layout.id,
-            ),
-            [],
-        )?;
-        conn.execute(
-            &format!(
-                "CREATE TABLE IF NOT EXISTS {} (\
-                    {} TEXT PRIMARY KEY, \
-                    approved_at TEXT NOT NULL DEFAULT (datetime('now')), \
-                    [commit] TEXT NOT NULL, \
-                    pixel_diff_pct REAL NOT NULL{approval_element}\
-                )",
-                layout.approvals, layout.id,
-            ),
-            [],
-        )?;
+        let path = store_path(legacy_results_path, &layout);
+        let conn = open_writable(&path, &layout)?;
+        import_legacy(&conn, legacy_results_path, &layout)?;
         Ok(Self { conn, layout })
     }
 
-    pub(crate) fn connection(&self) -> &Connection {
-        &self.conn
+    /// Open a query-only connection, upgrading an older visual file first.
+    /// When neither a visual file nor legacy tables exist, query an empty
+    /// in-memory schema without creating a project file.
+    pub(crate) fn open_read_only(
+        legacy_results_path: &Path,
+        subject: DbSubject,
+    ) -> Result<Self, DevError> {
+        let layout = Layout::for_subject(subject);
+        let path = store_path(legacy_results_path, &layout);
+        let conn = if path.exists() {
+            crate::db::store::open_read_only_migrating(
+                &path,
+                layout.store_name,
+                SCHEMA_VERSION,
+                || {
+                    let conn = open_writable(&path, &layout)?;
+                    import_legacy(&conn, legacy_results_path, &layout)?;
+                    Ok(())
+                },
+            )?
+        } else if let Some(data) = read_legacy(legacy_results_path, &layout)? {
+            let conn = open_writable(&path, &layout)?;
+            import_legacy_data(&conn, &layout, &data)?;
+            drop(conn);
+            crate::db::store::open_read_only(&path)?
+        } else {
+            let conn = Connection::open_in_memory()?;
+            initialize(&conn, &layout)?;
+            conn.pragma_update(None, "query_only", true)?;
+            conn
+        };
+
+        // A current-version destination may predate the import marker if an
+        // earlier process stopped between schema setup and row transfer.
+        if !legacy_imported(&conn)? && has_legacy_tables(legacy_results_path, &layout)? {
+            drop(conn);
+            let writable = open_writable(&path, &layout)?;
+            import_legacy(&writable, legacy_results_path, &layout)?;
+            drop(writable);
+            return Ok(Self {
+                conn: crate::db::store::open_read_only(&path)?,
+                layout,
+            });
+        }
+        Ok(Self { conn, layout })
     }
 
     pub(crate) fn insert_run(
@@ -342,12 +353,12 @@ impl VisualDb {
         subject_id: &str,
     ) -> Result<Option<ResultRow>, DevError> {
         let mut stmt = self.conn.prepare(&format!(
-            "SELECT r.run_id, r.{}, r.pixel_diff_pct, r.{}, r.status \
+            "SELECT r.run_id, r.{}, r.pixel_diff_pct, {}, r.status \
              FROM {} r JOIN {} runs ON runs.run_id = r.run_id \
              WHERE r.{} = ?1 \
              ORDER BY runs.timestamp DESC, runs.rowid DESC LIMIT 1",
             self.layout.id,
-            self.layout.element_column(),
+            self.layout.qualified_element_column("r"),
             self.layout.results,
             self.layout.runs,
             self.layout.id,
@@ -359,6 +370,421 @@ impl VisualDb {
             None => Ok(None),
         }
     }
+}
+
+const SCHEMA_VERSION: i64 = 1;
+const LEGACY_IMPORT: &str = "results-db-visual-v1";
+
+struct LegacyRun {
+    run_id: String,
+    timestamp: String,
+    commit: String,
+    dirty: i64,
+    adapter_name: Option<String>,
+}
+
+struct LegacyResult {
+    run_id: String,
+    subject_id: String,
+    pixel_diff_pct: Option<f64>,
+    element_match_pct: Option<f64>,
+    status: String,
+}
+
+struct LegacyApproval {
+    subject_id: String,
+    approved_at: String,
+    commit: String,
+    pixel_diff_pct: f64,
+    element_match_pct: Option<f64>,
+}
+
+#[derive(Default)]
+struct LegacyData {
+    has_tables: bool,
+    runs: Vec<LegacyRun>,
+    results: Vec<LegacyResult>,
+    approvals: Vec<LegacyApproval>,
+}
+
+fn store_path(legacy_results_path: &Path, layout: &Layout) -> PathBuf {
+    legacy_results_path.with_file_name(layout.file_name)
+}
+
+fn open_writable(path: &Path, layout: &Layout) -> Result<Connection, DevError> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let conn = crate::db::store::open_read_write(path, layout.store_name, SCHEMA_VERSION)?;
+    crate::db::store::migrate(
+        &conn,
+        layout.store_name,
+        SCHEMA_VERSION,
+        |conn, _current| initialize(conn, layout),
+    )?;
+    // A current-version store may be missing an index or a table after manual
+    // repair. The idempotent DDL restores those without changing its stamp.
+    initialize(&conn, layout)?;
+    Ok(conn)
+}
+
+fn initialize(conn: &Connection, layout: &Layout) -> Result<(), DevError> {
+    let adapter_column = if layout.adapter {
+        ", adapter_name TEXT"
+    } else {
+        ""
+    };
+    let result_element = if layout.element {
+        ", element_match_pct REAL"
+    } else {
+        ""
+    };
+    let approval_element = if layout.element {
+        ", element_match_pct REAL"
+    } else {
+        ""
+    };
+    conn.execute_batch(&format!(
+        "CREATE TABLE IF NOT EXISTS {} (\
+            run_id TEXT PRIMARY KEY, \
+            timestamp TEXT NOT NULL DEFAULT (datetime('now')), \
+            [commit] TEXT NOT NULL, \
+            dirty INTEGER NOT NULL DEFAULT 0{adapter_column}\
+        );\
+        CREATE TABLE IF NOT EXISTS {} (\
+            run_id TEXT NOT NULL REFERENCES {}(run_id), \
+            {} TEXT NOT NULL, \
+            pixel_diff_pct REAL{result_element}, \
+            status TEXT NOT NULL, \
+            PRIMARY KEY (run_id, {})\
+        );\
+        CREATE TABLE IF NOT EXISTS {} (\
+            {} TEXT PRIMARY KEY, \
+            approved_at TEXT NOT NULL DEFAULT (datetime('now')), \
+            [commit] TEXT NOT NULL, \
+            pixel_diff_pct REAL NOT NULL{approval_element}\
+        );\
+        CREATE TABLE IF NOT EXISTS brokkr_imports (migration TEXT PRIMARY KEY);",
+        layout.runs, layout.results, layout.runs, layout.id, layout.id, layout.approvals, layout.id,
+    ))?;
+
+    if layout.adapter && !has_column(conn, layout.runs, "adapter_name")? {
+        conn.execute_batch(&format!(
+            "ALTER TABLE {} ADD COLUMN adapter_name TEXT",
+            layout.runs
+        ))?;
+    }
+    if layout.element && !has_column(conn, layout.results, "element_match_pct")? {
+        conn.execute_batch(&format!(
+            "ALTER TABLE {} ADD COLUMN element_match_pct REAL",
+            layout.results
+        ))?;
+    }
+    if layout.element && !has_column(conn, layout.approvals, "element_match_pct")? {
+        conn.execute_batch(&format!(
+            "ALTER TABLE {} ADD COLUMN element_match_pct REAL",
+            layout.approvals
+        ))?;
+    }
+    Ok(())
+}
+
+fn has_table(conn: &Connection, table: &str) -> Result<bool, DevError> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+        [table],
+        |row| row.get(0),
+    )?)
+}
+
+fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool, DevError> {
+    let mut stmt = conn.prepare("SELECT name FROM pragma_table_info(?1)")?;
+    let columns = stmt
+        .query_map([table], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(columns.iter().any(|name| name == column))
+}
+
+fn legacy_imported(conn: &Connection) -> rusqlite::Result<bool> {
+    let has_marker: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' \
+         AND name='brokkr_imports')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_marker {
+        return Ok(false);
+    }
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM brokkr_imports WHERE migration = ?1)",
+        [LEGACY_IMPORT],
+        |row| row.get(0),
+    )
+}
+
+fn has_legacy_tables(path: &Path, layout: &Layout) -> Result<bool, DevError> {
+    if !path.is_file() {
+        return Ok(false);
+    }
+    let conn = crate::db::store::open_read_only(path)?;
+    Ok(has_table(&conn, layout.runs)?
+        || has_table(&conn, layout.results)?
+        || has_table(&conn, layout.approvals)?)
+}
+
+fn read_legacy(path: &Path, layout: &Layout) -> Result<Option<LegacyData>, DevError> {
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let conn = crate::db::store::open_read_only(path)?;
+    let has_runs = has_table(&conn, layout.runs)?;
+    let has_results = has_table(&conn, layout.results)?;
+    let has_approvals = has_table(&conn, layout.approvals)?;
+    if !has_runs && !has_results && !has_approvals {
+        return Ok(None);
+    }
+
+    let mut data = LegacyData {
+        has_tables: true,
+        ..LegacyData::default()
+    };
+    if has_runs {
+        let adapter = if layout.adapter && has_column(&conn, layout.runs, "adapter_name")? {
+            "adapter_name"
+        } else {
+            "NULL"
+        };
+        let mut stmt = conn.prepare(&format!(
+            "SELECT run_id, timestamp, [commit], dirty, {adapter} FROM {} ORDER BY rowid",
+            layout.runs
+        ))?;
+        data.runs = stmt
+            .query_map([], |row| {
+                Ok(LegacyRun {
+                    run_id: row.get(0)?,
+                    timestamp: row.get(1)?,
+                    commit: row.get(2)?,
+                    dirty: row.get(3)?,
+                    adapter_name: row.get(4)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+    }
+    if has_results {
+        let element = if layout.element && has_column(&conn, layout.results, "element_match_pct")? {
+            "element_match_pct"
+        } else {
+            "NULL"
+        };
+        let mut stmt = conn.prepare(&format!(
+            "SELECT run_id, {}, pixel_diff_pct, {element}, status FROM {} ORDER BY rowid",
+            layout.id, layout.results
+        ))?;
+        data.results = stmt
+            .query_map([], |row| {
+                Ok(LegacyResult {
+                    run_id: row.get(0)?,
+                    subject_id: row.get(1)?,
+                    pixel_diff_pct: row.get(2)?,
+                    element_match_pct: row.get(3)?,
+                    status: row.get(4)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+    }
+    if has_approvals {
+        let element = if layout.element && has_column(&conn, layout.approvals, "element_match_pct")?
+        {
+            "element_match_pct"
+        } else {
+            "NULL"
+        };
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {}, approved_at, [commit], pixel_diff_pct, {element} \
+             FROM {} ORDER BY rowid",
+            layout.id, layout.approvals
+        ))?;
+        data.approvals = stmt
+            .query_map([], |row| {
+                Ok(LegacyApproval {
+                    subject_id: row.get(0)?,
+                    approved_at: row.get(1)?,
+                    commit: row.get(2)?,
+                    pixel_diff_pct: row.get(3)?,
+                    element_match_pct: row.get(4)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+    }
+    Ok(Some(data))
+}
+
+fn import_legacy(conn: &Connection, legacy_path: &Path, layout: &Layout) -> Result<(), DevError> {
+    if legacy_imported(conn)? {
+        return Ok(());
+    }
+    let Some(data) = read_legacy(legacy_path, layout)? else {
+        return Ok(());
+    };
+    import_legacy_data(conn, layout, &data)
+}
+
+fn import_legacy_data(
+    conn: &Connection,
+    layout: &Layout,
+    data: &LegacyData,
+) -> Result<(), DevError> {
+    if !data.has_tables || legacy_imported(conn)? {
+        return Ok(());
+    }
+    let foreign_keys: i64 = conn.pragma_query_value(None, "foreign_keys", |row| row.get(0))?;
+    conn.pragma_update(None, "foreign_keys", false)?;
+    let import = (|| {
+        conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| -> rusqlite::Result<()> {
+            if legacy_imported(conn)? {
+                return Ok(());
+            }
+            insert_legacy_runs(conn, layout, &data.runs)?;
+            insert_legacy_results(conn, layout, &data.results)?;
+            insert_legacy_approvals(conn, layout, &data.approvals)?;
+            conn.execute(
+                "INSERT INTO brokkr_imports (migration) VALUES (?1)",
+                [LEGACY_IMPORT],
+            )?;
+            Ok(())
+        })();
+        if let Err(error) = result {
+            conn.execute_batch("ROLLBACK").ok();
+            return Err(DevError::from(error));
+        }
+        if let Err(error) = conn.execute_batch("COMMIT") {
+            conn.execute_batch("ROLLBACK").ok();
+            return Err(DevError::from(error));
+        }
+        Ok(())
+    })();
+    let restored = conn.pragma_update(None, "foreign_keys", foreign_keys);
+    import?;
+    restored?;
+    Ok(())
+}
+
+fn insert_legacy_runs(
+    conn: &Connection,
+    layout: &Layout,
+    rows: &[LegacyRun],
+) -> rusqlite::Result<()> {
+    for run in rows {
+        if layout.adapter {
+            conn.execute(
+                &format!(
+                    "INSERT INTO {} (run_id, timestamp, [commit], dirty, adapter_name) \
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    layout.runs
+                ),
+                rusqlite::params![
+                    run.run_id,
+                    run.timestamp,
+                    run.commit,
+                    run.dirty,
+                    run.adapter_name
+                ],
+            )?;
+        } else {
+            conn.execute(
+                &format!(
+                    "INSERT INTO {} (run_id, timestamp, [commit], dirty) \
+                     VALUES (?1, ?2, ?3, ?4)",
+                    layout.runs
+                ),
+                rusqlite::params![run.run_id, run.timestamp, run.commit, run.dirty],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn insert_legacy_results(
+    conn: &Connection,
+    layout: &Layout,
+    rows: &[LegacyResult],
+) -> rusqlite::Result<()> {
+    for result in rows {
+        if layout.element {
+            conn.execute(
+                &format!(
+                    "INSERT INTO {} \
+                     (run_id, {}, pixel_diff_pct, element_match_pct, status) \
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    layout.results, layout.id
+                ),
+                rusqlite::params![
+                    result.run_id,
+                    result.subject_id,
+                    result.pixel_diff_pct,
+                    result.element_match_pct,
+                    result.status
+                ],
+            )?;
+        } else {
+            conn.execute(
+                &format!(
+                    "INSERT INTO {} (run_id, {}, pixel_diff_pct, status) \
+                     VALUES (?1, ?2, ?3, ?4)",
+                    layout.results, layout.id
+                ),
+                rusqlite::params![
+                    result.run_id,
+                    result.subject_id,
+                    result.pixel_diff_pct,
+                    result.status
+                ],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn insert_legacy_approvals(
+    conn: &Connection,
+    layout: &Layout,
+    rows: &[LegacyApproval],
+) -> rusqlite::Result<()> {
+    for approval in rows {
+        if layout.element {
+            conn.execute(
+                &format!(
+                    "INSERT INTO {} \
+                     ({}, approved_at, [commit], pixel_diff_pct, element_match_pct) \
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    layout.approvals, layout.id
+                ),
+                rusqlite::params![
+                    approval.subject_id,
+                    approval.approved_at,
+                    approval.commit,
+                    approval.pixel_diff_pct,
+                    approval.element_match_pct
+                ],
+            )?;
+        } else {
+            conn.execute(
+                &format!(
+                    "INSERT INTO {} ({}, approved_at, [commit], pixel_diff_pct) \
+                     VALUES (?1, ?2, ?3, ?4)",
+                    layout.approvals, layout.id
+                ),
+                rusqlite::params![
+                    approval.subject_id,
+                    approval.approved_at,
+                    approval.commit,
+                    approval.pixel_diff_pct
+                ],
+            )?;
+        }
+    }
+    Ok(())
 }
 
 fn map_approval(row: &Row<'_>) -> rusqlite::Result<Approval> {

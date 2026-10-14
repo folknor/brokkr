@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use crate::cargo_filter;
 use crate::check_cmd::{self, LaneEntry};
-use crate::config::{self, DevConfig};
+use crate::config::{self, DevConfig, SweepProfile};
 use crate::error::DevError;
 use crate::output;
 use crate::profile::PlannedSweep;
@@ -103,7 +103,7 @@ pub(super) struct ReadySweep<'s> {
     pub(super) sweep: &'s PlannedSweep,
     /// The sweep's attempt in the run's selection: its package selection.
     pub(super) attempt: check_cmd::Attempt,
-    pub(super) debug: bool,
+    pub(super) profile: SweepProfile,
     pub(super) env: Vec<(String, String)>,
     pub(super) allow_args: Vec<String>,
     /// The harnesses holding a match, run directly; `None` for a doc-only
@@ -129,8 +129,8 @@ pub(super) fn prepare_sweep<'s>(
     // as a `check` test phase's builds and runs do.
     check_cmd::enter_phase(check_cmd::Phase::Test);
 
-    let debug = resolve_debug(profile_override, cx.test_cfg, sweep.profile);
-    let profile_dir = if debug { "debug" } else { "release" };
+    let profile = resolve_profile(profile_override, cx.test_cfg, sweep.profile);
+    let profile_dir = profile.target_subdir();
 
     let (env_owned, allow_args) = sweep_env(
         sweep,
@@ -151,7 +151,7 @@ pub(super) fn prepare_sweep<'s>(
     // aggregator marks it as failed.
     let mut support: Vec<check_cmd::SupportArtifact> = Vec::new();
     for req in attempt.support() {
-        match run_pre_build(project_root, sweep, req, &env_refs, &allow_args, debug)? {
+        match run_pre_build(project_root, sweep, req, &env_refs, &allow_args, profile)? {
             Some(artifacts) => support.extend(artifacts),
             None => return Ok(SweepOutcome::Done(RunReport::bare(Outcome::BuildFailed))),
         }
@@ -166,7 +166,7 @@ pub(super) fn prepare_sweep<'s>(
         allow_args: &allow_args,
         run: single_run(sweep, attempt)?,
         jobs: cx.jobs,
-        debug,
+        profile,
     };
     let (focused, runtime_fingerprint) = if sweep.lane_exec.is_doc_only() {
         if timeout.is_some() {
@@ -201,7 +201,7 @@ pub(super) fn prepare_sweep<'s>(
     Ok(SweepOutcome::Ready(Box::new(ReadySweep {
         sweep,
         attempt: attempt.clone(),
-        debug,
+        profile,
         env: env_owned,
         allow_args,
         focused,
@@ -385,7 +385,7 @@ pub(super) fn plan_focused(
     }
     let mut listed: Vec<(&check_cmd::TestBinary, Vec<String>)> = Vec::new();
     for b in &split.eligible {
-        let names = focused::discover(b, &runtime, env, project_root)
+        let names = focused::discover(b, &runtime, env)
             .inspect_err(|_| {
                 output::error(&format!(
                     "test {}: discovery failed for {}",
@@ -447,11 +447,6 @@ pub(super) fn plan_focused(
     let mut runs = Vec::with_capacity(hits.len());
     for (b, m) in &hits {
         let (cwd, envelope) = runtime.envelope(b, env)?;
-        let cwd = if cwd.as_os_str() == "." {
-            project_root.to_path_buf()
-        } else {
-            cwd
-        };
         runs.push(HarnessRun {
             label: b.label(),
             program: b.executable.clone(),
@@ -560,10 +555,10 @@ pub(super) fn run_pre_build(
     req: &check_cmd::SupportRequest,
     env: &[(&str, &str)],
     allow_args: &[String],
-    debug: bool,
+    profile: SweepProfile,
 ) -> Result<Option<Vec<check_cmd::SupportArtifact>>, DevError> {
     let package = req.package();
-    let args = pre_build_argv(sweep, req, allow_args, debug);
+    let args = pre_build_argv(sweep, req, allow_args, profile);
     let line = format!("cargo {} (sweep build: {})", args.join(" "), sweep.label);
     output::detail(&line);
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -667,7 +662,7 @@ pub(super) fn pre_build_argv(
     sweep: &PlannedSweep,
     req: &check_cmd::SupportRequest,
     allow_args: &[String],
-    debug: bool,
+    profile: SweepProfile,
 ) -> Vec<String> {
     // `json-render-diagnostics`: the artifact stream on stdout names the
     // support executables the run's inventory hashes, while compiler
@@ -677,16 +672,8 @@ pub(super) fn pre_build_argv(
         "build".into(),
         "--message-format=json-render-diagnostics".into(),
     ];
-    args.extend(sweep.unification_args());
     args.extend(allow_args.iter().cloned());
-    if !debug {
-        args.push("--release".into());
-    }
-    // The sweep's features projected onto the support package alone.
-    args.extend(req.feature_args().iter().cloned());
-    // Its own explicit single-package selection, never the run's: a support
-    // package is usually not the package under test.
-    args.extend(req.package_args());
+    args.extend(check_cmd::support_selection_args(sweep, req, profile));
     args
 }
 
@@ -718,7 +705,7 @@ pub(super) struct BuildShape<'a> {
     /// projected onto it.
     pub(super) run: &'a check_cmd::ResolutionRun,
     pub(super) jobs: Option<u32>,
-    pub(super) debug: bool,
+    pub(super) profile: SweepProfile,
 }
 
 impl BuildShape<'_> {
@@ -739,21 +726,17 @@ impl BuildShape<'_> {
 /// everything past the `--` split belongs to libtest.
 pub(super) fn cargo_head(shape: &BuildShape<'_>, leading: &[&str]) -> Vec<String> {
     let mut args: Vec<String> = leading.iter().map(|s| (*s).to_owned()).collect();
-    // The lane's pinned resolution, same as every cargo command `check`
-    // builds. This path is already one package per invocation (`-p pkg`
-    // below), so package mode's one-resolution-per-package rule is satisfied
-    // by construction and needs no loop here.
-    args.extend(shape.sweep.unification_args());
     args.extend(shape.allow_args.iter().cloned());
-    if !shape.debug {
-        args.push("--release".into());
-    }
-    args.extend(shape.run.feature_args().iter().cloned());
+    args.extend(check_cmd::cargo_selection_args(
+        shape.sweep,
+        shape.run,
+        shape.profile,
+        check_cmd::CargoSelectionPurpose::Shape,
+    ));
     if let Some(j) = shape.jobs {
         args.push("-j".into());
         args.push(j.to_string());
     }
-    args.extend(shape.run.package_args());
     args
 }
 
@@ -934,30 +917,48 @@ pub(super) fn lint_allow_flags(dev_config: &DevConfig) -> Vec<String> {
         .map_or_else(Vec::new, config::check::test_phase_allow_flags)
 }
 
-/// Resolve one sweep's cargo profile for `brokkr test` to a `debug` bool,
+/// Resolve one sweep's cargo profile for `brokkr test` as its typed profile,
 /// in precedence order:
-///   1. An explicit `--debug`/`--release` on the CLI (`profile_override`:
-///      `Some(true)` / `Some(false)`) - the per-invocation answer always wins.
+///   1. An explicit `--debug`/`--release` on the CLI - the per-invocation
+///      answer always wins.
 ///   2. The sweep's own `[[check]] profile`, when it names one. A sweep that
 ///      declares its profile has a reason (a wall-clock contract that only
 ///      holds optimized, a lane pinned to dev for speed), and a project-wide
 ///      default must not silently overrule it - that is the whole point of
 ///      the key: `brokkr test <that test>` runs it the way it is meant to run
 ///      without the caller having to remember a flag.
-///   3. `[test] debug`, the project-wide default, `false` (release) when
+///   3. `[test] debug`, the project-wide default, release when
 ///      there is no `[test]` section at all.
+pub(super) fn resolve_profile(
+    profile_override: Option<bool>,
+    test_cfg: Option<&crate::config::TestConfig>,
+    sweep_profile: Option<crate::config::SweepProfile>,
+) -> SweepProfile {
+    if let Some(explicit) = profile_override {
+        return if explicit {
+            SweepProfile::Dev
+        } else {
+            SweepProfile::Release
+        };
+    }
+    if let Some(p) = sweep_profile {
+        return p;
+    }
+    if test_cfg.is_some_and(|t| t.debug) {
+        SweepProfile::Dev
+    } else {
+        SweepProfile::Release
+    }
+}
+
+/// The selection planner compares debug/release as a boolean; command argv
+/// and target paths keep the resolved `SweepProfile` itself.
 pub(super) fn resolve_debug(
     profile_override: Option<bool>,
     test_cfg: Option<&crate::config::TestConfig>,
     sweep_profile: Option<crate::config::SweepProfile>,
 ) -> bool {
-    if let Some(explicit) = profile_override {
-        return explicit;
-    }
-    if let Some(p) = sweep_profile {
-        return p == crate::config::SweepProfile::Dev;
-    }
-    test_cfg.is_some_and(|t| t.debug)
+    resolve_profile(profile_override, test_cfg, sweep_profile) == SweepProfile::Dev
 }
 
 /// Resolve the cargo package name in precedence order:

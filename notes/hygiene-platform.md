@@ -77,14 +77,6 @@ Reported by: elivagar, pbfhogg-nidhogg, piners, measurement-storage, ratatoskr.
 
 Internal `expect`/`unreachable!` in production: elivagar `engine.rs`, `compare.rs`, `overlay.rs`, `pairing.rs`, `mutate.rs`, `dispatch.rs`; pbfhogg (BUG-115); piners `measured.rs` `MeasureMode::Run => unreachable!` for a dispatch contract (refuses `--bench` at runtime instead of clap conflicts); `sidecar_cmd` `.expect` on a clap guarantee and `run_compare` indexing `uuids[0]`/`[1]`; ratatoskr `run_gate_hook`'s `.expect("gate existence already validated upstream")` depending on call order. Allowed only because `expect_used`/`indexing_slicing` aren't denied (PLT-002). PMTiles decoding panics: BUG-062.
 
-## PLT-011 - Lock-protocol literals are copied across the bin boundary
-
-Reported by: process-control.
-
-`rustc_guard.rs` hand-spells `"BROKKR_HOLD_NONCE"`, `"BROKKR_COMPILE_LEASE"`, `"BROKKR_CARGO"`, `".brokkr"`, `"brokkr.lock"`, `"compile.lock"`, the `auth=` key, `auth_hash`, and handshake `protocol=1`, pairing with `hold.rs` constants, `lockfile.rs` paths and `guard::GUARD_PROTOCOL`. The stated reason ("no lib target") doesn't force the copy: a `#[path = "../lock_protocol.rs"] mod protocol;` included by both bins would share them. Hunter's further suggestion: `BROKKR_LONG_VERSION` applies to both bins, so the guard could print its build hash for an exact comparison, replacing the hand-bumped protocol number. `guard::probe_guard` uses `Duration::from_secs(3)` and the literal `"within 3s"`.
-
-Design hunt (process-control): none of these copies is tested pairwise, and `hold.rs` carries a comment block explaining why `BROKKR_CARGO` cannot be a shared constant. The hunter's `src/protocol.rs`, included by the guard via `#[path]` and dependency-free apart from `libc` and `xxhash`, would hold the paths, env names, the token types and `AuthHash`, the shared held-probe, `read_auth`/the lock-record decoder for `auth`, `GUARD_PROTOCOL` with the handshake line format (printed by one side, parsed by the other) and the compile-lease open/flock; the guard keeps `classify`, `Decision` and `main`, and every "keep them edited together" comment becomes a compile error. The held-probe disagreement this would also fix is filed in `bugs.md`.
-
 ## PLT-012 - Interrupt handling residue outside `SigtermGuard`
 
 Reported by: process-control, ratatoskr.

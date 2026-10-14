@@ -12,6 +12,23 @@ use crate::error::DevError;
 use crate::output;
 use crate::output::CapturedOutput;
 
+/// Stable labels shared by individual verify dispatch and `verify all`.
+pub(super) mod labels {
+    pub const SORT: &str = "sort";
+    pub const CAT: &str = "cat";
+    pub const EXTRACT: &str = "extract";
+    pub const MULTI_EXTRACT: &str = "multi-extract";
+    pub const TAGS_FILTER: &str = "tags-filter";
+    pub const GETID_REMOVEID: &str = "getid-removeid";
+    pub const ADD_LOCATIONS_TO_WAYS: &str = "add-locations-to-ways";
+    pub const CHECK_REFS: &str = "check-refs";
+    pub const APPLY_CHANGES: &str = "apply-changes";
+    pub const DIFF_OSC: &str = "diff --format osc";
+    pub const RENUMBER: &str = "renumber";
+    pub const DIFF: &str = "diff";
+    pub const ALL: &str = "all";
+}
+
 // ---------------------------------------------------------------------------
 // VerifyHarness
 // ---------------------------------------------------------------------------
@@ -463,12 +480,7 @@ fn is_plain_component(name: &str) -> bool {
 /// The per-kind `(monotonic: yes|no)` id-range lines are deliberately ignored
 /// - the top-level `Ordered:` value already folds in monotonicity.
 fn parse_ordered(inspect_text: &str) -> Option<bool> {
-    for line in inspect_text.lines() {
-        if let Some(rest) = line.trim_start().strip_prefix("Ordered:") {
-            return Some(rest.trim() == "yes");
-        }
-    }
-    None
+    super::inspect_report::InspectReport::parse(inspect_text).ordered
 }
 
 #[cfg(test)]

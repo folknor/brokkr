@@ -19,6 +19,10 @@ fn open_db(project_root: &Path) -> Result<SnapshotDb, DevError> {
     engine::open_results_db(project_root, SnapshotDb::open)
 }
 
+fn open_db_read_only(project_root: &Path) -> Result<SnapshotDb, DevError> {
+    engine::open_results_db(project_root, SnapshotDb::open_read_only)
+}
+
 struct SnapshotOutcome {
     pixel_diff_pct: Option<f64>,
     status: status::Status,
@@ -74,6 +78,23 @@ fn resolve_snapshot<'a>(
         return Ok(snapshot);
     }
     engine::resolve_prefix(&config.snapshots, id)
+}
+
+fn validate_approval_ready(
+    snapshot_id: &str,
+    latest: Option<&super::db::ResultRow>,
+    output_exists: bool,
+) -> Result<(), DevError> {
+    match latest {
+        Some(result) if result.status == status::Status::Error => Err(DevError::Verify(format!(
+            "latest run of snapshot '{snapshot_id}' is ERROR - nothing to approve; fix it and \
+             rerun `brokkr visual {snapshot_id}`"
+        ))),
+        Some(_) if output_exists => Ok(()),
+        _ => Err(DevError::Verify(format!(
+            "no output.png for snapshot '{snapshot_id}' - run `brokkr visual {snapshot_id}` first"
+        ))),
+    }
 }
 
 fn resolve_snapshots<'a>(
@@ -397,7 +418,7 @@ impl Subject for SnapshotRunner<'_> {
 // Test command
 // ---------------------------------------------------------------------------
 
-/// `project_root` is the config dir (snapshots, results.db); `build_root` is
+/// `project_root` is the config dir (snapshots, the visual store); `build_root` is
 /// the code tree cargo and git run in - they differ only under the
 /// one-level-up layout.
 pub(crate) fn test(
@@ -455,7 +476,7 @@ pub(crate) fn list(
     project::require(project, Project::Sluggrs, "list")?;
     validate_config(sluggrs_config)?;
 
-    let db = open_db(project_root)?;
+    let db = open_db_read_only(project_root)?;
 
     output::sluggrs_msg(&format!(
         "  {:<25} {:<40} {}",
@@ -482,7 +503,7 @@ pub(crate) fn list(
 // ---------------------------------------------------------------------------
 
 /// `build_root` is the code tree whose cleanliness and commit the approval
-/// is pinned to; `project_root` holds the snapshots and results.db.
+/// is pinned to; `project_root` holds the snapshots and the visual store.
 pub(crate) fn approve(
     project: Project,
     project_root: &Path,
@@ -504,22 +525,8 @@ pub(crate) fn approve(
 
     // Only approve an output the latest run actually produced and scored:
     // an ERROR row means output.png is missing or untrustworthy.
-    match db.latest_result_for_snapshot(&snapshot.id)? {
-        Some(r) if r.status == status::Status::Error => {
-            return Err(DevError::Verify(format!(
-                "latest run of snapshot '{}' is ERROR \u{2014} nothing to approve; fix it and \
-                 rerun `brokkr visual {}`",
-                snapshot.id, snapshot.id,
-            )));
-        }
-        Some(_) if output_png.exists() => {}
-        _ => {
-            return Err(DevError::Verify(format!(
-                "no output.png for snapshot '{}' \u{2014} run `brokkr visual {}` first",
-                snapshot.id, snapshot.id,
-            )));
-        }
-    }
+    let latest = db.latest_result_for_snapshot(&snapshot.id)?;
+    validate_approval_ready(&snapshot.id, latest.as_ref(), output_png.exists())?;
 
     // Approving makes this output the image every later run is compared
     // against, so the ratchet value that belongs with it is its diff against
@@ -558,7 +565,7 @@ pub(crate) fn status(
     project::require(project, Project::Sluggrs, "visual-status")?;
     validate_config(sluggrs_config)?;
 
-    let db = open_db(project_root)?;
+    let db = open_db_read_only(project_root)?;
     let approvals = db.all_approvals()?;
 
     output::sluggrs_msg(&format!(
@@ -611,7 +618,7 @@ fn print_snapshot_status(
 pub(crate) fn report(project: Project, project_root: &Path, run_id: &str) -> Result<(), DevError> {
     project::require(project, Project::Sluggrs, "report")?;
 
-    let db = open_db(project_root)?;
+    let db = open_db_read_only(project_root)?;
     let results = db.run_results(run_id)?;
 
     if results.is_empty() {
@@ -642,4 +649,73 @@ pub(crate) fn report(project: Project, project_root: &Path, run_id: &str) -> Res
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::panic, clippy::unwrap_used)]
+
+    use super::*;
+
+    fn snapshot(id: &str) -> SluggrsSnapshot {
+        SluggrsSnapshot {
+            id: id.into(),
+            description: format!("{id} snapshot"),
+            fonts: Vec::new(),
+            optional_fonts: None,
+        }
+    }
+
+    fn config(snapshots: Vec<SluggrsSnapshot>) -> SluggrsConfig {
+        SluggrsConfig {
+            width: 800,
+            height: 600,
+            pixel_diff_threshold: 0.5,
+            snapshots,
+        }
+    }
+
+    fn result(status: status::Status) -> crate::sluggrs::db::ResultRow {
+        crate::sluggrs::db::ResultRow {
+            run_id: "run".into(),
+            subject_id: "snapshot".into(),
+            pixel_diff_pct: Some(1.0),
+            element_match_pct: None,
+            status,
+        }
+    }
+
+    #[test]
+    fn snapshot_resolution_prefers_exact_ids_and_rejects_ambiguous_prefixes() {
+        let cfg = config(vec![
+            snapshot("mail-a"),
+            snapshot("mail-b"),
+            snapshot("other"),
+        ]);
+
+        assert_eq!(resolve_snapshot(&cfg, "mail-a").unwrap().id, "mail-a");
+        assert_eq!(resolve_snapshot(&cfg, "other").unwrap().id, "other");
+        let error = resolve_snapshot(&cfg, "mail-").unwrap_err().to_string();
+        assert!(error.contains("ambiguous snapshot prefix 'mail-'"));
+        assert!(error.contains("mail-a, mail-b"));
+    }
+
+    #[test]
+    fn snapshot_selection_refuses_a_wide_run_when_a_selector_is_present() {
+        let cfg = config(vec![snapshot("mail-a"), snapshot("mail-b")]);
+        assert_eq!(resolve_snapshots(&cfg, None, true).unwrap().len(), 2);
+        assert!(resolve_snapshots(&cfg, Some("mail-a"), true).is_err());
+        assert!(resolve_snapshots(&cfg, None, false).is_err());
+    }
+
+    #[test]
+    fn approval_requires_a_scored_run_and_the_current_output_image() {
+        let pass = result(status::Status::Pass);
+        assert!(validate_approval_ready("snapshot", Some(&pass), true).is_ok());
+
+        let error = result(status::Status::Error);
+        assert!(validate_approval_ready("snapshot", Some(&error), true).is_err());
+        assert!(validate_approval_ready("snapshot", Some(&pass), false).is_err());
+        assert!(validate_approval_ready("snapshot", None, true).is_err());
+    }
 }

@@ -97,6 +97,10 @@ fn split_semver(version: &str) -> (String, String, String, String) {
 /// does not vary per binary.
 #[derive(Debug)]
 pub(crate) struct DirectRuntime {
+    /// The fallback manifest/cwd for an artifact whose metadata omitted its
+    /// package directory. This is part of the envelope so listing and running
+    /// cannot apply different fallback rules.
+    project_root: PathBuf,
     /// Full package id -> manifest facts, for `CARGO_PKG_*`.
     packages: HashMap<String, PkgRuntimeMeta>,
     index: BuildRuntimeIndex,
@@ -122,6 +126,7 @@ impl DirectRuntime {
         let effective_env = rustflags::EffectiveEnv::new(env_refs);
         let cargo_config = rustflags::CargoLaunchConfig::discover(project_root, effective_env);
         Ok(Self {
+            project_root: project_root.to_path_buf(),
             packages: workspace_pkg_meta(project_root)?,
             linked_paths,
             index,
@@ -144,8 +149,10 @@ impl DirectRuntime {
         binary: &TestBinary,
         env_refs: &[(&str, &str)],
     ) -> Result<(PathBuf, Vec<(String, String)>), DevError> {
-        let cwd = if binary.manifest_dir.as_os_str().is_empty() {
-            PathBuf::from(".")
+        let cwd = if binary.manifest_dir.as_os_str().is_empty()
+            || binary.manifest_dir == Path::new(".")
+        {
+            self.project_root.clone()
         } else {
             binary.manifest_dir.clone()
         };
@@ -347,16 +354,16 @@ fn is_rustup_proxy(cargo: &Path) -> bool {
 
 /// Every workspace member's manifest facts, keyed by full package id.
 fn workspace_pkg_meta(project_root: &Path) -> Result<HashMap<String, PkgRuntimeMeta>, DevError> {
-    let captured = run_check_cargo(&["metadata", "--no-deps", "--format-version", "1"],
-        project_root, &[]
+    let metadata = crate::cargo::metadata::load(
+        project_root,
+        crate::cargo::metadata::Query::workspace(),
+        &[],
+        current_phase(),
     )?;
-    if !captured.success() {
-        return Err(DevError::Build(format!(
-            "cargo metadata failed: {}",
-            String::from_utf8_lossy(&captured.stderr)
-        )));
-    }
-    let val: serde_json::Value = serde_json::from_slice(&captured.stdout)
+    let raw = metadata
+        .raw_json()
+        .ok_or_else(|| DevError::Internal("cargo metadata snapshot kept no JSON".into()))?;
+    let val: serde_json::Value = serde_json::from_str(raw)
         .map_err(|e| DevError::Build(format!("cargo metadata output unparseable: {e}")))?;
     let Some(packages) = val.get("packages").and_then(serde_json::Value::as_array) else {
         return Err(DevError::Build("cargo metadata missing packages".into()));
@@ -525,6 +532,7 @@ mod direct_runtime_tests {
     fn runtime_with(index: BuildRuntimeIndex, packages: HashMap<String, PkgRuntimeMeta>) -> DirectRuntime {
         let linked_paths = index.all_linked_paths();
         DirectRuntime {
+            project_root: PathBuf::from("/workspace"),
             packages,
             linked_paths,
             index,

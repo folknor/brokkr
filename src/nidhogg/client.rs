@@ -100,23 +100,23 @@ pub fn build_batch_queries(bbox: &Bbox) -> (String, Vec<(String, String)>) {
 
 /// Build the `/api/query` URL for the given port.
 pub fn query_url(port: u16) -> String {
-    format!("http://localhost:{port}/api/query")
+    super::policy::ServerAddress::localhost(port).url("api/query")
 }
 
 /// Build the `/api/query_batch` URL for the given port.
 pub fn batch_query_url(port: u16) -> String {
-    format!("http://localhost:{port}/api/query_batch")
+    super::policy::ServerAddress::localhost(port).url("api/query_batch")
 }
 
 /// Build the `/api/tiles/{z}/{x}/{y}` URL for the given port and tile coordinates.
 pub fn tile_url(port: u16, z: u32, x: u32, y: u32) -> String {
-    format!("http://localhost:{port}/api/tiles/{z}/{x}/{y}")
+    super::policy::ServerAddress::localhost(port).url(&format!("api/tiles/{z}/{x}/{y}"))
 }
 
 /// Build the `/api/geocode?q=<encoded>` URL for the given port and search term.
 pub fn geocode_url(port: u16, term: &str) -> String {
     let encoded = url_encode(term);
-    format!("http://localhost:{port}/api/geocode?q={encoded}")
+    super::policy::ServerAddress::localhost(port).url(&format!("api/geocode?q={encoded}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -154,12 +154,13 @@ const ERROR_BODY_PREVIEW: usize = 300;
 /// carries that line plus a preview of the response body `--fail-with-body`
 /// kept, so an HTTP 500's explanation survives.
 fn run_curl_body(request_args: &[&str]) -> Result<String, DevError> {
+    let max_time = super::policy::curl_seconds(super::policy::CLIENT_REQUEST_TIMEOUT);
     let mut args = vec![
         "-sS",
         "--compressed",
         "--fail-with-body",
         "--max-time",
-        "30",
+        &max_time,
     ];
     args.extend_from_slice(request_args);
     let output = Command::new("curl")
@@ -203,7 +204,9 @@ fn run_curl_body(request_args: &[&str]) -> Result<String, DevError> {
 /// healthy answers (refused, timed out, non-200). Errors only when curl
 /// itself cannot be run: "curl is not installed" is not "server not running".
 pub fn health_check(port: u16) -> Result<bool, DevError> {
-    let url = format!("http://localhost:{port}/api/health");
+    let url = super::policy::ServerAddress::localhost(port).url("api/health");
+    let connect_timeout = super::policy::curl_seconds(super::policy::HEALTH_CONNECT_TIMEOUT);
+    let max_time = super::policy::curl_seconds(super::policy::HEALTH_REQUEST_TIMEOUT);
 
     let output = Command::new("curl")
         .args([
@@ -213,9 +216,9 @@ pub fn health_check(port: u16) -> Result<bool, DevError> {
             "-w",
             "%{http_code}",
             "--connect-timeout",
-            "2",
+            &connect_timeout,
             "--max-time",
-            "5",
+            &max_time,
             &url,
         ])
         .stdout(Stdio::piped())
@@ -259,17 +262,6 @@ pub fn describe_curl_error(err: &DevError) -> String {
         // `Spawn` renders as "could not run curl: <why>".
         other => other.to_string(),
     }
-}
-
-// ---------------------------------------------------------------------------
-// Path helpers
-// ---------------------------------------------------------------------------
-
-/// Convert a path to a `&str`, returning a clear error if it's not valid UTF-8.
-pub fn path_str(path: &std::path::Path) -> Result<&str, crate::error::DevError> {
-    path.to_str().ok_or_else(|| {
-        crate::error::DevError::Config(format!("path is not valid UTF-8: {}", path.display()))
-    })
 }
 
 // ---------------------------------------------------------------------------

@@ -1,7 +1,7 @@
 //! Route the parsed command into a concrete execution input.
 use crate::cli::{Command, ModeArgs, PbfArgs};
-use crate::measure::CommandParams;
-use crate::pbfhogg::commands::PbfhoggCommand;
+use crate::pbfhogg::commands::{InspectMode, PbfhoggCommand, TagsFilterInput};
+use crate::pbfhogg::context::CommandParams;
 
 // A routed command is built once per process and consumed at once, so the
 // size gap between the variants costs nothing worth a box on every arm.
@@ -41,10 +41,13 @@ impl Command {
                     mode,
                     pbf,
                     command: PbfhoggCommand::Inspect {
-                        nodes,
-                        tags,
-                        type_filter,
-                        extended,
+                        mode: if tags {
+                            InspectMode::Tags { type_filter }
+                        } else if nodes {
+                            InspectMode::Nodes
+                        } else {
+                            InspectMode::Default { extended }
+                        },
                     },
                     osc: None,
                     params,
@@ -144,7 +147,15 @@ impl Command {
                 snapshot,
                 jobs,
             } => {
-                let input_kind_osc = input_kind.as_deref() == Some("osc");
+                let input = if input_kind.as_deref() == Some("osc") {
+                    TagsFilterInput::Osc
+                } else {
+                    TagsFilterInput::Pbf {
+                        omit_referenced,
+                        invert: invert_match,
+                        remove_tags,
+                    }
+                };
                 let params = CommandParams {
                     snapshot,
                     jobs,
@@ -153,13 +164,7 @@ impl Command {
                 RoutedCommand::Pbf {
                     mode,
                     pbf,
-                    command: PbfhoggCommand::TagsFilter {
-                        filter,
-                        omit_referenced,
-                        invert_match,
-                        remove_tags,
-                        input_kind_osc,
-                    },
+                    command: PbfhoggCommand::TagsFilter { filter, input },
                     osc: osc_seq,
                     params,
                 }

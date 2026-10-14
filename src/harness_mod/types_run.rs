@@ -1,10 +1,10 @@
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::build::CargoProfile;
 use crate::config::DriveConfig;
 use crate::db::{
-    self, Distribution, DistributionUs, HotpathData, KvClass, KvPair, KvValue, ResultsDb, RunRow,
+    self, Distribution, HotpathData, KvClass, KvPair, KvValue, ResultsDb, RunRow, Wall,
 };
 use crate::error::DevError;
 use crate::git::GitInfo;
@@ -47,7 +47,7 @@ pub struct BenchResult {
     /// 100-200us, which integer milliseconds flatten to nothing. Filled by
     /// the stderr-kv path (from a fractional `elapsed_ms=6.847` line) and by
     /// the paths brokkr times itself from an exact `Duration`
-    /// (`run_external`/`run_external_ok`, `run_hotpath_capture`, and
+    /// (`run_external`/`run_external_ok`, `BenchHarness::capture_hotpath`, and
     /// `run_distribution`, whose closures hand back a `Duration` and which
     /// records the fastest sample here). `run_internal` carries whatever its
     /// closure returned; a closure that only had milliseconds leaves it
@@ -57,13 +57,13 @@ pub struct BenchResult {
     /// them as independent measurements.
     pub elapsed_us: Option<i64>,
     pub kv: Vec<KvPair>,
-    /// Per-iteration wall times in execution order, filled in by the harness
-    /// `run_*` loops on the aggregate best-of-N result they return.
+    /// Per-iteration wall times in execution order, attached by `record`
+    /// to the aggregate best-of-N result.
     ///
     /// Always empty on the `BenchResult` a per-iteration closure hands back -
-    /// one iteration doesn't have a list of iterations. The loop collects each
-    /// iteration's `elapsed_ms` as it goes and attaches the vector to the
-    /// winner before recording, so `elapsed_ms` is the best of `iterations`.
+    /// one iteration doesn't have a list of iterations. Recording collects each
+    /// iteration's `elapsed_ms` and attaches the vector to the winner, so
+    /// `elapsed_ms` is the best of `iterations`.
     ///
     /// Ordering is the payload: `--bench N` reports the minimum, which hides
     /// whether the run drifted (iteration 3 slowest) or started cold
@@ -71,27 +71,6 @@ pub struct BenchResult {
     pub iterations: Vec<i64>,
     pub distribution: Option<Distribution>,
     pub hotpath: Option<HotpathData>,
-}
-
-/// Sidecar payload collected during a benched run but not yet persisted.
-///
-/// The kv-parsing harness path (`run_external_with_kv_raw`) hands stderr back
-/// to the caller for post-processing before `record_with_pending` mints the run's
-/// UUID. It therefore returns the sidecar data here instead of storing it
-/// eagerly, and the caller flushes it under the recorded UUID via
-/// `commit_sidecar`. Storing eagerly (the pre-fix behaviour) passed `None` for
-/// the UUID, so every success-path store landed under the `dirty` alias and
-/// `brokkr sidecar <uuid>` found nothing for the recorded row - and, with N
-/// modes per invocation, each mode clobbered the previous `dirty`.
-pub struct PendingSidecar {
-    runs: Vec<crate::sidecar::SidecarData>,
-    best_run_idx: usize,
-    info: crate::db::sidecar::RunInfo,
-    /// Per-iteration walls in microseconds, deferred for the same reason as
-    /// the sidecar payload: the row is recorded by the caller, after the
-    /// loop, via [`BenchHarness::record_with_pending`]. Kept here rather than
-    /// on `BenchResult`, which loops outside this module also build.
-    iterations_us: Vec<i64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -137,10 +116,10 @@ pub struct BenchHarness {
     /// distinguished across result rows.
     env_kv: Vec<crate::db::KvPair>,
     /// Unix epoch at which the current measurement loop began its first
-    /// iteration; 0 until a `run_*` loop sets it.
+    /// iteration; 0 until `MeasurementLoop` sets it.
     ///
     /// `prev.gap_seconds` has to be measured to the moment this run *started*,
-    /// but it is written by `build_row` during `record_result` - which happens
+    /// but it is written by `build_row` during `record` - which happens
     /// after every iteration has finished. Reading the clock there would fold
     /// this run's own duration into the gap, so a 10-minute cell launched
     /// immediately after its predecessor would report a ~10-minute gap and
@@ -292,554 +271,99 @@ impl BenchHarness {
     }
 
     /// Expose the held lock so callers that spawn children outside of
-    /// `run_external` (notably `run_hotpath_capture`) can still report
+    /// `run_external` (notably `BenchHarness::capture_hotpath`) can still report
     /// `child_pid` into the lockfile for `brokkr lock`.
     pub fn lock(&self) -> &LockGuard {
         &self.lock
     }
 
-    /// Internal timing: closure called N times, returns `BenchResult`.
-    /// Best-of-N (minimum `elapsed_ms`).
+    /// Collect closure-provided timing using the shared measurement loop.
     pub fn run_internal<F>(&self, config: &BenchConfig, f: F) -> Result<BenchResult, DevError>
-    where
-        F: Fn(usize) -> Result<BenchResult, DevError>,
+    where F: Fn(usize) -> Result<BenchResult, DevError>,
     {
-        self.mark_measure_start();
-        let mut best: Option<BenchResult> = None;
-        let mut walls: Vec<i64> = Vec::with_capacity(config.runs);
-        let mut walls_us: Vec<Option<i64>> = Vec::with_capacity(config.runs);
-        let total = clamp_u32(config.runs);
-
-        for i in 0..config.runs {
-            announce_run(i, config.runs);
-            self.lock.set_progress(clamp_u32(i + 1), total);
-            let result = f(i)?;
-            walls.push(result.elapsed_ms);
-            walls_us.push(result.elapsed_us);
-            best = Some(pick_best(best, result));
-        }
-
-        let mut best =
-            best.ok_or_else(|| DevError::Config("benchmark requires at least 1 run".into()))?;
-        best.iterations = walls;
-
-        self.record_measured(config, &best, &all_or_none(walls_us), None)?;
-        Ok(best)
+        let mut measurement = self.measure(config, None, WallSource::Closure, false,
+            |i, _| f(i).map(Iteration::from_result))?;
+        self.record(config, &mut measurement, |_, _| Ok(()))
     }
 
-    /// Internal timing like [`run_internal`](Self::run_internal), but the
-    /// closure additionally hands back the `SidecarData` collected during each
-    /// run (as returned by [`run_hotpath_capture`]), and that data is persisted
-    /// to sidecar.db under the recorded results UUID.
-    ///
-    /// `run_internal` alone discards sidecar data - it has no store step. This
-    /// is the hotpath/alloc counterpart to `run_external_ok`'s sidecar storage,
-    /// so `brokkr sidecar <uuid>` works for `--hotpath`/`--alloc` runs too. The
-    /// sidecar payload for the best-of-N run (lowest `elapsed_ms`, matching
-    /// [`pick_best`]) is flagged as `best_run_idx`. `program` supplies the
-    /// binary path for sidecar provenance ([`build_run_info`](Self::build_run_info)).
-    pub fn run_hotpath<F>(
-        &self,
-        config: &BenchConfig,
-        program: &Path,
-        f: F,
-    ) -> Result<BenchResult, DevError>
-    where
-        F: Fn(usize) -> Result<(BenchResult, crate::sidecar::SidecarData), DevError>,
+    /// Collect captured profiling iterations, including their failure evidence.
+    pub fn run_hotpath<F>(&self, config: &BenchConfig, program: &Path, f: F)
+        -> Result<BenchResult, DevError>
+    where F: Fn(usize, &mut crate::sidecar::SidecarFifo) -> Result<Iteration, DevError>,
     {
-        let start_epoch = wall_clock_epoch();
-        self.measure_start_epoch.set(start_epoch);
-        let mut best: Option<BenchResult> = None;
-        let mut best_run_idx: usize = 0;
-        let mut walls: Vec<i64> = Vec::with_capacity(config.runs);
-        let mut walls_us: Vec<Option<i64>> = Vec::with_capacity(config.runs);
-        let mut sidecar_runs: Vec<crate::sidecar::SidecarData> =
-            Vec::with_capacity(config.runs);
-        let total = clamp_u32(config.runs);
-
-        for i in 0..config.runs {
-            announce_run(i, config.runs);
-            self.lock.set_progress(clamp_u32(i + 1), total);
-            // A stale parked failure from some earlier, unrelated capture
-            // must not be attributed to this iteration.
-            drop(take_failed_capture());
-            let (result, sidecar) = match f(i) {
-                Ok(pair) => pair,
-                Err(e) => {
-                    // Keep what was collected - the failing run's trajectory
-                    // (parked by `run_hotpath_capture`) and every earlier
-                    // run's - under `dirty`, as `run_external_*` do. The
-                    // loop used to return here and drop all of it.
-                    let (pid, ending) = match take_failed_capture() {
-                        Some(failed) => {
-                            let pid = Some(failed.pid);
-                            sidecar_runs.push(failed.data);
-                            let ending = sidecar_runs.last().map(|data| data.ending.clone());
-                            (pid, ending)
-                        }
-                        None => (None, None),
-                    };
-                    if !sidecar_runs.is_empty() {
-                        let info =
-                            self.build_run_info(config, program, start_epoch, pid, ending);
-                        let idx = sidecar_runs.len() - 1;
-                        self.store_sidecar(None, &sidecar_runs, idx, Some(&info)).ok();
-                    }
-                    return Err(e);
-                }
-            };
-            sidecar_runs.push(sidecar);
-            walls.push(result.elapsed_ms);
-            walls_us.push(result.elapsed_us);
-            // Track the best run's index consistently with `pick_best`, which
-            // only replaces on a strict improvement (keeps current on ties)
-            // and compares on the same key.
-            if best
-                .as_ref()
-                .is_none_or(|b| bench_ordering_key(&result) < bench_ordering_key(b))
-            {
-                best_run_idx = i;
-            }
-            best = Some(pick_best(best, result));
-        }
-
-        let mut best =
-            best.ok_or_else(|| DevError::Config("benchmark requires at least 1 run".into()))?;
-        best.iterations = walls;
-
-        // The closure reaped the child, so its PID is unknown here. Preserve
-        // the actual ending from the sidecar payload and leave the PID absent.
-        let ending = sidecar_runs
-            .get(best_run_idx)
-            .map(|data| data.ending.clone());
-        let info = self.build_run_info(config, program, start_epoch, None, ending);
-        let fired_stop_marker = sidecar_runs
-            .get(best_run_idx)
-            .and_then(|data| data.fired_stop_marker.as_deref());
-        let uuid = match self.record_measured(
-            config,
-            &best,
-            &all_or_none(walls_us),
-            fired_stop_marker,
-        ) {
-            Ok(uuid) => uuid,
-            Err(e) => {
-                // The row is lost; the trajectory need not be.
-                self.store_sidecar(None, &sidecar_runs, best_run_idx, Some(&info)).ok();
-                return Err(e);
-            }
-        };
-        self.store_sidecar(uuid.as_deref(), &sidecar_runs, best_run_idx, Some(&info))?;
-
-        Ok(best)
+        let mut measurement = self.measure(config, Some(program), WallSource::External, true,
+            |i, fifo| f(i, fifo.expect("profiled loop owns a FIFO")))?;
+        self.record(config, &mut measurement, |_, _| Ok(()))
     }
 
-    /// External timing: run subprocess N times with sidecar monitoring.
-    ///
-    /// The sidecar samples `/proc` metrics at 100ms intervals and reads phase
-    /// markers from a FIFO. Sidecar data is stored in `.brokkr/sidecar.db`.
-    ///
-    /// The sidecar takes ownership of each `Child` process, drains
-    /// stdout/stderr in background threads (preventing pipe-buffer deadlock),
-    /// and records the child's exact exit time for wall-clock measurement.
-    ///
-    /// The winning run's stderr is scraped for `key=value` counters, which is
-    /// free - stderr is captured either way, and was previously dropped. A
-    /// wall on its own cannot distinguish "the code got faster" from "the code
-    /// did less"; the counters are what answer that. An `elapsed_ms` on stderr
-    /// is kept as an ordinary counter here and does NOT replace the measured
-    /// wall - see [`run_external_with_kv`](Self::run_external_with_kv) for the
-    /// path that believes it instead.
-    pub fn run_external(
-        &self,
-        config: &BenchConfig,
-        program: &Path,
-        args: &[&str],
-        cwd: &Path,
-    ) -> Result<BenchResult, DevError> {
+    pub fn run_external(&self, config: &BenchConfig, program: &Path, args: &[&str], cwd: &Path)
+        -> Result<BenchResult, DevError>
+    {
         self.run_external_ok(config, program, args, cwd, &[])
     }
 
-    /// Like `run_external`, but treats the given exit codes as success.
-    /// For example, `diff` exits 1 when differences are found (not an error).
-    pub fn run_external_ok(
-        &self,
-        config: &BenchConfig,
-        program: &Path,
-        args: &[&str],
-        cwd: &Path,
-        ok_codes: &[i32],
-    ) -> Result<BenchResult, DevError> {
+    pub fn run_external_ok(&self, config: &BenchConfig, program: &Path, args: &[&str], cwd: &Path,
+        ok_codes: &[i32]) -> Result<BenchResult, DevError>
+    {
         self.run_external_prepared(config, program, args, cwd, ok_codes, || Ok(()))
     }
 
-    /// Shared body of the external-timing paths.
-    ///
-    /// The winner is chosen by external wall; the counters never influence
-    /// which iteration is "best", they only describe it.
-    pub(crate) fn run_external_prepared<F>(
-        &self,
-        config: &BenchConfig,
-        program: &Path,
-        args: &[&str],
-        cwd: &Path,
-        ok_codes: &[i32],
-        prepare: F,
-    ) -> Result<BenchResult, DevError>
+    pub(crate) fn run_external_prepared<F>(&self, config: &BenchConfig, program: &Path,
+        args: &[&str], cwd: &Path, ok_codes: &[i32], prepare: F) -> Result<BenchResult, DevError>
     where F: Fn() -> Result<(), DevError>,
     {
-        let scratch_dir = self.state.root();
-        use crate::sidecar;
-
-        let start_epoch = wall_clock_epoch();
-        self.measure_start_epoch.set(start_epoch);
-        let mut fifo = sidecar::SidecarFifo::create(scratch_dir)?;
-        let fifo_path_str = fifo.path_str()?.to_owned();
-
-        // Best-of-N on the exact microsecond wall; `elapsed_ms` is that
-        // rounded. Comparing floored milliseconds used to make ties of runs
-        // up to 999us apart and store a figure up to 1ms faster than measured.
-        let mut best_us: Option<i64> = None;
-        let mut best_run_idx: usize = 0;
-        let mut best_stderr: Vec<u8> = Vec::new();
-        let mut pids: Vec<u32> = Vec::with_capacity(config.runs);
-        let mut walls: Vec<i64> = Vec::with_capacity(config.runs);
-        let mut walls_us: Vec<i64> = Vec::with_capacity(config.runs);
-        let mut sidecar_runs: Vec<sidecar::SidecarData> = Vec::with_capacity(config.runs);
-        let prog_str = program.display().to_string();
-        let total = clamp_u32(config.runs);
-
-        for i in 0..config.runs {
-            prepare()?;
-            announce_run(i, config.runs);
-            self.lock.set_progress(clamp_u32(i + 1), total);
-
-            // Reopen FIFO read end between runs so the next child's write
-            // end connects to a fresh reader (not one stuck at EOF).
-            if i > 0 {
-                fifo.reopen()?;
-            }
-
-            let env = [("BROKKR_MARKER_FIFO", fifo_path_str.as_str())];
-            let start = Instant::now();
-            let child = child::spawn_captured(&prog_str, args, cwd, &env, true, crate::output::SpawnProfile::Plain)?;
-            let pid = child.id();
-            pids.push(pid);
-            self.lock.set_child_pid(pid);
-
-            // run_sidecar takes ownership of the child, drains stdout/stderr
-            // in background threads, and returns everything when the child exits.
-            let result = sidecar::run_sidecar(child, &mut fifo, i, start, self.stop_marker.as_deref());
-            // Iteration's child has reaped; clear so a stale PID can't
-            // be SIGKILLed by `--hard` once the kernel recycles it.
-            self.lock.clear_child_pid();
-            let ending = result.data.ending.clone();
-            let ms = elapsed_to_ms(&result.elapsed);
-            let us = elapsed_to_us(&result.elapsed);
-            let stderr = result.stderr;
-
-            // Always collect sidecar data - especially valuable when the
-            // child is OOM-killed, since the /proc trajectory shows what
-            // happened before the kill.
-            sidecar_runs.push(result.data);
-
-            let error = match child::verdict(&ending, &prog_str, &stderr, ok_codes) {
-                child::IterationVerdict::Counted => None,
-                child::IterationVerdict::Failed(error) => Some(error),
-                child::IterationVerdict::Interrupted => Some(DevError::Interrupted),
-            };
-            if let Some(error) = error {
-                drop(fifo);
-                let info = self.build_run_info(
-                    config,
-                    program,
-                    start_epoch,
-                    Some(pid),
-                    Some(ending),
-                );
-                self.store_sidecar(None, &sidecar_runs, i, Some(&info)).ok();
-                return Err(error);
-            }
-
-            // Recorded only past the failure checks above, so `walls` holds
-            // one entry per iteration that actually completed.
-            walls.push(ms);
-            walls_us.push(us);
-
-            if best_us.is_none_or(|best| us < best) {
-                best_us = Some(us);
-                best_run_idx = i;
-                best_stderr = stderr;
-            }
-        }
-
-        drop(fifo);
-
-        let elapsed_us =
-            best_us.ok_or_else(|| DevError::Config("benchmark requires at least 1 run".into()))?;
-        let elapsed_ms = us_to_ms(elapsed_us);
-
-        // Counters from the winning run only. Averaging them across iterations
-        // would be wrong for the property they exist to support: a benched
-        // workload's work is usually identical every iteration, so a mean would
-        // hide a run that somehow differed rather than surface it.
-        //
-        // The self-reported elapsed is deliberately discarded here. On this
-        // path the measured wall is brokkr's, and letting a target's own
-        // number silently replace it is the whole difference between this and
-        // `run_external_with_kv`.
-        let (_self_reported_us, kv) = parse_kv_lines_us(&best_stderr);
-
-        let bench_result = BenchResult {
-            elapsed_ms,
-            elapsed_us: Some(elapsed_us),
-            kv,
-            iterations: walls,
-            distribution: None,
-            hotpath: None,
-        };
-
-        let info = self.build_run_info(
-            config,
-            program,
-            start_epoch,
-            pids.get(best_run_idx).copied(),
-            sidecar_runs.get(best_run_idx).map(|data| data.ending.clone()),
-        );
-        let fired_stop_marker = sidecar_runs
-            .get(best_run_idx)
-            .and_then(|data| data.fired_stop_marker.as_deref());
-        let uuid = match self.record_measured(
-            config,
-            &bench_result,
-            &walls_us,
-            fired_stop_marker,
-        ) {
-            Ok(uuid) => uuid,
-            Err(e) => {
-                // The row is lost; the trajectory need not be.
-                self.store_sidecar(None, &sidecar_runs, best_run_idx, Some(&info)).ok();
-                return Err(e);
-            }
-        };
-        self.store_sidecar(uuid.as_deref(), &sidecar_runs, best_run_idx, Some(&info))?;
-
-        Ok(bench_result)
+        let mut measurement = self.measure_external(config, program, args, cwd, ok_codes,
+            WallSource::External, prepare)?;
+        self.record(config, &mut measurement, |_, _| Ok(()))
     }
 
-    /// Distribution timing: collect all N samples, compute min/p50/p95/max.
-    ///
-    /// The closure hands back each sample as a `Duration`, and the whole
-    /// summary is computed in microseconds; the stored `*_ms` fields are
-    /// those rounded. Samples used to be integer milliseconds from the
-    /// closure up, so a nidhogg API query under half a millisecond recorded
-    /// 0 at every percentile. The row's `elapsed_us` is the fastest sample,
-    /// matching `elapsed_ms = min`.
+    /// Collect all closure durations and summarize the same ordered iterations.
     pub fn run_distribution<F>(&self, config: &BenchConfig, f: F) -> Result<BenchResult, DevError>
-    where
-        F: Fn(usize) -> Result<Duration, DevError>,
+    where F: Fn(usize) -> Result<Duration, DevError>,
     {
-        self.mark_measure_start();
-        let mut samples_us = Vec::with_capacity(config.runs);
-        let total = clamp_u32(config.runs);
-
-        for i in 0..config.runs {
-            announce_run(i, config.runs);
-            self.lock.set_progress(clamp_u32(i + 1), total);
+        let mut measurement = self.measure(config, None, WallSource::Closure, false, |i, _| {
             let wall = f(i)?;
-            samples_us.push(elapsed_to_us(&wall));
-        }
-
-        // Same refusal as the best-of-N loops: with no samples every
-        // percentile would read 0, which is a flattering row, not an error.
-        let (dist, min_us) = summarize_distribution(&samples_us)
-            .ok_or_else(|| DevError::Config("benchmark requires at least 1 run".into()))?;
-
-        // Execution order, unsorted - `summarize_distribution` sorted its own
-        // copy. The percentiles are a sorted summary, which answers a
-        // different question than "did the walls trend up or down".
-        let walls: Vec<i64> = samples_us.iter().copied().map(us_to_ms).collect();
-
-        let result = BenchResult {
-            elapsed_ms: dist.min_ms,
-            elapsed_us: Some(min_us),
-            kv: Vec::new(),
-            iterations: walls,
-            distribution: Some(dist),
-            hotpath: None,
-        };
-
-        self.record_measured(config, &result, &samples_us, None)?;
-        Ok(result)
+            Ok(Iteration::from_result(BenchResult {
+                elapsed_ms: elapsed_to_ms(&wall), elapsed_us: Some(elapsed_to_us(&wall)),
+                kv: Vec::new(), iterations: Vec::new(), distribution: None, hotpath: None,
+            }))
+        })?;
+        self.record(config, &mut measurement, |result, iterations| {
+            let mut samples: Vec<i64> = iterations.iter().filter_map(|i| i.result.as_ref())
+                .map(bench_ordering_key).collect();
+            samples.push(bench_ordering_key(result));
+            result.distribution = summarize_distribution(&samples).map(|(distribution, _)| distribution);
+            Ok(())
+        })
     }
 
-    /// External timing with kv parsing and sidecar: run subprocess N times,
-    /// parse stderr for key=value lines. Uses the subprocess's self-reported
-    /// `elapsed_ms` from stderr (not external wall-clock). Best-of-N.
-    pub fn run_external_with_kv(
-        &self,
-        config: &BenchConfig,
-        program: &Path,
-        args: &[&str],
-        cwd: &Path,
-    ) -> Result<BenchResult, DevError> {
-        let (best, _stderr, pending) = self.run_external_with_kv_raw(config, program, args, cwd)?;
-        let uuid = match self.record_with_pending(config, &best, &pending) {
-            Ok(uuid) => uuid,
-            Err(e) => {
-                // The row is lost; the trajectory need not be.
-                self.commit_sidecar(None, &pending).ok();
-                return Err(e);
-            }
-        };
-        self.commit_sidecar(uuid.as_deref(), &pending)?;
-        Ok(best)
+    pub fn run_external_with_kv(&self, config: &BenchConfig, program: &Path, args: &[&str], cwd: &Path)
+        -> Result<BenchResult, DevError>
+    {
+        let mut measurement = self.measure_external(config, program, args, cwd, &[],
+            WallSource::SelfReported, || Ok(()))?;
+        self.record(config, &mut measurement, |_, _| Ok(()))
     }
 
-    /// Like `run_external_with_kv` but does NOT record - returns the best
-    /// result, the raw stderr from the best run, and the collected sidecar
-    /// payload. The caller must call `record_with_pending` (after any stderr
-    /// post-processing) and then `commit_sidecar` with the resulting UUID, so
-    /// the sidecar rows land under the recorded row rather than `dirty` and
-    /// the per-iteration microseconds reach `run_iterations`.
-    pub fn run_external_with_kv_raw(
-        &self,
-        config: &BenchConfig,
-        program: &Path,
-        args: &[&str],
-        cwd: &Path,
-    ) -> Result<(BenchResult, Vec<u8>, PendingSidecar), DevError> {
-        let scratch_dir = self.state.root();
-        use crate::sidecar;
-
-        let start_epoch = wall_clock_epoch();
-        self.measure_start_epoch.set(start_epoch);
-        let mut fifo = sidecar::SidecarFifo::create(scratch_dir)?;
-        let fifo_path_str = fifo.path_str()?.to_owned();
-
-        let mut best: Option<BenchResult> = None;
-        let mut best_stderr: Vec<u8> = Vec::new();
-        let mut best_run_idx: usize = 0;
-        let mut pids: Vec<u32> = Vec::with_capacity(config.runs);
-        let mut walls: Vec<i64> = Vec::with_capacity(config.runs);
-        let mut walls_us: Vec<Option<i64>> = Vec::with_capacity(config.runs);
-        let mut sidecar_runs: Vec<sidecar::SidecarData> = Vec::with_capacity(config.runs);
-        let prog_str = program.display().to_string();
-        let total = clamp_u32(config.runs);
-
-        for i in 0..config.runs {
-            announce_run(i, config.runs);
-            self.lock.set_progress(clamp_u32(i + 1), total);
-
-            if i > 0 {
-                fifo.reopen()?;
-            }
-
-            let env = [("BROKKR_MARKER_FIFO", fifo_path_str.as_str())];
-            let start = Instant::now();
-            let child = child::spawn_captured(&prog_str, args, cwd, &env, true, crate::output::SpawnProfile::Plain)?;
-            let pid = child.id();
-            pids.push(pid);
-            self.lock.set_child_pid(pid);
-            let sidecar_result = sidecar::run_sidecar(child, &mut fifo, i, start, self.stop_marker.as_deref());
-            self.lock.clear_child_pid();
-            let ending = sidecar_result.data.ending.clone();
-            let stderr = sidecar_result.stderr;
-            sidecar_runs.push(sidecar_result.data);
-
-            let error = match child::verdict(&ending, &prog_str, &stderr, &[]) {
-                child::IterationVerdict::Counted => None,
-                child::IterationVerdict::Failed(error) => Some(error),
-                child::IterationVerdict::Interrupted => Some(DevError::Interrupted),
-            };
-            if let Some(error) = error {
-                drop(fifo);
-                let info = self.build_run_info(
-                    config,
-                    program,
-                    start_epoch,
-                    Some(pid),
-                    Some(ending),
-                );
-                self.store_sidecar(None, &sidecar_runs, i, Some(&info)).ok();
-                return Err(error);
-            }
-
-            let result = parse_kv_stderr(&stderr)?;
-            // Self-reported elapsed from stderr, matching what this path
-            // stores as the run's elapsed - not the external wall clock.
-            // `parse_kv_stderr` always yields microseconds (a fractional
-            // `elapsed_ms=` line keeps them; a whole one is exact at x1000).
-            walls.push(result.elapsed_ms);
-            walls_us.push(result.elapsed_us);
-            // Same key and strict-improvement rule as `pick_best`, so the
-            // stderr and sidecar run kept are the winner's. Comparing rounded
-            // milliseconds here could pick a different run than `pick_best`
-            // on a sub-millisecond tie.
-            let is_new_best = best
-                .as_ref()
-                .is_none_or(|b| bench_ordering_key(&result) < bench_ordering_key(b));
-            if is_new_best {
-                best_stderr = stderr;
-                best_run_idx = i;
-            }
-            best = Some(pick_best(best, result));
-        }
-
-        drop(fifo);
-
-        let mut best =
-            best.ok_or_else(|| DevError::Config("benchmark requires at least 1 run".into()))?;
-        best.iterations = walls;
-
-        let info = self.build_run_info(
-            config,
-            program,
-            start_epoch,
-            pids.get(best_run_idx).copied(),
-            sidecar_runs.get(best_run_idx).map(|data| data.ending.clone()),
-        );
-        let pending = PendingSidecar {
-            runs: sidecar_runs,
-            best_run_idx,
-            info,
-            iterations_us: all_or_none(walls_us),
-        };
-
-        Ok((best, best_stderr, pending))
+    /// Collect subprocess iterations without recording; postprocessing belongs in `record`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn measure_external<F>(&self, config: &BenchConfig, program: &Path, args: &[&str],
+        cwd: &Path, ok_codes: &[i32], source: WallSource, prepare: F)
+        -> Result<Measurement, DevError>
+    where F: Fn() -> Result<(), DevError>,
+    {
+        self.measure(config, Some(program), source, true, |i, fifo| {
+            prepare()?;
+            self.capture(program, args, cwd, &[], ok_codes,
+                fifo.expect("external loop owns a FIFO"), i, None)
+        })
     }
 
     // -----------------------------------------------------------------------
     // Private methods
     // -----------------------------------------------------------------------
 
-    /// Record a result: always emit to stdout, store in DB if tree is clean.
-    /// Prints the short UUID on a `[run] results.db` line (always, regardless
-    /// of quiet mode).
-    /// Returns the full UUID if stored, `None` if the tree was dirty.
-    ///
-    /// A failed insert still prints the `[result]` line - unconditionally,
-    /// since the row cannot be looked up later - before returning the error.
-    /// The harness loops then store the sidecar trajectory under `dirty`, so
-    /// a DB failure costs the row, never the measurement. A caller of
-    /// `run_external_with_kv_raw` that records itself should do the same
-    /// (`commit_sidecar(None, ..)` on error).
-    pub fn record_result(
-        &self,
-        config: &BenchConfig,
-        result: &BenchResult,
-    ) -> Result<Option<String>, DevError> {
-        self.record_measured(config, result, &[], None)
-    }
-
-    /// [`record_result`](Self::record_result) plus the per-iteration walls in
-    /// microseconds, for the harness loops that measured them.
-    ///
-    /// A separate argument rather than a `BenchResult` field because
-    /// `BenchResult` is built by loops outside this module too, and a field
-    /// every one of them must fill would couple them to a detail only these
-    /// loops have. Pass `&[]` when unknown; a list whose length differs from
-    /// `result.iterations` is not stored (see `RunRow::iterations_us`).
+    /// Write and report the winning row; `record` owns sidecar persistence.
     fn record_measured(
         &self,
         config: &BenchConfig,
@@ -881,12 +405,6 @@ impl BenchHarness {
         self.store_results.then(|| self.measure_mode.label().to_owned())
     }
 
-    /// Record that measurement is starting now. For the loops that don't
-    /// already compute a `start_epoch` for sidecar provenance.
-    fn mark_measure_start(&self) {
-        self.measure_start_epoch.set(wall_clock_epoch());
-    }
-
     /// Build a `RunInfo` from harness state for sidecar provenance.
     fn build_run_info(
         &self,
@@ -903,45 +421,11 @@ impl BenchHarness {
             command: Some(config.command.clone()),
             binary_path: Some(program.display().to_string()),
             binary_xxh128,
-            git_commit: Some(self.git.commit.as_str().to_owned()),
+            git_commit: Some(self.git.commit.clone()),
             mode: self.effective_mode(),
             dataset: config.input_file.clone(),
             ending,
         }
-    }
-
-    /// [`record_result`](Self::record_result) for a `run_external_with_kv_raw`
-    /// result: also files the per-iteration microsecond walls the loop
-    /// deferred in `pending`. `record_result` alone would store milliseconds
-    /// only for those iterations.
-    pub fn record_with_pending(
-        &self,
-        config: &BenchConfig,
-        result: &BenchResult,
-        pending: &PendingSidecar,
-    ) -> Result<Option<String>, DevError> {
-        let fired_stop_marker = pending
-            .runs
-            .get(pending.best_run_idx)
-            .and_then(|data| data.fired_stop_marker.as_deref());
-        self.record_measured(
-            config,
-            result,
-            &pending.iterations_us,
-            fired_stop_marker,
-        )
-    }
-
-    /// Persist a deferred sidecar payload under the recorded UUID. Pass the
-    /// `Option<String>` returned by `record_with_pending` (as a `&str`); `None`
-    /// (dirty tree, so no row was inserted) routes the rows to the `dirty`
-    /// alias, matching `store_sidecar`'s own fallback.
-    pub fn commit_sidecar(
-        &self,
-        uuid: Option<&str>,
-        pending: &PendingSidecar,
-    ) -> Result<(), DevError> {
-        self.store_sidecar(uuid, &pending.runs, pending.best_run_idx, Some(&pending.info))
     }
 
     /// Store sidecar data in the separate sidecar.db.
@@ -956,10 +440,10 @@ impl BenchHarness {
     /// When `uuid` is `None` (dirty tree or failed run), generates a fresh
     /// UUID and updates the `dirty` latest pointer so `brokkr results dirty`
     /// always finds the most recent unstored run.
-    pub fn store_sidecar(
+    fn store_sidecar(
         &self,
         uuid: Option<&str>,
-        sidecar_runs: &[crate::sidecar::SidecarData],
+        sidecar_runs: &[&crate::sidecar::SidecarData],
         best_run_idx: usize,
         run_info: Option<&crate::db::sidecar::RunInfo>,
     ) -> Result<(), DevError> {
@@ -1000,7 +484,7 @@ impl BenchHarness {
 
         // The one sidecar summary line: what was stored (and the id, only for
         // a `dirty`-filed profile - otherwise the results.db line named it).
-        // Per-run attach and sample counts are run-log detail (`run_sidecar`);
+        // Per-run attach and sample counts are run-log detail (the sidecar run);
         // the wall time is on the `[result]` line.
         let short = &store_uuid[..8.min(store_uuid.len())];
         console::sidecar_msg(&sidecar_summary_line(
@@ -1061,7 +545,7 @@ impl BenchHarness {
 
         RunRow {
             hostname: self.host.hostname.clone(),
-            commit: self.git.commit.as_str().to_owned(),
+            commit: self.git.commit.clone(),
             subject: self.git.subject.clone(),
             command: config.command.clone(),
             mode,
@@ -1080,12 +564,11 @@ impl BenchHarness {
                 .external_build
                 .or_else(|| self.build_identity.as_ref().map(|b| b.profile))
                 .unwrap_or(CargoProfile::Release),
-            elapsed_ms: result.elapsed_ms,
             // Carried through, not recomputed: only the harness path that
             // produced the result knows whether sub-millisecond timing was
-            // ever measured. `None` here means "never measured", which is
-            // not the same as `elapsed_ms * 1000`.
-            elapsed_us: result.elapsed_us,
+            // ever measured. No microseconds means "never measured", which
+            // is not the same as `elapsed_ms * 1000`.
+            elapsed: result_wall(result.elapsed_ms, result.elapsed_us),
             kernel: self.host.kernel.clone(),
             cpu_governor: self.host.governor.clone(),
             avail_memory_mb: i64::try_from(self.host.memory_available_mb).ok(),
@@ -1102,8 +585,13 @@ impl BenchHarness {
                 None
             },
             kv,
-            iterations: result.iterations.clone(),
-            iterations_us: iterations_us.to_vec(),
+            // Microsecond walls are all-or-none (`all_or_none`), so either
+            // every iteration is exact or every one is millisecond-only.
+            iterations: if iterations_us.len() == result.iterations.len() {
+                iterations_us.iter().copied().map(Wall::from_micros).collect()
+            } else {
+                result.iterations.iter().copied().map(Wall::from_legacy_millis).collect()
+            },
             distribution: result.distribution.clone(),
             hotpath: result.hotpath.clone(),
         }

@@ -545,7 +545,7 @@ expected `\"`, `'`
     fn codes(stderr: &str) -> Vec<(String, Option<String>)> {
         parse_manifest_lints(stderr)
             .into_iter()
-            .map(|e| (e.message, e.code))
+            .map(|e| (e.message, e.code.map(|code| code.as_str().to_owned())))
             .collect()
     }
 

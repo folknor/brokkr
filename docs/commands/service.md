@@ -24,7 +24,8 @@ Flags that only make sense when running (`-N`, `--keep-going`,
 fails at parse time rather than silently listing; `--filter` and
 `--include-ignored` additionally require `--all`.
 
-For the `[ratatoskr.harness]` config block (sweep + binary linkage) see
+For the `[ratatoskr.harness]` config block (direct package and binary build
+specification) see
 `docs/brokkr.toml.md`. For the harness model (lua VM, ServiceClient userdata,
 artefact writers, runtime-outcome) see `docs/projects/ratatoskr.md`.
 
@@ -45,12 +46,16 @@ Recognised fields:
   Triggers mock-server spawn + endpoint env-var injection at run time
   (see "Fixture frontmatter" below). Pass with `.toml` / `.lua`
   extension to disambiguate when both files exist.
-- `protocol` - informational; sæhrimnir binds every protocol
-  listener regardless of this value.
+- `protocol` - informational; sæhrimnir binds every protocol listener
+  regardless of this value. `discovery` labels WebFinger scripts, which
+  use sæhrimnir's JMAP endpoint rather than a separate listener.
 
-Unknown annotation fields are ignored. The likely misspelling `fixtures` is
-rejected in favor of the singular `fixture` key. Invalid values for recognized
-fields fail discovery with the script path and frontmatter line.
+Unknown lower-case annotation keys, duplicate fields, malformed recognized
+fields, and invalid values fail discovery with the script path and frontmatter
+line. The likely misspelling `fixtures` is rejected in favor of the singular
+`fixture` key. Ratatoskr's `@covers` and `measured` annotations are passed
+through; ordinary comments after a blank line or bare `--` are outside the
+frontmatter block.
 Empty-state output names the expected directory. Nested cohort dirs (`t1/`,
 `extract/`, etc.) are picked up automatically; the displayed name is the path
 relative to the script root, minus `.lua`.
@@ -63,9 +68,10 @@ Run a Service-subprocess test script. When the path is a directory under
 layout, `-N` becomes cohort cycles.
 
 End-to-end on the brokkr side: project gating, script-path validation,
-frontmatter parse (`ceiling`, `preserve_data_dir`, `fixture`), lockfile,
-sweep-aware build via `[ratatoskr.harness]` (same feature contract as
-`brokkr check`), optional sæhrimnir spawn for fixture-bearing scripts (see
+frontmatter parse (`ceiling`, `preserve_data_dir`, `fixture`), optional
+preflight of the sæhrimnir binary and fixture before the build, lockfile,
+direct harness build via `[ratatoskr.harness]` (the configured package,
+binary, features, and profile), optional sæhrimnir spawn for fixture-bearing scripts (see
 "Fixture frontmatter" below), per-run artefact-dir allocation under
 `.brokkr/ratatoskr/service/<test>/run-N/`, sync `std::process::Command` spawn of
 `<binary> --test-harness <script>` with `BROKKR_HARNESS_ARTEFACT_DIR` and
@@ -138,7 +144,7 @@ the dependency in frontmatter:
 ```
 
 When `service` sees `-- fixture: <NAME>` on a selected script, brokkr
-resolves `<NAME>` against `[ratatoskr] fixtures_dir` (the verbatim string
+resolves `<NAME>` against `[ratatoskr] fixtures_dir` before building (the verbatim string
 is passed through, so the explicit `.toml` / `.lua` extension form
 disambiguates when both files exist), spawns sæhrimnir via `[ratatoskr]
 mock_server_binary` with `--fixture <PATH> --readiness-file

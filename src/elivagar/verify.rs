@@ -16,12 +16,7 @@ pub fn run(
     geometry_stats: bool,
     unique_payloads: bool,
 ) -> Result<(), DevError> {
-    let build_config = if features.is_empty() {
-        build::BuildConfig::release(None)
-    } else {
-        build::BuildConfig::release_with_owned_features(None, features)
-    };
-    let binary = build::cargo_build(&build_config, build_root)?.path;
+    let binary = build::cargo_build(&super::build_config(features), build_root)?.path;
     let binary_str = binary.display().to_string();
     let pmtiles_str = pmtiles_path.display().to_string();
 

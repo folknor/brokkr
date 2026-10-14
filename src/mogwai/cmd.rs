@@ -1,10 +1,9 @@
 //! `brokkr mogwai` - build a mogwai surface and measure one invocation.
 
-use crate::clean::layout::ProjectState;
 use crate::context::MeasurementSession;
 use crate::error::DevError;
 use crate::harness::{self, BenchConfig};
-use crate::measure::{MeasureMode, MeasureRequest};
+use crate::measure::MeasureRequest;
 use crate::output;
 use crate::project::{self, Project};
 
@@ -39,14 +38,11 @@ pub(crate) fn run(
     // the target buildable (an instrumented example commonly carries
     // `required-features`), so dropping it under `--bench` would fail the build
     // rather than produce a leaner one.
-    let mode_features: Vec<String> = if uses_hotpath(req) {
-        req.build_features()
-            .into_iter()
-            .map(str::to_owned)
-            .collect()
-    } else {
-        req.features.to_vec()
-    };
+    let mode_features: Vec<String> = req
+        .build_features()
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
 
     let resolved = targets::resolve(cfg, target, &mode_features)?;
     let argv: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -84,11 +80,7 @@ pub(crate) fn run(
     // run built with every right feature still records a row with no profile in
     // it - the hotpath report is written to a file the child is told about, and
     // something has to set that up and read it back.
-    if uses_hotpath(req) {
-        let state = ProjectState::new(req.project_root.as_path());
-        let scratch_dir = state.mogwai().scratch().to_path_buf();
-        std::fs::create_dir_all(&scratch_dir)?;
-
+    if req.mode.profiled().is_some() {
         let label = req
             .mode
             .profiled()
@@ -98,18 +90,17 @@ pub(crate) fn run(
             profiling.print_note();
         }
 
-        ctx.harness.run_hotpath(&config, ctx.binary()?, |_i| {
-            let (result, _stderr, sidecar) = harness::run_hotpath_capture(
-                &binary_str,
+        ctx.harness.run_hotpath(&config, ctx.binary()?, |i, fifo| {
+            ctx.harness.capture_hotpath(
+                ctx.binary()?,
                 &argv,
-                &scratch_dir,
                 req.project_root.as_path(),
                 &[],
                 &[],
-                req.stop_marker,
-                Some(ctx.harness.lock()),
-            )?;
-            Ok((result, sidecar))
+                fifo,
+                i,
+                None,
+            )
         })?;
         return Ok(());
     }
@@ -124,12 +115,4 @@ pub(crate) fn run(
         .run_external(&config, ctx.binary()?, &argv, req.project_root.as_path())?;
 
     Ok(())
-}
-
-/// Whether this mode builds and runs with hotpath instrumentation.
-fn uses_hotpath(req: &MeasureRequest) -> bool {
-    matches!(
-        req.mode,
-        MeasureMode::Hotpath { .. } | MeasureMode::Alloc { .. }
-    )
 }

@@ -309,11 +309,6 @@ fn run_one_isolated_test(
     let command = format!("{} {}", case.binary.executable, args.join(" "));
     cargo_line(commands, &command);
     let (cwd, env) = runtime.envelope(&case.binary, env_refs)?;
-    let cwd = if cwd.as_os_str() == "." {
-        project_root.to_path_buf()
-    } else {
-        cwd
-    };
     let env_pairs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
     let origin = StreamOrigin::Binary {
         resolution: case.resolution.clone(),
@@ -427,6 +422,10 @@ fn run_one_isolated_test(
 /// listing cut short keeps a valid-looking tally only if the tally itself
 /// survived, and then it disagrees with the entries above it - which, unchecked,
 /// certified a partial universe.
+///
+/// This is the only text parser for libtest's `--list` tally format. Focused
+/// discovery in `brokkr test` consumes libtest's JSON discovery protocol
+/// instead, so there is no second parser for this text/tally format.
 fn parse_list_output(stdout: &str) -> Option<Vec<String>> {
     let mut tallied = (0_u64, 0_u64);
     let mut saw_tally = false;

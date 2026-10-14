@@ -8,4 +8,7 @@ mod lock;
 
 pub use self::lock::*;
 pub(crate) use self::lock::{AcqId, AuthHash, Nonce, RunToken};
+pub(crate) use self::lock::{
+    CAPABILITY_ENV, GUARD_HANDSHAKE_PREFIX, GUARD_INFO_ARG, GUARD_PROTOCOL, LEASE_MARKER_ENV,
+};
 pub(crate) use self::lock::{escape_value, unescape_value};

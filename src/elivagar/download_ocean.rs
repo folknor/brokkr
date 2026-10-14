@@ -23,29 +23,41 @@ struct OceanVariant {
     size_hint: &'static str,
 }
 
+pub(crate) const FULL_RES_3857_ZIP: &str = "water-polygons-split-3857.zip";
+pub(crate) const FULL_RES_3857_DIR: &str = "water-polygons-split-3857";
+pub(crate) const FULL_RES_3857_SHP: &str = "water_polygons.shp";
+pub(crate) const SIMPLIFIED_3857_ZIP: &str = "simplified-water-polygons-split-3857.zip";
+pub(crate) const SIMPLIFIED_3857_DIR: &str = "simplified-water-polygons-split-3857";
+pub(crate) const SIMPLIFIED_3857_SHP: &str = "simplified_water_polygons.shp";
+pub(crate) const FULL_RES_4326_ZIP: &str = "water-polygons-split-4326.zip";
+pub(crate) const FULL_RES_4326_DIR: &str = "water-polygons-split-4326";
+pub(crate) const FULL_RES_4326_SHP: &str = "water_polygons.shp";
+pub(crate) const SIMPLIFIED_4326_DIR: &str = "simplified-water-polygons-split-4326";
+pub(crate) const SIMPLIFIED_4326_SHP: &str = "simplified_water_polygons.shp";
+
 const FULL_RES: OceanVariant = OceanVariant {
     url: "https://osmdata.openstreetmap.de/download/water-polygons-split-3857.zip",
-    zip_name: "water-polygons-split-3857.zip",
-    dir_name: "water-polygons-split-3857",
-    shp_name: "water_polygons.shp",
+    zip_name: FULL_RES_3857_ZIP,
+    dir_name: FULL_RES_3857_DIR,
+    shp_name: FULL_RES_3857_SHP,
     label: "full-resolution ocean polygons",
     size_hint: "~765 MB",
 };
 
 const SIMPLIFIED: OceanVariant = OceanVariant {
     url: "https://osmdata.openstreetmap.de/download/simplified-water-polygons-split-3857.zip",
-    zip_name: "simplified-water-polygons-split-3857.zip",
-    dir_name: "simplified-water-polygons-split-3857",
-    shp_name: "simplified_water_polygons.shp",
+    zip_name: SIMPLIFIED_3857_ZIP,
+    dir_name: SIMPLIFIED_3857_DIR,
+    shp_name: SIMPLIFIED_3857_SHP,
     label: "simplified ocean polygons",
     size_hint: "~13 MB",
 };
 
 const FULL_RES_4326: OceanVariant = OceanVariant {
     url: "https://osmdata.openstreetmap.de/download/water-polygons-split-4326.zip",
-    zip_name: "water-polygons-split-4326.zip",
-    dir_name: "water-polygons-split-4326",
-    shp_name: "water_polygons.shp",
+    zip_name: FULL_RES_4326_ZIP,
+    dir_name: FULL_RES_4326_DIR,
+    shp_name: FULL_RES_4326_SHP,
     label: "full-resolution ocean polygons (4326)",
     size_hint: "~700 MB",
 };
@@ -198,8 +210,8 @@ pub fn ensure_ocean_4326(data_dir: &Path) -> Result<(), DevError> {
     download_variant(data_dir, &FULL_RES_4326)?;
 
     // Simplified 4326 - reprojected from 3857 source via ogr2ogr.
-    let simplified_dir = data_dir.join("simplified-water-polygons-split-4326");
-    let simplified = simplified_dir.join("simplified_water_polygons.shp");
+    let simplified_dir = data_dir.join(SIMPLIFIED_4326_DIR);
+    let simplified = simplified_dir.join(SIMPLIFIED_4326_SHP);
     let simplified_marker = simplified_dir.join(COMPLETE_MARKER);
 
     if shapefile_complete(&simplified) {

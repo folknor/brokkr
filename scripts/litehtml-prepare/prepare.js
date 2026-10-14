@@ -53,7 +53,7 @@ function parseArgs(argv) {
 
 	if (command === "outline") {
 		const input = args[1];
-		const opts = { depth: 4, full: false, selectors: false };
+		const opts = { full: false, selectors: false };
 		for (let i = 2; i < args.length; i++) {
 			const key = args[i];
 			if (key === "--depth") {
@@ -64,11 +64,20 @@ function parseArgs(argv) {
 				opts.selectors = true;
 			}
 		}
+		if (!opts.full && opts.depth === undefined) {
+			throw new Error("outline requires --depth unless --full is set");
+		}
+		if (
+			opts.depth !== undefined &&
+			(!Number.isInteger(opts.depth) || opts.depth < 0)
+		) {
+			throw new Error("--depth must be a non-negative integer");
+		}
 		return { command, input, opts };
 	}
 
 	process.stderr.write(
-		`Usage:\n  node prepare.js prepare <input> <output> [options]\n  node prepare.js extract <input> <output> --selector <sel>\n  node prepare.js outline <input> [--depth N] [--full] [--selectors]\n`,
+		`Usage:\n  node prepare.js prepare <input> <output> [options]\n  node prepare.js extract <input> <output> --selector <sel>\n  node prepare.js outline <input> --depth N [--full] [--selectors]\n`,
 	);
 	process.exit(1);
 }
@@ -730,7 +739,10 @@ async function cmdPrepare(input, output, opts) {
 
 	const cacheDir = opts.cacheDir;
 	const ahemFont = opts.ahemFont;
-	const fallbackRatio = opts.fallbackAspectRatio || 2.0;
+	const fallbackRatio = opts.fallbackAspectRatio;
+	if (!Number.isFinite(fallbackRatio) || fallbackRatio <= 0) {
+		throw new Error("--fallback-aspect-ratio must be a finite number greater than zero");
+	}
 
 	if (cacheDir) fs.mkdirSync(cacheDir, { recursive: true });
 

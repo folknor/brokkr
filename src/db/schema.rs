@@ -10,6 +10,12 @@ use crate::error::DevError;
 // Schema DDL
 // ---------------------------------------------------------------------------
 
+/// The `runs.project` column default: rows written before the column existed
+/// were all pbfhogg's. Must match the `DEFAULT` spelled in the DDL below and
+/// in the migration that added the column; displays hide it as the implied
+/// project.
+pub(crate) const DEFAULT_PROJECT: &str = "pbfhogg";
+
 /// DDL for the per-iteration wall table. Referenced by both [`SCHEMA`] (fresh
 /// databases) and the v15->v16 migration (existing ones) so the two can't drift.
 ///

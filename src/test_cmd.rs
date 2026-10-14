@@ -349,7 +349,7 @@ mod tests {
             allow_args: &[],
             run: &run,
             jobs: None,
-            debug: true,
+            profile: crate::config::SweepProfile::Dev,
         };
         let pre = prebuild_argv(&shape);
         assert_eq!(
@@ -400,7 +400,7 @@ mod tests {
             allow_args: &[],
             run: &one,
             jobs: None,
-            debug: true,
+            profile: crate::config::SweepProfile::Dev,
         };
         let run = test_argv(&shape, "x");
         let sep = run.iter().position(|a| a == "--").expect("separator");
@@ -967,7 +967,7 @@ include_ignored = false
             &sweep,
             &support_for(&sweep, "daemon", "daemon"),
             &allow,
-            false,
+            crate::config::SweepProfile::Release,
         );
         assert!(
             args.iter()
@@ -986,7 +986,7 @@ include_ignored = false
             &plain_sweep,
             &support_for(&plain_sweep, "core", "bin"),
             &[],
-            true,
+            crate::config::SweepProfile::Dev,
         );
         assert_eq!(
             plain,
@@ -1052,7 +1052,7 @@ include_ignored = false
             allow_args: &[],
             run,
             jobs: None,
-            debug: true,
+            profile: crate::config::SweepProfile::Dev,
         };
         let pre = prebuild_argv(&shape);
         assert!(
@@ -1063,7 +1063,7 @@ include_ignored = false
                 ]),
             "{pre:?}"
         );
-        let support = pre_build_argv(&sweep, &attempt.support()[0], &[], true);
+        let support = pre_build_argv(&sweep, &attempt.support()[0], &[], crate::config::SweepProfile::Dev);
         assert!(
             support
                 .windows(2)
@@ -1089,7 +1089,7 @@ include_ignored = false
         ReadySweep {
             sweep,
             attempt,
-            debug: true,
+            profile: crate::config::SweepProfile::Dev,
             env: Vec::new(),
             allow_args: Vec::new(),
             focused: Some(FocusedPlan {

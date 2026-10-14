@@ -4,8 +4,8 @@ use std::path::Path;
 
 use crate::error::DevError;
 use crate::harness::{BenchConfig, BenchHarness};
-use crate::measure::{CommandContext, CommandParams};
 use crate::pbfhogg::commands::{ArgMode, ExtractStrategy, PbfhoggCommand, scratch_output_path};
+use crate::pbfhogg::context::{CommandContext, CommandObservations, CommandParams, ResolvedInputs};
 use crate::resolve::Bbox;
 
 #[allow(clippy::too_many_arguments)]
@@ -22,14 +22,14 @@ pub fn run(
     std::fs::create_dir_all(scratch_dir)?;
     let command_ctx = CommandContext {
         binary: binary.to_path_buf(),
-        pbf_path: Some(pbf_path.to_path_buf()),
-        osc_path: None,
-        osc_paths: Vec::new(),
-        pbf_b_path: None,
+        inputs: ResolvedInputs::PbfAndBbox {
+            pbf: pbf_path.to_path_buf(),
+            bbox: bbox.clone(),
+        },
         scratch_dir: scratch_dir.to_path_buf(),
         dataset: String::new(),
-        bbox: Some(bbox.clone()),
         params: CommandParams::default(),
+        observations: CommandObservations::default(),
     };
     let output_path = scratch_output_path(
         &command_ctx,
@@ -39,7 +39,7 @@ pub fn run(
         ArgMode::Bench,
     )?;
 
-    let (basename, _) = super::path_strs(pbf_path)?;
+    let (basename, _) = crate::utf8_path::path_strings(pbf_path)?;
     let strategy_names: Vec<&str> = ExtractStrategy::all()
         .iter()
         .map(|strategy| strategy.name())

@@ -19,8 +19,8 @@
 
 use std::path::Path;
 
+use crate::cargo::metadata::{self, Query};
 use crate::error::DevError;
-use crate::output;
 
 /// One `kind: ["bench"]` target and the package that owns it.
 pub struct BenchTarget {
@@ -32,44 +32,17 @@ pub struct BenchTarget {
 
 /// Discover every bench target in the workspace.
 pub fn discover(build_root: &Path) -> Result<Vec<BenchTarget>, DevError> {
-    let captured = output::run_cargo(
-        &["metadata", "--format-version", "1", "--no-deps"],
-        build_root,
-        &[],
-        None,
-    )?;
-    if !captured.success() {
-        let stderr = String::from_utf8_lossy(&captured.stderr);
-        return Err(DevError::Build(format!("cargo metadata failed: {stderr}")));
-    }
-    let stdout = String::from_utf8_lossy(&captured.stdout);
-    let val: serde_json::Value = serde_json::from_str(&stdout)?;
-    let packages = val
-        .get("packages")
-        .and_then(serde_json::Value::as_array)
-        .ok_or_else(|| DevError::Build("cargo metadata missing \"packages\"".into()))?;
+    let metadata = metadata::load(build_root, Query::workspace(), &[], None)?;
 
     let mut out = Vec::new();
-    for pkg in packages {
-        let Some(pkg_name) = pkg.get("name").and_then(serde_json::Value::as_str) else {
-            continue;
-        };
-        let Some(targets) = pkg.get("targets").and_then(serde_json::Value::as_array) else {
-            continue;
-        };
-        for target in targets {
-            let Some(kinds) = target.get("kind").and_then(serde_json::Value::as_array) else {
-                continue;
-            };
-            if !kinds.iter().any(|v| v.as_str() == Some("bench")) {
+    for pkg in &metadata.packages {
+        for target in &pkg.targets {
+            if !target.kind.iter().any(|kind| kind == "bench") {
                 continue;
             }
-            let Some(name) = target.get("name").and_then(serde_json::Value::as_str) else {
-                continue;
-            };
             out.push(BenchTarget {
-                name: name.to_owned(),
-                package: pkg_name.to_owned(),
+                name: target.name.clone(),
+                package: pkg.name.clone(),
             });
         }
     }

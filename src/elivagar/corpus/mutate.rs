@@ -15,8 +15,11 @@ use flate2::Compression;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 
+use super::super::constants::mvt;
+use super::super::constants::pmtiles as pmtiles_constants;
 use super::super::eliv::{
-    ArchiveView, BlobRef, PmtilesConfig, PmtilesWriter, RawDirEntry, read_i32_le, xy_to_tile_id,
+    ArchiveView, BlobRef, PmtilesConfig, PmtilesWriter, RawDirEntry, WIRE_32BIT, WIRE_64BIT,
+    WIRE_LEN, WIRE_VARINT, encode_varint, read_i32_le, read_varint, xy_to_tile_id,
 };
 
 /// A deliberately small set of direct archive mutations used to calibrate the
@@ -44,19 +47,6 @@ impl MutationOp {
     }
 }
 
-fn encode_varint(out: &mut Vec<u8>, mut v: u64) {
-    loop {
-        let byte = (v & 0x7f) as u8;
-        v >>= 7;
-        if v != 0 {
-            out.push(byte | 0x80);
-        } else {
-            out.push(byte);
-            break;
-        }
-    }
-}
-
 /// Rewrite `input` into `output` applying one mutation, header + metadata
 /// preserved verbatim.
 pub fn mutate(
@@ -79,8 +69,17 @@ pub fn mutate(
     let config = PmtilesConfig {
         min_zoom: archive.min_zoom(),
         max_zoom: archive.max_zoom(),
-        bounds: (e7(102), e7(106), e7(110), e7(114)),
-        center: (e7(119), e7(123), header[118]),
+        bounds: (
+            e7(pmtiles_constants::HEADER_BOUNDS_LEFT),
+            e7(pmtiles_constants::HEADER_BOUNDS_BOTTOM),
+            e7(pmtiles_constants::HEADER_BOUNDS_RIGHT),
+            e7(pmtiles_constants::HEADER_BOUNDS_TOP),
+        ),
+        center: (
+            e7(pmtiles_constants::HEADER_CENTER_LONGITUDE),
+            e7(pmtiles_constants::HEADER_CENTER_LATITUDE),
+            header[pmtiles_constants::HEADER_CENTER_ZOOM],
+        ),
     };
     let mut writer = PmtilesWriter::new(config);
     writer.set_metadata_verbatim(archive.metadata()?);
@@ -172,26 +171,8 @@ fn regzip(raw: &[u8]) -> io::Result<Vec<u8>> {
 #[derive(Clone)]
 struct Field {
     number: u32,
-    wire: u8,
+    wire: u32,
     value: Vec<u8>,
-}
-
-fn read_varint(input: &[u8], at: &mut usize) -> io::Result<u64> {
-    let mut value = 0u64;
-    for shift in (0..64).step_by(7) {
-        let byte = *input.get(*at).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::UnexpectedEof, "truncated protobuf varint")
-        })?;
-        *at += 1;
-        value |= u64::from(byte & 0x7f) << shift;
-        if byte & 0x80 == 0 {
-            return Ok(value);
-        }
-    }
-    Err(io::Error::new(
-        io::ErrorKind::InvalidData,
-        "protobuf varint overflows u64",
-    ))
 }
 
 fn fields(input: &[u8]) -> io::Result<Vec<Field>> {
@@ -199,22 +180,22 @@ fn fields(input: &[u8]) -> io::Result<Vec<Field>> {
     let mut out = Vec::new();
     while at < input.len() {
         let tag = read_varint(input, &mut at)?;
-        let number = u32::try_from(tag >> 3)
+        let number = u32::try_from(tag >> mvt::FIELD_NUMBER_SHIFT)
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "field number too large"))?;
-        let wire = u8::try_from(tag & 7).unwrap_or(u8::MAX);
+        let wire = u32::try_from(tag & mvt::FIELD_WIRE_MASK).unwrap_or(u32::MAX);
         let value = match wire {
-            0 => {
+            WIRE_VARINT => {
                 let start = at;
                 read_varint(input, &mut at)?;
                 input[start..at].to_vec()
             }
-            1 => take(input, &mut at, 8)?,
-            2 => {
+            WIRE_64BIT => take(input, &mut at, 8)?,
+            WIRE_LEN => {
                 let n = usize::try_from(read_varint(input, &mut at)?)
                     .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "length too large"))?;
                 take(input, &mut at, n)?
             }
-            5 => take(input, &mut at, 4)?,
+            WIRE_32BIT => take(input, &mut at, 4)?,
             _ => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -248,9 +229,9 @@ fn encode_fields(fields: &[Field]) -> Vec<u8> {
     for field in fields {
         encode_varint(
             &mut out,
-            u64::from(field.number) << 3 | u64::from(field.wire),
+            u64::from(field.number) << mvt::FIELD_NUMBER_SHIFT | u64::from(field.wire),
         );
-        if field.wire == 2 {
+        if field.wire == WIRE_LEN {
             encode_varint(&mut out, field.value.len() as u64);
         }
         out.extend_from_slice(&field.value);
@@ -264,21 +245,21 @@ fn mutate_payload(raw: &[u8], op: MutationOp) -> io::Result<Vec<u8>> {
     let mut tile = fields(&decoded)?;
     let layer = tile
         .iter_mut()
-        .find(|f| f.number == 3 && f.wire == 2)
+        .find(|f| f.number == mvt::TILE_LAYER && f.wire == WIRE_LEN)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "tile has no layer"))?;
     let mut layer_fields = fields(&layer.value)?;
     match op {
         MutationOp::LayerVersion => {
             if let Some(version) = layer_fields
                 .iter_mut()
-                .find(|f| f.number == 15 && f.wire == 0)
+                .find(|f| f.number == mvt::layer::VERSION && f.wire == WIRE_VARINT)
             {
-                version.value = vec![3];
+                version.value = vec![mvt::MUTATION_LAYER_VERSION];
             } else {
                 layer_fields.push(Field {
-                    number: 15,
-                    wire: 0,
-                    value: vec![3],
+                    number: mvt::layer::VERSION,
+                    wire: WIRE_VARINT,
+                    value: vec![mvt::MUTATION_LAYER_VERSION],
                 });
             }
         }
@@ -287,12 +268,11 @@ fn mutate_payload(raw: &[u8], op: MutationOp) -> io::Result<Vec<u8>> {
                 .iter()
                 .enumerate()
                 .find_map(|(index, field)| {
-                    (field.number == 2
-                        && field.wire == 2
-                        && fields(&field.value)
-                            .ok()?
-                            .iter()
-                            .any(|nested| nested.number == 4 && nested.wire == 2))
+                    (field.number == mvt::layer::FEATURE
+                        && field.wire == WIRE_LEN
+                        && fields(&field.value).ok()?.iter().any(|nested| {
+                            nested.number == mvt::feature::GEOMETRY && nested.wire == WIRE_LEN
+                        }))
                     .then_some(index)
                 })
                 .ok_or_else(|| {
@@ -302,7 +282,7 @@ fn mutate_payload(raw: &[u8], op: MutationOp) -> io::Result<Vec<u8>> {
             let mut feature_fields = fields(&feature.value)?;
             let geometry = feature_fields
                 .iter_mut()
-                .find(|f| f.number == 4 && f.wire == 2)
+                .find(|f| f.number == mvt::feature::GEOMETRY && f.wire == WIRE_LEN)
                 .ok_or_else(|| {
                     io::Error::new(io::ErrorKind::InvalidData, "feature has no geometry")
                 })?;
@@ -322,7 +302,11 @@ fn nudge_geometry(input: &[u8]) -> io::Result<Vec<u8>> {
     while at < input.len() {
         let start = at;
         let command = read_varint(input, &mut at)?;
-        if command & 7 == 1 && command >> 3 != 0 {
+        let command_type =
+            u32::try_from(command & u64::from(mvt::COMMAND_ID_MASK)).map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidData, "geometry command id too large")
+            })?;
+        if command_type == mvt::COMMAND_MOVE_TO && command >> mvt::COMMAND_COUNT_SHIFT != 0 {
             let parameter = read_varint(input, &mut at)?;
             let magnitude = i64::try_from(parameter >> 1).map_err(|_| {
                 io::Error::new(io::ErrorKind::InvalidData, "geometry delta too large")
@@ -355,11 +339,11 @@ fn nudge_geometry(input: &[u8]) -> io::Result<Vec<u8>> {
         // MoveTo/LineTo carry two varints per count, ClosePath carries none.
         // (Unreachable for valid MVT, where geometry opens with a MoveTo and
         // the loop above has already returned - robustness only.)
-        let count = usize::try_from(command >> 3)
+        let count = usize::try_from(command >> mvt::COMMAND_COUNT_SHIFT)
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "geometry count too large"))?;
-        let parameters = match command & 7 {
-            1 | 2 => count.saturating_mul(2),
-            7 => 0,
+        let parameters = match command_type {
+            mvt::COMMAND_MOVE_TO | mvt::COMMAND_LINE_TO => count.saturating_mul(2),
+            mvt::COMMAND_CLOSE_PATH => 0,
             other => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -395,52 +379,60 @@ mod calibration {
     use flate2::Compression;
     use flate2::write::GzEncoder;
 
+    use super::super::super::constants::mvt;
     use super::super::super::eliv::{
-        ArchiveView, PmtilesConfig, PmtilesWriter, tile_id_to_zxy, xy_to_tile_id,
+        ArchiveView, PmtilesConfig, PmtilesWriter, WIRE_LEN, WIRE_VARINT, tile_id_to_zxy,
+        xy_to_tile_id,
     };
     use super::super::compute;
     use super::super::digest::{DigestMode, LeafRun};
-    use super::{Field, MutationOp, encode_fields, mutate};
+    use super::{Field, MutationOp, encode_fields, encode_varint, mutate};
 
     fn fixture_payload() -> Vec<u8> {
-        // One point feature: geometry MoveTo(1) at (0,0); extent 4096, version 2.
+        // One point feature: geometry MoveTo(1) at (0,0); standard extent/version.
+        let mut extent = Vec::new();
+        encode_varint(&mut extent, u64::from(mvt::TILE_EXTENT));
+        let mut geometry = Vec::new();
+        encode_varint(&mut geometry, (1 << 3) | u64::from(mvt::COMMAND_MOVE_TO));
+        encode_varint(&mut geometry, 0);
+        encode_varint(&mut geometry, 0);
         let feature = encode_fields(&[
             Field {
-                number: 3,
-                wire: 0,
-                value: vec![1],
+                number: mvt::feature::GEOMETRY_TYPE,
+                wire: WIRE_VARINT,
+                value: vec![mvt::GEOMETRY_POINT],
             },
             Field {
-                number: 4,
-                wire: 2,
-                value: vec![9, 0, 0],
+                number: mvt::feature::GEOMETRY,
+                wire: WIRE_LEN,
+                value: geometry,
             },
         ]);
         let layer = encode_fields(&[
             Field {
-                number: 1,
-                wire: 2,
+                number: mvt::layer::NAME,
+                wire: WIRE_LEN,
                 value: b"test".to_vec(),
             },
             Field {
-                number: 2,
-                wire: 2,
+                number: mvt::layer::FEATURE,
+                wire: WIRE_LEN,
                 value: feature,
             },
             Field {
-                number: 5,
-                wire: 0,
-                value: vec![0x80, 0x20],
+                number: mvt::layer::EXTENT,
+                wire: WIRE_VARINT,
+                value: extent,
             },
             Field {
-                number: 15,
-                wire: 0,
-                value: vec![2],
+                number: mvt::layer::VERSION,
+                wire: WIRE_VARINT,
+                value: vec![u8::try_from(mvt::FIXTURE_LAYER_VERSION).unwrap()],
             },
         ]);
         let tile = encode_fields(&[Field {
-            number: 3,
-            wire: 2,
+            number: mvt::TILE_LAYER,
+            wire: WIRE_LEN,
             value: layer,
         }]);
         let mut gzip = GzEncoder::new(Vec::new(), Compression::new(6));
@@ -477,10 +469,11 @@ mod calibration {
     fn mutations_are_isolated_and_regzip_is_semantically_neutral() {
         let scratch = super::super::fixture::TestDir::new("corpus-mutation");
         let dir = &scratch.path;
+        let sort_scratch = dir.join("sort-scratch");
         let input = dir.join("source.pmtiles");
         let target = source(&input);
         let before = ArchiveView::open(&input).unwrap();
-        let (before_digest, before_leaves) = compute(&before, DigestMode::Leaves).unwrap();
+        let (before_digest, before_leaves) = compute(&before, DigestMode::Leaves, &sort_scratch).unwrap();
         let before_meta = before.metadata().unwrap();
 
         for (op, name) in [
@@ -496,7 +489,7 @@ mod calibration {
                 before_meta,
                 "{name} metadata changed"
             );
-            let (digest, leaves) = compute(&after, DigestMode::Leaves).unwrap();
+            let (digest, leaves) = compute(&after, DigestMode::Leaves, &sort_scratch).unwrap();
             assert_ne!(
                 digest.root, before_digest.root,
                 "{name} did not FIRE (digest unchanged)"
@@ -518,7 +511,7 @@ mod calibration {
         let output = dir.join("regzip.pmtiles");
         mutate(&input, &output, None, MutationOp::Regzip).unwrap();
         let after = ArchiveView::open(&output).unwrap();
-        let (digest, leaves) = compute(&after, DigestMode::Leaves).unwrap();
+        let (digest, leaves) = compute(&after, DigestMode::Leaves, &sort_scratch).unwrap();
         assert_eq!(after.metadata().unwrap(), before_meta);
         assert_eq!(digest.root, before_digest.root, "regzip changed the digest");
         assert_eq!(leaves, before_leaves, "regzip changed the leaves");

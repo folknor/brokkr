@@ -28,7 +28,10 @@ its project-specific config block.
 
   The build and the run's commit stamp use the code tree (cwd), so the
   one-level-up layout builds and describes the checkout, not the config
-  dir; fixtures, snapshots and `results.db` stay under the config dir.
+  dir; fixtures, snapshots and visual history stay under the config dir.
+  Litehtml and sluggrs use separate versioned files at
+  `.brokkr/litehtml-visual.db` and `.brokkr/sluggrs-visual.db`. The first open
+  imports that subject's existing tables from `.brokkr/results.db`.
 
   A fixture whose Chrome reference (`chrome.png` + `chrome.json`) is missing
   is captured automatically only while it has no approval - its first run.
@@ -179,8 +182,10 @@ is recorded as one `ERROR` row; it does not abort the remaining snapshots.
   removed, rather than fighting the cascade with a zero-specificity
   universal rule; the pretty-printer keeps runs of inline siblings
   verbatim on one line regardless of length, so it can't invent or drop
-  whitespace between inline elements. `scripts/litehtml-prepare/smoke.js`
-  asserts these offline (`node smoke.js`).
+  whitespace between inline elements. The manual
+  `scripts/litehtml-prepare/smoke.js` helper exercises these offline
+  (`node scripts/litehtml-prepare/smoke.js`) after that package's dependencies
+  are installed; it is not part of `brokkr test` or `brokkr check`.
 - `html-extract <input.html> [--selector S | --from S --to S] <output.html>` -
   extract sub-fixture from prepared HTML. `--selector` for single element,
   `--from`/`--to` for sibling range. Preserves ancestor context and table

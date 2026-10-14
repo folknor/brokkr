@@ -185,7 +185,7 @@ fn linker_failure_detail(stderr: &str) -> Option<String> {
 /// Parse a diagnostic block into structured fields.
 ///
 /// `["error[E0425]: cannot find value ...", " --> src/foo.rs:10:5", ...]`
-/// → `Diagnostic { level: Error, code: Some("E0425"), site: ..., ... }`
+/// → `Diagnostic { level: Error, code: Some(LintName::parse("E0425")), site: ..., ... }`
 fn parse_block(block: &[String], level: Level) -> Diagnostic {
     let (mut header, message) = parse_header(&block[0]);
     // If the header didn't carry a [rule], try to recover one from a

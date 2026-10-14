@@ -158,39 +158,30 @@ pub(crate) fn run(req: &MeasureRequest, args: &CorpusArgs) -> Result<(), DevErro
         ("BROKKR_HARNESS_ARTEFACT_DIR", scratch_str.as_str()),
         ("BROKKR_TEST_BIN_DIR", bin_dir_str.as_str()),
     ];
-    let scratch_dir = ctx.paths.scratch_dir.clone();
     let project_root = req.project_root.as_path().to_path_buf();
-    // Each measured iteration gets the parity path's hang backstop: a wedged
-    // harness would otherwise hold the global lock until `brokkr kill`.
-    // Applied through the sidecar's ambient scope because the child is
-    // spawned inside `run_hotpath_capture`, which takes no deadline.
-    let _deadline = crate::sidecar::DeadlineScope::enter(crate::piners::cmd::HARNESS_HANG_BACKSTOP);
-    ctx.harness.run_hotpath(&config, binary, |i| {
-        // The capture does not reject on the exit status: the stream is read
-        // first, on every status, so a run_error or a partial report is what
-        // the failure names.
-        let capture = harness::run_hotpath_capture_with_stdout(
-            &binary_str,
+    ctx.harness.run_hotpath(&config, binary, |i, fifo| {
+        let mut iteration = ctx.harness.capture_hotpath(
+            binary,
             &subprocess_args,
-            &scratch_dir,
             &project_root,
             &env,
             &[0],
-            req.stop_marker,
-            Some(ctx.harness.lock()),
+            fifo,
+            i,
+            Some(crate::piners::cmd::HARNESS_HANG_BACKSTOP),
         )?;
-        // A stop marker that actually fired ends the run early by design, and
-        // is not held to its selection or its status; every other run, a
-        // configured marker that never fired included, is.
-        if !matches!(capture.sidecar.ending, crate::output::Ending::StopMarker(_)) {
-            // A backstop kill is brokkr's, never a spontaneous SIGKILL.
-            let end = HarnessEnd::from_ending(&capture.sidecar.ending);
-            if let Err(e) = check_iteration(i, &ids, end, &capture.stdout, &capture.stderr) {
-                capture.park_failure();
-                return Err(e);
+        if let Some(ending) = &iteration.ending
+            && !matches!(ending, crate::output::Ending::StopMarker(_))
+        {
+            let end = HarnessEnd::from_ending(ending);
+            if let Err(error) = check_iteration(i, &ids, end, &iteration.stdout, &iteration.stderr)
+            {
+                // The protocol assessment explains the failure more precisely
+                // than the generic child verdict; keep its captured evidence.
+                iteration.error = Some(error);
             }
         }
-        Ok((capture.result, capture.sidecar))
+        Ok(iteration)
     })?;
 
     Ok(())

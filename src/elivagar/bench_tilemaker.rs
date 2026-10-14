@@ -67,12 +67,12 @@ pub(crate) fn prepare(
         std::fs::create_dir_all(&sb_data)?;
 
         ensure_symlink(
-            &data_dir.join("water-polygons-split-4326"),
-            &sb_data.join("water-polygons-split-4326"),
+            &data_dir.join(super::download_ocean::FULL_RES_4326_DIR),
+            &sb_data.join(super::download_ocean::FULL_RES_4326_DIR),
         )?;
         ensure_symlink(
-            &data_dir.join("simplified-water-polygons-split-4326"),
-            &sb_data.join("simplified-water-polygons-split-4326"),
+            &data_dir.join(super::download_ocean::SIMPLIFIED_4326_DIR),
+            &sb_data.join(super::download_ocean::SIMPLIFIED_4326_DIR),
         )?;
     }
 

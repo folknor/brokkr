@@ -112,32 +112,7 @@ fn categorize_blocks(detail: &str) -> TypeCounts {
 /// `..` between the two numbers, and because the elements section comes
 /// first in the output we never see it when anchoring forwards.
 fn parse_total_relations(inspect_text: &str) -> Option<u64> {
-    let mut in_elements = false;
-    for line in inspect_text.lines() {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("Elements:") {
-            in_elements = true;
-            continue;
-        }
-        if !in_elements {
-            continue;
-        }
-        // A blank line terminates the elements section.
-        if trimmed.is_empty() {
-            return None;
-        }
-        let mut toks = trimmed.split_whitespace();
-        let Some(label) = toks.next() else {
-            continue;
-        };
-        if label != "Relations:" {
-            continue;
-        }
-        let num_tok = toks.next()?;
-        let cleaned: String = num_tok.chars().filter(|c| *c != ',').collect();
-        return cleaned.parse::<u64>().ok();
-    }
-    None
+    super::inspect_report::InspectReport::parse(inspect_text).relations
 }
 
 /// Format an integer with comma thousand separators.
@@ -156,9 +131,9 @@ fn fmt_num(n: u64) -> String {
 
 /// Format a byte count as a short human-readable string.
 fn fmt_size(bytes: u64) -> String {
-    const KB: u64 = 1024;
-    const MB: u64 = 1024 * 1024;
-    const GB: u64 = 1024 * 1024 * 1024;
+    const KB: u64 = 1_000;
+    const MB: u64 = 1_000_000;
+    const GB: u64 = 1_000_000_000;
     #[allow(clippy::cast_precision_loss)]
     if bytes >= GB {
         format!("{:.1} GB", bytes as f64 / GB as f64)
@@ -544,8 +519,10 @@ Elements: 100 total
     #[test]
     fn fmt_size_units() {
         assert_eq!(fmt_size(500), "500 B");
-        assert_eq!(fmt_size(2048), "2 KB");
-        assert_eq!(fmt_size(5 * 1024 * 1024), "5 MB");
-        assert_eq!(fmt_size(3 * 1024 * 1024 * 1024), "3.0 GB");
+        // Decimal units, matching the sizes the other tools print.
+        assert_eq!(fmt_size(2_500), "2 KB");
+        assert_eq!(fmt_size(5_500_000), "5 MB");
+        assert_eq!(fmt_size(3_000_000_000), "3.0 GB");
+        assert_eq!(fmt_size(3 * 1024 * 1024 * 1024), "3.2 GB");
     }
 }

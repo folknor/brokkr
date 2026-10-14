@@ -75,14 +75,14 @@ fn insert_inner(conn: &rusqlite::Connection, row: &RunRow, uuid: &str) -> Result
         INSERT_SQL,
         rusqlite::params![
             row.hostname,
-            row.commit,
+            row.commit.as_str(),
             row.subject,
             row.command,
             row.mode,
             row.input_file,
             row.input_mb,
-            row.elapsed_ms,
-            row.elapsed_us,
+            row.elapsed.ms(),
+            row.elapsed.micros(),
             row.peak_rss_mb,
             cargo_features,
             row.cargo_profile.as_str(),
@@ -128,7 +128,6 @@ fn insert_timings(conn: &rusqlite::Connection, run_id: i64, row: &RunRow) -> Res
     // Distribution child row. The microsecond columns stay NULL when the
     // distribution never measured them.
     if let Some(ref dist) = row.distribution {
-        let us = dist.us;
         conn.execute(
             "INSERT INTO run_distribution \
              (run_id, samples, min_ms, p50_ms, p95_ms, max_ms, min_us, p50_us, p95_us, max_us) \
@@ -136,33 +135,28 @@ fn insert_timings(conn: &rusqlite::Connection, run_id: i64, row: &RunRow) -> Res
             rusqlite::params![
                 run_id,
                 dist.samples,
-                dist.min_ms,
-                dist.p50_ms,
-                dist.p95_ms,
-                dist.max_ms,
-                us.map(|u| u.min),
-                us.map(|u| u.p50),
-                us.map(|u| u.p95),
-                us.map(|u| u.max),
+                dist.min.ms(),
+                dist.p50.ms(),
+                dist.p95.ms(),
+                dist.max.ms(),
+                dist.min.micros(),
+                dist.p50.micros(),
+                dist.p95.micros(),
+                dist.max.micros(),
             ],
         )?;
     }
 
-    // Per-iteration walls, in execution order. Microseconds ride along only
-    // when there is one per iteration - a shorter list cannot be aligned to
-    // the order the table exists to keep.
-    let iterations_us =
-        (row.iterations_us.len() == row.iterations.len()).then_some(&row.iterations_us);
-    for (run_idx, elapsed_ms) in row.iterations.iter().enumerate() {
-        let elapsed_us = iterations_us.and_then(|us| us.get(run_idx).copied());
+    // Each per-iteration wall keeps its own precision until this SQL boundary.
+    for (run_idx, wall) in row.iterations.iter().enumerate() {
         conn.execute(
             "INSERT INTO run_iterations (run_id, run_idx, elapsed_ms, elapsed_us) \
              VALUES (?1, ?2, ?3, ?4)",
             rusqlite::params![
                 run_id,
                 i64::try_from(run_idx).unwrap_or(i64::MAX),
-                elapsed_ms,
-                elapsed_us
+                wall.ms(),
+                wall.micros()
             ],
         )?;
     }
@@ -376,7 +370,9 @@ mod tests {
         clippy::let_underscore_must_use,
         clippy::useless_vec
     )]
-    use crate::db::{HotpathData, KvPair, QueryFilter, ResultsDb, RunInvocation, RunRow};
+    use crate::db::{
+        HotpathData, KvPair, QueryFilter, ResultsDb, RunInvocation, RunRow, RunRowBuilder, Wall,
+    };
 
     #[test]
     fn db_open_and_insert_roundtrip() {
@@ -387,40 +383,23 @@ mod tests {
         drop(std::fs::remove_file(&db_path));
 
         let db = ResultsDb::open(&db_path).expect("open db");
-        let run = RunRow {
-            hostname: String::from("testhost"),
-            commit: String::from("aabbccdd"),
-            subject: String::from("test subject"),
-            command: String::from("read"),
-            mode: Some(String::from("bench")),
-            input_file: Some(String::from("denmark.osm.pbf")),
-            input_mb: Some(42.5),
-            elapsed_ms: 1234,
-            elapsed_us: None,
-            peak_rss_mb: None,
-            cargo_features: None,
-            cargo_profile: crate::build::CargoProfile::Release,
-            kernel: None,
-            cpu_governor: None,
-            avail_memory_mb: None,
-            storage_notes: None,
-            cli_args: Some(String::from("--fast")),
-            invocation: RunInvocation {
-                argv: vec![
-                    String::from("brokkr"),
-                    String::from("test"),
-                    String::from("--fast"),
-                ],
-                arm_key: String::from("test/fast"),
-            },
-            project: String::from("test"),
-            stop_marker: None,
-            kv: vec![],
-            iterations: Vec::new(),
-            iterations_us: Vec::new(),
-            distribution: None,
-            hotpath: None,
-        };
+        let run = RunRowBuilder::new()
+            .update(|run| {
+                run.subject = String::from("test subject");
+                run.input_file = Some(String::from("denmark.osm.pbf"));
+                run.input_mb = Some(42.5);
+                run.elapsed = Wall::LegacyMillis(1234);
+                run.cli_args = Some(String::from("--fast"));
+                run.invocation = RunInvocation {
+                    argv: vec![
+                        String::from("brokkr"),
+                        String::from("test"),
+                        String::from("--fast"),
+                    ],
+                    arm_key: String::from("test/fast"),
+                };
+            })
+            .build();
         let (_, short) = db.insert(&run).expect("insert");
         assert_eq!(short.len(), 8, "short uuid should be 8 chars");
 
@@ -441,7 +420,7 @@ mod tests {
         assert_eq!(rows[0].command, "read");
         assert_eq!(rows[0].mode, "bench");
         assert_eq!(rows[0].input_file, "denmark.osm.pbf");
-        assert_eq!(rows[0].elapsed_ms, 1234);
+        assert_eq!(rows[0].elapsed, Wall::LegacyMillis(1234));
         assert_eq!(rows[0].cli_args, "--fast");
         assert_eq!(rows[0].brokkr_args, r#"["brokkr","test","--fast"]"#);
         assert_eq!(rows[0].arm_key.as_deref(), Some("test/fast"));
@@ -471,36 +450,13 @@ mod tests {
     }
 
     fn kv_row(kv: Vec<KvPair>, hotpath: Option<HotpathData>) -> RunRow {
-        RunRow {
-            hostname: String::from("testhost"),
-            commit: String::from("aabbccdd"),
-            subject: String::from("test"),
-            command: String::from("read"),
-            mode: Some(String::from("bench")),
-            input_file: None,
-            input_mb: None,
-            elapsed_ms: 1,
-            elapsed_us: None,
-            peak_rss_mb: None,
-            cargo_features: None,
-            cargo_profile: crate::build::CargoProfile::Release,
-            kernel: None,
-            cpu_governor: None,
-            avail_memory_mb: None,
-            storage_notes: None,
-            cli_args: None,
-            invocation: RunInvocation {
-                argv: Vec::new(),
-                arm_key: String::new(),
-            },
-            project: String::from("test"),
-            stop_marker: None,
-            kv,
-            iterations: Vec::new(),
-            iterations_us: Vec::new(),
-            distribution: None,
-            hotpath,
-        }
+        RunRowBuilder::new()
+            .update(|row| {
+                row.elapsed = Wall::LegacyMillis(1);
+                row.kv = kv;
+                row.hotpath = hotpath;
+            })
+            .build()
     }
 
     fn rows_for(db: &ResultsDb, uuid: &str) -> Vec<crate::db::StoredRow> {
@@ -555,19 +511,20 @@ mod tests {
         assert_eq!(kv_text(&db, &full, "threads.rss_bytes"), "stderr");
     }
 
-    // A microsecond list that does not cover every iteration cannot be
-    // aligned to the execution order, so none of it is stored.
+    // Precision is attached to each iteration, so a legacy sample and an
+    // exact sample retain their own measured forms in execution order.
     #[test]
-    fn partial_iteration_microseconds_are_not_stored() {
-        let db_path = crate::test_scratch::scratch("db-write", "partial_iter_us").join("t.db");
+    fn mixed_precision_iteration_walls_round_trip() {
+        let db_path = crate::test_scratch::scratch("db-write", "mixed_iter_walls").join("t.db");
         let db = ResultsDb::open(&db_path).expect("open");
         let mut row = kv_row(Vec::new(), None);
-        row.iterations = vec![1, 2];
-        row.iterations_us = vec![1_200];
+        row.iterations = vec![Wall::LegacyMillis(1), Wall::from_micros(1_200)];
         let (full, _) = db.insert(&row).expect("insert");
         let stored = rows_for(&db, &full);
-        assert_eq!(stored[0].iterations, vec![1, 2]);
-        assert!(stored[0].iterations_us.is_empty());
+        assert_eq!(
+            stored[0].iterations,
+            vec![Wall::LegacyMillis(1), Wall::from_micros(1_200)]
+        );
     }
 
     #[test]
@@ -618,7 +575,7 @@ mod tests {
             )
             .expect("reshape child tables to a legacy form");
         let mut row = kv_row(vec![KvPair::text("meta.x", "y")], None);
-        row.iterations = vec![1, 2];
+        row.iterations = vec![Wall::LegacyMillis(1), Wall::LegacyMillis(2)];
         let (full, _) = db.insert(&row).expect("insert");
         assert_eq!(
             db.delete_by_uuid(&crate::db::RunId::new(full.clone()))

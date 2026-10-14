@@ -15,7 +15,7 @@ pub fn run(
     compressions: &[String],
     project_root: &Path,
 ) -> Result<(), DevError> {
-    let (basename, pbf_str) = super::path_strs(pbf_path)?;
+    let (basename, pbf_str) = crate::utf8_path::path_strings(pbf_path)?;
 
     let variant_names: Vec<String> = compressions
         .iter()

@@ -16,11 +16,11 @@ use std::cmp::Reverse;
 use std::io::{self, Write};
 use std::sync::Arc;
 
-use protohoggr::{Cursor, WIRE_LEN, WIRE_VARINT};
-
+use super::super::constants::{RING_GROUP_LIMIT, SVG_FALLBACK_COLOR, SVG_TILE_SIZE, mvt};
 use super::super::eliv::{
-    ArchiveView, DetailAttr, DetailFeature, Strictness, decode_detail_attr, decode_detail_feature,
-    find_entry, gzip_decompress, tile_id_to_zxy, xy_to_tile_id,
+    ArchiveView, Cursor, DetailAttr, DetailFeature, RawDirEntry, Strictness, WIRE_LEN, WIRE_VARINT,
+    decode_detail_attr, decode_detail_feature, find_entry, gzip_decompress, tile_id_to_zxy,
+    xy_to_tile_id,
 };
 use super::canonical::{compare_detail_components, compare_detail_features};
 use super::style::{Paint, Style};
@@ -51,7 +51,7 @@ pub fn decode_render_tile(data: &[u8]) -> Result<RenderTile, String> {
     let mut layers = Vec::new();
     let mut cursor = Cursor::new(data);
     while let Some((field, wire)) = cursor.read_tag().map_err(|e| e.to_string())? {
-        if field != 3 || wire != WIRE_LEN {
+        if field != mvt::TILE_LAYER || wire != WIRE_LEN {
             return Err("invalid MVT tile".into());
         }
         let layer = cursor.read_len_delimited().map_err(|e| e.to_string())?;
@@ -123,11 +123,12 @@ pub fn classify_rings(rings: &[Vec<(i32, i32)>]) -> (Vec<Vec<usize>>, u32) {
     }
     let mut clamped = 0u32;
     for group in &mut groups {
-        if group.len() > 500 {
+        if group.len() > RING_GROUP_LIMIT {
             let before = group.len();
             group.sort_by_key(|&index| Reverse(area(&rings[index]).unsigned_abs()));
-            group.truncate(500);
-            clamped = clamped.saturating_add(u32::try_from(before - 500).unwrap_or(u32::MAX));
+            group.truncate(RING_GROUP_LIMIT);
+            clamped = clamped
+                .saturating_add(u32::try_from(before - RING_GROUP_LIMIT).unwrap_or(u32::MAX));
         }
     }
     (groups, clamped)
@@ -170,7 +171,7 @@ pub fn render_svg(
     style: &Style,
     layers: Option<&[String]>,
 ) -> Result<RenderedSvg, String> {
-    let mut bytes = format!("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 4096 4096\" width=\"512\" height=\"512\">\n  <title>{z}/{x}/{y}</title>\n  <rect width=\"4096\" height=\"4096\" fill=\"{}\"/>\n", xml_attr(&style.file.background)).into_bytes();
+    let mut bytes = format!("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {SVG_TILE_SIZE} {SVG_TILE_SIZE}\" width=\"512\" height=\"512\">\n  <title>{z}/{x}/{y}</title>\n  <rect width=\"{SVG_TILE_SIZE}\" height=\"{SVG_TILE_SIZE}\" fill=\"{}\"/>\n", xml_attr(&style.file.background)).into_bytes();
     let mut refs: Vec<&RenderLayer> = tile
         .layers
         .iter()
@@ -184,7 +185,7 @@ pub fn render_svg(
     });
     let mut warnings = Vec::new();
     for layer in refs {
-        if layer.extent == 0 || 4096 % layer.extent != 0 {
+        if layer.extent == 0 || !SVG_TILE_SIZE.is_multiple_of(layer.extent) {
             return Err(format!(
                 "{z}/{x}/{y} layer {} has non-integral extent {}",
                 layer.name, layer.extent
@@ -193,7 +194,7 @@ pub fn render_svg(
         if style.position(&layer.name).is_none() {
             warnings.push(format!("unstyled layer {}", layer.name));
         }
-        let scale = 4096 / layer.extent;
+        let scale = SVG_TILE_SIZE / layer.extent;
         bytes.extend_from_slice(
             format!(
                 "  <g id=\"{}\"{}>\n",
@@ -220,7 +221,7 @@ pub fn render_svg(
 fn emit_feature(out: &mut Vec<u8>, layer: &str, i: usize, f: &RenderFeature, paint: &Paint) {
     let id = xml_attr(&format!("{layer}-f{i}"));
     match f.geom_type {
-        3 => {
+        mvt::GEOMETRY_POLYGON => {
             let (groups, clamped) = classify_rings(&f.wire_paths);
             for (j, g) in groups.iter().enumerate() {
                 let paths: Vec<_> = g.iter().map(|&n| f.wire_paths[n].as_slice()).collect();
@@ -228,7 +229,7 @@ fn emit_feature(out: &mut Vec<u8>, layer: &str, i: usize, f: &RenderFeature, pai
                     "    <path id=\"{}-p{j}\" d=\"{}\" fill=\"{}\" fill-rule=\"nonzero\"",
                     id,
                     xml_attr(&path_data(&paths, true)),
-                    xml_attr(paint.fill.as_deref().unwrap_or("#ff00ff"))
+                    xml_attr(paint.fill.as_deref().unwrap_or(SVG_FALLBACK_COLOR))
                 );
                 if let Some(v) = &paint.fill_opacity {
                     s.push_str(&format!(" fill-opacity=\"{}\"", xml_attr(v)));
@@ -246,7 +247,7 @@ fn emit_feature(out: &mut Vec<u8>, layer: &str, i: usize, f: &RenderFeature, pai
                 out.extend_from_slice(s.as_bytes());
             }
         }
-        2 => {
+        mvt::GEOMETRY_LINESTRING => {
             let paths: Vec<_> = f.wire_paths.iter().map(Vec::as_slice).collect();
             let mut s = format!(
                 "    <path id=\"{id}\" d=\"{}\" fill=\"none\" stroke=\"{}\" stroke-width=\"{}\"",
@@ -256,7 +257,7 @@ fn emit_feature(out: &mut Vec<u8>, layer: &str, i: usize, f: &RenderFeature, pai
                         .stroke
                         .as_deref()
                         .or(paint.fill.as_deref())
-                        .unwrap_or("#ff00ff")
+                        .unwrap_or(SVG_FALLBACK_COLOR)
                 ),
                 xml_attr(paint.stroke_width.as_deref().unwrap_or("1"))
             );
@@ -269,10 +270,10 @@ fn emit_feature(out: &mut Vec<u8>, layer: &str, i: usize, f: &RenderFeature, pai
             s.push_str("/>\n");
             out.extend_from_slice(s.as_bytes());
         }
-        1 => {
+        mvt::GEOMETRY_POINT => {
             for (k, path) in f.wire_paths.iter().enumerate() {
                 for (x, y) in path {
-                    out.extend_from_slice(format!("    <circle id=\"{id}-p{k}\" cx=\"{x}\" cy=\"{y}\" r=\"{}\" fill=\"{}\"/>\n", paint.point_radius.unwrap_or(4), xml_attr(paint.fill.as_deref().or(paint.stroke.as_deref()).unwrap_or("#ff00ff"))).as_bytes());
+                    out.extend_from_slice(format!("    <circle id=\"{id}-p{k}\" cx=\"{x}\" cy=\"{y}\" r=\"{}\" fill=\"{}\"/>\n", paint.point_radius.unwrap_or(4), xml_attr(paint.fill.as_deref().or(paint.stroke.as_deref()).unwrap_or(SVG_FALLBACK_COLOR))).as_bytes());
                 }
             }
         }
@@ -289,8 +290,23 @@ pub fn render_archive_tile(
     layers: Option<&[String]>,
 ) -> io::Result<RenderedSvg> {
     let runs = archive.read_all_runs()?;
+    render_archive_tile_from_runs(archive, &runs, z, x, y, style, layers)
+}
+
+/// Render a tile using a directory index the caller already read. Manifest
+/// operations render several targets from one archive and should not reload
+/// the complete directory for every tile.
+pub(crate) fn render_archive_tile_from_runs(
+    archive: &ArchiveView,
+    runs: &[RawDirEntry],
+    z: u8,
+    x: u32,
+    y: u32,
+    style: &Style,
+    layers: Option<&[String]>,
+) -> io::Result<RenderedSvg> {
     let id = xy_to_tile_id(z, x, y);
-    let raw = if let Some(e) = find_entry(&runs, id) {
+    let raw = if let Some(e) = find_entry(runs, id) {
         gzip_decompress(archive.raw_blob_at(e.offset, e.length)?)?
     } else {
         Vec::new()
@@ -300,50 +316,58 @@ pub fn render_archive_tile(
 }
 
 /// Emit the ring-grouping report - the input to the ring-grouping differential
-/// oracle. One line per polygon feature: `z/x/y layer i groups`.
+/// oracle. One line per polygon feature: `z/x/y layer i groups`, in archive
+/// tile-id order. A directory run's blob is decoded once and its feature
+/// summaries are reused for every tile id in that run.
 pub fn dump_ring_grouping(archive: &ArchiveView, out: &mut dyn Write) -> io::Result<()> {
-    let mut lines = Vec::new();
     for run in archive.read_all_runs()? {
         let raw = gzip_decompress(archive.raw_blob_at(run.offset, run.length)?)?;
+        let summaries = ring_grouping_for_blob(&raw)?;
         for tile_id in run.tile_id..run.tile_id + u64::from(run.run_length) {
             let (z, x, y) = tile_id_to_zxy(tile_id);
-            let mut tile = Cursor::new(&raw);
-            while let Some((field, wire)) = tile.read_tag().map_err(io::Error::other)? {
-                if field != 3 || wire != WIRE_LEN {
-                    return Err(io::Error::other("invalid MVT tile"));
-                }
-                let layer = tile.read_len_delimited().map_err(io::Error::other)?;
-                let (name, _extent, _keys, _values, features) =
-                    wire_layer(layer).map_err(io::Error::other)?;
-                for (i, feature) in features.iter().enumerate() {
-                    let (typ, rings) = wire_feature_paths(feature).map_err(io::Error::other)?;
-                    if typ != 3 {
-                        continue;
-                    }
-                    let (g, _) = classify_rings(&rings);
-                    let group = if g.is_empty() {
-                        "-".into()
-                    } else {
-                        g.iter()
-                            .map(|v| {
-                                v.iter()
-                                    .map(|&n| rings[n].len().to_string())
-                                    .collect::<Vec<_>>()
-                                    .join("+")
-                            })
-                            .collect::<Vec<_>>()
-                            .join("|")
-                    };
-                    lines.push(format!("{z}/{x}/{y} {name} {i} {group}"));
-                }
+            for (name, feature, group) in &summaries {
+                writeln!(out, "{z}/{x}/{y} {name} {feature} {group}")?;
             }
         }
     }
-    lines.sort();
-    for line in lines {
-        writeln!(out, "{line}")?;
-    }
     Ok(())
+}
+
+fn ring_grouping_for_blob(raw: &[u8]) -> io::Result<Vec<(String, usize, String)>> {
+    let mut summaries = Vec::new();
+    let mut tile = Cursor::new(raw);
+    while let Some((field, wire)) = tile.read_tag().map_err(io::Error::other)? {
+        if field != mvt::TILE_LAYER || wire != WIRE_LEN {
+            return Err(io::Error::other("invalid MVT tile"));
+        }
+        let layer = tile.read_len_delimited().map_err(io::Error::other)?;
+        let (name, _extent, _keys, _values, features) =
+            wire_layer(layer).map_err(io::Error::other)?;
+        for (i, feature) in features.iter().enumerate() {
+            let (typ, rings) = wire_feature_paths(feature).map_err(io::Error::other)?;
+            if typ != mvt::GEOMETRY_POLYGON {
+                continue;
+            }
+            let (groups, _) = classify_rings(&rings);
+            let group = if groups.is_empty() {
+                "-".into()
+            } else {
+                groups
+                    .iter()
+                    .map(|members| {
+                        members
+                            .iter()
+                            .map(|&n| rings[n].len().to_string())
+                            .collect::<Vec<_>>()
+                            .join("+")
+                    })
+                    .collect::<Vec<_>>()
+                    .join("|")
+            };
+            summaries.push((name.clone(), i, group));
+        }
+    }
+    Ok(summaries)
 }
 
 #[allow(clippy::type_complexity)]
@@ -352,33 +376,33 @@ fn wire_layer(
 ) -> Result<(String, u32, Vec<Arc<str>>, Vec<DetailAttr>, Vec<Vec<u8>>), String> {
     let mut c = Cursor::new(data);
     let mut name = String::new();
-    let mut extent = 4096u32;
+    let mut extent = mvt::TILE_EXTENT;
     let mut keys: Vec<Arc<str>> = Vec::new();
     let mut values = Vec::new();
     let mut features = Vec::new();
     while let Some((f, w)) = c.read_tag().map_err(|e| e.to_string())? {
         match (f, w) {
-            (1, WIRE_LEN) => {
+            (mvt::layer::NAME, WIRE_LEN) => {
                 name = std::str::from_utf8(c.read_len_delimited().map_err(|e| e.to_string())?)
                     .map_err(|e| e.to_string())?
                     .into();
             }
-            (2, WIRE_LEN) => {
+            (mvt::layer::FEATURE, WIRE_LEN) => {
                 features.push(c.read_len_delimited().map_err(|e| e.to_string())?.to_vec());
             }
-            (3, WIRE_LEN) => keys.push(Arc::from(
+            (mvt::layer::KEY, WIRE_LEN) => keys.push(Arc::from(
                 std::str::from_utf8(c.read_len_delimited().map_err(|e| e.to_string())?)
                     .map_err(|e| e.to_string())?,
             )),
-            (4, WIRE_LEN) => values.push(decode_detail_attr(
+            (mvt::layer::VALUE, WIRE_LEN) => values.push(decode_detail_attr(
                 c.read_len_delimited().map_err(|e| e.to_string())?,
                 Strictness::Strict,
             )?),
-            (5, WIRE_VARINT) => {
+            (mvt::layer::EXTENT, WIRE_VARINT) => {
                 extent = u32::try_from(c.read_varint().map_err(|e| e.to_string())?)
                     .map_err(|e| e.to_string())?;
             }
-            (15, WIRE_VARINT) => {
+            (mvt::layer::VERSION, WIRE_VARINT) => {
                 c.read_varint().map_err(|e| e.to_string())?;
             }
             _ => return Err("unknown layer field".into()),
@@ -395,15 +419,15 @@ fn wire_feature_paths(data: &[u8]) -> Result<(u8, Vec<Vec<(i32, i32)>>), String>
     let (mut typ, mut geom) = (0u64, Vec::new());
     while let Some((f, w)) = c.read_tag().map_err(|e| e.to_string())? {
         match (f, w) {
-            (1 | 3, WIRE_VARINT) => {
+            (mvt::feature::ID | mvt::feature::GEOMETRY_TYPE, WIRE_VARINT) => {
                 let value = c.read_varint().map_err(|e| e.to_string())?;
-                if f == 3 {
+                if f == mvt::feature::GEOMETRY_TYPE {
                     typ = value;
                 }
             }
-            (2 | 4, WIRE_LEN) => {
+            (mvt::feature::TAGS | mvt::feature::GEOMETRY, WIRE_LEN) => {
                 let value = c.read_len_delimited().map_err(|e| e.to_string())?;
-                if f == 4 {
+                if f == mvt::feature::GEOMETRY {
                     geom.extend_from_slice(value);
                 }
             }
@@ -417,9 +441,9 @@ fn wire_feature_paths(data: &[u8]) -> Result<(u8, Vec<Vec<(i32, i32)>>), String>
     while !c.is_empty() {
         let command = u32::try_from(c.read_varint().map_err(|e| e.to_string())?)
             .map_err(|_| "geometry command overflow")?;
-        match command & 7 {
-            1 => {
-                for _ in 0..command >> 3 {
+        match command & mvt::COMMAND_ID_MASK {
+            mvt::COMMAND_MOVE_TO => {
+                for _ in 0..command >> mvt::COMMAND_COUNT_SHIFT {
                     x = x
                         .checked_add(unzigzag(
                             u32::try_from(c.read_varint().map_err(|e| e.to_string())?)
@@ -435,9 +459,9 @@ fn wire_feature_paths(data: &[u8]) -> Result<(u8, Vec<Vec<(i32, i32)>>), String>
                     paths.push(vec![(x, y)]);
                 }
             }
-            2 => {
+            mvt::COMMAND_LINE_TO => {
                 let path = paths.last_mut().ok_or("LineTo without MoveTo")?;
-                for _ in 0..command >> 3 {
+                for _ in 0..command >> mvt::COMMAND_COUNT_SHIFT {
                     x = x
                         .checked_add(unzigzag(
                             u32::try_from(c.read_varint().map_err(|e| e.to_string())?)
@@ -453,8 +477,8 @@ fn wire_feature_paths(data: &[u8]) -> Result<(u8, Vec<Vec<(i32, i32)>>), String>
                     path.push((x, y));
                 }
             }
-            7 => {
-                if geom_type == 3
+            mvt::COMMAND_CLOSE_PATH => {
+                if geom_type == mvt::GEOMETRY_POLYGON
                     && let Some(r) = paths.last_mut()
                     && let Some(first) = r.first().copied()
                 {
@@ -489,6 +513,7 @@ pub fn xml_attr(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
+    use super::super::super::constants::{RING_GROUP_LIMIT, SVG_TILE_SIZE};
     use super::{classify_rings, xml_attr, xml_text};
 
     fn pos(a: i32, b: i32) -> Vec<(i32, i32)> {
@@ -528,13 +553,20 @@ mod tests {
 
     #[test]
     fn classify_rings_clamps_at_500_with_ties() {
-        let mut rings = vec![vec![(0, 0), (4096, 0), (4096, 4096), (0, 4096), (0, 0)]];
-        for i in 0..500 {
-            rings.push(neg(i * 2, 0));
+        let tile_size = i32::try_from(SVG_TILE_SIZE).unwrap();
+        let mut rings = vec![vec![
+            (0, 0),
+            (tile_size, 0),
+            (tile_size, tile_size),
+            (0, tile_size),
+            (0, 0),
+        ]];
+        for i in 0..RING_GROUP_LIMIT {
+            rings.push(neg(i32::try_from(i).unwrap() * 2, 0));
         }
         let (groups, clamped) = classify_rings(&rings);
         assert_eq!(groups.len(), 1);
-        assert_eq!(groups[0].len(), 500);
+        assert_eq!(groups[0].len(), RING_GROUP_LIMIT);
         assert_eq!(clamped, 1);
     }
 

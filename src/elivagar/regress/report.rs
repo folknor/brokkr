@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 use serde_json::json;
 
+use super::super::constants::DEFAULT_MAX_EXAMPLES;
 use super::super::eliv::tile_id_to_zxy;
 use super::compare::{OutcomeClass, OutcomeCounts};
 
@@ -38,7 +39,7 @@ impl Default for RegressConfig {
         Self {
             tol: 0,
             max_moved: 0,
-            max_examples: 20,
+            max_examples: DEFAULT_MAX_EXAMPLES,
         }
     }
 }

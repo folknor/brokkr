@@ -156,6 +156,19 @@ mod selection {
                 .collect()
         }
 
+        /// Whether the forwarded cargo args carry `--config` or `--target`
+        /// (either spelling), which change the config chain or the build
+        /// platform out from under anything brokkr installs into cargo.
+        pub(crate) fn changes_config_or_target(&self) -> bool {
+            self.classified.iter().any(|arg| match arg {
+                ForwardedCargoArg::Unsupported(tokens) => tokens.first().is_some_and(|token| {
+                    let head = token.split_once('=').map_or(token.as_str(), |(head, _)| head);
+                    head == "--config" || head == "--target"
+                }),
+                _ => false,
+            })
+        }
+
         /// Cargo argv that rides the prebuild or reproduction command after
         /// target selectors have already narrowed the plan.
         pub(crate) fn cargo_without_targets(&self) -> Vec<String> {
@@ -244,7 +257,13 @@ mod selection {
                 && !forwarded.narrows_package_selection()
         });
         let whole_workspace = if any_candidate {
-            crate::build::project_info(Some(project_root))?.bare_selection_is_whole_workspace
+            crate::cargo::metadata::load(
+                project_root,
+                crate::cargo::metadata::Query::workspace(),
+                &[],
+                None,
+            )?
+            .members_are_all_default()
         } else {
             false
         };
@@ -363,18 +382,22 @@ mod selection {
             forwarded: &ForwardedArgs,
         ) -> Self {
             let mut args = vec!["test".to_owned()];
-            args.extend(sweep.unification_args());
             args.extend(allow_args.iter().cloned());
             if let Some(request) = request {
-                args.extend(request.cargo_args());
-                args.extend(cargo_target_selector(binary.selector_kind(), &binary.target));
+                // The planned request through the one selection renderer;
+                // the binary narrows only the target.
+                args.extend(super::cargo_selection_args(
+                    sweep,
+                    request,
+                    sweep.cargo_profile(),
+                    super::CargoSelectionPurpose::Shape,
+                ));
             } else {
+                args.extend(sweep.cargo_profile().cargo_args().iter().map(|arg| (*arg).to_owned()));
+                args.extend(sweep.unification_args());
                 args.extend(["-p".to_owned(), binary.package.clone()]);
-                args.extend(cargo_target_selector(binary.selector_kind(), &binary.target));
             }
-            if let Some(profile) = sweep.profile {
-                args.extend(profile.cargo_args().iter().map(|arg| (*arg).to_owned()));
-            }
+            args.extend(cargo_target_selector(binary.selector_kind(), &binary.target));
             args.extend(forwarded.cargo_without_targets());
             let mut libtest = sweep.lane_filters().libtest_args();
             libtest.extend(sweep.lane_filters().name_filters());

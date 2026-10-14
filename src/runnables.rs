@@ -10,6 +10,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::cargo::metadata::{self, Query};
 use crate::config::BinConfig;
 use crate::error::DevError;
 use crate::output;
@@ -121,60 +122,28 @@ fn discover(project_root: &Path) -> Result<Vec<Runnable>, DevError> {
 /// [`discover`], plus metadata's `workspace_root` - the directory cargo reads
 /// `Cargo.lock` from for every member, wherever the invocation started.
 fn discover_workspace(project_root: &Path) -> Result<(Vec<Runnable>, PathBuf), DevError> {
-    let captured = output::run_cargo(
-        &["metadata", "--format-version", "1", "--no-deps"],
-        project_root,
-        &[],
-        None,
-    )?;
-    if !captured.success() {
-        let stderr = String::from_utf8_lossy(&captured.stderr);
-        return Err(DevError::Build(format!("cargo metadata failed: {stderr}")));
-    }
-    let stdout = String::from_utf8_lossy(&captured.stdout);
-    let val: serde_json::Value = serde_json::from_str(&stdout)?;
-    let packages = val
-        .get("packages")
-        .and_then(serde_json::Value::as_array)
-        .ok_or_else(|| DevError::Build("cargo metadata missing \"packages\"".into()))?;
-    let workspace_root = val
-        .get("workspace_root")
-        .and_then(serde_json::Value::as_str)
-        .map(PathBuf::from)
-        .ok_or_else(|| DevError::Build("cargo metadata missing \"workspace_root\"".into()))?;
+    let metadata = metadata::load(project_root, Query::workspace(), &[], None)?;
+    let workspace_root = PathBuf::from(&metadata.workspace_root);
 
     let mut out = Vec::new();
-    for pkg in packages {
-        let pkg_name = pkg
-            .get("name")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| DevError::Build("package metadata missing \"name\"".into()))?;
-        let manifest = pkg
-            .get("manifest_path")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| DevError::Build("package metadata missing \"manifest_path\"".into()))?;
-        let package_dir = Path::new(manifest)
+    for pkg in &metadata.packages {
+        let package_dir = Path::new(&pkg.manifest_path)
             .parent()
-            .ok_or_else(|| DevError::Build(format!("manifest path has no parent: {manifest}")))?
+            .ok_or_else(|| {
+                DevError::Build(format!(
+                    "manifest path has no parent: {}",
+                    pkg.manifest_path
+                ))
+            })?
             .to_owned();
-        let Some(targets) = pkg.get("targets").and_then(serde_json::Value::as_array) else {
-            continue;
-        };
-        for target in targets {
-            let Some(kinds) = target.get("kind").and_then(serde_json::Value::as_array) else {
-                continue;
-            };
-            let kind_of = |k: &str| kinds.iter().any(|v| v.as_str() == Some(k));
-            let example = kind_of("example");
-            if !example && !kind_of("bin") {
+        for target in &pkg.targets {
+            let example = target.kind.iter().any(|kind| kind == "example");
+            if !example && !target.kind.iter().any(|kind| kind == "bin") {
                 continue;
             }
-            let Some(name) = target.get("name").and_then(serde_json::Value::as_str) else {
-                continue;
-            };
             out.push(Runnable {
-                name: name.to_owned(),
-                package: pkg_name.to_owned(),
+                name: target.name.clone(),
+                package: pkg.name.clone(),
                 package_dir: package_dir.clone(),
                 example,
             });

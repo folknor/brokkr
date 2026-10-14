@@ -1,8 +1,13 @@
 //! PMTiles statistics and tile-coordinate sampling over elivagar's reader.
+//!
+//! Header decoding belongs to `PmtilesReader`; this adapter has no independent
+//! header-byte offset table. Mutation's write-side header fields are in the
+//! shared elivagar constants module.
 
 use std::collections::HashMap;
 use std::path::Path;
 
+use crate::elivagar::constants::pmtiles as pmtiles_constants;
 use crate::elivagar::eliv::{PmtilesReader, RawDirEntry, tile_id_to_zxy};
 use crate::error::DevError;
 
@@ -151,7 +156,9 @@ pub fn sample_tile_coords(path: &Path) -> Result<Vec<(u32, u32, u32)>, DevError>
 fn read_all_entries(path: &Path) -> Result<(HeaderStats, Vec<RawDirEntry>), DevError> {
     let mut reader = PmtilesReader::open(path).map_err(|error| archive_error(path, &error))?;
     let compression = reader.internal_compression();
-    if compression != 1 && compression != 2 {
+    if compression != pmtiles_constants::TILE_COMPRESSION_NONE
+        && compression != pmtiles_constants::TILE_COMPRESSION_GZIP
+    {
         return Err(DevError::Config(format!(
             "{}: unsupported directory compression: {} ({compression})",
             path.display(),
@@ -241,10 +248,10 @@ fn archive_error(path: &Path, error: &std::io::Error) -> DevError {
 fn compression_name(compression: u8) -> &'static str {
     match compression {
         0 => "unknown",
-        1 => "none",
-        2 => "gzip",
-        3 => "brotli",
-        4 => "zstd",
+        pmtiles_constants::TILE_COMPRESSION_NONE => "none",
+        pmtiles_constants::TILE_COMPRESSION_GZIP => "gzip",
+        pmtiles_constants::TILE_COMPRESSION_BROTLI => "brotli",
+        pmtiles_constants::TILE_COMPRESSION_ZSTD => "zstd",
         _ => "unknown",
     }
 }

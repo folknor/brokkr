@@ -8,8 +8,12 @@ use std::path::Path;
 
 use crate::error::DevError;
 use crate::harness::BenchHarness;
-use crate::measure::{CommandContext, CommandParams};
-use crate::pbfhogg::commands::{CatTypeFilter, DiffFormat, InputKind, PbfhoggCommand};
+use crate::pbfhogg::commands::{
+    CatTypeFilter, DiffFormat, InspectMode, PbfhoggCommand, TagsFilterInput,
+};
+use crate::pbfhogg::context::{
+    CommandContext, CommandObservations, CommandParams, ResolvedInputs, TwoPbfOrigin,
+};
 
 /// Preset commands included in the suite. Extract is benchmarked separately
 /// by `bench_all` so it uses the selected dataset's bbox and one strategy axis.
@@ -50,28 +54,18 @@ pub const ALL_COMMANDS: &[&str] = &[
 fn preset_to_command(name: &str) -> Result<PbfhoggCommand, DevError> {
     Ok(match name {
         "inspect" => PbfhoggCommand::Inspect {
-            nodes: false,
-            tags: false,
-            type_filter: None,
-            extended: false,
+            mode: InspectMode::Default { extended: false },
         },
         "inspect-nodes" => PbfhoggCommand::Inspect {
-            nodes: true,
-            tags: false,
-            type_filter: None,
-            extended: false,
+            mode: InspectMode::Nodes,
         },
         "inspect-tags" => PbfhoggCommand::Inspect {
-            nodes: false,
-            tags: true,
-            type_filter: None,
-            extended: false,
+            mode: InspectMode::Tags { type_filter: None },
         },
         "inspect-tags-way" => PbfhoggCommand::Inspect {
-            nodes: false,
-            tags: true,
-            type_filter: Some("way".into()),
-            extended: false,
+            mode: InspectMode::Tags {
+                type_filter: Some("way".into()),
+            },
         },
         "check-refs" => PbfhoggCommand::CheckRefs,
         "check-ids" => PbfhoggCommand::CheckIds { full: false },
@@ -98,31 +92,31 @@ fn preset_to_command(name: &str) -> Result<PbfhoggCommand, DevError> {
         },
         "tags-filter-way" => PbfhoggCommand::TagsFilter {
             filter: "w/highway=primary".into(),
-            omit_referenced: true,
-            invert_match: false,
-            remove_tags: false,
-            input_kind_osc: false,
+            input: TagsFilterInput::Pbf {
+                omit_referenced: true,
+                invert: false,
+                remove_tags: false,
+            },
         },
         "tags-filter-amenity" => PbfhoggCommand::TagsFilter {
             filter: "amenity=restaurant".into(),
-            omit_referenced: true,
-            invert_match: false,
-            remove_tags: false,
-            input_kind_osc: false,
+            input: TagsFilterInput::Pbf {
+                omit_referenced: true,
+                invert: false,
+                remove_tags: false,
+            },
         },
         "tags-filter-twopass" => PbfhoggCommand::TagsFilter {
             filter: "highway=primary".into(),
-            omit_referenced: false,
-            invert_match: false,
-            remove_tags: false,
-            input_kind_osc: false,
+            input: TagsFilterInput::Pbf {
+                omit_referenced: false,
+                invert: false,
+                remove_tags: false,
+            },
         },
         "tags-filter-osc" => PbfhoggCommand::TagsFilter {
             filter: "highway=primary".into(),
-            omit_referenced: false,
-            invert_match: false,
-            remove_tags: false,
-            input_kind_osc: true,
+            input: TagsFilterInput::Osc,
         },
         "getid" => PbfhoggCommand::Getid {
             add_referenced: false,
@@ -153,9 +147,7 @@ fn suite_needs_merged_pbf(commands: &[&str]) -> Result<bool, DevError> {
     commands
         .iter()
         .map(|c| preset_to_command(c))
-        .try_fold(false, |acc, cmd| {
-            Ok(acc || matches!(cmd?.input_kind(), InputKind::PbfAndMerged))
-        })
+        .try_fold(false, |acc, cmd| Ok(acc || cmd?.needs_merged_pbf()))
 }
 
 /// Whether any requested preset needs an OSC file directly as input.
@@ -163,14 +155,7 @@ fn suite_needs_osc(commands: &[&str]) -> Result<bool, DevError> {
     commands
         .iter()
         .map(|c| preset_to_command(c))
-        .try_fold(false, |acc, cmd| {
-            let kind = cmd?.input_kind();
-            Ok(acc
-                || matches!(
-                    kind,
-                    InputKind::PbfAndOsc | InputKind::OscOnly | InputKind::PbfAndMerged
-                ))
-        })
+        .try_fold(false, |acc, cmd| Ok(acc || cmd?.needs_osc_for_setup()))
 }
 
 /// Run the suite presets.
@@ -210,7 +195,7 @@ pub fn run(
     };
 
     // Generate merged PBF if any requested command needs it.
-    let merged_pbf = if suite_needs_merged_pbf(commands)? {
+    let (merged_pbf, merged_cache) = if suite_needs_merged_pbf(commands)? {
         let osc = osc_path.ok_or_else(|| {
             DevError::Config(
                 "diff/diff-osc require an OSC file (dataset must have osc configured)".into(),
@@ -223,7 +208,7 @@ pub fn run(
         })?;
         let scratch = scratch_dir
             .ok_or_else(|| DevError::Config("diff/diff-osc require a scratch directory".into()))?;
-        let (merged, _state) = crate::pbfhogg::plan::ensure_merged_pbf(
+        let (merged, state) = crate::pbfhogg::plan::ensure_merged_pbf(
             binary,
             pbf_path,
             osc,
@@ -233,9 +218,9 @@ pub fn run(
             project_root,
             true,
         )?;
-        Some(merged)
+        (Some(merged), Some(state))
     } else {
-        None
+        (None, None)
     };
 
     // Ensure scratch dir exists up front so per-preset contexts can reference it.
@@ -253,21 +238,40 @@ pub fn run(
             params.index_type = Some(it.to_owned());
         }
 
-        let osc_pathbuf_for_ctx = osc_pathbuf.clone();
-        let osc_paths = osc_pathbuf_for_ctx
-            .clone()
-            .map(|p| vec![p])
-            .unwrap_or_default();
+        let primary_pbf = pbf_path.to_path_buf();
+        let inputs = match &cmd {
+            PbfhoggCommand::MergeChanges { .. }
+            | PbfhoggCommand::TagsFilter {
+                input: TagsFilterInput::Osc,
+                ..
+            } => ResolvedInputs::OscOnly {
+                oscs: osc_pathbuf.clone().into_iter().collect(),
+            },
+            PbfhoggCommand::ApplyChanges => ResolvedInputs::PbfAndOsc {
+                pbf: primary_pbf,
+                osc: osc_pathbuf.clone().ok_or_else(|| {
+                    DevError::Config("apply-changes requires a resolved OSC file".into())
+                })?,
+            },
+            PbfhoggCommand::Diff { .. } => ResolvedInputs::TwoPbfs {
+                a: primary_pbf,
+                b: merged_pbf.clone().ok_or_else(|| {
+                    DevError::Config("diff requires a resolved merged PBF".into())
+                })?,
+                origin: TwoPbfOrigin::Merged,
+            },
+            _ => ResolvedInputs::Pbf { pbf: primary_pbf },
+        };
         let ctx = CommandContext {
             binary: binary.to_path_buf(),
-            pbf_path: Some(pbf_path.to_path_buf()),
-            osc_path: osc_pathbuf_for_ctx,
-            osc_paths,
-            pbf_b_path: merged_pbf.clone(),
+            inputs,
             scratch_dir: scratch_dir.to_path_buf(),
             dataset: String::new(),
-            bbox: None,
             params,
+            observations: CommandObservations {
+                merged_cache,
+                snapshot_to: None,
+            },
         };
 
         crate::pbfhogg::plan::run_wallclock_core(

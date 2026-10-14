@@ -17,35 +17,6 @@ use rusqlite::OptionalExtension;
 // ---------------------------------------------------------------------------
 
 const SIDECAR_SCHEMA: &str = "\
-CREATE TABLE IF NOT EXISTS sidecar_samples (
-    result_uuid TEXT NOT NULL,
-    run_idx     INTEGER NOT NULL DEFAULT 0,
-    sample_idx  INTEGER NOT NULL,
-    timestamp_us INTEGER NOT NULL,
-    rss_kb      INTEGER,
-    anon_kb     INTEGER,
-    file_kb     INTEGER,
-    shmem_kb    INTEGER,
-    swap_kb     INTEGER,
-    vsize_kb    INTEGER,
-    vm_hwm_kb   INTEGER,
-    utime       INTEGER,
-    stime       INTEGER,
-    num_threads INTEGER,
-    minflt      INTEGER,
-    majflt      INTEGER,
-    rchar       INTEGER,
-    wchar       INTEGER,
-    read_bytes  INTEGER,
-    write_bytes INTEGER,
-    cancelled_write_bytes INTEGER,
-    syscr       INTEGER,
-    syscw       INTEGER,
-    vol_cs      INTEGER,
-    nonvol_cs   INTEGER,
-    PRIMARY KEY (result_uuid, run_idx, sample_idx)
-);
-
 CREATE TABLE IF NOT EXISTS sidecar_markers (
     result_uuid  TEXT NOT NULL,
     run_idx      INTEGER NOT NULL DEFAULT 0,
@@ -95,6 +66,23 @@ CREATE TABLE IF NOT EXISTS sidecar_latest (
     uuid  TEXT NOT NULL
 );
 ";
+
+pub(crate) fn sample_table_schema() -> String {
+    let mut columns = vec![
+        "result_uuid TEXT NOT NULL".to_owned(),
+        "run_idx INTEGER NOT NULL DEFAULT 0".to_owned(),
+    ];
+    columns.extend(crate::sidecar::Sample::db_column_definitions());
+    columns.push("PRIMARY KEY (result_uuid, run_idx, sample_idx)".to_owned());
+    format!(
+        "CREATE TABLE IF NOT EXISTS sidecar_samples (\n    {}\n);\n",
+        columns.join(",\n    ")
+    )
+}
+
+fn sidecar_schema() -> String {
+    format!("{}{SIDECAR_SCHEMA}", sample_table_schema())
+}
 
 // ---------------------------------------------------------------------------
 // Migrations
@@ -241,7 +229,9 @@ pub struct RunInfo {
     pub command: Option<String>,
     pub binary_path: Option<String>,
     pub binary_xxh128: Option<String>,
-    pub git_commit: Option<String>,
+    /// Read with the results store's policy: legacy non-commit text is kept
+    /// verbatim, never refused ([`crate::git::ShortCommit::from_stored_lossy`]).
+    pub git_commit: Option<crate::git::ShortCommit>,
     pub mode: Option<String>,
     pub dataset: Option<String>,
     /// How the run ended, as the child supervisor assigned it. `None` when
@@ -267,7 +257,7 @@ impl SidecarDb {
         let conn = super::store::open_read_write(path, "sidecar.db", SIDECAR_VERSION)?;
         super::store::migrate(&conn, "sidecar.db", SIDECAR_VERSION, |conn, version| {
             run_sidecar_migrations(conn, version)?;
-            conn.execute_batch(SIDECAR_SCHEMA)?;
+            conn.execute_batch(&sidecar_schema())?;
             Ok(())
         })?;
         Ok(Self { conn })
@@ -276,12 +266,10 @@ impl SidecarDb {
     /// Open an existing sidecar database for reading. An older schema is
     /// migrated first (through [`Self::open`]); a newer one is refused.
     pub(crate) fn open_read_only(path: &Path) -> Result<Self, DevError> {
-        let conn = super::store::open_read_only_migrating(
-            path,
-            "sidecar.db",
-            SIDECAR_VERSION,
-            || Self::open(path).map(drop),
-        )?;
+        let conn =
+            super::store::open_read_only_migrating(path, "sidecar.db", SIDECAR_VERSION, || {
+                Self::open(path).map(drop)
+            })?;
         Ok(Self { conn })
     }
 
@@ -300,50 +288,24 @@ impl SidecarDb {
         let tx = self.conn.unchecked_transaction()?;
 
         {
-            let mut stmt = tx.prepare_cached(
-                "INSERT INTO sidecar_samples (
-                    result_uuid, run_idx, sample_idx, timestamp_us,
-                    rss_kb, anon_kb, file_kb, shmem_kb, swap_kb, vsize_kb, vm_hwm_kb,
-                    utime, stime, num_threads, minflt, majflt,
-                    rchar, wchar, read_bytes, write_bytes, cancelled_write_bytes,
-                    syscr, syscw, vol_cs, nonvol_cs
-                ) VALUES (
-                    ?1, ?2, ?3, ?4,
-                    ?5, ?6, ?7, ?8, ?9, ?10, ?11,
-                    ?12, ?13, ?14, ?15, ?16,
-                    ?17, ?18, ?19, ?20, ?21,
-                    ?22, ?23, ?24, ?25
-                )",
-            )?;
+            let sample_columns = crate::sidecar::Sample::db_column_names();
+            let columns = sample_columns.join(", ");
+            let placeholders = (1..=sample_columns.len() + 2)
+                .map(|index| format!("?{index}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let sql = format!(
+                "INSERT INTO sidecar_samples (result_uuid, run_idx, {columns}) VALUES ({placeholders})"
+            );
+            let mut stmt = tx.prepare_cached(&sql)?;
 
             for s in &data.samples {
-                stmt.execute(rusqlite::params![
-                    result_uuid,
-                    run_idx as i64,
-                    s.sample_idx,
-                    s.timestamp_us,
-                    s.rss_kb,
-                    s.anon_kb,
-                    s.file_kb,
-                    s.shmem_kb,
-                    s.swap_kb,
-                    s.vsize_kb,
-                    s.vm_hwm_kb,
-                    s.utime,
-                    s.stime,
-                    s.num_threads,
-                    s.minflt,
-                    s.majflt,
-                    s.rchar,
-                    s.wchar,
-                    s.read_bytes,
-                    s.write_bytes,
-                    s.cancelled_write_bytes,
-                    s.syscr,
-                    s.syscw,
-                    s.vol_cs,
-                    s.nonvol_cs,
-                ])?;
+                let mut values = vec![
+                    rusqlite::types::Value::Text(result_uuid.to_owned()),
+                    rusqlite::types::Value::Integer(run_idx as i64),
+                ];
+                values.extend(s.db_values());
+                stmt.execute(rusqlite::params_from_iter(values))?;
             }
         }
 
@@ -426,7 +388,10 @@ impl SidecarDb {
                 run_info.as_ref().and_then(|r| r.command.as_deref()),
                 run_info.as_ref().and_then(|r| r.binary_path.as_deref()),
                 run_info.as_ref().and_then(|r| r.binary_xxh128.as_deref()),
-                run_info.as_ref().and_then(|r| r.git_commit.as_deref()),
+                run_info
+                    .as_ref()
+                    .and_then(|r| r.git_commit.as_ref())
+                    .map(crate::git::ShortCommit::as_str),
                 run_info.as_ref().and_then(|r| r.mode.as_deref()),
                 run_info.as_ref().and_then(|r| r.dataset.as_deref()),
                 run_info
@@ -481,7 +446,9 @@ impl SidecarDb {
                         command: row.get(2)?,
                         binary_path: row.get(3)?,
                         binary_xxh128: row.get(4)?,
-                        git_commit: row.get(5)?,
+                        git_commit: row
+                            .get::<_, Option<String>>(5)?
+                            .map(|raw| crate::git::ShortCommit::from_stored_lossy(&raw)),
                         mode: row.get(6)?,
                         dataset: row.get(7)?,
                         ending,
@@ -530,58 +497,25 @@ impl SidecarDb {
         run_idx: Option<usize>,
     ) -> Result<Vec<crate::sidecar::Sample>, DevError> {
         let uuid_prefix = id.as_str();
+        let columns = crate::sidecar::Sample::db_column_names().join(", ");
         let (sql, run_filter) = match run_idx {
             Some(idx) => (
-                "SELECT sample_idx, timestamp_us,
-                        rss_kb, anon_kb, file_kb, shmem_kb, swap_kb, vsize_kb, vm_hwm_kb,
-                        utime, stime, num_threads, minflt, majflt,
-                        rchar, wchar, read_bytes, write_bytes, cancelled_write_bytes,
-                        syscr, syscw, vol_cs, nonvol_cs
-                 FROM sidecar_samples
-                 WHERE result_uuid = ?1 AND run_idx = ?2
-                 ORDER BY sample_idx",
+                format!(
+                    "SELECT {columns} FROM sidecar_samples \
+                     WHERE result_uuid = ?1 AND run_idx = ?2 ORDER BY sample_idx"
+                ),
                 Some(i64::try_from(idx).unwrap_or(0)),
             ),
             None => (
-                "SELECT sample_idx, timestamp_us,
-                        rss_kb, anon_kb, file_kb, shmem_kb, swap_kb, vsize_kb, vm_hwm_kb,
-                        utime, stime, num_threads, minflt, majflt,
-                        rchar, wchar, read_bytes, write_bytes, cancelled_write_bytes,
-                        syscr, syscw, vol_cs, nonvol_cs
-                 FROM sidecar_samples
-                 WHERE result_uuid = ?1
-                 ORDER BY run_idx, sample_idx",
+                format!(
+                    "SELECT {columns} FROM sidecar_samples \
+                     WHERE result_uuid = ?1 ORDER BY run_idx, sample_idx"
+                ),
                 None,
             ),
         };
-        let mut stmt = self.conn.prepare(sql)?;
-        let map_row = |row: &rusqlite::Row<'_>| {
-            Ok(crate::sidecar::Sample {
-                sample_idx: row.get(0)?,
-                timestamp_us: row.get(1)?,
-                rss_kb: row.get(2)?,
-                anon_kb: row.get(3)?,
-                file_kb: row.get(4)?,
-                shmem_kb: row.get(5)?,
-                swap_kb: row.get(6)?,
-                vsize_kb: row.get(7)?,
-                vm_hwm_kb: row.get(8)?,
-                utime: row.get(9)?,
-                stime: row.get(10)?,
-                num_threads: row.get(11)?,
-                minflt: row.get(12)?,
-                majflt: row.get(13)?,
-                rchar: row.get(14)?,
-                wchar: row.get(15)?,
-                read_bytes: row.get(16)?,
-                write_bytes: row.get(17)?,
-                cancelled_write_bytes: row.get(18)?,
-                syscr: row.get(19)?,
-                syscw: row.get(20)?,
-                vol_cs: row.get(21)?,
-                nonvol_cs: row.get(22)?,
-            })
-        };
+        let mut stmt = self.conn.prepare(&sql)?;
+        let map_row = crate::sidecar::Sample::from_db_row;
         let rows = match run_filter {
             Some(idx) => stmt.query_map(rusqlite::params![uuid_prefix, idx], map_row)?,
             None => stmt.query_map(rusqlite::params![uuid_prefix], map_row)?,
@@ -875,10 +809,7 @@ mod tests {
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
         assert_eq!(version, SIDECAR_VERSION);
-        let has_ending = ro
-            .conn()
-            .prepare("SELECT ending FROM sidecar_meta")
-            .is_ok();
+        let has_ending = ro.conn().prepare("SELECT ending FROM sidecar_meta").is_ok();
         assert!(has_ending, "the migrated schema has the current column");
         let markers: i64 = ro
             .conn()

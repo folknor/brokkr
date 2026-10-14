@@ -56,10 +56,11 @@ Normalized metric tables can wait until there is a real query need.
 
 ## Write policy
 
-Every `--gate <name>` invocation of `sync --bench` writes a row, regardless
-of whether `--as-baseline` was passed. Baselines are pure pointers in
-TOML; they don't change the write path. This gives local history for
-free and makes baseline promotion cheap (just paste a UUID).
+A gated run that completes all harness iterations writes a row, regardless
+of whether `--as-baseline` was passed. A harness failure returns before the
+gate hook, so it writes no gate row. Baselines are pure pointers in TOML;
+they don't change the successful-run write path. This gives local history
+for free and makes baseline promotion cheap (just paste a UUID).
 
 If gate.db growth ever matters, prune by age or count - not in v1.
 
@@ -102,7 +103,8 @@ scope for v1.
    fail with: `no baseline pinned for host "<hostname>" in gate "<name>"
    - record one with --as-baseline and add it to brokkr.toml`.
 3. Look up that UUID in `gate.db`, scoped to this hostname. The pin is a
-   full UUID or a prefix of one (the `a344fcc2` form below), and it must
+   non-empty lowercase hexadecimal UUID or prefix of one (up to 32
+   characters; `a344fcc2` is the short form below), and it must
    resolve to exactly one row: an exact match wins, a prefix matching a
    single row resolves to it, and a prefix matching several is a hard
    error naming them - never newest-wins, which would let a later run
@@ -180,15 +182,16 @@ actually describes the code that produced the numbers. It does not count
 Nor does it count `*.md` or `brokkr.toml` - the latter mattering here
 because pinning a baseline means editing `brokkr.toml`. Without those
 exclusions `--as-baseline` was self-blocking, since each gated run
-writes a `gate.db` row and gate.db is tracked: the first recording
+can write a `gate.db` row and gate.db is tracked: the first recording
 worked and every later one refused until you committed. That is the
 same trap `brokkr approve` hit with `approved.png`.
 
 A gated run under `--force` is recorded in `gate.db` with `dirty = 1`,
 and the run prints a warning saying so. This does not contradict the
 harness's earlier `dirty tree - results will NOT be stored in database`
-warning, which governs `results.db` only: gate rows are always written
-so a gate failure stays inspectable. Pinning a dirty row as a baseline
+warning, which governs `results.db` only: a successful gated run still
+writes its gate row, so an evaluated gate failure stays inspectable.
+Harness failures before the gate hook produce no row. Pinning a dirty row as a baseline
 is allowed, and every later comparison against it re-warns.
 
 ## Rule kinds
@@ -242,8 +245,8 @@ as zero.
 `--gate` requires `--bench` - every rule compares measured numbers, so
 there is nothing to evaluate on an unmeasured run.
 
-Runs the bench as documented in `docs/commands/sync.md`, writes a row
-to gate.db, then evaluates every rule under
+Runs the bench as documented in `docs/commands/sync.md`; after a successful
+harness run, it writes a row to gate.db and evaluates every rule under
 `[ratatoskr.gate.<name>.metrics.*]`. Reports each rule with `OK` /
 `FAIL` and a numeric line; exits non-zero if any rule fails.
 
@@ -290,19 +293,19 @@ sharing a script is legible rather than surprising.
 
 ### `--as-baseline` is refused with `--gate all`
 
-Hard error, at parse time, before any build:
+Hard error during command validation, before a worktree or build starts:
 
 > `--as-baseline` cannot be combined with `--gate all`.
 
 Repinning is a per-gate decision by design. A cohort rebase re-anchors
 every baseline-relative rule at once onto whatever the tree measures at
 that moment, with no per-gate pause to notice a regression being
-blessed. The rules that make this severe are exactly the ones a sweep
-would silence wholesale: on ratatoskr's own `brokkr.toml`, 14 of the 16
-gates carry `max_delta = 0` and/or `equal_to_baseline`. (The two that
-don't - `contacts_cadence` and `bifrost-consumer-hot-path` - express
-their invariants as literal `equal = <scalar>` rules, which are
-rebase-proof precisely because they aren't anchored to a baseline.)
+blessed. The checked-out Ratatoskr config has 17 gates; 15 use
+`max_delta` and/or `equal_to_baseline`, while `contacts_cadence` and
+`bifrost-consumer-hot-path` use literal equality rules. All 17 also pin
+`success = 1` and `exit_code = 0`. Those constants confirm the stored row's
+expected successful-run shape; they cannot detect failed harness runs,
+because the gate hook runs only after a successful bench.
 
 Record baselines one at a time, from a tree independently confirmed
 good. The single-gate `--as-baseline` path warns when it is repinning
@@ -335,10 +338,10 @@ forensics). Dirty rows are valid baselines but flagged in the gate
 report.
 
 The harness's `dirty tree - results will NOT be stored in results.db`
-warning governs `results.db` only. A gated run still writes to
-`gate.db` - that is the write policy above, not a contradiction - and
-the `recorded run <id> in gate.db` line names its database for exactly
-that reason. A dirty row additionally prints a `tagged dirty` warning.
+warning governs `results.db` only. A successful gated run still writes to
+`gate.db` - that is the write policy above, not a contradiction - and the
+`recorded run <id> in gate.db` line names its database for exactly that
+reason. A dirty row additionally prints a `tagged dirty` warning.
 
 ## Out of scope for v1
 

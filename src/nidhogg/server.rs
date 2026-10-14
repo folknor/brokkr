@@ -23,15 +23,6 @@ use crate::process::{self, BootId, Pid, ProcIdentity, StartTicks, VerifiedProces
 /// Default port for the nidhogg server.
 pub const DEFAULT_PORT: u16 = 3033;
 
-/// How long `serve` waits for the health endpoint to answer.
-const READY_TIMEOUT: Duration = Duration::from_secs(6);
-
-/// How long `stop` waits after SIGTERM before escalating to SIGKILL.
-const TERM_GRACE: Duration = Duration::from_secs(5);
-
-/// How long `stop` waits for the process to die after SIGKILL.
-const KILL_GRACE: Duration = Duration::from_secs(2);
-
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -136,7 +127,7 @@ pub fn serve(
     if !poll_for_ready(port, &mut child)? {
         return Err(DevError::Config(format!(
             "server did not start within {}s (check {})",
-            READY_TIMEOUT.as_secs(),
+            super::policy::SERVER_READY_TIMEOUT.as_secs(),
             log_path.display()
         )));
     }
@@ -216,13 +207,14 @@ pub fn check_running(port: u16) -> Result<(), DevError> {
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-/// Poll the HTTP health endpoint for up to [`READY_TIMEOUT`]. Returns
+/// Poll the HTTP health endpoint for up to
+/// [`SERVER_READY_TIMEOUT`](super::policy::SERVER_READY_TIMEOUT). Returns
 /// `Ok(false)` on timeout; errors if the server process exits first (its
 /// log names why) or the health check cannot run at all.
 fn poll_for_ready(port: u16, child: &mut Child) -> Result<bool, DevError> {
-    let deadline = Instant::now() + READY_TIMEOUT;
+    let deadline = Instant::now() + super::policy::SERVER_READY_TIMEOUT;
     while Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(200));
+        std::thread::sleep(super::policy::SERVER_READY_POLL_INTERVAL);
         if let Some(exit) = child.try_wait()? {
             return Err(DevError::Config(format!(
                 "server exited during startup ({exit}); see logs/serve.log"
@@ -327,7 +319,7 @@ fn stop_verified(record: &ServerRecord) -> Result<StopOutcome, DevError> {
     if !pidfd_send_signal(&pidfd, libc::SIGTERM)? {
         return Ok(StopOutcome::NotRunning);
     }
-    if wait_for_exit(&pidfd, TERM_GRACE) {
+    if wait_for_exit(&pidfd, super::policy::SERVER_TERM_GRACE) {
         return Ok(StopOutcome::Stopped);
     }
 
@@ -338,13 +330,13 @@ fn stop_verified(record: &ServerRecord) -> Result<StopOutcome, DevError> {
     if !pidfd_send_signal(&pidfd, libc::SIGKILL)? {
         return Ok(StopOutcome::Stopped);
     }
-    if wait_for_exit(&pidfd, KILL_GRACE) {
+    if wait_for_exit(&pidfd, super::policy::SERVER_KILL_GRACE) {
         return Ok(StopOutcome::Stopped);
     }
     Err(DevError::Config(format!(
         "nidhogg server PID {} survived SIGKILL for {}s",
         record.pid,
-        KILL_GRACE.as_secs()
+        super::policy::SERVER_KILL_GRACE.as_secs()
     )))
 }
 

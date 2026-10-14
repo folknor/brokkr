@@ -23,6 +23,10 @@
   elivagar API the adjudication code depends on (reader, `tile_detail` decoder,
   writer, PMTiles addressing), so `corpus/`, `regress/` and the stats/sampling
   adapters import from here rather than reaching into `elivagar::` directly.
+- `src/elivagar/constants.rs` - shared MVT/PMTiles values, defaults, and fixed
+  policy thresholds used by archive, render, diff, and benchmark paths.
+- `src/elivagar/tilegen_config.rs` - closed tile format/compression sets,
+  byte-size and budget types, and validation run before a tilegen build.
 - `src/elivagar/corpus/` - the native corpus gate (`pmtiles-corpus`). Owns the
   frozen canonical tile hash, the digest fold, the contract gating policy, the
   SVG render core, and every verdict.
@@ -30,6 +34,33 @@
   regress section below.
 - `src/elivagar/compare_tiles.rs` - the lenient per-layer sampling census, also
   native.
+- `src/elivagar/corpus/sort.rs` - bounded-memory external sorting for corpus
+  multiset hashes; temporary run files are removed with the sorter.
+
+## Fixed implementation policies
+
+Implementation defaults and thresholds are collected in `constants.rs`;
+archive retention is in `archive_store.rs`. They are policy, not host config
+knobs. CLI defaults are still spelled in the command schema.
+
+| Policy | Fixed value |
+|---|---:|
+| Default MVT extent / SVG viewbox | 4096 |
+| PMTiles corpus bucket zoom | 7 |
+| Maximum manifest zoom | 14 |
+| Rings retained per polygon group | 500 |
+| Regress diff detail lines | 100 per outcome class |
+| Residual matcher candidates | 8 |
+| KD-tree switch threshold | 64 points |
+| Overlay attribute rows | 24 |
+| Overlay tile default | 32 |
+| Regress example default | 20 |
+| Compare sample default / maximum | 200 / 10,000 per zoom |
+| Node-store benchmark default | 50 million nodes |
+| PMTiles benchmark default | 500,000 tiles |
+| Planetiler heap | max(2 × input MiB, 2048 MiB) |
+| Retained tilegen archives | 5 per dataset and variant |
+| External sort chunk / merge fan-in | 1,000,000 values / 64 runs |
 
 ## Variant defaults
 
@@ -55,7 +86,12 @@ flags: either it is explicit in the block, or it is not set. See
 
 `resolve_tilegen()` (`src/elivagar/mod.rs`) resolves the block off
 `DevConfig`, mirroring `config::host_features` in resolving the hostname
-itself. The two input assertions (`locations_on_ways`, `force_sorted`) are
+itself. It checks the closed enum sets, byte-size budgets, compression level,
+and ocean spec syntax before the Cargo build. The enum and budget fields still
+deserialize as strings in `src/config_parts/project_config/elivagar.rs`, while
+`compression_level` is an unchecked `u32`; these checks run when the command
+plan is built. Typed schema fields would move rejection to config loading.
+The two input assertions (`locations_on_ways`, `force_sorted`) are
 properties of the PBF, so they come from the already-resolved `pbf.<variant>`
 entry (`PipelineOpts::from_pbf_entry`) rather than a second config lookup.
 `PipelineOpts::push_args()` expands the block plus those assertions into argv;
@@ -73,9 +109,9 @@ built, verified and blessed as the regress baseline while
 and every gate passed. `bench all`'s self arm shared the same path and the
 same defect.
 
-An A/B arm is a sibling block, not a flag - drop the `.pmtiles` line and
-`brokkr results --grep-v ocean-tiles` selects the computed arm off `cli_args`,
-which is the "arm defined by an absent flag" case `--grep-v` exists for.
+Only the `default` tilegen block is currently selected; sibling blocks are not
+runnable because the CLI has no block selector. Add that selector before using
+sibling config blocks as A/B arms.
 
 ## download-ocean
 
@@ -105,8 +141,7 @@ a clear brokkr message rather than deep inside elivagar). `--dry-run` prints
 the derived invocation and output path and validates the inputs without
 building, matching tilegen. The `default` tilegen block is hardcoded and there
 is no `--dataset` - the ocean artifact is per-host pipeline config (the world
-ocean serves every extract), not a dataset property; a block selector can be
-added the day a second tilegen block exists.
+ocean serves every extract), not a dataset property.
 
 Rotating the artifact is an output-changing event: the next `pmtiles-corpus
 check` refuses on the artifact key until the corpus is re-blessed. That
@@ -153,9 +188,10 @@ store survives a routine `brokkr clean`; only the deep clean (`brokkr clean
 release binary can inspect output built by any commit, so `--commit` picks
 which file to open, not which binary to build (no historical worktree rebuild,
 unlike `brokkr verify --commit` on the pbfhogg cross-validators). All four
-acquire the brokkr lock (non-blocking `acquire_cmd_lock`, like `regress`) so an
-inspection can't read an archive a concurrent `tilegen` run is mid-write - it
-refuses instead.
+acquire the brokkr lock (non-blocking `acquire_cmd_lock`, like `regress`)
+because each wrapper builds elivagar with Cargo and the lock serializes those
+build shapes. Tilegen writes to scratch and then promotes its finished archive,
+so the lock does not protect readers from a mid-write archive.
 
 ### verify pmtiles
 
@@ -290,10 +326,11 @@ see the pmtiles-corpus section below.
 
 `brokkr compare-tiles <a> <b> [--sample N]` (`src/elivagar/compare_tiles.rs`) is
 the lenient half of the pair. Where `regress` diffs feature by feature and
-returns a verdict, this samples `N` tiles per zoom (default 200, at indices
-spread across the zoom's whole common run so the sample spans the extent rather
-than one corner of the Hilbert curve) and prints per-layer feature counts side
-by side. It has no pass/fail, gates nothing, and never refuses.
+returns a verdict, this samples up to `N` common tiles per zoom (default 200,
+maximum 10,000, at indices spread across the zoom's common address intersection
+so the sample spans the extent rather than one corner of the Hilbert curve) and prints
+per-layer feature counts side by side. It has no pass/fail and gates nothing;
+it refuses only an invalid sample size or an archive it cannot read.
 
 Two things keep the census honest. The sample indices are `i * len / take`
 rather than a `step_by` stride, because an integer stride rounds to 1 whenever
@@ -308,6 +345,10 @@ That is why it decodes **tolerant** while regress decodes **strict**: a foreign
 producer's extra wire fields are corruption to the gate and unremarkable here,
 since the whole point is answering "roughly what changed, and where" for two
 archives that may not be comparable at all.
+
+The address walk intersects PMTiles run spans directly; it does not expand
+run-length directory entries into one item per addressed tile. The sample is
+bounded even when a single stored blob covers a very large tile range.
 
 Native since the corpus redesign - it used to build and run elivagar's
 `compare_tiles` cargo example, which carried its own hand-rolled PMTiles reader
@@ -340,6 +381,11 @@ clap namespace (the same reason `inspect` became `pmtiles-inspect`).
 | `pmtiles-corpus render [...] -z Z -x X -y Y [--layers L] [--style P] [-o OUT]` | archive only |
 | `pmtiles-corpus rings [...] -o OUT` | archive only |
 | `pmtiles-corpus mutate [...] [-o OUT] --op OP [--tile z/x/y]` | input archive only |
+
+`rings` streams one row per polygon feature in archive tile-id order. It
+decodes each directory run's stored blob once and keeps only that blob's
+feature summaries while emitting the addressed tile rows; it does not buffer
+and sort all rows lexicographically.
 
 `mutate`'s `-o` is optional: omitted, it writes a calibrand to
 `data/corpus-calibrands/<dataset>-<variant>-<op>.pmtiles`, a brokkr-designated

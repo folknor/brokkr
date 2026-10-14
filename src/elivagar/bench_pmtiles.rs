@@ -18,22 +18,13 @@ use crate::output;
 pub fn run(
     harness: &BenchHarness,
     project_root: &Path,
+    features: &[String],
     tiles: usize,
     runs: usize,
 ) -> Result<(), DevError> {
-    let binary = build::cargo_build(
-        &build::BuildConfig {
-            package: None,
-            bin: None,
-            example: Some("bench_pmtiles".into()),
-            features: vec![],
-            default_features: true,
-            all_features: false,
-            profile: "release",
-        },
-        project_root,
-    )?
-    .path;
+    let mut config = super::build_config(features);
+    config.example = Some("bench_pmtiles".into());
+    let binary = build::cargo_build(&config, project_root)?.path;
     let binary_str = binary.display().to_string();
 
     let tiles_str = tiles.to_string();

@@ -11,6 +11,7 @@
 //! not here: it landed with the canonical hash and lives in
 //! `corpus::canonical`'s `equivalence` module.
 
+use super::super::constants::mvt;
 use super::super::corpus::fixture::{
     TestDir, Value, anonymous_ocean_tile, duplicate_id_tile, empty_layer_tile, float_attr_tile,
     line_tile, multiline_tile, polygon_tile, write_archive,
@@ -348,7 +349,15 @@ fn layer_present_empty_on_one_side_reports_removed() {
     let current = dir.path.join("current.pmtiles");
     let baseline = dir.path.join("baseline.pmtiles");
     write_archive(&current, vec![(0, 0, 0, Vec::new())]);
-    write_archive(&baseline, vec![(0, 0, 0, empty_layer_tile("empty", 4096))]);
+    write_archive(
+        &baseline,
+        vec![(
+            0,
+            0,
+            0,
+            empty_layer_tile("empty", u64::from(mvt::TILE_EXTENT)),
+        )],
+    );
     let cfg = RegressConfig::default();
     let report = diff(&current, &baseline, &cfg);
     assert_eq!(report.totals.count(OutcomeClass::LayerRemoved), 1);
@@ -360,7 +369,15 @@ fn extent_mismatch_skips_geometry() {
     let current = dir.path.join("current.pmtiles");
     let baseline = dir.path.join("baseline.pmtiles");
     write_archive(&current, vec![(0, 0, 0, empty_layer_tile("roads", 8192))]);
-    write_archive(&baseline, vec![(0, 0, 0, empty_layer_tile("roads", 4096))]);
+    write_archive(
+        &baseline,
+        vec![(
+            0,
+            0,
+            0,
+            empty_layer_tile("roads", u64::from(mvt::TILE_EXTENT)),
+        )],
+    );
     let cfg = RegressConfig::default();
     let report = diff(&current, &baseline, &cfg);
     assert_eq!(report.totals.count(OutcomeClass::ExtentMismatch), 1);

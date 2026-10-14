@@ -7,9 +7,9 @@
 //! once a run is in the DB its scratch state can be discarded and its data
 //! stays queryable across runs.
 //!
-//! Deliberately mirrors the `corpus_db` patterns - WAL, a per-db
-//! `PRAGMA user_version` migration, single-transaction bulk insert, read-only
-//! open for queries, `rusqlite::Error -> DevError` via `?`. Unlike `corpus_db`
+//! Deliberately mirrors the `corpus_db` patterns - shared WAL and schema
+//! migration policy, single-transaction bulk insert, read-only open for
+//! queries, `rusqlite::Error -> DevError` via `?`. Unlike `corpus_db`
 //! (a 6-file module) this is a single self-contained file: the lint schema is
 //! two small tables and the rendering is two aligned text grids. The store is
 //! append-only - FK `REFERENCES` clauses are declarative only, with no cascade.
@@ -98,22 +98,23 @@ impl LintDb {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let conn = rusqlite::Connection::open(path)?;
-        conn.pragma_update(None, "journal_mode", "WAL")?;
+        let conn = crate::db::store::open_read_write(path, "piners lint runs", SCHEMA_VERSION)?;
         run_migrations(&conn)?;
         conn.execute_batch(SCHEMA)?;
-        conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         Ok(Self { conn })
     }
 
     /// Open the database read-only for queries.
     pub fn open_readonly(path: &Path) -> Result<Self, DevError> {
-        let conn = rusqlite::Connection::open_with_flags(
+        let conn = crate::db::store::open_read_only_migrating(
             path,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            "piners lint runs",
+            SCHEMA_VERSION,
+            || {
+                drop(Self::open(path)?);
+                Ok(())
+            },
         )?;
-        // Belt-and-suspenders; read-only open already blocks writes.
-        conn.pragma_update(None, "query_only", "ON").ok();
         Ok(Self { conn })
     }
 
@@ -313,33 +314,20 @@ impl DispRow {
     }
 }
 
-/// Run all pending migrations based on `PRAGMA user_version`. On a fresh
-/// database the schema DDL creates the v1 tables and stamps the version, so
-/// there is nothing to migrate; the version-1 store has no prior shape to
-/// upgrade from. The structure stays so a future column add is a localized
-/// change, exactly as in `corpus_db::migrate`.
+/// Run the initial schema through the shared transaction and version policy.
+/// Future schema changes add version-gated steps here.
 fn run_migrations(conn: &rusqlite::Connection) -> Result<(), DevError> {
-    if !has_table(conn, "run") {
-        return Ok(());
-    }
-    let current: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if current >= SCHEMA_VERSION {
-        return Ok(());
-    }
-    // No v0 -> v1 step: v1 is the initial schema. Future migrations slot here.
-    conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-    Ok(())
-}
-
-/// Check whether a table exists in the database.
-fn has_table(conn: &rusqlite::Connection, table: &str) -> bool {
-    conn.query_row(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
-        [table],
-        |row| row.get::<_, i64>(0),
+    crate::db::store::migrate(
+        conn,
+        "piners lint runs",
+        SCHEMA_VERSION,
+        |conn, _current| {
+            // Version 1 is the initial schema. Future steps are gated on the
+            // supplied version; this DDL also initializes a fresh store.
+            conn.execute_batch(SCHEMA)?;
+            Ok(())
+        },
     )
-    .map(|count| count > 0)
-    .unwrap_or(false)
 }
 
 #[cfg(test)]

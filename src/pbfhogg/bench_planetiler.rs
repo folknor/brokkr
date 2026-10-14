@@ -72,13 +72,9 @@ fn run_planetiler_subprocess(
     project_root: &Path,
 ) -> Result<Vec<ParsedResult>, DevError> {
     let heap_arg = format!("-Xmx{heap_mb}m");
-    let pbf_str = pbf_path
-        .to_str()
-        .ok_or_else(|| DevError::Config("PBF path is not valid UTF-8".into()))?;
+    let pbf_str = crate::utf8_path::path_str(pbf_path)?;
     let runs_str = runs.to_string();
-    let java_str = java
-        .to_str()
-        .ok_or_else(|| DevError::Config("Java path is not valid UTF-8".into()))?;
+    let java_str = crate::utf8_path::path_str(java)?;
 
     let args: Vec<&str> = vec![
         &heap_arg,
@@ -115,7 +111,7 @@ pub fn run(
         pt.bench_class_dir.display()
     );
 
-    let (basename, _) = super::path_strs(pbf_path)?;
+    let (basename, _) = crate::utf8_path::path_strings(pbf_path)?;
 
     let results =
         run_planetiler_subprocess(&pt.java, &classpath, pbf_path, heap_mb, runs, project_root)?;

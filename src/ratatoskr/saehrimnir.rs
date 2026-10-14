@@ -1,8 +1,8 @@
-//! Sæhrimnir orchestration helpers for plan 3.
+//! Sæhrimnir orchestration helpers for service and sync runs.
 //!
 //! Sæhrimnir is the mock email-protocol server (plan 2,
-//! `/home/folk/Programs/sæhrimnir/`). When brokkr spawns it for sync
-//! orchestration the contract is process-level only:
+//! `/home/folk/Programs/sæhrimnir/`). When brokkr spawns it for service
+//! or sync orchestration the contract is process-level only:
 //!
 //! - argv: `--fixture <PATH> --readiness-file <PATH>` (plus optional
 //!   per-protocol port flags brokkr does not use in v0; ephemeral
@@ -22,7 +22,8 @@ use std::time::{Duration, Instant};
 
 use crate::clean::layout::ProjectState;
 use crate::config::project_config::ratatoskr::RatatoskrConfig;
-use crate::error::DevError;
+use crate::error::{DevError, ProcessEnding};
+use crate::lockfile::LockGuard;
 use crate::output;
 use crate::ratatoskr::timing::{POLL_INTERVAL, SHUTDOWN_POLL_INTERVAL};
 pub use crate::ratatoskr::timing::{READINESS_BUDGET, SHUTDOWN_BUDGET};
@@ -90,6 +91,84 @@ impl Protocol {
             EndpointFormat::HostPort => format!("{MOCK_HOST}:{port}"),
         }
     }
+}
+
+pub(crate) fn is_protocol_name(name: &str) -> bool {
+    // `discovery` is a harness annotation for WebFinger tests; sæhrimnir
+    // serves it through JMAP and does not expose a separate listener.
+    name == "discovery" || Protocol::all().any(|protocol| protocol.name() == name)
+}
+
+/// Validated sæhrimnir locations shared by service and sync preflight.
+#[derive(Debug, Clone)]
+pub struct MockPaths {
+    pub binary: PathBuf,
+    pub fixtures_dir: PathBuf,
+}
+
+impl MockPaths {
+    pub fn resolve(cfg: &RatatoskrConfig, project_root: &Path) -> Result<Self, DevError> {
+        let binary = require_path(&cfg.mock_server_binary, project_root, "mock_server_binary")?;
+        if !binary.is_file() {
+            return Err(DevError::Config(format!(
+                "sæhrimnir binary is not a file: {}",
+                binary.display()
+            )));
+        }
+        let fixtures_dir = require_path(&cfg.fixtures_dir, project_root, "fixtures_dir")?;
+        if !fixtures_dir.is_dir() {
+            return Err(DevError::Config(format!(
+                "fixtures_dir is not a directory: {}",
+                fixtures_dir.display()
+            )));
+        }
+        Ok(Self {
+            binary,
+            fixtures_dir,
+        })
+    }
+
+    pub fn fixture(&self, name: &str) -> Result<PathBuf, DevError> {
+        resolve_fixture(&self.fixtures_dir, name)
+    }
+}
+
+/// The common artefact placement rules for mock lifecycles. Service shares
+/// one capture directory per fixture; sync nests it under each run record.
+#[derive(Clone, Copy)]
+pub enum MockArtifactScope<'a> {
+    Run(&'a Path),
+    SharedFixture {
+        project_root: &'a Path,
+        fixture_name: &'a str,
+    },
+}
+
+impl MockArtifactScope<'_> {
+    fn directory(&self) -> PathBuf {
+        match self {
+            Self::Run(run_dir) => run_dir.join("mock"),
+            Self::SharedFixture {
+                project_root,
+                fixture_name,
+            } => ProjectState::new(project_root)
+                .ratatoskr()
+                .service_mock_artifacts()
+                .join(safe_fixture_dir_name(fixture_name)),
+        }
+    }
+}
+
+fn safe_fixture_dir_name(name: &str) -> String {
+    name.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 #[derive(Clone, Copy)]
@@ -221,14 +300,14 @@ pub fn parse_sentinel(text: &str) -> Result<Endpoints, DevError> {
             continue;
         }
         let (name, rest) = line.split_once(char::is_whitespace).ok_or_else(|| {
-            DevError::Config(format!(
+            DevError::Verify(format!(
                 "saehrimnir sentinel line {} has no port: {raw:?}",
                 lineno + 1
             ))
         })?;
         let port_str = rest.trim();
         let port: u16 = port_str.parse().map_err(|e| {
-            DevError::Config(format!(
+            DevError::Verify(format!(
                 "saehrimnir sentinel line {}: port {port_str:?} for {name}: {e}",
                 lineno + 1
             ))
@@ -239,14 +318,14 @@ pub fn parse_sentinel(text: &str) -> Result<Endpoints, DevError> {
                 .map(Protocol::sentinel_name)
                 .collect::<Vec<_>>()
                 .join(" / ");
-            return Err(DevError::Config(format!(
+            return Err(DevError::Verify(format!(
                 "saehrimnir sentinel line {}: unknown protocol {name:?} (expected {expected})",
                 lineno + 1
             )));
         };
         let slot = &mut ports[protocol.index()];
         if slot.is_some() {
-            return Err(DevError::Config(format!(
+            return Err(DevError::Verify(format!(
                 "saehrimnir sentinel: duplicate {} entry",
                 protocol.sentinel_name()
             )));
@@ -259,7 +338,7 @@ pub fn parse_sentinel(text: &str) -> Result<Endpoints, DevError> {
         .map(Protocol::sentinel_name)
         .collect();
     if !missing.is_empty() {
-        return Err(DevError::Config(format!(
+        return Err(DevError::Verify(format!(
             "saehrimnir sentinel missing entries: {}",
             missing.join(", ")
         )));
@@ -274,9 +353,7 @@ pub fn parse_sentinel(text: &str) -> Result<Endpoints, DevError> {
 // ---------------------------------------------------------------------------
 // MockServer: spawn sæhrimnir, wait for the readiness sentinel, hand
 // the caller back a handle that owns the child process and the parsed
-// endpoints. Used by both shapes of `sync` (and indirectly
-// by `mock-serve`, which has its own foreground signal-loop layered
-// on top).
+// endpoints. Owned through the shared service/sync lifecycle below.
 // ---------------------------------------------------------------------------
 
 /// A spawned sæhrimnir process plus its parsed endpoints. The handle
@@ -289,10 +366,6 @@ pub struct MockServer {
     pid: u32,
     endpoints: Endpoints,
     ready_elapsed: Duration,
-    /// Whether the child was spawned with `process_group(0)`. Drives
-    /// whether `shutdown` / `Drop` / readiness-failure cleanup target
-    /// the PG (`kill(-pgid, ...)`) or just the leader PID.
-    isolate_pg: bool,
 }
 
 /// Diagnostic outcome of [`MockServer::shutdown`]. The exit/signal fields
@@ -303,6 +376,110 @@ pub struct MockOutcome {
     pub signal: Option<i32>,
     pub killed_after_budget: bool,
     pub shutdown_elapsed: Duration,
+}
+
+/// Result of waiting for a child through a SIGTERM grace period.
+#[derive(Debug)]
+pub struct DeadlineWait {
+    pub status: std::process::ExitStatus,
+    /// True only when this wait sent SIGKILL after the budget expired.
+    pub killed_after_budget: bool,
+}
+
+/// One sæhrimnir lifecycle shared by service and sync runs. Callers choose
+/// where the mock artefacts live; process-group isolation, PID registration,
+/// endpoint export, and teardown follow the same policy everywhere.
+pub struct ManagedMock<'a> {
+    fixture_name: String,
+    server: Option<MockServer>,
+    endpoint_envs: Vec<(String, String)>,
+    lock: &'a LockGuard,
+}
+
+impl<'a> ManagedMock<'a> {
+    pub fn start(
+        cfg: &RatatoskrConfig,
+        binary: &Path,
+        fixture_path: &Path,
+        fixture_name: &str,
+        artifact_scope: MockArtifactScope<'_>,
+        lock: &'a LockGuard,
+    ) -> Result<Self, DevError> {
+        let mock_dir = artifact_scope.directory();
+        std::fs::create_dir_all(&mock_dir).map_err(DevError::Io)?;
+        let server = MockServer::spawn_observed(
+            binary,
+            fixture_path,
+            &mock_dir,
+            Some(&|pid| lock.add_mock_pid(pid)),
+            Some(&|pid| lock.remove_mock_pid(pid)),
+        )?;
+        let endpoint_envs = endpoint_env_pairs(cfg, server.endpoints());
+        Ok(Self {
+            fixture_name: fixture_name.to_owned(),
+            server: Some(server),
+            endpoint_envs,
+            lock,
+        })
+    }
+
+    pub fn endpoints(&self) -> &Endpoints {
+        self.server
+            .as_ref()
+            .expect("managed mock is running until shutdown")
+            .endpoints()
+    }
+
+    pub fn ready_elapsed(&self) -> Duration {
+        self.server
+            .as_ref()
+            .expect("managed mock is running until shutdown")
+            .ready_elapsed()
+    }
+
+    pub fn env_pair_refs(&self) -> Vec<(&str, &str)> {
+        self.endpoint_envs
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str()))
+            .collect()
+    }
+
+    pub fn shutdown(mut self) -> Result<MockOutcome, DevError> {
+        let server = self
+            .server
+            .take()
+            .ok_or_else(|| DevError::Internal("managed mock shut down twice".into()))?;
+        let pid = server.pid();
+        let result = server.shutdown();
+        self.lock.remove_mock_pid(pid);
+        let outcome = match result {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                output::ratatoskr_msg(&format!(
+                    "mock-server shutdown failed (fixture={}): {error}",
+                    self.fixture_name
+                ));
+                return Err(error);
+            }
+        };
+        if outcome.killed_after_budget {
+            output::ratatoskr_msg(&format!(
+                "mock-server SIGKILLed (fixture={}, drain budget exceeded)",
+                self.fixture_name
+            ));
+        }
+        Ok(outcome)
+    }
+}
+
+impl Drop for ManagedMock<'_> {
+    fn drop(&mut self) {
+        if let Some(server) = self.server.take() {
+            let pid = server.pid();
+            drop(server);
+            self.lock.remove_mock_pid(pid);
+        }
+    }
 }
 
 impl MockServer {
@@ -321,16 +498,14 @@ impl MockServer {
     ///
     /// `on_failure` is the inverse: invoked with the same PID if
     /// readiness fails (sentinel never written, child exited early,
-    /// budget expired). Lets the orchestrator unpublish the PID it just
-    /// added via `on_spawn`, so a stale `mock_pids` entry doesn't
-    /// linger until later code clears the whole set.
+    /// budget expired). Lets the orchestrator remove the PID it just
+    /// published via `on_spawn` immediately.
     pub fn spawn_observed(
         binary: &Path,
         fixture_path: &Path,
         mock_dir: &Path,
         on_spawn: Option<&dyn Fn(u32)>,
         on_failure: Option<&dyn Fn(u32)>,
-        isolate_pg: bool,
     ) -> Result<Self, DevError> {
         let readiness = mock_dir.join("readiness");
         if readiness.exists() {
@@ -342,11 +517,9 @@ impl MockServer {
         let fixture_str = fixture_path.display().to_string();
         let readiness_str = readiness.display().to_string();
         let spawn_start = Instant::now();
-        // PG isolation is opt-in: caller asserts a SigtermGuard (or
-        // MockServeSignalGuard) is active so terminal Ctrl-C bridges
-        // to the PG. With isolation, `kill(-pgid, ...)` from `--hard`
-        // / shutdown paths sweeps sæhrimnir's helper workers (mock
-        // SMTP/IMAP/JMAP listeners) along with the leader.
+        // Every managed mock owns a process group. Service and sync callers
+        // install a signal guard before spawning, so cooperative signals use
+        // the same group-aware cleanup path everywhere.
         use std::os::unix::process::CommandExt;
         let mut cmd = Command::new(binary);
         cmd.args([
@@ -358,9 +531,7 @@ impl MockServer {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(stderr_log);
-        if isolate_pg {
-            cmd.process_group(0);
-        }
+        cmd.process_group(0);
         // Every child of a hold carries its capability: see `crate::hold`.
         crate::hold::stamp(&mut cmd);
         let mut child = cmd.spawn().map_err(|error| DevError::Spawn {
@@ -375,12 +546,16 @@ impl MockServer {
         let endpoints = match wait_for_endpoints(&mut child, &readiness, READINESS_BUDGET) {
             Ok(ep) => ep,
             Err(e) => {
-                // Bounded shutdown: SIGTERM (PG if isolated, single PID
-                // otherwise), give SHUTDOWN_BUDGET, then SIGKILL. A
+                // Bounded shutdown: SIGTERM the process group, give
+                // SHUTDOWN_BUDGET, then SIGKILL. A
                 // wedged sæhrimnir that ignores SIGTERM can't make the
                 // readiness-failure path hang forever.
-                kill_for_shutdown(pid, libc::SIGTERM, isolate_pg);
-                let _outcome = wait_with_deadline(&mut child, pid, SHUTDOWN_BUDGET, isolate_pg);
+                kill_for_shutdown(pid, libc::SIGTERM);
+                if let Err(cleanup_error) = wait_with_deadline(&mut child, pid, SHUTDOWN_BUDGET) {
+                    output::ratatoskr_msg(&format!(
+                        "mock-server cleanup also failed after readiness error: {cleanup_error}"
+                    ));
+                }
                 if let Some(cb) = on_failure {
                     cb(pid);
                 }
@@ -393,7 +568,6 @@ impl MockServer {
             pid,
             endpoints,
             ready_elapsed: spawn_start.elapsed(),
-            isolate_pg,
         })
     }
 
@@ -417,32 +591,27 @@ impl MockServer {
     /// SIGTERM the child, grant [`SHUTDOWN_BUDGET`], escalate to SIGKILL
     /// on timeout. Always reaps. Consumes the handle so the Drop fallback
     /// can't double-fire.
-    pub fn shutdown(mut self) -> MockOutcome {
+    pub fn shutdown(mut self) -> Result<MockOutcome, DevError> {
         use std::os::unix::process::ExitStatusExt;
 
         let Some(mut child) = self.child.take() else {
-            return MockOutcome {
+            return Ok(MockOutcome {
                 exit_code: None,
                 signal: None,
                 killed_after_budget: false,
                 shutdown_elapsed: Duration::ZERO,
-            };
+            });
         };
         let shutdown_start = Instant::now();
-        kill_for_shutdown(self.pid, libc::SIGTERM, self.isolate_pg);
-        match wait_with_deadline(&mut child, self.pid, SHUTDOWN_BUDGET, self.isolate_pg) {
-            Ok(status) => MockOutcome {
-                exit_code: status.code(),
-                signal: status.signal(),
-                killed_after_budget: matches!(status.signal(), Some(s) if s == libc::SIGKILL),
+        kill_for_shutdown(self.pid, libc::SIGTERM);
+        match wait_with_deadline(&mut child, self.pid, SHUTDOWN_BUDGET) {
+            Ok(waited) => Ok(MockOutcome {
+                exit_code: waited.status.code(),
+                signal: waited.status.signal(),
+                killed_after_budget: waited.killed_after_budget,
                 shutdown_elapsed: shutdown_start.elapsed(),
-            },
-            Err(_) => MockOutcome {
-                exit_code: None,
-                signal: None,
-                killed_after_budget: true,
-                shutdown_elapsed: shutdown_start.elapsed(),
-            },
+            }),
+            Err(error) => Err(error),
         }
     }
 }
@@ -454,7 +623,7 @@ impl Drop for MockServer {
         // leak the child; nothing graceful to wait for if we're
         // unwinding.
         if let Some(mut child) = self.child.take() {
-            kill_for_shutdown(self.pid, libc::SIGKILL, self.isolate_pg);
+            kill_for_shutdown(self.pid, libc::SIGKILL);
             let _reaped = child.wait();
         }
     }
@@ -486,24 +655,11 @@ pub struct MockServeRequest<'a> {
 /// child on signal with a [`SHUTDOWN_BUDGET`] before escalating to
 /// SIGKILL.
 pub fn run_mock_serve(req: &MockServeRequest<'_>) -> Result<(), DevError> {
-    let binary = require_path(
-        &req.config.mock_server_binary,
-        req.project_root,
-        "mock_server_binary",
-    )?;
-    let fixtures_dir = require_path(&req.config.fixtures_dir, req.project_root, "fixtures_dir")?;
-    let fixture_path = resolve_fixture(&fixtures_dir, req.fixture)?;
+    let paths = MockPaths::resolve(req.config, req.project_root)?;
+    let fixture_path = paths.fixture(req.fixture)?;
+    let binary = paths.binary;
 
     let _lock = crate::context::reenter_command_lock()?;
-
-    if !binary.exists() {
-        return Err(DevError::Config(format!(
-            "mock-serve: sæhrimnir binary not found at {}. \
-             Build it first: `cargo build --release` in sæhrimnir's repo. \
-             Auto-build is not yet wired (plan 3 follow-up).",
-            binary.display()
-        )));
-    }
 
     let state = ProjectState::new(req.project_root);
     let mock_dir = state.ratatoskr().mock_artifacts();
@@ -535,7 +691,6 @@ pub fn run_mock_serve(req: &MockServeRequest<'_>) -> Result<(), DevError> {
     // helper listeners via `kill(-pgid, ...)`. Safe here because
     // MockServeSignalGuard (installed above) bridges terminal signals.
     use std::os::unix::process::CommandExt;
-    const MOCK_SERVE_ISOLATE_PG: bool = true;
     let mut child = Command::new(&binary)
         .args([
             "--fixture",
@@ -563,13 +718,12 @@ pub fn run_mock_serve(req: &MockServeRequest<'_>) -> Result<(), DevError> {
             // sentinel - don't leave it running, and don't let a wedged
             // child make `brokkr kill` hang here either. SIGTERM, give
             // SHUTDOWN_BUDGET, then SIGKILL via wait_with_deadline.
-            kill_for_shutdown(child_pid, libc::SIGTERM, MOCK_SERVE_ISOLATE_PG);
-            let _outcome = wait_with_deadline(
-                &mut child,
-                child_pid,
-                SHUTDOWN_BUDGET,
-                MOCK_SERVE_ISOLATE_PG,
-            );
+            kill_for_shutdown(child_pid, libc::SIGTERM);
+            if let Err(cleanup_error) = wait_with_deadline(&mut child, child_pid, SHUTDOWN_BUDGET) {
+                output::ratatoskr_msg(&format!(
+                    "mock-server cleanup also failed after readiness error: {cleanup_error}"
+                ));
+            }
             return Err(e);
         }
     };
@@ -577,7 +731,7 @@ pub fn run_mock_serve(req: &MockServeRequest<'_>) -> Result<(), DevError> {
     print_endpoints(&endpoints);
     output::ratatoskr_msg("press Ctrl-C to stop");
 
-    let exit_status = wait_with_signals(&mut child, child_pid, MOCK_SERVE_ISOLATE_PG)?;
+    let exit_status = wait_with_signals(&mut child, child_pid)?;
 
     if let Some(code) = exit_status.code() {
         if code != 0 {
@@ -767,17 +921,22 @@ fn wait_for_endpoints_inner(
             return Err(DevError::Interrupted);
         }
         if let Some(status) = child.try_wait().map_err(DevError::Io)? {
-            return Err(DevError::Config(format!(
-                "saehrimnir exited before writing the readiness sentinel \
-                 (status: {status:?}). Check stderr above for the failure."
-            )));
+            let stderr_path = readiness.with_file_name("stderr.log");
+            return Err(DevError::Subprocess {
+                program: "saehrimnir".into(),
+                ending: ProcessEnding::from_status(&status),
+                stderr: format!(
+                    "exited before writing the readiness sentinel; see {}",
+                    stderr_path.display()
+                ),
+            });
         }
         if readiness.exists() {
             let text = std::fs::read_to_string(readiness).map_err(DevError::Io)?;
             return parse_sentinel(&text);
         }
         if started.elapsed() > budget {
-            return Err(DevError::Config(format!(
+            return Err(DevError::Verify(format!(
                 "saehrimnir did not write a readiness sentinel within {budget:?}."
             )));
         }
@@ -798,16 +957,10 @@ fn print_endpoints(ep: &Endpoints) {
     }
 }
 
-/// Send a signal to the child, choosing between `kill(-pgid, ...)` and
-/// `kill(pid, ...)` based on whether the caller spawned with PG
-/// isolation. Used by every shutdown path so the policy stays
-/// consistent with the spawn site.
-fn kill_for_shutdown(pid: u32, signum: i32, isolate_pg: bool) {
-    if isolate_pg {
-        crate::process::signal_process_group(pid, signum).ok();
-    } else {
-        crate::process::signal_pid(pid, signum).ok();
-    }
+/// Send a signal to the managed child's process group. Every sæhrimnir
+/// lifecycle creates one process group so helpers are stopped with it.
+fn kill_for_shutdown(pid: u32, signum: i32) {
+    crate::process::signal_process_group(pid, signum).ok();
 }
 
 /// Wait for the child while watching the SIGINT/SIGTERM flag. On signal
@@ -816,16 +969,21 @@ fn kill_for_shutdown(pid: u32, signum: i32, isolate_pg: bool) {
 fn wait_with_signals(
     child: &mut std::process::Child,
     pid: u32,
-    isolate_pg: bool,
 ) -> Result<std::process::ExitStatus, DevError> {
     loop {
-        if let Some(status) = child.try_wait().map_err(DevError::Io)? {
-            return Ok(status);
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(status),
+            Ok(None) => {}
+            Err(error) => {
+                kill_for_shutdown(pid, libc::SIGKILL);
+                let _reaped = child.wait();
+                return Err(DevError::Io(error));
+            }
         }
         if MOCK_SIGNAL_FLAG.load(Ordering::Relaxed) {
             output::ratatoskr_msg("signal received, shutting saehrimnir down");
-            kill_for_shutdown(pid, libc::SIGTERM, isolate_pg);
-            return wait_with_deadline(child, pid, SHUTDOWN_BUDGET, isolate_pg);
+            kill_for_shutdown(pid, libc::SIGTERM);
+            return wait_with_deadline(child, pid, SHUTDOWN_BUDGET).map(|waited| waited.status);
         }
         std::thread::sleep(POLL_INTERVAL);
     }
@@ -838,19 +996,35 @@ pub fn wait_with_deadline(
     child: &mut std::process::Child,
     pid: u32,
     budget: Duration,
-    isolate_pg: bool,
-) -> Result<std::process::ExitStatus, DevError> {
+) -> Result<DeadlineWait, DevError> {
     let started = Instant::now();
     loop {
-        if let Some(status) = child.try_wait().map_err(DevError::Io)? {
-            return Ok(status);
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                return Ok(DeadlineWait {
+                    status,
+                    killed_after_budget: false,
+                });
+            }
+            Ok(None) => {}
+            Err(error) => {
+                kill_for_shutdown(pid, libc::SIGKILL);
+                let _reaped = child.wait();
+                return Err(DevError::Io(error));
+            }
         }
         if started.elapsed() > budget {
             output::ratatoskr_msg(&format!(
                 "saehrimnir did not exit within {budget:?}, escalating to SIGKILL"
             ));
-            kill_for_shutdown(pid, libc::SIGKILL, isolate_pg);
-            return child.wait().map_err(DevError::Io);
+            kill_for_shutdown(pid, libc::SIGKILL);
+            return child
+                .wait()
+                .map(|status| DeadlineWait {
+                    status,
+                    killed_after_budget: true,
+                })
+                .map_err(DevError::Io);
         }
         std::thread::sleep(SHUTDOWN_POLL_INTERVAL);
     }

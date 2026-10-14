@@ -217,6 +217,15 @@ mod tests {
             links: None,
             publish: None,
             dependencies: Vec::new(),
+            targets: Vec::new(),
+            features: Default::default(),
+            authors: Vec::new(),
+            description: None,
+            homepage: None,
+            license: None,
+            license_file: None,
+            repository: None,
+            rust_version: None,
         }
     }
 

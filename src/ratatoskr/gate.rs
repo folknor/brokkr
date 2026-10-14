@@ -63,6 +63,7 @@ enum Predicate {
 
 impl GateRules {
     pub fn compile(gate_name: &str, gate: &GateConfig) -> Result<Self, DevError> {
+        validate_baseline_pins(gate_name, gate)?;
         let mut metrics = Vec::with_capacity(gate.metrics.len());
         for (name, rule) in &gate.metrics {
             let key = MetricKey::parse(name)
@@ -112,6 +113,23 @@ impl GateRules {
             .map(|metric| metric.name.as_str())
             .collect()
     }
+}
+
+fn validate_baseline_pins(gate_name: &str, gate: &GateConfig) -> Result<(), DevError> {
+    for (hostname, pin) in &gate.baseline {
+        let valid = !pin.is_empty()
+            && pin.len() <= 32
+            && pin
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
+        if !valid {
+            return Err(DevError::Config(format!(
+                "gate `{gate_name}`: baseline pin for host `{hostname}` must be a non-empty \
+                 lowercase hexadecimal UUID or prefix (at most 32 characters)"
+            )));
+        }
+    }
+    Ok(())
 }
 
 impl MetricKey {
@@ -586,10 +604,10 @@ impl GateRun {
 
 fn parse_obj(blob: &str, label: &str) -> Result<Map<String, Value>, DevError> {
     let v: Value = serde_json::from_str(blob)
-        .map_err(|e| DevError::Config(format!("gate: parse {label} blob: {e}")))?;
+        .map_err(|e| DevError::Verify(format!("gate: parse {label} blob: {e}")))?;
     match v {
         Value::Object(m) => Ok(m),
-        _ => Err(DevError::Config(format!(
+        _ => Err(DevError::Verify(format!(
             "gate: {label} blob must be a JSON object"
         ))),
     }
@@ -639,12 +657,12 @@ fn lookup_scalar(run: &GateRun, key: &MetricKey) -> Result<Scalar, DevError> {
 
 fn lookup_in_blob(map: &Map<String, Value>, key: &str, ns: &str) -> Result<Scalar, DevError> {
     let v = map.get(key).ok_or_else(|| {
-        DevError::Config(format!(
+        DevError::Verify(format!(
             "gate: missing `{ns}.{key}` in run data - cannot evaluate rule"
         ))
     })?;
     json_to_scalar(v).ok_or_else(|| {
-        DevError::Config(format!(
+        DevError::Verify(format!(
             "gate: `{ns}.{key}` is not a scalar (got {})",
             kind_of(v)
         ))
@@ -703,7 +721,7 @@ fn check_num<F: FnOnce(f64) -> (bool, String)>(
 
 fn require_num(metric: &str, rule: &str, s: &Scalar, side: &str) -> Result<f64, DevError> {
     s.as_num().ok_or_else(|| {
-        DevError::Config(format!(
+        DevError::Verify(format!(
             "gate: metric `{metric}` rule `{rule}`: {side} value is not numeric"
         ))
     })
@@ -754,6 +772,22 @@ mod tests {
             baseline: BTreeMap::new(),
             metrics,
         }
+    }
+
+    #[test]
+    fn gate_compile_validates_baseline_uuid_prefixes() {
+        let rule = MetricRule {
+            max: Some(10.0),
+            ..MetricRule::default()
+        };
+        let mut valid = gate_with("elapsed_ms", rule.clone());
+        valid.baseline.insert("host-a".into(), "a344fcc2".into());
+        assert!(GateRules::compile("g", &valid).is_ok());
+
+        let mut invalid = gate_with("elapsed_ms", rule);
+        invalid.baseline.insert("host-a".into(), "bad-pin".into());
+        let error = GateRules::compile("g", &invalid).unwrap_err().to_string();
+        assert!(error.contains("lowercase hexadecimal UUID"), "got: {error}");
     }
 
     #[test]

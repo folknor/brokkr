@@ -32,6 +32,7 @@ mod features {
     use std::collections::{BTreeSet, HashMap};
     use std::path::Path;
 
+    use crate::cargo::metadata::{CargoMetadata, Query};
     use crate::error::DevError;
 
     /// A dependency a member declares, as feature routing sees it.
@@ -60,53 +61,47 @@ mod features {
     }
 
     impl WorkspaceFeatures {
-        pub(crate) fn from_metadata(meta: &serde_json::Value) -> Self {
-            let str_of = |v: &serde_json::Value, key: &str| v.get(key).and_then(serde_json::Value::as_str).map(str::to_owned);
-            let ids = |key: &str| -> Vec<String> {
-                meta.get(key)
-                    .and_then(serde_json::Value::as_array)
-                    .into_iter()
-                    .flatten()
-                    .filter_map(serde_json::Value::as_str)
-                    .map(str::to_owned)
-                    .collect()
-            };
-            let member_ids = ids("workspace_members");
+        pub(crate) fn from_metadata(meta: &CargoMetadata) -> Self {
             let mut by_id: HashMap<String, MemberFeatures> = HashMap::new();
-            for pkg in meta.get("packages").and_then(serde_json::Value::as_array).into_iter().flatten() {
-                let (Some(id), Some(name)) = (str_of(pkg, "id"), str_of(pkg, "name")) else { continue };
-                if !member_ids.contains(&id) {
+            for pkg in &meta.packages {
+                if !meta.is_member(&pkg.id) {
                     continue;
                 }
-                let features = pkg
-                    .get("features")
-                    .and_then(serde_json::Value::as_object)
-                    .map(|m| m.keys().cloned().collect())
-                    .unwrap_or_default();
+                let features = pkg.features.keys().cloned().collect();
                 let deps = pkg
-                    .get("dependencies")
-                    .and_then(serde_json::Value::as_array)
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|d| {
-                        let name = str_of(d, "rename").or_else(|| str_of(d, "name"))?;
-                        let optional = d.get("optional").and_then(serde_json::Value::as_bool).unwrap_or(false);
-                        Some(DeclaredDep { name, optional })
+                    .dependencies
+                    .iter()
+                    .map(|dep| DeclaredDep {
+                        name: dep.rename.as_ref().unwrap_or(&dep.name).clone(),
+                        optional: dep.optional,
                     })
                     .collect();
-                by_id.insert(id, MemberFeatures { name, features, deps });
+                by_id.insert(
+                    pkg.id.to_string(),
+                    MemberFeatures {
+                        name: pkg.name.clone(),
+                        features,
+                        deps,
+                    },
+                );
             }
-            let names_of = |list: &[String]| -> Vec<String> {
-                list.iter().filter_map(|id| by_id.get(id).map(|m| m.name.clone())).collect()
+            let names_of = |list: &[crate::cargo::metadata::PackageId]| -> Vec<String> {
+                list.iter()
+                    .filter_map(|id| by_id.get(&id.to_string()).map(|m| m.name.clone()))
+                    .collect()
             };
             // An older cargo omits the default set; the whole workspace is
             // then cargo's own default for a virtual manifest.
-            let default_members = if meta.get("workspace_default_members").is_some() {
-                names_of(&ids("workspace_default_members"))
-            } else {
-                names_of(&member_ids)
-            };
-            let members = member_ids.iter().filter_map(|id| by_id.remove(id)).collect();
+            let default_members = names_of(
+                meta.workspace_default_members
+                    .as_deref()
+                    .unwrap_or(&meta.workspace_members),
+            );
+            let members = meta
+                .workspace_members
+                .iter()
+                .filter_map(|id| by_id.remove(&id.to_string()))
+                .collect();
             Self { members, default_members }
         }
 
@@ -267,8 +262,8 @@ mod features {
 
         pub(crate) fn get(&self) -> Result<&WorkspaceFeatures, DevError> {
             let snap = self.snapshot.get_or_init(|| match self.root {
-                Some(root) => crate::build::metadata_no_deps(root)
-                    .map(|v| WorkspaceFeatures::from_metadata(&v))
+                Some(root) => crate::cargo::metadata::load(root, Query::workspace(), &[], None)
+                    .map(|metadata| WorkspaceFeatures::from_metadata(&metadata))
                     .map_err(|e| e.to_string()),
                 None => Err("no workspace metadata is available".to_owned()),
             });
@@ -279,7 +274,9 @@ mod features {
 
     #[cfg(test)]
     pub(crate) mod fixture {
-        use super::WorkspaceFeatures;
+        #![allow(clippy::unwrap_used)]
+
+        use super::{CargoMetadata, WorkspaceFeatures};
 
         /// One member's metadata `packages` entry: its features, and its
         /// declared dependencies as `(name, rename, optional)`.
@@ -303,11 +300,12 @@ mod features {
         /// A metadata document over `members`, every member a default member.
         pub(crate) fn workspace(members: &[serde_json::Value]) -> WorkspaceFeatures {
             let ids: Vec<serde_json::Value> = members.iter().filter_map(|m| m.get("id").cloned()).collect();
-            WorkspaceFeatures::from_metadata(&serde_json::json!({
+            let metadata: CargoMetadata = serde_json::from_value(serde_json::json!({
                 "packages": members,
                 "workspace_members": ids,
                 "workspace_default_members": ids,
-            }))
+            })).unwrap();
+            WorkspaceFeatures::from_metadata(&metadata)
         }
 
         /// The piners workspace of the bug report: four members, the
@@ -415,7 +413,7 @@ mod features {
 
         #[test]
         fn metadata_names_members_and_default_members() {
-            let meta = serde_json::json!({
+            let meta: CargoMetadata = serde_json::from_value(serde_json::json!({
                 "packages": [
                     { "id": "a-id", "name": "a", "features": { "f": [] }, "dependencies": [] },
                     { "id": "b-id", "name": "b", "features": {}, "dependencies": [
@@ -424,7 +422,7 @@ mod features {
                 ],
                 "workspace_members": ["a-id", "b-id"],
                 "workspace_default_members": ["b-id"],
-            });
+            })).unwrap();
             let ws = WorkspaceFeatures::from_metadata(&meta);
             assert_eq!(ws.member_names(), s(&["a", "b"]));
             assert_eq!(ws.default_members(), s(&["b"]).as_slice());

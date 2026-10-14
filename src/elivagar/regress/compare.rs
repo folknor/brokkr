@@ -15,6 +15,7 @@ use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 
+use super::super::constants::mvt;
 use super::super::eliv::DetailAttr;
 use super::RegressConfig;
 use super::geometry::{component_distance, component_structure_matches};
@@ -280,7 +281,7 @@ pub(crate) fn compare_detail_layer<S: DiffSink>(
     cfg: &RegressConfig,
     out: &mut S,
 ) {
-    let ocean = current.name.as_ref() == "ocean";
+    let ocean = current.name.as_ref() == mvt::OCEAN_LAYER;
     let mut cur_ids: IdGroups<'_> = FxHashMap::default();
     let mut bl_ids: IdGroups<'_> = FxHashMap::default();
     let mut cur_anon = AnonymousGroups::default();

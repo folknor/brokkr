@@ -4,6 +4,8 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::error::DevError;
+// Both visual subjects use the shared status thresholds and column formatter;
+// keep project tests on this surface rather than growing adapter-local copies.
 pub(crate) use crate::visual::compare::{compare_pixels, validate_artifact_id};
 pub(crate) use crate::visual::status::{
     ApprovedScores, ComparisonThresholds, Status, StatusInput, StatusTally, determine_status,
@@ -50,14 +52,22 @@ impl Offender {
 // Element comparison
 // ---------------------------------------------------------------------------
 
-// Element geometry matching has one fixed tolerance policy for all fixtures;
-// configurable thresholds control acceptance of the resulting scores.
-const POS_TOLERANCE: f64 = 2.0;
-const SIZE_TOLERANCE: f64 = 5.0;
+/// Geometry policy used by the scorer. Kept as an explicit input so tests can
+/// exercise threshold boundaries without changing production defaults.
+#[derive(Clone, Copy)]
+struct ElementComparisonPolicy {
+    position_tolerance: f64,
+    size_tolerance: f64,
+    zero_height_threshold: f64,
+}
 
-/// Below Chrome's 0.1px dump quantum: "the reference says this element
-/// has no height at all".
-const ZERO_HEIGHT: f64 = 0.05;
+const DEFAULT_ELEMENT_POLICY: ElementComparisonPolicy = ElementComparisonPolicy {
+    position_tolerance: 2.0,
+    size_tolerance: 5.0,
+    // Below Chrome's 0.1px dump quantum: "the reference says this element
+    // has no height at all".
+    zero_height_threshold: 0.05,
+};
 
 #[derive(serde::Deserialize)]
 struct LayoutElement {
@@ -171,6 +181,14 @@ fn compare_element_sets(
     pipeline_elems: &[LayoutElement],
     reference_elems: &[LayoutElement],
 ) -> ElementMatchResult {
+    compare_element_sets_with_policy(pipeline_elems, reference_elems, DEFAULT_ELEMENT_POLICY)
+}
+
+fn compare_element_sets_with_policy(
+    pipeline_elems: &[LayoutElement],
+    reference_elems: &[LayoutElement],
+    policy: ElementComparisonPolicy,
+) -> ElementMatchResult {
     let pipeline_by_path: HashMap<&str, &LayoutElement> = pipeline_elems
         .iter()
         .filter(|e| !is_head_path(&e.path) && !is_br(e))
@@ -192,7 +210,10 @@ fn compare_element_sets(
         // an invisible convention: Chrome reports container width at
         // h=0, the pipeline reports 0x0. Skip them from scoring; they
         // stay in the map so they can still anchor a child's frame.
-        if ref_el.h.is_some_and(|h| h.abs() < ZERO_HEIGHT) {
+        if ref_el
+            .h
+            .is_some_and(|h| h.abs() < policy.zero_height_threshold)
+        {
             continue;
         }
 
@@ -210,7 +231,7 @@ fn compare_element_sets(
         scored += 1;
 
         let d = geometry_deltas(ref_el, pipe_el, &reference_by_path, &pipeline_by_path);
-        if d.within_tolerance() {
+        if d.within_tolerance(policy) {
             passing += 1;
         } else {
             offenders.push(Offender {
@@ -250,11 +271,11 @@ struct GeometryDeltas {
 }
 
 impl GeometryDeltas {
-    fn within_tolerance(&self) -> bool {
-        self.dx.abs() <= POS_TOLERANCE
-            && self.dy.abs() <= POS_TOLERANCE
-            && self.dw.abs() <= SIZE_TOLERANCE
-            && self.dh.abs() <= SIZE_TOLERANCE
+    fn within_tolerance(&self, policy: ElementComparisonPolicy) -> bool {
+        self.dx.abs() <= policy.position_tolerance
+            && self.dy.abs() <= policy.position_tolerance
+            && self.dw.abs() <= policy.size_tolerance
+            && self.dh.abs() <= policy.size_tolerance
     }
 }
 
@@ -389,7 +410,8 @@ mod tests {
         assert!(is_br(&by_tag));
         assert!(is_br(&el("html>body[0]>p[0]>br[2]", 0.0, 0.0, 0.0, 16.0)));
         assert!(!is_br(&el("html>body[0]>p[0]>b[0]", 0.0, 0.0, 0.0, 16.0)));
-        // `brXX` tags must not match the `br[` prefix probe.
+        // Path-derived tags must match `br` exactly, so a lookalike such as
+        // `broken` stays in the comparison.
         assert!(!is_br(&el("html>body[0]>broken[0]", 0.0, 0.0, 0.0, 16.0)));
     }
 
@@ -426,6 +448,48 @@ mod tests {
         let r = compare_element_sets(&pipeline, &reference);
         assert_eq!(r.total_elements, 1);
         assert_eq!(r.match_pct, 100.0);
+    }
+
+    #[test]
+    fn geometry_thresholds_are_injected_into_the_comparison() {
+        let reference = vec![el("html", 0.0, 0.0, 800.0, 100.0)];
+        let pipeline = vec![el("html", 1.0, 0.0, 803.0, 100.0)];
+
+        let ordinary = compare_element_sets(&pipeline, &reference);
+        assert_eq!(ordinary.passing_elements, 1);
+
+        let strict = compare_element_sets_with_policy(
+            &pipeline,
+            &reference,
+            ElementComparisonPolicy {
+                position_tolerance: 0.5,
+                size_tolerance: 1.0,
+                zero_height_threshold: 0.0,
+            },
+        );
+        assert_eq!(strict.passing_elements, 0);
+        assert_eq!(strict.offenders.len(), 1);
+        assert_eq!(strict.offenders[0].dx, 1.0);
+        assert_eq!(strict.offenders[0].dw, 3.0);
+    }
+
+    #[test]
+    fn status_columns_render_missing_values_and_delta_annotations() {
+        let missing = status_columns(None, None, None, true);
+        assert_eq!(missing.pixel, "\u{2014}");
+        assert_eq!(missing.delta, "\u{2014}");
+        assert_eq!(missing.status, "\u{2014}");
+        assert_eq!(missing.annotation, "");
+
+        let improved = status_columns(Some(Status::Pass), Some(1.0), Some(1.6), true);
+        assert_eq!(improved.pixel, "1.0%");
+        assert_eq!(improved.delta, "-0.6%");
+        assert_eq!(improved.status, "PASS");
+        assert_eq!(improved.annotation, " (improved)");
+
+        let small_delta = status_columns(Some(Status::Pass), Some(1.0), Some(1.04), false);
+        assert_eq!(small_delta.delta, "\u{2014}");
+        assert_eq!(small_delta.annotation, "");
     }
 
     #[test]

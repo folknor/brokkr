@@ -21,12 +21,6 @@ been verified.
    and they are never deduplicated through git history. Carry the context
    inline instead.
 
-## CON-014 - Diagnostic codes are still parsed at each comparison
-
-Reported by: check-report, config-cli.
-
-`LintsConfig` stores owned `LintName`s parsed at load, `SitedAllow` refuses absolute paths, and the check, clippy and test commands receive `&LintsConfig` whole. Residue: `Diagnostic.code` stays a `String`, parsed into a lint name where it is compared (`diagnostic_lint` in `check_cmd/diagnostics.rs`) rather than once at ingestion.
-
 ## CON-023 - Host features are applied per build path
 
 Reported by: config-cli.

@@ -1,8 +1,14 @@
 // Shared lock protocol primitives and non-blocking observation of the global
-// exclusive lock. `include!`d into both `lockfile` and the standalone guard, so
-// it carries `//` comments, not `//!` (an inner doc comment is rejected there).
+// exclusive lock. `include!`d into both `lockfile` and the standalone guard,
+// alongside the literal protocol values from `lock_protocol.rs`, so it carries
+// `//` comments, not `//!` (an inner doc comment is rejected there).
 
 use std::os::fd::RawFd;
+
+#[allow(dead_code)]
+pub(super) mod protocol {
+    include!("lock_protocol.rs");
+}
 
 /// A canonical, lowercase 128-bit value shared by the holder and standalone
 /// guard. The wrappers below keep each protocol role distinct at call sites.

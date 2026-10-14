@@ -1178,7 +1178,10 @@ not-a-cargo-dependency = \"1\"\n";
 
         // Each walked table is a real Cargo location, named by its dotted
         // path; the target and the kind ride in the spelling.
-        let paths: Vec<&str> = deps.tables().map(|table| table.table_path.as_str()).collect();
+        let paths: Vec<&str> = deps
+            .tables()
+            .map(|table| table.table_path.as_str())
+            .collect();
         assert_eq!(
             paths,
             vec![
@@ -1188,9 +1191,18 @@ not-a-cargo-dependency = \"1\"\n";
                 "workspace.dependencies",
             ]
         );
-        assert_eq!(dependency_table_kind("dependencies"), Some(DependencyKind::Normal));
-        assert_eq!(dependency_table_kind("dev_dependencies"), Some(DependencyKind::Dev));
-        assert_eq!(dependency_table_kind("build-dependencies"), Some(DependencyKind::Build));
+        assert_eq!(
+            dependency_table_kind("dependencies"),
+            Some(DependencyKind::Normal)
+        );
+        assert_eq!(
+            dependency_table_kind("dev_dependencies"),
+            Some(DependencyKind::Dev)
+        );
+        assert_eq!(
+            dependency_table_kind("build-dependencies"),
+            Some(DependencyKind::Build)
+        );
         assert_eq!(dependency_table_kind("metadata"), None);
 
         assert!(entries.iter().any(|dep| {

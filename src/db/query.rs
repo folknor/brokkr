@@ -3,12 +3,13 @@
 use super::ResultsDb;
 use super::like::{ESCAPE, contains_pattern, prefix_pattern, require_prefix};
 use super::schema::SELECT_COLS;
-use super::types::{KvClass, canonical_cargo_features};
+use super::types::{KvClass, Wall, canonical_cargo_features};
 use super::{
-    Distribution, DistributionUs, HotpathData, HotpathFunction, HotpathThread, KvPair, KvValue,
-    Percentile, PreviousRun, Quantity, QueryFilter, RunId, StoredRow,
+    Distribution, HotpathData, HotpathFunction, HotpathThread, KvPair, KvValue, Percentile,
+    PreviousRun, Quantity, QueryFilter, RunId, StoredRow,
 };
 use crate::error::DevError;
+use crate::git::ShortCommit;
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -218,7 +219,7 @@ pub(super) fn load_children(
     row: &mut StoredRow,
 ) -> Result<(), DevError> {
     row.distribution = load_distribution(conn, row.id)?;
-    (row.iterations, row.iterations_us) = load_iterations(conn, row.id)?;
+    row.iterations = load_iterations(conn, row.id)?;
     let mut kv = load_kv(conn, row.id)?;
     // Promote `env.*` entries to a first-class `captured_env` field.
     // They're still stored in run_kv (no migration needed), but every
@@ -281,7 +282,7 @@ fn map_stored_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredRow> {
         id: row.get("id")?,
         timestamp: row.get("timestamp")?,
         hostname: row.get("hostname")?,
-        commit: row.get("commit")?,
+        commit: read_stored_commit(row)?,
         subject: row.get("subject")?,
         command: row.get("command")?,
         mode: row.get::<_, Option<String>>("mode")?.unwrap_or_default(),
@@ -289,8 +290,7 @@ fn map_stored_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredRow> {
             .get::<_, Option<String>>("input_file")?
             .unwrap_or_default(),
         input_mb: row.get("input_mb")?,
-        elapsed_ms: row.get("elapsed_ms")?,
-        elapsed_us: row.get("elapsed_us")?,
+        elapsed: read_wall(row, "elapsed_ms", "elapsed_us")?,
         peak_rss_mb: row.get("peak_rss_mb")?,
         cargo_features: canonical_cargo_features(
             row.get::<_, Option<String>>("cargo_features")?.as_deref(),
@@ -337,10 +337,29 @@ fn map_stored_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredRow> {
         kv: Vec::new(),
         captured_env: std::collections::BTreeMap::new(),
         iterations: Vec::new(),
-        iterations_us: Vec::new(),
         distribution: None,
         hotpath: None,
     })
+}
+
+/// Stored commit text never fails a read. Old databases hold values such as
+/// `""`, `unknown` or `dirty`; those are kept and displayed verbatim (see
+/// [`ShortCommit::from_stored_lossy`]) so `brokkr results` always shows every
+/// row, and a verbatim value only ever pairs with the same verbatim value.
+fn read_stored_commit(row: &rusqlite::Row<'_>) -> rusqlite::Result<ShortCommit> {
+    let raw: String = row.get("commit")?;
+    Ok(ShortCommit::from_stored_lossy(&raw))
+}
+
+fn read_wall(
+    row: &rusqlite::Row<'_>,
+    millis_column: &str,
+    micros_column: &str,
+) -> rusqlite::Result<Wall> {
+    Ok(Wall::from_columns(
+        row.get(millis_column)?,
+        row.get(micros_column)?,
+    ))
 }
 
 /// One `--grep` term's match expression: true when the term appears anywhere in
@@ -514,25 +533,37 @@ fn load_distribution(
     )?;
     let mut rows = stmt.query_map(rusqlite::params![run_id], |row| {
         // All four or none: a partial set is not a distribution anyone
-        // measured, so it reads as the pre-v19 millisecond-only shape.
-        let us = match (
+        // measured, so malformed/legacy rows stay wholly millisecond-only.
+        let min_ms = row.get(1)?;
+        let p50_ms = row.get(2)?;
+        let p95_ms = row.get(3)?;
+        let max_ms = row.get(4)?;
+        let microseconds = (
             row.get::<_, Option<i64>>(5)?,
             row.get::<_, Option<i64>>(6)?,
             row.get::<_, Option<i64>>(7)?,
             row.get::<_, Option<i64>>(8)?,
-        ) {
-            (Some(min), Some(p50), Some(p95), Some(max)) => {
-                Some(DistributionUs { min, p50, p95, max })
-            }
-            _ => None,
+        );
+        let (min, p50, p95, max) = match microseconds {
+            (Some(min), Some(p50), Some(p95), Some(max)) => (
+                Wall::from_micros(min),
+                Wall::from_micros(p50),
+                Wall::from_micros(p95),
+                Wall::from_micros(max),
+            ),
+            _ => (
+                Wall::from_legacy_millis(min_ms),
+                Wall::from_legacy_millis(p50_ms),
+                Wall::from_legacy_millis(p95_ms),
+                Wall::from_legacy_millis(max_ms),
+            ),
         };
         Ok(Distribution {
             samples: row.get(0)?,
-            min_ms: row.get(1)?,
-            p50_ms: row.get(2)?,
-            p95_ms: row.get(3)?,
-            max_ms: row.get(4)?,
-            us,
+            min,
+            p50,
+            p95,
+            max,
         })
     })?;
     match rows.next() {
@@ -546,32 +577,20 @@ fn load_distribution(
 /// iterations actually ran. The ordering is the whole point of the table, so
 /// the ORDER BY is load-bearing rather than cosmetic.
 ///
-/// Returns `(milliseconds, microseconds)`. The microsecond list is empty
-/// unless every iteration has one, so the two stay index-aligned.
-fn load_iterations(
-    conn: &rusqlite::Connection,
-    run_id: i64,
-) -> Result<(Vec<i64>, Vec<i64>), DevError> {
+/// Each historical iteration retains its own available precision.
+fn load_iterations(conn: &rusqlite::Connection, run_id: i64) -> Result<Vec<Wall>, DevError> {
     let mut stmt = conn.prepare(
         "SELECT elapsed_ms, elapsed_us FROM run_iterations WHERE run_id = ?1 ORDER BY run_idx",
     )?;
     let rows = stmt.query_map(rusqlite::params![run_id], |row| {
         Ok((row.get::<_, i64>(0)?, row.get::<_, Option<i64>>(1)?))
     })?;
-    let mut ms = Vec::new();
-    let mut us: Option<Vec<i64>> = Some(Vec::new());
+    let mut walls = Vec::new();
     for row in rows {
         let (wall_ms, wall_us) = row?;
-        ms.push(wall_ms);
-        us = match (us, wall_us) {
-            (Some(mut list), Some(v)) => {
-                list.push(v);
-                Some(list)
-            }
-            _ => None,
-        };
+        walls.push(Wall::from_columns(wall_ms, wall_us));
     }
-    Ok((ms, us.unwrap_or_default()))
+    Ok(walls)
 }
 
 fn load_kv(conn: &rusqlite::Connection, run_id: i64) -> Result<Vec<KvPair>, DevError> {
@@ -969,7 +988,7 @@ mod tests {
         clippy::useless_vec
     )]
     use super::*;
-    use crate::db::{ResultsDb, RunInvocation, RunRow};
+    use crate::db::{ResultsDb, RunInvocation, RunRow, RunRowBuilder, Wall};
 
     fn test_invocation(raw: &str) -> RunInvocation {
         RunInvocation {
@@ -1229,32 +1248,15 @@ mod tests {
         let (dir, db_path) = test_db("meta_filter_missing");
         let db = ResultsDb::open(&db_path).expect("open");
 
-        let make_row = |variant: &str, kv: Vec<KvPair>| RunRow {
-            hostname: String::from("testhost"),
-            commit: String::from("aabbccdd"),
-            subject: String::from("test"),
-            command: String::from("bench diff-snapshots"),
-            mode: Some(String::from(variant)),
-            input_file: None,
-            input_mb: None,
-            elapsed_ms: 100,
-            elapsed_us: None,
-            peak_rss_mb: None,
-            cargo_features: None,
-            cargo_profile: crate::build::CargoProfile::Release,
-            kernel: None,
-            cpu_governor: None,
-            avail_memory_mb: None,
-            storage_notes: None,
-            cli_args: None,
-            invocation: test_invocation(""),
-            project: String::from("test"),
-            stop_marker: None,
-            kv,
-            iterations: Vec::new(),
-            iterations_us: Vec::new(),
-            distribution: None,
-            hotpath: None,
+        let make_row = |variant: &str, kv: Vec<KvPair>| {
+            RunRowBuilder::new()
+                .update(|row| {
+                    row.command = String::from("bench diff-snapshots");
+                    row.mode = Some(String::from(variant));
+                    row.invocation = test_invocation("");
+                    row.kv = kv;
+                })
+                .build()
         };
 
         // Row 1: has meta.format = osc
@@ -1333,32 +1335,14 @@ mod tests {
 
         let db = ResultsDb::open(&db_path).expect("open");
 
-        let make_row = |cmd: &str, variant: &str| RunRow {
-            hostname: String::from("testhost"),
-            commit: String::from("aabbccdd"),
-            subject: String::from("test"),
-            command: String::from(cmd),
-            mode: Some(String::from(variant)),
-            input_file: None,
-            input_mb: None,
-            elapsed_ms: 100,
-            elapsed_us: None,
-            peak_rss_mb: None,
-            cargo_features: None,
-            cargo_profile: crate::build::CargoProfile::Release,
-            kernel: None,
-            cpu_governor: None,
-            avail_memory_mb: None,
-            storage_notes: None,
-            cli_args: None,
-            invocation: test_invocation(""),
-            project: String::from("test"),
-            stop_marker: None,
-            kv: vec![],
-            iterations: Vec::new(),
-            iterations_us: Vec::new(),
-            distribution: None,
-            hotpath: None,
+        let make_row = |cmd: &str, variant: &str| {
+            RunRowBuilder::new()
+                .update(|row| {
+                    row.command = String::from(cmd);
+                    row.mode = Some(String::from(variant));
+                    row.invocation = test_invocation("");
+                })
+                .build()
         };
 
         db.insert(&make_row("bench merge", "buffered+zlib"))
@@ -1465,32 +1449,14 @@ mod tests {
 
         let db = ResultsDb::open(&db_path).expect("open");
 
-        let make_row = |variant: &str| RunRow {
-            hostname: String::from("testhost"),
-            commit: String::from("aabbccdd"),
-            subject: String::from("test"),
-            command: String::from("bench merge"),
-            mode: Some(String::from(variant)),
-            input_file: None,
-            input_mb: None,
-            elapsed_ms: 100,
-            elapsed_us: None,
-            peak_rss_mb: None,
-            cargo_features: None,
-            cargo_profile: crate::build::CargoProfile::Release,
-            kernel: None,
-            cpu_governor: None,
-            avail_memory_mb: None,
-            storage_notes: None,
-            cli_args: None,
-            invocation: test_invocation(""),
-            project: String::from("test"),
-            stop_marker: None,
-            kv: vec![],
-            iterations: Vec::new(),
-            iterations_us: Vec::new(),
-            distribution: None,
-            hotpath: None,
+        let make_row = |variant: &str| {
+            RunRowBuilder::new()
+                .update(|row| {
+                    row.command = String::from("bench merge");
+                    row.mode = Some(String::from(variant));
+                    row.invocation = test_invocation("");
+                })
+                .build()
         };
 
         db.insert(&make_row("buffered+zlib")).unwrap();
@@ -1561,73 +1527,56 @@ mod tests {
         let (dir, db_path) = test_db("hydration");
         let db = ResultsDb::open(&db_path).expect("open");
 
-        let row = RunRow {
-            hostname: String::from("testhost"),
-            commit: String::from("aabbccdd"),
-            subject: String::from("test"),
-            command: String::from("hotpath"),
-            mode: Some(String::from("default")),
-            input_file: None,
-            input_mb: None,
-            elapsed_ms: 500,
-            elapsed_us: None,
-            peak_rss_mb: None,
-            cargo_features: None,
-            cargo_profile: crate::build::CargoProfile::Release,
-            kernel: None,
-            cpu_governor: None,
-            avail_memory_mb: None,
-            storage_notes: None,
-            cli_args: None,
-            invocation: test_invocation(""),
-            project: String::from("test"),
-            stop_marker: None,
-            kv: vec![
-                KvPair::int("elapsed_ms", 500),
-                KvPair::text("threads.rss_bytes", "1024"),
-            ],
-            // Deliberately not ascending: the round-trip must preserve
-            // execution order, not helpfully sort it.
-            iterations: vec![500, 700, 600],
-            iterations_us: vec![500_400, 699_600, 600_049],
-            distribution: Some(Distribution {
-                samples: 5,
-                min_ms: 100,
-                p50_ms: 110,
-                p95_ms: 130,
-                max_ms: 150,
-                us: Some(crate::db::DistributionUs {
-                    min: 100_312,
-                    p50: 110_000,
-                    p95: 129_501,
-                    max: 150_499,
-                }),
-            }),
-            hotpath: Some(HotpathData {
-                functions: vec![HotpathFunction {
-                    section: String::from("timing"),
-                    description: Some(String::from("main")),
-                    ordinal: 0,
-                    name: String::from("process"),
-                    calls: Some(10),
-                    avg: Quantity::parse("50 ms"),
-                    total: Quantity::parse("500 ms"),
-                    percent_total: Quantity::parse("100%"),
-                    percentiles: std::collections::BTreeMap::new(),
-                }],
-                threads: vec![HotpathThread {
-                    name: String::from("main"),
-                    status: Some(String::from("running")),
-                    cpu_percent: Quantity::parse("95%"),
-                    cpu_percent_max: None,
-                    cpu_percent_avg: None,
-                    alloc_bytes: None,
-                    dealloc_bytes: None,
-                    mem_diff: None,
-                }],
-                thread_summary: vec![KvPair::text("threads.rss_bytes", "1024")],
-            }),
-        };
+        let row = RunRowBuilder::new()
+            .update(|row| {
+                row.command = String::from("hotpath");
+                row.mode = Some(String::from("default"));
+                row.elapsed = Wall::LegacyMillis(500);
+                row.invocation = test_invocation("");
+                row.kv = vec![
+                    KvPair::int("elapsed_ms", 500),
+                    KvPair::text("threads.rss_bytes", "1024"),
+                ];
+                // Deliberately not ascending: the round-trip must preserve
+                // execution order, not helpfully sort it.
+                row.iterations = vec![
+                    Wall::from_micros(500_400),
+                    Wall::from_micros(699_600),
+                    Wall::from_micros(600_049),
+                ];
+                row.distribution = Some(Distribution {
+                    samples: 5,
+                    min: Wall::from_micros(100_312),
+                    p50: Wall::from_micros(110_000),
+                    p95: Wall::from_micros(129_501),
+                    max: Wall::from_micros(150_499),
+                });
+                row.hotpath = Some(HotpathData {
+                    functions: vec![HotpathFunction {
+                        section: String::from("timing"),
+                        description: Some(String::from("main")),
+                        ordinal: 0,
+                        name: String::from("process"),
+                        calls: Some(10),
+                        avg: Quantity::parse("50 ms"),
+                        total: Quantity::parse("500 ms"),
+                        percent_total: Quantity::parse("100%"),
+                        percentiles: std::collections::BTreeMap::new(),
+                    }],
+                    threads: vec![HotpathThread {
+                        name: String::from("main"),
+                        status: Some(String::from("running")),
+                        cpu_percent: Quantity::parse("95%"),
+                        cpu_percent_max: None,
+                        cpu_percent_avg: None,
+                        alloc_bytes: None,
+                        dealloc_bytes: None,
+                        mem_diff: None,
+                    }],
+                    thread_summary: vec![KvPair::text("threads.rss_bytes", "1024")],
+                });
+            })
+            .build();
 
         let (full, _) = db.insert(&row).expect("insert");
 
@@ -1648,11 +1597,14 @@ mod tests {
         // Per-iteration walls, in execution order.
         assert_eq!(
             r.iterations,
-            vec![500, 700, 600],
+            vec![
+                Wall::from_micros(500_400),
+                Wall::from_micros(699_600),
+                Wall::from_micros(600_049),
+            ],
             "iterations must round-trip in execution order - sorting them \
              would erase the drift signal they exist to carry"
         );
-        assert_eq!(r.iterations_us, vec![500_400, 699_600, 600_049]);
 
         // Distribution.
         let dist = r
@@ -1660,19 +1612,10 @@ mod tests {
             .as_ref()
             .expect("distribution should be loaded");
         assert_eq!(dist.samples, 5);
-        assert_eq!(dist.min_ms, 100);
-        assert_eq!(dist.p50_ms, 110);
-        assert_eq!(dist.p95_ms, 130);
-        assert_eq!(dist.max_ms, 150);
-        assert_eq!(
-            dist.us,
-            Some(crate::db::DistributionUs {
-                min: 100_312,
-                p50: 110_000,
-                p95: 129_501,
-                max: 150_499,
-            })
-        );
+        assert_eq!(dist.min, Wall::from_micros(100_312));
+        assert_eq!(dist.p50, Wall::from_micros(110_000));
+        assert_eq!(dist.p95, Wall::from_micros(129_501));
+        assert_eq!(dist.max, Wall::from_micros(150_499));
 
         // KV pairs.
         assert!(r.kv.len() >= 2, "should have at least 2 kv pairs");
@@ -1706,32 +1649,15 @@ mod tests {
         let (dir, db_path) = test_db("query_grep_and");
         let db = ResultsDb::open(&db_path).expect("open");
 
-        let make_row = |cli: &str, brokkr: &str| RunRow {
-            hostname: String::from("testhost"),
-            commit: String::from("aabbccdd"),
-            subject: String::from("test"),
-            command: String::from("bench apply-changes"),
-            mode: Some(String::from("release")),
-            input_file: None,
-            input_mb: None,
-            elapsed_ms: 100,
-            elapsed_us: None,
-            peak_rss_mb: None,
-            cargo_features: None,
-            cargo_profile: crate::build::CargoProfile::Release,
-            kernel: None,
-            cpu_governor: None,
-            avail_memory_mb: None,
-            storage_notes: None,
-            cli_args: Some(String::from(cli)),
-            invocation: test_invocation(brokkr),
-            project: String::from("test"),
-            stop_marker: None,
-            kv: vec![],
-            iterations: Vec::new(),
-            iterations_us: Vec::new(),
-            distribution: None,
-            hotpath: None,
+        let make_row = |cli: &str, brokkr: &str| {
+            RunRowBuilder::new()
+                .update(|row| {
+                    row.command = String::from("bench apply-changes");
+                    row.mode = Some(String::from("release"));
+                    row.cli_args = Some(String::from(cli));
+                    row.invocation = test_invocation(brokkr);
+                })
+                .build()
         };
 
         // Row 1: zstd + uring, matches both terms.
@@ -1836,32 +1762,15 @@ mod tests {
         let (dir, db_path) = test_db("query_grep_v");
         let db = ResultsDb::open(&db_path).expect("open");
 
-        let make_row = |cli: &str, brokkr: &str| RunRow {
-            hostname: String::from("testhost"),
-            commit: String::from("aabbccdd"),
-            subject: String::from("test"),
-            command: String::from("bench apply-changes"),
-            mode: Some(String::from("release")),
-            input_file: None,
-            input_mb: None,
-            elapsed_ms: 100,
-            elapsed_us: None,
-            peak_rss_mb: None,
-            cargo_features: None,
-            cargo_profile: crate::build::CargoProfile::Release,
-            kernel: None,
-            cpu_governor: None,
-            avail_memory_mb: None,
-            storage_notes: None,
-            cli_args: Some(String::from(cli)),
-            invocation: test_invocation(brokkr),
-            project: String::from("test"),
-            stop_marker: None,
-            kv: vec![],
-            iterations: Vec::new(),
-            iterations_us: Vec::new(),
-            distribution: None,
-            hotpath: None,
+        let make_row = |cli: &str, brokkr: &str| {
+            RunRowBuilder::new()
+                .update(|row| {
+                    row.command = String::from("bench apply-changes");
+                    row.mode = Some(String::from("release"));
+                    row.cli_args = Some(String::from(cli));
+                    row.invocation = test_invocation(brokkr);
+                })
+                .build()
         };
 
         // Row 1: zstd + uring (the ON arm).
@@ -1958,34 +1867,19 @@ mod tests {
         // in *neither* argv column. This is the case --grep used to miss.
         // Rows are otherwise identical, so `elapsed_ms` stands in as an id -
         // `query` doesn't hydrate children, so `captured_env` is empty here.
-        let make_row = |elapsed_ms: i64, env: Option<(&str, &str)>| RunRow {
-            hostname: String::from("testhost"),
-            commit: String::from("aabbccdd"),
-            subject: String::from("test"),
-            command: String::from("bench tilegen"),
-            mode: Some(String::from("release")),
-            input_file: None,
-            input_mb: None,
-            elapsed_ms,
-            elapsed_us: None,
-            peak_rss_mb: None,
-            cargo_features: None,
-            cargo_profile: crate::build::CargoProfile::Release,
-            kernel: None,
-            cpu_governor: None,
-            avail_memory_mb: None,
-            storage_notes: None,
-            cli_args: Some(String::from("tilegen --zoom 14")),
-            invocation: test_invocation("brokkr tilegen --bench 3"),
-            project: String::from("test"),
-            stop_marker: None,
-            kv: env
-                .map(|(k, v)| vec![KvPair::text(format!("env.{k}"), v)])
-                .unwrap_or_default(),
-            iterations: Vec::new(),
-            iterations_us: Vec::new(),
-            distribution: None,
-            hotpath: None,
+        let make_row = |elapsed_ms: i64, env: Option<(&str, &str)>| {
+            RunRowBuilder::new()
+                .update(|row| {
+                    row.command = String::from("bench tilegen");
+                    row.mode = Some(String::from("release"));
+                    row.elapsed = Wall::LegacyMillis(elapsed_ms);
+                    row.cli_args = Some(String::from("tilegen --zoom 14"));
+                    row.invocation = test_invocation("brokkr tilegen --bench 3");
+                    row.kv = env
+                        .map(|(k, v)| vec![KvPair::text(format!("env.{k}"), v)])
+                        .unwrap_or_default();
+                })
+                .build()
         };
 
         // Row 1: the ON arm. Row 2: explicit OFF baseline. Row 3: no capture.
@@ -2017,7 +1911,7 @@ mod tests {
         // NAME=VALUE selects one arm, since the var is matched as typed.
         let rows = grep(vec!["ELIVAGAR_LAYER_STATS=1".into()], Vec::new());
         assert_eq!(rows.len(), 1, "--grep NAME=VALUE selects the ON arm");
-        assert_eq!(rows[0].elapsed_ms, 101);
+        assert_eq!(rows[0].elapsed.ms(), 101);
 
         // grep_v's De Morgan flip: a term absent from every source, including
         // the env, excludes only the rows that actually carry it.
@@ -2028,7 +1922,7 @@ mod tests {
         // exclusion hits the env.
         let rows = grep(vec!["tilegen".into()], vec!["LAYER_STATS".into()]);
         assert_eq!(rows.len(), 1, "only the uncaptured row survives");
-        assert_eq!(rows[0].elapsed_ms, 103);
+        assert_eq!(rows[0].elapsed.ms(), 103);
 
         // The `env.` storage prefix is stripped before matching, so it isn't
         // itself greppable - otherwise every captured row would match `env`.
@@ -2040,33 +1934,13 @@ mod tests {
     }
 
     fn plain_row(command: &str, kv: Vec<KvPair>) -> RunRow {
-        RunRow {
-            hostname: String::from("testhost"),
-            commit: String::from("aabbccdd"),
-            subject: String::from("test"),
-            command: String::from(command),
-            mode: Some(String::from("bench")),
-            input_file: None,
-            input_mb: None,
-            elapsed_ms: 100,
-            elapsed_us: None,
-            peak_rss_mb: None,
-            cargo_features: None,
-            cargo_profile: crate::build::CargoProfile::Release,
-            kernel: None,
-            cpu_governor: None,
-            avail_memory_mb: None,
-            storage_notes: None,
-            cli_args: None,
-            invocation: test_invocation(""),
-            project: String::from("test"),
-            stop_marker: None,
-            kv,
-            iterations: Vec::new(),
-            iterations_us: Vec::new(),
-            distribution: None,
-            hotpath: None,
-        }
+        RunRowBuilder::new()
+            .update(|row| {
+                row.command = String::from(command);
+                row.invocation = test_invocation("");
+                row.kv = kv;
+            })
+            .build()
     }
 
     #[test]

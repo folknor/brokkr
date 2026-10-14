@@ -15,11 +15,19 @@ pub(crate) struct SnapshotDb {
 }
 
 impl SnapshotDb {
-    /// Opens `results.db`, shared with `ResultsDb` and litehtml. The visual
-    /// tables do not read or write `PRAGMA user_version`.
+    /// Opens sluggrs' versioned visual store, importing legacy snapshot tables
+    /// from the supplied `results.db` path on first open.
     pub fn open(path: &Path) -> Result<Self, DevError> {
         Ok(Self {
             inner: VisualDb::open(path, DbSubject::Sluggrs)?,
+        })
+    }
+
+    /// Open sluggrs' visual store for queries (`list`, `visual-status`,
+    /// `report`). Never writes except to perform the one-time import.
+    pub fn open_read_only(path: &Path) -> Result<Self, DevError> {
+        Ok(Self {
+            inner: VisualDb::open_read_only(path, DbSubject::Sluggrs)?,
         })
     }
 
@@ -84,5 +92,77 @@ impl SnapshotDb {
         snapshot_id: &str,
     ) -> Result<Option<ResultRow>, DevError> {
         self.inner.latest_result_for_subject(snapshot_id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::panic, clippy::unwrap_used)]
+
+    use super::*;
+
+    #[test]
+    fn visual_stores_coexist_with_the_main_results_database() {
+        let dir = crate::test_scratch::scratch("sluggrs_db", "separate_visual_stores");
+        let path = dir.join("results.db");
+
+        let snapshots = SnapshotDb::open(&path).unwrap();
+        snapshots
+            .insert_run("sluggrs-run", "commit", false, Some("adapter"))
+            .unwrap();
+        snapshots
+            .insert_result("sluggrs-run", "snapshot", Some(1.0), Status::Pass)
+            .unwrap();
+        snapshots.set_approval("snapshot", "commit", 0.0).unwrap();
+        drop(snapshots);
+
+        let mechanical = crate::litehtml::db::MechanicalDb::open(&path).unwrap();
+        mechanical
+            .insert_run("litehtml-run", "commit", false)
+            .unwrap();
+        mechanical
+            .insert_result(
+                "litehtml-run",
+                "fixture",
+                Some(2.0),
+                Some(98.0),
+                Status::Pass,
+            )
+            .unwrap();
+        mechanical
+            .set_approval("fixture", "commit", 2.0, Some(98.0))
+            .unwrap();
+        drop(mechanical);
+
+        drop(crate::db::ResultsDb::open(&path).unwrap());
+
+        let snapshots = SnapshotDb::open(&path).unwrap();
+        assert_eq!(
+            snapshots
+                .latest_result_for_snapshot("snapshot")
+                .unwrap()
+                .unwrap()
+                .run_id,
+            "sluggrs-run"
+        );
+        assert_eq!(
+            snapshots.get_approval("snapshot").unwrap().unwrap().commit,
+            "commit"
+        );
+        drop(snapshots);
+
+        let mechanical = crate::litehtml::db::MechanicalDb::open(&path).unwrap();
+        assert_eq!(
+            mechanical
+                .latest_result_for_fixture("fixture")
+                .unwrap()
+                .unwrap()
+                .run_id,
+            "litehtml-run"
+        );
+        assert_eq!(
+            mechanical.get_approval("fixture").unwrap().unwrap().commit,
+            "commit"
+        );
     }
 }

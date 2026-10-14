@@ -5,7 +5,9 @@ use std::path::{Path, PathBuf};
 
 use crate::build;
 use crate::cli::{LitehtmlVisualArgs, VisualArgs};
-use crate::config::project_config::litehtml::{LitehtmlConfig, LitehtmlFixture};
+use crate::config::project_config::litehtml::{
+    ExpectedOutcome, LitehtmlConfig, LitehtmlFixture, PipelineMode,
+};
 use crate::error::DevError;
 use crate::git;
 use crate::output;
@@ -16,45 +18,27 @@ use crate::visual::engine::{self, Subject, SubjectItem, SummaryOptions};
 use super::compare;
 use super::db::MechanicalDb;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum PipelineMode {
-    Ahem,
-    Default,
-}
+const DEFAULT_FALLBACK_ASPECT_RATIO: f64 = 2.0;
 
-impl PipelineMode {
-    fn parse(value: &str, field: &str) -> Result<Self, DevError> {
-        match value {
-            "ahem" => Ok(Self::Ahem),
-            // The normal pipeline invocation omits `--fixture`.
-            "default" => Ok(Self::Default),
-            _ => Err(DevError::Config(format!(
-                "{field} must be `ahem` or `default`, got {value:?}"
-            ))),
-        }
+fn effective_fallback_aspect_ratio(config: &LitehtmlConfig) -> Result<f64, DevError> {
+    let ratio = config
+        .fallback_aspect_ratio
+        .unwrap_or(DEFAULT_FALLBACK_ASPECT_RATIO);
+    if !ratio.is_finite() || ratio <= 0.0 {
+        return Err(DevError::Config(
+            "[litehtml].fallback_aspect_ratio must be a finite number greater than zero".into(),
+        ));
     }
-}
-
-#[derive(Clone, Copy)]
-enum ExpectedOutcome {
-    Pass,
-    Fail,
-}
-
-impl ExpectedOutcome {
-    fn parse(value: &str, field: &str) -> Result<Self, DevError> {
-        match value {
-            "pass" => Ok(Self::Pass),
-            "fail" => Ok(Self::Fail),
-            _ => Err(DevError::Config(format!(
-                "{field} must be `pass` or `fail`, got {value:?}"
-            ))),
-        }
-    }
+    Ok(ratio)
 }
 
 fn validate_config(config: &LitehtmlConfig) -> Result<(), DevError> {
-    PipelineMode::parse(&config.mode, "[litehtml].mode")?;
+    if config.viewport_width == 0 {
+        return Err(DevError::Config(
+            "[litehtml].viewport_width must be greater than zero".into(),
+        ));
+    }
+    effective_fallback_aspect_ratio(config)?;
     let mut ids = HashSet::new();
     for fixture in &config.fixtures {
         compare::validate_artifact_id(&fixture.id, "fixture")?;
@@ -64,25 +48,22 @@ fn validate_config(config: &LitehtmlConfig) -> Result<(), DevError> {
                 fixture.id
             )));
         }
-        ExpectedOutcome::parse(
-            &fixture.expected,
-            &format!("fixture {:?} expected", fixture.id),
-        )?;
-        let mode = fixture.mode.as_deref().unwrap_or(&config.mode);
-        PipelineMode::parse(mode, &format!("fixture {:?} mode", fixture.id))?;
+        if fixture.viewport_width == Some(0) {
+            return Err(DevError::Config(format!(
+                "fixture {:?} viewport_width must be greater than zero",
+                fixture.id
+            )));
+        }
     }
     Ok(())
 }
 
-fn expected_outcome(fixture: &LitehtmlFixture) -> Result<ExpectedOutcome, DevError> {
-    ExpectedOutcome::parse(
-        &fixture.expected,
-        &format!("fixture {:?} expected", fixture.id),
-    )
-}
-
 fn open_db(project_root: &Path) -> Result<MechanicalDb, DevError> {
     engine::open_results_db(project_root, MechanicalDb::open)
+}
+
+fn open_db_read_only(project_root: &Path) -> Result<MechanicalDb, DevError> {
+    engine::open_results_db(project_root, MechanicalDb::open_read_only)
 }
 
 struct FixtureOutcome {
@@ -205,10 +186,7 @@ fn run_pipeline(
     let html_str = fixture_html.display().to_string();
     let output_dir_str = artifact_dir.display().to_string();
 
-    let mode = PipelineMode::parse(
-        fixture.mode.as_deref().unwrap_or(&config.mode),
-        &format!("fixture {:?} mode", fixture.id),
-    )?;
+    let mode = fixture.resolved_mode(config);
 
     let mut args = vec![&html_str as &str, "--output-dir", &output_dir_str];
     if mode == PipelineMode::Ahem {
@@ -349,7 +327,7 @@ fn score_fixture(
     } else {
         Some(fixture.resolved_element_threshold(ctx.config))
     };
-    let expected_fail = matches!(expected_outcome(fixture)?, ExpectedOutcome::Fail);
+    let expected_fail = fixture.expected == ExpectedOutcome::Fail;
     let approval = ctx.db.get_approval(&fixture.id)?;
     let approved_pixel = approval.as_ref().map(|a| a.pixel_diff_pct);
     let approved_element = approval.as_ref().and_then(|a| a.element_match_pct);
@@ -441,16 +419,29 @@ fn format_offender(o: &compare::Offender) -> String {
 const OFFENDER_PRINT_LIMIT: usize = 10;
 
 fn print_offenders(fixture_id: &str, offenders: &[compare::Offender]) {
-    for o in offenders.iter().take(OFFENDER_PRINT_LIMIT) {
-        output::litehtml_msg(&format!("      {}", format_offender(o)));
+    for line in offender_messages(fixture_id, offenders, OFFENDER_PRINT_LIMIT) {
+        output::litehtml_msg(&line);
     }
+}
 
-    if offenders.len() > OFFENDER_PRINT_LIMIT {
-        output::litehtml_msg(&format!(
+fn offender_messages(
+    fixture_id: &str,
+    offenders: &[compare::Offender],
+    limit: usize,
+) -> Vec<String> {
+    let mut lines = offenders
+        .iter()
+        .take(limit)
+        .map(|offender| format!("      {}", format_offender(offender)))
+        .collect::<Vec<_>>();
+
+    if offenders.len() > limit {
+        lines.push(format!(
             "      ... and {} more (fixtures/{fixture_id}/offenders.txt)",
-            offenders.len() - OFFENDER_PRINT_LIMIT,
+            offenders.len() - limit,
         ));
     }
+    lines
 }
 
 // ---------------------------------------------------------------------------
@@ -473,6 +464,26 @@ fn resolve_fixture<'a>(
         return Ok(fixture);
     }
     engine::resolve_prefix(&manifest.fixtures, id)
+}
+
+fn approval_scores(
+    fixture_id: &str,
+    result: &super::db::ResultRow,
+) -> Result<(f64, f64), DevError> {
+    if result.status == compare::Status::Error {
+        return Err(DevError::Verify(format!(
+            "latest result for fixture '{fixture_id}' is ERROR - nothing to approve; fix it and \
+             rerun `brokkr visual {fixture_id}`"
+        )));
+    }
+    match (result.pixel_diff_pct, result.element_match_pct) {
+        (Some(pixel), Some(element)) => Ok((pixel, element)),
+        _ => Err(DevError::Verify(format!(
+            "latest result for fixture '{fixture_id}' is {} without both a pixel and an element score \
+             - nothing to approve; fix it and rerun `brokkr visual {fixture_id}`",
+            result.status,
+        ))),
+    }
 }
 
 fn resolve_fixtures<'a>(
@@ -516,7 +527,7 @@ fn build_pipeline(build_root: &Path) -> Result<PathBuf, DevError> {
 // Test command
 // ---------------------------------------------------------------------------
 
-/// `project_root` is the config dir (fixtures, `.brokkr/`, results.db);
+/// `project_root` is the config dir (fixtures, `.brokkr/`, the visual store);
 /// `build_root` is the code tree cargo and git run in. They differ only under
 /// the one-level-up layout, where using `project_root` for the build and the
 /// commit stamp built and described the wrong tree.
@@ -605,7 +616,7 @@ pub(crate) fn list(
     project::require(project, Project::Litehtml, "list")?;
     validate_config(litehtml_config)?;
 
-    let db = open_db(project_root)?;
+    let db = open_db_read_only(project_root)?;
 
     output::litehtml_msg(&format!(
         "  {:<25} {:<30} {:<10} {}",
@@ -717,7 +728,7 @@ fn capture_fixture(
 // ---------------------------------------------------------------------------
 
 /// `build_root` is the code tree whose cleanliness and commit the approval
-/// is pinned to; `project_root` holds results.db. See [`test()`].
+/// is pinned to; `project_root` holds the visual store. See [`test()`].
 pub(crate) fn approve(
     project: Project,
     project_root: &Path,
@@ -741,18 +752,9 @@ pub(crate) fn approve(
         ))
     })?;
 
-    // Both scores or nothing. An errored run has no pixel score, and
-    // defaulting it to 0.0 turned "could not render" into a perfect
-    // baseline (`approve --all` did it to every errored fixture); a missing
-    // element score stored a NULL that disabled the element ratchet for good.
-    let (Some(pixel_pct), Some(element_pct)) = (result.pixel_diff_pct, result.element_match_pct)
-    else {
-        return Err(DevError::Verify(format!(
-            "latest result for fixture '{}' is {} without both a pixel and an element score \
-             \u{2014} nothing to approve; fix it and rerun `brokkr visual {}`",
-            fixture.id, result.status, fixture.id,
-        )));
-    };
+    // Both scores or nothing. An error row is never an approval candidate,
+    // and a missing element score would disable the element ratchet for good.
+    let (pixel_pct, element_pct) = approval_scores(&fixture.id, &result)?;
 
     db.set_approval(
         &fixture.id,
@@ -776,7 +778,7 @@ pub(crate) fn approve(
 pub(crate) fn report(project: Project, project_root: &Path, run_id: &str) -> Result<(), DevError> {
     project::require(project, Project::Litehtml, "report")?;
 
-    let db = open_db(project_root)?;
+    let db = open_db_read_only(project_root)?;
     let results = db.run_results(run_id)?;
 
     if results.is_empty() {
@@ -811,7 +813,7 @@ pub(crate) fn status(
     project::require(project, Project::Litehtml, "visual-status")?;
     validate_config(litehtml_config)?;
 
-    let db = open_db(project_root)?;
+    let db = open_db_read_only(project_root)?;
     let approvals = db.all_approvals()?;
 
     output::litehtml_msg(&format!(
@@ -998,6 +1000,7 @@ pub(crate) fn prepare(
     output_path: &str,
 ) -> Result<(), DevError> {
     project::require(project, Project::Litehtml, "prepare")?;
+    let ratio = effective_fallback_aspect_ratio(litehtml_config)?;
 
     let script = ensure_prepare_script(project_root)?;
     let script_str = script.display().to_string();
@@ -1029,7 +1032,6 @@ pub(crate) fn prepare(
         )));
     }
 
-    let ratio = litehtml_config.fallback_aspect_ratio.unwrap_or(2.0);
     let ratio_str = ratio.to_string();
 
     let args = vec![
@@ -1193,4 +1195,124 @@ pub(crate) fn outline(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::float_cmp, clippy::panic, clippy::unwrap_used)]
+
+    use super::*;
+
+    fn fixture(id: &str) -> LitehtmlFixture {
+        LitehtmlFixture {
+            id: id.into(),
+            path: format!("fixtures/{id}.html"),
+            tags: Vec::new(),
+            viewport_width: None,
+            mode: None,
+            pixel_diff_threshold: None,
+            element_match_threshold: None,
+            expected: ExpectedOutcome::Pass,
+            waive_element_threshold: false,
+            notes: None,
+        }
+    }
+
+    fn config(fixtures: Vec<LitehtmlFixture>) -> LitehtmlConfig {
+        LitehtmlConfig {
+            viewport_width: 800,
+            mode: PipelineMode::Default,
+            pixel_diff_threshold: 0.5,
+            element_match_threshold: 95.0,
+            fallback_aspect_ratio: None,
+            fixtures,
+        }
+    }
+
+    fn result(
+        status: compare::Status,
+        pixel: Option<f64>,
+        element: Option<f64>,
+    ) -> crate::litehtml::db::ResultRow {
+        crate::litehtml::db::ResultRow {
+            run_id: "run".into(),
+            subject_id: "fixture".into(),
+            pixel_diff_pct: pixel,
+            element_match_pct: element,
+            status,
+        }
+    }
+
+    #[test]
+    fn fixture_resolution_prefers_exact_ids_and_rejects_ambiguous_prefixes() {
+        let cfg = config(vec![fixture("alpha"), fixture("alphabet"), fixture("beta")]);
+
+        assert_eq!(resolve_fixture(&cfg, "alpha").unwrap().id, "alpha");
+        assert_eq!(resolve_fixture(&cfg, "beta").unwrap().id, "beta");
+        let error = resolve_fixture(&cfg, "alph").unwrap_err().to_string();
+        assert!(error.contains("ambiguous fixture prefix 'alph'"));
+        assert!(error.contains("alpha, alphabet"));
+    }
+
+    #[test]
+    fn approval_requires_a_non_error_result_with_both_scores() {
+        let scored = result(compare::Status::Pass, Some(1.5), Some(98.0));
+        assert_eq!(approval_scores("fixture", &scored).unwrap(), (1.5, 98.0));
+
+        let error_with_scores = result(compare::Status::Error, Some(0.0), Some(100.0));
+        assert!(approval_scores("fixture", &error_with_scores).is_err());
+
+        let missing_element = result(compare::Status::Pass, Some(1.5), None);
+        assert!(approval_scores("fixture", &missing_element).is_err());
+    }
+
+    #[test]
+    fn offender_display_limit_is_injectable() {
+        let offenders = [
+            compare::Offender {
+                path: "html>body[0]>a[0]".into(),
+                dx: 3.0,
+                dy: 0.0,
+                dw: 0.0,
+                dh: 0.0,
+            },
+            compare::Offender {
+                path: "html>body[0]>b[0]".into(),
+                dx: 0.0,
+                dy: 4.0,
+                dw: 0.0,
+                dh: 0.0,
+            },
+        ];
+
+        let lines = offender_messages("sample", &offenders, 1);
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].contains("html>body[0]>a[0]"));
+        assert!(lines[1].contains("... and 1 more (fixtures/sample/offenders.txt)"));
+    }
+
+    #[test]
+    fn aspect_ratio_uses_one_positive_finite_default() {
+        assert_eq!(
+            effective_fallback_aspect_ratio(&config(Vec::new())).unwrap(),
+            DEFAULT_FALLBACK_ASPECT_RATIO
+        );
+
+        for invalid in [0.0, f64::NAN, f64::INFINITY, -1.0] {
+            let mut cfg = config(Vec::new());
+            cfg.fallback_aspect_ratio = Some(invalid);
+            assert!(effective_fallback_aspect_ratio(&cfg).is_err());
+        }
+    }
+
+    #[test]
+    fn capture_dimensions_must_be_positive() {
+        let mut cfg = config(Vec::new());
+        cfg.viewport_width = 0;
+        assert!(validate_config(&cfg).is_err());
+
+        let mut cfg = config(vec![fixture("small")]);
+        cfg.fixtures[0].viewport_width = Some(0);
+        assert!(validate_config(&cfg).is_err());
+    }
 }

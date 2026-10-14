@@ -8,12 +8,13 @@
 //! This is the **lenient** half of the pair `elivagar.md` describes: where
 //! `brokkr regress` diffs two archives feature by feature and returns a verdict,
 //! this samples tiles and reports per-layer feature counts side by side. It has
-//! no pass/fail, gates nothing, and never refuses - it answers "roughly what
-//! changed, and where" for two archives that may not be comparable at all
-//! (different producers, different configs, different extracts). That is why it
-//! decodes **tolerant**: a foreign producer's extra wire fields are skipped
-//! rather than treated as corruption, which is exactly wrong for the gate and
-//! exactly right here.
+//! no pass/fail and gates nothing - it answers "roughly what changed, and
+//! where" for two archives that may not be comparable at all (different
+//! producers, different configs, different extracts). Bad sampled tiles are
+//! skipped; invalid sample sizes and unreadable archives are errors. That is
+//! why it decodes **tolerant**: a foreign producer's extra wire fields are
+//! skipped rather than treated as corruption, which is exactly wrong for the
+//! gate and exactly right here.
 //!
 //! One reporting change from the shed example: it counted raw geometry-command
 //! varints (`cmds`), a number only reachable by scanning the wire bytes
@@ -24,8 +25,12 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use super::eliv::tile_id_to_zxy;
-use super::eliv::{ArchiveView, BlobRef, Strictness, decode_detail_tile, gzip_decompress};
+use super::constants::mvt;
+use super::constants::{DEFAULT_COMPARE_SAMPLE_PER_ZOOM, MAX_COMPARE_SAMPLE_PER_ZOOM};
+use super::eliv::{
+    ArchiveView, BlobRef, Strictness, decode_detail_tile, gzip_decompress, next_zoom_boundary,
+    tile_id_to_zxy,
+};
 use crate::error::DevError;
 use crate::output;
 
@@ -51,50 +56,132 @@ impl LayerTally {
 
 type Tallies = BTreeMap<String, LayerTally>;
 
-struct TileEntry {
-    tile_id: u64,
+#[derive(Clone, Copy)]
+struct TileSpan {
+    start: u64,
+    end: u64,
     blob: BlobRef,
 }
 
-fn addressed_tiles(archive: &ArchiveView) -> Result<Vec<TileEntry>, DevError> {
+#[derive(Clone, Copy)]
+struct CommonSpan {
+    start: u64,
+    end: u64,
+    a: BlobRef,
+    b: BlobRef,
+}
+
+#[derive(Clone, Copy)]
+struct SamplePair {
+    a: BlobRef,
+    b: BlobRef,
+}
+
+type ZoomRuns = BTreeMap<u8, Vec<TileSpan>>;
+
+fn addressed_runs(archive: &ArchiveView) -> Result<(ZoomRuns, u64), DevError> {
     let runs = archive
         .read_all_runs()
         .map_err(|e| DevError::Verify(format!("read directory: {e}")))?;
-    let mut out = Vec::new();
+    let mut by_zoom = ZoomRuns::new();
+    let mut addressed = 0u64;
     for run in runs {
-        for step in 0..u64::from(run.run_length) {
-            out.push(TileEntry {
-                tile_id: run.tile_id + step,
-                blob: BlobRef {
-                    offset: run.offset,
-                    length: run.length,
-                },
-            });
+        if run.run_length == 0 {
+            continue;
+        }
+        let run_end = run
+            .tile_id
+            .checked_add(u64::from(run.run_length))
+            .ok_or_else(|| DevError::Verify("directory run end overflows".into()))?;
+        addressed = addressed
+            .checked_add(u64::from(run.run_length))
+            .ok_or_else(|| DevError::Verify("addressed tile count overflows".into()))?;
+        let blob = BlobRef {
+            offset: run.offset,
+            length: run.length,
+        };
+        let mut start = run.tile_id;
+        while start < run_end {
+            let (zoom, _, _) = tile_id_to_zxy(start);
+            let end = run_end.min(next_zoom_boundary(start));
+            if end <= start {
+                return Err(DevError::Verify(
+                    "directory run crosses an invalid zoom boundary".into(),
+                ));
+            }
+            by_zoom
+                .entry(zoom)
+                .or_default()
+                .push(TileSpan { start, end, blob });
+            start = end;
         }
     }
-    Ok(out)
+    Ok((by_zoom, addressed))
 }
 
-fn group_by_zoom(entries: Vec<TileEntry>) -> BTreeMap<u8, Vec<TileEntry>> {
-    let mut map: BTreeMap<u8, Vec<TileEntry>> = BTreeMap::new();
-    for entry in entries {
-        let (z, _, _) = tile_id_to_zxy(entry.tile_id);
-        map.entry(z).or_default().push(entry);
+fn tile_count(runs: &[TileSpan]) -> u64 {
+    runs.iter().map(|run| run.end - run.start).sum()
+}
+
+fn intersect_runs(a: &[TileSpan], b: &[TileSpan]) -> Vec<CommonSpan> {
+    let mut out = Vec::new();
+    let (mut ai, mut bi) = (0usize, 0usize);
+    while let (Some(ar), Some(br)) = (a.get(ai), b.get(bi)) {
+        if ar.end <= br.start {
+            ai += 1;
+        } else if br.end <= ar.start {
+            bi += 1;
+        } else {
+            out.push(CommonSpan {
+                start: ar.start.max(br.start),
+                end: ar.end.min(br.end),
+                a: ar.blob,
+                b: br.blob,
+            });
+            if ar.end <= br.end {
+                ai += 1;
+            }
+            if br.end <= ar.end {
+                bi += 1;
+            }
+        }
     }
-    map
+    out
+}
+
+fn spread_sample(common: &[CommonSpan], count: u64, take: usize) -> Vec<SamplePair> {
+    let mut sampled = Vec::with_capacity(take);
+    let mut next = 0usize;
+    let mut before = 0u64;
+    for span in common {
+        let span_count = span.end - span.start;
+        let after = before + span_count;
+        while next < take {
+            let numerator = u128::try_from(next).unwrap_or(u128::MAX) * u128::from(count);
+            let denominator = u128::try_from(take).unwrap_or(u128::MAX);
+            let ordinal = u64::try_from(numerator / denominator).unwrap_or(u64::MAX);
+            if ordinal >= after {
+                break;
+            }
+            if ordinal >= before {
+                sampled.push(SamplePair {
+                    a: span.a,
+                    b: span.b,
+                });
+            }
+            next += 1;
+        }
+        before = after;
+    }
+    sampled
 }
 
 /// Decode one tile into its own tallies, returning them with the decompressed
 /// size. A tile that will not decode is skipped rather than fatal: this is a
-/// census over a sample, and one bad tile should not deny the other 199.
-///
-/// The tallies are per-tile and merged by the caller only when BOTH sides
-/// decoded, which is what keeps the two columns comparable: folding straight
-/// into the running totals would put side A's features in the census for a
-/// tile side B never contributed - a bias in exactly the half-broken-archive
-/// case the tolerant mode exists to survey.
-fn tally_tile(archive: &ArchiveView, entry: &TileEntry) -> Option<(Tallies, usize)> {
-    let raw = archive.raw_blob(entry.blob).ok()?;
+/// census over a sample, and one bad tile should not deny the other sampled
+/// tiles.
+fn tally_tile(archive: &ArchiveView, blob: BlobRef) -> Option<(Tallies, usize)> {
+    let raw = archive.raw_blob(blob).ok()?;
     let bytes = gzip_decompress(raw).ok()?;
     let tile = decode_detail_tile(&bytes, Strictness::Tolerant).ok()?;
     let mut into = Tallies::new();
@@ -103,9 +190,9 @@ fn tally_tile(archive: &ArchiveView, entry: &TileEntry) -> Option<(Tallies, usiz
         for feature in &layer.features {
             tally.features += 1;
             match feature.geom_type {
-                1 => tally.points += 1,
-                2 => tally.lines += 1,
-                3 => tally.polygons += 1,
+                mvt::GEOMETRY_POINT => tally.points += 1,
+                mvt::GEOMETRY_LINESTRING => tally.lines += 1,
+                mvt::GEOMETRY_POLYGON => tally.polygons += 1,
                 _ => {}
             }
             tally.vertices += feature
@@ -139,7 +226,12 @@ fn percent(a: usize, b: usize) -> String {
 }
 
 pub fn run(file_a: &str, file_b: &str, sample: Option<usize>) -> Result<(), DevError> {
-    let sample_per_zoom = sample.unwrap_or(200);
+    let sample_per_zoom = sample.unwrap_or(DEFAULT_COMPARE_SAMPLE_PER_ZOOM);
+    if sample_per_zoom == 0 || sample_per_zoom > MAX_COMPARE_SAMPLE_PER_ZOOM {
+        return Err(DevError::Config(format!(
+            "--sample must be between 1 and {MAX_COMPARE_SAMPLE_PER_ZOOM} tiles per zoom"
+        )));
+    }
     let open = |path: &str| {
         ArchiveView::open(Path::new(path))
             .map_err(|e| DevError::Verify(format!("open {path}: {e}")))
@@ -155,37 +247,34 @@ pub fn run(file_a: &str, file_b: &str, sample: Option<usize>) -> Result<(), DevE
     let name_a = name(file_a);
     let name_b = name(file_b);
 
-    let entries_a = addressed_tiles(&archive_a)?;
-    let entries_b = addressed_tiles(&archive_b)?;
+    let (by_zoom_a, addressed_a) = addressed_runs(&archive_a)?;
+    let (by_zoom_b, addressed_b) = addressed_runs(&archive_b)?;
     output::bench_msg(&format!(
         "{name_a}: {} tiles, z{}-{}",
-        entries_a.len(),
+        addressed_a,
         archive_a.min_zoom(),
         archive_a.max_zoom()
     ));
     output::bench_msg(&format!(
         "{name_b}: {} tiles, z{}-{}",
-        entries_b.len(),
+        addressed_b,
         archive_b.min_zoom(),
         archive_b.max_zoom()
     ));
 
     let min_zoom = archive_a.min_zoom().min(archive_b.min_zoom());
     let max_zoom = archive_a.max_zoom().max(archive_b.max_zoom());
-    let by_zoom_a = group_by_zoom(entries_a);
-    let by_zoom_b = group_by_zoom(entries_b);
-
     let mut grand_a: Tallies = BTreeMap::new();
     let mut grand_b: Tallies = BTreeMap::new();
 
     for z in min_zoom..=max_zoom {
-        let empty = Vec::new();
+        let empty: Vec<TileSpan> = Vec::new();
         let (zoom_a, zoom_b) = compare_zoom(
             z,
             (&archive_a, by_zoom_a.get(&z).unwrap_or(&empty)),
             (&archive_b, by_zoom_b.get(&z).unwrap_or(&empty)),
             sample_per_zoom,
-        );
+        )?;
         merge(&mut grand_a, &zoom_a);
         merge(&mut grand_b, &zoom_b);
     }
@@ -232,47 +321,42 @@ pub fn run(file_a: &str, file_b: &str, sample: Option<usize>) -> Result<(), DevE
 /// table. Returns the two side's tallies for the grand total.
 fn compare_zoom(
     z: u8,
-    a: (&ArchiveView, &[TileEntry]),
-    b: (&ArchiveView, &[TileEntry]),
+    a: (&ArchiveView, &[TileSpan]),
+    b: (&ArchiveView, &[TileSpan]),
     sample_per_zoom: usize,
-) -> (Tallies, Tallies) {
+) -> Result<(Tallies, Tallies), DevError> {
     let (archive_a, za) = a;
     let (archive_b, zb) = b;
     let (mut zoom_a, mut zoom_b): (Tallies, Tallies) = (BTreeMap::new(), BTreeMap::new());
 
-    // Only tiles addressed by both sides are comparable.
-    let b_index: BTreeMap<u64, usize> =
-        zb.iter().enumerate().map(|(i, e)| (e.tile_id, i)).collect();
-    let common: Vec<(usize, usize)> = za
+    // Intersect directory intervals and retain one record per run overlap.
+    // Memory follows directory size, not the number of addressed tiles.
+    let common = intersect_runs(za, zb);
+    let common_count = common
         .iter()
-        .enumerate()
-        .filter_map(|(ai, entry)| b_index.get(&entry.tile_id).map(|&bi| (ai, bi)))
-        .collect();
-    if common.is_empty() {
+        .try_fold(0u64, |count, span| count.checked_add(span.end - span.start))
+        .ok_or_else(|| DevError::Verify("common tile count overflows".into()))?;
+    let count_a = tile_count(za);
+    let count_b = tile_count(zb);
+    if common_count == 0 {
         output::bench_msg(&format!(
-            "z{z:2}: A={} tiles, B={} tiles, 0 common - skipping",
-            za.len(),
-            zb.len()
+            "z{z:2}: A={count_a} tiles, B={count_b} tiles, 0 common - skipping"
         ));
-        return (zoom_a, zoom_b);
+        return Ok((zoom_a, zoom_b));
     }
 
-    // Indices spread across the whole run rather than the first N, so the sample
-    // spans the extent instead of one corner of the Hilbert curve. Computed as
-    // `i * len / take` rather than a `step_by` stride: an integer stride rounds
-    // to 1 whenever `len < 2 * sample`, and `take` then truncates from the
-    // front - quietly reinstating the first-N bias the stride was there to
-    // avoid, for every zoom whose tile count is merely close to the sample size.
-    let take = sample_per_zoom.min(common.len());
-    let sampled = (0..take).map(|i| common[i * common.len() / take]);
+    // Choose evenly spaced ordinals from the interval intersection. The
+    // sample vector is bounded by the configured cap regardless of the
+    // number of tile IDs the runs cover.
+    let take = usize::try_from(common_count)
+        .unwrap_or(usize::MAX)
+        .min(sample_per_zoom);
+    let sampled = spread_sample(&common, common_count, take);
 
     let (mut bytes_a, mut bytes_b) = (0usize, 0usize);
     let (mut decoded, mut errors) = (0usize, 0usize);
-    for (ai, bi) in sampled {
-        match (
-            tally_tile(archive_a, &za[ai]),
-            tally_tile(archive_b, &zb[bi]),
-        ) {
+    for pair in sampled {
+        match (tally_tile(archive_a, pair.a), tally_tile(archive_b, pair.b)) {
             (Some((ta, la)), Some((tb, lb))) => {
                 merge(&mut zoom_a, &ta);
                 merge(&mut zoom_b, &tb);
@@ -287,7 +371,7 @@ fn compare_zoom(
         output::bench_msg(&format!(
             "z{z:2}: {errors} read errors, 0 decoded - skipping"
         ));
-        return (BTreeMap::new(), BTreeMap::new());
+        return Ok((BTreeMap::new(), BTreeMap::new()));
     }
 
     let err_note = if errors > 0 {
@@ -297,14 +381,14 @@ fn compare_zoom(
     };
     output::bench_msg(&format!(
         "z{z:2}: {decoded} tiles sampled (of {} common, A={} B={} total)  avg_mvt: A={} B={} bytes{err_note}",
-        common.len(),
-        za.len(),
-        zb.len(),
+        common_count,
+        count_a,
+        count_b,
         bytes_a / decoded,
         bytes_b / decoded,
     ));
     print_layers(&zoom_a, &zoom_b, "  ");
-    (zoom_a, zoom_b)
+    Ok((zoom_a, zoom_b))
 }
 
 fn layer_names(a: &Tallies, b: &Tallies) -> Vec<String> {

@@ -309,9 +309,7 @@ fn run_osmpbf_baseline(
     let binary = build::find_executable(&captured.stdout, None)?;
 
     // Run the baseline binary: {binary} {pbf} {runs}
-    let pbf_str = pbf_path
-        .to_str()
-        .ok_or_else(|| DevError::Config("PBF path is not valid UTF-8".into()))?;
+    let pbf_str = crate::utf8_path::path_str(pbf_path)?;
     let runs_str = runs.to_string();
     let binary_str = binary.display().to_string();
 
@@ -323,11 +321,7 @@ fn run_osmpbf_baseline(
     let stderr = String::from_utf8_lossy(&captured.stderr);
     let blocks = parse_stderr_blocks(&stderr);
 
-    let basename = pbf_path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or_default()
-        .to_owned();
+    let basename = crate::utf8_path::file_name(pbf_path);
 
     // Build variant list from parsed blocks.
     let variant_data: Vec<(String, i64, Vec<KvPair>)> = blocks
@@ -388,15 +382,9 @@ fn run_osmium_baseline(
     scratch_dir: &Path,
     project_root: &Path,
 ) -> Result<(), DevError> {
-    let pbf_str = pbf_path
-        .to_str()
-        .ok_or_else(|| DevError::Config("PBF path is not valid UTF-8".into()))?;
+    let pbf_str = crate::utf8_path::path_str(pbf_path)?;
 
-    let basename = pbf_path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or_default()
-        .to_owned();
+    let basename = crate::utf8_path::file_name(pbf_path);
 
     let osmium_args: Vec<&str> = vec![
         "cat",
@@ -427,9 +415,7 @@ fn run_osmium_baseline(
 
     let altw_output =
         PbfhoggLayout::fixed_scratch_file(scratch_dir, "bench-osmium-altw-output.osm.pbf");
-    let altw_output_str = altw_output
-        .to_str()
-        .ok_or_else(|| DevError::Config("scratch path is not valid UTF-8".into()))?;
+    let altw_output_str = crate::utf8_path::path_str(&altw_output)?;
 
     let altw_args: Vec<&str> = vec![
         "add-locations-to-ways",

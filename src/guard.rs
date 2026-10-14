@@ -23,23 +23,15 @@
 use std::path::{Path, PathBuf};
 
 use crate::error::DevError;
+use crate::lockfile::{GUARD_HANDSHAKE_PREFIX, GUARD_INFO_ARG, GUARD_PROTOCOL};
 use crate::output;
 
 const WRAPPER_KEY: &str = "rustc-wrapper";
 const GUARD_BIN: &str = "brokkr-rustc-guard";
 
-/// The guard protocol this brokkr expects from the enrolled wrapper.
-///
-/// Printed by the guard as `--brokkr-guard-info` (`src/bin/rustc_guard.rs` -
-/// the two sides must be edited together, like `auth_hash`) and compared by
-/// [`warn_if_guard_stale`] at locked-command startup and by `brokkr guard`
-/// status. Bump it whenever the guard's admission behaviour changes in a way
-/// brokkr depends on - the number names required behaviour, not the wire
-/// format, because a guard that parses everything correctly but refuses what
-/// the current brokkr expects admitted is exactly the stale half this exists
-/// to catch.
-const GUARD_PROTOCOL: u32 = 1;
-
+// The version and wire fields are shared with the standalone guard through
+// `lock_protocol.rs`. Bump the version there when admission behavior changes
+// in a way brokkr depends on.
 /// `brokkr guard [--install|--remove]`: bare shows status.
 pub fn cmd_guard(install: bool, remove: bool) -> Result<(), DevError> {
     if install && remove {
@@ -244,7 +236,7 @@ enum GuardProbe {
 fn probe_guard(wrapper: &str) -> GuardProbe {
     let capture = output::run_captured_with_env_and_deadline(
         wrapper,
-        &["--brokkr-guard-info"],
+        &[GUARD_INFO_ARG],
         std::path::Path::new("/"),
         &[],
         std::time::Duration::from_secs(3),
@@ -263,7 +255,7 @@ fn probe_guard(wrapper: &str) -> GuardProbe {
         return GuardProbe::Stale("answered the handshake with no output".into());
     };
     let Some(proto) = first
-        .strip_prefix("brokkr-rustc-guard protocol=")
+        .strip_prefix(GUARD_HANDSHAKE_PREFIX)
         .and_then(|rest| rest.split_whitespace().next())
         .and_then(|n| n.parse::<u32>().ok())
     else {

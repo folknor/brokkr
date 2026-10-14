@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use crate::cargo::metadata::{self, CargoMetadata, Query};
 use crate::error::DevError;
 use crate::output;
 
@@ -207,7 +208,7 @@ pub struct ProjectInfo {
 // project_info
 // ---------------------------------------------------------------------------
 
-/// Resolve target directory via `cargo metadata`.
+/// Resolve project facts from the shared typed `cargo metadata` snapshot.
 ///
 /// Runs `cargo metadata` in the given directory (or cwd if `None`).
 pub fn project_info(cwd: Option<&Path>) -> Result<ProjectInfo, DevError> {
@@ -217,149 +218,16 @@ pub fn project_info(cwd: Option<&Path>) -> Result<ProjectInfo, DevError> {
             .map_err(|e| DevError::Build(format!("cannot determine current directory: {e}")))?,
     };
 
-    let val = metadata_no_deps(&project_root)?;
-
-    let target_dir = extract_string(&val, "target_directory")?;
+    let metadata = metadata::load(&project_root, Query::workspace(), &[], None)?;
 
     Ok(ProjectInfo {
-        target_dir: PathBuf::from(target_dir),
-        bare_selection_is_whole_workspace: members_all_default(&val),
-        workspace_members: member_names(&val),
-        default_members: val
-            .get("workspace_default_members")
-            .or_else(|| val.get("workspace_members"))
-            .and_then(serde_json::Value::as_array)
-            .map(|ids| {
-                ids.iter()
-                    .filter_map(|v| v.as_str().map(str::to_owned))
-                    .collect()
-            })
-            .unwrap_or_default(),
-        workspace_root: PathBuf::from(extract_string(&val, "workspace_root")?),
-        member_manifests: member_manifests(&val),
+        target_dir: PathBuf::from(&metadata.target_directory),
+        bare_selection_is_whole_workspace: metadata.members_are_all_default(),
+        workspace_members: metadata.workspace_member_name_map(),
+        default_members: metadata.default_member_ids().into_iter().collect(),
+        workspace_root: PathBuf::from(&metadata.workspace_root),
+        member_manifests: metadata.member_manifests(),
     })
-}
-
-/// `cargo metadata --format-version 1 --no-deps` at `project_root`, parsed.
-/// The one spelling of that call: [`project_info`] reads it, and so does
-/// `check`'s feature routing (which needs each member's `features` map and
-/// declared dependencies, both present in the `--no-deps` output). Run
-/// with no feature arguments - metadata's package list does not depend on
-/// them, and a sweep's tokens are exactly what may be invalid here.
-pub fn metadata_no_deps(project_root: &Path) -> Result<serde_json::Value, DevError> {
-    require_cargo_tree(project_root)?;
-
-    let captured = output::run_cargo(
-        &["metadata", "--format-version", "1", "--no-deps"],
-        project_root,
-        &[],
-        None,
-    )?;
-
-    if !captured.success() {
-        let stderr = String::from_utf8_lossy(&captured.stderr);
-        return Err(DevError::Build(format!("cargo metadata failed: {stderr}")));
-    }
-
-    let stdout = String::from_utf8_lossy(&captured.stdout);
-    Ok(serde_json::from_str(&stdout)?)
-}
-
-/// Each member's manifest path -> package id, from the same `packages` array
-/// [`member_names`] reads.
-fn member_manifests(metadata: &serde_json::Value) -> std::collections::HashMap<PathBuf, String> {
-    let names = member_names(metadata);
-    metadata
-        .get("packages")
-        .and_then(serde_json::Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|p| Some((p.get("id")?.as_str()?, p.get("manifest_path")?.as_str()?)))
-        .filter(|(id, _)| names.contains_key(*id))
-        .map(|(id, path)| (PathBuf::from(path), id.to_owned()))
-        .collect()
-}
-
-/// `workspace_members` ids mapped to their package names, from the
-/// `packages` array a `--no-deps` metadata call lists exactly the members in.
-fn member_names(metadata: &serde_json::Value) -> std::collections::HashMap<String, String> {
-    let ids: std::collections::HashSet<&str> = metadata
-        .get("workspace_members")
-        .and_then(serde_json::Value::as_array)
-        .map(|ids| ids.iter().filter_map(serde_json::Value::as_str).collect())
-        .unwrap_or_default();
-    metadata
-        .get("packages")
-        .and_then(serde_json::Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|p| Some((p.get("id")?.as_str()?, p.get("name")?.as_str()?)))
-        .filter(|(id, _)| ids.contains(id))
-        .map(|(id, name)| (id.to_owned(), name.to_owned()))
-        .collect()
-}
-
-/// Whether `workspace_default_members` covers every `workspace_members`
-/// entry. Compared as sets: the two lists carry the same package-id strings
-/// but cargo does not promise an order. A missing `workspace_default_members`
-/// (cargo before 1.71) reads as false - the conservative direction, since the
-/// only consumer uses true to widen build semantics.
-fn members_all_default(metadata: &serde_json::Value) -> bool {
-    let ids = |key: &str| -> Option<std::collections::BTreeSet<&str>> {
-        Some(
-            metadata
-                .get(key)?
-                .as_array()?
-                .iter()
-                .filter_map(serde_json::Value::as_str)
-                .collect(),
-        )
-    };
-    match (ids("workspace_members"), ids("workspace_default_members")) {
-        (Some(members), Some(default)) => default == members,
-        _ => false,
-    }
-}
-
-/// Refuse, in brokkr's own words, to run cargo somewhere that is not a Rust
-/// tree.
-///
-/// Cargo's message for this walks to the filesystem root and names the
-/// directory it started from, which reads as "your project is broken" when the
-/// truth is that brokkr chose the wrong directory to stand in. The build root
-/// is always cwd (`project::detect`), so under the config-one-level-up layout -
-/// where `brokkr.toml` governs a checkout beside it - standing in the config
-/// directory points every cargo-driving command at a directory that was never
-/// meant to hold code. There is deliberately no step that descends to find the
-/// checkout: one config directory may sit above several, and guessing which one
-/// was meant is how a command silently operates on the wrong tree.
-///
-/// The check mirrors cargo's own search (the directory and its ancestors) so it
-/// can only ever fire where cargo was going to fail anyway.
-fn require_cargo_tree(dir: &Path) -> Result<(), DevError> {
-    if dir.ancestors().any(|d| d.join("Cargo.toml").exists()) {
-        return Ok(());
-    }
-    let mut msg = format!(
-        "no Cargo.toml in {} or any parent - brokkr runs cargo in the working \
-         directory, and this one is not a Rust tree",
-        dir.display()
-    );
-    if dir.join("brokkr.toml").exists() {
-        msg.push_str(
-            ". This directory holds the brokkr.toml governing a checkout beside it; \
-             run the command from inside that checkout, not from here",
-        );
-    }
-    Err(DevError::Build(msg))
-}
-
-/// Extract a string field from a JSON value, returning a `DevError::Build` on
-/// missing or wrong type.
-fn extract_string<'a>(val: &'a serde_json::Value, key: &str) -> Result<&'a str, DevError> {
-    val.get(key)
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| DevError::Build(format!("cargo metadata missing \"{key}\" field")))
 }
 
 // ---------------------------------------------------------------------------
@@ -503,23 +371,10 @@ pub fn resolve_existing_binary(
     config: &BuildConfig,
     project_root: &Path,
 ) -> Result<PathBuf, DevError> {
-    let captured = output::run_cargo(
-        &["metadata", "--format-version", "1", "--no-deps"],
-        project_root,
-        &[],
-        None,
-    )?;
-    if !captured.success() {
-        let stderr = String::from_utf8_lossy(&captured.stderr);
-        return Err(DevError::Build(format!("cargo metadata failed: {stderr}")));
-    }
+    let metadata = metadata::load(project_root, Query::workspace(), &[], None)?;
+    let bin_name = resolve_bin_name(&metadata, config)?;
 
-    let stdout = String::from_utf8_lossy(&captured.stdout);
-    let val: serde_json::Value = serde_json::from_str(&stdout)?;
-    let target_dir = extract_string(&val, "target_directory")?;
-    let bin_name = resolve_bin_name(&val, config)?;
-
-    let mut path = PathBuf::from(target_dir);
+    let mut path = PathBuf::from(&metadata.target_directory);
     path.push(config.profile);
     path.push(bin_name);
 
@@ -582,58 +437,29 @@ fn build_args(config: &BuildConfig) -> Vec<String> {
     args
 }
 
-fn resolve_bin_name(
-    metadata: &serde_json::Value,
-    config: &BuildConfig,
-) -> Result<String, DevError> {
+fn resolve_bin_name(metadata: &CargoMetadata, config: &BuildConfig) -> Result<String, DevError> {
     if let Some(ref bin) = config.bin {
         return Ok(bin.clone());
     }
 
-    let packages = metadata
-        .get("packages")
-        .and_then(serde_json::Value::as_array)
-        .ok_or_else(|| DevError::Build("cargo metadata missing packages".into()))?;
-
     let package = if let Some(ref name) = config.package {
-        packages
+        metadata
+            .packages
             .iter()
-            .find(|pkg| pkg.get("name").and_then(serde_json::Value::as_str) == Some(name.as_str()))
+            .find(|pkg| pkg.name == *name)
             .ok_or_else(|| DevError::Build(format!("package '{name}' not found in metadata")))?
     } else {
-        let root_id = metadata
-            .get("resolve")
-            .and_then(|r| r.get("root"))
-            .and_then(serde_json::Value::as_str);
-        if let Some(id) = root_id {
-            packages
-                .iter()
-                .find(|pkg| pkg.get("id").and_then(serde_json::Value::as_str) == Some(id))
-                .ok_or_else(|| {
-                    DevError::Build(format!("root package '{id}' not found in metadata"))
-                })?
-        } else {
-            packages
-                .first()
-                .ok_or_else(|| DevError::Build("cargo metadata has no packages".into()))?
-        }
+        metadata
+            .packages
+            .first()
+            .ok_or_else(|| DevError::Build("cargo metadata has no packages".into()))?
     };
 
-    let targets = package
-        .get("targets")
-        .and_then(serde_json::Value::as_array)
-        .ok_or_else(|| DevError::Build("package metadata missing targets".into()))?;
-
-    let mut bins: Vec<&serde_json::Value> = Vec::new();
-    for target in targets {
-        let kinds = target
-            .get("kind")
-            .and_then(serde_json::Value::as_array)
-            .ok_or_else(|| DevError::Build("target metadata missing kind".into()))?;
-        if kinds.iter().any(|k| k.as_str() == Some("bin")) {
-            bins.push(target);
-        }
-    }
+    let bins: Vec<_> = package
+        .targets
+        .iter()
+        .filter(|target| target.kind.iter().any(|kind| kind == "bin"))
+        .collect();
 
     if bins.is_empty() {
         return Err(DevError::Build(
@@ -642,30 +468,16 @@ fn resolve_bin_name(
     }
 
     if bins.len() == 1 {
-        return bins[0]
-            .get("name")
-            .and_then(serde_json::Value::as_str)
-            .map(std::borrow::ToOwned::to_owned)
-            .ok_or_else(|| DevError::Build("binary target missing name".into()));
+        return Ok(bins[0].name.clone());
     }
 
     if let Some(ref pkg) = config.package
-        && let Some(named) = bins.iter().find(|target| {
-            target.get("name").and_then(serde_json::Value::as_str) == Some(pkg.as_str())
-        })
+        && let Some(named) = bins.iter().find(|target| target.name == *pkg)
     {
-        return named
-            .get("name")
-            .and_then(serde_json::Value::as_str)
-            .map(std::borrow::ToOwned::to_owned)
-            .ok_or_else(|| DevError::Build("binary target missing name".into()));
+        return Ok(named.name.clone());
     }
 
-    bins[0]
-        .get("name")
-        .and_then(serde_json::Value::as_str)
-        .map(std::borrow::ToOwned::to_owned)
-        .ok_or_else(|| DevError::Build("binary target missing name".into()))
+    Ok(bins[0].name.clone())
 }
 
 /// Scan JSON lines from cargo output to find the compiled executable.
@@ -857,45 +669,5 @@ mod failure_report_tests {
                 (false, "error: e".to_owned())
             ]
         );
-    }
-}
-
-#[cfg(test)]
-mod project_info_tests {
-    #![allow(clippy::unwrap_used)]
-    use super::members_all_default;
-
-    fn meta(json: &str) -> serde_json::Value {
-        serde_json::from_str(json).unwrap()
-    }
-
-    // Order must not matter: cargo promises the same package-id strings in
-    // both lists, not the same sequence.
-    #[test]
-    fn whole_workspace_is_recognized_regardless_of_order() {
-        let m = meta(
-            r#"{"workspace_members":["id-a","id-b"],
-                "workspace_default_members":["id-b","id-a"]}"#,
-        );
-        assert!(members_all_default(&m));
-    }
-
-    // A `default-members` subset means a bare selection builds less than the
-    // workspace, so workspace-mode unification would widen semantics.
-    #[test]
-    fn a_default_members_subset_reads_as_not_whole() {
-        let m = meta(
-            r#"{"workspace_members":["id-a","id-b"],
-                "workspace_default_members":["id-a"]}"#,
-        );
-        assert!(!members_all_default(&m));
-    }
-
-    // Old cargo omits the field entirely; the conservative reading is the
-    // only safe one, because the consumer uses true to widen build semantics.
-    #[test]
-    fn a_missing_default_members_field_reads_as_not_whole() {
-        let m = meta(r#"{"workspace_members":["id-a"]}"#);
-        assert!(!members_all_default(&m));
     }
 }

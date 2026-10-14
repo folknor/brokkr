@@ -45,10 +45,9 @@ same row. Rows recorded before a path learned microseconds have no
 `elapsed_us` and print as integers; that detail was never measured, so it is
 never invented from `elapsed_ms * 1000`.
 
-The same rule applies to a distribution's `min`/`p50`/`p95`/`max` and to the
-per-iteration walls. The per-iteration list shows microseconds only when
-every iteration has one; a row where any is missing shows the integers for
-all of them, so the list stays in execution order.
+The same rule applies to each distribution statistic. Per-iteration walls keep
+their precision individually: exact samples print with three decimals and
+legacy samples print as integers. The list remains in execution order.
 
 ## Filters
 
@@ -59,7 +58,9 @@ All narrow the table, and all AND together:
   typed may start with the recorded hash (4+ digits). Rows carry the width
   brokkr abbreviated to when they were recorded - it used to grow with the
   repo - so a full hash from `git log` still finds a row stored at 7. The same
-  match selects each side of `--compare`.
+  match selects each side of `--compare`. A stored commit that is not a hash
+  at all (legacy text such as `unknown`) never makes a query fail: the row is
+  shown with that text verbatim.
 - `--command <SUB>` - substring, so `read` matches `bench read`.
 - `--mode <SUB>` - substring; the exact values are `bench`, `hotpath`,
   `alloc`. `--variant` is accepted as a legacy alias.

@@ -44,6 +44,8 @@ The measurement stores are never removed, by any flag combination:
 | --- | --- |
 | `.brokkr/results.db` | the benchmark record `brokkr results` reads |
 | `.brokkr/sidecar.db` | the profiler record `brokkr sidecar` reads |
+| `.brokkr/litehtml-visual.db` | litehtml visual runs, results, and approvals |
+| `.brokkr/sluggrs-visual.db` | sluggrs visual runs, results, and approvals |
 | `$XDG_DATA_HOME/brokkr/history.db` | global command history |
 | `.brokkr/piners/corpus/runs.db` | the corpus run store, source of truth |
 | `.brokkr/piners/lint/runs.db` | the differential-lint run store |

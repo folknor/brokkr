@@ -23,11 +23,9 @@ pub fn run(
     std::fs::create_dir_all(scratch_dir)?;
 
     let output_path = PbfhoggLayout::fixed_scratch_file(scratch_dir, "bench-merge-output.osm.pbf");
-    let (basename, pbf_str) = super::path_strs(pbf_path)?;
-    let osc_str = osc_path
-        .to_str()
-        .ok_or_else(|| DevError::Config("OSC path is not valid UTF-8".into()))?;
-    let output_str = output_path.display().to_string();
+    let (basename, pbf_str) = crate::utf8_path::path_strings(pbf_path)?;
+    let osc_str = crate::utf8_path::path_str(osc_path)?;
+    let output_str = crate::utf8_path::path_str(&output_path)?;
 
     let io_modes: Vec<&str> = if uring {
         vec!["buffered", "uring"]
@@ -49,7 +47,7 @@ pub fn run(
             pbf_str,
             osc_str,
             "-o",
-            &output_str,
+            output_str,
             "--compression",
             compression,
             "--io-mode",

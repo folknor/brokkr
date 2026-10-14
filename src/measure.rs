@@ -1,17 +1,12 @@
 //! Unified measurement types for the CLI redesign.
 //!
 //! Replaces the separate `BenchRequest` / `HotpathRequest` / `ProfileRequest`
-//! structs with a single `MeasureRequest` carrying a `MeasureMode`.  Also
-//! defines `CommandContext` - the resolved runtime context that a command's
-//! arg-builder needs to produce its argument vector.
+//! structs with a single `MeasureRequest` carrying a `MeasureMode`.
 
 use std::num::NonZeroUsize;
-use std::path::PathBuf;
 
 use crate::config;
-use crate::error::DevError;
 use crate::project::{BuildRoot, Project, ProjectRoot};
-use crate::resolve::Bbox;
 
 // ---------------------------------------------------------------------------
 // MeasureMode
@@ -24,10 +19,10 @@ pub enum MeasureMode {
     Run,
     /// Full benchmark: lockfile, N runs (best-of-N), DB storage.
     Bench { runs: NonZeroUsize },
-    /// Function-level timing via `--features hotpath` + `run_hotpath_capture()`.
+    /// Function-level timing via `--features hotpath` + `BenchHarness::capture_hotpath()`.
     Hotpath { runs: NonZeroUsize },
     /// Per-function allocation tracking via `--features hotpath-alloc` +
-    /// `run_hotpath_capture()`.
+    /// `BenchHarness::capture_hotpath()`.
     Alloc { runs: NonZeroUsize },
 }
 
@@ -188,179 +183,6 @@ impl MeasureRequest<'_> {
     /// Feature refs as `&str` slices (for passing to build functions).
     pub fn feat_refs(&self) -> Vec<&str> {
         self.features.iter().map(String::as_str).collect()
-    }
-}
-
-// ---------------------------------------------------------------------------
-// CommandParams
-// ---------------------------------------------------------------------------
-
-/// Typed command-specific parameters.
-///
-/// Replaces the legacy `HashMap<String, String>` that threaded through the
-/// dispatch layer with a compile-time-checked struct. Configuration fields
-/// are populated from CLI args; runtime-observation fields are populated
-/// during dispatch (e.g. merged-PBF cache state, resolved snapshot filename).
-#[derive(Debug, Default, Clone)]
-pub struct CommandParams {
-    // ----- Configuration (from CLI) -----
-    /// `--direct-io` (pbfhogg, Linux).
-    pub direct_io: bool,
-    /// `--io-uring` (pbfhogg, Linux).
-    pub io_uring: bool,
-    /// `--compression <spec>` (pbfhogg).
-    pub compression: Option<String>,
-    /// `--bbox` CLI override for extract / multi-extract.
-    pub bbox: Option<String>,
-    /// `--index-type <mode>` for `add-locations-to-ways`.
-    pub index_type: Option<String>,
-    /// `--inject-prepass` for `add-locations-to-ways`. Forwarded verbatim to
-    /// the pbfhogg child, which emits the injected-prepass wire extensions
-    /// (BlobHeader field 5 way-member bitmaps, Way field 20 shared-node pins).
-    /// pbfhogg hard-errors on invalid combinations, so brokkr only forwards.
-    pub inject_prepass: bool,
-    /// `--force-altw` for `add-locations-to-ways`. Appends `--force` to the
-    /// pbfhogg child, skipping its indexdata requirement so raw / non-indexed
-    /// input reaches the decode-all fallback. Named to disambiguate from
-    /// brokkr's own dirty-tree `--force`, mirroring `--force-repack`.
-    pub force_altw: bool,
-    /// `--locations-on-ways` for `apply-changes`.
-    pub locations_on_ways: bool,
-    /// `--snapshot <key>`.
-    pub snapshot: Option<String>,
-    /// `--from <key>` for DiffSnapshots.
-    pub from_snapshot: Option<String>,
-    /// `--to <key>` for DiffSnapshots.
-    pub to_snapshot: Option<String>,
-    /// `--osc-range LO-HI`.
-    pub osc_range: Option<String>,
-    /// `--keep-cache` (skip rebuilt merged-PBF cache invalidation).
-    pub keep_cache: bool,
-    /// `-j/--jobs N` for `diff` / `diff-snapshots`. `0` means "auto"
-    /// (forwarded verbatim to pbfhogg, which resolves via
-    /// `available_parallelism()`). `None` means the flag wasn't passed,
-    /// so brokkr doesn't emit it and pbfhogg's own default (1) stands.
-    pub jobs: Option<usize>,
-    /// `--as-snapshot KEY` for `repack` / `degrade`. When set, the dispatch
-    /// layer skips scratch cleanup after a successful run and promotes the
-    /// final artifact into the dataset graph.
-    pub as_snapshot: Option<String>,
-    /// `--replace-snapshot` companion to `as_snapshot`. Allows overwriting
-    /// an existing `[..snapshot.KEY]` entry.
-    pub replace_snapshot: bool,
-
-    // ----- Runtime observations (set during dispatch) -----
-    /// Merged-PBF cache state: `"hit"` or `"miss"`. Observed when resolving
-    /// the B-side of diff-style commands.
-    pub merged_cache_state: Option<String>,
-    /// Age of cached merged PBF in seconds (when `merged_cache_state == "hit"`).
-    pub merged_cache_age_s: Option<String>,
-    /// Resolved `--to` snapshot filename (for DiffSnapshots metadata).
-    pub to_snapshot_file: Option<String>,
-    /// Resolved `--to` snapshot file size in MB (formatted).
-    pub to_snapshot_file_mb: Option<String>,
-}
-
-// ---------------------------------------------------------------------------
-// CommandContext
-// ---------------------------------------------------------------------------
-
-/// Everything a command's arg-builder needs to construct an argument vector.
-///
-/// Populated by the dispatch layer after resolving dataset paths, scratch
-/// directories, and command-specific parameters.  Passed to each command's
-/// `build_args` method.
-pub struct CommandContext {
-    /// Path to the compiled binary.
-    pub binary: PathBuf,
-    /// Resolved PBF file path, when this command consumes one.
-    pub pbf_path: Option<PathBuf>,
-    /// Resolved OSC file path (when the command needs one).
-    ///
-    /// For commands that accept multiple OSCs (e.g. `merge-changes --osc-range`),
-    /// this holds the first entry for back-compat; use `osc_paths` for the full list.
-    pub osc_path: Option<PathBuf>,
-    /// Resolved OSC file paths in ascending seq order.
-    ///
-    /// Single-OSC commands populate this with a one-element vec; multi-OSC commands
-    /// (merge-changes with a range) populate it with the full expanded range.
-    pub osc_paths: Vec<PathBuf>,
-    /// Resolved B-side PBF path for any diff-style operation. Populated by:
-    /// - `Diff` / `DiffOsc` from `ensure_merged_pbf` (apply-changes output).
-    /// - `DiffSnapshots` from `resolve_snapshot_pbf_path` for the `--to` side.
-    pub pbf_b_path: Option<PathBuf>,
-    /// Scratch directory for output files.
-    pub scratch_dir: PathBuf,
-    /// Dataset name (e.g. `"denmark"`).
-    pub dataset: String,
-    /// Resolved, validated bounding box for commands that consume one.
-    pub bbox: Option<Bbox>,
-    /// Command-specific parameters (flags, runtime observations).
-    pub params: CommandParams,
-}
-
-impl CommandContext {
-    /// Get the PBF path as a UTF-8 string, or error.
-    pub fn pbf_str(&self) -> Result<&str, DevError> {
-        self.pbf_path
-            .as_deref()
-            .ok_or_else(|| DevError::Config("PBF path is required but not set".into()))?
-            .to_str()
-            .ok_or_else(|| DevError::Config("PBF path is not valid UTF-8".into()))
-    }
-
-    /// Get the OSC path as a UTF-8 string, or error if not set.
-    pub fn osc_str(&self) -> Result<&str, DevError> {
-        self.osc_path
-            .as_ref()
-            .ok_or_else(|| DevError::Config("OSC path is required but not set".into()))?
-            .to_str()
-            .ok_or_else(|| DevError::Config("OSC path is not valid UTF-8".into()))
-    }
-
-    /// Get all OSC paths as UTF-8 strings, or error if none set.
-    pub fn osc_strs(&self) -> Result<Vec<&str>, DevError> {
-        if self.osc_paths.is_empty() {
-            return Err(DevError::Config(
-                "OSC paths are required but not set".into(),
-            ));
-        }
-        self.osc_paths
-            .iter()
-            .map(|p| {
-                p.to_str()
-                    .ok_or_else(|| DevError::Config("OSC path is not valid UTF-8".into()))
-            })
-            .collect()
-    }
-
-    /// Get the B-side PBF path as a UTF-8 string, or error if not set.
-    pub fn pbf_b_str(&self) -> Result<&str, DevError> {
-        self.pbf_b_path
-            .as_ref()
-            .ok_or_else(|| DevError::Config("B-side PBF path is required but not set".into()))?
-            .to_str()
-            .ok_or_else(|| DevError::Config("B-side PBF path is not valid UTF-8".into()))
-    }
-
-    /// Get the binary path as a UTF-8 string, or error.
-    pub fn binary_str(&self) -> Result<&str, DevError> {
-        self.binary
-            .to_str()
-            .ok_or_else(|| DevError::Config("binary path is not valid UTF-8".into()))
-    }
-
-    /// PBF file basename (e.g. `"denmark-with-indexdata.osm.pbf"`).
-    pub fn pbf_basename(&self) -> Result<String, DevError> {
-        let pbf_path = self
-            .pbf_path
-            .as_deref()
-            .ok_or_else(|| DevError::Config("PBF path is required but not set".into()))?;
-        Ok(pbf_path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or_default()
-            .to_owned())
     }
 }
 

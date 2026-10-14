@@ -319,7 +319,7 @@ pub fn render_lines(c: &PublishCycleEvent) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::deps::model::{CargoResolve, PackageDep};
+    use crate::cargo::metadata::{CargoResolve, PackageDep};
     use crate::deps::{CargoMetadata, CargoPackage};
 
     fn pkg(name: &str, deps: Vec<PackageDep>) -> CargoPackage {
@@ -332,6 +332,15 @@ mod tests {
             links: None,
             publish: None,
             dependencies: deps,
+            targets: Vec::new(),
+            features: Default::default(),
+            authors: Vec::new(),
+            description: None,
+            homepage: None,
+            license: None,
+            license_file: None,
+            repository: None,
+            rust_version: None,
         }
     }
 
@@ -355,7 +364,10 @@ mod tests {
         CargoMetadata::new(
             packages,
             &members,
-            &CargoResolve { nodes: Vec::new() },
+            &CargoResolve {
+                root: None,
+                nodes: Vec::new(),
+            },
             "/ws".to_string(),
         )
     }

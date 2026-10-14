@@ -91,9 +91,9 @@ mod visibility_tests {
         }
     }
 
-    /// The measured-run query commands follow the rows. Litehtml's only use of
-    /// `results.db` is the unrelated `MechanicalDb` schema, so it is the one
-    /// project where they have nothing to show; everywhere else - including an
+    /// The measured-run query commands follow the rows. Litehtml records no
+    /// measured runs (its visual results live in their own store), so it is
+    /// the one project where they have nothing to show; everywhere else - including an
     /// `Other(_)` tree, which reaches `BenchHarness` via `generic-hotpath` -
     /// they must stay.
     #[test]

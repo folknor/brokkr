@@ -445,7 +445,6 @@ fn toolchain_libdir(
 /// the listing failed and was already reported.
 fn binary_list(
     binary: &TestBinary,
-    project_root: &Path,
     libtest_args: &[&str],
     env_refs: &[(&str, &str)],
     runtime: &DirectRuntime,
@@ -453,7 +452,6 @@ fn binary_list(
     let mut args: Vec<&str> = libtest_args.to_vec();
     args.push("--list");
     let (cwd, env_owned) = runtime.envelope(binary, env_refs)?;
-    let cwd = if cwd.as_os_str() == "." { project_root.to_path_buf() } else { cwd };
     let env: Vec<(&str, &str)> = env_owned.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
     // Launched as a test run is (own process group, run token, hold
     // capability), with its output bounded after exit: see `run_listing`.

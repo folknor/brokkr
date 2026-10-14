@@ -725,7 +725,7 @@ pub fn spawn_captured(
     // PG isolation is opt-in for the same reason as the deadline
     // runner: the caller asserts a SigtermGuard is active so terminal
     // signals bridge to the PG. The sidecar's own SigtermGuard (around
-    // `run_sidecar`) is the typical pairing.
+    // `run_sidecar_with_deadline`) is the typical pairing.
     use std::os::unix::process::CommandExt;
     if isolate_pg {
         cmd.process_group(0);

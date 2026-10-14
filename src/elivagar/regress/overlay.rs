@@ -12,11 +12,16 @@
 //!
 //! Ported from elivagar's shed `corpus/overlay.rs` (commit `0129ef3~1`).
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
 
+use super::super::constants::{
+    OVERLAY_ATTRIBUTE_LIMIT, OVERLAY_ATTRIBUTE_START_Y, OVERLAY_LEGEND_Y, OVERLAY_LINE_HEIGHT,
+    OVERLAY_PANEL_HEIGHT, SVG_TILE_SIZE, mvt,
+};
 use super::super::corpus::layout::tile_svg_file_name;
 use super::super::corpus::render::{path_data, xml_attr, xml_text};
 use super::super::eliv::{
@@ -133,7 +138,7 @@ fn draw(out: &mut String, feature: &PreparedFeature, color: &str, class: &str, o
         .iter()
         .flat_map(|c| c.rings.iter().map(|r| r.points.as_slice()))
         .collect();
-    let close = feature.geom_type == 3;
+    let close = feature.geom_type == mvt::GEOMETRY_POLYGON;
     let fill = if close { color } else { "none" };
     let stroke = if close { "none" } else { color };
     out.push_str(&format!(
@@ -142,11 +147,12 @@ fn draw(out: &mut String, feature: &PreparedFeature, color: &str, class: &str, o
     ));
 }
 
-/// The viewBox is 4096 wide and 5120 tall: the tile occupies the top 4096, and
-/// the extra 1024 is the attribute panel.
+/// The tile occupies the shared SVG extent; the lower panel lists a bounded
+/// number of attributes.
 pub(crate) fn render_overlay(collector: &OverlayCollector, background: &str) -> Vec<u8> {
+    let view_height = SVG_TILE_SIZE + OVERLAY_PANEL_HEIGHT;
     let mut out = format!(
-        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 4096 5120\"><rect width=\"4096\" height=\"4096\" fill=\"{}\"/>\n",
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {SVG_TILE_SIZE} {view_height}\"><rect width=\"{SVG_TILE_SIZE}\" height=\"{SVG_TILE_SIZE}\" fill=\"{}\"/>\n",
         xml_attr(background)
     );
     let mut attrs = Vec::new();
@@ -211,19 +217,19 @@ pub(crate) fn render_overlay(collector: &OverlayCollector, background: &str) -> 
             OutcomeClass::ExtentMismatch | OutcomeClass::Count => {}
         }
     }
-    out.push_str("<g font-family=\"monospace\" font-size=\"20\"><text x=\"20\" y=\"4140\">grey unchanged; pink current; blue comparand; orange attributes</text>");
-    for (i, line) in attrs.iter().take(24).enumerate() {
+    out.push_str(&format!("<g font-family=\"monospace\" font-size=\"20\"><text x=\"20\" y=\"{OVERLAY_LEGEND_Y}\">grey unchanged; pink current; blue comparand; orange attributes</text>"));
+    for (i, line) in attrs.iter().take(OVERLAY_ATTRIBUTE_LIMIT).enumerate() {
         out.push_str(&format!(
             "<text x=\"20\" y=\"{}\">{}</text>",
-            4170 + i * 24,
+            OVERLAY_ATTRIBUTE_START_Y + i * OVERLAY_LINE_HEIGHT,
             xml_text(line)
         ));
     }
-    if attrs.len() > 24 {
+    if attrs.len() > OVERLAY_ATTRIBUTE_LIMIT {
         out.push_str(&format!(
             "<text x=\"20\" y=\"{}\">(+{} more)</text>",
-            4170 + 24 * 24,
-            attrs.len() - 24
+            OVERLAY_ATTRIBUTE_START_Y + OVERLAY_ATTRIBUTE_LIMIT * OVERLAY_LINE_HEIGHT,
+            attrs.len() - OVERLAY_ATTRIBUTE_LIMIT
         ));
     }
     out.push_str("</g></svg>\n");
@@ -266,32 +272,69 @@ pub(crate) fn dump_overlays(
     let baseline_view = ArchiveView::open(baseline)?;
     let current_runs = current_view.read_all_runs()?;
     let baseline_runs = baseline_view.read_all_runs()?;
-    let mut written = 0u64;
+    let mut tile_ids = Vec::new();
     'ranges: for range in &report.differing_ranges {
         for tile_id in range.start..range.end {
-            if usize::try_from(written).unwrap_or(usize::MAX) >= max {
+            if tile_ids.len() >= max {
                 break 'ranges;
             }
-            let read = |view: &ArchiveView,
-                        runs: &[super::super::eliv::RawDirEntry]|
-             -> io::Result<Vec<u8>> {
-                match find_entry(runs, tile_id) {
+            tile_ids.push(tile_id);
+        }
+    }
+    let mut expected = BTreeSet::new();
+    for tile_id in &tile_ids {
+        let read =
+            |view: &ArchiveView, runs: &[super::super::eliv::RawDirEntry]| -> io::Result<Vec<u8>> {
+                match find_entry(runs, *tile_id) {
                     Some(entry) => gzip_decompress(view.raw_blob_at(entry.offset, entry.length)?),
                     None => Ok(Vec::new()),
                 }
             };
-            let cur = decode_prepared_tile(&read(&current_view, &current_runs)?, strictness)
-                .map_err(invalid_tile)?;
-            let bl = decode_prepared_tile(&read(&baseline_view, &baseline_runs)?, strictness)
-                .map_err(invalid_tile)?;
-            let collector = compare_detail_tiles::<OverlayCollector>(&cur, &bl, cfg);
-            let (z, x, y) = tile_id_to_zxy(tile_id);
-            fs::write(
-                dir.join(tile_svg_file_name(z, x, y, &[])),
-                render_overlay(&collector, background),
-            )?;
-            written += 1;
+        let cur = decode_prepared_tile(&read(&current_view, &current_runs)?, strictness)
+            .map_err(invalid_tile)?;
+        let bl = decode_prepared_tile(&read(&baseline_view, &baseline_runs)?, strictness)
+            .map_err(invalid_tile)?;
+        let collector = compare_detail_tiles::<OverlayCollector>(&cur, &bl, cfg);
+        let (z, x, y) = tile_id_to_zxy(*tile_id);
+        let name = tile_svg_file_name(z, x, y, &[]);
+        fs::write(dir.join(&name), render_overlay(&collector, background))?;
+        expected.insert(name);
+    }
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if entry.file_type()?.is_file()
+            && is_overlay_tile_svg(&name)
+            && !name.to_str().is_some_and(|name| expected.contains(name))
+        {
+            fs::remove_file(entry.path())?;
         }
     }
-    Ok(written)
+    u64::try_from(tile_ids.len())
+        .map_err(|_| io::Error::other("overlay tile count does not fit u64"))
+}
+
+fn is_overlay_tile_svg(name: &std::ffi::OsStr) -> bool {
+    let Some(name) = name.to_str() else {
+        return false;
+    };
+    let Some(rest) = name.strip_prefix('z') else {
+        return false;
+    };
+    let Some((zoom, rest)) = rest.split_once("-x") else {
+        return false;
+    };
+    let Some((x, y)) = rest.split_once("-y") else {
+        return false;
+    };
+    let Some(y) = y.strip_suffix(".svg") else {
+        return false;
+    };
+    let (Ok(zoom), Ok(x), Ok(y)) = (zoom.parse::<u8>(), x.parse::<u32>(), y.parse::<u32>()) else {
+        return false;
+    };
+    zoom <= 31
+        && u64::from(x) < (1u64 << zoom)
+        && u64::from(y) < (1u64 << zoom)
+        && tile_svg_file_name(zoom, x, y, &[]) == name
 }

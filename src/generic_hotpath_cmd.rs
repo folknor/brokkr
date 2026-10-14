@@ -31,18 +31,17 @@ pub(crate) fn cmd_hotpath_generic(req: &measure::MeasureRequest) -> Result<(), D
         metadata: vec![],
     };
 
-    ctx.harness.run_hotpath(&config, ctx.binary()?, |_i| {
-        let (result, _stderr, sidecar) = harness::run_hotpath_capture(
-            &binary_str,
+    ctx.harness.run_hotpath(&config, ctx.binary()?, |i, fifo| {
+        ctx.harness.capture_hotpath(
+            ctx.binary()?,
             &[],
-            &ctx.paths.scratch_dir,
             req.project_root.as_path(),
             &[],
             &[],
-            req.stop_marker,
-            Some(ctx.harness.lock()),
-        )?;
-        Ok((result, sidecar))
+            fifo,
+            i,
+            None,
+        )
     })?;
 
     Ok(())

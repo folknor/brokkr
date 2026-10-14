@@ -1,9 +1,8 @@
 use super::super::types::KvClass;
-use super::super::{HotpathData, KvPair, StoredRow};
+use super::super::{HotpathData, KvPair, StoredRow, Wall};
 use super::DatasetMatcher;
 use super::table::{
-    compute_rewrite_pct, find_output_bytes, format_blob_counts, format_input, format_us_as_ms,
-    format_wall,
+    compute_rewrite_pct, find_output_bytes, format_blob_counts, format_input, format_wall,
 };
 
 /// Format side-by-side comparison of two commits, uncapped - the tests'
@@ -121,14 +120,8 @@ struct CompareWidths {
 
 struct ComparisonPair {
     key: PairKey,
-    a_ms: Option<i64>,
-    b_ms: Option<i64>,
-    /// Exact walls in microseconds, when both rows have them. The delta is
-    /// computed from these in preference to `a_ms`/`b_ms`: on a single-digit
-    /// millisecond benchmark, a percentage taken from rounded milliseconds
-    /// is mostly quantisation noise.
-    a_us: Option<i64>,
-    b_us: Option<i64>,
+    a_wall: Option<Wall>,
+    b_wall: Option<Wall>,
     a_hotpath: Option<HotpathData>,
     b_hotpath: Option<HotpathData>,
     a_output_bytes: Option<i64>,
@@ -182,8 +175,7 @@ struct HostEnv {
 /// The per-side fields a `ComparisonPair` is assembled from, pre-computed once
 /// per row so the pairing loop below stays a pairing loop.
 struct RowData {
-    elapsed_ms: i64,
-    elapsed_us: Option<i64>,
+    elapsed: Wall,
     hotpath: Option<HotpathData>,
     output_bytes: Option<i64>,
     peak_rss_mb: Option<f64>,
@@ -213,8 +205,7 @@ fn collect_counters(kv: &[KvPair]) -> std::collections::BTreeMap<String, String>
 
 fn make_row_data(row: &StoredRow, matcher: &DatasetMatcher) -> RowData {
     RowData {
-        elapsed_ms: row.elapsed_ms,
-        elapsed_us: row.elapsed_us,
+        elapsed: row.elapsed,
         hotpath: row.hotpath.clone(),
         output_bytes: find_output_bytes(&row.kv),
         peak_rss_mb: row.peak_rss_mb,
@@ -300,10 +291,8 @@ fn build_comparison_pairs(
             let b_counters = b.as_ref().map(|r| r.counters.clone()).unwrap_or_default();
             ComparisonPair {
                 key: k,
-                a_ms: a.as_ref().map(|r| r.elapsed_ms),
-                b_ms: b.as_ref().map(|r| r.elapsed_ms),
-                a_us: a.as_ref().and_then(|r| r.elapsed_us),
-                b_us: b.as_ref().and_then(|r| r.elapsed_us),
+                a_wall: a.as_ref().map(|r| r.elapsed),
+                b_wall: b.as_ref().map(|r| r.elapsed),
                 a_hotpath: a.and_then(|r| r.hotpath),
                 b_hotpath: b.and_then(|r| r.hotpath),
                 a_output_bytes,
@@ -333,7 +322,7 @@ fn build_comparison_pairs(
 /// that signal, and with no B elapsed there is nothing for the host conditions
 /// to explain.
 fn append_pair_annotations(out: &mut String, pair: &ComparisonPair) {
-    if pair.a_ms.is_none() || pair.b_ms.is_none() {
+    if pair.a_wall.is_none() || pair.b_wall.is_none() {
         return;
     }
     if let Some(annotation) = format_env_diff(&pair.a_env, &pair.b_env) {
@@ -544,8 +533,8 @@ fn compute_compare_widths(
         w.command = w.command.max(cmd.len());
         w.mode = w.mode.max(var.len());
         w.input = w.input.max(pair.input_display.len());
-        w.col_a = w.col_a.max(format_ms_or_dash(pair.a_ms, pair.a_us).len());
-        w.col_b = w.col_b.max(format_ms_or_dash(pair.b_ms, pair.b_us).len());
+        w.col_a = w.col_a.max(format_ms_or_dash(pair.a_wall).len());
+        w.col_b = w.col_b.max(format_ms_or_dash(pair.b_wall).len());
         w.change = w.change.max(format_change_pair(pair).len());
         if has_output {
             w.output_a = w
@@ -654,8 +643,8 @@ fn append_compare_row(out: &mut String, pair: &ComparisonPair, w: &CompareWidths
     use std::fmt::Write;
     let cmd = &pair.key.command;
     let var = &pair.key.mode;
-    let a_str = format_ms_or_dash(pair.a_ms, pair.a_us);
-    let b_str = format_ms_or_dash(pair.b_ms, pair.b_us);
+    let a_str = format_ms_or_dash(pair.a_wall);
+    let b_str = format_ms_or_dash(pair.b_wall);
     let ch = format_change_pair(pair);
     write!(
         out,
@@ -734,29 +723,21 @@ fn append_compare_row(out: &mut String, pair: &ComparisonPair, w: &CompareWidths
     }
 }
 
-/// Render a wall for the A/B columns.
-///
-/// Prefers the microsecond reading when the row has one, so a 6.847 ms
-/// region does not print as `7 ms` next to a delta computed from the finer
-/// value - the column and the change would visibly disagree.
-fn format_ms_or_dash(ms: Option<i64>, us: Option<i64>) -> String {
-    match (ms, us) {
-        (_, Some(v)) => format!("{} ms", format_us_as_ms(v)),
-        (Some(v), None) => format_wall(v, None),
-        (None, None) => String::from("--"),
-    }
+/// Render a wall for the A/B columns at its measured precision.
+fn format_ms_or_dash(wall: Option<Wall>) -> String {
+    wall.map_or_else(|| String::from("--"), format_wall)
 }
 
-/// Percentage change for a pair, from microseconds when both sides have them.
+/// Percentage change on the common scale supplied by each wall's precision.
 fn format_change_pair(pair: &ComparisonPair) -> String {
-    match (pair.a_us, pair.b_us) {
-        (Some(a), Some(b)) => format_change(Some(a), Some(b)),
-        _ => format_change(pair.a_ms, pair.b_ms),
+    match (pair.a_wall, pair.b_wall) {
+        (Some(a), Some(b)) => format_change(Some(a.ordering_key()), Some(b.ordering_key())),
+        _ => format_change(None, None),
     }
 }
 
-fn format_change(a_ms: Option<i64>, b_ms: Option<i64>) -> String {
-    match (a_ms, b_ms) {
+fn format_change(a: Option<i128>, b: Option<i128>) -> String {
+    match (a, b) {
         (Some(a), Some(b)) if a != 0 => {
             #[allow(clippy::cast_precision_loss)]
             let pct = ((b - a) as f64 / a as f64) * 100.0;
@@ -863,14 +844,13 @@ mod tests {
             id: 0,
             timestamp: String::from("2026-03-01 00:00:00"),
             hostname: String::from("testhost"),
-            commit: String::from("aabbccdd"),
+            commit: "aabbccdd".parse().expect("fixture commit is valid"),
             subject: String::from("test commit"),
             command: command.to_owned(),
             mode: variant.to_owned(),
             input_file: input_file.to_owned(),
             input_mb: None,
-            elapsed_ms,
-            elapsed_us: None,
+            elapsed: Wall::LegacyMillis(elapsed_ms),
             cargo_features: String::new(),
             cargo_profile: Some(crate::build::CargoProfile::Release),
             kernel: String::new(),
@@ -888,7 +868,6 @@ mod tests {
             kv: vec![],
             captured_env: std::collections::BTreeMap::new(),
             iterations: Vec::new(),
-            iterations_us: Vec::new(),
             distribution: None,
             hotpath: None,
         }
@@ -956,11 +935,11 @@ mod tests {
         // The parsed CLI excludes commit provenance before it produces the
         // arm key, so matching work pairs without parsing argv here.
         let mut a = row("render", "bench", "", 300);
-        a.commit = String::from("736e18c");
+        a.commit = "736e18c".parse().expect("fixture commit is valid");
         a.brokkr_args = String::from(r#"["brokkr","hotpath","--bench","1","--commit","736e18c"]"#);
         a.arm_key = Some(String::from("sluggrs/render/standard"));
         let mut b = row("render", "bench", "", 280);
-        b.commit = String::from("b2371d8");
+        b.commit = "b2371d8".parse().expect("fixture commit is valid");
         b.brokkr_args = String::from(r#"["brokkr","hotpath","--bench","1"]"#);
         b.arm_key = Some(String::from("sluggrs/render/standard"));
 
@@ -970,8 +949,8 @@ mod tests {
             1,
             "retro and current rows should form one pair"
         );
-        assert_eq!(pairs[0].a_ms, Some(300));
-        assert_eq!(pairs[0].b_ms, Some(280));
+        assert_eq!(pairs[0].a_wall.map(Wall::ms), Some(300));
+        assert_eq!(pairs[0].b_wall.map(Wall::ms), Some(280));
     }
 
     #[test]
@@ -1010,8 +989,8 @@ mod tests {
         let pairs = build_comparison_pairs(&a, &b, &DatasetMatcher::empty());
 
         assert_eq!(pairs.len(), 1);
-        assert_eq!(pairs[0].a_ms, Some(100));
-        assert_eq!(pairs[0].b_ms, Some(90));
+        assert_eq!(pairs[0].a_wall.map(Wall::ms), Some(100));
+        assert_eq!(pairs[0].b_wall.map(Wall::ms), Some(90));
     }
 
     #[test]
@@ -1021,8 +1000,8 @@ mod tests {
         let pairs = build_comparison_pairs(&a, &b, &DatasetMatcher::empty());
 
         assert_eq!(pairs.len(), 1);
-        assert_eq!(pairs[0].a_ms, Some(100));
-        assert_eq!(pairs[0].b_ms, None);
+        assert_eq!(pairs[0].a_wall.map(Wall::ms), Some(100));
+        assert_eq!(pairs[0].b_wall.map(Wall::ms), None);
     }
 
     #[test]
@@ -1032,8 +1011,8 @@ mod tests {
         let pairs = build_comparison_pairs(&a, &b, &DatasetMatcher::empty());
 
         assert_eq!(pairs.len(), 1);
-        assert_eq!(pairs[0].a_ms, None);
-        assert_eq!(pairs[0].b_ms, Some(200));
+        assert_eq!(pairs[0].a_wall.map(Wall::ms), None);
+        assert_eq!(pairs[0].b_wall.map(Wall::ms), Some(200));
     }
 
     #[test]
@@ -1051,11 +1030,15 @@ mod tests {
 
         assert_eq!(pairs.len(), 1);
         assert_eq!(
-            pairs[0].a_ms,
+            pairs[0].a_wall.map(Wall::ms),
             Some(100),
             "first A entry should win, not 999"
         );
-        assert_eq!(pairs[0].b_ms, Some(50), "first B entry should win, not 888");
+        assert_eq!(
+            pairs[0].b_wall.map(Wall::ms),
+            Some(50),
+            "first B entry should win, not 888"
+        );
     }
 
     #[test]
@@ -1072,14 +1055,14 @@ mod tests {
         assert_eq!(key_commands, vec!["x-cmd", "y-cmd", "z-cmd"]);
 
         // x-cmd: A-only
-        assert_eq!(pairs[0].a_ms, Some(10));
-        assert_eq!(pairs[0].b_ms, None);
+        assert_eq!(pairs[0].a_wall.map(Wall::ms), Some(10));
+        assert_eq!(pairs[0].b_wall.map(Wall::ms), None);
         // y-cmd: both
-        assert_eq!(pairs[1].a_ms, Some(20));
-        assert_eq!(pairs[1].b_ms, Some(25));
+        assert_eq!(pairs[1].a_wall.map(Wall::ms), Some(20));
+        assert_eq!(pairs[1].b_wall.map(Wall::ms), Some(25));
         // z-cmd: B-only
-        assert_eq!(pairs[2].a_ms, None);
-        assert_eq!(pairs[2].b_ms, Some(30));
+        assert_eq!(pairs[2].a_wall.map(Wall::ms), None);
+        assert_eq!(pairs[2].b_wall.map(Wall::ms), Some(30));
     }
 
     #[test]
@@ -1095,9 +1078,9 @@ mod tests {
 
         assert_eq!(pairs.len(), 3);
         // Only the first pair should have both sides.
-        assert!(pairs[0].a_ms.is_some() && pairs[0].b_ms.is_some());
-        assert!(pairs[1].a_ms.is_some() && pairs[1].b_ms.is_none());
-        assert!(pairs[2].a_ms.is_some() && pairs[2].b_ms.is_none());
+        assert!(pairs[0].a_wall.is_some() && pairs[0].b_wall.is_some());
+        assert!(pairs[1].a_wall.is_some() && pairs[1].b_wall.is_none());
+        assert!(pairs[2].a_wall.is_some() && pairs[2].b_wall.is_none());
     }
 
     #[test]
@@ -1279,10 +1262,10 @@ mod tests {
         // compare view used to report only the wall delta, leaving the
         // environmental cause invisible.
         let mut a = row("read", "buffered", "planet.pbf", 19000);
-        a.commit = String::from("abc1234");
+        a.commit = "abc1234".parse().expect("fixture commit is valid");
         a.avail_memory_mb = Some(24780);
         let mut b = row("read", "buffered", "planet.pbf", 25500);
-        b.commit = String::from("def5678");
+        b.commit = "def5678".parse().expect("fixture commit is valid");
         b.avail_memory_mb = Some(22221);
 
         let output = format_compare(
@@ -1310,11 +1293,11 @@ mod tests {
     #[test]
     fn format_compare_quiet_when_host_matches() {
         let mut a = row("read", "buffered", "planet.pbf", 19000);
-        a.commit = String::from("abc1234");
+        a.commit = "abc1234".parse().expect("fixture commit is valid");
         a.avail_memory_mb = Some(24780);
         a.cpu_governor = String::from("performance");
         let mut b = row("read", "buffered", "planet.pbf", 19500);
-        b.commit = String::from("def5678");
+        b.commit = "def5678".parse().expect("fixture commit is valid");
         b.avail_memory_mb = Some(24780);
         b.cpu_governor = String::from("performance");
 
@@ -1335,10 +1318,10 @@ mod tests {
     #[test]
     fn format_compare_flags_governor_change() {
         let mut a = row("read", "buffered", "planet.pbf", 19000);
-        a.commit = String::from("abc1234");
+        a.commit = "abc1234".parse().expect("fixture commit is valid");
         a.cpu_governor = String::from("performance");
         let mut b = row("read", "buffered", "planet.pbf", 25500);
-        b.commit = String::from("def5678");
+        b.commit = "def5678".parse().expect("fixture commit is valid");
         b.cpu_governor = String::from("powersave");
 
         let output = format_compare(
@@ -1359,7 +1342,7 @@ mod tests {
     #[test]
     fn format_compare_shows_rewrite_columns() {
         let mut a = row("bench merge", "buffered+zlib:6", "dk.pbf", 4500);
-        a.commit = String::from("abc1234");
+        a.commit = "abc1234".parse().expect("fixture commit is valid");
         a.kv = vec![
             KvPair::int("bytes_passthrough", 920),
             KvPair::int("bytes_rewritten", 80),
@@ -1367,7 +1350,7 @@ mod tests {
             KvPair::int("blobs_rewritten", 10),
         ];
         let mut b = row("bench merge", "buffered+zlib:6", "dk.pbf", 4200);
-        b.commit = String::from("def5678");
+        b.commit = "def5678".parse().expect("fixture commit is valid");
         b.kv = vec![
             KvPair::int("bytes_passthrough", 900),
             KvPair::int("bytes_rewritten", 100),

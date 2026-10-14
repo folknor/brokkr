@@ -59,10 +59,11 @@ impl fmt::Display for Commit {
     }
 }
 
-/// A validated commit abbreviation used for persistent keys and display.
-/// Stored legacy prefixes may be shorter than the current fixed width; new
-/// abbreviations always come from [`Commit::short`] and have
-/// [`SHORT_HASH_LEN`] digits.
+/// A commit abbreviation used for persistent keys and display. Stored legacy
+/// prefixes may be shorter than the current fixed width, and a value read
+/// from an old store may be non-hex legacy text kept verbatim
+/// ([`ShortCommit::from_stored_lossy`]); new abbreviations always come from
+/// [`Commit::short`] and have [`SHORT_HASH_LEN`] digits.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ShortCommit(String);
 
@@ -80,6 +81,15 @@ impl ShortCommit {
         } else {
             value.parse()
         }
+    }
+
+    /// The read policy for stored rows: a recognised commit is normalised as
+    /// [`Self::from_stored`] does, and anything else (`""`, `unknown`,
+    /// `dirty`, other legacy text) is kept verbatim rather than refused, so a
+    /// store written by an older brokkr always stays readable. New values
+    /// never take this path; they come from [`Commit::short`].
+    pub fn from_stored_lossy(value: &str) -> Self {
+        Self::from_stored(value).unwrap_or_else(|_| Self(value.to_owned()))
     }
 }
 

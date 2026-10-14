@@ -139,6 +139,11 @@ impl PlannedSweep {
         self.effective_unification
     }
 
+    /// The profile cargo uses when this sweep leaves the key unset.
+    pub(crate) fn cargo_profile(&self) -> SweepProfile {
+        self.profile.unwrap_or(SweepProfile::Dev)
+    }
+
     /// The declaration this sweep was planned from, for fixtures that revise
     /// one field of an existing sweep.
     #[cfg(test)]
@@ -701,6 +706,17 @@ pub fn sweep_from_check_entry(entry: &CheckEntry) -> SweepDecl {
     )
     .expect("parsed check entries have a valid execution mode");
 
+    sweep_decl_from_entry(entry, filters, entry.env.clone(), lane_exec)
+}
+
+/// The `[[check]]` entry's shared sweep fields, with profile resolution
+/// supplying only its filter/env overlays and execution policy.
+fn sweep_decl_from_entry(
+    entry: &CheckEntry,
+    filters: LaneFilters,
+    env: BTreeMap<String, String>,
+    lane_exec: LaneExec,
+) -> SweepDecl {
     SweepDecl {
         label: entry.name.clone(),
         features: FeatureConfig::from_entry(entry),
@@ -708,12 +724,12 @@ pub fn sweep_from_check_entry(entry: &CheckEntry) -> SweepDecl {
         packages: entry.packages.clone(),
         test_exclude_packages: entry.test_exclude_packages.clone(),
         filters,
-        env: entry.env.clone(),
+        env,
         rustflags: entry.rustflags.clone(),
-        feature_unification: entry.feature_unification,
         lane_exec,
         curated: entry.curated,
         profile: entry.profile,
+        feature_unification: entry.feature_unification,
         entry_name: entry.name.clone(),
         // A gate sweep always lints every target; only the investigative
         // `brokkr clippy --lib` narrows, and it sets this after construction.
@@ -1117,24 +1133,7 @@ fn build_sweep_decl(
     )
     .map_err(|error| DevError::Config(format!("[test.profiles.{profile_name}]: {error}")))?;
 
-    Ok(SweepDecl {
-        label: entry.name.clone(),
-        features: FeatureConfig::from_entry(entry),
-        build_packages: entry.build_packages.clone(),
-        packages: entry.packages.clone(),
-        test_exclude_packages: entry.test_exclude_packages.clone(),
-        filters,
-        env,
-        rustflags: entry.rustflags.clone(),
-        feature_unification: entry.feature_unification,
-        lane_exec,
-        curated: entry.curated,
-        profile: entry.profile,
-        entry_name: entry.name.clone(),
-        // A gate sweep always lints every target; only the investigative
-        // `brokkr clippy --lib` narrows, and it sets this after construction.
-        lib_only: false,
-    })
+    Ok(sweep_decl_from_entry(entry, filters, env, lane_exec))
 }
 
 #[cfg(test)]

@@ -123,7 +123,7 @@ impl CargoLaunchConfig {
             })
             .collect();
 
-        let host = host_triple();
+        let host = host_triple_for(root);
         let runner_var = host.as_deref().map(runner_env_var);
         let runner = runner_var
             .as_deref()
@@ -191,7 +191,7 @@ fn config_runner_source(files: &[(PathBuf, toml::Table)], host: Option<&str>) ->
             {
                 // Unknown -> true: replacing a runner that might apply is the
                 // destructive direction.
-                eval_cfg(expr) != Some(false)
+                eval_cfg_for_host(expr, host) != Some(false)
             } else {
                 host == Some(selector.as_str())
             };
@@ -303,7 +303,7 @@ pub fn sink(build_root: &Path, sweep_sets_rustflags: bool) -> Sink {
     if sweep_sets_rustflags || std::env::var_os("RUSTFLAGS").is_some() {
         return Sink::Env;
     }
-    let triple = host_triple();
+    let triple = host_triple_for(build_root);
     for path in config_paths(build_root) {
         let Ok(text) = std::fs::read_to_string(&path) else {
             continue;
@@ -444,7 +444,7 @@ fn target_rustflags_match(doc: &toml::Table, triple: Option<&str>) -> Option<boo
             .strip_prefix("cfg(")
             .and_then(|s| s.strip_suffix(')'))
         {
-            Some(expr) => eval_cfg(expr),
+            Some(expr) => eval_cfg_for_host(expr, triple),
             None => triple.map(|t| t == selector),
         };
         match matches {
@@ -466,7 +466,7 @@ pub fn sink_may_be_inert(build_root: &Path) -> bool {
     if sink(build_root, false) != Sink::BuildConfig {
         return false;
     }
-    let triple = host_triple();
+    let triple = host_triple_for(build_root);
     config_paths(build_root).iter().any(|path| {
         std::fs::read_to_string(path)
             .ok()
@@ -475,26 +475,18 @@ pub fn sink_may_be_inert(build_root: &Path) -> bool {
     })
 }
 
-/// `rustc -vV`'s host triple. Read once per process; a failure here degrades
-/// the bare-triple check to "no match", never to a wrong match.
+/// The rustc host selected from the current working directory. A failure here
+/// degrades the bare-triple check to "no match", never to a wrong match.
 pub(crate) fn host_triple() -> Option<String> {
-    use std::sync::OnceLock;
-    static CACHE: OnceLock<Option<String>> = OnceLock::new();
-    CACHE
-        .get_or_init(|| {
-            let out = std::process::Command::new("rustc")
-                .arg("-vV")
-                .output()
-                .ok()?;
-            if !out.status.success() {
-                return None;
-            }
-            String::from_utf8_lossy(&out.stdout)
-                .lines()
-                .find_map(|l| l.strip_prefix("host: "))
-                .map(|h| h.trim().to_owned())
-        })
-        .clone()
+    std::env::current_dir()
+        .ok()
+        .and_then(|root| host_triple_for(&root))
+}
+
+fn host_triple_for(root: &Path) -> Option<String> {
+    crate::cargo::rustc::load(root)
+        .ok()
+        .map(|info| info.host.clone())
 }
 
 /// Evaluate a cargo `cfg(...)` selector body against the host.
@@ -504,13 +496,22 @@ pub(crate) fn host_triple() -> Option<String> {
 /// take the non-destructive branch. brokkr runs on the host it builds for, so
 /// the host's values are brokkr's own `cfg!` values - no triple parsing beyond
 /// the `target_env` / `target_vendor` fields, which the consts do not expose.
+#[cfg(test)]
 pub(crate) fn eval_cfg(expr: &str) -> Option<bool> {
-    let (value, rest) = parse_expr(expr.trim())?;
+    let host = std::env::current_dir()
+        .ok()
+        .and_then(|root| host_triple_for(&root));
+    eval_cfg_for_host(expr, host.as_deref())
+}
+
+/// Evaluate a cargo `cfg(...)` selector against a known host triple.
+pub(crate) fn eval_cfg_for_host(expr: &str, host: Option<&str>) -> Option<bool> {
+    let (value, rest) = parse_expr(expr.trim(), host)?;
     rest.trim().is_empty().then_some(value)
 }
 
 /// Parse one predicate and return it with the unconsumed remainder.
-fn parse_expr(s: &str) -> Option<(bool, &str)> {
+fn parse_expr<'a>(s: &'a str, host: Option<&str>) -> Option<(bool, &'a str)> {
     let s = s.trim_start();
     let end = s
         .find(|c: char| !(c.is_alphanumeric() || c == '_'))
@@ -522,7 +523,7 @@ fn parse_expr(s: &str) -> Option<(bool, &str)> {
     let rest = rest.trim_start();
 
     if let Some(inner) = rest.strip_prefix('(') {
-        let (args, after) = parse_args(inner)?;
+        let (args, after) = parse_args(inner, host)?;
         let value = match ident {
             // `all()` of nothing is vacuously true - that is `cfg(all())`, the
             // idiomatic "every target" selector this module also injects into.
@@ -539,7 +540,7 @@ fn parse_expr(s: &str) -> Option<(bool, &str)> {
         let quoted = after_eq.strip_prefix('"')?;
         let close = quoted.find('"')?;
         let (value, after) = quoted.split_at(close);
-        return Some((cfg_key(ident)? == value, &after[1..]));
+        return Some((cfg_key(ident, host)? == value, &after[1..]));
     }
 
     // Bare flag: `unix`, `windows`.
@@ -549,14 +550,14 @@ fn parse_expr(s: &str) -> Option<(bool, &str)> {
 /// Parse a comma-separated argument list up to the closing paren, returning the
 /// evaluated arguments and the remainder after the paren. An argument that
 /// cannot be evaluated poisons the whole expression.
-fn parse_args(mut s: &str) -> Option<(Vec<bool>, &str)> {
+fn parse_args<'a>(mut s: &'a str, host: Option<&str>) -> Option<(Vec<bool>, &'a str)> {
     let mut args = Vec::new();
     loop {
         s = s.trim_start();
         if let Some(after) = s.strip_prefix(')') {
             return Some((args, after));
         }
-        let (value, rest) = parse_expr(s)?;
+        let (value, rest) = parse_expr(s, host)?;
         args.push(value);
         s = rest.trim_start();
         if let Some(next) = s.strip_prefix(',') {
@@ -566,7 +567,7 @@ fn parse_args(mut s: &str) -> Option<(Vec<bool>, &str)> {
 }
 
 /// The host's value for a `key = "value"` cfg key, or `None` if unmodelled.
-fn cfg_key(key: &str) -> Option<String> {
+fn cfg_key(key: &str, host: Option<&str>) -> Option<String> {
     let v = match key {
         "target_os" => std::env::consts::OS.to_string(),
         "target_arch" => std::env::consts::ARCH.to_string(),
@@ -579,8 +580,8 @@ fn cfg_key(key: &str) -> Option<String> {
                 "big".into()
             }
         }
-        "target_env" => triple_field(2)?,
-        "target_vendor" => triple_field(1)?,
+        "target_env" => triple_field(2, host)?,
+        "target_vendor" => triple_field(1, host)?,
         _ => return None,
     };
     Some(v)
@@ -590,8 +591,8 @@ fn cfg_key(key: &str) -> Option<String> {
 /// the two cfg keys `std::env::consts` does not carry. A triple short of the
 /// requested field yields the empty string, which is the correct answer for
 /// `target_env` on e.g. `x86_64-apple-darwin`.
-fn triple_field(index: usize) -> Option<String> {
-    let triple = host_triple()?;
+fn triple_field(index: usize, host: Option<&str>) -> Option<String> {
+    let triple = host?;
     let parts: Vec<&str> = triple.split('-').collect();
     // Field 2 is the OS; `target_env` is field 3 when present.
     let idx = if index == 2 { 3 } else { index };

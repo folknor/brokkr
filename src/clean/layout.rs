@@ -71,6 +71,12 @@ impl ProjectState {
         self.root.join("worktrees.toml")
     }
 
+    /// Spill directory for the corpus digest's external sort. Each sorter
+    /// makes its own subdirectory here and removes it when dropped.
+    pub(crate) fn corpus_sort_dir(&self) -> PathBuf {
+        self.root.join("corpus-sort")
+    }
+
     pub(crate) fn nidhogg_pid_file(&self) -> PathBuf {
         self.root.join("nidhogg.pid")
     }

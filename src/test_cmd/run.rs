@@ -284,7 +284,7 @@ pub(super) fn run_ready(
                 allow_args: &r.allow_args,
                 run: single_run(r.sweep, &r.attempt)?,
                 jobs: cx.jobs,
-                debug: r.debug,
+                profile: r.profile,
             },
             name: cx.name,
             focused: r.focused.as_ref(),
@@ -422,7 +422,7 @@ pub(super) fn recheck_sweep(
             req,
             &env_refs,
             &prepared.allow_args,
-            prepared.debug,
+            prepared.profile,
         )? {
             Some(artifacts) => support.extend(artifacts),
             None => return Ok(None),
@@ -433,7 +433,7 @@ pub(super) fn recheck_sweep(
         allow_args: &prepared.allow_args,
         run: single_run(prepared.sweep, &prepared.attempt)?,
         jobs: cx.jobs,
-        debug: prepared.debug,
+        profile: prepared.profile,
     };
     sweep_drift(
         prepared,

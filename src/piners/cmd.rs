@@ -73,7 +73,7 @@ const ARTEFACT_TEST_ID: &str = "corpus";
 /// This fixed guard does not estimate from run history or use a dirty-tree
 /// bypass; those checks belong to measured commands, not parity runs.
 /// Shared with the measured path (`measured.rs`), which applies it per
-/// iteration through `sidecar::DeadlineScope`.
+/// iteration as the sidecar's deadline.
 pub(crate) const HARNESS_HANG_BACKSTOP: Duration = Duration::from_secs(60 * 60);
 
 /// Flags lifted off the `Corpus` CLI command.

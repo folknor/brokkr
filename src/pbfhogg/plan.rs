@@ -6,9 +6,13 @@ use crate::context::MeasurementSession;
 use crate::error::DevError;
 use crate::harness::{self, BenchConfig};
 use crate::measure::runner::{CommandPlan, PlannedCommand, RowSubject};
-use crate::measure::{CommandContext, CommandParams, MeasureMode, MeasureRequest};
+use crate::measure::{MeasureMode, MeasureRequest};
 use crate::output;
-use crate::pbfhogg::commands::{ArgMode, InputKind, OutputKind, PbfhoggCommand};
+use crate::pbfhogg::commands::{ArgMode, OutputKind, PbfhoggCommand, TagsFilterInput};
+use crate::pbfhogg::context::{
+    CommandContext, CommandObservations, CommandParams, MergedCacheState, ResolvedInputs,
+    SnapshotSide, TwoPbfOrigin,
+};
 use crate::project::Project;
 use crate::resolve::{self, resolve_bbox};
 
@@ -18,29 +22,20 @@ fn resolve_io_features(
     command: &PbfhoggCommand,
     extra_params: &CommandParams,
 ) -> Result<Vec<&'static str>, DevError> {
-    let direct_io = extra_params.direct_io;
-    let io_uring = extra_params.io_uring;
+    let io = extra_params.io;
 
-    if io_uring && !command.supports_io_uring() {
+    if io.io_uring && !command.supports_io_uring() {
         return Err(DevError::Config(format!(
             "--io-uring is not supported by '{}'",
             command.id(),
         )));
     }
 
-    if io_uring {
+    if io.io_uring {
         crate::preflight::run_preflight(&crate::preflight::uring_checks())?;
     }
 
-    let mut features = Vec::new();
-    if direct_io {
-        features.push("linux-direct-io");
-    }
-    if io_uring {
-        features.push("linux-io-uring");
-    }
-
-    Ok(features)
+    Ok(io.features())
 }
 
 pub(crate) struct PbfhoggPlan<'a> {
@@ -103,7 +98,7 @@ impl PlannedCommand for PbfhoggPlan<'_> {
         if mode == ArgMode::Hotpath {
             args.remove(0);
         }
-        let (basename, mb) = result_input_metadata(self.command, &state)?;
+        let (basename, mb) = result_input_metadata(&state)?;
         Ok(CommandPlan {
             args,
             scratch_dirs: vec![],
@@ -112,7 +107,7 @@ impl PlannedCommand for PbfhoggPlan<'_> {
                 input_file: Some(basename),
                 input_mb: Some(mb),
                 cli_args: None,
-                metadata: self.command.metadata(&state),
+                metadata: self.command.metadata(&state.observations),
             },
             state,
         })
@@ -137,30 +132,29 @@ impl PlannedCommand for PbfhoggPlan<'_> {
             self.command.id(),
             plan.args.join(" ")
         )];
-        if let Some(path) = &plan.state.pbf_path {
+        if let Some(path) = plan.state.inputs.primary_pbf() {
             lines.push(format!("pbf: {}", path.display()));
         }
-        if let Some(path) = &plan.state.osc_path {
+        let osc_paths = plan.state.inputs.osc_paths();
+        if let Some(path) = osc_paths.first() {
             lines.push(format!("osc: {}", path.display()));
         }
-        if plan.state.osc_paths.len() > 1 {
+        if osc_paths.len() > 1 {
             lines.push(format!(
                 "osc range: {} files ({} .. {})",
-                plan.state.osc_paths.len(),
-                plan.state
-                    .osc_paths
+                osc_paths.len(),
+                osc_paths
                     .first()
                     .map_or(String::new(), |path| path.display().to_string()),
-                plan.state
-                    .osc_paths
+                osc_paths
                     .last()
                     .map_or(String::new(), |path| path.display().to_string()),
             ));
         }
-        if let Some(path) = &plan.state.pbf_b_path {
+        if let Some(path) = plan.state.inputs.second_pbf() {
             lines.push(format!("pbf_b: {}", path.display()));
         }
-        if let Some(bbox) = &plan.state.bbox {
+        if let Some(bbox) = plan.state.inputs.bbox() {
             lines.push(format!("bbox: {bbox}"));
         }
         Ok(lines)
@@ -170,7 +164,7 @@ impl PlannedCommand for PbfhoggPlan<'_> {
         req: &MeasureRequest<'_>,
         plan: &CommandPlan<CommandContext>,
     ) -> Result<(), DevError> {
-        let (_, file_mb) = result_input_metadata(self.command, &plan.state)?;
+        let (_, file_mb) = result_input_metadata(&plan.state)?;
         output::bench_msg(&format!(
             "{} ({file_mb:.0} MB), {} run(s)",
             self.command.id(),
@@ -271,7 +265,7 @@ pub(crate) fn run_wallclock_core(
     let args = command.build_args(cmd_ctx, ArgMode::Bench)?;
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
 
-    let (basename, file_mb) = result_input_metadata(command, cmd_ctx)?;
+    let (basename, file_mb) = result_input_metadata(cmd_ctx)?;
 
     let config = BenchConfig {
         command: command.id().into(),
@@ -284,7 +278,7 @@ pub(crate) fn run_wallclock_core(
             &binary.display().to_string(),
             &arg_refs,
         )),
-        metadata: command.metadata(cmd_ctx),
+        metadata: command.metadata(&cmd_ctx.observations),
     };
 
     if announce {
@@ -311,40 +305,26 @@ pub(crate) fn run_wallclock_core(
 /// Select and account for the physical inputs represented by the result row.
 /// Most commands use one PBF; `merge-changes` consumes its resolved OSC file
 /// or files.
-fn result_input_metadata(
-    command: &PbfhoggCommand,
-    cmd_ctx: &CommandContext,
-) -> Result<(String, f64), DevError> {
-    if command.input_kind() == InputKind::OscOnly {
-        let input_paths: Vec<&Path> = if cmd_ctx.osc_paths.is_empty() {
-            vec![
-                cmd_ctx
-                    .osc_path
-                    .as_deref()
-                    .ok_or_else(|| DevError::Config("OSC path is required but not set".into()))?,
-            ]
-        } else {
-            cmd_ctx
-                .osc_paths
-                .iter()
-                .map(std::path::PathBuf::as_path)
-                .collect()
-        };
+fn result_input_metadata(cmd_ctx: &CommandContext) -> Result<(String, f64), DevError> {
+    if let ResolvedInputs::OscOnly { oscs } = &cmd_ctx.inputs {
+        let input_paths: Vec<&Path> = oscs.iter().map(std::path::PathBuf::as_path).collect();
+        if input_paths.is_empty() {
+            return Err(DevError::Internal(
+                "OSC-only pbfhogg input has no resolved files".into(),
+            ));
+        }
         let mut file_mb = 0.0;
         let mut basenames = Vec::with_capacity(input_paths.len());
         for path in input_paths {
             file_mb += resolve::file_size_mb(path)?;
-            basenames.push(path.file_name().map_or_else(
-                || path.display().to_string(),
-                |name| name.to_string_lossy().into_owned(),
-            ));
+            basenames.push(crate::utf8_path::file_name(path));
         }
         Ok((basenames.join(","), file_mb))
     } else {
         let pbf_path = cmd_ctx
-            .pbf_path
-            .as_deref()
-            .ok_or_else(|| DevError::Config("PBF path is required but not set".into()))?;
+            .inputs
+            .primary_pbf()
+            .ok_or_else(|| DevError::Internal("pbfhogg input has no primary PBF".into()))?;
         Ok((cmd_ctx.pbf_basename()?, resolve::file_size_mb(pbf_path)?))
     }
 }
@@ -358,8 +338,6 @@ fn build_pbfhogg_context(
     paths: &config::ResolvedPaths,
     extra_params: &CommandParams,
 ) -> Result<CommandContext, DevError> {
-    // DiffSnapshots resolves both PBFs via the snapshot resolver instead of
-    // the standard pbf_path/osc/merged flow. Short-circuit here.
     if matches!(command, PbfhoggCommand::DiffSnapshots { .. }) {
         return build_diff_snapshots_context(req, binary, paths, extra_params);
     }
@@ -369,11 +347,7 @@ fn build_pbfhogg_context(
     // behavior preserved). Anything else → Named, validated.
     let snapshot_ref = resolve::SnapshotRef::from_opt(extra_params.snapshot.as_deref())?;
 
-    // Resolve only inputs this command consumes. In particular, merge-changes
-    // takes OSC files only; an absent or unregistered PBF must not block it.
-    let pbf_path = if command.input_kind() == InputKind::OscOnly {
-        None
-    } else {
+    let pbf_path = if command.needs_pbf() {
         Some(resolve::resolve_snapshot_pbf_path(
             req.dataset,
             &snapshot_ref,
@@ -381,6 +355,8 @@ fn build_pbfhogg_context(
             paths,
             req.project_root.as_path(),
         )?)
+    } else {
+        None
     };
 
     // Resolve OSC path(s) if needed.
@@ -392,7 +368,7 @@ fn build_pbfhogg_context(
     //
     // Both resolution paths are snapshot-scoped: when --snapshot is set, OSCs
     // come from the snapshot's osc table, not the legacy top-level.
-    let (osc_path, osc_paths, single_osc_seq) = if command.needs_osc() {
+    let (osc_paths, single_osc_seq) = if command.needs_osc_for_setup() {
         if let Some(range) = &extra_params.osc_range {
             let paths_vec = resolve::resolve_osc_range(
                 req.dataset,
@@ -401,7 +377,7 @@ fn build_pbfhogg_context(
                 paths,
                 req.project_root.as_path(),
             )?;
-            (paths_vec.first().cloned(), paths_vec, None)
+            (paths_vec, None)
         } else {
             let (path, seq_key) = resolve::resolve_single_osc(
                 req.dataset,
@@ -410,54 +386,80 @@ fn build_pbfhogg_context(
                 paths,
                 req.project_root.as_path(),
             )?;
-            (Some(path.clone()), vec![path], Some(seq_key))
+            (vec![path], Some(seq_key))
         }
     } else {
-        (None, Vec::new(), None)
+        (Vec::new(), None)
     };
 
-    // Resolve merged PBF if needed (diff/diff-osc commands).
-    let mut params = extra_params.clone();
-    let pbf_b_path = resolve_merged_pbf(
+    let osc_path = osc_paths.first().map(std::path::PathBuf::as_path);
+    let (merged_pbf, merged_cache) = resolve_merged_pbf(
         req,
         command,
         binary,
         pbf_path.as_deref(),
-        osc_path.as_deref(),
+        osc_path,
         single_osc_seq.as_deref(),
         &snapshot_ref,
         paths,
         extra_params,
-        &mut params,
     )?;
 
-    // Resolve bbox if needed. Check extra_params for a CLI override first.
-    let bbox = if command.needs_bbox() {
-        let cli_bbox = extra_params.bbox.as_deref();
-        Some(resolve_bbox(cli_bbox, req.dataset, paths)?)
-    } else {
-        None
+    let inputs = match command {
+        PbfhoggCommand::MergeChanges { .. }
+        | PbfhoggCommand::TagsFilter {
+            input: TagsFilterInput::Osc,
+            ..
+        } => ResolvedInputs::OscOnly { oscs: osc_paths },
+        PbfhoggCommand::ApplyChanges => ResolvedInputs::PbfAndOsc {
+            pbf: pbf_path.ok_or_else(|| {
+                DevError::Internal("apply-changes requires a resolved PBF".into())
+            })?,
+            osc: osc_paths.into_iter().next().ok_or_else(|| {
+                DevError::Internal("apply-changes requires a resolved OSC".into())
+            })?,
+        },
+        PbfhoggCommand::Diff { .. } => ResolvedInputs::TwoPbfs {
+            a: pbf_path
+                .ok_or_else(|| DevError::Internal("diff requires a resolved primary PBF".into()))?,
+            b: merged_pbf
+                .ok_or_else(|| DevError::Internal("diff requires a resolved merged PBF".into()))?,
+            origin: TwoPbfOrigin::Merged,
+        },
+        PbfhoggCommand::Extract { .. } | PbfhoggCommand::MultiExtract { .. } => {
+            let bbox = resolve_bbox(extra_params.bbox.as_deref(), req.dataset, paths)?;
+            ResolvedInputs::PbfAndBbox {
+                pbf: pbf_path
+                    .ok_or_else(|| DevError::Internal("extract requires a resolved PBF".into()))?,
+                bbox,
+            }
+        }
+        _ => ResolvedInputs::Pbf {
+            pbf: pbf_path.ok_or_else(|| {
+                DevError::Internal("pbfhogg command requires a resolved PBF".into())
+            })?,
+        },
+    };
+
+    let observations = CommandObservations {
+        merged_cache,
+        snapshot_to: None,
     };
 
     Ok(CommandContext {
         binary: binary.to_path_buf(),
-        pbf_path,
-        osc_path,
-        osc_paths,
-        pbf_b_path,
+        inputs,
         scratch_dir: paths.scratch_dir.clone(),
         dataset: req.dataset.to_owned(),
-        bbox,
-        params,
+        params: extra_params.clone(),
+        observations,
     })
 }
 
-/// Resolve the B-side (merged) PBF path for diff/diff-osc commands.
+/// Resolve the B-side (merged) PBF path for diff commands.
 ///
-/// In any measured mode (bench/hotpath/alloc) we force a cache rebuild by
-/// default so total brokkr-invocation wall time is deterministic regardless
-/// of prior session state. `--keep-cache` opts back into reuse. In dry-run
-/// mode, synthesizes the would-be cache path without running apply-changes.
+/// In measured modes, cache rebuilding is deterministic unless
+/// `--keep-cache` opts into reuse. Dry-run resolves only the would-be path.
 #[allow(clippy::too_many_arguments)]
 fn resolve_merged_pbf(
     req: &MeasureRequest,
@@ -469,34 +471,30 @@ fn resolve_merged_pbf(
     snapshot_ref: &resolve::SnapshotRef,
     paths: &config::ResolvedPaths,
     extra_params: &CommandParams,
-    params: &mut CommandParams,
-) -> Result<Option<std::path::PathBuf>, DevError> {
-    if command.input_kind() != InputKind::PbfAndMerged {
-        return Ok(None);
+) -> Result<(Option<std::path::PathBuf>, Option<MergedCacheState>), DevError> {
+    if !command.needs_merged_pbf() {
+        return Ok((None, None));
     }
-    let pbf_path = pbf_path
-        .ok_or_else(|| DevError::Config("merged PBF requires a primary PBF file".into()))?;
-    let osc = osc_path.ok_or_else(|| DevError::Config("merged PBF requires an OSC file".into()))?;
-    let osc_seq_str = single_osc_seq
-        .ok_or_else(|| DevError::Config("merged PBF requires a single OSC seq".into()))?;
-    // Snapshot key for the cache key. Different snapshots produce different
-    // merged PBFs from the same OSC seq, so the cache must disambiguate.
+    let pbf_path =
+        pbf_path.ok_or_else(|| DevError::Internal("diff requires a primary PBF".into()))?;
+    let osc = osc_path.ok_or_else(|| DevError::Internal("diff requires an OSC file".into()))?;
+    let osc_seq_str =
+        single_osc_seq.ok_or_else(|| DevError::Config("diff requires one OSC sequence".into()))?;
     let snapshot_key = match snapshot_ref {
         resolve::SnapshotRef::Base => "base",
         resolve::SnapshotRef::Named(k) => k.as_str(),
     };
 
     if req.dry_run {
-        // Synthesize the would-be merged path through the same key function
-        // `ensure_merged_pbf` uses, without running apply-changes. The
-        // existence of the cache file is irrelevant to dry-run - we just
-        // need a populated `pbf_b_path` so `build_args` can reference it.
-        return Ok(Some(merged_pbf_path(
-            &paths.scratch_dir,
-            pbf_path,
-            snapshot_key,
-            osc_seq_str,
-        )));
+        return Ok((
+            Some(merged_pbf_path(
+                &paths.scratch_dir,
+                pbf_path,
+                snapshot_key,
+                osc_seq_str,
+            )),
+            None,
+        ));
     }
 
     let force_rebuild = !matches!(req.mode, MeasureMode::Run) && !extra_params.keep_cache;
@@ -510,23 +508,10 @@ fn resolve_merged_pbf(
         req.project_root.as_path(),
         force_rebuild,
     )?;
-    // Stash cache state in params so the command's metadata builder can
-    // emit it as KvPairs on the result row.
-    match state {
-        MergedCacheState::Hit { age_secs } => {
-            params.merged_cache_state = Some("hit".into());
-            params.merged_cache_age_s = Some(age_secs.to_string());
-        }
-        MergedCacheState::Miss => {
-            params.merged_cache_state = Some("miss".into());
-        }
-    }
-    Ok(Some(merged))
+    Ok((Some(merged), Some(state)))
 }
 
-/// Build the `CommandContext` for `DiffSnapshots`. Resolves both PBF paths
-/// via the snapshot resolver - `pbf_path` is the `--from` side, `pbf_b_path`
-/// is the `--to` side. The `--variant` is applied symmetrically to both.
+/// Resolve both snapshot paths and retain typed metadata for the `--to` side.
 fn build_diff_snapshots_context(
     req: &MeasureRequest,
     binary: &Path,
@@ -544,7 +529,6 @@ fn build_diff_snapshots_context(
 
     let from_ref = resolve::SnapshotRef::parse(from_str)?;
     let to_ref = resolve::SnapshotRef::parse(to_str)?;
-
     let from_path = resolve::resolve_snapshot_pbf_path(
         req.dataset,
         &from_ref,
@@ -559,29 +543,25 @@ fn build_diff_snapshots_context(
         paths,
         req.project_root.as_path(),
     )?;
-
-    // Stash the to-side file's basename and size in params so the result row
-    // metadata can describe both inputs (input_file/input_mb on the row only
-    // covers the from side). Lets `brokkr results` queries filter by the
-    // B-side via `--meta to_snapshot_file=<name>`.
-    let mut params = extra_params.clone();
-    if let Some(name) = to_path.file_name().and_then(|s| s.to_str()) {
-        params.to_snapshot_file = Some(name.to_owned());
-    }
-    if let Ok(mb) = resolve::file_size_mb(&to_path) {
-        params.to_snapshot_file_mb = Some(format!("{mb:.0}"));
-    }
+    let snapshot_to = SnapshotSide {
+        file_name: crate::utf8_path::file_name_str(&to_path).map(str::to_owned),
+        size_mb: resolve::file_size_mb(&to_path).ok(),
+    };
 
     Ok(CommandContext {
         binary: binary.to_path_buf(),
-        pbf_path: Some(from_path),
-        osc_path: None,
-        osc_paths: Vec::new(),
-        pbf_b_path: Some(to_path),
+        inputs: ResolvedInputs::TwoPbfs {
+            a: from_path,
+            b: to_path,
+            origin: TwoPbfOrigin::Snapshot,
+        },
         scratch_dir: paths.scratch_dir.clone(),
         dataset: req.dataset.to_owned(),
-        bbox: None,
-        params,
+        params: extra_params.clone(),
+        observations: CommandObservations {
+            merged_cache: None,
+            snapshot_to: Some(snapshot_to),
+        },
     })
 }
 
@@ -606,12 +586,15 @@ fn promote_artifact(
 
     require_snapshot_output(command)?;
     let scratch_pbf = crate::pbfhogg::commands::scratch_output_path(ctx, command, mode)?;
-    let target_variant = match command {
-        PbfhoggCommand::Degrade {
-            strip_indexdata: true,
-            ..
-        } => "raw",
-        _ => "indexed",
+    let target_variant = match command.descriptor().promotion_variant {
+        crate::pbfhogg::commands::PromotionVariant::Raw => "raw",
+        crate::pbfhogg::commands::PromotionVariant::Indexed => "indexed",
+        crate::pbfhogg::commands::PromotionVariant::Unsupported => {
+            return Err(DevError::Internal(format!(
+                "{} cannot be promoted to a snapshot",
+                command.id()
+            )));
+        }
     };
     let dataset = paths.datasets.get(&ctx.dataset);
 
@@ -655,19 +638,6 @@ pub(crate) fn cleanup_output(
         .ok();
     }
     Ok(())
-}
-
-/// State of the merged-PBF cache after `ensure_merged_pbf` returns.
-///
-/// Carried into the result row's metadata so `brokkr results <uuid>` can
-/// distinguish runs that paid the apply-changes setup cost from runs that
-/// reused a cached file.
-#[derive(Debug, Clone, Copy)]
-pub(crate) enum MergedCacheState {
-    /// The merged PBF was reused from a prior run.
-    Hit { age_secs: u64 },
-    /// The merged PBF was generated by this invocation.
-    Miss,
 }
 
 /// The merged-PBF cache path: the one spelling of its key.
@@ -714,9 +684,7 @@ pub(crate) fn ensure_merged_pbf(
     force_rebuild: bool,
 ) -> Result<(std::path::PathBuf, MergedCacheState), DevError> {
     let merged_path = merged_pbf_path(scratch_dir, pbf_path, snapshot_key, osc_seq);
-    let merged_name = merged_path
-        .file_name()
-        .and_then(|s| s.to_str())
+    let merged_name = crate::utf8_path::file_name_str(&merged_path)
         .unwrap_or("merged.osm.pbf")
         .to_owned();
 
@@ -745,12 +713,8 @@ pub(crate) fn ensure_merged_pbf(
         .map_err(|e| DevError::Config(format!("failed to create scratch dir: {e}")))?;
 
     output::bench_msg(&format!("generating merged PBF: {merged_name}"));
-    let pbf_str = pbf_path
-        .to_str()
-        .ok_or_else(|| DevError::Config("PBF path not UTF-8".into()))?;
-    let osc_str = osc_path
-        .to_str()
-        .ok_or_else(|| DevError::Config("OSC path not UTF-8".into()))?;
+    let pbf_str = crate::utf8_path::path_str(pbf_path)?;
+    let osc_str = crate::utf8_path::path_str(osc_path)?;
     // Write under a partial name and rename into the cache slot only on
     // success: the cache test above is bare existence, so an apply-changes
     // killed mid-write must not leave a truncated file for the next
@@ -758,11 +722,7 @@ pub(crate) fn ensure_merged_pbf(
     // `.osm.pbf` suffix so the output format is unchanged. Dropping `staged`
     // on any error removes the partial file.
     let staged = crate::atomic_write::Staged::stable_keeping(&merged_path, ".osm.pbf")?;
-    let partial_str = staged
-        .tmp_path()
-        .to_str()
-        .ok_or_else(|| DevError::Config("merged path not UTF-8".into()))?
-        .to_owned();
+    let partial_str = crate::utf8_path::path_str(staged.tmp_path())?.to_owned();
     let binary_str = binary.display().to_string();
 
     let start = std::time::Instant::now();

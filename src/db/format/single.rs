@@ -1,6 +1,6 @@
 use super::super::types::{KvClass, short_uuid};
 use super::super::{Distribution, KvPair, StoredRow};
-use super::table::{format_us_as_ms, format_wall};
+use super::table::{format_wall, format_wall_value};
 
 /// Format a single result row as a standalone labelled block.
 ///
@@ -29,7 +29,10 @@ pub fn format_single_result(row: &StoredRow, has_sidecar: bool) -> String {
         let short = short_uuid(&row.uuid);
         vec![(
             "sidecar".into(),
-            format!("brokkr sidecar {short} (+ --samples/--markers/--durations/--counters/--stat)"),
+            format!(
+                "brokkr sidecar {short} ({})",
+                crate::sidecar_cmd::view_selector_hint()
+            ),
         )]
     } else {
         Vec::new()
@@ -99,14 +102,12 @@ fn identity_fields(row: &StoredRow) -> Vec<(String, String)> {
     if !row.timestamp.is_empty() {
         fields.push(("timestamp".into(), row.timestamp.clone()));
     }
-    if !row.commit.is_empty() {
-        let c = if row.subject.is_empty() {
-            row.commit.clone()
-        } else {
-            format!("{} ({})", row.commit, row.subject)
-        };
-        fields.push(("commit".into(), c));
-    }
+    let c = if row.subject.is_empty() {
+        row.commit.to_string()
+    } else {
+        format!("{} ({})", row.commit, row.subject)
+    };
+    fields.push(("commit".into(), c));
     if !row.command.is_empty() {
         fields.push(("command".into(), row.command.clone()));
     }
@@ -133,25 +134,21 @@ fn identity_fields(row: &StoredRow) -> Vec<(String, String)> {
 /// reads as a cold page cache. Sorting would erase the distinction, and those
 /// are opposite diagnoses.
 ///
-/// A single iteration adds nothing over `elapsed_ms`, so it stays quiet.
+/// A single iteration adds nothing over `elapsed`, so it stays quiet.
 ///
-/// The walls are microsecond-precise when every one has a microsecond reading
-/// (`0.312 / 0.298 ms`); otherwise the integer milliseconds, which is all a
-/// pre-v19 row or a loop that never measured microseconds has.
+/// Each wall is rendered at its own measured precision, including mixed
+/// legacy and microsecond samples.
 fn format_elapsed_with_iterations(row: &StoredRow) -> String {
-    let best = format_wall(row.elapsed_ms, row.elapsed_us);
+    let best = format_wall(row.elapsed);
     if row.iterations.len() < 2 {
         return best;
     }
-    let walls: Vec<String> = if row.iterations_us.len() == row.iterations.len() {
-        row.iterations_us
-            .iter()
-            .copied()
-            .map(format_us_as_ms)
-            .collect()
-    } else {
-        row.iterations.iter().map(i64::to_string).collect()
-    };
+    let walls: Vec<String> = row
+        .iterations
+        .iter()
+        .copied()
+        .map(format_wall_value)
+        .collect();
     format!(
         "{best} (best of {}: {} ms)",
         row.iterations.len(),
@@ -218,7 +215,7 @@ fn host_fields(row: &StoredRow) -> Vec<(String, String)> {
             format!("killed at \"{}\"", row.stop_marker),
         ));
     }
-    if !row.project.is_empty() && row.project != "pbfhogg" {
+    if !row.project.is_empty() && row.project != crate::db::schema::DEFAULT_PROJECT {
         fields.push(("project".into(), row.project.clone()));
     }
     fields
@@ -262,17 +259,16 @@ fn extras_fields(row: &StoredRow) -> Vec<(String, String)> {
     fields
 }
 
-/// The `samples`/`min`/`p50`/`p95`/`max` fields of a distribution, each from
-/// its microsecond reading when the row has one. Shared with the details
-/// block so both views render the same run identically.
+/// The `samples`/`min`/`p50`/`p95`/`max` fields of a distribution, each at its
+/// measured precision. Shared with the details block so both views render the
+/// same run identically.
 pub(super) fn distribution_fields(dist: &Distribution) -> Vec<(String, String)> {
-    let us = dist.us;
     vec![
         ("samples".into(), dist.samples.to_string()),
-        ("min".into(), format_wall(dist.min_ms, us.map(|u| u.min))),
-        ("p50".into(), format_wall(dist.p50_ms, us.map(|u| u.p50))),
-        ("p95".into(), format_wall(dist.p95_ms, us.map(|u| u.p95))),
-        ("max".into(), format_wall(dist.max_ms, us.map(|u| u.max))),
+        ("min".into(), format_wall(dist.min)),
+        ("p50".into(), format_wall(dist.p50)),
+        ("p95".into(), format_wall(dist.p95)),
+        ("max".into(), format_wall(dist.max)),
     ]
 }
 

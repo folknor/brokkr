@@ -6,18 +6,18 @@ use std::path::PathBuf;
 
 /// Ratatoskr-specific configuration from `[ratatoskr]` in brokkr.toml.
 ///
-/// Holds two clusters of fields. `[ratatoskr.harness]` (the nested table)
-/// drives `service` builds (plan 1). The flat fields
-/// drive plan-3 sync orchestration: where sæhrimnir's binary and fixtures
-/// live, which env-var names ratatoskr's `test-helpers` feature reads to
-/// pick up the mock endpoints, and where sync-test scripts live. All flat
-/// fields are optional - a project that only wires plan 1 omits them.
+/// `[ratatoskr.harness]` (the nested table) is the harness build both
+/// `service` and `sync` run. The flat fields say where sæhrimnir's binary and
+/// fixtures live, which env-var names ratatoskr's `test-helpers` feature reads
+/// to pick up the mock endpoints (exported by `service` and `sync` alike), and
+/// where sync-test scripts live. All flat fields are optional; a command that
+/// needs one refuses when it is missing.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RatatoskrConfig {
     pub harness: Option<HarnessConfig>,
 
-    /// Path to sæhrimnir's compiled binary (plan 3). Resolved relative
+    /// Path to sæhrimnir's compiled binary. Resolved relative
     /// to `brokkr.toml`. Auto-build of sæhrimnir is not yet wired -
     /// today the binary must already exist at this path.
     pub mock_server_binary: Option<PathBuf>,
@@ -32,9 +32,9 @@ pub struct RatatoskrConfig {
     pub fixtures_dir: Option<PathBuf>,
 
     /// Env-var names ratatoskr's `test-helpers` reads to pick up the
-    /// per-protocol mock endpoints. Consumed by `sync` (run and bench
-    /// shapes) when exporting endpoints to the harness binary -
-    /// `mock-serve` doesn't need them. Brokkr does not hardcode the
+    /// per-protocol mock endpoints. Consumed by `service` and `sync` when
+    /// exporting endpoints to the harness binary - `mock-serve` doesn't
+    /// need them. Brokkr does not hardcode the
     /// spellings so they stay in sync with whatever ratatoskr's
     /// account-config code expects; missing field = "not exposed in
     /// this checkout."
@@ -146,5 +146,24 @@ pub(crate) fn parse(
         .clone()
         .try_into()
         .map_err(|e: toml::de::Error| DevError::Config(format!("ratatoskr: {e}")))?;
+    validate_gates(&config)?;
     Ok(config)
+}
+
+/// Gate blocks are checked when the config loads, not when a gated run
+/// reaches them: the reserved `all` name, every metric rule, and every
+/// baseline pin. An empty rule set stays legal here - it is what
+/// `--as-baseline` records against - and is refused only by an evaluating run.
+fn validate_gates(config: &RatatoskrConfig) -> Result<(), DevError> {
+    let reserved = crate::ratatoskr::sync::GATE_ALL;
+    if config.gate.contains_key(reserved) {
+        return Err(DevError::Config(format!(
+            "`[ratatoskr.gate.{reserved}]` collides with the reserved `--gate {reserved}` \
+             sweep value - rename that gate"
+        )));
+    }
+    for (name, gate) in &config.gate {
+        crate::ratatoskr::gate::validate_rules(name, gate)?;
+    }
+    Ok(())
 }

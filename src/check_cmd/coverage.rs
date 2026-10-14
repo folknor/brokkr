@@ -686,32 +686,6 @@ fn prepare_policy_universes(
         .collect();
 }
 
-/// One shape resolution's bare cargo selection: the planned request's
-/// packages and projected features, no target filters (those are lane
-/// narrowing, audited via the selections).
-///
-/// `run` is the lane's own planned request for the resolution - the same one
-/// its prebuild compiled - so the universe is enumerated from exactly the
-/// build the lane ran. A complete claim (the only one that enumerates a
-/// universe) refuses `-p`, so this is the sweep's own test selection; under
-/// package mode it is one package, which REPLACES the shape's `-p` list
-/// rather than adding to it (cargo unions selection flags) and carries only
-/// the tokens that package routes.
-fn shape_selection_args(sweep: &PlannedSweep, run: &ResolutionRun) -> Vec<String> {
-    // The shape's profile comes first: enumeration compiles
-    // (`cargo test --no-run`), and enumerating a release shape in dev would
-    // both rebuild the world and list the dev build's tests - a universe for
-    // a build the phase never ran.
-    let mut args: Vec<String> = sweep_profile_args(sweep);
-    // Exactly the same argument as the profile, and the reason this line is
-    // not optional: enumerating a package-mode lane under ambient resolution
-    // would list the tests of a build nothing ran, and rebuild the shape in
-    // both directions on every audit.
-    args.extend(sweep.unification_args());
-    args.extend(run.cargo_args());
-    args
-}
-
 /// The enumeration build's selection: the lint allows first, then the shape
 /// resolution's selection.
 ///
@@ -729,7 +703,12 @@ fn shape_selection_args(sweep: &PlannedSweep, run: &ResolutionRun) -> Vec<String
 /// produced.
 fn shape_enumeration_args(sweep: &PlannedSweep, run: &ResolutionRun, allow_args: Vec<String>) -> Vec<String> {
     let mut args = allow_args;
-    args.extend(shape_selection_args(sweep, run));
+    args.extend(cargo_selection_args(
+        sweep,
+        run,
+        sweep.cargo_profile(),
+        CargoSelectionPurpose::Shape,
+    ));
     args
 }
 

@@ -34,9 +34,11 @@ use std::io::{self, Read};
 use std::sync::Arc;
 
 use flate2::read::GzDecoder;
-use protohoggr::{Cursor, WIRE_LEN, WIRE_VARINT};
 
-use super::super::eliv::{CanonRingRole, DetailAttr, Strictness, decode_detail_attr};
+use super::super::constants::mvt;
+use super::super::eliv::{
+    CanonRingRole, Cursor, DetailAttr, Strictness, WIRE_LEN, WIRE_VARINT, decode_detail_attr,
+};
 use super::canon_sink::{CanonSink, HashSink, detail_attrs_hash, write_len, write_string};
 
 // ---------------------------------------------------------------------------
@@ -310,7 +312,7 @@ fn streaming_tile_hash(data: &[u8]) -> Result<u128, String> {
         .read_tag()
         .map_err(|error| format!("read tile tag: {error}"))?
     {
-        if field == 3 && wire_type == WIRE_LEN {
+        if field == mvt::TILE_LAYER && wire_type == WIRE_LEN {
             layers.push(streaming_layer_hash(
                 cursor
                     .read_len_delimited()
@@ -335,8 +337,8 @@ fn streaming_tile_hash(data: &[u8]) -> Result<u128, String> {
 
 fn streaming_layer_hash(data: &[u8]) -> Result<(&str, u128), String> {
     let mut name = "";
-    let mut extent = 4096u32;
-    let mut version = 1u32;
+    let mut extent = mvt::TILE_EXTENT;
+    let mut version = mvt::DEFAULT_LAYER_VERSION;
     let mut keys = Vec::new();
     let mut values = Vec::new();
     let mut features = Vec::new();
@@ -346,7 +348,7 @@ fn streaming_layer_hash(data: &[u8]) -> Result<(&str, u128), String> {
         .map_err(|error| format!("read layer tag: {error}"))?
     {
         match (field, wire_type) {
-            (1, WIRE_LEN) => {
+            (mvt::layer::NAME, WIRE_LEN) => {
                 name = std::str::from_utf8(
                     cursor
                         .read_len_delimited()
@@ -354,12 +356,12 @@ fn streaming_layer_hash(data: &[u8]) -> Result<(&str, u128), String> {
                 )
                 .map_err(|error| format!("layer name is not UTF-8: {error}"))?;
             }
-            (2, WIRE_LEN) => features.push(
+            (mvt::layer::FEATURE, WIRE_LEN) => features.push(
                 cursor
                     .read_len_delimited()
                     .map_err(|error| format!("read feature message: {error}"))?,
             ),
-            (3, WIRE_LEN) => keys.push(Arc::from(
+            (mvt::layer::KEY, WIRE_LEN) => keys.push(Arc::from(
                 std::str::from_utf8(
                     cursor
                         .read_len_delimited()
@@ -367,19 +369,19 @@ fn streaming_layer_hash(data: &[u8]) -> Result<(&str, u128), String> {
                 )
                 .map_err(|error| format!("layer key is not UTF-8: {error}"))?,
             )),
-            (4, WIRE_LEN) => values.push(decode_detail_attr(
+            (mvt::layer::VALUE, WIRE_LEN) => values.push(decode_detail_attr(
                 cursor
                     .read_len_delimited()
                     .map_err(|error| format!("read layer value: {error}"))?,
                 Strictness::Strict,
             )?),
-            (5, WIRE_VARINT) => {
+            (mvt::layer::EXTENT, WIRE_VARINT) => {
                 let raw = cursor
                     .read_varint()
                     .map_err(|error| format!("read layer extent: {error}"))?;
                 extent = u32::try_from(raw).map_err(|_| format!("extent out of range: {raw}"))?;
             }
-            (15, WIRE_VARINT) => {
+            (mvt::layer::VERSION, WIRE_VARINT) => {
                 let raw = cursor
                     .read_varint()
                     .map_err(|error| format!("read layer version: {error}"))?;
@@ -416,28 +418,28 @@ fn streaming_feature_hash(
         .map_err(|error| format!("read feature tag: {error}"))?
     {
         match (field, wire_type) {
-            (1, WIRE_VARINT) => {
+            (mvt::feature::ID, WIRE_VARINT) => {
                 id = Some(
                     cursor
                         .read_varint()
                         .map_err(|error| format!("read feature id: {error}"))?,
                 );
             }
-            (2, WIRE_LEN) => {
+            (mvt::feature::TAGS, WIRE_LEN) => {
                 tag_bytes.extend_from_slice(
                     cursor
                         .read_len_delimited()
                         .map_err(|error| format!("read feature tags: {error}"))?,
                 );
             }
-            (3, WIRE_VARINT) => {
+            (mvt::feature::GEOMETRY_TYPE, WIRE_VARINT) => {
                 let raw = cursor
                     .read_varint()
                     .map_err(|error| format!("read feature type: {error}"))?;
                 geom_type =
                     u8::try_from(raw).map_err(|_| format!("geometry type out of range: {raw}"))?;
             }
-            (4, WIRE_LEN) => {
+            (mvt::feature::GEOMETRY, WIRE_LEN) => {
                 let bytes = cursor
                     .read_len_delimited()
                     .map_err(|error| format!("read feature geometry: {error}"))?;
@@ -535,9 +537,9 @@ impl StreamingComponent {
 
 fn streaming_geometry_hash(geom_type: u8, data: &[u8]) -> Result<u128, String> {
     let mut components = match geom_type {
-        1 => streaming_points(data)?,
-        2 => streaming_lines(data)?,
-        3 => streaming_polygons(data)?,
+        mvt::GEOMETRY_POINT => streaming_points(data)?,
+        mvt::GEOMETRY_LINESTRING => streaming_lines(data)?,
+        mvt::GEOMETRY_POLYGON => streaming_polygons(data)?,
         _ => Vec::new(),
     };
     let mut sink = HashSink::new();
@@ -585,10 +587,13 @@ fn streaming_points(data: &[u8]) -> Result<Vec<u128>, String> {
     let mut ring = StreamingRing::new();
     while !cursor.is_empty() {
         let command = read_geometry_varint(&mut cursor, "point command")?;
-        if command & 7 != 1 {
-            return Err(format!("point geometry contains command {}", command & 7));
+        if command & mvt::COMMAND_ID_MASK != mvt::COMMAND_MOVE_TO {
+            return Err(format!(
+                "point geometry contains command {}",
+                command & mvt::COMMAND_ID_MASK
+            ));
         }
-        for _ in 0..(command >> 3) {
+        for _ in 0..(command >> mvt::COMMAND_COUNT_SHIFT) {
             ring.point(next_geometry_point(&mut cursor, &mut x, &mut y, "point")?);
         }
     }
@@ -611,8 +616,11 @@ fn streaming_lines(data: &[u8]) -> Result<Vec<u128>, String> {
     let mut path: Option<StreamingRing> = None;
     while !cursor.is_empty() {
         let command = read_geometry_varint(&mut cursor, "line command")?;
-        match (command & 7, command >> 3) {
-            (1, count) => {
+        match (
+            command & mvt::COMMAND_ID_MASK,
+            command >> mvt::COMMAND_COUNT_SHIFT,
+        ) {
+            (mvt::COMMAND_MOVE_TO, count) => {
                 if let Some(path) = path.take() {
                     components.push(
                         StreamingComponent {
@@ -641,7 +649,7 @@ fn streaming_lines(data: &[u8]) -> Result<Vec<u128>, String> {
                     }
                 }
             }
-            (2, count) => {
+            (mvt::COMMAND_LINE_TO, count) => {
                 let path = path
                     .as_mut()
                     .ok_or_else(|| "line LineTo without MoveTo".to_string())?;
@@ -654,7 +662,7 @@ fn streaming_lines(data: &[u8]) -> Result<Vec<u128>, String> {
                     )?);
                 }
             }
-            (7, _) => {}
+            (mvt::COMMAND_CLOSE_PATH, _) => {}
             (id, _) => return Err(format!("unknown line command {id}")),
         }
     }
@@ -697,8 +705,11 @@ fn streaming_polygons(data: &[u8]) -> Result<Vec<u128>, String> {
     };
     while !cursor.is_empty() {
         let command = read_geometry_varint(&mut cursor, "polygon command")?;
-        match (command & 7, command >> 3) {
-            (1, count) => {
+        match (
+            command & mvt::COMMAND_ID_MASK,
+            command >> mvt::COMMAND_COUNT_SHIFT,
+        ) {
+            (mvt::COMMAND_MOVE_TO, count) => {
                 for _ in 0..count {
                     if let Some(ring) = ring.take() {
                         add_ring(ring, &mut component, &mut components);
@@ -713,7 +724,7 @@ fn streaming_polygons(data: &[u8]) -> Result<Vec<u128>, String> {
                     ring = Some(next);
                 }
             }
-            (2, count) => {
+            (mvt::COMMAND_LINE_TO, count) => {
                 let ring = ring
                     .as_mut()
                     .ok_or_else(|| "polygon LineTo without MoveTo".to_string())?;
@@ -726,7 +737,7 @@ fn streaming_polygons(data: &[u8]) -> Result<Vec<u128>, String> {
                     )?);
                 }
             }
-            (7, _) => {
+            (mvt::COMMAND_CLOSE_PATH, _) => {
                 if let Some(ring) = ring.as_mut()
                     && let Some(first) = ring.first
                 {
@@ -767,9 +778,10 @@ fn streaming_polygons(data: &[u8]) -> Result<Vec<u128>, String> {
     clippy::unwrap_used
 )]
 mod equivalence {
-    use protohoggr::{encode_bytes_field_always, encode_varint_field_always};
-
-    use elivagar::tile_detail::decode_detail_tile;
+    use super::super::super::constants::mvt;
+    use super::super::super::eliv::{
+        decode_detail_tile, encode_bytes_field_always, encode_varint_field_always,
+    };
 
     use super::super::super::eliv::Strictness;
     use super::super::fixture::{
@@ -857,16 +869,16 @@ mod equivalence {
 
         // A repeated-count line MoveTo splits identically in both decoders.
         let mut repeated = Vec::new();
-        repeated.push(command(1, 2));
+        repeated.push(command(mvt::COMMAND_MOVE_TO, 2));
         repeated.extend([zigzag(0), zigzag(0), zigzag(5), zigzag(5)]);
-        repeated.push(command(2, 1));
+        repeated.push(command(mvt::COMMAND_LINE_TO, 1));
         repeated.extend([zigzag(5), zigzag(5)]);
         let mut conventional = Vec::new();
-        conventional.push(command(1, 1));
+        conventional.push(command(mvt::COMMAND_MOVE_TO, 1));
         conventional.extend([zigzag(0), zigzag(0)]);
-        conventional.push(command(2, 1));
+        conventional.push(command(mvt::COMMAND_LINE_TO, 1));
         conventional.extend([zigzag(10), zigzag(10)]);
-        conventional.push(command(1, 1));
+        conventional.push(command(mvt::COMMAND_MOVE_TO, 1));
         conventional.extend([zigzag(-5), zigzag(-5)]);
         assert_fingerprint_verdict(
             &raw_geometry_tile(GeomType::LineString, repeated),
@@ -987,25 +999,29 @@ mod equivalence {
     fn unknown_fields_are_hard_errors_at_every_message_level() {
         let level_tile = |unknown_at: u8| -> Vec<u8> {
             let mut value = Vec::new();
-            encode_bytes_field_always(&mut value, 1, b"x");
+            encode_bytes_field_always(&mut value, mvt::value::STRING, b"x");
             if unknown_at == 3 {
                 encode_varint_field_always(&mut value, 9, 1);
             }
             let mut feature = Vec::new();
-            encode_varint_field_always(&mut feature, 3, 1);
+            encode_varint_field_always(
+                &mut feature,
+                mvt::feature::GEOMETRY_TYPE,
+                u64::from(mvt::GEOMETRY_POINT),
+            );
             if unknown_at == 2 {
                 encode_varint_field_always(&mut feature, 9, 1);
             }
             let mut layer = Vec::new();
-            encode_bytes_field_always(&mut layer, 1, b"roads");
-            encode_varint_field_always(&mut layer, 5, 4096);
-            encode_bytes_field_always(&mut layer, 4, &value);
-            encode_bytes_field_always(&mut layer, 2, &feature);
+            encode_bytes_field_always(&mut layer, mvt::layer::NAME, b"roads");
+            encode_varint_field_always(&mut layer, mvt::layer::EXTENT, u64::from(mvt::TILE_EXTENT));
+            encode_bytes_field_always(&mut layer, mvt::layer::VALUE, &value);
+            encode_bytes_field_always(&mut layer, mvt::layer::FEATURE, &feature);
             if unknown_at == 1 {
                 encode_varint_field_always(&mut layer, 9, 1);
             }
             let mut tile = Vec::new();
-            encode_bytes_field_always(&mut tile, 3, &layer);
+            encode_bytes_field_always(&mut tile, mvt::TILE_LAYER, &layer);
             if unknown_at == 0 {
                 encode_varint_field_always(&mut tile, 9, 1);
             }
@@ -1026,8 +1042,8 @@ mod equivalence {
 
     #[test]
     fn packed_fields_split_across_occurrences_hash_identically() {
-        let mv = command(1, 1);
-        let lt = command(2, 1);
+        let mv = command(mvt::COMMAND_MOVE_TO, 1);
+        let lt = command(mvt::COMMAND_LINE_TO, 1);
         let z0 = zigzag(0);
         let z10 = zigzag(10);
         let whole_geom = [mv, z0, z0, lt, z10, z10];

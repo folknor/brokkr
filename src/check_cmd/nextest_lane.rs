@@ -298,7 +298,12 @@ pub(crate) fn build_nextest(
             sweep.label
         ))
     })?;
-    selection.extend(sweep_selection_args(sweep, run));
+    selection.extend(cargo_selection_args(
+        sweep,
+        run,
+        sweep.cargo_profile(),
+        CargoSelectionPurpose::TestLane,
+    ));
     selection.extend(cargo_extra.iter().cloned());
     build_nextest_shape(inputs, sweep, selection, env)
         .inspect_err(|e| report_certifying_failure(inputs, sweep, attempt, e))

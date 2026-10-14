@@ -5,9 +5,15 @@ const fs = require('fs');
 const htmlPath = process.argv[2];
 const pngPath = process.argv[3];
 const jsonPath = process.argv[4];
-const viewportWidth = parseInt(process.argv[5] || '800', 10);
+const viewportWidth = parseInt(process.argv[5], 10);
 
-if (!htmlPath || !pngPath || !jsonPath) {
+if (
+  !htmlPath ||
+  !pngPath ||
+  !jsonPath ||
+  !Number.isInteger(viewportWidth) ||
+  viewportWidth < 1
+) {
   console.error('Usage: node capture.js <html> <png> <json> <width>');
   process.exit(1);
 }

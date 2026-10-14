@@ -16,9 +16,11 @@ pub use format::{
 };
 pub use hotpath::hotpath_data_from_json;
 pub(crate) use run_store::{Resolved, RunId, RunRef, RunSelector, RunStore};
+#[cfg(test)]
+pub(crate) use types::RunRowBuilder;
 pub use types::{
-    Distribution, DistributionUs, HotpathData, HotpathFunction, HotpathThread, KvPair, KvValue,
-    Percentile, PreviousRun, Quantity, QueryFilter, RunInvocation, RunRow, StoredRow,
+    Distribution, HotpathData, HotpathFunction, HotpathThread, KvPair, KvValue, Percentile,
+    PreviousRun, Quantity, QueryFilter, RunInvocation, RunRow, StoredRow, Wall,
 };
 pub(crate) use types::{KvClass, generate_uuid, short_uuid};
 

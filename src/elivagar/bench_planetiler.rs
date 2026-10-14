@@ -109,7 +109,10 @@ pub(crate) fn prepare(
     let jar_str = pt.planetiler_jar.display().to_string();
 
     #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-    let heap_mb = std::cmp::max((file_mb as i64) * 2, 2048);
+    let heap_mb = std::cmp::max(
+        (file_mb as i64) * super::constants::PLANETILER_HEAP_FILE_MULTIPLIER,
+        super::constants::PLANETILER_MIN_HEAP_MB,
+    );
     let heap_arg = format!("-Xmx{heap_mb}m");
 
     if !dry_run {

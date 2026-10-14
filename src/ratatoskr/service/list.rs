@@ -30,14 +30,14 @@ pub fn service_list(project_root: &Path) -> Result<(), DevError> {
     for ScriptInfo {
         name,
         description,
-        expected,
+        selection,
         ..
     } in &scripts
     {
         output::ratatoskr_msg(&format!(
             "  {:<40} {:<10} {}",
             name,
-            expected.as_str(),
+            selection.as_str(),
             description.as_deref().unwrap_or("\u{2014}"),
         ));
     }

@@ -37,6 +37,7 @@
 
 use std::os::unix::io::RawFd;
 use std::os::unix::process::CommandExt;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 mod lock_probe {
@@ -47,10 +48,13 @@ mod lock_record {
     include!("../lock_record.rs");
 }
 
+use lock_probe::protocol;
 use lock_probe::{AuthHash, Nonce};
 
 /// The shared path source keeps the standalone guard and main crate on the same
-/// per-user lock-path rule without linking the brokkr crate.
+/// per-user lock-path rule without linking the brokkr crate. The guard reads
+/// only the `_at` resolvers; the environment-reading ones serve the main crate.
+#[allow(dead_code)]
 mod user_dirs {
     include!("../user_dirs/paths.rs");
 }
@@ -71,10 +75,10 @@ fn main() {
     // even when the lock infrastructure is wedged. An OLD guard reaching this
     // point instead treats the flag as the executable to wrap and dies at
     // `exec` with status 127, which the prober reads as "stale".
-    // `brokkr guard` and locked-command startup compare this against
-    // `guard::GUARD_PROTOCOL`; both sides must be edited together.
-    if real == "--brokkr-guard-info" && rest.is_empty() {
-        println!("brokkr-rustc-guard protocol=1 capabilities=capability-lease-v1,query-bypass-v1");
+    // `brokkr guard` and locked-command startup read the version and wire
+    // fields from the same included lock protocol source as this binary.
+    if real == protocol::GUARD_INFO_ARG && rest.is_empty() {
+        println!("{}", protocol::guard_handshake());
         return;
     }
 
@@ -125,7 +129,8 @@ fn main() {
             drop(lease);
             eprintln!(
                 "brokkr-rustc-guard: refusing to compile - {why}. `brokkr lock` shows the \
-                 holder; BROKKR_CARGO=1 overrides."
+                 holder; {}=1 overrides.",
+                protocol::CARGO_OVERRIDE_ENV
             );
             // A refused invocation carrying a `--print` request is one
             // `classify` did not recognize as a query - which means cargo may
@@ -142,7 +147,8 @@ fn main() {
                     "brokkr-rustc-guard: note: cargo may cache this refusal in \
                      target/.rustc_info.json and replay it after the hold ends; if you are \
                      reading this with no brokkr running, re-probe with \
-                     CARGO_CACHE_RUSTC_INFO=0 BROKKR_CARGO=1"
+                     CARGO_CACHE_RUSTC_INFO=0 {}=1",
+                    protocol::CARGO_OVERRIDE_ENV
                 );
             }
             std::process::exit(1);
@@ -155,7 +161,7 @@ fn main() {
     // shells out - to refuse a fresh hold rather than deadlock waiting to drain
     // the very lease its own ancestor is holding.
     if let Some(lease) = lease {
-        cmd.env("BROKKR_COMPILE_LEASE", "1");
+        cmd.env(protocol::LEASE_MARKER_ENV, "1");
         // The descriptor must outlive this process so the exec'd compiler holds
         // the share for its whole run.
         lease.leak();
@@ -175,10 +181,30 @@ fn main() {
 /// republished under us. Parsed first-occurrence-wins, matching the writer's
 /// format: identity and `auth` are emitted first and byte-identical across a
 /// holder's rewrites, so a torn read cannot blend two holders' capabilities.
-fn read_auth() -> Option<AuthHash> {
-    let bytes = std::fs::read(user_dirs::lock_file()?).ok()?;
+fn read_auth(path: Option<&Path>) -> Option<AuthHash> {
+    let bytes = std::fs::read(path?).ok()?;
     let fields = lock_record::fields(&bytes)?;
     AuthHash::parse(fields.get(lock_record::AUTH)?)
+}
+
+/// The two paths the admission decision reads. Supplying them separately from
+/// the environment lets tests exercise the production decision against
+/// isolated lock files without mutating process-global variables.
+#[derive(Debug)]
+struct ProtocolPaths {
+    lock_file: Option<PathBuf>,
+    compile_lock: Option<PathBuf>,
+}
+
+impl ProtocolPaths {
+    fn from_home(home: Option<std::ffi::OsString>) -> Self {
+        let home = home.filter(|home| !home.is_empty()).map(PathBuf::from);
+        let home = home.as_deref();
+        Self {
+            lock_file: user_dirs::lock_file_at(home),
+            compile_lock: user_dirs::compile_lock_at(home),
+        }
+    }
 }
 
 /// The lease this compilation holds, kept alive across `exec`.
@@ -196,8 +222,8 @@ impl Lease {
     /// kernel refuses the lock, `CLOEXEC` cannot be cleared. All three mean
     /// this execution will not participate in the protocol, and the caller
     /// fails open: see [`decide`].
-    fn take() -> Option<Self> {
-        let path = user_dirs::compile_lock()?;
+    fn take(path: Option<&Path>) -> Option<Self> {
+        let path = path?;
         // Created if absent, and never unlinked or replaced by anyone: the
         // drain's proof is an exclusive flock on this *inode*, so a fresh inode
         // at the same path would split the exclusion in two.
@@ -206,7 +232,7 @@ impl Lease {
             .write(true)
             .create(true)
             .truncate(false)
-            .open(&path)
+            .open(path)
             .ok()?;
         use std::os::fd::{AsRawFd, IntoRawFd};
         // SAFETY: flock on an fd owned by `file`, live for the call.
@@ -461,9 +487,20 @@ enum Decision {
 }
 
 fn decide() -> Decision {
+    let paths = ProtocolPaths::from_home(std::env::var_os(protocol::HOME_ENV));
+    decide_with(&paths, |key| std::env::var_os(key))
+}
+
+/// The guard's admission decision, with filesystem locations and environment
+/// lookup supplied by the caller. Production passes the current user's lock
+/// paths and `var_os`; tests pass scratch paths and a fixed lookup table.
+fn decide_with<F>(paths: &ProtocolPaths, mut env: F) -> Decision
+where
+    F: FnMut(&str) -> Option<std::ffi::OsString>,
+{
     // First, and before any lease: a hatch that needs working lock
     // infrastructure is useless exactly when it is needed.
-    if std::env::var_os("BROKKR_CARGO").is_some_and(|v| !v.is_empty()) {
+    if env(protocol::CARGO_OVERRIDE_ENV).is_some_and(|v| !v.is_empty()) {
         return Decision::Override;
     }
 
@@ -472,11 +509,11 @@ fn decide() -> Decision {
     // capability without the exclusive lock this share excludes, so the value
     // we read cannot change under us. Reading first and locking second is the
     // stale-read race that sank two earlier designs.
-    let Some(lease) = Lease::take() else {
+    let Some(lease) = Lease::take(paths.compile_lock.as_deref()) else {
         return Decision::Unleased("the compile lease could not be taken");
     };
 
-    let published = read_auth();
+    let published = read_auth(paths.lock_file.as_deref());
 
     // The flock is the sole authority on whether a hold exists, and it is
     // consulted *last* so it has the final word - the window between reading the
@@ -488,7 +525,7 @@ fn decide() -> Decision {
     // perfectly well-formed capability that matches nobody. Deciding on the
     // record alone refused every compile on the machine until something
     // rewrote the file. A leftover record is inert; only a live flock is a hold.
-    if !lock_is_held() {
+    if !lock_is_held(paths.lock_file.as_deref()) {
         return Decision::Idle(lease);
     }
 
@@ -500,15 +537,15 @@ fn decide() -> Decision {
             why: "a brokkr hold is starting up and is not admitting compilers yet",
         };
     };
-    match std::env::var("BROKKR_HOLD_NONCE") {
-        Ok(nonce) if Nonce::parse(&nonce).is_some_and(|nonce| nonce.auth_hash() == published) => {
+    match env(protocol::CAPABILITY_ENV).and_then(|nonce| nonce.into_string().ok()) {
+        Some(nonce) if Nonce::parse(&nonce).is_some_and(|nonce| nonce.auth_hash() == published) => {
             Decision::Admitted(lease)
         }
-        Ok(_) => Decision::Refused {
+        Some(_) => Decision::Refused {
             lease,
             why: "this process carries a capability for a different hold",
         },
-        Err(_) => Decision::Refused {
+        None => Decision::Refused {
             lease,
             why: "this process carries no brokkr capability",
         },
@@ -531,11 +568,11 @@ fn decide() -> Decision {
 /// so the probe conflicts rather than queues. The fd drops (and any
 /// momentary shared hold releases) before the caller execs. A missing file
 /// or unset/empty `$HOME` reads as not held.
-fn lock_is_held() -> bool {
-    let Some(path) = user_dirs::lock_file() else {
+fn lock_is_held(path: Option<&Path>) -> bool {
+    let Some(path) = path else {
         return false;
     };
-    let Ok(file) = std::fs::File::open(&path) else {
+    let Ok(file) = std::fs::File::open(path) else {
         return false;
     };
     use std::os::fd::AsRawFd;
@@ -680,5 +717,180 @@ mod classify_tests {
         use std::os::unix::ffi::OsStringExt;
         let bad = std::ffi::OsString::from_vec(vec![0x2d, 0xff, 0xfe]);
         assert_eq!(classify(&[bad]), Invocation::Compile);
+    }
+}
+
+#[cfg(test)]
+mod decision_tests {
+    #![allow(clippy::expect_used, clippy::unwrap_used)]
+
+    use std::collections::HashMap;
+    use std::ffi::OsString;
+    use std::fs::{self, File, OpenOptions};
+    use std::os::fd::AsRawFd;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use super::{Decision, Nonce, ProtocolPaths, decide_with, lock_record, protocol};
+
+    static NEXT_SCRATCH: AtomicU64 = AtomicU64::new(0);
+    const NONCE: &str = "0123456789abcdef0123456789abcdef";
+    const OTHER_NONCE: &str = "fedcba9876543210fedcba9876543210";
+
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new() -> Self {
+            let serial = NEXT_SCRATCH.fetch_add(1, Ordering::Relaxed);
+            // Inside the checkout's gitignored `target/`, never the system
+            // temporary directory.
+            let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("target")
+                .join("rustc-guard-test-scratch")
+                .join(format!("{}-{serial}", std::process::id()));
+            fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+
+        fn paths(&self, auth: Option<&str>) -> ProtocolPaths {
+            let lock_file = self.0.join(protocol::LOCK_FILE);
+            let record = auth
+                .map(|auth| format!("{}={auth}\n", lock_record::AUTH))
+                .unwrap_or_default();
+            fs::write(&lock_file, record).unwrap();
+
+            let compile_lock = self.0.join(protocol::COMPILE_LOCK_FILE);
+            File::create(&compile_lock).unwrap();
+            ProtocolPaths {
+                lock_file: Some(lock_file),
+                compile_lock: Some(compile_lock),
+            }
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            drop(fs::remove_dir_all(&self.0));
+        }
+    }
+
+    fn vars(entries: &[(&str, &str)]) -> HashMap<String, OsString> {
+        entries
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), OsString::from(*value)))
+            .collect()
+    }
+
+    fn decide_with_vars(paths: &ProtocolPaths, variables: &HashMap<String, OsString>) -> Decision {
+        decide_with(paths, |name| variables.get(name).cloned())
+    }
+
+    fn hold_exclusive(path: &Path) -> File {
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .unwrap();
+        // SAFETY: `file` owns this descriptor and remains alive while the test
+        // asks the guard to probe the same lock through a separate descriptor.
+        assert_eq!(unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) }, 0);
+        file
+    }
+
+    #[test]
+    fn override_is_checked_before_lock_infrastructure() {
+        let paths = ProtocolPaths {
+            lock_file: None,
+            compile_lock: None,
+        };
+        let variables = vars(&[(protocol::CARGO_OVERRIDE_ENV, "1")]);
+        assert!(matches!(
+            decide_with_vars(&paths, &variables),
+            Decision::Override
+        ));
+    }
+
+    #[test]
+    fn missing_compile_lease_fails_open() {
+        let scratch = Scratch::new();
+        let paths = ProtocolPaths {
+            lock_file: None,
+            compile_lock: Some(scratch.0.join("missing/compile.lock")),
+        };
+        let variables = HashMap::new();
+        assert!(matches!(
+            decide_with_vars(&paths, &variables),
+            Decision::Unleased(_)
+        ));
+    }
+
+    #[test]
+    fn an_unheld_lock_admits_with_a_lease() {
+        let scratch = Scratch::new();
+        let paths = scratch.paths(None);
+        let variables = HashMap::new();
+        match decide_with_vars(&paths, &variables) {
+            Decision::Idle(lease) => drop(lease),
+            _ => panic!("an idle lock should admit the compiler with a lease"),
+        }
+    }
+
+    #[test]
+    fn an_active_hold_without_a_published_hash_refuses() {
+        let scratch = Scratch::new();
+        let paths = scratch.paths(None);
+        let lock = hold_exclusive(paths.lock_file.as_deref().unwrap());
+        let variables = HashMap::new();
+        match decide_with_vars(&paths, &variables) {
+            Decision::Refused { lease, why } => {
+                assert_eq!(
+                    why,
+                    "a brokkr hold is starting up and is not admitting compilers yet"
+                );
+                drop(lease);
+            }
+            _ => panic!("an active hold without a hash should refuse"),
+        }
+        drop(lock);
+    }
+
+    #[test]
+    fn a_matching_capability_is_admitted_and_a_different_one_is_refused() {
+        let auth = Nonce::parse(NONCE).unwrap().auth_hash();
+        let scratch = Scratch::new();
+        let paths = scratch.paths(Some(auth.as_str()));
+        let lock = hold_exclusive(paths.lock_file.as_deref().unwrap());
+
+        let matching = vars(&[(protocol::CAPABILITY_ENV, NONCE)]);
+        match decide_with_vars(&paths, &matching) {
+            Decision::Admitted(lease) => drop(lease),
+            _ => panic!("the published capability should admit its compiler"),
+        }
+
+        let different = vars(&[(protocol::CAPABILITY_ENV, OTHER_NONCE)]);
+        match decide_with_vars(&paths, &different) {
+            Decision::Refused { lease, why } => {
+                assert_eq!(
+                    why,
+                    "this process carries a capability for a different hold"
+                );
+                drop(lease);
+            }
+            _ => panic!("a different capability should be refused"),
+        }
+        drop(lock);
+    }
+
+    #[test]
+    fn empty_manual_override_does_not_bypass_a_live_hold() {
+        let scratch = Scratch::new();
+        let paths = scratch.paths(None);
+        let lock = hold_exclusive(paths.lock_file.as_deref().unwrap());
+        let variables = vars(&[(protocol::CARGO_OVERRIDE_ENV, "")]);
+        match decide_with_vars(&paths, &variables) {
+            Decision::Refused { lease, .. } => drop(lease),
+            _ => panic!("an empty override must not bypass a live hold"),
+        }
+        drop(lock);
     }
 }

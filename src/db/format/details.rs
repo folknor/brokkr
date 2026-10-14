@@ -62,7 +62,7 @@ pub fn format_details(row: &StoredRow) -> String {
         fields.push((format!("env {k}"), v.clone()));
     }
     // Keep the original store's implicit project out of every legacy detail.
-    if !row.project.is_empty() && row.project != "pbfhogg" {
+    if !row.project.is_empty() && row.project != crate::db::schema::DEFAULT_PROJECT {
         fields.push(("project".into(), row.project.clone()));
     }
 

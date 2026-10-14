@@ -6,6 +6,7 @@ pub(crate) mod commands;
 pub mod geocode;
 pub mod ingest;
 pub(crate) mod plan;
+pub(crate) mod policy;
 pub mod query;
 pub mod server;
 pub mod update;

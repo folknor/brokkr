@@ -9,26 +9,31 @@ use std::path::{Path, PathBuf};
 
 use crate::clean::layout::{PbfhoggFileKind, PbfhoggLayout};
 use crate::error::DevError;
-use crate::measure::{CommandContext, CommandParams};
+use crate::pbfhogg::context::{CommandContext, CommandObservations, CommandParams};
 use crate::resolve::Bbox;
 
 // ---------------------------------------------------------------------------
 // Input / output descriptors
 // ---------------------------------------------------------------------------
 
-/// What inputs a command requires beyond the binary itself.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InputKind {
-    /// PBF file only.
-    Pbf,
-    /// PBF + OSC diff file.
-    PbfAndOsc,
-    /// PBF + resolved bbox.
-    PbfAndBbox,
-    /// PBF + merged PBF (generated from PBF + OSC).
-    PbfAndMerged,
-    /// OSC file only (no PBF).
-    OscOnly,
+/// Valid inspect modes. The shape prevents contradictory node/tag switches
+/// and keeps `extended` out of modes where pbfhogg ignores it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InspectMode {
+    Default { extended: bool },
+    Nodes,
+    Tags { type_filter: Option<String> },
+}
+
+/// Valid tags-filter input policies. OSC input cannot carry PBF-only switches.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TagsFilterInput {
+    Pbf {
+        omit_referenced: bool,
+        invert: bool,
+        remove_tags: bool,
+    },
+    Osc,
 }
 
 /// What output a command produces.
@@ -47,6 +52,23 @@ pub enum OutputKind {
     },
     /// No output file (read-only / stdout-only commands).
     None,
+}
+
+/// Variant-specific output routing for snapshot promotion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromotionVariant {
+    Indexed,
+    Raw,
+    Unsupported,
+}
+
+/// Facts that must stay aligned with a command's argv behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CommandDescriptor {
+    pub id: &'static str,
+    pub output: OutputKind,
+    pub promotion_variant: PromotionVariant,
+    pub supports_io_uring: bool,
 }
 
 /// Which build-args flavor to produce: the default wallclock/suite args,
@@ -183,6 +205,9 @@ const GETPARENTS_BENCH_IDS: &[&str] = &["n115722", "n115723", "w2080"];
 /// anything - we want the full decode cost measured, not just popular tags.
 const INSPECT_ALL_TAGS_MIN_COUNT: &str = "999999999";
 
+/// Default `verify multi-extract` region count, shared with the CLI schema.
+pub const DEFAULT_MULTI_EXTRACT_REGIONS: usize = 5;
+
 // ---------------------------------------------------------------------------
 // PbfhoggCommand - the unified command enum
 // ---------------------------------------------------------------------------
@@ -203,11 +228,7 @@ pub enum PbfhoggCommand {
     ///   - `type_filter` → `--type <node|way|relation>` for the tags
     ///     subcommand only.
     Inspect {
-        nodes: bool,
-        tags: bool,
-        type_filter: Option<String>,
-        /// `--extended` for default inspect (no-op in `--nodes` / `--tags` modes).
-        extended: bool,
+        mode: InspectMode,
     },
     CheckRefs,
     /// `check --ids`. `full` adds `--full` - per-type duplicate-ID detection
@@ -233,19 +254,11 @@ pub enum PbfhoggCommand {
     ///   - `filter` - the pbfhogg filter expression (e.g.
     ///     `w/highway=primary`, `amenity=restaurant`); defaults to
     ///     `w/highway=primary`.
-    ///   - `omit_referenced` → `-R` (single-pass, matched objects only;
-    ///     default off = two-pass, pull in referenced objects).
-    ///   - `invert_match` → `-i` (flip match sense).
-    ///   - `remove_tags` → `-t` (strip tags from referenced-but-unmatched
-    ///     objects; two-pass path only - no-op under `-R`).
-    ///   - `input_kind_osc` → `--input-kind osc` (read an OSC diff
-    ///     instead of a PBF as input). Rejects `-R`, `-i`, `-t`.
+    ///
+    /// Input-specific flags are encoded by `TagsFilterInput`.
     TagsFilter {
         filter: String,
-        omit_referenced: bool,
-        invert_match: bool,
-        remove_tags: bool,
-        input_kind_osc: bool,
+        input: TagsFilterInput,
     },
     /// Unified `getid`. Flags:
     ///   - `add_referenced` → `--add-referenced` (two-pass with
@@ -321,91 +334,101 @@ pub enum PbfhoggCommand {
 }
 
 impl PbfhoggCommand {
-    /// The command ID string used in CLI and result DB.
-    pub fn id(&self) -> &'static str {
-        match self {
-            Self::Inspect { .. } => "inspect",
-            Self::CheckRefs => "check-refs",
-            Self::CheckIds { .. } => "check-ids",
-            Self::Sort => "sort",
-            Self::Cat { .. } => "cat",
-            Self::TagsFilter { .. } => "tags-filter",
-            Self::Getid { .. } => "getid",
-            Self::Getparents => "getparents",
-            Self::Renumber => "renumber",
-            Self::MergeChanges { .. } => "merge-changes",
-            Self::ApplyChanges => "apply-changes",
-            Self::AddLocationsToWays => "add-locations-to-ways",
-            Self::TimeFilter => "time-filter",
-            Self::Diff { .. } => "diff",
-            Self::BuildGeocodeIndex => "build-geocode-index",
-            Self::Extract { .. } => "extract",
-            Self::MultiExtract { .. } => "multi-extract",
-            Self::DiffSnapshots { .. } => "diff-snapshots",
-            Self::Repack { .. } => "repack",
-            Self::Degrade { .. } => "degrade",
+    /// Describe command identity, output routing and I/O support in one match.
+    pub fn descriptor(&self) -> CommandDescriptor {
+        use OutputKind::{None, ScratchDir, ScratchOsc, ScratchPbf};
+        let (id, output, promotion_variant, supports_io_uring) = match self {
+            Self::Inspect { .. } => ("inspect", None, PromotionVariant::Unsupported, false),
+            Self::CheckRefs => ("check-refs", None, PromotionVariant::Unsupported, false),
+            Self::CheckIds { .. } => ("check-ids", None, PromotionVariant::Unsupported, false),
+            Self::Sort => ("sort", ScratchPbf, PromotionVariant::Indexed, true),
+            Self::Cat { dedupe, .. } => ("cat", ScratchPbf, PromotionVariant::Indexed, *dedupe),
+            Self::TagsFilter { input, .. } => (
+                "tags-filter",
+                if matches!(input, TagsFilterInput::Osc) {
+                    ScratchOsc
+                } else {
+                    ScratchPbf
+                },
+                PromotionVariant::Unsupported,
+                false,
+            ),
+            Self::Getid { .. } => ("getid", ScratchPbf, PromotionVariant::Indexed, false),
+            Self::Getparents => ("getparents", ScratchPbf, PromotionVariant::Indexed, false),
+            Self::Renumber => ("renumber", ScratchPbf, PromotionVariant::Indexed, false),
+            Self::MergeChanges { .. } => (
+                "merge-changes",
+                ScratchOsc,
+                PromotionVariant::Unsupported,
+                false,
+            ),
+            Self::ApplyChanges => ("apply-changes", ScratchPbf, PromotionVariant::Indexed, true),
+            Self::AddLocationsToWays => (
+                "add-locations-to-ways",
+                ScratchPbf,
+                PromotionVariant::Indexed,
+                false,
+            ),
+            Self::TimeFilter => ("time-filter", ScratchPbf, PromotionVariant::Indexed, false),
+            Self::Diff {
+                format: DiffFormat::Default,
+            } => ("diff", None, PromotionVariant::Unsupported, false),
+            Self::Diff {
+                format: DiffFormat::Osc,
+            } => ("diff", ScratchOsc, PromotionVariant::Unsupported, true),
+            Self::DiffSnapshots {
+                format: DiffFormat::Default,
+            } => ("diff-snapshots", None, PromotionVariant::Unsupported, false),
+            Self::DiffSnapshots {
+                format: DiffFormat::Osc,
+            } => (
+                "diff-snapshots",
+                ScratchOsc,
+                PromotionVariant::Unsupported,
+                false,
+            ),
+            Self::Repack { .. } => ("repack", ScratchPbf, PromotionVariant::Indexed, true),
+            Self::Degrade {
+                strip_indexdata: true,
+                ..
+            } => ("degrade", ScratchPbf, PromotionVariant::Raw, true),
+            Self::Degrade { .. } => ("degrade", ScratchPbf, PromotionVariant::Indexed, true),
+            Self::BuildGeocodeIndex => (
+                "build-geocode-index",
+                ScratchDir {
+                    name: "geocode",
+                    dataset_suffix: true,
+                },
+                PromotionVariant::Unsupported,
+                false,
+            ),
+            Self::Extract { .. } => ("extract", ScratchPbf, PromotionVariant::Indexed, false),
+            Self::MultiExtract { .. } => (
+                "multi-extract",
+                ScratchDir {
+                    name: "multi-extract",
+                    dataset_suffix: false,
+                },
+                PromotionVariant::Unsupported,
+                false,
+            ),
+        };
+        CommandDescriptor {
+            id,
+            output,
+            promotion_variant,
+            supports_io_uring,
         }
     }
 
-    /// What inputs this command requires.
-    pub fn input_kind(&self) -> InputKind {
-        match self {
-            Self::TagsFilter {
-                input_kind_osc: true,
-                ..
-            } => InputKind::PbfAndOsc,
-            Self::MergeChanges { .. } => InputKind::OscOnly,
-            Self::ApplyChanges => InputKind::PbfAndOsc,
-            Self::Diff { .. } => InputKind::PbfAndMerged,
-            Self::Extract { .. } | Self::MultiExtract { .. } => InputKind::PbfAndBbox,
-            // DiffSnapshots resolves both PBFs via the snapshot path resolver.
-            // Doesn't need OSC or merged-PBF setup; the dispatch layer handles
-            // the snapshot resolution outside the InputKind dispatch.
-            Self::DiffSnapshots { .. } => InputKind::Pbf,
-            _ => InputKind::Pbf,
-        }
+    /// The command ID string used in CLI and result DB.
+    pub fn id(&self) -> &'static str {
+        self.descriptor().id
     }
 
     /// What output this command produces.
     pub fn output_kind(&self) -> OutputKind {
-        match self {
-            // No output file (read-only / stdout commands).
-            Self::Inspect { .. }
-            | Self::CheckRefs
-            | Self::CheckIds { .. }
-            | Self::Diff {
-                format: DiffFormat::Default,
-            }
-            | Self::DiffSnapshots {
-                format: DiffFormat::Default,
-            } => OutputKind::None,
-
-            // OSC output (includes OSC-format diff and diff-snapshots).
-            Self::TagsFilter {
-                input_kind_osc: true,
-                ..
-            }
-            | Self::MergeChanges { .. }
-            | Self::Diff {
-                format: DiffFormat::Osc,
-            }
-            | Self::DiffSnapshots {
-                format: DiffFormat::Osc,
-            } => OutputKind::ScratchOsc,
-
-            // Directory output.
-            Self::BuildGeocodeIndex => OutputKind::ScratchDir {
-                name: "geocode",
-                dataset_suffix: true,
-            },
-            Self::MultiExtract { .. } => OutputKind::ScratchDir {
-                name: "multi-extract",
-                dataset_suffix: false,
-            },
-
-            // Everything else writes a scratch PBF.
-            _ => OutputKind::ScratchPbf,
-        }
+        self.descriptor().output
     }
 
     /// Whether this command supports hotpath profiling.
@@ -422,30 +445,42 @@ impl PbfhoggCommand {
     /// not generated from its clap schema; callers should not repeat it in
     /// error text.
     pub fn supports_io_uring(&self) -> bool {
-        matches!(
-            self,
-            Self::ApplyChanges
-                | Self::Sort
-                | Self::Diff {
-                    format: DiffFormat::Osc
+        self.descriptor().supports_io_uring
+    }
+
+    /// Whether this command consumes an OSC file as an argv input.
+    pub fn needs_osc_input(&self) -> bool {
+        matches!(self, Self::MergeChanges { .. } | Self::ApplyChanges)
+            || matches!(
+                self,
+                Self::TagsFilter {
+                    input: TagsFilterInput::Osc,
+                    ..
                 }
-                | Self::Cat { dedupe: true, .. }
-                | Self::Repack { .. }
-                | Self::Degrade { .. }
-        )
+            )
     }
 
-    /// Whether this command needs an OSC file.
-    pub fn needs_osc(&self) -> bool {
-        matches!(
-            self.input_kind(),
-            InputKind::PbfAndOsc | InputKind::OscOnly | InputKind::PbfAndMerged
-        )
+    /// Whether setup must resolve an OSC file, including for the merged-PBF
+    /// preparation that `diff` consumes.
+    pub fn needs_osc_for_setup(&self) -> bool {
+        self.needs_osc_input() || self.needs_merged_pbf()
     }
 
-    /// Whether this command needs a bbox.
-    pub fn needs_bbox(&self) -> bool {
-        matches!(self.input_kind(), InputKind::PbfAndBbox)
+    /// Whether this command requires a PBF after its resolved-input shape is known.
+    pub fn needs_pbf(&self) -> bool {
+        !matches!(self, Self::MergeChanges { .. })
+            && !matches!(
+                self,
+                Self::TagsFilter {
+                    input: TagsFilterInput::Osc,
+                    ..
+                }
+            )
+    }
+
+    /// Whether the plan needs to build the merged PBF consumed by `diff`.
+    pub fn needs_merged_pbf(&self) -> bool {
+        matches!(self, Self::Diff { .. })
     }
 
     /// Non-zero exit codes that should be treated as success for this command.
@@ -475,22 +510,29 @@ impl PbfhoggCommand {
     /// (index_type, snapshot key, strategy, bbox, …) are passed on the
     /// brokkr command line and recorded in the brokkr_args/cli_args
     /// columns, so they don't need mirroring here.
-    pub fn metadata(&self, ctx: &CommandContext) -> Vec<crate::db::KvPair> {
+    pub fn metadata(&self, observations: &CommandObservations) -> Vec<crate::db::KvPair> {
         use crate::db::KvPair;
 
         match self {
             Self::Diff { .. } => {
-                // Merged-PBF cache state is observed at dispatch time
-                // (the caller sets the params based on whether the cached
-                // merged file was reused). Lets `brokkr results <uuid>`
+                // Merged-PBF cache state is observed while resolving the
+                // command input. Lets `brokkr results <uuid>`
                 // distinguish runs that paid the setup cost from runs that
                 // reused a cached file.
                 let mut meta = Vec::new();
-                if let Some(state) = &ctx.params.merged_cache_state {
-                    meta.push(KvPair::text("meta.merged_cache", state));
-                }
-                if let Some(age) = &ctx.params.merged_cache_age_s {
-                    meta.push(KvPair::text("meta.merged_cache_age_s", age));
+                if let Some(state) = observations.merged_cache {
+                    match state {
+                        crate::pbfhogg::context::MergedCacheState::Hit { age_secs } => {
+                            meta.push(KvPair::text("meta.merged_cache", "hit"));
+                            meta.push(KvPair::text(
+                                "meta.merged_cache_age_s",
+                                age_secs.to_string(),
+                            ));
+                        }
+                        crate::pbfhogg::context::MergedCacheState::Miss => {
+                            meta.push(KvPair::text("meta.merged_cache", "miss"));
+                        }
+                    }
                 }
                 meta
             }
@@ -501,11 +543,13 @@ impl PbfhoggCommand {
                 // brokkr.toml. Record the resolved info so queries can
                 // identify which B-side file was actually consumed.
                 let mut meta = Vec::new();
-                if let Some(file) = &ctx.params.to_snapshot_file {
-                    meta.push(KvPair::text("meta.to_snapshot_file", file));
-                }
-                if let Some(mb) = &ctx.params.to_snapshot_file_mb {
-                    meta.push(KvPair::text("meta.to_snapshot_file_mb", mb));
+                if let Some(snapshot) = &observations.snapshot_to {
+                    if let Some(file) = &snapshot.file_name {
+                        meta.push(KvPair::text("meta.to_snapshot_file", file));
+                    }
+                    if let Some(mb) = snapshot.size_mb {
+                        meta.push(KvPair::real("meta.to_snapshot_file_mb", mb));
+                    }
                 }
                 meta
             }
@@ -535,12 +579,7 @@ impl PbfhoggCommand {
             && ctx.params.compression.is_none();
         let body = self.build_body(ctx, mode, default_hotpath_compression)?;
         prefix.extend(body);
-        if ctx.params.direct_io {
-            prefix.push("--direct-io".into());
-        }
-        if ctx.params.io_uring {
-            prefix.push("--io-uring".into());
-        }
+        prefix.extend(ctx.params.io.args());
         if let Some(compression) = &ctx.params.compression {
             prefix.push("--compression".into());
             prefix.push(compression.clone());
@@ -585,41 +624,38 @@ impl PbfhoggCommand {
             // -----------------------------------------------------------------
             // Tool CLI commands (26 from bench_commands.rs)
             // -----------------------------------------------------------------
-            Self::Inspect {
-                nodes,
-                tags,
-                type_filter,
-                extended,
-            } => {
+            Self::Inspect { mode: inspect_mode } => {
                 let mut args: Vec<String> = vec!["inspect".into()];
-                if *tags {
-                    args.push("tags".into());
-                    args.push(ctx.pbf_str()?.into());
-                    // Hotpath legacy: the pre-unification build_hotpath_args
-                    // dropped --type and --min-count for `inspect tags`.
-                    // Preserved here so hotpath result rows don't shift.
-                    if mode == ArgMode::Bench {
-                        if let Some(tf) = type_filter {
-                            args.push("--type".into());
-                            args.push(tf.clone());
+                match inspect_mode {
+                    InspectMode::Tags { type_filter } => {
+                        args.push("tags".into());
+                        args.push(ctx.pbf_str()?.into());
+                        // Hotpath legacy: the pre-unification build_hotpath_args
+                        // dropped --type and --min-count for `inspect tags`.
+                        // Preserved here so hotpath result rows don't shift.
+                        if mode == ArgMode::Bench {
+                            if let Some(tf) = type_filter {
+                                args.push("--type".into());
+                                args.push(tf.clone());
+                            }
+                            args.push("--min-count".into());
+                            args.push(INSPECT_ALL_TAGS_MIN_COUNT.into());
                         }
-                        args.push("--min-count".into());
-                        args.push(INSPECT_ALL_TAGS_MIN_COUNT.into());
                     }
-                } else if *nodes {
-                    args.push("--nodes".into());
-                    args.push(ctx.pbf_str()?.into());
-                } else {
-                    args.push(ctx.pbf_str()?.into());
-                    // --extended is only accepted in the default inspect
-                    // mode (pbfhogg rejects it alongside --nodes).
-                    if *extended {
-                        args.push("--extended".into());
+                    InspectMode::Nodes => {
+                        args.push("--nodes".into());
+                        args.push(ctx.pbf_str()?.into());
+                    }
+                    InspectMode::Default { extended } => {
+                        args.push(ctx.pbf_str()?.into());
+                        if *extended {
+                            args.push("--extended".into());
+                        }
                     }
                 }
                 // pbfhogg's default inspect (metadata) doesn't accept -j;
                 // drop the flag silently rather than let pbfhogg reject.
-                if (*nodes || *tags)
+                if matches!(inspect_mode, InspectMode::Nodes | InspectMode::Tags { .. })
                     && let Some(j) = ctx.params.jobs
                 {
                     args.push("-j".into());
@@ -641,7 +677,7 @@ impl PbfhoggCommand {
                     "sort".into(),
                     ctx.pbf_str()?.into(),
                     "-o".into(),
-                    path_to_string(&output)?,
+                    crate::utf8_path::path_string(&output)?,
                 ])
             }
             Self::Cat {
@@ -674,44 +710,39 @@ impl PbfhoggCommand {
                     args.push(tf.as_str().into());
                 }
                 args.push("-o".into());
-                args.push(path_to_string(&output)?);
+                args.push(crate::utf8_path::path_string(&output)?);
                 Ok(args)
             }
-            Self::TagsFilter {
-                filter,
-                omit_referenced,
-                invert_match,
-                remove_tags,
-                input_kind_osc,
-            } => {
+            Self::TagsFilter { filter, input } => {
                 let output = scratch_output_path(ctx, self, mode)?;
                 let mut args: Vec<String> = vec!["tags-filter".into()];
-                if *input_kind_osc {
-                    args.push("--input-kind".into());
-                    args.push("osc".into());
-                } else {
-                    // PBF-only axes. pbfhogg rejects these under
-                    // --input-kind osc; brokkr's CLI already enforces
-                    // that via conflicts_with, but we skip them defensively.
-                    if *omit_referenced {
-                        args.push("-R".into());
+                let input_path = match input {
+                    TagsFilterInput::Osc => {
+                        args.push("--input-kind".into());
+                        args.push("osc".into());
+                        ctx.osc_str()?.to_owned()
                     }
-                    if *invert_match {
-                        args.push("-i".into());
+                    TagsFilterInput::Pbf {
+                        omit_referenced,
+                        invert,
+                        remove_tags,
+                    } => {
+                        if *omit_referenced {
+                            args.push("-R".into());
+                        }
+                        if *invert {
+                            args.push("-i".into());
+                        }
+                        if *remove_tags {
+                            args.push("-t".into());
+                        }
+                        ctx.pbf_str()?.to_owned()
                     }
-                    if *remove_tags {
-                        args.push("-t".into());
-                    }
-                }
-                // Input: OSC file when --input-kind osc, otherwise PBF.
-                if *input_kind_osc {
-                    args.push(ctx.osc_str()?.into());
-                } else {
-                    args.push(ctx.pbf_str()?.into());
-                }
+                };
+                args.push(input_path);
                 args.push(filter.clone());
                 args.push("-o".into());
-                args.push(path_to_string(&output)?);
+                args.push(crate::utf8_path::path_string(&output)?);
                 if let Some(j) = ctx.params.jobs {
                     args.push("-j".into());
                     args.push(j.to_string());
@@ -735,7 +766,7 @@ impl PbfhoggCommand {
                     args.push((*id).into());
                 }
                 args.push("-o".into());
-                args.push(path_to_string(&output)?);
+                args.push(crate::utf8_path::path_string(&output)?);
                 Ok(args)
             }
             Self::Getparents => {
@@ -745,7 +776,7 @@ impl PbfhoggCommand {
                     args.push((*id).into());
                 }
                 args.push("-o".into());
-                args.push(path_to_string(&output)?);
+                args.push(crate::utf8_path::path_string(&output)?);
                 Ok(args)
             }
             Self::Renumber => {
@@ -754,7 +785,7 @@ impl PbfhoggCommand {
                     "renumber".into(),
                     ctx.pbf_str()?.into(),
                     "-o".into(),
-                    path_to_string(&output)?,
+                    crate::utf8_path::path_string(&output)?,
                 ])
             }
             Self::MergeChanges { simplify } => {
@@ -765,7 +796,7 @@ impl PbfhoggCommand {
                     args.push(o.into());
                 }
                 args.push("-o".into());
-                args.push(path_to_string(&output)?);
+                args.push(crate::utf8_path::path_string(&output)?);
                 if *simplify {
                     args.push("--simplify".into());
                 }
@@ -777,7 +808,7 @@ impl PbfhoggCommand {
                 Ok(Self::apply_changes_args(
                     ctx.pbf_str()?,
                     osc,
-                    &path_to_string(&output)?,
+                    &crate::utf8_path::path_string(&output)?,
                     &ctx.params,
                     default_hotpath_compression,
                 ))
@@ -788,7 +819,7 @@ impl PbfhoggCommand {
                     "add-locations-to-ways".into(),
                     ctx.pbf_str()?.into(),
                     "-o".into(),
-                    path_to_string(&output)?,
+                    crate::utf8_path::path_string(&output)?,
                 ];
                 if let Some(it) = &ctx.params.index_type {
                     args.push("--index-type".into());
@@ -809,38 +840,10 @@ impl PbfhoggCommand {
                     ctx.pbf_str()?.into(),
                     "2024-01-01T00:00:00Z".into(),
                     "-o".into(),
-                    path_to_string(&output)?,
+                    crate::utf8_path::path_string(&output)?,
                 ])
             }
-            Self::Diff { format } => {
-                let merged = ctx.pbf_b_str()?;
-                let pbf = ctx.pbf_str()?;
-                let mut args = match format {
-                    DiffFormat::Default => {
-                        vec!["diff".into(), pbf.into(), merged.into(), "-c".into()]
-                    }
-                    DiffFormat::Osc => {
-                        let output = scratch_output_path(ctx, self, mode)?;
-                        vec![
-                            "diff".into(),
-                            "--format".into(),
-                            "osc".into(),
-                            pbf.into(),
-                            merged.into(),
-                            "-o".into(),
-                            path_to_string(&output)?,
-                        ]
-                    }
-                };
-                if let Some(j) = ctx.params.jobs {
-                    args.push("-j".into());
-                    args.push(j.to_string());
-                }
-                Ok(args)
-            }
-            Self::DiffSnapshots { format } => {
-                // Both PBFs come from snapshot resolution; pbf_path is the
-                // --from side, pbf_b_path is the --to side.
+            Self::Diff { format } | Self::DiffSnapshots { format } => {
                 let from = ctx.pbf_str()?;
                 let to = ctx.pbf_b_str()?;
                 let mut args = match format {
@@ -854,7 +857,7 @@ impl PbfhoggCommand {
                             from.into(),
                             to.into(),
                             "-o".into(),
-                            path_to_string(&output)?,
+                            crate::utf8_path::path_string(&output)?,
                         ]
                     }
                 };
@@ -874,7 +877,7 @@ impl PbfhoggCommand {
                     "repack".into(),
                     ctx.pbf_str()?.into(),
                     "-o".into(),
-                    path_to_string(&output)?,
+                    crate::utf8_path::path_string(&output)?,
                 ];
                 if let Some(n) = elements_per_blob {
                     args.push("--elements-per-blob".into());
@@ -895,7 +898,7 @@ impl PbfhoggCommand {
                     "degrade".into(),
                     ctx.pbf_str()?.into(),
                     "-o".into(),
-                    path_to_string(&output)?,
+                    crate::utf8_path::path_string(&output)?,
                 ];
                 if *unsort {
                     args.push("--unsort".into());
@@ -918,7 +921,7 @@ impl PbfhoggCommand {
                     "build-geocode-index".into(),
                     ctx.pbf_str()?.into(),
                     "--output-dir".into(),
-                    path_to_string(&output_dir)?,
+                    crate::utf8_path::path_string(&output_dir)?,
                     "--force".into(),
                 ])
             }
@@ -933,8 +936,8 @@ impl PbfhoggCommand {
                 // call `prepare_scratch` to materialise it.
                 let output_dir = scratch_output_path(ctx, self, mode)?;
                 let bbox = ctx
-                    .bbox
-                    .as_ref()
+                    .inputs
+                    .bbox()
                     .ok_or_else(|| DevError::Config("multi-extract requires a bbox".into()))?;
                 let plan = multi_extract_plan(ctx, output_dir, bbox, *regions)?;
                 let config_path = plan.config_path;
@@ -943,7 +946,7 @@ impl PbfhoggCommand {
                     "extract".into(),
                     ctx.pbf_str()?.into(),
                     "--config".into(),
-                    path_to_string(&config_path)?,
+                    crate::utf8_path::path_string(&config_path)?,
                 ];
                 if let Some(flag) = strategy.flag() {
                     args.push(flag.into());
@@ -956,11 +959,11 @@ impl PbfhoggCommand {
             // -----------------------------------------------------------------
             Self::Extract { .. } => {
                 let bbox = ctx
-                    .bbox
-                    .as_ref()
+                    .inputs
+                    .bbox()
                     .ok_or_else(|| DevError::Config("extract requires a bbox".into()))?;
                 let output = scratch_output_path(ctx, self, mode)?;
-                let output_str = path_to_string(&output)?;
+                let output_str = crate::utf8_path::path_string(&output)?;
                 self.extract_args_for(ctx.pbf_str()?, bbox, &output_str)
             }
         }
@@ -1006,8 +1009,8 @@ impl PbfhoggCommand {
         };
         let output_dir = scratch_output_path(ctx, self, ArgMode::Bench)?;
         let bbox = ctx
-            .bbox
-            .as_ref()
+            .inputs
+            .bbox()
             .ok_or_else(|| DevError::Config("multi-extract requires a bbox".into()))?;
         let plan = multi_extract_plan(ctx, output_dir, bbox, *regions)?;
         std::fs::create_dir_all(&plan.output_dir)?;
@@ -1051,7 +1054,7 @@ pub(crate) fn multi_extract_config(output_dir: &Path, strips: &[Bbox]) -> Result
             "multi-extract requires at least 1 region".into(),
         ));
     }
-    let output_dir_str = path_to_string(output_dir)?;
+    let output_dir_str = crate::utf8_path::path_string(output_dir)?;
     let extracts: Vec<serde_json::Value> = strips
         .iter()
         .enumerate()
@@ -1080,13 +1083,6 @@ pub(crate) fn multi_extract_config_path(scratch_dir: &Path) -> PathBuf {
 // ---------------------------------------------------------------------------
 // Helper functions
 // ---------------------------------------------------------------------------
-
-/// Convert a `PathBuf` to a `String`, returning a `DevError` if not UTF-8.
-fn path_to_string(path: &Path) -> Result<String, DevError> {
-    path.to_str()
-        .map(String::from)
-        .ok_or_else(|| DevError::Config(format!("path is not valid UTF-8: {}", path.display())))
-}
 
 /// Compute the scratch output path for a command based on its output kind.
 ///
@@ -1147,30 +1143,48 @@ mod tests {
         clippy::useless_vec
     )]
     use super::*;
-    use crate::measure::CommandParams;
+    use crate::pbfhogg::context::{ResolvedInputs, TwoPbfOrigin};
 
     fn test_ctx() -> CommandContext {
         CommandContext {
             binary: PathBuf::from("/usr/bin/pbfhogg"),
-            pbf_path: Some(PathBuf::from("/data/denmark.osm.pbf")),
-            osc_path: Some(PathBuf::from("/data/denmark-4705.osc.gz")),
-            osc_paths: vec![PathBuf::from("/data/denmark-4705.osc.gz")],
-            pbf_b_path: Some(PathBuf::from("/data/scratch/merged.osm.pbf")),
+            inputs: ResolvedInputs::PbfAndBbox {
+                pbf: PathBuf::from("/data/denmark.osm.pbf"),
+                bbox: Bbox::parse("12.4,55.6,12.7,55.8").unwrap(),
+            },
             scratch_dir: PathBuf::from("/data/scratch"),
             dataset: "denmark".into(),
-            bbox: Some(Bbox::parse("12.4,55.6,12.7,55.8").unwrap()),
             params: CommandParams::default(),
+            observations: CommandObservations::default(),
         }
+    }
+
+    fn use_pbf_and_osc(ctx: &mut CommandContext) {
+        ctx.inputs = ResolvedInputs::PbfAndOsc {
+            pbf: PathBuf::from("/data/denmark.osm.pbf"),
+            osc: PathBuf::from("/data/denmark-4705.osc.gz"),
+        };
+    }
+
+    fn use_two_pbfs(ctx: &mut CommandContext) {
+        ctx.inputs = ResolvedInputs::TwoPbfs {
+            a: PathBuf::from("/data/denmark.osm.pbf"),
+            b: PathBuf::from("/data/scratch/merged.osm.pbf"),
+            origin: TwoPbfOrigin::Merged,
+        };
+    }
+
+    fn use_osc_only(ctx: &mut CommandContext) {
+        ctx.inputs = ResolvedInputs::OscOnly {
+            oscs: vec![PathBuf::from("/data/denmark-4705.osc.gz")],
+        };
     }
 
     #[test]
     fn inspect_builds_correct_args() {
         let ctx = test_ctx();
         let cmd = PbfhoggCommand::Inspect {
-            nodes: false,
-            tags: false,
-            type_filter: None,
-            extended: false,
+            mode: InspectMode::Default { extended: false },
         };
         let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
         assert_eq!(args, vec!["inspect", "/data/denmark.osm.pbf"]);
@@ -1180,10 +1194,7 @@ mod tests {
     fn inspect_extended_appends_flag() {
         let ctx = test_ctx();
         let cmd = PbfhoggCommand::Inspect {
-            nodes: false,
-            tags: false,
-            type_filter: None,
-            extended: true,
+            mode: InspectMode::Default { extended: true },
         };
         let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
         assert_eq!(args, vec!["inspect", "/data/denmark.osm.pbf", "--extended"]);
@@ -1193,10 +1204,7 @@ mod tests {
     fn inspect_extended_ignored_in_nodes_mode() {
         let ctx = test_ctx();
         let cmd = PbfhoggCommand::Inspect {
-            nodes: true,
-            tags: false,
-            type_filter: None,
-            extended: true,
+            mode: InspectMode::Nodes,
         };
         let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
         assert!(!args.iter().any(|a| a == "--extended"));
@@ -1206,10 +1214,7 @@ mod tests {
     fn inspect_tags_builds_correct_args() {
         let ctx = test_ctx();
         let cmd = PbfhoggCommand::Inspect {
-            nodes: false,
-            tags: true,
-            type_filter: None,
-            extended: false,
+            mode: InspectMode::Tags { type_filter: None },
         };
         let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
         assert_eq!(
@@ -1226,7 +1231,8 @@ mod tests {
 
     #[test]
     fn apply_changes_builds_correct_args() {
-        let ctx = test_ctx();
+        let mut ctx = test_ctx();
+        use_pbf_and_osc(&mut ctx);
         let cmd = PbfhoggCommand::ApplyChanges;
         let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
         assert_eq!(args[0], "apply-changes");
@@ -1239,6 +1245,7 @@ mod tests {
     #[test]
     fn apply_changes_forwards_locations_on_ways() {
         let mut ctx = test_ctx();
+        use_pbf_and_osc(&mut ctx);
         ctx.params.locations_on_ways = true;
         let cmd = PbfhoggCommand::ApplyChanges;
         let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
@@ -1249,6 +1256,7 @@ mod tests {
     #[test]
     fn apply_changes_forwards_jobs_flag() {
         let mut ctx = test_ctx();
+        use_pbf_and_osc(&mut ctx);
         ctx.params.jobs = Some(8);
         let cmd = PbfhoggCommand::ApplyChanges;
         let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
@@ -1258,7 +1266,8 @@ mod tests {
 
     #[test]
     fn apply_changes_omits_jobs_when_unset() {
-        let ctx = test_ctx();
+        let mut ctx = test_ctx();
+        use_pbf_and_osc(&mut ctx);
         let cmd = PbfhoggCommand::ApplyChanges;
         let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
         assert!(!args.iter().any(|a| a == "-j"));
@@ -1266,7 +1275,8 @@ mod tests {
 
     #[test]
     fn diff_builds_correct_args() {
-        let ctx = test_ctx();
+        let mut ctx = test_ctx();
+        use_two_pbfs(&mut ctx);
         let cmd = PbfhoggCommand::Diff {
             format: DiffFormat::Default,
         };
@@ -1287,10 +1297,7 @@ mod tests {
         let mut ctx = test_ctx();
         ctx.params.jobs = Some(4);
         let cmd = PbfhoggCommand::Inspect {
-            nodes: true,
-            tags: false,
-            type_filter: None,
-            extended: false,
+            mode: InspectMode::Nodes,
         };
         let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
         let pos = args.iter().position(|a| a == "-j").expect("-j present");
@@ -1302,10 +1309,7 @@ mod tests {
         let mut ctx = test_ctx();
         ctx.params.jobs = Some(0);
         let cmd = PbfhoggCommand::Inspect {
-            nodes: false,
-            tags: true,
-            type_filter: None,
-            extended: false,
+            mode: InspectMode::Tags { type_filter: None },
         };
         let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
         let pos = args.iter().position(|a| a == "-j").expect("-j present");
@@ -1317,10 +1321,7 @@ mod tests {
         let mut ctx = test_ctx();
         ctx.params.jobs = Some(4);
         let cmd = PbfhoggCommand::Inspect {
-            nodes: false,
-            tags: false,
-            type_filter: None,
-            extended: false,
+            mode: InspectMode::Default { extended: false },
         };
         let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
         assert!(!args.iter().any(|a| a == "-j"));
@@ -1329,6 +1330,7 @@ mod tests {
     #[test]
     fn diff_forwards_jobs_flag() {
         let mut ctx = test_ctx();
+        use_two_pbfs(&mut ctx);
         ctx.params.jobs = Some(0);
         let cmd = PbfhoggCommand::Diff {
             format: DiffFormat::Default,
@@ -1341,6 +1343,11 @@ mod tests {
     #[test]
     fn diff_snapshots_forwards_jobs_flag() {
         let mut ctx = test_ctx();
+        ctx.inputs = ResolvedInputs::TwoPbfs {
+            a: PathBuf::from("/data/denmark-from.osm.pbf"),
+            b: PathBuf::from("/data/denmark-to.osm.pbf"),
+            origin: TwoPbfOrigin::Snapshot,
+        };
         ctx.params.jobs = Some(8);
         let cmd = PbfhoggCommand::DiffSnapshots {
             format: DiffFormat::Osc,
@@ -1436,7 +1443,7 @@ mod tests {
         let mut ctx = test_ctx();
         ctx.params.index_type = Some("external".into());
         let cmd = PbfhoggCommand::AddLocationsToWays;
-        assert!(cmd.metadata(&ctx).is_empty());
+        assert!(cmd.metadata(&ctx.observations).is_empty());
     }
 
     #[test]
@@ -1455,10 +1462,7 @@ mod tests {
     fn supports_hotpath_includes_tool_commands() {
         assert!(
             PbfhoggCommand::Inspect {
-                nodes: false,
-                tags: false,
-                type_filter: None,
-                extended: false,
+                mode: InspectMode::Default { extended: false }
             }
             .supports_hotpath()
         );
@@ -1471,26 +1475,26 @@ mod tests {
     fn tags_filter_osc_requires_osc() {
         let cmd = PbfhoggCommand::TagsFilter {
             filter: "highway=primary".into(),
-            omit_referenced: false,
-            invert_match: false,
-            remove_tags: false,
-            input_kind_osc: true,
+            input: TagsFilterInput::Osc,
         };
-        assert!(cmd.needs_osc());
-        assert_eq!(cmd.input_kind(), InputKind::PbfAndOsc);
+        assert!(cmd.needs_osc_input());
+        assert!(cmd.needs_osc_for_setup());
+        assert!(!cmd.needs_pbf());
     }
 
     #[test]
     fn tags_filter_pbf_does_not_require_osc() {
         let cmd = PbfhoggCommand::TagsFilter {
             filter: "w/highway=primary".into(),
-            omit_referenced: true,
-            invert_match: false,
-            remove_tags: false,
-            input_kind_osc: false,
+            input: TagsFilterInput::Pbf {
+                omit_referenced: true,
+                invert: false,
+                remove_tags: false,
+            },
         };
-        assert!(!cmd.needs_osc());
-        assert_eq!(cmd.input_kind(), InputKind::Pbf);
+        assert!(!cmd.needs_osc_input());
+        assert!(!cmd.needs_osc_for_setup());
+        assert!(cmd.needs_pbf());
     }
 
     #[test]
@@ -1498,10 +1502,11 @@ mod tests {
         let ctx = test_ctx();
         let cmd = PbfhoggCommand::TagsFilter {
             filter: "highway=primary".into(),
-            omit_referenced: false,
-            invert_match: true,
-            remove_tags: true,
-            input_kind_osc: false,
+            input: TagsFilterInput::Pbf {
+                omit_referenced: false,
+                invert: true,
+                remove_tags: true,
+            },
         };
         let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
         assert!(args.iter().any(|a| a == "-i"));
@@ -1511,13 +1516,11 @@ mod tests {
 
     #[test]
     fn tags_filter_osc_mode_drops_pbf_only_flags() {
-        let ctx = test_ctx();
+        let mut ctx = test_ctx();
+        use_osc_only(&mut ctx);
         let cmd = PbfhoggCommand::TagsFilter {
             filter: "highway=primary".into(),
-            omit_referenced: true,
-            invert_match: true,
-            remove_tags: true,
-            input_kind_osc: true,
+            input: TagsFilterInput::Osc,
         };
         let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
         assert!(!args.iter().any(|a| a == "-R"));
@@ -1531,10 +1534,11 @@ mod tests {
         ctx.params.jobs = Some(4);
         let cmd = PbfhoggCommand::TagsFilter {
             filter: "w/highway=primary".into(),
-            omit_referenced: true,
-            invert_match: false,
-            remove_tags: false,
-            input_kind_osc: false,
+            input: TagsFilterInput::Pbf {
+                omit_referenced: true,
+                invert: false,
+                remove_tags: false,
+            },
         };
         let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
         let pos = args.iter().position(|a| a == "-j").expect("-j present");
@@ -1544,13 +1548,15 @@ mod tests {
     #[test]
     fn merge_changes_uses_osc_only() {
         let cmd = PbfhoggCommand::MergeChanges { simplify: false };
-        assert_eq!(cmd.input_kind(), InputKind::OscOnly);
+        assert!(!cmd.needs_pbf());
+        assert!(cmd.needs_osc_input());
+        assert!(cmd.needs_osc_for_setup());
     }
 
     #[test]
     fn merge_changes_emits_simplify_when_set() {
         let mut ctx = test_ctx();
-        ctx.osc_paths = vec![PathBuf::from("/data/denmark-4705.osc.gz")];
+        use_osc_only(&mut ctx);
         let cmd = PbfhoggCommand::MergeChanges { simplify: true };
         let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
         assert!(args.iter().any(|a| a == "--simplify"));
@@ -1559,7 +1565,7 @@ mod tests {
     #[test]
     fn merge_changes_omits_simplify_by_default() {
         let mut ctx = test_ctx();
-        ctx.osc_paths = vec![PathBuf::from("/data/denmark-4705.osc.gz")];
+        use_osc_only(&mut ctx);
         let cmd = PbfhoggCommand::MergeChanges { simplify: false };
         let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
         assert!(!args.iter().any(|a| a == "--simplify"));
@@ -1601,7 +1607,7 @@ mod tests {
             ArgMode::Bench,
         )
         .unwrap();
-        let bbox = ctx.bbox.as_ref().unwrap();
+        let bbox = ctx.inputs.bbox().unwrap();
         let plan = multi_extract_plan(&ctx, output_dir, bbox, 1).unwrap();
         let json: serde_json::Value = serde_json::from_str(&plan.config_json).unwrap();
         assert_eq!(

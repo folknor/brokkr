@@ -59,14 +59,8 @@ pub fn run(
     modes: &[ReadMode],
     project_root: &Path,
 ) -> Result<(), DevError> {
-    let basename = pbf_path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or_default()
-        .to_owned();
-    let pbf_str = pbf_path
-        .to_str()
-        .ok_or_else(|| DevError::Config("PBF path is not valid UTF-8".into()))?;
+    let basename = crate::utf8_path::file_name(pbf_path);
+    let pbf_str = crate::utf8_path::path_str(pbf_path)?;
 
     let mode_names: Vec<&str> = modes.iter().map(|m| m.name()).collect();
 

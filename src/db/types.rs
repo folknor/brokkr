@@ -5,6 +5,7 @@ use std::io::Read;
 
 use crate::build::CargoProfile;
 use crate::error::DevError;
+use crate::git::ShortCommit;
 
 // ---------------------------------------------------------------------------
 // Key-value pairs
@@ -136,34 +137,85 @@ impl std::fmt::Display for KvValue {
 // Profiling data
 // ---------------------------------------------------------------------------
 
+/// A wall duration whose measured precision remains attached to the value.
+/// SQL code splits this into legacy milliseconds and optional microseconds
+/// only at the database boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Wall {
+    /// Exact microseconds were measured. Milliseconds are rounded to nearest,
+    /// with ties away from zero, whenever the legacy column is written.
+    Micros(i64),
+    /// A historical duration was recorded only to integer milliseconds.
+    LegacyMillis(i64),
+}
+
+impl Wall {
+    /// Store an exactly measured duration in microseconds.
+    pub const fn from_micros(micros: i64) -> Self {
+        Self::Micros(micros)
+    }
+
+    /// Store a historical duration that has only integer millisecond precision.
+    pub const fn from_legacy_millis(millis: i64) -> Self {
+        Self::LegacyMillis(millis)
+    }
+
+    /// Reconstruct a wall read from the paired SQL columns. If the finer
+    /// column exists it is authoritative; its millisecond value is derived
+    /// when needed, so a stale rounded column cannot disagree.
+    pub const fn from_columns(millis: i64, micros: Option<i64>) -> Self {
+        match micros {
+            Some(value) => Self::Micros(value),
+            None => Self::LegacyMillis(millis),
+        }
+    }
+
+    /// Millisecond value for the legacy SQL column and existing summaries.
+    pub fn ms(self) -> i64 {
+        match self {
+            Self::LegacyMillis(millis) => millis,
+            Self::Micros(micros) => {
+                let whole = micros / 1_000;
+                let remainder = micros % 1_000;
+                if remainder >= 500 {
+                    whole.saturating_add(1)
+                } else if remainder <= -500 {
+                    whole.saturating_sub(1)
+                } else {
+                    whole
+                }
+            }
+        }
+    }
+
+    /// Exact microseconds when measured, otherwise `None`.
+    pub const fn micros(self) -> Option<i64> {
+        match self {
+            Self::Micros(value) => Some(value),
+            Self::LegacyMillis(_) => None,
+        }
+    }
+
+    /// A common microsecond scale for ordering values of either precision.
+    /// `i128` keeps even the largest legacy `i64` millisecond value exact.
+    pub fn ordering_key(self) -> i128 {
+        match self {
+            Self::Micros(micros) => i128::from(micros),
+            Self::LegacyMillis(millis) => i128::from(millis) * 1_000,
+        }
+    }
+}
+
 /// Distribution statistics from `harness.run_distribution()`.
-///
-/// The `*_ms` fields are integer milliseconds and always present - every
-/// historical row has them. They are the `us` readings rounded to nearest
-/// whenever `us` exists, so never treat the two as independent measurements.
+/// Historical rows without microsecond columns retain millisecond-only
+/// precision in each value.
 #[derive(Clone)]
 pub struct Distribution {
     pub samples: i64,
-    pub min_ms: i64,
-    pub p50_ms: i64,
-    pub p95_ms: i64,
-    pub max_ms: i64,
-    /// The same statistics in microseconds. `None` for every row recorded
-    /// before the v18->v19 schema bump: those samples were rounded to whole
-    /// milliseconds at measure time, so a nidhogg API query under half a
-    /// millisecond stored 0, and the detail cannot be reconstructed. Not
-    /// backfilled from `*_ms * 1000`, which would manufacture a precision
-    /// the row never had.
-    pub us: Option<DistributionUs>,
-}
-
-/// Microsecond distribution statistics; see [`Distribution::us`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct DistributionUs {
-    pub min: i64,
-    pub p50: i64,
-    pub p95: i64,
-    pub max: i64,
+    pub min: Wall,
+    pub p50: Wall,
+    pub p95: Wall,
+    pub max: Wall,
 }
 
 /// The dimension carried by a hotpath quantity.
@@ -439,7 +491,7 @@ pub struct HotpathData {
 /// A benchmark result row to insert.
 pub struct RunRow {
     pub hostname: String,
-    pub commit: String,
+    pub commit: ShortCommit,
     pub subject: String,
     pub command: String,
     /// Measurement mode - exactly one of `"bench"`, `"hotpath"`, or
@@ -449,11 +501,9 @@ pub struct RunRow {
     pub mode: Option<String>,
     pub input_file: Option<String>,
     pub input_mb: Option<f64>,
-    pub elapsed_ms: i64,
-    /// Exact wall in microseconds when the harness path knew it; see
-    /// [`crate::harness::BenchResult::elapsed_us`]. `None` for every path
-    /// that only ever had integer milliseconds.
-    pub elapsed_us: Option<i64>,
+    /// The elapsed wall, retaining whether it was measured in microseconds
+    /// or only recorded historically in integer milliseconds.
+    pub elapsed: Wall,
     pub peak_rss_mb: Option<f64>,
     pub cargo_features: Option<String>,
     pub cargo_profile: CargoProfile,
@@ -475,15 +525,9 @@ pub struct RunRow {
     /// harness paths with no meaningful per-iteration wall.
     ///
     /// Ordered, and stored ordered: see [`Distribution`] for the sorted
-    /// summary, which is a different question. `elapsed_ms` is the best of
-    /// these; keeping them lets a reader see drift *within* one row.
-    pub iterations: Vec<i64>,
-    /// The same walls in microseconds, index for index, when the loop
-    /// measured them. Empty when it did not; stored only when its length
-    /// matches `iterations` (a partial list would misalign the order that is
-    /// the table's whole point). Each `iterations[i]` is `iterations_us[i]`
-    /// rounded to nearest.
-    pub iterations_us: Vec<i64>,
+    /// summary, which is a different question. `elapsed` is the best of these;
+    /// keeping them lets a reader see drift *within* one row.
+    pub iterations: Vec<Wall>,
     pub distribution: Option<Distribution>,
     pub hotpath: Option<HotpathData>,
 }
@@ -506,7 +550,7 @@ pub struct StoredRow {
     pub id: i64,
     pub timestamp: String,
     pub hostname: String,
-    pub commit: String,
+    pub commit: ShortCommit,
     pub subject: String,
     pub command: String,
     /// Measurement mode - `"bench"`, `"hotpath"`, or `"alloc"`. Empty
@@ -515,11 +559,9 @@ pub struct StoredRow {
     pub mode: String,
     pub input_file: String,
     pub input_mb: Option<f64>,
-    pub elapsed_ms: i64,
-    /// Exact wall in microseconds. `None` for every row recorded before the
-    /// v16->v17 schema bump, and for every harness path that only ever had
-    /// integer milliseconds. Not backfilled - the detail was never measured.
-    pub elapsed_us: Option<i64>,
+    /// Exact when the database row has a microsecond reading; otherwise the
+    /// millisecond-only value retained from a legacy row.
+    pub elapsed: Wall,
     pub peak_rss_mb: Option<f64>,
     pub cargo_features: String,
     /// `None` for legacy rows whose `cargo_profile` column is `NULL` or
@@ -549,15 +591,9 @@ pub struct StoredRow {
     /// change *what* ran, not just metadata. Empty for the vast majority
     /// of historical rows predating the capture feature.
     pub captured_env: BTreeMap<String, String>,
-    /// Per-iteration wall times in execution order (index = `run_idx`).
-    /// Empty for single-run modes and for every row recorded before the
-    /// v15->v16 schema bump - those walls were discarded at measure time and
-    /// cannot be reconstructed from `elapsed_ms`.
-    pub iterations: Vec<i64>,
-    /// Per-iteration walls in microseconds, parallel to `iterations`. Empty
-    /// unless every iteration of the row carries one - rows recorded before
-    /// the v18->v19 schema bump, and loops that never measured microseconds.
-    pub iterations_us: Vec<i64>,
+    /// Per-iteration walls in execution order (index = `run_idx`). A legacy
+    /// entry retains millisecond-only precision independently of its peers.
+    pub iterations: Vec<Wall>,
     pub distribution: Option<Distribution>,
     pub hotpath: Option<HotpathData>,
 }
@@ -649,6 +685,59 @@ pub struct QueryFilter {
     pub limit: usize,
 }
 
+/// Common results-row defaults for database tests. Test cases change only the
+/// columns relevant to their assertion instead of repeating the whole row.
+#[cfg(test)]
+pub(crate) struct RunRowBuilder {
+    row: RunRow,
+}
+
+#[cfg(test)]
+impl RunRowBuilder {
+    #[allow(clippy::expect_used)]
+    pub(crate) fn new() -> Self {
+        Self {
+            row: RunRow {
+                hostname: String::from("testhost"),
+                commit: "aabbccdd".parse().expect("fixture commit is valid"),
+                subject: String::from("test"),
+                command: String::from("read"),
+                mode: Some(String::from("bench")),
+                input_file: None,
+                input_mb: None,
+                elapsed: Wall::LegacyMillis(100),
+                peak_rss_mb: None,
+                cargo_features: None,
+                cargo_profile: CargoProfile::Release,
+                kernel: None,
+                cpu_governor: None,
+                avail_memory_mb: None,
+                storage_notes: None,
+                cli_args: None,
+                invocation: RunInvocation {
+                    argv: Vec::new(),
+                    arm_key: String::new(),
+                },
+                project: String::from("test"),
+                stop_marker: None,
+                kv: Vec::new(),
+                iterations: Vec::new(),
+                distribution: None,
+                hotpath: None,
+            },
+        }
+    }
+
+    pub(crate) fn update(mut self, update: impl FnOnce(&mut RunRow)) -> Self {
+        update(&mut self.row);
+        self
+    }
+
+    pub(crate) fn build(self) -> RunRow {
+        self.row
+    }
+}
+
 // ---------------------------------------------------------------------------
 // UUID helpers
 // ---------------------------------------------------------------------------
@@ -720,14 +809,13 @@ mod tests {
             id: 0,
             timestamp: String::new(),
             hostname: String::new(),
-            commit: String::new(),
+            commit: "aabbccdd".parse().expect("fixture commit is valid"),
             subject: String::new(),
             command: String::new(),
             mode: String::new(),
             input_file: String::new(),
             input_mb: None,
-            elapsed_ms: 0,
-            elapsed_us: None,
+            elapsed: Wall::LegacyMillis(0),
             peak_rss_mb: None,
             cargo_features: String::new(),
             cargo_profile: None,
@@ -748,7 +836,6 @@ mod tests {
                 .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
                 .collect(),
             iterations: Vec::new(),
-            iterations_us: Vec::new(),
             distribution: None,
             hotpath: None,
         }

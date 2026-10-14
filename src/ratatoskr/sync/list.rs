@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use crate::config::project_config::ratatoskr::RatatoskrConfig;
 use crate::error::DevError;
 use crate::output;
-use crate::ratatoskr::discover::{self, ScriptInfo};
+use crate::ratatoskr::discover;
 
 /// Default location for sync-test scripts inside ratatoskr's tree.
 pub const DEFAULT_SYNC_SCRIPT_DIR: &str = "crates/app/tests/sync-harness";
@@ -16,7 +16,7 @@ pub const DEFAULT_SYNC_SCRIPT_DIR: &str = "crates/app/tests/sync-harness";
 /// a useful response.
 pub fn run_sync_list(project_root: &Path, ratatoskr: &RatatoskrConfig) -> Result<(), DevError> {
     let dir = sync_script_dir(project_root, Some(ratatoskr));
-    let scripts = discover::discover_at(&dir)?;
+    let scripts = discover::discover_sync_at(&dir)?;
     let display_dir = dir.display();
 
     if scripts.is_empty() {
@@ -32,22 +32,14 @@ pub fn run_sync_list(project_root: &Path, ratatoskr: &RatatoskrConfig) -> Result
         "Name", "Expected", "Fixture", "Protocol", "Description",
     ));
     output::ratatoskr_msg(&format!("  {}", "\u{2500}".repeat(78)));
-    for ScriptInfo {
-        name,
-        description,
-        expected,
-        fixture,
-        protocol,
-        ..
-    } in &scripts
-    {
+    for script in &scripts {
         output::ratatoskr_msg(&format!(
             "  {:<32} {:<10} {:<14} {:<10} {}",
-            name,
-            expected.as_str(),
-            fixture.as_deref().unwrap_or("\u{2014}"),
-            protocol.as_deref().unwrap_or("\u{2014}"),
-            description.as_deref().unwrap_or("\u{2014}"),
+            script.name,
+            script.selection.as_str(),
+            script.fixture().unwrap_or("\u{2014}"),
+            script.protocol().unwrap_or("\u{2014}"),
+            script.description.as_deref().unwrap_or("\u{2014}"),
         ));
     }
     Ok(())

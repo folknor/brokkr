@@ -28,7 +28,7 @@
 //! merely *eligible* for discovery still has to produce a valid listing.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use serde_json::Value;
 
@@ -145,14 +145,8 @@ pub(super) fn discover(
     binary: &TestBinary,
     runtime: &DirectRuntime,
     env: &[(&str, &str)],
-    project_root: &Path,
 ) -> Result<Vec<Listed>, DevError> {
     let (cwd, envelope) = runtime.envelope(binary, env)?;
-    let cwd = if cwd.as_os_str() == "." {
-        project_root.to_path_buf()
-    } else {
-        cwd
-    };
     let env_pairs: Vec<(&str, &str)> = envelope
         .iter()
         .map(|(k, v)| (k.as_str(), v.as_str()))

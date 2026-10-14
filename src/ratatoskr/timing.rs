@@ -11,14 +11,11 @@ pub const SHUTDOWN_BUDGET: Duration = Duration::from_millis(1500);
 /// Default per-script wall-clock ceiling when frontmatter omits one.
 pub const DEFAULT_CEILING: Duration = Duration::from_secs(60);
 
-/// Poll cadence shared by harness process and readiness waits.
+/// Poll cadence used by sæhrimnir readiness and signal waits.
 pub(crate) const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// Poll cadence while waiting for a child to exit after SIGTERM.
 pub(crate) const SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(25);
-
-/// Number of trailing stderr lines shown when a measured harness exits badly.
-pub(crate) const STDERR_TAIL_LINES: usize = 5;
 
 /// Parse the positive integer duration grammar used by script frontmatter.
 /// Bare numbers mean seconds; supported suffixes are `ms`, `s`, `m`, and `h`.
@@ -75,4 +72,27 @@ pub(crate) fn format_duration(duration: Duration) -> String {
 /// Format elapsed time at the one-decimal precision used by sync summaries.
 pub(crate) fn format_secs(duration: Duration) -> String {
     format!("{:.1}s", duration.as_secs_f64())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{format_duration, parse_duration};
+    use std::time::Duration;
+
+    #[test]
+    fn duration_spelling_round_trips_at_millisecond_precision() {
+        for duration in [
+            Duration::from_millis(1),
+            Duration::from_millis(500),
+            Duration::from_millis(1_500),
+            Duration::from_secs(1),
+            Duration::from_secs(90),
+            Duration::from_secs(120),
+            Duration::from_secs(3_600),
+            Duration::from_secs(7_200),
+        ] {
+            let spelling = format_duration(duration);
+            assert_eq!(parse_duration(&spelling), Some(duration), "{spelling}");
+        }
+    }
 }

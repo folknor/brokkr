@@ -128,12 +128,10 @@ impl GateDb {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let conn = Connection::open(path)?;
-        conn.pragma_update(None, "journal_mode", "WAL")?;
+        let conn = crate::db::store::open_read_write(path, "ratatoskr gate", SCHEMA_VERSION)?;
         run_migrations(&conn)?;
         conn.execute_batch(CREATE_TABLE)?;
         conn.execute_batch(CREATE_INDEX)?;
-        conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         Ok(Self { conn })
     }
 
@@ -325,23 +323,20 @@ fn unix_now() -> i64 {
 }
 
 fn run_migrations(conn: &Connection) -> Result<(), DevError> {
-    if !has_table(conn, "gate_runs") {
-        return Ok(());
-    }
-    let current: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    if current >= SCHEMA_VERSION {
-        return Ok(());
-    }
-    if current < 2 && !has_column(conn, "gate_runs", "features")? {
-        // v1 -> v2: nullable, no backfill. The features a v1 row was built
-        // with are unknowable after the fact, and inventing a value (the
-        // current config's, say) would make a legacy baseline claim an
-        // identity it may not have. NULL is what the gate reads as
-        // "unrecorded".
-        conn.execute_batch("ALTER TABLE gate_runs ADD COLUMN features TEXT")?;
-    }
-    conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-    Ok(())
+    crate::db::store::migrate(conn, "ratatoskr gate", SCHEMA_VERSION, |conn, current| {
+        if !has_table(conn, "gate_runs") {
+            conn.execute_batch(CREATE_TABLE)?;
+        } else if current < 2 && !has_column(conn, "gate_runs", "features")? {
+            // v1 -> v2: nullable, no backfill. The features a v1 row was built
+            // with are unknowable after the fact, and inventing a value (the
+            // current config's, say) would make a legacy baseline claim an
+            // identity it may not have. NULL is what the gate reads as
+            // "unrecorded".
+            conn.execute_batch("ALTER TABLE gate_runs ADD COLUMN features TEXT")?;
+        }
+        conn.execute_batch(CREATE_INDEX)?;
+        Ok(())
+    })
 }
 
 fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool, DevError> {

@@ -82,8 +82,7 @@ fn preview(ids: &[RunId], store: &RunStore, descriptor: &str) -> Result<(), DevE
         let sidecar_present = store.has_sidecar_data(id)?;
         let detail = match results_row {
             Some(row) => {
-                let commit = crate::git::ShortCommit::from_stored(&row.commit)
-                    .map_or_else(|_| row.commit.clone(), |commit| commit.to_string());
+                let commit = row.commit.to_string();
                 format!(
                     "{commit} {} {} (elapsed {}ms)",
                     row.command,
@@ -92,7 +91,7 @@ fn preview(ids: &[RunId], store: &RunStore, descriptor: &str) -> Result<(), DevE
                     } else {
                         row.mode.as_str()
                     },
-                    row.elapsed_ms,
+                    row.elapsed.ms(),
                 )
             }
             None => String::from("(sidecar-only, no results row)"),

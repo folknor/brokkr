@@ -1,22 +1,3 @@
-use std::path::Path;
-
-use crate::error::DevError;
-
-/// Extract the basename and UTF-8 string for a PBF (or similar) path.
-///
-/// Returns `(basename, path_str)` or an error if the path is not valid UTF-8.
-pub fn path_strs(path: &Path) -> Result<(String, &str), DevError> {
-    let basename = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or_default()
-        .to_owned();
-    let path_str = path
-        .to_str()
-        .ok_or_else(|| DevError::Config(format!("path is not valid UTF-8: {}", path.display())))?;
-    Ok((basename, path_str))
-}
-
 pub mod bench_all;
 pub mod bench_allocator;
 pub mod bench_blob_filter;
@@ -28,7 +9,9 @@ pub mod bench_read;
 pub mod bench_write;
 pub(crate) mod cmd;
 pub mod commands;
+pub mod context;
 pub mod download;
+pub(crate) mod inspect_report;
 pub(crate) mod plan;
 pub mod verify;
 pub mod verify_add_locations;
@@ -44,6 +27,8 @@ pub mod verify_multi_extract;
 pub mod verify_renumber;
 pub mod verify_sort;
 pub mod verify_tags_filter;
+
+use crate::error::DevError;
 
 /// Parse a comma-separated compression list (e.g. "none,zlib,zstd:5").
 ///

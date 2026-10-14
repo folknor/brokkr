@@ -1,5 +1,5 @@
 use super::super::types::short_uuid;
-use super::super::{KvPair, KvValue, StoredRow};
+use super::super::{KvPair, KvValue, StoredRow, Wall};
 use super::DatasetMatcher;
 
 /// Format rows as a column-aligned table for stdout.
@@ -195,8 +195,8 @@ fn compute_table_widths(rows: &[StoredRow], matcher: &DatasetMatcher) -> TableWi
         if row.timestamp.len() > w.timestamp {
             w.timestamp = row.timestamp.len();
         }
-        if row.commit.len() > w.commit {
-            w.commit = row.commit.len();
+        if row.commit.as_str().len() > w.commit {
+            w.commit = row.commit.as_str().len();
         }
         if row.command.len() > w.command {
             w.command = row.command.len();
@@ -204,7 +204,7 @@ fn compute_table_widths(rows: &[StoredRow], matcher: &DatasetMatcher) -> TableWi
         if row.mode.len() > w.mode {
             w.mode = row.mode.len();
         }
-        let elapsed_str = format_wall(row.elapsed_ms, row.elapsed_us);
+        let elapsed_str = format_wall(row.elapsed);
         if elapsed_str.len() > w.elapsed {
             w.elapsed = elapsed_str.len();
         }
@@ -257,7 +257,7 @@ fn append_table_header(out: &mut String, w: &TableWidths) {
 fn append_table_row(out: &mut String, row: &StoredRow, w: &TableWidths, matcher: &DatasetMatcher) {
     use std::fmt::Write;
     let uuid_short = short_uuid(&row.uuid);
-    let elapsed_str = format_wall(row.elapsed_ms, row.elapsed_us);
+    let elapsed_str = format_wall(row.elapsed);
     let input_str = matcher.short_name(&row.input_file);
     let args_str = format_args_summary(row);
     write!(
@@ -287,17 +287,22 @@ fn append_table_row(out: &mut String, row: &StoredRow, w: &TableWidths, matcher:
     }
 }
 
-/// Render a wall in milliseconds, from the microsecond reading when the row
-/// has one (`6.847 ms`), else from the integer milliseconds every row has.
+/// Render a wall in milliseconds, preserving exact measured microseconds and
+/// leaving legacy values at their stored integer precision.
 ///
 /// The one rendering every `brokkr results` view uses, so a table row, the
 /// single-result block and a `--compare` column never disagree about the same
 /// run. Preferring microseconds is what keeps a sub-millisecond run - a
 /// nidhogg API query, a sluggrs region - from printing as `0 ms`.
-pub(super) fn format_wall(ms: i64, us: Option<i64>) -> String {
-    match us {
-        Some(us) => format!("{} ms", format_us_as_ms(us)),
-        None => format!("{ms} ms"),
+pub(super) fn format_wall(wall: Wall) -> String {
+    format!("{} ms", format_wall_value(wall))
+}
+
+/// Render the numeric millisecond value without repeating its unit.
+pub(super) fn format_wall_value(wall: Wall) -> String {
+    match wall {
+        Wall::Micros(us) => format_us_as_ms(us),
+        Wall::LegacyMillis(ms) => ms.to_string(),
     }
 }
 
@@ -514,26 +519,26 @@ mod tests {
 
     #[test]
     fn format_wall_positive() {
-        assert_eq!(format_wall(1234, None), "1234 ms");
+        assert_eq!(format_wall(Wall::LegacyMillis(1234)), "1234 ms");
     }
 
     #[test]
     fn format_wall_zero() {
-        assert_eq!(format_wall(0, None), "0 ms");
+        assert_eq!(format_wall(Wall::LegacyMillis(0)), "0 ms");
     }
 
     #[test]
     fn format_wall_negative() {
         // Shouldn't happen in practice, but verify it doesn't panic.
-        assert_eq!(format_wall(-5, None), "-5 ms");
+        assert_eq!(format_wall(Wall::LegacyMillis(-5)), "-5 ms");
     }
 
     #[test]
     fn format_wall_prefers_microseconds() {
         // The motivating case: a 312us API query stored `elapsed_ms = 0` and
         // printed as `0 ms`.
-        assert_eq!(format_wall(0, Some(312)), "0.312 ms");
-        assert_eq!(format_wall(7, Some(6847)), "6.847 ms");
+        assert_eq!(format_wall(Wall::from_micros(312)), "0.312 ms");
+        assert_eq!(format_wall(Wall::from_micros(6847)), "6.847 ms");
         assert_eq!(format_us_as_ms(1_500_000), "1500.000");
     }
 

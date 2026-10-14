@@ -4,6 +4,7 @@
 //! one view; clap enforces the mutual exclusion.
 
 use std::path::Path;
+use std::sync::OnceLock;
 
 use crate::db;
 use crate::error::DevError;
@@ -16,6 +17,47 @@ use crate::sidecar_fmt::{
     resolve_phase_range, sidecar_marker_json, sidecar_sample_json_projected,
     validate_timeline_args,
 };
+
+/// A compact, current list of sidecar view selectors for results output.
+/// Selectors are the options whose clap conflict set contains the other view
+/// choices; command modifiers such as `--run`, `--phase` and `--human` stay out
+/// of the hint automatically.
+pub(crate) fn view_selector_hint() -> &'static str {
+    static HINT: OnceLock<String> = OnceLock::new();
+    HINT.get_or_init(|| {
+        std::thread::Builder::new()
+            .stack_size(8 << 20)
+            .spawn(|| {
+                use clap::CommandFactory;
+
+                let mut cli = crate::cli::Cli::command();
+                let Some(command) = cli.find_subcommand_mut("sidecar") else {
+                    return "see `brokkr sidecar --help` for available views".to_owned();
+                };
+                let selectors = command
+                    .get_arguments()
+                    .filter(|arg| arg.get_long().is_some())
+                    .filter(|arg| {
+                        command
+                            .get_arg_conflicts_with(arg)
+                            .iter()
+                            .filter(|other| other.get_long().is_some())
+                            .count()
+                            >= 3
+                    })
+                    .filter_map(|arg| arg.get_long().map(|long| format!("--{long}")))
+                    .collect::<Vec<_>>();
+                if selectors.is_empty() {
+                    "see `brokkr sidecar --help` for available views".to_owned()
+                } else {
+                    format!("views: {}", selectors.join(", "))
+                }
+            })
+            .ok()
+            .and_then(|worker| worker.join().ok())
+            .unwrap_or_else(|| "see `brokkr sidecar --help` for available views".to_owned())
+    })
+}
 
 /// Resolve `--run`: `"all"` → None (all runs), N → Some(N), absent → best run.
 /// Also logs which run(s) will be shown when the result has multiple runs.

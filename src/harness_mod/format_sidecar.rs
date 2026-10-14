@@ -24,7 +24,7 @@ fn format_result_line(
     // signal a sub-millisecond workload is being measured for.
     parts.push(format!(
         "elapsed_ms={}",
-        ms_value(result.elapsed_ms, result.elapsed_us)
+        ms_value(result_wall(result.elapsed_ms, result.elapsed_us))
     ));
     parts.push(format!("commit={}", git.commit));
 
@@ -54,12 +54,11 @@ fn format_result_line(
     }
 
     if let Some(ref dist) = result.distribution {
-        let us = dist.us;
         parts.push(format!("samples={}", dist.samples));
-        parts.push(format!("min_ms={}", ms_value(dist.min_ms, us.map(|u| u.min))));
-        parts.push(format!("p50_ms={}", ms_value(dist.p50_ms, us.map(|u| u.p50))));
-        parts.push(format!("p95_ms={}", ms_value(dist.p95_ms, us.map(|u| u.p95))));
-        parts.push(format!("max_ms={}", ms_value(dist.max_ms, us.map(|u| u.max))));
+        parts.push(format!("min_ms={}", ms_value(dist.min)));
+        parts.push(format!("p50_ms={}", ms_value(dist.p50)));
+        parts.push(format!("p95_ms={}", ms_value(dist.p95)));
+        parts.push(format!("max_ms={}", ms_value(dist.max)));
     }
 
     parts.join("  ")
@@ -67,15 +66,21 @@ fn format_result_line(
 
 /// A millisecond value for a `[result]` field: three decimals from the
 /// microsecond reading when there is one (`0.312`), else the integer.
-fn ms_value(ms: i64, us: Option<i64>) -> String {
-    match us {
+fn ms_value(wall: Wall) -> String {
+    match wall.micros() {
         Some(us) => {
             #[allow(clippy::cast_precision_loss)]
             let exact = us as f64 / 1000.0;
             format!("{exact:.3}")
         }
-        None => ms.to_string(),
+        None => wall.ms().to_string(),
     }
+}
+
+/// The stored wall for a harness result: exact when the path measured
+/// microseconds, otherwise the millisecond-only reading.
+fn result_wall(elapsed_ms: i64, elapsed_us: Option<i64>) -> Wall {
+    Wall::from_columns(elapsed_ms, elapsed_us)
 }
 
 /// Emit a `[result]` line (respects quiet mode).
@@ -97,7 +102,7 @@ fn force_emit_result_lines(
     result: &BenchResult,
     git: &GitInfo,
 ) {
-    println!("[result]  {}", format_result_line(config, mode, result, git));
+    console::plain(&format!("[result]  {}", format_result_line(config, mode, result, git)));
 }
 
 /// Look up an integer KV pair by key.
@@ -135,7 +140,7 @@ fn run_progress_line(i: usize, runs: usize) -> Option<String> {
 fn sidecar_summary_line(
     short: &str,
     dirty: bool,
-    runs: &[crate::sidecar::SidecarData],
+    runs: &[&crate::sidecar::SidecarData],
     best_run_idx: usize,
 ) -> String {
     let which = if runs.len() > 1 {
@@ -282,209 +287,6 @@ pub fn elapsed_to_us(duration: &Duration) -> i64 {
     i64::try_from(duration.as_micros()).unwrap_or(i64::MAX)
 }
 
-/// A `run_hotpath_capture` that failed after its child ran, parked for the
-/// enclosing [`BenchHarness::run_hotpath`] loop.
-///
-/// The capture has no harness (no `sidecar.db` path), and its callers
-/// propagate its error with `?` out of the loop's closure, so the
-/// `/proc` trajectory it collected - the most useful data a crashed or
-/// OOM-killed run leaves - used to be dropped with the error. Parking it
-/// here lets the loop store it under `dirty`, as `run_external_*` does,
-/// without changing the closure contract every hotpath writer uses.
-struct FailedCapture {
-    data: crate::sidecar::SidecarData,
-    pid: u32,
-}
-
-thread_local! {
-    /// At most one parked failure: the loop clears the slot before each
-    /// iteration and takes it on the iteration's error. Thread-local
-    /// because the closure runs on the loop's own thread.
-    static FAILED_CAPTURE: std::cell::RefCell<Option<FailedCapture>> =
-        const { std::cell::RefCell::new(None) };
-}
-
-fn park_failed_capture(capture: FailedCapture) {
-    FAILED_CAPTURE.with(|slot| *slot.borrow_mut() = Some(capture));
-}
-
-fn take_failed_capture() -> Option<FailedCapture> {
-    FAILED_CAPTURE.with(|slot| slot.borrow_mut().take())
-}
-
-/// Run a binary with hotpath env vars and sidecar monitoring, capture the
-/// JSON report, and return a `BenchResult` plus sidecar data.
-///
-/// Sets `HOTPATH_METRICS_SERVER_OFF`, `HOTPATH_OUTPUT_FORMAT`,
-/// `HOTPATH_OUTPUT_PATH`, and `BROKKR_MARKER_FIFO`. Uses `spawn_captured`
-/// + sidecar loop so /proc metrics are sampled during the run.
-///
-/// Creates and manages its own FIFO in `scratch_dir`.
-#[allow(clippy::too_many_arguments)]
-pub fn run_hotpath_capture(
-    binary: &str,
-    args: &[&str],
-    scratch_dir: &std::path::Path,
-    project_root: &std::path::Path,
-    extra_env: &[(&str, &str)],
-    ok_codes: &[i32],
-    stop_marker: Option<&str>,
-    lock: Option<&LockGuard>,
-) -> Result<(BenchResult, Vec<u8>, crate::sidecar::SidecarData), crate::error::DevError> {
-    let c = run_hotpath_capture_with_stdout(
-        binary,
-        args,
-        scratch_dir,
-        project_root,
-        extra_env,
-        ok_codes,
-        stop_marker,
-        lock,
-    )?;
-    match child::verdict(&c.sidecar.ending, binary, &c.stderr, ok_codes) {
-        child::IterationVerdict::Counted => {}
-        child::IterationVerdict::Failed(error) => {
-            c.park_failure();
-            return Err(error);
-        }
-        child::IterationVerdict::Interrupted => {
-            c.park_failure();
-            return Err(crate::error::DevError::Interrupted);
-        }
-    }
-    Ok((c.result, c.stderr, c.sidecar))
-}
-
-/// What [`run_hotpath_capture_with_stdout`] returns: the measured result,
-/// both captured streams, the sidecar data and how the process ended.
-pub struct HotpathCapture {
-    pub result: BenchResult,
-    pub stdout: Vec<u8>,
-    pub stderr: Vec<u8>,
-    pub sidecar: crate::sidecar::SidecarData,
-    pid: u32,
-}
-
-impl HotpathCapture {
-    /// Park this capture's sidecar data for the enclosing `run_hotpath` loop
-    /// to store under `dirty` (see `FailedCapture`). For a caller about to
-    /// fail the iteration after reading the capture.
-    pub fn park_failure(self) {
-        park_failed_capture(FailedCapture {
-            data: self.sidecar,
-            pid: self.pid,
-        });
-    }
-}
-
-/// [`run_hotpath_capture`], keeping the child's stdout and not rejecting on
-/// an unsuccessful ending: the caller reads the stream first and decides (the
-/// piners corpus harness reports on stdout what it actually did, including a
-/// `run_error` explaining a failed exit). An interrupt still returns
-/// `Interrupted`. A caller that fails the iteration calls
-/// [`HotpathCapture::park_failure`] so the sidecar data is kept.
-#[allow(clippy::too_many_arguments)]
-pub fn run_hotpath_capture_with_stdout(
-    binary: &str,
-    args: &[&str],
-    scratch_dir: &std::path::Path,
-    project_root: &std::path::Path,
-    extra_env: &[(&str, &str)],
-    ok_codes: &[i32],
-    stop_marker: Option<&str>,
-    lock: Option<&LockGuard>,
-) -> Result<HotpathCapture, crate::error::DevError> {
-    let json_file = scratch_dir.join("hotpath-report.json");
-    let json_file_str = json_file.display().to_string();
-
-    let mut fifo = crate::sidecar::SidecarFifo::create(scratch_dir)?;
-    let fifo_path_str = fifo.path_str()?.to_owned();
-
-    let mut env: Vec<(&str, &str)> = vec![
-        ("HOTPATH_METRICS_SERVER_OFF", "true"),
-        ("HOTPATH_OUTPUT_FORMAT", "json"),
-        ("HOTPATH_OUTPUT_PATH", &json_file_str),
-        ("BROKKR_MARKER_FIFO", &fifo_path_str),
-    ];
-    env.extend_from_slice(extra_env);
-
-    let start = std::time::Instant::now();
-    let child = child::spawn_captured(binary, args, project_root, &env, true, crate::output::SpawnProfile::Plain)?;
-    let pid = child.id();
-    if let Some(lock) = lock {
-        lock.set_child_pid(pid);
-    }
-    let sidecar_result = crate::sidecar::run_sidecar(child, &mut fifo, 0, start, stop_marker);
-    if let Some(lock) = lock {
-        lock.clear_child_pid();
-    }
-    drop(fifo);
-
-    // Failures park the sidecar data for the enclosing `run_hotpath` loop,
-    // which stores it under `dirty` (see `FailedCapture`).
-    if matches!(&sidecar_result.data.ending, child::Ending::Interrupted) {
-        park_failed_capture(FailedCapture {
-            data: sidecar_result.data,
-            pid,
-        });
-        return Err(crate::error::DevError::Interrupted);
-    }
-
-    let ms = elapsed_to_ms(&sidecar_result.elapsed);
-    let us = elapsed_to_us(&sidecar_result.elapsed);
-    let (_stderr_ms, kv) = parse_kv_lines(&sidecar_result.stderr);
-    let status_ok = matches!(
-        child::verdict(
-            &sidecar_result.data.ending,
-            binary,
-            &sidecar_result.stderr,
-            ok_codes
-        ),
-        child::IterationVerdict::Counted
-    );
-    let stderr = sidecar_result.stderr;
-
-    // A failed run's report is not read (it would only warn about a file the
-    // run never wrote); the caller classifies the ending after reading output.
-    let hotpath = if !status_ok {
-        None
-    } else {
-        match std::fs::read_to_string(&json_file) {
-            Ok(s) => match serde_json::from_str::<serde_json::Value>(&s) {
-                Ok(v) => db::hotpath_data_from_json(&v),
-                Err(e) => {
-                    console::warn(&format!("failed to parse hotpath JSON: {e}"));
-                    None
-                }
-            },
-            Err(e) => {
-                console::warn(&format!(
-                    "failed to read hotpath report {}: {e}",
-                    json_file.display()
-                ));
-                None
-            }
-        }
-    };
-    std::fs::remove_file(&json_file).ok();
-
-    Ok(HotpathCapture {
-        result: BenchResult {
-            elapsed_ms: ms,
-            elapsed_us: Some(us),
-            kv,
-            // Single capture - the enclosing run_hotpath loop owns the list.
-            iterations: Vec::new(),
-            distribution: None,
-            hotpath,
-        },
-        stdout: sidecar_result.stdout,
-        stderr,
-        sidecar: sidecar_result.data,
-        pid,
-    })
-}
-
 /// Compute a percentile from a sorted slice using linear interpolation.
 ///
 /// Uses the "C = 1" variant (linear interpolation between adjacent ranks).
@@ -519,41 +321,31 @@ fn percentile(sorted: &[i64], pct: usize) -> i64 {
 /// min/p50/p95/max. Returns the summary and the fastest sample, or `None`
 /// when there are no samples.
 ///
-/// The percentiles are taken over the microseconds and each `*_ms` field is
-/// its `*_us` counterpart rounded to nearest (`us_to_ms`), so the two
-/// columns of one row can never disagree by more than the rounding.
+/// The percentiles are taken over the microseconds and kept exact; the
+/// millisecond column is derived from them by [`Wall::ms`]'s nearest
+/// rounding, so the two columns of one row can never disagree.
 fn summarize_distribution(samples_us: &[i64]) -> Option<(Distribution, i64)> {
     if samples_us.is_empty() {
         return None;
     }
     let mut sorted = samples_us.to_vec();
     sorted.sort_unstable();
-    let us = DistributionUs {
-        min: percentile(&sorted, 0),
-        p50: percentile(&sorted, 50),
-        p95: percentile(&sorted, 95),
-        max: percentile(&sorted, 100),
-    };
+    let min = percentile(&sorted, 0);
     let dist = Distribution {
         samples: i64::try_from(sorted.len()).unwrap_or(i64::MAX),
-        min_ms: us_to_ms(us.min),
-        p50_ms: us_to_ms(us.p50),
-        p95_ms: us_to_ms(us.p95),
-        max_ms: us_to_ms(us.max),
-        us: Some(us),
+        min: Wall::from_micros(min),
+        p50: Wall::from_micros(percentile(&sorted, 50)),
+        p95: Wall::from_micros(percentile(&sorted, 95)),
+        max: Wall::from_micros(percentile(&sorted, 100)),
     };
-    Some((dist, us.min))
+    Some((dist, min))
 }
 
-/// Pick the faster `BenchResult`.
-///
-/// Compares microseconds when both sides have them - on a single-digit
-/// millisecond workload, best-of-N on rounded milliseconds is mostly a
-/// coin toss between ties.
-fn pick_best(current: Option<BenchResult>, candidate: BenchResult) -> BenchResult {
+/// Keep the first minimum, comparing exact walls where available.
+fn winning_index(current: Option<(usize, &BenchResult)>, index: usize, candidate: &BenchResult) -> usize {
     match current {
-        Some(best) if bench_ordering_key(&best) <= bench_ordering_key(&candidate) => best,
-        _ => candidate,
+        Some((winner, best)) if bench_ordering_key(best) <= bench_ordering_key(candidate) => winner,
+        _ => index,
     }
 }
 
@@ -672,7 +464,10 @@ fn parse_kv_stderr(stderr: &[u8]) -> Result<BenchResult, DevError> {
 
     let elapsed_us = elapsed_us.ok_or_else(|| {
         let text = String::from_utf8_lossy(stderr);
-        let preview: String = text.chars().take(500).collect();
+        let preview: String = text
+            .chars()
+            .take(crate::sidecar::DEFAULT_MEASUREMENT_TUNABLES.stderr_preview_chars)
+            .collect();
         DevError::Config(format!(
             "subprocess stderr missing elapsed_ms=NNN. stderr was:\n{preview}"
         ))
@@ -696,7 +491,8 @@ fn parse_kv_stderr(stderr: &[u8]) -> Result<BenchResult, DevError> {
 // ---------------------------------------------------------------------------
 
 /// Number of rotating backup copies to keep.
-const SIDECAR_BACKUP_COPIES: usize = 3;
+const SIDECAR_BACKUP_COPIES: usize =
+    crate::sidecar::DEFAULT_MEASUREMENT_TUNABLES.sidecar_backup_copies;
 
 /// Resolve the sidecar backup directory.
 ///

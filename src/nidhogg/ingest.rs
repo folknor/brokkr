@@ -19,9 +19,9 @@ pub fn run(
     data_dir: &Path,
     project_root: &Path,
 ) -> Result<(), DevError> {
-    let binary_str = super::client::path_str(binary)?;
-    let pbf_str = super::client::path_str(pbf_path)?;
-    let data_str = super::client::path_str(data_dir)?;
+    let binary_str = crate::utf8_path::path_str(binary)?;
+    let pbf_str = crate::utf8_path::path_str(pbf_path)?;
+    let data_str = crate::utf8_path::path_str(data_dir)?;
 
     // Ensure the output directory exists.
     std::fs::create_dir_all(data_dir)?;
@@ -69,7 +69,7 @@ fn list_output_files(data_dir: &Path) -> Result<(), DevError> {
 
     output::run_msg("output files:");
     for (name, size) in &files {
-        let mb = *size as f64 / 1_048_576.0;
+        let mb = *size as f64 / 1_000_000.0;
         output::run_msg(&format!("  {name}: {mb:.1} MB"));
     }
 

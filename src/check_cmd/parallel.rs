@@ -237,17 +237,11 @@ fn direct_libtest_args(
     // output emits no per-test *start* signal under concurrency, so there is
     // nothing to age. Same constraint, and same refusal, as the sequential
     // parallel path.
-    if libtest_args.iter().any(|a| a == "--format") {
-        return Err(DevError::Config(format!(
-            "sweep '{}' drives libtest's JSON output for the per-test watchdog; \
-             remove the forwarded `--format` override",
-            sweep.label
-        )));
-    }
     libtest_args.push("-Z".into());
     libtest_args.push("unstable-options".into());
     libtest_args.push("--format".into());
     libtest_args.push("json".into());
+    reject_format_override(&libtest_args)?;
     Ok(libtest_args)
 }
 
@@ -270,12 +264,10 @@ struct DirectExtras<'a> {
 
 /// Run one binary to completion, having already claimed `slots` of the
 /// budget. Executes the prebuilt binary directly under the cargo launch
-/// envelope; `project_root` is the fallback cwd for a binary whose manifest
-/// dir the artifact stream did not carry. Everything the binary's stream says
+/// envelope. Everything the binary's stream says
 /// is journaled through `tap` as it arrives, attributed to this binary.
 #[allow(clippy::too_many_arguments)]
 fn run_one_binary(
-    project_root: &Path,
     state_root: &Path,
     sweep: &PlannedSweep,
     run: &PlannedRun<'_>,
@@ -295,7 +287,6 @@ fn run_one_binary(
     let args = direct_libtest_args(sweep, slots, extras.libtest_extra)?;
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     let (cwd, env) = runtime.envelope(binary, env_refs)?;
-    let cwd = if cwd.as_os_str() == "." { project_root.to_path_buf() } else { cwd };
     let env_pairs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
     let sink_origin = origin.clone();
     let sink = tap.sink(move |_| sink_origin.clone(), false);
@@ -499,7 +490,6 @@ fn run_parallel_sweep(
                     return Ok(BinaryRun::skipped_after_abort(&run.planned.binary));
                 }
                 let out = run_one_binary(
-                    project_root,
                     state_root,
                     sweep,
                     run,

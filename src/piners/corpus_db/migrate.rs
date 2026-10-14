@@ -16,9 +16,9 @@
 //! `run.debug` and `run.harness_args` columns for execution context, backfilled
 //! from selector fields only when each has the expected JSON type; incomplete
 //! context stays unknown. On a fresh database the schema DDL in `schema.rs`
-//! creates the current tables (columns included) and stamps the version, so
-//! the migration steps below only run for an older db on disk. The `has_table` helper lives here so a future column
-//! add stays a localized change, exactly as in `ResultsDb`.
+//! creates the current tables (columns included) inside the shared migration
+//! transaction. The `has_table` helper lives here so a future column add stays
+//! a localized change, exactly as in `ResultsDb`.
 
 use rusqlite::params;
 use serde_json::{Map, Value};
@@ -29,61 +29,29 @@ use crate::error::DevError;
 /// Current schema version. Increment when adding a migration below.
 pub(super) const SCHEMA_VERSION: i64 = 9;
 
-/// Run all pending migrations based on `PRAGMA user_version`. On a fresh
-/// database the schema DDL in `schema.rs` creates the current tables and
-/// stamps the version, so there is nothing to migrate. A store stamped newer
-/// than this binary is refused: `CorpusDb::open` stamps the version it
-/// knows, and stamping a newer store down would re-run that newer build's
-/// steps the next time it opens the file.
-///
-/// Every pending step and the version stamp commit as one transaction, so a
-/// failed upgrade leaves the store exactly as it was - which matters because
-/// `open_readonly` migrates on the way to a read, and a refused read must not
-/// have half-upgraded the file. The transaction is `IMMEDIATE`, taking the
-/// write lock before reading anything, and the version is re-read under it:
-/// `corpus-results` runs outside brokkr's global lock, so two processes can
-/// race to migrate, and a deferred transaction that read before the other
-/// committed would fail its first write with a stale snapshot. Foreign-key
-/// enforcement is off for the duration: the steps move rows that already
-/// exist, and must not refuse a store over a disposition whose run row is
-/// gone (the bundled SQLite enforces the declarative FK by default). The
-/// pragma is a no-op inside a transaction, so it brackets the BEGIN.
+/// Run pending migrations through the shared store policy. The v5 rebuild
+/// preserves historical orphan dispositions, so foreign-key enforcement is
+/// bracketed around the helper's `IMMEDIATE` transaction.
 pub(super) fn run_migrations(conn: &rusqlite::Connection) -> Result<(), DevError> {
-    if !has_table(conn, "run") {
-        return Ok(());
-    }
-
     let current = user_version(conn)?;
     if current > SCHEMA_VERSION {
         return Err(newer_store(current));
     }
-    if current == SCHEMA_VERSION {
-        return Ok(());
-    }
-
     let fk: i64 = conn.pragma_query_value(None, "foreign_keys", |r| r.get(0))?;
     conn.pragma_update(None, "foreign_keys", 0)?;
-    // Whatever fails - BEGIN, a step, or COMMIT - roll back the transaction
-    // this opened if it is still open (the FK pragma is a no-op inside one),
-    // then restore enforcement, and report the first error.
-    let migrated = match conn.execute_batch("BEGIN IMMEDIATE") {
-        // A failed BEGIN opened nothing; any transaction open now is the
-        // caller's, not ours to roll back.
-        Err(e) => Err(DevError::from(e)),
-        Ok(()) => {
-            let done = user_version(conn)
-                .and_then(|now| match now {
-                    // Another process migrated while this one waited.
-                    v if v >= SCHEMA_VERSION => Ok(()),
-                    v => migrate_from(conn, v),
-                })
-                .and_then(|()| conn.execute_batch("COMMIT").map_err(DevError::from));
-            if done.is_err() && !conn.is_autocommit() {
-                conn.execute_batch("ROLLBACK").ok();
+    let migrated = crate::db::store::migrate(
+        conn,
+        "piners corpus runs",
+        SCHEMA_VERSION,
+        |conn, current| {
+            if has_table(conn, "run") {
+                migrate_from(conn, current)?;
             }
-            done
-        }
-    };
+            conn.execute_batch(super::schema::SCHEMA)?;
+            conn.execute_batch(&disposition_ddl("disposition"))?;
+            Ok(())
+        },
+    );
     let restored = conn.pragma_update(None, "foreign_keys", fk);
     migrated?;
     restored?;
@@ -102,8 +70,8 @@ fn newer_store(version: i64) -> DevError {
     ))
 }
 
-/// The steps from version `current` to [`SCHEMA_VERSION`], version stamp
-/// included; [`run_migrations`] runs them inside its transaction.
+/// The steps from version `current` to [`SCHEMA_VERSION`]. The shared store
+/// helper owns the transaction and final version stamp.
 fn migrate_from(conn: &rusqlite::Connection, current: i64) -> Result<(), DevError> {
     // v1 -> v2: add the per-probe wall-clock runtime column. IF NOT EXISTS-style
     // guard via `has_column` keeps the migration idempotent if rerun.
@@ -190,7 +158,6 @@ fn migrate_from(conn: &rusqlite::Connection, current: i64) -> Result<(), DevErro
         backfill_run_context(conn)?;
     }
 
-    conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     Ok(())
 }
 
@@ -648,8 +615,9 @@ mod tests {
             assert_eq!(r.5, None);
         }
         // The staging table is gone, and so are both old indexes: the v4 one
-        // went with the v4 table, the staging one is dropped by name, and
-        // `CorpusDb::open` recreates `idx_disposition_probe` from the DDL.
+        // went with the v4 table, the staging one is dropped by name. The
+        // migration's own schema step recreates `idx_disposition_probe` from
+        // the DDL, so it is the only index left.
         assert!(!has_table(&conn, "disposition_v5"));
         let indexes: Vec<String> = conn
             .prepare(
@@ -661,7 +629,7 @@ mod tests {
             .unwrap()
             .collect::<Result<_, _>>()
             .unwrap();
-        assert!(indexes.is_empty(), "{indexes:?}");
+        assert_eq!(indexes, ["idx_disposition_probe"]);
     }
 
     #[test]

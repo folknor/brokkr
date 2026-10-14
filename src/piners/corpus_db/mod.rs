@@ -8,11 +8,10 @@
 //! is in the DB its artefact dir can be discarded (pass or fail) and its data
 //! stays queryable across runs via `brokkr corpus-results` (piners only).
 //!
-//! Deliberately mirrors the `src/db` `ResultsDb` patterns - WAL, per-db
-//! `PRAGMA user_version` migrations ([`migrate`]), single-transaction bulk
-//! insert ([`ingest`]), parameterized queries + formatter-on-rows rendering
-//! ([`query`]/[`mod@format`]) - but is piners-specific and append-only: it never
-//! deletes, so it carries no FK-cascade machinery.
+//! Store opening and schema-version migrations use the shared policy in
+//! `db::store`; the corpus remains piners-specific and append-only, with
+//! single-transaction bulk inserts ([`ingest`]) and parameterized queries plus
+//! formatter-on-rows rendering ([`query`]/[`mod@format`]).
 
 pub mod compare;
 pub mod format;

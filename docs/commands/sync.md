@@ -64,9 +64,14 @@ Walk `[ratatoskr] sync_script_dir` (default `crates/app/tests/sync-harness`),
 parse top-of-file frontmatter (`description`, `expected`, `fixture`,
 `protocol`, `ceiling`, `preserve_data_dir`), print a sorted table. Empty-state
 output names the expected directory and notes that the cohort may not have
-landed yet. Pure brokkr - no sæhrimnir or harness-binary spawn.
-Invalid values for recognized fields fail discovery with the script path and
-frontmatter line; the fixture key is singular.
+landed yet. Every sync script must declare a fixture. Pure brokkr - no
+sæhrimnir or harness-binary spawn. Unknown lower-case annotation keys,
+duplicate fields, malformed recognized fields, invalid values, and missing
+fixtures fail discovery with the script path and frontmatter line. Ratatoskr's
+`@covers` and `measured` annotations are passed through; ordinary comments
+after a blank line or bare `--` are outside the frontmatter block. The
+informational `protocol: discovery` label describes WebFinger tests that use
+the JMAP endpoint; it does not name a separate sæhrimnir listener.
 
 ## `sync --all [--filter SUB] [--include-ignored]` - run the cohort
 
@@ -90,6 +95,10 @@ A failure that got far enough to allocate an artefact dir adds one
 at the end, not per failure. A 160-script sweep is therefore ~160 lines
 plus a header and a `sync cohort: N/M passed` summary - it used to be
 six lines and a no-op cargo invocation per script.
+
+Discovery validates every script and resolves each selected fixture before
+the lock and harness build begin, so a missing `fixture:` line or a fixture
+typo cannot fail halfway through the cohort.
 
 **Keep-going is the default here**, unlike `service --all`, which stops
 on the first failure. The reason is that each sync script owns its own
@@ -125,8 +134,9 @@ gates that have pinned baselines to compare against.
 
 Two-child orchestration. Validates `[ratatoskr.harness]`, `[ratatoskr]
 mock_server_binary`, and `[ratatoskr] fixtures_dir`, parses the script's
-`-- fixture: <NAME>` frontmatter, acquires the lockfile, builds the harness
-sweep, allocates `.brokkr/ratatoskr/sync/<test>/run-N/` with `harness/` and
+`-- fixture: <NAME>` frontmatter and resolves the fixture before building,
+acquires the lockfile, builds the configured harness directly, and allocates
+`.brokkr/ratatoskr/sync/<test>/run-N/` with `harness/` and
 `mock/` subdirs, spawns sæhrimnir with `--fixture <PATH> --readiness-file
 mock/readiness` (its stderr piped to `mock/stderr.log`), parses the
 readiness sentinel for per-protocol ports, then spawns `<harness binary>
@@ -139,30 +149,15 @@ jmap/graph/gmail/caldav/carddav/people/gcal, `host:port` for imap/smtp).
 During the run brokkr publishes both PIDs into the lockfile - sæhrimnir
 joins the auxiliary `mock_pids` set, the harness binary lands in
 `child_pid` - so `brokkr lock` from another shell shows live RSS/CPU for
-both. PG isolation is opt-in per spawn site: callers pass `isolate_pg = true`
-only when a `SigtermGuard` is active for the spawn's lifetime. The unmeasured
-`sync` run, the `service` shapes, mock-serve, and BenchHarness's sidecar
-window all qualify - their tracked children spawn with `process_group(0)`
-and every intentional kill (`--hard`, deadline expiry, cooperative
-SIGTERM, `MockServer::shutdown`) targets the whole group via
-`kill(-pgid, ...)`, so descendants (sæhrimnir's protocol listeners,
-harness helpers, the ratatoskr build's rustc) go down with the leader.
-The `--bench` path's pre-loop spawns (cargo build, sæhrimnir mock) and
-nidhogg's tile-server lifecycle stay in brokkr's foreground PG instead -
-they're tracked in the lockfile so `brokkr lock` shows them, but
-`--hard` falls back to a single-PID kill that may leave brief helper
-orphans. Untracked subprocesses (`cargo metadata`, ad-hoc `cargo clippy`
-from `brokkr check`, etc.) also stay in brokkr's PG so terminal Ctrl-C
-reaches them through the kernel without our help. Terminal Ctrl-C is bridged: the
-captured runner installs SIGINT alongside SIGTERM, both setting the
-shutdown flag, and the wait-loop forwards SIGTERM to the child PG.
-After the harness exits, `child_pid` is cleared so a stale PID can't be
-SIGKILLed by `--hard` once the kernel has recycled it. `brokkr kill` (cooperative SIGTERM) is
-caught by a guard installed right after the lockfile and held through
-build + run + teardown; the captured runner (used for both `cargo build`
-and the harness binary) polls the shutdown flag every 50ms, forwards
-SIGTERM to whichever child is current with a 1.5s budget, then mock-
-teardown drains sæhrimnir and brokkr exits with `DevError::Interrupted`.
+both. Tracked sæhrimnir, cargo-build, and harness children use their own
+process groups across service and sync. Deadline, cooperative shutdown, and
+`--hard` cleanup target the child group, including helper descendants.
+Terminal Ctrl-C and `brokkr kill` are bridged by the captured runner: it
+forwards SIGTERM to the active group, waits up to 1.5s, and then escalates.
+After the harness exits, `child_pid` is cleared so a recycled PID cannot be
+SIGKILLed by `--hard`. Every mock is unregistered when its shared lifecycle
+shuts it down; if a later step fails, the service cohort drains its mocks
+before propagating the original failure.
 
 After the harness exits, brokkr SIGTERMs sæhrimnir with the standard 1.5s
 budget then escalates to SIGKILL. PASS/FAIL on the harness exit code; FAIL
@@ -189,23 +184,25 @@ binary runs N times with `BROKKR_MARKER_FIFO` set. Each iteration gets its own
 wins, first `SYNC_END` after it ends the span - so a warmup loop under the
 same name is fine).
 
-Best-of-N selection: marker span if both markers fired, else wall-clock
-elapsed. The best iteration's `summary.json` (if the script writes one into
+Best-of-N selection ranks every iteration on its `SYNC_START` -> `SYNC_END`
+span, kept in microseconds; an iteration missing either marker fails the
+measurement rather than being ranked on a whole-process wall. The best
+iteration's `summary.json` (if the script writes one into
 `BROKKR_HARNESS_ARTEFACT_DIR`) gets ingested as `meta.<key>` KvPair rows:
 numeric values become Int/Real, strings become Text, nested objects/bools/null
-are skipped. Storage is via the standard `BenchHarness`, so `brokkr results
---compare` and the sidecar DB work the same as for pbfhogg/elivagar benches.
-The loop is ratatoskr's own (one sæhrimnir across iterations, marker-span
-ranking), but it records the provenance the harness loops do: every
-iteration's ranking value in execution order, `cargo_profile` from the
-profile actually built (`dev` under `[ratatoskr.harness] debug = true` or
-`--debug`), the configured features, the `capture_env` snapshot, sidecar
-RunInfo, and a measurement-start stamp so `prev.gap_seconds` excludes the
-run's own duration. A failed, hung or interrupted run keeps its collected
-sidecar data under the `dirty` alias - including an iteration whose child
-succeeded but whose post-processing (the per-iteration log write, or reading
-`summary.json`) then failed: each iteration's data joins the run's list the
-moment its child is reaped, and the dirty record carries the child's real
+are skipped. The run goes through the shared measurement loop and
+`BenchHarness::record` every other measured command uses - one sæhrimnir
+across iterations is the only sync-specific part - so `brokkr results
+--compare` and the sidecar DB work the same as for pbfhogg/elivagar benches,
+and the row carries the same provenance: every iteration's ranking value in
+execution order, `cargo_profile` from the profile actually built (`dev` under
+`[ratatoskr.harness] debug = true` or `--debug`), the configured features, the
+`capture_env` snapshot, sidecar RunInfo naming the winning iteration's process,
+and a measurement-start stamp so `prev.gap_seconds` excludes the run's own
+duration. A failed, hung or interrupted run keeps its collected sidecar data
+under the `dirty` alias - including an iteration whose child succeeded but
+whose post-processing (the per-iteration log write, or reading
+`summary.json`) then failed - and the dirty record carries the child's real
 exit status. `--force` allows recording on a dirty git tree (rows land under
 the `dirty` alias). A gated run also records the harness build's features
 in `gate.db`, where the gate requires them to match the baseline's (see
@@ -265,6 +262,7 @@ request that lands after the last iteration still surfaces as
 `Interrupted` once the run has recorded, so a `--gate all` sweep does not
 start its next gate.
 
-The bench path's pre-loop spawns (cargo build, sæhrimnir) stay in brokkr's
-foreground process group, so terminal Ctrl-C reaches them directly; the
-measured harness iterations get their own group under the sidecar.
+Cargo build and sæhrimnir use their own process groups during the bench
+setup; each measured harness iteration also gets its own group under the
+sidecar. The captured runner forwards terminal Ctrl-C and cooperative
+shutdown to whichever tracked child is active.

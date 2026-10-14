@@ -1,8 +1,8 @@
 //! `brokkr deps` - dependency audit.
 //!
-//! Phase-based full audit: `run()` loads full and host-filtered `cargo metadata`
-//! snapshots for the phases that need them. Focus mode resolves chains from the
-//! host-filtered graph and loads the full graph only when it needs a fallback.
+//! Phase-based full audit: `run()` loads one resolving Cargo snapshot and
+//! projects its graph to the host for phases that need that view. Focus mode
+//! uses the same projection and falls back to the unfiltered graph when needed.
 //! The renderer turns events into prefixed text or NDJSON, depending on `--json`.
 //!
 //! Shipped phases and planned work are listed in `docs/commands/deps.md`.
@@ -11,14 +11,13 @@ use std::path::Path;
 
 use serde::Serialize;
 
+use crate::cargo::metadata::{self, Query};
 use crate::error::DevError;
-use crate::output;
 
 mod ccu;
 mod duplicate_version;
 mod focus;
 mod git_dependency;
-mod model;
 mod native_code;
 mod path_dependency;
 mod phase;
@@ -26,9 +25,11 @@ mod publish_cycle;
 mod render;
 mod workspace_dep;
 
+pub use crate::cargo::metadata::DependencyKind;
+pub(crate) use crate::cargo::metadata::{
+    CargoMetadata, CargoPackage, PackageId, PackageSourceKind,
+};
 use focus::run_focus;
-pub use model::DependencyKind;
-pub(crate) use model::{CargoMetadata, CargoPackage, PackageId, PackageSourceKind};
 use phase::{Phase, PhaseOutcome, PhaseSummary};
 
 // --- Event model (NDJSON-serializable) ---
@@ -161,8 +162,17 @@ pub fn run(project_root: &Path, args: &DepsArgs) -> Result<(), DevError> {
     Ok(())
 }
 
-fn load_metadata(project_root: &Path) -> Result<CargoMetadata, DevError> {
-    run_metadata_locked(project_root, &["metadata", "--format-version", "1"])
+fn load_metadata(project_root: &Path) -> Result<std::sync::Arc<CargoMetadata>, DevError> {
+    metadata::load(
+        project_root,
+        Query {
+            locked: true,
+            ..Query::resolving()
+        },
+        &[],
+        None,
+    )
+    .map_err(with_locked_explanation)
 }
 
 /// A resolving `cargo metadata`, pinned with `--locked`. `deps` audits the
@@ -176,17 +186,15 @@ fn load_metadata(project_root: &Path) -> Result<CargoMetadata, DevError> {
 ///
 /// No lockfile at all is refused rather than generated: there is nothing to
 /// audit, and creating one is a build's job, not a report's.
-fn run_metadata_locked(project_root: &Path, args: &[&str]) -> Result<CargoMetadata, DevError> {
-    let mut locked: Vec<&str> = args.to_vec();
-    locked.push("--locked");
-    run_metadata(project_root, &locked).map_err(|e| match e {
+fn with_locked_explanation(error: DevError) -> DevError {
+    match error {
         DevError::Build(msg) => DevError::Build(format!(
             "{msg}\n`brokkr deps` runs cargo metadata with --locked: it audits Cargo.lock as \
              committed and never rewrites it. A missing or out-of-date lockfile must be \
              brought current by a build first."
         )),
         other => other,
-    })
+    }
 }
 
 /// The shared renderer: `deps` and the `check` phase print an identical
@@ -205,58 +213,19 @@ pub(crate) use publish_cycle::INVENTORY_CAVEAT as PUBLISH_CYCLE_CAVEAT;
 /// a cycle that fails `brokkr deps` must fail `brokkr check` identically,
 /// or `deps` and `check` could disagree about the same tree.
 pub(crate) fn publication_cycles(project_root: &Path) -> Result<Vec<PublishCycleEvent>, DevError> {
-    let metadata = run_metadata(
-        project_root,
-        &["metadata", "--format-version", "1", "--no-deps"],
-    )?;
+    let metadata = metadata::load(project_root, Query::workspace(), &[], None)?;
     Ok(publish_cycle::run(&metadata))
 }
 
-/// Same as `load_metadata` but adds `--filter-platform=<host>` so the
-/// resolve graph drops packages and edges that aren't built for this
-/// host. Used by `duplicate_version` to avoid blaming the workspace
-/// for transitive crates that only exist on other targets (the
-/// `cargo tree -i <crate> --target all` case where nothing actually
-/// depends on the crate on any active target). Host triple comes from
-/// `rustc -vV` field `host:`.
-fn load_metadata_host_filtered(project_root: &Path) -> Result<CargoMetadata, DevError> {
-    let host = host_triple()?;
-    run_metadata_locked(
-        project_root,
-        &[
-            "metadata",
-            "--format-version",
-            "1",
-            "--filter-platform",
-            &host,
-        ],
-    )
-}
-
-fn run_metadata(project_root: &Path, args: &[&str]) -> Result<CargoMetadata, DevError> {
-    let captured = output::run_cargo(args, project_root, &[], None)?;
-    if !captured.success() {
-        let stderr = String::from_utf8_lossy(&captured.stderr);
-        return Err(DevError::Build(format!("cargo metadata failed: {stderr}")));
-    }
-    let stdout = String::from_utf8_lossy(&captured.stdout);
-    let metadata: CargoMetadata = serde_json::from_str(&stdout)?;
-    Ok(metadata)
-}
-
-fn host_triple() -> Result<String, DevError> {
-    let captured = output::run_captured("rustc", &["-vV"], Path::new("."))?;
-    if !captured.success() {
-        let stderr = String::from_utf8_lossy(&captured.stderr);
-        return Err(DevError::Build(format!("rustc -vV failed: {stderr}")));
-    }
-    let stdout = String::from_utf8_lossy(&captured.stdout);
-    for line in stdout.lines() {
-        if let Some(rest) = line.strip_prefix("host: ") {
-            return Ok(rest.trim().to_string());
-        }
-    }
-    Err(DevError::Build(
-        "rustc -vV did not report a host triple".to_string(),
-    ))
+/// Project the shared resolving graph to the selected rustc host, dropping
+/// packages and edges confined to inactive targets. Used by
+/// `duplicate_version` to avoid blaming the workspace for transitive crates
+/// that only exist on other targets (the `cargo tree -i <crate> --target all`
+/// case where nothing actually depends on the crate on an active target).
+fn load_metadata_host_filtered(
+    project_root: &Path,
+) -> Result<std::sync::Arc<CargoMetadata>, DevError> {
+    let host = crate::cargo::rustc::load(project_root)?.host.clone();
+    let metadata = load_metadata(project_root)?;
+    Ok(std::sync::Arc::new(metadata.filtered_for_platform(&host)))
 }

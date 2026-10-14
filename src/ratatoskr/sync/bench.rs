@@ -2,7 +2,7 @@
 
 use std::fs;
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::artefacts::{self, ArtefactDir};
 use crate::build::CargoProfile;
@@ -12,18 +12,17 @@ use crate::config::project_config::ratatoskr::RatatoskrConfig;
 use crate::context;
 use crate::db::{KvPair, KvValue};
 use crate::error::DevError;
-use crate::harness::{BenchConfig, BenchHarness, BenchResult};
+use crate::harness::{BenchConfig, BenchHarness, WallSource};
 use crate::output;
 use crate::project::{BuildRoot, Project, ProjectRoot};
 use crate::ratatoskr::build::{self, HarnessBuild};
-use crate::ratatoskr::discover;
 use crate::ratatoskr::gate as gate_eval;
 use crate::ratatoskr::gate_store::canonical_features;
-use crate::ratatoskr::saehrimnir::{MockServer, endpoint_env_pairs, require_path, resolve_fixture};
-use crate::ratatoskr::timing::{STDERR_TAIL_LINES, format_secs};
-use crate::sidecar;
+use crate::ratatoskr::saehrimnir::{ManagedMock, MockArtifactScope};
+use crate::ratatoskr::timing::format_secs;
 
-use super::gate::{self, GATE_ALL, GateHookCtx};
+use super::gate::{self, GateHookCtx};
+use super::runner::{resolve_single, validate_sync_config};
 
 /// Drive the measured `brokkr sync <SCRIPT> --bench N` end-to-end:
 ///
@@ -45,8 +44,7 @@ use super::gate::{self, GATE_ALL, GateHookCtx};
 ///    captures `/proc` samples + phase markers; brokkr reads
 ///    `iter-K/harness/summary.json` after each iteration.
 /// 7. Best-of-N is selected on the script's `SYNC_START` -> `SYNC_END`
-///    marker span (falls back to wall-clock elapsed if the script
-///    doesn't emit those markers). The best iteration's summary.json
+///    marker span (missing markers fail the measurement). The best iteration's summary.json
 ///    metrics are stored as `meta.<key>` rows alongside the result;
 ///    sidecar data for the best iteration is what `brokkr sidecar
 ///    <uuid>` surfaces.
@@ -54,42 +52,10 @@ use super::gate::{self, GATE_ALL, GateHookCtx};
 #[allow(clippy::too_many_lines)] // entry point: validate + bootstrap + build + spawn + dispatch
 pub fn run_sync_bench(req: &SyncBenchRequest<'_>) -> Result<(), DevError> {
     let cfg = req.ratatoskr;
-    let harness_cfg = cfg.harness.as_ref().ok_or_else(|| {
-        DevError::Config(
-            "sync: no [ratatoskr.harness] section in brokkr.toml. \
-             Declare it with `package = \"<crate>\"` (and optional \
-             `binary`, `features`, `debug`)."
-                .into(),
-        )
-    })?;
-    let mock_binary = require_path(
-        &cfg.mock_server_binary,
-        req.project_root.as_path(),
-        "mock_server_binary",
-    )?;
-    let fixtures_dir = require_path(
-        &cfg.fixtures_dir,
-        req.project_root.as_path(),
-        "fixtures_dir",
-    )?;
-    if !mock_binary.exists() {
-        return Err(DevError::Config(format!(
-            "sync: sæhrimnir binary not found at {}. Build it first.",
-            mock_binary.display()
-        )));
-    }
+    let (cfg, harness_cfg, mock_binary, fixtures_dir) =
+        validate_sync_config(req.project_root.as_path(), cfg)?;
     if req.bench == 0 {
         return Err(DevError::Usage("sync: --bench must be >= 1".into()));
-    }
-
-    // `all` is the reserved sweep value, so a gate of that name could
-    // never be selected individually. Refuse rather than silently
-    // shadow it.
-    if cfg.gate.contains_key(GATE_ALL) {
-        return Err(DevError::Config(format!(
-            "sync: `[ratatoskr.gate.{GATE_ALL}]` collides with the reserved \
-             `--gate {GATE_ALL}` sweep value - rename that gate"
-        )));
     }
 
     // Validate `--gate <name>` references a configured gate before
@@ -112,29 +78,12 @@ pub fn run_sync_bench(req: &SyncBenchRequest<'_>) -> Result<(), DevError> {
         None
     };
 
-    let script_abs = Path::new(req.script)
-        .canonicalize()
-        .map_err(|e| DevError::Config(format!("sync: canonicalize script: {e}")))?;
-    if !script_abs.is_file() {
-        return Err(DevError::Config(format!(
-            "sync: script not found or not a file: {}",
-            req.script
-        )));
-    }
-    let test_id = script_abs
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .ok_or_else(|| DevError::Config(format!("sync: script has no stem: {}", req.script)))?
-        .to_owned();
-
-    let parsed = discover::parse_script(&script_abs, &test_id)
-        .map_err(|e| DevError::Config(format!("sync: parse script: {e}")))?;
-    let fixture_name = parsed.fixture.as_ref().ok_or_else(|| {
-        DevError::Config(format!(
-            "sync: script {test_id} has no `-- fixture: <NAME>` frontmatter line."
-        ))
-    })?;
-    let fixture_path = resolve_fixture(&fixtures_dir, fixture_name)?;
+    let resolved = resolve_single(req.script, &fixtures_dir)?;
+    let script_abs = resolved.script_abs;
+    let test_id = resolved.test_id;
+    let fixture_name = resolved.fixture_name;
+    let fixture_path = resolved.fixture_path;
+    let ceiling = resolved.ceiling;
 
     // Lock, host paths and the bench harness, through the same session
     // constructor every other measured command uses: the lock is taken (or
@@ -142,7 +91,7 @@ pub fn run_sync_bench(req: &SyncBenchRequest<'_>) -> Result<(), DevError> {
     // root - the `--commit` worktree when one was requested, so the recorded
     // commit describes the code that was actually built - and results.db
     // stays under the main tree's project root.
-    let context::MeasurementSession { paths, harness, .. } = context::MeasurementSession::new(
+    let context::MeasurementSession { harness, .. } = context::MeasurementSession::new(
         req.dev_config,
         Project::Ratatoskr,
         req.project_root,
@@ -179,11 +128,7 @@ pub fn run_sync_bench(req: &SyncBenchRequest<'_>) -> Result<(), DevError> {
         debug,
         Some(&|pid| harness.lock().set_child_pid(pid)),
         Some(&|| harness.lock().clear_child_pid()),
-        // isolate_pg=false: the phase guard above makes the captured
-        // runner forward `brokkr kill` to cargo; spawns stay in brokkr's PG
-        // so terminal Ctrl-C also reaches them directly. --hard walks
-        // brokkr's process tree, so rustc workers go down with it.
-        false,
+        true, // isolate_pg: phase guard forwards signals to the build process group
     )?;
     // What was actually built: ratatoskr's config sets `debug = true`, so the
     // row's profile follows the build, not a release default.
@@ -201,8 +146,6 @@ pub fn run_sync_bench(req: &SyncBenchRequest<'_>) -> Result<(), DevError> {
     let state = ProjectState::new(req.project_root.as_path());
     let artefact_parent = state.ratatoskr().sync_artifacts();
     let artefacts = ArtefactDir::allocate(&artefact_parent, &test_id, req.keep_artefacts)?;
-    let mock_dir = artefacts.path().join("mock");
-    fs::create_dir_all(&mock_dir).map_err(DevError::Io)?;
 
     output::ratatoskr_msg(&format!(
         "running {test_id} (fixture: {fixture_name}, bench={})",
@@ -217,17 +160,15 @@ pub fn run_sync_bench(req: &SyncBenchRequest<'_>) -> Result<(), DevError> {
         fixture_path: &fixture_path,
         script_abs: &script_abs,
         run_root: artefacts.path(),
-        mock_dir: &mock_dir,
-        scratch_dir: &paths.scratch_dir,
         harness: &harness,
-        fixture_name,
+        fixture_name: &fixture_name,
         debug,
         gate_rules: gate_rules.as_ref(),
         // The frontmatter `ceiling:` (or discover's default) bounds each
         // measured iteration exactly as it bounds the unmeasured run: a
         // hung harness in a `--gate all` sweep otherwise held the global
         // lock indefinitely.
-        ceiling: parsed.ceiling,
+        ceiling,
         phase_guard: &mut phase_guard,
     });
 
@@ -299,22 +240,6 @@ impl PhaseGuard {
     fn resume(&mut self) {}
 }
 
-/// One iteration's measured outcome. `marker_span_ms` is the
-/// `SYNC_START` -> `SYNC_END` span when those markers fired; otherwise
-/// `None` and `wall_clock_ms` is used for best-of-N selection.
-struct IterOutcome {
-    run_idx: usize,
-    marker_span_ms: Option<i64>,
-    wall_clock_ms: i64,
-    summary: serde_json::Map<String, serde_json::Value>,
-}
-
-impl IterOutcome {
-    fn elapsed_ms(&self) -> i64 {
-        self.marker_span_ms.unwrap_or(self.wall_clock_ms)
-    }
-}
-
 struct BenchLoopCtx<'a> {
     req: &'a SyncBenchRequest<'a>,
     cfg: &'a RatatoskrConfig,
@@ -323,8 +248,6 @@ struct BenchLoopCtx<'a> {
     fixture_path: &'a Path,
     script_abs: &'a Path,
     run_root: &'a Path,
-    mock_dir: &'a Path,
-    scratch_dir: &'a Path,
     harness: &'a BenchHarness,
     fixture_name: &'a str,
     debug: bool,
@@ -343,8 +266,6 @@ fn bench_loop(ctx: BenchLoopCtx<'_>) -> Result<(), DevError> {
         fixture_path,
         script_abs,
         run_root,
-        mock_dir,
-        scratch_dir,
         harness,
         fixture_name,
         debug,
@@ -352,31 +273,29 @@ fn bench_loop(ctx: BenchLoopCtx<'_>) -> Result<(), DevError> {
         ceiling,
         phase_guard,
     } = ctx;
+    // Allocate every fallible resource before the mock starts. Once a
+    // managed mock exists, every error below still reaches the shared
+    // graceful shutdown path.
+    let bin_dir_str = built.bin_dir.display().to_string();
+    let script_str = script_abs.display().to_string();
+
     // PID published from inside spawn_observed - before readiness wait
     // - so a `brokkr kill --hard` arriving during startup finds it. The
     // phase guard covers the readiness wait: it polls the shutdown flag
     // and reaps sæhrimnir before returning `Interrupted`.
-    let mock = MockServer::spawn_observed(
+    let mock = ManagedMock::start(
+        cfg,
         mock_binary,
         fixture_path,
-        mock_dir,
-        Some(&|pid| harness.lock().add_mock_pid(pid)),
-        Some(&|pid| harness.lock().remove_mock_pid(pid)),
-        // isolate_pg=false: same reason as the build call - the mock
-        // stays in brokkr's PG so terminal Ctrl-C reaches it directly.
-        false,
+        fixture_name,
+        MockArtifactScope::Run(run_root),
+        harness.lock(),
     )?;
     output::ratatoskr_msg(&format!(
         "mock ready in {}",
         format_secs(mock.ready_elapsed())
     ));
-    let endpoint_envs = endpoint_env_pairs(cfg, mock.endpoints());
-
-    let mut fifo = sidecar::SidecarFifo::create(scratch_dir)?;
-    let fifo_path = fifo.path_str()?.to_owned();
-    let bin_dir_str = built.bin_dir.display().to_string();
-    let binary_str = built.binary.display().to_string();
-    let script_str = script_abs.display().to_string();
+    let endpoint_envs = mock.env_pair_refs();
 
     // Built before the loop so a failed run can still record sidecar
     // provenance against it.
@@ -399,243 +318,133 @@ fn bench_loop(ctx: BenchLoopCtx<'_>) -> Result<(), DevError> {
         metadata: Vec::new(),
     };
 
-    let mut sidecar_runs: Vec<sidecar::SidecarData> = Vec::with_capacity(req.bench);
-    let mut best: Option<IterOutcome> = None;
-    // Each completed iteration's ranking value (marker span, else wall), in
-    // execution order - the same list `run_external_*` stores.
-    let mut walls: Vec<i64> = Vec::with_capacity(req.bench);
-    let mut last_pid: u32 = 0;
-    // The in-flight iteration's child status, for the dirty sidecar record:
-    // set as soon as the child is reaped, cleared once the iteration
-    // completes. A failure after a successful child (log write,
-    // `summary.json`) therefore records that success, not a fabricated code.
-    let mut failed_ending: Option<crate::output::Ending> = None;
-    // Stamped before the first iteration so `prev.gap_seconds` measures to
-    // the start of this run, not to its recording.
-    let start_epoch = harness.begin_measurement();
-
-    let bench_outcome = (|| -> Result<(), DevError> {
-        for i in 0..req.bench {
+    // One mock serves every iteration; the shared measurement loop owns the
+    // FIFO, progress, ranking on the `SYNC_START` -> `SYNC_END` span and
+    // winner selection. Each iteration's `summary.json`, indexed by
+    // iteration, is kept for the gate.
+    let mut summaries: Vec<Option<serde_json::Map<String, serde_json::Value>>> =
+        Vec::with_capacity(req.bench);
+    let measured = harness.measure(
+        &bench_config,
+        Some(&built.binary),
+        WallSource::MarkerSpan {
+            start: "SYNC_START",
+            end: "SYNC_END",
+        },
+        true,
+        |i, fifo| {
             if phase_guard.requested() {
                 return Err(DevError::Interrupted);
             }
-            crate::harness::announce_run(i, req.bench);
-            harness.lock().set_progress(
-                u32::try_from(i + 1).unwrap_or(u32::MAX),
-                u32::try_from(req.bench).unwrap_or(u32::MAX),
-            );
-            if i > 0 {
-                fifo.reopen()?;
-            }
-
+            let fifo = fifo
+                .ok_or_else(|| DevError::Internal("marker-span measurement owns a FIFO".into()))?;
             let iter_dir = run_root.join(format!("iter-{}", i + 1));
             let iter_harness_dir = iter_dir.join("harness");
             fs::create_dir_all(&iter_harness_dir).map_err(DevError::Io)?;
             let iter_harness_str = iter_harness_dir.display().to_string();
-
             let mut env_pairs: Vec<(&str, &str)> = vec![
-                ("BROKKR_MARKER_FIFO", fifo_path.as_str()),
-                ("BROKKR_HARNESS_ARTEFACT_DIR", &iter_harness_str),
-                ("BROKKR_TEST_BIN_DIR", &bin_dir_str),
+                ("BROKKR_HARNESS_ARTEFACT_DIR", iter_harness_str.as_str()),
+                ("BROKKR_TEST_BIN_DIR", bin_dir_str.as_str()),
             ];
-            for (name, value) in &endpoint_envs {
-                env_pairs.push((name.as_str(), value.as_str()));
-            }
+            env_pairs.extend(endpoint_envs.iter().copied());
 
             // The sidecar's own guard nests inside the phase guard for the
             // measured window. Refuses with `Interrupted` if a request
             // already landed in the gap.
             phase_guard.release_for_sidecar()?;
-            let start = Instant::now();
-            let spawned = output::spawn_captured(
-                &binary_str,
+            let captured = harness.capture(
+                &built.binary,
                 &["--test-harness", &script_str],
                 req.project_root.as_path(),
                 &env_pairs,
-                // isolate_pg=true: sidecar installs its own
-                // SigtermGuard around `run_sidecar` below, covering
-                // the lifetime of this child.
-                true,
-                output::SpawnProfile::Plain,
+                &[],
+                fifo,
+                i,
+                // The frontmatter ceiling bounds each measured iteration.
+                Some(ceiling),
             );
-            let child = match spawned {
-                Ok(c) => c,
-                Err(e) => {
-                    phase_guard.resume();
-                    return Err(e);
-                }
-            };
-            let pid = child.id();
-            last_pid = pid;
-            harness.lock().set_child_pid(pid);
-
-            let result =
-                sidecar::run_sidecar_with_deadline(child, &mut fifo, i, start, None, Some(ceiling));
             phase_guard.resume();
-            // Iteration's child has reaped; clear so a stale PID can't
-            // be SIGKILLed by `--hard` in the gap before the next iter.
-            harness.lock().clear_child_pid();
+            let mut iteration = captured?;
 
-            // The iteration's sidecar data joins the run's list the moment
-            // the child is reaped, before anything below can fail. Every
-            // later `?` - the log writes, the `summary.json` read - then
-            // leaves it in `sidecar_runs` for the `dirty` record after the
-            // loop, rather than dropping the trajectory of a run whose child
-            // succeeded. `failed_status` is stamped alongside for the same
-            // reason: a post-processing failure records the status the
-            // child actually had, which may well be success. The index
-            // stays `i`, so `best.run_idx` still addresses this entry.
-            let marker_span_ms = sync_span_from_markers(&result.data.markers);
-            let ending = result.data.ending.clone();
-            failed_ending = Some(ending.clone());
-            sidecar_runs.push(result.data);
-
-            // Persist each iter's stdout/stderr so a later FAIL can
-            // be reproduced without re-running. summary.json is
-            // already in iter_harness_dir from the harness binary.
-            fs::write(iter_dir.join("binary-stdout.log"), &result.stdout).map_err(DevError::Io)?;
-            fs::write(iter_dir.join("binary-stderr.log"), &result.stderr).map_err(DevError::Io)?;
-
-            match &ending {
-                crate::output::Ending::Interrupted => return Err(DevError::Interrupted),
-                crate::output::Ending::Deadline(_) => {
-                    return Err(DevError::Config(format!(
-                        "harness binary exceeded ceiling {ceiling:?} on iter {}/{}",
-                        i + 1,
-                        req.bench
-                    )));
+            // Persist each iter's stdout/stderr so a later FAIL can be
+            // reproduced without re-running, then ingest summary.json from
+            // a successful child. Observer failures keep the evidence.
+            let observed = (|| -> Result<Option<_>, DevError> {
+                fs::write(iter_dir.join("binary-stdout.log"), &iteration.stdout)
+                    .map_err(DevError::Io)?;
+                fs::write(iter_dir.join("binary-stderr.log"), &iteration.stderr)
+                    .map_err(DevError::Io)?;
+                if iteration.error.is_some() {
+                    return Ok(None);
                 }
-                _ => {}
+                let summary = read_summary_json(&iter_harness_dir)?;
+                if let Some(result) = &mut iteration.result {
+                    result.kv.extend(summary_to_kv(&summary));
+                }
+                Ok(Some(summary))
+            })();
+            match observed {
+                Ok(summary) => summaries.push(summary),
+                Err(error) => {
+                    summaries.push(None);
+                    iteration.fail(error);
+                }
             }
-            if !matches!(ending, crate::output::Ending::Exited(0)) {
-                let stderr_tail = String::from_utf8_lossy(&result.stderr)
-                    .lines()
-                    .rev()
-                    .take(STDERR_TAIL_LINES)
-                    .collect::<Vec<_>>()
-                    .into_iter()
-                    .rev()
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                return Err(DevError::Config(format!(
-                    "harness binary ended with {:?} on iter {}/{}\n--- last 5 stderr lines ---\n{stderr_tail}",
-                    ending,
-                    i + 1,
-                    req.bench
-                )));
-            }
+            Ok(iteration)
+        },
+    );
 
-            let summary = read_summary_json(&iter_harness_dir)?;
-            let wall_clock_ms = i64::try_from(result.elapsed.as_millis()).unwrap_or(i64::MAX);
-            let outcome = IterOutcome {
-                run_idx: i,
-                marker_span_ms,
-                wall_clock_ms,
-                summary,
-            };
+    let mock_shutdown = mock.shutdown();
+    if let Ok(mock_outcome) = &mock_shutdown {
+        output::ratatoskr_msg(&format!(
+            "mock shutdown in {}",
+            format_secs(mock_outcome.shutdown_elapsed)
+        ));
+    }
+    let killed_after_budget = mock_shutdown
+        .as_ref()
+        .is_ok_and(|outcome| outcome.killed_after_budget);
 
-            output::bench_msg(&format!(
-                "  iter {} -> {}ms{}",
-                i + 1,
-                outcome.elapsed_ms(),
-                if marker_span_ms.is_none() {
-                    " (wall-clock; no SYNC_START/SYNC_END markers)"
-                } else {
-                    ""
-                },
-            ));
-
-            walls.push(outcome.elapsed_ms());
-            if best
-                .as_ref()
-                .is_none_or(|b| outcome.elapsed_ms() < b.elapsed_ms())
-            {
-                best = Some(outcome);
-            }
-            // The iteration completed: no failure to attribute to it.
-            failed_ending = None;
+    let mut measurement = measured?;
+    let recorded = harness.record(&bench_config, &mut measurement, |result, _| {
+        if killed_after_budget {
+            result
+                .kv
+                .push(KvPair::text("meta.mock_killed_after_budget", "true"));
         }
         Ok(())
-    })();
-
-    drop(fifo);
-    let mock_outcome = mock.shutdown();
-    harness.lock().clear_mock_pids();
-    output::ratatoskr_msg(&format!(
-        "mock shutdown in {}",
-        format_secs(mock_outcome.shutdown_elapsed)
-    ));
-
-    let program = built.binary.as_path();
-    if let Err(e) = bench_outcome {
-        // Keep what was collected under the `dirty` alias, as
-        // `run_external_*` does - the /proc trajectory of a crashed, hung or
-        // interrupted iteration is the most useful data the run leaves.
-        // Best-effort: the run's own error is the one to report.
-        if !sidecar_runs.is_empty() {
-            let info = harness.run_info_for(
-                &bench_config,
-                program,
-                start_epoch,
-                Some(last_pid),
-                failed_ending.clone(),
-            );
-            harness
-                .store_sidecar(None, &sidecar_runs, sidecar_runs.len() - 1, Some(&info))
-                .ok();
-        }
-        return Err(e);
-    }
-
-    let best = best.ok_or_else(|| DevError::Config("sync: no successful iterations".into()))?;
-    let elapsed_ms = best.elapsed_ms();
-
-    let mut kv = summary_to_kv(&best.summary);
-    if best.marker_span_ms.is_none() {
-        kv.push(KvPair::text("meta.timing_source", "wall_clock_no_markers"));
-    } else {
-        kv.push(KvPair::text("meta.timing_source", "sync_markers"));
-    }
-    if mock_outcome.killed_after_budget {
-        kv.push(KvPair::text("meta.mock_killed_after_budget", "true"));
-    }
-
-    let bench_result = BenchResult {
-        elapsed_ms,
-        elapsed_us: None,
-        kv,
-        // Best-of-N: every iteration's ranking value, in execution order.
-        iterations: walls,
-        distribution: None,
-        hotpath: None,
-    };
-
-    let info = harness.run_info_for(
-        &bench_config,
-        program,
-        start_epoch,
-        Some(last_pid),
-        sidecar_runs
-            .get(best.run_idx)
-            .map(|data| data.ending.clone()),
-    );
-    let uuid = match harness.record_result(&bench_config, &bench_result) {
-        Ok(uuid) => uuid,
+    });
+    let result = match recorded {
+        Ok(result) => result,
         Err(e) => {
-            // The row is lost; the trajectory need not be.
-            harness
-                .store_sidecar(None, &sidecar_runs, best.run_idx, Some(&info))
-                .ok();
+            if let Err(shutdown_error) = &mock_shutdown {
+                output::ratatoskr_msg(&format!(
+                    "mock-server shutdown also failed: {shutdown_error}"
+                ));
+            }
             return Err(e);
         }
     };
-    harness.store_sidecar(uuid.as_deref(), &sidecar_runs, best.run_idx, Some(&info))?;
+    mock_shutdown?;
+
+    let best_idx = measurement.winner.ok_or_else(|| {
+        DevError::Internal("sync bench recorded without a winning iteration".into())
+    })?;
+    let elapsed_ms = result.elapsed_ms;
+    let summary = summaries
+        .get(best_idx)
+        .and_then(Option::as_ref)
+        .ok_or_else(|| DevError::Internal("sync bench winner has no summary".into()))?;
+    let sidecar_data = measurement.iterations[best_idx]
+        .sidecar
+        .as_ref()
+        .ok_or_else(|| DevError::Internal("sync bench winner has no sidecar data".into()))?;
 
     output::ratatoskr_msg(&format!(
         "best-of-{}: {}ms (iter {})",
         req.bench,
         elapsed_ms,
-        best.run_idx + 1,
+        best_idx + 1,
     ));
 
     // `run_sync_bench` compiles the rules whenever `req.gate` is set, so the
@@ -658,8 +467,8 @@ fn bench_loop(ctx: BenchLoopCtx<'_>) -> Result<(), DevError> {
                 .map(|h| canonical_features(&h.features))
                 .unwrap_or_default(),
             elapsed_ms,
-            summary: &best.summary,
-            sidecar_data: &sidecar_runs[best.run_idx],
+            summary,
+            sidecar_data,
         })?;
     }
 
@@ -679,10 +488,10 @@ pub(super) fn read_summary_json(
     }
     let text = fs::read_to_string(&path).map_err(DevError::Io)?;
     let value: serde_json::Value = serde_json::from_str(&text)
-        .map_err(|e| DevError::Config(format!("sync: parse {}: {e}", path.display())))?;
+        .map_err(|e| DevError::Verify(format!("sync: parse {}: {e}", path.display())))?;
     match value {
         serde_json::Value::Object(map) => Ok(map),
-        other => Err(DevError::Config(format!(
+        other => Err(DevError::Verify(format!(
             "sync: {} root must be a JSON object, got {}",
             path.display(),
             crate::ratatoskr::gate::kind_of(&other)
@@ -723,21 +532,6 @@ pub(super) fn summary_to_kv(map: &serde_json::Map<String, serde_json::Value>) ->
         }
     }
     out
-}
-
-/// Compute the millisecond span between the script-emitted `SYNC_START`
-/// and `SYNC_END` markers, if both fired. Returns `None` when either
-/// is missing - caller falls back to wall-clock. Multiple `SYNC_START`s
-/// are tolerated (last one wins) so a script that warms up under the
-/// same marker name doesn't break; first `SYNC_END` after the last
-/// `SYNC_START` wins.
-pub(super) fn sync_span_from_markers(markers: &[sidecar::Marker]) -> Option<i64> {
-    let last_start = markers.iter().rfind(|m| m.name == "SYNC_START")?;
-    let end = markers
-        .iter()
-        .find(|m| m.name == "SYNC_END" && m.timestamp_us > last_start.timestamp_us)?;
-    let span_us = end.timestamp_us.checked_sub(last_start.timestamp_us)?;
-    Some(span_us / 1000)
 }
 
 // ---------------------------------------------------------------------------

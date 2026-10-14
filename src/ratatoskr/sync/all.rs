@@ -7,7 +7,7 @@ use crate::config::project_config::ratatoskr::RatatoskrConfig;
 use crate::error::DevError;
 use crate::output;
 use crate::ratatoskr::build;
-use crate::ratatoskr::discover::{self, ScriptInfo};
+use crate::ratatoskr::discover::{self, ScriptInfo, Selection};
 
 use super::list::sync_script_dir;
 use super::runner::{SyncRunner, resolve_info, validate_sync_config};
@@ -33,7 +33,7 @@ fn select_cohort<'a>(
     let selected: Vec<&ScriptInfo> = scripts
         .iter()
         .filter(|s| req.filter.is_none_or(|f| s.name.contains(f)))
-        .filter(|s| req.include_ignored || s.expected.as_str() != "ignored")
+        .filter(|s| req.include_ignored || s.selection != Selection::Skip)
         .collect();
     if selected.is_empty() {
         return Err(DevError::Config(format!(
@@ -69,11 +69,15 @@ fn select_cohort<'a>(
 /// invariant belongs in the loop.
 pub fn run_sync_all(req: &SyncAllRequest<'_>) -> Result<(), DevError> {
     let dir = sync_script_dir(req.project_root, Some(req.ratatoskr));
-    let scripts = discover::discover_at(&dir)?;
+    let scripts = discover::discover_sync_at(&dir)?;
     let selected = select_cohort(&scripts, req, &dir)?;
 
     let (cfg, harness_cfg, mock_binary, fixtures_dir) =
         validate_sync_config(req.project_root, req.ratatoskr)?;
+    let resolved = selected
+        .iter()
+        .map(|script| resolve_info(script, &fixtures_dir))
+        .collect::<Result<Vec<_>, _>>()?;
 
     output::ratatoskr_msg(&format!("sync cohort: {} script(s)", selected.len()));
 
@@ -92,7 +96,7 @@ pub fn run_sync_all(req: &SyncAllRequest<'_>) -> Result<(), DevError> {
         .profile_override
         .unwrap_or_else(|| harness_cfg.debug.unwrap_or(false));
     let built = build::build_for_harness(
-        req.project_root,
+        req.build_root.as_path(),
         harness_cfg,
         debug,
         Some(&|pid| _lock.set_child_pid(pid)),
@@ -111,7 +115,7 @@ pub fn run_sync_all(req: &SyncAllRequest<'_>) -> Result<(), DevError> {
     let mut failures: Vec<&str> = Vec::new();
     let mut any_preserved = false;
     let mut interrupted_at: Option<usize> = None;
-    for (idx, script) in selected.iter().enumerate() {
+    for (idx, (script, resolved)) in selected.iter().zip(&resolved).enumerate() {
         // Keep-going covers script failures, not `brokkr kill` / Ctrl-C.
         // The flag stays set for the rest of the sweep (one guard for the
         // whole cohort), so continuing would spawn sæhrimnir for every
@@ -122,14 +126,7 @@ pub fn run_sync_all(req: &SyncAllRequest<'_>) -> Result<(), DevError> {
             interrupted_at = Some(idx);
             break;
         }
-        let outcome = match resolve_info(script, &fixtures_dir) {
-            Ok(resolved) => runner.run_resolved(&resolved, &_lock),
-            Err(e) => {
-                output::ratatoskr_msg(&format!("{}: FAIL - {e}", script.name));
-                failures.push(script.name.as_str());
-                continue;
-            }
-        };
+        let outcome = runner.run_resolved(resolved, &_lock);
         match outcome.result {
             Ok(()) => {
                 output::ratatoskr_msg(&format!("{}: PASS{}", script.name, outcome.summary));
@@ -174,7 +171,7 @@ pub fn run_sync_all(req: &SyncAllRequest<'_>) -> Result<(), DevError> {
     }
     // Each failure already printed its full error inline; the exit error
     // names them without repeating the messages.
-    Err(DevError::Config(format!(
+    Err(DevError::Reported(format!(
         "sync --all: {} of {} script(s) failed: {}",
         failures.len(),
         selected.len(),
@@ -185,6 +182,9 @@ pub fn run_sync_all(req: &SyncAllRequest<'_>) -> Result<(), DevError> {
 /// CLI inputs for `brokkr sync --all`.
 pub struct SyncAllRequest<'a> {
     pub project_root: &'a Path,
+    /// The code tree the harness is built from (cwd); differs from
+    /// `project_root` only when `brokkr.toml` lives one level up.
+    pub build_root: &'a crate::project::BuildRoot,
     pub ratatoskr: &'a RatatoskrConfig,
     /// Substring match against the script's discovered name.
     pub filter: Option<&'a str>,

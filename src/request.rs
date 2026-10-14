@@ -96,6 +96,9 @@ pub(crate) fn compare_pair<T>(values: Vec<T>, option: &str) -> Result<(T, T), De
 /// ratatoskr service entry points accept one explicit request value.
 pub(crate) struct ServiceSuiteRequest<'a> {
     pub(crate) project_root: &'a Path,
+    /// The code tree the harness is built from (cwd); differs from
+    /// `project_root` only when `brokkr.toml` lives one level up.
+    pub(crate) build_root: &'a crate::project::BuildRoot,
     pub(crate) ratatoskr: &'a RatatoskrConfig,
     pub(crate) filter: Option<&'a str>,
     pub(crate) keep_artefacts: bool,
@@ -107,6 +110,8 @@ pub(crate) struct ServiceSuiteRequest<'a> {
 
 pub(crate) struct ServiceTestRequest<'a> {
     pub(crate) project_root: &'a Path,
+    /// The code tree the harness is built from; see [`ServiceSuiteRequest`].
+    pub(crate) build_root: &'a crate::project::BuildRoot,
     pub(crate) ratatoskr: &'a RatatoskrConfig,
     pub(crate) script: &'a str,
     pub(crate) keep_artefacts: bool,

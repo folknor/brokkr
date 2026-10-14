@@ -13,7 +13,7 @@ use crate::sidecar;
 
 use super::bench::{SyncBenchRequest, run_sync_bench};
 #[cfg(test)]
-use super::bench::{read_summary_json, summary_to_kv, sync_span_from_markers};
+use super::bench::{read_summary_json, summary_to_kv};
 #[cfg(test)]
 use super::list::{DEFAULT_SYNC_SCRIPT_DIR, sync_script_dir};
 #[cfg(test)]
@@ -21,6 +21,16 @@ use super::runner::render_run_toml;
 
 /// The reserved `--gate` value that means "every configured gate".
 pub const GATE_ALL: &str = "all";
+
+pub(super) fn validate_reserved_gate(cfg: &RatatoskrConfig) -> Result<(), DevError> {
+    if cfg.gate.contains_key(GATE_ALL) {
+        return Err(DevError::Config(format!(
+            "sync: `[ratatoskr.gate.{GATE_ALL}]` collides with the reserved \
+             `--gate {GATE_ALL}` sweep value - rename that gate"
+        )));
+    }
+    Ok(())
+}
 
 /// Reject the two `--gate all` combinations that have no coherent
 /// meaning, before anything is built.
@@ -78,6 +88,7 @@ pub fn validate_gate_selection(
 /// no per-gate moment to notice a regression being blessed.
 pub fn run_gate_cohort(req: &SyncBenchRequest<'_>) -> Result<(), DevError> {
     let cfg = req.ratatoskr;
+    validate_reserved_gate(cfg)?;
 
     if cfg.gate.is_empty() {
         return Err(DevError::Config(
@@ -183,7 +194,7 @@ pub fn run_gate_cohort(req: &SyncBenchRequest<'_>) -> Result<(), DevError> {
         .map(|(name, msg)| format!("  {name}: {msg}"))
         .collect::<Vec<_>>()
         .join("\n");
-    Err(DevError::Config(format!(
+    Err(DevError::Reported(format!(
         "sync --gate all: {} of {} gate(s) failed:\n{detail}",
         failures.len(),
         plan.len()
@@ -210,7 +221,7 @@ pub(super) struct GateHookCtx<'a> {
 /// Record the gated run into `gate.db`, then either: print the
 /// `--as-baseline` paste-line and return, or look up the configured
 /// per-hostname baseline and evaluate every metric rule. Returns
-/// `DevError::Config` on any rule failure so the run exits non-zero.
+/// `DevError::Verify` on a measured rule breach so the run exits non-zero.
 pub(super) fn run_gate_hook(ctx: &GateHookCtx<'_>) -> Result<(), DevError> {
     let gate = ctx
         .cfg
@@ -221,14 +232,19 @@ pub(super) fn run_gate_hook(ctx: &GateHookCtx<'_>) -> Result<(), DevError> {
     // Validate the gate's configured script matches the current
     // invocation. The gate is bound to a specific script; mixing them
     // up would silently compare against a different fixture's baseline.
+    // Gate paths are config-relative, independent of the caller's cwd.
     let configured_script = if gate.script.is_absolute() {
         gate.script.clone()
     } else {
         ctx.project_root.join(&gate.script)
     };
-    let configured_canon = configured_script
-        .canonicalize()
-        .unwrap_or(configured_script.clone());
+    let configured_canon = configured_script.canonicalize().map_err(|error| {
+        DevError::Config(format!(
+            "gate `{}`: failed to resolve configured script {}: {error}",
+            ctx.gate_name,
+            configured_script.display()
+        ))
+    })?;
     if configured_canon != ctx.script_abs {
         return Err(DevError::Config(format!(
             "gate `{}`: configured script `{}` does not match invocation script `{}`",
@@ -414,7 +430,7 @@ fn missing_baseline_error(
         )
     };
 
-    DevError::Config(format!(
+    DevError::Verify(format!(
         "gate `{gate_name}`: baseline UUID `{baseline_uuid}` is pinned for host \
          `{hostname}` in brokkr.toml, but no such row exists in gate.db under that \
          host.\n  {cause}\n  Recovery: restore the gate.db that holds this row \
@@ -429,7 +445,7 @@ fn missing_baseline_error(
 /// Look up the pinned per-hostname baseline UUID in `brokkr.toml`,
 /// fetch the row from `gate.db`, validate gate/script/fixture/profile/features identity,
 /// run rule evaluation, and emit a report. Returns
-/// `DevError::Config("gate failed: ...")` on any rule failure.
+/// `DevError::Verify("gate failed: ...")` on any rule failure.
 fn evaluate_against_baseline(
     db: &GateDb,
     hostname: &str,
@@ -493,7 +509,7 @@ fn evaluate_against_baseline(
         }
     };
     if let Some(mismatch) = verdict.mismatch() {
-        return Err(DevError::Config(format!("gate `{gate_name}`: {mismatch}")));
+        return Err(DevError::Verify(format!("gate `{gate_name}`: {mismatch}")));
     }
     let report = verdict.format_report();
     let label_suffix = gate
@@ -526,7 +542,7 @@ fn evaluate_against_baseline(
         }
     }
     if !verdict.passed() {
-        return Err(DevError::Config(format!(
+        return Err(DevError::Verify(format!(
             "gate `{gate_name}` FAILED: one or more rules breached"
         )));
     }
@@ -553,7 +569,7 @@ fn identity_profile(
         CargoProfile::from_db(profile)
     };
     parsed.map_err(|unknown| {
-        DevError::Config(format!(
+        DevError::Verify(format!(
             "gate `{gate_name}`: {row_label} row has unknown cargo profile `{}`",
             unknown.0
         ))
@@ -843,19 +859,28 @@ mod tests {
             marker("SYNC_START", 5_000_000),
             marker("SYNC_END", 12_500_000),
         ];
-        assert_eq!(sync_span_from_markers(&markers), Some(7500));
+        assert_eq!(
+            crate::harness::marker_span_us(&markers, "SYNC_START", "SYNC_END").map(|us| us / 1000),
+            Some(7500)
+        );
     }
 
     #[test]
     fn sync_span_returns_none_without_markers() {
         let markers: Vec<sidecar::Marker> = Vec::new();
-        assert_eq!(sync_span_from_markers(&markers), None);
+        assert_eq!(
+            crate::harness::marker_span_us(&markers, "SYNC_START", "SYNC_END").map(|us| us / 1000),
+            None
+        );
     }
 
     #[test]
     fn sync_span_returns_none_with_only_start() {
         let markers = vec![marker("SYNC_START", 1_000_000)];
-        assert_eq!(sync_span_from_markers(&markers), None);
+        assert_eq!(
+            crate::harness::marker_span_us(&markers, "SYNC_START", "SYNC_END").map(|us| us / 1000),
+            None
+        );
     }
 
     #[test]
@@ -863,7 +888,10 @@ mod tests {
         // Pathological: SYNC_END before any SYNC_START. Treat as
         // missing rather than negative.
         let markers = vec![marker("SYNC_END", 500_000), marker("SYNC_START", 1_000_000)];
-        assert_eq!(sync_span_from_markers(&markers), None);
+        assert_eq!(
+            crate::harness::marker_span_us(&markers, "SYNC_START", "SYNC_END").map(|us| us / 1000),
+            None
+        );
     }
 
     #[test]

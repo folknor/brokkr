@@ -310,6 +310,11 @@ pub fn plain(msg: &str) {
     emit("", msg);
 }
 
+/// Print a block on stderr through the renderer and run log.
+pub fn plain_stderr(msg: &str) {
+    emit_text(Stream::Err, &prefixed("", msg));
+}
+
 pub fn build_msg(msg: &str) {
     if !is_quiet() {
         emit("[build]   ", msg);

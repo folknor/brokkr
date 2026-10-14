@@ -110,7 +110,7 @@ pub fn run(
         return Ok(());
     }
 
-    let binary = build::cargo_build(&build::BuildConfig::release(None), build_root)?.path;
+    let binary = build::cargo_build(&super::build_config(&paths.features), build_root)?.path;
     let binary_str = binary.display().to_string();
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
 

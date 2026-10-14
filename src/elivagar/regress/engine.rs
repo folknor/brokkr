@@ -25,7 +25,6 @@
 //! drains that FIFO, so the same numbers are reported in-band instead (the
 //! `regress ...` line of `print_text`, and `counters` in `--json`).
 
-use std::fs;
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
@@ -469,17 +468,9 @@ pub(crate) fn invalid_tile(error: String) -> io::Error {
 }
 
 fn elapsed_ms(start: Instant) -> u64 {
-    u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)
+    crate::passthrough_cmd::duration_ms(start.elapsed())
 }
 
 fn peak_rss_kb() -> Option<u64> {
-    let status = fs::read_to_string("/proc/self/status").ok()?;
-    status.lines().find_map(|line| {
-        line.strip_prefix("VmHWM:")?
-            .trim()
-            .strip_suffix("kB")?
-            .trim()
-            .parse()
-            .ok()
-    })
+    crate::sidecar::self_peak_rss_kb()
 }

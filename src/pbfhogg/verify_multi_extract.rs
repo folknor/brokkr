@@ -9,57 +9,17 @@
 use std::path::Path;
 
 use super::commands::{ExtractStrategy, PbfhoggCommand};
+use super::inspect_report::InspectReport;
 use super::verify::{Findings, VerifyHarness};
 use crate::error::DevError;
 use crate::output::verify_msg;
 use crate::resolve::Bbox;
 
-/// Element counts parsed from `pbfhogg inspect` output. Shared with
-/// `verify_getid_removeid`'s complement assertion.
-pub(super) struct Counts {
-    pub(super) nodes: u64,
-    pub(super) ways: u64,
-    pub(super) relations: u64,
-}
+pub(super) use super::inspect_report::InspectCounts as Counts;
 
-/// Strip comma separators from a number string (e.g. "918,549" → "918549").
-fn strip_commas(s: &str) -> String {
-    s.chars().filter(|c| *c != ',').collect()
-}
-
-/// Parse element counts from `pbfhogg inspect` stdout.
-///
-/// The output format is:
-/// ```text
-///   Nodes:       771,666  (25,597 tagged)
-///   Ways:        144,781
-///   Relations:   2,102
-/// ```
+/// Existing call shape retained while the one report parser owns formatting.
 fn parse_inspect_counts(stdout: &str) -> Option<Counts> {
-    let mut nodes = None;
-    let mut ways = None;
-    let mut relations = None;
-
-    for line in stdout.lines() {
-        let line = line.trim();
-        if let Some(rest) = line.strip_prefix("Nodes:") {
-            // "771,666  (25,597 tagged)" or just "771,666"
-            let num_str = rest.split_whitespace().next()?;
-            nodes = Some(strip_commas(num_str).parse().ok()?);
-        } else if let Some(rest) = line.strip_prefix("Ways:") {
-            let num_str = rest.split_whitespace().next()?;
-            ways = Some(strip_commas(num_str).parse().ok()?);
-        } else if let Some(rest) = line.strip_prefix("Relations:") {
-            let num_str = rest.split_whitespace().next()?;
-            relations = Some(strip_commas(num_str).parse().ok()?);
-        }
-    }
-
-    Some(Counts {
-        nodes: nodes?,
-        ways: ways?,
-        relations: relations?,
-    })
+    InspectReport::parse(stdout).counts()
 }
 
 /// Get element counts for a PBF file via `pbfhogg inspect`.

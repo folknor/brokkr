@@ -56,8 +56,7 @@ A running binary can hand data to brokkr three ways:
    paths. The timing contract below applies to the kv harness path only; the
    `run_external_ok` path keeps every pair, `elapsed_ms` included, as an
    ordinary counter beside its own wall-clock. On the kv path a `elapsed_ms=` (or its alias `total_ms=`) line is **mandatory** on that
-   path - its absence errors the whole run; if both appear, `elapsed_ms`
-   wins. The value may be **fractional** (`elapsed_ms=6.847`): it is kept as
+   path - its absence errors the whole run; if both appear, the last valid timing line wins. The value may be **fractional** (`elapsed_ms=6.847`): it is kept as
    exact microseconds in the `elapsed_us` column, with `elapsed_ms` holding
    it rounded to nearest for every existing query and view. Best-of-N and
    `--compare`'s delta use the microsecond reading when both sides have one -
@@ -94,8 +93,8 @@ computes itself, on top of the raw kv pairs:
 
 So a metric can reach the `[result]` line three ways: a raw stderr kv pair, a
 brokkr-derived throughput field, or (for `write_mbs`) a kv pair that feeds a
-derived one. None of these apply on the no-kv `run_external_ok` path except
-`read_mbs`, which only needs the input size and brokkr's own timing.
+derived one. The external wall-clock path also scrapes counters; only its timing comes
+from brokkr rather than stderr.
 
 ## The harness paths and what each captures
 
@@ -103,16 +102,21 @@ derived one. None of these apply on the no-kv `run_external_ok` path except
 |---|---|---|---|---|
 | `run_passthrough_timed` | inherited (shown) | no | **no** (no FIFO) | all `--` run mode (no `--bench`) |
 | `run_external_ok` | captured, dropped | **yes** (counters only) | yes | every pbfhogg bench command + elivagar `tilegen` + `brokkr mogwai` |
-| `run_external_with_kv_raw` | captured, dropped | **yes** | yes | elivagar `self` micro-bench; pbfhogg read/write/merge micro-benches (via `run_external_with_kv`) |
+| `measure_external` | captured, dropped | **yes** | yes | elivagar `self` micro-bench; pbfhogg read/write/merge micro-benches (via `run_external_with_kv`) |
 | `run_internal` (+ `run_captured`) | captured, dropped | no | **no** (no FIFO) | elivagar example benches |
-| `run_hotpath_capture` (stored via `run_hotpath`) | captured | via JSON report | yes | `--hotpath` / `--alloc`, all projects |
+| `capture_hotpath` (stored via `run_hotpath`) | captured | stderr counters + JSON profile | yes | `--hotpath` / `--alloc`, all projects |
 
 The two external paths differ in exactly one thing: **which clock the recorded
 `elapsed_ms` comes from.** `run_external_ok` measures the child from outside;
-`run_external_with_kv_raw` believes the target's own `elapsed_ms=` and discards
+`measure_external` believes the target's own `elapsed_ms=` and discards
 the external wall. Both record microseconds in `elapsed_us` - the external
 path from its exact `Duration` - and `elapsed_ms` is that value rounded to
 nearest.
+
+`Measurement` retains stdout and stderr for every captured iteration. Callers
+may inspect either stream before recording; storage uses the winner's metrics.
+Missing or invalid hotpath JSON fails the iteration and preserves its sidecar
+under `dirty`, rather than recording a profile mode without a profile.
 
 Both scrape stderr for `key=value` counters, because stderr is captured either
 way and the scrape is free. A wall on its own cannot distinguish "the code got
@@ -206,7 +210,7 @@ The external baselines build no Rust binary at all.
   the external wall-clock path (`run_external_ok`: every pbfhogg command,
   elivagar `tilegen`, `brokkr mogwai`) it is scraped into `kv` as a counter
   and feeds `--compare`'s `counters:` line; the wall stays brokkr's own. On the
-  read/write/merge/`self` micro-benches (`run_external_with_kv_raw`) a
+  read/write/merge/`self` micro-benches (`measure_external`) a
   mandatory `elapsed_ms=`/`total_ms=` line additionally supplies the recorded
   timing.
 - Want a metric in `brokkr sidecar`? Emit an `@name=value` counter to

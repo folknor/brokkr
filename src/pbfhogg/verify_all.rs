@@ -3,7 +3,7 @@
 use std::path::Path;
 use std::time::Instant;
 
-use super::verify::{VerifyHarness, run_check};
+use super::verify::{VerifyHarness, labels, run_check};
 use super::{
     verify_add_locations, verify_cat, verify_check_refs, verify_derive_changes, verify_diff,
     verify_extract, verify_getid_removeid, verify_merge, verify_multi_extract, verify_renumber,
@@ -59,7 +59,7 @@ pub fn run(
     // 1. sort
     tally(
         &mut counts,
-        &run_check("sort", verbose, || {
+        &run_check(labels::SORT, verbose, || {
             verify_sort::run(harness, pbf, direct_io)
         }),
     );
@@ -67,14 +67,16 @@ pub fn run(
     // 2. cat
     tally(
         &mut counts,
-        &run_check("cat", verbose, || verify_cat::run(harness, pbf, direct_io)),
+        &run_check(labels::CAT, verbose, || {
+            verify_cat::run(harness, pbf, direct_io)
+        }),
     );
 
     // 3. extract
     if let Some(b) = bbox {
         tally(
             &mut counts,
-            &run_check("extract", verbose, || {
+            &run_check(labels::EXTRACT, verbose, || {
                 verify_extract::run(harness, pbf, b, direct_io)
             }),
         );
@@ -87,8 +89,14 @@ pub fn run(
     if let Some(b) = bbox {
         tally(
             &mut counts,
-            &run_check("multi-extract", verbose, || {
-                verify_multi_extract::run(harness, pbf, b, 5, direct_io)
+            &run_check(labels::MULTI_EXTRACT, verbose, || {
+                verify_multi_extract::run(
+                    harness,
+                    pbf,
+                    b,
+                    super::commands::DEFAULT_MULTI_EXTRACT_REGIONS,
+                    direct_io,
+                )
             }),
         );
     } else {
@@ -99,7 +107,7 @@ pub fn run(
     // 4. tags-filter
     tally(
         &mut counts,
-        &run_check("tags-filter", verbose, || {
+        &run_check(labels::TAGS_FILTER, verbose, || {
             verify_tags_filter::run(harness, pbf, direct_io)
         }),
     );
@@ -107,7 +115,7 @@ pub fn run(
     // 5. getid-removeid
     tally(
         &mut counts,
-        &run_check("getid-removeid", verbose, || {
+        &run_check(labels::GETID_REMOVEID, verbose, || {
             verify_getid_removeid::run(harness, pbf, direct_io)
         }),
     );
@@ -115,7 +123,7 @@ pub fn run(
     // 6. add-locations-to-ways
     tally(
         &mut counts,
-        &run_check("add-locations-to-ways", verbose, || {
+        &run_check(labels::ADD_LOCATIONS_TO_WAYS, verbose, || {
             verify_add_locations::run(harness, pbf, crate::cli::AltwMode::All, direct_io)
         }),
     );
@@ -123,7 +131,7 @@ pub fn run(
     // 7. check-refs
     tally(
         &mut counts,
-        &run_check("check-refs", verbose, || {
+        &run_check(labels::CHECK_REFS, verbose, || {
             verify_check_refs::run(harness, pbf, direct_io)
         }),
     );
@@ -143,7 +151,7 @@ pub fn run(
         };
         tally(
             &mut counts,
-            &run_check("apply-changes", verbose, || {
+            &run_check(labels::APPLY_CHANGES, verbose, || {
                 verify_merge::run(harness, pbf, osc_path, osmosis.as_ref(), direct_io)
             }),
         );
@@ -156,7 +164,7 @@ pub fn run(
     if let Some(osc_path) = osc {
         tally(
             &mut counts,
-            &run_check("diff --format osc", verbose, || {
+            &run_check(labels::DIFF_OSC, verbose, || {
                 verify_derive_changes::run(harness, pbf, osc_path, direct_io)
             }),
         );
@@ -168,7 +176,7 @@ pub fn run(
     // 10. renumber
     tally(
         &mut counts,
-        &run_check("renumber", verbose, || {
+        &run_check(labels::RENUMBER, verbose, || {
             verify_renumber::run(harness, pbf, dataset, None, false)
         }),
     );
@@ -177,7 +185,9 @@ pub fn run(
     if let Some(osc_path) = osc {
         tally(
             &mut counts,
-            &run_check("diff", verbose, || verify_diff::run(harness, pbf, osc_path)),
+            &run_check(labels::DIFF, verbose, || {
+                verify_diff::run(harness, pbf, osc_path)
+            }),
         );
     } else {
         verify_summary(&format!("diff: {NO_OSC}"));

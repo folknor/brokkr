@@ -2,8 +2,6 @@
 
 use std::path::Path;
 
-use rusqlite::Connection;
-
 use crate::error::DevError;
 use crate::visual::db::{self, DbSubject, VisualDb};
 use crate::visual::status::Status;
@@ -26,10 +24,20 @@ pub(crate) struct MechanicalDb {
 }
 
 impl MechanicalDb {
+    /// Open litehtml's visual store for writing (`visual`, `approve`),
+    /// importing legacy tables from the given `results.db` path on first open.
     pub fn open(path: &Path) -> Result<Self, DevError> {
-        let inner = VisualDb::open(path, DbSubject::Litehtml)?;
-        migrate(inner.connection())?;
-        Ok(Self { inner })
+        Ok(Self {
+            inner: VisualDb::open(path, DbSubject::Litehtml)?,
+        })
+    }
+
+    /// Open litehtml's visual store for queries (`list`, `report`,
+    /// `visual-status`). Never writes except to perform the one-time import.
+    pub fn open_read_only(path: &Path) -> Result<Self, DevError> {
+        Ok(Self {
+            inner: VisualDb::open_read_only(path, DbSubject::Litehtml)?,
+        })
     }
 
     pub fn insert_run(&self, run_id: &str, commit: &str, dirty: bool) -> Result<(), DevError> {
@@ -89,30 +97,19 @@ impl MechanicalDb {
     }
 }
 
-/// Migrations here inspect this visual table's columns. `user_version` belongs
-/// to `ResultsDb` because both stores share `results.db`.
-fn migrate(conn: &Connection) -> Result<(), DevError> {
-    if has_column(conn, "mechanical_results", "artifact_dir") {
-        conn.execute(
-            "ALTER TABLE mechanical_results DROP COLUMN artifact_dir",
-            [],
-        )?;
-    }
-    Ok(())
-}
-
-fn has_column(conn: &Connection, table: &str, column: &str) -> bool {
-    conn.prepare(&format!("SELECT {column} FROM {table} LIMIT 0"))
-        .is_ok()
-}
-
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
+    use rusqlite::Connection;
 
-    /// Opening must neither read nor write `user_version`, which `ResultsDb`
-    /// owns in this same file.
+    fn has_column(conn: &Connection, table: &str, column: &str) -> bool {
+        conn.prepare(&format!("SELECT {column} FROM {table} LIMIT 0"))
+            .is_ok()
+    }
+
+    /// Opening the litehtml visual store must leave `user_version` untouched
+    /// in the legacy `results.db`; the main results store owns that stamp.
     #[test]
     fn open_leaves_user_version_alone() {
         let dir = crate::test_scratch::scratch("litehtml_db", "user_version");
@@ -138,10 +135,10 @@ mod tests {
         assert_eq!(v, 18);
     }
 
-    /// The legacy `artifact_dir` column is dropped whatever `user_version`
-    /// says - including a file `ResultsDb` already stamped.
+    /// Importing a legacy table omits its retired `artifact_dir` column from
+    /// the new litehtml store and leaves the original shared file as it was.
     #[test]
-    fn drops_legacy_column_regardless_of_user_version() {
+    fn import_omits_retired_artifact_dir_column() {
         let dir = crate::test_scratch::scratch("litehtml_db", "legacy_column");
         let path = dir.join("results.db");
         {
@@ -159,8 +156,11 @@ mod tests {
             conn.pragma_update(None, "user_version", 18).unwrap();
         }
         drop(MechanicalDb::open(&path).unwrap());
-        let conn = Connection::open(&path).unwrap();
-        assert!(!has_column(&conn, "mechanical_results", "artifact_dir"));
-        assert!(has_column(&conn, "mechanical_results", "status"));
+        let legacy = Connection::open(&path).unwrap();
+        assert!(has_column(&legacy, "mechanical_results", "artifact_dir"));
+        let visual_path = dir.join("litehtml-visual.db");
+        let visual = Connection::open(&visual_path).unwrap();
+        assert!(!has_column(&visual, "mechanical_results", "artifact_dir"));
+        assert!(has_column(&visual, "mechanical_results", "status"));
     }
 }

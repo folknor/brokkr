@@ -46,10 +46,6 @@ mod tests;
 
 pub use report::RegressConfig;
 
-/// The overlay backdrop. Matches elivagar's `svg` land colour so an overlay
-/// reads the same way as a plain tile dump does.
-const OVERLAY_BACKGROUND: &str = "#f2efe9";
-
 /// A regress run could not be completed - an unreadable archive, a tile that
 /// will not decode, an overlay that will not write.
 ///
@@ -116,8 +112,8 @@ pub fn run(
             &cfg,
             &overlay::OverlayOptions {
                 dir,
-                max: overlay_max.unwrap_or(32),
-                background: OVERLAY_BACKGROUND,
+                max: overlay_max.unwrap_or(super::constants::DEFAULT_OVERLAY_MAX),
+                background: super::constants::REGRESS_OVERLAY_BACKGROUND,
                 strictness: super::eliv::Strictness::Strict,
             },
         )

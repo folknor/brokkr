@@ -1,12 +1,14 @@
 #!/usr/bin/env node
 "use strict";
 
-// Offline smoke test for prepare.js. Exercises the corpus-fidelity
-// behaviors (HARNESS-IMPROVEMENTS.md items 10-14) against a generated
+// Offline smoke test for prepare.js. Exercises corpus-fidelity
+// behaviors against a generated
 // fixture: author-attr preservation, data-URI normalization, font-family
 // rewriting, inline-run whitespace, and the img background-color hack
-// regex. Run: node smoke.js. Exits non-zero on the first failure and
-// leaves smoke-tmp/ behind for inspection; cleans up on success.
+// regex. Run: node scripts/litehtml-prepare/smoke.js. Exits non-zero on failure
+// and keeps the failed run's files under the repository's .brokkr/ scratch
+// directory for inspection; cleans up on success. Nothing is written to the
+// system temporary directory.
 
 const fs = require("fs");
 const path = require("path");
@@ -15,9 +17,9 @@ const { execFileSync } = require("child_process");
 const { PNG } = require("pngjs");
 const { imageSize } = require("image-size");
 
-const tmpDir = path.join(__dirname, "smoke-tmp");
-fs.rmSync(tmpDir, { recursive: true, force: true });
-fs.mkdirSync(tmpDir, { recursive: true });
+const scratchRoot = path.join(__dirname, "..", "..", ".brokkr", "litehtml-smoke");
+fs.mkdirSync(scratchRoot, { recursive: true });
+const tmpDir = fs.mkdtempSync(path.join(scratchRoot, "run-"));
 
 function pngDataUri(width, height, rgb) {
 	const png = new PNG({ width, height });
@@ -70,7 +72,16 @@ fs.writeFileSync(fontPath, Buffer.from("not a real font"));
 
 execFileSync(
 	process.execPath,
-	[path.join(__dirname, "prepare.js"), "prepare", inputPath, outputPath, "--ahem-font", fontPath],
+	[
+		path.join(__dirname, "prepare.js"),
+		"prepare",
+		inputPath,
+		outputPath,
+		"--ahem-font",
+		fontPath,
+		"--fallback-aspect-ratio",
+		"2.0",
+	],
 	{ stdio: ["ignore", "inherit", "inherit"] },
 );
 

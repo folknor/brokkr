@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 /// The published capability hash. Emitted among the identity lines, ahead of
 /// everything a holder rewrites, so a torn read cannot blend two holders'.
-pub const AUTH: &str = "auth";
+pub const AUTH: &str = super::lock_probe::protocol::AUTH_KEY;
 
 /// Split a record into `key -> trimmed raw value`, first occurrence winning.
 /// `None` when the bytes are not UTF-8.

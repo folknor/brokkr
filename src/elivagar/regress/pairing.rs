@@ -251,8 +251,6 @@ pub(crate) fn remaining_pairs<T, K: Eq + std::hash::Hash + Copy>(
     paired
 }
 
-const RESIDUAL_CANDIDATES: usize = 8;
-
 /// The K-nearest candidate graph, taken from both sides so a baseline item whose
 /// best current partner did not reciprocate still gets an edge.
 #[allow(clippy::too_many_arguments)]
@@ -283,7 +281,7 @@ fn residual_candidates<T, K: Eq + std::hash::Hash + Copy>(
         edges.extend(
             nearest
                 .into_iter()
-                .take(RESIDUAL_CANDIDATES)
+                .take(super::super::constants::RESIDUAL_CANDIDATES)
                 .map(|(_, _, bi)| (ci, bi)),
         );
     }
@@ -304,7 +302,7 @@ fn residual_candidates<T, K: Eq + std::hash::Hash + Copy>(
         edges.extend(
             nearest
                 .into_iter()
-                .take(RESIDUAL_CANDIDATES)
+                .take(super::super::constants::RESIDUAL_CANDIDATES)
                 .map(|(_, _, ci)| (ci, bi)),
         );
     }

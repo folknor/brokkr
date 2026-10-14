@@ -150,8 +150,7 @@ mod tests {
             distribution: None,
             hotpath: None,
         };
-        let best = pick_best(Some(slower), faster);
-        assert_eq!(best.elapsed_us, Some(6847));
+        assert_eq!(winning_index(Some((0, &slower)), 1, &faster), 1);
     }
 
     // -----------------------------------------------------------------------
@@ -202,28 +201,26 @@ mod tests {
         let (dist, min_us) = summarize_distribution(&[312, 450, 298, 305]).unwrap();
         assert_eq!(min_us, 298);
         assert_eq!(dist.samples, 4);
-        assert_eq!(
-            dist.us,
-            Some(DistributionUs {
-                min: 298,
-                // Sorted [298, 305, 312, 450]; pos 1.5 -> 308.5, rounded.
-                p50: 309,
-                // pos 2.85 -> 312 + 0.85 * 138 = 429.3.
-                p95: 429,
-                max: 450,
-            })
-        );
+        assert_eq!(dist.min, Wall::from_micros(298));
+        // Sorted [298, 305, 312, 450]; pos 1.5 -> 308.5, rounded.
+        assert_eq!(dist.p50, Wall::from_micros(309));
+        // pos 2.85 -> 312 + 0.85 * 138 = 429.3.
+        assert_eq!(dist.p95, Wall::from_micros(429));
+        assert_eq!(dist.max, Wall::from_micros(450));
         // The millisecond columns are the microseconds rounded - still 0 here,
         // which is exactly why they cannot be the only record.
-        assert_eq!((dist.min_ms, dist.p50_ms, dist.p95_ms, dist.max_ms), (0, 0, 0, 0));
+        assert_eq!(
+            (dist.min.ms(), dist.p50.ms(), dist.p95.ms(), dist.max.ms()),
+            (0, 0, 0, 0)
+        );
     }
 
     #[test]
     fn distribution_ms_fields_round_to_nearest() {
         let (dist, _) = summarize_distribution(&[1_499, 1_500, 2_600]).unwrap();
-        assert_eq!(dist.min_ms, 1);
-        assert_eq!(dist.p50_ms, 2);
-        assert_eq!(dist.max_ms, 3);
+        assert_eq!(dist.min.ms(), 1);
+        assert_eq!(dist.p50.ms(), 2);
+        assert_eq!(dist.max.ms(), 3);
     }
 
     #[test]
@@ -245,7 +242,7 @@ mod tests {
         };
         let (dist, min_us) = summarize_distribution(&[312, 298, 450]).unwrap();
         let result = BenchResult {
-            elapsed_ms: dist.min_ms,
+            elapsed_ms: dist.min.ms(),
             elapsed_us: Some(min_us),
             kv: Vec::new(),
             iterations: vec![0, 0, 0],
@@ -521,11 +518,11 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // pick_best / pick_best_ms
+    // Shared measurement winner selection
     // -----------------------------------------------------------------------
 
     #[test]
-    fn pick_best_none_vs_candidate() {
+    fn winning_index_none_vs_candidate() {
         let candidate = BenchResult {
             elapsed_ms: 500,
             elapsed_us: None,
@@ -534,15 +531,15 @@ mod tests {
             distribution: None,
             hotpath: None,
         };
-        let result = pick_best(None, candidate);
+        let winner = winning_index(None, 0, &candidate);
         assert_eq!(
-            result.elapsed_ms, 500,
+            winner, 0,
             "None current should always take candidate"
         );
     }
 
     #[test]
-    fn pick_best_keeps_better() {
+    fn winning_index_keeps_better() {
         let current = BenchResult {
             elapsed_ms: 100,
             elapsed_us: None,
@@ -559,12 +556,11 @@ mod tests {
             distribution: None,
             hotpath: None,
         };
-        let result = pick_best(Some(current), candidate);
-        assert_eq!(result.elapsed_ms, 100, "should keep the lower value");
+        assert_eq!(winning_index(Some((0, &current)), 1, &candidate), 0, "should keep the lower value");
     }
 
     #[test]
-    fn pick_best_replaces_with_better() {
+    fn winning_index_replaces_with_better() {
         let current = BenchResult {
             elapsed_ms: 300,
             elapsed_us: None,
@@ -581,12 +577,11 @@ mod tests {
             distribution: None,
             hotpath: None,
         };
-        let result = pick_best(Some(current), candidate);
-        assert_eq!(result.elapsed_ms, 150, "should replace with lower value");
+        assert_eq!(winning_index(Some((0, &current)), 1, &candidate), 1, "should replace with lower value");
     }
 
     #[test]
-    fn pick_best_equal_keeps_current() {
+    fn winning_index_equal_keeps_current() {
         // Tie-breaking: current wins (<=)
         let current = BenchResult {
             elapsed_ms: 100,
@@ -604,12 +599,8 @@ mod tests {
             distribution: None,
             hotpath: None,
         };
-        let result = pick_best(Some(current), candidate);
-        let tag = result.kv.iter().find(|p| p.key == "tag").unwrap();
-        assert!(
-            matches!(&tag.value, KvValue::Text(s) if s == "first"),
-            "on tie, current (first seen) should be kept"
-        );
+        assert_eq!(winning_index(Some((0, &current)), 1, &candidate), 0,
+            "on tie, current (first seen) should be kept");
     }
 
     // -----------------------------------------------------------------------

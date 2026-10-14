@@ -19,24 +19,24 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use super::super::constants::mvt;
+use super::super::eliv::{
+    PmtilesConfig, PmtilesWriter, WIRE_32BIT, WIRE_64BIT, encode_bytes_field_always, encode_tag,
+    encode_varint, encode_varint_field_always, xy_to_tile_id,
+};
 use flate2::Compression;
 use flate2::write::GzEncoder;
-use protohoggr::{
-    WIRE_32BIT, WIRE_64BIT, encode_bytes_field_always, encode_tag, encode_varint,
-    encode_varint_field_always,
-};
-
-use super::super::eliv::{PmtilesConfig, PmtilesWriter, xy_to_tile_id};
 
 // ---------------------------------------------------------------------------
 // MVT encoder
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
 pub(crate) enum GeomType {
-    Point = 1,
-    LineString = 2,
-    Polygon = 3,
+    Point = mvt::GEOMETRY_POINT,
+    LineString = mvt::GEOMETRY_LINESTRING,
+    Polygon = mvt::GEOMETRY_POLYGON,
 }
 
 #[derive(Clone)]
@@ -124,11 +124,11 @@ impl LayerBuilder {
             val_remap[old as usize] = new_idx as u16;
         }
 
-        encode_bytes_field_always(&mut layer, 1, self.name.as_bytes());
+        encode_bytes_field_always(&mut layer, mvt::layer::NAME, self.name.as_bytes());
         for f in &self.features {
             let mut feat = Vec::new();
             if let Some(id) = f.id {
-                encode_varint_field_always(&mut feat, 1, id);
+                encode_varint_field_always(&mut feat, mvt::feature::ID, id);
             }
             if !f.tags.is_empty() {
                 let mut packed = Vec::new();
@@ -136,41 +136,49 @@ impl LayerBuilder {
                     encode_varint(&mut packed, u64::from(key_remap[k as usize]));
                     encode_varint(&mut packed, u64::from(val_remap[v as usize]));
                 }
-                encode_bytes_field_always(&mut feat, 2, &packed);
+                encode_bytes_field_always(&mut feat, mvt::feature::TAGS, &packed);
             }
-            encode_varint_field_always(&mut feat, 3, f.geom_type as u64);
+            encode_varint_field_always(&mut feat, mvt::feature::GEOMETRY_TYPE, f.geom_type as u64);
             if !f.geometry.is_empty() {
                 let mut packed = Vec::new();
                 for &g in &f.geometry {
                     encode_varint(&mut packed, u64::from(g));
                 }
-                encode_bytes_field_always(&mut feat, 4, &packed);
+                encode_bytes_field_always(&mut feat, mvt::feature::GEOMETRY, &packed);
             }
-            encode_bytes_field_always(&mut layer, 2, &feat);
+            encode_bytes_field_always(&mut layer, mvt::layer::FEATURE, &feat);
         }
         for &old in &sorted_keys {
-            encode_bytes_field_always(&mut layer, 3, self.keys[old as usize].as_bytes());
+            encode_bytes_field_always(
+                &mut layer,
+                mvt::layer::KEY,
+                self.keys[old as usize].as_bytes(),
+            );
         }
         for &old in &sorted_vals {
             let mut val = Vec::new();
             encode_value(&mut val, &self.values[old as usize]);
-            encode_bytes_field_always(&mut layer, 4, &val);
+            encode_bytes_field_always(&mut layer, mvt::layer::VALUE, &val);
         }
-        encode_varint_field_always(&mut layer, 5, 4096);
-        encode_varint_field_always(&mut layer, 15, 2);
-        encode_bytes_field_always(buf, 3, &layer);
+        encode_varint_field_always(&mut layer, mvt::layer::EXTENT, u64::from(mvt::TILE_EXTENT));
+        encode_varint_field_always(
+            &mut layer,
+            mvt::layer::VERSION,
+            u64::from(mvt::FIXTURE_LAYER_VERSION),
+        );
+        encode_bytes_field_always(buf, mvt::TILE_LAYER, &layer);
     }
 }
 
 fn encode_value(buf: &mut Vec<u8>, val: &Value) {
     match val {
-        Value::String(s) => encode_bytes_field_always(buf, 1, s.as_bytes()),
+        Value::String(s) => encode_bytes_field_always(buf, mvt::value::STRING, s.as_bytes()),
         Value::Float(f) => {
-            encode_tag(buf, 2, WIRE_32BIT);
+            encode_tag(buf, mvt::value::FLOAT, WIRE_32BIT);
             buf.extend_from_slice(&f.to_le_bytes());
         }
         Value::Double(d) => {
-            encode_tag(buf, 3, WIRE_64BIT);
+            encode_tag(buf, mvt::value::DOUBLE, WIRE_64BIT);
             buf.extend_from_slice(&d.to_le_bytes());
         }
     }
@@ -194,7 +202,7 @@ pub(crate) fn encode_tile(layers: &[&LayerBuilder]) -> Vec<u8> {
 // ---------------------------------------------------------------------------
 
 pub(crate) fn command(id: u32, count: u32) -> u32 {
-    id | (count << 3)
+    id | (count << mvt::COMMAND_COUNT_SHIFT)
 }
 
 #[allow(clippy::cast_sign_loss)]
@@ -207,7 +215,7 @@ pub(crate) fn encode_linestring(buf: &mut Vec<u32>, coords: &[(i32, i32)]) {
     if coords.len() < 2 {
         return;
     }
-    buf.push(command(1, 1));
+    buf.push(command(mvt::COMMAND_MOVE_TO, 1));
     buf.push(zigzag(coords[0].0));
     buf.push(zigzag(coords[0].1));
     let lineto = buf.len();
@@ -228,7 +236,7 @@ pub(crate) fn encode_linestring(buf: &mut Vec<u32>, coords: &[(i32, i32)]) {
         buf.clear();
         return;
     }
-    buf[lineto] = command(2, count);
+    buf[lineto] = command(mvt::COMMAND_LINE_TO, count);
 }
 
 pub(crate) fn encode_polygon(buf: &mut Vec<u32>, rings: &[&[(i32, i32)]]) {
@@ -248,7 +256,7 @@ fn encode_polygon_ring(buf: &mut Vec<u32>, ring: &[(i32, i32)], cx: &mut i32, cy
     }
     let points = &ring[..ring.len() - 1];
     let (save_len, save_cx, save_cy) = (buf.len(), *cx, *cy);
-    buf.push(command(1, 1));
+    buf.push(command(mvt::COMMAND_MOVE_TO, 1));
     buf.push(zigzag(points[0].0 - *cx));
     buf.push(zigzag(points[0].1 - *cy));
     *cx = points[0].0;
@@ -272,8 +280,8 @@ fn encode_polygon_ring(buf: &mut Vec<u32>, ring: &[(i32, i32)], cx: &mut i32, cy
         *cy = save_cy;
         return;
     }
-    buf[lineto] = command(2, count);
-    buf.push(command(7, 1));
+    buf[lineto] = command(mvt::COMMAND_LINE_TO, count);
+    buf.push(command(mvt::COMMAND_CLOSE_PATH, 1));
 }
 
 pub(crate) fn encode_multiline(buf: &mut Vec<u32>, paths: &[&[(i32, i32)]]) {
@@ -283,13 +291,13 @@ pub(crate) fn encode_multiline(buf: &mut Vec<u32>, paths: &[&[(i32, i32)]]) {
         if path.len() < 2 {
             continue;
         }
-        buf.push(command(1, 1));
+        buf.push(command(mvt::COMMAND_MOVE_TO, 1));
         buf.push(zigzag(path[0].0 - cx));
         buf.push(zigzag(path[0].1 - cy));
         cx = path[0].0;
         cy = path[0].1;
         let line_count = u32::try_from(path.len() - 1).expect("path length fits u32");
-        buf.push(command(2, line_count));
+        buf.push(command(mvt::COMMAND_LINE_TO, line_count));
         for &(x, y) in &path[1..] {
             buf.push(zigzag(x - cx));
             buf.push(zigzag(y - cy));
@@ -363,7 +371,7 @@ pub(crate) fn polygon_tile(rings: &[&[(i32, i32)]]) -> Vec<u8> {
 
 pub(crate) fn point_tile(points: &[(i32, i32)]) -> Vec<u8> {
     let mut geometry = vec![command(
-        1,
+        mvt::COMMAND_MOVE_TO,
         u32::try_from(points.len()).expect("point count fits u32"),
     )];
     let (mut cx, mut cy) = (0, 0);
@@ -477,7 +485,7 @@ pub(crate) fn duplicate_id_tile(paths: &[&[(i32, i32)]]) -> Vec<u8> {
 /// An `ocean` polygon with no id - the layer whose synthetic ids the diff
 /// deliberately ignores, so it must match geometrically.
 pub(crate) fn anonymous_ocean_tile(rings: &[&[(i32, i32)]]) -> Vec<u8> {
-    let mut layer = LayerBuilder::new("ocean");
+    let mut layer = LayerBuilder::new(mvt::OCEAN_LAYER);
     let mut geometry = Vec::new();
     encode_polygon(&mut geometry, rings);
     layer.add_feature(Feature {
@@ -493,75 +501,87 @@ pub(crate) fn anonymous_ocean_tile(rings: &[&[(i32, i32)]]) -> Vec<u8> {
 
 pub(crate) fn empty_layer_tile(name: &str, extent: u64) -> Vec<u8> {
     let mut layer = Vec::new();
-    encode_bytes_field_always(&mut layer, 1, name.as_bytes());
-    encode_varint_field_always(&mut layer, 5, extent);
-    encode_varint_field_always(&mut layer, 15, 2);
+    encode_bytes_field_always(&mut layer, mvt::layer::NAME, name.as_bytes());
+    encode_varint_field_always(&mut layer, mvt::layer::EXTENT, extent);
+    encode_varint_field_always(
+        &mut layer,
+        mvt::layer::VERSION,
+        u64::from(mvt::FIXTURE_LAYER_VERSION),
+    );
     let mut tile = Vec::new();
-    encode_bytes_field_always(&mut tile, 3, &layer);
+    encode_bytes_field_always(&mut tile, mvt::TILE_LAYER, &layer);
     tile
 }
 
 pub(crate) fn versioned_layer_tile(version: Option<u64>) -> Vec<u8> {
     let mut layer = Vec::new();
-    encode_bytes_field_always(&mut layer, 1, b"roads");
-    encode_varint_field_always(&mut layer, 5, 4096);
+    encode_bytes_field_always(&mut layer, mvt::layer::NAME, b"roads");
+    encode_varint_field_always(&mut layer, mvt::layer::EXTENT, u64::from(mvt::TILE_EXTENT));
     if let Some(v) = version {
-        encode_varint_field_always(&mut layer, 15, v);
+        encode_varint_field_always(&mut layer, mvt::layer::VERSION, v);
     }
     let mut tile = Vec::new();
-    encode_bytes_field_always(&mut tile, 3, &layer);
+    encode_bytes_field_always(&mut tile, mvt::TILE_LAYER, &layer);
     tile
 }
 
 pub(crate) fn split_geometry_tile(chunks: &[&[u32]]) -> Vec<u8> {
     let mut feature = Vec::new();
-    encode_varint_field_always(&mut feature, 1, 1);
-    encode_varint_field_always(&mut feature, 3, 2); // LineString
+    encode_varint_field_always(&mut feature, mvt::feature::ID, 1);
+    encode_varint_field_always(
+        &mut feature,
+        mvt::feature::GEOMETRY_TYPE,
+        u64::from(mvt::GEOMETRY_LINESTRING),
+    );
     for chunk in chunks {
         let mut g = Vec::new();
         for &v in *chunk {
             encode_varint(&mut g, u64::from(v));
         }
-        encode_bytes_field_always(&mut feature, 4, &g);
+        encode_bytes_field_always(&mut feature, mvt::feature::GEOMETRY, &g);
     }
     let mut layer = Vec::new();
-    encode_bytes_field_always(&mut layer, 1, b"roads");
-    encode_varint_field_always(&mut layer, 5, 4096);
-    encode_bytes_field_always(&mut layer, 2, &feature);
+    encode_bytes_field_always(&mut layer, mvt::layer::NAME, b"roads");
+    encode_varint_field_always(&mut layer, mvt::layer::EXTENT, u64::from(mvt::TILE_EXTENT));
+    encode_bytes_field_always(&mut layer, mvt::layer::FEATURE, &feature);
     let mut tile = Vec::new();
-    encode_bytes_field_always(&mut tile, 3, &layer);
+    encode_bytes_field_always(&mut tile, mvt::TILE_LAYER, &layer);
     tile
 }
 
 pub(crate) fn split_tags_tile(chunks: &[&[u32]]) -> Vec<u8> {
     let mut feature = Vec::new();
-    encode_varint_field_always(&mut feature, 3, 1); // point
+    encode_varint_field_always(
+        &mut feature,
+        mvt::feature::GEOMETRY_TYPE,
+        u64::from(mvt::GEOMETRY_POINT),
+    );
     let mut g = Vec::new();
-    for v in [command(1, 1), zigzag(0), zigzag(0)] {
+    for v in [command(mvt::COMMAND_MOVE_TO, 1), zigzag(0), zigzag(0)] {
         encode_varint(&mut g, u64::from(v));
     }
-    encode_bytes_field_always(&mut feature, 4, &g);
+    encode_bytes_field_always(&mut feature, mvt::feature::GEOMETRY, &g);
     for chunk in chunks {
         let mut t = Vec::new();
         for &v in *chunk {
             encode_varint(&mut t, u64::from(v));
         }
-        encode_bytes_field_always(&mut feature, 2, &t);
+        encode_bytes_field_always(&mut feature, mvt::feature::TAGS, &t);
     }
     let mut layer = Vec::new();
-    encode_bytes_field_always(&mut layer, 1, b"roads");
-    encode_varint_field_always(&mut layer, 5, 4096);
-    encode_bytes_field_always(&mut layer, 2, &feature);
-    encode_bytes_field_always(&mut layer, 3, b"a");
-    encode_bytes_field_always(&mut layer, 3, b"b");
+    encode_bytes_field_always(&mut layer, mvt::layer::NAME, b"roads");
+    encode_varint_field_always(&mut layer, mvt::layer::EXTENT, u64::from(mvt::TILE_EXTENT));
+    encode_bytes_field_always(&mut layer, mvt::layer::FEATURE, &feature);
+    encode_bytes_field_always(&mut layer, mvt::layer::KEY, b"a");
+    encode_bytes_field_always(&mut layer, mvt::layer::KEY, b"b");
     let mut v0 = Vec::new();
-    encode_bytes_field_always(&mut v0, 1, b"x");
-    encode_bytes_field_always(&mut layer, 4, &v0);
+    encode_bytes_field_always(&mut v0, mvt::value::STRING, b"x");
+    encode_bytes_field_always(&mut layer, mvt::layer::VALUE, &v0);
     let mut v1 = Vec::new();
-    encode_bytes_field_always(&mut v1, 1, b"y");
-    encode_bytes_field_always(&mut layer, 4, &v1);
+    encode_bytes_field_always(&mut v1, mvt::value::STRING, b"y");
+    encode_bytes_field_always(&mut layer, mvt::layer::VALUE, &v1);
     let mut tile = Vec::new();
-    encode_bytes_field_always(&mut tile, 3, &layer);
+    encode_bytes_field_always(&mut tile, mvt::TILE_LAYER, &layer);
     tile
 }
 

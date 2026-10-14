@@ -25,13 +25,13 @@ pub(crate) fn validate_artifact_id(id: &str, kind: &str) -> Result<(), DevError>
     Ok(())
 }
 
-const FUZZ_THRESHOLD: u8 = 13;
+/// Per-channel tolerance as a share of the 0-255 range.
+const FUZZ_PERCENT: u32 = 5;
 
-const _: () = {
-    assert!(12u8 <= FUZZ_THRESHOLD);
-    assert!(13u8 <= FUZZ_THRESHOLD);
-    assert!(14u8 > FUZZ_THRESHOLD);
-};
+/// The largest per-channel difference still counted as a match: 5% of 255
+/// (12.75), rounded to the nearest whole step.
+#[allow(clippy::cast_possible_truncation)] // at most 255 for FUZZ_PERCENT <= 100
+const FUZZ_THRESHOLD: u8 = ((255 * FUZZ_PERCENT + 50) / 100) as u8;
 
 struct DecodedPng {
     width: u32,

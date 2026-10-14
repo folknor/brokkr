@@ -14,6 +14,7 @@ pub mod bench_tilemaker;
 pub(crate) mod cmd;
 pub mod commands;
 pub mod compare_tiles;
+pub(crate) mod constants;
 pub mod corpus;
 pub mod diag;
 pub mod download_natural_earth;
@@ -24,7 +25,14 @@ pub mod ocean_build;
 pub(crate) mod plan;
 pub mod regress;
 pub mod svg;
+pub(crate) mod tilegen_config;
 pub mod verify;
+
+/// The elivagar executable is always built with the host's configured feature
+/// set so command wrappers do not alternate cargo shapes for the same binary.
+pub(crate) fn build_config(features: &[String]) -> crate::build::BuildConfig {
+    crate::build::BuildConfig::release_with_owned_features(None, features)
+}
 
 /// Input-specific assertions carried from the selected PBF entry to tilegen.
 pub struct PipelineOpts {
@@ -130,8 +138,8 @@ impl PipelineOpts {
             args.push(f.to_string());
         }
 
-        // Parsed and partition-checked at config load; re-parsed here to
-        // resolve each spec's bare path against the data dir.
+        // Syntax is validated when the named tilegen block is selected. Parse
+        // again here to resolve each spec's bare path against the data dir.
         let specs = tg
             .ocean_specs()
             .map_err(|e| DevError::Config(format!("tilegen ocean: {e}")))?;
@@ -196,12 +204,14 @@ pub fn resolve_tilegen<'a>(
             ))
         })?;
 
-    blocks.get(name).ok_or_else(|| {
+    let config = blocks.get(name).ok_or_else(|| {
         let mut known: Vec<&str> = blocks.keys().map(String::as_str).collect();
         known.sort_unstable();
         DevError::Config(format!(
             "no [{host}.tilegen.{name}] in brokkr.toml (known: {})",
             known.join(", ")
         ))
-    })
+    })?;
+    tilegen_config::validate(config)?;
+    Ok(config)
 }

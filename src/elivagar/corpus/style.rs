@@ -11,6 +11,7 @@ use std::sync::Arc;
 use serde::Deserialize;
 use xxhash_rust::xxh3::xxh3_128;
 
+use super::super::constants::SVG_FALLBACK_COLOR;
 use super::super::eliv::DetailAttr;
 
 #[derive(Deserialize)]
@@ -60,8 +61,12 @@ impl Style {
         let bytes = fs::read(path)?;
         let text = std::str::from_utf8(&bytes)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        let file =
+        let value: toml::Value =
             toml::from_str(text).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        validate_style_keys(&value)?;
+        let file: StyleFile = value
+            .try_into()
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         Ok(Self {
             file,
             hash: format!("{:032x}", xxh3_128(&bytes)),
@@ -92,10 +97,74 @@ impl Style {
     #[must_use]
     pub fn fallback() -> Paint {
         Paint {
-            fill: Some("#ff00ff".into()),
+            fill: Some(SVG_FALLBACK_COLOR.into()),
             ..Paint::default()
         }
     }
+}
+
+// Paint is flattened into both layers and matches; serde does not allow
+// deny_unknown_fields on a flattened struct, so validate those maps here.
+fn validate_style_keys(value: &toml::Value) -> io::Result<()> {
+    const PAINT_FIELDS: &[&str] = &[
+        "fill",
+        "fill_opacity",
+        "stroke",
+        "stroke_width",
+        "stroke_dasharray",
+        "stroke_opacity",
+        "point_radius",
+    ];
+    let invalid = |message: String| io::Error::new(io::ErrorKind::InvalidData, message);
+    let root = value
+        .as_table()
+        .ok_or_else(|| invalid("style must be a TOML table".into()))?;
+    reject_unknown_keys(root, &["background", "layer"], "style")?;
+    if let Some(layers) = root.get("layer") {
+        let layers = layers
+            .as_array()
+            .ok_or_else(|| invalid("style.layer must be an array of tables".into()))?;
+        for (index, layer) in layers.iter().enumerate() {
+            let layer = layer
+                .as_table()
+                .ok_or_else(|| invalid(format!("style.layer[{index}] must be a table")))?;
+            let mut allowed = vec!["name", "match"];
+            allowed.extend_from_slice(PAINT_FIELDS);
+            reject_unknown_keys(layer, &allowed, &format!("style.layer[{index}]"))?;
+            if let Some(matches) = layer.get("match") {
+                let matches = matches.as_array().ok_or_else(|| {
+                    invalid(format!(
+                        "style.layer[{index}].match must be an array of tables"
+                    ))
+                })?;
+                for (match_index, rule) in matches.iter().enumerate() {
+                    let rule = rule.as_table().ok_or_else(|| {
+                        invalid(format!(
+                            "style.layer[{index}].match[{match_index}] must be a table"
+                        ))
+                    })?;
+                    let mut allowed = vec!["key", "value"];
+                    allowed.extend_from_slice(PAINT_FIELDS);
+                    reject_unknown_keys(
+                        rule,
+                        &allowed,
+                        &format!("style.layer[{index}].match[{match_index}]"),
+                    )?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn reject_unknown_keys(table: &toml::Table, allowed: &[&str], context: &str) -> io::Result<()> {
+    if let Some(key) = table.keys().find(|key| !allowed.contains(&key.as_str())) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("unknown {context} key {key:?}"),
+        ));
+    }
+    Ok(())
 }
 
 /// Whether a decoded attribute matches a style rule's TOML value.

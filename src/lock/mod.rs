@@ -33,6 +33,9 @@ mod lock_probe {
     include!("../lock_tokens.rs");
 }
 
+pub(crate) use lock_probe::protocol::{
+    CAPABILITY_ENV, GUARD_HANDSHAKE_PREFIX, GUARD_INFO_ARG, GUARD_PROTOCOL, LEASE_MARKER_ENV,
+};
 pub(crate) use lock_probe::{AcqId, AuthHash, Nonce, RunToken};
 pub(crate) use lock_record::{Record as LockRecord, escape_value, unescape_value};
 
@@ -276,6 +279,7 @@ impl LockGuard {
 
     /// Drop all mock-server PIDs (e.g. after the suite has drained every
     /// mock gracefully).
+    #[cfg(test)]
     pub fn clear_mock_pids(&self) {
         if let Ok(mut state) = self.inner.state.lock() {
             state.mocks.clear();

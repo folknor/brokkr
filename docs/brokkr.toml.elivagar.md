@@ -38,7 +38,7 @@ allow_unsafe_flat_index = false              # expert debugging only
 ```
 
 Every key is optional; omit one and elivagar's own default applies. `tilegen`
-uses `default` - there is no selector flag yet. A host with **no**
+currently selects `default`; there is no selector for sibling blocks yet. A host with **no**
 `[<host>.tilegen.*]` block at all is an error rather than an implicit bare run:
 a bare run is a legitimate statement and already has a spelling, an empty
 block.
@@ -49,7 +49,16 @@ block.
 statement elivagar's removed `--no-ocean` flag used to make. Each entry is
 either a zoom-banded shapefile (`z0-z14:<f.shp>`, `z0-z7:<f.shp>`,
 `z8-z14:<f.shp>`) or a bare `<f.pmtiles>` artifact. Paths are relative to the
-host's `data`, like every other path in the file. Parse-time rules:
+host's `data`, like every other path in the file. When brokkr resolves the
+selected block, it validates the closed value sets, budget syntax and ranges,
+and ocean spec syntax before starting a Cargo build.
+
+The selected-block validation currently runs while brokkr builds the command
+plan. The schema still deserializes the enum and size fields as strings; using
+the typed values during config deserialization requires the schema change in
+`src/config_parts/project_config/elivagar.rs`.
+
+The ocean rules are:
 
 - Shapefiles must partition z0-z14 **exactly** - either a single `z0-z14` or
   the `z0-z7` + `z8-z14` pair. `ocean::selected_pass_grid` implements one
@@ -87,7 +96,7 @@ Two axes deliberately live outside the block. `locations_on_ways` /
 know which variant it was about to be run against. `--skip-to` is a
 per-invocation resume point, not part of the contract.
 
-For an A/B arm, write a sibling block: drop the `.pmtiles` line for an
-artifact-absent arm, and `brokkr results --grep-v ocean-tiles` selects it off
-`cli_args`. Key order in the expanded argv is stable (the maps are `BTreeMap`),
-so identical config produces byte-identical `cli_args`.
+Only `default` is currently selectable. A sibling block does not create a
+runnable A/B arm until a block selector is added; the CLI cannot select one.
+Key order in the expanded argv is stable (the maps are `BTreeMap`), so
+identical selected config produces byte-identical `cli_args`.

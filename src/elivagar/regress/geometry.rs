@@ -263,8 +263,7 @@ enum PointIndex<'a> {
 
 impl<'a> PointIndex<'a> {
     fn new(points: &'a [(i32, i32)]) -> Self {
-        const KD_TREE_THRESHOLD: usize = 64;
-        if points.len() < KD_TREE_THRESHOLD {
+        if points.len() < super::super::constants::KD_TREE_THRESHOLD {
             Self::Small(points)
         } else {
             Self::Tree(KdNode::build(points.to_vec(), 0))

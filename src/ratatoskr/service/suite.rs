@@ -13,8 +13,8 @@ use crate::error::DevError;
 use crate::lockfile;
 use crate::output::{self, CapturedOutput};
 use crate::ratatoskr::build::{self, HarnessBuild};
-use crate::ratatoskr::discover::{self, Expected, PreserveDataDir, SCRIPT_DIR, ScriptInfo};
-use crate::ratatoskr::saehrimnir::{MockServer, endpoint_env_pairs, require_path, resolve_fixture};
+use crate::ratatoskr::discover::{self, PreserveDataDir, SCRIPT_DIR, ScriptInfo, Selection};
+use crate::ratatoskr::saehrimnir::{ManagedMock, MockArtifactScope, MockPaths, Protocol};
 
 use super::single::{RunResult, spawn_and_capture};
 #[cfg(test)]
@@ -34,6 +34,7 @@ use super::single::{format_iter_line, format_soak_summary};
 pub(crate) fn service_suite(req: &crate::request::ServiceSuiteRequest<'_>) -> Result<(), DevError> {
     let crate::request::ServiceSuiteRequest {
         project_root,
+        build_root,
         ratatoskr,
         filter,
         keep_artefacts,
@@ -61,32 +62,34 @@ pub(crate) fn service_suite(req: &crate::request::ServiceSuiteRequest<'_>) -> Re
         return Ok(());
     }
 
-    let harness_cfg = ratatoskr.harness.as_ref().ok_or_else(|| {
-        DevError::Config(
-            "service: no [ratatoskr.harness] section in brokkr.toml. \
-                 Declare `[ratatoskr.harness]` with `package = \"<crate>\"` \
-                 (and optional `binary`, `features`, `debug`)."
-                .into(),
-        )
-    })?;
+    let harness_cfg = crate::ratatoskr::require_harness_config(ratatoskr, "service")?;
 
     // Fail fast if any selected script needs a fixture but the
     // [ratatoskr] mock-server config isn't populated. Spawn-time would
     // catch this too but reporting it before the build wastes nothing.
-    if let Some(needy) = runnable.iter().find(|s| s.fixture.is_some()) {
-        let cfg = ratatoskr;
-        require_path(&cfg.mock_server_binary, project_root, "mock_server_binary").map_err(|e| {
+    let mock_paths = if let Some(needy) = runnable.iter().find(|s| s.fixture().is_some()) {
+        Some(MockPaths::resolve(ratatoskr, project_root).map_err(|e| {
             DevError::Config(format!(
                 "service: script {} needs a mock fixture but {e}",
                 needy.name
             ))
-        })?;
-        require_path(&cfg.fixtures_dir, project_root, "fixtures_dir").map_err(|e| {
-            DevError::Config(format!(
-                "service: script {} needs a mock fixture but {e}",
-                needy.name
-            ))
-        })?;
+        })?)
+    } else {
+        None
+    };
+    let mut fixture_paths = HashMap::new();
+    if let Some(paths) = &mock_paths {
+        for script in &runnable {
+            if let Some(fixture_name) = script.fixture() {
+                let path = paths.fixture(fixture_name).map_err(|e| {
+                    DevError::Config(format!(
+                        "service: script {} declares fixture `{fixture_name}` but {e}",
+                        script.name
+                    ))
+                })?;
+                fixture_paths.insert(fixture_name.to_owned(), path);
+            }
+        }
     }
 
     let _lock = crate::context::reenter_command_lock()?;
@@ -95,7 +98,7 @@ pub(crate) fn service_suite(req: &crate::request::ServiceSuiteRequest<'_>) -> Re
 
     let debug = profile_override.unwrap_or_else(|| harness_cfg.debug.unwrap_or(false));
     let built = build::build_for_harness(
-        project_root,
+        build_root.as_path(),
         harness_cfg,
         debug,
         Some(&|pid| _lock.set_child_pid(pid)),
@@ -126,7 +129,7 @@ pub(crate) fn service_suite(req: &crate::request::ServiceSuiteRequest<'_>) -> Re
     // contract is "act as if no fixture exists"). Fixture isolation is
     // a per-script concern - scripts wanting a clean slate hit their
     // own /test/<protocol>/reset endpoint at start-of-test.
-    let mut mocks: HashMap<String, FixtureSession> = HashMap::new();
+    let mut mocks: HashMap<String, FixtureSession<'_>> = HashMap::new();
 
     // Drives the inner loop's exit shape: Ok runs to completion, Err
     // breaks out and gets propagated AFTER mocks are drained gracefully.
@@ -141,14 +144,25 @@ pub(crate) fn service_suite(req: &crate::request::ServiceSuiteRequest<'_>) -> Re
                 // Lazy-spawn the fixture for this script if it declares
                 // one and we don't already have it. Mocks live until the
                 // end of the suite.
-                if let Some(fixture_name) = script.fixture.as_deref()
+                if let Some(fixture_name) = script.fixture()
                     && !mocks.contains_key(fixture_name)
                 {
+                    let paths = mock_paths.as_ref().ok_or_else(|| {
+                        DevError::Internal(
+                            "service fixture passed preflight without mock paths".into(),
+                        )
+                    })?;
+                    let fixture_path = fixture_paths.get(fixture_name).ok_or_else(|| {
+                        DevError::Internal(format!(
+                            "service fixture `{fixture_name}` passed preflight without a resolved path"
+                        ))
+                    })?;
                     let session = FixtureSession::start(
                         project_root,
                         ratatoskr,
-                        &script.name,
                         fixture_name,
+                        paths,
+                        fixture_path,
                         &_lock,
                     )?;
                     mocks.insert(fixture_name.to_owned(), session);
@@ -184,8 +198,7 @@ pub(crate) fn service_suite(req: &crate::request::ServiceSuiteRequest<'_>) -> Re
                 // fixture. No-fixture scripts run as if no mock exists,
                 // even when other scripts in the suite have mocks alive.
                 let env_pairs = script
-                    .fixture
-                    .as_deref()
+                    .fixture()
                     .and_then(|name| mocks.get(name))
                     .map(FixtureSession::env_pair_refs)
                     .unwrap_or_default();
@@ -227,18 +240,25 @@ pub(crate) fn service_suite(req: &crate::request::ServiceSuiteRequest<'_>) -> Re
     // error unwind) is the SIGKILL fast-path. We do this BEFORE
     // propagating the error so a failing suite doesn't leave the user
     // with an SIGKILLed mock and uninformative artefacts.
+    let mut shutdown_error = None;
     for (_, session) in mocks.drain() {
-        session.shutdown(&_lock);
+        if let Err(error) = session.shutdown()
+            && shutdown_error.is_none()
+        {
+            shutdown_error = Some(error);
+        }
     }
-    _lock.clear_mock_pids();
 
     loop_result?;
+    if let Some(error) = shutdown_error {
+        return Err(error);
+    }
 
     output::ratatoskr_msg(&format_suite_summary(&results, total, cycles, bailed));
 
     if results.iter().any(|r| !r.result.succeeded) {
         artefacts::emit_clean_hint(output::ratatoskr_msg);
-        Err(DevError::ExitCode(1))
+        Err(DevError::Reported("service suite failed".into()))
     } else {
         Ok(())
     }
@@ -315,7 +335,7 @@ fn select_suite(
             filtered_out += 1;
             continue;
         }
-        if !include_ignored && script.expected == Expected::Ignored {
+        if !include_ignored && script.selection == Selection::Skip {
             skipped_ignored += 1;
             continue;
         }
@@ -597,113 +617,55 @@ pub(super) fn write_artefacts(
 /// The single-script shape creates one before iteration and drains it
 /// after; the cohort creates one per distinct fixture, lazily on first
 /// use (see the suite loop's `mocks` map).
-pub(super) struct FixtureSession {
-    fixture_name: String,
-    mock: MockServer,
-    env_owned: Vec<(String, String)>,
+pub(super) struct FixtureSession<'a> {
+    mock: ManagedMock<'a>,
 }
 
-impl FixtureSession {
-    /// Validate the mock-server paths in `[ratatoskr]`, resolve the fixture,
-    /// spawn sæhrimnir, parse endpoints, and emit a one-line "mock-server up"
-    /// status. Errors out with the same shape `mock-serve` uses when a path
-    /// is unset or the binary isn't built.
+impl<'a> FixtureSession<'a> {
+    /// Start a preflighted fixture in the service-wide artifact location.
     pub(super) fn start(
         project_root: &Path,
         cfg: &RatatoskrConfig,
-        owner_label: &str,
         fixture_name: &str,
-        lock: &lockfile::LockGuard,
+        paths: &MockPaths,
+        fixture_path: &Path,
+        lock: &'a lockfile::LockGuard,
     ) -> Result<Self, DevError> {
-        let binary = require_path(&cfg.mock_server_binary, project_root, "mock_server_binary")
-            .map_err(|e| {
-                DevError::Config(format!(
-                    "service: script {owner_label} declares `-- fixture: {fixture_name}` but {e}"
-                ))
-            })?;
-        let fixtures_dir = require_path(&cfg.fixtures_dir, project_root, "fixtures_dir")?;
-        if !binary.exists() {
-            return Err(DevError::Config(format!(
-                "service: sæhrimnir binary not found at {}. \
-                 Build it first: `cargo build --release` in sæhrimnir's repo.",
-                binary.display()
-            )));
-        }
-        let fixture_path = resolve_fixture(&fixtures_dir, fixture_name)?;
-
-        let state = ProjectState::new(project_root);
-        let mock_dir = state
-            .ratatoskr()
-            .service_mock_artifacts()
-            .join(safe_dir_name(fixture_name));
-        std::fs::create_dir_all(&mock_dir).map_err(DevError::Io)?;
-
-        // PID published from inside spawn_observed - before readiness
-        // wait - so a `--hard` landing during sæhrimnir startup finds it.
-        let mock = MockServer::spawn_observed(
-            &binary,
-            &fixture_path,
-            &mock_dir,
-            Some(&|pid| lock.add_mock_pid(pid)),
-            Some(&|pid| lock.remove_mock_pid(pid)),
-            true, // isolate_pg: caller (service single/cohort) has SigtermGuard
+        let mock = ManagedMock::start(
+            cfg,
+            &paths.binary,
+            fixture_path,
+            fixture_name,
+            MockArtifactScope::SharedFixture {
+                project_root,
+                fixture_name,
+            },
+            lock,
         )?;
-        let env_owned = endpoint_env_pairs(cfg, mock.endpoints());
         let ep = mock.endpoints();
-        let endpoint_ports = crate::ratatoskr::saehrimnir::Protocol::all()
+        let endpoint_ports = Protocol::all()
             .map(|protocol| format!("{}={}", protocol.name(), ep.port(protocol)))
             .collect::<Vec<_>>()
             .join(" ");
         output::ratatoskr_msg(&format!(
             "mock-server up: fixture={fixture_name} {endpoint_ports}"
         ));
-        Ok(Self {
-            fixture_name: fixture_name.to_owned(),
-            mock,
-            env_owned,
-        })
+        Ok(Self { mock })
     }
 
     /// Borrowed `&str` view over the owned env strings, ready to hand to
     /// `output::run_captured_with_env_and_deadline` via
     /// `spawn_and_capture`'s `extra_env` parameter.
     pub(super) fn env_pair_refs(&self) -> Vec<(&str, &str)> {
-        self.env_owned
-            .iter()
-            .map(|(k, v)| (k.as_str(), v.as_str()))
-            .collect()
+        self.mock.env_pair_refs()
     }
 
     /// SIGTERM sæhrimnir and reap (with the standard 1.5s budget then
     /// SIGKILL escalation). Logs only if the shutdown went forceful so
     /// the happy path stays quiet.
-    pub(super) fn shutdown(self, lock: &lockfile::LockGuard) {
-        let pid = self.mock.pid();
-        let outcome = self.mock.shutdown();
-        lock.remove_mock_pid(pid);
-        if outcome.killed_after_budget {
-            output::ratatoskr_msg(&format!(
-                "mock-server SIGKILLed (fixture={}, drain budget exceeded)",
-                self.fixture_name
-            ));
-        }
+    pub(super) fn shutdown(self) -> Result<(), DevError> {
+        self.mock.shutdown().map(|_| ())
     }
-}
-
-/// Sanitize a fixture string for use as a directory name. Fixture names
-/// don't contain `/` today, but the explicit-extension form
-/// (`jmap-small.toml`) does carry a `.` we want to keep readable on
-/// disk. Replace anything outside `[A-Za-z0-9._-]` with `_` to be safe.
-fn safe_dir_name(s: &str) -> String {
-    s.chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect()
 }
 
 #[cfg(test)]
@@ -712,6 +674,8 @@ mod tests {
 
     use std::process::Command;
     use std::time::Duration;
+
+    use crate::ratatoskr::discover::ScriptKind;
 
     use super::*;
 
@@ -937,25 +901,27 @@ mod tests {
 
     // ---- suite helpers ------------------------------------------------
 
-    fn info(name: &str, expected: Expected) -> ScriptInfo {
+    fn info(name: &str, selection: Selection) -> ScriptInfo {
         ScriptInfo {
             name: name.to_owned(),
             path: PathBuf::from(format!("{name}.lua")),
             description: None,
-            expected,
+            selection,
             ceiling: Duration::from_secs(60),
             preserve_data_dir: PreserveDataDir::OnFailureOnly,
-            fixture: None,
-            protocol: None,
+            kind: ScriptKind::Service {
+                fixture: None,
+                protocol: None,
+            },
         }
     }
 
     #[test]
     fn select_suite_no_filter_skips_ignored_by_default() {
         let scripts = vec![
-            info("alpha", Expected::Pass),
-            info("wedge", Expected::Ignored),
-            info("beta", Expected::Pass),
+            info("alpha", Selection::Run),
+            info("wedge", Selection::Skip),
+            info("beta", Selection::Run),
         ];
         let sel = select_suite(scripts, None, false);
         let names: Vec<&str> = sel.runnable.iter().map(|s| s.name.as_str()).collect();
@@ -967,8 +933,8 @@ mod tests {
     #[test]
     fn select_suite_include_ignored_keeps_them() {
         let scripts = vec![
-            info("alpha", Expected::Pass),
-            info("wedge", Expected::Ignored),
+            info("alpha", Selection::Run),
+            info("wedge", Selection::Skip),
         ];
         let sel = select_suite(scripts, None, true);
         assert_eq!(sel.runnable.len(), 2);
@@ -978,9 +944,9 @@ mod tests {
     #[test]
     fn select_suite_filter_matches_substring() {
         let scripts = vec![
-            info("t1/journal", Expected::Pass),
-            info("t1/replay", Expected::Pass),
-            info("boot/ping", Expected::Pass),
+            info("t1/journal", Selection::Run),
+            info("t1/replay", Selection::Run),
+            info("boot/ping", Selection::Run),
         ];
         let sel = select_suite(scripts, Some("t1/"), false);
         let names: Vec<&str> = sel.runnable.iter().map(|s| s.name.as_str()).collect();
@@ -991,9 +957,9 @@ mod tests {
     #[test]
     fn select_suite_filter_then_skip_ignored() {
         let scripts = vec![
-            info("t1/journal", Expected::Pass),
-            info("t1/wedge", Expected::Ignored),
-            info("boot/ping", Expected::Pass),
+            info("t1/journal", Selection::Run),
+            info("t1/wedge", Selection::Skip),
+            info("boot/ping", Selection::Run),
         ];
         let sel = select_suite(scripts, Some("t1/"), false);
         let names: Vec<&str> = sel.runnable.iter().map(|s| s.name.as_str()).collect();

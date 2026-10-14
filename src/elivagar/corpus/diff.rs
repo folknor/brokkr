@@ -3,10 +3,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use super::super::constants::DIFF_LINE_LIMIT;
 use super::super::eliv::tile_id_to_zxy;
 use super::digest::{BucketDigest, LeafRun, ZoomDigest, hex};
-
-const DIFF_CAP: usize = 100;
 
 #[derive(Default)]
 struct LeafDiff {
@@ -16,26 +15,29 @@ struct LeafDiff {
     cur: Option<(usize, u64, u64, u128, u128)>,
 }
 impl LeafDiff {
-    fn push(&mut self, class: usize, id: u64, oldh: u128, newh: u128) {
-        if let Some((c, start, len, o, nh)) = self.cur.as_mut()
+    fn push_range(&mut self, class: usize, segment_start: u64, end: u64, oldh: u128, newh: u128) {
+        if segment_start >= end {
+            return;
+        }
+        if let Some((c, run_start, len, o, nh)) = self.cur.as_mut()
             && *c == class
             && *o == oldh
             && *nh == newh
-            && id == *start + *len
-            && tile_id_to_zxy(*start).0 == tile_id_to_zxy(id).0
+            && *run_start + *len == segment_start
+            && tile_id_to_zxy(*run_start).0 == tile_id_to_zxy(segment_start).0
         {
-            *len += 1;
+            *len += end - segment_start;
             return;
         }
         self.flush();
-        self.cur = Some((class, id, 1, oldh, newh));
+        self.cur = Some((class, segment_start, end - segment_start, oldh, newh));
     }
     fn flush(&mut self) {
         let Some((class, start, len, oldh, newh)) = self.cur.take() else {
             return;
         };
         self.counts[class] += 1;
-        if self.lines[class].len() < DIFF_CAP {
+        if self.lines[class].len() < DIFF_LINE_LIMIT {
             let (z, x, y) = tile_id_to_zxy(start);
             let line = match class {
                 0 => format!("changed {z} {x} {y} {len} {}->{}", hex(oldh), hex(newh)),
@@ -47,32 +49,47 @@ impl LeafDiff {
     }
 }
 
-/// Per-tile diff of two leaf-run sets. Returns (changed-run count, capped lines).
+/// Diff two leaf-run sets without expanding their spans into per-tile vectors.
+/// Identical runs are skipped in one step; changed spans are coalesced directly.
+/// Returns (changed-run count, capped lines).
 #[must_use]
 pub fn leaf_diff(committed: &[LeafRun], current: &[LeafRun]) -> (u64, Vec<String>) {
-    let old = expand(committed);
-    let new = expand(current);
+    let mut old_runs: Vec<&LeafRun> = committed.iter().collect();
+    old_runs.sort_unstable_by_key(|run| run.tile_id);
+    let mut new_runs: Vec<&LeafRun> = current.iter().collect();
+    new_runs.sort_unstable_by_key(|run| run.tile_id);
+    let mut old = LeafCursor::new(old_runs);
+    let mut new = LeafCursor::new(new_runs);
     let mut st = LeafDiff::default();
-    let (mut i, mut j) = (0usize, 0usize);
-    while i < old.len() || j < new.len() {
-        let take_old = j >= new.len() || (i < old.len() && old[i].0 <= new[j].0);
-        let take_new = i >= old.len() || (j < new.len() && new[j].0 <= old[i].0);
-        if take_old && take_new {
-            let (id, oh) = old[i];
-            let nh = new[j].1;
-            if oh != nh {
-                st.push(0, id, oh, nh);
+    loop {
+        match (old.range(), new.range()) {
+            (None, None) => break,
+            (Some((start, end, hash)), None) => {
+                st.push_range(2, start, end, hash, 0);
+                old.advance(end);
             }
-            i += 1;
-            j += 1;
-        } else if take_old {
-            let (id, oh) = old[i];
-            st.push(2, id, oh, 0);
-            i += 1;
-        } else {
-            let (id, nh) = new[j];
-            st.push(1, id, 0, nh);
-            j += 1;
+            (None, Some((start, end, hash))) => {
+                st.push_range(1, start, end, 0, hash);
+                new.advance(end);
+            }
+            (Some((old_start, old_end, old_hash)), Some((new_start, new_end, new_hash))) => {
+                if old_start < new_start {
+                    let end = old_end.min(new_start);
+                    st.push_range(2, old_start, end, old_hash, 0);
+                    old.advance(end);
+                } else if new_start < old_start {
+                    let end = new_end.min(old_start);
+                    st.push_range(1, new_start, end, 0, new_hash);
+                    new.advance(end);
+                } else {
+                    let end = old_end.min(new_end);
+                    if old_hash != new_hash {
+                        st.push_range(0, old_start, end, old_hash, new_hash);
+                    }
+                    old.advance(end);
+                    new.advance(end);
+                }
+            }
         }
     }
     st.flush();
@@ -87,14 +104,40 @@ pub fn leaf_diff(committed: &[LeafRun], current: &[LeafRun]) -> (u64, Vec<String
     (st.counts.iter().sum(), out)
 }
 
-fn expand(leaves: &[LeafRun]) -> Vec<(u64, u128)> {
-    let mut out = Vec::new();
-    for l in leaves {
-        for id in l.tile_id..l.tile_id + u64::from(l.run_length) {
-            out.push((id, l.hash));
+struct LeafCursor<'a> {
+    runs: Vec<&'a LeafRun>,
+    index: usize,
+    position: u64,
+}
+
+impl<'a> LeafCursor<'a> {
+    fn new(runs: Vec<&'a LeafRun>) -> Self {
+        let position = runs.first().map_or(0, |run| run.tile_id);
+        Self {
+            runs,
+            index: 0,
+            position,
         }
     }
-    out
+
+    fn range(&self) -> Option<(u64, u64, u128)> {
+        let run = *self.runs.get(self.index)?;
+        let end = run.tile_id.saturating_add(u64::from(run.run_length));
+        Some((self.position.max(run.tile_id), end, run.hash))
+    }
+
+    fn advance(&mut self, end: u64) {
+        let Some(run) = self.runs.get(self.index) else {
+            return;
+        };
+        let run_end = run.tile_id.saturating_add(u64::from(run.run_length));
+        if end >= run_end {
+            self.index += 1;
+            self.position = self.runs.get(self.index).map_or(0, |next| next.tile_id);
+        } else {
+            self.position = end;
+        }
+    }
 }
 
 #[must_use]
@@ -143,7 +186,7 @@ pub fn bucket_delta_lines(
         };
         if ct != nt || hash_changed {
             changed += 1;
-            if out.len() < DIFF_CAP {
+            if out.len() < DIFF_LINE_LIMIT {
                 let (cz, x, y) = tile_id_to_zxy(key.1);
                 out.push(format!("bucket z={z} cell={cz}/{x}/{y} tiles {ct}->{nt}"));
             }

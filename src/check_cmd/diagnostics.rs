@@ -12,22 +12,20 @@ fn clippy_args(sweep: &PlannedSweep, run: &ResolutionRun, lints: &LintsConfig) -
         },
         "--message-format=json".into(),
     ];
-    // A sweep pinned to a profile is linted in it: `cfg(debug_assertions)`
-    // decides which code exists, so linting a release sweep in dev checks
-    // source the release build never compiles - and misses the source it
-    // does.
-    args.extend(sweep_profile_args(sweep));
-    // Same reason as the profile above, one level out: package and workspace
-    // resolution enable different features, so they compile different source
-    // and present different lint surfaces. Linting a package-mode sweep under
-    // ambient resolution checks code its own build never compiles - and misses
-    // the `#[cfg(feature)]` arms that only its resolution turns on, which is
-    // exactly the defect class the mode exists to catch.
-    args.extend(sweep.unification_args());
-    // `-p <pkg>` scoping is also what makes `--features` valid in a virtual
-    // workspace, where cargo rejects features at the root. The features are
-    // the run's projection: only the tokens its packages route.
-    args.extend(run.cargo_args());
+    // The sweep's build shape through the one selection renderer: its
+    // profile (`cfg(debug_assertions)` decides which code exists, so linting a
+    // release sweep in dev checks source the release build never compiles),
+    // its unification pin (package and workspace resolution enable different
+    // features, so they present different lint surfaces), and the run's
+    // projected `-p`/feature request (`-p` scoping is also what makes
+    // `--features` valid in a virtual workspace). No lane target filters:
+    // clippy lints the shape, not one test lane.
+    args.extend(cargo_selection_args(
+        sweep,
+        run,
+        sweep.cargo_profile(),
+        CargoSelectionPurpose::Shape,
+    ));
     args.push("--".into());
     args.push("--cap-lints=warn".into());
     // Cargo's own lints are allowed at ingestion instead (`code_allowed`):
@@ -91,9 +89,12 @@ fn doc_args(sweep: &PlannedSweep, run: &ResolutionRun, cfg: &RustdocConfig) -> V
     if cfg.document_private_items {
         args.push("--document-private-items".into());
     }
-    args.extend(sweep_profile_args(sweep));
-    args.extend(sweep.unification_args());
-    args.extend(run.cargo_args());
+    args.extend(cargo_selection_args(
+        sweep,
+        run,
+        sweep.cargo_profile(),
+        CargoSelectionPurpose::Shape,
+    ));
     args
 }
 
@@ -257,7 +258,7 @@ fn run_clippy_phase(
     let keep = |d: &Diagnostic| {
         !d.is_dependency_warning()
             && !sited_allowed(d, allow_exact)
-            && !(diagnostic_lint(d).is_some_and(|code| crate::config::check::is_cargo_lint(&code))
+            && !(diagnostic_lint(d).is_some_and(crate::config::check::is_cargo_lint)
                 && code_allowed(d, allow))
     };
     let outcome = ran.verdict(|failed| {
@@ -383,13 +384,12 @@ fn run_rustdoc_phase(
 /// for the lints no `-A` flag can reach: rustdoc's (no `-A` without changing
 /// the doc fingerprint) and cargo's own (no `-A` at all).
 fn code_allowed(d: &Diagnostic, allow: &[crate::config::check::LintName]) -> bool {
-    diagnostic_lint(d).is_some_and(|code| allow.iter().any(|allow| allow.matches(&code)))
+    diagnostic_lint(d).is_some_and(|code| allow.iter().any(|allow| allow.matches(code)))
 }
 
-/// A diagnostic's code as a lint identity. Parsed here, where it is compared:
-/// `Diagnostic` keeps cargo's spelling as text for display and sorting.
-fn diagnostic_lint(d: &Diagnostic) -> Option<crate::config::check::LintName> {
-    d.code.as_deref().map(crate::config::check::LintName::parse)
+/// A diagnostic's lint identity, parsed when cargo's event enters `Diagnostic`.
+fn diagnostic_lint(d: &Diagnostic) -> Option<&crate::config::check::LintName> {
+    d.code.as_ref()
 }
 
 /// Whether an `allow_exact` entry suppresses this diagnostic.
@@ -768,10 +768,10 @@ fn report_stale_sited_allows(
 /// accepts); the file must equal the entry's path exactly - cargo emits
 /// build-root-relative paths, which is also what the entry is written from.
 fn sited_match(s: &SitedAllow, d: &Diagnostic) -> bool {
-    let Some(code) = &d.code else {
+    let Some(code) = d.code.as_ref() else {
         return false;
     };
-    let lint_matches = s.lint.matches(&crate::config::check::LintName::parse(code));
+    let lint_matches = s.lint.matches(code);
     lint_matches && d.path() == Some(Path::new(s.path.as_str()))
 }
 
@@ -967,8 +967,8 @@ fn format_clippy_multi(
             let mut events = r.diagnostics.clone();
             events.retain(|d| keep(d));
             let parse = clippy_parse_from_events(&events, !r.success);
-            for (d, e) in parse.diagnostics.iter().zip(&events) {
-                if let Some(id) = &e.package_id {
+            for d in &parse.diagnostics {
+                if let Some(id) = &d.package_id {
                     package_of.entry(merge_key(d)).or_insert_with(|| id.clone());
                 }
             }
@@ -1291,7 +1291,11 @@ fn clippy_parse_from_events(
 /// A diagnostic with no code sorts to the end.
 fn clippy_sort_key(d: &crate::diagnostic::Diagnostic) -> (String, PathBuf, u64, u64) {
     // A key that sorts after any real code.
-    let lint_key = d.code.clone().unwrap_or_else(|| "\u{10FFFF}".to_owned());
+    let lint_key = d
+        .code
+        .as_ref()
+        .map(|code| code.as_str().to_owned())
+        .unwrap_or_else(|| "\u{10FFFF}".to_owned());
     let (file, line, column) = match &d.site {
         Some(site) => (site.file.clone(), site.line.unwrap_or(0), site.column.unwrap_or(0)),
         None => (PathBuf::new(), 0, 0),
@@ -1365,7 +1369,11 @@ fn render_build_diagnostics(
             Level::Other => 2,
         };
         (
-            diagnostic.code.clone().unwrap_or_else(|| "\u{10FFFF}".into()),
+            diagnostic
+                .code
+                .as_ref()
+                .map(|code| code.as_str().to_owned())
+                .unwrap_or_else(|| "\u{10FFFF}".into()),
             path,
             line,
             column,

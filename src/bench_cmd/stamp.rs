@@ -17,7 +17,7 @@
 //!
 //! ## What a stamp can and cannot see
 //!
-//! `rustc -vV` (version + host triple) and the CPU model are read directly.
+//! rustc's version and host triple, and the CPU model, are read directly.
 //! Flags are harder: `RUSTFLAGS` in the environment is visible, but flags set in
 //! `~/.cargo/config.toml` - which is where a standing `-Ctarget-cpu=native`
 //! usually lives - are not exposed by any stable cargo interface. Rather than
@@ -50,9 +50,12 @@ impl Stamp {
     pub fn capture(build_root: &Path) -> Self {
         let mut fields = BTreeMap::new();
 
-        if let Some((version, host)) = rustc_version(build_root) {
-            fields.insert("rustc".into(), version);
-            fields.insert("host".into(), host);
+        if let Ok(info) = crate::cargo::rustc::load(build_root) {
+            fields.insert("rustc".into(), info.release.clone());
+            fields.insert("host".into(), info.host.clone());
+            if let Some(commit_hash) = &info.commit_hash {
+                fields.insert("rustc_commit".into(), commit_hash.clone());
+            }
         }
         if let Some(cpu) = crate::host::cpu::collect().model {
             fields.insert("cpu".into(), cpu);
@@ -120,25 +123,6 @@ impl Stamp {
         }
         out
     }
-}
-
-/// `(version string, host triple)` from `rustc -vV`.
-fn rustc_version(build_root: &Path) -> Option<(String, String)> {
-    let captured = crate::output::run_captured("rustc", &["-vV"], build_root).ok()?;
-    if !captured.success() {
-        return None;
-    }
-    let text = String::from_utf8_lossy(&captured.stdout);
-    let mut version = None;
-    let mut host = None;
-    for line in text.lines() {
-        if let Some(rest) = line.strip_prefix("release: ") {
-            version = Some(rest.trim().to_owned());
-        } else if let Some(rest) = line.strip_prefix("host: ") {
-            host = Some(rest.trim().to_owned());
-        }
-    }
-    Some((version?, host?))
 }
 
 /// Digest of the user's cargo config, the usual home of standing rustflags.

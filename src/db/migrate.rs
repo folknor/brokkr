@@ -1162,7 +1162,7 @@ mod tests {
         // mode=`bench` here (after v13→v14 renamed `variant`→`mode`).
         assert_eq!(rows[0].command, "read");
         assert_eq!(rows[0].mode, "bench");
-        assert_eq!(rows[0].elapsed_ms, 1234);
+        assert_eq!(rows[0].elapsed.ms(), 1234);
 
         // UUID was backfilled.
         assert!(!rows[0].uuid.is_empty(), "uuid should be backfilled");
@@ -2162,8 +2162,8 @@ mod tests {
             run_id INTEGER NOT NULL, run_idx INTEGER NOT NULL, elapsed_ms INTEGER NOT NULL,
             PRIMARY KEY (run_id, run_idx));";
 
-    /// A pre-v19 distribution row stays readable and claims no microsecond
-    /// precision it never had: its `us` is `None`, not `min_ms * 1000`.
+    /// A pre-v19 distribution row stays readable as millisecond-only walls;
+    /// it claims no microsecond precision it never had.
     #[test]
     fn migrate_v18_to_v19_keeps_old_distributions_readable() {
         let dir = crate::test_scratch::scratch("db-migrate", "v18_to_v19");
@@ -2219,13 +2219,23 @@ mod tests {
             .as_ref()
             .expect("distribution survives");
         assert_eq!(
-            (dist.min_ms, dist.p50_ms, dist.p95_ms, dist.max_ms),
-            (0, 0, 1, 2)
+            (dist.min, dist.p50, dist.p95, dist.max),
+            (
+                crate::db::Wall::LegacyMillis(0),
+                crate::db::Wall::LegacyMillis(0),
+                crate::db::Wall::LegacyMillis(1),
+                crate::db::Wall::LegacyMillis(2),
+            )
         );
-        assert_eq!(dist.us, None, "an old row must not invent microseconds");
-        assert_eq!(rows[0].iterations, vec![0, 2, 1]);
-        assert!(rows[0].iterations_us.is_empty());
-        assert_eq!(rows[0].elapsed_us, None);
+        assert_eq!(
+            rows[0].iterations,
+            vec![
+                crate::db::Wall::LegacyMillis(0),
+                crate::db::Wall::LegacyMillis(2),
+                crate::db::Wall::LegacyMillis(1),
+            ]
+        );
+        assert_eq!(rows[0].elapsed, crate::db::Wall::LegacyMillis(0));
     }
 
     /// A v19 row records only the requested marker. v20 moves that value to

@@ -120,6 +120,9 @@ pub(crate) fn collect_clean_approval(
     Ok(git_info)
 }
 
+/// Open a subject's visual store. The opener is handed the legacy
+/// `results.db` path: the store lives beside it under its own file name, and
+/// the legacy tables in it are the source of the one-time import.
 pub(crate) fn open_results_db<T>(
     project_root: &Path,
     open: impl FnOnce(&Path) -> Result<T, DevError>,

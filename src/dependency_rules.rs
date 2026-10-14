@@ -11,7 +11,6 @@ use std::path::Path;
 use crate::config::DependencyRule;
 use crate::deps::{CargoMetadata, CargoPackage};
 use crate::error::DevError;
-use crate::output;
 
 pub use crate::deps::DependencyKind;
 
@@ -65,19 +64,16 @@ pub struct DependencyReport {
 }
 
 pub fn check(project_root: &Path, rules: &[DependencyRule]) -> Result<DependencyReport, DevError> {
-    let captured = output::run_cargo(
-        &["metadata", "--format-version", "1", "--no-deps"],
+    let metadata = crate::cargo::metadata::load(
         project_root,
+        crate::cargo::metadata::Query::workspace(),
         &[],
         None,
     )?;
-    if !captured.success() {
-        let stderr = String::from_utf8_lossy(&captured.stderr);
-        return Err(DevError::Build(format!("cargo metadata failed: {stderr}")));
-    }
-
-    let stdout = String::from_utf8_lossy(&captured.stdout);
-    check_metadata(&stdout, rules)
+    let raw = metadata
+        .raw_json()
+        .ok_or_else(|| DevError::Internal("cargo metadata snapshot kept no JSON".into()))?;
+    check_metadata(raw, rules)
 }
 
 pub fn check_metadata(

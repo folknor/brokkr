@@ -8,52 +8,49 @@ use serde::Serialize;
 
 use crate::artefacts::ArtefactDir;
 use crate::clean::layout::ProjectState;
-use crate::config::HarnessConfig;
 use crate::config::project_config::ratatoskr::RatatoskrConfig;
 use crate::error::DevError;
 use crate::git;
 use crate::lockfile;
 use crate::output;
 use crate::ratatoskr::build::HarnessBuild;
-use crate::ratatoskr::discover::{self, ScriptInfo};
+use crate::ratatoskr::discover::{self, ScriptInfo, ScriptKind};
 use crate::ratatoskr::saehrimnir::{
-    MockOutcome, MockServer, endpoint_env_pairs, require_path, resolve_fixture,
+    ManagedMock, MockArtifactScope, MockOutcome, MockPaths, resolve_fixture,
 };
 use crate::ratatoskr::timing::format_secs;
+
+use super::gate::validate_reserved_gate;
 
 // ---------------------------------------------------------------------------
 // shared plumbing: config validation, script resolution, the per-script run
 // ---------------------------------------------------------------------------
 
 /// Validate the `[ratatoskr]` surface every sync run needs and resolve
-/// sæhrimnir's paths. Shared by the single-script and cohort shapes so a
-/// cohort fails up front instead of once per script.
+/// sæhrimnir's paths. Shared by every sync shape so config failures happen
+/// before the build.
 pub(super) fn validate_sync_config<'a>(
     project_root: &Path,
     cfg: &'a RatatoskrConfig,
-) -> Result<(&'a RatatoskrConfig, &'a HarnessConfig, PathBuf, PathBuf), DevError> {
-    let harness_cfg = cfg.harness.as_ref().ok_or_else(|| {
-        DevError::Config(
-            "sync: no [ratatoskr.harness] section in brokkr.toml. \
-             Declare it with `package = \"<crate>\"` (and optional \
-             `binary`, `features`, `debug`)."
-                .into(),
-        )
-    })?;
-    let mock_binary = require_path(&cfg.mock_server_binary, project_root, "mock_server_binary")?;
-    let fixtures_dir = require_path(&cfg.fixtures_dir, project_root, "fixtures_dir")?;
-    if !mock_binary.exists() {
-        return Err(DevError::Config(format!(
-            "sync: sæhrimnir binary not found at {}. Build it first.",
-            mock_binary.display()
-        )));
-    }
-    Ok((cfg, harness_cfg, mock_binary, fixtures_dir))
+) -> Result<
+    (
+        &'a RatatoskrConfig,
+        &'a crate::config::HarnessConfig,
+        PathBuf,
+        PathBuf,
+    ),
+    DevError,
+> {
+    validate_reserved_gate(cfg)?;
+    let harness_cfg = crate::ratatoskr::require_harness_config(cfg, "sync")?;
+    let paths = MockPaths::resolve(cfg, project_root)
+        .map_err(|e| DevError::Config(format!("sync: {e}")))?;
+    Ok((cfg, harness_cfg, paths.binary, paths.fixtures_dir))
 }
 
 /// A sync script resolved to everything a run needs: canonical path,
-/// artefact key, fixture, ceiling. Produced before the lock and build in
-/// the single shape (fail fast) and per script inside the cohort loop.
+/// artefact key, fixture, ceiling. Produced for every selected script before
+/// the lock and build.
 pub(super) struct ResolvedScript {
     pub(super) script_abs: PathBuf,
     /// Artefact-dir key - the script's file stem.
@@ -83,13 +80,15 @@ pub(super) fn resolve_info(
             ))
         })?
         .to_owned();
-    let fixture_name = info.fixture.clone().ok_or_else(|| {
-        DevError::Config(format!(
-            "sync: script {} has no `-- fixture: <NAME>` frontmatter line. \
-             Required so brokkr knows which sæhrimnir fixture to load.",
-            info.name
-        ))
-    })?;
+    let fixture_name = match &info.kind {
+        ScriptKind::Sync { fixture, .. } => fixture.clone(),
+        ScriptKind::Service { .. } => {
+            return Err(DevError::Config(format!(
+                "sync: script {} was discovered as a service script",
+                info.name
+            )));
+        }
+    };
     let fixture_path = resolve_fixture(fixtures_dir, &fixture_name)?;
     Ok(ResolvedScript {
         script_abs,
@@ -116,7 +115,7 @@ pub(super) fn resolve_single(
         .file_stem()
         .and_then(|s| s.to_str())
         .ok_or_else(|| DevError::Config(format!("sync: script has no stem: {script}")))?;
-    let parsed = discover::parse_script(script_path, stem)
+    let parsed = discover::parse_sync_script(script_path, stem)
         .map_err(|e| DevError::Config(format!("sync: parse script: {e}")))?;
     resolve_info(&parsed, fixtures_dir)
 }
@@ -160,11 +159,9 @@ impl SyncRunner<'_> {
             let artefacts =
                 ArtefactDir::allocate(&artefact_parent, &resolved.test_id, self.keep_artefacts)?;
             let harness_dir = artefacts.path().join("harness");
-            let mock_dir = artefacts.path().join("mock");
             fs::create_dir_all(&harness_dir).map_err(DevError::Io)?;
-            fs::create_dir_all(&mock_dir).map_err(DevError::Io)?;
 
-            match self.orchestrate(resolved, &harness_dir, &mock_dir, &mut timings, lock) {
+            match self.orchestrate(resolved, artefacts.path(), &harness_dir, &mut timings, lock) {
                 Ok(()) => artefacts.finalize_success(),
                 Err(e) => {
                     preserved = Some(artefacts.path().to_path_buf());
@@ -227,8 +224,8 @@ impl SyncRunner<'_> {
     fn orchestrate(
         &self,
         resolved: &ResolvedScript,
+        run_dir: &Path,
         harness_dir: &Path,
-        mock_dir: &Path,
         timings: &mut PhaseTimings,
         lock: &lockfile::LockGuard,
     ) -> Result<(), DevError> {
@@ -236,13 +233,13 @@ impl SyncRunner<'_> {
         // readiness wait - so a `brokkr kill --hard` landing during
         // sæhrimnir startup finds the mock and SIGKILLs it instead of
         // orphaning it.
-        let mock = MockServer::spawn_observed(
+        let mock = ManagedMock::start(
+            self.cfg,
             self.mock_binary,
             &resolved.fixture_path,
-            mock_dir,
-            Some(&|pid| lock.add_mock_pid(pid)),
-            Some(&|pid| lock.remove_mock_pid(pid)),
-            true, // isolate_pg: the caller's SigtermGuard covers it
+            &resolved.fixture_name,
+            MockArtifactScope::Run(run_dir),
+            lock,
         )?;
         // Don't seed `child_pid` with the mock's PID - the captured runner's
         // `on_spawn` callback will publish the harness PID seconds from now,
@@ -250,7 +247,7 @@ impl SyncRunner<'_> {
         // landing in that gap would SIGKILL the mock twice (once via
         // `mock_pid`, once via `child_pid`) and the harness not at all.
         timings.mock_ready = Some(mock.ready_elapsed());
-        let endpoint_envs = endpoint_env_pairs(self.cfg, mock.endpoints());
+        let endpoint_envs = mock.env_pair_refs();
 
         let bin_dir_str = self.built.bin_dir.display().to_string();
         let harness_dir_str = harness_dir.display().to_string();
@@ -260,8 +257,8 @@ impl SyncRunner<'_> {
             ("BROKKR_HARNESS_ARTEFACT_DIR", &harness_dir_str),
             ("BROKKR_TEST_BIN_DIR", &bin_dir_str),
         ];
-        for (name, value) in &endpoint_envs {
-            env_pairs.push((name.as_str(), value.as_str()));
+        for &(name, value) in &endpoint_envs {
+            env_pairs.push((name, value));
         }
 
         // The frontmatter ceiling (or discover's generous default) keeps
@@ -290,17 +287,18 @@ impl SyncRunner<'_> {
 
         // Whatever the harness did, sæhrimnir gets torn down next.
         let mock_outcome = mock.shutdown();
-        // this path has at most one mock alive at a time; clear all is the
-        // honest call after that single mock drains.
-        lock.clear_mock_pids();
         lock.clear_child_pid();
-        timings.mock_shutdown = Some(mock_outcome.shutdown_elapsed);
+        timings.mock_shutdown = mock_outcome
+            .as_ref()
+            .ok()
+            .map(|outcome| outcome.shutdown_elapsed);
 
         let dc = deadline_capture?;
         fs::write(harness_dir.join("binary-stdout.log"), &dc.captured.stdout)
             .map_err(DevError::Io)?;
         fs::write(harness_dir.join("binary-stderr.log"), &dc.captured.stderr)
             .map_err(DevError::Io)?;
+        let mock_outcome = mock_outcome?;
         write_run_toml(
             harness_dir,
             &resolved.script_abs,
@@ -311,16 +309,13 @@ impl SyncRunner<'_> {
         )?;
 
         if dc.killed_on_deadline() {
-            return Err(DevError::Config(format!(
-                "harness binary exceeded ceiling {ceiling:?}"
-            )));
+            return Err(DevError::Subprocess {
+                program: binary_str,
+                ending: crate::error::ProcessEnding::Signal(libc::SIGKILL),
+                stderr: format!("brokkr killed the harness after ceiling {ceiling:?}"),
+            });
         }
-        if !dc.captured.success() {
-            return Err(DevError::Config(format!(
-                "harness binary ended with {:?}",
-                dc.captured.ending
-            )));
-        }
+        dc.captured.check_success(&binary_str)?;
         Ok(())
     }
 }

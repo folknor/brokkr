@@ -73,8 +73,8 @@ pub fn run(
         PbfhoggLayout::fixed_scratch_file(scratch_dir, "bench-blob-filter-output.osm.pbf");
     let output_str = output_path.display().to_string();
 
-    let (indexed_basename, indexed_str) = super::path_strs(pbf_indexed)?;
-    let (raw_basename, raw_str) = super::path_strs(pbf_raw)?;
+    let (indexed_basename, indexed_str) = crate::utf8_path::path_strings(pbf_indexed)?;
+    let (raw_basename, raw_str) = crate::utf8_path::path_strings(pbf_raw)?;
 
     let variants: &[(&str, &str, &str, bool)] = &[
         ("indexed", indexed_str, &indexed_basename, false),

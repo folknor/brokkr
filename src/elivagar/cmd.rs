@@ -30,6 +30,7 @@ pub(crate) fn bench_all(req: &MeasureRequest) -> Result<(), DevError> {
     super::bench_all::run(
         &ctx.harness,
         &ctx.paths,
+        req.features,
         req.build_root.as_path(),
         &pbf_path,
         file_mb,
@@ -123,7 +124,7 @@ pub(crate) fn inspect(
     let pmtiles_path = ArchiveStore::new(paths.output_dir.as_path())
         .resolve(dataset, variant, commit, file, build_root)?
         .path;
-    super::inspect::run(&pmtiles_path, build_root)
+    super::inspect::run(&pmtiles_path, build_root, &paths.features)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -147,7 +148,7 @@ pub(crate) fn diag(
     let pmtiles_path = ArchiveStore::new(paths.output_dir.as_path())
         .resolve(dataset, variant, commit, file, build_root)?
         .path;
-    super::diag::run(&pmtiles_path, build_root, z, x, y)
+    super::diag::run(&pmtiles_path, build_root, &paths.features, z, x, y)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -178,6 +179,7 @@ pub(crate) fn svg(
     super::svg::run(
         &pmtiles_path,
         build_root,
+        &paths.features,
         z,
         x,
         y,
@@ -334,12 +336,15 @@ pub(crate) fn corpus(
     // (`corpus_style_path`), never from the build root independently - the two
     // disagree as soon as `--corpus` points elsewhere.
     let style_default = gate::corpus_style_path;
+    // The digest's external sort spills under project state, never /tmp.
+    let sort_scratch = project_root.state().corpus_sort_dir();
 
     match cmd {
         PmtilesCorpusCommand::Check { archive, corpus } => {
             let path = resolve(archive)?;
             let (outcome, report) =
-                gate::check(&path, &corpus_dir(archive, corpus)).map_err(DevError::Io)?;
+                gate::check(&path, &corpus_dir(archive, corpus), &sort_scratch)
+                    .map_err(DevError::Io)?;
             emit_corpus(outcome, &report)
         }
         PmtilesCorpusCommand::Bless {
@@ -350,8 +355,14 @@ pub(crate) fn corpus(
         } => {
             let path = resolve(archive)?;
             let (outcome, report) =
-                gate::bless(&path, &corpus_dir(archive, corpus), *mode, *rotate)
-                    .map_err(DevError::Io)?;
+                gate::bless(
+                    &path,
+                    &corpus_dir(archive, corpus),
+                    *mode,
+                    *rotate,
+                    &sort_scratch,
+                )
+                .map_err(DevError::Io)?;
             emit_corpus(outcome, &report)
         }
         PmtilesCorpusCommand::RenderManifest {
@@ -363,7 +374,8 @@ pub(crate) fn corpus(
             let dir = corpus_dir(archive, corpus);
             let style_path = style.clone().unwrap_or_else(|| style_default(&dir));
             let (outcome, report) =
-                gate::render_manifest(&path, &dir, &style_path).map_err(DevError::Io)?;
+                gate::render_manifest(&path, &dir, &style_path, &sort_scratch)
+                    .map_err(DevError::Io)?;
             emit_corpus(outcome, &report)
         }
         PmtilesCorpusCommand::Render {

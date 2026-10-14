@@ -9,13 +9,17 @@ use std::path::Path;
 
 use serde::Deserialize;
 
+use super::super::constants::MAX_MANIFEST_ZOOM;
+
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ManifestFile {
     #[serde(default)]
     pub tile: Vec<ManifestTile>,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ManifestTile {
     pub z: u8,
     pub x: u32,
@@ -40,7 +44,7 @@ pub fn load(path: &Path) -> io::Result<ManifestFile> {
     let mut tuples = BTreeSet::new();
     let mut names = BTreeSet::new();
     for tile in &out.tile {
-        if tile.z > 14 || tile.x >= (1u32 << tile.z) || tile.y >= (1u32 << tile.z) {
+        if tile.z > MAX_MANIFEST_ZOOM || tile.x >= (1u32 << tile.z) || tile.y >= (1u32 << tile.z) {
             return Err(invalid("manifest tile out of range"));
         }
         if !tile.layers.windows(2).all(|v| v[0] < v[1])

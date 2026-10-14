@@ -5,7 +5,7 @@ use crate::clean::layout::ProjectState;
 use crate::context::MeasurementSession;
 use crate::error::DevError;
 use crate::harness::{self, BenchConfig};
-use crate::measure::{MeasureMode, MeasureRequest};
+use crate::measure::MeasureRequest;
 use crate::output;
 use crate::project::{self, Project};
 
@@ -23,13 +23,13 @@ pub(crate) fn run(req: &MeasureRequest, lua: &str) -> Result<(), DevError> {
         req.project_config,
         req.project_root.as_path(),
         lua,
-        uses_hotpath(req),
+        req.mode.profiled().is_some(),
     )?;
     let example = workload::config(req.project_config)?.example.clone();
     let lua_path = resolved.path_str()?.to_owned();
 
     if req.dry_run {
-        let variant = if uses_hotpath(req) {
+        let variant = if req.mode.profiled().is_some() {
             " (hotpath variant)"
         } else {
             ""
@@ -47,14 +47,11 @@ pub(crate) fn run(req: &MeasureRequest, lua: &str) -> Result<(), DevError> {
     // `--bench` builds the harness bare: its walls are the ones worth
     // comparing, and hotpath instrumentation would tax every call it wraps.
     // The profiling modes add the standard feature for their instrument.
-    let features: Vec<String> = if uses_hotpath(req) {
-        req.build_features()
-            .into_iter()
-            .map(str::to_owned)
-            .collect()
-    } else {
-        req.features.to_vec()
-    };
+    let features: Vec<String> = req
+        .build_features()
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
 
     let build_config = build::BuildConfig {
         package: None,
@@ -91,7 +88,7 @@ pub(crate) fn run(req: &MeasureRequest, lua: &str) -> Result<(), DevError> {
         metadata: vec![],
     };
 
-    if uses_hotpath(req) {
+    if req.mode.profiled().is_some() {
         let label = req
             .mode
             .profiled()
@@ -101,18 +98,17 @@ pub(crate) fn run(req: &MeasureRequest, lua: &str) -> Result<(), DevError> {
             profiling.print_note();
         }
 
-        ctx.harness.run_hotpath(&config, ctx.binary()?, |_i| {
-            let (result, _stderr, sidecar) = harness::run_hotpath_capture(
-                &binary_str,
+        ctx.harness.run_hotpath(&config, ctx.binary()?, |i, fifo| {
+            ctx.harness.capture_hotpath(
+                ctx.binary()?,
                 &args,
-                &scratch_dir,
                 req.project_root.as_path(),
                 &[],
                 &[],
-                req.stop_marker,
-                Some(ctx.harness.lock()),
-            )?;
-            Ok((result, sidecar))
+                fifo,
+                i,
+                None,
+            )
         })?;
     } else {
         output::bench_msg(&format!(
@@ -127,19 +123,12 @@ pub(crate) fn run(req: &MeasureRequest, lua: &str) -> Result<(), DevError> {
     Ok(())
 }
 
-/// Whether this mode builds the harness with hotpath instrumentation.
-fn uses_hotpath(req: &MeasureRequest) -> bool {
-    matches!(
-        req.mode,
-        MeasureMode::Hotpath { .. } | MeasureMode::Alloc { .. }
-    )
-}
-
 /// Human-readable feature summary for `--dry-run` output.
 fn feature_summary(req: &MeasureRequest) -> String {
-    if uses_hotpath(req) {
-        format!("--features {}", req.build_features().join(","))
+    let features = req.build_features();
+    if features.is_empty() {
+        "no cargo features".to_owned()
     } else {
-        "no hotpath features".to_owned()
+        format!("--features {}", features.join(","))
     }
 }

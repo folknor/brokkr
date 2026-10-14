@@ -18,11 +18,7 @@
 //! # Deadlines
 //!
 //! [`run_sidecar_with_deadline`] kills the child's process group once it has
-//! run longer than the given limit; [`run_sidecar`] takes its limit from the
-//! enclosing [`DeadlineScope`], if any. The scope exists so a caller several
-//! layers above the sidecar (a measured command driving
-//! `harness::run_hotpath_capture`) can bound a hung child without threading a
-//! parameter through every capture helper.
+//! run longer than the given limit, and the run records `Ending::Deadline`.
 //!
 //! # Pipe draining
 //!
@@ -57,51 +53,121 @@ use crate::process::{Pid, ProcStat};
 // Constants
 // ---------------------------------------------------------------------------
 
-/// Sample interval in microseconds (100ms).
-const SAMPLE_INTERVAL_US: u64 = 100_000;
+/// Environment variable the measured child uses to find the marker FIFO.
+/// This name is part of the sidecar emitter protocol.
+pub(crate) const MARKER_FIFO_ENV: &str = "BROKKR_MARKER_FIFO";
+
+/// Measurement defaults shared by the sidecar, harness output handling and
+/// sidecar file naming. Callers may copy this value and override fields in
+/// focused tests or alternate measurement runs.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct MeasurementTunables {
+    pub sample_interval: Duration,
+    pub sidecar_backup_copies: usize,
+    pub stderr_preview_chars: usize,
+    pub hotpath_report_filename: &'static str,
+}
+
+pub(crate) const DEFAULT_MEASUREMENT_TUNABLES: MeasurementTunables = MeasurementTunables {
+    sample_interval: Duration::from_micros(100_000),
+    sidecar_backup_copies: 3,
+    stderr_preview_chars: 500,
+    hotpath_report_filename: "hotpath-report.json",
+};
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
-/// A single point-in-time sample of process metrics from `/proc`.
-#[derive(Debug, Clone)]
-pub struct Sample {
-    pub sample_idx: i32,
-    pub timestamp_us: i64,
+/// One sidecar sample field, with its public CLI/JSON name.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SampleField {
+    pub name: &'static str,
+}
 
-    // Process memory (from /proc/{pid}/status, in kB)
-    pub rss_kb: i64,
-    pub anon_kb: i64,
-    pub file_kb: i64,
-    pub shmem_kb: i64,
-    pub swap_kb: i64,
-    pub vm_hwm_kb: i64,
+/// Define the sample shape and all derived field/storage views together.
+/// The aliases are the public `--fields`/JSON names; the Rust names are also
+/// the SQLite column names. Keeping these pairs here lets the database and
+/// formatter derive their projections from the same list.
+macro_rules! define_sample {
+    ($($field:ident => $name:literal;)+) => {
+        /// A single point-in-time sample of process metrics from `/proc`.
+        #[derive(Debug, Clone)]
+        pub struct Sample {
+            pub sample_idx: i32,
+            pub timestamp_us: i64,
+            $(pub $field: i64,)*
+        }
 
-    // Virtual memory size (from /proc/{pid}/stat, converted to kB)
-    pub vsize_kb: i64,
+        pub(crate) const SAMPLE_FIELDS: &[SampleField] = &[
+            SampleField { name: "i" },
+            $(SampleField { name: $name },)*
+        ];
 
-    // CPU (raw clock ticks from /proc/{pid}/stat)
-    pub utime: i64,
-    pub stime: i64,
-    pub num_threads: i64,
+        impl Sample {
+            pub(crate) fn field_value(&self, name: &str) -> Option<i64> {
+                match name {
+                    "i" => Some(i64::from(self.sample_idx)),
+                    $($name => Some(self.$field),)*
+                    _ => None,
+                }
+            }
 
-    // Page faults (cumulative, from /proc/{pid}/stat)
-    pub minflt: i64,
-    pub majflt: i64,
+            pub(crate) fn db_column_names() -> Vec<&'static str> {
+                vec!["sample_idx", "timestamp_us", $(stringify!($field),)*]
+            }
 
-    // I/O (cumulative bytes, from /proc/{pid}/io)
-    pub rchar: i64,
-    pub wchar: i64,
-    pub read_bytes: i64,
-    pub write_bytes: i64,
-    pub cancelled_write_bytes: i64,
-    pub syscr: i64,
-    pub syscw: i64,
+            pub(crate) fn db_column_definitions() -> Vec<String> {
+                vec![
+                    "sample_idx INTEGER NOT NULL".to_owned(),
+                    "timestamp_us INTEGER NOT NULL".to_owned(),
+                    $(format!("{} INTEGER", stringify!($field)),)*
+                ]
+            }
 
-    // Context switches (cumulative, from /proc/{pid}/status)
-    pub vol_cs: i64,
-    pub nonvol_cs: i64,
+            pub(crate) fn db_values(&self) -> Vec<rusqlite::types::Value> {
+                vec![
+                    rusqlite::types::Value::Integer(i64::from(self.sample_idx)),
+                    rusqlite::types::Value::Integer(self.timestamp_us),
+                    $(rusqlite::types::Value::Integer(self.$field),)*
+                ]
+            }
+
+            pub(crate) fn from_db_row(
+                row: &rusqlite::Row<'_>,
+            ) -> rusqlite::Result<Self> {
+                Ok(Self {
+                    sample_idx: row.get("sample_idx")?,
+                    timestamp_us: row.get("timestamp_us")?,
+                    $($field: row.get(stringify!($field))?,)*
+                })
+            }
+        }
+    };
+}
+
+define_sample! {
+    rss_kb => "rss";
+    anon_kb => "anon";
+    file_kb => "file";
+    shmem_kb => "shmem";
+    swap_kb => "swap";
+    vsize_kb => "vsize";
+    vm_hwm_kb => "hwm";
+    utime => "utime";
+    stime => "stime";
+    num_threads => "threads";
+    minflt => "minflt";
+    majflt => "majflt";
+    rchar => "rchar";
+    wchar => "wchar";
+    read_bytes => "rd";
+    write_bytes => "wr";
+    cancelled_write_bytes => "cwr";
+    syscr => "syscr";
+    syscw => "syscw";
+    vol_cs => "vcs";
+    nonvol_cs => "nvcs";
 }
 
 /// A phase marker emitted by the target process.
@@ -351,7 +417,16 @@ struct ProcStatus {
 
 /// Read `/proc/{pid}/stat` through the shared process parser.
 fn read_proc_stat(pid: u32) -> Option<ProcStat> {
-    ProcStat::read(Pid::new(pid)?).ok()
+    let pid = Pid::new(pid)?;
+    let path = format!("/proc/{}/stat", pid.get());
+    let contents = fs::read_to_string(path).ok()?;
+    let stat = parse_proc_stat(&contents)?;
+    (stat.identity().pid() == pid).then_some(stat)
+}
+
+/// Parse a `/proc/{pid}/stat` row without consulting the process table.
+fn parse_proc_stat(contents: &str) -> Option<ProcStat> {
+    ProcStat::parse(contents)
 }
 
 /// Read and parse `/proc/{pid}/io`.
@@ -364,7 +439,10 @@ fn read_proc_stat(pid: u32) -> Option<ProcStat> {
 fn read_proc_io(pid: u32) -> Option<ProcIo> {
     let path = format!("/proc/{pid}/io");
     let contents = fs::read_to_string(&path).ok()?;
+    parse_proc_io(&contents)
+}
 
+fn parse_proc_io(contents: &str) -> Option<ProcIo> {
     let mut io = ProcIo {
         rchar: 0,
         wchar: 0,
@@ -403,7 +481,18 @@ fn read_proc_io(pid: u32) -> Option<ProcIo> {
 fn read_proc_status(pid: u32) -> Option<ProcStatus> {
     let path = format!("/proc/{pid}/status");
     let contents = fs::read_to_string(&path).ok()?;
+    parse_proc_status(&contents)
+}
 
+/// This process's peak resident set (`VmHWM`, kB) through the same status
+/// parser the sampler uses. `None` when it cannot be read or is not reported.
+pub(crate) fn self_peak_rss_kb() -> Option<u64> {
+    let contents = fs::read_to_string("/proc/self/status").ok()?;
+    let kb = parse_proc_status(&contents)?.vm_hwm_kb;
+    u64::try_from(kb).ok().filter(|kb| *kb > 0)
+}
+
+fn parse_proc_status(contents: &str) -> Option<ProcStatus> {
     let mut status = ProcStatus {
         vm_rss_kb: 0,
         rss_anon_kb: 0,
@@ -486,6 +575,26 @@ fn read_proc_metrics(pid: u32, sample_idx: i32, timestamp_us: i64) -> Option<Sam
         vol_cs: status.vol_cs,
         nonvol_cs: status.nonvol_cs,
     })
+}
+
+/// Injectable clock and metric source for sidecar sampling. The production
+/// implementation reads procfs; tests can supply parsed fixtures and a
+/// deterministic clock without depending on their own process row.
+pub(crate) trait SidecarSampler {
+    fn elapsed_since(&mut self, start: Instant) -> Duration;
+    fn sample(&mut self, pid: u32, sample_idx: i32, timestamp_us: i64) -> Option<Sample>;
+}
+
+pub(crate) struct ProcSidecarSampler;
+
+impl SidecarSampler for ProcSidecarSampler {
+    fn elapsed_since(&mut self, start: Instant) -> Duration {
+        start.elapsed()
+    }
+
+    fn sample(&mut self, pid: u32, sample_idx: i32, timestamp_us: i64) -> Option<Sample> {
+        read_proc_metrics(pid, sample_idx, timestamp_us)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -640,6 +749,7 @@ impl SidecarFifo {
         next_marker_idx: &mut i32,
         counters: &mut Vec<Counter>,
     ) {
+        let mut rejected_lines = 0usize;
         let mut last_name: Option<String> = None;
         let mut line = String::new();
         loop {
@@ -650,6 +760,7 @@ impl SidecarFifo {
                     let trimmed = line.trim();
                     if let Some((ts_str, payload)) = trimmed.split_once(' ') {
                         let Ok(ts) = ts_str.parse::<i64>() else {
+                            rejected_lines += 1;
                             continue;
                         };
                         if let Some(counter_body) = payload.strip_prefix('@') {
@@ -662,6 +773,8 @@ impl SidecarFifo {
                                     name: name.to_owned(),
                                     value: val,
                                 });
+                            } else {
+                                rejected_lines += 1;
                             }
                         } else {
                             // Phase marker
@@ -673,11 +786,18 @@ impl SidecarFifo {
                             });
                             *next_marker_idx += 1;
                         }
+                    } else if !trimmed.is_empty() {
+                        rejected_lines += 1;
                     }
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
                 Err(_) => break,
             }
+        }
+        if rejected_lines > 0 {
+            console::warn(&format!(
+                "sidecar FIFO rejected {rejected_lines} malformed lines"
+            ));
         }
         if let Some(name) = last_name {
             self.update_status(&name);
@@ -747,64 +867,12 @@ impl StopSpec {
     }
 }
 
-thread_local! {
-    /// The deadline [`run_sidecar`] applies, set by the innermost live
-    /// [`DeadlineScope`] on this thread. Thread-local because the sidecar
-    /// loop runs on the thread that entered the scope.
-    static AMBIENT_DEADLINE: std::cell::Cell<Option<Duration>> =
-        const { std::cell::Cell::new(None) };
-}
-
-/// Bounds every [`run_sidecar`] call on this thread while it lives: a child
-/// running longer than `limit` (measured from the caller's `start`) has its
-/// process group SIGKILLed and the run records `Ending::Deadline`.
-///
-/// Scopes nest; dropping one restores the enclosing limit.
-pub(crate) struct DeadlineScope {
-    prev: Option<Duration>,
-}
-
-impl DeadlineScope {
-    pub(crate) fn enter(limit: Duration) -> Self {
-        let prev = AMBIENT_DEADLINE.with(|c| c.replace(Some(limit)));
-        Self { prev }
-    }
-}
-
-impl Drop for DeadlineScope {
-    fn drop(&mut self) {
-        AMBIENT_DEADLINE.with(|c| c.set(self.prev));
-    }
-}
-
-fn ambient_deadline() -> Option<Duration> {
-    AMBIENT_DEADLINE.with(std::cell::Cell::get)
-}
-
-/// Run the sidecar sampling loop for a single benchmark run, bounded by the
-/// enclosing [`DeadlineScope`] if there is one (unbounded otherwise).
-///
-/// See [`run_sidecar_with_deadline`].
-pub(crate) fn run_sidecar(
-    child_process: Child,
-    fifo: &mut SidecarFifo,
-    run_idx: usize,
-    start: Instant,
-    stop_marker: Option<&str>,
-) -> SidecarRunResult {
-    run_sidecar_with_deadline(
-        child_process,
-        fifo,
-        run_idx,
-        start,
-        stop_marker,
-        ambient_deadline(),
-    )
-}
-
-/// Run one sidecar-observed child. Process polling, stop/deadline killing,
+/// Run one sidecar-observed child, killing its process group once it has run
+/// longer than `deadline` (measured from the caller's `start`) when one is
+/// given. Process polling, stop/deadline killing,
 /// output draining, and waiting are owned by the shared child supervisor;
 /// this observer only samples procfs and drains the marker FIFO.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn run_sidecar_with_deadline(
     child_process: Child,
     fifo: &mut SidecarFifo,
@@ -812,7 +880,12 @@ pub(crate) fn run_sidecar_with_deadline(
     start: Instant,
     stop_marker: Option<&str>,
     deadline: Option<Duration>,
+    tunables: &MeasurementTunables,
+    sampler: &mut dyn SidecarSampler,
 ) -> SidecarRunResult {
+    // The shared child supervisor owns process polling and process-group
+    // signals. This guard only makes the sidecar's own shutdown path observe
+    // the process-wide termination request.
     let _shutdown_guard = crate::shutdown::SigtermGuard::install();
     let pid = child_process.id();
 
@@ -831,7 +904,7 @@ pub(crate) fn run_sidecar_with_deadline(
         run_idx + 1
     ));
 
-    let tick_interval = Duration::from_micros(SAMPLE_INTERVAL_US);
+    let tick_interval = tunables.sample_interval;
     let limit = deadline.map_or(ChildLimit::None, ChildLimit::Wall);
     let label = format!("sidecar run {}", run_idx + 1);
     let run = child::supervise_child(
@@ -842,8 +915,9 @@ pub(crate) fn run_sidecar_with_deadline(
         true,
         tick_interval,
         || {
-            let elapsed_us = i64::try_from(start.elapsed().as_micros()).unwrap_or(i64::MAX);
-            if let Some(sample) = read_proc_metrics(pid, sample_idx, elapsed_us) {
+            let elapsed_us =
+                i64::try_from(sampler.elapsed_since(start).as_micros()).unwrap_or(i64::MAX);
+            if let Some(sample) = sampler.sample(pid, sample_idx, elapsed_us) {
                 last_hwm = last_hwm.max(sample.vm_hwm_kb);
                 samples.push(sample);
                 sample_idx += 1;
@@ -877,7 +951,9 @@ pub(crate) fn run_sidecar_with_deadline(
         console::sidecar_msg("shutdown requested, killing child");
     }
 
-    let wall_time_ms = i64::try_from(run.elapsed.as_millis()).unwrap_or(i64::MAX);
+    // The shared nearest-millisecond rule, so the sidecar summary agrees with
+    // the results row's rounded wall.
+    let wall_time_ms = crate::harness::elapsed_to_ms(&run.elapsed);
     console::detail(&format!(
         "sidecar run {}: {} samples, {} markers, {} counters, {wall_time_ms}ms",
         run_idx + 1,
@@ -1006,21 +1082,6 @@ mod tests {
         assert_eq!(parse_status("STAGE2_START", 4242), None);
         assert_eq!(parse_status("4242\n", 4242), None);
         assert_eq!(parse_status("x\nSTAGE", 4242), None);
-    }
-
-    #[test]
-    fn deadline_scopes_nest_and_restore() {
-        assert_eq!(ambient_deadline(), None);
-        {
-            let _outer = DeadlineScope::enter(Duration::from_secs(60));
-            assert_eq!(ambient_deadline(), Some(Duration::from_secs(60)));
-            {
-                let _inner = DeadlineScope::enter(Duration::from_secs(5));
-                assert_eq!(ambient_deadline(), Some(Duration::from_secs(5)));
-            }
-            assert_eq!(ambient_deadline(), Some(Duration::from_secs(60)));
-        }
-        assert_eq!(ambient_deadline(), None);
     }
 
     #[test]

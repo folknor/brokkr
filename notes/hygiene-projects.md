@@ -39,12 +39,6 @@ Reported by: pbfhogg-nidhogg, config-cli-bootstrap.
 
 Enforcement proposed: a `Compression` type with `FromStr` used by clap.
 
-## PRJ-007 - nidhogg server addresses and timeouts
-
-Reported by: pbfhogg-nidhogg.
-
-`.brokkr/nidhogg.pid` in both `server::serve` and `server::stop`; `http://localhost:{port}` in five URL builders while `health_check` builds its own; the 6s readiness timeout exists as `30 × 200ms` in `poll_for_ready` and a literal "6s" in the error; `ITERATIONS=5`, `STARTUP_TIMEOUT=30s` (`bench_tiles.rs`), stop 5s and ready 6s (`server.rs`), curl `--max-time 30`/`--connect-timeout 2` (`client.rs`) - no list, no injection. Six curl invocations with six flag policies (failures: BUG-083). Port resolution: BUG-088.
-
 ## PRJ-008 - Denmark-only fixtures on dataset-parameterized commands
 
 Reported by: pbfhogg-nidhogg.
@@ -60,17 +54,6 @@ Reported by: pbfhogg-nidhogg.
 `download_core.rs` has seven `brokkr.toml` appenders and two line-based rewriters, each calling `project_root.join("brokkr.toml")` and hand-formatting TOML without escaping; the repo already has a comment-preserving `toml_edit` pattern (`guard.rs`, `piners/pins_write.rs`). `{key}-{date}.osm.pbf` and `-with-indexdata.osm.pbf` spelled at five sites (`raw_pbf_path`, `indexed_pbf_path`, `run_as_snapshot`, `run_refresh`, `promote_snapshot`). `download_core.rs` hand-rolls `days_to_civil`/`civil_to_days` and `SystemTime::now()` while `header.rs` uses libc `gmtime` for "what is today". Atomicity: BUG-081.
 
 Design hunt (map-projects): three calendar implementations and four string formats - `download_core::today` + `days_to_civil` (Hinnant forward); `download_modes::civil_to_days`, `unix_to_yyyymmdd`, `iso_date_to_yyyymmdd`, `snapshot_key_to_iso_date`, `iso_date_today`, `iso_date_parse_unix`; `tools::parse_http_date` (an inline Hinnant inverse whose comment cites `pbfhogg::download::days_to_civil`); `header.rs` with libc `gmtime_r`. Proposed: a `CivilDate { y, m, d }` in one shared module (it is not pbfhogg-specific) with `from_unix`, `to_unix`, `yyyymmdd()`, `iso()`, `parse_yyyymmdd`, `parse_iso`, `parse_http`, so snapshot keys, `download_date` and Last-Modified comparisons stop each re-deriving the date. A day-range defect in one of the copies is filed in `bugs.md`.
-
-## PRJ-010 - pbfhogg parsers, labels and helpers with several owners
-
-Reported by: pbfhogg-nidhogg.
-
-- Inspect-output parsers: `verify.rs::parse_ordered`, `verify_multi_extract.rs::parse_inspect_counts`, `verify_renumber.rs::parse_total_relations`, with `strip_commas` duplicated in the last two; the format contract with pbfhogg's `inspect.rs` is recorded only in a test comment.
-- `cmd.rs::verify_name` claims to "match the labels used by `verify all`", but `verify_all.rs` spells its own; it passes `5` regions to multi-extract, duplicating the CLI default `"5"`.
-- UTF-8 path helpers: `pbfhogg::path_strs`, `commands::path_to_string`, the `CommandContext::*_str` family, `nidhogg::client::path_str`, inline `to_str().ok_or_else`; messages disagree, some omit the path.
-- "MB": `file_size_mb` decimal; `nidhogg/ingest.rs` 1,048,576 and `verify_renumber::fmt_size` binary.
-
-Enforcement proposed: one `InspectReport` parser with tests from the doc-comment samples.
 
 ## PRJ-011 - pbfhogg/nidhogg configuration used before it is validated
 
@@ -284,12 +267,6 @@ Reported by: ratatoskr.
 - `gate.rs` says plumbing lives in `src/ratatoskr/sync.rs` and sync.md says the helpers do; it's an `include!` shim, code in `src/ratatoskr_sync/`.
 - Config docs are circular: service/sync/gate docs → `docs/brokkr.toml.md` → `docs/projects/ratatoskr.md` → rustdoc; no doc lists `mock_server_binary`, `fixtures_dir`, `test_endpoint_env_*`, `sync_script_dir` together.
 - Doc counts: PLT-041. SIGTERM claim: BUG-069.
-
-## PRJ-041 - ratatoskr lifecycle policy differs per shape
-
-Reported by: ratatoskr.
-
-Artefact placement: sync gets a per-run `mock/`, service shares `.brokkr/ratatoskr/mock/<fixture>`. Mock-pid bookkeeping: `remove` then `clear_mock_pids` in service, `clear` only in sync. Process-group decision: `true` in smoke/service, `false` in bench, each with a paragraph-long justification. Interrupt policy and validate-before-build: PLT-012, PRJ-034. `unix_now()`, `Instant::now` everywhere, the hostname in `run_gate_hook`, and a cwd-relative `canonicalize` of the script are ambient dependencies.
 
 ## PRJ-044 - piners registry residue
 

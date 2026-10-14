@@ -19,6 +19,7 @@ use super::{bench_node_store, bench_planetiler, bench_pmtiles, bench_self, bench
 pub fn run(
     harness: &BenchHarness,
     paths: &ResolvedPaths,
+    features: &[String],
     project_root: &Path,
     pbf_path: &Path,
     file_mb: f64,
@@ -29,11 +30,7 @@ pub fn run(
     let layout = ElivagarLayout::new(paths);
     // 1. bench self -- full elivagar pipeline
     output::bench_msg("=== bench self ===");
-    let binary = build::cargo_build(
-        &build::BuildConfig::release_with_owned_features(None, &paths.features),
-        project_root,
-    )?
-    .path;
+    let binary = build::cargo_build(&super::build_config(features), project_root)?.path;
     bench_self::run(
         harness,
         &binary,
@@ -66,11 +63,23 @@ pub fn run(
 
     // 3. bench node-store -- micro-benchmark
     output::bench_msg("=== bench node-store ===");
-    bench_node_store::run(harness, project_root, 50, runs)?;
+    bench_node_store::run(
+        harness,
+        project_root,
+        features,
+        super::constants::DEFAULT_NODE_STORE_MILLIONS,
+        runs,
+    )?;
 
     // 4. bench pmtiles -- micro-benchmark
     output::bench_msg("=== bench pmtiles ===");
-    bench_pmtiles::run(harness, project_root, 500_000, runs)?;
+    bench_pmtiles::run(
+        harness,
+        project_root,
+        features,
+        super::constants::DEFAULT_PMTILES_BENCH_TILES,
+        runs,
+    )?;
 
     // 5. bench tilemaker -- comparison baseline
     output::bench_msg("=== bench tilemaker ===");

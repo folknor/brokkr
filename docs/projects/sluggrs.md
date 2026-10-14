@@ -38,8 +38,11 @@ not silently treated as a new snapshot.
 ## Module layout
 
 - `src/sluggrs/cmd.rs` - snapshot rendering, approval, and status commands.
-- `src/sluggrs/db.rs` - the sluggrs adapter for the `snapshot_*` tables in
-  `.brokkr/results.db`; shared SQLite operations live in `src/visual/db.rs`.
+- `src/sluggrs/db.rs` - the sluggrs adapter for its versioned snapshot store;
+  shared SQLite operations and the one-time import from the former shared
+  file live in `src/visual/db.rs`. Snapshot tables now live in
+  `.brokkr/sluggrs-visual.db`; existing `snapshot_*` rows are imported from
+  `.brokkr/results.db` on first open.
 - `src/sluggrs/hotpath.rs` - the sluggrs rendering benchmark path.
 - `src/visual/` - shared pixel comparison, typed visual statuses, run engine,
   database operations, and common command formatting. Sluggrs has no

@@ -210,20 +210,24 @@ pub(crate) fn run(req: &MeasureRequest<'_>, command: &impl PlannedCommand) -> Re
                 if let Some(profiling) = req.mode.profiled() {
                     profiling.print_note();
                 }
-                ctx.harness.run_hotpath(&config, binary, |_| {
+                ctx.harness.run_hotpath(&config, binary, |i, fifo| {
                     prepare()?;
-                    let (mut result, stderr, sidecar) = harness::run_hotpath_capture(
-                        &program,
+                    let mut iteration = ctx.harness.capture_hotpath(
+                        binary,
                         &args,
-                        &ctx.paths.scratch_dir,
                         req.project_root.as_path(),
                         &command.env(),
                         command.ok_codes(),
-                        req.stop_marker,
-                        Some(ctx.harness.lock()),
+                        fifo,
+                        i,
+                        None,
                     )?;
-                    command.observe(&mut result, &stderr);
-                    Ok((result, sidecar))
+                    if iteration.error.is_none()
+                        && let Some(result) = &mut iteration.result
+                    {
+                        command.observe(result, &iteration.stderr);
+                    }
+                    Ok(iteration)
                 })?;
             }
         }
@@ -352,18 +356,17 @@ pub(crate) fn execute_example(
             if let Some(profiling) = req.mode.profiled() {
                 profiling.print_note();
             }
-            ctx.harness.run_hotpath(config, binary, |_| {
-                let (result, _, sidecar) = harness::run_hotpath_capture(
-                    &program,
+            ctx.harness.run_hotpath(config, binary, |i, fifo| {
+                ctx.harness.capture_hotpath(
+                    binary,
                     args,
-                    &ctx.paths.scratch_dir,
                     req.project_root.as_path(),
                     &[],
                     &[],
-                    req.stop_marker,
-                    Some(ctx.harness.lock()),
-                )?;
-                Ok((result, sidecar))
+                    fifo,
+                    i,
+                    None,
+                )
             })?;
         }
     }

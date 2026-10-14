@@ -16,6 +16,10 @@ pub(crate) enum AltwMode {
 /// `--version` so a stale installed `brokkr` names the commit it was built from.
 const LONG_VERSION: &str = env!("BROKKR_LONG_VERSION");
 
+/// `brokkr outline --depth` when the flag is absent; clap renders it in the
+/// help text, so the doc comment does not repeat it.
+const DEFAULT_OUTLINE_DEPTH: usize = 4;
+
 #[derive(Parser)]
 #[command(name = "brokkr", about = "Shared development tooling", version = LONG_VERSION)]
 pub(crate) struct Cli {
@@ -825,7 +829,7 @@ In depth: `brokkr man clippy`."
         #[command(flatten)]
         pbf: PbfArgs,
         /// Number of non-overlapping bbox regions to extract
-        #[arg(long, default_value = "5")]
+        #[arg(long, default_value_t = crate::pbfhogg::commands::DEFAULT_MULTI_EXTRACT_REGIONS)]
         regions: usize,
         /// Source bounding box to carve regions from (lon_min,lat_min,lon_max,lat_max).
         /// Falls back to the dataset's configured bbox if omitted.
@@ -2101,8 +2105,8 @@ In depth: `brokkr man nidhogg`."
     Outline {
         /// Input HTML file (prepared)
         input: String,
-        /// Maximum nesting depth before collapsing (default: 4)
-        #[arg(long, default_value = "4")]
+        /// Maximum nesting depth before collapsing
+        #[arg(long, default_value_t = DEFAULT_OUTLINE_DEPTH)]
         depth: usize,
         /// Show full tree with no depth limit
         #[arg(long)]
@@ -2956,7 +2960,7 @@ pub(crate) enum VerifyCommand {
         #[arg(long)]
         bbox: Option<String>,
         /// Number of non-overlapping bbox regions
-        #[arg(long, default_value = "5")]
+        #[arg(long, default_value_t = crate::pbfhogg::commands::DEFAULT_MULTI_EXTRACT_REGIONS)]
         regions: usize,
     },
     /// Cross-validate tags-filter against osmium tags-filter

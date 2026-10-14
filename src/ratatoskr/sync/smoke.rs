@@ -18,6 +18,9 @@ use super::runner::{SyncRunner, resolve_single, validate_sync_config};
 /// body can be smoke-tested with synthetic paths if needed.
 pub struct SyncSmokeRequest<'a> {
     pub project_root: &'a Path,
+    /// The code tree the harness is built from (cwd); differs from
+    /// `project_root` only when `brokkr.toml` lives one level up.
+    pub build_root: &'a crate::project::BuildRoot,
     pub ratatoskr: &'a RatatoskrConfig,
     pub script: &'a str,
     pub keep_artefacts: bool,
@@ -49,7 +52,7 @@ pub fn run_sync_smoke(req: &SyncSmokeRequest<'_>) -> Result<(), DevError> {
     let _lock = crate::context::reenter_command_lock()?;
     // Cooperative SIGTERM for `brokkr kill`. Installed right after the
     // lock so every captured subprocess from here on - cargo build,
-    // sæhrimnir spawn (no flag-poll, but Drop will hard-kill on unwind),
+    // sæhrimnir spawn/readiness,
     // the harness binary - sees the flag-poll path in
     // `output::run_captured_with_env_and_deadline`. Drops at function
     // end, before `_lock`.
@@ -59,7 +62,7 @@ pub fn run_sync_smoke(req: &SyncSmokeRequest<'_>) -> Result<(), DevError> {
         .profile_override
         .unwrap_or_else(|| harness_cfg.debug.unwrap_or(false));
     let built = build::build_for_harness(
-        req.project_root,
+        req.build_root.as_path(),
         harness_cfg,
         debug,
         Some(&|pid| _lock.set_child_pid(pid)),

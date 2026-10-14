@@ -137,9 +137,7 @@ impl PlannedCommand for NidhoggPlan<'_> {
             paths,
             req.project_root.as_path(),
         )?;
-        let pbf_str = pbf
-            .to_str()
-            .ok_or_else(|| DevError::Config("PBF path is not valid UTF-8".into()))?;
+        let pbf_str = crate::utf8_path::path_str(&pbf)?;
         // Preserve each mode's historic scratch name: it is part of the
         // subprocess cli_args stored on existing measurement rows.
         let layout = crate::clean::layout::NidhoggLayout::new(paths);
@@ -150,21 +148,15 @@ impl PlannedCommand for NidhoggPlan<'_> {
                 layout.hotpath_ingest_output()
             }
         };
-        let args = self
-            .0
-            .build_args(pbf_str, &output_dir.display().to_string())?;
+        let output_dir_str = crate::utf8_path::path_str(&output_dir)?;
+        let args = self.0.build_args(pbf_str, output_dir_str)?;
         Ok(CommandPlan {
             state: NidhoggState::Ingest,
             args,
             scratch_dirs: vec![output_dir],
             subject: RowSubject {
                 command: self.0.id().into(),
-                input_file: Some(
-                    pbf.file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or_default()
-                        .to_owned(),
-                ),
+                input_file: Some(crate::utf8_path::file_name(&pbf)),
                 input_mb: Some(file_mb),
                 cli_args: None,
                 metadata: self.0.metadata(),
@@ -195,8 +187,7 @@ fn api_plan(
     .ok();
     let input_file = pbf
         .as_ref()
-        .and_then(|p| p.file_name())
-        .and_then(|n| n.to_str())
+        .and_then(|p| crate::utf8_path::file_name_str(p))
         .map(str::to_owned);
     let input_mb = pbf
         .as_ref()
@@ -223,9 +214,8 @@ fn tiles_plan(
     if uring {
         crate::preflight::run_preflight(&crate::preflight::uring_checks())?;
     }
-    let data = crate::resolve::resolve_nidhogg_data_dir(req.dataset, paths)?
-        .display()
-        .to_string();
+    let data_path = crate::resolve::resolve_nidhogg_data_dir(req.dataset, paths)?;
+    let data = crate::utf8_path::path_str(&data_path)?.to_owned();
     let (tiles, mb) = match tiles_variant {
         Some(v) => crate::resolve::resolve_pmtiles_with_size(
             req.dataset,
@@ -259,12 +249,8 @@ fn tiles_plan(
         })
         .and_then(|e| e.xxhash.as_ref())
         .map(ToString::to_string);
-    let file = tiles
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or_default()
-        .to_owned();
-    let tiles = tiles.display().to_string();
+    let file = crate::utf8_path::file_name(&tiles);
+    let tiles = crate::utf8_path::path_str(&tiles)?.to_owned();
     Ok((
         vec![
             "serve".into(),

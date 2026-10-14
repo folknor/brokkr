@@ -41,7 +41,7 @@
 use crate::lockfile::{AuthHash, Nonce};
 
 /// The capability handed to descendants: the current hold's nonce.
-pub const CAPABILITY_ENV: &str = "BROKKR_HOLD_NONCE";
+pub(crate) use crate::lockfile::CAPABILITY_ENV;
 
 /// Cargo's switch for its persistent rustc-probe cache
 /// (`target/.rustc_info.json`), stamped `0` on every child brokkr starts.
@@ -65,16 +65,15 @@ pub const RUSTC_INFO_CACHE_ENV: &str = "CARGO_CACHE_RUSTC_INFO";
 /// from inside a compilation - a proc macro that shells out - can refuse to
 /// take a fresh hold instead of deadlocking against its own lease. See
 /// `lockfile::acquire`.
-pub const LEASE_MARKER_ENV: &str = "BROKKR_COMPILE_LEASE";
+pub(crate) use crate::lockfile::LEASE_MARKER_ENV;
 
-// The human escape hatch is `BROKKR_CARGO`, read only by the guard, which is a
-// separate self-contained binary and so cannot share a constant with this
-// module. It is checked before any lease is taken and bypasses the protocol
-// entirely: a hatch that needs working lock infrastructure is useless exactly
-// when it is needed. brokkr itself never sets it - handing it to brokkr's own
-// children would let a descendant keep compiling into later holds it was never
-// authorized for, which is the whole failure the per-acquisition nonce exists
-// to prevent.
+// The human escape hatch is `BROKKR_CARGO`, whose name is part of the shared
+// lock protocol and is read only by the standalone guard. It is checked before
+// any lease is taken and bypasses the protocol entirely: a hatch that needs
+// working lock infrastructure is useless exactly when it is needed. brokkr
+// itself never sets it - handing it to brokkr's own children would let a
+// descendant keep compiling into later holds it was never authorized for,
+// which is the whole failure the per-acquisition nonce exists to prevent.
 
 /// The capability to stamp onto a child, if this process holds one.
 ///

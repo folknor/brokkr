@@ -167,17 +167,9 @@ fn pre_build_args(sweep: &PlannedSweep, req: &SupportRequest, allow_args: &[Stri
     // diagnostics. The message format does not enter cargo's fingerprint.
     let mut args: Vec<String> = vec!["build".into(), "--message-format=json".into()];
     args.extend(allow_args.iter().cloned());
-    // The pre-build must land where the tests will look for it: a sweep
-    // pinned to a profile builds its binaries into that profile's
-    // directory, which is the one BROKKR_TEST_BIN_DIR names.
-    args.extend(sweep_profile_args(sweep));
-    args.extend(sweep.unification_args());
-    // The sweep's features projected onto the support package: a token only
-    // the lane's packages route would make cargo reject the pre-build.
-    args.extend(req.feature_args().iter().cloned());
-    // Its own explicit single-package selection, never the lane's test
-    // selection: a support package is often outside what the lane tests.
-    args.extend(req.package_args());
+    // The profile must match BROKKR_TEST_BIN_DIR, and the support request
+    // carries only features its package can resolve.
+    args.extend(support_selection_args(sweep, req, sweep.cargo_profile()));
     args
 }
 
@@ -314,7 +306,7 @@ fn run_sweep_pre_build(
 /// ambiguous takes the first-failure path rather than guessing.
 fn serial_shim_fallback(
     root: &Path,
-    forwarded: &[String],
+    forwarded: &ForwardedArgs,
     project_env: &[(String, String)],
     sweep_env: &std::collections::BTreeMap<String, String>,
 ) -> Option<String> {
@@ -329,9 +321,7 @@ fn serial_shim_fallback(
         root,
         crate::rustflags::EffectiveEnv::new(&cargo_env_refs),
     );
-    if forwarded.iter().any(|arg| {
-        arg == "--config" || arg.starts_with("--config=") || arg == "--target" || arg.starts_with("--target=")
-    }) {
+    if forwarded.changes_config_or_target() {
         return Some("forwarded --config or --target".into());
     }
     if let Some(target) = &launch.build_target {
@@ -373,42 +363,58 @@ fn serial_shim_fallback(
     None
 }
 
-/// The cargo profile-selection fragment for one sweep (`--release`, or
-/// nothing). Empty for a sweep that names no `profile`, which is every
-/// sweep in a repo that never sets the key: `brokkr check` compiles dev,
-/// exactly as it always has.
-///
-/// Emitted by every cargo run that COMPILES this sweep - clippy, the
-/// pre-build, the test run, the process-isolated per-test invocations, and
-/// the coverage enumeration - because a profile mismatch between any two of
-/// them is a silent full rebuild at best and lint results for a build that
-/// never ran at worst.
-fn sweep_profile_args(sweep: &PlannedSweep) -> Vec<String> {
-    sweep
-        .profile
-        .map(|p| p.cargo_args().iter().map(|a| (*a).to_owned()).collect())
-        .unwrap_or_default()
+/// Whether a cargo request carries the sweep's target selectors or only its
+/// build shape. The latter leaves lane filters to the per-binary inventory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CargoSelectionPurpose {
+    TestLane,
+    Shape,
 }
 
-/// The cargo-level selection + feature args shared by the standard and
-/// process-isolated test paths, so the two can never diverge on what a
-/// sweep selects. The package half is the invocation selection's
-/// ([`selection::package_args`]): a CLI `-p` set already *replaced* the sweep's own
-/// selection there - cargo unions selection flags, so emitting `--workspace
-/// --exclude ... -p X` would silently run the whole workspace.
-fn sweep_selection_args(sweep: &PlannedSweep, run: &ResolutionRun) -> Vec<String> {
-    let mut args: Vec<String> = sweep_profile_args(sweep);
-    // The sweep's pinned resolution. This is the ordinary (non-parallel) test
-    // path, and it was the one place the pin was never emitted: the lane was
-    // labelled `unification package`, isolated into its own target dir, and
-    // then compiled under whatever the config chain said - a shape asserted in
-    // config that was not the shape that ran, which is precisely the failure
-    // this feature exists to catch, reproduced inside the feature itself.
+/// The cargo selection for one already planned resolution. This is the one
+/// builder for profile, unification, package and projected feature flags; only
+/// a test-lane request additionally carries the sweep's cargo target filters.
+///
+/// Every cargo run that compiles a sweep (clippy, rustdoc, the pre-build, the
+/// test run, the per-binary reproduction and the coverage enumeration) goes
+/// through here, because a profile or unification mismatch between any two
+/// of them is a silent rebuild at best and lint results for a build that
+/// never ran at worst.
+pub(crate) fn cargo_selection_args(
+    sweep: &PlannedSweep,
+    run: &ResolutionRun,
+    profile: crate::config::SweepProfile,
+    purpose: CargoSelectionPurpose,
+) -> Vec<String> {
+    let mut args = profile
+        .cargo_args()
+        .iter()
+        .map(|arg| (*arg).to_owned())
+        .collect::<Vec<_>>();
     args.extend(sweep.unification_args());
-    // `-p <pkg>` scoping is also what makes `--features` valid in a virtual
-    // workspace. The features are the request's projection onto it.
     args.extend(run.cargo_args());
-    args.extend(sweep.lane_filters().cargo_args());
+    if purpose == CargoSelectionPurpose::TestLane {
+        args.extend(sweep.lane_filters().cargo_args());
+    }
+    args
+}
+
+/// The profile, unification pin, and projected package request for one
+/// `build_packages` support build. Both `check` and `brokkr test` use this
+/// fragment so the support executable is built under the sweep's graph.
+pub(crate) fn support_selection_args(
+    sweep: &PlannedSweep,
+    request: &SupportRequest,
+    profile: crate::config::SweepProfile,
+) -> Vec<String> {
+    let mut args = profile
+        .cargo_args()
+        .iter()
+        .map(|arg| (*arg).to_owned())
+        .collect::<Vec<_>>();
+    args.extend(sweep.unification_args());
+    args.extend(request.feature_args().iter().cloned());
+    args.extend(request.package_args());
     args
 }
 
@@ -554,7 +560,7 @@ fn run_one_test_sweep(
     let shim_reason = if parallel_threads {
         None
     } else {
-        serial_shim_fallback(project_root, cargo_extra, project_env, &sweep.env)
+        serial_shim_fallback(project_root, &forwarded, project_env, &sweep.env)
     };
     let use_shim = !parallel_threads && shim_reason.is_none();
     let sink = observe.sink();
@@ -576,7 +582,12 @@ fn run_one_test_sweep(
     // Before the selection and the `--` split: `--config` is a cargo option,
     // and everything past `--` belongs to libtest.
     args.extend(allow_args.iter().cloned());
-    args.extend(sweep_selection_args(sweep, run));
+    args.extend(cargo_selection_args(
+        sweep,
+        run,
+        sweep.cargo_profile(),
+        CargoSelectionPurpose::TestLane,
+    ));
     // Without this, cargo stops after the FIRST test binary that fails, so a
     // red run reports the failures of one target and stays silent about every
     // later one. The exit code is honest either way, which is what made the

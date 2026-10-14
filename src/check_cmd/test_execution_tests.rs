@@ -1,12 +1,12 @@
 #[cfg(test)]
 mod serial_shim_tests {
-    use super::serial_shim_fallback;
+    use super::{ForwardedArgs, serial_shim_fallback};
 
     #[test]
     fn forwarded_target_and_config_force_first_failure_mode() {
         let root = std::path::Path::new("/nonexistent");
         for arg in ["--target", "--target=other", "--config", "--config=target.x.runner=tool"] {
-            let reason = serial_shim_fallback(root, &[arg.into()], &[], &Default::default())
+            let reason = serial_shim_fallback(root, &ForwardedArgs::parse(&[arg.into()]), &[], &Default::default())
                 .expect("forwarded override must disable shim");
             assert!(reason.contains("forwarded"));
         }
@@ -16,7 +16,7 @@ mod serial_shim_tests {
     fn explicit_target_env_forces_first_failure_mode() {
         let reason = serial_shim_fallback(
             std::path::Path::new("/nonexistent"),
-            &[],
+            &ForwardedArgs::parse(&[]),
             &[("CARGO_BUILD_TARGET".into(), "other".into())],
             &Default::default(),
         )
@@ -1460,16 +1460,30 @@ warning: z [too_many_lines]
         // the same sweep, and a profile that reached only some of them would
         // mean linting one build, running another, and auditing a third.
         let sweep = release_sweep();
-        assert_eq!(sweep_profile_args(&sweep), ["--release"]);
+        assert_eq!(sweep.cargo_profile().cargo_args(), ["--release"]);
 
         let run = only_run(&sweep, SelectionPhase::Test);
-        let test_args = sweep_selection_args(&sweep, &run);
+        let test_args = cargo_selection_args(
+            &sweep,
+            &run,
+            sweep.cargo_profile(),
+            CargoSelectionPurpose::TestLane,
+        );
         assert_eq!(test_args.first().map(String::as_str), Some("--release"));
 
-        let clippy = clippy_args(&sweep, &only_run(&sweep, SelectionPhase::Clippy), &crate::config::LintsConfig::default());
+        let clippy = clippy_args(
+            &sweep,
+            &only_run(&sweep, SelectionPhase::Clippy),
+            &crate::config::LintsConfig::default(),
+        );
         assert!(clippy.iter().any(|a| a == "--release"), "got: {clippy:?}");
 
-        let enumeration = shape_selection_args(&sweep, &run);
+        let enumeration = cargo_selection_args(
+            &sweep,
+            &run,
+            sweep.cargo_profile(),
+            CargoSelectionPurpose::Shape,
+        );
         assert_eq!(enumeration.first().map(String::as_str), Some("--release"));
 
         // `--release` must not read as a target selector - that would suppress
@@ -1494,14 +1508,24 @@ warning: z [too_many_lines]
 
         let daemon = only_run(&pkg, SelectionPhase::Test);
         assert_eq!(daemon.selection, Selection::Explicit(vec!["daemon".to_owned()]));
-        let test_args = sweep_selection_args(&pkg, &daemon);
+        let test_args = cargo_selection_args(
+            &pkg,
+            &daemon,
+            pkg.cargo_profile(),
+            CargoSelectionPurpose::TestLane,
+        );
         assert!(test_args.iter().any(|a| a == "-Zfeature-unification"), "test: {test_args:?}");
         assert!(test_args.iter().any(|a| a == pin), "test: {test_args:?}");
 
         let clippy = clippy_args(&pkg, &daemon, &crate::config::LintsConfig::default());
         assert!(clippy.iter().any(|a| a == pin), "clippy: {clippy:?}");
 
-        let enumeration = shape_selection_args(&pkg, &daemon);
+        let enumeration = cargo_selection_args(
+            &pkg,
+            &daemon,
+            pkg.cargo_profile(),
+            CargoSelectionPurpose::Shape,
+        );
         assert!(enumeration.iter().any(|a| a == pin), "audit: {enumeration:?}");
 
         // The `build_packages` pre-build and the rustdoc phase compile the
@@ -1554,15 +1578,43 @@ warning: z [too_many_lines]
         // to what it produced before the key existed.
         let plain = crate::profile::PlannedSweep::from(crate::profile::SweepDecl::default());
         let run = only_run(&plain, SelectionPhase::Test);
-        assert!(sweep_profile_args(&plain).is_empty());
-        assert!(!sweep_selection_args(&plain, &run).iter().any(|a| a == "--release"));
+        assert!(plain.cargo_profile().cargo_args().is_empty());
+        assert!(
+            !cargo_selection_args(
+                &plain,
+                &run,
+                plain.cargo_profile(),
+                CargoSelectionPurpose::TestLane,
+            )
+            .iter()
+            .any(|a| a == "--release")
+        );
         assert!(!clippy_args(&plain, &run, &crate::config::LintsConfig::default()).iter().any(|a| a == "--release"));
-        assert!(!shape_selection_args(&plain, &run).iter().any(|a| a == "--release"));
+        assert!(
+            !cargo_selection_args(
+                &plain,
+                &run,
+                plain.cargo_profile(),
+                CargoSelectionPurpose::Shape,
+            )
+            .iter()
+            .any(|a| a == "--release")
+        );
         // Same for unification: `auto` un-promoted pins nothing anywhere.
         for args in [
-            sweep_selection_args(&plain, &run),
+            cargo_selection_args(
+                &plain,
+                &run,
+                plain.cargo_profile(),
+                CargoSelectionPurpose::TestLane,
+            ),
             clippy_args(&plain, &run, &crate::config::LintsConfig::default()),
-            shape_selection_args(&plain, &run),
+            cargo_selection_args(
+                &plain,
+                &run,
+                plain.cargo_profile(),
+                CargoSelectionPurpose::Shape,
+            ),
             pre_build_args(&plain, &support_req(&plain, "bin"), &[]),
         ] {
             assert!(!args.iter().any(|a| a == "-Zfeature-unification"), "got: {args:?}");

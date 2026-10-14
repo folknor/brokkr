@@ -10,8 +10,8 @@ use crate::build;
 use crate::error::DevError;
 use crate::output;
 
-pub fn run(pmtiles_path: &Path, build_root: &Path) -> Result<(), DevError> {
-    let binary = build::cargo_build(&build::BuildConfig::release(None), build_root)?.path;
+pub fn run(pmtiles_path: &Path, build_root: &Path, features: &[String]) -> Result<(), DevError> {
+    let binary = build::cargo_build(&super::build_config(features), build_root)?.path;
     let binary_str = binary.display().to_string();
     let pmtiles_str = pmtiles_path.display().to_string();
 

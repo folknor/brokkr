@@ -388,7 +388,6 @@ and don't drive the exit code. `--no-fail` always exits 0.
 ```
 src/deps/
   mod.rs                 # DepsEvent enum, run(), text + JSON renderers
-  model.rs               # shared Cargo metadata, PackageId, and indexed Graph
   duplicate_version.rs   # blame-aware duplicate detection
   focus.rs               # `brokkr deps <pkg>` chain trace
   git_dependency.rs      # git+ source scanning with ref parsing
@@ -400,7 +399,11 @@ src/deps/
 ```
 
 Future phases land as siblings (`advisory.rs`, etc.). Shared Cargo metadata and
-its indexed graph live in `model.rs`.
+its indexed graph live in `src/cargo/metadata.rs`; host-filtered dependency
+views are projected from the same resolving snapshot using its target
+selectors; cfg selectors the host evaluator cannot decide are retained
+conservatively. `src/cargo/rustc.rs` owns the cached host/release/commit parse
+from the rustc selected in the project directory.
 
 `src/cli/schema.rs` carries the `Command::Deps { ... }` variant. Dispatch
 lands in `src/main_parts/bootstrap.rs` next to the other shared commands

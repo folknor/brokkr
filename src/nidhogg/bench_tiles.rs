@@ -8,7 +8,7 @@ use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use crate::db::KvPair;
 use crate::error::DevError;
@@ -66,12 +66,6 @@ impl<'a> Drop for ChildGuard<'a> {
 }
 
 /// Number of iterations over the full tile set per run.
-const ITERATIONS: usize = 5;
-
-/// Maximum time to wait for the server to signal readiness on stderr.
-/// Generous to accommodate slow disk startup (mmap of large files on HDD).
-const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
-
 /// Check whether a stderr line indicates the server is ready.
 ///
 /// Matches case-insensitively on "listening" - this is more resilient than
@@ -124,7 +118,7 @@ pub fn run(
         #[allow(clippy::cast_possible_wrap)]
         KvPair::int("meta.tile_coords", tile_coords.len() as i64),
         #[allow(clippy::cast_possible_wrap)]
-        KvPair::int("meta.iterations", ITERATIONS as i64),
+        KvPair::int("meta.iterations", super::policy::TILE_ITERATIONS as i64),
     ];
     if let Some(hash) = tiles_hash {
         metadata.push(KvPair::text("meta.tiles_hash", hash));
@@ -233,7 +227,9 @@ fn run_lifecycle(
         (pre_ready, buf)
     });
 
-    let ready = rx.recv_timeout(STARTUP_TIMEOUT).unwrap_or(false);
+    let ready = rx
+        .recv_timeout(super::policy::TILE_STARTUP_TIMEOUT)
+        .unwrap_or(false);
     if !ready {
         // Guard handles kill+wait on drop.
         drop(guard);
@@ -242,12 +238,12 @@ fn run_lifecycle(
         let msg = if server_output.is_empty() {
             format!(
                 "nidhogg server did not print ready signal within {}s (no stderr output)",
-                STARTUP_TIMEOUT.as_secs()
+                super::policy::TILE_STARTUP_TIMEOUT.as_secs()
             )
         } else {
             format!(
                 "nidhogg server did not print ready signal within {}s\nserver stderr:\n{}",
-                STARTUP_TIMEOUT.as_secs(),
+                super::policy::TILE_STARTUP_TIMEOUT.as_secs(),
                 server_output.chars().take(2000).collect::<String>()
             )
         };
@@ -262,17 +258,18 @@ fn run_lifecycle(
     }
 
     // 4. Timed passes.
-    let total_requests = ITERATIONS * tile_coords.len();
+    let iterations = super::policy::TILE_ITERATIONS;
+    let total_requests = iterations * tile_coords.len();
     output::bench_msg(&format!(
-        "warmup done, running {ITERATIONS} iterations × {} tiles = {total_requests} requests",
+        "warmup done, running {iterations} iterations × {} tiles = {total_requests} requests",
         tile_coords.len()
     ));
 
-    for iter in 0..ITERATIONS {
+    for iter in 0..iterations {
         for &(z, x, y) in tile_coords {
             curl_get_tile(port, z, x, y)?;
         }
-        output::bench_msg(&format!("iteration {}/{ITERATIONS}", iter + 1));
+        output::bench_msg(&format!("iteration {}/{iterations}", iter + 1));
     }
 
     // 5. Send SIGTERM for graceful shutdown. Take child from guard so we
@@ -362,23 +359,20 @@ fn spawn_server(
     })
 }
 
-/// Ceiling on one tile request. The server is a child brokkr spawned under
-/// the global lock; one that accepts and then hangs must fail the run, not
-/// hold the lock forever.
-const TILE_MAX_TIME_SECS: &str = "30";
-
 /// Fire a single tile GET request. Non-fatal on HTTP errors (tile misses
 /// are valid - the server counts them in tile_misses).
 fn curl_get_tile(port: u16, z: u32, x: u32, y: u32) -> Result<(), DevError> {
     let url = super::client::tile_url(port, z, x, y);
+    let connect_timeout = super::policy::curl_seconds(super::policy::TILE_CONNECT_TIMEOUT);
+    let max_time = super::policy::curl_seconds(super::policy::TILE_REQUEST_TIMEOUT);
 
     let output = Command::new("curl")
         .args([
             "-sS",
             "--connect-timeout",
-            "5",
+            &connect_timeout,
             "--max-time",
-            TILE_MAX_TIME_SECS,
+            &max_time,
             "-o",
             "/dev/null",
             &url,

@@ -15,7 +15,7 @@ pub fn run(
     runs: usize,
     project_root: &Path,
 ) -> Result<(), DevError> {
-    let (basename, pbf_str) = super::path_strs(pbf_path)?;
+    let (basename, pbf_str) = crate::utf8_path::path_strings(pbf_path)?;
 
     crate::harness::run_variants("allocator", ALL_ALLOCATORS, |name| {
         let build_config = match name {
