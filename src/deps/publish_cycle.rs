@@ -41,7 +41,28 @@
 
 use std::collections::{HashMap, HashSet};
 
-use super::{CargoMetadata, CycleEdge, PublishCycleEvent};
+use serde::Serialize;
+
+use super::CargoMetadata;
+
+/// A dependency cycle among publishable workspace members. `members` is
+/// the loop in walk order, rotated to start at its lexicographically
+/// smallest member; `edges` has one entry per member, closing back to
+/// `members[0]`.
+#[derive(Serialize)]
+pub(crate) struct PublishCycleEvent {
+    pub(super) members: Vec<String>,
+    pub(super) edges: Vec<CycleEdge>,
+}
+
+#[derive(Serialize)]
+pub(super) struct CycleEdge {
+    pub(super) from: String,
+    pub(super) to: String,
+    /// `normal`, `build`, or `dev` (a dev-dep carrying a version, the
+    /// only kind that survives into the published manifest).
+    pub(super) kind: &'static str,
+}
 
 /// How a cycle edge got into the published manifest. `dev_versioned` is
 /// the actionable one - the others are structural.

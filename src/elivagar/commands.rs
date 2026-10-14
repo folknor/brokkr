@@ -1,207 +1,93 @@
 //! Consolidated elivagar measurable command definitions.
 //!
-//! Each variant of [`ElivagarCommand`] captures the identity, options, build
-//! requirements, measurement capabilities, and metadata for one measurable
-//! command. This is the single source of truth - bench, hotpath, profile, and
-//! the `brokkr run` surface all derive their behaviour from these definitions.
+//! The enum shape records whether a command builds Rust code and, for built
+//! commands, whether it builds the main binary or a cargo example.
 
 use std::path::{Path, PathBuf};
 
+use crate::config;
 use crate::db::KvPair;
 use crate::error::DevError;
 
 use super::PipelineOpts;
 
-// ---------------------------------------------------------------------------
-// BuildKind - how to build a command
-// ---------------------------------------------------------------------------
-
-/// Describes how to build the binary for an elivagar command.
-pub enum BuildKind {
-    /// Build the main project binary (e.g. `elivagar`).
-    MainBinary,
-    /// Build a cargo example by name (e.g. `bench_pmtiles`, `bench_node_store`).
-    Example(&'static str),
-    /// No Rust build needed (external tools like Planetiler, Tilemaker).
-    NoBuild,
+/// A measurable elivagar command, separated by how it is executed.
+pub enum ElivagarCommand<'a> {
+    Built(BuiltCommand<'a>),
+    External(ExternalTool),
 }
 
-// ---------------------------------------------------------------------------
-// ElivagarCommand - the unified command enum
-// ---------------------------------------------------------------------------
-
-/// All elivagar measurable commands.
-///
-/// Each variant carries the command-specific parameters that differ from one
-/// invocation to another. Shared concerns (dataset, variant, runs, features,
-/// measurement mode) are handled by the caller.
-pub enum ElivagarCommand<'a> {
-    /// Full elivagar pipeline: PBF -> PMTiles.
-    ///
-    /// Filed as `self`. Builds the main binary and runs it with the pipeline
-    /// options under brokkr's own external wall-clock; tilegen reports its
-    /// metrics as FIFO counters (sidecar.db), not as stderr `key=value` lines.
-    Tilegen {
-        opts: &'a PipelineOpts<'a>,
+/// Rust-backed commands. The outer variant is the build kind: main binary or
+/// cargo example.
+pub enum BuiltCommand<'a> {
+    /// Full elivagar pipeline: PBF -> PMTiles, using the main binary.
+    MainBinary {
+        tilegen: &'a config::TilegenConfig,
         /// Resume from a checkpoint. Per-invocation, not part of the contract:
         /// `execution.resumed_from` sits in provenance's diagnostic group, and
         /// elivagar validates the checkpoint's input identity and producer
         /// config against the current run itself.
         skip_to: Option<&'a str>,
     },
+    Example(ExampleCommand),
+}
 
+/// Cargo examples used by elivagar's synthetic micro-benchmarks.
+pub enum ExampleCommand {
     /// PMTiles writer micro-benchmark.
-    ///
-    /// Currently `bench pmtiles`. Builds the `bench_pmtiles` cargo example.
-    /// The example handles its own iteration internally.
-    PmtilesWriter {
-        /// Number of synthetic tiles to write. Default: 500_000.
-        tiles: usize,
-    },
-
+    PmtilesWriter { tiles: usize },
     /// SortedNodeStore micro-benchmark.
-    ///
-    /// Currently `bench node-store`. Builds the `bench_node_store` cargo
-    /// example. The example handles its own iteration internally.
-    NodeStore {
-        /// Number of nodes in millions. Default: 50.
-        nodes: usize,
-    },
+    NodeStore { nodes: usize },
+}
 
+/// Tools that have their own build and execution setup.
+pub enum ExternalTool {
     /// Planetiler Shortbread comparison baseline.
-    ///
-    /// External Java tool. Auto-downloads JDK + Planetiler JAR. No Rust
-    /// build, no hotpath support.
     Planetiler,
-
     /// Tilemaker Shortbread comparison baseline.
-    ///
-    /// External C++ tool. Auto-downloads/builds Tilemaker + shortbread config.
-    /// No Rust build, no hotpath support.
     Tilemaker,
 }
 
-impl<'a> ElivagarCommand<'a> {
-    /// The command ID used in the CLI and as the result DB command label.
+impl ElivagarCommand<'_> {
+    /// The command ID used in the CLI.
     pub fn id(&self) -> &'static str {
         match self {
-            Self::Tilegen { .. } => "tilegen",
-            Self::PmtilesWriter { .. } => "pmtiles-writer",
-            Self::NodeStore { .. } => "node-store",
-            Self::Planetiler => "planetiler",
-            Self::Tilemaker => "tilemaker",
+            Self::Built(command) => command.id(),
+            Self::External(tool) => tool.id(),
         }
-    }
-
-    /// Whether this command supports hotpath instrumentation
-    /// (function-level timing and allocation tracking).
-    pub fn supports_hotpath(&self) -> bool {
-        match self {
-            Self::Tilegen { .. } | Self::PmtilesWriter { .. } | Self::NodeStore { .. } => true,
-            Self::Planetiler | Self::Tilemaker => false,
-        }
-    }
-
-    /// Whether this command is an external tool (not a Rust binary we build).
-    ///
-    /// Planetiler and Tilemaker are external tools with their own complex
-    /// setup that doesn't fit the unified dispatch pattern.
-    pub fn is_external(&self) -> bool {
-        matches!(self, Self::Planetiler | Self::Tilemaker)
     }
 
     /// Whether this command needs a PBF input file.
-    ///
-    /// Tilegen and external tools process PBF files. Micro-benchmarks
-    /// (PmtilesWriter, NodeStore) are synthetic and need no PBF.
     pub fn needs_pbf(&self) -> bool {
         match self {
-            Self::Tilegen { .. } | Self::Planetiler | Self::Tilemaker => true,
-            Self::PmtilesWriter { .. } | Self::NodeStore { .. } => false,
+            Self::Built(BuiltCommand::MainBinary { .. }) | Self::External(_) => true,
+            Self::Built(BuiltCommand::Example(_)) => false,
         }
     }
 
-    /// Whether this command needs a data directory (for ocean shapefiles, tmp, etc.).
-    ///
-    /// Tilegen needs it for ocean data and tmp storage. External tools need it
-    /// for their own data. Micro-benchmarks are self-contained.
-    #[allow(dead_code)] // prepared for future nidhogg-style dispatch unification
-    pub fn needs_data_dir(&self) -> bool {
-        match self {
-            Self::Tilegen { .. } | Self::Planetiler | Self::Tilemaker => true,
-            Self::PmtilesWriter { .. } | Self::NodeStore { .. } => false,
-        }
-    }
+}
 
-    /// Files to clean up after a run.
-    ///
-    /// Returns paths relative to the given scratch directory that should be
-    /// removed after execution completes.
-    pub fn output_files(&self, scratch_dir: &Path) -> Vec<PathBuf> {
-        match self {
-            Self::Tilegen { .. } => {
-                vec![scratch_dir.join("bench-self-output.pmtiles")]
-            }
-            Self::PmtilesWriter { .. }
-            | Self::NodeStore { .. }
-            | Self::Planetiler
-            | Self::Tilemaker => vec![],
-        }
-    }
-
-    /// Describes how to build the binary for this command.
-    pub fn build_config(&self) -> BuildKind {
-        match self {
-            Self::Tilegen { .. } => BuildKind::MainBinary,
-            Self::PmtilesWriter { .. } => BuildKind::Example("bench_pmtiles"),
-            Self::NodeStore { .. } => BuildKind::Example("bench_node_store"),
-            Self::Planetiler | Self::Tilemaker => BuildKind::NoBuild,
-        }
-    }
-
-    /// Cargo package to build for this command (main binary).
-    ///
-    /// Returns `None` for the default package and external tools.
+impl BuiltCommand<'_> {
+    /// Cargo package to build for this command. Current elivagar commands use
+    /// the default package.
     pub fn package(&self) -> Option<&'static str> {
         None
     }
 
-    /// Whether this command needs the scratch directory to be created.
-    #[allow(dead_code)]
-    pub fn needs_scratch(&self) -> bool {
-        matches!(self, Self::Tilegen { .. })
-    }
-
-    /// The DB command label for result storage - the bare subcommand id.
-    /// The measurement mode (`bench`/`hotpath`/`alloc`) is recorded in the
-    /// `variant` column.
-    pub fn result_command(&self) -> &'static str {
-        match self {
-            Self::Tilegen { .. } => "self",
-            Self::PmtilesWriter { .. } => "pmtiles",
-            Self::NodeStore { .. } => "node-store",
-            Self::Planetiler => "planetiler",
-            Self::Tilemaker => "tilemaker",
-        }
-    }
-
-    /// Build the argument vector for this command.
-    ///
-    /// - **Tilegen**: full pipeline args (`run <pbf> -o <output> --tmp-dir <tmp> [flags]`).
-    ///   `pbf_str` is the resolved PBF path, `scratch_dir` is the output
-    ///   directory, and `data_dir` is the data directory for ocean shapefiles
-    ///   and tmp storage.
-    /// - **PmtilesWriter**: `["--tiles", "<N>", "--runs", "1"]`.
-    /// - **NodeStore**: `["--nodes", "<N>", "--runs", "1"]`.
-    /// - **Planetiler/Tilemaker**: returns an error (external tools have their own setup).
+    /// Build argv for Rust commands. Main-binary tilegen requires assertions
+    /// from the same PBF entry that supplied its resolved path.
     pub fn build_args(
         &self,
         pbf_str: &str,
         scratch_dir: &Path,
         data_dir: &Path,
+        opts: Option<&PipelineOpts>,
     ) -> Result<Vec<String>, DevError> {
         match self {
-            Self::Tilegen { opts, skip_to } => {
+            Self::MainBinary { tilegen, skip_to } => {
+                let opts = opts.ok_or_else(|| {
+                    DevError::Config("tilegen arguments require resolved PBF assertions".into())
+                })?;
                 std::fs::create_dir_all(scratch_dir)?;
 
                 let output_path = scratch_dir.join("bench-self-output.pmtiles");
@@ -224,42 +110,89 @@ impl<'a> ElivagarCommand<'a> {
                     args.push("--skip-to".into());
                     args.push((*phase).into());
                 }
-                if let Some(level) = opts.tilegen.compression_level {
+                if let Some(level) = tilegen.compression_level {
                     args.push("--compression-level".into());
                     args.push(level.to_string());
                 }
-                opts.push_args(&mut args, data_dir)?;
+                opts.push_args(tilegen, &mut args, data_dir)?;
 
                 Ok(args)
             }
-            Self::PmtilesWriter { tiles } => Ok(vec![
+            Self::Example(ExampleCommand::PmtilesWriter { tiles }) => Ok(vec![
                 "--tiles".into(),
                 tiles.to_string(),
                 "--runs".into(),
                 "1".into(),
             ]),
-            Self::NodeStore { nodes } => Ok(vec![
+            Self::Example(ExampleCommand::NodeStore { nodes }) => Ok(vec![
                 "--nodes".into(),
                 nodes.to_string(),
                 "--runs".into(),
                 "1".into(),
             ]),
-            Self::Planetiler | Self::Tilemaker => Err(DevError::Config(format!(
-                "build_args called on external command '{}' - external tools have their own arg construction",
-                self.id()
-            ))),
         }
     }
 
     /// Build metadata KV pairs for result storage.
     ///
-    /// Post-v13 this is reserved for runtime observations. Axis-like
-    /// fields (skip_to, compression_level, tiles count, nodes count,
-    /// pipeline opts like ocean/tile_format/fanout-cap/etc.) are all
-    /// captured in `brokkr_args`/`cli_args` so don't need mirroring
-    /// here. `locations_on_ways_detected` is observed after the run
-    /// and added by the dispatch layer.
+    /// Post-v13 this is reserved for runtime observations. Axis-like fields
+    /// are captured in `brokkr_args`/`cli_args`; `locations_on_ways_detected`
+    /// is observed after the run and added by the dispatch layer.
     pub fn metadata(&self) -> Vec<KvPair> {
         Vec::new()
+    }
+
+    /// The CLI command ID.
+    pub fn id(&self) -> &'static str {
+        match self {
+            Self::MainBinary { .. } => "tilegen",
+            Self::Example(command) => command.id(),
+        }
+    }
+
+    /// Historical command label stored in the results database. Measurement
+    /// mode is recorded separately in the `variant` column.
+    pub fn result_command(&self) -> &'static str {
+        match self {
+            Self::MainBinary { .. } => "self",
+            Self::Example(ExampleCommand::PmtilesWriter { .. }) => "pmtiles",
+            Self::Example(ExampleCommand::NodeStore { .. }) => "node-store",
+        }
+    }
+
+    /// Files this command may produce in the scratch directory.
+    pub fn output_files(&self, scratch_dir: &Path) -> Vec<PathBuf> {
+        match self {
+            Self::MainBinary { .. } => vec![scratch_dir.join("bench-self-output.pmtiles")],
+            Self::Example(_) => vec![],
+        }
+    }
+}
+
+impl ExternalTool {
+    /// The CLI command ID.
+    pub fn id(&self) -> &'static str {
+        match self {
+            Self::Planetiler => "planetiler",
+            Self::Tilemaker => "tilemaker",
+        }
+    }
+}
+
+impl ExampleCommand {
+    /// The CLI command ID.
+    pub fn id(&self) -> &'static str {
+        match self {
+            Self::PmtilesWriter { .. } => "pmtiles-writer",
+            Self::NodeStore { .. } => "node-store",
+        }
+    }
+
+    /// Cargo example target used to build this command.
+    pub fn cargo_example(&self) -> &'static str {
+        match self {
+            Self::PmtilesWriter { .. } => "bench_pmtiles",
+            Self::NodeStore { .. } => "bench_node_store",
+        }
     }
 }

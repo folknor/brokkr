@@ -51,6 +51,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::error::DevError;
+use crate::lockfile::AcqId;
 
 /// Longest request line accepted. `stop <32 hex>` is 37 bytes.
 const MAX_REQUEST: usize = 256;
@@ -85,7 +86,7 @@ pub struct Snapshot {
 }
 
 struct Shared {
-    id: String,
+    id: AcqId,
     live: Mutex<bool>,
     identity: Identity,
     snapshot: Mutex<Snapshot>,
@@ -109,23 +110,13 @@ fn socket_dir() -> Result<PathBuf, DevError> {
     Ok(dir)
 }
 
-/// Whether `id` has the exact shape `mint_id` produces: 32 lowercase hex
-/// digits. Socket paths are only ever derived from an id that passes this,
-/// never from path text read out of the lock file.
-pub fn valid_id(id: &str) -> bool {
-    id.len() == 32
-        && id
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-}
-
 /// A fresh public acquisition id. A separate draw from the capability nonce.
-pub fn mint_id() -> Option<String> {
-    crate::hold::mint_nonce()
+pub fn mint_id() -> Option<AcqId> {
+    AcqId::mint()
 }
 
-fn socket_path(dir: &Path, id: &str) -> PathBuf {
-    dir.join(format!("{id}.sock"))
+fn socket_path(dir: &Path, id: &AcqId) -> PathBuf {
+    dir.join(format!("{}.sock", id.as_str()))
 }
 
 /// Remove sockets left by acquisitions that are over. Called only while
@@ -143,7 +134,7 @@ pub fn sweep_leftovers() {
         let Some(id) = name.to_str().and_then(|n| n.strip_suffix(".sock")) else {
             continue;
         };
-        if !valid_id(id) {
+        if AcqId::parse(id).is_none() {
             continue;
         }
         if entry.file_type().is_ok_and(|t| t.is_socket()) {
@@ -155,10 +146,7 @@ pub fn sweep_leftovers() {
 impl Service {
     /// Bind and start serving. The socket is only reachable once this returns,
     /// so it is never published before it can answer.
-    pub fn start(id: &str, identity: Identity) -> Result<Self, DevError> {
-        if !valid_id(id) {
-            return Err(DevError::Lock("malformed lock acquisition id".into()));
-        }
+    pub fn start(id: &AcqId, identity: Identity) -> Result<Self, DevError> {
         let path = socket_path(&socket_dir()?, id);
         // `bind` refuses an existing path; a collision on a fresh 128-bit id is
         // a bug, not something to unlink over.
@@ -168,7 +156,7 @@ impl Service {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).ok();
         listener.set_nonblocking(true)?;
         let shared = Arc::new(Shared {
-            id: id.to_owned(),
+            id: id.clone(),
             live: Mutex::new(true),
             identity,
             snapshot: Mutex::new(Snapshot {
@@ -257,7 +245,7 @@ fn handle(stream: &UnixStream, shared: &Shared) {
 
 fn respond(line: &str, shared: &Shared) -> String {
     let (verb, id) = line.split_once(' ').unwrap_or((line, ""));
-    if id != shared.id || !is_live(shared) {
+    if AcqId::parse(id).as_ref() != Some(&shared.id) || !is_live(shared) {
         return "gone\n".into();
     }
     match verb {
@@ -448,20 +436,24 @@ pub enum Reply {
 
 /// Send one request to the holder of acquisition `id`.
 pub fn request(id: &str, verb: &str) -> Reply {
-    if !valid_id(id) {
+    let Some(id) = AcqId::parse(id) else {
         return Reply::NoAnswer("the lock file names no valid acquisition id".into());
-    }
+    };
     let dir = match socket_dir() {
         Ok(d) => d,
         Err(e) => return Reply::NoAnswer(e.to_string()),
     };
-    let path = socket_path(&dir, id);
+    let path = socket_path(&dir, &id);
     let stream = match UnixStream::connect(&path) {
         Ok(s) => s,
         Err(e) => return Reply::NoAnswer(format!("cannot reach the holder's socket: {e}")),
     };
     let deadline = Instant::now() + CLIENT_DEADLINE;
-    if !write_all(&stream, format!("{verb} {id}\n").as_bytes(), deadline) {
+    if !write_all(
+        &stream,
+        format!("{verb} {}\n", id.as_str()).as_bytes(),
+        deadline,
+    ) {
         return Reply::NoAnswer("the holder did not take the request in time".into());
     }
     let Some(text) = read_reply(&stream, deadline) else {
@@ -523,11 +515,11 @@ mod tests {
 
     #[test]
     fn ids_are_validated_strictly() {
-        assert!(valid_id(&mint_id().unwrap()));
-        assert!(!valid_id(""));
-        assert!(!valid_id("../../etc/passwd"));
-        assert!(!valid_id(&"A".repeat(32)));
-        assert!(!valid_id(&"a".repeat(31)));
+        assert!(AcqId::parse(mint_id().unwrap().as_str()).is_some());
+        assert!(AcqId::parse("").is_none());
+        assert!(AcqId::parse("../../etc/passwd").is_none());
+        assert!(AcqId::parse(&"A".repeat(32)).is_none());
+        assert!(AcqId::parse(&"a".repeat(31)).is_none());
     }
 
     #[test]
@@ -570,7 +562,7 @@ mod tests {
             has_child: true,
             mocks: 1,
         });
-        let Reply::Status(s) = request(&id, "status") else {
+        let Reply::Status(s) = request(id.as_str(), "status") else {
             panic!("status")
         };
         assert_eq!(s.get("project"), "p");
@@ -578,10 +570,13 @@ mod tests {
         assert_eq!(s.get("progress"), "2/5");
         assert_eq!(s.get("draining"), "0");
         let other = mint_id().unwrap();
-        assert!(matches!(request(&other, "status"), Reply::NoAnswer(_)));
+        assert!(matches!(
+            request(other.as_str(), "status"),
+            Reply::NoAnswer(_)
+        ));
         drop(service);
         assert!(matches!(
-            request(&id, "status"),
+            request(id.as_str(), "status"),
             Reply::NoAnswer(_) | Reply::Gone
         ));
     }

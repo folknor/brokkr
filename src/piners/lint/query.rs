@@ -37,7 +37,9 @@ pub fn cmd(project_root: &Path, q: &LintQuery) -> Result<(), DevError> {
 
     // A specific run (positional id or --run), else the latest when neither is
     // given but a detail view is implied by --full.
-    let target = q.run_id.or(q.run);
+    // Match corpus-results: the explicit --run flag takes precedence over a
+    // positional run id when both are supplied.
+    let target = q.run.or(q.run_id);
     if let Some(id) = target {
         println!("{}", db.run_dispositions(id, q.full)?);
         return Ok(());
@@ -50,7 +52,6 @@ pub fn cmd(project_root: &Path, q: &LintQuery) -> Result<(), DevError> {
         return Ok(());
     }
 
-    let limit = if q.limit == 0 { 20 } else { q.limit };
-    println!("{}", db.recent_runs(limit)?);
+    println!("{}", db.recent_runs(q.limit)?);
     Ok(())
 }

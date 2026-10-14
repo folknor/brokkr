@@ -9,10 +9,9 @@
 // (its datasets, its sweeps, its bin targets) and has no meaning outside one.
 // Rejecting the rest at parse time keeps that boundary from eroding.
 //
-// The layer is applied at *detection* (`project::detect`), not inside
-// `config::load`. `load` stays exactly what its doc says it is - the single
-// code path that reads one `brokkr.toml` - so a caller parsing a fixture file
-// gets that file and nothing from the machine it runs on.
+// Composition reads this table as the lowest-precedence layer before any
+// config section is parsed. `load_user` remains a standalone parsed view for
+// status consumers; project detection and config parsing use `compose` instead.
 
 /// Env override for the user-wide config path. A set-but-empty value disables
 /// the user-wide layer entirely, which is the documented opt-out for a shell
@@ -68,9 +67,25 @@ pub fn load_user() -> Result<Option<UserConfig>, DevError> {
     parse_user(&text, path).map(Some)
 }
 
-/// Parse the user-wide config text. Split from [`load_user`] so the schema is
-/// testable without touching the filesystem or the environment.
-fn parse_user(text: &str, path: PathBuf) -> Result<UserConfig, DevError> {
+/// Read the raw user-wide table for config composition. The allow-list is
+/// checked here, at the layer boundary, before the table can merge with a
+/// project config. Keeping it raw lets presets and named entries resolve with
+/// the project layers that sit above it.
+fn load_user_table() -> Result<Option<(PathBuf, toml::Table)>, DevError> {
+    let Some(path) = user_config_path() else {
+        return Ok(None);
+    };
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(DevError::Config(format!("{}: {e}", path.display())));
+        }
+    };
+    parse_user_table(&text, &path).map(|table| Some((path, table)))
+}
+
+fn parse_user_table(text: &str, path: &Path) -> Result<toml::Table, DevError> {
     let at = |msg: String| DevError::Config(format!("{}: {msg}", path.display()));
 
     let root: toml::Value = toml::from_str(text).map_err(|e| at(e.to_string()))?;
@@ -88,52 +103,25 @@ fn parse_user(text: &str, path: PathBuf) -> Result<UserConfig, DevError> {
             )));
         }
     }
+    Ok(table.clone())
+}
+
+/// Parse the user-wide config text. Split from [`load_user`] so the schema is
+/// testable without touching the filesystem or the environment.
+fn parse_user(text: &str, path: PathBuf) -> Result<UserConfig, DevError> {
+    let table = parse_user_table(text, &path)?;
+    let at = |msg: String| DevError::Config(format!("{}: {msg}", path.display()));
 
     let reword = |e: DevError| match e {
         DevError::Config(msg) => at(msg),
         other => other,
     };
-    let textlint = parse_textlint(table).map_err(reword)?;
-    let script_checks = parse_script_checks(table).map_err(reword)?;
+    let textlint = parse_textlint(&table).map_err(reword)?;
+    let script_checks = parse_script_checks(&table).map_err(reword)?;
 
     Ok(UserConfig {
         path,
         textlint,
         script_checks,
     })
-}
-
-impl DevConfig {
-    /// Fold the user-wide layer into this project config.
-    ///
-    /// User entries run first and project entries after, so a project's rules
-    /// are the last word in the output. Shadowing is by `name`: a project entry
-    /// that reuses a user entry's name replaces it outright. That is the
-    /// opt-out - a project that must not run a personal rule redefines it,
-    /// rather than needing a suppression syntax nobody would remember.
-    pub fn apply_user_layer(&mut self) -> Result<(), DevError> {
-        let Some(user) = load_user()? else {
-            return Ok(());
-        };
-        merge_named(&mut self.textlint, user.textlint, |r| r.name.as_str());
-        merge_named(&mut self.script_checks, user.script_checks, |c| {
-            c.name.as_str()
-        });
-        Ok(())
-    }
-}
-
-/// Prepend `incoming` to `project`, dropping any incoming entry whose name a
-/// project entry already uses.
-fn merge_named<T>(project: &mut Vec<T>, incoming: Vec<T>, name: impl Fn(&T) -> &str) {
-    if incoming.is_empty() {
-        return;
-    }
-    let taken: HashSet<String> = project.iter().map(|e| name(e).to_owned()).collect();
-    let kept: Vec<T> = incoming
-        .into_iter()
-        .filter(|e| !taken.contains(name(e)))
-        .collect();
-    let tail = std::mem::replace(project, kept);
-    project.extend(tail);
 }

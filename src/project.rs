@@ -140,8 +140,7 @@ pub fn detect() -> Result<Detection, DevError> {
             cwd.display()
         ))
     })?;
-    let (project, mut config) = config::load(&config_dir)?;
-    config.apply_user_layer()?;
+    let (project, config) = config::load(&config_dir)?;
     crate::cargo_env::install(&config.cargo_env);
     Ok(Detection {
         project,
@@ -163,8 +162,7 @@ pub fn detect_optional() -> Result<Option<Detection>, DevError> {
     let Some(config_dir) = find_config_dir(&cwd) else {
         return Ok(None);
     };
-    let (project, mut config) = config::load(&config_dir)?;
-    config.apply_user_layer()?;
+    let (project, config) = config::load(&config_dir)?;
     crate::cargo_env::install(&config.cargo_env);
     Ok(Some(Detection {
         project,

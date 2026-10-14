@@ -18,36 +18,16 @@
 //! process termination, stream integrity, the contract
 //! (`crate::piners::contract`) and the exact selection reconciliation,
 //! built by [`assess`]. Ordinary runs, bless, measured iterations and isolation
-//! attempts each read it under their own, explicit acceptance policy through
-//! [`RunAssessment::verdict`].
+//! attempts each read it through a verdict method with the matching return
+//! type: [`RunAssessment::parity_verdict`],
+//! [`RunAssessment::measured_verdict`] or
+//! [`RunAssessment::isolation_verdict`].
 
 use std::collections::{BTreeSet, HashSet};
 
 use crate::output;
 use crate::piners::contract::{self, ContractAssessment};
 use crate::piners::report::{self, HarnessReport};
-
-/// The consumer-specific acceptance rule applied to one shared assessment.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Policy {
-    /// Ordinary parity runs and bless, whose exit-1 rule depends on the gate.
-    Parity { exit1_explained: bool },
-    /// A measured iteration must exit zero and cannot include a harness abort.
-    Measured,
-    /// A diagnostic isolation attempt attributes failures to its subset.
-    IsolationAttempt,
-}
-
-/// The result of applying a policy to a [`RunAssessment`].
-#[derive(Debug, PartialEq, Eq)]
-pub enum Verdict {
-    /// Empty reasons mean the harness side of a parity run is acceptable.
-    Parity { failure_reasons: Vec<String> },
-    /// `Ok(())` is a timing sample; `Err` describes why it is not.
-    Measured(Result<(), String>),
-    /// A diagnostic attempt's disposition, including whether diagnosis stops.
-    IsolationAttempt(crate::piners::isolate::AttemptVerdict),
-}
 
 /// One harness invocation, judged once.
 #[derive(Debug)]
@@ -140,42 +120,48 @@ impl RunAssessment {
         self.violations() + usize::from(self.output_cut)
     }
 
-    /// Apply one consumer's acceptance rule to this shared assessment.
-    pub fn verdict(&self, policy: Policy) -> Verdict {
-        match policy {
-            Policy::Parity { exit1_explained } => Verdict::Parity {
-                failure_reasons: self.parity_failure_reasons(exit1_explained),
-            },
-            Policy::Measured => Verdict::Measured(self.measured_failure()),
-            Policy::IsolationAttempt => {
-                use crate::piners::isolate::{AttemptVerdict, Failure, StopReason};
-
-                let verdict = if let Some(error) = &self.contract.run_error {
-                    AttemptVerdict::Stop(StopReason::HarnessFailure(error.render()))
-                } else if self.completed() {
-                    AttemptVerdict::Completed
-                } else if self.violations() > 0 || self.output_cut {
-                    let mut what = Vec::new();
-                    if self.rec.protocol_violations() > 0 {
-                        what.push(self.rec.summary());
-                    }
-                    what.extend(self.contract.violations.iter().cloned());
-                    if self.output_cut {
-                        what.push("stdout cut short".to_owned());
-                    }
-                    AttemptVerdict::Failed(Failure::ProtocolInvalid(what.join("; ")))
-                } else if !self.end.completed_status() {
-                    AttemptVerdict::Failed(Failure::Aborted)
-                } else {
-                    AttemptVerdict::Failed(Failure::Incomplete(self.rec.summary()))
-                };
-                Verdict::IsolationAttempt(verdict)
-            }
+    /// Parity and bless acceptance of the harness side, independent of the
+    /// per-probe gate. `exit1_explained` comes from that gate's pinned breaks.
+    pub fn parity_verdict(&self, exit1_explained: bool) -> Result<(), Vec<String>> {
+        let reasons = self.parity_failure_reasons(exit1_explained);
+        if reasons.is_empty() {
+            Ok(())
+        } else {
+            Err(reasons)
         }
     }
 
-    /// Parity and bless acceptance of the harness side, independent of the
-    /// per-probe gate. `exit1_explained` comes from that gate's pinned breaks.
+    /// Whether an iteration is a valid timing sample and, if not, why.
+    pub fn measured_verdict(&self) -> Result<(), String> {
+        self.measured_failure()
+    }
+
+    /// Classify one diagnostic isolation attempt under its acceptance rule.
+    pub fn isolation_verdict(&self) -> crate::piners::isolate::AttemptVerdict {
+        use crate::piners::isolate::{AttemptVerdict, Failure, StopReason};
+
+        if let Some(error) = &self.contract.run_error {
+            AttemptVerdict::Stop(StopReason::HarnessFailure(error.render()))
+        } else if self.completed() {
+            AttemptVerdict::Completed
+        } else if self.violations() > 0 || self.output_cut {
+            let mut what = Vec::new();
+            if self.rec.protocol_violations() > 0 {
+                what.push(self.rec.summary());
+            }
+            what.extend(self.contract.violations.iter().cloned());
+            if self.output_cut {
+                what.push("stdout cut short".to_owned());
+            }
+            AttemptVerdict::Failed(Failure::ProtocolInvalid(what.join("; ")))
+        } else if !self.end.completed_status() {
+            AttemptVerdict::Failed(Failure::Aborted)
+        } else {
+            AttemptVerdict::Failed(Failure::Incomplete(self.rec.summary()))
+        }
+    }
+
+    /// Produce the detailed failure reasons for parity and bless callers.
     fn parity_failure_reasons(&self, exit1_explained: bool) -> Vec<String> {
         let mut reasons = Vec::new();
         let rec = &self.rec;
@@ -240,7 +226,7 @@ impl RunAssessment {
         reasons
     }
 
-    /// Whether an iteration is a valid timing sample and, if not, why.
+    /// Produce the measured-run failure reason, if the assessment is not a sample.
     fn measured_failure(&self) -> Result<(), String> {
         let aborts = self.harness_aborts();
         if self.end == HarnessEnd::Code(0) && self.completed() && aborts.is_empty() {
@@ -654,11 +640,10 @@ mod tests {
     }
 
     fn parity_reasons(a: &RunAssessment, exit1_explained: bool) -> Vec<String> {
-        let Verdict::Parity { failure_reasons } = a.verdict(Policy::Parity { exit1_explained })
-        else {
-            unreachable!("parity policy returns parity reasons")
-        };
-        failure_reasons
+        match a.parity_verdict(exit1_explained) {
+            Ok(()) => Vec::new(),
+            Err(reasons) => reasons,
+        }
     }
 
     #[test]

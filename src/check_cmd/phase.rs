@@ -2723,8 +2723,6 @@ fn run_clippy_phase(
     // log-only.
     echo_after: bool,
 ) -> Result<(), DevError> {
-    let multi = sweeps.len() > 1;
-
     // Inside `check` the verdict line names every suppression once, for all
     // the phases it narrows; `brokkr clippy` (and `--commands`, which asks
     // for the long form) prints them here.
@@ -2737,6 +2735,7 @@ fn run_clippy_phase(
     let mut ran = run_per_build_shape("clippy", &info, sweeps, selection, reach, |sweep, run, dir| {
         run_one_clippy(project_root, sweep, run, allow, dir, commands)
     })?;
+    let active_sweep_count = ran.active_sweep_count;
     let mut results = std::mem::take(&mut ran.results);
     for r in &mut results {
         r.manifest = attribute_manifest_lints(r, &info);
@@ -2762,7 +2761,17 @@ fn run_clippy_phase(
             && !(d.code.as_deref().is_some_and(crate::config::is_cargo_lint) && code_allowed(d, allow))
     };
     let outcome =
-        ran.verdict(|failed| report_diagnostic_phase("clippy", &results, &info, project_root, &keep, multi, failed));
+        ran.verdict(|failed| {
+            report_diagnostic_phase(
+                "clippy",
+                &results,
+                &info,
+                project_root,
+                &keep,
+                active_sweep_count,
+                failed,
+            )
+        });
     if echo_after && outcome.is_ok() {
         for r in &results {
             output::run_msg(&r.command);
@@ -2865,6 +2874,7 @@ fn run_rustdoc_phase(
         let args = doc_args(sweep, run, cfg);
         run_one_diagnostic_cargo("rustdoc", project_root, sweep, &args, run, dir, commands)
     })?;
+    let active_sweep_count = ran.active_sweep_count;
     let results = std::mem::take(&mut ran.results);
     // The `rustdoc::` half of the sited list is judged here, where those lints
     // can actually appear; clippy judges the rest.
@@ -2875,8 +2885,17 @@ fn run_rustdoc_phase(
             && !code_allowed(d, allow)
             && !sited_allowed(d, allow_exact)
     };
-    let multi = results.len() > 1;
-    ran.verdict(|failed| report_diagnostic_phase("rustdoc", &results, &info, project_root, &keep, multi, failed))
+    ran.verdict(|failed| {
+        report_diagnostic_phase(
+            "rustdoc",
+            &results,
+            &info,
+            project_root,
+            &keep,
+            active_sweep_count,
+            failed,
+        )
+    })
 }
 
 /// Whether `[lints] allow` names this diagnostic's lint. Matched on the exact
@@ -2917,7 +2936,7 @@ fn report_diagnostic_phase(
     info: &build::ProjectInfo,
     project_root: &Path,
     keep: &dyn Fn(&cargo_json::DiagnosticEvent) -> bool,
-    multi: bool,
+    active_sweep_count: usize,
     already_failed: bool,
 ) -> Result<(), DevError> {
     let run_failed = |r: &SweepResult| {
@@ -2927,11 +2946,9 @@ fn report_diagnostic_phase(
         // The phase's one green line. Only inside `check`: `brokkr clippy`
         // closes with its own `clippy clean` verdict.
         if report_active() && !already_failed {
-            let mut sweeps: Vec<&str> = results.iter().map(|r| r.label.as_str()).collect();
-            sweeps.dedup();
             output::run_msg(&format!(
                 "{phase}: ok ({}) in {}",
-                output::count(sweeps.len(), "sweep"),
+                output::count(active_sweep_count, "sweep"),
                 fmt_wall(phase_elapsed())
             ));
         }
@@ -2951,7 +2968,7 @@ fn report_diagnostic_phase(
         results,
         Some(info),
         project_root,
-        multi,
+        active_sweep_count,
         keep,
     ));
     Err(DevError::Reported(format!("{phase} failed")))
@@ -2959,8 +2976,8 @@ fn report_diagnostic_phase(
 
 /// Run `run_one` once per cargo resolution of every lane the phase's selection
 /// attempts - one per distinct build shape, one per package under
-/// package-mode unification - calling `reach(i)` for each sweep that gets a
-/// cargo run, before the run. The dedupe, the CLI `-p` intersection and the
+/// package-mode unification - calling `reach(i)` for each sweep whose run
+/// returns an outcome. The dedupe, the CLI `-p` intersection and the
 /// nothing-reached refusal were all decided by the selection, which every
 /// per-shape diagnostic phase reads, so they cannot drift apart; the stored
 /// refusal is reported here, at the phase's start.
@@ -2984,7 +3001,7 @@ fn run_per_build_shape(
     // one, the two disagreeing about where the artifacts are.
     let meta_target_dir = sweeps
         .iter()
-        .any(ResolvedSweep::needs_isolated_target_dir)
+        .any(|sweep| sweep.target_location().is_isolated())
         .then(|| info.target_dir.clone());
 
     // Every cargo run the phase makes, in configured order: (sweep, run).
@@ -3042,12 +3059,24 @@ fn run_per_build_shape(
         let (i, run) = jobs[j];
         run_one(&sweeps[i], run, meta_target_dir.as_deref())
     });
-    let mut ran = PhaseRuns { results: Vec::with_capacity(jobs.len()), error: None };
-    for (j, outcome) in outcomes {
+    let mut reached = vec![false; sweeps.len()];
+    let mut ran = PhaseRuns {
+        results: Vec::with_capacity(jobs.len()),
+        error: None,
+        active_sweep_count: 0,
+    };
+    // Record every completed chain before an interrupt can return early from
+    // the result pass below. Other target-dir chains may already have run.
+    for (j, (_, outcome)) in outcomes.iter().enumerate() {
+        if outcome.is_some() {
+            let sweep_index = jobs[j].0;
+            reach(sweep_index);
+            reached[sweep_index] = true;
+        }
+    }
+    ran.active_sweep_count = reached.into_iter().filter(|was_reached| *was_reached).count();
+    for (_, outcome) in outcomes {
         let Some(outcome) = outcome else { continue };
-        // A sweep that got a cargo run of its own may honestly be listed as
-        // checked in the `--json` trailer (S3-33).
-        reach(jobs[j].0);
         match outcome {
             Ok(r) => ran.results.push(r),
             // A stop ends the phase at once: nothing more is reported.
@@ -3071,6 +3100,9 @@ fn run_per_build_shape(
 struct PhaseRuns {
     results: Vec<SweepResult>,
     error: Option<DevError>,
+    /// Distinct sweeps that got at least one cargo run, independent of how
+    /// many package-mode resolutions each sweep expanded into.
+    active_sweep_count: usize,
 }
 
 impl PhaseRuns {
@@ -3114,8 +3146,8 @@ fn announce_test_allows(
         .map(String::as_str)
         .collect();
     // The sink can differ per sweep (a `rustflags` sweep exports an env var and
-    // so always lands in the env layer); report the shape the plain sweeps get.
-    let sink = rustflags::sink(project_root, sweeps.iter().all(|s| !s.rustflags.is_empty()));
+    // so always lands in the env layer); report the plain-sweep shape explicitly.
+    let sink = rustflags::sink(project_root, false);
     // One clause, not a second line: that a sited entry widens here is a
     // property of the phase, not news about any particular entry, so it does
     // not earn a line of its own - let alone one per entry.
@@ -3669,6 +3701,7 @@ fn coverage_tag(
     package: Option<&str>,
     results: &[SweepResult],
     info: Option<&build::ProjectInfo>,
+    active_sweep_count: usize,
 ) -> Option<String> {
     let covering: Vec<&str> = results
         .iter()
@@ -3683,7 +3716,7 @@ fn coverage_tag(
     if reported_everywhere {
         return None;
     }
-    sweep_tag(reported_by, results.len())
+    sweep_tag(reported_by, active_sweep_count)
 }
 
 /// Multi-sweep version of the text formatter: gathers each sweep's
@@ -3698,9 +3731,10 @@ fn format_clippy_multi(
     results: &[SweepResult],
     info: Option<&build::ProjectInfo>,
     project_root: &Path,
-    multi: bool,
+    active_sweep_count: usize,
     keep: &dyn Fn(&cargo_json::DiagnosticEvent) -> bool,
 ) -> String {
+    let multi = active_sweep_count > 1;
     // Each diagnostic's package, keyed as the merge keys it: identical
     // diagnostics from two runs come from the same source line, so the same
     // package.
@@ -3762,7 +3796,7 @@ fn format_clippy_multi(
 
     let errors = if total == 1 { "error" } else { "errors" };
     let header = if multi {
-        format!("{tool}: {total} {errors} ({} sweeps)\n", results.len())
+        format!("{tool}: {total} {errors} ({active_sweep_count} sweeps)\n")
     } else {
         format!("{tool}: {total} {errors}\n")
     };
@@ -3776,6 +3810,7 @@ fn format_clippy_multi(
                 package_of.get(&DiagKey::from(m.diag)).map(String::as_str),
                 results,
                 info,
+                active_sweep_count,
             )
         {
             out.push_str(&tag);

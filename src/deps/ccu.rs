@@ -23,28 +23,123 @@ use std::io::ErrorKind;
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize, Serializer};
 
-use super::{DepsEvent, OutdatedEvent, StaleEvent, ToolMissingEvent};
+use super::DepsEvent;
+use super::phase::{Phase, PhaseOutcome};
 use crate::error::DevError;
 use crate::output;
 
 const TOOL: &str = "ccu";
+const PHASES: [Phase; 2] = [Phase::Outdated, Phase::Stale];
 /// Wall-clock ceiling on the `ccu` call. It is a network client, and a
 /// stalled registry connection otherwise hangs `brokkr deps` indefinitely.
 /// Generous on purpose: a large workspace issues one registry query per
 /// direct dep. Exceeding it degrades to the usual `ToolMissing` skip - the
 /// phases are informational, so a timeout must never fail the run.
 const CCU_DEADLINE: Duration = Duration::from_secs(120);
-const PHASES: &[&str] = &["outdated", "stale"];
 const INSTALL_HINT: &str = "not installed; cargo install --path ~/Programs/check-updates/ccu";
 const SUPPORTED_SCHEMA: u32 = 1;
 
-/// ~8 months. Below this, a crate's latest release is "fresh enough"
-/// and we say nothing.
+/// 240 days (about eight months). Below this, a crate's latest release
+/// is "fresh enough" and we say nothing.
 const STALE_DAYS: i64 = 240;
-/// ~2 years. Crosses from "stale" into the louder "abandoned" label.
+/// 730 days (about two years). Crosses into the louder "abandoned" label.
 const ABANDONED_DAYS: i64 = 730;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum OutdatedSeverity {
+    Major,
+    Minor,
+    Patch,
+}
+
+impl OutdatedSeverity {
+    pub(super) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Patch => "patch",
+            Self::Minor => "minor",
+            Self::Major => "major",
+        }
+    }
+}
+
+impl Serialize for OutdatedSeverity {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) enum StaleSeverity {
+    Abandoned,
+    Stale,
+}
+
+impl StaleSeverity {
+    pub(super) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Abandoned => "abandoned",
+            Self::Stale => "stale",
+        }
+    }
+}
+
+impl Serialize for StaleSeverity {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+#[derive(Serialize)]
+pub(super) struct OutdatedEvent {
+    #[serde(rename = "crate")]
+    pub(super) krate: String,
+    /// Version currently resolved in Cargo.lock.
+    pub(super) installed: String,
+    /// Newest version available on crates.io.
+    pub(super) latest: String,
+    /// `ccu`'s severity classification: `patch`, `minor`, or `major`.
+    pub(super) severity: OutdatedSeverity,
+    /// Manifest path where this dep is declared (relative to project
+    /// root, as `ccu` reports it).
+    pub(super) source_file: String,
+    /// Line number in that manifest, useful for jump-to.
+    pub(super) line_number: u64,
+}
+
+#[derive(Serialize)]
+pub(super) struct StaleEvent {
+    #[serde(rename = "crate")]
+    pub(super) krate: String,
+    /// Version on the registry whose release date is the basis for
+    /// this event (i.e. the latest available, not the installed one).
+    pub(super) version: String,
+    /// ISO-8601 timestamp, verbatim from ccu / crates.io.
+    pub(super) released_at: String,
+    /// Days since `released_at` as of the run.
+    pub(super) age_days: u64,
+    /// Severity follows `STALE_DAYS` and `ABANDONED_DAYS` below.
+    pub(super) severity: StaleSeverity,
+}
+
+/// Emitted when `ccu` cannot produce results for either network phase.
+/// `phase` remains the original primary label; `phases` is the additive
+/// list of every phase covered by this tool invocation.
+#[derive(Serialize)]
+pub(super) struct ToolMissingEvent {
+    pub(super) phase: Phase,
+    pub(super) tool: &'static str,
+    pub(super) reason: String,
+    pub(super) phases: Vec<Phase>,
+}
 
 #[derive(Deserialize)]
 struct CcuOutput {
@@ -65,7 +160,7 @@ struct CcuCheck {
     latest: String,
     /// `null` when up-to-date; otherwise `"patch"` / `"minor"` /
     /// `"major"`.
-    severity: Option<String>,
+    severity: Option<OutdatedSeverity>,
     /// When the newest version on the registry was published. Used
     /// by the `stale` phase. ISO-8601 with timezone offset, verbatim
     /// from crates.io.
@@ -80,18 +175,33 @@ struct CcuDependency {
     line_number: u64,
 }
 
-pub fn run(project_root: &Path) -> Vec<DepsEvent> {
+pub(super) fn run(project_root: &Path) -> Vec<PhaseOutcome> {
     match try_run(project_root) {
-        Ok(events) => events,
-        Err(reason) => vec![DepsEvent::ToolMissing(ToolMissingEvent {
-            phase: PHASES[0],
-            tool: TOOL,
-            reason,
-        })],
+        Ok((outdated_events, stale_events)) => PHASES
+            .into_iter()
+            .zip([outdated_events, stale_events])
+            .map(|(phase, events)| PhaseOutcome::ran(phase, events))
+            .collect(),
+        Err(reason) => PHASES
+            .into_iter()
+            .map(|phase| {
+                let events = if phase == Phase::Outdated {
+                    vec![DepsEvent::ToolMissing(ToolMissingEvent {
+                        phase: Phase::Outdated,
+                        tool: TOOL,
+                        reason: reason.clone(),
+                        phases: PHASES.to_vec(),
+                    })]
+                } else {
+                    Vec::new()
+                };
+                PhaseOutcome::skipped(phase, reason.clone(), events)
+            })
+            .collect(),
     }
 }
 
-fn try_run(project_root: &Path) -> Result<Vec<DepsEvent>, String> {
+fn try_run(project_root: &Path) -> Result<(Vec<DepsEvent>, Vec<DepsEvent>), String> {
     let run = match output::run_captured_with_env_and_deadline(
         TOOL,
         &["--json"],
@@ -139,7 +249,8 @@ fn try_run(project_root: &Path) -> Result<Vec<DepsEvent>, String> {
     }
 
     let now_jdn = now_julian_day();
-    let mut events = Vec::new();
+    let mut outdated_events = Vec::new();
+    let mut stale_events = Vec::new();
     // In multi-workspace projects ccu reports the same crate once per
     // workspace member that depends on it. The findings are identical
     // (same Cargo.lock, same registry data) - we only want to surface
@@ -156,7 +267,7 @@ fn try_run(project_root: &Path) -> Result<Vec<DepsEvent>, String> {
                 check.latest.clone(),
             );
             if seen_outdated.insert(key) {
-                events.push(DepsEvent::Outdated(OutdatedEvent {
+                outdated_events.push(DepsEvent::Outdated(OutdatedEvent {
                     krate: check.dependency.name.clone(),
                     installed,
                     latest: check.latest.clone(),
@@ -171,7 +282,7 @@ fn try_run(project_root: &Path) -> Result<Vec<DepsEvent>, String> {
             && let Some(severity) = classify_age(age_days)
             && seen_stale.insert((check.dependency.name.clone(), check.latest.clone()))
         {
-            events.push(DepsEvent::Stale(StaleEvent {
+            stale_events.push(DepsEvent::Stale(StaleEvent {
                 krate: check.dependency.name,
                 version: check.latest,
                 released_at: released_at.clone(),
@@ -180,18 +291,17 @@ fn try_run(project_root: &Path) -> Result<Vec<DepsEvent>, String> {
             }));
         }
     }
-    // Marker so the renderer can print an "all at latest" line in the
-    // zero-upgrade case. Without it, an empty outdated section is
-    // indistinguishable from a skipped one.
-    events.push(DepsEvent::OutdatedComplete);
-    Ok(events)
+    // Retain the marker at the end for existing NDJSON consumers. The
+    // summary now carries each successful phase's zero-result state too.
+    stale_events.push(DepsEvent::OutdatedComplete);
+    Ok((outdated_events, stale_events))
 }
 
-fn classify_age(age_days: i64) -> Option<&'static str> {
+fn classify_age(age_days: i64) -> Option<StaleSeverity> {
     if age_days >= ABANDONED_DAYS {
-        Some("abandoned")
+        Some(StaleSeverity::Abandoned)
     } else if age_days >= STALE_DAYS {
-        Some("stale")
+        Some(StaleSeverity::Stale)
     } else {
         None
     }
@@ -200,7 +310,7 @@ fn classify_age(age_days: i64) -> Option<&'static str> {
 /// Returns days between `now` and the date encoded in `released_at`.
 /// Accepts any ISO-8601-like string whose first 10 characters are
 /// `YYYY-MM-DD`; the rest (time, fraction, timezone offset) is
-/// ignored - day granularity is plenty for "older than 8 months".
+/// ignored - day granularity is plenty for the 240-day age threshold.
 fn age_days_from(released_at: &str, now_jdn: i64) -> Option<i64> {
     let (y, mo, d) = parse_iso_date(released_at)?;
     Some(now_jdn - julian_day(y, mo, d))
@@ -274,9 +384,9 @@ mod tests {
     #[test]
     fn classify_thresholds() {
         assert_eq!(classify_age(239), None);
-        assert_eq!(classify_age(240), Some("stale"));
-        assert_eq!(classify_age(729), Some("stale"));
-        assert_eq!(classify_age(730), Some("abandoned"));
-        assert_eq!(classify_age(3000), Some("abandoned"));
+        assert_eq!(classify_age(240), Some(StaleSeverity::Stale));
+        assert_eq!(classify_age(729), Some(StaleSeverity::Stale));
+        assert_eq!(classify_age(730), Some(StaleSeverity::Abandoned));
+        assert_eq!(classify_age(3000), Some(StaleSeverity::Abandoned));
     }
 }

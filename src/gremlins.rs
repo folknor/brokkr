@@ -68,8 +68,11 @@ pub struct FixSummary {
 }
 
 /// Mechanical replacement for a gremlin char. Empty string means delete.
-/// Returns `None` for non-gremlin chars and for any char in `allow` (a
-/// config-permitted codepoint is left untouched by `--fix-gremlins`).
+/// Returns `None` for chars without a built-in replacement and for any char in
+/// `allow` (a config-permitted codepoint is left untouched by
+/// `--fix-gremlins`). A config `ban` can flag additional scalars that this
+/// table cannot rewrite, so the phase's fix hint must not promise every banned
+/// character will be rewritten.
 fn replacement(c: char, allow: &CodepointSet) -> Option<&'static str> {
     if allow.contains(c) {
         return None;
@@ -135,6 +138,7 @@ pub fn fix(
 ) -> Result<Vec<FixSummary>, DevError> {
     let allow = allow_set(config);
     let files = tracked_files(project_root)?;
+    validate_excludes(&files, config)?;
     let mut out = Vec::new();
     for rel in &files {
         if !is_scannable(rel) || is_excluded(rel, config) {
@@ -289,6 +293,7 @@ pub fn scan(
     let allow = allow_set(config);
     let ban = ban_set(config);
     let files = tracked_files(project_root)?;
+    validate_excludes(&files, config)?;
     let mut out = Vec::new();
     for rel in &files {
         if !is_scannable(rel) || is_excluded(rel, config) {
@@ -481,6 +486,37 @@ fn pictograph_name(cp: u32) -> Option<&'static str> {
 /// be skipped. `None` config (no `[gremlins]` section) excludes nothing.
 fn is_excluded(rel: &Path, config: Option<&GremlinsConfig>) -> bool {
     config.is_some_and(|c| c.is_excluded(rel))
+}
+
+/// An exclusion that covers no scannable tracked file is probably stale or
+/// misspelled, so it is reported before both scanning and rewriting. Reported,
+/// not refused: an exclusion often guards a generated or vendored tree that is
+/// absent from a fresh checkout and comes back after a build, and failing the
+/// whole check over that would punish a correct config (see
+/// `globs::warn_unmatched` for the same rule on the glob lists).
+fn validate_excludes(files: &[PathBuf], config: Option<&GremlinsConfig>) -> Result<(), DevError> {
+    let Some(config) = config else {
+        return Ok(());
+    };
+    for entry in &config.exclude {
+        let dir = Path::new(entry.trim_end_matches('/'));
+        if !files
+            .iter()
+            .any(|rel| is_scannable(rel) && (rel == dir || rel.starts_with(dir)))
+        {
+            crate::output::warn(&format!(
+                "[gremlins].exclude entry {entry:?} matches no scannable tracked path"
+            ));
+        }
+    }
+    if !config.exclude.is_empty()
+        && !files
+            .iter()
+            .any(|rel| is_scannable(rel) && !config.is_excluded(rel))
+    {
+        crate::output::warn("[gremlins].exclude removes every scannable tracked path");
+    }
+    Ok(())
 }
 
 fn is_scannable(rel: &Path) -> bool {

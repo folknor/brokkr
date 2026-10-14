@@ -1535,18 +1535,13 @@ fn cmd_verify(
 /// standard env-var mechanism.
 fn cmd_hotpath_generic(req: &measure::MeasureRequest) -> Result<(), DevError> {
     let hotpath_features = req.hotpath_features();
-    let ctx = context::BenchContext::new(
-        req.dev_config,
-        req.project,
-        req.project_root,
-        req.build_root,
+    let ctx = context::BenchContext::new_for_request(
+        req,
         req.project.cli_package(),
         &hotpath_features,
         true,
         "hotpath",
-        req.force,        req.stop_marker.map(str::to_owned),
-    )?
-    .with_request(req);
+    )?;
 
     let alloc = req.is_alloc();
     let label = harness::hotpath_feature(alloc);

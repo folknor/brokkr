@@ -963,6 +963,7 @@ mod tests {
             cli_args: String::new(),
             brokkr_args: String::new(),
             project: String::from("test"),
+            stop_marker_requested: String::new(),
             stop_marker: String::new(),
             kv: vec![],
             captured_env: std::collections::BTreeMap::new(),

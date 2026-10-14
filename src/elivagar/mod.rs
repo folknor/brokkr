@@ -24,28 +24,23 @@ pub mod regress;
 pub mod svg;
 pub mod verify;
 
-/// Everything a tilegen run is configured by: the named `[<host>.tilegen.<name>]`
-/// contract, plus the two assertions that belong to the input file rather than
-/// to the config.
-///
-/// brokkr interprets none of this beyond expanding it into argv - but it does
-/// name every input explicitly. Nothing is inferred from the filesystem. The
-/// ocean inputs used to be auto-detected from `data/`, so a run's meaning lived
-/// there rather than in the invocation: two runs of the same binary on the same
-/// PBF produced different ocean geometry depending on whether a file happened
-/// to exist, and `cli_args` could not tell you which. On 2026-07-14 a denmark
-/// archive was built, verified and blessed as the regress baseline while
-/// `ocean-tiles.pmtiles` was missing, taking the computed path throughout while
-/// every gate passed.
-pub struct PipelineOpts<'a> {
-    pub tilegen: &'a config::TilegenConfig,
+/// Input-specific assertions carried from the selected PBF entry to tilegen.
+pub struct PipelineOpts {
     /// From the selected `pbf.<variant>` entry - a property of the file.
     pub locations_on_ways: bool,
     /// From the selected `pbf.<variant>` entry - a property of the file.
     pub force_sorted: bool,
 }
 
-impl PipelineOpts<'_> {
+impl PipelineOpts {
+    /// Construct the tilegen input assertions from the selected PBF entry.
+    pub fn from_pbf_entry(entry: &config::PbfEntry) -> Self {
+        Self {
+            locations_on_ways: entry.locations_on_ways,
+            force_sorted: entry.force_sorted,
+        }
+    }
+
     /// Append elivagar CLI flags to an args vec.
     ///
     /// Ocean paths are stored bare in brokkr.toml and resolved against
@@ -56,9 +51,12 @@ impl PipelineOpts<'_> {
     /// dropping it from the argv - dropping it is precisely how an archive
     /// gets built, gated and blessed on the computed path while its
     /// invocation claims otherwise.
-    pub fn push_args(&self, args: &mut Vec<String>, data_dir: &Path) -> Result<(), DevError> {
-        let tg = self.tilegen;
-
+    pub fn push_args(
+        &self,
+        tg: &config::TilegenConfig,
+        args: &mut Vec<String>,
+        data_dir: &Path,
+    ) -> Result<(), DevError> {
         if self.force_sorted {
             args.push("--force-sorted".into());
         }
@@ -204,29 +202,4 @@ pub fn resolve_tilegen<'a>(
             known.join(", ")
         ))
     })
-}
-
-/// The two input assertions for a dataset variant, from its `pbf.<variant>`
-/// entry: `(locations_on_ways, force_sorted)`.
-///
-/// Both describe the PBF rather than the pipeline, which is why they live on
-/// the variant and not in a tilegen block - a block would otherwise have to
-/// know which variant it was about to be run against, re-coupling the two axes
-/// this config separates. An unknown dataset/variant yields `(false, false)`;
-/// PBF resolution reports that properly and this is not the place for it.
-pub fn input_assertions(
-    dev_config: &config::DevConfig,
-    dataset: &str,
-    variant: &str,
-) -> (bool, bool) {
-    let Ok(host) = config::hostname() else {
-        return (false, false);
-    };
-    dev_config
-        .hosts
-        .get(&host)
-        .and_then(|h| h.datasets.get(dataset))
-        .and_then(|d| d.pbf.get(variant))
-        .map(|e| (e.locations_on_ways, e.force_sorted))
-        .unwrap_or((false, false))
 }

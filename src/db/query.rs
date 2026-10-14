@@ -5,7 +5,7 @@ use super::like::{ESCAPE, contains_pattern, prefix_pattern, require_prefix};
 use super::schema::SELECT_COLS;
 use super::{
     Distribution, DistributionUs, HotpathData, HotpathFunction, HotpathThread, KvPair, KvValue,
-    PreviousRun, QueryFilter, StoredRow,
+    PreviousRun, QueryFilter, RunId, StoredRow,
 };
 use crate::error::DevError;
 
@@ -14,67 +14,101 @@ use crate::error::DevError;
 // ---------------------------------------------------------------------------
 
 impl ResultsDb {
-    /// Query rows by UUID prefix. Loads all child data (kv, distribution, hotpath).
-    ///
-    /// The prefix matches literally (`_`/`%` are not wildcards), and an empty
-    /// prefix is refused rather than matching every row.
-    pub fn query_by_uuid(&self, prefix: &str) -> Result<Vec<StoredRow>, DevError> {
-        self.query_by_uuid_with_limit(prefix, &QueryFilter::default(), None)
-    }
-
-    /// Query UUID-prefix matches with the complete results filter, including
-    /// the row limit used by the other results views.
-    pub fn query_by_uuid_with_filter(
+    /// Query exact run identities with the complete results filter. Returns
+    /// the number omitted by `filter.limit` alongside the selected rows.
+    pub(crate) fn query_by_run_ids(
         &self,
-        prefix: &str,
+        ids: &[RunId],
         filter: &QueryFilter,
-    ) -> Result<Vec<StoredRow>, DevError> {
-        if filter.commit.is_some() {
-            return Err(DevError::Config(
-                "--commit cannot be combined with a UUID lookup".into(),
-            ));
+    ) -> Result<(Vec<StoredRow>, usize), DevError> {
+        if ids.is_empty() {
+            return Ok((Vec::new(), 0));
         }
-        self.query_by_uuid_with_limit(prefix, filter, Some(filter.limit))
-    }
 
-    fn query_by_uuid_with_limit(
-        &self,
-        prefix: &str,
-        filter: &QueryFilter,
-        limit: Option<usize>,
-    ) -> Result<Vec<StoredRow>, DevError> {
-        require_prefix(prefix, "uuid")?;
-        let mut clauses = vec![format!("uuid LIKE ?1 {ESCAPE}")];
-        let mut params = vec![prefix_pattern(prefix)];
-        push_row_filter_clauses(&mut clauses, &mut params, filter);
-        let mut sql = format!(
-            "SELECT {SELECT_COLS} FROM runs WHERE {} ORDER BY id DESC",
-            clauses.join(" AND ")
-        );
-        if let Some(limit) = limit {
-            params.push(limit.to_string());
-            sql.push_str(&format!(" LIMIT ?{}", params.len()));
+        // Keep the placeholder count comfortably below SQLite's variable
+        // limit even when a very short prefix names many UUIDs.
+        let mut total = 0usize;
+        let mut selected = Vec::new();
+        for chunk in ids.chunks(250) {
+            let mut clauses = vec![format!(
+                "uuid IN ({})",
+                (1..=chunk.len())
+                    .map(|index| format!("?{index}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )];
+            let mut params: Vec<String> = chunk.iter().map(|id| id.as_str().to_owned()).collect();
+            push_row_filter_clauses(&mut clauses, &mut params, filter);
+            let where_clause = clauses.join(" AND ");
+            let param_refs: Vec<&dyn rusqlite::types::ToSql> = params
+                .iter()
+                .map(|p| p as &dyn rusqlite::types::ToSql)
+                .collect();
+            let chunk_total: i64 = self.conn.query_row(
+                &format!("SELECT COUNT(*) FROM runs WHERE {where_clause}"),
+                param_refs.as_slice(),
+                |row| row.get(0),
+            )?;
+            total = total.saturating_add(usize::try_from(chunk_total).unwrap_or(usize::MAX));
+
+            let mut selected_params = params.clone();
+            selected_params.push(filter.limit.to_string());
+            let selected_refs: Vec<&dyn rusqlite::types::ToSql> = selected_params
+                .iter()
+                .map(|p| p as &dyn rusqlite::types::ToSql)
+                .collect();
+            let sql = format!(
+                "SELECT {SELECT_COLS} FROM runs WHERE {where_clause} ORDER BY id DESC LIMIT ?{}",
+                selected_params.len(),
+            );
+            let mut stmt = self.conn.prepare(&sql)?;
+            let rows = stmt.query_map(selected_refs.as_slice(), map_stored_row)?;
+            selected.extend(collect_rows(rows)?);
         }
-        let param_refs: Vec<&dyn rusqlite::types::ToSql> = params
-            .iter()
-            .map(|p| p as &dyn rusqlite::types::ToSql)
-            .collect();
-        let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map(param_refs.as_slice(), map_stored_row)?;
-        let mut result = collect_rows(rows)?;
-        for row in &mut result {
+
+        selected.sort_by_key(|row| std::cmp::Reverse(row.id));
+        selected.truncate(filter.limit);
+        for row in &mut selected {
             load_children(&self.conn, row)?;
         }
-        Ok(result)
+        let omitted = total.saturating_sub(selected.len());
+        Ok((selected, omitted))
     }
 
-    /// Whether any stored results row has this UUID prefix, without loading
-    /// the row's child data.
-    pub fn has_uuid_prefix(&self, prefix: &str) -> Result<bool, DevError> {
+    /// Enumerate exact UUID values whose literal prefix matches.
+    pub(crate) fn uuids_matching_prefix(&self, prefix: &str) -> Result<Vec<String>, DevError> {
         require_prefix(prefix, "uuid")?;
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT DISTINCT uuid FROM runs WHERE uuid IS NOT NULL AND uuid LIKE ?1 {ESCAPE} ORDER BY uuid"
+        ))?;
+        let rows = stmt.query_map(rusqlite::params![prefix_pattern(prefix)], |row| {
+            row.get::<_, String>(0)
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(DevError::from)
+    }
+
+    /// Enumerate all UUIDs whose commits match the shared two-way prefix rule.
+    pub(crate) fn uuids_matching_commit_prefix(
+        &self,
+        commit_prefix: &str,
+    ) -> Result<Vec<String>, DevError> {
+        require_prefix(commit_prefix, "commit")?;
+        let (pattern, raw) = commit_params(commit_prefix);
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT DISTINCT uuid FROM runs WHERE uuid IS NOT NULL AND {} ORDER BY uuid",
+            commit_match_expr(1, 2),
+        ))?;
+        let rows = stmt.query_map(rusqlite::params![pattern, raw], |row| {
+            row.get::<_, String>(0)
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(DevError::from)
+    }
+
+    /// Whether a results row exists for this exact UUID.
+    pub(crate) fn has_uuid(&self, uuid: &str) -> Result<bool, DevError> {
         Ok(self.conn.query_row(
-            &format!("SELECT EXISTS(SELECT 1 FROM runs WHERE uuid LIKE ?1 {ESCAPE})"),
-            rusqlite::params![prefix_pattern(prefix)],
+            "SELECT EXISTS(SELECT 1 FROM runs WHERE uuid = ?1)",
+            rusqlite::params![uuid],
             |row| row.get(0),
         )?)
     }
@@ -287,6 +321,9 @@ fn map_stored_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredRow> {
         project: row
             .get::<_, Option<String>>("project")?
             .unwrap_or_else(|| "pbfhogg".to_owned()),
+        stop_marker_requested: row
+            .get::<_, Option<String>>("stop_marker_requested")?
+            .unwrap_or_default(),
         stop_marker: row
             .get::<_, Option<String>>("stop_marker")?
             .unwrap_or_default(),
@@ -1307,10 +1344,19 @@ mod tests {
             }),
         };
 
-        let (_, short) = db.insert(&row).expect("insert");
+        let (full, _) = db.insert(&row).expect("insert");
 
-        // query_by_uuid triggers load_children for each row.
-        let rows = db.query_by_uuid(&short).expect("query_by_uuid");
+        // query_by_run_ids triggers load_children for each row.
+        let (rows, omitted) = db
+            .query_by_run_ids(
+                &[RunId::new(full)],
+                &QueryFilter {
+                    limit: 100,
+                    ..Default::default()
+                },
+            )
+            .expect("query_by_run_ids");
+        assert_eq!(omitted, 0);
         assert_eq!(rows.len(), 1);
         let r = &rows[0];
 
@@ -1791,12 +1837,12 @@ mod tests {
     }
 
     #[test]
-    fn query_by_uuid_refuses_empty_prefix() {
+    fn uuid_prefix_enumeration_refuses_empty_prefix() {
         let db_path = crate::test_scratch::scratch("db-query", "uuid_empty").join("t.db");
         let db = ResultsDb::open(&db_path).expect("open");
         db.insert(&plain_row("read", vec![])).unwrap();
         assert!(
-            db.query_by_uuid("").is_err(),
+            db.uuids_matching_prefix("").is_err(),
             "an empty prefix must not match every row"
         );
     }

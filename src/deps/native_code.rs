@@ -34,7 +34,54 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-use super::{CargoMetadata, NativeDependencyEvent};
+use serde::ser::SerializeStruct;
+use serde::{Serialize, Serializer};
+
+use super::CargoMetadata;
+
+/// A dependency that pulls non-Rust code into the build. `reason` is
+/// serialized from the two source signals so it cannot disagree with them.
+pub(super) struct NativeDependencyEvent {
+    pub(super) krate: String,
+    pub(super) version: String,
+    pub(super) links: Option<String>,
+    pub(super) toolchains: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum NativeReason {
+    Links,
+    Compiles,
+    Both,
+}
+
+impl Serialize for NativeDependencyEvent {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let reason =
+            classify(self.links.is_some(), !self.toolchains.is_empty()).ok_or_else(|| {
+                <S::Error as serde::ser::Error>::custom(
+                    "native dependency event has neither native signal",
+                )
+            })?;
+        let field_count =
+            3 + self.links.is_some() as usize + (!self.toolchains.is_empty()) as usize;
+        let mut state = serializer.serialize_struct("NativeDependencyEvent", field_count)?;
+        state.serialize_field("crate", &self.krate)?;
+        state.serialize_field("version", &self.version)?;
+        state.serialize_field("reason", &reason)?;
+        if let Some(links) = &self.links {
+            state.serialize_field("links", links)?;
+        }
+        if !self.toolchains.is_empty() {
+            state.serialize_field("toolchains", &self.toolchains)?;
+        }
+        state.end()
+    }
+}
 
 /// Build-dependency crate names that mean "this build script compiles
 /// non-Rust source". `cxx-build` depends on `cc`, but a crate using
@@ -93,13 +140,12 @@ pub fn run(metadata: &CargoMetadata) -> Vec<NativeDependencyEvent> {
             .map(|set| set.iter().map(ToString::to_string).collect())
             .unwrap_or_default();
 
-        let Some(reason) = classify(links.is_some(), !toolchains.is_empty()) else {
+        if links.is_none() && toolchains.is_empty() {
             continue;
-        };
+        }
         events.push(NativeDependencyEvent {
             krate: pkg.name.clone(),
             version: pkg.version.clone(),
-            reason,
             links,
             toolchains,
         });
@@ -110,11 +156,11 @@ pub fn run(metadata: &CargoMetadata) -> Vec<NativeDependencyEvent> {
 
 /// `None` when neither signal fired (not a native dep). Otherwise the
 /// label that goes in the event and JSON output.
-fn classify(links: bool, compiles: bool) -> Option<&'static str> {
+fn classify(links: bool, compiles: bool) -> Option<NativeReason> {
     match (links, compiles) {
-        (true, true) => Some("both"),
-        (true, false) => Some("links"),
-        (false, true) => Some("compiles"),
+        (true, true) => Some(NativeReason::Both),
+        (true, false) => Some(NativeReason::Links),
+        (false, true) => Some(NativeReason::Compiles),
         (false, false) => None,
     }
 }
@@ -125,9 +171,9 @@ mod tests {
 
     #[test]
     fn classify_covers_all_combinations() {
-        assert_eq!(classify(true, true), Some("both"));
-        assert_eq!(classify(true, false), Some("links"));
-        assert_eq!(classify(false, true), Some("compiles"));
+        assert_eq!(classify(true, true), Some(NativeReason::Both));
+        assert_eq!(classify(true, false), Some(NativeReason::Links));
+        assert_eq!(classify(false, true), Some(NativeReason::Compiles));
         assert_eq!(classify(false, false), None);
     }
 }

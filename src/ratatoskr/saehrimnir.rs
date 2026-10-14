@@ -16,7 +16,6 @@
 //! Sæhrimnir's repo is authoritative for protocol surface, fixture
 //! model, and signal handling; brokkr only orchestrates.
 
-use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -28,21 +27,168 @@ use crate::lockfile::{self, LockContext};
 use crate::output;
 use crate::ratatoskr::process as proc_helpers;
 
+const MOCK_HOST: &str = "127.0.0.1";
+
+/// A protocol exposed by sæhrimnir's readiness sentinel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(usize)]
+pub(crate) enum Protocol {
+    Jmap,
+    Imap,
+    Smtp,
+    Graph,
+    Gmail,
+    Caldav,
+    Carddav,
+    People,
+    Gcal,
+    #[doc(hidden)]
+    __Count,
+}
+
+impl Protocol {
+    pub(crate) const COUNT: usize = Self::__Count as usize;
+    const ALL: [Self; Self::COUNT] = [
+        Self::Jmap,
+        Self::Imap,
+        Self::Smtp,
+        Self::Graph,
+        Self::Gmail,
+        Self::Caldav,
+        Self::Carddav,
+        Self::People,
+        Self::Gcal,
+    ];
+
+    fn index(self) -> usize {
+        self as usize
+    }
+
+    pub(crate) fn all() -> impl Iterator<Item = Self> {
+        Self::ALL.into_iter()
+    }
+
+    fn from_sentinel(name: &str) -> Option<Self> {
+        Self::all().find(|protocol| protocol.sentinel_name() == name)
+    }
+
+    pub(crate) fn name(self) -> &'static str {
+        self.spec().name
+    }
+
+    fn sentinel_name(self) -> &'static str {
+        self.spec().sentinel_name
+    }
+
+    fn configured_env(self, cfg: &RatatoskrConfig) -> Option<&str> {
+        (self.spec().endpoint_env)(cfg)
+    }
+
+    fn endpoint(self, port: u16) -> String {
+        match self.spec().format {
+            EndpointFormat::HttpOrigin => format!("http://{MOCK_HOST}:{port}"),
+            EndpointFormat::HostPort => format!("{MOCK_HOST}:{port}"),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum EndpointFormat {
+    HttpOrigin,
+    HostPort,
+}
+
+type EndpointEnvLookup = for<'a> fn(&'a RatatoskrConfig) -> Option<&'a str>;
+
+struct ProtocolSpec {
+    name: &'static str,
+    sentinel_name: &'static str,
+    format: EndpointFormat,
+    endpoint_env: EndpointEnvLookup,
+}
+
+// This exhaustive match is the protocol registry. A new variant must
+// supply its sentinel name, typed config accessor and endpoint shape; the enum's
+// `all` iterator then drives parsing and output consistently.
+impl Protocol {
+    fn spec(self) -> ProtocolSpec {
+        match self {
+            Self::Jmap => ProtocolSpec {
+                name: "jmap",
+                sentinel_name: "JMAP",
+                format: EndpointFormat::HttpOrigin,
+                endpoint_env: |cfg| cfg.test_endpoint_env_jmap.as_deref(),
+            },
+            Self::Imap => ProtocolSpec {
+                name: "imap",
+                sentinel_name: "IMAP",
+                format: EndpointFormat::HostPort,
+                endpoint_env: |cfg| cfg.test_endpoint_env_imap.as_deref(),
+            },
+            Self::Smtp => ProtocolSpec {
+                name: "smtp",
+                sentinel_name: "SMTP",
+                format: EndpointFormat::HostPort,
+                endpoint_env: |cfg| cfg.test_endpoint_env_smtp.as_deref(),
+            },
+            Self::Graph => ProtocolSpec {
+                name: "graph",
+                sentinel_name: "GRAPH",
+                format: EndpointFormat::HttpOrigin,
+                endpoint_env: |cfg| cfg.test_endpoint_env_graph.as_deref(),
+            },
+            Self::Gmail => ProtocolSpec {
+                name: "gmail",
+                sentinel_name: "GMAIL",
+                format: EndpointFormat::HttpOrigin,
+                endpoint_env: |cfg| cfg.test_endpoint_env_gmail.as_deref(),
+            },
+            Self::Caldav => ProtocolSpec {
+                name: "caldav",
+                sentinel_name: "CALDAV",
+                format: EndpointFormat::HttpOrigin,
+                endpoint_env: |cfg| cfg.test_endpoint_env_caldav.as_deref(),
+            },
+            Self::Carddav => ProtocolSpec {
+                name: "carddav",
+                sentinel_name: "CARDDAV",
+                format: EndpointFormat::HttpOrigin,
+                endpoint_env: |cfg| cfg.test_endpoint_env_carddav.as_deref(),
+            },
+            Self::People => ProtocolSpec {
+                name: "people",
+                sentinel_name: "PEOPLE",
+                format: EndpointFormat::HttpOrigin,
+                endpoint_env: |cfg| cfg.test_endpoint_env_people.as_deref(),
+            },
+            Self::Gcal => ProtocolSpec {
+                name: "gcal",
+                sentinel_name: "GCAL",
+                format: EndpointFormat::HttpOrigin,
+                endpoint_env: |cfg| cfg.test_endpoint_env_gcal.as_deref(),
+            },
+            Self::__Count => unreachable!("protocol count marker has no metadata"),
+        }
+    }
+}
+
 /// Resolved per-protocol listening ports parsed out of sæhrimnir's
-/// readiness sentinel. Every field is required - sæhrimnir always
-/// binds all nine listeners and the sentinel always carries one
-/// line per protocol.
+/// readiness sentinel. Every entry is required - sæhrimnir always binds
+/// all nine listeners and the sentinel carries one line per protocol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Endpoints {
-    pub jmap: u16,
-    pub imap: u16,
-    pub smtp: u16,
-    pub graph: u16,
-    pub gmail: u16,
-    pub caldav: u16,
-    pub carddav: u16,
-    pub people: u16,
-    pub gcal: u16,
+    ports: [u16; Protocol::COUNT],
+}
+
+impl Endpoints {
+    /// Construct endpoints in the order returned by [`Protocol::all`].
+    pub(crate) const fn from_ordered(ports: [u16; Protocol::COUNT]) -> Self {
+        Self { ports }
+    }
+
+    pub(crate) fn port(&self, protocol: Protocol) -> u16 {
+        self.ports[protocol.index()]
+    }
 }
 
 /// Parse sæhrimnir's readiness sentinel. Expects exactly nine lines,
@@ -67,16 +213,7 @@ pub struct Endpoints {
 /// values all fail loudly so a contract drift gets caught at the
 /// orchestration boundary instead of two layers down.
 pub fn parse_sentinel(text: &str) -> Result<Endpoints, DevError> {
-    let mut jmap: Option<u16> = None;
-    let mut imap: Option<u16> = None;
-    let mut smtp: Option<u16> = None;
-    let mut graph: Option<u16> = None;
-    let mut gmail: Option<u16> = None;
-    let mut caldav: Option<u16> = None;
-    let mut carddav: Option<u16> = None;
-    let mut people: Option<u16> = None;
-    let mut gcal: Option<u16> = None;
-    let mut seen: HashSet<&'static str> = HashSet::new();
+    let mut ports = [None; Protocol::COUNT];
 
     for (lineno, raw) in text.lines().enumerate() {
         let line = raw.trim();
@@ -97,47 +234,30 @@ pub fn parse_sentinel(text: &str) -> Result<Endpoints, DevError> {
             ))
         })?;
 
-        let slot: (&'static str, &mut Option<u16>) = match name {
-            "JMAP" => ("JMAP", &mut jmap),
-            "IMAP" => ("IMAP", &mut imap),
-            "SMTP" => ("SMTP", &mut smtp),
-            "GRAPH" => ("GRAPH", &mut graph),
-            "GMAIL" => ("GMAIL", &mut gmail),
-            "CALDAV" => ("CALDAV", &mut caldav),
-            "CARDDAV" => ("CARDDAV", &mut carddav),
-            "PEOPLE" => ("PEOPLE", &mut people),
-            "GCAL" => ("GCAL", &mut gcal),
-            other => {
-                return Err(DevError::Config(format!(
-                    "saehrimnir sentinel line {}: unknown protocol {other:?} \
-                     (expected JMAP / IMAP / SMTP / GRAPH / GMAIL / CALDAV / CARDDAV / PEOPLE / GCAL)",
-                    lineno + 1
-                )));
-            }
+        let Some(protocol) = Protocol::from_sentinel(name) else {
+            let expected = Protocol::all()
+                .map(Protocol::sentinel_name)
+                .collect::<Vec<_>>()
+                .join(" / ");
+            return Err(DevError::Config(format!(
+                "saehrimnir sentinel line {}: unknown protocol {name:?} (expected {expected})",
+                lineno + 1
+            )));
         };
-        if !seen.insert(slot.0) {
+        let slot = &mut ports[protocol.index()];
+        if slot.is_some() {
             return Err(DevError::Config(format!(
                 "saehrimnir sentinel: duplicate {} entry",
-                slot.0
+                protocol.sentinel_name()
             )));
         }
-        *slot.1 = Some(port);
+        *slot = Some(port);
     }
 
-    let missing: Vec<&str> = [
-        ("JMAP", jmap.is_none()),
-        ("IMAP", imap.is_none()),
-        ("SMTP", smtp.is_none()),
-        ("GRAPH", graph.is_none()),
-        ("GMAIL", gmail.is_none()),
-        ("CALDAV", caldav.is_none()),
-        ("CARDDAV", carddav.is_none()),
-        ("PEOPLE", people.is_none()),
-        ("GCAL", gcal.is_none()),
-    ]
-    .into_iter()
-    .filter_map(|(n, missing)| missing.then_some(n))
-    .collect();
+    let missing: Vec<&str> = Protocol::all()
+        .filter(|protocol| ports[protocol.index()].is_none())
+        .map(Protocol::sentinel_name)
+        .collect();
     if !missing.is_empty() {
         return Err(DevError::Config(format!(
             "saehrimnir sentinel missing entries: {}",
@@ -145,18 +265,10 @@ pub fn parse_sentinel(text: &str) -> Result<Endpoints, DevError> {
         )));
     }
 
-    Ok(Endpoints {
-        // unwrap is safe: we just verified `missing` is empty.
-        jmap: jmap.expect("checked above"),
-        imap: imap.expect("checked above"),
-        smtp: smtp.expect("checked above"),
-        graph: graph.expect("checked above"),
-        gmail: gmail.expect("checked above"),
-        caldav: caldav.expect("checked above"),
-        carddav: carddav.expect("checked above"),
-        people: people.expect("checked above"),
-        gcal: gcal.expect("checked above"),
-    })
+    // The missing list above proves each slot is Some.
+    Ok(Endpoints::from_ordered(
+        ports.map(|port| port.expect("checked above")),
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -359,7 +471,7 @@ impl Drop for MockServer {
 /// inside the per-run artefact dir instead.
 const MOCK_DIR: &str = ".brokkr/ratatoskr/mock";
 
-/// Wall-clock budget for sæhrimnir to bind all five listeners and write
+/// Wall-clock budget for sæhrimnir to bind all nine listeners and write
 /// the readiness sentinel. Generous - sæhrimnir's cold-start is sub-100ms
 /// in practice, but the budget needs to absorb a debug-build startup or
 /// a CPU-pinned host without spurious failures.
@@ -536,50 +648,13 @@ pub fn require_path(
 /// Shared by `sync` (where it originated) and the
 /// fixture-aware `service` paths.
 pub fn endpoint_env_pairs(cfg: &RatatoskrConfig, endpoints: &Endpoints) -> Vec<(String, String)> {
-    let mut out = Vec::new();
-    if let Some(name) = &cfg.test_endpoint_env_jmap {
-        out.push((name.clone(), format!("http://127.0.0.1:{}", endpoints.jmap)));
-    }
-    if let Some(name) = &cfg.test_endpoint_env_imap {
-        out.push((name.clone(), format!("127.0.0.1:{}", endpoints.imap)));
-    }
-    if let Some(name) = &cfg.test_endpoint_env_smtp {
-        out.push((name.clone(), format!("127.0.0.1:{}", endpoints.smtp)));
-    }
-    if let Some(name) = &cfg.test_endpoint_env_graph {
-        out.push((
-            name.clone(),
-            format!("http://127.0.0.1:{}", endpoints.graph),
-        ));
-    }
-    if let Some(name) = &cfg.test_endpoint_env_gmail {
-        out.push((
-            name.clone(),
-            format!("http://127.0.0.1:{}", endpoints.gmail),
-        ));
-    }
-    if let Some(name) = &cfg.test_endpoint_env_caldav {
-        out.push((
-            name.clone(),
-            format!("http://127.0.0.1:{}", endpoints.caldav),
-        ));
-    }
-    if let Some(name) = &cfg.test_endpoint_env_carddav {
-        out.push((
-            name.clone(),
-            format!("http://127.0.0.1:{}", endpoints.carddav),
-        ));
-    }
-    if let Some(name) = &cfg.test_endpoint_env_people {
-        out.push((
-            name.clone(),
-            format!("http://127.0.0.1:{}", endpoints.people),
-        ));
-    }
-    if let Some(name) = &cfg.test_endpoint_env_gcal {
-        out.push((name.clone(), format!("http://127.0.0.1:{}", endpoints.gcal)));
-    }
-    out
+    Protocol::all()
+        .filter_map(|protocol| {
+            protocol
+                .configured_env(cfg)
+                .map(|name| (name.to_owned(), protocol.endpoint(endpoints.port(protocol))))
+        })
+        .collect()
 }
 
 /// Pick the right file for a fixture name. `.toml` and `.lua` are both
@@ -727,21 +802,17 @@ fn wait_for_endpoints_inner(
     }
 }
 
-/// Print the per-protocol endpoint table for a manual session. URL
-/// shapes match what ratatoskr's existing client code expects: HTTP
-/// origins for the JSON-over-HTTP protocols, `host:port` for the
-/// stream protocols.
+/// Print the per-protocol endpoint table for a manual session, using
+/// the same URL shape as the harness environment values.
 fn print_endpoints(ep: &Endpoints) {
     output::ratatoskr_msg("listening on:");
-    output::ratatoskr_msg(&format!("  jmap   http://127.0.0.1:{}", ep.jmap));
-    output::ratatoskr_msg(&format!("  imap   127.0.0.1:{}", ep.imap));
-    output::ratatoskr_msg(&format!("  smtp   127.0.0.1:{}", ep.smtp));
-    output::ratatoskr_msg(&format!("  graph  http://127.0.0.1:{}", ep.graph));
-    output::ratatoskr_msg(&format!("  gmail  http://127.0.0.1:{}", ep.gmail));
-    output::ratatoskr_msg(&format!("  caldav http://127.0.0.1:{}", ep.caldav));
-    output::ratatoskr_msg(&format!("  carddav http://127.0.0.1:{}", ep.carddav));
-    output::ratatoskr_msg(&format!("  people http://127.0.0.1:{}", ep.people));
-    output::ratatoskr_msg(&format!("  gcal   http://127.0.0.1:{}", ep.gcal));
+    for protocol in Protocol::all() {
+        output::ratatoskr_msg(&format!(
+            "  {:<6} {}",
+            protocol.name(),
+            protocol.endpoint(ep.port(protocol))
+        ));
+    }
 }
 
 /// Send a signal to the child, choosing between `kill(-pgid, ...)` and
@@ -860,17 +931,9 @@ mod tests {
         let ep = parse_sentinel(text).unwrap();
         assert_eq!(
             ep,
-            Endpoints {
-                jmap: 12345,
-                imap: 23456,
-                smtp: 34567,
-                graph: 45678,
-                gmail: 56789,
-                caldav: 60000,
-                carddav: 60500,
-                people: 61000,
-                gcal: 62000,
-            }
+            Endpoints::from_ordered([
+                12345, 23456, 34567, 45678, 56789, 60000, 60500, 61000, 62000,
+            ])
         );
     }
 
@@ -879,15 +942,15 @@ mod tests {
         let text =
             "\nGMAIL 5\n\nCALDAV 6\nGRAPH 4\nJMAP 1\nIMAP 2\nSMTP 3\nCARDDAV 9\nPEOPLE 7\nGCAL 8\n";
         let ep = parse_sentinel(text).unwrap();
-        assert_eq!(ep.jmap, 1);
-        assert_eq!(ep.imap, 2);
-        assert_eq!(ep.smtp, 3);
-        assert_eq!(ep.graph, 4);
-        assert_eq!(ep.gmail, 5);
-        assert_eq!(ep.caldav, 6);
-        assert_eq!(ep.carddav, 9);
-        assert_eq!(ep.people, 7);
-        assert_eq!(ep.gcal, 8);
+        assert_eq!(ep.port(Protocol::Jmap), 1);
+        assert_eq!(ep.port(Protocol::Imap), 2);
+        assert_eq!(ep.port(Protocol::Smtp), 3);
+        assert_eq!(ep.port(Protocol::Graph), 4);
+        assert_eq!(ep.port(Protocol::Gmail), 5);
+        assert_eq!(ep.port(Protocol::Caldav), 6);
+        assert_eq!(ep.port(Protocol::Carddav), 9);
+        assert_eq!(ep.port(Protocol::People), 7);
+        assert_eq!(ep.port(Protocol::Gcal), 8);
     }
 
     #[test]

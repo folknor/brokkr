@@ -17,6 +17,8 @@ error - not having measured anything is a normal state.
 
 `--limit N` caps rows in table and UUID-prefix views, and comparison pairs in
 `--compare` (default 20). Compare pairs are formed before the cap is applied.
+When a UUID-prefix view is capped, it prints how many matching result rows
+were omitted so the cap is visible.
 
 `--top N` caps the functions shown in hotpath reports (default 10, `0` = all).
 
@@ -99,7 +101,7 @@ arm.
 
 ## A single run
 
-`brokkr results <uuid-prefix>` resolves a prefix to one row and prints a
+When `brokkr results <uuid-prefix>` matches one result row, it prints a
 labelled block instead of a table row: full multi-line `cli_args`, the brokkr
 invocation, and the sidecar hint folded in as a field. For a `--bench N` row it
 adds the per-iteration walls, and the `prev.*` provenance of what ran
@@ -107,10 +109,17 @@ immediately before it - the neighbouring run is often the explanation for an
 outlier. A distribution row (nidhogg `api`) also gets its `samples`, `min`,
 `p50`, `p95` and `max`.
 
+If `--stop` was configured, the block shows the requested marker separately
+from the marker that actually stopped the child. A request that never fired
+does not say the child was killed.
+
 Any supplied row filters still apply to the UUID matches.
 
-A prefix matching several rows falls back to the table plus per-row details.
-An empty prefix is refused rather than matching every row.
+A prefix matching several runs falls back to the table plus per-row details.
+UUID resolution considers both stores; results lists result rows and reports
+any matching sidecar-only UUIDs separately. `sidecar` requires a prefix to
+name one run and lists candidates when it is ambiguous. An empty prefix is
+refused rather than matching every row.
 
 A UUID with sidecar data but no results row reports itself as a **sidecar-only
 run** (a dirty tree, or a run that failed before it could file a result) and

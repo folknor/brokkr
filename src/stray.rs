@@ -416,10 +416,16 @@ pub fn find() -> Vec<Stray> {
     classify(&read_proc(), current_ownership())
 }
 
-/// SIGKILL each stray, then each rust-analyzer starter. Returns `(strays,
-/// starters)` signalled; a process that exited between the scan and the
-/// signal is not counted and not an error.
-pub fn kill(strays: &[Stray]) -> (usize, usize) {
+/// The two groups `kill` may signal. A process that exited between the scan
+/// and signal is not counted and not an error.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct KillCounts {
+    pub strays_signalled: usize,
+    pub starters_signalled: usize,
+}
+
+/// SIGKILL each stray, then each rust-analyzer starter.
+pub fn kill(strays: &[Stray]) -> KillCounts {
     // Re-read `/proc` once: it supplies both the fresh identity tokens the
     // signals are checked against and the descendant topology. A single read
     // keeps the two coherent.
@@ -496,19 +502,22 @@ pub fn kill(strays: &[Stray]) -> (usize, usize) {
         .into_iter()
         .filter(|(pid, _)| table.get(pid).is_some_and(|e| sigkill(*pid, &e.starttime)))
         .count();
-    (killed, starters)
+    KillCounts {
+        strays_signalled: killed,
+        starters_signalled: starters,
+    }
 }
 
 /// The `SIGKILL sent to …` line.
-fn killed_line(killed: usize, starters: usize) -> String {
+fn killed_line(counts: KillCounts) -> String {
     let mut line = format!(
         "SIGKILL sent to {}",
-        output::count(killed, "stray cargo process")
+        output::count(counts.strays_signalled, "stray cargo process")
     );
-    if starters > 0 {
+    if counts.starters_signalled > 0 {
         line.push_str(&format!(
             " and {} (it would only re-run the cargo)",
-            output::count(starters, "rust-analyzer")
+            output::count(counts.starters_signalled, "rust-analyzer")
         ));
     }
     line
@@ -520,7 +529,7 @@ fn killed_line(killed: usize, starters: usize) -> String {
 /// starters deduplicated. No pids: everything named is dead by the time the
 /// line prints, so a pid identifies nothing. The live, addressable detail
 /// stays with `brokkr strays`.
-fn reap_line(strays: &[Stray], killed: usize, starters: usize) -> String {
+fn reap_line(strays: &[Stray], counts: KillCounts) -> String {
     let mut comms: Vec<(&str, usize)> = Vec::new();
     for s in strays {
         match comms.iter_mut().find(|(c, _)| *c == s.comm) {
@@ -547,14 +556,14 @@ fn reap_line(strays: &[Stray], killed: usize, starters: usize) -> String {
     }
     let mut line = format!(
         "SIGKILL sent to {} ({}) started by {}",
-        output::count(killed, "stray cargo process"),
+        output::count(counts.strays_signalled, "stray cargo process"),
         comms.join(", "),
         by.join(", "),
     );
-    if starters > 0 {
+    if counts.starters_signalled > 0 {
         line.push_str(&format!(
             " and to {}",
-            output::count(starters, "rust-analyzer")
+            output::count(counts.starters_signalled, "rust-analyzer")
         ));
     }
     line
@@ -575,8 +584,8 @@ pub fn reap_after_lock() {
     if strays.is_empty() {
         return;
     }
-    let (killed, starters) = kill(&strays);
-    output::strays_msg(&reap_line(&strays, killed, starters));
+    let counts = kill(&strays);
+    output::strays_msg(&reap_line(&strays, counts));
 }
 
 /// The reap run from inside lock acquisition, when compilation leases have not
@@ -598,8 +607,8 @@ pub fn reap_for_drain() {
         output::lock_msg("no strays found - the lease is held by something this scan cannot see");
         return;
     }
-    let (killed, starters) = kill(&strays);
-    output::strays_msg(&reap_line(&strays, killed, starters));
+    let counts = kill(&strays);
+    output::strays_msg(&reap_line(&strays, counts));
 }
 
 /// `brokkr strays [--kill]`: bare lists, `--kill` lists then kills.
@@ -613,8 +622,8 @@ pub fn cmd_strays(kill_them: bool) -> Result<(), DevError> {
         output::strays_msg(&describe(s));
     }
     if kill_them {
-        let (killed, starters) = kill(&strays);
-        output::strays_msg(&killed_line(killed, starters));
+        let counts = kill(&strays);
+        output::strays_msg(&killed_line(counts));
     } else {
         output::strays_msg(
             "`brokkr strays --kill` sends SIGKILL; every locked brokkr command does so on its own once it holds the lock (`brokkr man check strays`)",
@@ -875,7 +884,13 @@ mod tests {
             (31, 20, "build_script_bu"),
         ]);
         let strays = classify(&t, foreign());
-        let line = reap_line(&strays, 3, 1);
+        let line = reap_line(
+            &strays,
+            KillCounts {
+                strays_signalled: 3,
+                starters_signalled: 1,
+            },
+        );
         assert!(!line.contains('\n'));
         assert_eq!(
             line,

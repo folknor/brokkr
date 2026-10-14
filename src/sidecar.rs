@@ -113,6 +113,174 @@ pub struct Marker {
     pub name: String,
 }
 
+/// A completed span derived from a matching `_START` and later `_END` marker.
+#[derive(Debug, Clone)]
+pub(crate) struct TimelineSpan {
+    pub name: String,
+    pub start_us: i64,
+    pub end_us: i64,
+}
+
+/// A segment between adjacent markers, used by phase-oriented views.
+#[derive(Debug, Clone)]
+pub(crate) struct TimelineSegment {
+    pub name: String,
+    pub start_us: i64,
+    pub end_us: i64,
+}
+
+/// A single interpretation surface for the marker stream.
+///
+/// The FIFO protocol remains a sequence of point markers. This model exposes
+/// the documented projections over that sequence: adjacent-marker segments,
+/// `_START`/`_END` spans, phase-name lookup, and stop-marker resolution.
+pub(crate) struct Timeline<'a> {
+    markers: &'a [Marker],
+    final_us: i64,
+    first_sample_us: Option<i64>,
+}
+
+impl<'a> Timeline<'a> {
+    /// Build a timeline for a stored run, using its sampled end as the final
+    /// boundary and retaining the whole-run fallback for markerless runs.
+    pub(crate) fn new(markers: &'a [Marker], samples: &[Sample]) -> Self {
+        Self {
+            markers,
+            final_us: samples.last().map_or(0, |s| s.timestamp_us + 1),
+            first_sample_us: samples.first().map(|s| s.timestamp_us),
+        }
+    }
+
+    /// Build a timeline over a fresh marker batch while a child is running.
+    fn marker_batch(markers: &'a [Marker]) -> Self {
+        Self {
+            markers,
+            final_us: 0,
+            first_sample_us: None,
+        }
+    }
+
+    /// Inter-marker segments. Every marker opens a segment ending at the next
+    /// marker; the last one ends at the final sample. With no markers, the
+    /// sampled run is one `(all)` segment.
+    pub(crate) fn segments(&self) -> Vec<TimelineSegment> {
+        if self.markers.is_empty() {
+            return self.first_sample_us.map_or_else(Vec::new, |start_us| {
+                vec![TimelineSegment {
+                    name: "(all)".to_owned(),
+                    start_us,
+                    end_us: self.final_us,
+                }]
+            });
+        }
+
+        self.markers
+            .iter()
+            .enumerate()
+            .map(|(i, marker)| TimelineSegment {
+                name: marker.name.clone(),
+                start_us: marker.timestamp_us,
+                end_us: self
+                    .markers
+                    .get(i + 1)
+                    .map_or(self.final_us, |next| next.timestamp_us),
+            })
+            .collect()
+    }
+
+    /// Derive completed `_START`/`_END` spans and the point markers that do
+    /// not participate in one. Unmatched starts remain standalone points.
+    pub(crate) fn durations(&self) -> (Vec<TimelineSpan>, Vec<&'a Marker>) {
+        let mut spans = Vec::new();
+        let mut consumed = vec![false; self.markers.len()];
+
+        for (i, marker) in self.markers.iter().enumerate() {
+            if consumed[i] {
+                continue;
+            }
+            let Some(base) = marker.name.strip_suffix("_START") else {
+                continue;
+            };
+
+            let end_name = format!("{base}_END");
+            if let Some((j, candidate)) = self.markers[i + 1..]
+                .iter()
+                .enumerate()
+                .find(|(j, candidate)| !consumed[i + 1 + *j] && candidate.name == end_name)
+            {
+                consumed[i] = true;
+                consumed[i + 1 + j] = true;
+                let end_us = candidate.timestamp_us;
+                spans.push(TimelineSpan {
+                    name: base.to_owned(),
+                    start_us: marker.timestamp_us,
+                    end_us,
+                });
+            }
+        }
+
+        let standalone = self
+            .markers
+            .iter()
+            .enumerate()
+            .filter_map(|(i, marker)| (!consumed[i]).then_some(marker))
+            .collect();
+        (spans, standalone)
+    }
+
+    /// Resolve `--phase`: exact event segment, then a base-name span, then a
+    /// substring event segment.
+    pub(crate) fn resolve_phase_range(&self, phase: &str) -> Option<(i64, i64)> {
+        if let Some(index) = self.markers.iter().position(|m| m.name == phase) {
+            let marker = &self.markers[index];
+            let end = self
+                .markers
+                .get(index + 1)
+                .map_or(self.final_us, |next| next.timestamp_us);
+            return Some((marker.timestamp_us, end));
+        }
+
+        if let Some(span) = self
+            .durations()
+            .0
+            .into_iter()
+            .find(|span| span.name == phase)
+        {
+            return Some((span.start_us, span.end_us));
+        }
+
+        self.markers
+            .iter()
+            .position(|m| m.name.contains(phase))
+            .map(|index| {
+                let marker = &self.markers[index];
+                let end = self
+                    .markers
+                    .get(index + 1)
+                    .map_or(self.final_us, |next| next.timestamp_us);
+                (marker.timestamp_us, end)
+            })
+    }
+
+    /// Resolve the parsed stop spelling against this marker batch.
+    fn stop_marker(&self, spec: &StopSpec) -> Option<&'a Marker> {
+        let first_named = |name: &str| self.markers.iter().find(|marker| marker.name == name);
+        match spec {
+            StopSpec::Exact(name) | StopSpec::SpanEnd(name) => first_named(name),
+            StopSpec::Lenient { exact, span_end } => {
+                first_named(exact).or_else(|| first_named(span_end))
+            }
+        }
+    }
+
+    pub(crate) fn marker_names(&self) -> Vec<&str> {
+        self.markers
+            .iter()
+            .map(|marker| marker.name.as_str())
+            .collect()
+    }
+}
+
 /// An application-level counter emitted by the target process.
 #[derive(Debug, Clone)]
 pub struct Counter {
@@ -747,18 +915,8 @@ impl StopSpec {
     }
 
     /// Return the actual marker name that matched in this fresh batch.
-    fn matching_marker(&self, recent: &[Marker]) -> Option<String> {
-        match self {
-            Self::Exact(name) | Self::SpanEnd(name) => recent
-                .iter()
-                .find(|marker| marker.name == *name)
-                .map(|marker| marker.name.clone()),
-            Self::Lenient { exact, span_end } => recent
-                .iter()
-                .find(|marker| marker.name == *exact)
-                .or_else(|| recent.iter().find(|marker| marker.name == *span_end))
-                .map(|marker| marker.name.clone()),
-        }
+    fn matching_marker(&self, timeline: &Timeline<'_>) -> Option<String> {
+        timeline.stop_marker(self).map(|marker| marker.name.clone())
     }
 }
 
@@ -911,7 +1069,8 @@ pub(crate) fn run_sidecar_with_deadline(
         //                                           one-line notice so the resolved
         //                                           form is visible.
         if let Some(spec) = &stop_spec {
-            let matched = spec.matching_marker(&markers[marker_count_before..]);
+            let timeline = Timeline::marker_batch(&markers[marker_count_before..]);
+            let matched = spec.matching_marker(&timeline);
             if let Some(matched_name) = matched {
                 fired_stop_marker = Some(matched_name.clone());
                 let display = if matched_name == requested_stop {

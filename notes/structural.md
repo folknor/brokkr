@@ -200,17 +200,17 @@ Reported by: check-report.
 
 It holds test env construction (`build_test_env`, `sweep_cargo_env`, `sweep_runtime_env`, rustflags composition), isolated target-dir naming, support-artifact pre-builds and fingerprinting, the serial shim fallback, and `run_one_test_sweep`, the serial lane (about 400 lines). That is 3079 lines, about 1800 of them tests, and nothing in it is about printing. Its name also collides with `crate::output`, the real console module, and both are imported side by side. Proposed: `check_cmd/sweep_env.rs` (env and target dir, the owner of the isolated-target-dir decision), with the serial lane joining the execution files. The name `output` goes away entirely.
 
+## STR-033 - Query requests still use bool flags and `Vec`s at the CLI boundary
+
+Reported by: measurement.
+
+Results and sidecar dispatch use exhaustive view enums and compare operands are pairs after validation, but `SidecarQuery` still carries bool view selectors, compare arguments still arrive as `Vec<String>`, and `BenchArgs.compare` is still a `Vec`. Converting them at parse time needs `main_parts/bootstrap.rs`, `request.rs` and `bench_cmd/mod.rs`.
+
 ## STR-024 - "Who is the audience for this line?" is a global plus ad-hoc bools
 
 Reported by: check-report.
 
 `run_per_build_shape` both schedules cargo runs and decides what to print for skipped, deduped and dropped lanes (`note`), switching between stdout and the run log on `report_active()`, a process global set by `check`. `announce_allows` takes two bools (`to_stdout`, `blanket_on_stdout`) and also consults `report_active()`. `run_clippy_phase` passes `commands || !report_active()` and `!echo_after`. Proposed: a `Reporter` value (`Check { commands } | Clippy`) passed explicitly, with methods `config_note`, `allow_notice` and `green_line`. The difference between `check` and `brokkr clippy` then becomes one type instead of a global and four flags.
-
-## STR-025 - The lock protocol's tokens are untyped hex strings
-
-Reported by: process-control.
-
-Four 32-hex-character strings have no types: the capability nonce (`hold::mint_nonce`), its published hash (`hold::auth_hash`, and the guard's copy), the acquisition id (`lock_service::mint_id`, which is literally `mint_nonce()`) and the orphan run token (`test_orphans::register_in`, also `mint_nonce()`). `lock_service::valid_id` and `test_orphans::is_token` are the same function. Nothing in the types stops an acquisition id being passed where a capability is expected, and that is the one mix-up the design explicitly cares about: `lock_service`'s header says the id is "deliberately NOT the compilation capability, whose raw value must stay unpublished". Proposed: `Nonce` (secret, never `Display`, no contents in `Debug`), `AuthHash` (derived only via `Nonce::auth_hash()`, the only thing written to the lock file), `AcqId` (public) and `RunToken` (public), sharing a private `Hex128` with `parse`/`mint`. `LockState::auth: String` becomes `Option<AuthHash>`, so "empty means draining" is `None` instead of a string comparison the guard also performs.
 
 ## STR-026 - The lock record and the holder's status reply are untyped wire formats with two parsers each
 
@@ -222,7 +222,7 @@ Reported by: process-control.
 
 Reported by: process-control.
 
-`lockfile::acquire` fails as `DevError::Lock(String)` for at least seven distinct, actionable reasons: the nested-descendant refusal, the inside-compilation refusal, drain timeout, flock infrastructure failure, metadata publish failure, no entropy and socket bind failure. The disk gate uses `Preflight(Vec<String>)`. A machine caller (`check --json`, an agent) cannot tell "your ancestor holds it, run it elsewhere" from "the kernel is out of lock records". The drain timeout says in its own text that it "is not a transient busy signal", exactly the fact a retry loop needs as data. `stray::kill` returns `(usize, usize)`, a bare tuple of two counts with different meanings. `cargo_env::FAILED: Mutex<Option<(String, Option<&'static str>)>>` stores the phase as a string from `check_cmd::current_phase()`, so it cannot be matched on. Proposed: an `AcquireRefusal` enum carried in `DevError::Lock`, with prose from `Display`, and named fields in place of the tuple.
+`lockfile::acquire` fails as `DevError::Lock(String)` for at least seven distinct, actionable reasons: the nested-descendant refusal, the inside-compilation refusal, drain timeout, flock infrastructure failure, metadata publish failure, no entropy and socket bind failure. The disk gate uses `Preflight(Vec<String>)`. A machine caller (`check --json`, an agent) cannot tell "your ancestor holds it, run it elsewhere" from "the kernel is out of lock records". The drain timeout says in its own text that it "is not a transient busy signal", exactly the fact a retry loop needs as data. Carrying a typed reason needs a `DevError` change in `src/error.rs` (`stray::kill`'s counts are already named fields). `cargo_env::FAILED: Mutex<Option<(String, Option<&'static str>)>>` stores the phase as a string from `check_cmd::current_phase()`, so it cannot be matched on. Proposed: an `AcquireRefusal` enum carried in `DevError::Lock`, with prose from `Display`.
 
 ## STR-028 - `lockfile.rs` is five modules
 
@@ -264,12 +264,6 @@ Proposed: `enum Ending { Exited(i32), Signalled(i32), StopMarker(String /* resol
 Reported by: measurement.
 
 `HotpathFunction { avg, total, percent_total, p50, p95, p99: Option<String> }`, and `HotpathThread` likewise. `hotpath_fmt::parse_metric` reverse-engineers units (`ns`/`us`/`ms`/`s`/`B`/`KB`/`%`) to compute diffs. The `db/hotpath.rs` header admits that the three percentile names are hard-coded in parser, schema and formatter, and that `p99.9` is silently dropped. Proposed: parse once at ingest into `Quantity { Duration(ns) | Bytes(u64) | Percent(f64) }` and `percentiles: BTreeMap<Percentile, Quantity>`, so the diff and the renderer never see a unit string. The schema change the header calls "a real project" is the right project.
-
-## STR-033 - Query requests use bool flags for an exclusive choice and a `Vec` for a pair
-
-Reported by: measurement.
-
-Results and sidecar dispatch now use exhaustive view enums, every results view carries one `QueryFilter`, and compare operands are pairs after validation. Residue at the CLI and bootstrap boundary: `SidecarQuery` still carries bool view selectors, compare arguments still arrive as `Vec<String>`, and `BenchArgs.compare` is still a `Vec` (converting it needs `main_parts/bootstrap.rs` and `bench_cmd/mod.rs`).
 
 ## STR-034 - The measurement session: two contexts, a config struct with dead fallbacks, and positional bools
 
@@ -333,12 +327,6 @@ xxh128 digests are `String`s compared with `eq_ignore_ascii_case` in `preflight:
 Reported by: map-projects.
 
 `resolve.rs` owns `pmtiles_archive_name`, `pmtiles_archive_prefix`, `pmtiles_archive_matches`, `legacy_archive_token` and `resolve_pmtiles_by_commit`. The rename into the store lives in `elivagar/dispatch.rs`, retention in two places, and `clean --archives` in `main_parts`. `pmtiles_archive_name`'s comment says it is "the single place this name is constructed". That holds for the name, but retention, enumeration (prefix match plus a hyphen-free remainder plus legacy hex tokens) and the "wiped dir" guard are spread across three modules. `resolve.rs`, the generic dataset-entry resolver, is the wrong home. `pmtiles_archive_name(output_dir, dataset, variant, commit)` takes four same-typed strings. `resolve_pmtiles_by_commit` falls back to the typed string as the hash token for an unresolvable revision (`Err(_) => c.to_owned()`), so a typo gives "no build for <typo>" and tells the operator to run tilegen for a commit that does not exist (deliberate according to its comment). With `--file` it skips hash verification and dataset scoping entirely, without recording that the input was unpinned. Proposed: `elivagar::archive_store::ArchiveStore { dir }` with `path_for(ArchiveKey { dataset, variant, commit })`, `resolve(dataset, variant, rev)`, `admit(scratch_file, key)`, `prune(group, keep)` and `groups()`.
-
-## STR-041 - `brokkr deps` labels are strings ranked by string match
-
-Reported by: deps-misc.
-
-`OutdatedEvent.severity: String` holds ccu's `patch`/`minor`/`major` and is sorted by `severity_rank` with a `_ => 3` catch-all, so an unknown ccu value silently sorts last instead of being a schema failure, though the module pins `schema_version` for exactly that reason. `StaleEvent.severity: &'static str` is minted by `ccu::classify_age` as `"stale"`/`"abandoned"` and ranked in `mod.rs::stale_rank` by matching the same literals again, so two sites own one enum's spelling. `NativeDependencyEvent.reason: &'static str` (`"links"`/`"compiles"`/`"both"`) is derivable from `links.is_some()` and `!toolchains.is_empty()`, a redundant field that can disagree with its siblings. `ManifestViolation.rule: &'static str` gives `--json` no closed set. Proposed: enums with `Serialize` + `Ord`, `reason` computed rather than stored, and an enum of manifest rules. `deps/mod.rs` (741 lines) mixes event types, the cargo schema, the loaders, the phase list, the text renderer with per-section noun pairs, and sort ranks. `UnusedWorkspaceDepEvent` is the one event type defined in its phase module rather than in `mod.rs`; the hunter prefers that convention (events next to their phase) for all of them.
 
 ## STR-042 - Commit identity is a string everywhere
 

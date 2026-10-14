@@ -63,14 +63,31 @@ pub fn scan(
     cfg: &HeaderConfig,
     year: i32,
 ) -> Result<Vec<HeaderViolation>, DevError> {
+    if cfg.paths.is_empty() {
+        return Err(DevError::Config(
+            "[header].paths is empty - list the files that require the header".into(),
+        ));
+    }
     let paths = globs::build_set(&cfg.paths, "[header].paths")?;
     let exempt = globs::build_set(&cfg.exempt, "[header].exempt")?;
     let expected = expand(&cfg.pattern, year);
 
     let files = gremlins::tracked_files(project_root)?;
+    // Dead scope is warned about, not refused - see `globs::warn_unmatched`.
+    globs::warn_unmatched(&cfg.paths, &files, "[header].paths")?;
+    let selected: Vec<PathBuf> = files
+        .iter()
+        .filter(|rel| globs::matches(&paths, rel))
+        .cloned()
+        .collect();
+    globs::warn_unmatched(&cfg.exempt, &selected, "[header].exempt")?;
+    if !selected.is_empty() && !selected.iter().any(|rel| !globs::matches(&exempt, rel)) {
+        crate::output::warn("[header].exempt excuses every file [header].paths selects");
+    }
+
     let mut out = Vec::new();
-    for rel in &files {
-        if !globs::matches(&paths, rel) || globs::matches(&exempt, rel) {
+    for rel in &selected {
+        if globs::matches(&exempt, rel) {
             continue;
         }
         let abs = project_root.join(rel);

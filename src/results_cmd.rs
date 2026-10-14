@@ -13,15 +13,6 @@ use crate::output;
 use crate::request::{ResultsQuery, ResultsView};
 use crate::resolve::{results_db_path, sidecar_db_path};
 
-fn open_sidecar_db(project_root: &Path) -> Option<db::sidecar::SidecarDb> {
-    let path = sidecar_db_path(project_root);
-    if path.exists() {
-        db::sidecar::SidecarDb::open(&path).ok()
-    } else {
-        None
-    }
-}
-
 /// Render a detail-style result view. When the result set is exactly
 /// one row, use the new labelled-block layout via
 /// `db::format_single_result` - no compact table header, multi-line
@@ -30,13 +21,14 @@ fn open_sidecar_db(project_root: &Path) -> Option<db::sidecar::SidecarDb> {
 /// many), fall back to `format_table` + per-row `format_details`.
 fn render_single_or_multi(
     rows: &[db::StoredRow],
-    sidecar_db: Option<&db::sidecar::SidecarDb>,
+    sidecar_ids: &std::collections::BTreeSet<String>,
     top: usize,
     matcher: &DatasetMatcher,
+    force_table: bool,
 ) {
-    let has_sidecar = |uuid: &str| sidecar_db.is_some_and(|sdb| sdb.has_data(uuid));
+    let has_sidecar = |uuid: &str| sidecar_ids.contains(uuid);
 
-    if rows.len() == 1 {
+    if rows.len() == 1 && !force_table {
         let row = &rows[0];
         let block = db::format_single_result(row, has_sidecar(&row.uuid));
         println!("{block}");
@@ -82,15 +74,14 @@ pub(crate) fn cmd_results(
     q: &ResultsQuery,
 ) -> Result<(), DevError> {
     let db_path = results_db_path(project_root);
+    let sidecar_path = sidecar_db_path(project_root);
     let matcher = DatasetMatcher::new(config::all_dataset_keys(dev_config));
 
-    if !db_path.exists() {
+    let store = db::RunStore::open(&db_path, &sidecar_path)?;
+    if !store.has_results_db() {
         output::result_msg("no results yet (run a benchmark first)");
         return Ok(());
     }
-
-    let results_db = db::ResultsDb::open(&db_path)?;
-    let sidecar_db = open_sidecar_db(project_root);
 
     match q.view()? {
         ResultsView::Uuid {
@@ -98,41 +89,16 @@ pub(crate) fn cmd_results(
             filter,
             top,
         } => {
-            // Resolve sidecar latest-keys (e.g. "dirty") so the results DB
-            // lookup uses the actual UUID, not the alias.
-            let resolved_prefix = sidecar_db
-                .as_ref()
-                .map(|sdb| sdb.resolve_latest(&prefix))
-                .unwrap_or_else(|| prefix.clone());
-            let rows = results_db.query_by_uuid_with_filter(&resolved_prefix, &filter)?;
-            if rows.is_empty() {
-                // A supplied row filter may have excluded a real result row. Only
-                // call it sidecar-only when the UUID has no results row at all.
-                if !results_db.has_uuid_prefix(&resolved_prefix)? {
-                    if let Some(ref sdb) = sidecar_db
-                        && sdb.has_data(&prefix)
-                    {
-                        output::result_msg(
-                            "sidecar-only run (no results DB entry - dirty tree or failed)",
-                        );
-                        output::result_msg(&format!(
-                            "use `brokkr sidecar {prefix}` (default phase summary; add --samples/--markers/--durations/--counters/--stat for raw views)",
-                        ));
-                    } else {
-                        output::result_msg("no matching results");
-                    }
-                } else {
-                    output::result_msg("no matching results");
-                }
-            } else {
-                render_single_or_multi(&rows, sidecar_db.as_ref(), top, &matcher);
-            }
+            show_uuid(&store, &prefix, &filter, top, &matcher)?;
         }
         ResultsView::Compare {
             commits: (commit_a, commit_b),
             filter,
             top,
         } => {
+            let results_db = store
+                .results_db()
+                .ok_or_else(|| DevError::Config("results database is not available".into()))?;
             let (rows_a, rows_b) = results_db.query_compare(&commit_a, &commit_b, &filter)?;
             let table = db::format_compare_with_limit(
                 &commit_a,
@@ -146,6 +112,9 @@ pub(crate) fn cmd_results(
             println!("{table}");
         }
         ResultsView::Table { filter } => {
+            let results_db = store
+                .results_db()
+                .ok_or_else(|| DevError::Config("results database is not available".into()))?;
             let rows = results_db.query(&filter)?;
             if rows.is_empty() {
                 output::result_msg("no matching results");
@@ -157,4 +126,79 @@ pub(crate) fn cmd_results(
     }
 
     Ok(())
+}
+
+/// Results keeps the historical multi-row display policy, while resolution
+/// itself is shared with sidecar and invalidate.
+fn show_uuid(
+    store: &db::RunStore,
+    prefix: &str,
+    filter: &db::QueryFilter,
+    top: usize,
+    matcher: &DatasetMatcher,
+) -> Result<(), DevError> {
+    let ids = match store.resolve(db::RunRef::Uuid(prefix))? {
+        db::Resolved::One(id) => vec![id],
+        db::Resolved::Ambiguous(ids) => ids,
+        db::Resolved::Missing => Vec::new(),
+    };
+    let (rows, omitted) = store.query_results(&ids, filter)?;
+    let mut has_result_candidate = false;
+    let mut sidecar_ids = std::collections::BTreeSet::new();
+    let mut sidecar_only_ids = Vec::new();
+    for id in &ids {
+        let has_result = store.has_result(id)?;
+        has_result_candidate |= has_result;
+        if store.has_sidecar_data(id)? {
+            sidecar_ids.insert(id.as_str().to_owned());
+            if !has_result {
+                sidecar_only_ids.push(id.as_str().to_owned());
+            }
+        }
+    }
+    if rows.is_empty() {
+        if omitted > 0 {
+            output::result_msg(&format!(
+                "{omitted} matching result row(s) not shown - raise --limit",
+            ));
+            if !sidecar_only_ids.is_empty() {
+                report_sidecar_only(prefix, &sidecar_only_ids, ids.len() == 1);
+            }
+        } else if !sidecar_only_ids.is_empty() {
+            if has_result_candidate {
+                output::result_msg("no matching results; sidecar-only run(s) also matched");
+            } else {
+                output::result_msg("sidecar-only run (no results DB entry - dirty tree or failed)");
+            }
+            report_sidecar_only(prefix, &sidecar_only_ids, ids.len() == 1);
+        } else {
+            output::result_msg("no matching results");
+        }
+    } else {
+        render_single_or_multi(&rows, &sidecar_ids, top, matcher, ids.len() > 1);
+        if omitted > 0 {
+            output::result_msg(&format!(
+                "{omitted} more matching result row(s) not shown - raise --limit",
+            ));
+        }
+        if !sidecar_only_ids.is_empty() {
+            output::sidecar_msg(&format!(
+                "sidecar-only run(s) also matched: {}",
+                sidecar_only_ids.join(", "),
+            ));
+            output::sidecar_msg("query one by its full UUID with `brokkr sidecar <uuid>`");
+        }
+    }
+    Ok(())
+}
+
+fn report_sidecar_only(prefix: &str, ids: &[String], prefix_is_unique: bool) {
+    if ids.len() == 1 && prefix_is_unique {
+        output::result_msg(&format!(
+            "use `brokkr sidecar {prefix}` (default phase summary; add --samples/--markers/--durations/--counters/--stat for raw views)",
+        ));
+    } else {
+        output::sidecar_msg(&format!("sidecar-only UUIDs: {}", ids.join(", ")));
+        output::sidecar_msg("query one by its full UUID with `brokkr sidecar <uuid>`");
+    }
 }

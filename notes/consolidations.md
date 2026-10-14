@@ -127,24 +127,6 @@ Reported by: check-report.
 
 The text path uses `cargo_filter::ClippyDiagnostic::is_foreign_manifest_warning`: an absolute `Cargo.toml` path that is not under `project_root`. The JSON path uses `attribute_manifest_lints` plus `is_dependency_warning`: a package id that is not among `cargo metadata`'s `workspace_members`, with a synthetic `"manifest+<path>"` marker minted inline for non-members. They disagree by construction. A path dependency inside the project root but excluded from the workspace is foreign to the JSON path and owned to the text path. A workspace member outside the root (`members = ["../x"]`) is the reverse. The test-build failure render (`output.rs` `filter_clippy_in_tree`) uses the text rule, while clippy and rustdoc use the JSON rule. The marker string is the third value of an implicit `enum Owner { Member(id), WorkspaceRoot, NonMember(path) }` encoded as a string prefix. Owner: a real `Owner` classification fed by metadata and used by both renderers. That requires the test-build path to stop being text-scraped (see the rustc text readers in `structural.md`).
 
-## CON-016 - "Does this sweep build in its own target dir, and which one?"
-
-Reported by: check-report.
-
-`ResolvedSweep::needs_isolated_target_dir` (`!rustflags.is_empty() || unification.is_per_package()`, in profile.rs) against `shape_target_key(...).is_some()` (in `config_parts/schema.rs`). These are consumed by `isolated_target_dir` (output.rs), which then picks the directory name by sniffing the key for a `"unify-"` prefix, and by `target_dir_key` (concurrency.rs). `run_per_build_shape`'s comment records that the predicate already drifted once ("any sweep has rustflags"). Owner: one `ResolvedSweep::target_location() -> TargetLocation { Shared | Isolated(Key) }`, with the key an enum (`Rustflags(hash) | Unify(..)`), from which both the "do we need metadata" gate and the path derive.
-
-## CON-017 - "Which layer does a rustflags injection land in?" - inputs decided per caller
-
-Reported by: check-report.
-
-`rustflags::sink(build_root, sweep_sets_rustflags)` makes the decision, but each caller decides its input separately. `plumbing` passes it per sweep (`!sweep.rustflags.is_empty()`) in prepare and test_cmd, install_shape passes a hard `false`, and `announce_test_allows` passes `sweeps.iter().all(|s| !s.rustflags.is_empty())`. That last one reports the sink for the plain sweeps only when *every* sweep has rustflags, the opposite of its comment ("report the shape the plain sweeps get"). With mixed sweeps it happens to describe `build_config`/`target_config` correctly. With all-plain sweeps it is right, and with all-rustflags sweeps it says `RUSTFLAGS`, which is also fine. But the predicate reads inverted, and the plain-sweep question should explicitly be `false`. The reserved-name half of this question is recorded in the hygiene platform document's reserved-env entry.
-
-## CON-018 - "How many sweeps is 'multi'?" - possible `[both]` mislabel
-
-Reported by: check-report.
-
-`run_clippy_phase` sets `multi = sweeps.len() > 1`, counting configured sweeps. `run_rustdoc_phase` sets `multi = results.len() > 1`, counting cargo runs, so a single package-mode sweep with two packages counts as multi. `sweep_tag`'s `active_sweep_count` is passed `results.len()` from `coverage_tag`, so `[both]` means "two cargo runs", not "two sweeps". `report_diagnostic_phase`'s green line deduplicates adjacent labels for its count. A possible bug, which the hunter did not verify by running: a single package-mode sweep prints `[both]`. Owner: the phase's selection knows the count of sweeps reached, so pass it in rather than re-deriving it from vectors of different granularity.
-
 ## CON-022 - "How does a named config entry shadow another of the same name?" - two layering implementations
 
 Reported by: config-cli.
@@ -164,48 +146,10 @@ Reported by: config-cli.
 
 Reported by: measurement, deps-misc.
 
-`ResultsDb::query_by_uuid(prefix)` returns every matching row, rendering ambiguity as a multi-row table. `SidecarDb::resolve_session` refuses ambiguity with a candidate list (as `DevError::Config`), and is re-run inside every query method (`query_samples`, `query_markers`, `query_counters`, `query_meta`, `query_run_info`) on a value that has already been resolved. `query_meta` swallows an ambiguity error into `(0, 1)`. `results_cmd` resolves the `dirty` alias through the *sidecar* DB before querying the *results* DB. `results_cmd` and `sidecar_cmd` each open the sidecar DB with their own identical `open_sidecar_db`. `invalidate_cmd.rs` reaches into both stores through `query_by_uuid`, `uuids_matching_prefix`, `QueryFilter { commit }` with `limit: 100_000` (whose comment says "so we don't silently truncate", yet it truncates at 100k), and `uuids_matching_commit_prefix`. It also passes full uuids into `delete_by_uuid_prefix`, a prefix API used as an exact delete, and its `(uuid_prefix, commit_prefix)` pair has a "clap guarantees one" fallback arm.
-
-Owner: a `RunStore` facade over both files, with one `resolve(RunRef) -> Resolved { One(RunId) | Ambiguous(Vec<RunId>) | Missing }` and one `select_runs(Selector { Uuid(p) | Commit(p) }) -> Vec<RunId>` (unlimited, or refusing when a cap is hit), consumed by `results`, `sidecar` and `invalidate` with a deliberate per-command policy. Query methods take a resolved `SessionId`, so they cannot be handed an unresolved prefix.
-
-## CON-025 - "What is a phase or span?" - four interpretations of marker names
-
-Reported by: measurement.
-
-- `sidecar::stop_match` maps both `-FOO` and `FOO` to `FOO_END`.
-- `sidecar_fmt::resolve_phase_range` (`--phase`) treats an exact name as running to the next marker, `FOO` as `FOO_START`..`FOO_END`, and a substring as running to the next marker. So `--phase STAGE2_START` and `--phase STAGE2` give different ranges.
-- `sidecar_fmt::print_marker_durations` (`--durations`) pairs each `X_START` with the next `X_END`.
-- `sidecar_fmt::build_phases` (the default summary and `--compare`) treats every marker as a boundary, with no pairing. The comment at its call site in `print_phase_summary` says it "pairs `*_START`/`*_END` into a single phase". It does not, so either the comment or the code is wrong.
-- `stall_totals_ns` relies on a `*_wait_ns` counter-suffix convention.
-
-Owner: one `Timeline` model in `sidecar.rs`, built once from the markers (spans with start and end, plus standalone points) and queried by every view and by the stop matcher.
+`db/run_store.rs` now owns resolution and selection across both stores; `results`, `sidecar` and `invalidate` go through it, `invalidate` selects uncapped and deletes by exact uuid. Residue: the provenance formatter in `sidecar_fmt.rs` still calls the string-prefix query helpers, which survive only for it; once it takes a resolved `RunId` they can go.
 
 ## CON-026 - "What is this command called?" - `id()` against `result_command()` in all three map-data projects
 
 Reported by: map-projects.
 
 Each command enum has both `id()` and `result_command()`, and they diverge: elivagar `tilegen`/`self` and `pmtiles-writer`/`pmtiles`; nidhogg `nid-ingest`/`ingest`; pbfhogg's `result_command()` is `id().to_owned()`. `bench_self.rs` and `bench_all` also file rows, so the results-DB name for the same work is chosen in several places. One test, `cat_variants_share_result_command`, guards one case pairwise. Owner: either a single `CommandIdentity { cli, results }` per variant, or renaming the results label to match the CLI id with a results-DB migration, which removes the axis entirely. The legacy names exist only because historical rows used them.
-
-## CON-027 - "Which dataset entry is this?" - two lookup routes
-
-Reported by: map-projects.
-
-`resolve_parts/schema.rs` now has a `ResolvedPbf` API returning the validated path with its selected entry. `elivagar::input_assertions` (in `elivagar/mod.rs`) still goes back to the raw host table and returns `(bool, bool)` = `(locations_on_ways, force_sorted)`, which can be swapped silently. Today both routes read the same host data (`resolve_paths` copies the selected host's datasets and `hostname()` is cached), so this is a divergence risk, not a live mismatch. `bench_all` now reads the assertions from the resolved entry. Residue: `Command::Tilegen` in `main_parts/bootstrap.rs` still calls `input_assertions`, because it builds `PipelineOpts` before `run_measured`, where no `ResolvedPaths` exist; moving it means building the opts inside `elivagar::dispatch` after context construction, after which the raw lookup can go.
-
-## CON-028 - "Is this elivagar command external, buildable, hotpath-capable?" - answered three times
-
-Reported by: map-projects.
-
-`ElivagarCommand` answers this through `is_external()`, `build_config() -> BuildKind::NoBuild` and `supports_hotpath()` (false exactly for the externals). Dispatch checks `is_external()` before the mode match. The `BuildKind::NoBuild` arms in `run_elivagar_run`/`run_elivagar_bench`/`run_elivagar_hotpath` repeat a "not supported" error that cannot be reached. `run_elivagar_external` needs `_ => unreachable!()` because the type does not encode the split. Owner: split the enum into `ElivagarCommand::{Built(BuiltCommand), External(ExternalTool)}`, with `BuildKind` the discriminant of `BuiltCommand` rather than a method.
-
-## CON-030 - "Are these two runs comparable?" - gate identity and piners context
-
-Reported by: other-projects.
-
-The ratatoskr gate's `evaluate_against_baseline` checks gate name, script, fixture, profile and features field by field. Each check is its own `if` with its own message, and features has a legacy `None` escape. piners already compares through a typed `RunContext` stored on the run row, and the core `brokkr results --compare` has its own pairing key. Owner for the ratatoskr residue: `GateIdentity { gate, script, fixture, profile: CargoProfile, features: CanonicalFeatures }` with one `fn mismatch(&self, other) -> Option<Mismatch>`, replacing the five ifs and feeding a typed `Incomparable` outcome into the new `GateVerdict`.
-
-## CON-032 - piners `RunAssessment::verdict` takes a policy enum that every caller unpacks with `unreachable!`
-
-Reported by: the wave-3 reviewer, laterally.
-
-`RunAssessment::verdict(Policy)` returns a `Verdict` whose shape depends on the policy, so each caller (`piners/cmd.rs` twice, `measured.rs`, `isolate.rs`, the integrity tests) matches the one variant its policy can produce and `unreachable!`s the rest. Per-policy methods (`parity_verdict`, `measured_verdict`, `isolation_verdict`) each returning their own outcome type would let the compiler check what the convention now only promises.

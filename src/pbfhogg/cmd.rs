@@ -175,19 +175,8 @@ pub(crate) fn bench_read(
     }
 
     let feat_refs = req.feat_refs();
-    let ctx = BenchContext::new(
-        req.dev_config,
-        req.project,
-        req.project_root,
-        req.build_root,
-        Some("pbfhogg-cli"),
-        &feat_refs,
-        true,
-        "bench read",
-        req.force,
-        req.stop_marker.map(str::to_owned),
-    )?
-    .with_request(req);
+    let ctx =
+        BenchContext::new_for_request(req, Some("pbfhogg-cli"), &feat_refs, true, "bench read")?;
     let (pbf_path, file_mb) = resolve_read_pbf_with_size(req, snapshot, &ctx.paths)?;
     let modes = super::bench_read::parse_modes(modes_str)?;
     super::bench_read::run(
@@ -211,19 +200,8 @@ pub(crate) fn bench_write(req: &MeasureRequest, compression_str: &str) -> Result
     }
 
     let feat_refs = req.feat_refs();
-    let ctx = BenchContext::new(
-        req.dev_config,
-        req.project,
-        req.project_root,
-        req.build_root,
-        Some("pbfhogg-cli"),
-        &feat_refs,
-        true,
-        "bench write",
-        req.force,
-        req.stop_marker.map(str::to_owned),
-    )?
-    .with_request(req);
+    let ctx =
+        BenchContext::new_for_request(req, Some("pbfhogg-cli"), &feat_refs, true, "bench write")?;
     let (pbf_path, file_mb) =
         resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
     let compressions = super::parse_compressions(compression_str, true)?;
@@ -270,19 +248,13 @@ pub(crate) fn bench_merge(
     if uring {
         all_features.push("linux-io-uring");
     }
-    let ctx = BenchContext::new(
-        req.dev_config,
-        req.project,
-        req.project_root,
-        req.build_root,
+    let ctx = BenchContext::new_for_request(
+        req,
         Some("pbfhogg-cli"),
         &all_features,
         true,
         "bench merge",
-        req.force,
-        req.stop_marker.map(str::to_owned),
-    )?
-    .with_request(req);
+    )?;
     let (pbf_path, file_mb) =
         resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
     let osc_path = match osc_seq {
@@ -312,16 +284,7 @@ pub(crate) fn bench_all(req: &MeasureRequest) -> Result<(), DevError> {
         return Ok(());
     }
 
-    let ctx = HarnessContext::new(
-        req.dev_config,
-        req.project,
-        req.project_root,
-        req.build_root,
-        "bench all",
-        req.force,
-        req.stop_marker.map(str::to_owned),
-    )?
-    .with_request(req);
+    let ctx = HarnessContext::new_for_request(req, "bench all")?;
     let (pbf_path, file_mb) =
         resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
     let effective = req.build_root.unwrap_or(req.project_root);

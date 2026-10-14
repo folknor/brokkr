@@ -45,8 +45,8 @@ Recognised fields:
   Triggers mock-server spawn + endpoint env-var injection at run time
   (see "Fixture frontmatter" below). Pass with `.toml` / `.lua`
   extension to disambiguate when both files exist.
-- `protocol` - informational; sæhrimnir binds all five protocol
-  listeners regardless of this value.
+- `protocol` - informational; sæhrimnir binds every protocol
+  listener regardless of this value.
 
 Unknown annotation fields are ignored. The likely misspelling `fixtures` is
 rejected in favor of the singular `fixture` key. Invalid values for recognized
@@ -142,12 +142,12 @@ resolves `<NAME>` against `[ratatoskr] fixtures_dir` (the verbatim string
 is passed through, so the explicit `.toml` / `.lua` extension form
 disambiguates when both files exist), spawns sæhrimnir via `[ratatoskr]
 mock_server_binary` with `--fixture <PATH> --readiness-file
-<mock_dir>/readiness`, parses the five-line readiness sentinel for
+<mock_dir>/readiness`, parses the readiness sentinel (one line per protocol) for
 per-protocol ports, then injects the configured
 `RATATOSKR_TEST_*_ENDPOINT` env vars into the harness process (HTTP
-origins for jmap/graph/gmail, `host:port` for imap/smtp - same shape as
-`sync` / `sync --bench`). After every dependent run, sæhrimnir is
-SIGTERM'd with the standard 1.5s drain budget then escalated to SIGKILL
+origins for jmap/graph/gmail/caldav/carddav/people/gcal, `host:port` for
+imap/smtp - same shape as `sync` / `sync --bench`). After every dependent
+run, sæhrimnir is SIGTERM'd with the standard 1.5s drain budget then escalated to SIGKILL
 if it overruns.
 
 Mock artefacts (`stderr.log`, `readiness`) land under

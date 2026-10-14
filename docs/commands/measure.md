@@ -308,14 +308,17 @@ The FIFO carries two line types (parsed in `SidecarFifo::drain`,
   or the line is silently dropped. `<ts_us>` that doesn't parse is skipped for
   either type. Timestamps are microseconds since process start.
 
-How marker *names* are interpreted is per query mode - the raw protocol is
-convention-free, but individual views opt into naming conventions:
+The marker protocol is convention-free. The sidecar timeline model applies
+these conventions to views that interpret marker names; `--markers` still
+prints the raw events:
 
 | View | Marker interpretation |
 |---|---|
-| default summary / `--markers` / `--phase` | each marker opens a segment running to the **next** marker (no `_START`/`_END` meaning); `--phase FOO` matches exact, then `FOO_START`..`FOO_END`, then substring |
-| `--durations` | pairs `FOO_START` with the next `FOO_END`; unpaired starts render as standalone. `--human` collapses names seen more than once into a single aggregate row (`WAIT_P2_SEND x287  total 4200.0ms  min/avg/max`), sorted by total desc, under a "Repeated spans" heading - the split is on observed cardinality, not on the name, so nothing here knows what `WAIT_` means. Totals accumulate in microseconds so a crowd of sub-millisecond spans still sums correctly. Collapsing is **off under `--run all`**: markers carry no `run_idx`, so a once-per-run phase would otherwise look like a repeated span and be aggregated away. JSONL is unaffected (one object per span) |
-| `--stop` | three spellings resolve to one marker: verbatim `FOO_END`; `-FOO` -> `FOO_END`; bare `FOO` -> `FOO_END` (fallback prints a notice) |
+| default summary / `--compare` | each marker opens a segment running to the **next** marker (no `_START`/`_END` meaning); with no markers, the sampled run is one `(all)` segment |
+| `--markers` | raw marker events in arrival order; no pairing or segment projection |
+| `--phase FOO` | exact marker name first (that marker to the next), then a completed `FOO_START`..`FOO_END` span, then the first marker name containing `FOO` (that marker to the next) |
+| `--durations` | each `FOO_START` pairs with the next later `FOO_END`; unmatched starts and markers not used by a span render as standalone points. `--human` collapses names seen more than once into a single aggregate row (`WAIT_P2_SEND x287  total 4200.0ms  min/avg/max`), sorted by total desc, under a "Repeated spans" heading - the split is on observed cardinality, not on the name, so nothing here knows what `WAIT_` means. Totals accumulate in microseconds so a crowd of sub-millisecond spans still sums correctly. Collapsing is **off under `--run all`**: markers carry no `run_idx`, so a once-per-run phase would otherwise look like a repeated span and be aggregated away. JSONL keeps one record per span and standalone point. |
+| `--stop` | `FOO_END` matches verbatim; `-FOO` resolves to `FOO_END`; bare `FOO` first checks for a marker named `FOO`, then falls back to `FOO_END`. Brokkr prints the resolved name whenever it differs from the requested spelling. |
 
 Markers are reserved for the small set of **true phase boundaries** - a
 high-frequency span in the marker stream drowns every phase-oriented view at

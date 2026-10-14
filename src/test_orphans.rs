@@ -66,7 +66,7 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use crate::output;
+use crate::{lockfile::RunToken, output};
 
 /// The environment variable carrying the owning brokkr's token.
 pub const MARKER_ENV: &str = "BROKKR_TEST_RUN";
@@ -96,7 +96,7 @@ const SETTLE_BUDGET: Duration = Duration::from_secs(1);
 /// open file whose flock proves it is alive. Never dropped - the flock must
 /// last exactly as long as the process.
 struct Registration {
-    token: String,
+    token: RunToken,
     _flock: std::fs::File,
 }
 
@@ -152,9 +152,9 @@ fn register_in(dir: &Path) -> std::io::Result<Registration> {
     use std::os::unix::fs::OpenOptionsExt as _;
 
     std::fs::create_dir_all(dir)?;
-    let token = crate::hold::mint_nonce()
-        .ok_or_else(|| std::io::Error::other("no entropy for a run token"))?;
-    let pending = dir.join(format!("{token}.{PENDING_EXT}"));
+    let token =
+        RunToken::mint().ok_or_else(|| std::io::Error::other("no entropy for a run token"))?;
+    let pending = dir.join(format!("{}.{PENDING_EXT}", token.as_str()));
     let file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -165,7 +165,7 @@ fn register_in(dir: &Path) -> std::io::Result<Registration> {
         drop(std::fs::remove_file(&pending));
         return Err(err);
     }
-    let live = dir.join(format!("{token}.{LIVE_EXT}"));
+    let live = dir.join(format!("{}.{LIVE_EXT}", token.as_str()));
     if let Err(e) = std::fs::rename(&pending, &live) {
         drop(std::fs::remove_file(&pending));
         return Err(e);
@@ -183,18 +183,10 @@ fn try_flock(file: &std::fs::File) -> bool {
     unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) == 0 }
 }
 
-/// Whether `s` is a token [`register_in`] could have minted: 32 lowercase hex
-/// characters. Anything else in the directory is not ours to judge.
-fn is_token(s: &str) -> bool {
-    s.len() == 32
-        && s.bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-}
-
 /// A registration whose owner is dead: its flock is now held by the reaper,
 /// which keeps it until the file is removed or left for the next reap.
 struct DeadRun {
-    token: String,
+    token: RunToken,
     path: PathBuf,
     _flock: std::fs::File,
 }
@@ -211,9 +203,9 @@ fn claim_dead(dir: &Path) -> Vec<DeadRun> {
         let Some((stem, ext)) = name.to_str().and_then(|n| n.split_once('.')) else {
             continue;
         };
-        if !is_token(stem) {
+        let Some(token) = RunToken::parse(stem) else {
             continue;
-        }
+        };
         let path = entry.path();
         match ext {
             LIVE_EXT => {
@@ -222,7 +214,7 @@ fn claim_dead(dir: &Path) -> Vec<DeadRun> {
                 };
                 if try_flock(&file) {
                     dead.push(DeadRun {
-                        token: stem.to_owned(),
+                        token,
                         path,
                         _flock: file,
                     });
@@ -268,7 +260,7 @@ struct Orphan {
     pid: u32,
     comm: String,
     starttime: String,
-    token: String,
+    token: RunToken,
 }
 
 /// The [`MARKER_ENV`] value in a raw `/proc/<pid>/environ` block, first
@@ -333,7 +325,7 @@ fn read_table() -> HashMap<u32, ProcRow> {
 /// Every process carrying a dead token, excluding `me`, its ancestors and its
 /// descendants, newest first. Pure over the table so the selection is
 /// unit-testable.
-fn select(table: &HashMap<u32, ProcRow>, dead: &HashSet<String>, me: u32) -> Vec<Orphan> {
+fn select(table: &HashMap<u32, ProcRow>, dead: &HashSet<RunToken>, me: u32) -> Vec<Orphan> {
     let exemptions = crate::stray::ReaperExemptions::from_parent_pairs(
         me,
         table.iter().map(|(&pid, row)| (pid, row.ppid)),
@@ -341,7 +333,11 @@ fn select(table: &HashMap<u32, ProcRow>, dead: &HashSet<String>, me: u32) -> Vec
     let mut out: Vec<Orphan> = table
         .iter()
         .filter_map(|(&pid, row)| {
-            let token = row.token.as_ref().filter(|t| dead.contains(*t))?;
+            let token = row
+                .token
+                .as_deref()
+                .and_then(RunToken::parse)
+                .filter(|t| dead.contains(t))?;
             if exemptions.contains(pid) {
                 return None;
             }
@@ -349,7 +345,7 @@ fn select(table: &HashMap<u32, ProcRow>, dead: &HashSet<String>, me: u32) -> Vec
                 pid,
                 comm: row.comm.clone(),
                 starttime: row.starttime.clone(),
-                token: token.clone(),
+                token,
             })
         })
         .collect();
@@ -415,7 +411,7 @@ fn reap_in(dir: &Path, me: u32) -> ReapReport {
     if dead.is_empty() {
         return report;
     }
-    let tokens: HashSet<String> = dead.iter().map(|d| d.token.clone()).collect();
+    let tokens: HashSet<RunToken> = dead.iter().map(|d| d.token.clone()).collect();
 
     let mut signalled: HashSet<u32> = HashSet::new();
     let mut table = read_table();
@@ -444,13 +440,13 @@ fn reap_in(dir: &Path, me: u32) -> ReapReport {
     // run's token itself) and its own tree are spared by design, not failures,
     // and counting them printed a "still visible" line at every nested hold.
     report.survivors = remaining.len();
-    let alive: HashSet<&str> = table
+    let alive: HashSet<RunToken> = table
         .values()
-        .filter_map(|row| row.token.as_deref())
-        .filter(|token| tokens.contains(*token))
+        .filter_map(|row| row.token.as_deref().and_then(RunToken::parse))
+        .filter(|token| tokens.contains(token))
         .collect();
     for run in &dead {
-        if !alive.contains(run.token.as_str()) {
+        if !alive.contains(&run.token) {
             drop(std::fs::remove_file(&run.path));
         }
     }
@@ -526,8 +522,8 @@ mod tests {
     const DEAD: &str = "0123456789abcdef0123456789abcdef";
     const LIVE: &str = "fedcba9876543210fedcba9876543210";
 
-    fn dead_set() -> HashSet<String> {
-        HashSet::from([DEAD.to_owned()])
+    fn dead_set() -> HashSet<RunToken> {
+        HashSet::from([RunToken::parse(DEAD).unwrap()])
     }
 
     #[test]
@@ -545,10 +541,10 @@ mod tests {
 
     #[test]
     fn only_minted_shapes_are_tokens() {
-        assert!(is_token(DEAD));
-        assert!(!is_token("0123456789ABCDEF0123456789ABCDEF"));
-        assert!(!is_token("0123"));
-        assert!(!is_token("../../../../etc/passwd0123456789a"));
+        assert!(RunToken::parse(DEAD).is_some());
+        assert!(RunToken::parse("0123456789ABCDEF0123456789ABCDEF").is_none());
+        assert!(RunToken::parse("0123").is_none());
+        assert!(RunToken::parse("../../../../etc/passwd0123456789a").is_none());
     }
 
     /// The shape an OOM-killed brokkr leaves behind: brokkr and cargo are gone,
@@ -615,9 +611,13 @@ mod tests {
             vec![gone_token.as_str()],
             "only the dropped registration is dead"
         );
-        assert!(dir.join(format!("{}.{LIVE_EXT}", live.token)).exists());
         assert!(
-            !dir.join(format!("{}.{PENDING_EXT}", live.token)).exists(),
+            dir.join(format!("{}.{LIVE_EXT}", live.token.as_str()))
+                .exists()
+        );
+        assert!(
+            !dir.join(format!("{}.{PENDING_EXT}", live.token.as_str()))
+                .exists(),
             "a completed registration leaves no pending file"
         );
     }
@@ -650,7 +650,7 @@ mod tests {
         let token = reg.token.clone();
         let mut child = Command::new("sleep")
             .arg("30")
-            .env(MARKER_ENV, &token)
+            .env(MARKER_ENV, token.as_str())
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -701,7 +701,7 @@ mod tests {
         // `child` is a zombie until `wait` above, and a zombie's environ reads
         // empty, so the reap saw no survivor and removed the file.
         assert_eq!(report.survivors, 0);
-        assert!(!dir.join(format!("{token}.{LIVE_EXT}")).exists());
+        assert!(!dir.join(format!("{}.{LIVE_EXT}", token.as_str())).exists());
     }
 
     #[test]

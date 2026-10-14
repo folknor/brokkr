@@ -4,8 +4,7 @@
 //! zero or more `DepsEvent`s. The renderer turns events into prefixed text
 //! or NDJSON, depending on `--json`.
 //!
-//! v1 phases: `duplicate_version`. See `docs/commands/deps.md` for the
-//! full design and the planned/idea phases.
+//! Shipped phases and planned work are listed in `docs/commands/deps.md`.
 
 use std::path::Path;
 
@@ -20,197 +19,39 @@ mod focus;
 mod git_dependency;
 mod native_code;
 mod path_dependency;
+mod phase;
 mod publish_cycle;
+mod render;
 mod workspace_dep;
 
 use focus::run_focus;
+use phase::{Phase, PhaseOutcome, PhaseSummary};
 
 // --- Event model (NDJSON-serializable) ---
 
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum DepsEvent {
-    DuplicateVersion(DuplicateVersionEvent),
-    GitDependency(GitDependencyEvent),
-    PathDependency(PathDependencyEvent),
-    PublishCycle(PublishCycleEvent),
+enum DepsEvent {
+    DuplicateVersion(duplicate_version::DuplicateVersionEvent),
+    GitDependency(git_dependency::GitDependencyEvent),
+    PathDependency(path_dependency::PathDependencyEvent),
+    PublishCycle(publish_cycle::PublishCycleEvent),
     UnusedWorkspaceDep(workspace_dep::UnusedWorkspaceDepEvent),
-    NativeDependency(NativeDependencyEvent),
-    Outdated(OutdatedEvent),
-    /// Marker emitted by the `outdated` phase whenever ccu ran to
-    /// completion, regardless of how many upgrades it found. Lets the
-    /// renderer print an "all at latest on crates.io" line for the
-    /// zero-upgrade case instead of silently omitting the section -
-    /// the colleague otherwise can't tell "we checked and there's
-    /// nothing" from "we couldn't check".
+    NativeDependency(native_code::NativeDependencyEvent),
+    Outdated(ccu::OutdatedEvent),
+    /// Kept for existing NDJSON consumers. `Summary.phase_outcomes` also
+    /// distinguishes a successful zero-result run from a skipped phase.
     OutdatedComplete,
-    Stale(StaleEvent),
-    ToolMissing(ToolMissingEvent),
+    Stale(ccu::StaleEvent),
+    ToolMissing(ccu::ToolMissingEvent),
     Summary(SummaryEvent),
 }
 
 #[derive(Serialize)]
-pub struct GitDependencyEvent {
-    #[serde(rename = "crate")]
-    pub krate: String,
-    pub version: String,
-    /// Repo URL with the `git+` prefix stripped.
-    pub url: String,
-    /// Ref requested by the manifest, or the default branch when no ref was
-    /// specified.
-    pub requested_ref: GitRef,
-    /// Resolved commit SHA from the source URL fragment.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub resolved_rev: Option<String>,
-    /// Compatibility field retained for existing NDJSON consumers. This has
-    /// the old `rev` meaning: the resolved fragment, falling back to a
-    /// requested `?rev=` when Cargo supplied no fragment.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub rev: Option<String>,
-    /// Compatibility field retained for existing NDJSON consumers.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub branch: Option<String>,
-    /// Compatibility field retained for existing NDJSON consumers.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tag: Option<String>,
-}
-
-/// A requested Git ref, distinct from the commit Cargo resolved.
-#[derive(Serialize)]
-#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
-pub enum GitRef {
-    /// A branch name from `?branch=...`.
-    Branch(String),
-    /// A tag name from `?tag=...`.
-    Tag(String),
-    /// A revision from `?rev=...`.
-    Rev(String),
-    /// No branch, tag, or revision was specified.
-    DefaultBranch,
-}
-
-#[derive(Serialize)]
-pub struct PathDependencyEvent {
-    #[serde(rename = "crate")]
-    pub krate: String,
-    pub version: String,
-    /// Absolute path to the dep's `Cargo.toml`.
-    pub manifest_path: String,
-}
-
-/// A dependency that pulls non-Rust code into the build - either by
-/// linking a native library (`links` set) or by compiling C/C++/asm
-/// in a build script (build-dep on `cc`/`cmake`/`cxx-build`/`nasm-rs`).
-/// Informational - doesn't count toward the failure-driving findings.
-#[derive(Serialize)]
-pub struct NativeDependencyEvent {
-    #[serde(rename = "crate")]
-    pub krate: String,
-    pub version: String,
-    /// Which signal(s) fired: `"links"`, `"compiles"`, or `"both"`.
-    pub reason: &'static str,
-    /// Native library name from the manifest's `links` key, when set.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub links: Option<String>,
-    /// Toolchain build-dep crates that drive compilation (`cc`, `cmake`,
-    /// ...). Empty when the crate only links a prebuilt library.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub toolchains: Vec<String>,
-}
-
-#[derive(Serialize)]
-pub struct OutdatedEvent {
-    #[serde(rename = "crate")]
-    pub krate: String,
-    /// Version currently resolved in Cargo.lock.
-    pub installed: String,
-    /// Newest version available on crates.io.
-    pub latest: String,
-    /// `ccu`'s severity classification: `patch`, `minor`, or `major`.
-    pub severity: String,
-    /// Manifest path where this dep is declared (relative to project
-    /// root, as `ccu` reports it).
-    pub source_file: String,
-    /// Line number in that manifest, useful for jump-to.
-    pub line_number: u64,
-}
-
-#[derive(Serialize)]
-pub struct StaleEvent {
-    #[serde(rename = "crate")]
-    pub krate: String,
-    /// Version on the registry whose release date is the basis for
-    /// this event (i.e. the latest available, not the installed one).
-    pub version: String,
-    /// ISO-8601 timestamp, verbatim from ccu / crates.io.
-    pub released_at: String,
-    /// Days since `released_at` as of the run.
-    pub age_days: u64,
-    /// `"stale"` (>= ~8 months) or `"abandoned"` (>= ~2 years).
-    pub severity: &'static str,
-}
-
-/// Emitted when a phase couldn't produce its findings because an
-/// external tool was missing or failed to run. Doesn't count as a
-/// finding for exit-code purposes - it's a heads-up about the
-/// phase, not a smell in the user's code.
-#[derive(Serialize)]
-pub struct ToolMissingEvent {
-    /// Phase that wanted the tool.
-    pub phase: &'static str,
-    /// Executable name we tried to invoke.
-    pub tool: &'static str,
-    /// Why the phase was skipped: install hint when the tool isn't on
-    /// PATH, error description when it ran but failed.
-    pub reason: String,
-}
-
-/// A dependency cycle among publishable workspace members. `members` is
-/// the loop in walk order, rotated to start at its lexicographically
-/// smallest member; `edges` has one entry per member, closing back to
-/// `members[0]`. See `publish_cycle.rs` for why dev-dependencies only
-/// sometimes count.
-#[derive(Serialize)]
-pub struct PublishCycleEvent {
-    pub members: Vec<String>,
-    pub edges: Vec<CycleEdge>,
-}
-
-#[derive(Serialize)]
-pub struct CycleEdge {
-    pub from: String,
-    pub to: String,
-    /// `normal`, `build`, or `dev` (a dev-dep carrying a version, the
-    /// only kind that survives into the published manifest).
-    pub kind: &'static str,
-}
-
-#[derive(Serialize)]
-pub struct DuplicateVersionEvent {
-    #[serde(rename = "crate")]
-    pub krate: String,
-    pub pins: Vec<VersionPin>,
-}
-
-#[derive(Serialize)]
-pub struct VersionPin {
-    pub version: String,
-    /// Direct (one-reverse-step) parents that pulled in this version,
-    /// over Normal-kind edges only. Workspace members appear as
-    /// `"<name> (direct)"`; non-workspace parents as `"name version"`.
-    pub picked_by: Vec<String>,
-    /// Workspace-direct dep names (bare, no version) that lead to this
-    /// pin via chains whose immediate picker is transitive. Empty when
-    /// every picker is already a workspace member or workspace-direct
-    /// dep - in that case `picked_by` already says what to bump.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub via_workspace: Vec<String>,
-}
-
-#[derive(Serialize)]
-pub struct SummaryEvent {
-    pub phases_run: Vec<&'static str>,
-    pub findings: usize,
+struct SummaryEvent {
+    phases_run: Vec<Phase>,
+    findings: usize,
+    phase_outcomes: Vec<PhaseSummary>,
 }
 
 // --- Cargo metadata (minimal subset we use) ---
@@ -331,61 +172,81 @@ pub fn run(project_root: &Path, args: &DepsArgs) -> Result<(), DevError> {
 
     let metadata = load_metadata(project_root)?;
     let host_metadata = load_metadata_host_filtered(project_root)?;
-    let mut events = Vec::new();
-    let phases_run = vec![
-        "duplicate_version",
-        "git_dependency",
-        "path_dependency",
-        "publish_cycle",
-        "workspace_dep",
-        "native_code",
-        "outdated",
-        "stale",
-    ];
-
     // duplicate_version uses host-filtered metadata so transitive crates
     // brought in only for inactive targets (e.g. wasmparser -> hashbrown
     // 0.15.5 on a linux host) don't show up as bogus duplicates.
-    let dup_events = duplicate_version::run(&host_metadata);
-    let git_events = git_dependency::run(&metadata);
-    let path_events = path_dependency::run(&metadata);
+    let mut outcomes = vec![PhaseOutcome::ran(
+        Phase::DuplicateVersion,
+        duplicate_version::run(&host_metadata)
+            .into_iter()
+            .map(DepsEvent::DuplicateVersion)
+            .collect(),
+    )];
+    outcomes.push(PhaseOutcome::ran(
+        Phase::GitDependency,
+        git_dependency::run(&metadata)
+            .into_iter()
+            .map(DepsEvent::GitDependency)
+            .collect(),
+    ));
+    outcomes.push(PhaseOutcome::ran(
+        Phase::PathDependency,
+        path_dependency::run(&metadata)
+            .into_iter()
+            .map(DepsEvent::PathDependency)
+            .collect(),
+    ));
     // Unfiltered metadata: publication is a property of the declared
     // manifests, so a cycle closed by a target-specific dep still blocks
     // the release even when this host doesn't build that edge.
-    let cycle_events = publish_cycle::run(&metadata);
+    outcomes.push(PhaseOutcome::ran(
+        Phase::PublishCycle,
+        publish_cycle::run(&metadata)
+            .into_iter()
+            .map(DepsEvent::PublishCycle)
+            .collect(),
+    ));
+    outcomes.push(PhaseOutcome::ran(
+        Phase::WorkspaceDep,
+        workspace_dep::run(&metadata, &args.workspace_dep_ignore)?
+            .into_iter()
+            .map(DepsEvent::UnusedWorkspaceDep)
+            .collect(),
+    ));
     // native_code uses host-filtered metadata like duplicate_version so
     // wasm-only native bundlers (e.g. sqlite-wasm-rs) don't show up on a
     // native host.
-    let native_events = native_code::run(&host_metadata);
-    let ws_events = workspace_dep::run(&metadata, &args.workspace_dep_ignore)?;
+    outcomes.push(PhaseOutcome::ran(
+        Phase::NativeCode,
+        native_code::run(&host_metadata)
+            .into_iter()
+            .map(DepsEvent::NativeDependency)
+            .collect(),
+    ));
+    outcomes.extend(ccu::run(project_root));
 
-    // Only offline *smell* phases contribute to the failure-counting
-    // findings. `native_code` is offline but informational (native code
-    // is a heads-up, not a defect), as are the network phases
-    // (`outdated`/`stale`) - a patch bump shouldn't fail your build.
-    let findings = dup_events.len()
-        + git_events.len()
-        + path_events.len()
-        + cycle_events.len()
-        + ws_events.len();
-
-    events.extend(dup_events.into_iter().map(DepsEvent::DuplicateVersion));
-    events.extend(git_events.into_iter().map(DepsEvent::GitDependency));
-    events.extend(path_events.into_iter().map(DepsEvent::PathDependency));
-    events.extend(cycle_events.into_iter().map(DepsEvent::PublishCycle));
-    events.extend(ws_events.into_iter().map(DepsEvent::UnusedWorkspaceDep));
-    events.extend(native_events.into_iter().map(DepsEvent::NativeDependency));
-    events.extend(ccu::run(project_root));
+    let findings: usize = outcomes.iter().map(PhaseOutcome::findings).sum();
+    let phases_run: Vec<Phase> = outcomes
+        .iter()
+        .filter(|outcome| outcome.did_run())
+        .map(|outcome| outcome.phase)
+        .collect();
+    let phase_outcomes: Vec<PhaseSummary> = outcomes.iter().map(PhaseOutcome::summary).collect();
+    let mut events: Vec<DepsEvent> = outcomes
+        .into_iter()
+        .flat_map(|outcome| outcome.events)
+        .collect();
 
     events.push(DepsEvent::Summary(SummaryEvent {
         phases_run,
         findings,
+        phase_outcomes,
     }));
 
     if args.json {
-        render_json(&events)?;
+        render::render_json(&events)?;
     } else {
-        render_text(&events);
+        render::render_text(&events);
     }
 
     if findings > 0 && !args.no_fail {
@@ -424,6 +285,7 @@ fn run_metadata_locked(project_root: &Path, args: &[&str]) -> Result<CargoMetada
 
 /// The shared renderer: `deps` and the `check` phase print an identical
 /// cycle identically.
+pub(crate) use publish_cycle::PublishCycleEvent;
 pub(crate) use publish_cycle::render_lines as publish_cycle_lines;
 
 /// The shared "this list may be partial" clause, printed by both reports.
@@ -491,305 +353,4 @@ fn host_triple() -> Result<String, DevError> {
     Err(DevError::Build(
         "rustc -vV did not report a host triple".to_string(),
     ))
-}
-
-// --- Rendering ---
-
-fn render_json(events: &[DepsEvent]) -> Result<(), DevError> {
-    for event in events {
-        let line = serde_json::to_string(event)?;
-        println!("{line}");
-    }
-    Ok(())
-}
-
-fn render_text(events: &[DepsEvent]) {
-    let mut dups = Vec::new();
-    let mut gits = Vec::new();
-    let mut paths = Vec::new();
-    let mut cycles = Vec::new();
-    let mut ws = Vec::new();
-    let mut native = Vec::new();
-    let mut outdated = Vec::new();
-    let mut outdated_ran = false;
-    let mut stale = Vec::new();
-    let mut missing = Vec::new();
-    for e in events {
-        match e {
-            DepsEvent::DuplicateVersion(d) => dups.push(d),
-            DepsEvent::GitDependency(g) => gits.push(g),
-            DepsEvent::PathDependency(p) => paths.push(p),
-            DepsEvent::PublishCycle(c) => cycles.push(c),
-            DepsEvent::UnusedWorkspaceDep(w) => ws.push(w),
-            DepsEvent::NativeDependency(n) => native.push(n),
-            DepsEvent::Outdated(o) => outdated.push(o),
-            DepsEvent::OutdatedComplete => outdated_ran = true,
-            DepsEvent::Stale(s) => stale.push(s),
-            DepsEvent::ToolMissing(t) => missing.push(t),
-            DepsEvent::Summary(_) => {}
-        }
-    }
-    outdated.sort_by(|a, b| {
-        severity_rank(&a.severity)
-            .cmp(&severity_rank(&b.severity))
-            .then(a.krate.cmp(&b.krate))
-    });
-    // Abandoned first, then stale; within each, oldest first.
-    stale.sort_by(|a, b| {
-        stale_rank(a.severity)
-            .cmp(&stale_rank(b.severity))
-            .then(b.age_days.cmp(&a.age_days))
-    });
-
-    render_dup_section(&dups);
-    render_section(
-        &gits,
-        "git dependency",
-        "git dependencies",
-        "",
-        render_git_text,
-    );
-    render_section(
-        &paths,
-        "path dependency",
-        "path dependencies",
-        "outside workspace",
-        render_path_text,
-    );
-    render_section(
-        &cycles,
-        "cargo publication cycle",
-        "cargo publication cycles",
-        "",
-        render_cycle_text,
-    );
-    if !cycles.is_empty() {
-        output::deps_msg(&format!("  {}", publish_cycle::INVENTORY_CAVEAT));
-    }
-    render_section(
-        &ws,
-        "unused workspace dependency",
-        "unused workspace dependencies",
-        "not inherited by any member",
-        render_ws_text,
-    );
-    render_section(
-        &native,
-        "dependency with native code",
-        "dependencies with native code",
-        "",
-        render_native_text,
-    );
-    render_outdated_section(&outdated, outdated_ran);
-    render_section(
-        &stale,
-        "stale dependency",
-        "stale dependencies",
-        "",
-        render_stale_text,
-    );
-
-    for tool_missing in &missing {
-        output::deps_msg(&format!(
-            "{} skipped ({}): {}",
-            tool_missing.phase, tool_missing.tool, tool_missing.reason,
-        ));
-    }
-
-    if let Some(DepsEvent::Summary(s)) = events.last() {
-        if s.findings == 0 {
-            output::deps_msg(&format!("ran {} phases, no findings", s.phases_run.len()));
-        } else {
-            output::deps_msg(&format!(
-                "ran {} phases, {} finding{}",
-                s.phases_run.len(),
-                s.findings,
-                if s.findings == 1 { "" } else { "s" },
-            ));
-        }
-    }
-}
-
-fn render_dup_section(items: &[&DuplicateVersionEvent]) {
-    if items.is_empty() {
-        return;
-    }
-    let noun = if items.len() == 1 { "crate" } else { "crates" };
-    output::deps_msg(&format!("{} {noun} with multiple versions:", items.len()));
-    for item in items {
-        render_duplicate_text(item);
-    }
-}
-
-/// The outdated section communicates an exhaustive answer, not a
-/// partial finding: if a direct dep isn't here, it has no newer
-/// version on crates.io. Header phrasing and the explicit zero-case
-/// line both lean on that. When ccu didn't run at all, this prints
-/// nothing - the accompanying `ToolMissing` event covers it.
-fn render_outdated_section(items: &[&OutdatedEvent], outdated_ran: bool) {
-    if !outdated_ran {
-        return;
-    }
-    if items.is_empty() {
-        output::deps_msg("All direct deps are at latest on crates.io.");
-        return;
-    }
-    output::deps_msg(&format!(
-        "{} available on crates.io; no other candidates:",
-        output::count(items.len(), "upgrade")
-    ));
-    for item in items {
-        render_outdated_text(item);
-    }
-}
-
-fn render_section<T>(items: &[&T], singular: &str, plural: &str, suffix: &str, render_one: fn(&T)) {
-    if items.is_empty() {
-        return;
-    }
-    let noun = if items.len() == 1 { singular } else { plural };
-    let header = if suffix.is_empty() {
-        format!("{} {noun}:", items.len())
-    } else {
-        format!("{} {noun} {suffix}:", items.len())
-    };
-    output::deps_msg(&header);
-    for item in items {
-        render_one(item);
-    }
-}
-
-fn render_duplicate_text(dup: &DuplicateVersionEvent) {
-    output::deps_msg(&format!("  {}: {} versions", dup.krate, dup.pins.len()));
-    for pin in &dup.pins {
-        let picked = if pin.picked_by.is_empty() {
-            "(unknown)".to_string()
-        } else {
-            pin.picked_by.join(", ")
-        };
-        let suffix = if pin.via_workspace.is_empty() {
-            String::new()
-        } else {
-            format!("  [via {}]", pin.via_workspace.join(", "))
-        };
-        output::deps_msg(&format!("    {}  picked by {picked}{suffix}", pin.version));
-    }
-}
-
-fn render_git_text(git: &GitDependencyEvent) {
-    let ref_part = match &git.requested_ref {
-        GitRef::Branch(branch) => format!("branch={branch}"),
-        GitRef::Tag(tag) => format!("tag={tag}"),
-        GitRef::Rev(rev) => format!("rev={rev}"),
-        GitRef::DefaultBranch => "default branch".to_string(),
-    };
-    let resolved = git
-        .resolved_rev
-        .as_deref()
-        .map(|rev| format!(" # {rev}"))
-        .unwrap_or_default();
-    output::deps_msg(&format!(
-        "  {} {}  {} @ {}{}",
-        git.krate, git.version, git.url, ref_part, resolved
-    ));
-}
-
-fn render_path_text(path: &PathDependencyEvent) {
-    output::deps_msg(&format!(
-        "  {} {}  {}",
-        path.krate, path.version, path.manifest_path
-    ));
-}
-
-/// Prints the loop as a chain, then - when the cycle is closed by a
-/// dev-dependency that names a version - the one-line fix, since that
-/// edge is removable without restructuring anything. The lines themselves
-/// come from `publish_cycle`, shared with the `brokkr check` phase so the
-/// two commands describe an identical cycle identically.
-fn render_cycle_text(c: &PublishCycleEvent) {
-    for line in publish_cycle::render_lines(c) {
-        output::deps_msg(&format!("  {line}"));
-    }
-}
-
-fn render_ws_text(w: &workspace_dep::UnusedWorkspaceDepEvent) {
-    output::deps_msg(&format!("  {}", w.krate));
-}
-
-fn render_native_text(n: &NativeDependencyEvent) {
-    let mut parts = Vec::new();
-    if !n.toolchains.is_empty() {
-        parts.push(format!("compiles ({})", n.toolchains.join(", ")));
-    }
-    if let Some(lib) = &n.links {
-        parts.push(format!("links {lib}"));
-    }
-    output::deps_msg(&format!(
-        "  {} {}  {}",
-        n.krate,
-        n.version,
-        parts.join(" + ")
-    ));
-}
-
-fn render_outdated_text(o: &OutdatedEvent) {
-    output::deps_msg(&format!(
-        "  {}: {} {} -> {}  ({}:{})",
-        o.severity, o.krate, o.installed, o.latest, o.source_file, o.line_number,
-    ));
-}
-
-fn render_stale_text(s: &StaleEvent) {
-    output::deps_msg(&format!(
-        "  {}: {} (last release {} ago)",
-        s.severity,
-        s.krate,
-        human_age(s.age_days),
-    ));
-}
-
-/// Lower is more severe. Used for sorting so majors print first.
-fn severity_rank(severity: &str) -> u8 {
-    match severity {
-        "major" => 0,
-        "minor" => 1,
-        "patch" => 2,
-        _ => 3,
-    }
-}
-
-fn stale_rank(severity: &str) -> u8 {
-    match severity {
-        "abandoned" => 0,
-        "stale" => 1,
-        _ => 2,
-    }
-}
-
-/// Coarse years-and-months age. Months are 30-day buckets of the remainder
-/// under 365, so days 360-364 would divide out to 12 - clamped to 11, since
-/// "12mo" (or "1y12mo") is a year the year column already owns.
-fn human_age(days: u64) -> String {
-    let years = days / 365;
-    let months = ((days % 365) / 30).min(11);
-    match (years, months) {
-        (0, m) => format!("{}mo", m.max(1)),
-        (y, 0) => format!("{y}y"),
-        (y, m) => format!("{y}y{m}mo"),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::human_age;
-
-    #[test]
-    fn human_age_never_prints_twelve_months() {
-        assert_eq!(human_age(0), "1mo");
-        assert_eq!(human_age(45), "1mo");
-        assert_eq!(human_age(364), "11mo");
-        assert_eq!(human_age(365), "1y");
-        assert_eq!(human_age(365 + 362), "1y11mo");
-        assert_eq!(human_age(800), "2y2mo");
-    }
 }

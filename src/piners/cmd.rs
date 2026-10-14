@@ -53,7 +53,7 @@ use crate::lockfile::{self, LockContext, LockGuard};
 use crate::output;
 use crate::piners::contract::RunErrorRecord;
 use crate::piners::corpus_db::{CorpusDb, RunContext, RunRecord};
-use crate::piners::integrity::{self, HarnessEnd, Policy, Reconciliation, Trigger, Verdict};
+use crate::piners::integrity::{self, HarnessEnd, Reconciliation, Trigger};
 use crate::piners::isolate::{self, AttemptOutcome, StopReason};
 use crate::piners::manifest::Manifest;
 use crate::piners::registry::{self, Registry, VerifiedProbe};
@@ -389,9 +389,9 @@ pub fn corpus(
     } else {
         crate::piners::gate::breaks_all_pinned(&ids, &registry, report)
     };
-    let mut harness_reasons = match assessment.verdict(Policy::Parity { exit1_explained }) {
-        Verdict::Parity { failure_reasons } => failure_reasons,
-        _ => unreachable!("parity policy returns parity reasons"),
+    let mut harness_reasons = match assessment.parity_verdict(exit1_explained) {
+        Ok(()) => Vec::new(),
+        Err(reasons) => reasons,
     };
     if evidence_failed {
         harness_reasons.push(evidence_reason(&evidence_errors));
@@ -1171,11 +1171,9 @@ mod tests {
     }
 
     fn reasons(ids: &[&str], nd: &str, end: HarnessEnd, cut: bool, exit1: bool) -> Vec<String> {
-        match assessed(ids, nd, end, cut).verdict(Policy::Parity {
-            exit1_explained: exit1,
-        }) {
-            Verdict::Parity { failure_reasons } => failure_reasons,
-            _ => unreachable!("parity policy returns parity reasons"),
+        match assessed(ids, nd, end, cut).parity_verdict(exit1) {
+            Ok(()) => Vec::new(),
+            Err(reasons) => reasons,
         }
     }
 

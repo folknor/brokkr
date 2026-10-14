@@ -42,6 +42,12 @@ pub fn format_details(row: &StoredRow) -> String {
     if !row.storage_notes.is_empty() {
         fields.push(("storage".into(), row.storage_notes.clone()));
     }
+    if !row.stop_marker_requested.is_empty() {
+        fields.push((
+            "stop marker requested".into(),
+            row.stop_marker_requested.clone(),
+        ));
+    }
     if !row.stop_marker.is_empty() {
         fields.push((
             "stop marker".into(),

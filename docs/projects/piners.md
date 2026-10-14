@@ -388,6 +388,12 @@ struct, no benchmark filters to reject. The corpus views:
   ad-hoc query no view covers. The standing rule: when an ad-hoc query recurs,
   promote it to a named view rather than keep reaching through this door.
 
+Each query view takes only its own view flags: `--over` requires
+`--runtimes`, and `--sql`/`--trend` cannot be combined with another view.
+`--run` takes precedence over a positional run id when both are present.
+`corpus-results` and `lint-results` both default `-n` to 20 rows; `-n 0`
+returns no rows.
+
 Canned views are `?N`-parameterized; `--columns` interpolates only allow-listed
 column identifiers (a typo can't become injection). `--where`/`--sql`
 interpolate trusted local SQL; safety rests on the read-only DB open (the

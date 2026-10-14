@@ -5,15 +5,16 @@
 // directory of the file naming it, and the included files are folded in
 // *beneath* it: a file's own keys override everything it includes, and a later
 // include overrides an earlier one. Flattened, that is a post-order walk of
-// the include graph, lowest precedence first, with the project's `brokkr.toml`
-// last - and folding the files in that order is the whole algorithm.
+// the include graph, lowest precedence first, with the user-wide config first
+// and the project's `brokkr.toml` last - and folding the files in that order
+// is the whole algorithm.
 //
 // The merge rules, applied key by key:
 // - table + table: merged recursively (a host section split across files).
 // - array of tables + array of tables (`[[check]]`, `[[textlint]]`, ...):
 //   joined, lower-precedence entries first, and an entry whose `name` the
-//   higher-precedence side reuses is dropped - the user layer's shadowing
-//   rule, so a project redefines a shared entry to replace it.
+//   higher-precedence side reuses is dropped - a higher layer can redefine
+//   a shared entry to replace it.
 // - anything else: the higher-precedence value replaces the lower one.
 //
 // The composition is resolved here, before any section parser runs, so every
@@ -31,22 +32,25 @@
 #[derive(Debug, Clone, Default)]
 pub struct ConfigSources {
     /// Every file in the composition, lowest precedence first; the project's
-    /// `brokkr.toml` is last.
+    /// `brokkr.toml` is last when present.
     files: Vec<PathBuf>,
+    /// Project include files only. The user layer is a composition source but
+    /// must not be treated as an in-tree include by dirty-check callers.
+    included_files: Vec<PathBuf>,
     /// Table path -> the files (indices into `files`) that define it, whether
     /// with a header of their own or implicitly through a sub-table.
     tables: BTreeMap<Vec<String>, BTreeSet<usize>>,
 }
 
 impl ConfigSources {
-    /// The project's own `brokkr.toml`.
+    /// The highest-precedence file (`brokkr.toml` for a project composition).
     pub fn root(&self) -> Option<&Path> {
         self.files.last().map(PathBuf::as_path)
     }
 
-    /// The included files, lowest precedence first (everything but the root).
+    /// The project config's included files, lowest precedence first.
     pub fn included(&self) -> &[PathBuf] {
-        self.files.split_last().map_or(&[], |(_, rest)| rest)
+        &self.included_files
     }
 
     /// The files that define the table at `path`.
@@ -101,28 +105,110 @@ impl ConfigSources {
     }
 }
 
-/// Read `root` and everything it includes, and fold them into one table.
+/// Read the user-wide config, `root`, and everything it includes, and fold
+/// them into one table. The user file is the lowest-precedence layer.
 ///
 /// `root` is the project's `brokkr.toml`; only it may carry `project`. An
 /// include that is missing, unreadable, malformed, part of a cycle, or reached
 /// twice is an error - skipping it would silently drop whatever it configured,
 /// and a file folded in twice would duplicate its array entries.
 pub fn compose(root: &Path) -> Result<(toml::Table, ConfigSources), DevError> {
-    let mut files = Vec::new();
-    let mut walk = Walk {
-        stack: Vec::new(),
-        seen: HashSet::new(),
-        out: &mut files,
-    };
-    walk.visit(root, None)?;
+    compose_layers(Some(root))
+}
 
-    let mut sources = ConfigSources::default();
+/// Compose only the user-wide config. Used when a caller needs a normal
+/// `DevConfig` in a tree with no project config.
+pub fn compose_user_only() -> Result<(toml::Table, ConfigSources), DevError> {
+    compose_layers(None)
+}
+
+fn compose_layers(root: Option<&Path>) -> Result<(toml::Table, ConfigSources), DevError> {
+    let user_layer = load_user_table()?;
+    let mut seen = HashSet::new();
+    if let Some((path, _)) = &user_layer {
+        let canonical = std::fs::canonicalize(path)
+            .map_err(|e| DevError::Config(format!("{}: {e}", path.display())))?;
+        seen.insert(canonical);
+    }
+
+    let mut files = Vec::new();
+    {
+        let mut walk = Walk {
+            stack: Vec::new(),
+            seen,
+            out: &mut files,
+        };
+        if let Some(root) = root {
+            walk.visit(root, None)?;
+        }
+    }
+    let included_files: Vec<PathBuf> = if root.is_some() {
+        files
+            .iter()
+            .take(files.len().saturating_sub(1))
+            .map(|(path, _)| path.clone())
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let has_user_layer = user_layer.is_some();
+    if let Some(user_layer) = user_layer {
+        files.insert(0, user_layer);
+    }
+
+    let mut sources = ConfigSources {
+        included_files,
+        ..ConfigSources::default()
+    };
     let mut merged = toml::Table::new();
     for (idx, (path, table)) in files.into_iter().enumerate() {
         sources.files.push(path);
         merge_into(&mut merged, table, idx, &mut Vec::new(), &mut sources);
     }
+    if has_user_layer {
+        drop_orphaned_user_presets(&mut merged, &sources);
+    }
     Ok((merged, sources))
+}
+
+/// Remove `[textlint_preset.*]` blocks that only the user layer (file 0)
+/// defines and that no composed `[[textlint]]` rule references any more.
+///
+/// The parser rejects an unreferenced preset as dead config. That is right for
+/// a file's own presets, but a user preset can be orphaned by the project
+/// itself: shadowing a user rule by `name` is the documented opt-out, and the
+/// shadowed rule may have been the preset's only reference. Refusing the load
+/// would turn the opt-out into an error the project cannot fix from its own
+/// tree, so such a preset is dropped instead. A preset any project file
+/// defines still goes through the dead-config check.
+fn drop_orphaned_user_presets(merged: &mut toml::Table, sources: &ConfigSources) {
+    let mut referenced: HashSet<String> = HashSet::new();
+    if let Some(toml::Value::Array(rules)) = merged.get("textlint") {
+        for rule in rules {
+            match rule.get("preset") {
+                Some(toml::Value::String(name)) => {
+                    referenced.insert(name.clone());
+                }
+                Some(toml::Value::Array(names)) => {
+                    referenced.extend(names.iter().filter_map(|n| n.as_str().map(str::to_owned)));
+                }
+                _ => {}
+            }
+        }
+    }
+    let Some(toml::Value::Table(presets)) = merged.get_mut("textlint_preset") else {
+        return;
+    };
+    presets.retain(|name, _| {
+        let user_only = sources
+            .tables
+            .get(&vec!["textlint_preset".to_owned(), name.to_owned()])
+            .is_some_and(|defs| defs.len() == 1 && defs.contains(&0));
+        !user_only || referenced.contains(name)
+    });
+    if presets.is_empty() {
+        merged.remove("textlint_preset");
+    }
 }
 
 /// Depth-first walk of the include graph, collecting files in post-order.

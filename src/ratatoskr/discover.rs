@@ -114,7 +114,7 @@ pub struct ScriptInfo {
     pub fixture: Option<String>,
     /// Sync-script frontmatter only; service scripts leave it `None`.
     /// Informational - tells the `sync` index which protocol the script
-    /// primarily exercises. Sæhrimnir always binds all five regardless.
+    /// primarily exercises. Sæhrimnir always binds all nine regardless.
     pub protocol: Option<String>,
 }
 

@@ -1,12 +1,20 @@
-/// Load `brokkr.toml` from the project root directory.
-///
-/// Returns both the detected `Project` and the parsed `DevConfig`.
-/// This is the **single code path** that reads and parses `brokkr.toml`,
-/// together with every file it `include`s (see [`compose`]).
+/// Load `brokkr.toml` from the project root directory, with the user-wide
+/// config composed beneath its include layers.
 pub fn load(project_root: &Path) -> Result<(Project, DevConfig), DevError> {
     let (root, _sources) = compose(&project_root.join("brokkr.toml"))?;
-    let table = &root;
+    let project = parse_project(&root)?;
+    let config = parse_dev_config(&root)?;
+    Ok((project, config))
+}
 
+/// Parse a normal config from the user-wide layer alone, for a check run in a
+/// tree without `brokkr.toml`.
+pub fn load_user_only() -> Result<DevConfig, DevError> {
+    let (root, _sources) = compose_user_only()?;
+    parse_dev_config(&root)
+}
+
+fn parse_project(table: &toml::Table) -> Result<Project, DevError> {
     let project_str = table
         .get("project")
         .and_then(|v| v.as_str())
@@ -26,7 +34,10 @@ pub fn load(project_root: &Path) -> Result<(Project, DevConfig), DevError> {
         "mogwai" => Project::Mogwai,
         other => Project::Other(Box::leak(other.to_owned().into_boxed_str())),
     };
+    Ok(project)
+}
 
+fn parse_dev_config(table: &toml::Table) -> Result<DevConfig, DevError> {
     let litehtml = parse_litehtml(table)?;
     let sluggrs = parse_sluggrs(table)?;
     let ratatoskr = parse_ratatoskr(table)?;
@@ -54,34 +65,31 @@ pub fn load(project_root: &Path) -> Result<(Project, DevConfig), DevError> {
     validate_datasets(&hosts)?;
     validate_tilegen(&hosts)?;
 
-    Ok((
-        project,
-        DevConfig {
-            hosts,
-            litehtml,
-            sluggrs,
-            ratatoskr,
-            piners,
-            dellingr,
-            mogwai,
-            dependency_rules,
-            check,
-            test,
-            quarantine,
-            capture_env,
-            gremlins,
-            header,
-            textlint,
-            script_checks,
-            manifest,
-            rustdoc,
-            deps,
-            lints,
-            bin,
-            disable_toolchain,
-            cargo_env,
-        },
-    ))
+    Ok(DevConfig {
+        hosts,
+        litehtml,
+        sluggrs,
+        ratatoskr,
+        piners,
+        dellingr,
+        mogwai,
+        dependency_rules,
+        check,
+        test,
+        quarantine,
+        capture_env,
+        gremlins,
+        header,
+        textlint,
+        script_checks,
+        manifest,
+        rustdoc,
+        deps,
+        lints,
+        bin,
+        disable_toolchain,
+        cargo_env,
+    })
 }
 
 /// Parse the optional `[cargo_env]` table: variable name -> shell command.

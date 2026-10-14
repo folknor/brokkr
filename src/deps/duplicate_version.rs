@@ -19,7 +19,31 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
-use super::{CargoMetadata, DuplicateVersionEvent, VersionPin};
+use serde::Serialize;
+
+use super::CargoMetadata;
+
+#[derive(Serialize)]
+pub(super) struct DuplicateVersionEvent {
+    #[serde(rename = "crate")]
+    pub(super) krate: String,
+    pub(super) pins: Vec<VersionPin>,
+}
+
+#[derive(Serialize)]
+pub(super) struct VersionPin {
+    pub(super) version: String,
+    /// Direct (one-reverse-step) parents that pulled in this version,
+    /// over Normal-kind edges only. Workspace members appear as
+    /// `"<name> (direct)"`; non-workspace parents as `"name version"`.
+    pub(super) picked_by: Vec<String>,
+    /// Workspace-direct dep names (bare, no version) that lead to this
+    /// pin via chains whose immediate picker is transitive. Empty when
+    /// every picker is already a workspace member or workspace-direct
+    /// dep - in that case `picked_by` already says what to bump.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(super) via_workspace: Vec<String>,
+}
 
 pub fn run(metadata: &CargoMetadata) -> Vec<DuplicateVersionEvent> {
     let workspace_set: HashSet<&str> = metadata

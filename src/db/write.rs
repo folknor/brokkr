@@ -1,7 +1,7 @@
 //! Insert operations for the results database.
 
 use super::ResultsDb;
-use super::like::{ESCAPE, prefix_pattern, require_prefix};
+use super::run_store::RunId;
 use super::schema::INSERT_SQL;
 use super::types::{HotpathData, KvPair, KvValue, RunRow, generate_uuid, short_uuid};
 use crate::error::DevError;
@@ -11,40 +11,14 @@ use crate::error::DevError;
 // ---------------------------------------------------------------------------
 
 impl ResultsDb {
-    /// Insert a benchmark result row. Returns `(full_uuid, short_uuid)`.
-    pub fn insert(&self, row: &RunRow) -> Result<(String, String), DevError> {
-        let uuid = generate_uuid()?;
-        self.conn.execute("BEGIN", [])?;
-
-        let result = insert_inner(&self.conn, row, &uuid);
-        if result.is_err() {
-            self.conn.execute("ROLLBACK", []).ok();
-            result?;
-        }
-
-        self.conn.execute("COMMIT", [])?;
-        let short = short_uuid(&uuid);
-        Ok((uuid, short))
-    }
-
-    /// Delete every run whose uuid starts with `uuid_prefix`, along with all
-    /// FK children (`run_distribution`, `run_iterations`, `run_kv`,
-    /// `hotpath_functions`, `hotpath_threads`). FK cascade isn't active (no
-    /// `PRAGMA foreign_keys`), so children are deleted explicitly in one
-    /// transaction.
-    ///
-    /// Returns the number of `runs` rows removed.
-    ///
-    /// The prefix matches literally, and an empty one is refused: `LIKE '%'`
-    /// is every row, which is what `brokkr invalidate "" -f` used to delete.
-    pub fn delete_by_uuid_prefix(&self, uuid_prefix: &str) -> Result<usize, DevError> {
-        require_prefix(uuid_prefix, "uuid")?;
-        let pattern = prefix_pattern(uuid_prefix);
+    /// Delete rows for one canonical UUID, using equality rather than the
+    /// prefix API. FK cascade isn't active, so children are removed explicitly.
+    pub(crate) fn delete_by_uuid(&self, uuid: &RunId) -> Result<usize, DevError> {
         let tx = self.conn.unchecked_transaction()?;
         let ids: Vec<i64> = {
-            let mut stmt =
-                tx.prepare(&format!("SELECT id FROM runs WHERE uuid LIKE ?1 {ESCAPE}"))?;
-            let rows = stmt.query_map(rusqlite::params![pattern], |row| row.get::<_, i64>(0))?;
+            let mut stmt = tx.prepare("SELECT id FROM runs WHERE uuid = ?1")?;
+            let rows =
+                stmt.query_map(rusqlite::params![uuid.as_str()], |row| row.get::<_, i64>(0))?;
             rows.collect::<Result<Vec<_>, _>>()?
         };
         for id in &ids {
@@ -70,12 +44,29 @@ impl ResultsDb {
             )?;
         }
         let removed = tx.execute(
-            &format!("DELETE FROM runs WHERE uuid LIKE ?1 {ESCAPE}"),
-            rusqlite::params![pattern],
+            "DELETE FROM runs WHERE uuid = ?1",
+            rusqlite::params![uuid.as_str()],
         )?;
         tx.commit()?;
         Ok(removed)
     }
+
+    /// Insert a benchmark result row. Returns `(full_uuid, short_uuid)`.
+    pub fn insert(&self, row: &RunRow) -> Result<(String, String), DevError> {
+        let uuid = generate_uuid()?;
+        self.conn.execute("BEGIN", [])?;
+
+        let result = insert_inner(&self.conn, row, &uuid);
+        if result.is_err() {
+            self.conn.execute("ROLLBACK", []).ok();
+            result?;
+        }
+
+        self.conn.execute("COMMIT", [])?;
+        let short = short_uuid(&uuid);
+        Ok((uuid, short))
+    }
+
 }
 
 // ---------------------------------------------------------------------------
@@ -403,8 +394,18 @@ mod tests {
         }
     }
 
-    fn kv_text(db: &ResultsDb, short: &str, key: &str) -> String {
-        let rows = db.query_by_uuid(short).expect("query");
+    fn rows_for(db: &ResultsDb, uuid: &str) -> Vec<crate::db::StoredRow> {
+        let filter = crate::db::QueryFilter {
+            limit: 100,
+            ..Default::default()
+        };
+        db.query_by_run_ids(&[crate::db::RunId::new(uuid.to_owned())], &filter)
+            .expect("query")
+            .0
+    }
+
+    fn kv_text(db: &ResultsDb, uuid: &str, key: &str) -> String {
+        let rows = rows_for(db, uuid);
         let pair = rows[0]
             .kv
             .iter()
@@ -427,8 +428,8 @@ mod tests {
             ],
             None,
         );
-        let (_, short) = db.insert(&row).expect("insert");
-        assert_eq!(kv_text(&db, &short, "meta.cache"), "7");
+        let (full, _) = db.insert(&row).expect("insert");
+        assert_eq!(kv_text(&db, &full, "meta.cache"), "7");
     }
 
     #[test]
@@ -441,8 +442,8 @@ mod tests {
             thread_summary: vec![KvPair::text("threads.rss_bytes", "summary")],
         };
         let row = kv_row(vec![KvPair::text("threads.rss_bytes", "stderr")], Some(hp));
-        let (_, short) = db.insert(&row).expect("insert");
-        assert_eq!(kv_text(&db, &short, "threads.rss_bytes"), "stderr");
+        let (full, _) = db.insert(&row).expect("insert");
+        assert_eq!(kv_text(&db, &full, "threads.rss_bytes"), "stderr");
     }
 
     // A microsecond list that does not cover every iteration cannot be
@@ -454,24 +455,27 @@ mod tests {
         let mut row = kv_row(Vec::new(), None);
         row.iterations = vec![1, 2];
         row.iterations_us = vec![1_200];
-        let (_, short) = db.insert(&row).expect("insert");
-        let stored = db.query_by_uuid(&short).expect("query");
+        let (full, _) = db.insert(&row).expect("insert");
+        let stored = rows_for(&db, &full);
         assert_eq!(stored[0].iterations, vec![1, 2]);
         assert!(stored[0].iterations_us.is_empty());
     }
 
     #[test]
-    fn delete_refuses_empty_prefix() {
-        let db_path = crate::test_scratch::scratch("db-write", "delete_empty").join("t.db");
+    fn delete_by_uuid_removes_exactly_one_run() {
+        let db_path = crate::test_scratch::scratch("db-write", "delete_exact").join("t.db");
         let db = ResultsDb::open(&db_path).expect("open");
-        let (_, short) = db.insert(&kv_row(Vec::new(), None)).expect("insert");
-        assert!(db.delete_by_uuid_prefix("").is_err());
+        let (full, short) = db.insert(&kv_row(Vec::new(), None)).expect("insert");
+        let (other, _) = db.insert(&kv_row(Vec::new(), None)).expect("insert");
         assert_eq!(
-            db.query_by_uuid(&short).expect("query").len(),
-            1,
-            "nothing deleted"
+            db.delete_by_uuid(&crate::db::RunId::new(short)).expect("delete"),
+            0,
+            "a prefix is not an identity"
         );
-        assert_eq!(db.delete_by_uuid_prefix(&short).expect("delete"), 1);
+        assert_eq!(rows_for(&db, &full).len(), 1, "nothing deleted");
+        assert_eq!(db.delete_by_uuid(&crate::db::RunId::new(full.clone())).expect("delete"), 1);
+        assert!(rows_for(&db, &full).is_empty());
+        assert_eq!(rows_for(&db, &other).len(), 1);
     }
 
     // The index used to be created only by the v0->v1 migration, which a fresh

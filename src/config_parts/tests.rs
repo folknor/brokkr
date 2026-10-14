@@ -2462,8 +2462,8 @@ debug = true
         );
     }
 
-    /// Presets are resolved within the file that defines them: a user preset
-    /// serves user rules, and is dead if it serves none.
+    /// The standalone status view parses the user file by itself; composed
+    /// loading also accepts cross-layer preset references (covered below).
     #[test]
     fn user_config_resolves_its_own_presets() {
         let cfg = parse_user(
@@ -2480,21 +2480,39 @@ debug = true
     }
 
     #[test]
-    fn merging_puts_user_entries_first_and_lets_the_project_shadow_by_name() {
-        let mut project = vec!["b".to_owned(), "shared".to_owned()];
-        merge_named(
-            &mut project,
-            vec!["a".to_owned(), "shared".to_owned()],
-            |s| s.as_str(),
-        );
-        assert_eq!(project, vec!["a", "b", "shared"]);
-    }
+    fn composed_user_and_project_rules_share_presets_and_project_shadows_names() {
+        let user: toml::Table = toml::from_str(
+            "[textlint_preset.user-scope]\npaths = [\"user/**/*.md\"]\n\n\
+             [[textlint]]\nname = \"personal\"\npattern = \"!!\"\n\
+             message = \"personal\"\npreset = \"project-scope\"\n\n\
+             [[textlint]]\nname = \"shared\"\npattern = \"?\"\n\
+             paths = [\"user/**/*.md\"]\nmessage = \"user\"\n",
+        )
+        .unwrap();
+        let project: toml::Table = toml::from_str(
+            "[textlint_preset.project-scope]\npaths = [\"project/**/*.md\"]\n\n\
+             [[textlint]]\nname = \"project-rule\"\npattern = \"##\"\n\
+             message = \"project\"\npreset = \"user-scope\"\n\n\
+             [[textlint]]\nname = \"shared\"\npattern = \"###\"\n\
+             paths = [\"project/**/*.md\"]\nmessage = \"project\"\n",
+        )
+        .unwrap();
 
-    #[test]
-    fn merging_nothing_leaves_the_project_untouched() {
-        let mut project = vec!["b".to_owned()];
-        merge_named(&mut project, Vec::new(), |s| s.as_str());
-        assert_eq!(project, vec!["b"]);
+        let mut merged = toml::Table::new();
+        let mut sources = ConfigSources::default();
+        let mut path = Vec::new();
+        merge_into(&mut merged, user, 0, &mut path, &mut sources);
+        merge_into(&mut merged, project, 1, &mut path, &mut sources);
+
+        let rules = parse_textlint(&merged).unwrap();
+        assert_eq!(rules.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(), [
+            "personal",
+            "project-rule",
+            "shared",
+        ]);
+        assert_eq!(rules[0].paths, vec!["project/**/*.md".to_owned()]);
+        assert_eq!(rules[1].paths, vec!["user/**/*.md".to_owned()]);
+        assert_eq!(rules[2].pattern, "###");
     }
 
     /// An explicit empty override is the opt-out, not a path to a file named "".

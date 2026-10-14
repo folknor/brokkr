@@ -1,15 +1,9 @@
 //! Implementation of the `invalidate` command - hard-delete benchmark results
 //! and their sidecar profile data by UUID prefix or commit prefix.
-//!
-//! Dry-run by default: previews which UUIDs would go, then requires `-f` to
-//! actually delete. Sidecar-only runs (dirty/failed, no results.db row) are
-//! picked up via `uuids_matching_prefix` / `uuids_matching_commit_prefix` so a
-//! single invalidate call cleans both sides.
 
-use std::collections::BTreeSet;
 use std::path::Path;
 
-use crate::db::{self, QueryFilter};
+use crate::db::{self, RunId, RunSelector, RunStore};
 use crate::error::DevError;
 use crate::output;
 use crate::resolve::{results_db_path, sidecar_db_path};
@@ -22,43 +16,28 @@ pub(crate) fn cmd_invalidate(
 ) -> Result<(), DevError> {
     // An empty prefix is `LIKE '%'` - every row in both databases, which
     // `brokkr invalidate "" -f` used to delete. Refused before anything opens.
-    if let Some(u) = uuid_prefix {
-        db::like::require_prefix(u, "uuid")?;
+    if let Some(uuid) = uuid_prefix {
+        db::like::require_prefix(uuid, "uuid")?;
     }
-    if let Some(c) = commit_prefix {
-        db::like::require_prefix(c, "commit")?;
+    if let Some(commit) = commit_prefix {
+        db::like::require_prefix(commit, "commit")?;
     }
 
-    let rdb_path = results_db_path(project_root);
-    let sdb_path = sidecar_db_path(project_root);
-
-    let rdb = if rdb_path.exists() {
-        Some(db::ResultsDb::open(&rdb_path)?)
-    } else {
-        None
-    };
-    let sdb = if sdb_path.exists() {
-        Some(db::sidecar::SidecarDb::open(&sdb_path)?)
-    } else {
-        None
-    };
-
-    if rdb.is_none() && sdb.is_none() {
+    let store = RunStore::open(
+        &results_db_path(project_root),
+        &sidecar_db_path(project_root),
+    )?;
+    if !store.has_results_db() && !store.has_sidecar_db() {
         output::result_msg("no results.db or sidecar.db found - nothing to invalidate");
         return Ok(());
     }
 
-    // Collect full target UUIDs. BTreeSet gives stable ordering + dedup.
-    let mut targets: BTreeSet<String> = BTreeSet::new();
-    let descriptor = match (uuid_prefix, commit_prefix) {
-        (Some(u), _) => {
-            collect_by_uuid_prefix(u, rdb.as_ref(), sdb.as_ref(), &mut targets)?;
-            format!("uuid prefix '{u}'")
-        }
-        (None, Some(c)) => {
-            collect_by_commit_prefix(c, rdb.as_ref(), sdb.as_ref(), &mut targets)?;
-            format!("commit prefix '{c}'")
-        }
+    let (selector, descriptor) = match (uuid_prefix, commit_prefix) {
+        (Some(uuid), _) => (RunSelector::Uuid(uuid), format!("uuid prefix '{uuid}'")),
+        (None, Some(commit)) => (
+            RunSelector::Commit(commit),
+            format!("commit prefix '{commit}'"),
+        ),
         // Clap's required_unless_present guarantees one of the two is set.
         (None, None) => {
             return Err(DevError::Config(
@@ -67,14 +46,13 @@ pub(crate) fn cmd_invalidate(
         }
     };
 
+    let targets = store.select_runs(selector)?;
     if targets.is_empty() {
         output::result_msg(&format!("no matching rows for {descriptor}"));
         return Ok(());
     }
 
-    let target_list: Vec<String> = targets.into_iter().collect();
-    preview(&target_list, rdb.as_ref(), sdb.as_ref(), &descriptor);
-
+    preview(&targets, &store, &descriptor)?;
     if !force {
         output::result_msg("dry-run - re-run with -f / --force to delete");
         return Ok(());
@@ -82,13 +60,10 @@ pub(crate) fn cmd_invalidate(
 
     let mut results_removed = 0usize;
     let mut sidecar_sessions_removed = 0usize;
-    for uuid in &target_list {
-        if let Some(ref db) = rdb {
-            results_removed += db.delete_by_uuid_prefix(uuid)?;
-        }
-        if let Some(ref db) = sdb {
-            sidecar_sessions_removed += db.delete_by_uuid_prefix(uuid)?;
-        }
+    for id in &targets {
+        let deleted = store.delete(id)?;
+        results_removed += deleted.results_rows;
+        sidecar_sessions_removed += deleted.sidecar_sessions;
     }
     output::result_msg(&format!(
         "deleted {results_removed} results row(s), {sidecar_sessions_removed} sidecar session(s)",
@@ -96,70 +71,12 @@ pub(crate) fn cmd_invalidate(
     Ok(())
 }
 
-fn collect_by_uuid_prefix(
-    uuid_prefix: &str,
-    rdb: Option<&db::ResultsDb>,
-    sdb: Option<&db::sidecar::SidecarDb>,
-    targets: &mut BTreeSet<String>,
-) -> Result<(), DevError> {
-    // Resolve sidecar latest-keys (e.g. "dirty") so the user can invalidate
-    // the last dirty/failed run by its alias.
-    let resolved = sdb
-        .map(|s| s.resolve_latest(uuid_prefix))
-        .unwrap_or_else(|| uuid_prefix.to_owned());
-
-    if let Some(db) = rdb {
-        for row in db.query_by_uuid(&resolved)? {
-            targets.insert(row.uuid);
-        }
-    }
-    if let Some(db) = sdb {
-        for uuid in db.uuids_matching_prefix(&resolved)? {
-            targets.insert(uuid);
-        }
-    }
-    Ok(())
-}
-
-fn collect_by_commit_prefix(
-    commit_prefix: &str,
-    rdb: Option<&db::ResultsDb>,
-    sdb: Option<&db::sidecar::SidecarDb>,
-    targets: &mut BTreeSet<String>,
-) -> Result<(), DevError> {
-    if let Some(db) = rdb {
-        // A single commit can produce many runs (especially for A/B sweeps).
-        // Pick a generous limit so we don't silently truncate.
-        let filter = QueryFilter {
-            commit: Some(commit_prefix.to_owned()),
-            limit: 100_000,
-            ..Default::default()
-        };
-        for row in db.query(&filter)? {
-            if !row.uuid.is_empty() {
-                targets.insert(row.uuid);
-            }
-        }
-    }
-    if let Some(db) = sdb {
-        for uuid in db.uuids_matching_commit_prefix(commit_prefix)? {
-            targets.insert(uuid);
-        }
-    }
-    Ok(())
-}
-
-fn preview(
-    uuids: &[String],
-    rdb: Option<&db::ResultsDb>,
-    sdb: Option<&db::sidecar::SidecarDb>,
-    descriptor: &str,
-) {
-    output::result_msg(&format!("{} UUID(s) match {descriptor}:", uuids.len(),));
-    for uuid in uuids {
-        let short = &uuid[..8.min(uuid.len())];
-        let results_row = rdb.and_then(|db| db.query_by_uuid(uuid).ok().and_then(|mut v| v.pop()));
-        let sidecar_present = sdb.is_some_and(|db| db.has_data(uuid));
+fn preview(ids: &[RunId], store: &RunStore, descriptor: &str) -> Result<(), DevError> {
+    output::result_msg(&format!("{} UUID(s) match {descriptor}:", ids.len()));
+    for id in ids {
+        let short = &id.as_str()[..8.min(id.as_str().len())];
+        let results_row = store.result_preview(id)?;
+        let sidecar_present = store.has_sidecar_data(id)?;
         let detail = match results_row {
             Some(row) => format!(
                 "{} {} {} (elapsed {}ms)",
@@ -177,4 +94,5 @@ fn preview(
         let sc_tag = if sidecar_present { " [+sidecar]" } else { "" };
         output::result_msg(&format!("  {short}  {detail}{sc_tag}"));
     }
+    Ok(())
 }

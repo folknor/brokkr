@@ -21,26 +21,31 @@ languages and CI integrations. `brokkr deps` is the daily-driver triage view.
 Mirrors `brokkr check`:
 
 - Phase-based. Each smell is a phase that emits zero or more events.
-- `DepsEvent` enum in `src/deps/mod.rs`, serde-tagged like `CheckEvent` in
-  `src/cargo_json.rs`.
+- `DepsEvent` enum in `src/deps/mod.rs`, serialized as type-tagged events.
 - Default output: prefixed text via `[deps]`, grouped by phase. Every
   finding prints - there is no cap and no flag to raise one.
-- `--json` emits NDJSON on stdout, one event per line. Every run ends
-  with a `summary` event listing the phases that ran plus a findings
-  count.
+- `--json` emits NDJSON on stdout, one event per line. A successful full
+  audit ends with a `summary` event; focus mode emits chain records instead.
+  `phases_run` lists only phases that completed; `findings` counts the
+  failure-driving phases. The additive `phase_outcomes` array reports each
+  phase as `ran` or `skipped`, with a `reason` field on skipped phases. The
+  array includes all eight phases. A shared-tool failure reports both
+  `outdated` and `stale` as skipped.
 - Exit code: `1` if any findings, `0` otherwise. `--no-fail` always
   exits 0 (useful for report-only CI runs).
 
-Adding a phase later: one new `DepsEvent` variant, one new module, wire
-it into `run()`, add a render arm. No changes to callers.
+Adding a phase later: add its closed `Phase` variant and event type beside the
+phase implementation, return a `PhaseOutcome`, and implement `Render` for its
+event. The phase's gating classification drives the finding count and exit
+code; `phases_run` and `phase_outcomes` come from the outcomes.
 
 ## Data source
 
-Shells out to `cargo metadata --format-version 1 --locked` (once
-unfiltered, once `--filter-platform`ed) and deserializes a minimal
-subset (packages, workspace members, resolve graph). No extra crate
-dependencies. Network phases shell out to existing tools (`ccu`
-today, `cargo audit` planned) - no native network code in brokkr.
+Runs `cargo metadata --format-version 1 --locked` twice: once unfiltered and
+once with `--filter-platform` set to the host triple from `rustc -vV`. It
+deserializes a minimal subset (packages, workspace members, resolve graph).
+No extra crate dependencies. Network phases shell out to existing tools
+(`ccu` today, `cargo audit` planned) - no native network code in brokkr.
 
 `--locked` is what makes "audits `Cargo.lock`" true: without it cargo
 re-resolves whenever the lockfile is missing or behind a manifest,
@@ -265,6 +270,9 @@ wasm-only native bundlers (`sqlite-wasm-rs`) don't appear on a native
 host. Workspace members are skipped - first-party native code is the
 user's own choice, not a dependency smell.
 
+The `reason` field is computed from `links` and `toolchains`; it remains in
+the JSON event for existing consumers.
+
 Informational, like `outdated`/`stale`: native code is a portability /
 cross-compile / supply-chain heads-up, not a defect, so it doesn't
 drive the exit code.
@@ -284,6 +292,9 @@ Shells out to `ccu --json` (the user's check-updates tool, pinned at
 direct dep, carrying name + installed + latest + severity
 (`patch`/`minor`/`major`) + source_file + line_number.
 
+The severity values are a closed set. An unrecognized value from ccu makes
+the response unparsable and both network phases are reported as skipped.
+
 These events are informational - they don't count toward the failure-
 counting findings tally. A patch bump shouldn't fail your build; you
 look at the report and decide.
@@ -296,23 +307,29 @@ when there is one) and, when
 ccu found nothing, prints `All direct deps are at latest on crates.io.`
 - a colleague reading "duplicate hashbrown" then asking "should I bump
 `reqwest`?" can resolve it from this section alone without running
-`cargo search`. The completeness signal relies on a marker event
-(`OutdatedComplete`) ccu emits after a successful parse so the
-renderer can distinguish "0 upgrades, checked" from "didn't check".
+`cargo search`. The summary's `phase_outcomes` now distinguishes "0 upgrades,
+checked" from "didn't check". Brokkr continues to emit the
+`OutdatedComplete` marker at the end of the ccu-derived events for existing
+NDJSON consumers.
 
 `ccu` runs under a wall-clock ceiling (`CCU_DEADLINE` in
 `src/deps/ccu.rs`) and is killed past it, so a stalled registry
 connection cannot hang `deps`. If `ccu` is missing or fails for any
-reason (offline, timed out, schema mismatch, crash), the phase emits a single `ToolMissing` event with a reason
-string and skips. Doesn't fail the run, and doesn't print the
-"all at latest" line - the `ToolMissing` event covers it.
+reason (offline, timed out, schema mismatch, crash), the phases emit one
+`ToolMissing` event and are reported as skipped. Its existing `phase: "outdated"`
+field remains; the additive `phases: ["outdated", "stale"]` lists both
+affected phases. The summary gives each skipped phase the same reason. This
+doesn't fail the run or print the "all at latest" line. The summary keeps its
+existing `phases_run` and `findings` fields, then adds `phase_outcomes`, for
+example `{"phase":"stale","status":"skipped","reason":"..."}`.
 
 ### stale [v1]
 
 Same `ccu --json` invocation as `outdated` (one network call, two
 signals). Reads each check's `latest_released_at` and emits a `Stale`
-event when the newest available version was published more than
-~8 months ago. Crosses to severity `"abandoned"` past ~2 years.
+event when the newest available version was released at least 240 days
+ago (about 8 months). Severity becomes `"abandoned"` at 730 days (about
+2 years). These closed severity values are serialized as strings.
 
 The point of looking at the latest version's age (not the installed
 version's) is to answer "is this project maintained?". A long gap on
@@ -377,7 +394,8 @@ cargo-metadata deserializer lives in `mod.rs` until it grows enough to
 warrant its own file.
 
 `src/cli/schema.rs` carries the `Command::Deps { ... }` variant. Dispatch
-lands in `src/main.rs` next to the other shared commands (not project-gated).
+lands in `src/main_parts/bootstrap.rs` next to the other shared commands
+(not project-gated).
 
 ## v1 cut
 

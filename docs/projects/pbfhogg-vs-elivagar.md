@@ -40,14 +40,15 @@ the command's `BuildKind`, not from caller-supplied params.
 pbfhogg is always one release build of the `pbfhogg-cli` main binary. Every
 command is a subcommand of that one binary.
 
-elivagar's `ElivagarCommand::build_config()` returns one of three kinds
+elivagar's `ElivagarCommand` encodes the build kind in its shape
 (`src/elivagar/commands.rs`):
 
-- **MainBinary** (`tilegen`) - release build of the elivagar binary.
-- **Example** (`pmtiles-writer` -> `bench_pmtiles`, `node-store` ->
-  `bench_node_store`) - cargo `--example` builds; the example runs its own N
-  internal iterations.
-- **NoBuild** (`planetiler`, `tilemaker`) - external Java/C++ tools,
+- **`Built(BuiltCommand::MainBinary)`** (`tilegen`) - release build of the
+  elivagar binary.
+- **`Built(BuiltCommand::Example)`** (`pmtiles-writer` -> `bench_pmtiles`,
+  `node-store` -> `bench_node_store`) - cargo `--example` builds; the example
+  runs its own N internal iterations.
+- **`External`** (`planetiler`, `tilemaker`) - external Java/C++ tools,
   auto-downloaded, no Rust build at all.
 
 ## 3. Bench harness path and timing

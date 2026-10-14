@@ -42,6 +42,8 @@ mod lock_probe {
     include!("../lock_probe.rs");
 }
 
+use lock_probe::{AuthHash, Nonce};
+
 /// The two per-user lock paths, by the same rule as the main crate's
 /// `user_dirs` (an unset or empty `$HOME` has no directory). Written out here
 /// because this bin links nothing from the brokkr crate, and `user_dirs.rs`
@@ -184,26 +186,14 @@ fn main() {
 /// republished under us. Parsed first-occurrence-wins, matching the writer's
 /// format: identity and `auth` are emitted first and byte-identical across a
 /// holder's rewrites, so a torn read cannot blend two holders' capabilities.
-fn read_auth() -> Option<String> {
+fn read_auth() -> Option<AuthHash> {
     let text = std::fs::read_to_string(user_dirs::lock_file()?).ok()?;
     for line in text.lines() {
         if let Some(v) = line.strip_prefix("auth=") {
-            return Some(v.trim().to_owned());
+            return AuthHash::parse(v.trim());
         }
     }
     None
-}
-
-/// The lock-file value for a nonce. Duplicated from `crate::hold::auth_hash`
-/// because this binary is self-contained - the package has no lib target - in
-/// the same way the `/proc` parse was duplicated from `stray.rs`. Both sides
-/// must agree byte for byte, so keep them edited together.
-fn auth_hash(nonce: &str) -> String {
-    let mut s = String::with_capacity(32);
-    for b in xxhash_rust::xxh3::xxh3_128(nonce.as_bytes()).to_be_bytes() {
-        s.push_str(&format!("{b:02x}"));
-    }
-    s
 }
 
 /// The lease this compilation holds, kept alive across `exec`.
@@ -501,7 +491,7 @@ fn decide() -> Decision {
         return Decision::Unleased("the compile lease could not be taken");
     };
 
-    let published = read_auth().unwrap_or_default();
+    let published = read_auth();
 
     // The flock is the sole authority on whether a hold exists, and it is
     // consulted *last* so it has the final word - the window between reading the
@@ -519,14 +509,14 @@ fn decide() -> Decision {
 
     // A hold is active. An empty `auth` means it is still draining and admitting
     // nobody; a non-empty one must match the capability we carry.
-    if published.is_empty() {
+    let Some(published) = published else {
         return Decision::Refused {
             lease,
             why: "a brokkr hold is starting up and is not admitting compilers yet",
         };
-    }
+    };
     match std::env::var("BROKKR_HOLD_NONCE") {
-        Ok(nonce) if !nonce.is_empty() && auth_hash(&nonce) == published => {
+        Ok(nonce) if Nonce::parse(&nonce).is_some_and(|nonce| nonce.auth_hash() == published) => {
             Decision::Admitted(lease)
         }
         Ok(_) => Decision::Refused {

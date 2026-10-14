@@ -9,7 +9,18 @@
 
 use std::collections::HashSet;
 
-use super::{CargoMetadata, PathDependencyEvent};
+use serde::Serialize;
+
+use super::CargoMetadata;
+
+#[derive(Serialize)]
+pub(super) struct PathDependencyEvent {
+    #[serde(rename = "crate")]
+    pub(super) krate: String,
+    pub(super) version: String,
+    /// Absolute path to the dep's `Cargo.toml`.
+    pub(super) manifest_path: String,
+}
 
 pub fn run(metadata: &CargoMetadata) -> Vec<PathDependencyEvent> {
     let workspace_set: HashSet<&str> = metadata

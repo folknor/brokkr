@@ -1215,41 +1215,6 @@ pub fn rustflags_target_key(rustflags: &[String]) -> Option<String> {
     Some(format!("{hash:016x}"))
 }
 
-/// The isolated target subdirectory a sweep needs, or `None` to use cargo's
-/// ordinary one.
-///
-/// Isolation exists to stop two builds that cannot share a cache from
-/// alternating in one directory and rebuilding each other. Two inputs force it:
-///
-/// - `rustflags`, which re-fingerprints every unit (the pre-existing case,
-///   whose directory name is preserved exactly so no existing tree rebuilds);
-/// - package-mode unification, which resolves a different feature graph for the
-///   same source and would otherwise thrash against every ordinary sweep on
-///   every run.
-///
-/// Pinned `selected` and `workspace` deliberately do NOT isolate. Ambient
-/// resolution is already one of those in any given repo, so isolating them
-/// would split the common cache in two for no gain - and `workspace` is what
-/// the parallel lane has always pinned into the shared dir.
-///
-/// Package mode shares ONE directory across its per-package resolutions rather
-/// than taking a directory each. The resolution boundary and the artifact
-/// boundary are not the same thing: cargo fingerprints independent invocations
-/// correctly within a shared dir, and a lane exports a single
-/// `BROKKR_TEST_BIN_DIR`, so per-package dirs would leave a multi-package lane
-/// with no one directory containing the binaries its tests spawn.
-pub fn shape_target_key(rustflags: &[String], unification: EffectiveUnification) -> Option<String> {
-    match rustflags_target_key(rustflags) {
-        // Both inputs present: the rustflags dir, qualified by the mode, so a
-        // package-mode sweep and an ordinary sweep carrying identical flags do
-        // not land in one directory.
-        Some(key) if unification.is_per_package() => Some(format!("unify-package-{key}")),
-        Some(key) => Some(key),
-        None if unification.is_per_package() => Some("unify-package".into()),
-        None => None,
-    }
-}
-
 /// `[test]` section.
 ///
 /// - `default_package` is the cargo package `brokkr test` should pass to

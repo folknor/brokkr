@@ -68,6 +68,19 @@ const PINS_FILE: &str = "pins.toml";
 
 /// Entry point for `brokkr corpus --reseed`.
 pub fn run(project_root: &Path, cfg: &PinersConfig, args: &CorpusArgs) -> Result<(), DevError> {
+    // `--force` is checked in command dispatch: without a measured mode it is
+    // rejected, and measured modes conflict with reseed before dispatch.
+    if args.no_gate {
+        return Err(DevError::Config(
+            "corpus --reseed: --no-gate only applies to a harness run.".into(),
+        ));
+    }
+    if args.profile_override.is_some() {
+        return Err(DevError::Config(
+            "corpus --reseed: --debug/--release only apply when building the harness.".into(),
+        ));
+    }
+
     if !args.keywords.is_empty() {
         return Err(DevError::Config(
             "corpus --reseed: --keyword is not supported (keywords reference \

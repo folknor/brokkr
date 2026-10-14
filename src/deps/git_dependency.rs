@@ -5,7 +5,49 @@
 //! The query string carries what the manifest asked for; the fragment is
 //! always the actual resolved commit.
 
-use super::{CargoMetadata, GitDependencyEvent, GitRef};
+use serde::Serialize;
+
+use super::CargoMetadata;
+
+#[derive(Serialize)]
+pub(super) struct GitDependencyEvent {
+    #[serde(rename = "crate")]
+    pub(super) krate: String,
+    pub(super) version: String,
+    /// Repo URL with the `git+` prefix stripped.
+    pub(super) url: String,
+    /// Ref requested by the manifest, or the default branch when no ref was
+    /// specified.
+    pub(super) requested_ref: GitRef,
+    /// Resolved commit SHA from the source URL fragment.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) resolved_rev: Option<String>,
+    /// Compatibility field retained for existing NDJSON consumers. This has
+    /// the old `rev` meaning: the resolved fragment, falling back to a
+    /// requested `?rev=` when Cargo supplied no fragment.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) rev: Option<String>,
+    /// Compatibility field retained for existing NDJSON consumers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) branch: Option<String>,
+    /// Compatibility field retained for existing NDJSON consumers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) tag: Option<String>,
+}
+
+/// A requested Git ref, distinct from the commit Cargo resolved.
+#[derive(Serialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+pub(super) enum GitRef {
+    /// A branch name from `?branch=...`.
+    Branch(String),
+    /// A tag name from `?tag=...`.
+    Tag(String),
+    /// A revision from `?rev=...`.
+    Rev(String),
+    /// No branch, tag, or revision was specified.
+    DefaultBranch,
+}
 
 pub fn run(metadata: &CargoMetadata) -> Vec<GitDependencyEvent> {
     let mut events = Vec::new();

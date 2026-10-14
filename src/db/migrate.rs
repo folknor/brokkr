@@ -2166,7 +2166,15 @@ mod tests {
         }
         assert!(has_column(&db.conn, "run_iterations", "elapsed_us"));
 
-        let rows = db.query_by_uuid("oldrow01").unwrap();
+        let (rows, _) = db
+            .query_by_run_ids(
+                &[crate::db::RunId::new("oldrow01".to_owned())],
+                &crate::db::QueryFilter {
+                    limit: 100,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
         assert_eq!(rows.len(), 1);
         let dist = rows[0]
             .distribution

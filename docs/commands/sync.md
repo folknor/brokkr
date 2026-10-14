@@ -43,8 +43,8 @@ fixture to `<fixtures_dir>/<NAME>.toml` or `<fixtures_dir>/<NAME>.lua`
 (whichever exists; both is an error - pass the name with its extension to
 disambiguate), spawns sæhrimnir with `--fixture <PATH> --readiness-file
 .brokkr/ratatoskr/mock/readiness` and stdio inherited so logs land live, polls
-(50ms cadence, 10s budget) for the readiness sentinel, parses the five-line
-`<NAME> <port>` content via `parse_sentinel`, prints the per-protocol
+(50ms cadence, 10s budget) for the readiness sentinel, parses the
+`<NAME> <port>` content (one line per protocol) via `parse_sentinel`, prints the per-protocol
 HTTP/host:port endpoints, then loops until SIGINT/SIGTERM. On signal: SIGTERM
 the child, grant 1.5s, escalate to SIGKILL. If sæhrimnir exits before writing
 the sentinel (fixture-validation error, port-in-use, etc.) the spawn-side
@@ -128,9 +128,10 @@ mock_server_binary`, and `[ratatoskr] fixtures_dir`, parses the script's
 `-- fixture: <NAME>` frontmatter, acquires the lockfile, builds the harness
 sweep, allocates `.brokkr/ratatoskr/sync/<test>/run-N/` with `harness/` and
 `mock/` subdirs, spawns sæhrimnir with `--fixture <PATH> --readiness-file
-mock/readiness` (its stderr piped to `mock/stderr.log`), parses the readiness
-sentinel for per-protocol ports, then spawns `<harness binary> --test-harness
-<SCRIPT>` with `BROKKR_HARNESS_ARTEFACT_DIR` and `BROKKR_TEST_BIN_DIR` set
+mock/readiness` (its stderr piped to `mock/stderr.log`), parses the
+readiness sentinel for per-protocol ports, then spawns `<harness binary>
+--test-harness <SCRIPT>` with `BROKKR_HARNESS_ARTEFACT_DIR` and
+`BROKKR_TEST_BIN_DIR` set
 plus one `RATATOSKR_TEST_<PROTO>_ENDPOINT` per protocol whose env-var spelling
 is configured under `[ratatoskr]` (HTTP origins for
 jmap/graph/gmail/caldav/carddav/people/gcal, `host:port` for imap/smtp).

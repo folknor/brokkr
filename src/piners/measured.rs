@@ -26,7 +26,7 @@ use crate::harness::{self, BenchConfig};
 use crate::measure::{MeasureMode, MeasureRequest};
 use crate::output;
 use crate::piners::cmd::CorpusArgs;
-use crate::piners::integrity::{self, HarnessEnd, Policy, Verdict};
+use crate::piners::integrity::{self, HarnessEnd};
 use crate::piners::manifest::Manifest;
 use crate::piners::registry::{self, Registry};
 use crate::piners::select::{self, SelectArgs};
@@ -134,17 +134,7 @@ pub(crate) fn run(req: &MeasureRequest, args: &CorpusArgs) -> Result<(), DevErro
         .features
         .push(harness::hotpath_feature(alloc).to_owned());
 
-    let ctx = BenchContext::with_build_config(
-        req.dev_config,
-        req.project,
-        req.project_root,
-        req.build_root,
-        &build_cfg,
-        lock_command,
-        req.force,
-        req.stop_marker.map(str::to_owned),
-    )?
-    .with_request(req);
+    let ctx = BenchContext::with_build_config_for_request(req, &build_cfg, lock_command)?;
 
     // Manifest into the bench scratch dir. The harness writes its (ignored)
     // NDJSON there via BROKKR_HARNESS_ARTEFACT_DIR, and run_hotpath_capture
@@ -255,10 +245,9 @@ fn check_iteration(
     stderr: &[u8],
 ) -> Result<(), DevError> {
     let a = integrity::assess(ids, stdout, end, false);
-    let why = match a.verdict(Policy::Measured) {
-        Verdict::Measured(Ok(())) => return Ok(()),
-        Verdict::Measured(Err(why)) => why,
-        _ => unreachable!("measured policy returns a measured verdict"),
+    let why = match a.measured_verdict() {
+        Ok(()) => return Ok(()),
+        Err(why) => why,
     };
     output::corpus_msg(&format!("iteration {iteration}: {why}"));
     for line in a.detail_lines().into_iter().chain(a.context_lines()) {

@@ -1052,54 +1052,46 @@ fn evaluate_against_baseline(
         .ok_or_else(|| {
             missing_baseline_error(db, gate_name, hostname, baseline_uuid, current_uuid)
         })?;
-    if baseline_entry.gate_name != gate_name {
-        return Err(DevError::Config(format!(
-            "gate `{gate_name}`: baseline row's gate is `{}` (mismatch)",
-            baseline_entry.gate_name
-        )));
-    }
-    if baseline_entry.script != current_row.script {
-        return Err(DevError::Config(format!(
-            "gate `{gate_name}`: baseline script `{}` != current `{}`",
-            baseline_entry.script, current_row.script
-        )));
-    }
-    if baseline_entry.fixture != current_row.fixture {
-        return Err(DevError::Config(format!(
-            "gate `{gate_name}`: baseline fixture `{}` != current `{}`",
-            baseline_entry.fixture, current_row.fixture
-        )));
-    }
-    // A debug build is several times slower than release, so comparing
-    // across profiles makes every timing rule meaningless in one
-    // direction or the other: a `--debug` run breaches a release
-    // baseline, and a release run against a debug baseline passes
-    // anything. Same identity check as script and fixture.
-    if baseline_entry.profile != current_row.profile {
-        return Err(DevError::Config(format!(
-            "gate `{gate_name}`: baseline was built `{}` but this run is `{}`. \
-             Re-run with the baseline's profile (--debug / --release), or pin a \
-             baseline recorded under this one.",
-            baseline_entry.profile, current_row.profile
-        )));
-    }
-    let features_unrecorded = check_features_identity(
-        gate_name,
-        baseline_entry.features.as_deref(),
-        &current_row.features,
-    )?;
-
-    let current_run = gate_eval::GateRun::from_parts(
-        current_row.elapsed_ms,
-        current_row.exit_code,
-        current_row.success,
-        serde_json::from_str(&current_row.sidecar).unwrap_or_default(),
-        serde_json::from_str(&current_row.meta).unwrap_or_default(),
+    let baseline_identity = gate_eval::GateIdentity::new(
+        baseline_entry.gate_name.clone(),
+        baseline_entry.script.clone(),
+        baseline_entry.fixture.clone(),
+        identity_profile(gate_name, "baseline", &baseline_entry.profile)?,
+        baseline_entry
+            .features
+            .as_deref()
+            .map(gate_eval::CanonicalFeatures::new),
     );
-    let baseline_run = gate_eval::GateRun::from_entry(&baseline_entry)?;
+    let current_identity = gate_eval::GateIdentity::new(
+        gate_name.to_owned(),
+        current_row.script.clone(),
+        current_row.fixture.clone(),
+        identity_profile(gate_name, "current", &current_row.profile)?,
+        Some(gate_eval::CanonicalFeatures::new(
+            current_row.features.clone(),
+        )),
+    );
+    let features_unrecorded = baseline_identity.features_unrecorded();
 
-    let outcomes = rules.evaluate(&current_run, &baseline_run)?;
-    let verdict = gate_eval::GateVerdict::from_outcomes(outcomes);
+    let verdict = match baseline_identity.mismatch(&current_identity) {
+        Some(mismatch) => gate_eval::GateVerdict::incomparable(mismatch),
+        None => {
+            let current_run = gate_eval::GateRun::from_parts(
+                current_row.elapsed_ms,
+                current_row.exit_code,
+                current_row.success,
+                serde_json::from_str(&current_row.sidecar).unwrap_or_default(),
+                serde_json::from_str(&current_row.meta).unwrap_or_default(),
+            );
+            let baseline_run = gate_eval::GateRun::from_entry(&baseline_entry)?;
+            gate_eval::GateVerdict::from_outcomes(rules.evaluate(&current_run, &baseline_run)?)
+        }
+    };
+    if let Some(mismatch) = verdict.mismatch() {
+        return Err(DevError::Config(format!(
+            "gate `{gate_name}`: {mismatch}"
+        )));
+    }
     let report = verdict.format_report();
     let label_suffix = gate
         .baseline_label
@@ -1139,45 +1131,23 @@ fn evaluate_against_baseline(
     Ok(())
 }
 
-/// Refuse a baseline built with different cargo features than this run,
-/// for the reason the profile check exists: a different feature set is a
-/// different binary, so every rule compares two programs rather than two
-/// runs of one.
-///
-/// Both sides are `canonical_features` strings, so order and list shape
-/// never read as a mismatch. Returns `Ok(true)` when the baseline row
-/// predates the features column (`None`): the build it measured is
-/// unknowable, and refusing would leave re-recording as the only way
-/// forward - which is exactly the rebase `--as-baseline` warns against,
-/// forced onto every legacy pin at once and blessing whatever the current
-/// tree measures. So a legacy baseline is compared, and the caller warns
-/// that the identity went unchecked.
-fn check_features_identity(
-    gate_name: &str,
-    baseline: Option<&str>,
-    current: &str,
-) -> Result<bool, DevError> {
-    match baseline {
-        None => Ok(true),
-        Some(b) if b == current => Ok(false),
-        Some(b) => Err(DevError::Config(format!(
-            "gate `{gate_name}`: baseline was built with {} but this run with {}. \
-             Build with the baseline's `[ratatoskr.harness] features`, or pin a \
-             baseline recorded under these.",
-            features_label(b),
-            features_label(current)
-        ))),
-    }
-}
-
 /// A canonical features string for a message: the empty string is a
 /// default-features build.
 fn features_label(canonical: &str) -> String {
-    if canonical.is_empty() {
-        "default features".to_owned()
-    } else {
-        format!("features `{canonical}`")
-    }
+    gate_eval::CanonicalFeatures::new(canonical).to_string()
+}
+
+fn identity_profile(
+    gate_name: &str,
+    row_label: &str,
+    profile: &str,
+) -> Result<CargoProfile, DevError> {
+    CargoProfile::from_db(profile).map_err(|unknown| {
+        DevError::Config(format!(
+            "gate `{gate_name}`: {row_label} row has unknown cargo profile `{}`",
+            unknown.0
+        ))
+    })
 }
 
 /// Project a `SidecarData` into a flat JSON object usable by gate
@@ -1359,20 +1329,40 @@ mod tests {
 
     #[test]
     fn features_identity_refuses_a_different_build() {
-        let err = check_features_identity("g", Some("a,b"), "a").unwrap_err();
-        let msg = err.to_string();
+        let msg = gate_identity(Some("a,b"))
+            .mismatch(&gate_identity(Some("a")))
+            .unwrap()
+            .to_string();
         assert!(msg.contains("features `a,b`"), "got: {msg}");
         assert!(msg.contains("features `a`"), "got: {msg}");
-        let err = check_features_identity("g", Some(""), "a").unwrap_err();
-        assert!(err.to_string().contains("default features"), "got: {err}");
+        let mismatch = gate_identity(Some(""))
+            .mismatch(&gate_identity(Some("a")))
+            .unwrap();
+        assert!(mismatch.to_string().contains("default features"));
     }
 
     #[test]
     fn features_identity_passes_same_and_flags_legacy() {
-        assert!(!check_features_identity("g", Some("a,b"), "a,b").unwrap());
-        assert!(!check_features_identity("g", Some(""), "").unwrap());
+        assert!(gate_identity(Some("a,b"))
+            .mismatch(&gate_identity(Some("a,b")))
+            .is_none());
+        assert!(gate_identity(Some(""))
+            .mismatch(&gate_identity(Some("")))
+            .is_none());
         // A pre-v2 row: compared, but reported as unchecked.
-        assert!(check_features_identity("g", None, "a").unwrap());
+        let legacy = gate_identity(None);
+        assert!(legacy.features_unrecorded());
+        assert!(legacy.mismatch(&gate_identity(Some("a"))).is_none());
+    }
+
+    fn gate_identity(features: Option<&str>) -> gate_eval::GateIdentity {
+        gate_eval::GateIdentity::new(
+            "g",
+            "script.lua",
+            "fixture.toml",
+            CargoProfile::Release,
+            features.map(gate_eval::CanonicalFeatures::new),
+        )
     }
 
     fn cfg_with_endpoints() -> RatatoskrConfig {
@@ -1400,17 +1390,7 @@ mod tests {
     }
 
     fn endpoints() -> Endpoints {
-        Endpoints {
-            jmap: 1001,
-            imap: 1002,
-            smtp: 1003,
-            graph: 1004,
-            gmail: 1005,
-            caldav: 1006,
-            carddav: 1009,
-            people: 1007,
-            gcal: 1008,
-        }
+        Endpoints::from_ordered([1001, 1002, 1003, 1004, 1005, 1006, 1009, 1007, 1008])
     }
 
     #[test]

@@ -136,17 +136,7 @@ pub(crate) fn cmd(req: &MeasureRequest, target: &str) -> Result<(), DevError> {
     // `--commit`) while resolving data paths and the results DB against
     // `project_root`, and takes the global lock before the `cargo metadata`
     // call so a worktree's own toolchain pin is already disarmed.
-    let ctx = BenchContext::with_build_config(
-        req.dev_config,
-        req.project,
-        req.project_root,
-        req.build_root,
-        &build_config,
-        "hotpath",
-        req.force,
-        req.stop_marker.map(str::to_owned),
-    )?
-    .with_request(req);
+    let ctx = BenchContext::with_build_config_for_request(req, &build_config, "hotpath")?;
 
     let scratch_dir = ctx.paths.scratch_dir.clone();
     run(

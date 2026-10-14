@@ -7,7 +7,13 @@ use crate::error::DevError;
 
 mod lock_probe {
     include!("lock_probe.rs");
+    // The minting side and the holder-only identities, kept out of
+    // `lock_probe.rs` because the standalone guard includes that file and
+    // only ever parses and hashes - it would carry them as dead code.
+    include!("lock_tokens.rs");
 }
+
+pub(crate) use lock_probe::{AcqId, AuthHash, Nonce, RunToken};
 
 /// Mutable lock-file state - maintained while brokkr holds the lock so
 /// `brokkr lock` (from another invocation) can see the current child PID
@@ -33,8 +39,8 @@ struct LockState {
     /// unrelated process in this one.
     boot_id: String,
     /// This acquisition's public id, naming its control socket
-    /// (`crate::lock_service`). Empty for a hold that runs no service (tests).
-    acq_id: String,
+    /// (`crate::lock_service`). `None` for a hold that runs no service (tests).
+    acq_id: Option<AcqId>,
     /// The holder's PID-namespace inode and the time-namespace inode of the
     /// thread that read `starttime`. A reader compares both with its own
     /// before trusting any recorded PID or starttime: the PID is numbered in
@@ -48,14 +54,14 @@ struct LockState {
     /// thread as you"); never an identity anything is authorised on.
     codex_thread: String,
     codex_session: String,
-    /// Hash of this acquisition's capability nonce (`crate::hold`), or empty
-    /// while the hold is still draining and has not minted one. Empty is what
+    /// Hash of this acquisition's capability nonce (`crate::hold`), or `None`
+    /// while the hold is still draining and has not minted one. `None` is what
     /// makes the drain safe: a guard that reads an empty `auth` refuses, so no
     /// long-running compile can be admitted into a window brokkr has not
     /// finished clearing. It is the anti-starvation property, obtained from the
     /// publication order rather than from a separate flag that a crashed writer
     /// could leave behind.
-    auth: String,
+    auth: Option<AuthHash>,
     /// True while this hold is waiting for earlier compilation leases to drain.
     /// Published for diagnostics only - `brokkr lock` and the wait message -
     /// so a waiter can tell "brokkr is clearing compilers" from "brokkr is
@@ -268,17 +274,18 @@ pub struct LockInfo {
     pub pid: u32,
     pub starttime: String,
     pub boot_id: String,
-    /// The holder's public acquisition id (its control socket), PID and time
-    /// namespace inodes, and advisory codex thread id. Empty when the holder did not
-    /// record them (an older brokkr) or they were unreadable.
+    /// The holder's acquisition id as read from the lock file. The service
+    /// reparses it as `AcqId` before constructing a socket path; it stays a
+    /// string here because the `brokkr lock` renderer prints it as read.
+    /// Empty when absent or unreadable.
     pub acq_id: String,
     pub pid_ns: String,
     pub time_ns: String,
     pub codex_thread: String,
-    /// The hash of the holder's capability nonce (`crate::hold`), empty while
+    /// The hash of the holder's capability nonce (`crate::hold`), `None` while
     /// it drains or when unrecorded. What a waiting descendant compares its
     /// inherited nonce against.
-    pub auth: String,
+    pub auth: Option<AuthHash>,
     pub project: String,
     pub command: String,
     pub args: String,
@@ -353,6 +360,9 @@ fn lock_path() -> Result<PathBuf, DevError> {
 /// this function directly (bench contexts, the verify harness, piners,
 /// ratatoskr) silently skipped both. A nested acquire runs neither - the
 /// outer hold already did.
+///
+/// Refusal reasons cross the string-only `DevError::Lock` boundary; a caller
+/// cannot tell a nested-holder refusal from a stop by type.
 pub fn acquire(ctx: &LockContext<'_>) -> Result<LockGuard, DevError> {
     let path = lock_path()?;
     acquire_at(&path, ctx, &HOST_EFFECTS)
@@ -498,10 +508,8 @@ fn acquire_at(
     let fd = open_lock_file(&c_path)?;
 
     let owned = unsafe { OwnedFd::from_raw_fd(fd) };
-    wait_for_flock(
-        owned.as_raw_fd(),
-        crate::hold::inherited_capability_hash().as_deref(),
-    )?;
+    let inherited = crate::hold::inherited_capability_hash();
+    wait_for_flock(owned.as_raw_fd(), inherited.as_ref())?;
     // A stop accepted while this thread waited on the flock.
     refuse_if_stopping()?;
     // The control socket exists before the drain, so a hold that is clearing
@@ -522,10 +530,7 @@ fn acquire_at(
     } else {
         None
     };
-    let acq_id = service
-        .as_ref()
-        .map(|(id, _)| id.clone())
-        .unwrap_or_default();
+    let acq_id = service.as_ref().map(|(id, _)| id.clone());
     let service = service.map(|(_, s)| s);
     // The free-space gate. After the flock, not before: the wait may have been
     // behind a `brokkr clean` that freed the space, or a build that used it.
@@ -541,7 +546,7 @@ fn acquire_at(
         state,
         nonce,
         toolchain,
-    } = drain_and_authorize(owned.as_raw_fd(), ctx, effects, &acq_id)?;
+    } = drain_and_authorize(owned.as_raw_fd(), ctx, effects, acq_id.as_ref())?;
     // A stop accepted during the drain: never authorise work after it.
     // `toolchain` drops here, restoring the moved-aside toolchain.
     refuse_if_stopping()?;
@@ -602,7 +607,7 @@ const LOCK_POLL: std::time::Duration = std::time::Duration::from_millis(100);
 /// flock, then re-reads the holder; acquisition wins over whatever stale record
 /// is on disk (a dead ancestor's flock is gone with it - the descriptor is
 /// close-on-exec). A shutdown requested while waiting ends the wait.
-fn wait_for_flock(fd: RawFd, inherited: Option<&str>) -> Result<(), DevError> {
+fn wait_for_flock(fd: RawFd, inherited: Option<&AuthHash>) -> Result<(), DevError> {
     let mut announced = false;
     loop {
         // This is acquisition, not observation: it must establish exclusive
@@ -633,8 +638,7 @@ fn wait_for_flock(fd: RawFd, inherited: Option<&str>) -> Result<(), DevError> {
         }
         let holder = read_lock_contents(fd);
         if let (Some(mine), Some(info)) = (inherited, &holder)
-            && !info.auth.is_empty()
-            && info.auth == mine
+            && info.auth.as_ref() == Some(mine)
         {
             return Err(DevError::Lock(nested_refusal(info)));
         }
@@ -722,7 +726,7 @@ pub fn status() -> Result<Option<LockInfo>, DevError> {
             pid_ns: String::new(),
             time_ns: String::new(),
             codex_thread: String::new(),
-            auth: String::new(),
+            auth: None,
             project: "unknown".into(),
             command: "unknown".into(),
             args: String::new(),
@@ -1167,7 +1171,7 @@ fn drain_and_authorize(
     fd: RawFd,
     ctx: &LockContext<'_>,
     effects: &HoldEffects,
-    acq_id: &str,
+    acq_id: Option<&AcqId>,
 ) -> Result<Authorized, DevError> {
     let mut state = build_state(ctx, acq_id);
     rewrite_from_state(fd, &state)
@@ -1175,14 +1179,14 @@ fn drain_and_authorize(
 
     let compile_lease = (effects.drain)()?;
 
-    let nonce = crate::hold::mint_nonce().ok_or_else(|| {
+    let nonce = Nonce::mint().ok_or_else(|| {
         DevError::Lock(
             "could not read /dev/urandom to mint a compilation capability; a hold that cannot \
              mint one would have every one of its own compiles refused"
                 .into(),
         )
     })?;
-    state.auth = crate::hold::auth_hash(&nonce);
+    state.auth = Some(nonce.auth_hash());
     state.draining = false;
     rewrite_from_state(fd, &state).map_err(|e| {
         DevError::Lock(format!("failed to publish the compilation capability: {e}"))
@@ -1213,7 +1217,7 @@ fn drain_and_authorize(
 /// `LockInner` exists whose `Drop` clears it".
 struct Authorized {
     state: LockState,
-    nonce: String,
+    nonce: Nonce,
     toolchain: Option<crate::toolchain::DisabledToolchain>,
 }
 
@@ -1221,7 +1225,7 @@ struct Authorized {
 /// current brokkr invocation args (argv minus `argv[0]`) so `brokkr lock`
 /// can show exactly what the user typed, plus the identity tokens readers
 /// verify before trusting the PID.
-fn build_state(ctx: &LockContext<'_>, acq_id: &str) -> LockState {
+fn build_state(ctx: &LockContext<'_>, acq_id: Option<&AcqId>) -> LockState {
     let identity = identity_of(ctx);
     LockState {
         project: identity.project,
@@ -1232,12 +1236,12 @@ fn build_state(ctx: &LockContext<'_>, acq_id: &str) -> LockState {
         // ancestor namespace the numeric path names some other process.
         starttime: self_starttime().unwrap_or_default(),
         boot_id: local_boot_id().unwrap_or_default(),
-        acq_id: acq_id.to_owned(),
+        acq_id: acq_id.cloned(),
         pid_ns: identity.pid_ns,
         time_ns: identity.time_ns,
         codex_thread: identity.codex_thread,
         codex_session: identity.codex_session,
-        auth: String::new(),
+        auth: None,
         draining: true,
         child: None,
         mocks: Vec::new(),
@@ -1413,12 +1417,12 @@ fn rewrite_from_state(fd: RawFd, state: &LockState) -> std::io::Result<()> {
         std::process::id(),
         state.starttime,
         state.boot_id,
-        state.acq_id,
+        state.acq_id.as_ref().map_or("", AcqId::as_str),
         state.pid_ns,
         state.time_ns,
         escape_value(&state.codex_thread),
         escape_value(&state.codex_session),
-        state.auth,
+        state.auth.as_ref().map_or("", AuthHash::as_str),
         u8::from(state.draining),
     );
     match &state.child {
@@ -1651,7 +1655,7 @@ fn parse_lock_contents(text: &str) -> Option<LockInfo> {
         pid_ns: raw("pid_ns").to_owned(),
         time_ns: raw("time_ns").to_owned(),
         codex_thread: escaped("codex_thread"),
-        auth: raw("auth").to_owned(),
+        auth: AuthHash::parse(raw("auth")),
         project,
         command: escaped("command"),
         args: escaped("args"),
@@ -1716,10 +1720,13 @@ mod tests {
     /// A holder on `path` publishing `auth`, as a second descriptor of this
     /// process stands in for another process: flock locks are per open file
     /// description, so the two contend exactly as two processes would.
-    fn foreign_holder(path: &Path, auth: &str) -> OwnedFd {
+    fn foreign_holder(path: &Path, auth: Option<&AuthHash>) -> OwnedFd {
         std::fs::write(
             path,
-            format!("pid=1\nproject=outer\ncommand=run\nauth={auth}\n"),
+            format!(
+                "pid=1\nproject=outer\ncommand=run\nauth={}\n",
+                auth.map_or("", AuthHash::as_str)
+            ),
         )
         .unwrap();
         let fd = open_lock_file(&path_to_cstring(path).unwrap()).unwrap();
@@ -1738,10 +1745,11 @@ mod tests {
     #[test]
     fn a_descendant_of_the_holder_refuses_instead_of_waiting() {
         let path = tmp_lock("nested_refuses");
-        let _holder = foreign_holder(&path, "abc123");
+        let auth = AuthHash::parse("0123456789abcdef0123456789abcdef").unwrap();
+        let _holder = foreign_holder(&path, Some(&auth));
         let me = waiter(&path);
         let started = std::time::Instant::now();
-        let err = wait_for_flock(me.as_raw_fd(), Some("abc123"))
+        let err = wait_for_flock(me.as_raw_fd(), Some(&auth))
             .unwrap_err()
             .to_string();
         assert!(
@@ -1760,13 +1768,15 @@ mod tests {
     #[test]
     fn an_unrelated_holder_is_waited_for() {
         let path = tmp_lock("unrelated_waits");
-        let holder = foreign_holder(&path, "theirs");
+        let their_auth = AuthHash::parse("0123456789abcdef0123456789abcdef").unwrap();
+        let my_auth = AuthHash::parse("fedcba9876543210fedcba9876543210").unwrap();
+        let holder = foreign_holder(&path, Some(&their_auth));
         let me = waiter(&path);
         let release = std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(250));
             drop(holder);
         });
-        wait_for_flock(me.as_raw_fd(), Some("mine")).unwrap();
+        wait_for_flock(me.as_raw_fd(), Some(&my_auth)).unwrap();
         release.join().unwrap();
     }
 
@@ -1775,16 +1785,17 @@ mod tests {
     #[test]
     fn an_empty_or_absent_nonce_never_reads_as_nesting() {
         let path = tmp_lock("empty_auth_waits");
-        let holder = foreign_holder(&path, "");
+        let inherited = AuthHash::parse("0123456789abcdef0123456789abcdef").unwrap();
+        let holder = foreign_holder(&path, None);
         let me = waiter(&path);
         let release = std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(150));
             drop(holder);
         });
-        wait_for_flock(me.as_raw_fd(), Some("")).unwrap();
+        wait_for_flock(me.as_raw_fd(), Some(&inherited)).unwrap();
         release.join().unwrap();
         drop(me);
-        let _holder = foreign_holder(&path, "abc");
+        let _holder = foreign_holder(&path, None);
         let me = waiter(&path);
         let path_t = path.clone();
         let release = std::thread::spawn(move || {
@@ -1860,14 +1871,18 @@ mod tests {
     fn inert_hold_leaves_the_capability_slot_alone() {
         let _serial = crate::test_scratch::process_global_lock();
         let before = crate::hold::capability();
-        crate::hold::publish_capability("sentinel");
+        let sentinel = Nonce::parse("0123456789abcdef0123456789abcdef").unwrap();
+        crate::hold::publish_capability(&sentinel);
         let path = tmp_lock("capability.lock");
         let guard = acquire_at(&path, &ctx(), &INERT).unwrap();
-        assert_eq!(crate::hold::capability().as_deref(), Some("sentinel"));
+        assert_eq!(
+            crate::hold::capability().as_ref().map(Nonce::expose),
+            Some(sentinel.expose())
+        );
         drop(guard);
         assert_eq!(
-            crate::hold::capability().as_deref(),
-            Some("sentinel"),
+            crate::hold::capability().as_ref().map(Nonce::expose),
+            Some(sentinel.expose()),
             "a hold that never published must not clear the slot on release"
         );
         match before {

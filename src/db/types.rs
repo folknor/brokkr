@@ -220,6 +220,9 @@ pub struct StoredRow {
     pub cli_args: String,
     pub brokkr_args: String,
     pub project: String,
+    /// The configured `--stop` marker, which may not have fired.
+    pub stop_marker_requested: String,
+    /// The marker that actually ended the child, empty unless `--stop` fired.
     pub stop_marker: String,
     pub kv: Vec<KvPair>,
     /// Env vars captured per `capture_env` in brokkr.toml, extracted from
@@ -417,6 +420,7 @@ mod tests {
             cli_args: String::new(),
             brokkr_args: String::new(),
             project: String::new(),
+            stop_marker_requested: String::new(),
             stop_marker: String::new(),
             kv: Vec::new(),
             captured_env: env

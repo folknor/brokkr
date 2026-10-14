@@ -4,9 +4,10 @@
 
 ## Module layout
 
-- `src/elivagar/commands.rs` - `ElivagarCommand` enum (Tilegen, PmtilesWriter,
-  NodeStore, Planetiler, Tilemaker) with `build_args()`, `build_config()`,
-  `needs_pbf()`, `output_files()`, `metadata()`.
+- `src/elivagar/commands.rs` - `ElivagarCommand` (`Built(BuiltCommand)` for
+  the main binary and the cargo examples, `External(ExternalTool)` for
+  Planetiler and Tilemaker) with `needs_pbf()`; `BuiltCommand` carries
+  `build_args()`, `metadata()`, `output_files()` and `result_command()`.
 - `src/elivagar/dispatch.rs` - exposes `run_command()`. Routes through
   run/bench/hotpath/alloc based on command enum + mode. Uses `BenchContext`
   for build+harness.
@@ -47,11 +48,13 @@ comes from `[<host>.tilegen.default]` in brokkr.toml. There are no override
 flags: either it is explicit in the block, or it is not set. See
 `docs/brokkr.toml.md` for the full key list and the ocean partition rules.
 
-`resolve_tilegen()` / `input_assertions()` (`src/elivagar/mod.rs`) resolve the
-block and the per-variant input assertions off `DevConfig`, mirroring
-`config::host_features` in resolving the hostname themselves.
-`PipelineOpts::push_args()` expands the block into argv; the maps are
-`BTreeMap`, so identical config yields byte-identical `cli_args`.
+`resolve_tilegen()` (`src/elivagar/mod.rs`) resolves the block off
+`DevConfig`, mirroring `config::host_features` in resolving the hostname
+itself. The two input assertions (`locations_on_ways`, `force_sorted`) are
+properties of the PBF, so they come from the already-resolved `pbf.<variant>`
+entry (`PipelineOpts::from_pbf_entry`) rather than a second config lookup.
+`PipelineOpts::push_args()` expands the block plus those assertions into argv;
+the maps are `BTreeMap`, so identical config yields byte-identical `cli_args`.
 
 This replaced `detect_ocean()`/`push_ocean_args()`, which stat'd `data/` for
 the two shapefiles and passed whichever existed (and never passed the

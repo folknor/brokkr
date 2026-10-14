@@ -140,35 +140,12 @@ pub(crate) fn resolve_phase_range(
     markers: &[sidecar::Marker],
     samples: &[sidecar::Sample],
 ) -> Result<(i64, i64), DevError> {
-    let final_us = samples.last().map_or(0, |s| s.timestamp_us + 1);
-
-    // Try exact match first.
-    if let Some(idx) = markers.iter().position(|m| m.name == phase) {
-        let start = markers[idx].timestamp_us;
-        let end = markers.get(idx + 1).map_or(final_us, |m| m.timestamp_us);
-        return Ok((start, end));
+    let timeline = sidecar::Timeline::new(markers, samples);
+    if let Some(range) = timeline.resolve_phase_range(phase) {
+        return Ok(range);
     }
 
-    // Try base name: phase "STAGE2" matches "STAGE2_START".
-    let start_name = format!("{phase}_START");
-    let end_name = format!("{phase}_END");
-    if let Some(start_idx) = markers.iter().position(|m| m.name == start_name) {
-        let start = markers[start_idx].timestamp_us;
-        let end = markers
-            .iter()
-            .find(|m| m.name == end_name)
-            .map_or(final_us, |m| m.timestamp_us);
-        return Ok((start, end));
-    }
-
-    // Try substring match.
-    if let Some(idx) = markers.iter().position(|m| m.name.contains(phase)) {
-        let start = markers[idx].timestamp_us;
-        let end = markers.get(idx + 1).map_or(final_us, |m| m.timestamp_us);
-        return Ok((start, end));
-    }
-
-    let available: Vec<&str> = markers.iter().map(|m| m.name.as_str()).collect();
+    let available = timeline.marker_names();
     Err(DevError::Config(format!(
         "--phase: no marker matching '{phase}'. Available: {available:?}"
     )))
@@ -640,8 +617,8 @@ pub(crate) fn print_phase_summary(
     markers: &[sidecar::Marker],
     human: bool,
 ) {
-    // Shared with `--compare`: pairs `*_START`/`*_END` into a single
-    // phase rather than treating each marker as an independent boundary.
+    // Shared with `--compare`: each marker opens a segment ending at the next
+    // marker, regardless of its name.
     let phases = build_phases(markers, samples);
     let clk_tck = clk_tck_per_second();
 
@@ -769,12 +746,8 @@ fn print_phase_summary_jsonl(
     }
 }
 
-/// Print duration between _START/_END marker pairs.
-///
-/// Matches markers by stripping the `_START`/`_END` suffix to find pairs.
-/// For unpaired markers (standalone), prints the timestamp only. JSONL by
-/// default; `human` renders the fixed-width table.
-/// Render `_START`/`_END` pair timings.
+/// Render `_START`/`_END` pair timings. Starts without a later end are open
+/// spans; markers unused by a span remain standalone points.
 ///
 /// JSONL stays one object per span - it's the machine-readable view and must
 /// remain lossless. The `--human` table collapses repeated span names into one
@@ -788,68 +761,25 @@ fn print_phase_summary_jsonl(
 /// times, looks like a high-frequency event, and would be aggregated into a
 /// single row, destroying exactly the per-run timings that view exists to show.
 pub(crate) fn print_marker_durations(markers: &[sidecar::Marker], human: bool, collapse: bool) {
-    // Build a map of base_name -> (start_us, end_us).
-    let mut pairs: Vec<(String, i64, Option<i64>)> = Vec::new();
-
-    // Index of consumed markers (to avoid double-counting).
-    let mut consumed = vec![false; markers.len()];
-
-    for (i, m) in markers.iter().enumerate() {
-        if consumed[i] {
-            continue;
-        }
-        if let Some(base) = m.name.strip_suffix("_START") {
-            consumed[i] = true;
-            let end_name = format!("{base}_END");
-            // Find the matching END.
-            let end_us = markers[i + 1..]
-                .iter()
-                .enumerate()
-                .find(|(_, m2)| m2.name == end_name)
-                .map(|(j, m2)| {
-                    consumed[i + 1 + j] = true;
-                    m2.timestamp_us
-                });
-            pairs.push((base.to_owned(), m.timestamp_us, end_us));
-        }
-    }
-
-    // Print standalone markers that weren't consumed.
-    let mut standalone: Vec<&sidecar::Marker> = Vec::new();
-    for (i, m) in markers.iter().enumerate() {
-        if !consumed[i] {
-            standalone.push(m);
-        }
-    }
+    let timeline = sidecar::Timeline::new(markers, &[]);
+    let (spans, standalone) = timeline.durations();
 
     if human {
-        print_marker_durations_human(&pairs, &standalone, collapse);
+        print_marker_durations_human(&spans, &standalone, collapse);
     } else {
-        print_marker_durations_jsonl(&pairs, &standalone);
+        print_marker_durations_jsonl(&spans, &standalone);
     }
 }
 
-fn print_marker_durations_jsonl(
-    pairs: &[(String, i64, Option<i64>)],
-    standalone: &[&sidecar::Marker],
-) {
-    for (name, start_us, end_us) in pairs {
-        let obj = match end_us {
-            Some(end) => serde_json::json!({
-                "type": "phase",
-                "name": name,
-                "start_us": start_us,
-                "end_us": end,
-                "duration_ms": (end - start_us) / 1_000,
-            }),
-            None => serde_json::json!({
-                "type": "phase",
-                "name": name,
-                "start_us": start_us,
-                "end_us": serde_json::Value::Null,
-                "duration_ms": serde_json::Value::Null,
-            }),
-        };
+fn print_marker_durations_jsonl(pairs: &[sidecar::TimelineSpan], standalone: &[&sidecar::Marker]) {
+    for span in pairs {
+        let obj = serde_json::json!({
+            "type": "phase",
+            "name": span.name,
+            "start_us": span.start_us,
+            "end_us": span.end_us,
+            "duration_ms": (span.end_us - span.start_us) / 1_000,
+        });
         println!("{obj}");
     }
     for m in standalone {
@@ -870,7 +800,7 @@ struct DurationGroups<'a> {
     singles: Vec<&'a str>,
     /// Names seen more than once - events, rendered as one aggregate row each.
     repeats: Vec<&'a str>,
-    spans: std::collections::HashMap<&'a str, Vec<(i64, Option<i64>)>>,
+    spans: std::collections::HashMap<&'a str, Vec<(i64, i64)>>,
 }
 
 /// Split span names into those seen once and those that repeat.
@@ -882,18 +812,18 @@ struct DurationGroups<'a> {
 /// Both are legitimate `_START`/`_END` pairs, so the split is on observed
 /// cardinality, not on any naming convention: nothing here knows what `WAIT_`
 /// means, and a future high-frequency span gets collapsed for free.
-fn group_duration_pairs(pairs: &[(String, i64, Option<i64>)]) -> DurationGroups<'_> {
+fn group_duration_pairs(pairs: &[sidecar::TimelineSpan]) -> DurationGroups<'_> {
     let mut order: Vec<&str> = Vec::new();
-    let mut spans: std::collections::HashMap<&str, Vec<(i64, Option<i64>)>> =
+    let mut spans: std::collections::HashMap<&str, Vec<(i64, i64)>> =
         std::collections::HashMap::new();
-    for (name, start_us, end_us) in pairs {
-        if !spans.contains_key(name.as_str()) {
-            order.push(name.as_str());
+    for span in pairs {
+        if !spans.contains_key(span.name.as_str()) {
+            order.push(span.name.as_str());
         }
         spans
-            .entry(name.as_str())
+            .entry(span.name.as_str())
             .or_default()
-            .push((*start_us, *end_us));
+            .push((span.start_us, span.end_us));
     }
     let singles: Vec<&str> = order
         .iter()
@@ -934,7 +864,6 @@ fn print_repeated_spans(groups: &DurationGroups<'_>, had_singles: bool) {
     struct Agg<'a> {
         name: &'a str,
         count: usize,
-        unpaired: usize,
         total_us: i64,
         min_us: i64,
         max_us: i64,
@@ -948,13 +877,8 @@ fn print_repeated_spans(groups: &DurationGroups<'_>, had_singles: bool) {
         let mut total_us = 0i64;
         let mut min_us = i64::MAX;
         let mut max_us = 0i64;
-        let mut unpaired = 0usize;
         for (start_us, end_us) in spans {
-            let Some(end) = end_us else {
-                unpaired += 1;
-                continue;
-            };
-            let dur_us = end - start_us;
+            let dur_us = end_us - start_us;
             total_us += dur_us;
             min_us = min_us.min(dur_us);
             max_us = max_us.max(dur_us);
@@ -962,7 +886,6 @@ fn print_repeated_spans(groups: &DurationGroups<'_>, had_singles: bool) {
         aggs.push(Agg {
             name,
             count: spans.len(),
-            unpaired,
             total_us,
             min_us: if min_us == i64::MAX { 0 } else { min_us },
             max_us,
@@ -972,12 +895,7 @@ fn print_repeated_spans(groups: &DurationGroups<'_>, had_singles: bool) {
 
     #[allow(clippy::cast_precision_loss)]
     for agg in &aggs {
-        let paired = agg.count - agg.unpaired;
-        let avg_ms = if paired == 0 {
-            0.0
-        } else {
-            agg.total_us as f64 / paired as f64 / 1_000.0
-        };
+        let avg_ms = agg.total_us as f64 / agg.count as f64 / 1_000.0;
         let label = format!("{} x{}", agg.name, agg.count);
         print!(
             "  {label:<38} total {:>9.1}ms  min {:>6.1}ms  avg {:>7.1}ms  max {:>6.1}ms",
@@ -986,30 +904,20 @@ fn print_repeated_spans(groups: &DurationGroups<'_>, had_singles: bool) {
             avg_ms,
             agg.max_us as f64 / 1_000.0
         );
-        if agg.unpaired > 0 {
-            print!("  ({} with no end)", agg.unpaired);
-        }
         println!();
     }
 }
 
 /// One `Phase / Start / End / Duration` row.
-fn print_duration_row(name: &str, start_us: i64, end_us: Option<i64>) {
+fn print_duration_row(name: &str, start_us: i64, end_us: i64) {
     let start_ms = start_us / 1_000;
-    match end_us {
-        Some(end) => {
-            let dur_ms = (end - start_us) / 1_000;
-            let end_ms = end / 1_000;
-            println!("{name:<32} {start_ms:>9}ms {end_ms:>9}ms {dur_ms:>9}ms");
-        }
-        None => {
-            println!("{name:<32} {start_ms:>9}ms {:>12} {:>12}", "(no end)", "-");
-        }
-    }
+    let dur_ms = (end_us - start_us) / 1_000;
+    let end_ms = end_us / 1_000;
+    println!("{name:<32} {start_ms:>9}ms {end_ms:>9}ms {dur_ms:>9}ms");
 }
 
 fn print_marker_durations_human(
-    pairs: &[(String, i64, Option<i64>)],
+    pairs: &[sidecar::TimelineSpan],
     standalone: &[&sidecar::Marker],
     collapse: bool,
 ) {
@@ -1041,8 +949,8 @@ fn print_marker_durations_human(
         }
         print_repeated_spans(&groups, rows_shown);
     } else {
-        for (name, start_us, end_us) in pairs {
-            print_duration_row(name, *start_us, *end_us);
+        for span in pairs {
+            print_duration_row(&span.name, span.start_us, span.end_us);
         }
     }
 
@@ -1317,43 +1225,17 @@ fn phase_stats(samples: &[sidecar::Sample], start_us: i64, end_us: i64) -> Phase
     }
 }
 
-/// Build phase boundaries from markers (or single "(all)" phase if no markers).
-/// Split the sample stream into inter-marker segments.
-///
-/// Markers are point-in-time bookmarks in the stream (see the FIFO protocol
-/// in pbfhogg's `emit_marker` - timestamp + name, nothing else). A segment
-/// runs from marker N to marker N+1; the last segment runs from the final
-/// marker to end-of-samples. The segment is labelled with the name of the
-/// marker that opens it.
-///
-/// We deliberately DON'T interpret any naming convention (`_START`/`_END`)
-/// as span structure. If you want duration between paired markers, use
-/// `print_marker_durations` (`--durations`), which is explicitly opt-in
-/// about the pairing.
+/// Build the phase-oriented projection of a marker timeline: inter-marker
+/// segments, or one `(all)` segment for a markerless sampled run.
 fn build_phases(
     markers: &[sidecar::Marker],
     samples: &[sidecar::Sample],
 ) -> Vec<(String, i64, i64)> {
-    let mut phases = Vec::new();
-    if markers.is_empty() {
-        if let (Some(first), Some(last)) = (samples.first(), samples.last()) {
-            phases.push((
-                "(all)".to_owned(),
-                first.timestamp_us,
-                last.timestamp_us + 1,
-            ));
-        }
-        return phases;
-    }
-
-    let final_us = samples.last().map_or(0, |s| s.timestamp_us + 1);
-    for (i, m) in markers.iter().enumerate() {
-        let phase_end = markers
-            .get(i + 1)
-            .map_or(final_us, |next| next.timestamp_us);
-        phases.push((m.name.clone(), m.timestamp_us, phase_end));
-    }
-    phases
+    sidecar::Timeline::new(markers, samples)
+        .segments()
+        .into_iter()
+        .map(|segment| (segment.name, segment.start_us, segment.end_us))
+        .collect()
 }
 
 /// Roll up cumulative `*_wait_ns` counters into per-category blocking time and

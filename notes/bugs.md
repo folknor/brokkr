@@ -20,20 +20,32 @@ demonstrating them.
    and they are never deduplicated through git history. Carry the context
    inline instead.
 
-## BUG-039 - pbfhogg's run path bypasses the shared run-mode dirty-tree policy
+## BUG-043 - Config tests read the developer's real user-wide config
 
-Reported by: a wave-3 fixer, laterally.
+Reported by: the wave-4 reviewer, laterally.
 
-Run mode's dirty-tree allowance now lives in `context::dirty_tree_allowed`, applied by the request-aware context constructors, and nidhogg, elivagar, mogwai and dellingr route through it. Still bypassing it, passing `req.force` or a literal `true` straight to the constructors: pbfhogg (`dispatch.rs`, `cmd.rs`), sluggrs `hotpath.rs`, piners `measured.rs` and the generic hotpath in `main_parts/commands.rs`. They behave correctly today, but a change to the rule would miss them.
+`compose()` now always folds in the machine's user-wide `brokkr.toml` (XDG-resolved, `BROKKR_USER_CONFIG` overrides), so the compose, provenance and dellingr/mogwai `config::load` fixture tests are no longer hermetic: a developer whose user config defines textlint rules can fail them. The test in `config_parts/tests.rs` that sets `BROKKR_USER_CONFIG` with `set_var` is process-global and races other tests on the parallel lane unless it holds the process-global test lock. Pass the user layer into `compose` explicitly (or give tests an override that is not the process env).
 
-## BUG-040 - A `--stop` that never fired is invisible in `brokkr results`
+## BUG-044 - *Suspected:* glob warnings may land in `check --json` stdout
 
-Reported by: the wave-3 reviewer, laterally.
+Reported by: the wave-4 reviewer, laterally.
 
-Results schema v20 stores the requested marker (`stop_marker_requested`) apart from the one that fired (`stop_marker`), but nothing reads the requested column, so a run asked to stop at X that ran to completion shows nothing in the single view (only `--grep` over `brokkr_args` finds it). Also check `ratatoskr_sync/bench_gate.rs`: it records through `record_result`, which passes no fired marker, so a `--stop` that fires there (if that path forwards `--stop` at all) records requested-but-not-fired.
+Unmatched-scope globs now warn through `output::warn`, which writes to stdout. `check --json` promises stdout carries only the trailer; confirm whether these (and the existing check warnings) are routed away under `--json`.
 
-## BUG-041 - `results` uuid views are capped by `--limit` with no notice
+## BUG-045 - *Suspected:* a legacy gate.db profile spelling blocks every gate run against it
 
-Reported by: the wave-3 reviewer, laterally.
+Reported by: the wave-4 reviewer, laterally.
 
-`--compare` now prints how many pairs the cap cut; a uuid-prefix lookup is cut at the same default of 20 silently.
+The ratatoskr gate identity now refuses a baseline row whose profile string `CargoProfile::from_db` cannot parse. Earlier code stored `"debug"`/`"release"`; if any older row holds another spelling, every gate run against that baseline becomes incomparable. Check what existing `gate.db` rows hold and accept the legacy spellings if needed.
+
+## BUG-046 - The results v20 backfill has no migration test
+
+Reported by: the wave-4 reviewer, laterally.
+
+`migrate_v19_to_v20` copies `stop_marker` into `stop_marker_requested` and clears the fired column; no test asserts that on a pre-v20 database.
+
+## BUG-042 - `brokkr env` parses the user config itself and hides parse errors
+
+Reported by: a wave-4 fixer, laterally.
+
+The user layer now composes beneath project includes (so a user rule can reference a project preset), but `env.rs`'s `user cfg:` line still parses the user file on its own and swallows errors. A valid user rule that names a project preset fails that private parse, and the line then reports the layer as absent. It should report from the same composed load the rest of brokkr uses.

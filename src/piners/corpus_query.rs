@@ -38,6 +38,8 @@ use crate::request::CorpusQuery;
 use crate::resolve::corpus_runs_db_path;
 
 pub fn cmd(project_root: &Path, q: &CorpusQuery) -> Result<(), DevError> {
+    validate_query(q)?;
+
     let db_path = corpus_runs_db_path(project_root);
     if !db_path.exists() {
         // A view naming a run (compare, `<id>`, `--run`) asked for one that
@@ -56,32 +58,6 @@ pub fn cmd(project_root: &Path, q: &CorpusQuery) -> Result<(), DevError> {
         let comparison = db.compare_runs(a, b)?;
         println!("{}", corpus_db::compare_report(&comparison, q.full));
         return Ok(());
-    }
-
-    // `--columns`/`--where` only shape the `--diffs`/`--dispositions` tables;
-    // refuse them anywhere else rather than silently ignore them, and refuse
-    // the two table flags beside a view that would ignore them.
-    let shaped = if q.diffs {
-        Some(Shaped::Diffs)
-    } else if q.dispositions {
-        Some(Shaped::Dispositions)
-    } else {
-        None
-    };
-    let other_view = q.sql.is_some() || q.runtimes || q.trend.is_some();
-    if shaped.is_none() && (!q.columns.is_empty() || q.where_expr.is_some()) {
-        return Err(DevError::Config(
-            "corpus-results --columns/--where shape the --diffs or --dispositions table - \
-             add one (e.g. `--diffs --probe <id> --columns our_qty,tv_entry_qty`)"
-                .to_owned(),
-        ));
-    }
-    if shaped.is_some() && other_view {
-        return Err(DevError::Config(
-            "corpus-results --diffs/--dispositions is its own view; it cannot be combined \
-             with --sql, --runtimes or --trend"
-                .to_owned(),
-        ));
     }
 
     // --sql escape hatch (read-only, SELECT/WITH only).
@@ -108,6 +84,14 @@ pub fn cmd(project_root: &Path, q: &CorpusQuery) -> Result<(), DevError> {
         println!("{}", corpus_db::trend_table(&rows));
         return Ok(());
     }
+
+    let shaped = if q.diffs {
+        Some(Shaped::Diffs)
+    } else if q.dispositions {
+        Some(Shaped::Dispositions)
+    } else {
+        None
+    };
 
     // --diffs / --dispositions [--probe ...] [--columns ...] [--where E]: a
     // shapeable table across the selected/latest run. `--probe` here is an
@@ -170,6 +154,100 @@ fn explicit_run_id(q: &CorpusQuery) -> Result<Option<i64>, DevError> {
     // `--run` and the bare positional are equivalent; prefer the flag. clap
     // already rejects a non-numeric positional, so there is no parse path here.
     Ok(q.run.or(q.run_id))
+}
+
+/// Reject options that would otherwise be accepted and silently ignored by a
+/// higher-priority corpus-results view.
+fn validate_query(q: &CorpusQuery) -> Result<(), DevError> {
+    let shaped = q.diffs || q.dispositions;
+
+    if q.over.is_some() && !q.runtimes {
+        return Err(DevError::Config(
+            "corpus-results --over requires --runtimes.".to_owned(),
+        ));
+    }
+    // `--columns` and `--where` shape either table view. In particular,
+    // `--columns` with --dispositions is supported even without --diffs.
+    if !shaped && (!q.columns.is_empty() || q.where_expr.is_some()) {
+        return Err(DevError::Config(
+            "corpus-results --columns/--where shape the --diffs or --dispositions table - \
+             add one (e.g. `--diffs --probe <id> --columns our_qty,tv_entry_qty`)"
+                .to_owned(),
+        ));
+    }
+
+    let sql_conflict = q.run_id.is_some()
+        || q.run.is_some()
+        || !q.probe.is_empty()
+        || q.diffs
+        || q.dispositions
+        || !q.columns.is_empty()
+        || q.runtimes
+        || q.over.is_some()
+        || q.trend.is_some()
+        || q.where_expr.is_some()
+        || q.full
+        || q.compare.is_some();
+    if q.sql.is_some() && sql_conflict {
+        return Err(DevError::Config(
+            "corpus-results --sql is a standalone view and cannot be combined with other view flags."
+                .to_owned(),
+        ));
+    }
+
+    let trend_conflict = q.run_id.is_some()
+        || q.run.is_some()
+        || !q.probe.is_empty()
+        || q.diffs
+        || q.dispositions
+        || !q.columns.is_empty()
+        || q.runtimes
+        || q.over.is_some()
+        || q.where_expr.is_some()
+        || q.full
+        || q.compare.is_some();
+    if q.trend.is_some() && trend_conflict {
+        return Err(DevError::Config(
+            "corpus-results --trend is a standalone view and cannot be combined with other view flags."
+                .to_owned(),
+        ));
+    }
+
+    let runtimes_conflict = q.run_id.is_some()
+        || q.run.is_some()
+        || !q.probe.is_empty()
+        || q.diffs
+        || q.dispositions
+        || !q.columns.is_empty()
+        || q.where_expr.is_some()
+        || q.full
+        || q.compare.is_some();
+    if q.runtimes && runtimes_conflict {
+        return Err(DevError::Config(
+            "corpus-results --runtimes cannot be combined with run-detail, probe, or table-view flags."
+                .to_owned(),
+        ));
+    }
+
+    if shaped && (q.full || q.compare.is_some()) {
+        return Err(DevError::Config(
+            "corpus-results --full/--compare cannot be combined with --diffs or --dispositions."
+                .to_owned(),
+        ));
+    }
+    if !q.probe.is_empty() && !shaped && q.full {
+        return Err(DevError::Config(
+            "corpus-results --full applies to run detail, not the single-probe combo view."
+                .to_owned(),
+        ));
+    }
+    if q.full && q.run_id.is_none() && q.run.is_none() && q.compare.is_none() {
+        return Err(DevError::Config(
+            "corpus-results --full requires a run id (or --compare).".to_owned(),
+        ));
+    }
+
+    Ok(())
 }
 
 /// The explicit run id if given, else the latest recorded run.

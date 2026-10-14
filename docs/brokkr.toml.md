@@ -79,18 +79,22 @@ silently ignoring it.
 
 `[[textlint]]` `paths` globs and `[[script_check]]` commands are interpreted
 against each project's own tree, exactly as if the entry had been written in
-that project's config. Presets are resolved within the file that defines them:
-a user preset serves user rules, and is dead - an error - if it serves none.
+that project's config. Presets resolve after all config layers are composed,
+so a user rule can use a project preset and a project rule can use a user
+preset. A preset not referenced by any composed rule is an error, except a
+user-only preset whose last referencing rule a project shadowed: that one is
+dropped, so the shadowing opt-out below never fails the load. A project rule
+that uses a user preset only loads on machines that have the user config.
 
-**Merging.** User entries run first, project entries after. Shadowing is by
-`name`: a project entry that reuses a user entry's name replaces it outright.
-That is the opt-out - a project that must not run a personal rule redefines it
-under the same name, rather than needing a suppression syntax nobody would
-remember.
+**Merging.** The user file is the lowest-precedence config layer. Its entries
+run first, followed by included project files and the project's own file.
+Shadowing is by `name`: a higher layer that reuses a lower entry's name
+replaces it outright. That is the opt-out - a project that must not run a
+personal rule redefines it under the same name, rather than needing a
+suppression syntax nobody would remember.
 
-The layer is applied at project detection, not when a `brokkr.toml` is parsed,
-so parsing a config file yields that file and nothing from the machine it runs
-on.
+The layer is composed before config sections are parsed, so named entries and
+presets resolve across the same complete config.
 
 **Trees with no `brokkr.toml` at all.** `check` runs in any Rust+git repo, and
 the user-wide layer reaches those too - it is not about this project, and a repo
@@ -446,7 +450,13 @@ pattern = "Copyright (C) 2015-{year}"
 exempt = ["**/examples/**", "**/core/rust/**"]
 ```
 
-`paths`/`exempt` are globs (`**` matches any directories). The header is
+`paths`/`exempt` are globs (`**` matches any directories; a single `*` stays
+within one path component, so `src/*.rs` does not reach `src/a/b.rs`). The
+same glob rules hold for `[[textlint]]` and `[manifest]`. A glob in any of
+these lists that matches no tracked path in its scope is printed as a warning
+on every run but does not fail the check: an exclusion may legitimately guard
+a file that is absent today, and a user-wide rule names paths most trees lack.
+The header is
 matched as bytes, so a file that is not valid UTF-8 is judged on its content
 like any other rather than skipped. The current year
 comes from libc `gmtime` (no date-crate dependency). Ported from

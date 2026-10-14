@@ -3,7 +3,7 @@
 //! Builds nothing itself (the caller hands in the binary) and measures the
 //! same way `brokkr tilegen --bench` does (`dispatch::run_elivagar_wallclock`):
 //! brokkr's own best-of-N external wall-clock via `run_external_ok`, with the
-//! argv built by the same `ElivagarCommand::Tilegen::build_args`. tilegen
+//! argv built by the same `BuiltCommand::MainBinary::build_args` path. tilegen
 //! emits its metrics as FIFO counters (sidecar.db) as of the elivagar side's
 //! 54f9b07 and no longer prints `elapsed_ms=` on stderr, so the old
 //! `run_external_with_kv_raw` path - which requires that line - failed this
@@ -15,7 +15,7 @@ use crate::error::DevError;
 use crate::harness::{BenchConfig, BenchHarness};
 use crate::output;
 
-use super::commands::ElivagarCommand;
+use super::commands::BuiltCommand;
 
 // ---------------------------------------------------------------------------
 // Public entry point
@@ -32,6 +32,7 @@ pub fn run(
     scratch_dir: &Path,
     project_root: &Path,
     skip_to: Option<&str>,
+    tilegen: &crate::config::TilegenConfig,
     opts: &super::PipelineOpts,
 ) -> Result<(), DevError> {
     let pbf_str = pbf_path
@@ -44,8 +45,8 @@ pub fn run(
         .unwrap_or_default()
         .to_owned();
 
-    let command = ElivagarCommand::Tilegen { opts, skip_to };
-    let args = command.build_args(pbf_str, scratch_dir, data_dir)?;
+    let command = BuiltCommand::MainBinary { tilegen, skip_to };
+    let args = command.build_args(pbf_str, scratch_dir, data_dir, Some(opts))?;
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
 
     output::bench_msg(&format!(

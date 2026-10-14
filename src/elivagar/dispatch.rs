@@ -3,13 +3,14 @@
 use crate::context::BenchContext;
 use crate::db::KvPair;
 use crate::elivagar;
-use crate::elivagar::commands::ElivagarCommand;
+use crate::elivagar::PipelineOpts;
+use crate::elivagar::commands::{BuiltCommand, ElivagarCommand, ExampleCommand, ExternalTool};
 use crate::error::DevError;
 use crate::harness::{self, BenchConfig};
 use crate::measure::{MeasureMode, MeasureRequest};
 use crate::output;
 use crate::project::{self, Project};
-use crate::resolve::resolve_pbf_with_size;
+use crate::resolve::resolve_pbf_entry;
 
 /// Run an elivagar command with the specified measurement mode.
 ///
@@ -23,17 +24,15 @@ pub(crate) fn run_command(req: &MeasureRequest, command: &ElivagarCommand) -> Re
         return run_elivagar_dry_run(req, command);
     }
 
-    // External tools (Planetiler, Tilemaker) keep their old dispatch path.
-    if command.is_external() {
-        return run_elivagar_external(req, command);
-    }
-
-    match req.mode {
-        MeasureMode::Run => run_elivagar_run(req, command),
-        MeasureMode::Bench { .. } => run_elivagar_bench(req, command),
-        MeasureMode::Hotpath { .. } | MeasureMode::Alloc { .. } => {
-            run_elivagar_hotpath(req, command)
-        }
+    match command {
+        ElivagarCommand::External(tool) => run_elivagar_external(req, tool),
+        ElivagarCommand::Built(command) => match req.mode {
+            MeasureMode::Run => run_elivagar_run(req, command),
+            MeasureMode::Bench { .. } => run_elivagar_bench(req, command),
+            MeasureMode::Hotpath { .. } | MeasureMode::Alloc { .. } => {
+                run_elivagar_hotpath(req, command)
+            }
+        },
     }
 }
 
@@ -55,11 +54,16 @@ fn run_elivagar_dry_run(req: &MeasureRequest, command: &ElivagarCommand) -> Resu
     let paths = crate::context::bootstrap_config(req.dev_config, req.project_root, &pi.target_dir)?;
 
     // Resolve + report the input PBF for commands that need one.
-    let pbf_str = if command.needs_pbf() {
-        let (pbf_path, file_mb) =
-            resolve_pbf_with_size(req.dataset, req.variant, &paths, req.project_root)?;
-        output::dry_run_msg(&format!("pbf: {} ({file_mb:.0} MB)", pbf_path.display()));
-        pbf_path
+    let pbf = if command.needs_pbf() {
+        let pbf = resolve_pbf_entry(req.dataset, req.variant, &paths, req.project_root)?;
+        let file_mb = crate::resolve::file_size_mb(&pbf.path)?;
+        output::dry_run_msg(&format!("pbf: {} ({file_mb:.0} MB)", pbf.path.display()));
+        Some(pbf)
+    } else {
+        None
+    };
+    let pbf_str = if let Some(pbf) = &pbf {
+        pbf.path
             .to_str()
             .ok_or_else(|| DevError::Config("PBF path is not valid UTF-8".into()))?
             .to_owned()
@@ -67,33 +71,36 @@ fn run_elivagar_dry_run(req: &MeasureRequest, command: &ElivagarCommand) -> Resu
         String::new()
     };
 
-    // External tools construct their own argv elsewhere; there's nothing to
-    // validate here beyond the resolved input.
-    if command.is_external() {
-        output::dry_run_msg(&format!(
-            "{} is an external tool (no Rust build)",
-            command.id()
-        ));
-        output::dry_run_msg("ok");
-        return Ok(());
+    match command {
+        // External tools construct argv in their own handlers, so there is
+        // nothing to validate here beyond the resolved input.
+        ElivagarCommand::External(_) => {
+            output::dry_run_msg(&format!(
+                "{} is an external tool (no Rust build)",
+                command.id()
+            ));
+            output::dry_run_msg("ok");
+            Ok(())
+        }
+        ElivagarCommand::Built(command) => {
+            // Construct the arg vector (catches any build_args failures).
+            let opts = pbf.as_ref().map(|p| PipelineOpts::from_pbf_entry(p.entry));
+            let args =
+                command.build_args(&pbf_str, &paths.scratch_dir, &paths.data_dir, opts.as_ref())?;
+            output::dry_run_msg(&format!("{} args: {}", command.id(), args.join(" ")));
+            output::dry_run_msg("ok");
+            Ok(())
+        }
     }
-
-    // Construct the arg vector (catches any build_args failures).
-    let args = command.build_args(&pbf_str, &paths.scratch_dir, &paths.data_dir)?;
-    output::dry_run_msg(&format!("{} args: {}", command.id(), args.join(" ")));
-    output::dry_run_msg("ok");
-    Ok(())
 }
 
 /// Elivagar run mode: build, run once, print timing. No DB storage.
 ///
-/// Uses `ElivagarCommand::build_config()` to determine build type and
-/// `ElivagarCommand::build_args()` for argument construction.
-fn run_elivagar_run(req: &MeasureRequest, command: &ElivagarCommand) -> Result<(), DevError> {
-    use crate::elivagar::commands::BuildKind;
-
-    match command.build_config() {
-        BuildKind::MainBinary => {
+/// The `BuiltCommand` variant determines whether this builds the main binary
+/// or a cargo example.
+fn run_elivagar_run(req: &MeasureRequest, command: &BuiltCommand<'_>) -> Result<(), DevError> {
+    match command {
+        BuiltCommand::MainBinary { .. } => {
             let feat_refs: Vec<&str> = req.features.iter().map(String::as_str).collect();
             let ctx = BenchContext::new_for_request(
                 req,
@@ -103,17 +110,18 @@ fn run_elivagar_run(req: &MeasureRequest, command: &ElivagarCommand) -> Result<(
                 &format!("run {}", command.id()),
             )?;
 
-            let pbf_str = if command.needs_pbf() {
-                let (p, _) =
-                    resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
-                p.to_str()
-                    .ok_or_else(|| DevError::Config("PBF path is not valid UTF-8".into()))?
-                    .to_owned()
-            } else {
-                String::new()
-            };
-
-            let args = command.build_args(&pbf_str, &ctx.paths.scratch_dir, &ctx.paths.data_dir)?;
+            let pbf = resolve_pbf_entry(req.dataset, req.variant, &ctx.paths, req.project_root)?;
+            let pbf_str = pbf
+                .path
+                .to_str()
+                .ok_or_else(|| DevError::Config("PBF path is not valid UTF-8".into()))?;
+            let opts = PipelineOpts::from_pbf_entry(pbf.entry);
+            let args = command.build_args(
+                pbf_str,
+                &ctx.paths.scratch_dir,
+                &ctx.paths.data_dir,
+                Some(&opts),
+            )?;
             let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
 
             let binary_str = ctx.binary.display().to_string();
@@ -143,7 +151,7 @@ fn run_elivagar_run(req: &MeasureRequest, command: &ElivagarCommand) -> Result<(
             output::run_msg(&format!("elapsed={ms}ms"));
             Ok(())
         }
-        BuildKind::Example(example) => {
+        BuiltCommand::Example(example) => {
             // No BenchContext on this path, so nothing else takes the lock:
             // take it here, before the build. It used to run unlocked, which
             // `cargo_build` now refuses - an unlocked build competes with a
@@ -158,7 +166,7 @@ fn run_elivagar_run(req: &MeasureRequest, command: &ElivagarCommand) -> Result<(
                 &crate::build::BuildConfig {
                     package: None,
                     bin: None,
-                    example: Some(example.into()),
+                    example: Some(example.cargo_example().into()),
                     features: vec![],
                     default_features: true,
                     all_features: false,
@@ -169,7 +177,7 @@ fn run_elivagar_run(req: &MeasureRequest, command: &ElivagarCommand) -> Result<(
             let binary_str = binary.display().to_string();
 
             let args =
-                command.build_args("", std::path::Path::new(""), std::path::Path::new(""))?;
+                command.build_args("", std::path::Path::new(""), std::path::Path::new(""), None)?;
             let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
 
             output::run_msg(&format!("{binary_str} {}", arg_refs.join(" ")));
@@ -186,29 +194,18 @@ fn run_elivagar_run(req: &MeasureRequest, command: &ElivagarCommand) -> Result<(
             output::run_msg(&format!("elapsed={ms}ms"));
             Ok(())
         }
-        BuildKind::NoBuild => Err(DevError::Config(format!(
-            "command '{}' does not support run mode",
-            command.id(),
-        ))),
     }
 }
 
 /// Elivagar bench mode: full harness with DB storage.
 ///
-/// Uses `ElivagarCommand::build_config()` to determine how to build and
-/// `ElivagarCommand::build_args()` to get the argument vector. Tilegen uses
+/// The `BuiltCommand` variant determines how to build. Tilegen uses
 /// `run_external_ok` (brokkr's own external wall-clock, pbfhogg-style);
 /// micro-benchmarks use `run_internal` (examples handle their own iteration).
-fn run_elivagar_bench(req: &MeasureRequest, command: &ElivagarCommand) -> Result<(), DevError> {
-    use crate::elivagar::commands::BuildKind;
-
-    match command.build_config() {
-        BuildKind::MainBinary => run_elivagar_wallclock(req, command),
-        BuildKind::Example(_) => run_elivagar_internal(req, command),
-        BuildKind::NoBuild => Err(DevError::Config(format!(
-            "command '{}' does not support bench mode via this path",
-            command.id(),
-        ))),
+fn run_elivagar_bench(req: &MeasureRequest, command: &BuiltCommand<'_>) -> Result<(), DevError> {
+    match command {
+        BuiltCommand::MainBinary { .. } => run_elivagar_wallclock(req, command),
+        BuiltCommand::Example(example) => run_elivagar_internal(req, example),
     }
 }
 
@@ -220,7 +217,10 @@ fn run_elivagar_bench(req: &MeasureRequest, command: &ElivagarCommand) -> Result
 /// so brokkr no longer reads stderr: there is no `elapsed_ms=` contract, and
 /// runs are distinguished purely by their recorded `cli_args` (the
 /// `--locations-on-ways` flag lands in the subprocess argv when passed).
-fn run_elivagar_wallclock(req: &MeasureRequest, command: &ElivagarCommand) -> Result<(), DevError> {
+fn run_elivagar_wallclock(
+    req: &MeasureRequest,
+    command: &BuiltCommand<'_>,
+) -> Result<(), DevError> {
     let feat_refs: Vec<&str> = req.features.iter().map(String::as_str).collect();
     let ctx = BenchContext::new_for_request(
         req,
@@ -230,11 +230,9 @@ fn run_elivagar_wallclock(req: &MeasureRequest, command: &ElivagarCommand) -> Re
         &format!("bench {}", command.id()),
     )?;
 
-    let (pbf_path, file_mb) = if command.needs_pbf() {
-        resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?
-    } else {
-        (std::path::PathBuf::new(), 0.0)
-    };
+    let pbf = resolve_pbf_entry(req.dataset, req.variant, &ctx.paths, req.project_root)?;
+    let pbf_path = pbf.path;
+    let file_mb = crate::resolve::file_size_mb(&pbf_path)?;
     let pbf_str = pbf_path
         .to_str()
         .ok_or_else(|| DevError::Config("PBF path is not valid UTF-8".into()))?;
@@ -245,7 +243,13 @@ fn run_elivagar_wallclock(req: &MeasureRequest, command: &ElivagarCommand) -> Re
         .unwrap_or_default()
         .to_owned();
 
-    let args = command.build_args(pbf_str, &ctx.paths.scratch_dir, &ctx.paths.data_dir)?;
+    let opts = PipelineOpts::from_pbf_entry(pbf.entry);
+    let args = command.build_args(
+        pbf_str,
+        &ctx.paths.scratch_dir,
+        &ctx.paths.data_dir,
+        Some(&opts),
+    )?;
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
 
     output::bench_msg(&format!(
@@ -257,16 +261,8 @@ fn run_elivagar_wallclock(req: &MeasureRequest, command: &ElivagarCommand) -> Re
     let bench_config = BenchConfig {
         command: command.result_command().into(),
         mode: None,
-        input_file: if command.needs_pbf() {
-            Some(basename)
-        } else {
-            None
-        },
-        input_mb: if command.needs_pbf() {
-            Some(file_mb)
-        } else {
-            None
-        },
+        input_file: Some(basename),
+        input_mb: Some(file_mb),
         cargo_features: None,
         cargo_profile: crate::build::CargoProfile::Release,
         runs: req.runs(),
@@ -304,29 +300,25 @@ fn run_elivagar_wallclock(req: &MeasureRequest, command: &ElivagarCommand) -> Re
 /// The harness does 1 external run while the example does `req.runs()`
 /// internal runs - this path used to hard-code `--runs 1` while printing
 /// "N run(s)", and recorded no values at all.
-fn run_elivagar_internal(req: &MeasureRequest, command: &ElivagarCommand) -> Result<(), DevError> {
+fn run_elivagar_internal(req: &MeasureRequest, command: &ExampleCommand) -> Result<(), DevError> {
     use crate::context::HarnessContext;
 
     let ctx = HarnessContext::new_for_request(req, &format!("bench {}", command.id()))?;
 
     let build_root = req.build_root.unwrap_or(req.project_root);
     match command {
-        ElivagarCommand::PmtilesWriter { tiles } => {
+        ExampleCommand::PmtilesWriter { tiles } => {
             elivagar::bench_pmtiles::run(&ctx.harness, build_root, *tiles, req.runs())
         }
-        ElivagarCommand::NodeStore { nodes } => {
+        ExampleCommand::NodeStore { nodes } => {
             elivagar::bench_node_store::run(&ctx.harness, build_root, *nodes, req.runs())
         }
-        _ => Err(DevError::Config(format!(
-            "command '{}' has no cargo example",
-            command.id()
-        ))),
     }
 }
 
 /// Elivagar hotpath/alloc: build with hotpath feature, run with instrumentation.
 ///
-/// Uses `ElivagarCommand::build_config()` to determine build type:
+/// The `BuiltCommand` variant determines build type:
 /// - MainBinary (Tilegen): `BenchContext::new` with hotpath features, `build_args()`,
 ///   OOM check, locations_on_ways detection, output cleanup.
 /// - Example (PmtilesWriter, NodeStore): `cargo_build` with example + hotpath feature,
@@ -334,24 +326,15 @@ fn run_elivagar_internal(req: &MeasureRequest, command: &ElivagarCommand) -> Res
 ///
 /// Both paths go through `run_hotpath_capture` for JSON report collection.
 #[allow(clippy::too_many_lines)]
-fn run_elivagar_hotpath(req: &MeasureRequest, command: &ElivagarCommand) -> Result<(), DevError> {
-    use crate::elivagar::commands::BuildKind;
-
-    if !command.supports_hotpath() {
-        return Err(DevError::Config(format!(
-            "command '{}' does not support hotpath/alloc profiling",
-            command.id(),
-        )));
-    }
-
+fn run_elivagar_hotpath(req: &MeasureRequest, command: &BuiltCommand<'_>) -> Result<(), DevError> {
     let alloc = req.is_alloc();
     let feature = harness::hotpath_feature(alloc);
 
     output::detail(&format!("{} {feature}", command.id()));
     harness::hotpath_alloc_note(alloc);
 
-    match command.build_config() {
-        BuildKind::MainBinary => {
+    match command {
+        BuiltCommand::MainBinary { .. } => {
             // Tilegen: build main binary with hotpath features, resolve PBF, OOM check.
             let hotpath_features = req.hotpath_features();
             let ctx = BenchContext::new_for_request(
@@ -362,8 +345,9 @@ fn run_elivagar_hotpath(req: &MeasureRequest, command: &ElivagarCommand) -> Resu
                 &format!("hotpath {}", command.id()),
             )?;
 
-            let (pbf_path, file_mb) =
-                resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
+            let pbf = resolve_pbf_entry(req.dataset, req.variant, &ctx.paths, req.project_root)?;
+            let pbf_path = pbf.path;
+            let file_mb = crate::resolve::file_size_mb(&pbf_path)?;
 
             let pbf_str = pbf_path
                 .to_str()
@@ -375,7 +359,13 @@ fn run_elivagar_hotpath(req: &MeasureRequest, command: &ElivagarCommand) -> Resu
                 .unwrap_or_default()
                 .to_owned();
 
-            let args = command.build_args(pbf_str, &ctx.paths.scratch_dir, &ctx.paths.data_dir)?;
+            let opts = PipelineOpts::from_pbf_entry(pbf.entry);
+            let args = command.build_args(
+                pbf_str,
+                &ctx.paths.scratch_dir,
+                &ctx.paths.data_dir,
+                Some(&opts),
+            )?;
             let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
 
             let binary_str = ctx.binary.display().to_string();
@@ -427,7 +417,7 @@ fn run_elivagar_hotpath(req: &MeasureRequest, command: &ElivagarCommand) -> Resu
 
             Ok(())
         }
-        BuildKind::Example(example) => {
+        BuiltCommand::Example(example) => {
             // Micro-benchmarks: build example with hotpath feature.
             let ctx = crate::context::HarnessContext::new_for_request(
                 req,
@@ -438,7 +428,7 @@ fn run_elivagar_hotpath(req: &MeasureRequest, command: &ElivagarCommand) -> Resu
                 &crate::build::BuildConfig {
                     package: None,
                     bin: None,
-                    example: Some(example.into()),
+                    example: Some(example.cargo_example().into()),
                     features: vec![feature.into()],
                     default_features: true,
                     all_features: false,
@@ -449,7 +439,7 @@ fn run_elivagar_hotpath(req: &MeasureRequest, command: &ElivagarCommand) -> Resu
             let binary_str = binary.display().to_string();
 
             let args =
-                command.build_args("", std::path::Path::new(""), std::path::Path::new(""))?;
+                command.build_args("", std::path::Path::new(""), std::path::Path::new(""), None)?;
             let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
 
             let metadata = command.metadata();
@@ -483,10 +473,6 @@ fn run_elivagar_hotpath(req: &MeasureRequest, command: &ElivagarCommand) -> Resu
 
             Ok(())
         }
-        BuildKind::NoBuild => Err(DevError::Config(format!(
-            "command '{}' does not support hotpath/alloc profiling",
-            command.id(),
-        ))),
     }
 }
 
@@ -512,7 +498,7 @@ const OUTPUT_RETENTION: usize = 5;
 /// that then reports "no build" with nothing tying it to this run. The scratch
 /// output is left in place on every failure path so it can be moved by hand.
 fn rename_elivagar_output(
-    command: &ElivagarCommand,
+    command: &BuiltCommand<'_>,
     scratch_dir: &std::path::Path,
     output_dir: &std::path::Path,
     data_dir: &std::path::Path,
@@ -526,7 +512,7 @@ fn rename_elivagar_output(
     }
 
     // Only Tilegen produces output to rename.
-    if !matches!(command, ElivagarCommand::Tilegen { .. }) {
+    if !matches!(command, BuiltCommand::MainBinary { .. }) {
         for path in &output_files {
             std::fs::remove_file(path).ok();
         }
@@ -641,16 +627,15 @@ fn prune_output_dir(output_dir: &std::path::Path, dataset: &str, variant: &str) 
 
 /// External tool dispatch (Planetiler, Tilemaker). Request-aware context
 /// construction applies the mode's dirty-tree policy for both run and bench.
-fn run_elivagar_external(req: &MeasureRequest, command: &ElivagarCommand) -> Result<(), DevError> {
+fn run_elivagar_external(req: &MeasureRequest, tool: &ExternalTool) -> Result<(), DevError> {
     match req.mode {
-        MeasureMode::Run | MeasureMode::Bench { .. } => match command {
-            ElivagarCommand::Planetiler => elivagar::cmd::bench_planetiler(req),
-            ElivagarCommand::Tilemaker => elivagar::cmd::bench_tilemaker(req),
-            _ => unreachable!(),
+        MeasureMode::Run | MeasureMode::Bench { .. } => match tool {
+            ExternalTool::Planetiler => elivagar::cmd::bench_planetiler(req),
+            ExternalTool::Tilemaker => elivagar::cmd::bench_tilemaker(req),
         },
         MeasureMode::Hotpath { .. } | MeasureMode::Alloc { .. } => Err(DevError::Config(format!(
             "command '{}' does not support hotpath/alloc profiling",
-            command.id(),
+            tool.id(),
         ))),
     }
 }

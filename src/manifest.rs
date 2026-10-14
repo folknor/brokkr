@@ -80,12 +80,30 @@ pub fn scan(project_root: &Path, cfg: &ManifestConfig) -> Result<Vec<ManifestVio
         }
     }
 
+    let files = gremlins::tracked_files(project_root)?;
+    // Dead globs are warned about, not refused - see `globs::warn_unmatched`.
+    // The adapter group's own references below stay hard errors: they name
+    // packages and a marker, not paths, and a dead one silently disables the
+    // rule rather than guarding against a file that may come back.
+    globs::warn_unmatched(path_globs, &files, "[manifest] paths")?;
+    let path_candidates: Vec<PathBuf> = files
+        .iter()
+        .filter(|rel| globs::matches(&paths, rel))
+        .cloned()
+        .collect();
+    globs::warn_unmatched(&cfg.exclude, &path_candidates, "[manifest] exclude")?;
+    let included: Vec<PathBuf> = path_candidates
+        .into_iter()
+        .filter(|rel| !globs::matches(&exclude, rel))
+        .collect();
+    if included.is_empty() {
+        crate::output::warn("[manifest] paths and exclude leave no manifest to scan");
+    }
+    globs::warn_unmatched(&cfg.shape_exclude, &included, "[manifest] shape_exclude")?;
+
     let mut manifests: Vec<(PathBuf, DocumentMut)> = Vec::new();
     let mut out = Vec::new();
-    for rel in gremlins::tracked_files(project_root)? {
-        if !globs::matches(&paths, &rel) || globs::matches(&exclude, &rel) {
-            continue;
-        }
+    for rel in included {
         let abs = project_root.join(&rel);
         // An unreadable file is an error (see `gremlins::read_in_scope`); only a
         // path deleted from the working tree is skipped.
@@ -108,13 +126,23 @@ pub fn scan(project_root: &Path, cfg: &ManifestConfig) -> Result<Vec<ManifestVio
         }
     }
 
+    let workspace_deps = manifests
+        .iter()
+        .find_map(|(_, doc)| workspace_dependencies(doc));
     for (rel, doc) in &manifests {
-        check_document(rel, doc, cfg, globs::matches(&shape_exclude, rel), &mut out);
+        check_document(
+            rel,
+            doc,
+            cfg,
+            globs::matches(&shape_exclude, rel),
+            workspace_deps,
+            &mut out,
+        )?;
     }
     // A workspace-level check needs every manifest at once (the root defines the
     // group, members are checked against it).
     if let Some(ag) = &cfg.adapter_group {
-        check_adapter_group(&manifests, ag, &mut out);
+        check_adapter_group(&manifests, ag, &mut out)?;
     }
     Ok(out)
 }
@@ -137,36 +165,59 @@ fn check_adapter_group(
     manifests: &[(PathBuf, DocumentMut)],
     ag: &AdapterGroup,
     out: &mut Vec<ManifestViolation>,
-) {
-    let adapter_deps = manifests
+) -> Result<(), DevError> {
+    let workspace_deps = manifests
         .iter()
-        .find_map(|(_, doc)| {
-            let ws = doc
-                .get("workspace")
-                .and_then(Item::as_table)
-                .and_then(|w| w.get("dependencies"))
-                .and_then(Item::as_table)?;
-            Some(labelled_group_keys(ws, &ag.marker))
+        .find_map(|(_, doc)| workspace_dependencies(doc))
+        .ok_or_else(|| {
+            DevError::Config(
+                "[manifest.adapter_group] has no scanned [workspace.dependencies] table".into(),
+            )
+        })?;
+    let group = labelled_group(workspace_deps, &ag.marker).ok_or_else(|| {
+        DevError::Config(format!(
+            "[manifest.adapter_group].marker {:?} matches no comment-labelled group in [workspace.dependencies]",
+            ag.marker
+        ))
+    })?;
+    let adapter_packages: std::collections::BTreeSet<String> = group
+        .keys
+        .iter()
+        .filter_map(|key| {
+            workspace_deps
+                .get(key)
+                .map(|item| effective_package_name(key, item, None))
         })
-        .unwrap_or_default();
-    if adapter_deps.is_empty() {
-        return;
+        .collect();
+    if adapter_packages.is_empty() {
+        return Err(DevError::Config(format!(
+            "[manifest.adapter_group].marker {:?} matched a group with no dependencies",
+            ag.marker
+        )));
     }
+
+    let package_names: std::collections::BTreeSet<&str> = manifests
+        .iter()
+        .filter_map(|(_, doc)| package_name(doc))
+        .collect();
+    for name in &ag.forbidden_in {
+        if !package_names.contains(name.as_str()) {
+            return Err(DevError::Config(format!(
+                "[manifest.adapter_group].forbidden_in names {name:?}, but no scanned manifest declares that package"
+            )));
+        }
+    }
+
     for (rel, doc) in manifests {
-        let Some(name) = doc
-            .get("package")
-            .and_then(Item::as_table)
-            .and_then(|p| p.get("name"))
-            .and_then(Item::as_str)
-        else {
+        let Some(name) = package_name(doc) else {
             continue;
         };
         if !ag.forbidden_in.iter().any(|f| f == name) {
             continue;
         }
         let mut declared = std::collections::BTreeSet::new();
-        declared_deps(doc.as_table(), &mut declared);
-        for dep in declared.intersection(&adapter_deps) {
+        declared_dep_packages(doc.as_table(), Some(workspace_deps), &mut declared);
+        for dep in declared.intersection(&adapter_packages) {
             out.push(ManifestViolation {
                 file: rel.clone(),
                 rule: "adapter-group",
@@ -174,15 +225,74 @@ fn check_adapter_group(
             });
         }
     }
+    Ok(())
 }
 
-/// Keys of the dependency-table group whose header comment contains `marker`.
-fn labelled_group_keys(table: &Table, marker: &str) -> std::collections::BTreeSet<String> {
+fn workspace_dependencies(doc: &DocumentMut) -> Option<&Table> {
+    doc.get("workspace")
+        .and_then(Item::as_table)
+        .and_then(|workspace| workspace.get("dependencies"))
+        .and_then(Item::as_table)
+}
+
+fn package_name(doc: &DocumentMut) -> Option<&str> {
+    doc.get("package")
+        .and_then(Item::as_table)
+        .and_then(|package| package.get("name"))
+        .and_then(Item::as_str)
+}
+
+/// The effective package name of a dependency declaration, resolving aliases
+/// and workspace inheritance the way Cargo does.
+fn effective_package_name(name: &str, item: &Item, workspace_deps: Option<&Table>) -> String {
+    if let Some(package) = item
+        .as_table_like()
+        .and_then(|table| table.get("package"))
+        .and_then(Item::as_str)
+    {
+        return package.to_owned();
+    }
+    let inherited = item
+        .as_table_like()
+        .and_then(|table| table.get("workspace"))
+        .and_then(Item::as_bool)
+        == Some(true);
+    if inherited
+        && let Some(package) = workspace_deps
+            .and_then(|deps| deps.get(name))
+            .and_then(Item::as_table_like)
+            .and_then(|table| table.get("package"))
+            .and_then(Item::as_str)
+    {
+        return package.to_owned();
+    }
+    name.to_owned()
+}
+
+fn declared_dep_packages(
+    table: &Table,
+    workspace_deps: Option<&Table>,
+    out: &mut std::collections::BTreeSet<String>,
+) {
+    for (key, item) in table {
+        let Some(child) = item.as_table() else {
+            continue;
+        };
+        if is_dependency_table_name(key) {
+            for (dep, spec) in child {
+                out.insert(effective_package_name(dep, spec, workspace_deps));
+            }
+        } else if key != "workspace" {
+            declared_dep_packages(child, workspace_deps, out);
+        }
+    }
+}
+
+/// The dependency-table group whose header comment contains `marker`.
+fn labelled_group(table: &Table, marker: &str) -> Option<DepGroup> {
     dependency_groups(table)
         .into_iter()
-        .find(|g| g.labels.iter().any(|l| l.contains(marker)))
-        .map(|g| g.keys.into_iter().collect())
-        .unwrap_or_default()
+        .find(|group| group.labels.iter().any(|label| label.contains(marker)))
 }
 
 fn check_document(
@@ -190,8 +300,9 @@ fn check_document(
     doc: &DocumentMut,
     cfg: &ManifestConfig,
     shape_excluded: bool,
+    workspace_deps: Option<&Table>,
     out: &mut Vec<ManifestViolation>,
-) {
+) -> Result<(), DevError> {
     // Dependency-content checks (1, 10, 8) apply to every manifest.
     if cfg.sort_dependencies {
         check_sorted_dependencies(rel, doc.as_table(), out);
@@ -200,7 +311,7 @@ fn check_document(
         check_cargo_machete(rel, doc, out);
     }
     if !cfg.version_align.is_empty() {
-        check_version_align(rel, doc, &cfg.version_align, out);
+        check_version_align(rel, doc, &cfg.version_align, workspace_deps, out)?;
     }
     // The section/target-shape checks (2-6) describe a crate's own structure,
     // which is moot for a cargo-fuzz stub (its own tiny standalone workspace) -
@@ -208,7 +319,7 @@ fn check_document(
     // placeholder crate whose layout is deliberately non-conventional but whose
     // deps still sort).
     if is_cargo_fuzz(doc) || shape_excluded {
-        return;
+        return Ok(());
     }
     if !cfg.section_order.is_empty() {
         for (name, before) in order_violations(top_level_keys(doc), &cfg.section_order) {
@@ -235,6 +346,7 @@ fn check_document(
         check_lints_workspace(rel, doc, out);
     }
     check_bin_example_flags(rel, doc, cfg, out);
+    Ok(())
 }
 
 /// The alignment key of a version requirement at `granularity`: `"^54.1.2"` is
@@ -275,20 +387,47 @@ fn dep_version(item: &Item) -> Option<String> {
 }
 
 /// Find `name`'s version requirement in any dependency table (any depth).
-fn find_dep_version(table: &Table, name: &str) -> Option<String> {
+fn find_dep_version(
+    table: &Table,
+    name: &str,
+    workspace_deps: Option<&Table>,
+) -> Result<Option<String>, DevError> {
     for (k, item) in table {
         let Some(child) = item.as_table() else {
             continue;
         };
         if is_dependency_table_name(k) {
-            if let Some(v) = child.get(name).and_then(dep_version) {
-                return Some(v);
+            let Some(dep) = child.get(name) else {
+                continue;
+            };
+            if let Some(v) = dep_version(dep) {
+                return Ok(Some(v));
             }
-        } else if let Some(v) = find_dep_version(child, name) {
-            return Some(v);
+            if dep
+                .as_table_like()
+                .and_then(|spec| spec.get("workspace"))
+                .and_then(Item::as_bool)
+                == Some(true)
+            {
+                let deps = workspace_deps.ok_or_else(|| {
+                    DevError::Config(format!(
+                        "[[manifest.version_align]] cannot resolve inherited dependency {name:?}: \
+                         the scanned manifests omit [workspace.dependencies]"
+                    ))
+                })?;
+                let inherited = deps.get(name).ok_or_else(|| {
+                    DevError::Config(format!(
+                        "[[manifest.version_align]] cannot resolve inherited dependency {name:?}: \
+                         it is absent from [workspace.dependencies]"
+                    ))
+                })?;
+                return Ok(dep_version(inherited));
+            }
+        } else if let Some(v) = find_dep_version(child, name, workspace_deps)? {
+            return Ok(Some(v));
         }
     }
-    None
+    Ok(None)
 }
 
 /// Every dependency name declared in any dependency table (any depth).
@@ -346,22 +485,24 @@ fn check_version_align(
     rel: &Path,
     doc: &DocumentMut,
     groups: &[VersionAlign],
+    workspace_deps: Option<&Table>,
     out: &mut Vec<ManifestViolation>,
-) {
+) -> Result<(), DevError> {
     for g in groups {
         let gran = if g.granularity.is_empty() {
             "minor"
         } else {
             &g.granularity
         };
-        let found: Vec<(String, String)> = g
-            .crates
-            .iter()
-            .filter_map(|c| {
-                let ver = find_dep_version(doc.as_table(), c)?;
-                Some((c.clone(), version_key(&ver, gran)?))
-            })
-            .collect();
+        let mut found = Vec::new();
+        for name in &g.crates {
+            let Some(ver) = find_dep_version(doc.as_table(), name, workspace_deps)? else {
+                continue;
+            };
+            if let Some(key) = version_key(&ver, gran) {
+                found.push((name.clone(), key));
+            }
+        }
         let Some((_, first)) = found.first() else {
             continue;
         };
@@ -378,6 +519,7 @@ fn check_version_align(
             });
         }
     }
+    Ok(())
 }
 
 fn top_level_keys(doc: &DocumentMut) -> impl Iterator<Item = &str> {
@@ -631,7 +773,15 @@ mod tests {
     ) -> Vec<(&'static str, String)> {
         let doc: DocumentMut = src.parse().unwrap();
         let mut out = Vec::new();
-        check_document(Path::new("Cargo.toml"), &doc, cfg, shape_excluded, &mut out);
+        check_document(
+            Path::new("Cargo.toml"),
+            &doc,
+            cfg,
+            shape_excluded,
+            None,
+            &mut out,
+        )
+        .unwrap();
         out.iter().map(|v| (v.rule, v.message.clone())).collect()
     }
 
@@ -948,7 +1098,7 @@ mod tests {
         ];
         let mut out = Vec::new();
         if let Some(ag) = &cfg.adapter_group {
-            check_adapter_group(&manifests, ag, &mut out);
+            check_adapter_group(&manifests, ag, &mut out).unwrap();
         }
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].rule, "adapter-group");
@@ -957,10 +1107,15 @@ mod tests {
         // A non-core crate using the same dep is fine.
         let other = "[package]\nname = \"nautilus-adapter-x\"\n\n\
                      [dependencies]\ndydx-proto = { workspace = true }\n";
+        let core_clean = "[package]\nname = \"nautilus-core\"\n";
         let manifests2 = vec![
             (
                 PathBuf::from("Cargo.toml"),
                 root.parse::<DocumentMut>().unwrap(),
+            ),
+            (
+                PathBuf::from("core/Cargo.toml"),
+                core_clean.parse::<DocumentMut>().unwrap(),
             ),
             (
                 PathBuf::from("x/Cargo.toml"),
@@ -968,7 +1123,7 @@ mod tests {
             ),
         ];
         let mut out2 = Vec::new();
-        check_adapter_group(&manifests2, cfg.adapter_group.as_ref().unwrap(), &mut out2);
+        check_adapter_group(&manifests2, cfg.adapter_group.as_ref().unwrap(), &mut out2).unwrap();
         assert!(out2.is_empty(), "{out2:?}");
     }
 
@@ -995,7 +1150,7 @@ mod tests {
             root.parse::<DocumentMut>().unwrap(),
         )];
         let mut out = Vec::new();
-        check_adapter_group(&manifests, cfg.adapter_group.as_ref().unwrap(), &mut out);
+        check_adapter_group(&manifests, cfg.adapter_group.as_ref().unwrap(), &mut out).unwrap();
         assert!(out.is_empty(), "{out:?}");
     }
 

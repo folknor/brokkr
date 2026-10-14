@@ -280,8 +280,40 @@ pub fn scan(project_root: &Path, rules: &[TextlintRule]) -> Result<TextlintScan,
             files: 0,
         });
     }
-    let compiled = compile(rules)?;
     let files = gremlins::tracked_files(project_root)?;
+    for rule in rules {
+        let paths_field = format!("[[textlint]] {:?} paths", rule.name);
+        if rule.paths.is_empty() {
+            return Err(DevError::Config(format!(
+                "[[textlint]] {:?} has no `paths` - list the files this rule scans",
+                rule.name
+            )));
+        }
+        // Dead scope is warned about, not refused (`globs::warn_unmatched`):
+        // user-wide rules reach every tree brokkr checks, and most trees lack
+        // most of the paths a personal rule names.
+        globs::warn_unmatched(&rule.paths, &files, &paths_field)?;
+        let path_set = globs::build_set(&rule.paths, &paths_field)?;
+        let in_scope: Vec<PathBuf> = files
+            .iter()
+            .filter(|rel| globs::matches(&path_set, rel))
+            .cloned()
+            .collect();
+        let exclude_field = format!("[[textlint]] {:?} exclude", rule.name);
+        globs::warn_unmatched(&rule.exclude, &in_scope, &exclude_field)?;
+        let exclude_set = globs::build_set(&rule.exclude, &exclude_field)?;
+        if !in_scope.is_empty()
+            && !in_scope
+                .iter()
+                .any(|rel| !globs::matches(&exclude_set, rel))
+        {
+            crate::output::warn(&format!(
+                "[[textlint]] {:?}: exclude excuses every file paths selects",
+                rule.name
+            ));
+        }
+    }
+    let compiled = compile(rules)?;
     let mut out = Vec::new();
     let mut scanned = 0usize;
     for rel in &files {

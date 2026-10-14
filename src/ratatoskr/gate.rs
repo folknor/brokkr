@@ -6,7 +6,7 @@
 //! reports per-rule pass/fail. Storage and CLI plumbing live in
 //! `src/db/gate.rs` and `src/ratatoskr/sync.rs`.
 
-use std::fmt::Write;
+use std::fmt::{self, Write};
 
 use serde_json::{Map, Value};
 
@@ -306,29 +306,209 @@ pub fn evaluate(
     GateRules::compile("<gate>", gate)?.evaluate(current, baseline)
 }
 
-/// The complete caller-facing result of a gate evaluation.
-pub struct GateVerdict {
-    outcomes: Vec<RuleOutcome>,
-    passed: bool,
+/// A canonical cargo feature set stored in a gate identity.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CanonicalFeatures(String);
+
+impl CanonicalFeatures {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+}
+
+impl fmt::Display for CanonicalFeatures {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.0.is_empty() {
+            f.write_str("default features")
+        } else {
+            write!(f, "features `{}`", self.0)
+        }
+    }
+}
+
+/// The fields that identify whether two gate runs measured the same setup.
+/// `features = None` is reserved for pre-v2 database rows where that field
+/// was never recorded.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GateIdentity {
+    gate: String,
+    script: String,
+    fixture: String,
+    profile: crate::build::CargoProfile,
+    features: Option<CanonicalFeatures>,
+}
+
+impl GateIdentity {
+    pub fn new(
+        gate: impl Into<String>,
+        script: impl Into<String>,
+        fixture: impl Into<String>,
+        profile: crate::build::CargoProfile,
+        features: Option<CanonicalFeatures>,
+    ) -> Self {
+        Self {
+            gate: gate.into(),
+            script: script.into(),
+            fixture: fixture.into(),
+            profile,
+            features,
+        }
+    }
+
+    /// Return the first identity field that differs. Call this on the
+    /// baseline identity with the current identity as `other`; a missing
+    /// baseline feature value is the compatibility path for pre-v2 rows.
+    pub fn mismatch(&self, other: &Self) -> Option<GateIdentityMismatch> {
+        if self.gate != other.gate {
+            return Some(GateIdentityMismatch::Gate {
+                baseline: self.gate.clone(),
+                current: other.gate.clone(),
+            });
+        }
+        if self.script != other.script {
+            return Some(GateIdentityMismatch::Script {
+                baseline: self.script.clone(),
+                current: other.script.clone(),
+            });
+        }
+        if self.fixture != other.fixture {
+            return Some(GateIdentityMismatch::Fixture {
+                baseline: self.fixture.clone(),
+                current: other.fixture.clone(),
+            });
+        }
+        if self.profile != other.profile {
+            return Some(GateIdentityMismatch::Profile {
+                baseline: self.profile,
+                current: other.profile,
+            });
+        }
+        if let Some(baseline) = &self.features {
+            match &other.features {
+                Some(current) if baseline != current => {
+                    return Some(GateIdentityMismatch::Features {
+                        baseline: baseline.clone(),
+                        current: current.clone(),
+                    });
+                }
+                None => return Some(GateIdentityMismatch::FeaturesUnrecorded),
+                _ => {}
+            }
+        }
+        None
+    }
+
+    pub fn features_unrecorded(&self) -> bool {
+        self.features.is_none()
+    }
+}
+
+/// Why a baseline and a current run cannot be compared.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GateIdentityMismatch {
+    Gate {
+        baseline: String,
+        current: String,
+    },
+    Script {
+        baseline: String,
+        current: String,
+    },
+    Fixture {
+        baseline: String,
+        current: String,
+    },
+    Profile {
+        baseline: crate::build::CargoProfile,
+        current: crate::build::CargoProfile,
+    },
+    Features {
+        baseline: CanonicalFeatures,
+        current: CanonicalFeatures,
+    },
+    FeaturesUnrecorded,
+}
+
+impl fmt::Display for GateIdentityMismatch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Gate { baseline, current } => {
+                write!(
+                    f,
+                    "baseline row's gate is `{baseline}`, current gate is `{current}`"
+                )
+            }
+            Self::Script { baseline, current } => {
+                write!(f, "baseline script `{baseline}` != current `{current}`")
+            }
+            Self::Fixture { baseline, current } => {
+                write!(f, "baseline fixture `{baseline}` != current `{current}`")
+            }
+            Self::Profile { baseline, current } => write!(
+                f,
+                "baseline was built `{}` but this run is `{}`. Re-run with the \
+                 baseline's profile (--debug / --release), or pin a baseline \
+                 recorded under this one.",
+                baseline.as_str(),
+                current.as_str()
+            ),
+            Self::Features { baseline, current } => write!(
+                f,
+                "baseline was built with {baseline} but this run with {current}. \
+                 Build with the baseline's `[ratatoskr.harness] features`, or \
+                 pin a baseline recorded under these."
+            ),
+            Self::FeaturesUnrecorded => {
+                f.write_str("current run's cargo features were not recorded")
+            }
+        }
+    }
+}
+
+/// The complete caller-facing result of a gate comparison.
+pub enum GateVerdict {
+    Incomparable(GateIdentityMismatch),
+    Evaluated(Vec<RuleOutcome>),
 }
 
 impl GateVerdict {
     pub fn from_outcomes(outcomes: Vec<RuleOutcome>) -> Self {
-        let passed = !outcomes.is_empty() && outcomes.iter().all(|outcome| outcome.pass);
-        Self { outcomes, passed }
+        Self::Evaluated(outcomes)
+    }
+
+    pub fn incomparable(mismatch: GateIdentityMismatch) -> Self {
+        Self::Incomparable(mismatch)
+    }
+
+    pub fn mismatch(&self) -> Option<&GateIdentityMismatch> {
+        match self {
+            Self::Incomparable(mismatch) => Some(mismatch),
+            Self::Evaluated(_) => None,
+        }
     }
 
     pub fn outcomes(&self) -> &[RuleOutcome] {
-        &self.outcomes
+        match self {
+            Self::Incomparable(_) => &[],
+            Self::Evaluated(outcomes) => outcomes,
+        }
     }
 
     pub fn passed(&self) -> bool {
-        self.passed
+        match self {
+            Self::Incomparable(_) => false,
+            Self::Evaluated(outcomes) => {
+                !outcomes.is_empty() && outcomes.iter().all(|outcome| outcome.pass)
+            }
+        }
     }
 
     pub fn format_report(&self) -> String {
         let mut report = String::new();
-        for outcome in &self.outcomes {
+        if let Self::Incomparable(mismatch) = self {
+            return format!("  [INCOMPARABLE] {mismatch}");
+        }
+        for outcome in self.outcomes() {
             let tag = if outcome.pass { "OK  " } else { "FAIL" };
             writeln!(
                 report,

@@ -509,11 +509,12 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 // project - it applies to any tree brokkr checks, and a repo
                 // that never adopted a brokkr.toml is exactly where a personal
                 // convention is most likely the only rule there is. Detection
-                // normally folds it in; here there is nothing to fold it into,
-                // so it stands alone.
-                let user = config::load_user()?;
-                let (textlint, script_checks) = user
-                    .map_or_else(|| (Vec::new(), Vec::new()), |u| (u.textlint, u.script_checks));
+                // composes it beneath the project; here it is composed alone.
+                let config::DevConfig {
+                    textlint,
+                    script_checks,
+                    ..
+                } = config::load_user_only()?;
                 (
                     None,
                     Vec::new(),
@@ -857,20 +858,15 @@ fn run(cli: Cli) -> Result<(), DevError> {
             variant,
             skip_to,
         } => {
-            // The whole pipeline contract comes from the named block; the two
-            // input assertions come from the variant that has the property.
+            // The pipeline contract comes from the named block. Input
+            // assertions are attached later to the resolved PBF entry.
             let tilegen = elivagar::resolve_tilegen(&dev_config, elivagar::DEFAULT_TILEGEN)?;
-            let (locations_on_ways, force_sorted) =
-                elivagar::input_assertions(&dev_config, &dataset, &variant);
-            let opts = elivagar::PipelineOpts {
-                tilegen,
-                locations_on_ways,
-                force_sorted,
-            };
-            let cmd = elivagar::commands::ElivagarCommand::Tilegen {
-                opts: &opts,
-                skip_to: skip_to.as_deref(),
-            };
+            let cmd = elivagar::commands::ElivagarCommand::Built(
+                elivagar::commands::BuiltCommand::MainBinary {
+                    tilegen,
+                    skip_to: skip_to.as_deref(),
+                },
+            );
             run_measured(
                 &mode,
                 &dev_config,
@@ -883,7 +879,11 @@ fn run(cli: Cli) -> Result<(), DevError> {
             )
         }
         Command::PmtilesWriter { mode, tiles } => {
-            let cmd = elivagar::commands::ElivagarCommand::PmtilesWriter { tiles };
+            let cmd = elivagar::commands::ElivagarCommand::Built(
+                elivagar::commands::BuiltCommand::Example(
+                    elivagar::commands::ExampleCommand::PmtilesWriter { tiles },
+                ),
+            );
             run_measured(
                 &mode,
                 &dev_config,
@@ -896,7 +896,11 @@ fn run(cli: Cli) -> Result<(), DevError> {
             )
         }
         Command::NodeStore { mode, nodes } => {
-            let cmd = elivagar::commands::ElivagarCommand::NodeStore { nodes };
+            let cmd = elivagar::commands::ElivagarCommand::Built(
+                elivagar::commands::BuiltCommand::Example(
+                    elivagar::commands::ExampleCommand::NodeStore { nodes },
+                ),
+            );
             run_measured(
                 &mode,
                 &dev_config,
@@ -913,7 +917,9 @@ fn run(cli: Cli) -> Result<(), DevError> {
             dataset,
             variant,
         } => {
-            let cmd = elivagar::commands::ElivagarCommand::Planetiler;
+            let cmd = elivagar::commands::ElivagarCommand::External(
+                elivagar::commands::ExternalTool::Planetiler,
+            );
             run_measured(
                 &mode,
                 &dev_config,
@@ -930,7 +936,9 @@ fn run(cli: Cli) -> Result<(), DevError> {
             dataset,
             variant,
         } => {
-            let cmd = elivagar::commands::ElivagarCommand::Tilemaker;
+            let cmd = elivagar::commands::ElivagarCommand::External(
+                elivagar::commands::ExternalTool::Tilemaker,
+            );
             run_measured(
                 &mode,
                 &dev_config,

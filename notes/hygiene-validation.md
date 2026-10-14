@@ -320,14 +320,6 @@ Reported by: convention-engines.
 
 A hand-written list of 16 names in `parser.rs` mirroring `TextlintRule` minus 3; no test compares them, so a new field left off is silently rejected in presets. Enforcement proposed: a parity test or a `Preset` struct derived from the same field set.
 
-## VAL-033 - `brokkr deps` bookkeeping is spelled beside the phases
-
-Reported by: convention-engines.
-
-`deps::run` has a literal `phases_run` list of 8 names and a hand-written `findings` sum; `deps.md`'s "adding a phase" recipe mentions neither. `phases_run` includes outdated and stale even when ccu was skipped ("ran 8 phases" false then). `ccu::PHASES[1]` is never read. `STALE_DAYS`/`ABANDONED_DAYS` are restated as "~8 months / ~2 years" in the `StaleEvent` doc and `deps.md` (approximate; no divergence). Enforcement proposed: build both from a phase table.
-
-Design hunt (deps-misc): `ToolMissingEvent.phase` is `PHASES[0]` = `"outdated"` though the event covers both phases, and the gating-versus-informational classification lives only in the `findings` addition expression and the comment above it. `OutdatedComplete` is a marker event that exists only because "ran with zero results" cannot be expressed, and the renderer's shape (match into ten vectors, then render each section) is why it is needed. Proposed: a `Phase` enum with `gating()`, each phase returning `PhaseOutcome { phase, events, ran: Ran | Skipped(reason) }`, so `phases_run`, `findings`, the exit code, `OutdatedComplete` and `ToolMissing` are all derived and a `--json` caller can branch on "skipped" per phase; the renderer moves to `render.rs` with a `Render` impl per event type, and event types live beside their phases.
-
 ## VAL-034 - The displayed cargo argv is a second copy of the real one
 
 Reported by: convention-engines.
@@ -354,11 +346,9 @@ Reported by: convention-engines.
 
 Reported by: convention-engines.
 
-- `deps` JSON and `focus` JSON `println!` directly (defensible for NDJSON; no rule marks where allowed).
 - Focus JSON drops `prefix_note` ("not in host-filtered graph", "substring matches"); a consumer can't tell a fallback result from an exact one.
-- The `ccu` failure names only `outdated` (`PHASES[0]`) though it also skips `stale`; the renderer says nothing about stale.
-- Textlint, dependency rules and script-check report counts "so ok is falsifiable"; header, manifest and gremlins print a bare `ok`.
-- The gremlins failure hint "rerun with `--fix-gremlins` to rewrite all banned chars" is false for config-`ban`ned codepoints (scan-only).
+- Textlint, dependency rules and script-check report counts "so ok is falsifiable"; header, manifest and gremlins print a bare `ok`, and textlint's count still aggregates across rules (the green lines live in `check_cmd/phase.rs`).
+- The gremlins failure hint "rerun with `--fix-gremlins` to rewrite all banned chars" (printed from `check_cmd/phase.rs`) is false for config-`ban`ned codepoints; `gremlins.rs` now documents why those may not be rewritable.
 
 ## VAL-038 - Convention-engine and deps errors misclassified
 
@@ -378,11 +368,9 @@ Design hunt (check-report): `header::current_utc_year` (libc `gmtime`) is called
 
 Reported by: convention-engines.
 
-- `globs::build_set` uses `Glob::new` (default `literal_separator(false)`), so `*` matches `/`: `crates/*/src/**` (the preset example in `brokkr.toml.md`) also matches deeper paths. One-line `GlobBuilder` fix in the single owner.
-- `manifest.adapter_group`: a `marker` matching no comment group silently no-ops; it compares dependency keys, so `foo = { package = "adapter" }` passes (dependency_rules guards this rename); `forbidden_in` names are never checked against real packages (dependency_rules errors on unknown `from`) - two implementations of one rule with opposite validation.
-- `version_align`: `find_dep_version` finds no version for `{ workspace = true }`, so the check does nothing in inheriting members.
-- Entries that match nothing are silent: gremlins `exclude`, textlint `exclude`, header `exempt`, manifest `exclude`/`shape_exclude`, `workspace_dep_ignore`, dependency_rule `except` - inconsistent with the parser's "dead preset config is an error" rule.
-- Textlint's file count aggregates across rules, so one rule's dead `paths` is hidden whenever another matches (docs promise "a shrinking count" gives it away); header and manifest have no count, so a `[header].paths` matching nothing is green.
+Globs, adapter groups, `version_align` and the dead-scope checks for gremlins, textlint, header and manifest are now enforced when their scanners run. Residue:
+- Unmatched `[deps].workspace_dep_ignore` and `dependency_rule.except` entries are still silent.
+- The dead-scope checks are scan-time, so a skipped phase, the prose-only shortcut or an unselected `--textlint` rule still bypasses them; moving them to config load needs the tracked-file list at parse time.
 
 ## VAL-041 - Stale claims in convention-engine and deps code/docs
 

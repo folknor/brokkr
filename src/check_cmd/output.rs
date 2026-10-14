@@ -32,10 +32,10 @@ pub(crate) fn build_test_env(
     out
 }
 
-/// The isolated target dir a sweep's `rustflags` imply, or `None` when it sets
-/// none. Keyed on the flag content (`<target>/rustflags-<hash>`), so every sweep
-/// carrying identical flags shares one cache and a global cfg change (e.g.
-/// `--cfg madsim`) never thrashes the plain sweeps' shared target dir.
+/// The isolated target dir the sweep's target location implies, or `None` for
+/// cargo's shared dir. The location owns both the isolation decision and the
+/// stable directory name, so callers cannot disagree about why or where a
+/// sweep isolates.
 ///
 /// `meta_target_dir` is cargo's resolved `target_directory` (from `cargo
 /// metadata`), not `<project_root>/target`: a workspace `.cargo/config.toml`
@@ -50,18 +50,12 @@ pub(crate) fn build_test_env(
 /// `BROKKR_TEST_BIN_DIR`, so a directory per package would leave a multi-package
 /// lane with no single directory holding the binaries its tests spawn.
 ///
-/// The name for the rustflags-only case is unchanged (`rustflags-<hash>`), so no
-/// existing tree re-derives a directory or pays a cold rebuild for this feature.
 pub(crate) fn isolated_target_dir(
     sweep: &ResolvedSweep,
     meta_target_dir: &Path,
 ) -> Option<std::path::PathBuf> {
-    crate::config::shape_target_key(&sweep.rustflags, sweep.effective_unification)
-        .map(|key| meta_target_dir.join(if key.starts_with("unify-") {
-            key
-        } else {
-            format!("rustflags-{key}")
-        }))
+    let location = sweep.target_location();
+    location.is_isolated().then(|| location.target_dir(meta_target_dir))
 }
 
 /// Compose a sweep's `rustflags` with any inherited flags into the env pair to
@@ -1678,7 +1672,7 @@ warning: desktop: Exported component 'B' doesn't inherit Window
         let r = attributed(r, &info);
 
         let root = crate::test_scratch::scratch("check-output", "failed_build_script_run");
-        let out = format_clippy_multi("cargo clippy", &[r], Some(&info), &root, false, &|_| true);
+        let out = format_clippy_multi("cargo clippy", &[r], Some(&info), &root, 1, &|_| true);
 
         assert!(out.starts_with("cargo clippy: 1 error\n"), "{out}");
         assert!(
@@ -1722,7 +1716,7 @@ Caused by:
 error: could not compile `core` (lib) due to 1 previous error
 "
         .to_owned();
-        let out = format_clippy_multi("cargo clippy", &[r], None, &root, false, &|_| true);
+        let out = format_clippy_multi("cargo clippy", &[r], None, &root, 1, &|_| true);
         assert!(out.contains("error[E0425] core/src/a.rs:1:1 cannot find value `x`"), "{out}");
         assert!(out.contains("failed to run custom build command for `x-sys"), "{out}");
         assert!(!out.contains("RENDERED-E0425"), "{out}");
@@ -1731,7 +1725,7 @@ error: could not compile `core` (lib) due to 1 previous error
         r.success = false;
         r.stdout = error.to_owned();
         r.stderr = "error: could not compile `core` (lib) due to 1 previous error\n".to_owned();
-        let out = format_clippy_multi("cargo clippy", &[r], None, &root, false, &|_| true);
+        let out = format_clippy_multi("cargo clippy", &[r], None, &root, 1, &|_| true);
         assert!(!out.contains("could not compile"), "{out}");
     }
 
@@ -1771,7 +1765,7 @@ error: could not compile `core` (lib) due to 1 previous error
         ]
         .join("\n");
         let root = crate::test_scratch::scratch("check-output", "a_filtered_error");
-        let out = format_clippy_multi("cargo clippy", &[r], None, &root, false, &|_| false);
+        let out = format_clippy_multi("cargo clippy", &[r], None, &root, 1, &|_| false);
         assert!(out.contains("error[E0425]: cannot find value `x` in this scope"), "{out}");
         assert!(!out.contains("compiler-artifact"), "{out}");
     }
@@ -1790,7 +1784,7 @@ warning: plain one-liner
 "
         .to_owned();
         let root = crate::test_scratch::scratch("check-output", "a_warning_block_with_foreign_text");
-        let out = format_clippy_multi("cargo clippy", &[r], None, &root, false, &|_| true);
+        let out = format_clippy_multi("cargo clippy", &[r], None, &root, 1, &|_| true);
         assert!(out.contains("TOOL CRASHED: out of disk"), "{out}");
         assert!(out.contains("error: could not compile"), "{out}");
         assert!(!out.contains("plain one-liner"), "{out}");
@@ -1815,7 +1809,7 @@ warning: `b` (manifest) generated 1 warning
         .to_owned();
         let r = attributed(r, &two_member_info());
         let root = crate::test_scratch::scratch("check-output", "a_filtered_manifest_error");
-        let out = format_clippy_multi("cargo clippy", &[r], None, &root, false, &|_| false);
+        let out = format_clippy_multi("cargo clippy", &[r], None, &root, 1, &|_| false);
         assert!(out.contains("error: unused dependency `anyhow`"), "{out}");
         assert!(out.contains("TOOL CRASHED: out of disk"), "{out}");
         // The self-contained tally is dropped, and never counted.
@@ -1904,11 +1898,17 @@ warning: `b` (manifest) generated 1 warning
         let info = two_member_info();
         let results = [run("default", None), run("daemon-shape", Some(&["daemon"]))];
         let both = ["default".to_owned(), "daemon-shape".to_owned()];
-        assert_eq!(coverage_tag(&both, Some("id-daemon"), &results, Some(&info)), None);
+        assert_eq!(
+            coverage_tag(&both, Some("id-daemon"), &results, Some(&info), 2),
+            None
+        );
         // A core diagnostic from the workspace sweep alone: the daemon sweep
         // never selected core, so nothing covering it stayed silent.
         let default_only = ["default".to_owned()];
-        assert_eq!(coverage_tag(&default_only, Some("id-core"), &results, Some(&info)), None);
+        assert_eq!(
+            coverage_tag(&default_only, Some("id-core"), &results, Some(&info), 2),
+            None
+        );
     }
 
     /// The case the tag exists for: a shape-specific diagnostic, here one the
@@ -1919,7 +1919,7 @@ warning: `b` (manifest) generated 1 warning
         let results = [run("default", None), run("daemon-shape", Some(&["daemon"]))];
         let shape_only = ["daemon-shape".to_owned()];
         assert_eq!(
-            coverage_tag(&shape_only, Some("id-daemon"), &results, Some(&info)),
+            coverage_tag(&shape_only, Some("id-daemon"), &results, Some(&info), 2),
             Some("[daemon-shape]".into())
         );
     }
@@ -1931,7 +1931,7 @@ warning: `b` (manifest) generated 1 warning
         let results = [run("default", None), run("daemon-shape", Some(&["daemon"]))];
         let default_only = ["default".to_owned()];
         assert_eq!(
-            coverage_tag(&default_only, None, &results, Some(&info)),
+            coverage_tag(&default_only, None, &results, Some(&info), 2),
             Some("[default]".into())
         );
     }

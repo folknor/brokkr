@@ -50,11 +50,7 @@ pub(crate) fn bench_all(req: &MeasureRequest) -> Result<(), DevError> {
     // gets. It used to hardcode a bare PipelineOpts and lean on ocean
     // auto-detection, so what it measured depended on what was in data/.
     let tilegen = super::resolve_tilegen(req.dev_config, super::DEFAULT_TILEGEN)?;
-    let opts = super::PipelineOpts {
-        tilegen,
-        locations_on_ways: pbf.entry.locations_on_ways,
-        force_sorted: pbf.entry.force_sorted,
-    };
+    let opts = super::PipelineOpts::from_pbf_entry(pbf.entry);
     let pbf_path = pbf.path.clone();
     super::bench_all::run(
         &ctx.harness,
@@ -65,6 +61,7 @@ pub(crate) fn bench_all(req: &MeasureRequest) -> Result<(), DevError> {
         req.runs(),
         &ctx.paths.data_dir,
         &ctx.paths.scratch_dir,
+        tilegen,
         &opts,
     )
 }

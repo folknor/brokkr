@@ -40,6 +40,8 @@
 
 use std::sync::Mutex;
 
+use crate::lockfile::{AuthHash, Nonce};
+
 /// The capability handed to descendants: the current hold's nonce.
 pub const CAPABILITY_ENV: &str = "BROKKR_HOLD_NONCE";
 
@@ -91,12 +93,12 @@ pub const LEASE_MARKER_ENV: &str = "BROKKR_COMPILE_LEASE";
 /// construction and never reach this, so only the sequential case was exposed;
 /// it fails totally when it happens, and no live descendant of the released hold
 /// has any claim on the new one.
-static CAPABILITY: Mutex<Option<String>> = Mutex::new(None);
+static CAPABILITY: Mutex<Option<Nonce>> = Mutex::new(None);
 
 /// Take the capability lock, treating poison as recoverable. The critical
 /// section is a single clone; failing closed here would mean refusing to stamp,
 /// which turns into the guard refusing brokkr's own compiles.
-fn slot() -> std::sync::MutexGuard<'static, Option<String>> {
+fn slot() -> std::sync::MutexGuard<'static, Option<Nonce>> {
     CAPABILITY
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -104,8 +106,8 @@ fn slot() -> std::sync::MutexGuard<'static, Option<String>> {
 
 /// Publish the capability for a newly acquired hold, replacing any previous
 /// one.
-pub fn publish_capability(nonce: &str) {
-    *slot() = Some(nonce.to_owned());
+pub fn publish_capability(nonce: &Nonce) {
+    *slot() = Some(nonce.clone());
 }
 
 /// Forget the capability when a hold is released, so a child spawned outside any
@@ -115,7 +117,7 @@ pub fn clear_capability() {
 }
 
 /// The capability to stamp onto a child, if this process holds one.
-pub fn capability() -> Option<String> {
+pub fn capability() -> Option<Nonce> {
     slot().clone()
 }
 
@@ -128,11 +130,11 @@ pub fn capability() -> Option<String> {
 /// its children, and the inherited value never becomes an owned one. What the
 /// inherited hash is for is recognising, while waiting for the lock, that the
 /// current holder is this process's own ancestor (`lockfile::acquire`).
-pub fn inherited_capability_hash() -> Option<String> {
+pub fn inherited_capability_hash() -> Option<AuthHash> {
     std::env::var(CAPABILITY_ENV)
         .ok()
-        .filter(|n| !n.is_empty())
-        .map(|n| auth_hash(&n))
+        .and_then(|n| Nonce::parse(&n))
+        .map(|nonce| nonce.auth_hash())
 }
 
 /// Stamp the current capability onto a child command.
@@ -145,7 +147,7 @@ pub fn inherited_capability_hash() -> Option<String> {
 /// layer down.
 pub fn stamp(cmd: &mut std::process::Command) {
     if let Some(nonce) = capability() {
-        cmd.env(CAPABILITY_ENV, nonce);
+        cmd.env(CAPABILITY_ENV, nonce.expose());
     }
     // Unconditional, hold or no hold: replay protection is about what a
     // cargo READS, not about what this process is authorized to do. See
@@ -210,7 +212,8 @@ pub fn cargo_config_overrides() -> std::io::Result<Vec<String>> {
     ));
     if let Some(nonce) = capability() {
         contents.push_str(&format!(
-            "{CAPABILITY_ENV} = {{ value = \"{nonce}\", force = true, relative = false }}\n"
+            "{CAPABILITY_ENV} = {{ value = \"{}\", force = true, relative = false }}\n",
+            nonce.expose()
         ));
     }
     // The engine builds its own test commands, so brokkr's parent-death signal
@@ -249,35 +252,6 @@ pub fn inside_admitted_compilation() -> bool {
     std::env::var_os(LEASE_MARKER_ENV).is_some_and(|v| !v.is_empty())
 }
 
-/// A fresh per-acquisition nonce: 16 bytes of kernel entropy, hex.
-///
-/// `/dev/urandom` rather than a crate, because the guard is a self-contained
-/// binary and this keeps both sides on one dependency-free definition. `None`
-/// if entropy is unavailable, which the caller must treat as a failure to
-/// acquire: a hold with no capability can hand nothing to its children, so
-/// every one of its own compiles would be refused.
-pub fn mint_nonce() -> Option<String> {
-    use std::io::Read;
-    let mut buf = [0_u8; 16];
-    let mut f = std::fs::File::open("/dev/urandom").ok()?;
-    f.read_exact(&mut buf).ok()?;
-    Some(hex(&buf))
-}
-
-/// The value published in the lock file for a nonce. See the module header for
-/// why the file carries the hash and not the nonce itself.
-pub fn auth_hash(nonce: &str) -> String {
-    hex(&xxhash_rust::xxh3::xxh3_128(nonce.as_bytes()).to_be_bytes())
-}
-
-fn hex(bytes: &[u8]) -> String {
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        s.push_str(&format!("{b:02x}"));
-    }
-    s
-}
-
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -285,23 +259,24 @@ mod tests {
 
     #[test]
     fn a_minted_nonce_is_thirty_two_hex_chars() {
-        let n = mint_nonce().expect("/dev/urandom readable on any test host");
-        assert_eq!(n.len(), 32, "{n}");
-        assert!(n.chars().all(|c| c.is_ascii_hexdigit()), "{n}");
+        let n = Nonce::mint().expect("/dev/urandom readable on any test host");
+        assert_eq!(n.expose().len(), 32);
+        assert!(n.expose().bytes().all(|b| b.is_ascii_hexdigit()));
     }
 
     #[test]
     fn two_minted_nonces_differ() {
         // Not a randomness test - a guard against a constant sneaking in.
-        assert_ne!(mint_nonce().unwrap(), mint_nonce().unwrap());
+        assert_ne!(Nonce::mint().unwrap(), Nonce::mint().unwrap());
     }
 
     #[test]
     fn the_hash_is_stable_and_hides_the_nonce() {
-        let n = "0123456789abcdef0123456789abcdef";
-        assert_eq!(auth_hash(n), auth_hash(n));
-        assert_ne!(auth_hash(n), n);
-        assert_ne!(auth_hash(n), auth_hash("0123456789abcdef0123456789abcdee"));
+        let n = Nonce::parse("0123456789abcdef0123456789abcdef").unwrap();
+        let other = Nonce::parse("0123456789abcdef0123456789abcdee").unwrap();
+        assert_eq!(n.auth_hash(), n.auth_hash());
+        assert_ne!(n.auth_hash().as_str(), n.expose());
+        assert_ne!(n.auth_hash(), other.auth_hash());
     }
 
     #[test]
@@ -313,7 +288,7 @@ mod tests {
         let mut cmd = std::process::Command::new("/bin/true");
         stamp(&mut cmd);
         if let Some(c) = capability() {
-            assert!(!c.is_empty());
+            assert!(!c.expose().is_empty());
         }
     }
 
@@ -328,12 +303,17 @@ mod tests {
     fn a_second_hold_replaces_the_first_holds_capability() {
         let _seq = crate::test_scratch::process_global_lock();
         let before = capability();
-        publish_capability("first");
-        assert_eq!(capability().as_deref(), Some("first"));
-        publish_capability("second");
+        let first = Nonce::parse("0123456789abcdef0123456789abcdef").unwrap();
+        let second = Nonce::parse("fedcba9876543210fedcba9876543210").unwrap();
+        publish_capability(&first);
         assert_eq!(
-            capability().as_deref(),
-            Some("second"),
+            capability().as_ref().map(Nonce::expose),
+            Some(first.expose())
+        );
+        publish_capability(&second);
+        assert_eq!(
+            capability().as_ref().map(Nonce::expose),
+            Some(second.expose()),
             "a sequential second hold must replace the first hold's nonce"
         );
         clear_capability();

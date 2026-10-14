@@ -38,7 +38,8 @@ is rejected at parse time with a migration message: drop the matching
 
 sæhrimnir is an external repo (sibling checkout, see
 `mock_server_binary` / `fixtures_dir` in `[ratatoskr]` config). It writes a
-five-line readiness sentinel naming per-protocol listening ports, which
+readiness sentinel naming each protocol's listening port, one line per
+protocol, which
 brokkr parses via `parse_sentinel` in `src/ratatoskr/saehrimnir.rs`.
 
 Spawn lifecycle:

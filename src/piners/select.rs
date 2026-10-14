@@ -31,6 +31,14 @@ pub struct SelectArgs {
 /// invocation with no flags - is a hard error listing the available
 /// keywords, mirroring the dataset-resolver error style.
 pub fn resolve(registry: &Registry, args: &SelectArgs) -> Result<Vec<String>, DevError> {
+    if args.verify_only && (!args.keywords.is_empty() || !args.probe.is_empty()) {
+        return Err(DevError::Config(
+            "piners: --verify-only checks the whole pinned universe and cannot be combined with \
+             --keyword or --probe."
+                .into(),
+        ));
+    }
+
     if args.verify_only || args.all {
         // The whole universe leaves every [pending] probe out: name them.
         let pending: Vec<String> = registry.pending.keys().cloned().collect();

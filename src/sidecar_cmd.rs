@@ -9,7 +9,7 @@ use crate::db;
 use crate::error::DevError;
 use crate::output;
 use crate::request::{SidecarQuery, SidecarView};
-use crate::resolve::sidecar_db_path;
+use crate::resolve::{results_db_path, sidecar_db_path};
 use crate::sidecar_fmt::{
     apply_timeline_filter, parse_time_range, print_compare_timeline, print_counters,
     print_field_stat, print_marker_durations, print_phase_summary, print_run_info,
@@ -17,23 +17,14 @@ use crate::sidecar_fmt::{
     validate_timeline_args,
 };
 
-fn open_sidecar_db(project_root: &Path) -> Option<db::sidecar::SidecarDb> {
-    let path = sidecar_db_path(project_root);
-    if path.exists() {
-        db::sidecar::SidecarDb::open(&path).ok()
-    } else {
-        None
-    }
-}
-
 /// Resolve `--run`: `"all"` → None (all runs), N → Some(N), absent → best run.
 /// Also logs which run(s) will be shown when the result has multiple runs.
 fn resolve_run_filter(
-    sdb: &db::sidecar::SidecarDb,
-    uuid_prefix: &str,
+    store: &db::RunStore,
+    id: &db::RunId,
     run_arg: Option<&str>,
 ) -> Result<Option<usize>, DevError> {
-    let (best_idx, total) = sdb.query_meta(uuid_prefix);
+    let (best_idx, total) = store.query_sidecar_meta(id)?;
     let run_filter = match run_arg {
         Some("all") => None,
         Some(n) => Some(n.parse::<usize>().map_err(|_| {
@@ -58,76 +49,112 @@ pub(crate) fn cmd_sidecar(project_root: &Path, q: &SidecarQuery) -> Result<(), D
     validate_timeline_args(q)?;
     let view = q.view()?;
 
-    let Some(sdb) = open_sidecar_db(project_root) else {
+    let store = db::RunStore::open(
+        &results_db_path(project_root),
+        &sidecar_db_path(project_root),
+    )?;
+    if !store.has_sidecar_db() {
         output::result_msg("no sidecar.db found");
         return Ok(());
-    };
-
+    }
     match view {
-        SidecarView::Compare { uuids: (a, b) } => run_compare(&sdb, a, b, q.human),
+        SidecarView::Compare { uuids: (a, b) } => run_compare(&store, a, b, q.human),
         SidecarView::Summary { uuid } => {
-            let uuid = sdb.resolve_session(uuid)?;
-            run_phase_summary(&sdb, &uuid, q)
+            with_resolved(&store, uuid, |id| run_phase_summary(&store, id, q))
         }
         SidecarView::Samples { uuid } => {
-            let uuid = sdb.resolve_session(uuid)?;
-            run_samples(&sdb, &uuid, q)
+            with_resolved(&store, uuid, |id| run_samples(&store, id, q))
         }
         SidecarView::Markers { uuid } => {
-            let uuid = sdb.resolve_session(uuid)?;
-            run_markers(&sdb, &uuid, q)
+            with_resolved(&store, uuid, |id| run_markers(&store, id, q))
         }
         SidecarView::Durations { uuid } => {
-            let uuid = sdb.resolve_session(uuid)?;
-            run_durations(&sdb, &uuid, q)
+            with_resolved(&store, uuid, |id| run_durations(&store, id, q))
         }
         SidecarView::Counters { uuid } => {
-            let uuid = sdb.resolve_session(uuid)?;
-            run_counters(&sdb, &uuid, q)
+            with_resolved(&store, uuid, |id| run_counters(&store, id, q))
         }
-        SidecarView::Stalls { uuid } => {
-            let uuid = sdb.resolve_session(uuid)?;
-            run_stalls(&sdb, &uuid, q)
-        }
+        SidecarView::Stalls { uuid } => with_resolved(&store, uuid, |id| run_stalls(&store, id, q)),
         SidecarView::Stat { uuid, field } => {
-            let uuid = sdb.resolve_session(uuid)?;
-            run_stat(&sdb, &uuid, field, q)
+            with_resolved(&store, uuid, |id| run_stat(&store, id, field, q))
+        }
+    }
+}
+
+fn print_resolved_run_info(store: &db::RunStore, id: &db::RunId) {
+    if let Some(sdb) = store.sidecar_db() {
+        print_run_info(sdb, id.as_str());
+    }
+}
+
+fn with_resolved(
+    store: &db::RunStore,
+    prefix: &str,
+    run: impl FnOnce(&db::RunId) -> Result<(), DevError>,
+) -> Result<(), DevError> {
+    match resolve_id(store, prefix)? {
+        Some(id) => run(&id),
+        None => {
+            output::result_msg("no sidecar data for this result");
+            Ok(())
+        }
+    }
+}
+
+fn resolve_id(store: &db::RunStore, prefix: &str) -> Result<Option<db::RunId>, DevError> {
+    match store.resolve(db::RunRef::Uuid(prefix))? {
+        db::Resolved::One(id) => Ok(Some(id)),
+        db::Resolved::Missing => Ok(None),
+        db::Resolved::Ambiguous(ids) => {
+            const SHOWN: usize = 10;
+            let listed = ids
+                .iter()
+                .take(SHOWN)
+                .map(db::RunId::as_str)
+                .collect::<Vec<_>>();
+            let more = ids.len().saturating_sub(SHOWN);
+            let tail = if more > 0 {
+                format!(", and {more} more")
+            } else {
+                String::new()
+            };
+            Err(DevError::Config(format!(
+                "uuid prefix '{prefix}' is ambiguous - it matches {} runs: {}{tail}",
+                ids.len(),
+                listed.join(", "),
+            )))
         }
     }
 }
 
 fn run_phase_summary(
-    sdb: &db::sidecar::SidecarDb,
-    uuid_prefix: &str,
+    store: &db::RunStore,
+    id: &db::RunId,
     q: &SidecarQuery,
 ) -> Result<(), DevError> {
-    print_run_info(sdb, uuid_prefix);
-    let run_filter = resolve_run_filter(sdb, uuid_prefix, q.run.as_deref())?;
-    let samples = sdb.query_samples(uuid_prefix, run_filter)?;
+    print_resolved_run_info(store, id);
+    let run_filter = resolve_run_filter(store, id, q.run.as_deref())?;
+    let samples = store.query_sidecar_samples(id, run_filter)?;
     if samples.is_empty() {
         output::result_msg("no sidecar data for this result");
         return Ok(());
     }
-    let markers = sdb.query_markers(uuid_prefix, run_filter)?;
+    let markers = store.query_sidecar_markers(id, run_filter)?;
     print_phase_summary(&samples, &markers, q.human);
     Ok(())
 }
 
-fn run_samples(
-    sdb: &db::sidecar::SidecarDb,
-    uuid_prefix: &str,
-    q: &SidecarQuery,
-) -> Result<(), DevError> {
-    print_run_info(sdb, uuid_prefix);
-    let run_filter = resolve_run_filter(sdb, uuid_prefix, q.run.as_deref())?;
-    let mut samples = sdb.query_samples(uuid_prefix, run_filter)?;
+fn run_samples(store: &db::RunStore, id: &db::RunId, q: &SidecarQuery) -> Result<(), DevError> {
+    print_resolved_run_info(store, id);
+    let run_filter = resolve_run_filter(store, id, q.run.as_deref())?;
+    let mut samples = store.query_sidecar_samples(id, run_filter)?;
     if samples.is_empty() {
         output::result_msg("no sidecar data for this result");
         return Ok(());
     }
 
     if let Some(ref phase_name) = q.phase {
-        let markers = sdb.query_markers(uuid_prefix, run_filter)?;
+        let markers = store.query_sidecar_markers(id, run_filter)?;
         let (start_us, end_us) = resolve_phase_range(phase_name, &markers, &samples)?;
         samples.retain(|s| s.timestamp_us >= start_us && s.timestamp_us < end_us);
     }
@@ -148,14 +175,10 @@ fn run_samples(
     Ok(())
 }
 
-fn run_markers(
-    sdb: &db::sidecar::SidecarDb,
-    uuid_prefix: &str,
-    q: &SidecarQuery,
-) -> Result<(), DevError> {
-    print_run_info(sdb, uuid_prefix);
-    let run_filter = resolve_run_filter(sdb, uuid_prefix, q.run.as_deref())?;
-    let markers = sdb.query_markers(uuid_prefix, run_filter)?;
+fn run_markers(store: &db::RunStore, id: &db::RunId, q: &SidecarQuery) -> Result<(), DevError> {
+    print_resolved_run_info(store, id);
+    let run_filter = resolve_run_filter(store, id, q.run.as_deref())?;
+    let markers = store.query_sidecar_markers(id, run_filter)?;
     if markers.is_empty() {
         output::result_msg("no sidecar markers for this result");
         return Ok(());
@@ -166,14 +189,10 @@ fn run_markers(
     Ok(())
 }
 
-fn run_durations(
-    sdb: &db::sidecar::SidecarDb,
-    uuid_prefix: &str,
-    q: &SidecarQuery,
-) -> Result<(), DevError> {
-    print_run_info(sdb, uuid_prefix);
-    let run_filter = resolve_run_filter(sdb, uuid_prefix, q.run.as_deref())?;
-    let markers = sdb.query_markers(uuid_prefix, run_filter)?;
+fn run_durations(store: &db::RunStore, id: &db::RunId, q: &SidecarQuery) -> Result<(), DevError> {
+    print_resolved_run_info(store, id);
+    let run_filter = resolve_run_filter(store, id, q.run.as_deref())?;
+    let markers = store.query_sidecar_markers(id, run_filter)?;
     if markers.is_empty() {
         output::result_msg("no sidecar markers for this result");
         return Ok(());
@@ -186,17 +205,13 @@ fn run_durations(
     Ok(())
 }
 
-fn run_stalls(
-    sdb: &db::sidecar::SidecarDb,
-    uuid_prefix: &str,
-    q: &SidecarQuery,
-) -> Result<(), DevError> {
-    print_run_info(sdb, uuid_prefix);
-    let run_filter = resolve_run_filter(sdb, uuid_prefix, q.run.as_deref())?;
+fn run_stalls(store: &db::RunStore, id: &db::RunId, q: &SidecarQuery) -> Result<(), DevError> {
+    print_resolved_run_info(store, id);
+    let run_filter = resolve_run_filter(store, id, q.run.as_deref())?;
     // Stalls roll up cumulative `*_wait_ns` counters (not markers - markers are
     // reserved for phase boundaries). print_stalls handles the empty case.
-    let counters = sdb.query_counters(uuid_prefix, run_filter)?;
-    let samples = sdb.query_samples(uuid_prefix, run_filter)?;
+    let counters = store.query_sidecar_counters(id, run_filter)?;
+    let samples = store.query_sidecar_samples(id, run_filter)?;
     let wall_us = samples
         .first()
         .zip(samples.last())
@@ -205,14 +220,10 @@ fn run_stalls(
     Ok(())
 }
 
-fn run_counters(
-    sdb: &db::sidecar::SidecarDb,
-    uuid_prefix: &str,
-    q: &SidecarQuery,
-) -> Result<(), DevError> {
-    print_run_info(sdb, uuid_prefix);
-    let run_filter = resolve_run_filter(sdb, uuid_prefix, q.run.as_deref())?;
-    let mut counters = sdb.query_counters(uuid_prefix, run_filter)?;
+fn run_counters(store: &db::RunStore, id: &db::RunId, q: &SidecarQuery) -> Result<(), DevError> {
+    print_resolved_run_info(store, id);
+    let run_filter = resolve_run_filter(store, id, q.run.as_deref())?;
+    let mut counters = store.query_sidecar_counters(id, run_filter)?;
     if counters.is_empty() {
         output::result_msg("no counters for this result");
         return Ok(());
@@ -225,8 +236,8 @@ fn run_counters(
         }
     }
     if let Some(ref phase_name) = q.phase {
-        let markers = sdb.query_markers(uuid_prefix, run_filter)?;
-        let samples = sdb.query_samples(uuid_prefix, run_filter)?;
+        let markers = store.query_sidecar_markers(id, run_filter)?;
+        let samples = store.query_sidecar_samples(id, run_filter)?;
         let (start_us, end_us) =
             crate::sidecar_fmt::resolve_phase_range(phase_name, &markers, &samples)?;
         counters.retain(|c| c.timestamp_us >= start_us && c.timestamp_us < end_us);
@@ -236,20 +247,20 @@ fn run_counters(
 }
 
 fn run_stat(
-    sdb: &db::sidecar::SidecarDb,
-    uuid_prefix: &str,
+    store: &db::RunStore,
+    id: &db::RunId,
     field: &str,
     q: &SidecarQuery,
 ) -> Result<(), DevError> {
-    print_run_info(sdb, uuid_prefix);
-    let run_filter = resolve_run_filter(sdb, uuid_prefix, q.run.as_deref())?;
-    let mut samples = sdb.query_samples(uuid_prefix, run_filter)?;
+    print_resolved_run_info(store, id);
+    let run_filter = resolve_run_filter(store, id, q.run.as_deref())?;
+    let mut samples = store.query_sidecar_samples(id, run_filter)?;
     if samples.is_empty() {
         output::result_msg("no sidecar data for this result");
         return Ok(());
     }
     if let Some(ref phase_name) = q.phase {
-        let markers = sdb.query_markers(uuid_prefix, run_filter)?;
+        let markers = store.query_sidecar_markers(id, run_filter)?;
         let (start_us, end_us) = resolve_phase_range(phase_name, &markers, &samples)?;
         samples.retain(|s| s.timestamp_us >= start_us && s.timestamp_us < end_us);
     }
@@ -262,28 +273,38 @@ fn run_stat(
 }
 
 fn run_compare(
-    sdb: &db::sidecar::SidecarDb,
+    store: &db::RunStore,
     uuid_a: &str,
     uuid_b: &str,
     human: bool,
 ) -> Result<(), DevError> {
-    // Each side must name exactly one session, as for a single-UUID view.
-    let resolved_a = sdb.resolve_session(uuid_a)?;
-    let resolved_b = sdb.resolve_session(uuid_b)?;
-    let uuid_a = resolved_a.as_str();
-    let uuid_b = resolved_b.as_str();
-    let (best_a, _) = sdb.query_meta(uuid_a);
-    let (best_b, _) = sdb.query_meta(uuid_b);
-    let samples_a = sdb.query_samples(uuid_a, Some(best_a))?;
-    let samples_b = sdb.query_samples(uuid_b, Some(best_b))?;
+    // Each side must name exactly one run across both stores.
+    let Some(id_a) = resolve_id(store, uuid_a)? else {
+        output::result_msg("one or both results have no sidecar data");
+        return Ok(());
+    };
+    let Some(id_b) = resolve_id(store, uuid_b)? else {
+        output::result_msg("one or both results have no sidecar data");
+        return Ok(());
+    };
+    let (best_a, _) = store.query_sidecar_meta(&id_a)?;
+    let (best_b, _) = store.query_sidecar_meta(&id_b)?;
+    let samples_a = store.query_sidecar_samples(&id_a, Some(best_a))?;
+    let samples_b = store.query_sidecar_samples(&id_b, Some(best_b))?;
     if samples_a.is_empty() || samples_b.is_empty() {
         output::result_msg("one or both results have no sidecar data");
         return Ok(());
     }
-    let markers_a = sdb.query_markers(uuid_a, Some(best_a))?;
-    let markers_b = sdb.query_markers(uuid_b, Some(best_b))?;
+    let markers_a = store.query_sidecar_markers(&id_a, Some(best_a))?;
+    let markers_b = store.query_sidecar_markers(&id_b, Some(best_b))?;
     print_compare_timeline(
-        uuid_a, &samples_a, &markers_a, uuid_b, &samples_b, &markers_b, human,
+        id_a.as_str(),
+        &samples_a,
+        &markers_a,
+        id_b.as_str(),
+        &samples_b,
+        &markers_b,
+        human,
     );
     Ok(())
 }

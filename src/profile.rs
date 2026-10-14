@@ -13,8 +13,10 @@
 //! not touch disk, and does not depend on `Project`.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
 
 use crate::config::ParallelBinaries;
+use crate::config::rustflags_target_key;
 use crate::config::{
     CargoUnification, CheckEntry, EffectiveUnification, FeatureUnification, Harness, Isolation,
     ProfileDef, QualifiedSkip, SkipSpec, SweepProfile, TestConfig,
@@ -145,6 +147,56 @@ pub struct ResolvedSweep {
     /// ever see gate sweeps, and the one sweep that can carry this
     /// runs alone under `cmd_clippy` with nothing to dedupe against.
     pub lib_only: bool,
+}
+
+/// Whether a sweep shares cargo's target directory or owns an isolated one.
+/// The key is also the sole source of the isolated directory's stable name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TargetLocation {
+    Shared,
+    Isolated(IsolatedTargetKey),
+}
+
+/// The input that makes a sweep's build incompatible with cargo's shared
+/// cache. `Rustflags` preserves the established directory name; package
+/// unification qualifies that hash because it resolves a different graph.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum IsolatedTargetKey {
+    Rustflags(String),
+    Unify {
+        mode: CargoUnification,
+        rustflags_hash: Option<String>,
+    },
+}
+
+impl TargetLocation {
+    pub(crate) fn is_isolated(&self) -> bool {
+        matches!(self, Self::Isolated(_))
+    }
+
+    /// The cargo target dir this location denotes, using cargo metadata's
+    /// resolved directory as the base for both shared and isolated builds.
+    pub(crate) fn target_dir(&self, meta_target_dir: &Path) -> PathBuf {
+        match self {
+            Self::Shared => meta_target_dir.to_path_buf(),
+            Self::Isolated(key) => meta_target_dir.join(key.directory_name()),
+        }
+    }
+}
+
+impl IsolatedTargetKey {
+    fn directory_name(&self) -> String {
+        match self {
+            Self::Rustflags(hash) => format!("rustflags-{hash}"),
+            Self::Unify {
+                mode,
+                rustflags_hash,
+            } => match rustflags_hash {
+                Some(hash) => format!("unify-{}-{hash}", mode.as_str()),
+                None => format!("unify-{}", mode.as_str()),
+            },
+        }
+    }
 }
 
 /// A sweep's feature configuration as declared, before any run projects it
@@ -340,13 +392,31 @@ impl ResolvedSweep {
         )
     }
 
-    /// Whether this sweep compiles into its own target dir rather than
-    /// cargo's. The gate for the lazy `cargo metadata` call that resolves
-    /// where that dir hangs off: it used to read "any sweep has rustflags",
-    /// which silently stopped being the whole question once package mode
-    /// could isolate on its own.
-    pub fn needs_isolated_target_dir(&self) -> bool {
-        !self.rustflags.is_empty() || self.effective_unification.is_per_package()
+    /// The one target-location decision for this sweep. Its isolated key
+    /// determines both whether the caller needs cargo's metadata target dir
+    /// and the directory path built phases use.
+    ///
+    /// Isolation exists to stop two builds that cannot share a cache from
+    /// alternating in one directory and rebuilding each other: `rustflags`
+    /// re-fingerprint every unit, and package-mode unification resolves a
+    /// different feature graph for the same source. Pinned `selected` and
+    /// `workspace` deliberately do NOT isolate - ambient resolution is already
+    /// one of those in any given repo, so isolating them would split the common
+    /// cache for no gain. Package mode shares ONE directory across its
+    /// per-package resolutions, because a lane exports a single
+    /// `BROKKR_TEST_BIN_DIR`.
+    pub(crate) fn target_location(&self) -> TargetLocation {
+        let rustflags_hash = rustflags_target_key(&self.rustflags);
+        if self.effective_unification.is_per_package() {
+            TargetLocation::Isolated(IsolatedTargetKey::Unify {
+                mode: CargoUnification::Package,
+                rustflags_hash,
+            })
+        } else if let Some(hash) = rustflags_hash {
+            TargetLocation::Isolated(IsolatedTargetKey::Rustflags(hash))
+        } else {
+            TargetLocation::Shared
+        }
     }
 
     /// The cargo argv fragment pinning this sweep's resolution, empty under
@@ -1059,32 +1129,78 @@ skip = [{ package = "a", pattern = "slow" }]
 
     #[test]
     fn only_package_mode_and_rustflags_isolate_the_target_dir() {
-        use crate::config::shape_target_key;
         // The default must keep cargo's own dir, or every existing tree pays
         // a cold rebuild for a feature it does not use.
-        assert_eq!(shape_target_key(&[], EffectiveUnification::Ambient), None);
+        assert_eq!(
+            ResolvedSweep::default().target_location(),
+            TargetLocation::Shared
+        );
         // A pinned selected/workspace sweep resolves what ambient already
         // resolves in any given repo, so splitting the cache buys nothing.
         for mode in [CargoUnification::Selected, CargoUnification::Workspace] {
             assert_eq!(
-                shape_target_key(&[], EffectiveUnification::Pinned(mode)),
-                None
+                ResolvedSweep {
+                    effective_unification: EffectiveUnification::Pinned(mode),
+                    ..ResolvedSweep::default()
+                }
+                .target_location(),
+                TargetLocation::Shared,
             );
         }
         // Package mode isolates even with no rustflags: it resolves a
         // different graph and would otherwise thrash against every ordinary
         // sweep, in both directions, on every run.
-        let pkg = EffectiveUnification::Pinned(CargoUnification::Package);
-        assert_eq!(shape_target_key(&[], pkg), Some("unify-package".to_owned()));
+        let pkg = ResolvedSweep {
+            effective_unification: EffectiveUnification::Pinned(CargoUnification::Package),
+            ..ResolvedSweep::default()
+        };
+        assert_eq!(
+            pkg.target_location(),
+            TargetLocation::Isolated(IsolatedTargetKey::Unify {
+                mode: CargoUnification::Package,
+                rustflags_hash: None,
+            })
+        );
+        assert_eq!(
+            pkg.target_location().target_dir(Path::new("/target")),
+            PathBuf::from("/target/unify-package")
+        );
 
         // The rustflags-only name is unchanged, so no existing isolated dir
         // is re-derived by this feature.
         let flags = vec!["--cfg".to_owned(), "madsim".to_owned()];
-        let plain = shape_target_key(&flags, EffectiveUnification::Ambient).unwrap();
-        assert_eq!(plain, crate::config::rustflags_target_key(&flags).unwrap());
+        let plain = ResolvedSweep {
+            rustflags: flags.clone(),
+            ..ResolvedSweep::default()
+        };
+        let hash = crate::config::rustflags_target_key(&flags).unwrap();
+        assert_eq!(
+            plain.target_location(),
+            TargetLocation::Isolated(IsolatedTargetKey::Rustflags(hash.clone()))
+        );
+        assert_eq!(
+            plain.target_location().target_dir(Path::new("/target")),
+            PathBuf::from(format!("/target/rustflags-{hash}"))
+        );
         // ...and the two inputs compose rather than colliding: a package-mode
         // sweep carrying the same flags gets its own dir, not the plain one.
-        assert_ne!(shape_target_key(&flags, pkg).unwrap(), plain);
+        let pkg_with_flags = ResolvedSweep {
+            rustflags: flags,
+            ..pkg
+        };
+        assert_eq!(
+            pkg_with_flags.target_location(),
+            TargetLocation::Isolated(IsolatedTargetKey::Unify {
+                mode: CargoUnification::Package,
+                rustflags_hash: Some(hash.clone()),
+            })
+        );
+        assert_eq!(
+            pkg_with_flags
+                .target_location()
+                .target_dir(Path::new("/target")),
+            PathBuf::from(format!("/target/unify-package-{hash}"))
+        );
     }
 
     #[test]

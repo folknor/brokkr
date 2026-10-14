@@ -266,7 +266,8 @@ excluded, and the harness opens live paths.
 - `--verify-only` - verify every pinned probe (and every referenced feed
   group, and every harness file) against the corpus tree and exit, without
   building or running.
-  Use after a submodule re-pin.
+  Use after a submodule re-pin. It cannot be combined with `--keyword` or
+  `--probe`, since it always verifies the whole pinned universe.
 - `--reseed` - stamp `pins.toml` hashes from the corpus filesystem (below).
 - `--bless` - run the selection, then stamp current dispositions (below).
 - `--no-isolate` - skip the diagnostic isolation pass after an abnormal
@@ -627,7 +628,8 @@ parses its own output against the loader's rules, so a write can never
 produce a file the next load refuses.
 
 `--reseed` stamps hashes from the corpus **filesystem** (not `pins.toml`) -
-the only way the file is created or its hashes refreshed. No build/harness.
+the only way the file is created or its hashes refreshed. No build/harness;
+`--no-gate`, `--debug` and `--release` are therefore refused with reseed.
 Probe dirs are discovered anywhere under `corpus_root` by the marker (a dir
 containing `strategy.pine` plus `tv_trades.csv` or `tv_record.json`, all
 regular files), independent of depth and root layout; the registry dir is

@@ -218,20 +218,13 @@ fn run_pbfhogg_run(
     let mut feat_refs: Vec<&str> = req.features.iter().map(String::as_str).collect();
     feat_refs.extend_from_slice(&io_features);
 
-    // Run mode never stores results, so dirty tree is always fine.
-    let ctx = BenchContext::new(
-        req.dev_config,
-        req.project,
-        req.project_root,
-        req.build_root,
+    let ctx = BenchContext::new_for_request(
+        req,
         Some("pbfhogg-cli"),
         &feat_refs,
         true,
         &format!("run {}", command.id()),
-        true,
-        req.stop_marker.map(str::to_owned),
-    )?
-    .with_request(req);
+    )?;
 
     let cmd_ctx =
         build_pbfhogg_context(req, command, osc_seq, &ctx.binary, &ctx.paths, extra_params)?;
@@ -283,19 +276,13 @@ fn run_pbfhogg_wallclock(
     let mut feat_refs: Vec<&str> = req.features.iter().map(String::as_str).collect();
     feat_refs.extend_from_slice(&io_features);
 
-    let ctx = BenchContext::new(
-        req.dev_config,
-        req.project,
-        req.project_root,
-        req.build_root,
+    let ctx = BenchContext::new_for_request(
+        req,
         Some("pbfhogg-cli"),
         &feat_refs,
         true,
         &format!("run {}", command.id()),
-        req.force,
-        req.stop_marker.map(str::to_owned),
-    )?
-    .with_request(req);
+    )?;
 
     let cmd_ctx =
         build_pbfhogg_context(req, command, osc_seq, &ctx.binary, &ctx.paths, extra_params)?;
@@ -452,11 +439,8 @@ fn run_pbfhogg_hotpath(
     all_features.extend(req.features.iter().map(String::as_str));
     all_features.extend_from_slice(&io_features);
 
-    let ctx = BenchContext::new(
-        req.dev_config,
-        req.project,
-        req.project_root,
-        req.build_root,
+    let ctx = BenchContext::new_for_request(
+        req,
         Some("pbfhogg-cli"),
         &all_features,
         true,
@@ -465,10 +449,7 @@ fn run_pbfhogg_hotpath(
             command.id(),
             if alloc { "alloc" } else { "hotpath" }
         ),
-        req.force,
-        req.stop_marker.map(str::to_owned),
-    )?
-    .with_request(req);
+    )?;
 
     let cmd_ctx =
         build_pbfhogg_context(req, command, osc_seq, &ctx.binary, &ctx.paths, extra_params)?;

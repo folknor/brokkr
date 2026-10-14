@@ -107,10 +107,7 @@ pub enum AttemptVerdict {
 
 /// Classify one isolation attempt under the policy in the shared assessment.
 pub fn classify_attempt(assessment: &crate::piners::integrity::RunAssessment) -> AttemptVerdict {
-    match assessment.verdict(crate::piners::integrity::Policy::IsolationAttempt) {
-        crate::piners::integrity::Verdict::IsolationAttempt(verdict) => verdict,
-        _ => unreachable!("isolation policy returns an attempt verdict"),
-    }
+    assessment.isolation_verdict()
 }
 
 impl StopReason {
