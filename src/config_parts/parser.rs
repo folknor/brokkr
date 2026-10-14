@@ -7,6 +7,24 @@ pub fn load(project_root: &Path) -> Result<(Project, DevConfig), DevError> {
     Ok((project, config))
 }
 
+/// Describe host sections that all belong to other machines, or `None` when
+/// there are none or one matches `hostname`. Resolution deliberately falls
+/// back to defaults then - a config shared across machines (and CI) is the
+/// normal case - so this is reported where host data is inspected
+/// (`brokkr env`, a missing dataset) rather than on every config load, where
+/// it would be a standing warning on every command of every other machine.
+pub fn unmatched_host_note(config: &DevConfig, hostname: &str) -> Option<String> {
+    if config.hosts.is_empty() || config.hosts.contains_key(hostname) {
+        return None;
+    }
+    let mut configured = config.hosts.keys().map(String::as_str).collect::<Vec<_>>();
+    configured.sort_unstable();
+    Some(format!(
+        "no host section matches this machine ({hostname:?}); configured host sections: {}",
+        configured.join(", ")
+    ))
+}
+
 /// Parse a normal config from the user-wide layer alone, for a check run in a
 /// tree without `brokkr.toml`.
 pub fn load_user_only() -> Result<DevConfig, DevError> {
@@ -677,53 +695,113 @@ fn parse_capture_env(
     Ok(out)
 }
 
-/// Every top-level key that is a table and is not `project` is
-/// treated as a hostname section.
+/// Top-level config sections that are not host tables. `include` is consumed
+/// by composition before this parser sees the merged table.
+const NON_HOST_TOP_LEVEL_KEYS: &[&str] = &[
+    "project",
+    "host",
+    "litehtml",
+    "sluggrs",
+    "ratatoskr",
+    "piners",
+    "dellingr",
+    "mogwai",
+    "dependency_rule",
+    "check",
+    "test",
+    "quarantine",
+    "capture_env",
+    "gremlins",
+    "header",
+    "textlint",
+    "textlint_preset",
+    "script_check",
+    "manifest",
+    "rustdoc",
+    "deps",
+    "clippy",
+    "lints",
+    "bin",
+    "disable_toolchain",
+    "cargo_env",
+];
+
+/// Every other top-level table is a hostname section. The table shape is
+/// ambiguous by design: hostnames are open-ended, so section-name typos are
+/// caught by the host schema (and empty, no-op host sections are refused).
 fn parse_hosts(
     table: &toml::map::Map<String, toml::Value>,
 ) -> Result<HashMap<String, HostConfig>, DevError> {
     let mut out = HashMap::new();
+
+    // The explicit namespace provides a spelling for hostnames that collide
+    // with reserved section names such as `test`, `check` or `bin`.
+    if let Some(value) = table.get("host") {
+        let hosts = value.as_table().ok_or_else(|| {
+            DevError::Config("[host] must be a table keyed by hostname".into())
+        })?;
+        if hosts.is_empty() {
+            return Err(DevError::Config(
+                "[host] is empty; add a hostname table or remove it.".into(),
+            ));
+        }
+        for (key, value) in hosts {
+            if !value.is_table() {
+                return Err(DevError::Config(format!(
+                    "[host.{key}] must be a host configuration table"
+                )));
+            }
+            let section = format!("host.{key}");
+            out.insert(key.clone(), parse_host_config(&section, value)?);
+        }
+    }
+
     for (key, value) in table {
-        if key == "project"
-            || key == "litehtml"
-            || key == "sluggrs"
-            || key == "ratatoskr"
-            || key == "piners"
-            || key == "dellingr"
-            || key == "mogwai"
-            || key == "dependency_rule"
-            || key == "check"
-            || key == "test"
-            || key == "quarantine"
-            || key == "capture_env"
-            || key == "gremlins"
-            || key == "header"
-            || key == "textlint"
-            || key == "textlint_preset"
-            || key == "script_check"
-            || key == "manifest"
-            || key == "rustdoc"
-            || key == "deps"
-            || key == "clippy"
-            || key == "lints"
-            || key == "bin"
-            || key == "disable_toolchain"
-            || key == "cargo_env"
-        {
+        if NON_HOST_TOP_LEVEL_KEYS.contains(&key.as_str()) {
             continue;
         }
         if !value.is_table() {
             return Err(DevError::Config(format!(
-                "unknown key '{key}' in brokkr.toml"
+                "unknown top-level key '{key}' in brokkr.toml; expected a hostname table"
             )));
         }
-        let hc: HostConfig = value
-            .clone()
-            .try_into()
-            .map_err(|e: toml::de::Error| DevError::Config(format!("{key}: {e}")))?;
-        out.insert(key.clone(), hc);
+        if out.contains_key(key) {
+            return Err(DevError::Config(format!(
+                "host '{key}' is configured both as [{key}] and [host.{key}]; keep one spelling."
+            )));
+        }
+        out.insert(key.clone(), parse_host_config(key, value)?);
     }
     Ok(out)
+}
+
+fn parse_host_config(section: &str, value: &toml::Value) -> Result<HostConfig, DevError> {
+    let hc: HostConfig = value
+        .clone()
+        .try_into()
+        .map_err(|e: toml::de::Error| DevError::Config(format!("{section}: {e}")))?;
+    let drive_settings_present = hc.drives.as_ref().is_some_and(|drives| {
+        drives.source.is_some()
+            || drives.data.is_some()
+            || drives.scratch.is_some()
+            || drives.target.is_some()
+    });
+    if hc.data.is_none()
+        && hc.scratch.is_none()
+        && hc.output.is_none()
+        && hc.target.is_none()
+        && hc.worktree_keep.is_none()
+        && hc.port.is_none()
+        && !drive_settings_present
+        && hc.features.is_empty()
+        && hc.datasets.is_empty()
+        && hc.tilegen.is_empty()
+    {
+        return Err(DevError::Config(format!(
+            "[{section}] is an empty host section; set at least one host option or remove it."
+        )));
+    }
+    Ok(hc)
 }
 
 /// Parse the optional `[litehtml]` section from the root table.
@@ -2279,11 +2357,21 @@ pub(crate) fn validate_snapshot_key(key: &str) -> Result<(), String> {
 /// `PBFHOGG_USE_NEW_PATH=1 brokkr apply-changes --bench` records that
 /// var without any per-command plumbing.
 pub fn captured_env_pairs(config: &DevConfig) -> Vec<crate::db::KvPair> {
+    captured_env_pairs_from(config, std::env::vars())
+}
+
+/// Build the captured environment snapshot from an explicit iterator. The
+/// public wrapper above uses the inherited process environment, while keeping
+/// the selection and sorting logic independently injectable.
+fn captured_env_pairs_from(
+    config: &DevConfig,
+    vars: impl IntoIterator<Item = (String, String)>,
+) -> Vec<crate::db::KvPair> {
     if config.capture_env.is_empty() {
         return Vec::new();
     }
     let mut out: Vec<crate::db::KvPair> = Vec::new();
-    for (name, value) in std::env::vars() {
+    for (name, value) in vars {
         if matches_capture(&name, &config.capture_env) {
             out.push(crate::db::KvPair::text(format!("env.{name}"), value));
         }

@@ -1,7 +1,7 @@
 //! ccu-driven phases: `outdated` and `stale`.
 //!
-//! Shells out once to `ccu --json` (the user's check-updates tool) and
-//! turns the response into two kinds of events:
+//! Shells out to `ccu --json` (the user's check-updates tool) and turns the
+//! response into dependency-update and release-age events:
 //!
 //! - `Outdated` for each check with non-null `severity`
 //!   (patch/minor/major) - someone you can upgrade.
@@ -14,9 +14,10 @@
 //! `~/Programs/check-updates/ccu`.
 //!
 //! All failure modes (tool missing, subprocess error, deadline kill,
-//! non-zero exit, schema mismatch, parse error) collapse into a single `ToolMissing`
-//! event covering both phases. The check is informational - if it
-//! can't run, that shouldn't fail the whole `brokkr deps` invocation.
+//! non-zero exit, schema mismatch, parse error) collapse into a shared
+//! `ToolMissing` event covering the ccu-driven phases. The check is
+//! informational - if it can't run, that shouldn't fail the whole
+//! `brokkr deps` invocation.
 
 use std::collections::HashSet;
 use std::io::ErrorKind;
@@ -31,6 +32,8 @@ use crate::error::DevError;
 use crate::output;
 
 const TOOL: &str = "ccu";
+// `run()` consumes the entries in order, pairing them with its success results
+// and emitting skipped outcomes for them on failure.
 const PHASES: [Phase; 2] = [Phase::Outdated, Phase::Stale];
 /// Wall-clock ceiling on the `ccu` call. It is a network client, and a
 /// stalled registry connection otherwise hangs `brokkr deps` indefinitely.

@@ -890,10 +890,10 @@ fn run_one_test_sweep(
         .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect();
 
-    // Serial => the watchdog runner; parallel => the whole-sweep-timeout
-    // runner. Both reduce to (captured, optional hung test, timed_out, per-test
+    // Both runners use the same deadline verdict and reduce to
+    // (captured, optional deadline report, per-test
     // timings) so the reporting below is shared.
-    let (captured, hung, timed_out, completed) = if parallel {
+    let (captured, hung, completed) = if parallel {
         let run = test_runner::run_libtest_parallel(
             "cargo",
             test_runner::Leader::Cargo,
@@ -917,7 +917,7 @@ fn run_one_test_sweep(
             LibtestOutcome::HungTest(h) => Some(h),
             LibtestOutcome::Completed => None,
         };
-        (run.captured, hung, run.timed_out, run.completed)
+        (run.captured, hung, run.completed)
     } else {
         let run = test_runner::streaming_run_libtest(
             test_runner::Launch::Cargo,
@@ -940,7 +940,7 @@ fn run_one_test_sweep(
             LibtestOutcome::HungTest(h) => Some(h),
             LibtestOutcome::Completed => None,
         };
-        (run.captured, hung, false, run.completed)
+        (run.captured, hung, run.completed)
     };
 
     if let Some(out) = timings {
@@ -966,32 +966,18 @@ fn run_one_test_sweep(
     // deadlock, a lock nobody will release, a runaway child) is still there for
     // the next sweep to inherit. `Err` propagates out of the sweep loop and ends
     // the run.
-    if timed_out {
-        output::error(&format!(
-            "sweep '{}' exceeded the parallel test timeout ({}s) and was killed",
-            sweep.label,
-            test_runner::PARALLEL_SWEEP_TIMEOUT.as_secs(),
-        ));
-        output::error(&full_command);
-        // `Reported`: the diagnosis and the failing command are printed above.
-        return Err(DevError::Reported(format!(
-            "sweep '{}' exceeded its time budget - stopping",
-            sweep.label
-        )));
-    }
-
     if let Some(hung) = hung {
         // The sweep leads: `check` does not echo the `Reported` label below,
         // and neither the hung-test block nor the cargo line names it.
         output::error(&format!(
-            "a test exceeded its {}s budget in sweep '{}' - stopping",
+            "a test execution exceeded its {}s deadline in sweep '{}' - stopping",
             hung.ceiling.as_secs(),
             sweep.label
         ));
         output::error(&test_runner::format_hung_test(&hung, project_root));
         output::error(&full_command);
         return Err(DevError::Reported(format!(
-            "a test exceeded its {}s budget in sweep '{}' - stopping",
+            "a test execution exceeded its {}s deadline in sweep '{}' - stopping",
             hung.ceiling.as_secs(),
             sweep.label
         )));

@@ -5,6 +5,7 @@ use std::path::Path;
 use rusqlite::Connection;
 
 use crate::error::DevError;
+use crate::litehtml::compare::Status;
 
 const SCHEMA_RUNS: &str = "\
 CREATE TABLE IF NOT EXISTS mechanical_runs (
@@ -56,7 +57,7 @@ pub(crate) struct ResultRow {
     pub fixture_id: String,
     pub pixel_diff_pct: Option<f64>,
     pub element_match_pct: Option<f64>,
-    pub status: String,
+    pub status: Status,
 }
 
 pub(crate) struct MechanicalDb {
@@ -88,7 +89,7 @@ impl MechanicalDb {
         fixture_id: &str,
         pixel_diff_pct: Option<f64>,
         element_match_pct: Option<f64>,
-        status: &str,
+        status: Status,
     ) -> Result<(), DevError> {
         self.conn.execute(
             "INSERT INTO mechanical_results \
@@ -99,7 +100,7 @@ impl MechanicalDb {
                 fixture_id,
                 pixel_diff_pct,
                 element_match_pct,
-                status
+                status.as_str()
             ],
         )?;
         Ok(())
@@ -138,7 +139,7 @@ impl MechanicalDb {
     pub fn latest_run(&self) -> Result<Option<RunSummary>, DevError> {
         let mut stmt = self.conn.prepare(
             "SELECT run_id, timestamp, [commit], dirty \
-             FROM mechanical_runs ORDER BY timestamp DESC LIMIT 1",
+             FROM mechanical_runs ORDER BY timestamp DESC, rowid DESC LIMIT 1",
         )?;
         let mut rows = stmt.query_map([], map_run_summary)?;
         match rows.next() {
@@ -183,7 +184,7 @@ impl MechanicalDb {
              FROM mechanical_results r \
              JOIN mechanical_runs mr ON mr.run_id = r.run_id \
              WHERE r.fixture_id = ?1 \
-             ORDER BY mr.timestamp DESC LIMIT 1",
+             ORDER BY mr.timestamp DESC, mr.rowid DESC LIMIT 1",
         )?;
         let mut rows = stmt.query_map(rusqlite::params![fixture_id], map_result_row)?;
         match rows.next() {

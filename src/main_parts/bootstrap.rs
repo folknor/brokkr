@@ -3,9 +3,7 @@
 #[allow(clippy::too_many_arguments)]
 fn run_measured<F>(
     mode: &cli::ModeArgs,
-    dev_config: &config::DevConfig,
-    project: Project,
-    project_root: &std::path::PathBuf,
+    detection: &project::Detection,
     dataset: &str,
     variant: &str,
     brokkr_args: &str,
@@ -14,6 +12,9 @@ fn run_measured<F>(
 where
     F: FnOnce(&measure::MeasureRequest) -> Result<(), DevError>,
 {
+    let dev_config = &detection.config;
+    let project = detection.project;
+    let project_root = detection.project_root.as_path();
     let mm = resolve_mode(mode)?;
     let features = resolve_features(dev_config, &mode.features);
     output::set_quiet(!mode.verbose);
@@ -21,12 +22,10 @@ where
     // attach and counts, the hotpath header, worktree and toolchain lines)
     // goes here; without a log it would be discarded.
     let _log = check_cmd::RunLog::begin(project_root, check_cmd::run_log_kind::MEASURE);
-    // When brokkr.toml lives one level up, `project_root` is the config dir
-    // and the code tree is cwd; build/git must run against cwd. `None` in the
-    // common case (config in cwd), where behaviour is unchanged.
-    let cwd = std::env::current_dir()
-        .map_err(|e| DevError::Config(format!("cannot determine current directory: {e}")))?;
-    let parent_build_root = (cwd != *project_root).then_some(cwd.as_path());
+    // Detection carries the code tree (cwd) separately from the config/state
+    // root, so worktree setup does not have to derive it again.
+    let parent_build_root =
+        context::parent_build_root(project_root, detection.build_root.as_path());
     context::with_worktree(
         Some(project),
         project_root,
@@ -34,7 +33,7 @@ where
         mode.commit.as_deref(),
         mode.dry_run,
         dev_config.disable_toolchain,
-        dev_config.worktree_keep(&config::hostname()?),
+        context::worktree_keep(dev_config)?,
         |build_root| {
             let req = measure::MeasureRequest {
                 dev_config,
@@ -84,10 +83,10 @@ fn capture_brokkr_args() -> String {
 /// an unreadable cwd - leaves the full command list visible rather than
 /// hiding commands on the strength of a guess. A `brokkr.toml` so broken that
 /// the project is unknown must not also cost the user their `--help`.
-fn parse_cli() -> Cli {
+fn parse_cli(project: Option<Project>) -> Cli {
     let argv = crate::runnables::bare_run_sentinel(std::env::args().collect());
 
-    let Some(project) = project::detect_optional().ok().flatten().map(|d| d.project) else {
+    let Some(project) = project else {
         return Cli::parse_from(argv);
     };
 
@@ -120,7 +119,15 @@ fn main() {
     let raw_args: String = std::env::args().skip(1).collect::<Vec<_>>().join(" ");
     let start = Instant::now();
 
-    let cli = parse_cli();
+    // Resolve the project once for help filtering, toolchain arming, command
+    // dispatch and interrupt cleanup. Help still fails open on a bad config;
+    // the command decides below whether that detection error is fatal.
+    let (detection, detection_error) = match project::detect_optional() {
+        Ok(detection) => (detection, None),
+        Err(error) => (None, Some(error)),
+    };
+    let help_project = detection.as_ref().map(|d| d.project);
+    let cli = parse_cli(help_project);
 
     // Lead our own process group before spawning anything or acquiring the
     // lock, so brokkr's internal `kill(-pgid, …)` sweeps can't escape upward
@@ -135,7 +142,10 @@ fn main() {
     // (lock, disabled toolchain, scratch and streams) drop before we record
     // history and choose the process exit, including propagated child codes.
     // A `[cargo_env]` failure some path tolerated still fails the command.
-    let result = crate::cargo_env::seal(run(cli));
+    let result = crate::cargo_env::seal(match detection_error {
+        Some(error) if !detection_error_is_ignored(&cli.command) => Err(error),
+        _ => run(cli, detection.as_ref()),
+    });
     let elapsed_ms = duration_ms(start.elapsed());
 
     let exit_code = match &result {
@@ -155,9 +165,10 @@ fn main() {
         Err(DevError::Interrupted) => {
             output::run_msg("interrupted - running scratch cleanup");
             crate::shutdown::admit_exit_cleanup();
-            // Best-effort cleanup; if project detection fails here, the
-            // user already has `brokkr clean` as a follow-up.
-            if let Ok(d) = project::detect()
+            // Best-effort cleanup from the same config that governed this
+            // invocation; the user already has `brokkr clean` as a follow-up
+            // when startup could not detect a project.
+            if let Some(d) = detection.as_ref()
                 && let Err(e) = cmd_clean(
                     &d.config,
                     d.project,
@@ -177,8 +188,101 @@ fn main() {
     }
 }
 
+/// A few commands are useful even when the project config is malformed or
+/// unavailable. All other handlers historically propagated detection errors
+/// before dispatch; keep that policy while sharing the one startup result.
+fn detection_error_is_ignored(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::Lock
+            | Command::Kill { .. }
+            | Command::Strays { .. }
+            | Command::Guard { .. }
+            | Command::History { .. }
+            | Command::Man { .. }
+    )
+}
+
+fn require_detection(
+    detection: Option<&project::Detection>,
+) -> Result<&project::Detection, DevError> {
+    match detection {
+        Some(detection) => Ok(detection),
+        None => {
+            let cwd = std::env::current_dir().map_err(|e| {
+                DevError::Config(format!("cannot determine current directory: {e}"))
+            })?;
+            Err(DevError::Config(format!(
+                "no brokkr.toml found in {} or its parent directory",
+                cwd.display()
+            )))
+        }
+    }
+}
+
+/// `cargo fmt` runs rustfmt from the pinned toolchain, so honour
+/// disable_toolchain. When it's set we must move the pin aside; do it by
+/// arming the build root and riding the global lock's activation - the same
+/// mechanism every build path uses - rather than a bare guard. A bare guard
+/// would race a concurrent locked build that had already moved the same file
+/// aside: fmt would adopt that build's sidecar and restore it mid-command.
+/// Under the lock, fmt and the build can't overlap. When disable_toolchain is
+/// off there is nothing to move, so fmt stays lock-free as before.
+fn run_fmt(args: &[String], detection: Option<&project::Detection>) -> Result<(), DevError> {
+    match detection {
+        Some(d) if d.config.disable_toolchain => {
+            toolchain::arm(Some(d.build_root.clone()));
+            let lock = acquire_cmd_lock(d.project, &d.build_root, "fmt")?;
+            cmd_fmt(args, Some(&lock))
+        }
+        _ => cmd_fmt(args, None),
+    }
+}
+
+/// Reading the docs must work in a tree brokkr knows nothing about, so a
+/// missing or malformed config falls back to `Other("")` and gets the
+/// project-agnostic topics. No lock: this reads compiled-in strings and
+/// touches nothing on disk, and needs no toolchain arming.
+fn run_man(
+    topic: Option<&str>,
+    sections: &[String],
+    full: bool,
+    detection: Option<&project::Detection>,
+) -> Result<(), DevError> {
+    let project = detection.map_or(Project::Other(""), |d| d.project);
+    man::run(topic, sections, full, project)
+}
+
+/// Like `run`, `install` builds the code tree (cwd), riding the same lock +
+/// toolchain-disable window. The session-workflow closer: install the
+/// workspace's bins without reaching for raw cargo.
+fn run_install(
+    debug: bool,
+    release: bool,
+    unlocked: bool,
+    detection: Option<&project::Detection>,
+) -> Result<(), DevError> {
+    let (project, bin_cfg, project_root) = match detection {
+        Some(d) => (Some(d.project), d.config.bin.as_ref(), d.build_root.clone()),
+        None => (None, None, std::env::current_dir()?),
+    };
+    let lock = acquire_cmd_lock_opt(project, &project_root, "install")?;
+    runnables::cmd_install(&project_root, bin_cfg, debug, release, unlocked, Some(&lock))
+}
+
+/// `wc` lists source files in the code tree (cwd).
+fn run_wc(threshold: usize, detection: Option<&project::Detection>) -> Result<(), DevError> {
+    match detection {
+        Some(d) => wc::run(&d.build_root, threshold),
+        None => {
+            let cwd = std::env::current_dir()?;
+            wc::run(&cwd, threshold)
+        }
+    }
+}
+
 #[allow(clippy::too_many_lines)]
-fn run(cli: Cli) -> Result<(), DevError> {
+fn run(cli: Cli, detection: Option<&project::Detection>) -> Result<(), DevError> {
     // These commands work without a project root.
     if matches!(cli.command, Command::Lock) {
         return cmd_lock();
@@ -221,38 +325,10 @@ fn run(cli: Cli) -> Result<(), DevError> {
         });
     }
     if let Command::Fmt { args } = &cli.command {
-        // `cargo fmt` runs rustfmt from the pinned toolchain, so honour
-        // disable_toolchain. When it's set we must move the pin aside; do it
-        // by arming the build root and riding the global lock's activation -
-        // the same mechanism every build path uses - rather than a bare
-        // guard. A bare guard would race a concurrent locked build that had
-        // already moved the same file aside: fmt would adopt that build's
-        // sidecar and restore it mid-command. Under the lock, fmt and the
-        // build can't overlap. When disable_toolchain is off there is nothing
-        // to move, so fmt stays lock-free as before.
-        match project::detect_optional()? {
-            Some(d) if d.config.disable_toolchain => {
-                toolchain::arm(Some(d.build_root.clone()));
-                let lock = acquire_cmd_lock(d.project, &d.build_root, "fmt")?;
-                return cmd_fmt(args, Some(&lock));
-            }
-            _ => return cmd_fmt(args, None),
-        }
+        return run_fmt(args, detection);
     }
     if let Command::Man { topic, sections, full } = &cli.command {
-        // Reading the docs must work in a tree brokkr knows nothing about, so
-        // an undetectable project falls back to `Other("")` and gets the
-        // project-agnostic topics rather than an error. This sits ABOVE the
-        // `detect_optional()?` below on purpose: that `?` propagates a parse
-        // error from a malformed brokkr.toml, which would abort `man` before
-        // its own `.ok()` fallback could run - the exact case the fallback
-        // exists to cover. No lock: this reads compiled-in strings and touches
-        // nothing on disk, and needs no toolchain arming (it never builds).
-        let project = project::detect_optional()
-            .ok()
-            .flatten()
-            .map_or(Project::Other(""), |d| d.project);
-        return man::run(topic.as_deref(), sections, *full, project);
+        return run_man(topic.as_deref(), sections, *full, detection);
     }
 
     // When `disable_toolchain` is set, arm the build root whose pinned
@@ -260,10 +336,9 @@ fn run(cli: Cli) -> Result<(), DevError> {
     // lock* activates it (and restores it on release), so the moved-aside window
     // is exactly the locked window and concurrent brokkr runs can't race it. The
     // file lives in the code tree (build root / cwd), not the config dir; a
-    // `--commit` run re-arms this at the worktree via `with_worktree`. This peeks
-    // the config once; per-command detection still happens below.
-    let disable_dir = match project::detect_optional()? {
-        Some(d) if d.config.disable_toolchain => Some(d.build_root),
+    // `--commit` run re-arms this at the worktree via `with_worktree`.
+    let disable_dir = match detection {
+        Some(d) if d.config.disable_toolchain => Some(d.build_root.clone()),
         _ => None,
     };
     toolchain::arm(disable_dir);
@@ -283,7 +358,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
         // (cwd). Detection also supplies the `[bin]` section - target
         // resolution itself comes from cargo metadata, so `run` still works
         // with no brokkr.toml at all.
-        let detected = project::detect_optional()?;
+        let detected = detection;
         let feat = runnables::FeatureArgs {
             features,
             all: *all_features,
@@ -291,13 +366,13 @@ fn run(cli: Cli) -> Result<(), DevError> {
         };
         let Some(commit) = commit.as_deref() else {
             let (project, bin_cfg, project_root) = match detected {
-                Some(d) => (Some(d.project), d.config.bin, d.build_root),
+                Some(d) => (Some(d.project), d.config.bin.as_ref(), d.build_root.clone()),
                 None => (None, None, std::env::current_dir()?),
             };
             let _lock = acquire_cmd_lock_opt(project, &project_root, "run")?;
             return runnables::cmd_run(
                 &project_root,
-                bin_cfg.as_ref(),
+                bin_cfg,
                 name.as_deref(),
                 *debug,
                 *release,
@@ -310,15 +385,14 @@ fn run(cli: Cli) -> Result<(), DevError> {
         // root, its bookkeeping lives under the project root, and the lock is
         // taken inside the closure so the toolchain-disable lands on the
         // worktree rather than the live tree.
-        let (project, bin_cfg, project_root, build_root, disable_toolchain, keep) = match detected
-        {
+        let (project, bin_cfg, project_root, build_root, disable_toolchain, keep) = match detected {
             Some(d) => {
-                let keep = d.config.worktree_keep(&config::hostname()?);
+                let keep = context::worktree_keep(&d.config)?;
                 (
                     Some(d.project),
-                    d.config.bin,
-                    d.project_root,
-                    d.build_root,
+                    d.config.bin.as_ref(),
+                    d.project_root.clone(),
+                    d.build_root.clone(),
                     d.config.disable_toolchain,
                     keep,
                 )
@@ -328,7 +402,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 (None, None, cwd.clone(), cwd, false, crate::worktree_record::DEFAULT_KEEP)
             }
         };
-        let parent_build_root = (build_root != project_root).then_some(build_root.as_path());
+        let parent_build_root = context::parent_build_root(&project_root, &build_root);
         return context::with_worktree(
             project,
             &project_root,
@@ -345,7 +419,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 runnables::cmd_run_commit(
                     worktree,
                     &build_root,
-                    bin_cfg.as_ref(),
+                    bin_cfg,
                     name.as_deref(),
                     *debug,
                     *release,
@@ -362,30 +436,10 @@ fn run(cli: Cli) -> Result<(), DevError> {
         unlocked,
     } = &cli.command
     {
-        // Like `run`, `install` builds the code tree (cwd), riding the same
-        // lock + toolchain-disable window. The session-workflow closer:
-        // install the workspace's bins without reaching for raw cargo.
-        let (project, bin_cfg, project_root) = match project::detect_optional()? {
-            Some(d) => (Some(d.project), d.config.bin, d.build_root),
-            None => (None, None, std::env::current_dir()?),
-        };
-        let _lock = acquire_cmd_lock_opt(project, &project_root, "install")?;
-        return runnables::cmd_install(
-            &project_root,
-            bin_cfg.as_ref(),
-            *debug,
-            *release,
-            *unlocked,
-            Some(&_lock),
-        );
+        return run_install(*debug, *release, *unlocked, detection);
     }
     if let Command::Wc { threshold } = &cli.command {
-        // `wc` lists source files in the code tree (cwd).
-        let project_root = match project::detect_optional()? {
-            Some(d) => d.build_root,
-            None => std::env::current_dir()?,
-        };
-        return wc::run(&project_root, *threshold);
+        return run_wc(*threshold, detection);
     }
     if let Command::Bench {
         target,
@@ -424,13 +478,14 @@ fn run(cli: Cli) -> Result<(), DevError> {
         // must take the global lock like the other build paths: the lock is what
         // activates the armed toolchain-disable, moving a foreign checkout's
         // uninstalled pin aside for the window these tools run in.
-        let (project, project_root, workspace_dep_ignore) = match project::detect_optional()? {
+        let (project, project_root, workspace_dep_ignore) = match detection {
             Some(d) => (
                 Some(d.project),
-                d.build_root,
+                d.build_root.clone(),
                 d.config
                     .deps
-                    .map(|c| c.workspace_dep_ignore)
+                    .as_ref()
+                    .map(|c| c.workspace_dep_ignore.clone())
                     .unwrap_or_default(),
             ),
             None => (None, std::env::current_dir()?, Vec::new()),
@@ -466,8 +521,20 @@ fn run(cli: Cli) -> Result<(), DevError> {
         // the build root (cwd). The config values it uses ([[check]] sweeps,
         // dependency rules, gremlin excludes) come from wherever brokkr.toml
         // was found, in cwd or one level up.
+        // Keep the loaded Detection available to main's interrupt cleanup;
+        // the no-config path still composes the user-wide rules on their own.
+        let no_config_cwd = if detection.is_none() {
+            Some(std::env::current_dir()?)
+        } else {
+            None
+        };
+        let user_config = if detection.is_none() {
+            Some(config::load_user_only()?)
+        } else {
+            None
+        };
+        let project = detection.map(|d| d.project);
         let (
-            project,
             check_entries,
             dependency_rules,
             quarantine,
@@ -480,65 +547,59 @@ fn run(cli: Cli) -> Result<(), DevError> {
             manifest_cfg,
             rustdoc_cfg,
             clippy_cfg,
-            project_root,
-            state_root,
-        ) = match project::detect_optional()? {
-            Some(d) => (
-                Some(d.project),
-                d.config.check,
-                d.config.dependency_rules,
-                d.config.quarantine,
-                d.config.test,
-                d.config.bin,
-                d.config.gremlins,
-                d.config.header,
-                d.config.textlint,
-                d.config.script_checks,
-                d.config.manifest,
-                d.config.rustdoc,
-                d.config.lints,
-                // cargo/git run in the code tree (build_root); brokkr's own
-                // `.brokkr` state anchors to the config dir (project_root).
-                // The two differ only under the one-level-up layout.
-                d.build_root,
-                d.project_root,
-            ),
+        ) = if let Some(d) = detection {
+            (
+                d.config.check.as_slice(),
+                d.config.dependency_rules.as_slice(),
+                d.config.quarantine.as_slice(),
+                d.config.test.as_ref(),
+                d.config.bin.as_ref(),
+                d.config.gremlins.as_ref(),
+                d.config.header.as_ref(),
+                d.config.textlint.as_slice(),
+                d.config.script_checks.as_slice(),
+                d.config.manifest.as_ref(),
+                d.config.rustdoc.as_ref(),
+                d.config.lints.as_ref(),
+            )
+        } else {
+            // No project config, but the user-wide layer applies to any tree
+            // brokkr checks. A repo without brokkr.toml is exactly where a
+            // personal convention may be the only rule in force.
+            let user = user_config.as_ref().ok_or_else(|| {
+                DevError::Config("internal error: no-config check has no user config".into())
+            })?;
+            (
+                &[][..],
+                &[][..],
+                &[][..],
+                None,
+                None,
+                None,
+                None,
+                user.textlint.as_slice(),
+                user.script_checks.as_slice(),
+                None,
+                None,
+                None,
+            )
+        };
+        // cargo/git run in the code tree; check's `.brokkr` state anchors to
+        // the config dir. They differ under the one-level-up layout.
+        let (project_root, state_root) = match detection {
+            Some(d) => (d.build_root.as_path(), d.project_root.as_path()),
             None => {
-                let cwd = std::env::current_dir()?;
-                // No project config, but the user-wide layer is not about this
-                // project - it applies to any tree brokkr checks, and a repo
-                // that never adopted a brokkr.toml is exactly where a personal
-                // convention is most likely the only rule there is. Detection
-                // composes it beneath the project; here it is composed alone.
-                let config::DevConfig {
-                    textlint,
-                    script_checks,
-                    ..
-                } = config::load_user_only()?;
-                (
-                    None,
-                    Vec::new(),
-                    Vec::new(),
-                    Vec::new(),
-                    None,
-                    None,
-                    None,
-                    None,
-                    textlint,
-                    script_checks,
-                    None,
-                    None,
-                    None,
-                    cwd.clone(),
-                    cwd,
-                )
+                let cwd = no_config_cwd.as_deref().ok_or_else(|| {
+                    DevError::Config("internal error: no-config check has no current directory".into())
+                })?;
+                (cwd, cwd)
             }
         };
         // The run log is reserved before the lock and opened under it, so its narration
         // lands in it, and closes after the watchdog's join (declared first,
         // dropped last).
-        let _log = check_cmd::RunLog::begin(&state_root, check_cmd::run_log_kind::CHECK);
-        let _lock = acquire_cmd_lock_opt(project, &state_root, "check")?;
+        let _log = check_cmd::RunLog::begin(state_root, check_cmd::run_log_kind::CHECK);
+        let _lock = acquire_cmd_lock_opt(project, state_root, "check")?;
         // The whole-run ceiling, armed once the lock is ours so a wait behind
         // another brokkr command is not charged against it. Fires by
         // SIGKILLing every descendant and letting this command unwind to
@@ -547,30 +608,30 @@ fn run(cli: Cli) -> Result<(), DevError> {
         let _ceiling = check_cmd::CheckWatchdog::arm(check_cmd::CHECK_CEILING);
         if !textlint_names.is_empty() || !script_names.is_empty() {
             return check_cmd::cmd_check_selected(
-                &project_root,
-                &textlint_rules,
-                &script_checks,
+                project_root,
+                textlint_rules,
+                script_checks,
                 &textlint_names,
                 &script_names,
             );
         }
         return check_cmd::cmd_check(
             project,
-            &project_root,
-            &state_root,
-            &check_entries,
-            &dependency_rules,
-            &quarantine,
-            test_cfg.as_ref(),
-            bin_cfg.as_ref(),
-            gremlins_cfg.as_ref(),
-            header_cfg.as_ref(),
-            &textlint_rules,
-            &script_checks,
-            manifest_cfg.as_ref(),
-            rustdoc_cfg.as_ref(),
-            clippy_cfg.as_ref().map_or(&[][..], |c| &c.allow),
-            clippy_cfg.as_ref().map_or(&[][..], |c| &c.allow_exact),
+            project_root,
+            state_root,
+            check_entries,
+            dependency_rules,
+            quarantine,
+            test_cfg,
+            bin_cfg,
+            gremlins_cfg,
+            header_cfg,
+            textlint_rules,
+            script_checks,
+            manifest_cfg,
+            rustdoc_cfg,
+            clippy_cfg.map_or(&[][..], |c| &c.allow),
+            clippy_cfg.map_or(&[][..], |c| &c.allow_exact),
             &features,
             no_default_features,
             &package,
@@ -599,16 +660,32 @@ fn run(cli: Cli) -> Result<(), DevError> {
         // above activates when `acquire_cmd_lock_opt` takes the global lock below,
         // so the clippy build honours pin-suppression. Detection is optional -
         // `clippy` runs in any Rust+git repo with no config.
-        let (project, check_entries, clippy_cfg, project_root) =
-            match project::detect_optional()? {
-                Some(d) => (Some(d.project), d.config.check, d.config.lints, d.build_root),
-                None => (None, Vec::new(), None, std::env::current_dir()?),
-            };
+        let no_config_cwd = if detection.is_none() {
+            Some(std::env::current_dir()?)
+        } else {
+            None
+        };
+        let (project, check_entries, clippy_cfg, project_root) = match detection {
+            Some(d) => (
+                Some(d.project),
+                d.config.check.as_slice(),
+                d.config.lints.as_ref(),
+                d.build_root.as_path(),
+            ),
+            None => (
+                None,
+                &[][..],
+                None,
+                no_config_cwd.as_deref().ok_or_else(|| {
+                    DevError::Config("internal error: no-config clippy has no current directory".into())
+                })?,
+            ),
+        };
         let env_overrides = parse_env_overrides(&env)?;
-        let _lock = acquire_cmd_lock_opt(project, &project_root, "clippy")?;
+        let _lock = acquire_cmd_lock_opt(project, project_root, "clippy")?;
         return check_cmd::cmd_clippy(
-            &project_root,
-            &check_entries,
+            project_root,
+            check_entries,
             &package,
             all_features,
             &features,
@@ -616,22 +693,21 @@ fn run(cli: Cli) -> Result<(), DevError> {
             sweep.as_deref(),
             lib,
             &env_overrides,
-            clippy_cfg.as_ref().map_or(&[][..], |c| &c.allow),
-            clippy_cfg.as_ref().map_or(&[][..], |c| &c.allow_exact),
+            clippy_cfg.map_or(&[][..], |c| &c.allow),
+            clippy_cfg.map_or(&[][..], |c| &c.allow_exact),
         );
     }
 
-    let detection = project::detect()?;
+    let detection = require_detection(detection)?;
     let project = detection.project;
-    let dev_config = detection.config;
+    let dev_config = &detection.config;
     // The config dir (brokkr.toml's directory). Anchors data/ and .brokkr/.
-    // Commands that build/git against the code tree derive the build root
-    // (cwd) themselves - see `run_measured`.
-    let project_root = detection.project_root;
+    // The code tree is stored separately in `Detection.build_root`.
+    let project_root = &detection.project_root;
     // The code tree (cwd), where cargo and git run. Coincides with
     // `project_root` in the common case (config in cwd) and differs only under
     // the one-level-up layout used to drive a foreign checkout.
-    let build_root = detection.build_root;
+    let build_root = &detection.build_root;
     let brokkr_args = capture_brokkr_args();
 
     // Pbfhogg measured commands → single dispatch path.
@@ -641,9 +717,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
         params.compression = pbf.compression.clone();
         return run_measured(
             mode,
-            &dev_config,
-            project,
-            &project_root,
+            detection,
             &pbf.dataset,
             &pbf.variant,
             &brokkr_args,
@@ -695,7 +769,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
         | Command::BuildGeocodeIndex { .. } => Err(DevError::Config(
             "internal error: a pbfhogg command has no as_pbfhogg() mapping".into(),
         )),
-        Command::Env => cmd_env(&dev_config, project, &project_root),
+        Command::Env => cmd_env(dev_config, project, project_root),
         Command::DiffSnapshots {
             mode,
             dataset,
@@ -713,9 +787,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             };
             run_measured(
                 &mode,
-                &dev_config,
-                project,
-                &project_root,
+                detection,
                 &dataset,
                 &variant,
                 &brokkr_args,
@@ -739,9 +811,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             };
             run_measured(
                 &mode,
-                &dev_config,
-                project,
-                &project_root,
+                detection,
                 &pbf.dataset,
                 &pbf.variant,
                 &brokkr_args,
@@ -776,9 +846,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             };
             run_measured(
                 &mode,
-                &dev_config,
-                project,
-                &project_root,
+                detection,
                 &pbf.dataset,
                 &pbf.variant,
                 &brokkr_args,
@@ -810,9 +878,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             snapshot,
         } => run_measured(
             &mode,
-            &dev_config,
-            project,
-            &project_root,
+            detection,
             &pbf.dataset,
             &pbf.variant,
             &brokkr_args,
@@ -824,9 +890,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             compressions,
         } => run_measured(
             &mode,
-            &dev_config,
-            project,
-            &project_root,
+            detection,
             &pbf.dataset,
             &pbf.variant,
             &brokkr_args,
@@ -840,9 +904,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             osc_seq,
         } => run_measured(
             &mode,
-            &dev_config,
-            project,
-            &project_root,
+            detection,
             &pbf.dataset,
             &pbf.variant,
             &brokkr_args,
@@ -860,7 +922,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
         } => {
             // The pipeline contract comes from the named block. Input
             // assertions are attached later to the resolved PBF entry.
-            let tilegen = elivagar::resolve_tilegen(&dev_config, elivagar::DEFAULT_TILEGEN)?;
+            let tilegen = elivagar::resolve_tilegen(dev_config, elivagar::DEFAULT_TILEGEN)?;
             let cmd = elivagar::commands::ElivagarCommand::Built(
                 elivagar::commands::BuiltCommand::MainBinary {
                     tilegen,
@@ -869,9 +931,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             );
             run_measured(
                 &mode,
-                &dev_config,
-                project,
-                &project_root,
+                detection,
                 &dataset,
                 &variant,
                 &brokkr_args,
@@ -886,9 +946,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             );
             run_measured(
                 &mode,
-                &dev_config,
-                project,
-                &project_root,
+                detection,
                 "denmark",
                 "raw",
                 &brokkr_args,
@@ -903,9 +961,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             );
             run_measured(
                 &mode,
-                &dev_config,
-                project,
-                &project_root,
+                detection,
                 "denmark",
                 "raw",
                 &brokkr_args,
@@ -922,9 +978,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             );
             run_measured(
                 &mode,
-                &dev_config,
-                project,
-                &project_root,
+                detection,
                 &dataset,
                 &variant,
                 &brokkr_args,
@@ -941,9 +995,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             );
             run_measured(
                 &mode,
-                &dev_config,
-                project,
-                &project_root,
+                detection,
                 &dataset,
                 &variant,
                 &brokkr_args,
@@ -960,9 +1012,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             let cmd = nidhogg::commands::NidhoggCommand::Api { query };
             run_measured(
                 &mode,
-                &dev_config,
-                project,
-                &project_root,
+                detection,
                 &dataset,
                 "raw",
                 &brokkr_args,
@@ -977,9 +1027,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             let cmd = nidhogg::commands::NidhoggCommand::Ingest;
             run_measured(
                 &mode,
-                &dev_config,
-                project,
-                &project_root,
+                detection,
                 &dataset,
                 &variant,
                 &brokkr_args,
@@ -998,9 +1046,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             };
             run_measured(
                 &mode,
-                &dev_config,
-                project,
-                &project_root,
+                detection,
                 &dataset,
                 "raw",
                 &brokkr_args,
@@ -1014,9 +1060,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
         // than inventing a "denmark" that would land in the DB.
         Command::Dellingr { mode, lua } => run_measured(
             &mode,
-            &dev_config,
-            project,
-            &project_root,
+            detection,
             "",
             "",
             &brokkr_args,
@@ -1029,9 +1073,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
         // duplicate it under a second name that pairing also keys on.
         Command::Mogwai { mode, target, args } => run_measured(
             &mode,
-            &dev_config,
-            project,
-            &project_root,
+            detection,
             "",
             "",
             &brokkr_args,
@@ -1046,9 +1088,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             variant,
         } => run_measured(
             &mode,
-            &dev_config,
-            project,
-            &project_root,
+            detection,
             &dataset,
             &variant,
             &brokkr_args,
@@ -1075,9 +1115,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             variant,
         } => run_measured(
             &mode,
-            &dev_config,
-            project,
-            &project_root,
+            detection,
             &dataset,
             &variant,
             &brokkr_args,
@@ -1126,8 +1164,8 @@ fn run(cli: Cli) -> Result<(), DevError> {
             no_build,
             args,
         } => {
-            let _lock = acquire_cmd_lock(project, &project_root, "run")?;
-            let features = resolve_features(&dev_config, &features);
+            let _lock = acquire_cmd_lock(project, project_root, "run")?;
+            let features = resolve_features(dev_config, &features);
             let opts = RunOptions {
                 time,
                 json,
@@ -1135,10 +1173,10 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 no_build,
             };
             cmd_run(
-                &dev_config,
+                dev_config,
                 project,
-                &project_root,
-                &build_root,
+                project_root,
+                build_root,
                 &features,
                 &args,
                 &opts,
@@ -1173,7 +1211,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 limit,
                 top,
             };
-            results_cmd::cmd_results(&dev_config, &project_root, &rq)
+            results_cmd::cmd_results(dev_config, project_root, &rq)
         }
         Command::CorpusResults {
             run_id,
@@ -1208,7 +1246,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 full,
                 compare: compare.map(|ids| (ids[0], ids[1])),
             };
-            piners::corpus_query::cmd(&project_root, &cq)
+            piners::corpus_query::cmd(project_root, &cq)
         }
         Command::Sidecar {
             query,
@@ -1250,10 +1288,10 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 head,
                 tail,
             };
-            sidecar_cmd::cmd_sidecar(&project_root, &sq)
+            sidecar_cmd::cmd_sidecar(project_root, &sq)
         }
         Command::Invalidate { uuid, commit, force } => {
-            invalidate_cmd::cmd_invalidate(&project_root, uuid.as_deref(), commit.as_deref(), force)
+            invalidate_cmd::cmd_invalidate(project_root, uuid.as_deref(), commit.as_deref(), force)
         }
         Command::Clean {
             worktrees,
@@ -1263,7 +1301,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             all,
             dry_run,
         } => {
-            let _lock = acquire_cmd_lock(project, &project_root, "clean")?;
+            let _lock = acquire_cmd_lock(project, project_root, "clean")?;
             // `--all` folds in the worktrees, archives, and cargo sweeps.
             let cargo = if all { Some(cargo.unwrap_or(None)) } else { cargo };
             let cargo_swept = cargo.is_some();
@@ -1272,14 +1310,14 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 if dry_run {
                     output::run_msg(&format!("would run cargo clean -p {pkg}"));
                 } else {
-                    cargo_clean_package(&build_root, &pkg)?;
+                    cargo_clean_package(build_root, &pkg)?;
                 }
             }
             cmd_clean(
-                &dev_config,
+                dev_config,
                 project,
-                &project_root,
-                &build_root,
+                project_root,
+                build_root,
                 CleanOpts {
                     cargo_swept,
                     worktrees: worktrees || all,
@@ -1295,7 +1333,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             commit,
             verify,
         } => {
-            let features = resolve_features(&dev_config, &[]);
+            let features = resolve_features(dev_config, &[]);
             output::set_quiet(!verbose);
             // `verify pmtiles` only reads an archive, with the current binary,
             // so it belongs to the resolver family (pmtiles-inspect/diag/svg/
@@ -1313,25 +1351,23 @@ fn run(cli: Cli) -> Result<(), DevError> {
                             .to_string(),
                     ));
                 }
-                let _lock = acquire_cmd_lock(project, &project_root, "verify pmtiles")?;
+                let _lock = acquire_cmd_lock(project, project_root, "verify pmtiles")?;
                 return cmd_verify(
-                    &dev_config,
+                    dev_config,
                     project,
-                    &project_root,
-                    Some(&build_root),
+                    project_root,
+                    Some(build_root.as_path()),
                     verify,
                     &features,
                     verbose,
                 );
             }
-            let cwd = std::env::current_dir()
-                .map_err(|e| DevError::Config(format!("cannot determine current directory: {e}")))?;
-            let parent_build_root = (cwd != project_root).then_some(cwd.as_path());
-            with_worktree(Some(project), &project_root, parent_build_root, commit.as_deref(), false, dev_config.disable_toolchain, dev_config.worktree_keep(&config::hostname()?), |build_root| {
+            let parent_build_root = context::parent_build_root(project_root, build_root);
+            with_worktree(Some(project), project_root, parent_build_root, commit.as_deref(), false, dev_config.disable_toolchain, context::worktree_keep(dev_config)?, |build_root| {
                 cmd_verify(
-                    &dev_config,
+                    dev_config,
                     project,
-                    &project_root,
+                    project_root,
                     build_root,
                     verify,
                     &features,
@@ -1346,12 +1382,12 @@ fn run(cli: Cli) -> Result<(), DevError> {
             refresh,
             force,
         } => {
-            let _lock = acquire_cmd_lock(project, &project_root, "download")?;
+            let _lock = acquire_cmd_lock(project, project_root, "download")?;
             pbfhogg::cmd::download(
-                &dev_config,
+                dev_config,
                 project,
-                &project_root,
-                &build_root,
+                project_root,
+                build_root,
                 &region,
                 osc_seq,
                 as_snapshot.as_deref(),
@@ -1375,12 +1411,12 @@ fn run(cli: Cli) -> Result<(), DevError> {
             commit,
             file,
         } => {
-            let _lock = acquire_cmd_lock(project, &project_root, "pmtiles-inspect")?;
+            let _lock = acquire_cmd_lock(project, project_root, "pmtiles-inspect")?;
             elivagar::cmd::inspect(
-                &dev_config,
+                dev_config,
                 project,
-                &project_root,
-                &build_root,
+                project_root,
+                build_root,
                 &dataset,
                 &variant,
                 commit.as_deref(),
@@ -1396,12 +1432,12 @@ fn run(cli: Cli) -> Result<(), DevError> {
             x,
             y,
         } => {
-            let _lock = acquire_cmd_lock(project, &project_root, "diag")?;
+            let _lock = acquire_cmd_lock(project, project_root, "diag")?;
             elivagar::cmd::diag(
-                &dev_config,
+                dev_config,
                 project,
-                &project_root,
-                &build_root,
+                project_root,
+                build_root,
                 &dataset,
                 &variant,
                 commit.as_deref(),
@@ -1424,12 +1460,12 @@ fn run(cli: Cli) -> Result<(), DevError> {
             layers,
             output,
         } => {
-            let _lock = acquire_cmd_lock(project, &project_root, "svg")?;
+            let _lock = acquire_cmd_lock(project, project_root, "svg")?;
             elivagar::cmd::svg(
-                &dev_config,
+                dev_config,
                 project,
-                &project_root,
-                &build_root,
+                project_root,
+                build_root,
                 &dataset,
                 &variant,
                 commit.as_deref(),
@@ -1463,12 +1499,12 @@ fn run(cli: Cli) -> Result<(), DevError> {
             // `operational`: a failure before any verdict (lock, bootstrap,
             // resolution) exits regress's "could not complete" code, not 1.
             elivagar::cmd::operational(elivagar::regress::INCOMPLETE_EXIT, || {
-                let _lock = acquire_cmd_lock(project, &project_root, "regress")?;
+                let _lock = acquire_cmd_lock(project, project_root, "regress")?;
                 elivagar::cmd::regress(
-                    &dev_config,
+                    dev_config,
                     project,
-                    &project_root,
-                    &build_root,
+                    project_root,
+                    build_root,
                     &dataset,
                     &variant,
                     commit.as_deref(),
@@ -1487,35 +1523,35 @@ fn run(cli: Cli) -> Result<(), DevError> {
         }
         Command::PmtilesCorpus { cmd } => {
             elivagar::cmd::operational(elivagar::corpus::INCOMPLETE_EXIT, || {
-                let _lock = acquire_cmd_lock(project, &project_root, "pmtiles-corpus")?;
+                let _lock = acquire_cmd_lock(project, project_root, "pmtiles-corpus")?;
                 elivagar::cmd::corpus(
-                    &dev_config,
+                    dev_config,
                     project,
-                    &project_root,
-                    &build_root,
+                    project_root,
+                    build_root,
                     &cmd,
                     Some(&_lock),
                 )
             })
         }
         Command::DownloadOcean => {
-            let _lock = acquire_cmd_lock(project, &project_root, "download-ocean")?;
-            elivagar::cmd::download_ocean(&dev_config, project, &project_root)
+            let _lock = acquire_cmd_lock(project, project_root, "download-ocean")?;
+            elivagar::cmd::download_ocean(dev_config, project, project_root)
         }
         Command::OceanBuild { dry_run } => {
-            let _lock = acquire_cmd_lock(project, &project_root, "ocean-build")?;
+            let _lock = acquire_cmd_lock(project, project_root, "ocean-build")?;
             elivagar::ocean_build::run(
-                &dev_config,
+                dev_config,
                 project,
-                &project_root,
-                &build_root,
+                project_root,
+                build_root,
                 dry_run,
                 Some(&_lock),
             )
         }
         Command::DownloadNaturalEarth => {
-            let _lock = acquire_cmd_lock(project, &project_root, "download-natural-earth")?;
-            elivagar::cmd::download_natural_earth(&dev_config, project, &project_root)
+            let _lock = acquire_cmd_lock(project, project_root, "download-natural-earth")?;
+            elivagar::cmd::download_natural_earth(dev_config, project, project_root)
         }
         Command::PmtilesStats { files } => cmd_pmtiles_stats(project, &files),
         Command::Serve {
@@ -1523,44 +1559,44 @@ fn run(cli: Cli) -> Result<(), DevError> {
             dataset,
             tiles,
         } => {
-            let _lock = acquire_cmd_lock(project, &project_root, "serve")?;
-            let features = resolve_features(&dev_config, &[]);
+            let _lock = acquire_cmd_lock(project, project_root, "serve")?;
+            let features = resolve_features(dev_config, &[]);
             nidhogg::cmd::serve(
-                &dev_config,
+                dev_config,
                 project,
-                &project_root,
-                &build_root,
+                project_root,
+                build_root,
                 data_dir.as_deref(),
                 &dataset,
                 tiles.as_deref(),
                 &features,
             )
         }
-        Command::Stop => nidhogg::cmd::stop(project, &project_root),
-        Command::Status => nidhogg::cmd::status(&dev_config, project, &project_root),
+        Command::Stop => nidhogg::cmd::stop(project, project_root),
+        Command::Status => nidhogg::cmd::status(dev_config, project, project_root),
         Command::Ingest { variant, dataset } => {
-            let _lock = acquire_cmd_lock(project, &project_root, "ingest")?;
-            let features = resolve_features(&dev_config, &[]);
+            let _lock = acquire_cmd_lock(project, project_root, "ingest")?;
+            let features = resolve_features(dev_config, &[]);
             nidhogg::cmd::ingest(
-                &dev_config,
+                dev_config,
                 project,
-                &project_root,
-                &build_root,
+                project_root,
+                build_root,
                 &variant,
                 &dataset,
                 &features,
             )
         }
         Command::Update { args } => {
-            let _lock = acquire_cmd_lock(project, &project_root, "update")?;
-            let features = resolve_features(&dev_config, &[]);
-            nidhogg::cmd::update(project, &project_root, &build_root, &args, &features)
+            let _lock = acquire_cmd_lock(project, project_root, "update")?;
+            let features = resolve_features(dev_config, &[]);
+            nidhogg::cmd::update(project, project_root, build_root, &args, &features)
         }
         Command::Query { json } => {
-            nidhogg::cmd::query(&dev_config, project, &project_root, json.as_deref())
+            nidhogg::cmd::query(dev_config, project, project_root, json.as_deref())
         }
         Command::Geocode { term } => {
-            nidhogg::cmd::geocode(&dev_config, project, &project_root, &term)
+            nidhogg::cmd::geocode(dev_config, project, project_root, &term)
         }
         // ----- visual testing commands (litehtml + sluggrs) -----
         Command::Visual { fixture, suite, all, recapture } => {
@@ -1570,19 +1606,19 @@ fn run(cli: Cli) -> Result<(), DevError> {
             // otherwise contaminate) and what activates the armed
             // toolchain-disable. It was the one cargo-driving command reaching
             // its handler unlocked.
-            let _lock = acquire_cmd_lock(project, &project_root, "visual")?;
+            let _lock = acquire_cmd_lock(project, project_root, "visual")?;
             match project {
                 Project::Litehtml => {
                     let litehtml_config = dev_config.litehtml.as_ref().ok_or_else(|| {
                         DevError::Config("no [litehtml] section in brokkr.toml".into())
                     })?;
-                    litehtml::cmd::test(project, &project_root, &build_root, litehtml_config, fixture.as_deref(), suite.as_deref(), all, recapture)
+                    litehtml::cmd::test(project, project_root, build_root, litehtml_config, fixture.as_deref(), suite.as_deref(), all, recapture)
                 }
                 Project::Sluggrs => {
                     let sluggrs_config = dev_config.sluggrs.as_ref().ok_or_else(|| {
                         DevError::Config("no [sluggrs] section in brokkr.toml".into())
                     })?;
-                    sluggrs::cmd::test(project, &project_root, &build_root, sluggrs_config, fixture.as_deref(), suite.as_deref(), all, recapture)
+                    sluggrs::cmd::test(project, project_root, build_root, sluggrs_config, fixture.as_deref(), suite.as_deref(), all, recapture)
                 }
                 other => Err(DevError::Config(format!(
                     "'visual' runs visual tests and is only available for litehtml/sluggrs projects (current: {other})"
@@ -1597,23 +1633,23 @@ fn run(cli: Cli) -> Result<(), DevError> {
             // The run log is reserved before the lock and opened under it (so its narration
             // lands in it) and outlives the watchdog `test_cmd::run` arms, so
             // a 124 or 130 keeps everything up to the stop.
-            let _log = check_cmd::RunLog::begin(&project_root, check_cmd::run_log_kind::TEST);
-            let _lock = acquire_cmd_lock(project, &project_root, "test")?;
+            let _log = check_cmd::RunLog::begin(project_root, check_cmd::run_log_kind::TEST);
+            let _lock = acquire_cmd_lock(project, project_root, "test")?;
             // cargo runs in the code tree (build_root); brokkr's own
             // `.brokkr` state (hung-test snapshots) belongs under the
             // config dir (project_root), which differs under the
             // one-level-up foreign-checkout layout.
-            test_cmd::run(&dev_config, project, &build_root, &project_root, &name, package.as_deref(), repeat, jobs, profile_override(debug, release), timeout, sweep.as_deref())
+            test_cmd::run(dev_config, project, build_root, project_root, &name, package.as_deref(), repeat, jobs, profile_override(debug, release), timeout, sweep.as_deref())
         }
         Command::List => {
             match project {
                 Project::Litehtml => {
                     let cfg = dev_config.litehtml.as_ref().ok_or_else(|| DevError::Config("no [litehtml] section in brokkr.toml".into()))?;
-                    litehtml::cmd::list(project, &project_root, cfg)
+                    litehtml::cmd::list(project, project_root, cfg)
                 }
                 Project::Sluggrs => {
                     let cfg = dev_config.sluggrs.as_ref().ok_or_else(|| DevError::Config("no [sluggrs] section in brokkr.toml".into()))?;
-                    sluggrs::cmd::list(project, &project_root, cfg)
+                    sluggrs::cmd::list(project, project_root, cfg)
                 }
                 other => Err(DevError::Config(format!(
                     "'list' is only available for litehtml/sluggrs projects (current: {other})"
@@ -1621,12 +1657,12 @@ fn run(cli: Cli) -> Result<(), DevError> {
             }
         }
         Command::Approve { fixture, all } => {
-            cmd_approve(&dev_config, project, &project_root, &build_root, fixture, all)
+            cmd_approve(dev_config, project, project_root, build_root, fixture, all)
         }
         Command::Report { run_id } => {
             match project {
-                Project::Litehtml => litehtml::cmd::report(project, &project_root, &run_id),
-                Project::Sluggrs => sluggrs::cmd::report(project, &project_root, &run_id),
+                Project::Litehtml => litehtml::cmd::report(project, project_root, &run_id),
+                Project::Sluggrs => sluggrs::cmd::report(project, project_root, &run_id),
                 other => Err(DevError::Config(format!(
                     "'report' is only available for litehtml/sluggrs projects (current: {other})"
                 )))
@@ -1636,11 +1672,11 @@ fn run(cli: Cli) -> Result<(), DevError> {
             match project {
                 Project::Litehtml => {
                     let cfg = dev_config.litehtml.as_ref().ok_or_else(|| DevError::Config("no [litehtml] section in brokkr.toml".into()))?;
-                    litehtml::cmd::status(project, &project_root, cfg)
+                    litehtml::cmd::status(project, project_root, cfg)
                 }
                 Project::Sluggrs => {
                     let cfg = dev_config.sluggrs.as_ref().ok_or_else(|| DevError::Config("no [sluggrs] section in brokkr.toml".into()))?;
-                    sluggrs::cmd::status(project, &project_root, cfg)
+                    sluggrs::cmd::status(project, project_root, cfg)
                 }
                 other => Err(DevError::Config(format!(
                     "'visual-status' is only available for litehtml/sluggrs projects (current: {other})"
@@ -1650,13 +1686,13 @@ fn run(cli: Cli) -> Result<(), DevError> {
         // ----- litehtml-only commands -----
         Command::Prepare { input, output } => {
             let cfg = dev_config.litehtml.as_ref().ok_or_else(|| DevError::Config("no [litehtml] section in brokkr.toml".into()))?;
-            litehtml::cmd::prepare(project, &project_root, cfg, &input, &output)
+            litehtml::cmd::prepare(project, project_root, cfg, &input, &output)
         }
         Command::HtmlExtract { input, selector, from, to, output } => {
-            litehtml::cmd::extract(project, &project_root, &input, selector.as_deref(), from.as_deref(), to.as_deref(), &output)
+            litehtml::cmd::extract(project, project_root, &input, selector.as_deref(), from.as_deref(), to.as_deref(), &output)
         }
         Command::Outline { input, depth, full, selectors } => {
-            litehtml::cmd::outline(project, &project_root, &input, depth, full, selectors)
+            litehtml::cmd::outline(project, project_root, &input, depth, full, selectors)
         }
         // ----- sluggrs-only commands -----
         Command::Hotpath { mut mode, target } => {
@@ -1669,9 +1705,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
             }
             run_measured(
                 &mode,
-                &dev_config,
-                project,
-                &project_root,
+                detection,
                 "n/a",
                 "n/a",
                 &brokkr_args,
@@ -1697,8 +1731,8 @@ fn run(cli: Cli) -> Result<(), DevError> {
             // discovered cohort.
             if all {
                 ratatoskr::cmd::service_suite(
-                    &project_root,
-                    &dev_config,
+                    project_root,
+                    dev_config,
                     filter.as_deref(),
                     keep_artefacts,
                     profile_override(debug, release),
@@ -1708,8 +1742,8 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 )
             } else if let Some(script) = script {
                 ratatoskr::cmd::service_test(
-                    &project_root,
-                    &dev_config,
+                    project_root,
+                    dev_config,
                     &script,
                     keep_artefacts,
                     profile_override(debug, release),
@@ -1717,7 +1751,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                     keep_going,
                 )
             } else {
-                ratatoskr::cmd::service_list(&project_root)
+                ratatoskr::cmd::service_list(project_root)
             }
         }
         Command::Sync {
@@ -1751,8 +1785,8 @@ fn run(cli: Cli) -> Result<(), DevError> {
             // lists, a script runs, a script plus --bench measures.
             if all {
                 return ratatoskr::sync::run_sync_all(&ratatoskr::sync::SyncAllRequest {
-                    project_root: &project_root,
-                    dev_config: &dev_config,
+                    project_root,
+                    dev_config,
                     filter: filter.as_deref(),
                     include_ignored,
                     keep_artefacts,
@@ -1767,39 +1801,37 @@ fn run(cli: Cli) -> Result<(), DevError> {
                             .into(),
                     ));
                 }
-                return ratatoskr::sync::run_sync_list(&project_root, &dev_config);
+                return ratatoskr::sync::run_sync_list(project_root, dev_config);
             }
             // `--gate all` implies `--bench` (clap `requires`), so a
             // missing bench here means the plain script-run shape.
             let Some(bench) = bench else {
                 let script = script.as_deref().unwrap_or_default();
                 return ratatoskr::sync::run_sync_smoke(&ratatoskr::sync::SyncSmokeRequest {
-                    project_root: &project_root,
-                    dev_config: &dev_config,
+                    project_root,
+                    dev_config,
                     script,
                     keep_artefacts,
                     profile_override: profile_override(debug, release),
                 });
             };
-            let cwd = std::env::current_dir()
-                .map_err(|e| DevError::Config(format!("cannot determine current directory: {e}")))?;
-            let parent_build_root = (cwd != project_root).then_some(cwd.as_path());
+            let parent_build_root = context::parent_build_root(project_root, build_root);
             // A sync bench runs the sidecar, whose per-run narration is
             // run-log only: give it the measured runs' log.
-            let _log = check_cmd::RunLog::begin(&project_root, check_cmd::run_log_kind::MEASURE);
+            let _log = check_cmd::RunLog::begin(project_root, check_cmd::run_log_kind::MEASURE);
             with_worktree(
                 Some(project),
-                &project_root,
+                project_root,
                 parent_build_root,
                 commit.as_deref(),
                 false,
                 dev_config.disable_toolchain,
-                dev_config.worktree_keep(&config::hostname()?),
+                context::worktree_keep(dev_config)?,
                 |build_root| {
                     let req = ratatoskr::sync::SyncBenchRequest {
-                        project_root: &project_root,
+                        project_root,
                         build_root,
-                        dev_config: &dev_config,
+                        dev_config,
                         // Empty for the cohort: `run_gate_cohort`
                         // substitutes each gate's configured script.
                         script: script.as_deref().unwrap_or_default(),
@@ -1830,7 +1862,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 )
             })?;
             ratatoskr::saehrimnir::run_mock_serve(&ratatoskr::saehrimnir::MockServeRequest {
-                project_root: &project_root,
+                project_root,
                 config: cfg,
                 fixture: &fixture,
             })
@@ -1881,9 +1913,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 // and record to results.db, skipping the gate and runs.db.
                 run_measured(
                     &mode,
-                    &dev_config,
-                    project,
-                    &project_root,
+                    detection,
                     "",
                     "",
                     &brokkr_args,
@@ -1891,7 +1921,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 )
             } else {
                 // Bare corpus: the parity run (gate + runs.db), unchanged.
-                piners::cmd::corpus(&project_root, &dev_config, &args)
+                piners::cmd::corpus(project_root, dev_config, &args)
             }
         }
         Command::LintCorpus {
@@ -1922,7 +1952,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 warnings,
                 profile_override: profile_override(debug, release),
             };
-            piners::lint::cmd::lint_corpus(&project_root, &dev_config, &args)
+            piners::lint::cmd::lint_corpus(project_root, dev_config, &args)
         }
         Command::LintResults {
             run_id,
@@ -1937,7 +1967,7 @@ fn run(cli: Cli) -> Result<(), DevError> {
                 limit,
                 full,
             };
-            piners::lint::query::cmd(&project_root, &lq)
+            piners::lint::query::cmd(project_root, &lq)
         }
     }
 }

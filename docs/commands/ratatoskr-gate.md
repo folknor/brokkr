@@ -23,9 +23,9 @@ CREATE TABLE gate_runs (
   dirty         INTEGER NOT NULL,   -- 0/1
   hostname      TEXT NOT NULL,      -- libc gethostname
   gate_name     TEXT NOT NULL,      -- e.g. "jmap_small"
-  script        TEXT NOT NULL,      -- absolute or repo-relative path
+  script        TEXT NOT NULL,      -- project-relative path; legacy rows may be absolute
   fixture       TEXT NOT NULL,
-  profile       TEXT NOT NULL,      -- debug/release
+  profile       TEXT NOT NULL,      -- dev/release
   elapsed_ms    INTEGER NOT NULL,
   exit_code     INTEGER NOT NULL,
   success       INTEGER NOT NULL,   -- 0/1
@@ -43,6 +43,13 @@ is a default-features build. Schema v2 added the column; the v1 -> v2
 migration leaves existing rows NULL rather than backfilling, because the
 features an older row was built with are unknowable and a guessed value
 would claim an identity it may not have.
+
+Current rows store an in-project script path relative to the project root;
+scripts outside the project remain absolute. Older rows contain canonical
+absolute paths. When a checkout has moved, the gate accepts an older absolute
+baseline path whose components end in the current project-relative path. New
+rows store Cargo's profile name (`dev` or `release`); the legacy spelling
+`debug` is read as `dev`.
 
 Index on `(gate_name, hostname, created_at)` for the lookup paths below.
 Normalized metric tables can wait until there is a real query need.

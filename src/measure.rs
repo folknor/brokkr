@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use crate::config;
 use crate::error::DevError;
 use crate::project::Project;
+use crate::resolve::Bbox;
 
 // ---------------------------------------------------------------------------
 // MeasureMode
@@ -228,8 +229,8 @@ pub struct CommandContext {
     pub scratch_dir: PathBuf,
     /// Dataset name (e.g. `"denmark"`).
     pub dataset: String,
-    /// Bounding box string (e.g. `"12.4,55.6,12.7,55.8"`).
-    pub bbox: Option<String>,
+    /// Resolved, validated bounding box for commands that consume one.
+    pub bbox: Option<Bbox>,
     /// Command-specific parameters (flags, runtime observations).
     pub params: CommandParams,
 }

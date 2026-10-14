@@ -185,6 +185,8 @@ fn run(
         metadata: vec![],
     };
 
+    // Keep the child in the same tree as the built example. `--commit` may
+    // make this a worktree distinct from the project root that stores results.
     if uses_hotpath(req) {
         let label = harness::hotpath_feature(req.is_alloc());
         output::detail(&format!("sluggrs {label}: {command_label}"));

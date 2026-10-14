@@ -1,11 +1,13 @@
-//! `[header]` check: a required file header whose year must be current.
+//! `[header]` check: selected files must contain configured header text with
+//! the current year.
 //!
 //! Ported from nautilus_trader's `check_copyright_year` hook. The one thing a
 //! plain regex rule cannot express is the *dynamic* element - "the copyright
 //! year must be this year" - so it gets a dedicated feature. A file matching
 //! `paths` (minus `exempt`) must contain `pattern` with `{year}` substituted by
-//! the current UTC year; a missing header and a stale year both fail the same
-//! check (neither contains the expanded string).
+//! the current UTC year. The byte substring may occur anywhere in the file;
+//! this phase does not check its position. Missing text or a stale year fails
+//! the same check (neither contains the expanded string).
 //!
 //! Enabled by a `[header]` section with `paths` and `pattern`; absent by
 //! default.
@@ -16,7 +18,7 @@ use crate::config::HeaderConfig;
 use crate::error::DevError;
 use crate::{globs, gremlins};
 
-/// A file that is missing the header or carries a stale year.
+/// A file that does not contain the expected header text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HeaderViolation {
     pub file: PathBuf,
@@ -56,8 +58,8 @@ pub fn expand(pattern: &str, year: i32) -> String {
 }
 
 /// Scan tracked files matching `cfg.paths` (minus `cfg.exempt`) for the
-/// expanded header. `year` is injected so the check is deterministic and
-/// testable.
+/// expanded header text anywhere in each file. `year` is injected so the check
+/// is deterministic and testable.
 pub fn scan(
     project_root: &Path,
     cfg: &HeaderConfig,

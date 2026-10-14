@@ -168,6 +168,11 @@ fn cmd_env(
 
     let info = env::collect(&paths, project, project_root);
     env::print(&info);
+    if let Some(note) = config::unmatched_host_note(dev_config, &paths.hostname) {
+        output::warn(&format!(
+            "{note}. Host-specific settings are ignored and defaults apply."
+        ));
+    }
     Ok(())
 }
 
@@ -488,6 +493,24 @@ fn cmd_clean(
     }
 
     clean_artefact_trees(project, project_root, &c);
+
+    // Litehtml: the per-user Node script cache keeps one directory per bundled
+    // script version, each with its own node_modules. Every version other than
+    // the one this binary carries is unreachable and goes; the current one
+    // stays so the next run does not reinstall.
+    if project == Project::Litehtml {
+        let stale = litehtml::cmd::stale_script_cache_dirs();
+        for dir in &stale {
+            c.dir(dir);
+        }
+        if !stale.is_empty() {
+            output::run_msg(&format!(
+                "{} {}",
+                c.verb(),
+                output::count(stale.len(), "stale litehtml script cache")
+            ));
+        }
+    }
 
     // An empty routine sweep says so once, instead of printing nothing (which
     // reads as "did it run?"). Cargo and the deep flags report their own work.
@@ -972,7 +995,7 @@ fn cmd_lock() -> Result<(), DevError> {
     if !info.acq_id.is_empty() {
         match crate::lock_service::request(&info.acq_id, "status") {
             crate::lock_service::Reply::Status(s) => {
-                print_holder_status(&info, &invocation, &s);
+                print_holder_status(&info, &s);
                 return Ok(());
             }
             crate::lock_service::Reply::Busy => {
@@ -980,6 +1003,11 @@ fn cmd_lock() -> Result<(), DevError> {
                 output::lock_msg("the holder was mid-update; run `brokkr lock` again for details");
                 output::lock_msg(&format!("root: {}", info.project_root));
                 return Ok(());
+            }
+            crate::lock_service::Reply::InvalidStatus(reason) => {
+                output::lock_msg(&format!(
+                    "the holder's status reply could not be decoded ({reason}); showing lock-file details"
+                ));
             }
             // Released between the flock probe and the request, or stale
             // metadata: say what the file says, then try the local view.
@@ -1073,39 +1101,37 @@ fn cmd_lock() -> Result<(), DevError> {
 /// when the PID means the same thing here as it did to the holder.
 fn print_holder_status(
     info: &lockfile::LockInfo,
-    invocation: &str,
     s: &crate::lock_service::HolderStatus,
 ) {
+    let invocation = if s.identity.args.is_empty() {
+        format!("{} {}", s.identity.project, s.identity.command)
+    } else {
+        format!("{} {}", s.identity.project, s.identity.args)
+    };
     let mut facts = Vec::new();
-    if let Ok(secs) = s.get("held_secs").parse::<u64>() {
-        facts.push(format!("holding {}", lockfile::format_duration(secs)));
+    facts.push(format!("holding {}", lockfile::format_duration(s.held.as_secs())));
+    if let Some(cpu) = s.cpu {
+        facts.push(format!("{} CPU", lockfile::format_duration(cpu.as_secs())));
     }
-    if let Ok(secs) = s.get("cpu_secs").parse::<u64>() {
-        facts.push(format!("{} CPU", lockfile::format_duration(secs)));
-    }
-    if let Ok(kb) = s.get("rss_kb").parse::<u64>() {
+    if let Some(kb) = s.rss_kb {
         facts.push(format!("RSS {} MB", kb / 1024));
     }
-    if s.get("draining") == "1" {
+    if s.snapshot.draining {
         facts.push("draining earlier compilers".into());
     }
     let facts = if facts.is_empty() { String::new() } else { format!(" ({})", facts.join(", ")) };
     output::lock_msg(&format!("brokkr{facts}: {invocation}"));
-    output::lock_msg(&format!("root: {}", info.project_root));
+    output::lock_msg(&format!("root: {}", s.identity.root));
 
     let mut work = Vec::new();
-    if !s.get("progress").is_empty() {
-        work.push(format!("run {}", s.get("progress")));
+    if let Some((run, total)) = s.snapshot.progress {
+        work.push(format!("run {run}/{total}"));
     }
-    if s.get("child") == "1" {
+    if s.snapshot.has_child {
         work.push("a child process is running".into());
     }
-    match s.get("mocks") {
-        "" | "0" => {}
-        n => work.push(match n.parse::<usize>() {
-            Ok(k) => output::count(k, "mock server"),
-            Err(_) => format!("{n} mock servers"),
-        }),
+    if s.snapshot.mocks > 0 {
+        work.push(output::count(s.snapshot.mocks, "mock server"));
     }
     if !work.is_empty() {
         output::lock_msg(&work.join(", "));
@@ -1248,6 +1274,7 @@ fn kill_graceful(info: &lockfile::LockInfo) -> Result<(), DevError> {
                 return Ok(());
             }
             Reply::Busy | Reply::Status(_) => "the holder gave an unexpected answer".to_owned(),
+            Reply::InvalidStatus(why) => why,
             Reply::NoAnswer(why) => why,
         }
     };

@@ -1,14 +1,13 @@
 //! The `[[script_check]]` phase: run a command and assert its output.
 //!
-//! Some pre-commit gates can't be expressed as brokkr's native phases
-//! (textlint/manifest/style/header) - their logic is semantic or
-//! formatter-specific (e.g. a `# Panics`/`# Errors` doc analyser). A
+//! Some pre-commit gates do not fit a built-in phase because their logic is
+//! semantic or formatter-specific (e.g. a `# Panics`/`# Errors` doc analyser). A
 //! `[[script_check]]` runs an arbitrary `command` via `sh -c` and passes iff
 //! its captured output matches a configured `expect` sentinel per `match` and
 //! `stream`. Asserting on a success sentinel - not the exit code - is the
 //! point: it catches a check silently stubbed to exit 0, because the script
 //! must prove it ran to completion by emitting the sentinel. The exit code is
-//! therefore ignored; only a spawn failure is a hard error.
+//! therefore ignored; spawn failure and cooperative shutdown are errors.
 //!
 //! A script-check may run cargo under the lock brokkr already holds; it is
 //! admitted by the inherited hold capability like every other child - see

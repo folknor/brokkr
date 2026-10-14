@@ -157,9 +157,15 @@ const TOPICS: &[Topic] = &[
     },
     Topic {
         name: "litehtml",
-        summary: "litehtml/sluggrs internals: modules, fixtures, Node.js scripts",
+        summary: "litehtml internals: modules, fixtures, Node.js scripts",
         content: include_str!("../docs/projects/litehtml.md"),
         visibility: Visibility::Only(&[Project::Litehtml, Project::Sluggrs]),
+    },
+    Topic {
+        name: "sluggrs",
+        summary: "sluggrs config, snapshot layout and module map",
+        content: include_str!("../docs/projects/sluggrs.md"),
+        visibility: Visibility::Only(&[Project::Sluggrs]),
     },
     Topic {
         name: "ratatoskr",

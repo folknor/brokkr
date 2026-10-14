@@ -21,35 +21,16 @@ been verified.
    and they are never deduplicated through git history. Carry the context
    inline instead.
 
-## CON-001 - "Has a test ceiling expired, and what is the kill called?" - three implementations
+## CON-002 - "Did this run pass, fail, or blow its budget, and does that stop brokkr?" - lane-local answers
 
 Reported by: check-exec.
 
-- `test_runner::watchdog_loop_with_timing` (serial, unisolated and Direct lanes).
-- `harness_shim::Session::watchdog` (serial lane with the shim). This is a separate re-implementation and it already disagrees with the first:
-  - It ignores `ceilings.shape`, so a wall expiry is always `SweepWall` and never `OneTest -> PerTest { caller's name }`. That is unreachable today, because `brokkr test`'s one-test runs are Direct, but nothing prevents the combination.
-  - It always reports `SweepWall { blamed: Vec::new() }`, where the other loop reports the in-flight set.
-  - Its idle rule is run-wide (`!executing` across harnesses) rather than per tracker. That is deliberate, but the expiry order (per-test, then idle, then wall) is copied by hand.
-  - It has no "no event ever observed" warning.
-  - On the shared-stream tracker it accepts any `timed_out` name, including `IDLE_WEDGE` filed as `PerTest`, which the other branch filters out. This is unreachable while `NO_COMPLETION` (20s) always beats IDLE (300s).
-- `wait_parallel`: the parallel runner's own wall clock in a `try_wait` loop, running beside a `watchdog_loop` that was deliberately given `wall: None`. The parallel lane therefore has two kill paths with two outcome shapes (`HungTest` and `timed_out: bool`), and every caller has to handle both.
+One deadline verdict and one freeze/snapshot/kill sequence now serve every libtest lane, and the parallel lane's separate timeout outcome is gone. Residue:
+- Pass/fail/completeness is still decided per lane: serial and cargo-threaded in `check_cmd/output.rs`, `parallel::report_runs`, `test_cmd::run_one`, and `nextest_lane` mapping its own outcomes.
+- The lane verdicts still re-parse reconstructed human text (`cargo_filter::parse_test_output*`), while `accounting.rs` reconciles the same runs from the typed `ObsEvent` stream with its own reducer, so the lane verdict and the audit have two evidence bases that can disagree.
+- `nextest_lane` records `StreamEnded { Eof }` unconditionally, including after an engine error.
 
-The freeze, snapshot and kill sequence (`stop_process_group`, emit `Killed`, `capture_hung_test`, `kill_process_group`) is also written twice.
-
-Owner: a `Deadlines` value (per-test, idle, wall, shape) with one pure `fn verdict(&self, trackers: &[&TestTracker], run_started) -> Option<Verdict>` covering the one-tracker and many-tracker cases (the shim is "many trackers plus a run-level idle clock"), and one `enforce(verdict)` that does the SIGSTOP, snapshot and SIGKILL. The parallel runner's wall then becomes `Ceilings.wall`, and `wait_parallel` keeps only abort and shutdown polling.
-
-## CON-002 - "Did this run pass, fail, or blow its budget, and does that stop brokkr?" - four lane-local answers
-
-Reported by: check-exec.
-
-- `output.rs`, serial and cargo-threaded: `timed_out` -> `Err(Reported)`; `hung` -> `Err(Reported)`; `!status.success()` -> `Ok(false)`; then completeness from `cargo_filter::parse_test_output` over the reconstructed text.
-- `parallel::report_runs`: the same intent, rebuilt per binary, with its own `Incomplete` check that re-parses reconstructed text, and `passed` counted from the tracker's `completed` rather than libtest's summary.
-- `test_cmd::run_one`: a third parse (`parse_test_output_with_stderr`), a `starts_with("test result:")` sniff, a discovery-count comparison, and its own `stop_for_budget`.
-- `nextest_lane::run_nextest_engine`: maps a timed-out terminal event to its own per-test stop and error.
-
-`accounting.rs` meanwhile reconciles the same runs from the typed `ObsEvent` stream. So one verdict has two independent evidence bases: reconstructed human text plus exit status for the lane's pass or fail, and typed observations for the audit. They can disagree. Today libtest emits JSON, brokkr renders it into libtest's human format, and `cargo_filter` parses that format back. The hunter calls this round trip the structural core of the problem, and says it survives only because the parsers predate the JSON lane. Related: `nextest_lane` always records `StreamEnded { Eof }` with `Unattributed { "the engine lane's stream" }`, including after an engine error, so its "Eof" is asserted rather than observed. `DevError::Reported("... exceeded its time budget ... - stopping")` is built in three places (`output.rs` twice, `parallel::report_runs`) plus `test_cmd::stop_for_budget`. A caller such as the `--json` trailer or the exit-code mapper cannot tell "budget blown, stop" from any other reported error without reading the message.
-
-Owner: an `ExecutionOutcome` reduced from the observation stream (suite open/closed, terminals per test, kills, stream ends, exit), produced by the runner or by a pure reducer shared with accounting, and returned in `LibtestRun`. One `fn lane_verdict(&ExecutionOutcome) -> Pass | Fail | Incomplete | BudgetBlown | Stopped`. The nextest lane maps `TestResult::TimedOut` into the same `BudgetBlown`. The reconstructed text becomes display-only, which is how the JSON reconstructor already describes itself.
+Owner: an `ExecutionOutcome` reduced from the observation stream (shared with accounting) and one `lane_verdict(&ExecutionOutcome) -> Pass | Fail | Incomplete | BudgetBlown | Stopped`, with the reconstructed text display-only.
 
 ## CON-005 - "Is this lane cargo-threaded, and therefore unattributable?"
 
@@ -140,7 +121,7 @@ They agree today. But the user layer is really "the lowest-precedence include, r
 
 Reported by: config-cli.
 
-`resolve_features` (host features plus CLI features) is called in `run_measured`, `Passthrough`, `Verify`, `Serve`, `Ingest` and `Update`. The other build paths (`run`, `install`, `check`, `clippy`, `test`, `bench`) never consult host features. Whether the setting applies to a command is decided by whether its match arm remembered to call the helper. Either it is a property of building through `BenchContext`, and should be applied there, or it is a property of the command and belongs on its descriptor. Today it is neither.
+Every `BenchContext` build now merges host features itself, and `docs/brokkr.toml.md` states which other commands apply them. Residue: `run`, `install`, `check`, `clippy`, `test` and `bench` keep their own feature selection and do not share `BenchContext` or a command descriptor, so whether host features apply is still a per-path decision rather than one policy.
 
 ## CON-024 - "Which run does this id name?" - two stores, two policies, three selection APIs
 

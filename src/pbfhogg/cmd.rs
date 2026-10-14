@@ -366,7 +366,7 @@ pub(crate) fn verify(
         } else {
             None
         };
-        let bbox_str = if bbox_configured(bbox.as_deref(), &pbf.dataset, &paths) {
+        let resolved_bbox = if bbox_configured(bbox.as_deref(), &pbf.dataset, &paths) {
             Some(resolve_bbox(bbox.as_deref(), &pbf.dataset, &paths)?)
         } else {
             None
@@ -375,7 +375,7 @@ pub(crate) fn verify(
             &harness,
             &pbf_path,
             osc_path.as_deref(),
-            bbox_str.as_deref(),
+            resolved_bbox.as_ref(),
             &paths.data_dir,
             project_root,
             pbf.direct_io,

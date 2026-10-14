@@ -1382,6 +1382,8 @@ pub struct QuarantineEntry {
     pub package: Option<String>,
     /// Non-test suppression channels. The only category is `"doctests"`,
     /// which justifies `[test] doctests = false` under a complete profile.
+    /// `parse_quarantine` enforces this at config load; this remains a string
+    /// because coverage consumers render the category label.
     pub category: Option<String>,
     /// Backlog / issue identifier (e.g. "B14"). Opaque to brokkr; its
     /// stability is the repo's contract.
@@ -1749,10 +1751,7 @@ impl DevConfig {
     pub fn worktree_keep(&self, hostname: &str) -> usize {
         self.hosts
             .get(hostname)
-            .and_then(|h| h.worktree_keep)
-            // Zero would evict every worktree the moment a second one is
-            // wanted, which is indistinguishable from the feature being broken.
-            .filter(|n| *n > 0)
+            .and_then(|h| h.worktree_keep.map(std::num::NonZeroUsize::get))
             .unwrap_or(crate::worktree_record::DEFAULT_KEEP)
     }
 }
@@ -1778,7 +1777,7 @@ pub struct HostConfig {
     /// host property; per project because the store is - so the disk-wide total
     /// is this times the number of projects in play, which is why it is a
     /// growth damper rather than a bound.
-    pub worktree_keep: Option<usize>,
+    pub worktree_keep: Option<std::num::NonZeroUsize>,
     pub port: Option<u16>,
     pub drives: Option<DriveConfig>,
     /// Cargo features to enable by default for all build commands on this host.
@@ -1794,6 +1793,7 @@ pub struct HostConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DriveConfig {
     pub source: Option<String>,
     pub data: Option<String>,

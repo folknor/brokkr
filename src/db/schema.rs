@@ -174,9 +174,15 @@ INSERT INTO runs (\
 
 impl ResultsDb {
     /// Open (or create) the database at `path`. Creates schema and enables WAL
-    /// mode. Runs any pending migrations based on `PRAGMA user_version`.
+    /// mode and foreign-key enforcement. Runs any pending migrations based on
+    /// `PRAGMA user_version`.
     pub fn open(path: &Path) -> Result<Self, DevError> {
         let conn = rusqlite::Connection::open(path)?;
+        // Current child tables declare ON DELETE CASCADE; SQLite requires this
+        // per-connection switch for those declarations to run. Tables from
+        // older schemas may lack the cascade, so `delete_by_uuid` still
+        // removes children explicitly.
+        conn.pragma_update(None, "foreign_keys", true)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         // Migrate existing databases *before* applying SCHEMA so that
         // indexes on columns added by migrations (e.g. `project`) exist

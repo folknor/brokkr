@@ -8,6 +8,7 @@ use crate::db::KvPair;
 use crate::error::DevError;
 use crate::harness::{BenchConfig, BenchHarness};
 use crate::output;
+use crate::resolve::Bbox;
 
 // ---------------------------------------------------------------------------
 // Public entry point
@@ -15,7 +16,7 @@ use crate::output;
 
 /// Run API query benchmarks against the nidhogg server.
 ///
-/// Queries are derived from `bbox` (brokkr.toml format: `lon_min,lat_min,lon_max,lat_max`).
+/// Queries are derived from the resolved dataset bbox.
 /// For each query (optionally filtered by `only`): warmup, run N timed
 /// requests via curl, then report timing distribution plus element counts.
 pub fn run(
@@ -25,7 +26,7 @@ pub fn run(
     only: Option<&str>,
     input_file: Option<&str>,
     input_mb: Option<f64>,
-    bbox: &str,
+    bbox: &Bbox,
 ) -> Result<(), DevError> {
     super::server::check_running(port)?;
 

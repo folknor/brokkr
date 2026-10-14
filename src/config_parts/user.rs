@@ -10,12 +10,15 @@
 // Rejecting the rest at parse time keeps that boundary from eroding.
 //
 // Composition reads this table as the lowest-precedence layer before any
-// config section is parsed. `load_user` remains a standalone parsed view for
-// status consumers; project detection and config parsing use `compose` instead.
+// config section is parsed. Project loading and environment reporting both
+// use `compose`, so presets can resolve across the user and project layers.
+// Unit-test builds never read the developer's file: composition substitutes
+// no user layer there, so the environment-reading path is compiled out.
 
 /// Env override for the user-wide config path. A set-but-empty value disables
 /// the user-wide layer entirely, which is the documented opt-out for a shell
 /// or CI job that must see only the project's own rules.
+#[cfg(not(test))]
 const USER_CONFIG_ENV: &str = "BROKKR_USER_CONFIG";
 
 /// Path to the user-wide config: `$XDG_CONFIG_HOME/brokkr/brokkr.toml`,
@@ -26,8 +29,15 @@ const USER_CONFIG_ENV: &str = "BROKKR_USER_CONFIG";
 /// neither `XDG_CONFIG_HOME` nor `HOME` is set, which is a sandbox, not an
 /// error. An empty or relative `XDG_CONFIG_HOME` counts as unset, per the XDG
 /// spec (`user_dirs`) - taken literally it would read a config out of the cwd.
+#[cfg(not(test))]
 pub fn user_config_path() -> Option<PathBuf> {
-    if let Some(v) = std::env::var_os(USER_CONFIG_ENV) {
+    user_config_path_from_override(std::env::var_os(USER_CONFIG_ENV))
+}
+
+/// Resolve an already-read override. Kept separate so tests can cover the
+/// explicit opt-out without mutating the process-wide environment.
+fn user_config_path_from_override(override_path: Option<std::ffi::OsString>) -> Option<PathBuf> {
+    if let Some(v) = override_path {
         if v.is_empty() {
             return None;
         }
@@ -37,40 +47,14 @@ pub fn user_config_path() -> Option<PathBuf> {
     Some(dir.join("brokkr").join("brokkr.toml"))
 }
 
-/// The parsed user-wide layer.
-#[derive(Debug, Clone)]
-pub struct UserConfig {
-    /// Where it was read from, for error messages.
-    pub path: PathBuf,
-    pub textlint: Vec<TextlintRule>,
-    pub script_checks: Vec<ScriptCheck>,
-}
-
 /// The only top-level keys a user-wide config may carry.
 const USER_CONFIG_KEYS: [&str; 3] = ["textlint", "textlint_preset", "script_check"];
-
-/// Read and parse the user-wide config. `Ok(None)` when there is no such file -
-/// the overwhelmingly common case, and not a condition worth reporting. A file
-/// that exists but does not parse is an error: silently ignoring it would mean
-/// a typo quietly switches off every rule the user wrote.
-pub fn load_user() -> Result<Option<UserConfig>, DevError> {
-    let Some(path) = user_config_path() else {
-        return Ok(None);
-    };
-    let text = match std::fs::read_to_string(&path) {
-        Ok(text) => text,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => {
-            return Err(DevError::Config(format!("{}: {e}", path.display())));
-        }
-    };
-    parse_user(&text, path).map(Some)
-}
 
 /// Read the raw user-wide table for config composition. The allow-list is
 /// checked here, at the layer boundary, before the table can merge with a
 /// project config. Keeping it raw lets presets and named entries resolve with
 /// the project layers that sit above it.
+#[cfg(not(test))]
 fn load_user_table() -> Result<Option<(PathBuf, toml::Table)>, DevError> {
     let Some(path) = user_config_path() else {
         return Ok(None);
@@ -104,24 +88,4 @@ fn parse_user_table(text: &str, path: &Path) -> Result<toml::Table, DevError> {
         }
     }
     Ok(table.clone())
-}
-
-/// Parse the user-wide config text. Split from [`load_user`] so the schema is
-/// testable without touching the filesystem or the environment.
-fn parse_user(text: &str, path: PathBuf) -> Result<UserConfig, DevError> {
-    let table = parse_user_table(text, &path)?;
-    let at = |msg: String| DevError::Config(format!("{}: {msg}", path.display()));
-
-    let reword = |e: DevError| match e {
-        DevError::Config(msg) => at(msg),
-        other => other,
-    };
-    let textlint = parse_textlint(&table).map_err(reword)?;
-    let script_checks = parse_script_checks(&table).map_err(reword)?;
-
-    Ok(UserConfig {
-        path,
-        textlint,
-        script_checks,
-    })
 }

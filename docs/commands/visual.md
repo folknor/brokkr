@@ -1,8 +1,8 @@
 # Visual reference testing
 
 Gated to `project = "litehtml-rs"` and `project = "sluggrs"`. Visual reference
-testing - renders HTML fixtures through a pipeline binary, compares against
-Chrome screenshots.
+testing. Litehtml renders HTML fixtures and compares against Chrome captures;
+sluggrs renders snapshots and compares them against approved PNGs.
 
 All litehtml and sluggrs commands are top-level (no `brokkr litehtml` or
 `brokkr sluggrs` namespace). Shared visual testing commands (`visual`, `list`,
@@ -13,15 +13,17 @@ the detected project.
 > by the generic cargo single-test runner - see `docs/commands/check.md`.
 
 For project-specific fixture conventions and the prepare pipeline see
-`docs/projects/litehtml.md`. For the `[litehtml]` config block see
-`docs/brokkr.toml.md`.
+`docs/projects/litehtml.md` and `docs/projects/sluggrs.md`; each also documents
+its project-specific config block.
 
 ## Commands
 
-- `visual [ID] [--suite S] [--all] [--recapture]` - run fixtures against
-  Chrome reference artifacts. Builds pipeline binary, produces pixel diff +
-  element match comparison. Give exactly one selector (an ID, `--suite`, or
-  `--all`); combining them is refused rather than letting one silently win.
+- `visual [ID] [--suite S] [--all] [--recapture]` - run visual fixtures.
+  Litehtml uses Chrome reference artifacts; sluggrs uses approved PNGs. Builds
+  the pipeline binary and produces pixel diff + element match comparison for
+  litehtml, or a pixel diff for sluggrs. Give exactly one selector (an ID,
+  `--suite`, or `--all`); combining them is refused rather than letting one
+  silently win.
   `--suite` and `--recapture` are litehtml-only and refused on sluggrs.
 
   The build and the run's commit stamp use the code tree (cwd), so the
@@ -40,7 +42,7 @@ For project-specific fixture conventions and the prepare pipeline see
   A capture, pipeline, or comparison failure is one `ERROR` row with the
   reason printed, and the run continues with the next fixture.
 
-  Capture (litehtml, embedded puppeteer script) awaits `document.fonts.ready`
+  Capture (litehtml, bundled Puppeteer script) awaits `document.fonts.ready`
   after load - `networkidle0` does not cover data-URI `@font-face` decoding,
   and measuring before Ahem is active captures fallback-font geometry. Each
   capture writes a `chrome.meta.json` sidecar (browser + puppeteer version,

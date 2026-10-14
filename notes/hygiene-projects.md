@@ -25,21 +25,11 @@ Reported by: pbfhogg-nidhogg.
 
 `commands.rs::GETID_BENCH_IDS` and `verify_getid_removeid.rs::IDS` identical; `INSPECT_ALL_TAGS_MIN_COUNT` is a constant but `bench_blob_filter.rs` spells `"999999999"`; `"Sort.Type_then_ID"` three times in `verify.rs`; the nidhogg highway filter list six times (`client.rs` ×5, `query.rs::FALLBACK_QUERY`); `"planet.openstreetmap.org"` three times in `download_core.rs`.
 
-## PRJ-004 - Extract strategy → flags mapping has four copies
-
-Reported by: pbfhogg-nidhogg.
-
-`commands.rs` (`Extract` and `MultiExtract`), `bench_extract.rs::strategy_args`, `verify_extract.rs`. Diverged: `commands.rs` emits `-b=<bbox>`, `bench_extract` `-b <bbox>`, so rows under the same `extract` command never pair (BUG-049). `bench_extract.rs` also duplicates the `extract-*` presets in `bench_commands` (hard-coded bbox) with different argv; `suite pbfhogg` runs both, producing two extract row families that can never pair.
-
-Design hunt (map-projects): the strategy-to-flag mapping is also in `verify_multi_extract` (always `--simple`); `main.rs` fans out both `extract` and `multi-extract` and `bench_extract::run` fans out again by string, with `bench_extract::ALL_STRATEGIES` a separate `&[&str]`. `ensure_merged_pbf` spells `["apply-changes", pbf, osc, "-o", out]` apart from `PbfhoggCommand::ApplyChanges`, dropping `--locations-on-ways`, `-j`, `--compression` and the I/O flags, so the merged B-side for `diff` is built under different settings from an `apply-changes` bench (perhaps intended, but a second argv for one subcommand). The `--io-uring` support list exists as `supports_io_uring()` and again as prose in `resolve_io_flags` ("only apply-changes, sort, cat-dedupe, diff-osc, repack, degrade"), neither tied to pbfhogg's clap. Appending the I/O args plus `--compression` is copy-pasted in `run_pbfhogg_dry_run`, `run_pbfhogg_run`, `run_wallclock_core` and `run_pbfhogg_hotpath`, so dry-run shows bench argv even under `--hotpath`, and the hotpath "legacy" `--compression zlib` default is decided inside `build_body` by peeking at `ctx.params.compression` because the append happens elsewhere. Proposed: `ExtractStrategy::flag() -> Option<&str>` plus a bbox type's `to_pbfhogg_arg()`, `bench_extract` building `PbfhoggCommand::Extract` values rather than its own argv (one fan-out), the io-uring prose derived by iterating a variant catalogue, and I/O mode plus compression appended inside `build_args`, so dry-run shows the real argv by construction.
-
 ## PRJ-005 - bbox parsing re-implemented
 
 Reported by: pbfhogg-nidhogg.
 
-`resolve_bbox`/`validate_bbox` own validation; four other places re-parse: `commands.rs` MultiExtract, `verify_multi_extract.rs`, `nidhogg/client.rs::shrink_bbox`, `bbox_to_api` (no numeric check). `bench_all.rs` reads `ds.bbox` raw, unvalidated.
-
-Design hunt (map-projects): the bbox travels as `String` from config (`Dataset.bbox: Option<String>`) through `resolve_bbox` into `CommandContext.bbox: Option<String>`; the parsers differ in checks - `validate_bbox` (count, f64, no finiteness), `multi_extract_plan` (count, f64, finite), `verify_multi_extract::run` (count, f64, no finiteness), `shrink_bbox` (count, f64), `bbox_to_api` (count only, then a lon/lat swap by index on raw strings, so `default_api_query` can send malformed JSON to the server). The axis order `lon_min,lat_min,lon_max,lat_max` is restated in comments at each site. Proposed: `Bbox { min_lon, min_lat, max_lon, max_lat }` parsed once at config load and once for `--bbox` via a clap value parser, owning `strips(n)`, `shrink_quarter()`, `to_nidhogg_api()` and `to_pbfhogg_arg()` (the `-b=<bbox>` spelling), keeping the original text for `cli_args` fidelity or defining one canonical render.
+A shared `Bbox` type now owns parsing, strips, quarter shrinking and the pbfhogg and nidhogg renderings, and resolvers pass it typed. Residue: config (`Dataset.bbox`) and clap (`--bbox`) still carry the bbox as a string, parsed at resolution rather than at config load or by a clap value parser; coordinate range and min/max ordering are still not validated.
 
 ## PRJ-006 - Two compression validators that disagree
 
@@ -431,21 +421,15 @@ Reported by: small-benches.
 
 Design hunt (other-projects): `piners/measured.rs` re-derives `alloc` from a match on `req.mode`, ignores `req.features` (CLI `-F`), pushing only the hotpath feature onto `[piners.harness] features`, and uses `hotpath_feature(alloc)` alone rather than `hotpath_features()`; whether that is intended is stated nowhere. Each of the four files then chooses `run_hotpath` + `run_hotpath_capture` or `run_external`, the `harness::hotpath_feature(...)` label, `hotpath_alloc_note` and a scratch dir - the same ~40-line decision four times. Proposed: the mode question on `MeasureMode` (`fn instruments(&self)`) and a core `run_measured_target(ctx, config, argv, env)` the four adapters call.
 
-## PRJ-056 - litehtml/sluggrs configuration is untyped and undocumented
+## PRJ-056 - litehtml/sluggrs configuration is untyped
 
 Reported by: small-benches.
 
-`LitehtmlConfig.mode` and `LitehtmlFixture.expected` are free `String`s compared at use (`"ahem"`, `"fail"`), so `"Ahem"`/`"failure"` silently select the other behaviour (serde enums proposed). No config-time check for duplicate fixture/snapshot ids (`fixture_by_id` takes the first) or ids containing `/` or `..` (joined into `fixtures/<id>`). `FUZZ_THRESHOLD`, `POS_TOLERANCE`, `SIZE_TOLERANCE`, `ZERO_HEIGHT`, `REGRESSION_TOLERANCE`, `OFFENDER_PRINT_LIMIT` are scattered with no injection. `[litehtml]` and `[sluggrs]` are documented nowhere: `brokkr.toml.md` points `[litehtml]` to `litehtml.md`, which points back ("See `docs/brokkr.toml.md` for full schema"); `waive_element_threshold`, per-fixture `mode`/`viewport_width`/thresholds, `notes` and the whole `[sluggrs]` schema lack docs. `scripts_dir()` uses `env!("CARGO_MANIFEST_DIR")`, so the installed binary depends on the source checkout existing where it was built; `pnpm install` (not `--frozen-lockfile`) writes into brokkr's tree from any litehtml project, and deps install only when `node_modules` is missing, so a `package.json` bump never re-installs.
-
-Design hunt (other-projects): `CAPTURE_JS` is a 90-line Puppeteer script embedded as a Rust string in `litehtml/cmd.rs`, written to `.brokkr/capture.js` per run and run with `NODE_PATH = $(npm root -g)`, while `prepare.js`/`smoke.js` live under `scripts/litehtml-prepare/` with a `package.json` and pnpm lockfile, so the two resolve puppeteer and cheerio through two package managers and scopes and the Chrome version behind reference captures is pinned by no lockfile. Proposed: `capture.js` beside `prepare.js` under one `package.json` (puppeteer pinned there), all scripts `include_str!`'d and materialized with their `node_modules` into a brokkr-owned cache dir (XDG data, keyed by the lockfile hash) rather than the source tree.
-
-## PRJ-057 - Visual status and exit policy invented per project
-
-Reported by: small-benches.
-
-Exit policy lives in positional `counts: [u32; 4]` arrays with different index meanings per project; `NoBaseline` is a failure in litehtml (the `_` arm) and not in sluggrs (`Status::is_failure()` proposed). Status is stored as TEXT and matched back as literals (`"PASS"`, `"NO_BASELINE"`) with no `FromStr`; an unknown value falls through silently. `determine_status` takes seven positional args including two adjacent `Option<f64>` approvals that can be swapped silently (a struct proposed). The child cwd differs: sluggrs hotpath `build_root`, dellingr and mogwai `project_root`. `latest_result_for_*` orders by `datetime('now')` (one-second resolution; same-second runs ambiguous).
-
-Design hunt (other-projects): the exit rule fails on indices 1 and 3 in litehtml and 1 and 2 in sluggrs (same meaning, different indices); both bucket "everything else" with `_ => counts[1] += 1`, so a future litehtml path producing `NoBaseline` would fail the run, which `Status::NoBaseline`'s own doc says must never happen. The "improved" threshold `0.5` is hard-coded in both status renderers (the value of `compare::REGRESSION_TOLERANCE` but not that constant), as is the 0.05 "no visible delta" cutoff. "Approval record exists but the baseline artefact is gone means ERROR, not NO_BASELINE / not recapture" is decided separately in `litehtml::run_fixture` (Chrome reference) and `sluggrs::run_snapshot` (`approved.png`). `sluggrs approve` compares `r.status == Status::Error.as_str()` and both `format_status_columns` match on `"PASS"`/`"NO_BASELINE"` literals. Proposed: a `StatusTally` keyed by `compare::Status` (plus the `unexpected_pass` refinement), `Status::parse` with `ResultRow::status: Status`, and `Status` owning `fails_run()`, `annotation(current, approval)` and the tolerance constants, with one status renderer for both projects.
+Duplicate and path-unsafe ids are refused and `mode`/`expected` are validated, both schemas are documented, and the Node scripts are bundled and installed into an XDG cache keyed by package, lockfile and script contents. Residue:
+- `LitehtmlConfig.mode` and `LitehtmlFixture.expected` are still `String`s in `config_parts/schema.rs`, validated at command entry rather than deserialized as enums.
+- `FUZZ_THRESHOLD`, `POS_TOLERANCE`, `SIZE_TOLERANCE`, `ZERO_HEIGHT`, `REGRESSION_TOLERANCE` (in `litehtml/compare.rs`) and `OFFENDER_PRINT_LIMIT` (in `cmd.rs`) are not injectable.
+- Capture still resolves puppeteer from global npm, so the Chrome behind reference captures is pinned by no lockfile.
+- `scripts/litehtml-prepare/package.json` asks for cheerio `^1.2.0` while the lockfile records `^1.0.0`, so the cache install cannot be frozen.
 
 ## PRJ-058 - Visual failures don't say why
 

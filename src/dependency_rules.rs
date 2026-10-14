@@ -55,6 +55,37 @@ impl From<Option<&str>> for DependencyKind {
     }
 }
 
+enum RulePolarity<'a> {
+    Forbid(BTreeSet<&'a str>),
+    Allow(BTreeSet<&'a str>),
+}
+
+impl<'a> RulePolarity<'a> {
+    fn violates(&self, name: &str) -> bool {
+        match self {
+            Self::Forbid(names) => names.contains(name),
+            Self::Allow(names) => !names.contains(name),
+        }
+    }
+}
+
+fn rule_polarity(rule: &DependencyRule) -> Result<RulePolarity<'_>, DevError> {
+    match (&rule.forbid, &rule.allow) {
+        (Some(forbidden), None) => Ok(RulePolarity::Forbid(
+            forbidden.iter().map(String::as_str).collect(),
+        )),
+        (None, Some(allowed)) => Ok(RulePolarity::Allow(
+            allowed.iter().map(String::as_str).collect(),
+        )),
+        (Some(_), Some(_)) => Err(DevError::Config(
+            "[[dependency_rule]] sets both `forbid` and `allow`; a rule has one polarity".into(),
+        )),
+        (None, None) => Err(DevError::Config(
+            "[[dependency_rule]] needs `forbid` or `allow`".into(),
+        )),
+    }
+}
+
 /// Parse a `kinds` config token into a filter kind. `Unknown` is never a valid
 /// config value (it only exists for future/odd metadata), so it is rejected.
 fn parse_config_kind(s: &str) -> Option<DependencyKind> {
@@ -133,22 +164,11 @@ pub fn check_metadata(
 
     let mut violations = Vec::new();
     for rule in rules {
-        // One polarity per rule (the parser enforces exactly one of the two).
+        // The parser enforces one polarity; materialize it as an enum here too
+        // so malformed direct input cannot become a silent no-op.
         // An edge is judged by `dep.name`, the real package name - never the
         // rename key - so `foo = { package = "bar" }` can't dodge either list.
-        let forbidden: Option<BTreeSet<&str>> = rule
-            .forbid
-            .as_ref()
-            .map(|f| f.iter().map(String::as_str).collect());
-        let allowed: Option<BTreeSet<&str>> = rule
-            .allow
-            .as_ref()
-            .map(|a| a.iter().map(String::as_str).collect());
-        let violates = |name: &str| match (&forbidden, &allowed) {
-            (Some(f), _) => f.contains(name),
-            (None, Some(a)) => !a.contains(name),
-            (None, None) => false,
-        };
+        let polarity = rule_polarity(rule)?;
         let except: BTreeSet<&str> = rule.except.iter().map(String::as_str).collect();
 
         // Resolve the kind filter once per rule. Empty = every kind.
@@ -195,19 +215,32 @@ pub fn check_metadata(
 
         for pkg in from_pkgs {
             for dep in &pkg.dependencies {
-                if !violates(dep.name.as_str()) {
+                if !polarity.violates(dep.name.as_str()) {
                     continue;
                 }
                 let dep_kind = DependencyKind::from(dep.kind.as_deref());
                 // `kinds` scopes to specific kinds (empty = all); `optional`
                 // scopes to a specific optional flag (unset = either).
-                if !kinds.is_empty() && !kinds.contains(&dep_kind) {
-                    continue;
-                }
                 if let Some(want) = rule.optional
                     && dep.optional != want
                 {
                     continue;
+                }
+                if !kinds.is_empty() {
+                    if dep_kind == DependencyKind::Unknown {
+                        return Err(DevError::Build(format!(
+                            "cargo metadata returned unrecognized dependency kind {:?} for {} -> {} \
+                             while applying a `kinds` filter",
+                            dep.kind.as_deref(),
+                            pkg.name,
+                            dep.name,
+                        )));
+                    }
+                    // An unknown metadata kind is an error under an explicit
+                    // filter; otherwise it could silently evade the rule.
+                    if !kinds.contains(&dep_kind) {
+                        continue;
+                    }
                 }
                 violations.push(DependencyViolation {
                     rule: rule.name.clone(),

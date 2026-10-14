@@ -11,6 +11,7 @@ use super::{
 };
 use crate::error::DevError;
 use crate::output::verify_summary;
+use crate::resolve::Bbox;
 
 /// Tally a check's outcome into `(passed, failed)`. Kept a free function (not
 /// a closure) so it doesn't hold a mutable borrow of the counters across the
@@ -44,7 +45,7 @@ pub fn run(
     harness: &VerifyHarness,
     pbf: &Path,
     osc: Option<&Path>,
-    bbox: Option<&str>,
+    bbox: Option<&Bbox>,
     data_dir: &Path,
     project_root: &Path,
     direct_io: bool,

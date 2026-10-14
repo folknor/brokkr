@@ -129,9 +129,9 @@ Design hunt (measurement): `BuildConfig.profile: &'static str` (`"release"`/`"de
 
 Reported by: measurement-storage.
 
-`insert` uses hand-written `BEGIN`/`COMMIT` strings (a failed `COMMIT` leaves the transaction open) while `delete` uses `unchecked_transaction`. Two ms-rounding policies (floor in `elapsed_to_ms`, nearest in `us_to_ms`; BUG-048). The compare pair key is a tab-joined string split back apart; `pair_key_tabs_in_values_still_bleed` documents the resulting bug instead of fixing it - a tuple key would make it unrepresentable.
-
-Design hunt (measurement): wall time is a pair of integers held in step by comments - `BenchResult { elapsed_ms: i64, elapsed_us: Option<i64> }`, `RunRow`/`StoredRow` (the same pair), `Distribution { min_ms.. max_ms, us: Option<DistributionUs> }`, and `iterations: Vec<i64>` beside `iterations_us: Vec<i64>` - each with a doc saying "the ms value is the us value rounded, never treat them as independent". Enforcement is scattered over `us_to_ms`/`elapsed_to_ms`, `all_or_none` (loop side), the `len() == len()` check in `db::write::insert_timings`, `bench_ordering_key` (`elapsed_us.unwrap_or(ms * 1000)`), `ms_value`, and `format_ms_or_dash`/`format_wall`. The hunter reads the harness paths as rounding to nearest today, and reports one live disagreement: `sidecar::run_sidecar_with_deadline` computes `SidecarSummary.wall_time_ms` with `as_millis()` (floor), so the sidecar's stored wall and the results row's wall for one run can differ by a millisecond in the flattering direction (the earlier hygiene account places the floor in `elapsed_to_ms`; the two readings disagree on where it is). Proposed: `enum Wall { Micros(i64), LegacyMillis(i64) }` with a derived nearest `.ms()` and `.ordering_key()`, `Distribution` holding `Wall`s, iterations as one `Vec<Wall>`, the DB splitting and re-joining the two columns at its boundary, and `all_or_none` as a constructor on the iteration list.
+Inserts now use a real transaction and the compare pair key is a typed `PairKey`; both ms conversions round to nearest. Residue:
+- `sidecar::run_sidecar_with_deadline` computes `SidecarSummary.wall_time_ms` with `as_millis()` (floor) while the results row rounds, so one run's two stored walls can differ by a millisecond.
+- Wall time is still a pair of integers held in step by comments (`elapsed_ms`/`elapsed_us` on `BenchResult`, `RunRow`, `StoredRow`; `Distribution` with its optional `us`; parallel `iterations`/`iterations_us` vectors). Proposed: `enum Wall { Micros(i64), LegacyMillis(i64) }` with a derived nearest `.ms()` and `.ordering_key()`, iterations as one `Vec<Wall>`, the DB splitting the two columns at its boundary.
 
 ## MEA-016 - Measurement resources grow without bound
 
@@ -163,12 +163,6 @@ Reported by: measurement-storage, pbfhogg-nidhogg, elivagar, ratatoskr.
 - `RowData.counters` describes the removed identity-counters feature; `request.rs` `ResultsQuery.grep`/`grep_v` say two sources (three); migrate v7→v8 "Fresh databases already have these tables" (false); `exit_code_from_status`'s doc sits on `clamp_u32`; `parse_kv_lines` has two stacked summaries.
 - `hotpath.md`/dellingr dispatch premise that rows carry `n/a`: PLT-027. `dellingr.md` says the marker FIFO lives in `.brokkr/dellingr/`; for `--bench`, `run_external_inner` creates it in `db_dir` (small-benches). `dellingr.md` gives a three-part pair key; `db/format/compare.rs::pair_key` has five (`hotpath.md` is correct).
 
-## MEA-019 - `ON DELETE CASCADE` with foreign keys never enabled
-
-Reported by: measurement-storage.
-
-`delete_by_uuid_prefix` keeps a hand-maintained list of child tables instead. Enforcement proposed: `PRAGMA foreign_keys=ON`, or a test enumerating every table with a `run_id` column.
-
 ## MEA-020 - Dead fields, columns and migrations in the stores
 
 Reported by: measurement-storage.
@@ -181,9 +175,3 @@ Reported by: measurement-storage.
 - `#[allow(dead_code)]` on `StoredRow` and `GateEntry` hides which fields are unused.
 
 Design hunt (other-projects): the artefact retention decision is split - `keep_on_success` is fixed at allocation, ratatoskr's `PreserveDataDir::OnSuccessToo` frontmatter is folded into that bool by each caller, and piners decides "keep despite success because diagnosis ran" by calling `finalize_failure` on a run that did not fail. Proposed: `Retention { OnFailure, Always }` plus `finalize(Outcome::{Success, Failure, KeepEvidence})`, and either removing `armed` or making `Drop` do something observable (log that the dir was kept unfinalized).
-
-## MEA-021 - The gate store (`db/gate.rs`)
-
-Reported by: ratatoskr, measurement-storage.
-
-`run_migrations` is a no-op scaffold ("Future migrations go here"; schema still v1); `unix_now()` reads the clock directly; `gate_runs.script` stores the canonical absolute path while the doc says "absolute or repo-relative", so moving the checkout breaks every pinned baseline via the script-identity check; `value_kind` (`bench_gate.rs`) and `kind_of` (`gate.rs`) are identical. Prefix resolution: BUG-050. Open-path coverage: MEA-017.

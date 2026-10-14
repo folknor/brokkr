@@ -1,5 +1,6 @@
 //! Command dispatch for litehtml visual reference testing.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::build;
@@ -9,9 +10,75 @@ use crate::git;
 use crate::output;
 use crate::project::{self, Project};
 use crate::resolve;
+use crate::user_dirs;
 
 use super::compare;
 use super::db::MechanicalDb;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PipelineMode {
+    Ahem,
+    Default,
+}
+
+impl PipelineMode {
+    fn parse(value: &str, field: &str) -> Result<Self, DevError> {
+        match value {
+            "ahem" => Ok(Self::Ahem),
+            // The normal pipeline invocation omits `--fixture`.
+            "default" => Ok(Self::Default),
+            _ => Err(DevError::Config(format!(
+                "{field} must be `ahem` or `default`, got {value:?}"
+            ))),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ExpectedOutcome {
+    Pass,
+    Fail,
+}
+
+impl ExpectedOutcome {
+    fn parse(value: &str, field: &str) -> Result<Self, DevError> {
+        match value {
+            "pass" => Ok(Self::Pass),
+            "fail" => Ok(Self::Fail),
+            _ => Err(DevError::Config(format!(
+                "{field} must be `pass` or `fail`, got {value:?}"
+            ))),
+        }
+    }
+}
+
+fn validate_config(config: &LitehtmlConfig) -> Result<(), DevError> {
+    PipelineMode::parse(&config.mode, "[litehtml].mode")?;
+    let mut ids = HashSet::new();
+    for fixture in &config.fixtures {
+        compare::validate_artifact_id(&fixture.id, "fixture")?;
+        if !ids.insert(fixture.id.as_str()) {
+            return Err(DevError::Config(format!(
+                "duplicate litehtml fixture ID {:?}",
+                fixture.id
+            )));
+        }
+        ExpectedOutcome::parse(
+            &fixture.expected,
+            &format!("fixture {:?} expected", fixture.id),
+        )?;
+        let mode = fixture.mode.as_deref().unwrap_or(&config.mode);
+        PipelineMode::parse(mode, &format!("fixture {:?} mode", fixture.id))?;
+    }
+    Ok(())
+}
+
+fn expected_outcome(fixture: &LitehtmlFixture) -> Result<ExpectedOutcome, DevError> {
+    ExpectedOutcome::parse(
+        &fixture.expected,
+        &format!("fixture {:?} expected", fixture.id),
+    )
+}
 
 fn open_db(project_root: &Path) -> Result<MechanicalDb, DevError> {
     let db_path = resolve::results_db_path(project_root);
@@ -43,23 +110,16 @@ impl FixtureOutcome {
     }
 }
 
-/// The embedded capture script on disk, removed on drop - including when a
-/// capture fails partway, which used to leave `.brokkr/capture.js` behind.
+/// The bundled capture script's path in the per-user runtime cache.
 struct CaptureScript {
     path: PathBuf,
 }
 
 impl CaptureScript {
-    fn write(project_root: &Path) -> Result<Self, DevError> {
+    fn write() -> Result<Self, DevError> {
         Ok(Self {
-            path: write_capture_script(project_root)?,
+            path: write_capture_script()?,
         })
-    }
-}
-
-impl Drop for CaptureScript {
-    fn drop(&mut self) {
-        drop(std::fs::remove_file(&self.path));
     }
 }
 
@@ -95,10 +155,13 @@ fn run_pipeline(
     let html_str = fixture_html.display().to_string();
     let output_dir_str = artifact_dir.display().to_string();
 
-    let mode = fixture.mode.as_deref().unwrap_or(&config.mode);
+    let mode = PipelineMode::parse(
+        fixture.mode.as_deref().unwrap_or(&config.mode),
+        &format!("fixture {:?} mode", fixture.id),
+    )?;
 
     let mut args = vec![&html_str as &str, "--output-dir", &output_dir_str];
-    if mode == "ahem" {
+    if mode == PipelineMode::Ahem {
         args.push("--fixture");
     }
 
@@ -133,13 +196,8 @@ fn record_error(
     reason: &str,
 ) -> Result<FixtureOutcome, DevError> {
     output::litehtml_msg(&format!("  ERROR {}: {reason}", fixture.id));
-    ctx.db.insert_result(
-        ctx.run_id,
-        &fixture.id,
-        None,
-        None,
-        compare::Status::Error.as_str(),
-    )?;
+    ctx.db
+        .insert_result(ctx.run_id, &fixture.id, None, None, compare::Status::Error)?;
     Ok(FixtureOutcome::error())
 }
 
@@ -179,7 +237,7 @@ fn run_fixture(ctx: &TestContext, fixture: &LitehtmlFixture) -> Result<FixtureOu
                  approved baseline measured against it - restore it, or rerun with --recapture",
             );
         }
-        let script = CaptureScript::write(ctx.project_root)?;
+        let script = CaptureScript::write()?;
         if let Err(e) = capture_fixture(fixture, ctx.config, ctx.project_root, &script.path) {
             return record_error(ctx, fixture, &e.to_string());
         }
@@ -241,7 +299,7 @@ fn score_fixture(
     } else {
         Some(fixture.resolved_element_threshold(ctx.config))
     };
-    let expected_fail = fixture.expected == "fail";
+    let expected_fail = matches!(expected_outcome(fixture)?, ExpectedOutcome::Fail);
     let approval = ctx.db.get_approval(&fixture.id)?;
     let approved_pixel = approval.as_ref().map(|a| a.pixel_diff_pct);
     let approved_element = approval.as_ref().and_then(|a| a.element_match_pct);
@@ -262,15 +320,19 @@ fn score_fixture(
     let offenders = em.offenders;
     write_offenders_file(fixture_dir, &offenders)?;
 
-    let status = compare::determine_status(
-        px.diff_pct,
-        Some(em.match_pct),
-        pixel_threshold,
-        element_threshold,
+    let status = compare::determine_status(&compare::StatusInput {
+        pixel_diff_pct: px.diff_pct,
+        element_match_pct: Some(em.match_pct),
+        thresholds: compare::ComparisonThresholds {
+            pixel: pixel_threshold,
+            element: element_threshold,
+        },
         expected_fail,
-        approved_pixel,
-        approved_element,
-    );
+        approved: compare::ApprovedScores {
+            pixel: approved_pixel,
+            element: approved_element,
+        },
+    });
     let pixel_diff_pct = Some(px.diff_pct);
     let element_match_pct = Some(em.match_pct);
 
@@ -279,7 +341,7 @@ fn score_fixture(
         &fixture.id,
         pixel_diff_pct,
         element_match_pct,
-        status.as_str(),
+        status,
     )?;
 
     let unexpected_pass = expected_fail && matches!(status, compare::Status::Pass);
@@ -324,8 +386,8 @@ fn format_offender(o: &compare::Offender) -> String {
     )
 }
 
-/// How many offenders the test table prints per fixture; the rest are in
-/// offenders.txt.
+/// Presentation limit for each table row; comparison tolerances live in
+/// `compare.rs`, and the complete offender list is persisted separately.
 const OFFENDER_PRINT_LIMIT: usize = 10;
 
 fn print_offenders(fixture_id: &str, offenders: &[compare::Offender]) {
@@ -442,6 +504,7 @@ pub(crate) fn test(
     recapture: bool,
 ) -> Result<(), DevError> {
     project::require(project, Project::Litehtml, "visual")?;
+    validate_config(litehtml_config)?;
 
     let db = open_db(project_root)?;
     let git_info = git::collect(build_root)?;
@@ -450,10 +513,10 @@ pub(crate) fn test(
     // Build the pipeline binary once.
     let binary = build_pipeline(build_root)?;
 
-    // Write the capture script once if --recapture was requested; the guard
-    // removes it however the run ends.
+    // Materialize the capture script once if --recapture was requested; it
+    // stays in the versioned per-user cache for later runs.
     let recapture_script = if recapture {
-        Some(CaptureScript::write(project_root)?)
+        Some(CaptureScript::write()?)
     } else {
         None
     };
@@ -481,7 +544,7 @@ pub(crate) fn test(
         capture_script: recapture_script.as_ref().map(|s| s.path.as_path()),
     };
 
-    let mut counts = [0u32; 5]; // pass, fail, expected_fail, error, unexpected pass
+    let mut counts = compare::StatusTally::default();
 
     for fixture in &fixtures {
         let outcome = run_fixture(&ctx, fixture)?;
@@ -508,13 +571,7 @@ pub(crate) fn test(
             print_offenders(&fixture.id, &outcome.offenders);
         }
 
-        match outcome.status {
-            compare::Status::Pass if outcome.unexpected_pass => counts[4] += 1,
-            compare::Status::Pass => counts[0] += 1,
-            compare::Status::ExpectedFail => counts[2] += 1,
-            compare::Status::Error => counts[3] += 1,
-            _ => counts[1] += 1,
-        }
+        counts.record(outcome.status, outcome.unexpected_pass);
     }
 
     drop(recapture_script);
@@ -525,25 +582,29 @@ pub(crate) fn test(
 
 /// An unexpected pass is reported but does not fail the run: the render got
 /// better, and the only thing wrong is the manifest's stale expectation.
-fn print_run_summary(counts: &[u32; 5]) -> Result<(), DevError> {
+fn print_run_summary(counts: &compare::StatusTally) -> Result<(), DevError> {
     output::litehtml_msg(&format!("  {}", "\u{2500}".repeat(60)));
 
-    let labels = [
-        "passed",
-        "failed",
-        "expected fail",
-        "error",
-        "unexpected pass",
-    ];
-    let parts: Vec<String> = counts
-        .iter()
-        .zip(labels.iter())
-        .filter(|&(&c, _)| c > 0)
-        .map(|(&c, &l)| format!("{c} {l}"))
-        .collect();
+    let failed =
+        counts.count(compare::Status::FailThreshold) + counts.count(compare::Status::Regression);
+    let parts = [
+        (counts.ordinary_passes(), "passed"),
+        (failed, "failed"),
+        (counts.count(compare::Status::ExpectedFail), "expected fail"),
+        (counts.count(compare::Status::Error), "error"),
+        (
+            counts.count(compare::Status::NoBaseline),
+            "awaiting approval",
+        ),
+        (counts.unexpected_passes(), "unexpected pass"),
+    ]
+    .into_iter()
+    .filter(|(count, _)| *count > 0)
+    .map(|(count, label)| format!("{count} {label}"))
+    .collect::<Vec<_>>();
     output::litehtml_msg(&format!("  {}", parts.join(", ")));
 
-    if counts[1] > 0 || counts[3] > 0 {
+    if counts.fails_run() {
         return Err(DevError::ExitCode(1));
     }
     Ok(())
@@ -559,6 +620,7 @@ pub(crate) fn list(
     litehtml_config: &LitehtmlConfig,
 ) -> Result<(), DevError> {
     project::require(project, Project::Litehtml, "list")?;
+    validate_config(litehtml_config)?;
 
     let db = open_db(project_root)?;
 
@@ -584,109 +646,16 @@ pub(crate) fn list(
 }
 
 // ---------------------------------------------------------------------------
-// Chrome capture (embedded JS)
+// Chrome capture script, bundled as a source asset
 // ---------------------------------------------------------------------------
 
-const CAPTURE_JS: &str = r#"
-const puppeteer = require('puppeteer');
-const path = require('path');
-const fs = require('fs');
+const CAPTURE_JS: &str = include_str!("capture.js");
 
-const htmlPath = process.argv[2];
-const pngPath = process.argv[3];
-const jsonPath = process.argv[4];
-const viewportWidth = parseInt(process.argv[5] || '800', 10);
-
-if (!htmlPath || !pngPath || !jsonPath) {
-  console.error('Usage: node capture.js <html> <png> <json> <width>');
-  process.exit(1);
-}
-
-const absPath = path.resolve(htmlPath);
-
-(async () => {
-  const browser = await puppeteer.launch({
-    headless: 'new',
-    args: ['--no-sandbox', '--disable-setuid-sandbox'],
-  });
-  const page = await browser.newPage();
-  await page.setViewport({ width: viewportWidth, height: 600 });
-  // 30s: multi-MB data-URI emails get close to the old 10s budget.
-  await page.goto('file://' + absPath, { waitUntil: 'networkidle0', timeout: 30000 });
-  // networkidle0 does not cover data-URI @font-face decoding; without
-  // this the measurement pass can run against fallback-font geometry.
-  await page.evaluate(() => document.fonts.ready.then(() => true));
-
-  const elements = await page.evaluate(() => {
-    const results = [];
-    function walk(node, parentPath) {
-      if (node.nodeType !== Node.ELEMENT_NODE) return;
-      const cs = window.getComputedStyle(node);
-      const tag = node.tagName.toLowerCase();
-      if (cs.display === 'none') return;
-
-      let sibIdx = 0;
-      let sib = node.previousElementSibling;
-      while (sib) {
-        if (sib.tagName === node.tagName) sibIdx++;
-        sib = sib.previousElementSibling;
-      }
-      const nodePath = parentPath ? `${parentPath}>${tag}[${sibIdx}]` : tag;
-      const rect = node.getBoundingClientRect();
-
-      results.push({
-        path: nodePath,
-        tag,
-        x: Math.round(rect.left * 10) / 10,
-        y: Math.round(rect.top * 10) / 10,
-        w: Math.round(rect.width * 10) / 10,
-        h: Math.round(rect.height * 10) / 10,
-      });
-
-      for (const child of node.children) {
-        walk(child, nodePath);
-      }
-    }
-    walk(document.documentElement, '');
-    return results;
-  });
-
-  fs.mkdirSync(path.dirname(jsonPath), { recursive: true });
-  fs.writeFileSync(jsonPath, JSON.stringify(elements));
-  console.error(`Extracted ${elements.length} elements`);
-
-  // Sidecar so a silent Chrome update changing fractional line heights
-  // is attributable instead of looking like mysterious drift across
-  // every fixture at once. Separate file: neither JSON parser changes.
-  const meta = {
-    browser: await browser.version(),
-    puppeteer: require('puppeteer/package.json').version,
-    viewport: page.viewport(),
-    timestamp: new Date().toISOString(),
-  };
-  const metaPath = path.join(path.dirname(jsonPath), 'chrome.meta.json');
-  fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2) + '\n');
-
-  // fullPage captures the whole scrollable document; the viewport stays
-  // at its measurement-pass size so viewport-dependent layout cannot
-  // shift between the JSON dump and the screenshot.
-  const bodyHeight = await page.evaluate(() => document.body.scrollHeight);
-  fs.mkdirSync(path.dirname(pngPath), { recursive: true });
-  await page.screenshot({ path: pngPath, fullPage: true });
-  console.error(`Screenshot: ${bodyHeight}px`);
-
-  await browser.close();
-})();
-"#;
-
-fn write_capture_script(project_root: &Path) -> Result<PathBuf, DevError> {
-    let script_path = project_root.join(".brokkr").join("capture.js");
-    std::fs::create_dir_all(
-        script_path
-            .parent()
-            .ok_or_else(|| DevError::Config("cannot determine .brokkr directory".into()))?,
-    )?;
-    std::fs::write(&script_path, CAPTURE_JS)?;
+fn write_capture_script() -> Result<PathBuf, DevError> {
+    let dir = runtime_scripts_dir()?;
+    let script_key = xxhash_rust::xxh3::xxh3_128(CAPTURE_JS.as_bytes());
+    let script_path = dir.join(format!("capture-{script_key:032x}.js"));
+    write_cached_file(&script_path, CAPTURE_JS)?;
     Ok(script_path)
 }
 
@@ -774,6 +743,7 @@ pub(crate) fn approve(
     fixture_id: &str,
 ) -> Result<(), DevError> {
     project::require(project, Project::Litehtml, "approve")?;
+    validate_config(litehtml_config)?;
 
     let git_info = git::collect(build_root)?;
     if !git_info.is_clean {
@@ -856,6 +826,7 @@ pub(crate) fn status(
     litehtml_config: &LitehtmlConfig,
 ) -> Result<(), DevError> {
     project::require(project, Project::Litehtml, "visual-status")?;
+    validate_config(litehtml_config)?;
 
     let db = open_db(project_root)?;
     let approvals = db.all_approvals()?;
@@ -885,96 +856,146 @@ fn print_fixture_status(
         .map(|a| format!("{:.1}%", a.pixel_diff_pct))
         .unwrap_or_else(|| "\u{2014}".into());
 
-    let (last_run_str, delta_str, status_extra) = format_status_columns(&latest, approval);
-
-    let base_status = latest.as_ref().map_or("\u{2014}", |r| r.status.as_str());
+    let columns = compare::status_columns(
+        latest.as_ref().map(|row| row.status),
+        latest.as_ref().and_then(|row| row.pixel_diff_pct),
+        approval.map(|entry| entry.pixel_diff_pct),
+        true,
+    );
     output::litehtml_msg(&format!(
         "  {:<25} {:<11} {:<11} {:<9} {}{}",
-        fixture.id, approved_str, last_run_str, delta_str, base_status, status_extra,
+        fixture.id, approved_str, columns.pixel, columns.delta, columns.status, columns.annotation,
     ));
 
     Ok(())
-}
-
-fn format_status_columns(
-    latest: &Option<super::db::ResultRow>,
-    approval: Option<&super::db::Approval>,
-) -> (String, String, String) {
-    let Some(r) = latest else {
-        return ("\u{2014}".into(), "\u{2014}".into(), String::new());
-    };
-
-    let px = format_pct(r.pixel_diff_pct, 1);
-
-    let delta = match (r.pixel_diff_pct, approval) {
-        (Some(current), Some(appr)) => {
-            let d = current - appr.pixel_diff_pct;
-            if d.abs() < 0.05 {
-                "\u{2014}".into()
-            } else {
-                format!("{d:+.1}%")
-            }
-        }
-        _ => "\u{2014}".into(),
-    };
-
-    let extra = match r.status.as_str() {
-        "PASS" => {
-            if let (Some(current), Some(appr)) = (r.pixel_diff_pct, approval) {
-                if current < appr.pixel_diff_pct - 0.5 {
-                    " (improved)".into()
-                } else {
-                    String::new()
-                }
-            } else if approval.is_none() {
-                " (unapproved)".into()
-            } else {
-                String::new()
-            }
-        }
-        // Keep the status in its own column. Extra text is an annotation,
-        // never another copy of a non-PASS status.
-        "NO_BASELINE" => " (run `brokkr approve`)".into(),
-        _ => String::new(),
-    };
-
-    (px, delta, extra)
 }
 
 // ---------------------------------------------------------------------------
 // Script infrastructure
 // ---------------------------------------------------------------------------
 
-/// Directory containing the prepare/extract Node.js scripts.
-fn scripts_dir() -> PathBuf {
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    PathBuf::from(manifest_dir)
-        .join("scripts")
-        .join("litehtml-prepare")
+const PREPARE_JS: &str = include_str!("../../scripts/litehtml-prepare/prepare.js");
+const PREPARE_PACKAGE_JSON: &str = include_str!("../../scripts/litehtml-prepare/package.json");
+const PREPARE_PNPM_LOCK: &str = include_str!("../../scripts/litehtml-prepare/pnpm-lock.yaml");
+
+/// Wall bound on the one-time `pnpm install` of the prepare dependencies. A
+/// frozen install of three small packages takes seconds; this only stops a
+/// hung registry from stalling the command forever.
+const PNPM_INSTALL_DEADLINE: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// `$XDG_CACHE_HOME/brokkr/litehtml-prepare`: one subdirectory per bundled
+/// script version. Regenerable - a swept cache costs one reinstall.
+fn script_cache_root() -> Result<PathBuf, DevError> {
+    let cache_home = user_dirs::xdg_cache_home().ok_or_else(|| {
+        DevError::Config("cannot resolve an XDG cache directory for litehtml scripts".into())
+    })?;
+    Ok(cache_home.join("brokkr").join("litehtml-prepare"))
 }
 
-/// Ensure pnpm dependencies are installed, then return path to prepare.js.
-fn ensure_prepare_script(project_root: &Path) -> Result<PathBuf, DevError> {
-    let dir = scripts_dir();
-    let script = dir.join("prepare.js");
+/// The cache key of the scripts this binary carries.
+fn script_cache_key() -> String {
+    let cache_material =
+        format!("{PREPARE_PACKAGE_JSON}\0{PREPARE_PNPM_LOCK}\0{PREPARE_JS}\0{CAPTURE_JS}");
+    format!(
+        "{:032x}",
+        xxhash_rust::xxh3::xxh3_128(cache_material.as_bytes())
+    )
+}
 
-    if !script.exists() {
-        return Err(DevError::Config(format!(
-            "prepare script not found: {}",
-            script.display(),
+/// Cache directories left by other brokkr builds' scripts, for `brokkr
+/// clean`. Only 32-hex-digit names are candidates (the names this module
+/// constructs); anything else under the root is not ours to remove.
+pub(crate) fn stale_script_cache_dirs() -> Vec<PathBuf> {
+    let Ok(root) = script_cache_root() else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(&root) else {
+        return Vec::new();
+    };
+    let current = script_cache_key();
+    entries
+        .flatten()
+        .filter(|entry| entry.path().is_dir())
+        .filter_map(|entry| {
+            let name = entry.file_name().into_string().ok()?;
+            let ours = name.len() == 32 && name.bytes().all(|b| b.is_ascii_hexdigit());
+            (ours && name != current).then(|| entry.path())
+        })
+        .collect()
+}
+
+/// Private script/dependency cache keyed by the bundled package, lockfile,
+/// and script contents. An installed brokkr binary therefore carries its
+/// Node entry points instead of reaching back into its source checkout.
+fn runtime_scripts_dir() -> Result<PathBuf, DevError> {
+    let dir = script_cache_root()?.join(script_cache_key());
+    std::fs::create_dir_all(&dir)?;
+    write_cached_file(&dir.join("package.json"), PREPARE_PACKAGE_JSON)?;
+    write_cached_file(&dir.join("pnpm-lock.yaml"), PREPARE_PNPM_LOCK)?;
+    write_cached_file(&dir.join("prepare.js"), PREPARE_JS)?;
+    Ok(dir)
+}
+
+fn write_cached_file(path: &Path, contents: &str) -> Result<(), DevError> {
+    if std::fs::read(path).is_ok_and(|old| old.as_slice() == contents.as_bytes()) {
+        return Ok(());
+    }
+    crate::atomic_write::replace(path, contents.as_bytes())?;
+    Ok(())
+}
+
+/// Ensure dependencies for the bundled prepare script are installed in the
+/// per-user cache, then return the script path.
+fn ensure_prepare_script(project_root: &Path) -> Result<PathBuf, DevError> {
+    let dir = runtime_scripts_dir()?;
+    let script = dir.join("prepare.js");
+    let node_modules = dir.join("node_modules");
+    let ready = dir.join(".pnpm-deps-ready");
+    let installed = || ready.is_file() && node_modules.is_dir();
+    if installed() {
+        return Ok(script);
+    }
+
+    // The cache is per user, not per project, so two brokkr runs in different
+    // trees can reach here at once. An exclusive lock on a file in the
+    // version's own dir serialises the install; the loser re-checks and finds
+    // it done. Released when `install_lock` drops.
+    let install_lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(dir.join(".install.lock"))?;
+    install_lock.lock()?;
+    if installed() {
+        return Ok(script);
+    }
+
+    output::litehtml_msg("installing prepare dependencies...");
+    let dir_str = dir.display().to_string();
+    let run = output::run_captured_with_env_and_deadline(
+        "pnpm",
+        &["install", "--frozen-lockfile", "--dir", &dir_str],
+        project_root,
+        &[],
+        PNPM_INSTALL_DEADLINE,
+        None,
+        false,
+    )?;
+    if run.killed_on_deadline || !run.captured.status.success() {
+        drop(std::fs::remove_dir_all(&node_modules));
+        let why = if run.killed_on_deadline {
+            format!("timed out after {}s", PNPM_INSTALL_DEADLINE.as_secs())
+        } else {
+            String::from_utf8_lossy(&run.captured.stderr)
+                .trim()
+                .to_owned()
+        };
+        return Err(DevError::Verify(format!(
+            "pnpm install failed in {dir_str}: {why}"
         )));
     }
-
-    let node_modules = dir.join("node_modules");
-    if !node_modules.exists() {
-        output::litehtml_msg("installing prepare dependencies...");
-        let dir_str = dir.display().to_string();
-        let captured = output::run_captured("pnpm", &["install", "--dir", &dir_str], project_root)?;
-        if !captured.status.success() {
-            let stderr = String::from_utf8_lossy(&captured.stderr);
-            return Err(DevError::Verify(format!("pnpm install failed: {stderr}",)));
-        }
-    }
+    crate::atomic_write::replace(&ready, b"ready\n")?;
+    drop(install_lock);
 
     Ok(script)
 }

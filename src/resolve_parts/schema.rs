@@ -503,14 +503,15 @@ pub(crate) fn resolve_default_osc_path(
     )
 }
 
-/// Resolve the bbox from --bbox or dataset config.
+/// Resolve and parse the bbox from --bbox or dataset config.
 ///
-/// Validates that the bbox has exactly 4 comma-separated floats.
+/// The config and CLI keep their serialized string forms; callers receive one
+/// shared typed value before doing geometry or constructing tool arguments.
 pub(crate) fn resolve_bbox(
     bbox: Option<&str>,
     dataset: &str,
     paths: &config::ResolvedPaths,
-) -> Result<String, DevError> {
+) -> Result<Bbox, DevError> {
     let value = if let Some(b) = bbox {
         b.to_owned()
     } else {
@@ -525,28 +526,7 @@ pub(crate) fn resolve_bbox(
         })?
     };
 
-    validate_bbox(&value)?;
-    Ok(value)
-}
-
-/// Check that a bbox string has exactly 4 comma-separated floats.
-fn validate_bbox(bbox: &str) -> Result<(), DevError> {
-    let parts: Vec<&str> = bbox.split(',').collect();
-    if parts.len() != 4 {
-        return Err(DevError::Config(format!(
-            "bbox must have 4 comma-separated values, got {}: '{bbox}'",
-            parts.len()
-        )));
-    }
-    for (i, part) in parts.iter().enumerate() {
-        if part.trim().parse::<f64>().is_err() {
-            return Err(DevError::Config(format!(
-                "bbox component {i} is not a number: '{}'",
-                part.trim()
-            )));
-        }
-    }
-    Ok(())
+    Bbox::parse(&value)
 }
 
 /// Resolve the PMTiles path from --dataset + --tiles variant.

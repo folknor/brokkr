@@ -99,6 +99,12 @@ pub(crate) fn xdg_data_home() -> Option<PathBuf> {
     xdg_dir("XDG_DATA_HOME", &[".local", "share"])
 }
 
+/// `$XDG_CACHE_HOME`, falling back to `$HOME/.cache`. For regenerable
+/// material only - a swept cache dir must cost a reinstall, never data.
+pub(crate) fn xdg_cache_home() -> Option<PathBuf> {
+    xdg_dir("XDG_CACHE_HOME", &[".cache"])
+}
+
 /// `$XDG_CONFIG_HOME`, falling back to `$HOME/.config`.
 pub(crate) fn xdg_config_home() -> Option<PathBuf> {
     xdg_dir("XDG_CONFIG_HOME", &[".config"])

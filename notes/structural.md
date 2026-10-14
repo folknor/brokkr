@@ -212,12 +212,6 @@ Reported by: check-report.
 
 `run_per_build_shape` both schedules cargo runs and decides what to print for skipped, deduped and dropped lanes (`note`), switching between stdout and the run log on `report_active()`, a process global set by `check`. `announce_allows` takes two bools (`to_stdout`, `blanket_on_stdout`) and also consults `report_active()`. `run_clippy_phase` passes `commands || !report_active()` and `!echo_after`. Proposed: a `Reporter` value (`Check { commands } | Clippy`) passed explicitly, with methods `config_note`, `allow_notice` and `green_line`. The difference between `check` and `brokkr clippy` then becomes one type instead of a global and four flags.
 
-## STR-026 - The lock record and the holder's status reply are untyped wire formats with two parsers each
-
-Reported by: process-control.
-
-`rewrite_from_state` writes the lock file and `parse_lock_contents` reads it (`HashMap<&str,&str>`, first occurrence wins). The guard reads it again with its own `read_auth`, a line scan for `auth=`. The holder builds its status reply from typed `Identity` + `Snapshot` and encodes it as `key=value` lines. The client, `commands.rs::print_holder_status`, reads it back as `HolderStatus { fields: Vec<(String, String)> }` with `s.get("draining") == "1"`, `s.get("mocks").parse::<usize>()`, `s.get("held_secs").parse::<u64>()` and so on. A key renamed on one side reads as empty on the other and nothing notices; the hunter calls this the most fragile seam in the scope. `PidfdRefusal` is the right shape for an outcome, yet `KillTarget` immediately flattens it into a `String` via `map_err`. Proposed: one `lock_record` module owning the key names (constants or an enum), the escaping (once), `encode(&Record) -> Vec<u8>` and `decode(&[u8]) -> Option<Record>`, included by the guard binary too. The status reply becomes a typed `HolderStatus { identity, snapshot, held: Duration, cpu: Option<Duration>, rss_kb: Option<u64>, .. }`, decoded by the client module, not by the CLI renderer.
-
 ## STR-027 - Lock acquisition fails only as prose
 
 Reported by: process-control.

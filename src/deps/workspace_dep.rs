@@ -34,7 +34,10 @@ pub fn run(
     ignore: &[String],
 ) -> Result<Vec<UnusedWorkspaceDepEvent>, DevError> {
     if metadata.workspace_root.is_empty() {
-        return Ok(Vec::new());
+        return Err(DevError::Build(
+            "cargo metadata returned an empty workspace_root; cannot audit [workspace.dependencies]"
+                .into(),
+        ));
     }
     let root_manifest = Path::new(&metadata.workspace_root).join("Cargo.toml");
     let root = parse(&root_manifest)?;

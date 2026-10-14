@@ -16,6 +16,7 @@ reads the ones that apply to it:
 - `[<host>.tilegen.*]` -> `docs/brokkr.toml.elivagar.md`
   (`brokkr man elivagar-config`)
 - `[litehtml]` -> `docs/projects/litehtml.md`
+- `[sluggrs]` -> `docs/projects/sluggrs.md`
 - `[ratatoskr]` and `[ratatoskr.harness]` -> `docs/projects/ratatoskr.md`
 - `[piners]` and `[piners.harness]` -> `docs/brokkr.toml.piners.md`; runner
   behaviour is in `docs/commands/corpus.md`
@@ -176,10 +177,21 @@ features = ["linux-direct-io", "linux-io-uring"]
 # see docs/brokkr.toml.datasets.md
 # elivagar adds [<host>.tilegen.*] blocks -
 # see docs/brokkr.toml.elivagar.md
+# A hostname colliding with a reserved section can use [host.<name>],
+# e.g. [host.test].
 ```
 
-Top-level keys that aren't `project` are treated as hostname sections
-(unknown non-table keys are rejected). Datasets are host-scoped (no global
+`include` is consumed while config layers are composed. Other reserved
+top-level keys are parsed as their named sections; an unrecognized table is a
+legacy hostname section, and an unrecognized non-table value is rejected.
+`[host.<name>]` is also accepted and lets a hostname use a reserved section
+name. Host tables must set at least one supported option, and unknown fields
+inside one are rejected. When host sections exist but none names this machine,
+defaults apply silently on ordinary commands (a config shared across machines
+is normal); `brokkr env` warns and lists the configured hostnames, which is
+where a misspelled hostname shows up. Since legacy hostnames are open-ended, a table with a
+valid host shape is necessarily interpreted as a host even if its name
+resembles a misspelled section. Datasets are host-scoped (no global
 `[datasets]` section). Path resolution: host config -> defaults (`data/`,
 `data/scratch/`, `data/tilegen/`, cargo target dir). `output` is the durable
 tilegen output store (map-data projects): `tilegen` renames each run's archive
@@ -195,14 +207,19 @@ another's archives at the same commit. Group membership is decided by
 *constructing* the name shape and requiring a hyphen-free commit token after it
 (`resolve::pmtiles_archive_matches`), never by parsing a filename back: dataset
 names carry hyphens, and a prefix test alone would let a variant claim a
-dash-extending sibling's files (`raw` swallowing `raw-fast`) and evict them. Host `features` are cargo features
-appended to every build command (all measurable commands, `verify`, `serve`,
-`ingest`, `update`). CLI `--features` are additive on top of host features
-(deduped). Host `port` is the nidhogg server port (default 3033) that
-`serve`/`status`/`query`/`geocode`/`verify`/the benches target; brokkr passes
-it to the server it spawns as `PORT`, but never reads `PORT` from its own
-environment - an unrelated `PORT` in the shell must not retarget the commands.
-Reserved top-level keys (skipped by host parsing): `project`, `include`,
+dash-extending sibling's files (`raw` swallowing `raw-fast`) and evict them.
+Host `features` are added to measured-request builds through the shared build
+context, and to the `passthrough`, `verify`, `serve`, `ingest`, and `update`
+paths. Standalone `run`, `install`, `check`, `clippy`, `test`, and Criterion
+`bench` use their own cargo/default or sweep feature selection and do not
+inherit host features. CLI `--features` are additive to host features in paths
+that apply them, with duplicates removed. Host `port` is the nidhogg server
+port (default 3033) that `serve`/`status`/`query`/`geocode`/`verify`/the benches
+target; brokkr passes it to the server it spawns as `PORT`, but never reads
+`PORT` from its own environment - an unrelated `PORT` in the shell must not
+retarget the commands.
+Reserved top-level keys parsed as config sections, or consumed by composition:
+`project`, `include`, `host`,
 `litehtml`, `sluggrs`, `ratatoskr`, `piners`, `dellingr`, `mogwai`, `check`,
 `dependency_rule`, `test`, `quarantine`, `capture_env`, `gremlins`, `header`,
 `textlint`, `textlint_preset`, `script_check`, `manifest`, `rustdoc`, `deps`,
@@ -217,9 +234,9 @@ worktree_keep = 6
 
 How many persistent `--commit` worktrees this project keeps before the
 least-recently-used are evicted. Default 6. Per host because the disk is a host
-property. `0` is ignored and the default applies - zero would evict every
-worktree the moment a second was wanted, which is indistinguishable from the
-feature being broken.
+property. `0` is a config error; omit the key to use the default. Zero would
+evict every worktree the moment a second was wanted, which is indistinguishable
+from the feature being broken.
 
 Eviction runs when a **new** worktree is cut, never on reuse and never on a
 plain run. That keeps the cost adjacent to a build you are already paying for
@@ -438,10 +455,10 @@ tree (still listed by `git ls-files`) is passed over.
 
 ## `[header]` section
 
-A required file header whose year must be current (the header phase). A file
-matching `paths` (and not `exempt`) must contain `pattern`, with `{year}`
-expanded to the current UTC year; a missing header and a stale year both fail.
-Absent by default.
+The header phase checks that each selected file contains the configured
+`pattern`, with `{year}` expanded to the current UTC year. Missing text or a
+stale year fails. The pattern is searched as a byte substring anywhere in the
+file; its position is not checked. Absent by default.
 
 ```toml
 [header]
@@ -456,10 +473,9 @@ same glob rules hold for `[[textlint]]` and `[manifest]`. A glob in any of
 these lists that matches no tracked path in its scope is printed as a warning
 on every run but does not fail the check: an exclusion may legitimately guard
 a file that is absent today, and a user-wide rule names paths most trees lack.
-The header is
-matched as bytes, so a file that is not valid UTF-8 is judged on its content
-like any other rather than skipped. The current year
-comes from libc `gmtime` (no date-crate dependency). Ported from
+The byte search also works on files that are not valid UTF-8, so they are
+judged on their content rather than skipped. The current year comes from libc
+`gmtime` (no date-crate dependency). Ported from
 nautilus_trader's `check_copyright_year` hook; see `src/header.rs`.
 
 ## `[[textlint]]` array
@@ -503,7 +519,9 @@ Fields: `name`, `pattern` (a linear-time `regex`; a match is a violation),
   only; for markers a wrapped construct pushes off the offending line).
 - `only_if_file_matches` (regex; the rule fires only in files where some line
   matches it) - a cheap import-awareness stand-in, e.g. flag bare
-  `Instant::now()` only where the file imports `Instant`.
+  `Instant::now()` only where the file imports `Instant`. Set
+  `only_if_file_matches_above = true` to require that precondition at or above
+  each match, so a later line cannot arm an earlier match.
 - `region` (`code` / `string` / `comment`; Rust files, tokenized with
   `rustc_lexer`) scopes where `pattern` may match: `code` never flags a pattern
   quoted in a comment or string, `string` targets message text (a `", got"`

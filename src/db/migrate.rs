@@ -2190,6 +2190,60 @@ mod tests {
         assert_eq!(rows[0].elapsed_us, None);
     }
 
+    /// A v19 row records only the requested marker. v20 moves that value to
+    /// `stop_marker_requested` and leaves the event column empty.
+    #[test]
+    fn migrate_v19_to_v20_preserves_requests_without_claiming_a_stop() {
+        let dir = crate::test_scratch::scratch("db-migrate", "v19_to_v20");
+        let db_path = dir.join("results.db");
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.execute_batch(V18_SCHEMA).unwrap();
+            migrate_v18_to_v19(&conn).unwrap();
+            conn.pragma_update(None, "user_version", 19).unwrap();
+            conn.execute(
+                "INSERT INTO runs (timestamp, hostname, [commit], subject, command, mode, \
+                 elapsed_ms, uuid, project, stop_marker) VALUES \
+                 ('2026-09-01 00:00:00', 'h', 'aabb', 's', 'api-bbox-small', \
+                 'bench', 0, 'marked01', 'nidhogg', 'SYNC_END')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO runs (timestamp, hostname, [commit], subject, command, mode, \
+                 elapsed_ms, uuid, project, stop_marker) VALUES \
+                 ('2026-09-01 00:00:00', 'h', 'aabb', 's', 'api-bbox-small', \
+                 'bench', 0, 'plain001', 'nidhogg', NULL)",
+                [],
+            )
+            .unwrap();
+        }
+
+        let db = ResultsDb::open(&db_path).expect("open should migrate v19 to v20");
+        let version: i64 = db
+            .conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+        assert!(has_column(&db.conn, "runs", "stop_marker_requested"));
+        let mut stmt = db
+            .conn
+            .prepare("SELECT uuid, stop_marker, stop_marker_requested FROM runs ORDER BY uuid")
+            .unwrap();
+        let rows: Vec<(String, Option<String>, Option<String>)> = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                ("marked01".into(), None, Some("SYNC_END".into())),
+                ("plain001".into(), None, None),
+            ]
+        );
+    }
+
     // -----------------------------------------------------------------------
     // Fresh database gets correct schema version
     // -----------------------------------------------------------------------

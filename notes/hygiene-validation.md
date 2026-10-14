@@ -134,9 +134,7 @@ Reported by: test-execution.
 
 Reported by: test-execution.
 
-`streaming_run_libtest` and `run_libtest_parallel` share the tracker but differ in: wall clock (watchdog `wall` vs `try_wait`), whether a wall kill snapshots `/proc` (serial yes, parallel no), cancellation (abort and shutdown checks only in parallel), `build_elapsed` tracking (serial only), and the timeout message. Hunter's view: one runner taking `Ceilings`, an optional abort flag and a program.
-
-Design hunt (check-exec): the two runners share about 80% of their body (spawn group, `GroupReaper`, the stdout JSON drain, the stderr drain, tracker, watchdog thread, `join_drains`, buffer clones). Further accidental differences: parallel emits `ObsEvent::Exited` and serial never does, even for `Launch::Direct` (test_cmd's direct runs), so accounting sees no exit for those; parallel hard-codes `Leader::TestBinary` (the consequence is filed in `bugs.md`); serial returns `in_flight` and parallel does not. `ParallelWait::Exited { timed_out: bool, cancelled: bool }` holds two bools exclusive by construction (`cancelled && !overtime`), with `ParallelRun.timed_out` and `ListingRun.timed_out` repeating the bool; both parallel callers pass `|_| {}` for `forward_stdout_line`/`on_build_finished`, so the signature is shaped for the other runner. Proposed: one `run_libtest(Launch, LibtestInvocation, Ceilings, Observe, abort: Option<&AtomicBool>, callbacks)`, with the shim allowed only for `Launch::Cargo` and the watchdog chosen by thread mode; cargo-threaded parallelism stops being a separate code path (it is a run whose per-test clock ages many in-flight tests, which `TestTracker` already supports), and the exit shape is one enum (`Natural | Wall | Cancelled`).
+Deadline handling (verdict, snapshot, kill) is now shared. Residue: `streaming_run_libtest` and `run_libtest_parallel` are still two runner bodies sharing most of their code (spawn group, `GroupReaper`, JSON and stderr drains, tracker, watchdog thread, `join_drains`), and they still differ in cancellation (abort and shutdown checks only in parallel), `build_elapsed` tracking (serial only), `in_flight` (serial only) and `ObsEvent::Exited` (parallel emits it, serial never does, even for `Launch::Direct`, so accounting sees no exit for direct runs). Proposed: one `run_libtest(Launch, LibtestInvocation, Ceilings, Observe, abort, callbacks)`.
 
 ## VAL-014 - nextest engine setup is copied twice and has diverged
 
@@ -376,14 +374,9 @@ Globs, adapter groups, `version_align` and the dead-scope checks for gremlins, t
 
 Reported by: convention-engines.
 
-- `script_check.rs` module doc: "The child is given `BROKKR_CARGO=1`" (removed; `run_one` passes empty env); lists a nonexistent "style" phase.
-- `textlint.rs` header: "Four bounded capabilities… the *only* two predicates: no arbitrary multiline" (now also `region`, `join_wrapped_use`, `skip_after`, `only_if_file_matches(_above)`, four context windows); CLAUDE.md's textlint line lists only the old four.
-- `lex.rs`: "(and, later, logical-line joins)" - joins exist.
-- `deps/mod.rs`: "v1 phases: `duplicate_version`" (8 phases); `deps` CLI help "v1 ships `duplicate_version`" (config-cli-bootstrap).
-- `deps.md`: "serde-tagged like `CheckEvent` in `src/cargo_json.rs`" (removed); "Shells out to `cargo metadata` once per run" (twice plus `rustc -vV`); "Dispatch lands in `src/main.rs`" (in `main_parts/bootstrap.rs`); `OutdatedComplete` "ccu emits" (brokkr emits); summary lists "the phases that ran" (VAL-033).
-- `check.md` manifest: "today `sort_dependencies`" (about 10 checks).
-- `DependencyRule` doc: "a direct Cargo dependency that must not exist" (predates allow polarity).
-- `header.rs`/docs call it a "required file header"; `scan` accepts the text anywhere (`contains`).
+Residue after the convention-engine and deps docs were corrected:
+- `deps` CLI help in `src/cli/schema.rs` still says "v1 ships `duplicate_version`".
+- `src/config_parts/schema.rs` and `src/check_cmd/phase.rs` still call `[header]` a "required file header", while the scan accepts the text anywhere in a selected file.
 
 ## VAL-042 - Convention-engine policy invented per site
 
@@ -393,9 +386,3 @@ Reported by: convention-engines.
 - Textlint `skip_after` and `allow_marker` each have per-line and join-pass implementations (`skip_after_suppresses`, `use_marker_suppresses`), kept aligned by comments.
 - `except_above`/`require_above` (and the `_below` pair) behave identically; the docs say the names differ only to show intent; each is documented four times in `schema.rs`.
 - `script_check` holds child stdout/stderr fully in memory (unbounded).
-
-## VAL-043 - Dead code in convention engines and deps
-
-Reported by: convention-engines.
-
-`ccu::PHASES[1]` never read; the `(None, None) => false` arm in `dependency_rules` is unreachable (parser requires exactly one of `forbid`/`allow`; an `enum Polarity` would make it unrepresentable); `DependencyKind::Unknown` is silently skipped whenever `kinds` is set; `globs::matches` is a one-line pass-through; `workspace_root`'s `#[serde(default)]` + `is_empty` early return is a no-op path for a field cargo always emits and would silently disable the phase if it fired.

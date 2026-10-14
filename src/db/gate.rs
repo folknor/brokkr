@@ -306,6 +306,8 @@ fn row_to_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<GateEntry> {
 }
 
 fn unix_now() -> i64 {
+    // This is the row's insertion timestamp, separate from the measured
+    // benchmark duration stored in `elapsed_ms`.
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
@@ -424,6 +426,40 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(fresh.features.as_deref(), Some("fast-sync"));
+    }
+
+    #[test]
+    fn open_migrates_v1_file_and_enables_wal() {
+        let path = crate::test_scratch::scratch_path("db-gate", "open_migrates_v1_file");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(CREATE_TABLE_V1).unwrap();
+            conn.pragma_update(None, "user_version", 1).unwrap();
+            conn.execute(
+                "INSERT INTO gate_runs VALUES ('legacy1', 0, 'abc', 0, 'host-a', \
+                 'jmap_small', 's.lua', 'fx', 'debug', 10, 0, 1, '{}', '{}')",
+                [],
+            )
+            .unwrap();
+        }
+
+        let db = GateDb::open(&path).unwrap();
+        let version: i64 = db
+            .conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        let journal_mode: String = db
+            .conn
+            .pragma_query_value(None, "journal_mode", |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+        assert_eq!(journal_mode.to_ascii_lowercase(), "wal");
+        let legacy = db
+            .lookup_baseline("legacy1", "host-a", "current")
+            .unwrap()
+            .unwrap();
+        assert_eq!(legacy.features, None);
+        assert_eq!(legacy.profile, "debug");
     }
 
     #[test]

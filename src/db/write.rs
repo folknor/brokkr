@@ -12,35 +12,25 @@ use crate::error::DevError;
 
 impl ResultsDb {
     /// Delete rows for one canonical UUID, using equality rather than the
-    /// prefix API. FK cascade isn't active, so children are removed explicitly.
+    /// prefix API. Children are deleted explicitly before the parent: a
+    /// database created by an older schema can still carry child tables
+    /// without `ON DELETE CASCADE` (`CREATE TABLE IF NOT EXISTS` never
+    /// rewrites them), where relying on the cascade would orphan the rows or,
+    /// with a plain `REFERENCES`, refuse the delete under `foreign_keys=ON`.
     pub(crate) fn delete_by_uuid(&self, uuid: &RunId) -> Result<usize, DevError> {
         let tx = self.conn.unchecked_transaction()?;
-        let ids: Vec<i64> = {
-            let mut stmt = tx.prepare("SELECT id FROM runs WHERE uuid = ?1")?;
-            let rows =
-                stmt.query_map(rusqlite::params![uuid.as_str()], |row| row.get::<_, i64>(0))?;
-            rows.collect::<Result<Vec<_>, _>>()?
-        };
-        for id in &ids {
+        for table in [
+            "run_distribution",
+            "run_iterations",
+            "run_kv",
+            "hotpath_functions",
+            "hotpath_threads",
+        ] {
             tx.execute(
-                "DELETE FROM run_distribution WHERE run_id = ?1",
-                rusqlite::params![id],
-            )?;
-            tx.execute(
-                "DELETE FROM run_iterations WHERE run_id = ?1",
-                rusqlite::params![id],
-            )?;
-            tx.execute(
-                "DELETE FROM run_kv WHERE run_id = ?1",
-                rusqlite::params![id],
-            )?;
-            tx.execute(
-                "DELETE FROM hotpath_functions WHERE run_id = ?1",
-                rusqlite::params![id],
-            )?;
-            tx.execute(
-                "DELETE FROM hotpath_threads WHERE run_id = ?1",
-                rusqlite::params![id],
+                &format!(
+                    "DELETE FROM {table} WHERE run_id IN (SELECT id FROM runs WHERE uuid = ?1)"
+                ),
+                rusqlite::params![uuid.as_str()],
             )?;
         }
         let removed = tx.execute(
@@ -54,19 +44,12 @@ impl ResultsDb {
     /// Insert a benchmark result row. Returns `(full_uuid, short_uuid)`.
     pub fn insert(&self, row: &RunRow) -> Result<(String, String), DevError> {
         let uuid = generate_uuid()?;
-        self.conn.execute("BEGIN", [])?;
-
-        let result = insert_inner(&self.conn, row, &uuid);
-        if result.is_err() {
-            self.conn.execute("ROLLBACK", []).ok();
-            result?;
-        }
-
-        self.conn.execute("COMMIT", [])?;
+        let tx = self.conn.unchecked_transaction()?;
+        insert_inner(&tx, row, &uuid)?;
+        tx.commit()?;
         let short = short_uuid(&uuid);
         Ok((uuid, short))
     }
-
 }
 
 // ---------------------------------------------------------------------------
@@ -468,14 +451,67 @@ mod tests {
         let (full, short) = db.insert(&kv_row(Vec::new(), None)).expect("insert");
         let (other, _) = db.insert(&kv_row(Vec::new(), None)).expect("insert");
         assert_eq!(
-            db.delete_by_uuid(&crate::db::RunId::new(short)).expect("delete"),
+            db.delete_by_uuid(&crate::db::RunId::new(short))
+                .expect("delete"),
             0,
             "a prefix is not an identity"
         );
         assert_eq!(rows_for(&db, &full).len(), 1, "nothing deleted");
-        assert_eq!(db.delete_by_uuid(&crate::db::RunId::new(full.clone())).expect("delete"), 1);
+        assert_eq!(
+            db.delete_by_uuid(&crate::db::RunId::new(full.clone()))
+                .expect("delete"),
+            1
+        );
         assert!(rows_for(&db, &full).is_empty());
         assert_eq!(rows_for(&db, &other).len(), 1);
+    }
+
+    // A database from an older schema can keep a child table whose `run_id`
+    // carries a plain `REFERENCES` without the cascade. Under
+    // `foreign_keys=ON` a parent-only delete would be refused there, and a
+    // table with no reference at all would keep orphans.
+    #[test]
+    fn delete_by_uuid_handles_legacy_child_tables_without_cascade() {
+        let db_path =
+            crate::test_scratch::scratch("db-write", "delete_legacy_children").join("t.db");
+        let db = ResultsDb::open(&db_path).expect("open");
+        db.conn
+            .execute_batch(
+                "DROP TABLE run_kv;
+                 CREATE TABLE run_kv (
+                     run_id INTEGER NOT NULL REFERENCES runs(id),
+                     key TEXT NOT NULL, value_int INTEGER, value_real REAL, value_text TEXT,
+                     PRIMARY KEY (run_id, key)
+                 );
+                 DROP TABLE run_iterations;
+                 CREATE TABLE run_iterations (
+                     run_id INTEGER NOT NULL, run_idx INTEGER NOT NULL,
+                     elapsed_ms INTEGER NOT NULL, elapsed_us INTEGER,
+                     PRIMARY KEY (run_id, run_idx)
+                 );",
+            )
+            .expect("reshape child tables to a legacy form");
+        let mut row = kv_row(vec![KvPair::text("meta.x", "y")], None);
+        row.iterations = vec![1, 2];
+        let (full, _) = db.insert(&row).expect("insert");
+        assert_eq!(
+            db.delete_by_uuid(&crate::db::RunId::new(full.clone()))
+                .expect("delete"),
+            1
+        );
+        for table in ["run_kv", "run_iterations"] {
+            let orphans: i64 = db
+                .conn
+                .query_row(
+                    &format!(
+                        "SELECT COUNT(*) FROM {table} WHERE run_id NOT IN (SELECT id FROM runs)"
+                    ),
+                    [],
+                    |r| r.get(0),
+                )
+                .expect("count");
+            assert_eq!(orphans, 0, "{table} kept orphans");
+        }
     }
 
     // The index used to be created only by the v0->v1 migration, which a fresh

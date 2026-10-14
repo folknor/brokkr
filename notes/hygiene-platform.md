@@ -218,25 +218,21 @@ Enforcement proposed: layout types that clean asks for removable names (with a t
 
 Design hunt (map-projects, config-cli): `elivagar/dispatch.rs::prune_output_dir` (`OUTPUT_RETENTION = 5` per dataset and variant, after each tilegen) and `main_parts/commands.rs::clean_archives` (`--keep`, default 2) share only `pmtiles_archive_matches`, so the newest-first ordering, the mtime fallback and the window are decided twice; `OUTPUT_RETENTION`'s doc still says `<dataset>-<commit>.pmtiles` (variant missing). The archive store as a whole is filed in `structural.md`. `clean` branching on every project inside `main_parts/commands.rs` is the hunter's reason for per-project `fn clean_targets(&ResolvedPaths) -> Vec<CleanTarget>` contributed by each project module.
 
-## PLT-021 - `brokkr.toml` is parsed three to five times per invocation
+## PLT-021 - `brokkr.toml` is parsed more than once per invocation
 
 Reported by: config-cli-bootstrap, process-control.
 
-Call sites: `parse_cli`, the `disable_dir` peek, per-command `detect_optional()`, `project::detect()`, `record_history` at exit (after a run that may last 25 minutes), `bench_cmd` internally. Each reloads the user layer and re-runs `Box::leak` for `Other`. `project::detect` ("read and parsed exactly once") and `Project::Other` ("leaked once at startup") are false today. `worktree_keep(&config::hostname()?)` and the `cwd != project_root` → `parent_build_root` derivation repeat three times in `bootstrap.rs`, though `Detection.build_root` carries the value; `bench` with no config silently uses `DEFAULT_KEEP`.
+Bootstrap now detects once and reuses the result for help filtering, toolchain arming, dispatch and interrupt cleanup. Residue:
+- `history_cmd.rs` (exit-time history recording) and `bench_cmd/mod.rs` still load the config themselves, so a configured command with history loads it twice and `bench` three times; each load re-composes the user layer.
+- Parsing an `Other` project still leaks its name (`config_parts/parser.rs`).
+- `bench` with no project config silently uses `DEFAULT_KEEP`.
+- Host settings are not resolved once into `Detection`; `bench_cmd` keeps its own root and retention lookups.
 
-Enforcement proposed: detect once in `main` and thread a `Detection`; a `OnceLock` cache in `project` makes a second parse impossible.
-
-Design hunt (config-cli): the three fallibility policies on one file - `parse_cli` swallows errors, `Man` swallows errors, everything else propagates - and the toolchain arming reads a different parse than the command later uses (harmless while the file does not change mid-run). The `Interrupted` path in `main` calls `detect()` once more, and each call also re-runs `cargo_env::install`. `hosts: HashMap<String, HostConfig>` is looked up by `config::hostname()` at each consumer (`worktree_keep(&config::hostname()?)` four times in `bootstrap.rs`). Proposed: detect once in `main` as `Result<Option<Detection>, DevError>`, hand it to help filtering, toolchain arming and dispatch, with each command's descriptor saying whether an `Err` is fatal for it, and resolve "this host's config" once at detection into `Detection.host`.
-
-## PLT-022 - The top-level config key universe has three owners
+## PLT-022 - The top-level config key universe has more than one owner
 
 Reported by: config-cli-bootstrap.
 
-`load()` calls each `parse_*`; `parse_hosts` has its own skip list of 24 keys; `docs/brokkr.toml.md` "Reserved top-level keys" lists 16 and lacks `ratatoskr`, `piners`, `dellingr`, `mogwai`, `quarantine`, `clippy`, `lints`, `bin`. A host named `test`, `check` or `bin` cannot be configured.
-
-Enforcement proposed: one `SECTIONS: &[(&str, parser)]` table driving parsing and the host skip, plus a doc-parity test (or the doc stops restating it).
-
-Design hunt (config-cli): nothing rejects an unrecognised top-level key - section structs use `deny_unknown_fields`, but a typo'd table name (`[lint]`, `[[checks]]`, `[gremlin]`, `[[script_checks]]`) parses clean and switches the feature off. The user-wide layer rejects every key outside its allow-list with a comment that a silently ignored typo "would mean a typo quietly switches off every rule the user wrote"; the hunter says the argument applies with more force to the project file. Hostname tables are what make this non-trivial: any unknown key is a candidate hostname, and the hunter asks someone to check whether `parse_hosts` treats every unrecognised table as a host (so `[lint]` becomes a host named "lint" with no error). Proposed: a known-key set plus a rule that a host table's keys must be host-section keys, or explicit `[host.<name>]` tables.
+Empty host sections and unknown host fields are refused, and `[host.<name>]` lets reserved names be hostnames. Residue: the legacy top-level host syntax is ambiguous by design (an unrecognised table with valid host fields is a host), and parser dispatch, the reserved-key list and `docs/brokkr.toml.md` still restate the key universe separately. Owner: one `SECTIONS` table driving parsing, the host skip and a doc-parity test.
 
 ## PLT-023 - "Which command runs in which project" has two owners
 
@@ -258,16 +254,11 @@ Enforcement proposed: `Project::ALL` and a round-trip test.
 
 Design hunt (config-cli): `config::load` leaks the TOML string to get `Project::Other(&'static str)`, and `man` dispatch uses `Project::Other("")` to mean "no project detected", which is not a project; visibility rules compare by discriminant so the payload never matters. Proposed: `Project::Other(Box<str>)` (or an interned `ProjectName`), drop `Copy`, make "no project" `Option<Project>` at every site (`acquire_cmd_lock_opt` already takes one; `man` should too), and put `FromStr` beside `name()` on `Project`, or derive both from one `const BUILTINS: &[(&str, Project)]`.
 
-## PLT-025 - Configuration is validated at use instead of at load (platform config)
+## PLT-025 - Configuration is validated at use instead of at load
 
 Reported by: config-cli-bootstrap, process-control.
 
-- `worktree_keep = 0` silently remapped to the default at use (`DevConfig::worktree_keep`), while `parallel.budget = 0` is refused at parse.
-- `DriveConfig` lacks `deny_unknown_fields` (every sibling denies), so typos under `drives.*` are ignored.
-- A misspelled hostname section silently resolves to default paths and no host features (`resolve_paths`, `host_features`). Checkable: warn when `hosts` is non-empty and none matches.
-- `QuarantineEntry.category` is a free string.
-- Stringly config in other areas: VAL-035 (convention engines), PRJ-011 (pbfhogg), PRJ-024 (elivagar), PRJ-034 (ratatoskr), PRJ-046 (piners), PRJ-056 (litehtml).
-- `captured_env_pairs` reads `std::env::vars()` itself (no injection point).
+`worktree_keep` is `NonZeroUsize`, `DriveConfig` denies unknown fields, a hostname mismatch warns, and captured-env selection is injectable. Residue: the stringly config areas listed under other entries (the convention engines, pbfhogg, elivagar, ratatoskr, piners and litehtml sections) are still validated at use.
 
 ## PLT-026 - CLI values are parsed or checked twice
 
@@ -439,3 +430,27 @@ Reported by: config-cli-bootstrap, process-control.
 - `HarnessConfig::binary_name` is `#[cfg(test)]`-only; its doc says it exists "to lock the defaulting rule into the schema", but production re-implements the rule, so the test pins a copy.
 - `history::fresh_db_schema_version` cannot fail (`test_db()` writes `SCHEMA_VERSION` and the test reads it back); `test_db` duplicates `open()`'s setup, so `run_migrations`/`open` are never exercised.
 - `hold::tests::stamp_is_a_no_op_without_a_capability` never inspects `cmd.get_envs()`.
+
+## PLT-046 - Host features changed what `cargo_features` records for several commands
+
+Reported by: the wave-5 reviewer, laterally.
+
+Every `BenchContext` build now merges `[<host>] features` first. Commands that used to pass an explicit list (pbfhogg bench read/write, nidhogg bench tiles, elivagar paths) now build and record the host features too, and the recorded label's order can change (`hotpath,linux-direct-io` becomes `linux-direct-io,hotpath`). `results --compare` across that boundary pairs rows with different labels. If anything keys on the `cargo_features` text, canonicalise it (sort) at write time.
+
+## PLT-047 - Detection errors now fail commands that may previously have tolerated a broken `brokkr.toml`
+
+Reported by: the wave-5 reviewer, laterally.
+
+`main` now detects once and fails every command not listed in `detection_error_is_ignored` (lock, kill, strays, guard, history, man) when `brokkr.toml` is malformed. The comment says that was the historical behaviour; verify it per command for those that work without a project (`deps`, `run`, `install`, `wc`, `clean`, `env`, `check`'s no-detection branch).
+
+## PLT-048 - The pbfhogg dataset writer may write a legacy host table beside `[host.<name>]`
+
+Reported by: the wave-5 reviewer, laterally.
+
+`pbfhogg_mod/download_toml.rs` finds the table to edit through `owner_of_table` with a `[hostname, ...]` path. A config that uses the new `[host.<name>]` spelling may get the writer creating a legacy `[<name>]` table, which the parser now refuses as "configured both as [x] and [host.x]". Check the writer against both spellings.
+
+## PLT-049 - `env` composes the config a second time to read the user layer
+
+Reported by: the wave-5 reviewer, laterally.
+
+`brokkr env` re-runs `compose` just to read user-layer counts, although detection already composed once; `Detection` could carry the `ConfigSources`. Also, `ratatoskr` gate script paths fall back to absolute in `stored_script_path` when `canonicalize` fails, so a relative baseline then mismatches an absolute current.

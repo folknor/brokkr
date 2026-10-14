@@ -106,7 +106,6 @@ struct BinaryRun {
     command: String,
     captured: CapturedOutput,
     hung: Option<HungTest>,
-    timed_out: bool,
     completed: Vec<(String, Duration)>,
     /// Wall time for this binary. Used for the summary's critical-path line -
     /// and NOT for the next run's allocation, because wall time is a function
@@ -132,7 +131,6 @@ impl BinaryRun {
                 elapsed: Duration::ZERO,
             },
             hung: None,
-            timed_out: false,
             completed: Vec::new(),
             elapsed: Duration::ZERO,
             skipped: true,
@@ -638,7 +636,6 @@ fn run_one_binary(
         ),
         captured: finished.captured,
         hung,
-        timed_out: finished.timed_out,
         completed: finished.completed,
         elapsed: started.elapsed(),
         skipped: false,
@@ -822,7 +819,7 @@ fn run_parallel_sweep(
                     tap,
                     aborted,
                 );
-                if out.as_ref().is_ok_and(|r| r.timed_out || r.hung.is_some()) {
+                if out.as_ref().is_ok_and(|r| r.hung.is_some()) {
                     aborted.store(true, std::sync::atomic::Ordering::SeqCst);
                 }
                 // Released whether the run succeeded or errored: a binary that
@@ -983,19 +980,6 @@ fn report_runs(
         let stdout = String::from_utf8_lossy(&run.captured.stdout);
         let stderr = String::from_utf8_lossy(&run.captured.stderr);
 
-        if run.timed_out {
-            output::error(&format!(
-                "sweep '{}' binary {} exceeded the parallel test timeout ({}s) \
-                 and was killed",
-                sweep.label,
-                run.label,
-                test_runner::PARALLEL_SWEEP_TIMEOUT.as_secs(),
-            ));
-            output::error(&run.command);
-            ok = false;
-            budget_blown = Some(run.label.clone());
-            continue;
-        }
         if let Some(hung) = run.hung {
             output::error(&format!("sweep '{}' binary {}:", sweep.label, run.label));
             output::error(&test_runner::format_hung_test(&hung, project_root));

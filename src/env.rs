@@ -40,6 +40,10 @@ pub struct UserConfigStatus {
     pub present: bool,
     pub textlint: usize,
     pub script_checks: usize,
+    /// A failure while reading the composed config. The project config loader
+    /// normally reports this first; retaining it here avoids presenting a
+    /// broken layer as absent if the file changes during `env` collection.
+    pub error: Option<String>,
 }
 
 /// Probed details for a configured storage path.
@@ -91,31 +95,53 @@ pub fn collect(paths: &ResolvedPaths, project: Project, project_root: &Path) -> 
         storage: collect_storage(paths),
         tools: collect_tools(project, project_root),
         datasets: check_datasets(&paths.datasets, &paths.data_dir, project_root),
-        user_config: collect_user_config(),
+        user_config: collect_user_config(project_root),
     }
 }
 
-/// Probe the user-wide config layer. A parse failure is not reported here -
-/// `detect` already failed the whole run on it, so reaching this point means
-/// the file either parsed or is absent.
-fn collect_user_config() -> Option<UserConfigStatus> {
-    let loaded = crate::config::load_user().ok().flatten();
-    Some(match loaded {
-        // Report the path the file was actually read from, not the one we would
-        // have looked in - they differ under `BROKKR_USER_CONFIG`.
-        Some(u) => UserConfigStatus {
-            path: u.path,
-            present: true,
-            textlint: u.textlint.len(),
-            script_checks: u.script_checks.len(),
+/// Report the user layer from the same composition path used by project
+/// loading. Reading its entries in isolation would reject valid references to
+/// project presets and could turn a broken layer into an "absent" status.
+fn collect_user_config(project_root: &Path) -> Option<UserConfigStatus> {
+    let configured_path = configured_user_config_path();
+    match crate::config::compose(&project_root.join("brokkr.toml")) {
+        Ok((_, sources)) => match sources.user_layer() {
+            Some(user) => Some(UserConfigStatus {
+                path: user.path.clone(),
+                present: true,
+                textlint: user.textlint,
+                script_checks: user.script_checks,
+                error: None,
+            }),
+            None => Some(UserConfigStatus {
+                path: configured_path?,
+                present: false,
+                textlint: 0,
+                script_checks: 0,
+                error: None,
+            }),
         },
-        None => UserConfigStatus {
-            path: crate::config::user_config_path()?,
+        Err(error) => Some(UserConfigStatus {
+            path: configured_path?,
             present: false,
             textlint: 0,
             script_checks: 0,
-        },
-    })
+            error: Some(error.to_string()),
+        }),
+    }
+}
+
+/// Fixture tests must not consult or race the developer's process environment.
+/// An explicitly injected test layer is reported through `ConfigSources`.
+fn configured_user_config_path() -> Option<PathBuf> {
+    #[cfg(not(test))]
+    {
+        crate::config::user_config_path()
+    }
+    #[cfg(test)]
+    {
+        None
+    }
 }
 
 /// Print environment info in formatted output.
@@ -160,7 +186,9 @@ fn print_header(info: &EnvInfo) {
     );
     println!("{:<12} {}", "io_uring:", info.io_uring_status);
     if let Some(uc) = &info.user_config {
-        let summary = if uc.present {
+        let summary = if let Some(error) = &uc.error {
+            format!("{} (composition error: {error})", uc.path.display())
+        } else if uc.present {
             format!(
                 "{} ({} textlint, {} script_check)",
                 uc.path.display(),

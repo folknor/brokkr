@@ -844,7 +844,7 @@ fn run_gate_hook(ctx: &GateHookCtx<'_>) -> Result<(), DevError> {
     // be. `gate.db` itself stays under the main `project_root` below - a
     // worktree is disposable, and the baselines are not.
     let git_info = git::collect(ctx.req.build_root.unwrap_or(ctx.project_root))?;
-    let profile_name = if ctx.debug { "debug" } else { "release" };
+    let profile_name = CargoProfile::for_debug(ctx.debug).as_str();
 
     let sidecar_blob = sidecar_to_json(ctx.sidecar_data);
     let meta_blob = meta_to_json(ctx.summary);
@@ -854,7 +854,7 @@ fn run_gate_hook(ctx: &GateHookCtx<'_>) -> Result<(), DevError> {
         dirty: !git_info.is_clean,
         hostname: hostname.clone(),
         gate_name: ctx.gate_name.to_owned(),
-        script: ctx.script_abs.display().to_string(),
+        script: stored_script_path(ctx.project_root, ctx.script_abs),
         fixture: ctx.fixture_name.to_owned(),
         profile: profile_name.into(),
         elapsed_ms: ctx.elapsed_ms,
@@ -906,6 +906,18 @@ fn run_gate_hook(ctx: &GateHookCtx<'_>) -> Result<(), DevError> {
         ctx.rules,
         &row,
         &uuid,
+    )
+}
+
+/// Keep in-project script identity stable when a checkout moves. Older rows
+/// retain canonical absolute paths and are handled by `GateIdentity`.
+fn stored_script_path(project_root: &Path, script_abs: &Path) -> String {
+    let Ok(project_root) = project_root.canonicalize() else {
+        return script_abs.display().to_string();
+    };
+    script_abs.strip_prefix(&project_root).map_or_else(
+        |_| script_abs.display().to_string(),
+        |path| path.display().to_string(),
     )
 }
 
@@ -1142,7 +1154,14 @@ fn identity_profile(
     row_label: &str,
     profile: &str,
 ) -> Result<CargoProfile, DevError> {
-    CargoProfile::from_db(profile).map_err(|unknown| {
+    // Earlier gate rows and the previous writer spelled Cargo's `dev`
+    // profile `debug`.
+    let parsed = if profile == "debug" {
+        Ok(CargoProfile::Dev)
+    } else {
+        CargoProfile::from_db(profile)
+    };
+    parsed.map_err(|unknown| {
         DevError::Config(format!(
             "gate `{gate_name}`: {row_label} row has unknown cargo profile `{}`",
             unknown.0
@@ -1224,19 +1243,8 @@ fn read_summary_json(harness_dir: &Path) -> Result<serde_json::Map<String, serde
         other => Err(DevError::Config(format!(
             "sync: {} root must be a JSON object, got {}",
             path.display(),
-            value_kind(&other)
+            crate::ratatoskr::gate::kind_of(&other)
         ))),
-    }
-}
-
-fn value_kind(v: &serde_json::Value) -> &'static str {
-    match v {
-        serde_json::Value::Null => "null",
-        serde_json::Value::Bool(_) => "bool",
-        serde_json::Value::Number(_) => "number",
-        serde_json::Value::String(_) => "string",
-        serde_json::Value::Array(_) => "array",
-        serde_json::Value::Object(_) => "object",
     }
 }
 
@@ -1353,6 +1361,30 @@ mod tests {
         let legacy = gate_identity(None);
         assert!(legacy.features_unrecorded());
         assert!(legacy.mismatch(&gate_identity(Some("a"))).is_none());
+    }
+
+    #[test]
+    fn legacy_debug_profile_maps_to_dev() {
+        assert_eq!(
+            identity_profile("g", "baseline", "debug").unwrap(),
+            CargoProfile::Dev
+        );
+        assert_eq!(
+            identity_profile("g", "baseline", "dev").unwrap(),
+            CargoProfile::Dev
+        );
+    }
+
+    #[test]
+    fn in_project_script_paths_are_stored_relative_to_the_checkout() {
+        let root = crate::test_scratch::scratch("ratatoskr-bench-gate", "stored_script_path");
+        let root = root.canonicalize().unwrap();
+        let script = root.join("crates/app/tests/sync/run.lua");
+
+        assert_eq!(
+            stored_script_path(&root, &script),
+            "crates/app/tests/sync/run.lua"
+        );
     }
 
     fn gate_identity(features: Option<&str>) -> gate_eval::GateIdentity {

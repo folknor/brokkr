@@ -32,7 +32,7 @@ pub fn run(
     runs: usize,
     dataset: &str,
 ) -> Result<(), DevError> {
-    // 1. bench commands -- all
+    // 1. command presets; extract runs later with the dataset's configured bbox.
     output::bench_msg("=== bench commands ===");
     let binary = build::cargo_build(
         &build::BuildConfig::release_with_owned_features(Some("pbfhogg-cli"), &paths.features),
@@ -143,9 +143,12 @@ fn run_dataset_dependent(
     }
 
     // bench extract -- if bbox is available
-    let bbox = ds.and_then(|d| d.bbox.as_ref());
+    let bbox = ds
+        .and_then(|dataset| dataset.bbox.as_deref())
+        .map(crate::resolve::Bbox::parse)
+        .transpose()?;
 
-    if let Some(bbox) = bbox {
+    if let Some(bbox) = bbox.as_ref() {
         output::bench_msg("=== bench extract ===");
         bench_extract::run(
             harness,
@@ -154,7 +157,6 @@ fn run_dataset_dependent(
             file_mb,
             runs,
             bbox,
-            bench_extract::ALL_STRATEGIES,
             project_root,
             &paths.scratch_dir,
         )?;

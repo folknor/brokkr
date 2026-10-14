@@ -8,9 +8,11 @@
 
 use std::path::Path;
 
+use super::commands::{ExtractStrategy, PbfhoggCommand};
 use super::verify::{Findings, VerifyHarness};
 use crate::error::DevError;
 use crate::output::verify_msg;
+use crate::resolve::Bbox;
 
 /// Element counts parsed from `pbfhogg inspect` output. Shared with
 /// `verify_getid_removeid`'s complement assertion.
@@ -80,17 +82,11 @@ pub(super) fn inspect_counts(harness: &VerifyHarness, pbf: &Path) -> Result<Coun
 pub fn run(
     harness: &VerifyHarness,
     pbf: &Path,
-    bbox: &str,
+    bbox: &Bbox,
     regions: usize,
     direct_io: bool,
 ) -> Result<Findings, DevError> {
-    if regions == 0 {
-        return Err(DevError::Config(
-            "multi-extract verify requires at least 1 region".into(),
-        ));
-    }
-
-    let strips = super::commands::multi_extract_strips(bbox, regions)?;
+    let strips = bbox.strips(regions)?;
     let outdir = harness.subdir("multi-extract")?;
     let pbf_str = pbf.display().to_string();
 
@@ -106,16 +102,19 @@ pub fn run(
     verify_msg("  running single-pass multi-extract...");
     let config_path_str = config_path.display().to_string();
     let mut multi_args = vec![
-        "extract",
-        &pbf_str,
-        "--config",
-        &config_path_str,
-        "--simple",
+        "extract".to_owned(),
+        pbf_str.clone(),
+        "--config".into(),
+        config_path_str,
     ];
-    if direct_io {
-        multi_args.push("--direct-io");
+    if let Some(flag) = ExtractStrategy::Simple.flag() {
+        multi_args.push(flag.into());
     }
-    let captured = harness.run_pbfhogg(&multi_args)?;
+    if direct_io {
+        multi_args.push("--direct-io".into());
+    }
+    let multi_arg_refs: Vec<&str> = multi_args.iter().map(String::as_str).collect();
+    let captured = harness.run_pbfhogg(&multi_arg_refs)?;
     harness.check_exit(&captured, "pbfhogg multi-extract")?;
 
     // --- Sequential single-region extracts ---
@@ -123,23 +122,18 @@ pub fn run(
     std::fs::create_dir_all(&seq_dir)?;
 
     verify_msg("  running sequential extracts...");
-    for (i, [s_min, s_min_lat, s_max, s_max_lat]) in strips.iter().enumerate() {
+    for (i, strip) in strips.iter().enumerate() {
         let seq_out = seq_dir.join(format!("strip-{i}.osm.pbf"));
         let seq_out_str = seq_out.display().to_string();
-        let bbox_flag = format!("-b={s_min},{s_min_lat},{s_max},{s_max_lat}");
-
-        let mut seq_args = vec![
-            "extract",
-            &pbf_str,
-            "--simple",
-            &bbox_flag,
-            "-o",
-            &seq_out_str,
-        ];
+        let command = PbfhoggCommand::Extract {
+            strategy: ExtractStrategy::Simple,
+        };
+        let mut seq_args = command.extract_args_for(&pbf_str, strip, &seq_out_str)?;
         if direct_io {
-            seq_args.push("--direct-io");
+            seq_args.push("--direct-io".into());
         }
-        let captured = harness.run_pbfhogg(&seq_args)?;
+        let seq_arg_refs: Vec<&str> = seq_args.iter().map(String::as_str).collect();
+        let captured = harness.run_pbfhogg(&seq_arg_refs)?;
         harness.check_exit(&captured, &format!("pbfhogg extract strip-{i}"))?;
     }
 

@@ -42,6 +42,10 @@ mod lock_probe {
     include!("../lock_probe.rs");
 }
 
+mod lock_record {
+    include!("../lock_record.rs");
+}
+
 use lock_probe::{AuthHash, Nonce};
 
 /// The two per-user lock paths, by the same rule as the main crate's
@@ -187,13 +191,9 @@ fn main() {
 /// format: identity and `auth` are emitted first and byte-identical across a
 /// holder's rewrites, so a torn read cannot blend two holders' capabilities.
 fn read_auth() -> Option<AuthHash> {
-    let text = std::fs::read_to_string(user_dirs::lock_file()?).ok()?;
-    for line in text.lines() {
-        if let Some(v) = line.strip_prefix("auth=") {
-            return AuthHash::parse(v.trim());
-        }
-    }
-    None
+    let bytes = std::fs::read(user_dirs::lock_file()?).ok()?;
+    let fields = lock_record::fields(&bytes)?;
+    AuthHash::parse(fields.get(lock_record::AUTH)?)
 }
 
 /// The lease this compilation holds, kept alive across `exec`.

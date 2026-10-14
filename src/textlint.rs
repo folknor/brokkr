@@ -1,17 +1,21 @@
-//! `[[textlint]]` check: declarative "forbid a pattern on a line" rules.
+//! `[[textlint]]` check: declarative regex rules over selected files.
 //!
 //! The generic engine behind most of nautilus_trader's grep-style convention
-//! hooks: each rule forbids a regex `pattern` on lines of files matching
-//! `paths`, and a match is a violation. Four bounded capabilities carry the
-//! rules that need more than a bare grep:
+//! hooks: by default, each rule checks a regex `pattern` on lines of files
+//! matching `paths`; `join_wrapped_use` instead checks reconstructed Rust
+//! `use` statements. Bounded selectors and gates cover rules that need more
+//! than a bare grep:
 //!
-//! - **per-rule file globs** (`paths`) - which files the rule scans;
-//! - **inline exception markers** (`allow_marker`) - a line carrying the
-//!   author's escape-hatch comment is skipped;
-//! - **line/region predicates** - `table_row_only` (markdown table rows) and
-//!   `in_toml_section` (only while the last-seen `[section]` matches). These are
-//!   the *only* two predicates: no arbitrary multiline, no Rust block tracking;
-//! - **regex exceptions** (`except`) - lines matching any are exempt.
+//! - **file globs** (`paths`, `exclude`) select the files to scan;
+//! - **exception markers** (`allow_marker`, optionally widened with
+//!   `allow_marker_above`) exempt authored lines;
+//! - **line and section predicates** (`table_row_only`, `in_toml_section`) and
+//!   **lexical regions** (`region`) scope where the pattern is considered;
+//! - **file and line preconditions** (`only_if_file_matches`,
+//!   `only_if_file_matches_above`) and **skip boundaries** (`skip_after`) gate
+//!   matches by surrounding file content;
+//! - **regex exceptions** (`except`) and bounded context windows further
+//!   suppress or require nearby text.
 //!
 //! Patterns are compiled with the linear-time `regex` crate (no backtracking),
 //! so an author-supplied pattern cannot hang the phase.
@@ -51,8 +55,8 @@ pub fn format_one(v: &TextlintViolation) -> String {
 
 /// A compiled context-window gate: scan `lines` raw physical lines above/below
 /// a match for `re`; a hit suppresses the match. The direction and which anchor
-/// it counts from live in the call site, not here - all four gate orientations
-/// share this one "is the pattern present in the window" test.
+/// it counts from live in the call site; every orientation shares this one
+/// "is the pattern present in the window" test.
 struct Window {
     lines: usize,
     re: Regex,
@@ -552,8 +556,8 @@ fn use_marker_suppresses(rule: &Compiled, lines: &[&str], st: &lex::UseStmt) -> 
         .is_some_and(|window| window.iter().any(|l| l.contains(marker)))
 }
 
-/// Whether any configured context-window gate suppresses this match. All four
-/// gates share one test - the match is suppressed iff the gate's pattern is
+/// Whether any configured context-window gate suppresses this match. The gates
+/// share one test - the match is suppressed iff the gate's pattern is
 /// found in its window - so any hit suppresses (the gates AND together for the
 /// reporter: the violation stands only when every window is clear). The
 /// above-windows count from `above_anchor`, the below-windows from

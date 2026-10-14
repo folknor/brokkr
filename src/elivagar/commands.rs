@@ -64,7 +64,6 @@ impl ElivagarCommand<'_> {
             Self::Built(BuiltCommand::Example(_)) => false,
         }
     }
-
 }
 
 impl BuiltCommand<'_> {

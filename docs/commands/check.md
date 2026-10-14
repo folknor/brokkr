@@ -94,7 +94,7 @@ Flags:
   `--profile`, `--features`, `--no-default-features`, and `-p`. Trailing
   `-- ...` test args are rejected under any `complete` claim (see `certifies`)
 - `--json` - append one machine-readable summary line (a JSON object) as the
-  last line of stdout; human output is unchanged
+  last line of stdout; human output, including warnings, remains on stdout
 - `--fix-gremlins` - rewrite banned chars in place before scan
 - `--commands` - print each cargo command before it runs (see the log-lines
   section)
@@ -225,8 +225,10 @@ Output:
      of errors is the reader's problem to scroll, not brokkr's to withhold.
      See `src/scope.rs`.
 - `--json` appends one summary object as the **last line of stdout**, leaving
-  the human output untouched (the old NDJSON per-event mode is gone; this is
-  the result contract). Fields: `schema` (currently 2), `certifies` (the
+  the human output untouched, including its warnings (the old NDJSON per-event
+  mode is gone; this is the result contract). Read the final line for the
+  object; preceding lines remain human-readable output. Fields: `schema`
+  (currently 2), `certifies` (the
   resolved profile's claim, `null` for unclaimed profiles), `verdict`
   (`"passed"`/`"complete"`/`"partial"`/`"failed"`), `profile` (the profile
   that drove sweep selection; `null` for ad-hoc and legacy runs), `sweeps`
@@ -610,6 +612,14 @@ Two details decide whether "20 seconds" means 20 seconds:
   running for as long as `/proc` collection took; killing first would fix the cap
   and destroy the diagnostic, since a dead process has no `wchan` and no stack.
   SIGSTOP stops execution immediately and leaves `/proc` readable.
+
+The shared-stream, shim and parallel libtest watchdogs use one deadline
+verdict, preferring per-test expiry, then idle expiry, then wall expiry, and
+one freeze/snapshot/kill sequence. The shim measures idle time across the
+whole session, including gaps between harnesses. Parallel wall expiry carries
+the same snapshot and in-flight context as serial wall expiry. The shim also
+honors the caller's `WallShape`: a resolved one-test invocation uses the
+caller's name; a shared wall expiry lists in-flight names as context only.
 
 ### Reading a timeout report
 
@@ -1223,9 +1233,10 @@ Empty and absolute entries are rejected at parse time.
 
 ## `header` phase
 
-Runs next, only when a `[header]` section is present. A file
-matching `[header].paths` (minus `exempt`) must contain `[header].pattern` with
-`{year}` expanded to the current UTC year; a missing header or a stale year
+Runs next, only when a `[header]` section is present. A file matching
+`[header].paths` (minus `exempt`) must contain `[header].pattern` with `{year}`
+expanded to the current UTC year. The byte substring may occur anywhere in the
+file; the phase does not check its position. Missing text or a stale year
 fails. Ported from `check_copyright_year`; see `src/header.rs`.
 
 ## `textlint` phase
@@ -1244,12 +1255,12 @@ inside a test module - no longer arms the rule), `region`
 file, tokenized with `rustc_lexer`, so a rule never fires on a match quoted in
 a comment or string), `join_wrapped_use` (match against whole `use ...;`
 statements, reconstructing a rustfmt-wrapped import onto one line first), and
-the four **context-window gates** `except_above` / `except_below` /
+the **context-window gates** `except_above` / `except_below` /
 `require_above` / `require_below` (each `{ lines = N, pattern = "..." }`).
-A gate filters a match by the raw physical lines around it: all four have the
-same behavior - the match is suppressed iff `pattern` is found within `lines`
-lines in that direction (excluding the match line, clamped at the file edges) -
-and the names differ only to document intent (`except_above` reads for a
+A gate filters a match by the raw physical lines around it. Each uses the same
+behavior: the match is suppressed iff `pattern` is found within `lines` lines
+in that direction (excluding the match line, clamped at the file edges); the
+names differ only to document intent (`except_above` reads for a
 preceding `#[cfg(...)]` exemption, `require_below` for a required token like
 `biased;` that must follow a `tokio::select!`). Multiple gates AND together
 (the violation stands only when every window is clear). Windows read raw text -
@@ -1270,11 +1281,12 @@ thing that gives it away.
 
 Runs next, only when a `[manifest]` section enables a check
 (off by default, inert otherwise). It parses each `Cargo.toml` matching
-`[manifest].paths` (minus `exclude`) with `toml_edit` and enforces structural
-conventions - today `sort_dependencies` (dependency keys sorted within each
-blank-line group; `[dependencies.<name>]` dotted sections, which TOML forces
-physically after the inline table, are their own group and never ordered against
-it). `shape_exclude` globs excuse a manifest from the structural checks only
+`[manifest].paths` (minus `exclude`) with `toml_edit` and enforces the
+configured manifest conventions. When `sort_dependencies` is enabled,
+dependency keys must be sorted within each blank-line group;
+`[dependencies.<name>]` dotted sections, which TOML forces physically after
+the inline table, are their own group and never ordered against it.
+`shape_exclude` globs excuse a manifest from the structural checks only
 (section/crate-type/package-field order, `[lints] workspace`, bin/example flags
 - the same set a `cargo-fuzz = true` stub skips) while still sort-checking it;
 `exclude` skips the file entirely. See `src/manifest.rs`.

@@ -47,9 +47,8 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use super::{
-    Ceilings, HungTest, IDLE_TIMEOUT, JsonReconstructor, ObsEvent, ObservationSink, StreamEnd,
-    StreamSource, StreamTap, StrictPlan, TestTracker, TimeoutReason, WATCHDOG_POLL, hash_file,
-    kill_of,
+    Ceilings, HungTest, JsonReconstructor, ObsEvent, ObservationSink, StreamEnd, StreamSource,
+    StreamTap, StrictPlan, TestTracker, WATCHDOG_POLL, hash_file,
 };
 use crate::error::DevError;
 
@@ -297,7 +296,8 @@ impl Session {
     ) -> thread::JoinHandle<()> {
         let harnesses = Arc::clone(&self.harnesses);
         let done = Arc::clone(&self.watchdog_done);
-        let (timeout, wall) = (ceilings.per_test, ceilings.wall);
+        let ceilings = ceilings.clone();
+        let timeout = ceilings.per_test;
         thread::spawn(move || {
             let mut idle_since = started;
             loop {
@@ -305,10 +305,8 @@ impl Session {
                     return;
                 }
                 let mut wait = WATCHDOG_POLL;
-                let mut verdict = None;
-                // The stream a verdict is charged to, for the report: the
-                // harness whose tracker produced it, else the shared stream.
-                let mut charged: Option<StreamTap> = primary.clone();
+                let mut readings = Vec::new();
+                let mut taps = Vec::new();
                 let mut executing = false;
                 if let Ok(harnesses) = harnesses.lock() {
                     for h in harnesses.iter() {
@@ -320,69 +318,51 @@ impl Session {
                             if let Some(d) = t.next_deadline(timeout) {
                                 wait = wait.min(d);
                             }
-                            // A tracker's own idle reading is not a verdict
-                            // here: idleness is judged run-wide below, since
-                            // the gap between harnesses belongs to no tracker.
-                            if let Some((name, elapsed)) = t.timed_out(timeout)
-                                && name != super::IDLE_WEDGE
-                            {
-                                verdict = Some((TimeoutReason::PerTest { name }, elapsed, timeout));
-                                charged.clone_from(&h.tap);
-                                break;
-                            }
+                            readings.push(super::DeadlineReading::from_tracker(&t, timeout));
+                            taps.push(h.tap.clone());
                         }
                     }
                 }
-                // The shared stream: whatever ran unisolated (a passthrough).
-                if verdict.is_none()
-                    && let Ok(t) = cargo_tracker.lock()
+                // The shared stream covers unisolated passthroughs. Its idle
+                // reading cannot own the gap between successive harnesses.
+                if let Ok(t) = cargo_tracker.lock()
                     && t.executing
                 {
                     executing = true;
                     if let Some(d) = t.next_deadline(timeout) {
                         wait = wait.min(d);
                     }
-                    if let Some((name, elapsed)) = t.timed_out(timeout) {
-                        verdict = Some((TimeoutReason::PerTest { name }, elapsed, timeout));
-                    }
+                    readings.push(super::DeadlineReading::from_tracker(&t, timeout));
+                    taps.push(primary.clone());
                 }
                 if executing {
                     idle_since = Instant::now();
                 }
-                if verdict.is_none() && !executing && idle_since.elapsed() >= IDLE_TIMEOUT {
-                    verdict = Some((TimeoutReason::Idle, idle_since.elapsed(), IDLE_TIMEOUT));
-                }
-                if verdict.is_none()
-                    && let Some(wall) = wall.filter(|w| started.elapsed() >= *w)
-                {
-                    verdict = Some((
-                        TimeoutReason::SweepWall { blamed: Vec::new() },
-                        started.elapsed(),
-                        wall,
-                    ));
-                }
-                if let Some((reason, elapsed, ceiling)) = verdict {
+                let idle = (!executing).then(|| idle_since.elapsed());
+                if let Some(verdict) = ceilings.verdict(&readings, idle, started.elapsed()) {
                     if done.load(Ordering::Acquire) {
                         return;
                     }
-                    super::stop_process_group(cargo_pid).ok();
-                    if let Some(tap) = &charged {
-                        let (cause, test) = kill_of(&reason);
-                        tap.emit(ObsEvent::Killed { cause, test });
-                    }
-                    let report = super::capture_hung_test(
+                    let charged = verdict
+                        .charged
+                        .and_then(|index| taps.get(index))
+                        .and_then(Option::as_ref)
+                        .or(primary.as_ref());
+                    super::enforce_deadline(
                         &state_root,
                         cargo_pid,
                         super::Leader::Cargo,
-                        reason,
-                        elapsed,
-                        ceiling,
+                        verdict,
+                        &hung,
+                        charged,
                     );
-                    if let Ok(mut slot) = hung.lock() {
-                        *slot = Some(report);
-                    }
-                    super::kill_process_group(cargo_pid).ok();
                     return;
+                }
+                if let Some(wall) = ceilings.wall {
+                    wait = wait.min(wall.saturating_sub(started.elapsed()));
+                }
+                if let Some(idle) = idle {
+                    wait = wait.min(super::IDLE_TIMEOUT.saturating_sub(idle));
                 }
                 thread::sleep(wait);
             }

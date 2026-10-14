@@ -477,7 +477,9 @@ pub fn error(msg: &str) {
 }
 
 /// Print a warning message. Multi-line messages get each line prefixed.
-/// Warnings are NEVER suppressed by quiet mode.
+/// Warnings are NEVER suppressed by quiet mode. They stay on stdout during
+/// `check --json` too: that flag appends its JSON summary as the last line; it
+/// does not make stdout JSON-only.
 pub fn warn(msg: &str) {
     if !msg.is_empty() {
         emit("[warn]    ", msg);

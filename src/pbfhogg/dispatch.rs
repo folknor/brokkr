@@ -14,23 +14,18 @@ use crate::pbfhogg::commands::{ArgMode, InputKind, OutputKind, PbfhoggCommand};
 use crate::project::{self, Project};
 use crate::resolve::{self, resolve_bbox};
 
-/// Extract I/O mode flags from extra_params, run preflight checks, and return:
-/// - extra cargo features to add to the build
-/// - extra CLI args to append to the binary invocation
-///
-/// The chosen I/O flags end up in the subprocess arg string (cli_args) via
-/// the caller, so no separate variant-suffix is needed - the result DB's
-/// variant column only carries the measurement mode after v13.
-fn resolve_io_flags(
+/// Resolve cargo features for the selected I/O mode and run its preflight
+/// checks. The command arg builder reads the same parameters to construct argv.
+fn resolve_io_features(
     command: &PbfhoggCommand,
     extra_params: &CommandParams,
-) -> Result<(Vec<&'static str>, Vec<&'static str>), DevError> {
+) -> Result<Vec<&'static str>, DevError> {
     let direct_io = extra_params.direct_io;
     let io_uring = extra_params.io_uring;
 
     if io_uring && !command.supports_io_uring() {
         return Err(DevError::Config(format!(
-            "--io-uring is not supported by '{}' (only apply-changes, sort, cat-dedupe, diff-osc, repack, degrade)",
+            "--io-uring is not supported by '{}'",
             command.id(),
         )));
     }
@@ -40,18 +35,14 @@ fn resolve_io_flags(
     }
 
     let mut features = Vec::new();
-    let mut args = Vec::new();
-
     if direct_io {
         features.push("linux-direct-io");
-        args.push("--direct-io");
     }
     if io_uring {
         features.push("linux-io-uring");
-        args.push("--io-uring");
     }
 
-    Ok((features, args))
+    Ok(features)
 }
 
 /// Run a single pbfhogg command with the specified measurement mode.
@@ -142,7 +133,7 @@ fn run_pbfhogg_dry_run(
 ) -> Result<(), DevError> {
     // Validate I/O flag compatibility (e.g. --io-uring on a command that
     // doesn't support it) and run io_uring preflight if requested.
-    let (_io_features, io_args) = resolve_io_flags(command, extra_params)?;
+    let _io_features = resolve_io_features(command, extra_params)?;
 
     // Resolve paths without building. bootstrap() reads cargo metadata for
     // target_dir - cheap, doesn't trigger a compile.
@@ -158,24 +149,38 @@ fn run_pbfhogg_dry_run(
 
     let cmd_ctx = build_pbfhogg_context(req, command, osc_seq, &fake_binary, &paths, extra_params)?;
 
-    // Construct the wall-clock arg vector (catches any build_args failures,
-    // e.g. missing bbox for extract, missing osc for merge).
-    let mut args = command.build_args(&cmd_ctx, ArgMode::Bench)?;
-    for flag in &io_args {
-        args.push((*flag).into());
-    }
-    if let Some(c) = &extra_params.compression {
-        args.push("--compression".into());
-        args.push(c.clone());
-    }
+    let arg_mode = if matches!(
+        req.mode,
+        MeasureMode::Hotpath { .. } | MeasureMode::Alloc { .. }
+    ) {
+        ArgMode::Hotpath
+    } else {
+        ArgMode::Bench
+    };
+    let args = command.build_args(&cmd_ctx, arg_mode)?;
 
-    // Also validate the hotpath arg construction path when supported, so
-    // `--dry-run --hotpath` is meaningful.
+    // Validate the other builder form too. The requested mode remains the one
+    // printed above, while both paths are checked for missing inputs.
     if command.supports_hotpath() {
-        let _ = command.build_args(&cmd_ctx, ArgMode::Hotpath)?;
+        let other_mode = if arg_mode == ArgMode::Bench {
+            ArgMode::Hotpath
+        } else {
+            ArgMode::Bench
+        };
+        let _ = command.build_args(&cmd_ctx, other_mode)?;
     }
 
-    output::dry_run_msg(&format!("{} args: {}", command.id(), args.join(" ")));
+    let display_slice = if arg_mode == ArgMode::Hotpath {
+        &args[1..]
+    } else {
+        &args[..]
+    };
+    let displayed_args: Vec<&str> = display_slice.iter().map(String::as_str).collect();
+    output::dry_run_msg(&format!(
+        "{} args: {}",
+        command.id(),
+        displayed_args.join(" ")
+    ));
     if let Some(pbf_path) = &cmd_ctx.pbf_path {
         output::dry_run_msg(&format!("pbf: {}", pbf_path.display()));
     }
@@ -213,7 +218,7 @@ fn run_pbfhogg_run(
     osc_seq: Option<&str>,
     extra_params: &CommandParams,
 ) -> Result<(), DevError> {
-    let (io_features, io_args) = resolve_io_flags(command, extra_params)?;
+    let io_features = resolve_io_features(command, extra_params)?;
 
     let mut feat_refs: Vec<&str> = req.features.iter().map(String::as_str).collect();
     feat_refs.extend_from_slice(&io_features);
@@ -228,15 +233,8 @@ fn run_pbfhogg_run(
 
     let cmd_ctx =
         build_pbfhogg_context(req, command, osc_seq, &ctx.binary, &ctx.paths, extra_params)?;
-    let mut args = command.build_args(&cmd_ctx, ArgMode::Bench)?;
+    let args = command.build_args(&cmd_ctx, ArgMode::Bench)?;
     command.prepare_scratch(&cmd_ctx)?;
-    for flag in &io_args {
-        args.push((*flag).into());
-    }
-    if let Some(c) = &extra_params.compression {
-        args.push("--compression".into());
-        args.push(c.clone());
-    }
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
 
     let binary_str = ctx.binary.display().to_string();
@@ -271,7 +269,7 @@ fn run_pbfhogg_wallclock(
     osc_seq: Option<&str>,
     extra_params: &CommandParams,
 ) -> Result<(), DevError> {
-    let (io_features, io_args) = resolve_io_flags(command, extra_params)?;
+    let io_features = resolve_io_features(command, extra_params)?;
 
     let mut feat_refs: Vec<&str> = req.features.iter().map(String::as_str).collect();
     feat_refs.extend_from_slice(&io_features);
@@ -292,8 +290,6 @@ fn run_pbfhogg_wallclock(
         &ctx.binary,
         command,
         &cmd_ctx,
-        &io_args,
-        extra_params.compression.as_deref(),
         req.runs(),
         req.project_root,
         true,
@@ -323,21 +319,12 @@ pub(crate) fn run_wallclock_core(
     binary: &Path,
     command: &PbfhoggCommand,
     cmd_ctx: &CommandContext,
-    io_args: &[&'static str],
-    compression: Option<&str>,
     runs: usize,
     project_root: &Path,
     announce: bool,
 ) -> Result<(), DevError> {
-    let mut args = command.build_args(cmd_ctx, ArgMode::Bench)?;
+    let args = command.build_args(cmd_ctx, ArgMode::Bench)?;
     command.prepare_scratch(cmd_ctx)?;
-    for flag in io_args {
-        args.push((*flag).into());
-    }
-    if let Some(c) = compression {
-        args.push("--compression".into());
-        args.push(c.to_owned());
-    }
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
 
     let (basename, file_mb) = result_input_metadata(command, cmd_ctx)?;
@@ -432,7 +419,7 @@ fn run_pbfhogg_hotpath(
 
     let alloc = matches!(req.mode, MeasureMode::Alloc { .. });
     let feature = harness::hotpath_feature(alloc);
-    let (io_features, io_args) = resolve_io_flags(command, extra_params)?;
+    let io_features = resolve_io_features(command, extra_params)?;
 
     // Build features: hotpath + user features + I/O features.
     let mut all_features: Vec<&str> = vec![feature];
@@ -456,15 +443,8 @@ fn run_pbfhogg_hotpath(
 
     let (basename, file_mb) = result_input_metadata(command, &cmd_ctx)?;
 
-    let mut hotpath_args = command.build_args(&cmd_ctx, ArgMode::Hotpath)?;
+    let hotpath_args = command.build_args(&cmd_ctx, ArgMode::Hotpath)?;
     command.prepare_scratch(&cmd_ctx)?;
-    for flag in &io_args {
-        hotpath_args.push((*flag).into());
-    }
-    if let Some(c) = &extra_params.compression {
-        hotpath_args.push("--compression".into());
-        hotpath_args.push(c.clone());
-    }
 
     output::detail(&format!("{} {feature}", command.id()));
     harness::hotpath_alloc_note(alloc);
@@ -941,11 +921,18 @@ pub(crate) fn ensure_merged_pbf(
     let binary_str = binary.display().to_string();
 
     let start = std::time::Instant::now();
-    let captured = output::run_captured(
-        &binary_str,
-        &["apply-changes", pbf_str, osc_str, "-o", &partial_str],
-        project_root,
-    )?;
+    // The merged cache is the default apply-changes output for this PBF/OSC
+    // pair. Its argv shares the command's builder, with no optional transform,
+    // job, compression or I/O parameters inherited from the diff invocation.
+    let apply_args = PbfhoggCommand::apply_changes_args(
+        pbf_str,
+        osc_str,
+        &partial_str,
+        &CommandParams::default(),
+        false,
+    );
+    let apply_arg_refs: Vec<&str> = apply_args.iter().map(String::as_str).collect();
+    let captured = output::run_captured(&binary_str, &apply_arg_refs, project_root)?;
 
     captured.check_success(&binary_str)?;
     staged.commit().map_err(|e| {

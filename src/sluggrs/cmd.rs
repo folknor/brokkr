@@ -1,5 +1,6 @@
 //! Command dispatch for sluggrs visual snapshot testing.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::build;
@@ -21,6 +22,20 @@ fn open_db(project_root: &Path) -> Result<SnapshotDb, DevError> {
 struct SnapshotOutcome {
     pixel_diff_pct: Option<f64>,
     status: compare::Status,
+}
+
+fn validate_config(config: &SluggrsConfig) -> Result<(), DevError> {
+    let mut ids = HashSet::new();
+    for snapshot in &config.snapshots {
+        compare::validate_artifact_id(&snapshot.id, "snapshot")?;
+        if !ids.insert(snapshot.id.as_str()) {
+            return Err(DevError::Config(format!(
+                "duplicate sluggrs snapshot ID {:?}",
+                snapshot.id
+            )));
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -218,7 +233,7 @@ fn run_snapshot(
             "  ERROR: {}",
             stderr.lines().next().unwrap_or("unknown error")
         ));
-        db.insert_result(run_id, &snapshot.id, None, compare::Status::Error.as_str())?;
+        db.insert_result(run_id, &snapshot.id, None, compare::Status::Error)?;
         return Ok((
             SnapshotOutcome {
                 pixel_diff_pct: None,
@@ -236,7 +251,7 @@ fn run_snapshot(
         Ok(meta) => meta.adapter,
         Err(e) => {
             sluggrs_msg(&format!("  ERROR: {} ({e})", snapshot.id));
-            db.insert_result(run_id, &snapshot.id, None, compare::Status::Error.as_str())?;
+            db.insert_result(run_id, &snapshot.id, None, compare::Status::Error)?;
             return Ok((
                 SnapshotOutcome {
                     pixel_diff_pct: None,
@@ -248,7 +263,7 @@ fn run_snapshot(
     };
 
     if !output_png.exists() {
-        db.insert_result(run_id, &snapshot.id, None, compare::Status::Error.as_str())?;
+        db.insert_result(run_id, &snapshot.id, None, compare::Status::Error)?;
         return Ok((
             SnapshotOutcome {
                 pixel_diff_pct: None,
@@ -271,7 +286,7 @@ fn run_snapshot(
                 "  ERROR: {} has an approval record but approved.png is missing - restore it",
                 snapshot.id
             ));
-            db.insert_result(run_id, &snapshot.id, None, compare::Status::Error.as_str())?;
+            db.insert_result(run_id, &snapshot.id, None, compare::Status::Error)?;
             return Ok((
                 SnapshotOutcome {
                     pixel_diff_pct: None,
@@ -280,12 +295,7 @@ fn run_snapshot(
                 Some(adapter_name),
             ));
         }
-        db.insert_result(
-            run_id,
-            &snapshot.id,
-            None,
-            compare::Status::NoBaseline.as_str(),
-        )?;
+        db.insert_result(run_id, &snapshot.id, None, compare::Status::NoBaseline)?;
         sluggrs_msg(&format!(
             "    no approved baseline for {} - run `brokkr approve {}`",
             snapshot.id, snapshot.id
@@ -307,15 +317,19 @@ fn run_snapshot(
 
     let (pixel_diff_pct, status) = match pixel_result {
         Ok(px) => {
-            let s = compare::determine_status(
-                px.diff_pct,
-                None,
-                pixel_threshold,
-                None,
-                false,
-                approved_pixel,
-                None, // no element comparison in the sluggrs snapshot path
-            );
+            let s = compare::determine_status(&compare::StatusInput {
+                pixel_diff_pct: px.diff_pct,
+                element_match_pct: None,
+                thresholds: compare::ComparisonThresholds {
+                    pixel: pixel_threshold,
+                    element: None,
+                },
+                expected_fail: false,
+                approved: compare::ApprovedScores {
+                    pixel: approved_pixel,
+                    element: None, // sluggrs has no element comparison
+                },
+            });
             (Some(px.diff_pct), s)
         }
         Err(e) => {
@@ -328,7 +342,7 @@ fn run_snapshot(
         }
     };
 
-    db.insert_result(run_id, &snapshot.id, pixel_diff_pct, status.as_str())?;
+    db.insert_result(run_id, &snapshot.id, pixel_diff_pct, status)?;
 
     Ok((
         SnapshotOutcome {
@@ -360,6 +374,7 @@ pub(crate) fn test(
     recapture: bool,
 ) -> Result<(), DevError> {
     project::require(project, Project::Sluggrs, "visual")?;
+    validate_config(sluggrs_config)?;
     if suite.is_some() || recapture {
         return Err(DevError::Config(
             "--suite and --recapture are litehtml-only; sluggrs snapshots take an ID or --all"
@@ -388,7 +403,7 @@ pub(crate) fn test(
     sluggrs_msg("");
     print_table_header();
 
-    let mut counts = [0u32; 4]; // pass, fail, error, no-baseline
+    let mut counts = compare::StatusTally::default();
     let mut first_adapter: Option<String> = None;
 
     for snapshot in &snapshots {
@@ -413,12 +428,7 @@ pub(crate) fn test(
             snapshot.id, px, outcome.status,
         ));
 
-        match outcome.status {
-            compare::Status::Pass => counts[0] += 1,
-            compare::Status::Error => counts[2] += 1,
-            compare::Status::NoBaseline => counts[3] += 1,
-            _ => counts[1] += 1,
-        }
+        counts.record(outcome.status, false);
     }
 
     // Update run with adapter name if we got one.
@@ -430,26 +440,35 @@ pub(crate) fn test(
     Ok(())
 }
 
-fn print_run_summary(counts: &[u32; 4]) -> Result<(), DevError> {
+fn print_run_summary(counts: &compare::StatusTally) -> Result<(), DevError> {
     sluggrs_msg(&format!("  {}", "\u{2500}".repeat(50)));
 
-    let labels = ["passed", "failed", "error", "awaiting approval"];
-    let parts: Vec<String> = counts
-        .iter()
-        .zip(labels.iter())
-        .filter(|&(&c, _)| c > 0)
-        .map(|(&c, &l)| format!("{c} {l}"))
-        .collect();
+    let failed =
+        counts.count(compare::Status::FailThreshold) + counts.count(compare::Status::Regression);
+    let parts = [
+        (counts.ordinary_passes(), "passed"),
+        (failed, "failed"),
+        (counts.count(compare::Status::ExpectedFail), "expected fail"),
+        (counts.count(compare::Status::Error), "error"),
+        (
+            counts.count(compare::Status::NoBaseline),
+            "awaiting approval",
+        ),
+    ]
+    .into_iter()
+    .filter(|(count, _)| *count > 0)
+    .map(|(count, label)| format!("{count} {label}"))
+    .collect::<Vec<_>>();
     sluggrs_msg(&format!("  {}", parts.join(", ")));
 
-    if counts[3] > 0 {
+    if counts.count(compare::Status::NoBaseline) > 0 {
         sluggrs_msg("  approve new snapshots with `brokkr approve --all`");
     }
 
     // A snapshot awaiting its first approval is not a failure - see
     // `compare::Status::NoBaseline`. Only real divergence and hard errors
     // set the exit code.
-    if counts[1] > 0 || counts[2] > 0 {
+    if counts.fails_run() {
         return Err(DevError::ExitCode(1));
     }
     Ok(())
@@ -465,6 +484,7 @@ pub(crate) fn list(
     sluggrs_config: &SluggrsConfig,
 ) -> Result<(), DevError> {
     project::require(project, Project::Sluggrs, "list")?;
+    validate_config(sluggrs_config)?;
 
     let db = open_db(project_root)?;
 
@@ -502,6 +522,7 @@ pub(crate) fn approve(
     snapshot_id: &str,
 ) -> Result<(), DevError> {
     project::require(project, Project::Sluggrs, "approve")?;
+    validate_config(sluggrs_config)?;
 
     let git_info = git::collect(build_root)?;
     if !git_info.is_clean {
@@ -520,7 +541,7 @@ pub(crate) fn approve(
     // Only approve an output the latest run actually produced and scored:
     // an ERROR row means output.png is missing or untrustworthy.
     match db.latest_result_for_snapshot(&snapshot.id)? {
-        Some(r) if r.status == compare::Status::Error.as_str() => {
+        Some(r) if r.status == compare::Status::Error => {
             return Err(DevError::Verify(format!(
                 "latest run of snapshot '{}' is ERROR \u{2014} nothing to approve; fix it and \
                  rerun `brokkr visual {}`",
@@ -571,6 +592,7 @@ pub(crate) fn status(
     sluggrs_config: &SluggrsConfig,
 ) -> Result<(), DevError> {
     project::require(project, Project::Sluggrs, "visual-status")?;
+    validate_config(sluggrs_config)?;
 
     let db = open_db(project_root)?;
     let approvals = db.all_approvals()?;
@@ -600,54 +622,18 @@ fn print_snapshot_status(
         .map(|a| format!("{:.1}%", a.pixel_diff_pct))
         .unwrap_or_else(|| "\u{2014}".into());
 
-    let (last_run_str, delta_str, status_extra) = format_status_columns(&latest, approval);
-
-    let base_status = latest.as_ref().map_or("\u{2014}", |r| r.status.as_str());
+    let columns = compare::status_columns(
+        latest.as_ref().map(|row| row.status),
+        latest.as_ref().and_then(|row| row.pixel_diff_pct),
+        approval.map(|entry| entry.pixel_diff_pct),
+        false,
+    );
     sluggrs_msg(&format!(
         "  {:<25} {:<11} {:<11} {:<9} {}{}",
-        snapshot.id, approved_str, last_run_str, delta_str, base_status, status_extra,
+        snapshot.id, approved_str, columns.pixel, columns.delta, columns.status, columns.annotation,
     ));
 
     Ok(())
-}
-
-fn format_status_columns(
-    latest: &Option<super::db::ResultRow>,
-    approval: Option<&super::db::Approval>,
-) -> (String, String, String) {
-    let Some(r) = latest else {
-        return ("\u{2014}".into(), "\u{2014}".into(), String::new());
-    };
-
-    let px = format_pct(r.pixel_diff_pct, 1);
-
-    let delta = match (r.pixel_diff_pct, approval) {
-        (Some(current), Some(appr)) => {
-            let d = current - appr.pixel_diff_pct;
-            if d.abs() < 0.05 {
-                "\u{2014}".into()
-            } else {
-                format!("{d:+.1}%")
-            }
-        }
-        _ => "\u{2014}".into(),
-    };
-
-    // Only ever an *annotation* on the status, never a repeat of it. This
-    // used to fall through to `format!(" ({s})")` for every non-PASS row,
-    // rendering `FAIL_THRESHOLD (FAIL_THRESHOLD)`.
-    let extra = match r.status.as_str() {
-        "PASS" => match (r.pixel_diff_pct, approval) {
-            (Some(current), Some(appr)) if current < appr.pixel_diff_pct - 0.5 => {
-                " (improved)".into()
-            }
-            _ => String::new(),
-        },
-        "NO_BASELINE" => " (run `brokkr approve`)".into(),
-        _ => String::new(),
-    };
-
-    (px, delta, extra)
 }
 
 // ---------------------------------------------------------------------------

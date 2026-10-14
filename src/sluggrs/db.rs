@@ -5,6 +5,7 @@ use std::path::Path;
 use rusqlite::Connection;
 
 use crate::error::DevError;
+use crate::litehtml::compare::Status;
 
 const SCHEMA_RUNS: &str = "\
 CREATE TABLE IF NOT EXISTS snapshot_runs (
@@ -54,7 +55,7 @@ pub(crate) struct ResultRow {
     pub run_id: String,
     pub snapshot_id: String,
     pub pixel_diff_pct: Option<f64>,
-    pub status: String,
+    pub status: Status,
 }
 
 pub(crate) struct SnapshotDb {
@@ -95,13 +96,13 @@ impl SnapshotDb {
         run_id: &str,
         snapshot_id: &str,
         pixel_diff_pct: Option<f64>,
-        status: &str,
+        status: Status,
     ) -> Result<(), DevError> {
         self.conn.execute(
             "INSERT INTO snapshot_results \
              (run_id, snapshot_id, pixel_diff_pct, status) \
              VALUES (?1, ?2, ?3, ?4)",
-            rusqlite::params![run_id, snapshot_id, pixel_diff_pct, status],
+            rusqlite::params![run_id, snapshot_id, pixel_diff_pct, status.as_str()],
         )?;
         Ok(())
     }
@@ -138,7 +139,7 @@ impl SnapshotDb {
     pub fn latest_run(&self) -> Result<Option<RunSummary>, DevError> {
         let mut stmt = self.conn.prepare(
             "SELECT run_id, timestamp, [commit], dirty, adapter_name \
-             FROM snapshot_runs ORDER BY timestamp DESC LIMIT 1",
+             FROM snapshot_runs ORDER BY timestamp DESC, rowid DESC LIMIT 1",
         )?;
         let mut rows = stmt.query_map([], map_run_summary)?;
         match rows.next() {
@@ -204,7 +205,7 @@ impl SnapshotDb {
              FROM snapshot_results r \
              JOIN snapshot_runs sr ON sr.run_id = r.run_id \
              WHERE r.snapshot_id = ?1 \
-             ORDER BY sr.timestamp DESC LIMIT 1",
+             ORDER BY sr.timestamp DESC, sr.rowid DESC LIMIT 1",
         )?;
         let mut rows = stmt.query_map(rusqlite::params![snapshot_id], map_result_row)?;
         match rows.next() {

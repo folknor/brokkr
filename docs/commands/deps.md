@@ -29,8 +29,8 @@ Mirrors `brokkr check`:
   `phases_run` lists only phases that completed; `findings` counts the
   failure-driving phases. The additive `phase_outcomes` array reports each
   phase as `ran` or `skipped`, with a `reason` field on skipped phases. The
-  array includes all eight phases. A shared-tool failure reports both
-  `outdated` and `stale` as skipped.
+  array includes every phase. A shared-tool failure reports every ccu-backed
+  phase as skipped.
 - Exit code: `1` if any findings, `0` otherwise. `--no-fail` always
   exits 0 (useful for report-only CI runs).
 
@@ -41,10 +41,11 @@ code; `phases_run` and `phase_outcomes` come from the outcomes.
 
 ## Data source
 
-Runs `cargo metadata --format-version 1 --locked` twice: once unfiltered and
-once with `--filter-platform` set to the host triple from `rustc -vV`. It
-deserializes a minimal subset (packages, workspace members, resolve graph).
-No extra crate dependencies. Network phases shell out to existing tools
+The full audit loads unfiltered metadata and a host-filtered snapshot, using
+the host triple from `rustc -vV`. Focus mode starts with the host-filtered
+graph and loads unfiltered metadata only when it needs a fallback. Brokkr
+deserializes a minimal subset (packages, workspace members, resolve graph). No
+extra crate dependencies. Network phases shell out to existing tools
 (`ccu` today, `cargo audit` planned) - no native network code in brokkr.
 
 `--locked` is what makes "audits `Cargo.lock`" true: without it cargo
@@ -65,7 +66,7 @@ Same crate resolved at >=2 versions. The point is **assigning blame**:
 when foo 1.0 and foo 2.0 both ship, you want to know who picked each
 and what's in your Cargo.toml that you can change to fix it.
 
-Each `VersionPin` carries two fields:
+Each `VersionPin` carries blame and workspace-route context:
 
 - `picked_by` - direct parents of the pin (one reverse step through
   the resolve graph). Workspace members appear as `"<name> (direct)"`;
@@ -78,7 +79,7 @@ Each `VersionPin` carries two fields:
   "what's in my Cargo.toml that I can update?" without making the
   reader run `cargo tree -i`.
 
-Two filters keep the blame honest:
+Filters keep the blame honest:
 
 - **Host-target.** Metadata for this phase is loaded with
   `--filter-platform=<host>` (host triple parsed from `rustc -vV`).
@@ -123,8 +124,8 @@ Normal-kind chain from a workspace member down to it:
 `source` is the normalised origin: `crates.io`, `git+<url>#<sha>`,
 `registry=<url>` (an alternate registry, git-index `registry+` and
 sparse-index `sparse+` alike), `workspace`, or `path`. `manifest` is the resolved
-Cargo.toml with `$HOME` collapsed to `~`. The JSON output carries
-the same two fields on each `ChainTrace`.
+Cargo.toml with `$HOME` collapsed to `~`. The JSON output carries the same
+`source` and `manifest` context on each `ChainTrace`.
 
 Resolution falls back in three steps:
 
@@ -180,7 +181,7 @@ says, not of what the resolver picked. For the same reason it uses the
 unfiltered metadata: a cycle closed by a target-specific dep still blocks
 the release on every host.
 
-Two exclusions carry the phase's whole subtlety:
+The phase's exclusions carry its publication nuance:
 
 - **Version-less dev-dependencies don't count.** Cargo strips a dev-dep
   with no version requirement (the `{ path = "..." }`-only form) from the
@@ -249,11 +250,10 @@ them as unused. See `src/deps/workspace_dep.rs`.
 
 ### native_code [v1]
 
-Lists dependencies that pull non-Rust code into the build. **Not**
-name-based - the `-sys` suffix is advisory and both over- and under-
-includes (`js-sys` / `windows-sys` are pure-Rust FFI declarations;
-plenty of native bundlers carry no suffix). Two orthogonal signals,
-each reported via a `reason` of `links` / `compiles` / `both`:
+Lists dependencies that pull non-Rust code into the build. The `-sys` suffix
+cannot identify native code reliably: `js-sys` / `windows-sys` are pure-Rust
+FFI declarations, while some native bundlers carry no suffix. The event's
+`reason` records the applicable `links` and/or `compiles` signal:
 
 - **links a native library** - the manifest's `links` key is set. The
   canonical marker Cargo reserves for linking a system/bundled native
@@ -293,7 +293,7 @@ direct dep, carrying name + installed + latest + severity
 (`patch`/`minor`/`major`) + source_file + line_number.
 
 The severity values are a closed set. An unrecognized value from ccu makes
-the response unparsable and both network phases are reported as skipped.
+the response unparsable and the ccu-backed phases are reported as skipped.
 
 These events are informational - they don't count toward the failure-
 counting findings tally. A patch bump shouldn't fail your build; you
@@ -317,18 +317,17 @@ NDJSON consumers.
 connection cannot hang `deps`. If `ccu` is missing or fails for any
 reason (offline, timed out, schema mismatch, crash), the phases emit one
 `ToolMissing` event and are reported as skipped. Its existing `phase: "outdated"`
-field remains; the additive `phases: ["outdated", "stale"]` lists both
-affected phases. The summary gives each skipped phase the same reason. This
+field remains; the additive `phases` array lists all affected ccu-backed
+phases. The summary gives each skipped phase the same reason. This
 doesn't fail the run or print the "all at latest" line. The summary keeps its
 existing `phases_run` and `findings` fields, then adds `phase_outcomes`, for
 example `{"phase":"stale","status":"skipped","reason":"..."}`.
 
 ### stale [v1]
 
-Same `ccu --json` invocation as `outdated` (one network call, two
-signals). Reads each check's `latest_released_at` and emits a `Stale`
-event when the newest available version was released at least 240 days
-ago (about 8 months). Severity becomes `"abandoned"` at 730 days (about
+Uses the same `ccu --json` response as `outdated`. A `Stale` event is emitted
+when a check's `latest_released_at` is at least 240 days old (about 8 months).
+Severity becomes `"abandoned"` at 730 days (about
 2 years). These closed severity values are serialized as strings.
 
 The point of looking at the latest version's age (not the installed

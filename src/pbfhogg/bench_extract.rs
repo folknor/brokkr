@@ -1,55 +1,12 @@
-//! Benchmark: extract strategies (simple/complete/smart) with bbox.
+//! Benchmark: extract strategies (simple/complete/smart) with a dataset bbox.
 
 use std::path::Path;
 
 use crate::error::DevError;
 use crate::harness::{BenchConfig, BenchHarness};
-
-pub const ALL_STRATEGIES: &[&str] = &["simple", "complete", "smart"];
-
-/// The bbox is spelled `-b=<bbox>`, identically to `PbfhoggCommand::Extract`'s
-/// argv in `commands.rs`: the two paths record the same `extract` rows, and a
-/// differing spelling split their `cli_args` for the same work. The `=` form
-/// is the safe one, too - a bbox west of Greenwich starts with `-`, which a
-/// separate token would present to pbfhogg's parser as a flag.
-///
-/// An unknown name is an error rather than `unreachable!()`: the names arrive
-/// as strings from the caller, and nothing at this signature proves they came
-/// from [`ALL_STRATEGIES`].
-fn strategy_args(name: &str, pbf: &str, bbox: &str, output: &str) -> Result<Vec<String>, DevError> {
-    let bbox_arg = format!("-b={bbox}");
-    Ok(match name {
-        "simple" => vec![
-            "extract".into(),
-            pbf.into(),
-            "--simple".into(),
-            bbox_arg,
-            "-o".into(),
-            output.into(),
-        ],
-        "complete" => vec![
-            "extract".into(),
-            pbf.into(),
-            bbox_arg,
-            "-o".into(),
-            output.into(),
-        ],
-        "smart" => vec![
-            "extract".into(),
-            pbf.into(),
-            "--smart".into(),
-            bbox_arg,
-            "-o".into(),
-            output.into(),
-        ],
-        _ => {
-            return Err(DevError::Config(format!(
-                "unknown extract strategy {name:?} (expected one of: {})",
-                ALL_STRATEGIES.join(", ")
-            )));
-        }
-    })
-}
+use crate::measure::{CommandContext, CommandParams};
+use crate::pbfhogg::commands::{ArgMode, ExtractStrategy, PbfhoggCommand, scratch_output_path};
+use crate::resolve::Bbox;
 
 #[allow(clippy::too_many_arguments)]
 pub fn run(
@@ -58,26 +15,46 @@ pub fn run(
     pbf_path: &Path,
     file_mb: f64,
     runs: usize,
-    bbox: &str,
-    strategies: &[&str],
+    bbox: &Bbox,
     project_root: &Path,
     scratch_dir: &Path,
 ) -> Result<(), DevError> {
     std::fs::create_dir_all(scratch_dir)?;
-    let output_path = scratch_dir.join("bench-extract-output.osm.pbf");
-    let output_str = output_path.display().to_string();
+    let command_ctx = CommandContext {
+        binary: binary.to_path_buf(),
+        pbf_path: Some(pbf_path.to_path_buf()),
+        osc_path: None,
+        osc_paths: Vec::new(),
+        pbf_b_path: None,
+        scratch_dir: scratch_dir.to_path_buf(),
+        dataset: String::new(),
+        bbox: Some(bbox.clone()),
+        params: CommandParams::default(),
+    };
+    let output_path = scratch_output_path(
+        &command_ctx,
+        &PbfhoggCommand::Extract {
+            strategy: ExtractStrategy::Simple,
+        },
+        ArgMode::Bench,
+    )?;
 
-    let (basename, pbf_str) = super::path_strs(pbf_path)?;
+    let (basename, _) = super::path_strs(pbf_path)?;
+    let strategy_names: Vec<&str> = ExtractStrategy::all()
+        .iter()
+        .map(|strategy| strategy.name())
+        .collect();
 
-    let result = crate::harness::run_variants("strategy", strategies, |name| {
-        let args = strategy_args(name, pbf_str, bbox, &output_str)?;
+    let result = crate::harness::run_variants("strategy", &strategy_names, |name| {
+        let strategy = ExtractStrategy::parse(name)?;
+        let command = PbfhoggCommand::Extract { strategy };
+        let args = command.build_args(&command_ctx, ArgMode::Bench)?;
         let args_refs: Vec<&str> = args.iter().map(String::as_str).collect();
 
         let config = BenchConfig {
-            command: "extract".into(),
-            // Strategy is in cli_args (--simple/--smart/none=complete).
-            // Bbox is in cli_args (-b). Measurement mode and brokkr_args
-            // come from the harness.
+            command: command.result_command(),
+            // Strategy and bbox remain in cli_args, preserving the existing
+            // result-row shape for dataset-configured extract measurements.
             mode: None,
             input_file: Some(basename.clone()),
             input_mb: Some(file_mb),

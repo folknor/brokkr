@@ -108,6 +108,21 @@ fn resolve_bootstrap_paths<'a>(
     Ok((paths, effective, db_root))
 }
 
+/// Return the code tree as an alternate build root only when it differs from
+/// the config/state root. Detection owns both paths; keeping this comparison
+/// here prevents callers from independently re-deriving the one-level-up
+/// layout rule.
+pub(crate) fn parent_build_root<'a>(project_root: &Path, build_root: &'a Path) -> Option<&'a Path> {
+    (build_root != project_root).then_some(build_root)
+}
+
+/// Resolve the worktree retention value for this machine at the shared
+/// context boundary.
+pub(crate) fn worktree_keep(dev_config: &config::DevConfig) -> Result<usize, DevError> {
+    let hostname = config::hostname()?;
+    Ok(dev_config.worktree_keep(&hostname))
+}
+
 impl HarnessContext {
     /// Create a harness context using the dirty-tree policy for this request.
     /// The policy must be applied before `BenchHarness` is constructed, since
@@ -280,12 +295,27 @@ impl BenchContext {
         })?;
         let (paths, effective_build_root, db_root) =
             resolve_bootstrap_paths(dev_config, project_root, build_root)?;
-        let cargo_features = if build_config.features.is_empty() {
+        // A BenchContext build always carries this host's configured defaults,
+        // even when its caller built the BuildConfig through a different path.
+        // Request callers may already have merged them into the request; the
+        // shared resolver dedupes that overlap before cargo and DB labeling.
+        // Direct cargo command paths that do not construct this context retain
+        // their own command or sweep feature selection.
+        let effective_config = build::BuildConfig {
+            package: build_config.package.clone(),
+            bin: build_config.bin.clone(),
+            example: build_config.example.clone(),
+            features: crate::resolve_features(dev_config, &build_config.features),
+            default_features: build_config.default_features,
+            all_features: build_config.all_features,
+            profile: build_config.profile,
+        };
+        let cargo_features = if effective_config.features.is_empty() {
             None
         } else {
-            Some(build_config.features.join(","))
+            Some(effective_config.features.join(","))
         };
-        let binary = build::cargo_build(build_config, effective_build_root)?;
+        let binary = build::cargo_build(&effective_config, effective_build_root)?;
         let harness = harness::BenchHarness::new_with_lock(
             lock,
             &paths,

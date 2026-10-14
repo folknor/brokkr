@@ -5,6 +5,13 @@ use std::time::{Duration, Instant};
 
 use crate::error::DevError;
 
+mod lock_record {
+    include!("lock_record.rs");
+    // The full codec, kept out of `lock_record.rs` because the standalone
+    // guard includes that file and only ever reads `auth`.
+    include!("lock_record_codec.rs");
+}
+
 mod lock_probe {
     include!("lock_probe.rs");
     // The minting side and the holder-only identities, kept out of
@@ -14,6 +21,7 @@ mod lock_probe {
 }
 
 pub(crate) use lock_probe::{AcqId, AuthHash, Nonce, RunToken};
+pub(crate) use lock_record::{Record as LockRecord, escape_value, unescape_value};
 
 /// Mutable lock-file state - maintained while brokkr holds the lock so
 /// `brokkr lock` (from another invocation) can see the current child PID
@@ -1411,44 +1419,26 @@ fn rewrite_from_state(fd: RawFd, state: &LockState) -> std::io::Result<()> {
     // mutable field: the authorization record must never be the line a
     // truncation sacrifices, and it must be byte-identical across a holder's
     // rewrites so a torn read cannot blend two holders' capabilities.
-    let mut contents = format!(
-        "pid={}\nstarttime={}\nboot_id={}\nacq={}\npid_ns={}\ntime_ns={}\ncodex_thread={}\n\
-         codex_session={}\nauth={}\ndraining={}\n",
-        std::process::id(),
-        state.starttime,
-        state.boot_id,
-        state.acq_id.as_ref().map_or("", AcqId::as_str),
-        state.pid_ns,
-        state.time_ns,
-        escape_value(&state.codex_thread),
-        escape_value(&state.codex_session),
-        state.auth.as_ref().map_or("", AuthHash::as_str),
-        u8::from(state.draining),
-    );
-    match &state.child {
-        Some((pid, st)) => {
-            contents.push_str(&format!("child_pid={pid}\nchild_starttime={st}\n"));
-        }
-        None => contents.push_str("child_pid=\nchild_starttime=\n"),
+    let contents = LockRecord {
+        pid: std::process::id(),
+        starttime: state.starttime.clone(),
+        boot_id: state.boot_id.clone(),
+        acq: state.acq_id.as_ref().map_or("", AcqId::as_str).to_owned(),
+        pid_ns: state.pid_ns.clone(),
+        time_ns: state.time_ns.clone(),
+        codex_thread: state.codex_thread.clone(),
+        codex_session: state.codex_session.clone(),
+        auth: state.auth.as_ref().map_or("", AuthHash::as_str).to_owned(),
+        draining: state.draining,
+        child: state.child.clone(),
+        mocks: state.mocks.clone(),
+        progress: state.progress,
+        project: state.project.clone(),
+        command: state.command.clone(),
+        root: state.project_root.clone(),
+        args: state.args.clone(),
     }
-    let mocks = state
-        .mocks
-        .iter()
-        .map(|(p, st)| format!("{p}:{st}"))
-        .collect::<Vec<_>>()
-        .join(",");
-    contents.push_str(&format!("mock_pids={mocks}\n"));
-    match state.progress {
-        Some((run, total)) => contents.push_str(&format!("progress={run}/{total}\n")),
-        None => contents.push_str("progress=\n"),
-    }
-    contents.push_str(&format!(
-        "project={}\ncommand={}\nroot={}\nargs={}\n",
-        escape_value(&state.project),
-        escape_value(&state.command),
-        escape_value(&state.project_root),
-        escape_value(&state.args),
-    ));
+    .encode();
 
     // Write first, then truncate. The inverse order (truncate → write) gave
     // a concurrent `brokkr lock` reader a window to read 0 bytes and print
@@ -1457,7 +1447,7 @@ fn rewrite_from_state(fd: RawFd, state: &LockState) -> std::io::Result<()> {
     // first-occurrence parsing renders harmless). Note this is coherence
     // best-effort, not a snapshot guarantee - readers double-read and fail
     // closed on change (see `read_lock_contents`).
-    let bytes = contents.as_bytes();
+    let bytes = contents.as_slice();
     unsafe {
         if libc::lseek(fd, 0, libc::SEEK_SET) == -1 {
             return Err(std::io::Error::last_os_error());
@@ -1509,57 +1499,6 @@ fn shell_quote(s: &str) -> String {
     } else {
         s.to_owned()
     }
-}
-
-/// Percent-escape the three bytes that would break the line-oriented
-/// `key=value` format: `%` (the escape itself), `\n` (line injection) and
-/// `\r`. Everything else passes through, keeping the file human-readable.
-pub(crate) fn escape_value(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '%' => out.push_str("%25"),
-            '\n' => out.push_str("%0A"),
-            '\r' => out.push_str("%0D"),
-            _ => out.push(c),
-        }
-    }
-    out
-}
-
-/// Inverse of [`escape_value`]. Unknown or truncated escapes pass through
-/// literally - this decodes a display string, it must never fail.
-pub(crate) fn unescape_value(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let bytes = s.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' {
-            match s.get(i + 1..i + 3) {
-                Some("25") => {
-                    out.push('%');
-                    i += 3;
-                    continue;
-                }
-                Some("0A") => {
-                    out.push('\n');
-                    i += 3;
-                    continue;
-                }
-                Some("0D") => {
-                    out.push('\r');
-                    i += 3;
-                    continue;
-                }
-                _ => {}
-            }
-        }
-        // Advance by one char (values are valid UTF-8; `%` is single-byte).
-        let ch_len = s[i..].chars().next().map_or(1, char::len_utf8);
-        out.push_str(&s[i..i + ch_len]);
-        i += ch_len;
-    }
-    out
 }
 
 /// Read lock file contents and parse the key=value fields.
@@ -1615,54 +1554,23 @@ fn read_file_bytes(fd: RawFd) -> Option<Vec<u8>> {
 /// Parse the `key=value` lines. First occurrence of each key wins (see
 /// [`read_lock_contents`]); an empty or unparseable value means unset.
 fn parse_lock_contents(text: &str) -> Option<LockInfo> {
-    let mut fields: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
-    for line in text.lines() {
-        if let Some((key, value)) = line.split_once('=') {
-            fields.entry(key).or_insert(value.trim());
-        }
-    }
-
-    let raw = |key: &str| fields.get(key).map_or("", |v| *v);
-    let escaped = |key: &str| unescape_value(raw(key));
-
-    let pid: u32 = raw("pid").parse().unwrap_or(0);
-    let project = escaped("project");
-    if pid == 0 && project.is_empty() {
-        return None;
-    }
-
-    let child = raw("child_pid")
-        .parse()
-        .ok()
-        .map(|p: u32| (p, raw("child_starttime").to_owned()));
-    let mocks = raw("mock_pids")
-        .split(',')
-        .filter(|s| !s.is_empty())
-        .filter_map(|entry| {
-            let (p, st) = entry.split_once(':')?;
-            Some((p.trim().parse().ok()?, st.trim().to_owned()))
-        })
-        .collect();
-    let progress = raw("progress")
-        .split_once('/')
-        .and_then(|(r, t)| Some((r.parse::<u32>().ok()?, t.parse::<u32>().ok()?)));
-
+    let record = LockRecord::decode(text.as_bytes())?;
     Some(LockInfo {
-        pid,
-        starttime: raw("starttime").to_owned(),
-        boot_id: raw("boot_id").to_owned(),
-        acq_id: raw("acq").to_owned(),
-        pid_ns: raw("pid_ns").to_owned(),
-        time_ns: raw("time_ns").to_owned(),
-        codex_thread: escaped("codex_thread"),
-        auth: AuthHash::parse(raw("auth")),
-        project,
-        command: escaped("command"),
-        args: escaped("args"),
-        project_root: escaped("root"),
-        child,
-        mocks,
-        progress,
+        pid: record.pid,
+        starttime: record.starttime,
+        boot_id: record.boot_id,
+        acq_id: record.acq,
+        pid_ns: record.pid_ns,
+        time_ns: record.time_ns,
+        codex_thread: record.codex_thread,
+        auth: AuthHash::parse(&record.auth),
+        project: record.project,
+        command: record.command,
+        args: record.args,
+        project_root: record.root,
+        child: record.child,
+        mocks: record.mocks,
+        progress: record.progress,
     })
 }
 

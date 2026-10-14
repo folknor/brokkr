@@ -93,6 +93,10 @@ Bare `brokkr clean`, in order:
   failed runs, plus `mock/` dirs from `mock-serve`), `.brokkr/dellingr/`
   wholesale (the harness's hotpath report and marker FIFO), and
   `.brokkr/piners/corpus/run-*/`.
+- **Litehtml also**: under `$XDG_CACHE_HOME/brokkr/litehtml-prepare/`, every
+  version directory (a constructed 32-hex-digit name) other than the one this
+  brokkr's bundled Node scripts hash to. The current one stays, so the next
+  `prepare` or `visual` does not reinstall its dependencies.
 
 A routine clean **spares the durable tilegen output archives**
 (`<output>/<dataset>-<variant>-<commit>.pmtiles`). They are reproducible but

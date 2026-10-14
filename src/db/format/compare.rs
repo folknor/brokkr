@@ -57,7 +57,8 @@ pub fn format_compare_with_limit(
         if let (Some(ha), Some(hb)) = (&pair.a_hotpath, &pair.b_hotpath)
             && let Some(diff) = crate::hotpath_fmt::format_hotpath_diff(ha, hb, top)
         {
-            let (cmd, var, _) = split_pair_key(&pair.key);
+            let cmd = &pair.key.command;
+            let var = &pair.key.mode;
             let label = if var.is_empty() {
                 cmd.to_owned()
             } else {
@@ -118,7 +119,7 @@ struct CompareWidths {
 }
 
 struct ComparisonPair {
-    key: String,
+    key: PairKey,
     a_ms: Option<i64>,
     b_ms: Option<i64>,
     /// Exact walls in microseconds, when both rows have them. The delta is
@@ -150,6 +151,17 @@ struct ComparisonPair {
     /// Work-size counters on each side. See [`format_counter_diff`].
     a_counters: std::collections::BTreeMap<String, String>,
     b_counters: std::collections::BTreeMap<String, String>,
+}
+
+/// The full identity of a comparison row. Keeping the components separate
+/// makes tabs and other delimiter characters in stored values unambiguous.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct PairKey {
+    command: String,
+    mode: String,
+    input_file: String,
+    brokkr_args: String,
+    env_fingerprint: String,
 }
 
 /// The host-condition fields of a row, pulled out for pairwise diffing.
@@ -238,9 +250,9 @@ fn build_comparison_pairs(
         )
     };
 
-    let mut keys: Vec<String> = Vec::new();
-    let mut a_map: HashMap<String, RowData> = HashMap::new();
-    let mut b_map: HashMap<String, RowData> = HashMap::new();
+    let mut keys: Vec<PairKey> = Vec::new();
+    let mut a_map: HashMap<PairKey, RowData> = HashMap::new();
+    let mut b_map: HashMap<PairKey, RowData> = HashMap::new();
 
     for row in rows_a {
         let key = row_key(row);
@@ -491,8 +503,14 @@ fn pair_key(
     input_file: &str,
     brokkr_args: &str,
     env_fp: &str,
-) -> String {
-    format!("{command}\t{mode}\t{input_file}\t{brokkr_args}\t{env_fp}")
+) -> PairKey {
+    PairKey {
+        command: command.to_owned(),
+        mode: mode.to_owned(),
+        input_file: input_file.to_owned(),
+        brokkr_args: brokkr_args.to_owned(),
+        env_fingerprint: env_fp.to_owned(),
+    }
 }
 
 /// Drop the `brokkr_args` tokens that name *provenance or presentation*
@@ -571,17 +589,6 @@ fn strip_count_suffix(token: &str) -> Option<&str> {
         .then_some(flag)
 }
 
-fn split_pair_key(key: &str) -> (&str, &str, &str) {
-    // splitn(5, …) - parts 4..=5 are brokkr_args / env_fingerprint, only
-    // used for deduping. Callers only consume the first three
-    // (command, mode, input_file).
-    let mut parts = key.splitn(5, '\t');
-    let cmd = parts.next().unwrap_or("");
-    let var = parts.next().unwrap_or("");
-    let input = parts.next().unwrap_or("");
-    (cmd, var, input)
-}
-
 fn compute_compare_widths(
     commit_a: &str,
     commit_b: &str,
@@ -622,7 +629,8 @@ fn compute_compare_widths(
         blobs_b: if has_blobs { "blobs_b".len() } else { 0 },
     };
     for pair in pairs {
-        let (cmd, var, _) = split_pair_key(&pair.key);
+        let cmd = &pair.key.command;
+        let var = &pair.key.mode;
         w.command = w.command.max(cmd.len());
         w.mode = w.mode.max(var.len());
         w.input = w.input.max(pair.input_display.len());
@@ -734,7 +742,8 @@ fn append_compare_header(out: &mut String, commit_a: &str, commit_b: &str, w: &C
 
 fn append_compare_row(out: &mut String, pair: &ComparisonPair, w: &CompareWidths) {
     use std::fmt::Write;
-    let (cmd, var, _) = split_pair_key(&pair.key);
+    let cmd = &pair.key.command;
+    let var = &pair.key.mode;
     let a_str = format_ms_or_dash(pair.a_ms, pair.a_us);
     let b_str = format_ms_or_dash(pair.b_ms, pair.b_us);
     let ch = format_change_pair(pair);
@@ -975,11 +984,11 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // pair_key / split_pair_key roundtrip
+    // Pair-key identity keeps its components distinct.
     // -----------------------------------------------------------------------
 
     #[test]
-    fn pair_key_roundtrip_normal() {
+    fn pair_key_preserves_all_components() {
         let key = pair_key(
             "read",
             "mmap",
@@ -987,28 +996,27 @@ mod tests {
             "brokkr read --dataset denmark",
             "",
         );
-        let (cmd, var, input) = split_pair_key(&key);
-        assert_eq!(cmd, "read");
-        assert_eq!(var, "mmap");
-        assert_eq!(input, "denmark.osm.pbf");
+        assert_eq!(key.command, "read");
+        assert_eq!(key.mode, "mmap");
+        assert_eq!(key.input_file, "denmark.osm.pbf");
+        assert_eq!(key.brokkr_args, "brokkr read --dataset denmark");
+        assert_eq!(key.env_fingerprint, "");
     }
 
     #[test]
-    fn pair_key_roundtrip_empty_fields() {
+    fn pair_key_preserves_empty_components() {
         let key = pair_key("read", "", "", "", "");
-        let (cmd, var, input) = split_pair_key(&key);
-        assert_eq!(cmd, "read");
-        assert_eq!(var, "");
-        assert_eq!(input, "");
+        assert_eq!(key.command, "read");
+        assert_eq!(key.mode, "");
+        assert_eq!(key.input_file, "");
     }
 
     #[test]
-    fn pair_key_roundtrip_all_empty() {
+    fn pair_key_allows_all_empty_components() {
         let key = pair_key("", "", "", "", "");
-        let (cmd, var, input) = split_pair_key(&key);
-        assert_eq!(cmd, "");
-        assert_eq!(var, "");
-        assert_eq!(input, "");
+        assert_eq!(key.command, "");
+        assert_eq!(key.mode, "");
+        assert_eq!(key.input_file, "");
     }
 
     #[test]
@@ -1158,23 +1166,12 @@ mod tests {
     }
 
     #[test]
-    fn pair_key_tabs_in_values_still_bleed() {
-        // splitn(5, '\t') means a tab inside the command field still
-        // corrupts downstream fields. None of our inputs have tabs in
-        // practice, but document the pitfall.
+    fn pair_key_keeps_tabs_inside_their_fields() {
         let key = pair_key("a\tb", "c", "d", "", "");
-        let (cmd, var, input) = split_pair_key(&key);
-        assert_eq!(cmd, "a");
-        assert_eq!(var, "b");
-        assert_eq!(input, "c");
-    }
-
-    #[test]
-    fn split_pair_key_no_tabs() {
-        let (cmd, var, input) = split_pair_key("notabs");
-        assert_eq!(cmd, "notabs");
-        assert_eq!(var, "");
-        assert_eq!(input, "");
+        assert_eq!(key.command, "a\tb");
+        assert_eq!(key.mode, "c");
+        assert_eq!(key.input_file, "d");
+        assert_ne!(key, pair_key("a", "b", "c", "d", ""));
     }
 
     // -----------------------------------------------------------------------
@@ -1246,11 +1243,8 @@ mod tests {
         let pairs = build_comparison_pairs(&a, &b, &DatasetMatcher::empty());
 
         assert_eq!(pairs.len(), 3);
-        let key_strings: Vec<String> = pairs
-            .iter()
-            .map(|p| split_pair_key(&p.key).0.to_owned())
-            .collect();
-        assert_eq!(key_strings, vec!["x-cmd", "y-cmd", "z-cmd"]);
+        let key_commands: Vec<String> = pairs.iter().map(|p| p.key.command.clone()).collect();
+        assert_eq!(key_commands, vec!["x-cmd", "y-cmd", "z-cmd"]);
 
         // x-cmd: A-only
         assert_eq!(pairs[0].a_ms, Some(10));

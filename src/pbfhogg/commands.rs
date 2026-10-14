@@ -8,7 +8,8 @@
 use std::path::{Path, PathBuf};
 
 use crate::error::DevError;
-use crate::measure::CommandContext;
+use crate::measure::{CommandContext, CommandParams};
+use crate::resolve::Bbox;
 
 // ---------------------------------------------------------------------------
 // Input / output descriptors
@@ -21,7 +22,7 @@ pub enum InputKind {
     Pbf,
     /// PBF + OSC diff file.
     PbfAndOsc,
-    /// PBF + bbox string.
+    /// PBF + resolved bbox.
     PbfAndBbox,
     /// PBF + merged PBF (generated from PBF + OSC).
     PbfAndMerged,
@@ -124,11 +125,37 @@ impl ExtractStrategy {
     }
 
     pub fn parse(s: &str) -> Result<Self, DevError> {
-        match s {
-            "simple" => Ok(Self::Simple),
-            "complete" => Ok(Self::Complete),
-            "smart" => Ok(Self::Smart),
-            _ => Err(DevError::Config(format!("unknown extract strategy: {s}"))),
+        Self::all()
+            .iter()
+            .copied()
+            .find(|strategy| strategy.name() == s)
+            .ok_or_else(|| DevError::Config(format!("unknown extract strategy: {s}")))
+    }
+
+    /// Stable strategy label used by command selectors and result output.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Simple => "simple",
+            Self::Complete => "complete",
+            Self::Smart => "smart",
+        }
+    }
+
+    /// pbfhogg's optional strategy flag. `Complete` is its default path.
+    pub fn flag(self) -> Option<&'static str> {
+        match self {
+            Self::Simple => Some("--simple"),
+            Self::Complete => None,
+            Self::Smart => Some("--smart"),
+        }
+    }
+
+    /// osmium's name for the equivalent extraction strategy.
+    pub fn osmium_name(self) -> &'static str {
+        match self {
+            Self::Simple => "simple",
+            Self::Complete => "complete_ways",
+            Self::Smart => "smart",
         }
     }
 }
@@ -390,6 +417,9 @@ impl PbfhoggCommand {
     /// Only commands whose pbfhogg binary clap definition includes `--io-uring`
     /// are listed here.  Passing the flag to other commands causes clap exit
     /// code 2.
+    /// pbfhogg is an external binary here, so this local compatibility set is
+    /// not generated from its clap schema; callers should not repeat it in
+    /// error text.
     pub fn supports_io_uring(&self) -> bool {
         matches!(
             self,
@@ -490,20 +520,66 @@ impl PbfhoggCommand {
     /// `run_hotpath_capture`) and picks hotpath-prefixed scratch filenames.
     /// A few commands have small argv differences between modes - those are
     /// called out inline.
+    /// I/O and explicit compression options are appended here so every caller,
+    /// including dry-run, sees the same final command shape. The one legacy
+    /// apply-changes default is selected here and placed with its core args.
     #[allow(clippy::too_many_lines)]
     pub fn build_args(&self, ctx: &CommandContext, mode: ArgMode) -> Result<Vec<String>, DevError> {
         let mut prefix: Vec<String> = Vec::new();
         if mode == ArgMode::Hotpath {
             prefix.push(ctx.binary_str()?.to_owned());
         }
-        let body = self.build_body(ctx, mode)?;
+        let default_hotpath_compression = mode == ArgMode::Hotpath
+            && matches!(self, Self::ApplyChanges)
+            && ctx.params.compression.is_none();
+        let body = self.build_body(ctx, mode, default_hotpath_compression)?;
         prefix.extend(body);
+        if ctx.params.direct_io {
+            prefix.push("--direct-io".into());
+        }
+        if ctx.params.io_uring {
+            prefix.push("--io-uring".into());
+        }
+        if let Some(compression) = &ctx.params.compression {
+            prefix.push("--compression".into());
+            prefix.push(compression.clone());
+        }
         Ok(prefix)
+    }
+
+    /// Build the core argv for an extract command with an explicit output
+    /// path. Shared by measured commands, suite benchmarks and verification,
+    /// keeping the strategy flag and single-token `-b=<bbox>` spelling alike.
+    pub(crate) fn extract_args_for(
+        &self,
+        pbf: &str,
+        bbox: &Bbox,
+        output: &str,
+    ) -> Result<Vec<String>, DevError> {
+        let Self::Extract { strategy } = self else {
+            return Err(DevError::Config(
+                "extract_args_for requires an extract command".into(),
+            ));
+        };
+
+        let mut args = vec!["extract".into(), pbf.into()];
+        if let Some(flag) = strategy.flag() {
+            args.push(flag.into());
+        }
+        args.push(bbox.to_pbfhogg_arg());
+        args.push("-o".into());
+        args.push(output.into());
+        Ok(args)
     }
 
     /// Build the body of the argument vector (no binary prefix).
     #[allow(clippy::too_many_lines, clippy::cognitive_complexity)]
-    fn build_body(&self, ctx: &CommandContext, mode: ArgMode) -> Result<Vec<String>, DevError> {
+    fn build_body(
+        &self,
+        ctx: &CommandContext,
+        mode: ArgMode,
+        default_hotpath_compression: bool,
+    ) -> Result<Vec<String>, DevError> {
         match self {
             // -----------------------------------------------------------------
             // Tool CLI commands (26 from bench_commands.rs)
@@ -697,26 +773,13 @@ impl PbfhoggCommand {
             Self::ApplyChanges => {
                 let output = scratch_output_path(ctx, self, mode)?;
                 let osc = ctx.osc_str()?;
-                let mut args = vec!["apply-changes".into(), ctx.pbf_str()?.into(), osc.into()];
-                if ctx.params.locations_on_ways {
-                    args.push("--locations-on-ways".into());
-                }
-                if let Some(j) = ctx.params.jobs {
-                    args.push("-j".into());
-                    args.push(j.to_string());
-                }
-                // Hotpath legacy: pre-unification build_hotpath_args always
-                // emitted --compression=zlib for apply-changes. Preserve that
-                // default only when the user didn't supply --compression; the
-                // dispatch layer appends the user's value itself, and pbfhogg
-                // rejects --compression given twice.
-                if mode == ArgMode::Hotpath && ctx.params.compression.is_none() {
-                    args.push("--compression".into());
-                    args.push("zlib".into());
-                }
-                args.push("-o".into());
-                args.push(path_to_string(&output)?);
-                Ok(args)
+                Ok(Self::apply_changes_args(
+                    ctx.pbf_str()?,
+                    osc,
+                    &path_to_string(&output)?,
+                    &ctx.params,
+                    default_hotpath_compression,
+                ))
             }
             Self::AddLocationsToWays => {
                 let output = scratch_output_path(ctx, self, mode)?;
@@ -868,7 +931,11 @@ impl PbfhoggCommand {
                 // dry-run must not touch the filesystem. The real run paths
                 // call `prepare_scratch` to materialise it.
                 let output_dir = scratch_output_path(ctx, self, mode)?;
-                let plan = multi_extract_plan(ctx, output_dir, *regions)?;
+                let bbox = ctx
+                    .bbox
+                    .as_ref()
+                    .ok_or_else(|| DevError::Config("multi-extract requires a bbox".into()))?;
+                let plan = multi_extract_plan(ctx, output_dir, bbox, *regions)?;
                 let config_path = plan.config_path;
 
                 let mut args: Vec<String> = vec![
@@ -877,11 +944,8 @@ impl PbfhoggCommand {
                     "--config".into(),
                     path_to_string(&config_path)?,
                 ];
-                match strategy {
-                    ExtractStrategy::Simple => args.push("--simple".into()),
-                    ExtractStrategy::Smart => args.push("--smart".into()),
-                    // Complete is pbfhogg's default path - no flag.
-                    ExtractStrategy::Complete => {}
+                if let Some(flag) = strategy.flag() {
+                    args.push(flag.into());
                 }
                 Ok(args)
             }
@@ -889,43 +953,43 @@ impl PbfhoggCommand {
             // -----------------------------------------------------------------
             // Multi-variant: extract (with resolved bbox)
             // -----------------------------------------------------------------
-            // `-b=<bbox>` (one token) must stay spelled identically to
-            // `bench_extract::strategy_args`, so the two paths' `extract`
-            // rows carry the same bbox spelling in `cli_args`.
-            Self::Extract { strategy } => {
+            Self::Extract { .. } => {
                 let bbox = ctx
                     .bbox
-                    .as_deref()
+                    .as_ref()
                     .ok_or_else(|| DevError::Config("extract requires a bbox".into()))?;
                 let output = scratch_output_path(ctx, self, mode)?;
                 let output_str = path_to_string(&output)?;
-                match strategy {
-                    ExtractStrategy::Simple => Ok(vec![
-                        "extract".into(),
-                        ctx.pbf_str()?.into(),
-                        "--simple".into(),
-                        format!("-b={bbox}"),
-                        "-o".into(),
-                        output_str,
-                    ]),
-                    ExtractStrategy::Complete => Ok(vec![
-                        "extract".into(),
-                        ctx.pbf_str()?.into(),
-                        format!("-b={bbox}"),
-                        "-o".into(),
-                        output_str,
-                    ]),
-                    ExtractStrategy::Smart => Ok(vec![
-                        "extract".into(),
-                        ctx.pbf_str()?.into(),
-                        "--smart".into(),
-                        format!("-b={bbox}"),
-                        "-o".into(),
-                        output_str,
-                    ]),
-                }
+                self.extract_args_for(ctx.pbf_str()?, bbox, &output_str)
             }
         }
+    }
+
+    /// Construct the shared apply-changes core argv. `ensure_merged_pbf`
+    /// uses default settings to build a cache input; measured apply-changes
+    /// commands pass their resolved parameters here.
+    pub(crate) fn apply_changes_args(
+        pbf: &str,
+        osc: &str,
+        output: &str,
+        params: &CommandParams,
+        default_hotpath_compression: bool,
+    ) -> Vec<String> {
+        let mut args = vec!["apply-changes".into(), pbf.into(), osc.into()];
+        if params.locations_on_ways {
+            args.push("--locations-on-ways".into());
+        }
+        if let Some(jobs) = params.jobs {
+            args.push("-j".into());
+            args.push(jobs.to_string());
+        }
+        if default_hotpath_compression {
+            args.push("--compression".into());
+            args.push("zlib".into());
+        }
+        args.push("-o".into());
+        args.push(output.into());
+        args
     }
 
     /// Materialise the on-disk inputs `build_args` only names.
@@ -940,7 +1004,11 @@ impl PbfhoggCommand {
             return Ok(());
         };
         let output_dir = scratch_output_path(ctx, self, ArgMode::Bench)?;
-        let plan = multi_extract_plan(ctx, output_dir, *regions)?;
+        let bbox = ctx
+            .bbox
+            .as_ref()
+            .ok_or_else(|| DevError::Config("multi-extract requires a bbox".into()))?;
+        let plan = multi_extract_plan(ctx, output_dir, bbox, *regions)?;
         std::fs::create_dir_all(&plan.output_dir)?;
         std::fs::write(&plan.config_path, plan.config_json)?;
         Ok(())
@@ -962,13 +1030,10 @@ struct MultiExtractPlan {
 fn multi_extract_plan(
     ctx: &CommandContext,
     output_dir: PathBuf,
+    bbox: &Bbox,
     regions: usize,
 ) -> Result<MultiExtractPlan, DevError> {
-    let bbox = ctx
-        .bbox
-        .as_deref()
-        .ok_or_else(|| DevError::Config("multi-extract requires a bbox".into()))?;
-    let strips = multi_extract_strips(bbox, regions)?;
+    let strips = bbox.strips(regions)?;
     let config_json = multi_extract_config(&output_dir, &strips)?;
     Ok(MultiExtractPlan {
         output_dir,
@@ -977,55 +1042,9 @@ fn multi_extract_plan(
     })
 }
 
-/// Compute the shared multi-extract strips from a bbox.
-#[allow(clippy::cast_precision_loss)]
-pub(crate) fn multi_extract_strips(
-    bbox_str: &str,
-    regions: usize,
-) -> Result<Vec<[f64; 4]>, DevError> {
-    if regions == 0 {
-        return Err(DevError::Config(
-            "multi-extract requires at least 1 region".into(),
-        ));
-    }
-    let parts: Vec<f64> = bbox_str
-        .split(',')
-        .map(|s| s.trim().parse::<f64>())
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| DevError::Config(format!("invalid bbox: {e}")))?;
-    if parts.len() != 4 {
-        return Err(DevError::Config(format!(
-            "bbox must have 4 values, got {}",
-            parts.len()
-        )));
-    }
-    if parts.iter().any(|v| !v.is_finite()) {
-        return Err(DevError::Config(format!(
-            "invalid bbox: non-finite value in {bbox_str}"
-        )));
-    }
-    let (min_lon, min_lat, max_lon, max_lat) = (parts[0], parts[1], parts[2], parts[3]);
-
-    let strip_width = (max_lon - min_lon) / regions as f64;
-    Ok((0..regions)
-        .map(|i| {
-            let strip_min = min_lon + strip_width * i as f64;
-            let strip_max = if i + 1 == regions {
-                max_lon
-            } else {
-                min_lon + strip_width * (i + 1) as f64
-            };
-            [strip_min, min_lat, strip_max, max_lat]
-        })
-        .collect())
-}
-
 /// Encode shared multi-extract strips for a resolved output path. Both the
 /// measured command and `verify multi-extract` use serde_json for escaping.
-pub(crate) fn multi_extract_config(
-    output_dir: &Path,
-    strips: &[[f64; 4]],
-) -> Result<String, DevError> {
+pub(crate) fn multi_extract_config(output_dir: &Path, strips: &[Bbox]) -> Result<String, DevError> {
     if strips.is_empty() {
         return Err(DevError::Config(
             "multi-extract requires at least 1 region".into(),
@@ -1038,7 +1057,7 @@ pub(crate) fn multi_extract_config(
         .map(|(i, bbox)| {
             serde_json::json!({
                 "output": format!("strip-{i}.osm.pbf"),
-                "bbox": bbox,
+                "bbox": bbox.coordinates(),
             })
         })
         .collect();
@@ -1138,7 +1157,7 @@ mod tests {
             pbf_b_path: Some(PathBuf::from("/data/scratch/merged.osm.pbf")),
             scratch_dir: PathBuf::from("/data/scratch"),
             dataset: "denmark".into(),
-            bbox: Some("12.4,55.6,12.7,55.8".into()),
+            bbox: Some(Bbox::parse("12.4,55.6,12.7,55.8").unwrap()),
             params: CommandParams::default(),
         }
     }
@@ -1581,7 +1600,8 @@ mod tests {
             ArgMode::Bench,
         )
         .unwrap();
-        let plan = multi_extract_plan(&ctx, output_dir, 1).unwrap();
+        let bbox = ctx.bbox.as_ref().unwrap();
+        let plan = multi_extract_plan(&ctx, output_dir, bbox, 1).unwrap();
         let json: serde_json::Value = serde_json::from_str(&plan.config_json).unwrap();
         assert_eq!(
             json["directory"].as_str().unwrap(),

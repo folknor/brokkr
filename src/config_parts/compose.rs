@@ -40,6 +40,18 @@ pub struct ConfigSources {
     /// Table path -> the files (indices into `files`) that define it, whether
     /// with a header of their own or implicitly through a sub-table.
     tables: BTreeMap<Vec<String>, BTreeSet<usize>>,
+    /// The user layer's effective contribution after higher layers shadow
+    /// named entries.
+    user_layer: Option<UserLayerSources>,
+}
+
+/// The user-wide config file and the entries it contributed to the composed
+/// config after project layers shadow entries by name.
+#[derive(Debug, Clone)]
+pub struct UserLayerSources {
+    pub path: PathBuf,
+    pub textlint: usize,
+    pub script_checks: usize,
 }
 
 impl ConfigSources {
@@ -51,6 +63,11 @@ impl ConfigSources {
     /// The project config's included files, lowest precedence first.
     pub fn included(&self) -> &[PathBuf] {
         &self.included_files
+    }
+
+    /// The user-wide config's effective contribution, if its file was read.
+    pub fn user_layer(&self) -> Option<&UserLayerSources> {
+        self.user_layer.as_ref()
     }
 
     /// The files that define the table at `path`.
@@ -123,7 +140,7 @@ pub fn compose_user_only() -> Result<(toml::Table, ConfigSources), DevError> {
 }
 
 fn compose_layers(root: Option<&Path>) -> Result<(toml::Table, ConfigSources), DevError> {
-    let user_layer = load_user_table()?;
+    let user_layer = selected_user_table()?;
     let mut seen = HashSet::new();
     if let Some((path, _)) = &user_layer {
         let canonical = std::fs::canonicalize(path)
@@ -152,12 +169,18 @@ fn compose_layers(root: Option<&Path>) -> Result<(toml::Table, ConfigSources), D
         Vec::new()
     };
     let has_user_layer = user_layer.is_some();
+    let user_sources = user_layer.as_ref().map(|(path, table)| UserLayerSources {
+        path: path.clone(),
+        textlint: surviving_user_entry_count(table, "textlint", &files),
+        script_checks: surviving_user_entry_count(table, "script_check", &files),
+    });
     if let Some(user_layer) = user_layer {
         files.insert(0, user_layer);
     }
 
     let mut sources = ConfigSources {
         included_files,
+        user_layer: user_sources,
         ..ConfigSources::default()
     };
     let mut merged = toml::Table::new();
@@ -169,6 +192,53 @@ fn compose_layers(root: Option<&Path>) -> Result<(toml::Table, ConfigSources), D
         drop_orphaned_user_presets(&mut merged, &sources);
     }
     Ok((merged, sources))
+}
+
+/// Select the normal user file in production. Unit tests run with no user
+/// layer so a developer's XDG config cannot alter fixture loads; user-layer
+/// merging is tested through `merge_into` directly.
+#[cfg(not(test))]
+fn selected_user_table() -> Result<Option<(PathBuf, toml::Table)>, DevError> {
+    load_user_table()
+}
+
+#[cfg(test)]
+#[allow(clippy::unnecessary_wraps)] // mirrors the production signature
+fn selected_user_table() -> Result<Option<(PathBuf, toml::Table)>, DevError> {
+    Ok(None)
+}
+
+/// Count user entries that remain after the higher-precedence project layers
+/// have replaced same-named entries. Unnamed entries always survive the
+/// array merge, matching `merge_entries`.
+fn surviving_user_entry_count(
+    user: &toml::Table,
+    key: &str,
+    higher_layers: &[(PathBuf, toml::Table)],
+) -> usize {
+    let Some(user_entries) = user.get(key).and_then(toml::Value::as_array) else {
+        return 0;
+    };
+    let mut shadowed = HashSet::new();
+    let mut replaced = false;
+    for (_, layer) in higher_layers {
+        let Some(value) = layer.get(key) else {
+            continue;
+        };
+        match value.as_array() {
+            Some(entries) if is_table_array(entries) => {
+                shadowed.extend(entries.iter().filter_map(entry_name).map(str::to_owned));
+            }
+            _ => replaced = true,
+        }
+    }
+    if replaced {
+        return 0;
+    }
+    user_entries
+        .iter()
+        .filter(|entry| entry_name(entry).is_none_or(|name| !shadowed.contains(name)))
+        .count()
 }
 
 /// Remove `[textlint_preset.*]` blocks that only the user layer (file 0)

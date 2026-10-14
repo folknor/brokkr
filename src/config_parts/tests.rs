@@ -2415,6 +2415,22 @@ debug = true
         PathBuf::from("/home/u/.config/brokkr/brokkr.toml")
     }
 
+    /// The user layer's sections parsed from its raw table alone, with errors
+    /// attributed to the file the way composition reports them.
+    fn parse_user(
+        text: &str,
+        path: PathBuf,
+    ) -> Result<(Vec<TextlintRule>, Vec<ScriptCheck>), DevError> {
+        let table = parse_user_table(text, &path)?;
+        let reword = |e: DevError| match e {
+            DevError::Config(msg) => DevError::Config(format!("{}: {msg}", path.display())),
+            other => other,
+        };
+        let textlint = parse_textlint(&table).map_err(reword)?;
+        let script_checks = parse_script_checks(&table).map_err(reword)?;
+        Ok((textlint, script_checks))
+    }
+
     const USER_RULE: &str = "[[textlint]]\n\
          name = \"no-shouting\"\n\
          pattern = \"!!\"\n\
@@ -2434,9 +2450,9 @@ debug = true
             user_path(),
         )
         .unwrap();
-        assert_eq!(cfg.textlint.len(), 1);
-        assert_eq!(cfg.script_checks.len(), 1);
-        assert_eq!(cfg.textlint[0].name, "no-shouting");
+        assert_eq!(cfg.0.len(), 1);
+        assert_eq!(cfg.1.len(), 1);
+        assert_eq!(cfg.0[0].name, "no-shouting");
     }
 
     /// The whole point of the thin schema: a project-shaped key in a machine-wide
@@ -2462,7 +2478,7 @@ debug = true
         );
     }
 
-    /// The standalone status view parses the user file by itself; composed
+    /// The user file's own presets resolve from its table alone; composed
     /// loading also accepts cross-layer preset references (covered below).
     #[test]
     fn user_config_resolves_its_own_presets() {
@@ -2473,7 +2489,7 @@ debug = true
             user_path(),
         )
         .unwrap();
-        assert_eq!(cfg.textlint[0].paths, vec!["**/*.md".to_owned()]);
+        assert_eq!(cfg.0[0].paths, vec!["**/*.md".to_owned()]);
 
         let err = parse_user("[textlint_preset.md]\npaths = [\"a\"]\n", user_path()).unwrap_err();
         assert!(format!("{err}").contains("no `[[textlint]]` rule"), "{err}");
@@ -2518,13 +2534,7 @@ debug = true
     /// An explicit empty override is the opt-out, not a path to a file named "".
     #[test]
     fn empty_env_override_disables_the_layer() {
-        let old = std::env::var_os("BROKKR_USER_CONFIG");
-        unsafe { std::env::set_var("BROKKR_USER_CONFIG", "") };
-        let path = user_config_path();
-        match old {
-            Some(v) => unsafe { std::env::set_var("BROKKR_USER_CONFIG", v) },
-            None => unsafe { std::env::remove_var("BROKKR_USER_CONFIG") },
-        }
+        let path = user_config_path_from_override(Some(std::ffi::OsString::new()));
         assert!(path.is_none());
     }
 }

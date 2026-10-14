@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 
 use crate::error::DevError;
 use crate::output;
+use crate::resolve::Bbox;
 use crate::shutdown::{self, SigtermGuard};
 
 /// The owner-write bit - the one bit the shell script's `chmod -R u-w`
@@ -44,7 +45,7 @@ pub fn run(
     data_dir: &str,
     port: u16,
     project_root: &Path,
-    bbox: &str,
+    bbox: &Bbox,
 ) -> Result<(), DevError> {
     output::verify_msg("=== read-only filesystem test ===");
 
@@ -111,7 +112,7 @@ fn run_tests(
     data_dir: &str,
     port: u16,
     project_root: &Path,
-    bbox: &str,
+    bbox: &Bbox,
 ) -> Result<(), DevError> {
     // Start server.
     super::server::serve(binary, Some(data_dir), None, port, project_root)?;
@@ -181,9 +182,9 @@ fn run_geocode_check(port: u16, query: &str) -> Result<(), String> {
 }
 
 /// Check a single API query returns non-empty elements. `Err` names why not.
-fn run_query_check(port: u16, bbox: &str) -> Result<(), String> {
+fn run_query_check(port: u16, bbox: &Bbox) -> Result<(), String> {
     let url = super::client::query_url(port);
-    let body = super::client::default_api_query(bbox).map_err(|e| e.to_string())?;
+    let body = super::client::default_api_query(bbox);
     let stdout = super::client::curl_post(&url, &body)
         .map_err(|e| super::client::describe_curl_error(&e))?;
     let val: serde_json::Value =

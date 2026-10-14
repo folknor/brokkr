@@ -8,6 +8,7 @@ use std::time::Instant;
 
 use crate::error::DevError;
 use crate::output;
+use crate::resolve::Bbox;
 
 // ---------------------------------------------------------------------------
 // Public entry point
@@ -15,11 +16,11 @@ use crate::output;
 
 /// Run batch query verification.
 ///
-/// `bbox` is in brokkr.toml format (`lon_min,lat_min,lon_max,lat_max`).
-pub fn run(port: u16, bbox: &str) -> Result<(), DevError> {
+/// `bbox` is the resolved dataset bbox.
+pub fn run(port: u16, bbox: &Bbox) -> Result<(), DevError> {
     super::server::check_running(port)?;
 
-    let (batch_body, individual_queries) = super::client::build_batch_queries(bbox)?;
+    let (batch_body, individual_queries) = super::client::build_batch_queries(bbox);
 
     let mut failures = 0u32;
 

@@ -281,44 +281,16 @@ fn status_reply(shared: &Shared) -> String {
     let Ok(snapshot) = shared.snapshot.try_lock().map(|s| *s) else {
         return "busy\n".into();
     };
-    let id = &shared.identity;
     let (rss_kb, threads) = self_status();
-    let mut out = String::from("ok\n");
-    let mut field = |k: &str, v: &str| {
-        out.push_str(k);
-        out.push('=');
-        out.push_str(&crate::lockfile::escape_value(v));
-        out.push('\n');
-    };
-    field("project", &id.project);
-    field("command", &id.command);
-    field("args", &id.args);
-    field("root", &id.root);
-    field("pid_ns", &id.pid_ns);
-    field("time_ns", &id.time_ns);
-    field("codex_thread", &id.codex_thread);
-    field("codex_session", &id.codex_session);
-    field("held_secs", &shared.started.elapsed().as_secs().to_string());
-    field(
-        "cpu_secs",
-        &self_cpu_secs().map(|s| s.to_string()).unwrap_or_default(),
-    );
-    field("rss_kb", &rss_kb.map(|v| v.to_string()).unwrap_or_default());
-    field(
-        "threads",
-        &threads.map(|v| v.to_string()).unwrap_or_default(),
-    );
-    field("draining", if snapshot.draining { "1" } else { "0" });
-    field(
-        "progress",
-        &snapshot
-            .progress
-            .map(|(r, t)| format!("{r}/{t}"))
-            .unwrap_or_default(),
-    );
-    field("child", if snapshot.has_child { "1" } else { "0" });
-    field("mocks", &snapshot.mocks.to_string());
-    out
+    HolderStatus {
+        identity: shared.identity.clone(),
+        snapshot,
+        held: shared.started.elapsed(),
+        cpu: self_cpu_secs().map(Duration::from_secs),
+        rss_kb,
+        threads,
+    }
+    .encode()
 }
 
 /// `VmRSS` (kB) and `Threads` of this process.
@@ -401,23 +373,157 @@ fn write_all(mut stream: &UnixStream, mut bytes: &[u8], deadline: Instant) -> bo
 // Client side.
 // ---------------------------------------------------------------------------
 
-/// The holder's answer to `status`.
+const STATUS_PROJECT: &str = "project";
+const STATUS_COMMAND: &str = "command";
+const STATUS_ARGS: &str = "args";
+const STATUS_ROOT: &str = "root";
+const STATUS_PID_NS: &str = "pid_ns";
+const STATUS_TIME_NS: &str = "time_ns";
+const STATUS_CODEX_THREAD: &str = "codex_thread";
+const STATUS_CODEX_SESSION: &str = "codex_session";
+const STATUS_HELD_SECS: &str = "held_secs";
+const STATUS_CPU_SECS: &str = "cpu_secs";
+const STATUS_RSS_KB: &str = "rss_kb";
+const STATUS_THREADS: &str = "threads";
+const STATUS_DRAINING: &str = "draining";
+const STATUS_PROGRESS: &str = "progress";
+const STATUS_CHILD: &str = "child";
+const STATUS_MOCKS: &str = "mocks";
+
+/// The typed answer the holder returns to `status`.
 pub struct HolderStatus {
-    fields: Vec<(String, String)>,
+    pub identity: Identity,
+    pub snapshot: Snapshot,
+    pub held: Duration,
+    pub cpu: Option<Duration>,
+    pub rss_kb: Option<u64>,
+    pub threads: Option<u64>,
 }
 
 impl HolderStatus {
-    pub fn get(&self, key: &str) -> &str {
-        self.fields
-            .iter()
-            .find(|(k, _)| k == key)
-            .map_or("", |(_, v)| v.as_str())
+    fn encode(&self) -> String {
+        let mut out = String::from("ok\n");
+        let mut field = |key: &str, value: &str| {
+            out.push_str(key);
+            out.push('=');
+            out.push_str(&crate::lockfile::escape_value(value));
+            out.push('\n');
+        };
+        field(STATUS_PROJECT, &self.identity.project);
+        field(STATUS_COMMAND, &self.identity.command);
+        field(STATUS_ARGS, &self.identity.args);
+        field(STATUS_ROOT, &self.identity.root);
+        field(STATUS_PID_NS, &self.identity.pid_ns);
+        field(STATUS_TIME_NS, &self.identity.time_ns);
+        field(STATUS_CODEX_THREAD, &self.identity.codex_thread);
+        field(STATUS_CODEX_SESSION, &self.identity.codex_session);
+        field(STATUS_HELD_SECS, &self.held.as_secs().to_string());
+        field(
+            STATUS_CPU_SECS,
+            &self
+                .cpu
+                .map_or_else(String::new, |cpu| cpu.as_secs().to_string()),
+        );
+        field(
+            STATUS_RSS_KB,
+            &self
+                .rss_kb
+                .map_or_else(String::new, |value| value.to_string()),
+        );
+        field(
+            STATUS_THREADS,
+            &self
+                .threads
+                .map_or_else(String::new, |value| value.to_string()),
+        );
+        field(
+            STATUS_DRAINING,
+            if self.snapshot.draining { "1" } else { "0" },
+        );
+        field(
+            STATUS_PROGRESS,
+            &self
+                .snapshot
+                .progress
+                .map(|(run, total)| format!("{run}/{total}"))
+                .unwrap_or_default(),
+        );
+        field(
+            STATUS_CHILD,
+            if self.snapshot.has_child { "1" } else { "0" },
+        );
+        field(STATUS_MOCKS, &self.snapshot.mocks.to_string());
+        out
+    }
+
+    fn decode(lines: &[&str]) -> Option<Self> {
+        let mut fields: std::collections::HashMap<&str, String> = std::collections::HashMap::new();
+        for line in lines {
+            if let Some((key, value)) = line.split_once('=') {
+                fields
+                    .entry(key)
+                    .or_insert_with(|| crate::lockfile::unescape_value(value));
+            }
+        }
+        let value = |key: &str| fields.get(key).map(String::as_str);
+        let draining = parse_bool(value(STATUS_DRAINING)?)?;
+        let has_child = parse_bool(value(STATUS_CHILD)?)?;
+        let progress = parse_optional(value(STATUS_PROGRESS)?, |raw| {
+            let (run, total) = raw.split_once('/')?;
+            Some((run.parse::<u32>().ok()?, total.parse::<u32>().ok()?))
+        })?;
+        let cpu = parse_optional(value(STATUS_CPU_SECS)?, |raw| {
+            raw.parse::<u64>().ok().map(Duration::from_secs)
+        })?;
+        let rss_kb = parse_optional(value(STATUS_RSS_KB)?, |raw| raw.parse::<u64>().ok())?;
+        let threads = parse_optional(value(STATUS_THREADS)?, |raw| raw.parse::<u64>().ok())?;
+        let held = Duration::from_secs(value(STATUS_HELD_SECS)?.parse().ok()?);
+        let mocks = value(STATUS_MOCKS)?.parse().ok()?;
+
+        Some(Self {
+            identity: Identity {
+                project: value(STATUS_PROJECT)?.to_owned(),
+                command: value(STATUS_COMMAND)?.to_owned(),
+                args: value(STATUS_ARGS)?.to_owned(),
+                root: value(STATUS_ROOT)?.to_owned(),
+                pid_ns: value(STATUS_PID_NS)?.to_owned(),
+                time_ns: value(STATUS_TIME_NS)?.to_owned(),
+                codex_thread: value(STATUS_CODEX_THREAD)?.to_owned(),
+                codex_session: value(STATUS_CODEX_SESSION)?.to_owned(),
+            },
+            snapshot: Snapshot {
+                draining,
+                progress,
+                has_child,
+                mocks,
+            },
+            held,
+            cpu,
+            rss_kb,
+            threads,
+        })
+    }
+}
+
+fn parse_bool(value: &str) -> Option<bool> {
+    match value {
+        "0" => Some(false),
+        "1" => Some(true),
+        _ => None,
+    }
+}
+
+fn parse_optional<T>(value: &str, parse: impl FnOnce(&str) -> Option<T>) -> Option<Option<T>> {
+    if value.is_empty() {
+        Some(None)
+    } else {
+        parse(value).map(Some)
     }
 }
 
 /// What came back from the holder.
 pub enum Reply {
-    Status(HolderStatus),
+    Status(Box<HolderStatus>),
     /// A stop was committed. `signal_error` is set when the holder's
     /// self-`SIGTERM` failed; the sticky stop flag is set regardless.
     Accepted {
@@ -428,6 +534,9 @@ pub enum Reply {
     Gone,
     /// The holder was mid-update; ask again.
     Busy,
+    /// The holder answered `status`, but its fields did not match the status
+    /// schema this client understands.
+    InvalidStatus(String),
     /// No answer: the socket is missing, refused, or the holder did not reply
     /// in time (a SIGSTOPped holder, say). Says nothing about liveness - the
     /// flock does.
@@ -491,12 +600,12 @@ fn parse_reply(text: &str) -> Reply {
     let mut lines = text.lines();
     let head = lines.next().unwrap_or("");
     match head.split_once(' ').map_or(head, |(h, _)| h) {
-        "ok" => Reply::Status(HolderStatus {
-            fields: lines
-                .filter_map(|l| l.split_once('='))
-                .map(|(k, v)| (k.to_owned(), crate::lockfile::unescape_value(v)))
-                .collect(),
-        }),
+        "ok" => match HolderStatus::decode(&lines.collect::<Vec<_>>()) {
+            Some(status) => Reply::Status(Box::new(status)),
+            None => {
+                Reply::InvalidStatus("the holder returned a missing or invalid status field".into())
+            }
+        },
         "accepted" => Reply::Accepted {
             signal_error: head
                 .split_once("signal_error=")
@@ -524,12 +633,27 @@ mod tests {
 
     #[test]
     fn replies_round_trip() {
-        let Reply::Status(s) = parse_reply("ok\nargs=a%0Ab%25\nmocks=2\n") else {
+        let Reply::Status(s) = parse_reply(
+            "ok\nproject=p\ncommand=run\nargs=a%0Ab%25\nroot=/r\npid_ns=1\ntime_ns=2\n\
+             codex_thread=t\ncodex_session=s\nheld_secs=3\ncpu_secs=4\nrss_kb=5\nthreads=6\n\
+             draining=1\nprogress=2/5\nchild=1\nmocks=2\n",
+        ) else {
             panic!("status");
         };
-        assert_eq!(s.get("args"), "a\nb%");
-        assert_eq!(s.get("mocks"), "2");
-        assert_eq!(s.get("absent"), "");
+        assert_eq!(s.identity.args, "a\nb%");
+        assert_eq!(s.identity.project, "p");
+        assert_eq!(s.held, Duration::from_secs(3));
+        assert_eq!(s.cpu, Some(Duration::from_secs(4)));
+        assert_eq!(s.rss_kb, Some(5));
+        assert_eq!(s.threads, Some(6));
+        assert!(s.snapshot.draining);
+        assert_eq!(s.snapshot.progress, Some((2, 5)));
+        assert!(s.snapshot.has_child);
+        assert_eq!(s.snapshot.mocks, 2);
+        assert!(matches!(
+            parse_reply("ok\nproject=p\n"),
+            Reply::InvalidStatus(_)
+        ));
         assert!(matches!(
             parse_reply("accepted\n"),
             Reply::Accepted { signal_error: None }
@@ -565,10 +689,10 @@ mod tests {
         let Reply::Status(s) = request(id.as_str(), "status") else {
             panic!("status")
         };
-        assert_eq!(s.get("project"), "p");
-        assert_eq!(s.get("args"), "x y");
-        assert_eq!(s.get("progress"), "2/5");
-        assert_eq!(s.get("draining"), "0");
+        assert_eq!(s.identity.project, "p");
+        assert_eq!(s.identity.args, "x y");
+        assert_eq!(s.snapshot.progress, Some((2, 5)));
+        assert!(!s.snapshot.draining);
         let other = mint_id().unwrap();
         assert!(matches!(
             request(other.as_str(), "status"),

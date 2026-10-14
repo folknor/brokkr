@@ -9,10 +9,10 @@ use std::path::Path;
 use crate::error::DevError;
 use crate::harness::BenchHarness;
 use crate::measure::{CommandContext, CommandParams};
-use crate::pbfhogg::commands::{
-    CatTypeFilter, DiffFormat, ExtractStrategy, InputKind, PbfhoggCommand,
-};
+use crate::pbfhogg::commands::{CatTypeFilter, DiffFormat, InputKind, PbfhoggCommand};
 
+/// Preset commands included in the suite. Extract is benchmarked separately
+/// by `bench_all` so it uses the selected dataset's bbox and one strategy axis.
 pub const ALL_COMMANDS: &[&str] = &[
     "inspect",
     "inspect-nodes",
@@ -36,18 +36,10 @@ pub const ALL_COMMANDS: &[&str] = &[
     "merge-changes",
     "apply-changes",
     "add-locations-to-ways",
-    "extract-simple",
-    "extract-complete",
-    "extract-smart",
     "time-filter",
     "diff",
     "diff-osc",
 ];
-
-/// Hardcoded bbox used by the extract-{simple,complete,smart} suite presets.
-/// Kept for backwards compatibility with historical suite rows; the
-/// standalone `brokkr extract` command uses the dataset's configured bbox.
-const SUITE_EXTRACT_BBOX: &str = "12.4,55.6,12.7,55.8";
 
 /// Map a suite preset string to a fully-specified `PbfhoggCommand` variant.
 ///
@@ -145,15 +137,6 @@ fn preset_to_command(name: &str) -> Result<PbfhoggCommand, DevError> {
         "merge-changes" => PbfhoggCommand::MergeChanges { simplify: false },
         "apply-changes" => PbfhoggCommand::ApplyChanges,
         "add-locations-to-ways" => PbfhoggCommand::AddLocationsToWays,
-        "extract-simple" => PbfhoggCommand::Extract {
-            strategy: ExtractStrategy::Simple,
-        },
-        "extract-complete" => PbfhoggCommand::Extract {
-            strategy: ExtractStrategy::Complete,
-        },
-        "extract-smart" => PbfhoggCommand::Extract {
-            strategy: ExtractStrategy::Smart,
-        },
         "time-filter" => PbfhoggCommand::TimeFilter,
         "diff" => PbfhoggCommand::Diff {
             format: DiffFormat::Default,
@@ -275,12 +258,6 @@ pub fn run(
             .clone()
             .map(|p| vec![p])
             .unwrap_or_default();
-        let bbox = if matches!(cmd, PbfhoggCommand::Extract { .. }) {
-            Some(SUITE_EXTRACT_BBOX.into())
-        } else {
-            None
-        };
-
         let ctx = CommandContext {
             binary: binary.to_path_buf(),
             pbf_path: Some(pbf_path.to_path_buf()),
@@ -289,7 +266,7 @@ pub fn run(
             pbf_b_path: merged_pbf.clone(),
             scratch_dir: scratch_dir.to_path_buf(),
             dataset: String::new(),
-            bbox,
+            bbox: None,
             params,
         };
 
@@ -298,8 +275,6 @@ pub fn run(
             binary,
             &cmd,
             &ctx,
-            &[],
-            None,
             runs,
             project_root,
             false,
@@ -354,17 +329,6 @@ mod tests {
         for name in ["cat", "cat-way", "cat-relation", "cat-dedupe"] {
             assert_eq!(preset_to_command(name).unwrap().result_command(), "cat");
         }
-    }
-
-    #[test]
-    fn extract_variants_use_hardcoded_bbox() {
-        let cmd = preset_to_command("extract-simple").unwrap();
-        assert!(matches!(
-            cmd,
-            PbfhoggCommand::Extract {
-                strategy: ExtractStrategy::Simple
-            }
-        ));
     }
 
     #[test]

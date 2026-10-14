@@ -155,10 +155,10 @@ mod tests {
         let paths = mk_paths(Path::new("/irrelevant"), datasets);
 
         let explicit = resolve_bbox(Some("9,9,9,9"), "denmark", &paths).expect("bbox");
-        assert_eq!(explicit, "9,9,9,9");
+        assert_eq!(explicit.as_str(), "9,9,9,9");
 
         let from_dataset = resolve_bbox(None, "denmark", &paths).expect("bbox");
-        assert_eq!(from_dataset, "1,2,3,4");
+        assert_eq!(from_dataset.as_str(), "1,2,3,4");
     }
 
     #[test]

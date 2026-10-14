@@ -1,8 +1,9 @@
 //! `brokkr deps` - dependency audit.
 //!
-//! Phase-based: each phase reads `cargo metadata` (parsed once) and emits
-//! zero or more `DepsEvent`s. The renderer turns events into prefixed text
-//! or NDJSON, depending on `--json`.
+//! Phase-based full audit: `run()` loads full and host-filtered `cargo metadata`
+//! snapshots for the phases that need them. Focus mode resolves chains from the
+//! host-filtered graph and loads the full graph only when it needs a fallback.
+//! The renderer turns events into prefixed text or NDJSON, depending on `--json`.
 //!
 //! Shipped phases and planned work are listed in `docs/commands/deps.md`.
 
@@ -66,10 +67,9 @@ pub(crate) struct CargoMetadata {
     /// rather than erroring so that loader stays a one-liner.
     #[serde(default, deserialize_with = "null_as_default")]
     pub resolve: CargoResolve,
-    /// Absolute path to the workspace root directory (holds the root
-    /// `Cargo.toml` with `[workspace.dependencies]`). Used by
-    /// `workspace_dep`.
-    #[serde(default)]
+    /// Cargo's absolute workspace root directory (holds the root
+    /// `Cargo.toml` with `[workspace.dependencies]`). Required by the metadata
+    /// format and used by `workspace_dep`.
     pub workspace_root: String,
 }
 
@@ -288,7 +288,7 @@ fn run_metadata_locked(project_root: &Path, args: &[&str]) -> Result<CargoMetada
 pub(crate) use publish_cycle::PublishCycleEvent;
 pub(crate) use publish_cycle::render_lines as publish_cycle_lines;
 
-/// The shared "this list may be partial" clause, printed by both reports.
+/// The shared "this list may be partial" clause, printed by `deps` and `check`.
 pub(crate) use publish_cycle::INVENTORY_CAVEAT as PUBLISH_CYCLE_CAVEAT;
 
 /// Run the `publish_cycle` phase on its own, for `brokkr check`.
@@ -297,7 +297,7 @@ pub(crate) use publish_cycle::INVENTORY_CAVEAT as PUBLISH_CYCLE_CAVEAT;
 /// metadata - the cheap call, no resolve graph, no lockfile update. It is
 /// deliberately the *same* `publish_cycle::run` the `deps` command drives:
 /// a cycle that fails `brokkr deps` must fail `brokkr check` identically,
-/// or the two commands would disagree about the same tree.
+/// or `deps` and `check` could disagree about the same tree.
 pub(crate) fn publication_cycles(project_root: &Path) -> Result<Vec<PublishCycleEvent>, DevError> {
     let metadata = run_metadata(
         project_root,

@@ -373,8 +373,125 @@ impl Ceilings {
     }
 }
 
+// Tracker readings are collected under their own locks; the decision below is
+// shared by direct, shared-stream and shim watchdogs. Idle is supplied by the
+// caller because a shim session owns the gap between successive harnesses.
+struct DeadlineReading {
+    expiry: Option<(String, Duration)>,
+    stale: bool,
+    in_flight: Vec<String>,
+}
+
+impl DeadlineReading {
+    fn from_tracker(t: &TestTracker, timeout: Duration) -> Self {
+        Self {
+            expiry: t.timed_out(timeout).filter(|(name, _)| name != IDLE_WEDGE),
+            stale: !t.ever_observed,
+            in_flight: t.current.keys().cloned().collect(),
+        }
+    }
+}
+
+struct DeadlineVerdict {
+    reason: TimeoutReason,
+    elapsed: Duration,
+    ceiling: Duration,
+    stale: bool,
+    // Index of the tracker whose stream owns a per-test expiry.
+    charged: Option<usize>,
+}
+
+impl Ceilings {
+    fn verdict(
+        &self,
+        readings: &[DeadlineReading],
+        idle: Option<Duration>,
+        elapsed: Duration,
+    ) -> Option<DeadlineVerdict> {
+        for (index, reading) in readings.iter().enumerate() {
+            if let Some((name, elapsed)) = &reading.expiry {
+                let name = match &self.shape {
+                    WallShape::OneTest { name } => name.clone(),
+                    WallShape::SharedHarness => name.clone(),
+                };
+                return Some(DeadlineVerdict {
+                    reason: TimeoutReason::PerTest { name },
+                    elapsed: *elapsed,
+                    ceiling: self.per_test,
+                    stale: reading.stale,
+                    charged: Some(index),
+                });
+            }
+        }
+        if let Some(idle) = idle.filter(|idle| *idle >= IDLE_TIMEOUT) {
+            return Some(DeadlineVerdict {
+                reason: TimeoutReason::Idle,
+                elapsed: idle,
+                ceiling: IDLE_TIMEOUT,
+                stale: false,
+                charged: None,
+            });
+        }
+        let wall = self.wall.filter(|wall| elapsed >= *wall)?;
+        let reason = match &self.shape {
+            WallShape::OneTest { name } => TimeoutReason::PerTest { name: name.clone() },
+            WallShape::SharedHarness => {
+                let mut blamed: Vec<_> = readings
+                    .iter()
+                    .flat_map(|reading| reading.in_flight.iter().cloned())
+                    .collect();
+                blamed.sort();
+                blamed.dedup();
+                TimeoutReason::SweepWall { blamed }
+            }
+        };
+        Some(DeadlineVerdict {
+            reason,
+            elapsed,
+            ceiling: wall,
+            stale: false,
+            charged: None,
+        })
+    }
+}
+
+fn enforce_deadline(
+    state_root: &Path,
+    pid: u32,
+    leader: Leader,
+    verdict: DeadlineVerdict,
+    hung: &Mutex<Option<HungTest>>,
+    tap: Option<&StreamTap>,
+) {
+    // Freeze before diagnosis: collection must not extend the execution budget.
+    stop_process_group(pid).ok();
+    if verdict.stale {
+        crate::output::warn(
+            "no libtest lifecycle event was ever observed, so the test named below is \
+             brokkr's best guess at which one burned the budget - the budget itself \
+             was still exceeded.",
+        );
+    }
+    if let Some(tap) = tap {
+        let (cause, test) = kill_of(&verdict.reason);
+        tap.emit(ObsEvent::Killed { cause, test });
+    }
+    let report = capture_hung_test(
+        state_root,
+        pid,
+        leader,
+        verdict.reason,
+        verdict.elapsed,
+        verdict.ceiling,
+    );
+    if let Ok(mut slot) = hung.lock() {
+        *slot = Some(report);
+    }
+    kill_process_group(pid).ok();
+}
+
 /// Whole-sweep wall-clock backstop for a parallel test sweep, enforced from the
-/// runner's own clock in the `try_wait` loop.
+/// watchdog's wall clock.
 ///
 /// A parallel sweep enforces the same [`TEST_TIMEOUT`] cap per test as the serial
 /// path, aging each in-flight test from libtest's JSON `started`/`ok`/`failed`
@@ -953,12 +1070,9 @@ where
 /// Outcome of a parallel test sweep.
 pub(crate) struct ParallelRun {
     pub captured: CapturedOutput,
-    /// A per-test hang caught by the watchdog (blamed test + snapshot), or
+    /// A deadline caught by the watchdog (reason + snapshot), or
     /// `Completed` if none tripped. Same shape as the serial runner.
     pub outcome: LibtestOutcome,
-    /// True when the coarse whole-sweep backstop was hit and the process group
-    /// killed (an un-attributable wedge, not a single hung test).
-    pub timed_out: bool,
     /// (test name, wall-clock duration) for every test observed running to
     /// completion, reconstructed from libtest's JSON `started`/`ok`/`failed`
     /// event pairs.
@@ -1063,11 +1177,7 @@ where
         );
     });
 
-    // The per-test hang watchdog - identical to the serial path, aging the
-    // JSON-fed tracker. It names an in-flight test that crosses
-    // `per_test_timeout`. Attribution only: this path already has an
-    // independent whole-sweep clock in the `try_wait` loop below, which is the
-    // authoritative bound, so the watchdog carries no `wall` of its own.
+    // One watchdog owns both per-test and wall expiry, including diagnostics.
     let state_root_t = state_root.to_path_buf();
     let tracker_w = Arc::clone(&tracker);
     let done_w = Arc::clone(&done);
@@ -1083,7 +1193,7 @@ where
             hung_w,
             Ceilings {
                 per_test: per_test_timeout,
-                wall: None,
+                wall: Some(timeout),
                 shape: WallShape::SharedHarness,
             },
             start,
@@ -1091,13 +1201,10 @@ where
         );
     });
 
-    let waited = wait_parallel(&mut child, program, start, timeout, abort);
+    let waited = wait_parallel(&mut child, program, abort);
     // The kill is recorded as what it was, before the stream end it caused.
     if let Some(tap) = &primary {
         let cause = match &waited {
-            Ok(ParallelWait::Exited {
-                timed_out: true, ..
-            }) => Some(KillCause::Wall),
             Ok(ParallelWait::Exited {
                 cancelled: true, ..
             }) => Some(KillCause::Cancelled),
@@ -1118,10 +1225,8 @@ where
 
     // A lane-wide cancellation was reported on the stream above, as what it
     // was; nothing in the exit status could say it.
-    let (status, timed_out) = match waited? {
-        ParallelWait::Exited {
-            status, timed_out, ..
-        } => (status, timed_out),
+    let status = match waited? {
+        ParallelWait::Exited { status, .. } => status,
         ParallelWait::Interrupted => return Err(DevError::Interrupted),
     };
     if let Some(tap) = &primary {
@@ -1152,18 +1257,16 @@ where
             Some(h) => LibtestOutcome::HungTest(h),
             None => LibtestOutcome::Completed,
         },
-        timed_out,
         completed,
     })
 }
 
 /// How [`wait_parallel`] ended.
 enum ParallelWait {
-    /// The leader exited, on its own or killed by the backstop (`timed_out`)
-    /// or a lane-wide abort (`cancelled`).
+    /// The leader exited, on its own, after a watchdog kill, or after a
+    /// lane-wide abort (`cancelled`). Deadline evidence lives in `HungTest`.
     Exited {
         status: std::process::ExitStatus,
-        timed_out: bool,
         cancelled: bool,
     },
     /// A cooperative shutdown (`brokkr kill`, Ctrl-C, the `check` watchdog):
@@ -1172,13 +1275,11 @@ enum ParallelWait {
 }
 
 /// The parallel runner's wait loop: poll the process-group leader until it
-/// exits, or kill the group on the whole-sweep backstop, a lane-wide `abort`,
+/// exits, or kill the group on a lane-wide `abort`,
 /// or a cooperative shutdown.
 fn wait_parallel(
     child: &mut std::process::Child,
     program: &str,
-    start: Instant,
-    timeout: Duration,
     abort: Option<&AtomicBool>,
 ) -> Result<ParallelWait, DevError> {
     // Spawned with `process_group(0)`, so the child's pid is its pgid.
@@ -1197,28 +1298,22 @@ fn wait_parallel(
                 }
                 return Ok(ParallelWait::Exited {
                     status,
-                    timed_out: false,
                     cancelled: false,
                 });
             }
             Ok(None) => {
-                let overtime = start.elapsed() >= timeout;
                 let cancelled = abort.is_some_and(|a| a.load(Ordering::SeqCst));
                 // `check` and `brokkr test` hold a `SigtermGuard` for their
                 // whole run, whose handler already killed this group; the poll
                 // covers a request raised without a signal (the watchdog).
                 let interrupted = crate::shutdown::is_shutdown_requested();
-                if overtime || cancelled || interrupted {
+                if cancelled || interrupted {
                     kill_process_group(cargo_pid).ok();
                     let status = child.wait().map_err(spawn_err)?;
                     if interrupted {
                         return Ok(ParallelWait::Interrupted);
                     }
-                    return Ok(ParallelWait::Exited {
-                        status,
-                        timed_out: overtime,
-                        cancelled: cancelled && !overtime,
-                    });
+                    return Ok(ParallelWait::Exited { status, cancelled });
                 }
                 thread::sleep(WATCHDOG_POLL);
             }
@@ -1990,9 +2085,6 @@ fn watchdog_loop_with_timing(
     tap: Option<&StreamTap>,
 ) {
     let timeout = ceilings.per_test;
-    // Emitted at most once, so a long sweep does not repeat the same guess every
-    // poll tick.
-    let mut warned = false;
     loop {
         if done.load(Ordering::SeqCst) {
             return;
@@ -2014,114 +2106,22 @@ fn watchdog_loop_with_timing(
             return;
         }
 
-        // THE PER-TEST CAP TERMINATES. Every test brokkr runs gets `per_test`
-        // of wall time and no more; exceeding it fails the run and stops it. The
-        // only exception is `brokkr test --timeout`, which raises this cap for one
-        // resolved test and is itself hard-capped at 280s by the CLI parser.
-        //
-        // The cap is enforced even though the clock that measures it is fed by a
-        // stream test output shares, and that is not an oversight. Either the
-        // named test really has burned its budget, or its terminal event was lost
-        // and brokkr has seen NO test complete for longer than the budget - in
-        // which case the run has still exceeded what the contract allows, and
-        // failing is right either way. What a lost event can corrupt is the NAME,
-        // not the entitlement to kill, so the report says so rather than
-        // pretending the attribution is proven.
-        let per_test_expiry = tracker.lock().ok().and_then(|t| {
-            t.timed_out(timeout).map(|(name, elapsed)| {
-                let stale = !t.ever_observed;
-                (name, elapsed, stale)
-            })
-        });
-
-        // The idle ceiling covers the gap the per-test cap cannot see: no test in
-        // flight at all, so there is no budget to charge. While
-        // `ever_observed` is false nothing has been parsed, so `idle_since` still
-        // holds the run's start and this is plain wall time since spawn. The case
-        // it was built for is cargo parked on a build-directory lock with no test
-        // ever announced.
-        let idle_expiry = tracker
-            .lock()
-            .ok()
-            .filter(|t| t.current.is_empty())
-            .map(|t| t.idle_since.elapsed())
-            .filter(|e| *e >= IDLE_TIMEOUT);
-
-        // The caller's wall ceiling: a backstop for a wedge that neither clock
-        // above can charge to anything.
-        let wall_expiry = ceilings.wall.filter(|w| started.elapsed() >= *w);
-
-        let verdict = if let Some((name, elapsed, stale)) = per_test_expiry {
-            if name == IDLE_WEDGE {
-                Some((TimeoutReason::Idle, elapsed, IDLE_TIMEOUT))
-            } else {
-                // A one-test invocation is named by the caller; a shared harness
-                // can only offer the tracker's best-known suspect.
-                let named = match &ceilings.shape {
-                    WallShape::OneTest { name } => name.clone(),
-                    WallShape::SharedHarness => name,
-                };
-                if stale && !warned {
-                    warned = true;
-                    crate::output::warn(
-                        "no libtest lifecycle event was ever observed, so the test named below is \
-                         brokkr's best guess at which one burned the budget - the budget itself \
-                         was still exceeded.",
-                    );
-                }
-                Some((TimeoutReason::PerTest { name: named }, elapsed, timeout))
-            }
-        } else if let Some(elapsed) = idle_expiry {
-            Some((TimeoutReason::Idle, elapsed, IDLE_TIMEOUT))
-        } else if let Some(wall) = wall_expiry {
-            let blamed = tracker
-                .lock()
-                .ok()
-                .map(|t| t.current.keys().cloned().collect::<Vec<_>>())
-                .unwrap_or_default();
-            match &ceilings.shape {
-                WallShape::OneTest { name } => Some((
-                    TimeoutReason::PerTest { name: name.clone() },
-                    started.elapsed(),
-                    wall,
-                )),
-                WallShape::SharedHarness => {
-                    Some((TimeoutReason::SweepWall { blamed }, started.elapsed(), wall))
-                }
-            }
-        } else {
-            None
-        };
-
-        let Some((reason, elapsed, ceiling)) = verdict else {
+        let (readings, idle) = tracker.lock().ok().map_or_else(
+            || (Vec::new(), None),
+            |t| {
+                (
+                    vec![DeadlineReading::from_tracker(&t, timeout)],
+                    t.current.is_empty().then(|| t.idle_since.elapsed()),
+                )
+            },
+        );
+        let Some(verdict) = ceilings.verdict(&readings, idle, started.elapsed()) else {
             continue;
         };
         if done.load(Ordering::SeqCst) {
             return;
         }
-
-        // FREEZE first, diagnose second, kill third.
-        //
-        // Snapshotting before stopping anything let the offending test keep
-        // running for as long as `/proc` collection took, so the cap was not
-        // literal: a test was permitted past its ceiling by the snapshot's
-        // duration on top of the poll interval. Killing first would fix the cap
-        // and destroy the diagnostic - a dead process has no `wchan` and no
-        // stack, which is exactly what a hang investigation needs.
-        //
-        // SIGSTOP resolves it. The group stops executing immediately, so no
-        // further test time is consumed, while `/proc` stays readable for the
-        // snapshot. SIGKILL then lands on already-stopped processes.
-        stop_process_group(cargo_pid).ok();
-        if let Some(tap) = tap {
-            let (cause, test) = kill_of(&reason);
-            tap.emit(ObsEvent::Killed { cause, test });
-        }
-        let hung_test = capture_hung_test(&state_root, cargo_pid, leader, reason, elapsed, ceiling);
-        if let Ok(mut slot) = hung.lock() {
-            *slot = Some(hung_test);
-        }
-        kill_process_group(cargo_pid).ok();
+        enforce_deadline(&state_root, cargo_pid, leader, verdict, &hung, tap);
         return;
     }
 }

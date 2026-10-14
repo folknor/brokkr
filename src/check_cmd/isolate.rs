@@ -345,11 +345,12 @@ fn run_one_isolated_test(
     // A wall kill, or a hung test: this process has exactly one selected test,
     // so the kill is attributed from the selection even if its output hid a
     // JSON event.
-    if run.timed_out || matches!(run.outcome, LibtestOutcome::HungTest(_)) {
+    if let LibtestOutcome::HungTest(hung) = &run.outcome {
         output::error(&format!(
             "test '{name}' in {}/{} exceeded its time budget in sweep '{sweep_label}' - stopping",
             case.binary.package, case.binary.target
         ));
+        output::error(&test_runner::format_hung_test(hung, project_root));
         output::error(&format!("failing command: {command}"));
         return Ok(IsolatedOutcome::TimedOut);
     }

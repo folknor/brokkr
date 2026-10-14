@@ -1,5 +1,5 @@
-//! Rust source tokenization for `[[textlint]]` region scoping (and, later,
-//! logical-line joins). Backed by `rustc_lexer` - the rust-lang tokenizer -
+//! Rust source tokenization for `[[textlint]]` region scoping and reconstructed
+//! `use` statements. Backed by `rustc_lexer` - the rust-lang tokenizer -
 //! so the string/char/comment boundaries are the *real* ones: raw strings
 //! (`r#"..."#`), byte strings, the lifetime-vs-char trap (`'a` vs `'x'`), and
 //! nested block comments are all classified correctly, which a hand-rolled

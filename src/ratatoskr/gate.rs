@@ -332,6 +332,8 @@ impl fmt::Display for CanonicalFeatures {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GateIdentity {
     gate: String,
+    /// Current rows use a project-relative path for in-project scripts;
+    /// pre-existing rows may still contain a canonical absolute path.
     script: String,
     fixture: String,
     profile: crate::build::CargoProfile,
@@ -365,7 +367,7 @@ impl GateIdentity {
                 current: other.gate.clone(),
             });
         }
-        if self.script != other.script {
+        if !same_script_identity(&self.script, &other.script) {
             return Some(GateIdentityMismatch::Script {
                 baseline: self.script.clone(),
                 current: other.script.clone(),
@@ -401,6 +403,18 @@ impl GateIdentity {
     pub fn features_unrecorded(&self) -> bool {
         self.features.is_none()
     }
+}
+
+/// Older gate rows stored canonical absolute script paths. A moved checkout
+/// compares those rows with the current project-relative path by components,
+/// preserving the identity of the script within this project's gate store.
+fn same_script_identity(baseline: &str, current: &str) -> bool {
+    if baseline == current {
+        return true;
+    }
+    let baseline = std::path::Path::new(baseline);
+    let current = std::path::Path::new(current);
+    baseline.is_absolute() && current.is_relative() && baseline.ends_with(current)
 }
 
 /// Why a baseline and a current run cannot be compared.
@@ -646,7 +660,7 @@ fn json_to_scalar(v: &Value) -> Option<Scalar> {
     }
 }
 
-fn kind_of(v: &Value) -> &'static str {
+pub(crate) fn kind_of(v: &Value) -> &'static str {
     match v {
         Value::Null => "null",
         Value::Bool(_) => "bool",
@@ -700,6 +714,26 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::float_cmp)]
     use super::*;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn legacy_absolute_script_identity_survives_a_checkout_move() {
+        let baseline = GateIdentity::new(
+            "gate",
+            "/old/checkout/crates/app/tests/sync/run.lua",
+            "fixture",
+            crate::build::CargoProfile::Release,
+            Some(CanonicalFeatures::new("")),
+        );
+        let current = GateIdentity::new(
+            "gate",
+            "crates/app/tests/sync/run.lua",
+            "fixture",
+            crate::build::CargoProfile::Release,
+            Some(CanonicalFeatures::new("")),
+        );
+
+        assert!(baseline.mismatch(&current).is_none());
+    }
 
     fn run(elapsed: i64, sidecar_json: &str, meta_json: &str) -> GateRun {
         GateRun {
