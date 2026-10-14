@@ -86,7 +86,7 @@ fn install_target_dir(meta_target_dir: &std::path::Path) -> std::path::PathBuf {
 
 
 /// Should the phase run under this mode and profile claim?
-fn install_feature_applies(
+pub(crate) fn install_feature_applies(
     mode: Option<crate::config::InstallFeatureCheck>,
     certifies: Option<Certifies>,
 ) -> bool {
@@ -266,13 +266,17 @@ fn install_check_args(
     args.extend(allow_args.iter().cloned());
     args.extend(package_unification_args());
     args.push("--keep-going".into());
-    // The profile install actually builds: release unless `[bin] debug`.
-    if !debug {
-        args.push("--release".into());
-    }
-    args.push("-p".into());
-    args.push(package.to_owned());
-    args.extend(target_selector.iter().cloned());
+    let shape = crate::build_purpose::resolve(crate::build_purpose::Request {
+        purpose: crate::build_purpose::Purpose::InstallCheck,
+        profiles: crate::build_purpose::Profiles {
+            invocation: Some(debug), ..Default::default()
+        },
+        packages: vec!["-p".into(), package.to_owned()],
+        features: crate::build_purpose::Features::Default,
+        unification: Vec::new(), targets: target_selector.to_vec(),
+        env: Vec::new(), build_root: None,
+    });
+    args.extend(shape.args);
     args.push("--message-format=json".into());
     args
 }

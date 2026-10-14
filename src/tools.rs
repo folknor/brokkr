@@ -8,7 +8,7 @@ use std::time::SystemTime;
 use crate::civil_date::CivilDate;
 use crate::error::DevError;
 use crate::output;
-use crate::preflight::Sha256;
+use crate::preflight::{Sha256, Xxh128};
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -479,11 +479,31 @@ pub(crate) fn run_curl(args: &[&str], cwd: &Path) -> Result<Vec<u8>, DevError> {
 /// Uses curl with `--progress-bar` and inherited stderr so the user can see
 /// download progress for large files.
 ///
-/// No hash check: the callers fetch map data brokkr pins no digest for, and
-/// much of it (a region's latest extract, osmdata's daily-rebuilt ocean
-/// shapefiles) is republished under a fixed URL, so no stable digest could be
-/// pinned. What is guaranteed is that `dest` is absent or a complete transfer.
+/// No hash check. Use this for mutable upstream files without a pin, such as
+/// the daily-regenerated ocean archives. What is guaranteed is that `dest` is
+/// absent or a complete transfer.
 pub(crate) fn download_file(url: &str, dest: &Path) -> Result<(), DevError> {
+    download_file_inner(url, dest, None)
+}
+
+/// Download a versioned archive and verify its pinned XXH128 before it is
+/// committed to `dest`.
+pub(crate) fn download_file_verified(
+    url: &str,
+    dest: &Path,
+    expected_xxh128: &str,
+) -> Result<(), DevError> {
+    let expected: Xxh128 = expected_xxh128
+        .parse()
+        .map_err(|error| DevError::Config(format!("invalid XXH128 pin: {error}")))?;
+    download_file_inner(url, dest, Some(expected))
+}
+
+fn download_file_inner(
+    url: &str,
+    dest: &Path,
+    expected_xxh128: Option<Xxh128>,
+) -> Result<(), DevError> {
     // Download to a staged sibling and rename on success, so a partial file
     // never sits at `dest` to block future retries. The stable `.partial`
     // name (not a per-process one) means a killed multi-gigabyte transfer is
@@ -514,6 +534,15 @@ pub(crate) fn download_file(url: &str, dest: &Path) -> Result<(), DevError> {
             ending: crate::error::ProcessEnding::from_status(&status),
             stderr: format!("download failed: {url}"),
         });
+    }
+
+    if let Some(expected) = expected_xxh128 {
+        let actual = crate::preflight::compute_file_digest(staged.tmp_path())?;
+        if actual.value() != expected {
+            return Err(DevError::Preflight(vec![format!(
+                "XXH128 mismatch downloading {url}\n  expected: {expected}\n  actual:   {actual}"
+            )]));
+        }
     }
 
     staged.commit()?;

@@ -50,25 +50,20 @@ Reported by: process-control, ratatoskr, test-execution, piners.
 
 Residue: the DB writers that record `Release` regardless of the actual profile are unchanged.
 
-## PLT-021 - `brokkr.toml` is parsed more than once per invocation
+## PLT-058 - build_purpose and check_cmd depend on each other
 
-Reported by: config-cli-bootstrap, process-control.
+Reported by: the wave-4 reviewer, laterally.
 
-Residue: five path-only `git::collect` callers remain (the measured commands via `measure.rs`, and ratatoskr service and sync among them). The path-only fallback no longer parses config, so for those callers in-tree `include` files count as uncommitted changes; their request types need to carry the included paths.
+- `build_purpose/selection.rs` (about 2.4k lines) is mostly check/test lane eligibility and needs check's `Lanes`, `LaneIdx`, `Phase`, `TestBinary`, `cargo_selection_args` and `install_feature_applies`, while `check_cmd` glob re-exports `selection` and `environment` back. `ReproLine::parallel_binary` is check-lane repro rendering. Keep lane eligibility in `check_cmd`; move only package/feature request construction (`ResolutionRun`, `SupportRequest`, projection) into `build_purpose`.
+- `build_purpose/features.rs` and `selection.rs` still wrap their bodies in an inner module (`routing`, `plan`), a leftover of the include! era; flatten them.
+- `Features::{Verbatim, Joined, Projected}` keeps three renderings; Verbatim and Joined differ when a value contains whitespace. `sweep_args` always uses `Purpose::Check`; the real env axis is runtime-env yes/no, not Clippy vs Check.
+- `Profile::sweep()` panics on `Profile::Bench` (unreachable by construction); a typed `profile_for_sweep` would remove the panic.
+- nidhogg `run_curl_body`/`bench_api`: a non-deadline ending with no exit status (Interrupted, WaitFailed) becomes `DevError::Verify` instead of reading as an interrupt; `CapturedOutput::check_success` already maps these.
+- `cargo_json` skips unknown diagnostic levels with no trace at all.
+- The 12 Natural Earth S3 versionIds and XXH128 pins were never exercised by the gate; run `download-natural-earth` once on a networked host.
 
-## PLT-056 - Wave-3 review leftovers
+## PLT-057 - Natural Earth treats a present `.shp` as a complete layer
 
-Reported by: the wave-3 reviewer, laterally.
+Reported by: a wave-4 fixer, laterally.
 
-- `history::redact_secret_text` decides what a failing script check shows and has no unit test; an invalid `FIELD_VALUE_RE` would withhold all script-check output.
-- `piners/time.rs` keeps its own `civil_from_days`, the same algorithm as `civil_date::from_unix_timestamp`.
-- `command_input.rs` now routes the remaining `Command` variants through a `command =>` catch-all, so a future variant that needs routing falls through silently where the old exhaustive list forced a decision.
-- `cargo_json::parse_cargo_diagnostics` errors on an unknown `message.level`, so a new rustc level would fail `check`.
-- `ratatoskr service` records `git_clean` from `project_root`; sync gate and bench use `build_root`.
-- history.db redaction narrowed to credential-named `--env` values; existing rows were written under the stricter rule and nothing documents the change.
-
-## PLT-030 - External tools: unpinned, unverified, re-discovered per site
-
-Reported by: config-cli-bootstrap, elivagar.
-
-Residue: nidhogg's separate curl timeout contract, and the Natural Earth download in `src/elivagar/download_natural_earth.rs` has no version or digest check (the daily-regenerated ocean polygons in `download_ocean.rs` cannot be pinned, and say so).
+`src/elivagar/download_natural_earth.rs` skips a layer when its `.shp` exists without checking the other shapefile components (`.shx`, `.dbf`, `.prj`), so an interrupted extraction is never repaired.

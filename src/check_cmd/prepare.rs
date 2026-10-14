@@ -85,9 +85,7 @@ pub(crate) fn lane_env(inputs: &LaneInputs<'_>, sweep: &PlannedSweep) -> Result<
         rustflags::plumbing(inputs.project_root, !sweep.rustflags.is_empty(), inputs.allow_flags);
     // Dev unless the sweep pinned a profile: BROKKR_TEST_BIN_DIR must name the
     // directory this sweep's own pre-build wrote into.
-    let profile_dir = sweep
-        .profile
-        .map_or("debug", crate::config::SweepProfile::target_subdir);
+    let profile_dir = sweep.cargo_profile().target_subdir();
     let project_env = sweep_runtime_env(
         sweep,
         inputs.project.as_ref(),
@@ -723,7 +721,7 @@ impl DocFacts {
     }
 
     /// The members one resolution of a serial lane runs `cargo test` over -
-    /// the same selection [`selection::package_args`] spells.
+    /// the same selection `package_args` in `build_purpose/selection.rs` spells.
     fn selected<'a>(&'a self, selection: &'a Selection) -> Vec<&'a str> {
         match selection {
             Selection::Explicit(p) | Selection::Override { packages: p, .. } => {

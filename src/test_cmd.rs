@@ -1073,7 +1073,7 @@ include_ignored = false
             "{support:?}"
         );
         assert!(
-            support.ends_with(&["-p".to_owned(), "piners-runner".to_owned()]),
+            support.windows(2).any(|w| w == ["-p", "piners-runner"]),
             "{support:?}"
         );
     }

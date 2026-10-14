@@ -54,14 +54,6 @@ impl CargoProfile {
         }
     }
 
-    /// The concise Cargo switch for a standard profile, if one exists.
-    pub fn cargo_flag(self) -> Option<&'static str> {
-        match self {
-            Self::Release => Some("--release"),
-            Self::Dev | Self::Java | Self::CMake => None,
-        }
-    }
-
     /// Parse a DB-stored value. Returns `Err` on unknown strings so the
     /// caller can surface a migration typo instead of silently coercing
     /// to `Release`.
@@ -187,7 +179,7 @@ impl BuildConfig {
 /// Target directory override shared by Cargo build, metadata, binary lookup,
 /// and benchmark paths for a brokkr-created worktree.
 pub(crate) fn cargo_target_dir_override(build_root: &Path) -> Option<String> {
-    crate::worktree::isolated_target_dir(build_root).map(|path| path.display().to_string())
+    crate::build_purpose::target_dir_override(build_root)
 }
 
 fn target_dir_env(target_dir: Option<&str>) -> Vec<(&'static str, &str)> {
@@ -476,42 +468,39 @@ fn build_args(config: &BuildConfig) -> Result<Vec<String>, DevError> {
             config.profile.as_label()
         )));
     }
-    let mut args = Vec::with_capacity(10);
-    args.push("build".into());
-
-    if let Some(ref pkg) = config.package {
-        args.push("-p".into());
-        args.push(pkg.clone());
-    }
-
-    if let Some(ref bin) = config.bin {
-        args.push("--bin".into());
-        args.push(bin.clone());
-    }
-
-    if let Some(ref example) = config.example {
-        args.push("--example".into());
-        args.push(example.clone());
-    }
-
-    if let Some(flag) = config.profile.cargo_flag() {
-        args.push(flag.into());
-    }
-
+    let shape = crate::build_purpose::resolve(crate::build_purpose::Request {
+        purpose: crate::build_purpose::Purpose::Build,
+        profiles: crate::build_purpose::Profiles {
+            invocation: Some(config.profile == CargoProfile::Dev),
+            ..Default::default()
+        },
+        packages: config
+            .package
+            .as_ref()
+            .map_or_else(Vec::new, |pkg| vec!["-p".into(), pkg.clone()]),
+        features: crate::build_purpose::Features::Joined {
+            values: &config.features,
+            all: config.all_features,
+            no_default: !config.default_features,
+        },
+        unification: Vec::new(),
+        targets: config
+            .bin
+            .iter()
+            .flat_map(|bin| ["--bin".into(), bin.clone()])
+            .chain(
+                config
+                    .example
+                    .iter()
+                    .flat_map(|name| ["--example".into(), name.clone()]),
+            )
+            .collect(),
+        env: Vec::new(),
+        build_root: None,
+    });
+    let mut args = vec!["build".into()];
+    args.extend(shape.args);
     args.push("--message-format=json".into());
-
-    if !config.default_features {
-        args.push("--no-default-features".into());
-    }
-
-    if config.all_features {
-        args.push("--all-features".into());
-    }
-
-    if !config.features.is_empty() {
-        args.push("--features".into());
-        args.push(config.features.join(","));
-    }
 
     Ok(args)
 }

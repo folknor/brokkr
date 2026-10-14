@@ -222,7 +222,7 @@ pub(super) struct SweepContext<'a> {
     pub(super) name: &'a str,
     pub(super) jobs: Option<u32>,
     pub(super) multi: bool,
-    /// `--debug`/`--release`, which a sweep's own profile pin outranks.
+    /// `--debug`/`--release`, which outranks a sweep's own profile pin.
     pub(super) profile_override: Option<bool>,
     /// `--timeout`, the one test's raised cap.
     pub(super) timeout: Option<u64>,
@@ -899,7 +899,7 @@ pub(super) fn sweep_env(
     let (env_allows, allow_args) =
         rustflags::plumbing(project_root, !sweep.rustflags.is_empty(), allow_flags);
     let project_env =
-        check_cmd::sweep_runtime_env(sweep, Some(project),target_dir, profile_dir, env_allows)?;
+        check_cmd::sweep_runtime_env(sweep, Some(project), target_dir, profile_dir, env_allows)?;
     Ok((
         check_cmd::merged_env(&sweep.env, project_env.as_slice()),
         allow_args,
@@ -936,21 +936,15 @@ pub(super) fn resolve_profile(
     test_cfg: Option<&crate::config::TestConfig>,
     sweep_profile: Option<crate::config::SweepProfile>,
 ) -> SweepProfile {
-    if let Some(explicit) = profile_override {
-        return if explicit {
-            SweepProfile::Dev
-        } else {
-            SweepProfile::Release
-        };
-    }
-    if let Some(p) = sweep_profile {
-        return p;
-    }
-    if test_cfg.is_some_and(|t| t.debug) {
-        SweepProfile::Dev
-    } else {
-        SweepProfile::Release
-    }
+    crate::build_purpose::profile(
+        crate::build_purpose::Purpose::Test,
+        crate::build_purpose::Profiles {
+            invocation: profile_override,
+            sweep: sweep_profile,
+            configured: test_cfg.map(|t| t.debug),
+        },
+    )
+    .sweep()
 }
 
 /// The selection planner compares debug/release as a boolean; command argv

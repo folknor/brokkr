@@ -1946,7 +1946,7 @@ warning: `b` (manifest) generated 1 warning
     }
 
     fn override_of(packages: &[&str]) -> Selection {
-        Selection::Override { packages: s(packages), provenance: crate::check_cmd::selection::Provenance::Cli }
+        Selection::Override { packages: s(packages), provenance: crate::build_purpose::selection::Provenance::Cli }
     }
 
     #[test]

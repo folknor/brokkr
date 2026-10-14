@@ -216,6 +216,7 @@ never by parsing a filename back: dataset names carry hyphens, and a prefix test
 alone would let a variant claim a dash-extending sibling's files (`raw`
 swallowing `raw-fast`) and evict them. `brokkr clean --archives` uses the same
 store pruning operation with its configured keep count and dry-run policy.
+
 **Host feature policy.** Host `features` are added to measured-request builds
 through the shared build context, and to the `passthrough`, `verify`, `serve`,
 `ingest`, and `update` paths. Standalone `run`, `install`, `check`, `clippy`,

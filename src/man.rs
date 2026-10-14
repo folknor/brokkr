@@ -404,10 +404,7 @@ mod tests {
             .map(|(_, project)| project.clone())
             .chain([Project::Other("some-foreign-repo".into())])
         {
-            let names: Vec<&str> = visible(Some(&project))
-                .iter()
-                .map(|t| t.name)
-                .collect();
+            let names: Vec<&str> = visible(Some(&project)).iter().map(|t| t.name).collect();
             for expected in ["check", "clippy", "deps", "config", "measure", "run"] {
                 assert!(
                     names.contains(&expected),

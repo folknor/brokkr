@@ -198,11 +198,15 @@ impl SweepProfile {
 
     /// The cargo argv fragment that selects this profile. Dev is cargo's
     /// default and needs no flag.
-    pub fn cargo_args(self) -> &'static [&'static str] {
-        match self {
-            Self::Dev => &[],
-            Self::Release => &["--release"],
-        }
+    #[cfg(test)]
+    pub fn cargo_args(self) -> Vec<String> {
+        crate::build_purpose::profile_args(
+            crate::build_purpose::Purpose::Check,
+            match self {
+                Self::Dev => crate::build_purpose::Profile::Dev,
+                Self::Release => crate::build_purpose::Profile::Release,
+            },
+        )
     }
 }
 

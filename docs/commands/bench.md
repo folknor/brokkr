@@ -133,6 +133,10 @@ on-disk layout cannot break the listing.
 cargo bench -p <owning package> --bench <target> --no-fail-fast -- <criterion args>
 ```
 
+The shared build-purpose resolver (`src/build_purpose.rs`) selects Cargo's
+bench profile, default features and the worktree target override; this command
+has no CLI feature surface and inherits no host features.
+
 `-p` is derived from the bench target's own package, never supplied by the
 caller. That is not a convenience: building several bench targets in one cargo
 invocation can link crates declaring `panic = "abort"` against a harness

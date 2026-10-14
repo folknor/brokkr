@@ -91,6 +91,12 @@ when the results store is upgraded. Older joined argv strings are kept as
 recorded because their original argument boundaries cannot be recovered
 reliably.
 
+Global command-history argv uses the same credential redaction rule and also
+hides the value of its `--project-dir` option. Rows recorded before the
+credential rule was narrowed may already show `<redacted>` for ordinary
+`--env` values; those values cannot be recovered, so the stored redaction
+remains.
+
 These row filters also narrow UUID lookups and apply to both sides of
 `--compare`; the commit prefixes select the comparison axis.
 

@@ -3,6 +3,7 @@ mod atomic_write;
 mod bench_cmd;
 mod bench_variants;
 mod build;
+mod build_purpose;
 mod cargo;
 mod cargo_env;
 mod cargo_filter;

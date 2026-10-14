@@ -358,41 +358,21 @@ fn spawn_server(
 fn curl_get_tile(port: u16, z: u32, x: u32, y: u32) -> Result<(), DevError> {
     let url = super::client::tile_url(port, z, x, y);
     let connect_timeout = super::policy::curl_seconds(super::policy::TILE_CONNECT_TIMEOUT);
-    let max_time = super::policy::curl_seconds(super::policy::TILE_REQUEST_TIMEOUT);
 
-    let output = crate::output::child::command_output(
-        crate::process::spawn::ChildPolicy::plain_command("curl")
-            .args([
-                "-sS",
-                "-o",
-                "/dev/null",
-                "--connect-timeout",
-                &connect_timeout,
-                "--max-time",
-                &max_time,
-                "-o",
-                "/dev/null",
-                &url,
-            ])
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped()),
-    )
-    .map_err(|error| DevError::Spawn {
-        program: "curl".into(),
-        error,
-    })?;
+    let output = super::client::run_curl(
+        &[
+            "-sS",
+            "-o",
+            "/dev/null",
+            "--connect-timeout",
+            &connect_timeout,
+            &url,
+        ],
+        super::policy::TILE_REQUEST_TIMEOUT,
+    )?;
 
     // Don't fail on HTTP errors (404 = tile miss, still useful data).
-    if !output.status.success() {
-        // curl itself failed (not an HTTP error), that's a real problem.
-        return Err(DevError::Subprocess {
-            program: "curl".into(),
-            ending: crate::error::ProcessEnding::from_status(&output.status),
-            stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
-        });
-    }
-
-    Ok(())
+    output.check_success("curl")
 }
 
 #[cfg(test)]

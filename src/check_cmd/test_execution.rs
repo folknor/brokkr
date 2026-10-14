@@ -401,17 +401,14 @@ pub(crate) fn cargo_selection_args(
     profile: crate::config::SweepProfile,
     purpose: CargoSelectionPurpose,
 ) -> Vec<String> {
-    let mut args = profile
-        .cargo_args()
-        .iter()
-        .map(|arg| (*arg).to_owned())
-        .collect::<Vec<_>>();
-    args.extend(sweep.unification_args());
-    args.extend(run.cargo_args());
-    if purpose == CargoSelectionPurpose::TestLane {
-        args.extend(sweep.lane_filters().cargo_args());
-    }
-    args
+    crate::build_purpose::sweep_args(
+        sweep, run.package_args(), run.feature_args(), profile,
+        if purpose == CargoSelectionPurpose::TestLane {
+            sweep.lane_filters().cargo_args()
+        } else {
+            Vec::new()
+        },
+    )
 }
 
 /// The profile, unification pin, and projected package request for one
@@ -422,15 +419,9 @@ pub(crate) fn support_selection_args(
     request: &SupportRequest,
     profile: crate::config::SweepProfile,
 ) -> Vec<String> {
-    let mut args = profile
-        .cargo_args()
-        .iter()
-        .map(|arg| (*arg).to_owned())
-        .collect::<Vec<_>>();
-    args.extend(sweep.unification_args());
-    args.extend(request.feature_args().iter().cloned());
-    args.extend(request.package_args());
-    args
+    crate::build_purpose::sweep_args(
+        sweep, request.package_args(), request.feature_args(), profile, Vec::new(),
+    )
 }
 
 /// One serial resolution's share of the plan: the executables its harnesses

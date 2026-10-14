@@ -85,40 +85,35 @@ pub fn run(
 /// (`--fail` rather than `--fail-with-body`: the body goes to `/dev/null`
 /// here either way, and curl's `-S` error line names the status.)
 fn run_curl_timed(url: &str, body: &str) -> Result<std::time::Duration, DevError> {
-    let max_time = super::policy::curl_seconds(super::policy::API_BENCH_REQUEST_TIMEOUT);
-    let output = crate::output::child::command_output(
-        crate::process::spawn::ChildPolicy::plain_command("curl")
-            .args([
-                "-sS",
-                "--compressed",
-                "--fail",
-                "--max-time",
-                &max_time,
-                "-o",
-                "/dev/null",
-                "-w",
-                "\n%{time_total}",
-                "-X",
-                "POST",
-                url,
-                "-H",
-                "Content-Type: application/json",
-                "-d",
-                body,
-            ])
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped()),
-    )
-    .map_err(|error| DevError::Spawn {
-        program: "curl".into(),
-        error,
-    })?;
+    let output = super::client::run_curl(
+        &[
+            "-sS",
+            "--compressed",
+            "--fail",
+            "-o",
+            "/dev/null",
+            "-w",
+            "\n%{time_total}",
+            "-X",
+            "POST",
+            url,
+            "-H",
+            "Content-Type: application/json",
+            "-d",
+            body,
+        ],
+        super::policy::API_BENCH_REQUEST_TIMEOUT,
+    )?;
 
-    if !output.status.success() {
+    if !output.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        let ending = output
+            .ending
+            .process_ending()
+            .ok_or_else(|| DevError::Verify("curl ended without an exit status".into()))?;
         return Err(DevError::Subprocess {
             program: "curl".into(),
-            ending: crate::error::ProcessEnding::from_status(&output.status),
+            ending,
             stderr: stderr.trim().to_owned(),
         });
     }
@@ -146,8 +141,8 @@ fn parse_time_total(time_str: &str) -> Result<std::time::Duration, DevError> {
             "curl time_total out of range: '{time_str}'"
         )));
     }
-    // Float-to-int `as` saturates, and `--max-time` bounds the value far
-    // below where that could matter.
+    // Float-to-int `as` saturates, and the shared child deadline bounds the
+    // value far below where that could matter.
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let micros = (seconds * 1_000_000.0).round() as u64;
     Ok(std::time::Duration::from_micros(micros))
@@ -160,38 +155,33 @@ fn parse_time_total(time_str: &str) -> Result<std::time::Duration, DevError> {
 /// "0 elements, 0 bytes response" - indistinguishable from a real empty
 /// result, right after a timing run that may have been measuring errors.
 fn report_response_stats(url: &str, body: &str, name: &str) -> Result<(), DevError> {
-    let max_time = super::policy::curl_seconds(super::policy::API_BENCH_REQUEST_TIMEOUT);
-    let output = crate::output::child::command_output(
-        crate::process::spawn::ChildPolicy::plain_command("curl")
-            .args([
-                "-sS",
-                "--compressed",
-                "--fail-with-body",
-                "--max-time",
-                &max_time,
-                "-w",
-                "\n%{size_download}",
-                "-X",
-                "POST",
-                url,
-                "-H",
-                "Content-Type: application/json",
-                "-d",
-                body,
-            ])
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped()),
-    )
-    .map_err(|error| DevError::Spawn {
-        program: "curl".into(),
-        error,
-    })?;
+    let output = super::client::run_curl(
+        &[
+            "-sS",
+            "--compressed",
+            "--fail-with-body",
+            "-w",
+            "\n%{size_download}",
+            "-X",
+            "POST",
+            url,
+            "-H",
+            "Content-Type: application/json",
+            "-d",
+            body,
+        ],
+        super::policy::API_BENCH_REQUEST_TIMEOUT,
+    )?;
 
-    if !output.status.success() {
+    if !output.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        let ending = output
+            .ending
+            .process_ending()
+            .ok_or_else(|| DevError::Verify("curl ended without an exit status".into()))?;
         return Err(DevError::Subprocess {
             program: "curl".into(),
-            ending: crate::error::ProcessEnding::from_status(&output.status),
+            ending,
             stderr: format!("{name} stats request: {}", stderr.trim()),
         });
     }

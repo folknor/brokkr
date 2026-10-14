@@ -213,6 +213,7 @@ pub(crate) fn service_suite(req: &crate::request::ServiceSuiteRequest<'_>) -> Re
                     &built,
                     &script.path,
                     project_root,
+                    build_root.as_path(),
                     included_config_files,
                     script.ceiling,
                     &env_pairs,
@@ -597,10 +598,10 @@ pub(super) fn write_artefacts(
     script_abs: &Path,
     built: &HarnessBuild,
     captured: &CapturedOutput,
-    project_root: &Path,
+    build_root: &Path,
     included_config_files: &[std::path::PathBuf],
 ) -> Result<(), DevError> {
-    let git = crate::git::collect_with_config_paths(project_root, included_config_files).ok();
+    let git = crate::git::collect_with_config_paths(build_root, included_config_files).ok();
     write_artefacts_with_git(artefact_dir, script_abs, built, captured, git.as_ref())
 }
 

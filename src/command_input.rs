@@ -416,8 +416,83 @@ impl Command {
                 }
             }
 
-            // Commands outside the pbfhogg adapter keep their parsed CLI value.
-            command => RoutedCommand::Other(Box::new(command)),
+            // These commands stay with the outer dispatcher. Keep this arm
+            // exhaustive: a new CLI variant must be routed above or named
+            // here, while each pass-through still uses the same forwarding
+            // path and does not duplicate route construction.
+            other @ (Self::Check { .. }
+            | Self::Clippy { .. }
+            | Self::Fmt { .. }
+            | Self::Run { .. }
+            | Self::Install { .. }
+            | Self::Wc { .. }
+            | Self::Man { .. }
+            | Self::Bench { .. }
+            | Self::Deps { .. }
+            | Self::Env
+            | Self::DiffSnapshots { .. }
+            | Self::Extract { .. }
+            | Self::Read { .. }
+            | Self::Write { .. }
+            | Self::MergeBench { .. }
+            | Self::Tilegen { .. }
+            | Self::PmtilesWriter { .. }
+            | Self::NodeStore { .. }
+            | Self::ElivPlanetiler { .. }
+            | Self::ElivTilemaker { .. }
+            | Self::RunApi { .. }
+            | Self::RunNidIngest { .. }
+            | Self::RunTiles { .. }
+            | Self::GenericHotpath { .. }
+            | Self::Suite { .. }
+            | Self::Passthrough { .. }
+            | Self::Results { .. }
+            | Self::Sidecar { .. }
+            | Self::Clean { .. }
+            | Self::Lock
+            | Self::Strays { .. }
+            | Self::Guard { .. }
+            | Self::Kill { .. }
+            | Self::History { .. }
+            | Self::Invalidate { .. }
+            | Self::Verify { .. }
+            | Self::Download { .. }
+            | Self::CompareTiles { .. }
+            | Self::DownloadOcean
+            | Self::OceanBuild { .. }
+            | Self::DownloadNaturalEarth
+            | Self::PmtilesInspect { .. }
+            | Self::Diag { .. }
+            | Self::Svg { .. }
+            | Self::Regress { .. }
+            | Self::PmtilesCorpus { .. }
+            | Self::PmtilesStats { .. }
+            | Self::Serve { .. }
+            | Self::Stop
+            | Self::Status
+            | Self::Ingest { .. }
+            | Self::Update { .. }
+            | Self::Query { .. }
+            | Self::Geocode { .. }
+            | Self::Visual { .. }
+            | Self::Test { .. }
+            | Self::List
+            | Self::Approve { .. }
+            | Self::Report { .. }
+            | Self::VisualStatus
+            | Self::Prepare { .. }
+            | Self::HtmlExtract { .. }
+            | Self::Outline { .. }
+            | Self::Hotpath { .. }
+            | Self::Dellingr { .. }
+            | Self::Mogwai { .. }
+            | Self::Service { .. }
+            | Self::Sync { .. }
+            | Self::MockServe { .. }
+            | Self::Corpus { .. }
+            | Self::CorpusResults { .. }
+            | Self::LintCorpus { .. }
+            | Self::LintResults { .. }) => RoutedCommand::Other(Box::new(other)),
         }
     }
 }

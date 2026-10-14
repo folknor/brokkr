@@ -4,17 +4,8 @@ use crate::config::{CheckEntry, TestConfig};
 use crate::error::DevError;
 use crate::profile::{self, SweepDecl};
 
-/// Escape sentences for a cross-entry `env` disagreement. `clippy` can pick a
-/// value (`--env`) or replay one entry (`--sweep`); `check` has neither flag,
-/// so its way out is to stop being ad-hoc.
-const CLIPPY_ENV_CONFLICT_REMEDY: &str = "`brokkr clippy` can't pick one; pass \
-     `--env KEY=...` to choose, or `--sweep NAME` to run one entry.";
-const CHECK_ENV_CONFLICT_REMEDY: &str = "an ad-hoc `--features` run takes no \
-     `[[check]]` entry and can't pick one; run a profile (or `-p` with no \
-     `--features`) instead, or reconcile the entries' `env`.";
-
 /// Build the list of sweep declarations both phases iterate, applying the
-/// priority ladder documented at the top of the file. The caller plans them
+/// priority ladder from the check-purpose policy. The caller plans them
 /// once the invocation's scope is known.
 ///
 /// Returns `Err` for an unresolved requested profile or an ad-hoc env
@@ -27,104 +18,129 @@ pub(crate) fn decide_active_sweeps(
     features: &[String],
     no_default_features: bool,
 ) -> Result<Vec<SweepDecl>, DevError> {
-    // 1. CLI override: ad-hoc one-off sweep. Overrides *sweep selection* -
-    //    it takes no `[[check]]` entry, and ships no `build_packages` (the
-    //    user is spot-checking; if they need a CLI rebuild they pass
-    //    --package).
-    //
-    //    It does NOT discard the profile's run shaping. Sweep selection
-    //    decides what cargo compiles; the profile's `skip`/`only`/
-    //    `test_threads`/`isolation` decide which tests run and how, and the
-    //    two are independent - a test that cannot pass in-process cannot
-    //    pass in-process at any feature shape. This branch used to drop both
-    //    together, so `check -p <pkg> --features x` issued a bare `cargo
-    //    test` with no `--skip` at all and failed on tests the profile had
-    //    always excluded, reporting a red indistinguishable from a code
-    //    failure. `announce_adhoc_shaping` says which profile was applied.
-    if !features.is_empty() || no_default_features {
+    resolve_sweeps(
+        super::Purpose::Check,
+        SweepInputs {
+            check_entries,
+            test_cfg,
+            profile_name,
+            features,
+            no_default_features,
+            all_features: false,
+            sweep_name: None,
+            packages: &[],
+            env_overrides: &[],
+        },
+    )
+}
+
+#[derive(Clone, Copy)]
+struct SweepInputs<'a> {
+    check_entries: &'a [CheckEntry],
+    test_cfg: Option<&'a TestConfig>,
+    profile_name: Option<&'a str>,
+    features: &'a [String],
+    no_default_features: bool,
+    all_features: bool,
+    sweep_name: Option<&'a str>,
+    packages: &'a [String],
+    env_overrides: &'a [(String, String)],
+}
+
+fn resolve_sweeps(
+    purpose: super::Purpose,
+    inputs: SweepInputs<'_>,
+) -> Result<Vec<SweepDecl>, DevError> {
+    let policy = purpose.sweep_policy();
+    let overridden = inputs
+        .env_overrides
+        .iter()
+        .map(|(k, _)| k.as_str())
+        .collect();
+    let mut sweeps = if let Some(name) = inputs.sweep_name {
+        let entry = inputs
+            .check_entries
+            .iter()
+            .find(|entry| entry.name == name)
+            .ok_or_else(|| {
+                DevError::Config(format!(
+                    "--sweep '{name}' matches no [[check]] entry in brokkr.toml"
+                ))
+            })?;
+        vec![profile::sweep_from_check_entry(entry)]
+    } else if policy.always_adhoc || !inputs.features.is_empty() || inputs.no_default_features {
         let mut sweep = SweepDecl {
-            label: "default".into(),
-            // The invocation named these features: never projected.
-            features: profile::FeatureConfig::explicit(features, no_default_features, false),
-            build_packages: Vec::new(),
-            packages: Vec::new(),
-            env: std::collections::BTreeMap::new(),
+            label: policy.label.into(),
+            features: profile::FeatureConfig::explicit(
+                if inputs.all_features {
+                    &[]
+                } else {
+                    inputs.features
+                },
+                !inputs.all_features && inputs.no_default_features,
+                inputs.all_features,
+            ),
+            packages: inputs.packages.to_vec(),
             ..Default::default()
         };
-        if let Some(cfg) = test_cfg
-            && let Some(name) = effective_profile_name(test_cfg, profile_name)?
+        // Feature overrides replace build selection, not a named profile's
+        // run shaping. Selection decides what cargo compiles; the profile's
+        // `skip`/`only`/`test_threads`/`isolation` decide which tests run and
+        // how, and a test that cannot pass in-process cannot pass at any
+        // feature shape. Dropping both together once made `check -p <pkg>
+        // --features x` fail on tests the profile always excluded, a red
+        // indistinguishable from a code failure. Profile env is part of the
+        // shaping; entry env overlays it below.
+        //
+        // The entry env union is what keeps an ad-hoc probe compiling the
+        // gate's shape: an invariant a build script reads from the env would
+        // otherwise be dropped silently. It does not reach an invariant
+        // expressed as a cargo feature, and `test_exclude_packages` is
+        // deliberately not unioned (a per-entry selection workaround, not an
+        // invariant).
+        if policy.profile_shaping
+            && let Some(cfg) = inputs.test_cfg
+            && let Some(name) = effective_profile_name(inputs.test_cfg, inputs.profile_name)?
         {
             profile::run_shaping(cfg, &name)?.apply(&mut sweep);
         }
-        // Entry-level env, unioned across every `[[check]]` entry - the same
-        // `merge_check_envs` `brokkr clippy`'s ad-hoc path uses, so the two
-        // commands compile the same shape from the same config. Without it a
-        // build-affecting invariant carried by the entries rather than the
-        // profile (a var a build script reads, a codegen toggle) was silently
-        // dropped, and a probe could go green having compiled something other
-        // than what the gate compiles - a quiet wrong, where the dropped-skips
-        // bug was a loud one. A key two entries disagree on is a hard error,
-        // never a coin flip.
-        //
-        // This does NOT reach an invariant expressed as a cargo *feature*:
-        // that follows feature resolution, which follows the CLI scope, and no
-        // env union restores it.
-        //
-        // Entry env overlays profile env, matching `profile::build_sweep_decl`.
-        //
-        // `test_exclude_packages` is deliberately NOT unioned: it is a
-        // per-entry selection workaround, not an invariant, so unioning it
-        // would narrow what a scoped run tests while everything else about the
-        // run claims to be wider. That residual stays with the caller.
-        for (k, v) in merge_check_envs(
-            check_entries,
-            &std::collections::BTreeSet::new(),
-            CHECK_ENV_CONFLICT_REMEDY,
-        )? {
-            sweep.env.insert(k, v);
-        }
-        return Ok(vec![sweep]);
-    }
-
-    // 2. Explicit --profile or default_profile from [test].
-    if let Some(name) = effective_profile_name(test_cfg, profile_name)? {
-        // Safe to unwrap: effective_profile_name returns Some only when
-        // test_cfg is Some.
-        let cfg = test_cfg.expect("test_cfg known present");
-        return profile::resolve(cfg, check_entries, &name);
-    }
-
-    // 3. [[check]] entries with no profile - run every entry in order,
-    //    with no libtest filters.
-    if !check_entries.is_empty() {
-        return Ok(check_entries
+        sweep.env.extend(merge_check_envs(
+            inputs.check_entries,
+            &overridden,
+            policy.env_remedy,
+        )?);
+        vec![sweep]
+    } else if let Some(name) = effective_profile_name(inputs.test_cfg, inputs.profile_name)? {
+        let cfg = inputs
+            .test_cfg
+            .expect("resolved profile requires test config");
+        profile::resolve(cfg, inputs.check_entries, &name)?
+    } else if !inputs.check_entries.is_empty() {
+        inputs
+            .check_entries
             .iter()
             .map(profile::sweep_from_check_entry)
-            .collect());
-    }
-
-    // 4. Legacy fallback: `brokkr check` against a project with no
-    //    `[[check]]` and no profile config. One `--all-features`
-    //    invocation, matching pre-redesign behaviour. Label tracks
-    //    the cargo flag so callers (e.g. `brokkr test`) don't have
-    //    to special-case-detect this branch by feature-arg shape.
-    Ok(vec![SweepDecl {
-        label: "all-features".into(),
-        features: profile::FeatureConfig {
-            all_features: true,
+            .collect()
+    } else {
+        vec![SweepDecl {
+            label: "all-features".into(),
+            features: profile::FeatureConfig {
+                all_features: true,
+                ..Default::default()
+            },
             ..Default::default()
-        },
-        build_packages: Vec::new(),
-        packages: Vec::new(),
-        env: std::collections::BTreeMap::new(),
-        ..Default::default()
-    }])
+        }]
+    };
+    for sweep in &mut sweeps {
+        sweep.env.extend(inputs.env_overrides.iter().cloned());
+    }
+    Ok(sweeps)
 }
 
 /// Return `Some(name)` if a profile should be resolved. Errors when
 /// the user passed `--profile <name>` but the project has no `[test]`
 /// section at all (loud failure beats silent fallback).
-pub(super) fn effective_profile_name(
+pub(crate) fn effective_profile_name(
     test_cfg: Option<&TestConfig>,
     profile_name: Option<&str>,
 ) -> Result<Option<String>, DevError> {
@@ -148,7 +164,7 @@ pub(super) fn effective_profile_name(
 /// both and are applied last; keys an override sets are exempt from cross-sweep
 /// conflict detection, so `--env` can *resolve* a conflict rather than be masked
 /// by it.
-pub(super) fn build_clippy_sweep(
+pub(crate) fn build_clippy_sweep(
     check_entries: &[CheckEntry],
     packages: &[String],
     all_features: bool,
@@ -157,43 +173,22 @@ pub(super) fn build_clippy_sweep(
     sweep_name: Option<&str>,
     env_overrides: &[(String, String)],
 ) -> Result<SweepDecl, DevError> {
-    let overridden: std::collections::BTreeSet<&str> =
-        env_overrides.iter().map(|(k, _)| k.as_str()).collect();
-
-    let mut sweep = if let Some(name) = sweep_name {
-        let entry = check_entries
-            .iter()
-            .find(|e| e.name == name)
-            .ok_or_else(|| {
-                DevError::Config(format!(
-                    "--sweep '{name}' matches no [[check]] entry in brokkr.toml"
-                ))
-            })?;
-        // A single entry's env is unambiguous - no cross-sweep merge needed.
-        profile::sweep_from_check_entry(entry)
-    } else {
-        // The invocation named these features: never projected (`-p` here is
-        // the sweep's own selection anyway, so there is nothing to narrow).
-        let features = if all_features {
-            profile::FeatureConfig::explicit(&[], false, true)
-        } else {
-            profile::FeatureConfig::explicit(features, no_default_features, false)
-        };
-        SweepDecl {
-            label: "clippy".into(),
+    let mut sweeps = resolve_sweeps(
+        super::Purpose::Clippy,
+        SweepInputs {
+            check_entries,
+            test_cfg: None,
+            profile_name: None,
             features,
-            packages: packages.to_vec(),
-            env: merge_check_envs(check_entries, &overridden, CLIPPY_ENV_CONFLICT_REMEDY)?,
-            ..Default::default()
-        }
-    };
-
-    // `--env` overrides win last, over both the merged check env and a borrowed
-    // entry's env.
-    for (k, v) in env_overrides {
-        sweep.env.insert(k.clone(), v.clone());
-    }
-    Ok(sweep)
+            no_default_features,
+            all_features,
+            sweep_name,
+            packages,
+            env_overrides,
+        },
+    )?;
+    // The investigative purpose always produces exactly one declaration.
+    Ok(sweeps.remove(0))
 }
 
 /// Union the `env` of every `[[check]]` entry, erroring on a key two entries set
@@ -202,7 +197,7 @@ pub(super) fn build_clippy_sweep(
 ///
 /// Union (not intersection) is deliberate: a build-affecting invariant present
 /// in most-but-not-all entries must not be silently dropped - that is the exact
-/// failure BUG_SWEEP set out to prevent. The cost is that entries setting
+/// failure a dropped build-affecting variable can cause. Entries setting
 /// *disjoint* keys contribute all of them; the escape is `--env KEY=...` (or
 /// `--sweep NAME` to replay one entry exactly).
 ///
@@ -273,8 +268,14 @@ mod clippy_sweep_tests {
     #[test]
     fn merge_unions_disjoint_keys() {
         let entries = [entry("a", &[("FOO", "1")]), entry("b", &[("BAR", "2")])];
-        let merged =
-            merge_check_envs(&entries, &BTreeSet::new(), CLIPPY_ENV_CONFLICT_REMEDY).unwrap();
+        let merged = merge_check_envs(
+            &entries,
+            &BTreeSet::new(),
+            crate::build_purpose::Purpose::Clippy
+                .sweep_policy()
+                .env_remedy,
+        )
+        .unwrap();
         assert_eq!(merged.get("FOO").map(String::as_str), Some("1"));
         assert_eq!(merged.get("BAR").map(String::as_str), Some("2"));
     }
@@ -282,16 +283,28 @@ mod clippy_sweep_tests {
     #[test]
     fn merge_agreeing_duplicate_is_fine() {
         let entries = [entry("a", &[("HP", "1")]), entry("b", &[("HP", "1")])];
-        let merged =
-            merge_check_envs(&entries, &BTreeSet::new(), CLIPPY_ENV_CONFLICT_REMEDY).unwrap();
+        let merged = merge_check_envs(
+            &entries,
+            &BTreeSet::new(),
+            crate::build_purpose::Purpose::Clippy
+                .sweep_policy()
+                .env_remedy,
+        )
+        .unwrap();
         assert_eq!(merged.get("HP").map(String::as_str), Some("1"));
     }
 
     #[test]
     fn merge_conflicting_duplicate_errors_naming_key() {
         let entries = [entry("a", &[("HP", "1")]), entry("b", &[("HP", "2")])];
-        let err =
-            merge_check_envs(&entries, &BTreeSet::new(), CLIPPY_ENV_CONFLICT_REMEDY).unwrap_err();
+        let err = merge_check_envs(
+            &entries,
+            &BTreeSet::new(),
+            crate::build_purpose::Purpose::Clippy
+                .sweep_policy()
+                .env_remedy,
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("HP"), "got: {err}");
     }
 
@@ -301,13 +314,35 @@ mod clippy_sweep_tests {
         // --env override will set it. (The P1-1 fix: --env resolves a conflict.)
         let entries = [entry("a", &[("HP", "1")]), entry("b", &[("HP", "2")])];
         let overridden: BTreeSet<&str> = ["HP"].into_iter().collect();
-        let merged = merge_check_envs(&entries, &overridden, CLIPPY_ENV_CONFLICT_REMEDY).unwrap();
+        let merged = merge_check_envs(
+            &entries,
+            &overridden,
+            crate::build_purpose::Purpose::Clippy
+                .sweep_policy()
+                .env_remedy,
+        )
+        .unwrap();
         // The overridden key is skipped entirely here; build_clippy_sweep layers
         // the override on afterwards.
         assert!(!merged.contains_key("HP"));
     }
 
     // ----- build_clippy_sweep: ad-hoc -----
+
+    #[test]
+    fn check_and_clippy_adhoc_build_inputs_agree() {
+        let entries = vec![entry("core", &[("CODEGEN", "1")])];
+        let features = vec!["ffi".to_owned()];
+        let check = decide_active_sweeps(&entries, None, None, &features, true).unwrap();
+        let clippy = build_clippy_sweep(&entries, &[], false, &features, true, None, &[]).unwrap();
+        assert_eq!(
+            check[0].features.configured_key(),
+            clippy.features.configured_key()
+        );
+        assert_eq!(check[0].env, clippy.env);
+        assert_eq!(check[0].packages, clippy.packages);
+        assert_eq!(check[0].profile, clippy.profile);
+    }
 
     #[test]
     fn adhoc_all_features() {

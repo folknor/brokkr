@@ -39,13 +39,15 @@
 // keeps promotion eligibility, package-mode refusals, target narrowing, and
 // the copy-pasteable request line grounded in the same planned inputs.
 
-mod selection {
+mod plan {
     use std::collections::BTreeSet;
     use std::fmt::{self, Display, Formatter};
     use std::path::Path;
 
-    use super::features::{project, DroppedToken, FeatureOracle, Projected, WorkspaceFeatures};
-    use super::{LaneIdx, Lanes};
+    use crate::build_purpose::features::routing::{
+        DroppedToken, FeatureOracle, Projected, WorkspaceFeatures, project,
+    };
+    use crate::check_cmd::{LaneIdx, Lanes};
     use crate::config::check::{CargoUnification, EffectiveUnification};
     use crate::config::{BinConfig, Certifies, FeatureUnification, SweepProfile};
     use crate::error::DevError;
@@ -156,7 +158,9 @@ mod selection {
         pub(crate) fn changes_config_or_target(&self) -> bool {
             self.classified.iter().any(|arg| match arg {
                 ForwardedCargoArg::Unsupported(tokens) => tokens.first().is_some_and(|token| {
-                    let head = token.split_once('=').map_or(token.as_str(), |(head, _)| head);
+                    let head = token
+                        .split_once('=')
+                        .map_or(token.as_str(), |(head, _)| head);
                     head == "--config" || head == "--target"
                 }),
                 _ => false,
@@ -301,7 +305,9 @@ mod selection {
             FeatureUnification::Workspace => {
                 EffectiveUnification::Pinned(CargoUnification::Workspace)
             }
-            FeatureUnification::Selected => EffectiveUnification::Pinned(CargoUnification::Selected),
+            FeatureUnification::Selected => {
+                EffectiveUnification::Pinned(CargoUnification::Selected)
+            }
             FeatureUnification::Auto if promotion_eligible => {
                 EffectiveUnification::Pinned(CargoUnification::Workspace)
             }
@@ -370,7 +376,7 @@ mod selection {
     impl ReproLine {
         pub(crate) fn parallel_binary(
             sweep: &PlannedSweep,
-            binary: &super::TestBinary,
+            binary: &crate::check_cmd::TestBinary,
             request: Option<&ResolutionRun>,
             allow_args: &[String],
             forwarded: &ForwardedArgs,
@@ -380,18 +386,25 @@ mod selection {
             if let Some(request) = request {
                 // The planned request through the one selection renderer;
                 // the binary narrows only the target.
-                args.extend(super::cargo_selection_args(
+                args.extend(crate::check_cmd::cargo_selection_args(
                     sweep,
                     request,
                     sweep.cargo_profile(),
-                    super::CargoSelectionPurpose::Shape,
+                    crate::check_cmd::CargoSelectionPurpose::Shape,
                 ));
             } else {
-                args.extend(sweep.cargo_profile().cargo_args().iter().map(|arg| (*arg).to_owned()));
-                args.extend(sweep.unification_args());
-                args.extend(["-p".to_owned(), binary.package.clone()]);
+                args.extend(crate::build_purpose::sweep_args(
+                    sweep,
+                    vec!["-p".to_owned(), binary.package.clone()],
+                    &[],
+                    sweep.cargo_profile(),
+                    Vec::new(),
+                ));
             }
-            args.extend(cargo_target_selector(binary.selector_kind(), &binary.target));
+            args.extend(cargo_target_selector(
+                binary.selector_kind(),
+                &binary.target,
+            ));
             args.extend(forwarded.cargo_without_targets());
             let mut libtest = sweep.lane_filters().libtest_args();
             libtest.extend(sweep.lane_filters().name_filters());
@@ -406,7 +419,6 @@ mod selection {
             &self.0
         }
     }
-
 
     /// A versioned, length-prefixed encoder for identity keys. Fields are
     /// encoded in declaration order and enums use explicit tags; changing a
@@ -488,7 +500,11 @@ mod selection {
                 test_exclude_packages: sweep.test_exclude_packages.clone(),
                 features: sweep.features.configured_key(),
                 rustflags: sweep.rustflags.clone(),
-                env: sweep.env.iter().map(|(key, value)| (key.clone(), value.clone())).collect(),
+                env: sweep
+                    .env
+                    .iter()
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect(),
                 profile: sweep.profile,
                 unification: sweep.effective_unification(),
             }
@@ -515,16 +531,22 @@ mod selection {
 
     /// Stable text form of one declared policy shape. It is minted only from
     /// `DeclaredShape`, never from an effective request or a debug rendering.
-    #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
+    #[derive(
+        Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+    )]
     #[serde(transparent)]
     pub(crate) struct ShapeId(String);
 
     impl From<String> for ShapeId {
-        fn from(value: String) -> Self { Self(value) }
+        fn from(value: String) -> Self {
+            Self(value)
+        }
     }
 
     impl From<&str> for ShapeId {
-        fn from(value: &str) -> Self { Self(value.to_owned()) }
+        fn from(value: &str) -> Self {
+            Self(value.to_owned())
+        }
     }
 
     impl Display for ShapeId {
@@ -592,7 +614,10 @@ mod selection {
         /// An invocation-level package set REPLACING the sweep's own selection
         /// (cargo unions selection flags, so it can never combine with it).
         /// The packages are the ones the sweep's rules admitted.
-        Override { packages: Vec<String>, provenance: Provenance },
+        Override {
+            packages: Vec<String>,
+            provenance: Provenance,
+        },
     }
 
     impl Selection {
@@ -623,9 +648,11 @@ mod selection {
         fn concrete(&self, ws: &WorkspaceFeatures) -> Vec<String> {
             match self {
                 Self::Explicit(p) | Self::Override { packages: p, .. } => p.clone(),
-                Self::WorkspaceExcluding(excluded) => {
-                    ws.member_names().into_iter().filter(|m| !excluded.contains(m)).collect()
-                }
+                Self::WorkspaceExcluding(excluded) => ws
+                    .member_names()
+                    .into_iter()
+                    .filter(|m| !excluded.contains(m))
+                    .collect(),
                 Self::Bare => ws.default_members().to_vec(),
             }
         }
@@ -634,9 +661,10 @@ mod selection {
         /// resolution of a per-package lane. Keeps the provenance.
         fn narrowed_to(&self, pkg: &str) -> Self {
             match self {
-                Self::Override { provenance, .. } => {
-                    Self::Override { packages: vec![pkg.to_owned()], provenance: *provenance }
-                }
+                Self::Override { provenance, .. } => Self::Override {
+                    packages: vec![pkg.to_owned()],
+                    provenance: *provenance,
+                },
                 _ => Self::Explicit(vec![pkg.to_owned()]),
             }
         }
@@ -648,9 +676,10 @@ mod selection {
     /// call this.
     pub(crate) fn package_args(selection: &Selection) -> Vec<String> {
         match selection {
-            Selection::Explicit(p) | Selection::Override { packages: p, .. } => {
-                p.iter().flat_map(|pkg| ["-p".to_owned(), pkg.clone()]).collect()
-            }
+            Selection::Explicit(p) | Selection::Override { packages: p, .. } => p
+                .iter()
+                .flat_map(|pkg| ["-p".to_owned(), pkg.clone()])
+                .collect(),
             Selection::WorkspaceExcluding(excluded) => {
                 // `--exclude` requires `--workspace`.
                 let mut args = vec!["--workspace".to_owned()];
@@ -741,6 +770,7 @@ mod selection {
         }
 
         /// Package then feature flags: the request's whole cargo fragment.
+        #[cfg(test)]
         pub(crate) fn cargo_args(&self) -> Vec<String> {
             let mut args = self.package_args();
             args.extend(self.features.iter().cloned());
@@ -796,7 +826,9 @@ mod selection {
     impl ProjectedSelection {
         fn of(selection: &Selection) -> Self {
             match selection {
-                Selection::Explicit(p) | Selection::Override { packages: p, .. } => Self::Packages(p.clone()),
+                Selection::Explicit(p) | Selection::Override { packages: p, .. } => {
+                    Self::Packages(p.clone())
+                }
                 Selection::WorkspaceExcluding(x) => Self::WorkspaceExcluding(x.clone()),
                 Selection::Bare => Self::Bare,
             }
@@ -972,12 +1004,17 @@ mod selection {
         if cfg.tokens.is_empty() || cfg.invocation_explicit {
             return Ok(identity);
         }
-        if extra_domain.iter().all(|x| selected.packages().is_some_and(|p| p.contains(x)))
+        if extra_domain
+            .iter()
+            .all(|x| selected.packages().is_some_and(|p| p.contains(x)))
             && ProjectedSelection::of(selected) == ProjectedSelection::of(domain)
         {
             return Ok(identity);
         }
-        let named = |sel: &Selection| sel.packages().map(|p| p.iter().cloned().collect::<BTreeSet<String>>());
+        let named = |sel: &Selection| {
+            sel.packages()
+                .map(|p| p.iter().cloned().collect::<BTreeSet<String>>())
+        };
         if let (Some(p), Some(mut s)) = (named(selected), named(domain)) {
             s.extend(extra_domain.iter().cloned());
             if p == s {
@@ -1018,10 +1055,18 @@ mod selection {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             match self.rule {
                 AdmissionRule::TestExcluded => {
-                    write!(f, "-p {} is in this sweep's test_exclude_packages", self.package)
+                    write!(
+                        f,
+                        "-p {} is in this sweep's test_exclude_packages",
+                        self.package
+                    )
                 }
                 AdmissionRule::NotListed => {
-                    write!(f, "-p {} is not in this sweep's packages list", self.package)
+                    write!(
+                        f,
+                        "-p {} is not in this sweep's packages list",
+                        self.package
+                    )
                 }
                 AdmissionRule::NotInstalled => {
                     write!(f, "-p {} is not in [bin] install", self.package)
@@ -1042,8 +1087,11 @@ mod selection {
     /// The package rules. The exclusion list is checked before the packages
     /// list, so a package both rule out is reported as excluded.
     fn admit(sweep: &PlannedSweep, packages: &[String], phase: SelectionPhase) -> Admission {
-        let excluded: &[String] =
-            if phase.honours_test_exclusions() { &sweep.test_exclude_packages } else { &[] };
+        let excluded: &[String] = if phase.honours_test_exclusions() {
+            &sweep.test_exclude_packages
+        } else {
+            &[]
+        };
         let allowlist = (!sweep.packages.is_empty())
             .then_some((sweep.packages.as_slice(), AdmissionRule::NotListed));
         admit_against(packages, excluded, allowlist)
@@ -1067,7 +1115,10 @@ mod selection {
             };
             match rule {
                 Some(rule) => {
-                    let note = AdmissionNote { package: pkg.clone(), rule };
+                    let note = AdmissionNote {
+                        package: pkg.clone(),
+                        rule,
+                    };
                     if !out.notes.contains(&note) {
                         out.notes.push(note);
                     }
@@ -1112,31 +1163,51 @@ mod selection {
         ) -> Result<Self, DevError> {
             let selections: Vec<(Option<String>, Selection)> = match &resolutions {
                 Resolutions::Combined => vec![(None, selection.clone())],
-                Resolutions::PerPackage(packages) => {
-                    packages.iter().map(|p| (Some(p.clone()), selection.narrowed_to(p))).collect()
-                }
+                Resolutions::PerPackage(packages) => packages
+                    .iter()
+                    .map(|p| (Some(p.clone()), selection.narrowed_to(p)))
+                    .collect(),
             };
             let mut runs = Vec::with_capacity(selections.len());
             for (resolution, sel) in selections {
                 let (features, dropped) = projected_features(sweep, &sel, domain, &[], oracle)?;
-                runs.push(ResolutionRun { resolution, selection: sel, features, dropped });
+                runs.push(ResolutionRun {
+                    resolution,
+                    selection: sel,
+                    features,
+                    dropped,
+                });
             }
             let mut support = Vec::with_capacity(sweep.build_packages.len());
             for pkg in &sweep.build_packages {
                 let own = Selection::Explicit(vec![pkg.clone()]);
                 let (features, dropped) =
                     projected_features(sweep, &own, domain, &sweep.build_packages, oracle)?;
-                support.push(SupportRequest { package: pkg.clone(), features, dropped });
+                support.push(SupportRequest {
+                    package: pkg.clone(),
+                    features,
+                    dropped,
+                });
             }
             let cfg = &sweep.features;
             let carried: Vec<String> = cfg
                 .tokens
                 .iter()
-                .filter(|t| runs.iter().any(|r| !r.dropped.iter().any(|d| &d.token == *t)))
+                .filter(|t| {
+                    runs.iter()
+                        .any(|r| !r.dropped.iter().any(|d| &d.token == *t))
+                })
                 .cloned()
                 .collect();
             let features = cfg.argv_with(&carried);
-            Ok(Self { selection, resolutions, notes, runs, support, features })
+            Ok(Self {
+                selection,
+                resolutions,
+                notes,
+                runs,
+                support,
+                features,
+            })
         }
 
         pub(crate) fn selection(&self) -> &Selection {
@@ -1176,7 +1247,11 @@ mod selection {
             EffectiveBuild {
                 profile,
                 rustflags: sweep.rustflags.clone(),
-                env: sweep.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+                env: sweep
+                    .env
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect(),
                 unification: sweep.effective_unification(),
                 runs: self
                     .runs
@@ -1219,7 +1294,9 @@ mod selection {
 
         /// The request of the resolution `resolution` names.
         pub(crate) fn run_for(&self, resolution: Option<&str>) -> Option<&ResolutionRun> {
-            self.runs.iter().find(|r| r.resolution.as_deref() == resolution)
+            self.runs
+                .iter()
+                .find(|r| r.resolution.as_deref() == resolution)
         }
     }
 
@@ -1323,7 +1400,9 @@ mod selection {
         pub(crate) fn skip_reason(&self) -> Option<String> {
             match self {
                 Self::Attempt(_) => None,
-                Self::Disabled(r) | Self::NotApplicable(NotApplicable { reason: r, .. }) => Some((*r).to_owned()),
+                Self::Disabled(r) | Self::NotApplicable(NotApplicable { reason: r, .. }) => {
+                    Some((*r).to_owned())
+                }
                 Self::Excluded(e) => Some(e.reason()),
                 Self::Deduped(d) => Some(format!("deduped onto lane {}", d.onto.get())),
             }
@@ -1351,18 +1430,30 @@ mod selection {
     /// the user-facing message passed to the existing command error path.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub(crate) enum SelectionRefusal {
-        NothingReached { phase: SelectionPhase, packages: Vec<String>, applicable: Vec<String> },
+        NothingReached {
+            phase: SelectionPhase,
+            packages: Vec<String>,
+            applicable: Vec<String>,
+        },
     }
 
     impl Display for SelectionRefusal {
         fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
             match self {
-                Self::NothingReached { phase: SelectionPhase::Test, packages, .. } => write!(
+                Self::NothingReached {
+                    phase: SelectionPhase::Test,
+                    packages,
+                    ..
+                } => write!(
                     f,
                     "-p {}: every sweep's config rules the selection out; zero tests ran",
                     packages.join(" -p ")
                 ),
-                Self::NothingReached { phase, packages, applicable } => write!(
+                Self::NothingReached {
+                    phase,
+                    packages,
+                    applicable,
+                } => write!(
                     f,
                     "-p {}: every sweep's config rules the selection out ({}); nothing reached {}",
                     packages.join(" -p "),
@@ -1390,7 +1481,11 @@ mod selection {
     impl PhaseSelection {
         /// A phase that does not run: every entry `Disabled`, nothing
         /// validated, no refusal.
-        pub(crate) fn disabled(phase: SelectionPhase, sweeps: &[PlannedSweep], reason: &'static str) -> Self {
+        pub(crate) fn disabled(
+            phase: SelectionPhase,
+            sweeps: &[PlannedSweep],
+            reason: &'static str,
+        ) -> Self {
             Self {
                 phase,
                 enabled: false,
@@ -1450,60 +1545,86 @@ mod selection {
         ) -> Result<Self, DevError> {
             let mut shapes: Vec<(EffectiveBuild, LaneIdx)> = Vec::new();
             let mut projections: Vec<(ExecProjection, LaneIdx)> = Vec::new();
-            let entries = Lanes::try_from_sweeps(sweeps, |i, sweep| -> Result<LaneEntry, DevError> {
-                let admission = match provenance {
-                    Some(_) => admit(sweep, overrides, phase),
-                    None => Admission::default(),
-                };
-                if phase == SelectionPhase::Rustdoc
-                    && matches!(sweep.lane_exec(), crate::profile::LaneExec::DocOnly { .. })
-                {
-                    return Ok(LaneEntry::NotApplicable(NotApplicable { reason: DOCTEST_CARRIER, admission }));
-                }
-                let Admission { kept, notes } = admission;
-                // The domain the sweep's feature tokens were written against:
-                // its own selection for this phase, before any override or
-                // per-package split.
-                let configured = Selection::configured(sweep, phase);
-                let selection = match provenance {
-                    Some(_) if kept.is_empty() => {
-                        return Ok(LaneEntry::Excluded(Excluded { notes }));
+            let entries =
+                Lanes::try_from_sweeps(sweeps, |i, sweep| -> Result<LaneEntry, DevError> {
+                    let admission = match provenance {
+                        Some(_) => admit(sweep, overrides, phase),
+                        None => Admission::default(),
+                    };
+                    if phase == SelectionPhase::Rustdoc
+                        && matches!(sweep.lane_exec(), crate::profile::LaneExec::DocOnly { .. })
+                    {
+                        return Ok(LaneEntry::NotApplicable(NotApplicable {
+                            reason: DOCTEST_CARRIER,
+                            admission,
+                        }));
                     }
-                    Some(provenance) => Selection::Override { packages: kept, provenance },
-                    None => configured.clone(),
-                };
-                // Validated for every lane that has a selection, deduped ones
-                // included: an invalid pairing is never repaired, nor hidden.
-                let resolutions = Resolutions::for_selection(sweep, &selection, phase)?;
-                let attempt = Attempt::build(sweep, selection, resolutions, notes, &configured, oracle)?;
-                let onto = match dedupe {
-                    Dedupe::Never => None,
-                    Dedupe::BuildShape => {
-                        let build = attempt.effective_build(sweep, sweep.profile, SupportIdentity::Exclude);
-                        let onto = shapes.iter().find(|(candidate, _)| *candidate == build).map(|(_, j)| *j);
-                        if onto.is_none() {
-                            shapes.push((build, i));
+                    let Admission { kept, notes } = admission;
+                    // The domain the sweep's feature tokens were written against:
+                    // its own selection for this phase, before any override or
+                    // per-package split.
+                    let configured = Selection::configured(sweep, phase);
+                    let selection = match provenance {
+                        Some(_) if kept.is_empty() => {
+                            return Ok(LaneEntry::Excluded(Excluded { notes }));
                         }
-                        onto
-                    }
-                    Dedupe::Execution(debug_of) => {
-                        let p = ExecProjection::of(sweep, &attempt, debug_of(sweep));
-                        let onto = projections.iter().find(|(k, _)| *k == p).map(|(_, j)| *j);
-                        if onto.is_none() {
-                            projections.push((p, i));
+                        Some(provenance) => Selection::Override {
+                            packages: kept,
+                            provenance,
+                        },
+                        None => configured.clone(),
+                    };
+                    // Validated for every lane that has a selection, deduped ones
+                    // included: an invalid pairing is never repaired, nor hidden.
+                    let resolutions = Resolutions::for_selection(sweep, &selection, phase)?;
+                    let attempt =
+                        Attempt::build(sweep, selection, resolutions, notes, &configured, oracle)?;
+                    let onto = match dedupe {
+                        Dedupe::Never => None,
+                        Dedupe::BuildShape => {
+                            let build = attempt.effective_build(
+                                sweep,
+                                sweep.profile,
+                                SupportIdentity::Exclude,
+                            );
+                            let onto = shapes
+                                .iter()
+                                .find(|(candidate, _)| *candidate == build)
+                                .map(|(_, j)| *j);
+                            if onto.is_none() {
+                                shapes.push((build, i));
+                            }
+                            onto
                         }
-                        onto
-                    }
-                };
-                Ok(match onto {
-                    Some(onto) => {
-                        let drops = attempt.drop_records();
-                        LaneEntry::Deduped(Deduped { onto, selection: attempt.selection, notes: attempt.notes, drops })
-                    }
-                    None => LaneEntry::Attempt(attempt),
-                })
-            })?;
-            Ok(Self { phase, enabled: true, overrides: overrides.to_vec(), entries, refusal: None })
+                        Dedupe::Execution(debug_of) => {
+                            let p = ExecProjection::of(sweep, &attempt, debug_of(sweep));
+                            let onto = projections.iter().find(|(k, _)| *k == p).map(|(_, j)| *j);
+                            if onto.is_none() {
+                                projections.push((p, i));
+                            }
+                            onto
+                        }
+                    };
+                    Ok(match onto {
+                        Some(onto) => {
+                            let drops = attempt.drop_records();
+                            LaneEntry::Deduped(Deduped {
+                                onto,
+                                selection: attempt.selection,
+                                notes: attempt.notes,
+                                drops,
+                            })
+                        }
+                        None => LaneEntry::Attempt(attempt),
+                    })
+                })?;
+            Ok(Self {
+                phase,
+                enabled: true,
+                overrides: overrides.to_vec(),
+                entries,
+                refusal: None,
+            })
         }
 
         /// The refusal of a run whose CLI `-p` rules every applicable sweep
@@ -1514,13 +1635,19 @@ mod selection {
             if !self.enabled || self.overrides.is_empty() {
                 return None;
             }
-            if self.entries.iter().any(|e| matches!(e, LaneEntry::Attempt(_))) {
+            if self
+                .entries
+                .iter()
+                .any(|e| matches!(e, LaneEntry::Attempt(_)))
+            {
                 return None;
             }
             let applicable: Vec<&str> = self
                 .entries
                 .iter_with(sweeps)
-                .filter(|(_, _, e)| !matches!(e, LaneEntry::NotApplicable(_) | LaneEntry::Disabled(_)))
+                .filter(|(_, _, e)| {
+                    !matches!(e, LaneEntry::NotApplicable(_) | LaneEntry::Disabled(_))
+                })
                 .map(|(_, s, _)| s.label.as_str())
                 .collect();
             if applicable.is_empty() {
@@ -1601,7 +1728,10 @@ mod selection {
     /// does not carry it, and the members that route it. Rendered once per
     /// lane however many phases share the request - the same text from two
     /// phases is one line.
-    pub(crate) fn feature_drop_lines(sweeps: &[PlannedSweep], phases: &[&PhaseSelection]) -> Vec<String> {
+    pub(crate) fn feature_drop_lines(
+        sweeps: &[PlannedSweep],
+        phases: &[&PhaseSelection],
+    ) -> Vec<String> {
         let mut lines: Vec<String> = Vec::new();
         let mut push = |line: String| {
             if !lines.contains(&line) {
@@ -1632,13 +1762,21 @@ mod selection {
             let mut out = Vec::new();
             for run in &self.runs {
                 let scope = match run.selection.packages() {
-                    Some(p) => p.iter().map(|p| format!("-p {p}")).collect::<Vec<_>>().join(" "),
+                    Some(p) => p
+                        .iter()
+                        .map(|p| format!("-p {p}"))
+                        .collect::<Vec<_>>()
+                        .join(" "),
                     None => "default selection".to_owned(),
                 };
                 out.extend(run.dropped.iter().map(|d| (scope.clone(), d.clone())));
             }
             for s in &self.support {
-                out.extend(s.dropped.iter().map(|d| (format!("build {}", s.package), d.clone())));
+                out.extend(
+                    s.dropped
+                        .iter()
+                        .map(|d| (format!("build {}", s.package), d.clone())),
+                );
             }
             out
         }
@@ -1666,7 +1804,12 @@ mod selection {
         /// invocation's order under one. Which of their bins are eligible
         /// stays a runtime fact (cargo's own answer). `notes` name every `-p`
         /// package the install set did not admit.
-        Eligible { packages: Vec<String>, configured: usize, debug: bool, notes: Vec<AdmissionNote> },
+        Eligible {
+            packages: Vec<String>,
+            configured: usize,
+            debug: bool,
+            notes: Vec<AdmissionNote>,
+        },
     }
 
     impl InstallSelection {
@@ -1685,7 +1828,7 @@ mod selection {
             if cfg.install.is_empty() {
                 return Self::NotApplicable("no [bin] install packages");
             }
-            if !super::install_feature_applies(cfg.install_feature_check, certifies) {
+            if !crate::check_cmd::install_feature_applies(cfg.install_feature_check, certifies) {
                 return Self::NotApplicable("install_feature_check rules this run out");
             }
             // CLI `-p` is admitted through the same rule every other phase
@@ -1700,7 +1843,12 @@ mod selection {
             if kept.is_empty() {
                 return Self::Skipped("-p rules the install set out");
             }
-            Self::Eligible { packages: kept, configured: cfg.install.len(), debug: cfg.debug, notes }
+            Self::Eligible {
+                packages: kept,
+                configured: cfg.install.len(),
+                debug: cfg.debug,
+                notes,
+            }
         }
     }
 
@@ -1719,7 +1867,7 @@ mod selection {
         pub(crate) fn build(
             sweeps: &[PlannedSweep],
             cli: &[String],
-            skip: &dyn Fn(super::Phase) -> bool,
+            skip: &dyn Fn(crate::check_cmd::Phase) -> bool,
             rustdoc_configured: bool,
             bin_cfg: Option<&BinConfig>,
             certifies: Option<Certifies>,
@@ -1729,7 +1877,7 @@ mod selection {
                 Some(reason) => Ok(PhaseSelection::disabled(p, sweeps, reason)),
                 None => PhaseSelection::for_check(p, sweeps, cli, oracle),
             };
-            let rustdoc_off = if skip(super::Phase::Rustdoc) {
+            let rustdoc_off = if skip(crate::check_cmd::Phase::Rustdoc) {
                 Some(PHASE_SKIPPED)
             } else if !rustdoc_configured {
                 Some("no [rustdoc] table")
@@ -1737,10 +1885,21 @@ mod selection {
                 None
             };
             Ok(Self {
-                clippy: phase(SelectionPhase::Clippy, skip(super::Phase::Clippy).then_some(PHASE_SKIPPED))?,
+                clippy: phase(
+                    SelectionPhase::Clippy,
+                    skip(crate::check_cmd::Phase::Clippy).then_some(PHASE_SKIPPED),
+                )?,
                 rustdoc: phase(SelectionPhase::Rustdoc, rustdoc_off)?,
-                test: phase(SelectionPhase::Test, skip(super::Phase::Test).then_some(PHASE_SKIPPED))?,
-                install: InstallSelection::build(bin_cfg, cli, certifies, !skip(super::Phase::InstallFeature)),
+                test: phase(
+                    SelectionPhase::Test,
+                    skip(crate::check_cmd::Phase::Test).then_some(PHASE_SKIPPED),
+                )?,
+                install: InstallSelection::build(
+                    bin_cfg,
+                    cli,
+                    certifies,
+                    !skip(crate::check_cmd::Phase::InstallFeature),
+                ),
             })
         }
     }
@@ -1764,7 +1923,9 @@ mod selection {
 
     impl ReachLedger {
         pub(crate) fn new(sweeps: &[PlannedSweep]) -> Self {
-            Self { lanes: Lanes::from_sweeps(sweeps, |_, _| ReachState::default()) }
+            Self {
+                lanes: Lanes::from_sweeps(sweeps, |_, _| ReachState::default()),
+            }
         }
 
         pub(crate) fn reach_diagnostics(&mut self, sweep: LaneIdx) {
@@ -1792,7 +1953,11 @@ mod selection {
     }
 
     pub(crate) fn join_notes(notes: &[AdmissionNote]) -> String {
-        notes.iter().map(ToString::to_string).collect::<Vec<_>>().join("; ")
+        notes
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("; ")
     }
 
     fn unique(list: &[String]) -> Vec<String> {
@@ -1834,7 +1999,10 @@ mod selection {
         }
 
         fn sweep(label: &str) -> PlannedSweep {
-            planned(crate::profile::SweepDecl { label: label.into(), ..Default::default() })
+            planned(crate::profile::SweepDecl {
+                label: label.into(),
+                ..Default::default()
+            })
         }
 
         fn listed(label: &str, packages: &[&str]) -> PlannedSweep {
@@ -1842,19 +2010,30 @@ mod selection {
         }
 
         fn excluding(label: &str, excluded: &[&str]) -> PlannedSweep {
-            with_sweep(sweep(label), |sweep| sweep.test_exclude_packages = s(excluded))
+            with_sweep(sweep(label), |sweep| {
+                sweep.test_exclude_packages = s(excluded);
+            })
         }
 
         fn package_mode(sweep: PlannedSweep) -> PlannedSweep {
-            with_sweep(sweep, |sweep| sweep.feature_unification = FeatureUnification::Package)
+            with_sweep(sweep, |sweep| {
+                sweep.feature_unification = FeatureUnification::Package;
+            })
         }
 
         fn cli(packages: &[&str]) -> Selection {
-            Selection::Override { packages: s(packages), provenance: Provenance::Cli }
+            Selection::Override {
+                packages: s(packages),
+                provenance: Provenance::Cli,
+            }
         }
 
         /// `for_check` over sweeps whose features never need metadata.
-        fn for_check(phase: SelectionPhase, sweeps: &[PlannedSweep], cli: &[String]) -> Result<PhaseSelection, DevError> {
+        fn for_check(
+            phase: SelectionPhase,
+            sweeps: &[PlannedSweep],
+            cli: &[String],
+        ) -> Result<PhaseSelection, DevError> {
             PhaseSelection::for_check(phase, sweeps, cli, &FeatureOracle::unavailable())
         }
 
@@ -1864,7 +2043,13 @@ mod selection {
             source: PackageSource,
             debug_of: &dyn Fn(&PlannedSweep) -> bool,
         ) -> Result<PhaseSelection, DevError> {
-            PhaseSelection::for_brokkr_test(sweeps, package, source, debug_of, &FeatureOracle::unavailable())
+            PhaseSelection::for_brokkr_test(
+                sweeps,
+                package,
+                source,
+                debug_of,
+                &FeatureOracle::unavailable(),
+            )
         }
 
         #[test]
@@ -1875,7 +2060,13 @@ mod selection {
                 sweep.test_exclude_packages = s(&["x"]);
             });
             let a = admit(&both, &s(&["x"]), SelectionPhase::Test);
-            assert_eq!(a.notes, vec![AdmissionNote { package: "x".into(), rule: AdmissionRule::TestExcluded }]);
+            assert_eq!(
+                a.notes,
+                vec![AdmissionNote {
+                    package: "x".into(),
+                    rule: AdmissionRule::TestExcluded
+                }]
+            );
             // Outside the test phase the exclusion list does not exist.
             let a = admit(&both, &s(&["x"]), SelectionPhase::Clippy);
             assert_eq!(a.notes[0].rule, AdmissionRule::NotListed);
@@ -1896,18 +2087,33 @@ mod selection {
         fn test_exclusions_narrow_the_test_phase_only() {
             let sweeps = vec![excluding("default", &["x"])];
             let clippy = for_check(SelectionPhase::Clippy, &sweeps, &[]).unwrap();
-            assert_eq!(clippy.attempt(LaneIdx::new(0)).unwrap().selection(), &Selection::Bare);
+            assert_eq!(
+                clippy.attempt(LaneIdx::new(0)).unwrap().selection(),
+                &Selection::Bare
+            );
             let test = for_check(SelectionPhase::Test, &sweeps, &[]).unwrap();
-            assert_eq!(test.attempt(LaneIdx::new(0)).unwrap().selection(), &Selection::WorkspaceExcluding(s(&["x"])));
-            assert_eq!(package_args(test.attempt(LaneIdx::new(0)).unwrap().selection()), s(&["--workspace", "--exclude", "x"]));
+            assert_eq!(
+                test.attempt(LaneIdx::new(0)).unwrap().selection(),
+                &Selection::WorkspaceExcluding(s(&["x"]))
+            );
+            assert_eq!(
+                package_args(test.attempt(LaneIdx::new(0)).unwrap().selection()),
+                s(&["--workspace", "--exclude", "x"])
+            );
 
             // Under `-p x` the exclusion rules the lane out of the test phase
             // and nowhere else.
             let x = s(&["x"]);
             let clippy = for_check(SelectionPhase::Clippy, &sweeps, &x).unwrap();
-            assert_eq!(clippy.attempt(LaneIdx::new(0)).unwrap().selection(), &cli(&["x"]));
+            assert_eq!(
+                clippy.attempt(LaneIdx::new(0)).unwrap().selection(),
+                &cli(&["x"])
+            );
             let test = for_check(SelectionPhase::Test, &sweeps, &x).unwrap();
-            assert!(matches!(test.entry(LaneIdx::new(0)), Some(LaneEntry::Excluded(_))));
+            assert!(matches!(
+                test.entry(LaneIdx::new(0)),
+                Some(LaneEntry::Excluded(_))
+            ));
             assert_eq!(
                 test.entry(LaneIdx::new(0)).unwrap().skip_reason().unwrap(),
                 "-p x is in this sweep's test_exclude_packages"
@@ -1924,13 +2130,18 @@ mod selection {
             assert_eq!(package_args(attempt.selection()), s(&["-p", "a"]));
             // Without an override the sweep's own list stands.
             let own = for_check(SelectionPhase::Test, &sweeps, &[]).unwrap();
-            assert_eq!(own.attempt(LaneIdx::new(0)).unwrap().selection(), &Selection::Explicit(s(&["a", "b"])));
+            assert_eq!(
+                own.attempt(LaneIdx::new(0)).unwrap().selection(),
+                &Selection::Explicit(s(&["a", "b"]))
+            );
         }
 
         #[test]
         fn package_mode_over_a_selection_naming_no_packages_is_an_error() {
             let bare = package_mode(sweep("pkg"));
-            let err = for_check(SelectionPhase::Clippy, &[bare], &[]).unwrap_err().to_string();
+            let err = for_check(SelectionPhase::Clippy, &[bare], &[])
+                .unwrap_err()
+                .to_string();
             assert!(err.contains("names no packages"), "{err}");
             let excl = package_mode(excluding("pkg", &["x"]));
             assert!(for_check(SelectionPhase::Test, &[excl], &[]).is_err());
@@ -1941,7 +2152,10 @@ mod selection {
             let sweeps = vec![package_mode(listed("pkg", &["a", "b", "c"]))];
             let own = for_check(SelectionPhase::Test, &sweeps, &[]).unwrap();
             let attempt = own.attempt(LaneIdx::new(0)).unwrap();
-            assert_eq!(attempt.resolutions(), &Resolutions::PerPackage(s(&["a", "b", "c"])));
+            assert_eq!(
+                attempt.resolutions(),
+                &Resolutions::PerPackage(s(&["a", "b", "c"]))
+            );
             let runs = attempt.runs();
             assert_eq!(runs.len(), 3);
             assert_eq!(runs[1].resolution.as_deref(), Some("b"));
@@ -1950,12 +2164,19 @@ mod selection {
             // Narrowed by `-p`, in invocation order, each once.
             let narrowed = for_check(SelectionPhase::Test, &sweeps, &s(&["c", "a", "c"])).unwrap();
             let attempt = narrowed.attempt(LaneIdx::new(0)).unwrap();
-            assert_eq!(attempt.resolutions(), &Resolutions::PerPackage(s(&["c", "a"])));
-            assert_eq!(attempt.selection().packages().unwrap(), s(&["c", "a"]).as_slice());
+            assert_eq!(
+                attempt.resolutions(),
+                &Resolutions::PerPackage(s(&["c", "a"]))
+            );
+            assert_eq!(
+                attempt.selection().packages().unwrap(),
+                s(&["c", "a"]).as_slice()
+            );
             assert_eq!(attempt.runs()[0].selection, cli(&["c"]));
 
             // Any other mode is one combined resolution over the selection.
-            let combined = for_check(SelectionPhase::Test, &[listed("x", &["a", "b"])], &[]).unwrap();
+            let combined =
+                for_check(SelectionPhase::Test, &[listed("x", &["a", "b"])], &[]).unwrap();
             let runs = combined.attempt(LaneIdx::new(0)).unwrap().runs();
             assert_eq!(runs.len(), 1);
             assert_eq!(runs[0].resolution, None);
@@ -1965,7 +2186,11 @@ mod selection {
         #[test]
         fn diagnostics_dedupe_only_onto_an_earlier_attempt() {
             // Two lanes of one entry: one build shape.
-            let sweeps = vec![listed("tier1/x", &["a"]), listed("tier2/x", &["a"]), listed("other", &["b"])];
+            let sweeps = vec![
+                listed("tier1/x", &["a"]),
+                listed("tier2/x", &["a"]),
+                listed("other", &["b"]),
+            ];
             let sel = for_check(SelectionPhase::Clippy, &sweeps, &[]).unwrap();
             assert!(sel.attempt(LaneIdx::new(0)).is_some());
             match sel.entry(LaneIdx::new(1)).unwrap() {
@@ -1981,7 +2206,11 @@ mod selection {
             // lane of the shape that is ATTEMPTED is.
             let sweeps = vec![listed("a-only", &["a"]), listed("a-only-twin", &["a"])];
             let sel = for_check(SelectionPhase::Clippy, &sweeps, &s(&["z"])).unwrap();
-            assert!(sel.entries().iter().all(|e| matches!(e, LaneEntry::Excluded(_))));
+            assert!(
+                sel.entries()
+                    .iter()
+                    .all(|e| matches!(e, LaneEntry::Excluded(_)))
+            );
 
             // The test phase never dedupes.
             let sweeps = vec![listed("tier1/x", &["a"]), listed("tier2/x", &["a"])];
@@ -2017,17 +2246,34 @@ mod selection {
             let sweeps = [invalid.clone(), sweep("other")];
             let sel = PhaseSelection::disabled(SelectionPhase::Test, &sweeps, "skipped");
             assert_eq!(sel.entries().len(), 2);
-            assert!(sel.entries().iter().all(|e| matches!(e, LaneEntry::Disabled(_)) && e.notes().is_empty()));
+            assert!(
+                sel.entries()
+                    .iter()
+                    .all(|e| matches!(e, LaneEntry::Disabled(_)) && e.notes().is_empty())
+            );
             assert!(!sel.is_enabled() && sel.refusal().is_none());
 
             use crate::check_cmd::Phase;
             let skip = |p: Phase| matches!(p, Phase::Test | Phase::Clippy);
             let oracle = FeatureOracle::unavailable();
-            let all = CheckSelections::build(std::slice::from_ref(&invalid), &[], &skip, false, None, None, &oracle)
-                .unwrap();
-            assert!(!all.clippy.is_enabled() && !all.test.is_enabled() && !all.rustdoc.is_enabled());
+            let all = CheckSelections::build(
+                std::slice::from_ref(&invalid),
+                &[],
+                &skip,
+                false,
+                None,
+                None,
+                &oracle,
+            )
+            .unwrap();
+            assert!(
+                !all.clippy.is_enabled() && !all.test.is_enabled() && !all.rustdoc.is_enabled()
+            );
             // The same sweep in an enabled phase is the construction error.
-            assert!(CheckSelections::build(&[invalid], &[], &|_| false, false, None, None, &oracle).is_err());
+            assert!(
+                CheckSelections::build(&[invalid], &[], &|_| false, false, None, None, &oracle)
+                    .is_err()
+            );
         }
 
         #[test]
@@ -2047,7 +2293,12 @@ mod selection {
             // One admitting sweep is enough; no `-p` never refuses.
             let ok = for_check(SelectionPhase::Test, &sweeps, &s(&["a"])).unwrap();
             assert!(ok.refusal().is_none());
-            assert!(for_check(SelectionPhase::Test, &sweeps, &[]).unwrap().refusal().is_none());
+            assert!(
+                for_check(SelectionPhase::Test, &sweeps, &[])
+                    .unwrap()
+                    .refusal()
+                    .is_none()
+            );
         }
 
         fn debug_of(debug: bool) -> impl Fn(&PlannedSweep) -> bool {
@@ -2057,12 +2308,22 @@ mod selection {
         #[test]
         fn exec_projection_collapses_profile_pins_under_one_override() {
             // `--debug` overrides both sweeps' pins: they execute identically.
-            let dev = with_sweep(sweep("dev"), |sweep| sweep.profile = Some(SweepProfile::Dev));
-            let rel = with_sweep(sweep("rel"), |sweep| sweep.profile = Some(SweepProfile::Release));
-            let sel =
-                for_brokkr_test(&[dev.clone(), rel.clone()], "a", PackageSource::Cli, &debug_of(true))
-                    .unwrap();
-            assert!(matches!(sel.entry(LaneIdx::new(1)), Some(LaneEntry::Deduped(d)) if d.onto() == LaneIdx::new(0)));
+            let dev = with_sweep(sweep("dev"), |sweep| {
+                sweep.profile = Some(SweepProfile::Dev);
+            });
+            let rel = with_sweep(sweep("rel"), |sweep| {
+                sweep.profile = Some(SweepProfile::Release);
+            });
+            let sel = for_brokkr_test(
+                &[dev.clone(), rel.clone()],
+                "a",
+                PackageSource::Cli,
+                &debug_of(true),
+            )
+            .unwrap();
+            assert!(
+                matches!(sel.entry(LaneIdx::new(1)), Some(LaneEntry::Deduped(d)) if d.onto() == LaneIdx::new(0))
+            );
             // Without the override each pin decides its own debug answer.
             let pinned = |s: &PlannedSweep| s.profile == Some(SweepProfile::Dev);
             let sel = for_brokkr_test(&[dev, rel], "a", PackageSource::Cli, &pinned).unwrap();
@@ -2072,8 +2333,13 @@ mod selection {
         #[test]
         fn exec_projection_collapses_two_sweeps_narrowed_to_one_package() {
             let sweeps = vec![listed("ab", &["a", "b"]), listed("ac", &["a", "c"])];
-            let sel = for_brokkr_test(&sweeps, "a", PackageSource::DefaultPackage, &debug_of(false))
-                .unwrap();
+            let sel = for_brokkr_test(
+                &sweeps,
+                "a",
+                PackageSource::DefaultPackage,
+                &debug_of(false),
+            )
+            .unwrap();
             assert_eq!(
                 sel.attempt(LaneIdx::new(0)).unwrap().selection(),
                 &Selection::Override {
@@ -2081,7 +2347,10 @@ mod selection {
                     provenance: Provenance::ResolvedPackage(PackageSource::DefaultPackage)
                 }
             );
-            assert!(matches!(sel.entry(LaneIdx::new(1)), Some(LaneEntry::Deduped(_))));
+            assert!(matches!(
+                sel.entry(LaneIdx::new(1)),
+                Some(LaneEntry::Deduped(_))
+            ));
         }
 
         #[test]
@@ -2089,15 +2358,28 @@ mod selection {
             let twin = with_sweep(sweep("docs"), |sweep| {
                 sweep.lane_exec = crate::profile::LaneExec::doc_only();
             });
-            let sel =
-                for_brokkr_test(&[sweep("default"), twin], "a", PackageSource::Cli, &debug_of(false))
-                    .unwrap();
-            assert!(sel.entries().iter().all(|e| e.attempt().is_some()), "the doc twin is its own run");
+            let sel = for_brokkr_test(
+                &[sweep("default"), twin],
+                "a",
+                PackageSource::Cli,
+                &debug_of(false),
+            )
+            .unwrap();
+            assert!(
+                sel.entries().iter().all(|e| e.attempt().is_some()),
+                "the doc twin is its own run"
+            );
 
-            let server = with_sweep(sweep("server"), |sweep| sweep.build_packages = s(&["server"]));
-            let sel =
-                for_brokkr_test(&[sweep("plain"), server], "a", PackageSource::Cli, &debug_of(false))
-                    .unwrap();
+            let server = with_sweep(sweep("server"), |sweep| {
+                sweep.build_packages = s(&["server"]);
+            });
+            let sel = for_brokkr_test(
+                &[sweep("plain"), server],
+                "a",
+                PackageSource::Cli,
+                &debug_of(false),
+            )
+            .unwrap();
             assert!(sel.entries().iter().all(|e| e.attempt().is_some()));
         }
 
@@ -2106,8 +2388,15 @@ mod selection {
             let sw = sweep("x");
             let oracle = FeatureOracle::unavailable();
             let of = |selection: Selection| {
-                let a = Attempt::build(&sw, selection, Resolutions::Combined, Vec::new(), &Selection::Bare, &oracle)
-                    .unwrap();
+                let a = Attempt::build(
+                    &sw,
+                    selection,
+                    Resolutions::Combined,
+                    Vec::new(),
+                    &Selection::Bare,
+                    &oracle,
+                )
+                .unwrap();
                 ExecProjection::of(&sw, &a, false)
             };
             let from_cli = of(cli(&["a"]));
@@ -2122,18 +2411,30 @@ mod selection {
 
         // ---- feature projection ------------------------------------------
 
-        use super::super::features::fixture;
+        use crate::build_purpose::features::routing::fixture;
 
         /// A sweep over `packages` with configured feature `tokens`.
         fn featured(label: &str, packages: &[&str], tokens: &[&str]) -> PlannedSweep {
             with_sweep(listed(label, packages), |sweep| {
-                sweep.features = crate::profile::FeatureConfig { tokens: s(tokens), ..Default::default() };
+                sweep.features = crate::profile::FeatureConfig {
+                    tokens: s(tokens),
+                    ..Default::default()
+                };
             })
         }
 
-        const PINERS: [&str; 4] = ["piners-vm", "piners-strategy", "piners-runner", "piners-harness"];
-        const PINERS_TOKENS: [&str; 4] =
-            ["piners-vm/opcode-counts", "piners-strategy/hotpath", "piners-runner/trace", "piners-harness/bench"];
+        const PINERS: [&str; 4] = [
+            "piners-vm",
+            "piners-strategy",
+            "piners-runner",
+            "piners-harness",
+        ];
+        const PINERS_TOKENS: [&str; 4] = [
+            "piners-vm/opcode-counts",
+            "piners-strategy/hotpath",
+            "piners-runner/trace",
+            "piners-harness/bench",
+        ];
 
         fn piners_sweep() -> PlannedSweep {
             featured("piners", &PINERS, &PINERS_TOKENS)
@@ -2145,7 +2446,10 @@ mod selection {
             // the oracle (which would fail) is never consulted.
             let sel = for_check(SelectionPhase::Clippy, &[piners_sweep()], &[]).unwrap();
             let run = &sel.attempt(LaneIdx::new(0)).unwrap().runs()[0];
-            assert_eq!(run.feature_args(), s(&["--features", &PINERS_TOKENS.join(",")]).as_slice());
+            assert_eq!(
+                run.feature_args(),
+                s(&["--features", &PINERS_TOKENS.join(",")]).as_slice()
+            );
             assert!(run.dropped().is_empty());
         }
 
@@ -2155,12 +2459,22 @@ mod selection {
             let sweeps = [piners_sweep()];
             // piners-strategy defines `hotpath` and depends on piners-vm, so
             // `piners-vm/opcode-counts` routes too; runner and harness do not.
-            let sel = PhaseSelection::for_check(SelectionPhase::Test, &sweeps, &s(&["piners-strategy"]), &oracle)
-                .unwrap();
+            let sel = PhaseSelection::for_check(
+                SelectionPhase::Test,
+                &sweeps,
+                &s(&["piners-strategy"]),
+                &oracle,
+            )
+            .unwrap();
             let run = &sel.attempt(LaneIdx::new(0)).unwrap().runs()[0];
             assert_eq!(
                 run.cargo_args(),
-                s(&["-p", "piners-strategy", "--features", "piners-vm/opcode-counts,piners-strategy/hotpath"])
+                s(&[
+                    "-p",
+                    "piners-strategy",
+                    "--features",
+                    "piners-vm/opcode-counts,piners-strategy/hotpath"
+                ])
             );
             let dropped: Vec<&str> = run.dropped().iter().map(|d| d.token.as_str()).collect();
             assert_eq!(dropped, ["piners-runner/trace", "piners-harness/bench"]);
@@ -2173,10 +2487,18 @@ mod selection {
             );
 
             // piners-harness depends on every other member: all kept.
-            let sel = PhaseSelection::for_check(SelectionPhase::Test, &sweeps, &s(&["piners-harness"]), &oracle)
-                .unwrap();
+            let sel = PhaseSelection::for_check(
+                SelectionPhase::Test,
+                &sweeps,
+                &s(&["piners-harness"]),
+                &oracle,
+            )
+            .unwrap();
             let run = &sel.attempt(LaneIdx::new(0)).unwrap().runs()[0];
-            assert_eq!(run.feature_args(), s(&["--features", &PINERS_TOKENS.join(",")]).as_slice());
+            assert_eq!(
+                run.feature_args(),
+                s(&["--features", &PINERS_TOKENS.join(",")]).as_slice()
+            );
             assert!(run.dropped().is_empty());
         }
 
@@ -2192,7 +2514,10 @@ mod selection {
             )
             .unwrap();
             let run = &sel.attempt(LaneIdx::new(0)).unwrap().runs()[0];
-            assert_eq!(run.feature_args(), s(&["--features", "piners-vm/opcode-counts"]).as_slice());
+            assert_eq!(
+                run.feature_args(),
+                s(&["--features", "piners-vm/opcode-counts"]).as_slice()
+            );
             assert_eq!(run.dropped().len(), 3);
         }
 
@@ -2200,32 +2525,56 @@ mod selection {
         fn package_mode_projects_each_resolution_without_dash_p() {
             let oracle = FeatureOracle::fixed(fixture::piners());
             let sweeps = [package_mode(piners_sweep())];
-            let sel = PhaseSelection::for_check(SelectionPhase::Test, &sweeps, &[], &oracle).unwrap();
+            let sel =
+                PhaseSelection::for_check(SelectionPhase::Test, &sweeps, &[], &oracle).unwrap();
             let attempt = sel.attempt(LaneIdx::new(0)).unwrap();
-            let features: Vec<&[String]> = attempt.runs().iter().map(ResolutionRun::feature_args).collect();
+            let features: Vec<&[String]> = attempt
+                .runs()
+                .iter()
+                .map(ResolutionRun::feature_args)
+                .collect();
             assert_eq!(
                 features,
                 [
                     s(&["--features", "piners-vm/opcode-counts"]).as_slice(),
-                    s(&["--features", "piners-vm/opcode-counts,piners-strategy/hotpath"]).as_slice(),
+                    s(&[
+                        "--features",
+                        "piners-vm/opcode-counts,piners-strategy/hotpath"
+                    ])
+                    .as_slice(),
                     s(&["--features", "piners-vm/opcode-counts,piners-runner/trace"]).as_slice(),
                     s(&["--features", &PINERS_TOKENS.join(",")]).as_slice(),
                 ]
             );
             // The lane-level description carries every token some run carries.
-            assert_eq!(attempt.described_features(), s(&["--features", &PINERS_TOKENS.join(",")]).as_slice());
+            assert_eq!(
+                attempt.described_features(),
+                s(&["--features", &PINERS_TOKENS.join(",")]).as_slice()
+            );
         }
 
         #[test]
         fn a_token_no_domain_member_routes_is_left_for_cargo() {
             let oracle = FeatureOracle::fixed(fixture::piners());
-            let sweeps = [featured("typo", &PINERS, &["piners-vm/opcode-count", "nonsense", "a/b/c"])];
-            let sel = PhaseSelection::for_check(SelectionPhase::Clippy, &sweeps, &s(&["piners-runner"]), &oracle)
-                .unwrap();
+            let sweeps = [featured(
+                "typo",
+                &PINERS,
+                &["piners-vm/opcode-count", "nonsense", "a/b/c"],
+            )];
+            let sel = PhaseSelection::for_check(
+                SelectionPhase::Clippy,
+                &sweeps,
+                &s(&["piners-runner"]),
+                &oracle,
+            )
+            .unwrap();
             let run = &sel.attempt(LaneIdx::new(0)).unwrap().runs()[0];
             // `piners-vm/...` routes through runner's dependency on vm (the
             // feature name is cargo's to check); the rest route nowhere.
-            assert_eq!(run.feature_args(), s(&["--features", "piners-vm/opcode-count,nonsense,a/b/c"]).as_slice());
+            assert_eq!(
+                run.feature_args(),
+                s(&["--features", "piners-vm/opcode-count,nonsense,a/b/c"]).as_slice()
+            );
             assert!(run.dropped().is_empty());
         }
 
@@ -2234,19 +2583,31 @@ mod selection {
             let oracle = FeatureOracle::fixed(fixture::piners());
             // The lane tests vm and strategy; the support build is the runner.
             let sweep = with_sweep(
-                featured("bin", &["piners-vm", "piners-strategy"], &[
-                    "piners-vm/opcode-counts",
-                    "piners-strategy/hotpath",
-                    "piners-runner/trace",
-                ]),
+                featured(
+                    "bin",
+                    &["piners-vm", "piners-strategy"],
+                    &[
+                        "piners-vm/opcode-counts",
+                        "piners-strategy/hotpath",
+                        "piners-runner/trace",
+                    ],
+                ),
                 |sweep| sweep.build_packages = s(&["piners-runner"]),
             );
-            let sel = PhaseSelection::for_check(SelectionPhase::Test, std::slice::from_ref(&sweep), &[], &oracle)
-                .unwrap();
+            let sel = PhaseSelection::for_check(
+                SelectionPhase::Test,
+                std::slice::from_ref(&sweep),
+                &[],
+                &oracle,
+            )
+            .unwrap();
             let attempt = sel.attempt(LaneIdx::new(0)).unwrap();
             let support = &attempt.support()[0];
             assert_eq!(support.package(), "piners-runner");
-            assert_eq!(support.feature_args(), s(&["--features", "piners-vm/opcode-counts,piners-runner/trace"]).as_slice());
+            assert_eq!(
+                support.feature_args(),
+                s(&["--features", "piners-vm/opcode-counts,piners-runner/trace"]).as_slice()
+            );
             assert_eq!(support.package_args(), s(&["-p", "piners-runner"]));
             assert_eq!(support.dropped()[0].token, "piners-strategy/hotpath");
             // The lane's own run IS its configured selection, so it is the
@@ -2254,22 +2615,32 @@ mod selection {
             // routes: cargo rejects it there exactly as a full run always has.
             // Only support builds widen the domain by `build_packages`.
             let run = &attempt.runs()[0];
-            assert!(run.dropped().is_empty(), "the test run's selection is the domain");
+            assert!(
+                run.dropped().is_empty(),
+                "the test run's selection is the domain"
+            );
             assert!(run.feature_args()[1].contains("piners-runner/trace"));
             let lines = feature_drop_lines(std::slice::from_ref(&sweep), &[&sel]);
             assert_eq!(
                 lines,
-                s(&["sweep bin, build piners-runner: dropped piners-strategy/hotpath (applies to piners-strategy only)"])
+                s(&[
+                    "sweep bin, build piners-runner: dropped piners-strategy/hotpath (applies to piners-strategy only)"
+                ])
             );
         }
 
         #[test]
         fn invocation_explicit_features_are_never_projected() {
-            let adhoc = with_sweep(piners_sweep(), |sweep| sweep.features.invocation_explicit = true);
+            let adhoc = with_sweep(piners_sweep(), |sweep| {
+                sweep.features.invocation_explicit = true;
+            });
             // No oracle consulted, every token kept, under `-p` too.
             let sel = for_check(SelectionPhase::Test, &[adhoc], &s(&["piners-vm"])).unwrap();
             let run = &sel.attempt(LaneIdx::new(0)).unwrap().runs()[0];
-            assert_eq!(run.feature_args(), s(&["--features", &PINERS_TOKENS.join(",")]).as_slice());
+            assert_eq!(
+                run.feature_args(),
+                s(&["--features", &PINERS_TOKENS.join(",")]).as_slice()
+            );
         }
 
         #[test]
@@ -2278,18 +2649,35 @@ mod selection {
             // Two sweeps differing only in a token piners-vm does not route:
             // under `-p piners-vm` they compile the same thing.
             let a = featured("a", &PINERS, &["piners-vm/opcode-counts"]);
-            let b = featured("b", &PINERS, &["piners-vm/opcode-counts", "piners-runner/trace"]);
+            let b = featured(
+                "b",
+                &PINERS,
+                &["piners-vm/opcode-counts", "piners-runner/trace"],
+            );
             let sweeps = [a.clone(), b.clone()];
-            let narrowed =
-                PhaseSelection::for_check(SelectionPhase::Clippy, &sweeps, &s(&["piners-vm"]), &oracle).unwrap();
-            assert!(matches!(narrowed.entry(LaneIdx::new(1)), Some(LaneEntry::Deduped(d)) if d.onto() == LaneIdx::new(0)));
+            let narrowed = PhaseSelection::for_check(
+                SelectionPhase::Clippy,
+                &sweeps,
+                &s(&["piners-vm"]),
+                &oracle,
+            )
+            .unwrap();
+            assert!(
+                matches!(narrowed.entry(LaneIdx::new(1)), Some(LaneEntry::Deduped(d)) if d.onto() == LaneIdx::new(0))
+            );
             // Without `-p` their requests differ: both attempted.
-            let full = PhaseSelection::for_check(SelectionPhase::Clippy, &sweeps, &[], &oracle).unwrap();
+            let full =
+                PhaseSelection::for_check(SelectionPhase::Clippy, &sweeps, &[], &oracle).unwrap();
             assert!(full.entries().iter().all(|e| e.attempt().is_some()));
             // A compile input outside the requests still keeps them apart.
             let c = with_sweep(a, |sweep| sweep.rustflags = s(&["--cfg", "x"]));
-            let apart =
-                PhaseSelection::for_check(SelectionPhase::Clippy, &[b, c], &s(&["piners-vm"]), &oracle).unwrap();
+            let apart = PhaseSelection::for_check(
+                SelectionPhase::Clippy,
+                &[b, c],
+                &s(&["piners-vm"]),
+                &oracle,
+            )
+            .unwrap();
             assert!(apart.entries().iter().all(|e| e.attempt().is_some()));
         }
 
@@ -2297,16 +2685,30 @@ mod selection {
         fn brokkr_test_dedupes_on_projected_features() {
             let oracle = FeatureOracle::fixed(fixture::piners());
             let a = featured("a", &PINERS, &["piners-vm/opcode-counts"]);
-            let b = featured("b", &PINERS, &["piners-vm/opcode-counts", "piners-harness/bench"]);
+            let b = featured(
+                "b",
+                &PINERS,
+                &["piners-vm/opcode-counts", "piners-harness/bench"],
+            );
             let sweeps = [a, b];
-            let sel = PhaseSelection::for_brokkr_test(&sweeps, "piners-vm", PackageSource::Cli, &debug_of(false), &oracle)
-                .unwrap();
-            assert!(matches!(sel.entry(LaneIdx::new(1)), Some(LaneEntry::Deduped(d)) if d.onto() == LaneIdx::new(0)));
+            let sel = PhaseSelection::for_brokkr_test(
+                &sweeps,
+                "piners-vm",
+                PackageSource::Cli,
+                &debug_of(false),
+                &oracle,
+            )
+            .unwrap();
+            assert!(
+                matches!(sel.entry(LaneIdx::new(1)), Some(LaneEntry::Deduped(d)) if d.onto() == LaneIdx::new(0))
+            );
             // The deduped lane's own drop is still said: folding it onto `a`
             // decides who runs, not whether its narrowing is announced.
             assert_eq!(
                 feature_drop_lines(&sweeps, &[&sel]),
-                s(&["sweep b, -p piners-vm: dropped piners-harness/bench (applies to piners-harness only)"])
+                s(&[
+                    "sweep b, -p piners-vm: dropped piners-harness/bench (applies to piners-harness only)"
+                ])
             );
         }
 
@@ -2314,7 +2716,10 @@ mod selection {
         fn brokkr_test_never_dedupes_an_excluded_lane() {
             let sweeps = vec![excluding("excl", &["a"]), sweep("plain")];
             let sel = for_brokkr_test(&sweeps, "a", PackageSource::Cli, &debug_of(false)).unwrap();
-            assert!(matches!(sel.entry(LaneIdx::new(0)), Some(LaneEntry::Excluded(_))));
+            assert!(matches!(
+                sel.entry(LaneIdx::new(0)),
+                Some(LaneEntry::Excluded(_))
+            ));
             assert!(sel.attempt(LaneIdx::new(1)).is_some());
         }
 
@@ -2336,7 +2741,12 @@ mod selection {
             );
             assert_eq!(
                 InstallSelection::build(Some(&cfg), &s(&["cli"]), None, true),
-                InstallSelection::Eligible { packages: s(&["cli"]), configured: 2, debug: false, notes: Vec::new() }
+                InstallSelection::Eligible {
+                    packages: s(&["cli"]),
+                    configured: 2,
+                    debug: false,
+                    notes: Vec::new()
+                }
             );
             // A `-p` package outside the install set is named, not dropped silently.
             assert_eq!(
@@ -2345,14 +2755,32 @@ mod selection {
                     packages: s(&["cli"]),
                     configured: 2,
                     debug: false,
-                    notes: vec![AdmissionNote { package: "x".into(), rule: AdmissionRule::NotInstalled }],
+                    notes: vec![AdmissionNote {
+                        package: "x".into(),
+                        rule: AdmissionRule::NotInstalled
+                    }],
                 }
             );
-            assert!(matches!(InstallSelection::build(Some(&cfg), &s(&["x"]), None, true), InstallSelection::Skipped(_)));
-            assert!(matches!(InstallSelection::build(Some(&cfg), &[], None, false), InstallSelection::NotApplicable(_)));
-            assert!(matches!(InstallSelection::build(None, &[], None, true), InstallSelection::NotApplicable(_)));
-            let gate = BinConfig { install_feature_check: None, ..cfg };
-            assert!(matches!(InstallSelection::build(Some(&gate), &[], None, true), InstallSelection::NotApplicable(_)));
+            assert!(matches!(
+                InstallSelection::build(Some(&cfg), &s(&["x"]), None, true),
+                InstallSelection::Skipped(_)
+            ));
+            assert!(matches!(
+                InstallSelection::build(Some(&cfg), &[], None, false),
+                InstallSelection::NotApplicable(_)
+            ));
+            assert!(matches!(
+                InstallSelection::build(None, &[], None, true),
+                InstallSelection::NotApplicable(_)
+            ));
+            let gate = BinConfig {
+                install_feature_check: None,
+                ..cfg
+            };
+            assert!(matches!(
+                InstallSelection::build(Some(&gate), &[], None, true),
+                InstallSelection::NotApplicable(_)
+            ));
         }
 
         #[test]
@@ -2370,12 +2798,12 @@ mod selection {
     }
 }
 
-pub(crate) use selection::{
-    feature_drop_lines, join_notes, AdmissionNote, AdmissionRule, Attempt, CheckSelections,
-    DeclaredShape, InstallSelection, LaneEntry, PackageSource, PhaseSelection, ReachLedger,
-    ForwardedArgs, ReproLine, Resolution, ResolutionRun, Selection, SelectionPhase, ShapeId,
-    SupportRequest, reject_direct_execution_args, reject_forwarded_package_selectors,
+pub(crate) use plan::{
+    AdmissionNote, AdmissionRule, Attempt, CheckSelections, DeclaredShape, ForwardedArgs,
+    InstallSelection, LaneEntry, PackageSource, PhaseSelection, ReachLedger, ReproLine, Resolution,
+    ResolutionRun, Selection, SelectionPhase, ShapeId, SupportRequest, feature_drop_lines,
+    join_notes, reject_direct_execution_args, reject_forwarded_package_selectors,
     resolve_invocation_sweeps, resolve_planned_sweep,
 };
 #[cfg(test)]
-pub(crate) use selection::{package_args, resolve_unification};
+pub(crate) use plan::{Provenance, cargo_target_selector, package_args, resolve_unification};

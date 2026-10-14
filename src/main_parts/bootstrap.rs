@@ -109,10 +109,8 @@ fn parse_cli(project: Option<&Project>) -> (Cli, cli::CommandId) {
         let prefix = spec.help_prefix();
         cmd = cmd.mut_subcommand(&name, |sub| {
             let about = sub.get_about().map(ToString::to_string).unwrap_or_default();
-            sub.about(format!("{prefix}{about}")).hide(
-                project
-                    .is_some_and(|project| !cli::visible_to(&spec.applies, project)),
-            )
+            sub.about(format!("{prefix}{about}"))
+                .hide(project.is_some_and(|project| !cli::visible_to(&spec.applies, project)))
         });
     }
     if matches!(project, Some(Project::Sluggrs)) {

@@ -70,12 +70,9 @@ pub fn parse_cargo_diagnostics(stdout: &str) -> Vec<Diagnostic> {
             "warning" => Level::Warning,
             "error" | "error: internal compiler error" => Level::Error,
             "note" | "help" | "failure-note" => continue,
-            other => {
-                events.push(cargo_json_error(format!(
-                    "unrecognized compiler-message level `{other}` on cargo stdout line {line_number}"
-                )));
-                continue;
-            }
+            // A future severity is a schema extension, not a malformed cargo
+            // record. Cargo's exit status still reports any fatal diagnostic.
+            _ => continue,
         };
 
         // Only the levels a finding is reported at. rustc also emits top-level

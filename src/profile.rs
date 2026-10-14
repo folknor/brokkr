@@ -35,7 +35,7 @@ pub struct SweepDecl {
     /// argv: what cargo is handed depends on the package selection each run
     /// resolves (a `-p` narrowing, a package-mode resolution, a support
     /// build), so the executable `--features` list is computed per run by
-    /// `check_cmd`'s selection module and nowhere else. See
+    /// the build-purpose selection resolver and nowhere else. See
     /// [`FeatureConfig`].
     pub features: FeatureConfig,
     /// Packages to rebuild before running tests, sourced from the resolved
@@ -141,7 +141,14 @@ impl PlannedSweep {
 
     /// The profile cargo uses when this sweep leaves the key unset.
     pub(crate) fn cargo_profile(&self) -> SweepProfile {
-        self.profile.unwrap_or(SweepProfile::Dev)
+        crate::build_purpose::profile(
+            crate::build_purpose::Purpose::Check,
+            crate::build_purpose::Profiles {
+                sweep: self.profile,
+                ..Default::default()
+            },
+        )
+        .sweep()
     }
 
     /// The declaration this sweep was planned from, for fixtures that revise

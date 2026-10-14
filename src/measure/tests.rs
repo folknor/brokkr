@@ -795,11 +795,8 @@ mod persistence {
         let dir = temp_dir("noop");
         let sidecar_path = dir.join("does-not-exist.db");
 
-        let result = backup_sidecar_to(
-            &sidecar_path,
-            &crate::project::Project::Pbfhogg,
-            Some(&dir),
-        );
+        let result =
+            backup_sidecar_to(&sidecar_path, &crate::project::Project::Pbfhogg, Some(&dir));
         assert!(result.is_ok());
 
         std::fs::remove_dir_all(&dir).ok();

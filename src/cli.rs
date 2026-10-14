@@ -81,10 +81,7 @@ mod visibility_tests {
             .chain([Project::Other("some-foreign-repo".into())])
         {
             for name in ["check", "env", "history", "clean"] {
-                assert!(
-                    visible_in(name, &project),
-                    "`{name}` hidden in {project}"
-                );
+                assert!(visible_in(name, &project), "`{name}` hidden in {project}");
             }
         }
     }
@@ -97,17 +94,17 @@ mod visibility_tests {
     #[test]
     fn measured_queries_follow_the_rows() {
         for name in ["results", "sidecar", "invalidate"] {
-            assert!(!visible_in(name, &Project::Litehtml), "`{name}` in litehtml");
+            assert!(
+                !visible_in(name, &Project::Litehtml),
+                "`{name}` in litehtml"
+            );
             for project in Project::ALL
                 .iter()
                 .map(|(_, project)| project.clone())
                 .filter(|project| *project != Project::Litehtml)
                 .chain([Project::Other("some-foreign-repo".into())])
             {
-                assert!(
-                    visible_in(name, &project),
-                    "`{name}` hidden in {project}"
-                );
+                assert!(visible_in(name, &project), "`{name}` hidden in {project}");
             }
         }
     }

@@ -62,8 +62,9 @@ time ceiling as a failed sample rather than a fast one, and its post-run
 element/byte report errors instead of printing zeros; the verify commands'
 FAIL lines carry curl's exit code, error line and a response-body preview; a
 missing `curl` is reported as such, not as "server not running". Every curl
-call has a `--max-time`, so a server that accepts and hangs cannot stall a
-command.
+call runs under the shared child supervisor's wall deadline (the budgets live
+in `src/nidhogg/policy.rs`), so a server that accepts and hangs cannot stall a
+command; a health check past its deadline reads as "not up".
 
 ## `bench api` timing
 

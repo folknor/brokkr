@@ -1,4 +1,4 @@
-mod activation;
+use crate::build_purpose::activation;
 mod conventions;
 mod reporter;
 mod verdict;
@@ -23,9 +23,13 @@ include!("check_cmd/diagnostics.rs");
 include!("check_cmd/clippy_cmd.rs");
 include!("check_cmd/test_phase.rs");
 include!("check_cmd/concurrency.rs");
-include!("check_cmd/features.rs");
-include!("check_cmd/selection.rs");
-include!("check_cmd/sweep_env.rs");
+pub(crate) use crate::build_purpose::environment::*;
+pub(crate) use crate::build_purpose::features::FeatureOracle;
+#[cfg(test)]
+pub(crate) use crate::build_purpose::features::feature_fixture;
+#[cfg(test)]
+use crate::build_purpose::features::routing as features;
+pub(crate) use crate::build_purpose::selection::*;
 include!("check_cmd/test_execution.rs");
 include!("check_cmd/test_execution_tests.rs");
 include!("check_cmd/isolate.rs");

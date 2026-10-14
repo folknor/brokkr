@@ -33,7 +33,7 @@ impl ServerAddress {
     }
 }
 
-/// Render whole-second curl timeout values from the shared duration policy.
+/// Render whole-second curl connect-timeout values from the request policy.
 pub(crate) fn curl_seconds(timeout: Duration) -> String {
     timeout.as_secs().to_string()
 }

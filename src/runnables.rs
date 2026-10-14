@@ -102,22 +102,6 @@ pub struct FeatureArgs<'a> {
     pub no_default: bool,
 }
 
-impl FeatureArgs<'_> {
-    /// Append the cargo flags this selection implies.
-    fn extend(&self, cargo_args: &mut Vec<String>) {
-        for list in self.features {
-            cargo_args.push("--features".into());
-            cargo_args.push(list.clone());
-        }
-        if self.all {
-            cargo_args.push("--all-features".into());
-        }
-        if self.no_default {
-            cargo_args.push("--no-default-features".into());
-        }
-    }
-}
-
 /// One discovered runnable target.
 struct Runnable {
     /// Target name (`cargo run`'s `--bin`/`--example` namespace).
@@ -135,13 +119,24 @@ struct Runnable {
 /// Precedence: `--debug` / `--release` (mutually exclusive, clap-enforced)
 /// > `[bin] debug` > release.
 fn resolve_debug(cfg: Option<&BinConfig>, debug: bool, release: bool) -> bool {
-    if debug {
-        return true;
+    crate::build_purpose::profile(
+        crate::build_purpose::Purpose::Run,
+        bin_profiles(cfg, debug, release),
+    ) == crate::build_purpose::Profile::Dev
+}
+
+/// The profile inputs `run` and `install` both hand the build-purpose
+/// resolver: the CLI flags and `[bin] debug`.
+fn bin_profiles(
+    cfg: Option<&BinConfig>,
+    debug: bool,
+    release: bool,
+) -> crate::build_purpose::Profiles {
+    crate::build_purpose::Profiles {
+        invocation: debug.then_some(true).or_else(|| release.then_some(false)),
+        configured: cfg.map(|c| c.debug),
+        ..Default::default()
     }
-    if release {
-        return false;
-    }
-    cfg.is_some_and(|c| c.debug)
 }
 
 /// Discover every bin and example target in the workspace via
@@ -271,17 +266,26 @@ pub fn cmd_run(
         return Ok(());
     };
 
+    let shape = crate::build_purpose::resolve(crate::build_purpose::Request {
+        purpose: crate::build_purpose::Purpose::Run,
+        profiles: bin_profiles(cfg, debug, release),
+        packages: vec!["-p".into(), target.package.clone()],
+        features: crate::build_purpose::Features::Verbatim {
+            values: feat.features,
+            all: feat.all,
+            no_default: feat.no_default,
+        },
+        unification: Vec::new(),
+        targets: Vec::new(),
+        env: Vec::new(),
+        build_root: Some(project_root),
+    });
     let mut cargo_args: Vec<String> = vec!["run".into()];
-    if !resolve_debug(cfg, debug, release) {
-        cargo_args.push("--release".into());
-    }
-    cargo_args.push("-p".into());
-    cargo_args.push(target.package.clone());
+    cargo_args.extend(shape.args);
     // Always name the target explicitly. `-p` alone leaves a multi-bin
     // package ambiguous, and cargo bails rather than guessing.
     cargo_args.push(if target.example { "--example" } else { "--bin" }.into());
     cargo_args.push(target.name.clone());
-    feat.extend(&mut cargo_args);
     if !args.is_empty() {
         cargo_args.push("--".into());
         cargo_args.extend(args.iter().cloned());
@@ -289,7 +293,7 @@ pub fn cmd_run(
     // The program's own exit code is the command's: cargo has nothing of its
     // own to add once the program ran, so echoing it as a brokkr error and
     // exiting 1 only lost the code.
-    match run_cargo(&cargo_args, lock)? {
+    match run_cargo_with_env(&cargo_args, &shape.env, lock)? {
         0 => Ok(()),
         code => Err(DevError::ExitCode(code)),
     }
@@ -462,7 +466,6 @@ pub fn cmd_install(
     };
     let selected = resolve_install_packages(&runnables, &install)?;
 
-    let dev = resolve_debug(cfg, debug, release);
     // A lock cargo cannot find is a lock `--locked` would only make it abort
     // over. Look where cargo does: every package discovered here is a member
     // of one workspace, and `cargo install --path <member>` reads that
@@ -479,16 +482,22 @@ pub fn cmd_install(
             ));
         }
         let mut cargo_args: Vec<String> = vec!["install".into()];
-        if dev {
-            cargo_args.push("--debug".into());
-        }
+        let shape = crate::build_purpose::resolve(crate::build_purpose::Request {
+            purpose: crate::build_purpose::Purpose::Install,
+            profiles: bin_profiles(cfg, debug, release),
+            packages: vec!["--path".into(), package.package_dir.display().to_string()],
+            features: crate::build_purpose::Features::Default,
+            unification: Vec::new(),
+            targets: Vec::new(),
+            env: Vec::new(),
+            build_root: Some(project_root),
+        });
+        cargo_args.extend(shape.args);
         if locked {
             cargo_args.push("--locked".into());
         }
-        cargo_args.push("--path".into());
-        cargo_args.push(package.package_dir.display().to_string());
         output::run_msg(&format!("cargo {}", cargo_args.join(" ")));
-        let code = run_cargo(&cargo_args, lock)?;
+        let code = run_cargo_with_env(&cargo_args, &shape.env, lock)?;
         if code != 0 {
             // Cargo printed its own error; this names which brokkr step died.
             return Err(DevError::Reported(format!(
@@ -522,12 +531,21 @@ pub(crate) fn run_cargo(
     args: &[String],
     lock: Option<&crate::lockfile::LockGuard>,
 ) -> Result<i32, DevError> {
+    run_cargo_with_env(args, &[], lock)
+}
+
+fn run_cargo_with_env(
+    args: &[String],
+    env: &[(String, String)],
+    lock: Option<&crate::lockfile::LockGuard>,
+) -> Result<i32, DevError> {
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let env_refs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
     let out = output::run_passthrough_in(
         "cargo",
         &arg_refs,
         None,
-        &[],
+        &env_refs,
         output::SpawnProfile::Cargo { phase: None },
         lock,
     )?;

@@ -170,7 +170,7 @@ pub fn run(
             // The lock context's state root is the *project* root, what
             // `brokkr lock` displays; its build root is the tree this closure
             // builds in, whose `target` the disk gate probes.
-            let _lock = acquire_cmd_lock_opt(project.as_ref(),project_root, wt)?;
+            let _lock = acquire_cmd_lock_opt(project.as_ref(), project_root, wt)?;
             let build_root = wt.as_path();
 
             let targets = discover::discover(build_root)?;
@@ -475,14 +475,22 @@ fn cargo_bench(
 ) -> Result<(), DevError> {
     std::fs::create_dir_all(home)?;
 
-    let mut cargo_args: Vec<String> = vec![
-        "bench".into(),
-        "-p".into(),
-        target.package.clone(),
-        "--bench".into(),
-        target.name.clone(),
-        "--no-fail-fast".into(),
-    ];
+    let shape = crate::build_purpose::resolve(crate::build_purpose::Request {
+        purpose: crate::build_purpose::Purpose::Bench,
+        profiles: Default::default(),
+        packages: vec!["-p".into(), target.package.clone()],
+        features: crate::build_purpose::Features::Default,
+        unification: Vec::new(),
+        targets: vec!["--bench".into(), target.name.clone()],
+        env: vec![(
+            "CRITERION_HOME".into(),
+            home.join("criterion").display().to_string(),
+        )],
+        build_root: Some(build_root),
+    });
+    let mut cargo_args = vec!["bench".into()];
+    cargo_args.extend(shape.args);
+    cargo_args.push("--no-fail-fast".into());
     if !criterion_args.is_empty() {
         cargo_args.push("--".into());
         cargo_args.extend(criterion_args.iter().cloned());
@@ -490,25 +498,14 @@ fn cargo_bench(
 
     output::build_msg(&format!("cargo {}", cargo_args.join(" ")));
 
-    let criterion_home = home.join("criterion").display().to_string();
-
-    // Isolate a `--commit` worktree's build into its own target dir, the same
-    // rule `build::cargo_build_observed` applies. Without it, every worktree
-    // writes to one shared target tree at an artifact path that doesn't encode
-    // the worktree, so successive commits overwrite each other's binary. Cargo's
-    // freshness is mtime-based and a reused worktree's sources predate the
-    // artifact a later commit built, so cargo calls it fresh, skips the rebuild,
-    // and the run measures the wrong commit's code under the right commit's
-    // baseline name. It reports success, and the number looks entirely ordinary.
-    let target_dir = crate::build::cargo_target_dir_override(build_root);
-    if let Some(dir) = &target_dir {
+    if let Some((_, dir)) = shape.env.iter().find(|(key, _)| key == "CARGO_TARGET_DIR") {
         output::detail(&format!("isolating worktree build target dir -> {dir}"));
     }
-
-    let mut env: Vec<(&str, &str)> = vec![("CRITERION_HOME", criterion_home.as_str())];
-    if let Some(dir) = &target_dir {
-        env.push(("CARGO_TARGET_DIR", dir.as_str()));
-    }
+    let env: Vec<(&str, &str)> = shape
+        .env
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
 
     let arg_refs: Vec<&str> = cargo_args.iter().map(String::as_str).collect();
     let out = output::run_passthrough_in(

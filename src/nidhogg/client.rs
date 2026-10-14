@@ -3,7 +3,8 @@
 //! Centralized URL construction, curl GET/POST wrappers, URL encoding,
 //! health check, and default query/geocode fixtures.
 
-use std::process::Stdio;
+use std::path::Path;
+use std::time::Duration;
 
 use crate::datasets::Bbox;
 use crate::error::DevError;
@@ -149,27 +150,11 @@ const ERROR_BODY_PREVIEW: usize = 300;
 /// carries that line plus a preview of the response body `--fail-with-body`
 /// kept, so an HTTP 500's explanation survives.
 fn run_curl_body(request_args: &[&str]) -> Result<String, DevError> {
-    let max_time = super::policy::curl_seconds(super::policy::CLIENT_REQUEST_TIMEOUT);
-    let mut args = vec![
-        "-sS",
-        "--compressed",
-        "--fail-with-body",
-        "--max-time",
-        &max_time,
-    ];
+    let mut args = vec!["-sS", "--compressed", "--fail-with-body"];
     args.extend_from_slice(request_args);
-    let output = crate::output::child::command_output(
-        crate::process::spawn::ChildPolicy::plain_command("curl")
-            .args(&args)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped()),
-    )
-    .map_err(|error| DevError::Spawn {
-        program: "curl".into(),
-        error,
-    })?;
+    let output = run_curl(&args, super::policy::CLIENT_REQUEST_TIMEOUT)?;
 
-    if !output.status.success() {
+    if !output.success() {
         let mut stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
         let body = String::from_utf8_lossy(&output.stdout);
         let body = body.trim();
@@ -183,12 +168,54 @@ fn run_curl_body(request_args: &[&str]) -> Result<String, DevError> {
         }
         return Err(DevError::Subprocess {
             program: "curl".into(),
-            ending: crate::error::ProcessEnding::from_status(&output.status),
+            ending: output
+                .ending
+                .process_ending()
+                .ok_or_else(|| DevError::Verify("curl ended without an exit status".into()))?,
             stderr,
         });
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Run a curl request under the shared child supervisor's wall deadline.
+/// This keeps nidhogg's request budgets in its policy module while making
+/// deadline enforcement, signal handling, and cleanup use the common runner.
+pub(super) fn run_curl(
+    args: &[&str],
+    timeout: Duration,
+) -> Result<crate::output::CapturedOutput, DevError> {
+    let capture = run_curl_with_deadline(args, timeout)?;
+    if capture.killed_on_deadline() {
+        return Err(DevError::ChildFailure {
+            program: "curl".into(),
+            failure: crate::error::ChildFailureKind::Deadline(timeout),
+        });
+    }
+    Ok(capture.captured)
+}
+
+fn run_curl_with_deadline(
+    args: &[&str],
+    timeout: Duration,
+) -> Result<crate::output::DeadlineCapture, DevError> {
+    let options = crate::output::child::ChildOptions {
+        // These include timed benchmark samples; keep the 1ms cadence used by
+        // command_output instead of adding the generic runner's 50ms cadence.
+        poll_interval: Duration::from_millis(1),
+        ..crate::output::child::ChildOptions::DEFAULT
+    };
+    crate::output::run_captured_with_env_and_deadline_with_options(
+        "curl",
+        args,
+        Path::new("."),
+        &[],
+        timeout,
+        None,
+        crate::shutdown::ChildIsolation::Inherit,
+        options,
+    )
 }
 
 /// Check if the server is responding on the given port.
@@ -202,31 +229,24 @@ fn run_curl_body(request_args: &[&str]) -> Result<String, DevError> {
 pub fn health_check(port: u16) -> Result<bool, DevError> {
     let url = super::policy::ServerAddress::localhost(port).url("api/health");
     let connect_timeout = super::policy::curl_seconds(super::policy::HEALTH_CONNECT_TIMEOUT);
-    let max_time = super::policy::curl_seconds(super::policy::HEALTH_REQUEST_TIMEOUT);
-
-    let output = crate::output::child::command_output(
-        crate::process::spawn::ChildPolicy::plain_command("curl")
-            .args([
-                "-s",
-                "-o",
-                "/dev/null",
-                "-w",
-                "%{http_code}",
-                "--connect-timeout",
-                &connect_timeout,
-                "--max-time",
-                &max_time,
-                &url,
-            ])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null()),
-    )
-    .map_err(|error| DevError::Spawn {
-        program: "curl".into(),
-        error,
-    })?;
-
-    if !output.status.success() {
+    let capture = run_curl_with_deadline(
+        &[
+            "-s",
+            "-o",
+            "/dev/null",
+            "-w",
+            "%{http_code}",
+            "--connect-timeout",
+            &connect_timeout,
+            &url,
+        ],
+        super::policy::HEALTH_REQUEST_TIMEOUT,
+    )?;
+    if capture.killed_on_deadline() {
+        return Ok(false);
+    }
+    let output = capture.captured;
+    if !output.success() {
         return Ok(false);
     }
     let code = String::from_utf8_lossy(&output.stdout);

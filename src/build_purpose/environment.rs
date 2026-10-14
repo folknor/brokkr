@@ -1,3 +1,8 @@
+use std::path::Path;
+
+use crate::profile::PlannedSweep;
+use crate::project::Project;
+
 /// Project + profile-aware env vars set on every cargo test/build
 /// subprocess. Owned `String`s (a `Vec<(&str, &str)>` invites
 /// borrow-from-local traps) and absolute paths (a relative
@@ -9,7 +14,8 @@
 /// project root, so the caller passes it in rather than us assuming
 /// `<project_root>/target`. `profile_dir` is the profile name as it
 /// appears under that target: `"debug"` for `brokkr check` (which
-/// always tests in the dev profile) and `brokkr test --debug`,
+/// defaults to the dev profile unless the sweep pins release) and
+/// `brokkr test --debug`,
 /// `"release"` for the default `brokkr test` invocation.
 pub(crate) fn build_test_env(
     project: Option<&Project>,
@@ -55,7 +61,9 @@ pub(crate) fn isolated_target_dir(
     meta_target_dir: &Path,
 ) -> Option<std::path::PathBuf> {
     let location = sweep.target_location();
-    location.is_isolated().then(|| location.target_dir(meta_target_dir))
+    location
+        .is_isolated()
+        .then(|| location.target_dir(meta_target_dir))
 }
 
 /// Compose a sweep's `rustflags` with any inherited flags into the env pair to
@@ -82,7 +90,6 @@ fn composed_rustflags_env(
     crate::rustflags::RustflagsEnv::process().compose(&additions)
 }
 
-
 /// The `CARGO_TARGET_DIR` + `RUSTFLAGS` pair a sweep's `rustflags` imply, or an
 /// empty vec when it sets none. Composition can return a config error when it
 /// cannot safely append to an inherited rustflags source. Used by clippy (which needs no
@@ -99,12 +106,14 @@ pub(crate) fn sweep_cargo_env(
     meta_target_dir: &Path,
     allow_flags: &[String],
 ) -> Result<Vec<(String, String)>, crate::error::DevError> {
-    let mut out = Vec::new();
-    if let Some(dir) = isolated_target_dir(sweep, meta_target_dir) {
-        out.push(("CARGO_TARGET_DIR".into(), dir.to_string_lossy().into_owned()));
-    }
-    out.extend(composed_rustflags_env(&sweep.rustflags, allow_flags)?);
-    Ok(out)
+    resolve_sweep_env(
+        super::Purpose::Clippy,
+        sweep,
+        None,
+        meta_target_dir,
+        "debug",
+        allow_flags,
+    )
 }
 
 /// The full base env for one sweep's test/pre-build cargo runs: `build_test_env`
@@ -123,12 +132,36 @@ pub(crate) fn sweep_runtime_env(
     profile_dir: &str,
     allow_flags: &[String],
 ) -> Result<Vec<(String, String)>, crate::error::DevError> {
-    let isolated = isolated_target_dir(sweep, meta_target_dir);
-    let effective: &Path = isolated.as_deref().unwrap_or(meta_target_dir);
+    resolve_sweep_env(
+        super::Purpose::Check,
+        sweep,
+        project,
+        meta_target_dir,
+        profile_dir,
+        allow_flags,
+    )
+}
 
-    let mut out = build_test_env(project, effective, profile_dir);
-    if let Some(dir) = &isolated {
-        out.push(("CARGO_TARGET_DIR".into(), dir.to_string_lossy().into_owned()));
+fn resolve_sweep_env(
+    purpose: super::Purpose,
+    sweep: &PlannedSweep,
+    project: Option<&Project>,
+    meta_target_dir: &Path,
+    profile_dir: &str,
+    allow_flags: &[String],
+) -> Result<Vec<(String, String)>, crate::error::DevError> {
+    let isolated = isolated_target_dir(sweep, meta_target_dir);
+    let effective = isolated.as_deref().unwrap_or(meta_target_dir);
+    let mut out = if purpose.policy().runtime_env {
+        build_test_env(project, effective, profile_dir)
+    } else {
+        Vec::new()
+    };
+    if let Some(dir) = isolated {
+        out.push((
+            "CARGO_TARGET_DIR".into(),
+            dir.to_string_lossy().into_owned(),
+        ));
     }
     out.extend(composed_rustflags_env(&sweep.rustflags, allow_flags)?);
     Ok(out)
@@ -146,8 +179,10 @@ pub(crate) fn merged_env(
     sweep_env: &std::collections::BTreeMap<String, String>,
     project_env: &[(String, String)],
 ) -> Vec<(String, String)> {
-    let mut out: Vec<(String, String)> =
-        sweep_env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    let mut out: Vec<(String, String)> = sweep_env
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
     for (k, v) in project_env {
         if !out.iter().any(|(ek, _)| ek == k) {
             out.push((k.clone(), v.clone()));
@@ -155,4 +190,3 @@ pub(crate) fn merged_env(
     }
     out
 }
-

@@ -24,10 +24,10 @@
 //   it routes nowhere, and is never dropped - cargo owns that error.
 //
 // What this module does NOT do: decide which runs exist, or which packages a
-// run selects. That is `selection.rs`, which calls `project` once per planned
+// run selects. That is the build-purpose `selection.rs`, which calls `project` once per planned
 // request and keeps the answer on the request.
 
-mod features {
+pub(crate) mod routing {
     use std::cell::OnceCell;
     use std::collections::{BTreeSet, HashMap};
     use std::path::Path;
@@ -103,7 +103,10 @@ mod features {
                 .iter()
                 .filter_map(|id| by_id.remove(&id.to_string()))
                 .collect();
-            Self { members, default_members }
+            Self {
+                members,
+                default_members,
+            }
         }
 
         /// Every member's name, in metadata order.
@@ -137,7 +140,11 @@ mod features {
             None => Token::Bare(token),
             Some((dep, feature)) => {
                 let dep = dep.strip_suffix('?').unwrap_or(dep);
-                if dep.is_empty() || feature.is_empty() || feature.contains('/') || dep.contains('?') {
+                if dep.is_empty()
+                    || feature.is_empty()
+                    || feature.contains('/')
+                    || dep.contains('?')
+                {
                     Token::Malformed
                 } else {
                     Token::Qualified { dep, feature }
@@ -179,7 +186,10 @@ mod features {
     impl Projected {
         /// Every token kept: no projection was needed.
         pub(crate) fn identity(tokens: &[String]) -> Self {
-            Self { kept: tokens.to_vec(), dropped: Vec::new() }
+            Self {
+                kept: tokens.to_vec(),
+                dropped: Vec::new(),
+            }
         }
     }
 
@@ -198,7 +208,11 @@ mod features {
         domain: &[String],
         ws: &WorkspaceFeatures,
     ) -> Projected {
-        let Some(selected) = selected.iter().map(|n| ws.member(n)).collect::<Option<Vec<_>>>() else {
+        let Some(selected) = selected
+            .iter()
+            .map(|n| ws.member(n))
+            .collect::<Option<Vec<_>>>()
+        else {
             // An invalid `-p` selection has no workspace package set to
             // project against. Preserve the tokens so Cargo can reject the
             // selection, and do not announce unverified feature drops.
@@ -220,7 +234,10 @@ mod features {
             if routed_by.is_empty() {
                 out.kept.push(raw.clone());
             } else {
-                out.dropped.push(DroppedToken { token: raw.clone(), routed_by });
+                out.dropped.push(DroppedToken {
+                    token: raw.clone(),
+                    routed_by,
+                });
             }
         }
         out
@@ -238,14 +255,20 @@ mod features {
         /// Reads `cargo metadata` at the project root (where brokkr runs
         /// cargo) when first consulted.
         pub(crate) fn at(root: &'a Path) -> Self {
-            Self { root: Some(root), snapshot: OnceCell::new() }
+            Self {
+                root: Some(root),
+                snapshot: OnceCell::new(),
+            }
         }
 
         /// No workspace to read: consulting it is an error. For selections
         /// whose sweeps carry no feature tokens.
         #[cfg(test)]
         pub(crate) fn unavailable() -> Self {
-            Self { root: None, snapshot: OnceCell::new() }
+            Self {
+                root: None,
+                snapshot: OnceCell::new(),
+            }
         }
 
         /// A snapshot of a workspace with no members: every selected package
@@ -258,7 +281,10 @@ mod features {
 
         #[cfg(test)]
         pub(crate) fn fixed(ws: WorkspaceFeatures) -> Self {
-            Self { root: None, snapshot: OnceCell::from(Ok(ws)) }
+            Self {
+                root: None,
+                snapshot: OnceCell::from(Ok(ws)),
+            }
         }
 
         pub(crate) fn get(&self) -> Result<&WorkspaceFeatures, DevError> {
@@ -283,9 +309,15 @@ mod features {
 
         /// One member's metadata `packages` entry: its features, and its
         /// declared dependencies as `(name, rename, optional)`.
-        pub(crate) fn member(name: &str, features: &[&str], deps: &[(&str, Option<&str>, bool)]) -> serde_json::Value {
-            let features: serde_json::Map<String, serde_json::Value> =
-                features.iter().map(|f| ((*f).to_owned(), serde_json::json!([]))).collect();
+        pub(crate) fn member(
+            name: &str,
+            features: &[&str],
+            deps: &[(&str, Option<&str>, bool)],
+        ) -> serde_json::Value {
+            let features: serde_json::Map<String, serde_json::Value> = features
+                .iter()
+                .map(|f| ((*f).to_owned(), serde_json::json!([])))
+                .collect();
             let deps: Vec<serde_json::Value> = deps
                 .iter()
                 .map(|(dep, rename, optional)| {
@@ -302,12 +334,16 @@ mod features {
 
         /// A metadata document over `members`, every member a default member.
         pub(crate) fn workspace(members: &[serde_json::Value]) -> WorkspaceFeatures {
-            let ids: Vec<serde_json::Value> = members.iter().filter_map(|m| m.get("id").cloned()).collect();
+            let ids: Vec<serde_json::Value> = members
+                .iter()
+                .filter_map(|m| m.get("id").cloned())
+                .collect();
             let metadata: CargoMetadata = serde_json::from_value(serde_json::json!({
                 "packages": members,
                 "workspace_members": ids,
                 "workspace_default_members": ids,
-            })).unwrap();
+            }))
+            .unwrap();
             WorkspaceFeatures::from_metadata(&metadata)
         }
 
@@ -316,12 +352,20 @@ mod features {
         pub(crate) fn piners() -> WorkspaceFeatures {
             workspace(&[
                 member("piners-vm", &["opcode-counts"], &[]),
-                member("piners-strategy", &["hotpath"], &[("piners-vm", None, false)]),
+                member(
+                    "piners-strategy",
+                    &["hotpath"],
+                    &[("piners-vm", None, false)],
+                ),
                 member("piners-runner", &["trace"], &[("piners-vm", None, false)]),
                 member(
                     "piners-harness",
                     &["bench"],
-                    &[("piners-vm", None, false), ("piners-strategy", None, false), ("piners-runner", None, false)],
+                    &[
+                        ("piners-vm", None, false),
+                        ("piners-strategy", None, false),
+                        ("piners-runner", None, false),
+                    ],
                 ),
             ])
         }
@@ -348,62 +392,127 @@ mod features {
             let domain = s(&["a", "b", "c"]);
             // Kept: the selected package is `a` and knows `fa`; `c` declares
             // a dependency named `a`.
-            assert_eq!(project(&s(&["a/fa"]), &s(&["a"]), &domain, &ws).kept, s(&["a/fa"]));
-            assert_eq!(project(&s(&["a/fa"]), &s(&["c"]), &domain, &ws).kept, s(&["a/fa"]));
+            assert_eq!(
+                project(&s(&["a/fa"]), &s(&["a"]), &domain, &ws).kept,
+                s(&["a/fa"])
+            );
+            assert_eq!(
+                project(&s(&["a/fa"]), &s(&["c"]), &domain, &ws).kept,
+                s(&["a/fa"])
+            );
             // Dropped: only `a` (itself) and `c` (its dependency on `a`),
             // both outside the selection, route it.
             let p = project(&s(&["a/fa"]), &s(&["b"]), &domain, &ws);
             assert!(p.kept.is_empty());
-            assert_eq!(p.dropped, vec![DroppedToken { token: "a/fa".into(), routed_by: s(&["a", "c"]) }]);
+            assert_eq!(
+                p.dropped,
+                vec![DroppedToken {
+                    token: "a/fa".into(),
+                    routed_by: s(&["a", "c"])
+                }]
+            );
             // Kept for cargo: nothing in the domain routes it.
-            assert_eq!(project(&s(&["zz/f"]), &s(&["b"]), &domain, &ws).kept, s(&["zz/f"]));
+            assert_eq!(
+                project(&s(&["zz/f"]), &s(&["b"]), &domain, &ws).kept,
+                s(&["zz/f"])
+            );
             // `a/nope`: `a` itself does not know the feature, but `c`'s
             // dependency on `a` routes it (whether `a` has it is cargo's to
             // check, later) - so a run over `b` alone drops it.
             let p = project(&s(&["a/nope"]), &s(&["b"]), &domain, &ws);
-            assert_eq!(p.dropped, vec![DroppedToken { token: "a/nope".into(), routed_by: s(&["c"]) }]);
+            assert_eq!(
+                p.dropped,
+                vec![DroppedToken {
+                    token: "a/nope".into(),
+                    routed_by: s(&["c"])
+                }]
+            );
             // Over `a` alone nothing routes it: kept, cargo's error.
-            assert_eq!(project(&s(&["a/nope"]), &s(&["a"]), &s(&["a", "b"]), &ws).kept, s(&["a/nope"]));
+            assert_eq!(
+                project(&s(&["a/nope"]), &s(&["a"]), &s(&["a", "b"]), &ws).kept,
+                s(&["a/nope"])
+            );
         }
 
         #[test]
         fn a_bare_token_routes_by_feature_or_optional_dependency() {
             let ws = workspace(&[
-                member("a", &["fast"], &[("serde", None, true), ("log", None, false)]),
+                member(
+                    "a",
+                    &["fast"],
+                    &[("serde", None, true), ("log", None, false)],
+                ),
                 member("b", &[], &[]),
             ]);
             let domain = s(&["a", "b"]);
             // Own feature, and an optional dependency's implicit feature.
             for t in ["fast", "serde"] {
                 assert_eq!(project(&s(&[t]), &s(&["a"]), &domain, &ws).kept, s(&[t]));
-                assert_eq!(project(&s(&[t]), &s(&["b"]), &domain, &ws).dropped.len(), 1, "{t}");
+                assert_eq!(
+                    project(&s(&[t]), &s(&["b"]), &domain, &ws).dropped.len(),
+                    1,
+                    "{t}"
+                );
             }
             // A non-optional dependency has no implicit feature: nobody routes
             // `log` bare, so it is kept for cargo to reject.
-            assert_eq!(project(&s(&["log"]), &s(&["b"]), &domain, &ws).kept, s(&["log"]));
+            assert_eq!(
+                project(&s(&["log"]), &s(&["b"]), &domain, &ws).kept,
+                s(&["log"])
+            );
         }
 
         #[test]
         fn weak_and_renamed_dependencies_route_by_manifest_spelling() {
             let ws = workspace(&[
-                member("a", &[], &[("serde", None, true), ("tokio", Some("rt-tokio"), false)]),
+                member(
+                    "a",
+                    &[],
+                    &[("serde", None, true), ("tokio", Some("rt-tokio"), false)],
+                ),
                 member("b", &[], &[]),
             ]);
             let domain = s(&["a", "b"]);
-            assert_eq!(project(&s(&["serde?/derive"]), &s(&["a"]), &domain, &ws).kept, s(&["serde?/derive"]));
-            assert_eq!(project(&s(&["serde?/derive"]), &s(&["b"]), &domain, &ws).dropped.len(), 1);
+            assert_eq!(
+                project(&s(&["serde?/derive"]), &s(&["a"]), &domain, &ws).kept,
+                s(&["serde?/derive"])
+            );
+            assert_eq!(
+                project(&s(&["serde?/derive"]), &s(&["b"]), &domain, &ws)
+                    .dropped
+                    .len(),
+                1
+            );
             // The rename is the spelling; the package name is not.
-            assert_eq!(project(&s(&["rt-tokio/full"]), &s(&["a"]), &domain, &ws).kept, s(&["rt-tokio/full"]));
-            assert_eq!(project(&s(&["rt-tokio/full"]), &s(&["b"]), &domain, &ws).dropped.len(), 1);
-            assert_eq!(project(&s(&["tokio/full"]), &s(&["b"]), &domain, &ws).kept, s(&["tokio/full"]));
+            assert_eq!(
+                project(&s(&["rt-tokio/full"]), &s(&["a"]), &domain, &ws).kept,
+                s(&["rt-tokio/full"])
+            );
+            assert_eq!(
+                project(&s(&["rt-tokio/full"]), &s(&["b"]), &domain, &ws)
+                    .dropped
+                    .len(),
+                1
+            );
+            assert_eq!(
+                project(&s(&["tokio/full"]), &s(&["b"]), &domain, &ws).kept,
+                s(&["tokio/full"])
+            );
         }
 
         #[test]
         fn malformed_tokens_are_never_dropped() {
-            let ws = workspace(&[member("a", &["f"], &[("x", None, true)]), member("b", &[], &[])]);
+            let ws = workspace(&[
+                member("a", &["f"], &[("x", None, true)]),
+                member("b", &[], &[]),
+            ]);
             let domain = s(&["a", "b"]);
             for t in ["dep:x", "a/f/g", "/f", "a/", "a??/f"] {
-                assert_eq!(project(&s(&[t]), &s(&["b"]), &domain, &ws).kept, s(&[t]), "{t}");
+                assert_eq!(
+                    project(&s(&[t]), &s(&["b"]), &domain, &ws).kept,
+                    s(&[t]),
+                    "{t}"
+                );
             }
         }
 
@@ -425,12 +534,16 @@ mod features {
                 ],
                 "workspace_members": ["a-id", "b-id"],
                 "workspace_default_members": ["b-id"],
-            })).unwrap();
+            }))
+            .unwrap();
             let ws = WorkspaceFeatures::from_metadata(&meta);
             assert_eq!(ws.member_names(), s(&["a", "b"]));
             assert_eq!(ws.default_members(), s(&["b"]).as_slice());
             // A dev-dependency routes `a/f` too: any kind counts.
-            assert_eq!(project(&s(&["a/f"]), &s(&["b"]), &s(&["a", "b"]), &ws).kept, s(&["a/f"]));
+            assert_eq!(
+                project(&s(&["a/f"]), &s(&["b"]), &s(&["a", "b"]), &ws).kept,
+                s(&["a/f"])
+            );
         }
 
         #[test]
@@ -442,6 +555,6 @@ mod features {
     }
 }
 
-pub(crate) use features::FeatureOracle;
+pub(crate) use routing::FeatureOracle;
 #[cfg(test)]
-pub(crate) use features::fixture as feature_fixture;
+pub(crate) use routing::fixture as feature_fixture;

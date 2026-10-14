@@ -559,9 +559,7 @@ fn sensitive_name(name: &str) -> bool {
         }
         if ch.is_ascii_uppercase() && !normalized.is_empty() {
             let previous = chars[index - 1];
-            let next_is_lower = chars
-                .get(index + 1)
-                .is_some_and(char::is_ascii_lowercase);
+            let next_is_lower = chars.get(index + 1).is_some_and(char::is_ascii_lowercase);
             let uppercase_run = chars[..index]
                 .iter()
                 .rev()
@@ -637,6 +635,9 @@ pub(crate) fn redact_secret_text(text: &str) -> String {
         .ok()
     });
 
+    // These are fixed, maintainer-authored patterns. Keep compilation failure
+    // fail-closed to avoid printing credentials; the captured-text unit test
+    // exercises every pattern and checks that normal output is not withheld.
     let Some(url_re) = URL_RE.as_ref() else {
         return "[captured output withheld: output redaction unavailable]".to_owned();
     };

@@ -894,7 +894,8 @@ mod tests {
             marker("SYNC_END", 12_500_000),
         ];
         assert_eq!(
-            crate::measure::wall::marker_span_us(&markers, "SYNC_START", "SYNC_END").map(|us| us / 1000),
+            crate::measure::wall::marker_span_us(&markers, "SYNC_START", "SYNC_END")
+                .map(|us| us / 1000),
             Some(7500)
         );
     }
@@ -903,7 +904,8 @@ mod tests {
     fn sync_span_returns_none_without_markers() {
         let markers: Vec<sidecar::Marker> = Vec::new();
         assert_eq!(
-            crate::measure::wall::marker_span_us(&markers, "SYNC_START", "SYNC_END").map(|us| us / 1000),
+            crate::measure::wall::marker_span_us(&markers, "SYNC_START", "SYNC_END")
+                .map(|us| us / 1000),
             None
         );
     }
@@ -912,7 +914,8 @@ mod tests {
     fn sync_span_returns_none_with_only_start() {
         let markers = vec![marker("SYNC_START", 1_000_000)];
         assert_eq!(
-            crate::measure::wall::marker_span_us(&markers, "SYNC_START", "SYNC_END").map(|us| us / 1000),
+            crate::measure::wall::marker_span_us(&markers, "SYNC_START", "SYNC_END")
+                .map(|us| us / 1000),
             None
         );
     }
@@ -923,7 +926,8 @@ mod tests {
         // missing rather than negative.
         let markers = vec![marker("SYNC_END", 500_000), marker("SYNC_START", 1_000_000)];
         assert_eq!(
-            crate::measure::wall::marker_span_us(&markers, "SYNC_START", "SYNC_END").map(|us| us / 1000),
+            crate::measure::wall::marker_span_us(&markers, "SYNC_START", "SYNC_END")
+                .map(|us| us / 1000),
             None
         );
     }

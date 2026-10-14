@@ -210,7 +210,7 @@ subdirectory still installs locked.
 `install` takes **no feature flags**. It is the session-workflow closer -
 it ships the project as configured, and what it ships should not depend on
 which instrument you last enabled to take a measurement. The two commands
-share only `resolve_debug` and the `[bin]` section; `run`'s feature selection
+share the build-purpose resolver and the `[bin]` section; `run`'s feature selection
 is per-invocation and reaches nothing else.
 
 A multi-crate workspace names its shippable packages explicitly:
@@ -239,7 +239,8 @@ package with no bin target is likewise an error rather than a silent skip.
 
 ## Profile
 
-Both commands resolve the same way: `--debug` / `--release` (mutually
+Both commands ask `src/build_purpose.rs` for their Cargo shape. Profiles
+resolve the same way: `--debug` / `--release` (mutually
 exclusive, rejected by clap together) > `[bin] debug` > **release**.
 
 Release-by-default matches `brokkr test`. `run` expresses the choice as

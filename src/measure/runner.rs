@@ -139,7 +139,7 @@ fn profiling(req: &MeasureRequest<'_>) -> bool {
 }
 
 pub(crate) fn run(req: &MeasureRequest<'_>, command: &impl PlannedCommand) -> Result<(), DevError> {
-    project::require(&req.project, &command.project(),command.id())?;
+    project::require(&req.project, &command.project(), command.id())?;
     if profiling(req) && !command.supports_profiling() {
         return Err(DevError::Config(format!(
             "command '{}' does not support hotpath/alloc profiling",
