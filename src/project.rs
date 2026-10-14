@@ -87,13 +87,17 @@ impl std::fmt::Display for Project {
 /// - `project_root` is the directory that holds `brokkr.toml`. It anchors
 ///   everything brokkr *owns*: the `data/`/`scratch/`/`output/` trees and
 ///   the `.brokkr/` state directory (`results.db`, `sidecar.db`, artefacts,
-///   worktrees).
+///   worktree records). Persistent checkouts live in the user state directory.
 /// - `build_root` is the working directory, where git and cargo run.
 ///
 /// The two coincide in the common case (`brokkr.toml` in cwd) and differ
 /// only when the config was found one level *above* cwd - the layout used
 /// to drive a checkout that isn't ours, keeping brokkr's config and state in
 /// the parent so the foreign repo stays clean.
+// These paths still cross legacy measurement APIs as Path/PathBuf pairs.
+// Wrapping the fields alone would not centralize their cargo/store rules.
+// The lock disk gate deliberately has no access to this pair: its live-build
+// probe derives cwd independently, so config discovery cannot redirect it.
 pub struct Detection {
     pub project: Project,
     pub config: DevConfig,

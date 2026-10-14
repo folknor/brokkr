@@ -26,12 +26,6 @@ Reported by: process-control.
 
 `stray.rs`'s test `descendant_expansion_never_crosses_into_brokkrs_own_subtree` asserts that in `cargo(10) -> brokkr(20, us) -> cargo(30)` the outer cargo is a stray **and is killed**. Expansion stops at brokkr, but the root itself is killed. So `cargo run --bin brokkr -- check`, or any brokkr started under a cargo (a script check run by an outer brokkr's cargo, an xtask), SIGKILLs its own parent cargo at the first fresh hold. `test_orphans::select` makes the opposite choice on purpose ("Exempt: this process, its ancestors and its descendants"). Neither reaper mentions the other, and a test on each side asserts its own answer. Even if killing the parent is intended (it does hold the target-dir lock), the decision should be stated once, in one exemptions type that both reapers use.
 
-## BUG-005 - The free-space gate probes the config dir's `target` for `check`, `test` and every post-detection command
-
-Reported by: config-cli (this hunt); the root mismatch was reported earlier by the hygiene hunt's process-control, pbfhogg-nidhogg and config-cli-bootstrap hunters.
-
-`Detection` carries `project_root` (the config dir: `.brokkr/`, data, results) and `build_root` (the cwd: cargo, git, `target/`). Both are `PathBuf`, and `bootstrap.rs` rebinds them under each other's names. `run`, `install`, `wc`, `deps` and `clippy` bind a local named `project_root` to `d.build_root`. `check` uses `project_root = d.build_root, state_root = d.project_root`. `test` takes the lock and run log on `project_root` and runs cargo on `build_root`. The path reaches `LockContext.project_root` (a `&str`), and `disk_gate::check` probes `<that>/target`. So the gate measures `<cwd>/target` for run/install/deps/clippy, but `<config dir>/target` for `check` (`acquire_cmd_lock_opt(project, &state_root, "check")`), for `test`, and for every post-detection locked command (`clean`, `download`, `serve`, ...). Under the one-level-up layout that `Detection` exists to support, the config dir has no `target/`. For the two heaviest build commands the gate then fails open, or measures the parent's disk, but never the disk cargo is about to fill. The structural fix (distinct root types) is filed in `structural.md`.
-
 ## BUG-015 - A `--stop` run records the configured marker, not whether it fired
 
 Reported by: measurement.

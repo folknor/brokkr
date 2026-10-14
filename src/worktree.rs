@@ -43,8 +43,9 @@
 //! *effective* target dir (`cargo metadata`'s `target_directory`, which already
 //! accounts for `CARGO_TARGET_DIR`, `build.target-dir` and a `target` symlink),
 //! so a worktree build lands on the same disk as every other build of the
-//! project, and the free-space gate covers it. Each worktree still gets its own
-//! directory there: sharing one with the live tree is how a reused worktree
+//! project. The lock-time free-space gate covers the live cwd target and
+//! environment override, but does not resolve cargo-config target overrides.
+//! Each worktree still gets its own directory there: sharing one with the live tree is how a reused worktree
 //! once re-linked a stale binary (see `build::cargo_build_observed`). The
 //! `.brokkr-target` link is how a build in the worktree finds it
 //! ([`isolated_target_dir`]).

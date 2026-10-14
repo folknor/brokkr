@@ -89,8 +89,9 @@ hash>/`, which holds the checkout plus a symlink for each path dependency that
 leaves the repo (`../pbfhogg` resolves to the live sibling). Their isolated
 target dirs live under the project's own effective target dir
 (`<target>/brokkr-worktrees/...`), so a worktree build lands on the same disk
-as any other build of the project and the free-space gate covers it. One
-pre-existing directory is the only shape a sandboxed agent's writable roots can
+as any other build of the project. The lock-time free-space gate probes the
+live cwd's target and the environment override; cargo-config target overrides
+are not resolved by that gate. One pre-existing directory is the only shape a sandboxed agent's writable roots can
 grant, which is why worktrees are no longer cut as siblings of the checkout.
 The design is in `src/worktree.rs`.
 

@@ -256,6 +256,7 @@ impl LockGuard {
 pub struct LockContext<'a> {
     pub project: &'a str,
     pub command: &'a str,
+    /// Display identity only, not a cargo cwd or a disk-probe path.
     pub project_root: &'a str,
 }
 
@@ -402,7 +403,7 @@ struct HoldEffects {
     after_fresh_hold: fn(),
     /// Refuse the hold when the disks the command writes to are nearly full
     /// ([`crate::disk_gate`]).
-    disk_gate: fn(&LockContext<'_>) -> Result<(), DevError>,
+    disk_gate: fn(&str) -> Result<(), DevError>,
     /// Run this acquisition's control socket (`crate::lock_service`).
     service: bool,
 }
@@ -530,7 +531,7 @@ fn acquire_at(
     // behind a `brokkr clean` that freed the space, or a build that used it.
     // Before the drain, so a refusal costs nothing but the release, which
     // dropping `owned` does.
-    (effects.disk_gate)(ctx)?;
+    (effects.disk_gate)(ctx.command)?;
     // We hold `brokkr.lock`, but the hold is not yet usable: compilers admitted
     // under an earlier hold may still be running. On failure `owned` drops here,
     // releasing `brokkr.lock`, and we never reach protected work - measuring
@@ -1683,7 +1684,7 @@ mod tests {
 
     fn nothing_after() {}
 
-    fn no_disk_gate(_: &LockContext<'_>) -> Result<(), DevError> {
+    fn no_disk_gate(_: &str) -> Result<(), DevError> {
         Ok(())
     }
 
@@ -1788,7 +1789,7 @@ mod tests {
     /// A refused gate releases the lock: the next acquirer takes it at once.
     #[test]
     fn a_refused_disk_gate_releases_the_lock() {
-        fn refuse(_: &LockContext<'_>) -> Result<(), DevError> {
+        fn refuse(_: &str) -> Result<(), DevError> {
             Err(DevError::Preflight(vec!["disk full".to_owned()]))
         }
         let path = tmp_lock("disk-gate.lock");

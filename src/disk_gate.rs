@@ -6,11 +6,11 @@
 //! lands. The project root's is not: `.brokkr/` and the results stores are
 //! small, and a root on a full disk with `target` symlinked onto a roomy one
 //! must not be refused for a build that writes nothing to the root's disk.
-//! The target is probed as `<project_root>/target` with symlinks resolved,
+//! The target is probed as `<cwd>/target` with symlinks resolved,
 //! which is what makes one rule cover every host: a plain per-project dir
 //! (or a `target` not created yet, which resolves to its nearest existing
-//! ancestor) reports the project's disk, a `target` symlinked into a shared
-//! directory reports the shared one. A `CARGO_TARGET_DIR` in the environment
+//! ancestor) reports the build directory's disk; a `target` symlinked into
+//! a shared directory reports the shared one. A `CARGO_TARGET_DIR` in the environment
 //! is probed too, deduplicated by mount. A target moved by `build.target-dir`
 //! in a cargo config is not - finding it takes `cargo metadata`, too slow for
 //! every lock acquisition.
@@ -32,7 +32,6 @@
 use std::path::{Path, PathBuf};
 
 use crate::error::DevError;
-use crate::lockfile::LockContext;
 
 /// Refuse below this share of a filesystem's size available.
 pub(crate) const MIN_FREE_PERCENT: u64 = 5;
@@ -41,15 +40,21 @@ pub(crate) const MIN_FREE_PERCENT: u64 = 5;
 const EXEMPT: [&str; 2] = ["clean", "env"];
 
 /// The host gate, run on every fresh lock hold.
-pub(crate) fn check(ctx: &LockContext<'_>) -> Result<(), DevError> {
-    if EXEMPT.contains(&ctx.command) {
+pub(crate) fn check(command: &str) -> Result<(), DevError> {
+    if EXEMPT.contains(&command) {
         return Ok(());
     }
+    // LockContext's root is a display/state label: with parent-level config
+    // it is not cargo's cwd. Do not accept it here, even as a typed wrapper.
+    // Live commands build from the invocation directory; worktree targets
+    // and cargo-config target overrides remain separate resolution concerns.
+    // An unreadable cwd (deleted directory) fails open like any other
+    // unreadable size; the command's own work reports it properly.
+    let Ok(build_root) = std::env::current_dir() else {
+        return Ok(());
+    };
     let cargo_target_dir = std::env::var_os("CARGO_TARGET_DIR").filter(|d| !d.is_empty());
-    check_paths(&candidates(
-        Path::new(ctx.project_root),
-        cargo_target_dir.as_deref(),
-    ))
+    check_paths(&candidates(&build_root, cargo_target_dir.as_deref()))
 }
 
 /// The gate over an explicit list of `(label, path)`s, deduplicated by mount.
@@ -92,12 +97,12 @@ pub(crate) fn check_paths(paths: &[(&str, PathBuf)]) -> Result<(), DevError> {
 
 /// The paths whose filesystems the gate probes, in report order.
 fn candidates(
-    root: &Path,
+    build_root: &Path,
     cargo_target_dir: Option<&std::ffi::OsStr>,
 ) -> Vec<(&'static str, PathBuf)> {
-    let mut out = vec![("target", root.join("target"))];
+    let mut out = vec![("target", build_root.join("target"))];
     if let Some(dir) = cargo_target_dir {
-        out.push(("CARGO_TARGET_DIR", root.join(dir)));
+        out.push(("CARGO_TARGET_DIR", build_root.join(dir)));
     }
     out
 }
@@ -133,7 +138,7 @@ mod tests {
         let root = Path::new("/p");
         let plain = candidates(root, None);
         assert_eq!(plain, vec![("target", PathBuf::from("/p/target"))]);
-        // A relative CARGO_TARGET_DIR resolves against the project; an
+        // A relative CARGO_TARGET_DIR resolves against the build cwd; an
         // absolute one replaces it (Path::join semantics).
         let rel = candidates(root, Some(std::ffi::OsStr::new("t")));
         assert_eq!(rel[1], ("CARGO_TARGET_DIR", PathBuf::from("/p/t")));
@@ -144,12 +149,7 @@ mod tests {
     #[test]
     fn exempt_commands_skip_the_probe() {
         for command in EXEMPT {
-            let ctx = LockContext {
-                project: "p",
-                command,
-                project_root: "/definitely/not/a/real/root",
-            };
-            assert!(check(&ctx).is_ok());
+            assert!(check(command).is_ok());
         }
     }
 }

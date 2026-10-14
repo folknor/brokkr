@@ -7,11 +7,14 @@ brokkr clean [--worktrees] [--cargo [PKG]] [--archives [--keep N]] [--all] [--dr
 Remove the scratch and temporary files a brokkr project accumulates. Runs in
 any project; what it finds is project-shaped, but the rule it follows is not.
 
-Every other locked command refuses to start when `target`'s disk (symlinks
+Every other locked command refuses to start when the invocation cwd's `target` disk (symlinks
 resolved, so a `target` linked elsewhere is measured where it points) has
 under 5% of its size available (`src/disk_gate.rs`). The project root's own
 disk is not gated. `clean` is exempt, being the remedy - as is `env`, which
-shows the free space.
+shows the free space. Finding config in the parent directory does not move
+this probe to the config directory. An environment `CARGO_TARGET_DIR` is
+also probed (relative paths resolve from cwd); cargo-config target overrides
+are not resolved by this lock-time gate.
 
 ## The rule
 
