@@ -24,33 +24,28 @@ use crate::piners::registry::FilePin;
 use crate::preflight;
 
 /// File name of the canonical lint pin file inside the registry directory.
-const LINTS_FILE: &str = "lints.toml";
+pub(crate) const LINTS_FILE: &str = "lints.toml";
 
-/// One pinned TV diagnostic: the re-anchor fingerprint. Stored as a string
-/// severity so the file reads naturally; converted to a [`DiagKey`] for
-/// comparison. Only `error`/`warning` are meaningful (the gated grain).
+/// One pinned TV diagnostic: the re-anchor fingerprint. Its severity is typed
+/// so an unknown value cannot silently disappear from the anchor. Only
+/// `error`/`warning` are meaningful (the gated grain).
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct TvDiag {
     pub line: usize,
     #[serde(default)]
     pub col: Option<usize>,
-    pub severity: String,
+    pub severity: Severity,
 }
 
 impl TvDiag {
-    /// Convert to a [`DiagKey`], or `None` for an unrecognized severity.
-    fn to_key(&self) -> Option<DiagKey> {
-        let severity = match self.severity.as_str() {
-            "error" => Severity::Error,
-            "warning" => Severity::Warning,
-            _ => return None,
-        };
-        Some(DiagKey {
+    /// Convert to the normalized anchor key.
+    fn to_key(&self) -> DiagKey {
+        DiagKey {
             line: self.line,
             col: self.col,
-            severity,
-        })
+            severity: self.severity,
+        }
     }
 }
 
@@ -105,7 +100,7 @@ impl LintPin {
         if self.tv.is_empty() && self.tv_anchored_at.is_none() {
             return None;
         }
-        Some(self.tv.iter().filter_map(TvDiag::to_key).collect())
+        Some(self.tv.iter().map(TvDiag::to_key).collect())
     }
 }
 
@@ -253,7 +248,7 @@ pub fn verify_probe(
             abs.display()
         )]));
     }
-    let origin = format!("probe '{id}' (strategy.pine)");
+    let origin = format!("probe '{id}' ({})", pin.pine.path.display());
     preflight::verify_file_hash(&abs, &pin.pine.xxh128, project_root, Some(&origin))?;
     Ok(abs)
 }
@@ -330,7 +325,7 @@ mod tests {
         pin.tv = vec![TvDiag {
             line: 3,
             col: Some(5),
-            severity: "error".to_owned(),
+            severity: Severity::Error,
         }];
         let anchor = pin.tv_anchor().unwrap();
         assert_eq!(anchor.len(), 1);

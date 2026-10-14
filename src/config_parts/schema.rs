@@ -47,7 +47,7 @@ pub struct DevConfig {
     /// docs) that legitimately carries gremlin characters. `None` when the
     /// project has no `[gremlins]` section. See [`GremlinsConfig`].
     pub gremlins: Option<GremlinsConfig>,
-    /// `[header]` config: a required file header with a current-year check.
+    /// `[header]` config: required text anywhere in selected files, with a current-year check.
     /// `None` when the project has no `[header]` section. See [`HeaderConfig`].
     pub header: Option<HeaderConfig>,
     /// `[[textlint]]` rules: declarative forbid-a-pattern line checks run by
@@ -224,10 +224,61 @@ pub fn test_phase_allow_flags(allow: &[String], allow_exact: &[SitedAllow]) -> V
     out
 }
 
+/// The tool that owns a lint's namespace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LintTool {
+    Rustc,
+    Clippy,
+    Rustdoc,
+    Cargo,
+}
+
+/// A borrowed lint identity. Parsing separates namespace from name; config
+/// validation remains responsible for rejecting empty names and flag syntax.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LintName<'a> {
+    pub tool: LintTool,
+    pub name: &'a str,
+}
+
+impl<'a> LintName<'a> {
+    pub fn parse(text: &'a str) -> Self {
+        for (prefix, tool) in [
+            ("clippy::", LintTool::Clippy),
+            ("rustdoc::", LintTool::Rustdoc),
+            ("cargo::", LintTool::Cargo),
+        ] {
+            if let Some(name) = text.strip_prefix(prefix) {
+                return Self { tool, name };
+            }
+        }
+        Self { tool: LintTool::Rustc, name: text }
+    }
+
+    pub fn reaches_test_build(self) -> bool {
+        self.tool == LintTool::Rustc
+    }
+
+    /// Clippy accepts an unqualified spelling too. Rustdoc and cargo names
+    /// must retain their namespaces; lint groups do not match member codes.
+    pub fn matches(self, code: Self) -> bool {
+        self.name == code.name
+            && (self.tool == code.tool
+                || matches!((self.tool, code.tool),
+                    (LintTool::Rustc, LintTool::Clippy)
+                    | (LintTool::Clippy, LintTool::Rustc)))
+    }
+
+    /// Rustdoc judges its tool lints; clippy judges every other namespace.
+    pub fn judged_by_rustdoc(self) -> bool {
+        self.tool == LintTool::Rustdoc
+    }
+}
+
 /// Whether an allow for `name` becomes a test-phase build flag: only a lint
 /// rustc itself raises does ([`test_phase_allow_flags`]).
 pub fn reaches_test_build(name: &str) -> bool {
-    !is_cargo_lint(name) && !name.starts_with("clippy::") && !name.starts_with("rustdoc::")
+    LintName::parse(name).reaches_test_build()
 }
 
 /// Whether a lint name belongs to cargo's own namespace (`[lints.cargo]`:
@@ -235,7 +286,7 @@ pub fn reaches_test_build(name: &str) -> bool {
 /// so an allow for one acts only where brokkr ingests diagnostics, never as a
 /// rustc `-A` flag.
 pub fn is_cargo_lint(name: &str) -> bool {
-    name.starts_with("cargo::")
+    LintName::parse(name).tool == LintTool::Cargo
 }
 
 /// One `[lints] allow_exact` entry: a lint suppressed in one file only.
@@ -370,7 +421,7 @@ impl GremlinsConfig {
     }
 }
 
-/// `[header]` section: a required file header whose year must be current.
+/// `[header]` section: required text anywhere in selected files, with a current-year check.
 ///
 /// A file matching `paths` (and not `exempt`) must contain `pattern`, with
 /// `{year}` expanded to the current UTC year. A missing header and a stale
@@ -1312,13 +1363,6 @@ pub struct QualifiedSkip {
     pub package: String,
     /// Test-name substring, matched within that package only.
     pub pattern: String,
-}
-
-impl QualifiedSkip {
-    /// Does this entry suppress `test` in `package`?
-    pub fn matches(&self, package: &str, test: &str) -> bool {
-        self.package == package && test.contains(&self.pattern)
-    }
 }
 
 /// How a profile's tests execute relative to process boundaries. The only

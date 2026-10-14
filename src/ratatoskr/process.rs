@@ -1,18 +1,11 @@
 //! Process-tree primitives for the service harness.
 //!
-//! Generic Linux helpers, written so they lift to a shared module when
-//! a second project needs them. The harness exercises four shapes:
+//! Generic Linux helpers for signaling and inspecting child processes. The
+//! module keeps two process-presence helpers available only to unit tests.
 //!
 //! - [`send_signal`] - send `SIGTERM` / `SIGKILL` (or any signum) to a
 //!   known PID. Used by every test that drives the Service via signals
 //!   (parent-death, deadlock-drop, crashloop, respawn).
-//! - [`pid_is_alive`] - non-destructive existence check (`kill(pid, 0)`).
-//!   Used to assert "child is dead within N ms" without racing the
-//!   harness's own `wait`.
-//! - [`wait_for_sentinel`] - poll for a file's appearance with a named
-//!   backstop. Required for manual-matrix items 4 and 5
-//!   (heartbeat-detects-killed-Service via `logs/heartbeat-exiting`,
-//!   SIGTERM-triggers-shutdown-drain via `clean_shutdown`).
 //! - [`snapshot_proc`] - copy `/proc/<pid>/{status,wchan,syscall,stack}`
 //!   into the artefact dir. Distinguishes "blocked on futex" from
 //!   "blocked on closed pipe" without re-running, which is the single
@@ -20,26 +13,21 @@
 
 use std::fs;
 use std::path::Path;
+#[cfg(test)]
 use std::time::{Duration, Instant};
 
 use crate::error::DevError;
-
-/// Sentinel-watch poll interval. Aligned with the 50 ms cadence
-/// `ServiceClient::observe_child_exit` uses internally so harness-side
-/// races track at the same granularity as the wire-side races.
-const SENTINEL_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// Send `signum` to `pid`.
 ///
 /// `signum` is a libc signal constant: `libc::SIGTERM` (15) for the
 /// shutdown-drain path, `libc::SIGKILL` (9) for crash simulation,
-/// `0` for an existence check (prefer [`pid_is_alive`] for that).
+/// `0` for an existence check (the unit tests use this to check a PID).
 ///
 /// Returns `Err` if `pid` does not exist (`ESRCH`) or the caller lacks
 /// permission (`EPERM`). Returning the typed error so the caller can
 /// distinguish "the process I was about to kill was already gone"
 /// (often fine) from "permission denied" (real configuration bug).
-#[allow(dead_code)]
 pub fn send_signal(pid: u32, signum: i32) -> Result<(), DevError> {
     // SAFETY: libc::kill is async-signal-safe and takes plain integers;
     // there is no pointer / lifetime concern. `cast_signed` is a no-op
@@ -63,7 +51,6 @@ pub fn send_signal(pid: u32, signum: i32) -> Result<(), DevError> {
 /// `ESRCH` is normalized to `Ok(())` because "the group is already
 /// gone" is the desired post-condition for every caller (deadline kill,
 /// cooperative SIGTERM, `--hard`, `MockServer::shutdown`).
-#[allow(dead_code)]
 pub fn send_signal_pgrp(pid: u32, signum: i32) -> Result<(), DevError> {
     let signed =
         i32::try_from(pid).map_err(|_| DevError::Build(format!("pid {pid} does not fit pid_t")))?;
@@ -91,8 +78,8 @@ pub fn send_signal_pgrp(pid: u32, signum: i32) -> Result<(), DevError> {
 /// A zombie process counts as alive here (`kill(pid, 0)` succeeds until
 /// the parent reaps it). That is the correct answer for most tests:
 /// "still occupying a PID slot, has not been waited on yet."
-#[allow(dead_code)]
-pub fn pid_is_alive(pid: u32) -> bool {
+#[cfg(test)]
+fn pid_is_alive(pid: u32) -> bool {
     let ret = unsafe { libc::kill(pid.cast_signed(), 0) };
     if ret == 0 {
         return true;
@@ -102,9 +89,9 @@ pub fn pid_is_alive(pid: u32) -> bool {
 }
 
 /// Outcome of [`wait_for_sentinel`].
-#[allow(dead_code)]
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SentinelOutcome {
+enum SentinelOutcome {
     /// File appeared within the backstop window.
     Appeared,
     /// Backstop expired before the file appeared.
@@ -120,12 +107,12 @@ pub enum SentinelOutcome {
 /// the named ceiling. Both outcomes are first-class returns; the caller
 /// asserts on whichever they expected.
 ///
-/// Polls [`SENTINEL_POLL_INTERVAL`] (50 ms) - low enough to be tight on
+/// Polls the shared 50 ms harness cadence - low enough to be tight on
 /// wall-clock budgets, high enough that 200-test soak runs do not melt
 /// the inotify-less polling implementation. inotify support could be
 /// layered later if a class of tests benefits from sub-50ms latency.
-#[allow(dead_code)]
-pub fn wait_for_sentinel(path: &Path, backstop: Duration) -> Result<SentinelOutcome, DevError> {
+#[cfg(test)]
+fn wait_for_sentinel(path: &Path, backstop: Duration) -> Result<SentinelOutcome, DevError> {
     let deadline = Instant::now() + backstop;
     loop {
         if path.exists() {
@@ -136,7 +123,7 @@ pub fn wait_for_sentinel(path: &Path, backstop: Duration) -> Result<SentinelOutc
             return Ok(SentinelOutcome::BackstopExpired);
         }
         let remaining = deadline - now;
-        std::thread::sleep(SENTINEL_POLL_INTERVAL.min(remaining));
+        std::thread::sleep(crate::ratatoskr::timing::POLL_INTERVAL.min(remaining));
     }
 }
 
@@ -166,7 +153,6 @@ const PROC_FILES: &[&str] = &["status", "wchan", "syscall", "stack"];
 /// The only error this function returns is from [`fs::write`] failing
 /// to create the output file (e.g. `out_dir` not writable) - that is a
 /// harness configuration bug worth surfacing.
-#[allow(dead_code)]
 pub fn snapshot_proc(pid: u32, out_dir: &Path) -> Result<(), DevError> {
     for probe in PROC_FILES {
         let src = Path::new("/proc").join(pid.to_string()).join(probe);

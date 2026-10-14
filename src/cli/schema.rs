@@ -407,9 +407,9 @@ In depth: `brokkr man clippy`."
     },
     /// Audit Cargo.lock for dependency smells (duplicate versions, etc.).
     ///
-    /// Phase-based; each phase emits zero or more findings. v1 ships
-    /// `duplicate_version` with blame attribution (which of your direct
-    /// deps is anchoring an old version).
+    /// Phase-based; each phase emits zero or more findings. Duplicate-version
+    /// findings include blame attribution (which direct dependency anchors
+    /// an old version).
     ///
     /// In depth: `brokkr man deps`.
     #[command(display_order = 0)]

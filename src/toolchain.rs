@@ -61,17 +61,16 @@ use crate::error::DevError;
 use crate::output;
 
 /// The build root whose pinned toolchain should be disabled when the global
-/// lock is taken, or `None`. Armed once from `main` (the live build root) and
-/// briefly cleared by `with_worktree` while it takes the lock for a `--commit`
-/// run, which never builds in the live root. Read by
-/// [`activate_for_lock`], which the lockfile calls under the flock.
+/// lock is taken, or `None`. Armed once from `main` for the live build root.
+/// Worktree runs bypass this setting through the lockfile's explicit
+/// no-toolchain acquisition and register their own path on the live hold.
+/// Read by [`activate_for_lock`], which the lockfile calls under the flock.
 static DISABLE_DIR: Mutex<Option<PathBuf>> = Mutex::new(None);
 
 /// Set the build root to disable at lock time, returning the previous value.
 ///
 /// Called once at startup with the live build root (or `None` when
-/// `disable_toolchain` is off / no project), and by `with_worktree` to disarm
-/// it around the `--commit` run's lock acquisition.
+/// `disable_toolchain` is off / no project).
 pub fn arm(dir: Option<PathBuf>) -> Option<PathBuf> {
     let mut slot = DISABLE_DIR.lock().unwrap_or_else(PoisonError::into_inner);
     std::mem::replace(&mut *slot, dir)
@@ -93,18 +92,29 @@ pub fn activate_for_lock() -> Result<Option<DisabledToolchain>, DevError> {
     }
 }
 
-/// Put back whatever the armed build root has moved aside, for a process about
-/// to exit without unwinding - the `check` watchdog's backstop, whose main
-/// thread (and so the `LockGuard` whose drop normally restores) is stuck. Only
-/// a sidecar whose original is absent is renamed back, which is exactly what
-/// the guard's drop would have done; never called on a path where that drop
-/// will still run.
+/// Put back toolchain pins held aside by the live lock, for a process about to
+/// exit without unwinding - the `check` watchdog's backstop, whose main thread
+/// (and so the `LockGuard` whose drop normally restores) is stuck. The hold
+/// records its primary directory and any active worktree directories. Before a
+/// lock exists, fall back to the armed build root. Only a sidecar whose
+/// original is absent is renamed back, which is exactly what the guard's drop
+/// would have done; never called on a path where that drop will still run.
 pub fn restore_armed() {
-    let dir = DISABLE_DIR
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .clone();
-    let Some(dir) = dir else { return };
+    let dirs = match crate::lockfile::current_hold_toolchain_dirs() {
+        Some(dirs) => dirs,
+        None => DISABLE_DIR
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+            .into_iter()
+            .collect(),
+    };
+    for dir in dirs {
+        restore_dir(&dir);
+    }
+}
+
+fn restore_dir(dir: &Path) {
     for name in FILES {
         let orig = dir.join(name);
         let aside = dir.join(format!("{name}{SUFFIX}"));
@@ -129,11 +139,17 @@ pub const SUFFIX: &str = ".brokkr-disabled";
 /// Guard that has moved a project's toolchain file(s) aside and restores them
 /// when dropped. An empty guard (no files found) is a harmless no-op.
 pub struct DisabledToolchain {
+    /// Directory whose toolchain files are held aside.
+    dir: PathBuf,
     /// `(moved-aside path, original path)` pairs to rename back on drop.
     moved: Vec<(PathBuf, PathBuf)>,
 }
 
 impl DisabledToolchain {
+    pub(crate) fn directory(&self) -> &Path {
+        &self.dir
+    }
+
     /// Move any toolchain file in `dir` aside, returning a guard that restores
     /// it on drop. `dir` is the code tree where cargo runs (the build root).
     ///
@@ -181,7 +197,10 @@ impl DisabledToolchain {
                 moved.push((aside, orig));
             }
         }
-        Ok(Self { moved })
+        Ok(Self {
+            dir: dir.to_owned(),
+            moved,
+        })
     }
 }
 

@@ -214,7 +214,10 @@ fn tv_elem(diag: &TvDiag) -> String {
     if let Some(col) = diag.col {
         out.push_str(&format!(", col = {col}"));
     }
-    out.push_str(&format!(", severity = {} }}", toml_str(&diag.severity)));
+    out.push_str(&format!(
+        ", severity = {} }}",
+        toml_str(diag.severity.as_str())
+    ));
     out
 }
 
@@ -286,12 +289,12 @@ mod tests {
                 TvDiag {
                     line: 4,
                     col: Some(8),
-                    severity: "error".to_owned(),
+                    severity: crate::piners::lint::Severity::Error,
                 },
                 TvDiag {
                     line: 9,
                     col: None,
-                    severity: "warning".to_owned(),
+                    severity: crate::piners::lint::Severity::Warning,
                 },
             ],
             pine: file_pin("lint/unterminated-01.pine", "aa"),
@@ -396,7 +399,7 @@ pine = { path = \"lint/alpha-01.pine\", xxh128 = \"aa\" }
         anchored.tv = vec![TvDiag {
             line: 3,
             col: Some(5),
-            severity: "error".to_owned(),
+            severity: crate::piners::lint::Severity::Error,
         }];
         let mut probes = BTreeMap::new();
         probes.insert("anchored-01".to_owned(), anchored);
@@ -419,7 +422,7 @@ pine = { path = \"lint/alpha-01.pine\", xxh128 = \"aa\" }
         anchored.tv = vec![TvDiag {
             line: 7,
             col: None,
-            severity: "warning".to_owned(),
+            severity: crate::piners::lint::Severity::Warning,
         }];
         let mut probes = BTreeMap::new();
         probes.insert("anchored-01".to_owned(), anchored);

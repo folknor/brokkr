@@ -16,9 +16,10 @@ use super::super::corpus::fixture::{
     line_tile, multiline_tile, polygon_tile, write_archive,
 };
 use super::super::eliv::Strictness;
+use super::compare::OutcomeClass;
 use super::engine::regress;
 use super::pairing::{remaining_pairs, sparse_min_cost_pairs};
-use super::report::{DiffTotals, RegressConfig};
+use super::report::RegressConfig;
 
 /// The engine under test always decodes strict here: every fixture is built by
 /// brokkr's own encoder, so an unknown field would be a bug in the test.
@@ -310,7 +311,7 @@ fn moved_vertex_respects_tolerance() {
         max_examples: 20,
     };
     let report = diff(&current, &baseline, &cfg);
-    assert_eq!(report.totals.tolerance_moved, 1);
+    assert_eq!(report.totals.count(OutcomeClass::ToleranceMoved), 1);
     assert!(report.passed(&cfg));
 
     let cfg = RegressConfig {
@@ -319,7 +320,7 @@ fn moved_vertex_respects_tolerance() {
         max_examples: 20,
     };
     let report = diff(&current, &baseline, &cfg);
-    assert_eq!(report.totals.structural_moved, 1);
+    assert_eq!(report.totals.count(OutcomeClass::StructuralMoved), 1);
     assert!(!report.passed(&cfg));
 }
 
@@ -338,7 +339,7 @@ fn attr_change_reports_attr_changed() {
     );
     let cfg = RegressConfig::default();
     let report = diff(&current, &baseline, &cfg);
-    assert_eq!(report.totals.attr_changed, 1);
+    assert_eq!(report.totals.count(OutcomeClass::AttrChanged), 1);
 }
 
 #[test]
@@ -350,7 +351,7 @@ fn layer_present_empty_on_one_side_reports_removed() {
     write_archive(&baseline, vec![(0, 0, 0, empty_layer_tile("empty", 4096))]);
     let cfg = RegressConfig::default();
     let report = diff(&current, &baseline, &cfg);
-    assert_eq!(report.totals.layers_removed, 1);
+    assert_eq!(report.totals.count(OutcomeClass::LayerRemoved), 1);
 }
 
 #[test]
@@ -362,8 +363,8 @@ fn extent_mismatch_skips_geometry() {
     write_archive(&baseline, vec![(0, 0, 0, empty_layer_tile("roads", 4096))]);
     let cfg = RegressConfig::default();
     let report = diff(&current, &baseline, &cfg);
-    assert_eq!(report.totals.extent_mismatch, 1);
-    assert_eq!(report.totals.structural_moved, 0);
+    assert_eq!(report.totals.count(OutcomeClass::ExtentMismatch), 1);
+    assert_eq!(report.totals.count(OutcomeClass::StructuralMoved), 0);
 }
 
 #[test]
@@ -388,8 +389,8 @@ fn polygon_hole_reassigned_at_zero_distance_is_structural() {
         max_examples: 20,
     };
     let report = diff(&current, &baseline, &cfg);
-    assert_eq!(report.totals.structural_moved, 1);
-    assert_eq!(report.totals.tolerance_moved, 0);
+    assert_eq!(report.totals.count(OutcomeClass::StructuralMoved), 1);
+    assert_eq!(report.totals.count(OutcomeClass::ToleranceMoved), 0);
 }
 
 #[test]
@@ -420,8 +421,8 @@ fn polygon_hole_escaping_its_outer_is_structural_not_tolerance() {
         max_examples: 20,
     };
     let report = diff(&current, &baseline, &cfg);
-    assert_eq!(report.totals.structural_moved, 1);
-    assert_eq!(report.totals.tolerance_moved, 0);
+    assert_eq!(report.totals.count(OutcomeClass::StructuralMoved), 1);
+    assert_eq!(report.totals.count(OutcomeClass::ToleranceMoved), 0);
 }
 
 #[test]
@@ -485,7 +486,7 @@ fn detailed_pair_multiplicity_is_reported_per_addressed_tile() {
     assert_eq!(report.counters.unique_blob_pairs, 1);
     assert_eq!(report.counters.detailed_pairs, 1);
     assert_eq!(report.counters.detailed_tiles, 2);
-    assert_eq!(report.totals.tolerance_moved, 2);
+    assert_eq!(report.totals.count(OutcomeClass::ToleranceMoved), 2);
 }
 
 #[test]
@@ -543,13 +544,9 @@ fn canonical_edge_cases_have_expected_live_engine_outcomes() {
     // preceding outer ring), so hole containment differs between archives.
     assert_eq!(report.identical_tiles, 2);
     assert_eq!(report.diff_count, 3);
-    assert_eq!(
-        report.totals,
-        DiffTotals {
-            attr_changed: 1,
-            tolerance_moved: 1,
-            structural_moved: 1,
-            ..DiffTotals::default()
-        }
-    );
+    assert_eq!(report.totals.only_in_current, 0);
+    assert_eq!(report.totals.only_in_baseline, 0);
+    assert_eq!(report.totals.count(OutcomeClass::AttrChanged), 1);
+    assert_eq!(report.totals.count(OutcomeClass::ToleranceMoved), 1);
+    assert_eq!(report.totals.count(OutcomeClass::StructuralMoved), 1);
 }

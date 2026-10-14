@@ -65,13 +65,11 @@ The `Sample` struct, both DDLs (`sidecar.rs` and the dead migrate v7→v8), `sto
 
 Enforcement proposed: one field table, macro-generated.
 
-## MEA-007 - Provenance-prefix lists disagree
+## MEA-007 - Provenance-prefix classes outside the results DB
 
 Reported by: measurement-storage.
 
-compare `{meta, env, prev}`, single/details `{meta, threads}`, `load_children` `{env}`. `threads.*` show up as `counters:` noise on hotpath pairs; compare's `env.` exclusion is dead because env was already stripped.
-
-Design hunt (measurement): `KvPair.key: String` carries five classes as prefixes - `meta.*`, `env.*`, `prev.*`, `threads.*`, bare runtime counters - plus `peak_rss_kb`, which `build_row` promotes to a column and removes; `db::write::insert_hotpath` writes `threads.*` `OR IGNORE` so stderr wins; `ratatoskr/gate.rs`, `ratatoskr_sync/bench_gate.rs`, `db/migrate.rs` and `config_parts/parser.rs` each format or strip `meta.`/`env.` themselves. So "counter" means different things to compare (counts `threads.*`) and single/details (counts `prev.*`). Proposed: a `KvClass` classifier in `db/types.rs` used once at load and once at write, with `StoredRow` carrying `meta`, `env` (already done as `captured_env`), `predecessor: Option<PreviousRun>`, `thread_summary` and `counters`, `RunRow` taking the same split, and prefixing happening only in `db::write`.
+`db::types::KvClass` now classifies kv keys once for the results DB (load, compare, both detail views, writes). Residue: `meta.`/`env.` prefixes are still formatted or stripped by hand in the ratatoskr gate paths (`ratatoskr/gate.rs`, `ratatoskr_sync/bench_gate.rs` or their successors), `config_parts/parser.rs` and the legacy migrations; `RunRow` still takes kv pairs as prefixed strings rather than the split `meta`/`env`/`predecessor`/`thread_summary`/`counters` the proposal named.
 
 ## MEA-008 - Invocation argv is stored as a string and re-parsed with different rules
 
@@ -117,13 +115,11 @@ Reported by: measurement-storage, ratatoskr.
 
 Design hunt (other-projects): `bench_gate.rs`'s round trip means a serialization failure becomes an empty map and the run then fails with "missing `sidecar.x`", blaming the data rather than the encoder, though `GateRun::from_parts` exists to skip the round trip. Proposed: keep the `Map`s in the in-memory row and serialize only at the DB edge.
 
-## MEA-014 - Row provenance precedence is decided per writer
+## MEA-014 - The recorded cargo profile is spelled by each writer
 
 Reported by: measurement-storage.
 
-`cargo_profile` is spelled at each writer while `cargo_features` has a harness default. Precedence disagrees: features config-over-harness; mode/brokkr_args harness-over-config; the `with_brokkr_args` doc claims config wins. See BUG-041, BUG-047.
-
-Design hunt (measurement): `BuildConfig.profile: &'static str` (`"release"`/`"dev"`) while `CargoProfile` exists; the `CargoProfile::Dev` doc records the drift this already caused ("older dev rows in those series carry the wrong profile"). Features likewise: `BenchContext::with_build_config` joins `build_config.features` into the harness default, `BenchConfig.cargo_features` can override it, and `HarnessContext` (no build) leaves it unset. Proposed: `cargo_build` returns `BuiltArtifact { path, profile: CargoProfile, features: FeatureSet, target: TargetKind }`, the harness takes the artifact (or an explicit `ExternalBuild::{Java, CMake}`) and stamps the row from it, and writers stop naming profiles.
+`cargo_features` labels are canonicalised (sorted, deduplicated) on write and read, and `with_brokkr_args` precedence is documented. Residue: about 30 `cargo_profile` assignments across two dozen writer files (almost all a literal `CargoProfile::Release`) say which profile was built, independently of `BuildConfig.profile: &'static str`, which is what actually built. Proposed: `cargo_build` returns `BuiltArtifact { path, profile, features, target }` and the harness stamps the row from it.
 
 ## MEA-015 - Store mechanics invented per site
 

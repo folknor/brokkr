@@ -19,7 +19,7 @@
 use std::collections::BTreeMap;
 
 use crate::output;
-use crate::piners::registry::Registry;
+use crate::piners::registry::{CorpusDisposition, Registry};
 use crate::piners::report::HarnessReport;
 
 /// One probe whose actual disposition does not satisfy its pinned `expected`.
@@ -55,7 +55,7 @@ pub fn evaluate(ids: &[String], registry: &Registry, report: &HarnessReport) -> 
                         p.disposition()
                     )
                 }
-                Some(label) => label.to_owned(),
+                Some(label) => label.as_str().to_owned(),
             };
             (p.probe.as_str(), got)
         })
@@ -63,13 +63,13 @@ pub fn evaluate(ids: &[String], registry: &Registry, report: &HarnessReport) -> 
 
     let mut diffs = Vec::new();
     for id in ids {
-        let expected = registry.pins.get(id).and_then(|p| p.expected.clone());
+        let expected = registry.pins.get(id).and_then(|p| p.expected);
         let got = actual.get(id.as_str()).cloned();
-        let satisfied = matches!((&expected, &got), (Some(e), Some(g)) if e == g);
+        let satisfied = matches!((expected, &got), (Some(e), Some(g)) if e.as_str() == g);
         if !satisfied {
             diffs.push(GateDiff {
                 probe: id.clone(),
-                expected,
+                expected: expected.map(|d| d.as_str().to_owned()),
                 actual: got,
             });
         }
@@ -77,19 +77,13 @@ pub fn evaluate(ids: &[String], registry: &Registry, report: &HarnessReport) -> 
     diffs
 }
 
-/// The dispositions the harness signals with exit code 1 ("break(s)"). A
-/// probe can pin any of them: a probe exercising an unimplemented feature
-/// legitimately expects `compile_fail`, and one whose process the harness
-/// saw die is `harness_abort`.
-pub const BREAK_DISPOSITIONS: [&str; 3] = ["compile_fail", "runtime_fail", "harness_abort"];
-
 /// Whether the report carries at least one break line (any probe).
 pub fn report_has_break(report: &HarnessReport) -> bool {
     let tainted = report.tainted();
     report.probes.iter().any(|p| {
         !tainted.contains(p.probe.as_str())
             && p.valid_disposition()
-                .is_some_and(|d| BREAK_DISPOSITIONS.contains(&d))
+                .is_some_and(CorpusDisposition::is_break)
     })
 }
 
@@ -109,7 +103,7 @@ pub fn breaks_all_pinned(ids: &[String], registry: &Registry, report: &HarnessRe
     for p in &report.probes {
         let Some(disp) = p
             .valid_disposition()
-            .filter(|d| BREAK_DISPOSITIONS.contains(d))
+            .filter(|disposition| disposition.is_break())
         else {
             continue;
         };
@@ -117,11 +111,7 @@ pub fn breaks_all_pinned(ids: &[String], registry: &Registry, report: &HarnessRe
         // A probe with an invalid occurrence explains nothing.
         let pinned = !tainted.contains(p.probe.as_str())
             && selected.contains(p.probe.as_str())
-            && registry
-                .pins
-                .get(&p.probe)
-                .and_then(|pin| pin.expected.as_deref())
-                == Some(disp);
+            && registry.pins.get(&p.probe).and_then(|pin| pin.expected) == Some(disp);
         if !pinned {
             return false;
         }
@@ -170,7 +160,9 @@ mod tests {
                 xxh128: "11".into(),
             },
         );
-        p.expected = expected.map(str::to_owned);
+        p.expected = expected.map(|label| {
+            CorpusDisposition::from_label(label).expect("test disposition is recognized")
+        });
         p
     }
 

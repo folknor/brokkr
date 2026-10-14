@@ -27,6 +27,7 @@ use super::prepared::{PreparedFeature, PreparedLayer, PreparedTile};
 
 /// The full set of differences the diff can report. Everything except
 /// `ToleranceMoved` fails a run; `ToleranceMoved` is budgeted by `--max-moved`.
+#[repr(usize)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum OutcomeClass {
     LayerAdded,
@@ -37,9 +38,28 @@ pub(crate) enum OutcomeClass {
     AttrChanged,
     ToleranceMoved,
     StructuralMoved,
+    #[doc(hidden)]
+    Count,
 }
 
 impl OutcomeClass {
+    pub(crate) const COUNT: usize = Self::Count as usize;
+
+    pub(crate) const ALL: [Self; Self::COUNT] = [
+        Self::LayerAdded,
+        Self::LayerRemoved,
+        Self::ExtentMismatch,
+        Self::MissingFeatures,
+        Self::AddedFeatures,
+        Self::AttrChanged,
+        Self::ToleranceMoved,
+        Self::StructuralMoved,
+    ];
+
+    pub(crate) const fn index(self) -> usize {
+        self as usize
+    }
+
     pub(crate) fn name(self) -> &'static str {
         match self {
             Self::LayerAdded => "layer_added",
@@ -50,7 +70,57 @@ impl OutcomeClass {
             Self::AttrChanged => "attr_changed",
             Self::ToleranceMoved => "tolerance_moved",
             Self::StructuralMoved => "structural_moved",
+            Self::Count => "<count>",
         }
+    }
+
+    pub(crate) const fn field_name(self) -> &'static str {
+        match self {
+            Self::LayerAdded => "layers_added",
+            Self::LayerRemoved => "layers_removed",
+            Self::ExtentMismatch => "extent_mismatch",
+            Self::MissingFeatures => "missing_features",
+            Self::AddedFeatures => "added_features",
+            Self::AttrChanged => "attr_changed",
+            Self::ToleranceMoved => "tolerance_moved",
+            Self::StructuralMoved => "structural_moved",
+            Self::Count => "<count>",
+        }
+    }
+
+    pub(crate) const fn text_label(self) -> &'static str {
+        match self {
+            Self::LayerAdded => "added_layers",
+            Self::LayerRemoved => "removed_layers",
+            Self::ExtentMismatch => "extent",
+            Self::MissingFeatures => "missing",
+            Self::AddedFeatures => "added",
+            Self::AttrChanged => "attrs",
+            Self::ToleranceMoved => "tol",
+            Self::StructuralMoved => "structural",
+            Self::Count => "<count>",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct OutcomeCounts([u64; OutcomeClass::COUNT]);
+
+impl OutcomeCounts {
+    pub(crate) fn get(&self, class: OutcomeClass) -> u64 {
+        self.0[class.index()]
+    }
+
+    pub(crate) fn add(&mut self, class: OutcomeClass, count: u64) {
+        self.0[class.index()] += count;
+    }
+
+    pub(crate) fn any(&self) -> bool {
+        OutcomeClass::ALL.iter().any(|class| self.get(*class) > 0)
+    }
+
+    pub(crate) fn is_zero(&self) -> bool {
+        !self.any()
     }
 }
 
@@ -104,27 +174,12 @@ pub(crate) struct OutcomeEvent {
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ContentCounts {
-    layers_added: u64,
-    layers_removed: u64,
-    extent_mismatch: u64,
-    missing_features: u64,
-    added_features: u64,
-    attr_changed: u64,
-    tolerance_moved: u64,
-    structural_moved: u64,
+    outcomes: OutcomeCounts,
 }
 
 impl ContentCounts {
     pub(crate) fn any(&self) -> bool {
-        self.layers_added
-            + self.layers_removed
-            + self.extent_mismatch
-            + self.missing_features
-            + self.added_features
-            + self.attr_changed
-            + self.tolerance_moved
-            + self.structural_moved
-            > 0
+        self.outcomes.any()
     }
 }
 
@@ -137,16 +192,7 @@ impl DiffSink for DetailOutcome {
         current: Option<&PreparedFeature>,
         baseline: Option<&PreparedFeature>,
     ) {
-        match class {
-            OutcomeClass::LayerAdded => self.counts.layers_added += 1,
-            OutcomeClass::LayerRemoved => self.counts.layers_removed += 1,
-            OutcomeClass::ExtentMismatch => self.counts.extent_mismatch += 1,
-            OutcomeClass::MissingFeatures => self.counts.missing_features += 1,
-            OutcomeClass::AddedFeatures => self.counts.added_features += 1,
-            OutcomeClass::AttrChanged => self.counts.attr_changed += 1,
-            OutcomeClass::ToleranceMoved => self.counts.tolerance_moved += 1,
-            OutcomeClass::StructuralMoved => self.counts.structural_moved += 1,
-        }
+        self.counts.outcomes.add(class, 1);
         self.events.push(OutcomeEvent {
             layer: Arc::clone(layer),
             id: current.or(baseline).and_then(|feature| feature.id),

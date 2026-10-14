@@ -434,15 +434,21 @@ fn direct_libtest_args(
     threads: u32,
     libtest_extra: &[String],
 ) -> Result<Vec<String>, DevError> {
-    let mut libtest_args: Vec<String> = sweep.libtest_args.clone();
-    libtest_args.extend(sweep.name_filters.iter().cloned());
+    let filters = sweep.lane_filters();
+    let mut libtest_args = filters.libtest_args();
+    libtest_args.extend(filters.name_filters());
     libtest_args.extend(libtest_extra.iter().cloned());
 
     // The budget is the single source of in-flight count, so a `--test-threads`
     // arriving from anywhere else is a second one. Refused rather than
     // silently overridden: the two numbers multiply into a concurrency nobody
     // asked for, which is exactly the failure the budget key exists to prevent.
-    if effective_test_threads(&libtest_args)?.is_some() {
+    if effective_test_threads(&libtest_args)?.is_some()
+        // A synthetic/legacy sweep may still carry an execution flag in the
+        // compatibility argv field. Resolved profiles keep only typed
+        // filters there, but refuse that stale spelling too.
+        || effective_test_threads(&sweep.libtest_args)?.is_some()
+    {
         return Err(DevError::Config(format!(
             "sweep '{}' sets `parallel.budget` and also carries a --test-threads \
              override; the budget owns per-binary thread counts. Drop the \
@@ -505,8 +511,9 @@ fn repro_cargo_line(
         args.extend(p.cargo_args().iter().map(|s| (*s).to_owned()));
     }
     args.extend(cargo_extra.iter().cloned());
-    let mut libtest: Vec<String> = sweep.libtest_args.clone();
-    libtest.extend(sweep.name_filters.iter().cloned());
+    let filters = sweep.lane_filters();
+    let mut libtest = filters.libtest_args();
+    libtest.extend(filters.name_filters());
     if !libtest.is_empty() {
         args.push("--".into());
         args.extend(libtest);

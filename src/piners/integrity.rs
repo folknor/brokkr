@@ -27,6 +27,7 @@ use std::collections::{BTreeSet, HashSet};
 
 use crate::output;
 use crate::piners::contract::{self, ContractAssessment};
+use crate::piners::registry::CorpusDisposition;
 use crate::piners::report::{self, HarnessReport};
 
 /// One harness invocation, judged once.
@@ -105,7 +106,7 @@ impl RunAssessment {
             // at this classification site so a raw outcome never counts as
             // an abort on its own.
             .filter(|p| {
-                p.valid_disposition() == Some(report::HARNESS_ABORT)
+                p.valid_disposition() == Some(CorpusDisposition::HarnessAbort)
                     && self.rec.valid.contains(&p.probe)
             })
             .map(|p| p.probe.as_str())

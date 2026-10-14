@@ -597,7 +597,7 @@ pub(crate) fn assemble_nextest_lane(
 
     let mut prepared = PreparedLane::bare(env.clone());
     prepared.runtime_fingerprint = artifacts.runtime_fingerprint;
-    prepared.include_ignored = args_run_ignored(sweep.libtest_args.iter().map(String::as_str));
+    prepared.include_ignored = sweep.lane_filters().include_ignored;
     prepared.enumerated = lane_binaries.len();
     prepared.resolutions.push(PreparedResolution { resolution: None, selection, binaries });
     prepared.nextest = Some(NextestPrepared {

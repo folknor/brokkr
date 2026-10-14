@@ -1,3 +1,4 @@
+use super::super::types::KvClass;
 use super::super::{KvPair, StoredRow};
 
 /// Format the detail fields that aren't shown in the summary table.
@@ -73,23 +74,20 @@ pub fn format_details(row: &StoredRow) -> String {
     let mut meta_kv: Vec<&KvPair> = row
         .kv
         .iter()
-        .filter(|kv| kv.key.starts_with("meta."))
+        .filter(|kv| kv.class() == KvClass::Metadata)
         .collect();
     meta_kv.sort_by_key(|kv| &kv.key);
     for kv in &meta_kv {
-        let label = kv
-            .key
-            .strip_prefix("meta.")
-            .unwrap_or(&kv.key)
-            .replace('_', " ");
+        let label = kv.class().suffix(&kv.key).replace('_', " ");
         fields.push((label, kv.value.to_string()));
     }
 
-    // Runtime kv pairs (non-meta, non-threads).
+    // Runtime counters and predecessor context; metadata, env and thread
+    // summaries have their own fields or are rendered separately.
     let mut runtime_kv: Vec<&KvPair> = row
         .kv
         .iter()
-        .filter(|kv| !kv.key.starts_with("meta.") && !kv.key.starts_with("threads."))
+        .filter(|kv| matches!(kv.class(), KvClass::Counter | KvClass::Predecessor))
         .collect();
     runtime_kv.sort_by_key(|kv| &kv.key);
     for kv in &runtime_kv {

@@ -8,9 +8,8 @@
 //!   per-protocol port flags brokkr does not use in v0; ephemeral
 //!   ports + sentinel reporting is the simpler path).
 //! - sentinel: written atomically (`<NAME> <port>\n` per protocol)
-//!   once every listener is bound. Brokkr's existing
-//!   `wait_for_sentinel` waits for presence; this module parses the
-//!   content into [`Endpoints`].
+//!   once every listener is bound. [`wait_for_endpoints`] waits for the
+//!   sentinel and parses its content into [`Endpoints`].
 //! - SIGTERM: clean shutdown within ~1s. SIGKILL is the backstop.
 //!
 //! Sæhrimnir's repo is authoritative for protocol surface, fixture
@@ -26,6 +25,8 @@ use crate::error::DevError;
 use crate::lockfile::{self, LockContext};
 use crate::output;
 use crate::ratatoskr::process as proc_helpers;
+use crate::ratatoskr::timing::{POLL_INTERVAL, SHUTDOWN_POLL_INTERVAL};
+pub use crate::ratatoskr::timing::{READINESS_BUDGET, SHUTDOWN_BUDGET};
 
 const MOCK_HOST: &str = "127.0.0.1";
 
@@ -471,17 +472,6 @@ impl Drop for MockServer {
 /// inside the per-run artefact dir instead.
 const MOCK_DIR: &str = ".brokkr/ratatoskr/mock";
 
-/// Wall-clock budget for sæhrimnir to bind all nine listeners and write
-/// the readiness sentinel. Generous - sæhrimnir's cold-start is sub-100ms
-/// in practice, but the budget needs to absorb a debug-build startup or
-/// a CPU-pinned host without spurious failures.
-pub const READINESS_BUDGET: Duration = Duration::from_secs(10);
-
-/// Wall-clock budget for sæhrimnir to honour SIGTERM. Plan 2 promises
-/// "clean shutdown within 1s"; we give it 1.5 to absorb scheduler jitter
-/// before escalating to SIGKILL.
-pub const SHUTDOWN_BUDGET: Duration = Duration::from_millis(1500);
-
 /// Resolved inputs for `brokkr mock-serve`. Pulled out of the
 /// CLI-dispatch shell so the spawn-and-loop body can be unit-tested
 /// against synthetic paths if desired.
@@ -798,7 +788,7 @@ fn wait_for_endpoints_inner(
                 "saehrimnir did not write a readiness sentinel within {budget:?}."
             )));
         }
-        std::thread::sleep(Duration::from_millis(50));
+        std::thread::sleep(POLL_INTERVAL);
     }
 }
 
@@ -844,7 +834,7 @@ fn wait_with_signals(
             kill_for_shutdown(pid, libc::SIGTERM, isolate_pg);
             return wait_with_deadline(child, pid, SHUTDOWN_BUDGET, isolate_pg);
         }
-        std::thread::sleep(Duration::from_millis(50));
+        std::thread::sleep(POLL_INTERVAL);
     }
 }
 
@@ -869,7 +859,7 @@ pub fn wait_with_deadline(
             kill_for_shutdown(pid, libc::SIGKILL, isolate_pg);
             return child.wait().map_err(DevError::Io);
         }
-        std::thread::sleep(Duration::from_millis(25));
+        std::thread::sleep(SHUTDOWN_POLL_INTERVAL);
     }
 }
 

@@ -7,7 +7,8 @@
 - `src/elivagar/commands.rs` - `ElivagarCommand` (`Built(BuiltCommand)` for
   the main binary and the cargo examples, `External(ExternalTool)` for
   Planetiler and Tilemaker) with `needs_pbf()`; `BuiltCommand` carries
-  `build_args()`, `metadata()`, `output_files()` and `result_command()`.
+  `build_args()`, `metadata()`, `output_files()` and `id()` - the CLI id,
+  which is also the `command` results are filed under.
 - `src/elivagar/dispatch.rs` - exposes `run_command()`. Routes through
   run/bench/hotpath/alloc based on command enum + mode. Uses `BenchContext`
   for build+harness.

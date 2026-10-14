@@ -62,16 +62,11 @@ Reported by: config-cli, measurement, map-projects.
 
 Proposed splits: real modules for `main_parts` and `cli`. Measurement: `measure/wall.rs`, `measure/loop.rs`, `measure/record.rs` (row building, `prev.*`, result line), `measure/capture.rs` (hotpath child runner), `measure/kv.rs` (stderr counter protocol), `sidecar/backup.rs`, and `bench_variants.rs` (`run_variants` is a dispatch helper, not harness). Resolve: `datasets::resolve` (entry resolution, `SnapshotRef`, `select_one`, typed errors), `elivagar::archive_store`, DB paths next to their DBs, `nidhogg_data_dir_path` into `nidhogg`. Download: a real `pbfhogg::download` with submodules `source` (Geofabrik/planet, aliases, URLs), `layout` (`raw_pbf_path`, `osc_filename`), `snapshot` (promotion, collision preflight, toml writes) and `modes`.
 
-## STR-006 - `main_parts/commands.rs` is a grab bag of other modules' work
+## STR-006 - `main_parts/commands.rs` still holds unrelated handlers
 
 Reported by: config-cli, process-control.
 
-About 1600 lines, holding things unrelated to each other and to dispatch:
-- The `clean` implementation, including per-project artefact rules (`if project == Project::Elivagar`, `Nidhogg`, `Ratatoskr`, `Dellingr`, `Piners`) and a `/proc` owner-liveness check (`join_dir_owner_alive`, `proc_start_epoch`).
-- `lock`/`kill`, including pidfd signalling and preflight of kill targets: about 450 lines. Its `/proc` starttime work duplicates competence `lockfile` already has.
-- `passthrough`'s run and timing stats, `env`, `pmtiles-stats`, `verify` routing and generic hotpath.
-
-Proposed: `kill`/`lock` presentation and orchestration move to a `lock_cmd.rs` consuming the typed holder status and verified-process types (see the lock entries below). `clean` moves to `src/clean.rs`, with each project contributing its own `fn clean_targets(&ResolvedPaths) -> Vec<CleanTarget>`. `env` moves to `src/env.rs`, which already exists.
+`clean` moved to `src/clean.rs`, `lock`/`kill` to `src/lock_cmd.rs` and `env` into `src/env.rs`. Residue: passthrough run and timing stats, `pmtiles-stats`, `verify` routing and the generic hotpath still live in `main_parts/commands.rs`, and `clean.rs` still branches on every project rather than asking each project module for its clean targets.
 
 ## STR-007 - `ResolvedSweep` is two types glued together by a mutable field
 
@@ -103,12 +98,6 @@ Reported by: check-plan.
 
 Proposed: `enum Inventory { Prepared { executions, .., unlisted }, Skipped(reason), Unavailable(UnavailableReason), DocTests }`, with a typed `UnavailableReason` (`CargoThreaded`, `NoShim(reason)`, `PrepareFailed(msg)`, `Stopped`). Enums stay in the model and serialize with `rename_all`; the JSON DTOs stop flattening early.
 
-## STR-011 - `accounting.rs` is four modules
-
-Reported by: check-plan.
-
-At about 2700 lines it holds: plan types and the wire format; the journal (lock-free fd write, global state, `JOURNAL_TEST_LOCK`, retention and pruning); the live `LaneTap` sink; the pure reconciliation with outcome, status and green; and the `--json` blocks. Prepare writes the plan types and everyone reads them, the journal is execution infrastructure, and reconciliation is pure. Proposed: `plan.rs` (types, `LaneRecordWire`), `journal.rs`, `reconcile.rs` and `report_json.rs`. `lane_runs_doctests` and `artifact_drift` are plan-domain predicates that live in this file only because it happened to hold `LaneKind`.
-
 ## STR-012 - `prepare.rs` interleaves building, listing and policy in one loop
 
 Reported by: check-plan.
@@ -127,28 +116,6 @@ Reported by: check-plan, check-exec.
 
 `selection.rs` claims "One decision, made once" for which runs exist. But `effective_unification`, the input that decides between `Resolutions::Combined` and `PerPackage`, is decided in `phase.rs::resolve_sweep_unification`, with its own promotion eligibility and metadata fetch, and written back onto the sweep. `parallel.rs` holds `unify_workspace`, `narrows_selection`, `reject_forwarded_selectors` and `target_selector`, which are selection and unification decisions that `profile.rs` and `selection.rs` call. They live in the parallel lane file only because the parallel lane was their first consumer; the file's own comment says the pin "now lives on the sweep". `parallel::repro_cargo_line` and `output.rs`'s `full_command` build the "failing command" line in two different ways. Proposed: promotion and `resolve_unification` move into selection, which already holds the feature oracle and the CLI scope. The argv classifiers move there too, as one typed forwarded-argv parser. One `ReproLine` builder works from the planned request. The parallel lane file keeps only budgeting, fan-out and per-binary reporting.
 
-## STR-015 - Test-timeout sentinels stand in for "no test to name", and attribution is recomputed
-
-Reported by: check-exec.
-
-`NO_COMPLETION`, `IDLE_WEDGE` and `WALL_WEDGE` are `&str` constants passed where a test name goes. `TestTracker::timed_out` returns `Option<(String, Duration)>`, and callers string-compare the name to learn which clock fired: `kill_of` (`TimeoutReason::PerTest { name } if name == NO_COMPLETION`), `watchdog_loop_with_timing` (`if name == IDLE_WEDGE`) and `harness_shim::Session::watchdog` (`&& name != super::IDLE_WEDGE`). `TimeoutReason::label()` turns the enum back into the same sentinels. `TimeoutReason` was introduced to keep "which clock fired" out of the name field, but `PerTest { name: NO_COMPLETION }` puts it straight back. A test actually named `(no test completed within the budget)` would be indistinguishable from the sentinel. Whether a kill's name is exact, a suspect or absent is decided three times: in the runner from `WallShape`, in `test_cmd::hung_test_tag` (`one_test && matches!(reason, PerTest)`), and in `format_hung_test`, whose wording branches on the reason. The "stale, best guess" warning is printed from inside the watchdog loop (`warned`). Proposed: `enum Expiry { Watched { test, elapsed }, NoCompletion { elapsed }, Idle { elapsed } }` returned by `timed_out`, `enum TimeoutReason { Watched { name }, NoCompletion, Idle, Wall { blamed }, OneTestWall { name } }`, with `KillCause` following without any string compare, and `HungTest` carrying `attribution: Exact | Suspect { stale } | None`, set once at kill time. `HungTest.test: String` (always `reason.label()`) goes away.
-
-## STR-016 - `test_runner.rs` does six jobs
-
-Reported by: check-exec.
-
-At about 3100 lines:
-1. The observation vocabulary (`ObsEvent`, `StreamTap`, `StrictPlan`, `ShimMode`).
-2. The libtest JSON protocol (`split_trailing_event`, `JsonReconstructor`).
-3. The deadline model (`TestTracker`, `Ceilings`, `TimeoutReason`, constants).
-4. Process-group mechanics (spawn, stop, kill, the `/proc` child scan, drains, `read_chunk`, `join_drains`).
-5. Three runners (`streaming_run_libtest`, `run_libtest_parallel`, `run_listing`).
-6. Reporting (`format_hung_test`, `is_bare_status_line` for test_cmd's condenser, `effective_test_threads`, `hash_file`).
-
-It also still spells `CARGO_TARGET_<HOST>_RUNNER` itself, the last copy outside `rustflags::CargoLaunchConfig`, which now owns the config chain and the runner lookup.
-
-Proposed: `test_runner/{events.rs, libtest_json.rs, deadline.rs, procgroup.rs, run.rs, hung.rs}`. `hash_file` is the plan's artifact identity, re-checked by the shim, and belongs with planning and accounting. `StrictPlan` is a planning artifact the runner merely consumes.
-
 ## STR-017 - The test runner reaches into process globals
 
 Reported by: check-exec.
@@ -160,12 +127,6 @@ Reported by: check-exec.
 Reported by: check-exec.
 
 `run_parallel_sweep` mixes timing load, cost estimation, slot claims, ordering, announcement, fan-out, abort, timing record and reporting. `claim_slots`, `useful_slot_cap`, `timing_weight_for` and `mean_cost_per_test` are pure but composed inline, so they are tested piecewise, while the oscillation and collapse bugs described in `binary_timings.rs`'s header lived in their composition. `BinaryCost { serial: f64, slowest: f64 }` holds seconds as floats, `claim_slots` works in `u64` ms, `weight_ms` and `weight_ms_ceil` convert between them, and everything else uses `Duration`. The "is this weight finite and non-negative" guarding exists only because the store uses `f64`. Proposed: one pure `fn allocate(binaries: &[(Key, count)], history, budget) -> Vec<(Key, slots)>` next to `binary_timings.rs`, tested whole, and `Duration` in the store (serialized as ms), which removes `weight_ms`, `weight_ms_ceil` and the NaN reasoning.
-
-## STR-019 - `test_cmd.rs` is a whole second lane
-
-Reported by: check-exec.
-
-At about 4000 lines it holds planning (`plan_focused`, `prebuild_targets`, `BuildShape`, `cargo_head`), its own verdict logic, display filtering (`StdoutCondenser`, `keep_stdout_line`, `is_test_phase_noise`, `stderr_indicates_compile_error`, and `test_runner::is_bare_status_line`, exported just for it), repeat bookkeeping and package resolution. The display condenser exists because brokkr renders JSON events back into human text and then has to filter that text. With a typed execution outcome, test_cmd could render footers from events directly. Proposed split along the real seams: `test_cmd/{plan.rs, run.rs, verdict.rs, display.rs}`.
 
 ## STR-020 - The harness-shim session
 
@@ -183,16 +144,11 @@ The block splitter, header rule and noise classification now live in `src/rustc_
 
 Proposed: one `Diagnostic { level: Level, code: Option<LintName>, message, site: Option<Site { file, line, col }>, detail, package: Option<PackageId> }`, produced by both the JSON reader and the manifest-lint reader and rendered exactly once at the edge, with sort and dedupe keys derived from fields. Modules: `src/rustc_text.rs` (block splitter, `Level`, block classification), `src/cargo_json.rs` (JSON messages to `Diagnostic`, with manifest lints read via `rustc_text`), and `src/diagnostic.rs` (the type, `Owner`, `LintName`, rendering). Libtest parsing moves to the test-execution side. `parse_clippy` retires entirely: the test build and the support pre-build run with `--message-format=json` (the serial lane already parses cargo JSON for executables in `build.rs`) and render through the clippy pipeline. The header's reason for keeping the text path ("not worth a second JSON pass") no longer holds once the formatter is shared.
 
-## STR-022 - `check_cmd/phase.rs` is the whole command
+## STR-022 - `check_cmd/phase.rs` is still most of the command
 
 Reported by: check-report.
 
-At 5323 lines it holds: the verdict and the `--json` schema, the sweep activation ladder, profile resolution, the prose shortcut, the convention-phase runners and their rendering, script-check rendering, clippy and rustdoc orchestration, manifest-lint attribution, allow announcement and staleness, the cross-sweep diagnostic merger and formatter, failed-run stream excerpting, `cmd_clippy`, the test phase driver and lane runner, and about 800 lines of tests. `#[allow(clippy::too_many_arguments)]` sits on `finish_check`, `emit_json_summary`, `report_diagnostic_phase`, `run_per_build_shape`, `run_rustdoc_phase`, `cmd_clippy` and others. Proposed seams:
-- `check_cmd/verdict.rs`: `RunStop`, `finish_check`, `verdict_context`, `CheckSummary`, `fmt_wall` and timings, with the verdict input (`certifies`, profile label, sweep labels, lints, skip phases, prose-only, package, failing phase, started) as one struct assembled as the run proceeds rather than threaded through at the end. `RunReport` already holds half of it.
-- `check_cmd/conventions.rs`: the gremlins, header, textlint, manifest, script, dependency and publish-cycle runners, which all share one shape (scan, `Vec<Violation>`, scope order, a `"<phase>: N violations"` block, `Reported`). The four near-identical bodies (`run_header`, `run_textlint`, `run_manifest`, gremlins) differ only in the violation type and the green line. A `trait Finding { fn path(&self) -> &Path; fn render(&self) -> String }` plus one `report_findings(phase, findings)` removes the per-phase copies of the rendering decision (header word "found" or "violation", ordering, sentinel).
-- `check_cmd/diagnostics/`: `run_per_build_shape`, allows (`announce_allows`, stale-allow judging, `sited_match`), manifest-lint attribution, merge and format, and failed-run stream excerpting (`failed_run_streams`, `drop_build_directives`, `is_self_contained`, `failed_stdout_line`), with `cmd_clippy` next to the pipeline it replays.
-- `check_cmd/activation.rs`: `decide_active_sweeps`, `build_clippy_sweep` and `merge_check_envs`, which are planning.
-- The test phase driver (`run_test_phase`, `run_test_lane`, `record_phase_stop`) moves to the test-execution files.
+`activation.rs`, `conventions.rs` and `verdict.rs` came out of it, and header/textlint/manifest findings share one renderer. Residue in `phase.rs`: the diagnostic pipeline and rendering (`run_per_build_shape`, allow announcement and staleness, manifest-lint attribution, merge and format, failed-run stream excerpting), `cmd_clippy`, the test phase driver (`run_test_phase`, `run_test_lane`, `record_phase_stop`) and build/audit orchestration. `finish_check` still takes its verdict inputs as loose arguments, and `Verdict`, `Phase` and `Reporter` are not yet types.
 
 ## STR-023 - `check_cmd/output.rs` is not output
 

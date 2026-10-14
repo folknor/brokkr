@@ -3,6 +3,7 @@
 use super::ResultsDb;
 use super::like::{ESCAPE, contains_pattern, prefix_pattern, require_prefix};
 use super::schema::SELECT_COLS;
+use super::types::{KvClass, canonical_cargo_features};
 use super::{
     Distribution, DistributionUs, HotpathData, HotpathFunction, HotpathThread, KvPair, KvValue,
     PreviousRun, QueryFilter, RunId, StoredRow,
@@ -224,13 +225,15 @@ pub(super) fn load_children(
     // downstream consumer - display, pair-key dedup, filters - treats
     // them as a distinct axis instead of anonymous kv.
     let mut captured_env = std::collections::BTreeMap::new();
-    kv.retain(|p| {
-        if let Some(name) = p.key.strip_prefix("env.") {
-            captured_env.insert(name.to_owned(), p.value.to_string());
+    kv.retain(|p| match p.class() {
+        KvClass::Environment => {
+            captured_env.insert(
+                KvClass::Environment.suffix(&p.key).to_owned(),
+                p.value.to_string(),
+            );
             false
-        } else {
-            true
         }
+        _ => true,
     });
     row.kv = kv;
     row.captured_env = captured_env;
@@ -289,9 +292,10 @@ fn map_stored_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredRow> {
         elapsed_ms: row.get("elapsed_ms")?,
         elapsed_us: row.get("elapsed_us")?,
         peak_rss_mb: row.get("peak_rss_mb")?,
-        cargo_features: row
-            .get::<_, Option<String>>("cargo_features")?
-            .unwrap_or_default(),
+        cargo_features: canonical_cargo_features(
+            row.get::<_, Option<String>>("cargo_features")?.as_deref(),
+        )
+        .unwrap_or_default(),
         cargo_profile: row
             .get::<_, Option<String>>("cargo_profile")?
             .as_deref()
@@ -480,12 +484,20 @@ pub(super) fn push_row_filter_clauses(
     // Metadata values are text-coalesced across run_kv's three value columns,
     // so numeric entries remain selectable through the same key=value form.
     for (key, value) in &filters.meta {
-        clauses.push(kv_equals_expr(params, &format!("meta.{key}"), value));
+        clauses.push(kv_equals_expr(
+            params,
+            &KvClass::Metadata.qualify(key),
+            value,
+        ));
     }
     // Missing captured environment keys do not match; callers select an
     // explicit baseline value when they need to compare an off arm.
     for (key, value) in &filters.env {
-        clauses.push(kv_equals_expr(params, &format!("env.{key}"), value));
+        clauses.push(kv_equals_expr(
+            params,
+            &KvClass::Environment.qualify(key),
+            value,
+        ));
     }
 }
 
@@ -597,7 +609,7 @@ fn load_hotpath(
     // Thread summary stats are stored in run_kv with "threads." prefix.
     let thread_summary: Vec<KvPair> = kv
         .iter()
-        .filter(|p| p.key.starts_with("threads."))
+        .filter(|p| p.class() == KvClass::ThreadSummary)
         .cloned()
         .collect();
     Ok(Some(HotpathData {

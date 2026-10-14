@@ -93,6 +93,7 @@ pub fn lint_corpus(
                 .into(),
         )
     })?;
+    crate::piners::layout::ensure_distinct_registry_dirs(project_root, &piners_cfg)?;
 
     // Reseed stamps lints.toml from the snippet tree - no registry to load (it
     // may not exist yet), no build, no run. Route early.
@@ -127,6 +128,12 @@ pub fn lint_corpus(
         all_universe: args.verify_only || (args.reanchor && args.all),
     };
     let ids = select::resolve(&registry, &sel)?;
+
+    // A missing external partner would otherwise become the same per-probe
+    // `lint_error` for the whole selection (and needlessly hash every file).
+    if !args.verify_only {
+        ensure_program_available(lint_cfg.pine_lint_bin(), project_root)?;
+    }
 
     // Hard correctness gate: verify every selected snippet, recording its
     // absolute path for the validator runners.
@@ -456,7 +463,7 @@ fn diag_to_tv(key: &lint::DiagKey) -> TvDiag {
     TvDiag {
         line: key.line,
         col: key.col,
-        severity: key.severity.as_str().to_owned(),
+        severity: key.severity,
     }
 }
 
@@ -484,7 +491,7 @@ fn write_registry(
     run_recorded: bool,
     apply: impl FnOnce(&mut BTreeMap<String, LintPin>),
 ) -> Result<(), DevError> {
-    let path = registry_dir.join("lints.toml");
+    let path = registry_dir.join(registry::LINTS_FILE);
     let on_disk = std::fs::read_to_string(&path).map_err(|e| {
         DevError::Config(format!(
             "piners lint: failed to re-read {}: {e}",
@@ -604,14 +611,42 @@ fn render(
 
 /// The `selector` JSON stored on the run row.
 fn selector_json(args: &LintArgs, ids: &[String]) -> String {
-    serde_json::json!({
-        "all": args.all,
-        "keywords": args.keywords,
-        "probe": args.probe,
-        "bless": args.bless,
-        "ids": ids,
-    })
-    .to_string()
+    crate::piners::selector::json(args.all, &args.keywords, &args.probe, args.bless, ids, None)
+}
+
+fn ensure_program_available(program: &str, project_root: &Path) -> Result<(), DevError> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let name = Path::new(program);
+    let candidates = if name.is_absolute() || name.components().count() > 1 {
+        vec![if name.is_absolute() {
+            name.to_path_buf()
+        } else {
+            project_root.join(name)
+        }]
+    } else {
+        std::env::var_os("PATH")
+            .into_iter()
+            .flat_map(|paths| std::env::split_paths(&paths).collect::<Vec<_>>())
+            .map(|dir| {
+                if dir.is_absolute() {
+                    dir.join(name)
+                } else {
+                    project_root.join(dir).join(name)
+                }
+            })
+            .collect()
+    };
+    if candidates.into_iter().any(|path| {
+        std::fs::metadata(path)
+            .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+    }) {
+        Ok(())
+    } else {
+        Err(DevError::Config(format!(
+            "piners lint: external validator `{program}` is not an executable file at its configured path or in PATH"
+        )))
+    }
 }
 
 #[cfg(test)]

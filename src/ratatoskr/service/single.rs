@@ -1,23 +1,20 @@
-// Top-level `[ratatoskr]` brokkr commands.
+//! Single-script service orchestration.
 
-use std::collections::HashMap;
 use std::fs;
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use serde::Serialize;
-
+use crate::artefacts::{self, ArtefactDir};
 use crate::config::DevConfig;
 use crate::error::DevError;
 use crate::lockfile::{self, LockContext};
-use crate::output::{self, CapturedOutput};
-use crate::artefacts::{self, ArtefactDir};
+use crate::output;
 use crate::ratatoskr::build::{self, HarnessBuild};
-use crate::ratatoskr::discover::{self, Expected, PreserveDataDir, ScriptInfo, SCRIPT_DIR};
-use crate::ratatoskr::saehrimnir::{
-    endpoint_env_pairs, require_path, resolve_fixture, MockServer,
-};
+use crate::ratatoskr::discover::{self, PreserveDataDir};
+use crate::ratatoskr::timing::format_duration;
+
+use super::suite::{FixtureSession, directory_filter, service_suite, write_artefacts};
 
 /// Where per-test artefact directories live, relative to the project
 /// root. Allocator under [`ArtefactDir`] creates `<this>/<test_id>/run-N/`.
@@ -26,14 +23,14 @@ use crate::ratatoskr::saehrimnir::{
 /// the script stem shared a namespace with brokkr's own entries (`sync/`,
 /// `mock/`, `gate.db`), so a `mock.lua` or `sync.lua` wrote into those
 /// trees.
-const ARTEFACT_PARENT: &str = ".brokkr/ratatoskr/service";
+pub(super) const ARTEFACT_PARENT: &str = ".brokkr/ratatoskr/service";
 
 /// Where a service run's sæhrimnir state lives: `<this>/<fixture>/`.
 /// Separate from [`ARTEFACT_PARENT`] so a fixture name can never collide
 /// with a script stem, and from mock-serve's `.brokkr/ratatoskr/mock/`,
 /// where a fixture called `readiness` would otherwise become a directory
 /// on the path mock-serve deletes as a file.
-const SERVICE_MOCK_PARENT: &str = ".brokkr/ratatoskr/service-mock";
+pub(super) const SERVICE_MOCK_PARENT: &str = ".brokkr/ratatoskr/service-mock";
 
 /// Run one or more service-script iterations through the harness binary
 /// built via `[ratatoskr.harness]`.
@@ -117,11 +114,8 @@ pub fn service_test(
 
     // Parse the script's frontmatter once: the ceiling and the
     // preserve-data-dir override apply to every iteration of a soak.
-    let parsed = discover::parse_script(&script_abs, &test_id).map_err(|e| {
-        DevError::Config(format!(
-            "service: failed to read script {script}: {e}"
-        ))
-    })?;
+    let parsed = discover::parse_script(&script_abs, &test_id)
+        .map_err(|e| DevError::Config(format!("service: failed to read script {script}: {e}")))?;
     let ceiling = parsed.ceiling;
     let keep_on_success =
         keep_artefacts || parsed.preserve_data_dir == PreserveDataDir::OnSuccessToo;
@@ -181,32 +175,21 @@ pub fn service_test(
         .map(|s| s.env_pair_refs())
         .unwrap_or_default();
 
+    let invocation = ServiceRun {
+        artefact_parent: &artefact_parent,
+        test_id: &test_id,
+        built: &built,
+        script_abs: &script_abs,
+        project_root,
+        keep_on_success,
+        ceiling,
+        extra_env: &env_pairs,
+        lock: &_lock,
+    };
     let outcome = if repeat == 1 {
-        run_single(
-            &artefact_parent,
-            &test_id,
-            &built,
-            &script_abs,
-            project_root,
-            keep_on_success,
-            ceiling,
-            &env_pairs,
-            &_lock,
-        )
+        run_single(&invocation)
     } else {
-        run_soak(
-            &artefact_parent,
-            &test_id,
-            &built,
-            &script_abs,
-            project_root,
-            keep_on_success,
-            ceiling,
-            repeat,
-            keep_going,
-            &env_pairs,
-            &_lock,
-        )
+        run_soak(&invocation, repeat, keep_going)
     };
 
     if let Some(session) = mock_session {
@@ -221,33 +204,43 @@ pub fn service_test(
 /// always for failures, and for successes only when `--keep-artefacts`
 /// was set. `exit_label` is the human-readable exit summary
 /// (`exit=N`, `signal=N`, or `unknown exit`).
-struct RunResult {
-    succeeded: bool,
-    elapsed_ms: u128,
-    exit_label: String,
-    artefact_path: Option<PathBuf>,
+pub(super) struct RunResult {
+    pub(super) succeeded: bool,
+    pub(super) elapsed_ms: u128,
+    pub(super) exit_label: String,
+    pub(super) artefact_path: Option<PathBuf>,
 }
 
 /// Single-run dispatch (`repeat == 1`). Mirrors the pre-soak output
 /// shape exactly: one "running ..." line, one PASS/FAIL line.
-#[allow(clippy::too_many_arguments)] // passes through the ceiling + keep flags from the entry point
-fn run_single(
-    artefact_parent: &Path,
-    test_id: &str,
-    built: &HarnessBuild,
-    script_abs: &Path,
-    project_root: &Path,
+struct ServiceRun<'a> {
+    artefact_parent: &'a Path,
+    test_id: &'a str,
+    built: &'a HarnessBuild,
+    script_abs: &'a Path,
+    project_root: &'a Path,
     keep_on_success: bool,
     ceiling: Duration,
-    extra_env: &[(&str, &str)],
-    lock: &lockfile::LockGuard,
-) -> Result<(), DevError> {
+    extra_env: &'a [(&'a str, &'a str)],
+    lock: &'a lockfile::LockGuard,
+}
+
+fn run_single(run: &ServiceRun<'_>) -> Result<(), DevError> {
     output::ratatoskr_msg(&format!(
-        "running {test_id} against {}",
-        built.binary.display()
+        "running {} against {}",
+        run.test_id,
+        run.built.binary.display()
     ));
-    let artefacts = ArtefactDir::allocate(artefact_parent, test_id, keep_on_success)?;
-    let result = spawn_and_capture(artefacts, built, script_abs, project_root, ceiling, extra_env, lock)?;
+    let artefacts = ArtefactDir::allocate(run.artefact_parent, run.test_id, run.keep_on_success)?;
+    let result = spawn_and_capture(
+        artefacts,
+        run.built,
+        run.script_abs,
+        run.project_root,
+        run.ceiling,
+        run.extra_env,
+        run.lock,
+    )?;
     if result.succeeded {
         output::ratatoskr_msg(&format!("PASS in {}ms", result.elapsed_ms));
         Ok(())
@@ -269,31 +262,28 @@ fn run_single(
 /// Soak dispatch (`repeat > 1`). Emits a per-iteration status line and
 /// a summary. With `keep_going = false` (default), bails on the first
 /// failed iteration; the summary then reports "stopped at iter X/Y".
-#[allow(clippy::too_many_arguments)] // mirrors the entry point's plumbing
-fn run_soak(
-    artefact_parent: &Path,
-    test_id: &str,
-    built: &HarnessBuild,
-    script_abs: &Path,
-    project_root: &Path,
-    keep_on_success: bool,
-    ceiling: Duration,
-    repeat: u32,
-    keep_going: bool,
-    extra_env: &[(&str, &str)],
-    lock: &lockfile::LockGuard,
-) -> Result<(), DevError> {
+fn run_soak(run: &ServiceRun<'_>, repeat: u32, keep_going: bool) -> Result<(), DevError> {
     output::ratatoskr_msg(&format!(
-        "running {test_id} against {} (-N {repeat}{})",
-        built.binary.display(),
+        "running {} against {} (-N {repeat}{})",
+        run.test_id,
+        run.built.binary.display(),
         if keep_going { ", --keep-going" } else { "" }
     ));
 
     let mut results: Vec<(u32, RunResult)> = Vec::new();
     for iter in 1..=repeat {
-        lock.set_progress(iter, repeat);
-        let artefacts = ArtefactDir::allocate(artefact_parent, test_id, keep_on_success)?;
-        let result = spawn_and_capture(artefacts, built, script_abs, project_root, ceiling, extra_env, lock)?;
+        run.lock.set_progress(iter, repeat);
+        let artefacts =
+            ArtefactDir::allocate(run.artefact_parent, run.test_id, run.keep_on_success)?;
+        let result = spawn_and_capture(
+            artefacts,
+            run.built,
+            run.script_abs,
+            run.project_root,
+            run.ceiling,
+            run.extra_env,
+            run.lock,
+        )?;
         output::ratatoskr_msg(&format_iter_line(iter, repeat, &result));
         let stop = !result.succeeded && !keep_going;
         results.push((iter, result));
@@ -321,7 +311,7 @@ fn run_soak(
 /// `ceiling` bounds the wall-clock the harness binary may run for - if
 /// it exceeds the budget brokkr SIGKILLs the child and reports the run
 /// as `ceiling=<ceiling>` so the failure surface is unambiguous.
-fn spawn_and_capture(
+pub(super) fn spawn_and_capture(
     artefacts: ArtefactDir,
     built: &HarnessBuild,
     script_abs: &Path,
@@ -415,28 +405,8 @@ fn spawn_and_capture(
     }
 }
 
-/// Render a `Duration` in the `<n>{ms,s,m,h}` shape `discover.rs` accepts.
-/// Used for `ceiling=` exit labels so the failure surface mirrors the
-/// frontmatter spelling.
-fn format_duration(d: Duration) -> String {
-    let secs = d.as_secs();
-    if secs == 0 {
-        return format!("{}ms", d.subsec_millis());
-    }
-    if d.subsec_millis() != 0 {
-        return format!("{}ms", d.as_millis());
-    }
-    if secs.is_multiple_of(3600) {
-        return format!("{}h", secs / 3600);
-    }
-    if secs.is_multiple_of(60) {
-        return format!("{}m", secs / 60);
-    }
-    format!("{secs}s")
-}
-
 /// Format one soak iteration's status line. Pure for testability.
-fn format_iter_line(iter: u32, total: u32, result: &RunResult) -> String {
+pub(super) fn format_iter_line(iter: u32, total: u32, result: &RunResult) -> String {
     if result.succeeded {
         format!("iter {iter}/{total}: PASS in {}ms", result.elapsed_ms)
     } else {
@@ -457,7 +427,7 @@ fn format_iter_line(iter: u32, total: u32, result: &RunResult) -> String {
 /// All-passed shape: `soak: N/total passed (min Xms, max Yms, avg Zms)`.
 /// Stopped-early shape: `soak: stopped at iter F/total (P passed, 1 failed)`.
 /// Keep-going shape: `soak: P/total passed, F failed (iters i, j, k)`.
-fn format_soak_summary(results: &[(u32, RunResult)], total: u32) -> String {
+pub(super) fn format_soak_summary(results: &[(u32, RunResult)], total: u32) -> String {
     let pass_times: Vec<u128> = results
         .iter()
         .filter_map(|(_, r)| r.succeeded.then_some(r.elapsed_ms))
@@ -496,42 +466,3 @@ fn format_soak_summary(results: &[(u32, RunResult)], total: u32) -> String {
         format!("soak: {pass_count}/{total} passed, {fail_count} failed (iters {fail_str})")
     }
 }
-
-/// Bare `brokkr service` - print every discovered script with its
-/// description and expected outcome. Empty-state message points at the
-/// expected location so a fresh checkout (no harness module yet) still
-/// gets a useful response.
-pub fn service_list(project_root: &Path) -> Result<(), DevError> {
-    let scripts = discover::discover(project_root)?;
-    if scripts.is_empty() {
-        output::ratatoskr_msg(&format!(
-            "no service-harness scripts found under {SCRIPT_DIR}/"
-        ));
-        output::ratatoskr_msg(
-            "  (the harness module has not landed in ratatoskr yet, or no scripts have been added)",
-        );
-        return Ok(());
-    }
-
-    output::ratatoskr_msg(&format!(
-        "  {:<40} {:<10} {}",
-        "Name", "Expected", "Description",
-    ));
-    output::ratatoskr_msg(&format!("  {}", "\u{2500}".repeat(78)));
-    for ScriptInfo {
-        name,
-        description,
-        expected,
-        ..
-    } in &scripts
-    {
-        output::ratatoskr_msg(&format!(
-            "  {:<40} {:<10} {}",
-            name,
-            expected.as_str(),
-            description.as_deref().unwrap_or("\u{2014}"),
-        ));
-    }
-    Ok(())
-}
-

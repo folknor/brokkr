@@ -1,7 +1,7 @@
 //! `brokkr corpus-results`, project-gated to piners.
 //!
-//! Queries the corpus run store (`.brokkr/piners/corpus/runs.db`, written by
-//! `brokkr corpus`). This is its own command rather than a mode of `brokkr
+//! Queries the corpus run store resolved by `corpus_runs_db_path` and written
+//! by `brokkr corpus`. This is its own command rather than a mode of `brokkr
 //! results`: piners now records hotpath/alloc benchmarks into the shared
 //! `results.db` like every other project, so `results` keeps its benchmark
 //! meaning and the corpus store gets a dedicated surface (no overloaded
@@ -293,7 +293,7 @@ fn render_probe(db: &CorpusDb, run_id: i64, probe: &str) -> Result<(), DevError>
 /// as in the live rendering, so a crash is never folded into "matching their
 /// pin".
 fn shown_by_default(d: &DispositionRow) -> bool {
-    !d.gate_ok || d.disposition == crate::piners::report::HARNESS_ABORT
+    !d.gate_ok || d.disposition == crate::piners::registry::CorpusDisposition::HarnessAbort.as_str()
 }
 
 fn render_run_detail(db: &CorpusDb, run_id: i64, full: bool) -> Result<(), DevError> {

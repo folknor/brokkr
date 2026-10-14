@@ -338,6 +338,8 @@ fn fingerprint_blobs(
         .try_for_each_init(
             DecodeScratch::default,
             |scratch, (blob, hash)| -> io::Result<()> {
+                // Keep semantic hashing identical to the corpus walk; rayon
+                // changes scheduling only, not the hash implementation.
                 *hash = semantic_hash(archive.raw_blob(*blob)?, scratch)?;
                 Ok(())
             },
@@ -427,40 +429,8 @@ fn add_event_counters(
     class: OutcomeClass,
     count: u64,
 ) {
-    match class {
-        OutcomeClass::LayerAdded => {
-            totals.layers_added += count;
-            layer.layers_added += count;
-        }
-        OutcomeClass::LayerRemoved => {
-            totals.layers_removed += count;
-            layer.layers_removed += count;
-        }
-        OutcomeClass::ExtentMismatch => {
-            totals.extent_mismatch += count;
-            layer.extent_mismatch += count;
-        }
-        OutcomeClass::MissingFeatures => {
-            totals.missing_features += count;
-            layer.missing_features += count;
-        }
-        OutcomeClass::AddedFeatures => {
-            totals.added_features += count;
-            layer.added_features += count;
-        }
-        OutcomeClass::AttrChanged => {
-            totals.attr_changed += count;
-            layer.attr_changed += count;
-        }
-        OutcomeClass::ToleranceMoved => {
-            totals.tolerance_moved += count;
-            layer.tolerance_moved += count;
-        }
-        OutcomeClass::StructuralMoved => {
-            totals.structural_moved += count;
-            layer.structural_moved += count;
-        }
-    }
+    totals.outcomes.add(class, count);
+    layer.outcomes.add(class, count);
 }
 
 fn push_differing_range(report: &mut RegressReport, start: u64, end: u64) {

@@ -65,10 +65,5 @@ pub fn load(path: &Path) -> io::Result<ManifestFile> {
 
 #[must_use]
 pub fn file_name(tile: &ManifestTile) -> String {
-    let base = format!("z{}-x{}-y{}", tile.z, tile.x, tile.y);
-    if tile.layers.is_empty() {
-        format!("{base}.svg")
-    } else {
-        format!("{base}-{}.svg", tile.layers.join("+"))
-    }
+    super::layout::tile_svg_file_name(tile.z, tile.x, tile.y, &tile.layers)
 }

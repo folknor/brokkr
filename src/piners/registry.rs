@@ -46,7 +46,7 @@ use crate::lockfile::LockGuard;
 use crate::preflight;
 
 /// File name of the canonical pin file inside the registry directory.
-const PINS_FILE: &str = "pins.toml";
+pub(crate) const PINS_FILE: &str = "pins.toml";
 
 /// A probe's input script.
 pub const PINE_FILE: &str = "strategy.pine";
@@ -61,29 +61,87 @@ pub const RECORD_FILE: &str = "tv_record.json";
 /// present, so it is pinned like the oracle.
 pub const INPUTS_FILE: &str = "inputs.json";
 
-/// The canonical per-probe disposition labels. A probe's actual disposition
-/// (and its pinned `expected`) is one of these: the four parity acceptance
-/// tiers, then the five non-`parity` outcomes (`harness_abort` is a probe
-/// process the harness's supervisor saw die, pinnable like `runtime_fail`).
-/// This is the single unit the gate compares - `count_tier`
-/// (exact/near/drift) stays diagnostic. Must equal `report::PARITY_TIERS`
-/// followed by `report::NON_PARITY_OUTCOMES`; a test holds them together.
-pub const DISPOSITION_LABELS: [&str; 9] = [
-    "byte_exact",
-    "accepted",
-    "actionable_drift",
-    "count_divergent",
-    "compile_fail",
-    "runtime_fail",
-    "no_tv_data",
-    "no_overlap",
-    "harness_abort",
-];
-
-/// True if `label` is one of [`DISPOSITION_LABELS`].
-pub fn is_disposition(label: &str) -> bool {
-    DISPOSITION_LABELS.contains(&label)
+/// The single pin and gate vocabulary: parity tiers followed by non-parity
+/// outcomes. The harness and SQLite store use these stable spellings at their
+/// boundaries; inside brokkr the pinned expectation stays typed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CorpusDisposition {
+    ByteExact,
+    Accepted,
+    ActionableDrift,
+    CountDivergent,
+    CompileFail,
+    RuntimeFail,
+    NoTvData,
+    NoOverlap,
+    HarnessAbort,
 }
+
+impl CorpusDisposition {
+    /// The stable spelling used by pins, harness records, and the run store.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ByteExact => "byte_exact",
+            Self::Accepted => "accepted",
+            Self::ActionableDrift => "actionable_drift",
+            Self::CountDivergent => "count_divergent",
+            Self::CompileFail => "compile_fail",
+            Self::RuntimeFail => "runtime_fail",
+            Self::NoTvData => "no_tv_data",
+            Self::NoOverlap => "no_overlap",
+            Self::HarnessAbort => "harness_abort",
+        }
+    }
+
+    /// Parse one persisted or reported label.
+    pub fn from_label(label: &str) -> Option<Self> {
+        ALL_DISPOSITIONS
+            .into_iter()
+            .find(|disposition| disposition.as_str() == label)
+    }
+
+    /// Validate the harness's outcome/tier pair and return its gate value.
+    pub fn from_fields(outcome: &str, tier: Option<&str>) -> Option<Self> {
+        let tier = tier.filter(|value| !value.is_empty());
+        if outcome == "parity" {
+            let disposition = Self::from_label(tier?)?;
+            disposition.is_parity().then_some(disposition)
+        } else if tier.is_none() {
+            Self::from_label(outcome).filter(|disposition| !disposition.is_parity())
+        } else {
+            None
+        }
+    }
+
+    pub const fn is_parity(self) -> bool {
+        matches!(
+            self,
+            Self::ByteExact | Self::Accepted | Self::ActionableDrift | Self::CountDivergent
+        )
+    }
+
+    /// Whether this outcome is one the harness signals with exit code 1.
+    pub const fn is_break(self) -> bool {
+        matches!(
+            self,
+            Self::CompileFail | Self::RuntimeFail | Self::HarnessAbort
+        )
+    }
+}
+
+/// Every pinnable corpus disposition in its stable registry order.
+pub(crate) const ALL_DISPOSITIONS: [CorpusDisposition; 9] = [
+    CorpusDisposition::ByteExact,
+    CorpusDisposition::Accepted,
+    CorpusDisposition::ActionableDrift,
+    CorpusDisposition::CountDivergent,
+    CorpusDisposition::CompileFail,
+    CorpusDisposition::RuntimeFail,
+    CorpusDisposition::NoTvData,
+    CorpusDisposition::NoOverlap,
+    CorpusDisposition::HarnessAbort,
+];
 
 /// One pinned file: a path relative to the corpus root plus its xxh128.
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -359,12 +417,12 @@ pub fn resolve(config: &BTreeMap<String, ProbeConfig>, dir: &Path) -> ProbeConfi
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Pin {
-    /// The blessed disposition label (one of [`DISPOSITION_LABELS`]). `None`
+    /// The blessed disposition. `None`
     /// means never blessed: the gate treats that as a hard "must bless"
     /// failure rather than passing silently. Stamped by `--bless`, preserved
     /// across `--reseed` (which touches the pinned files only).
     #[serde(default)]
-    pub expected: Option<String>,
+    pub expected: Option<CorpusDisposition>,
     pub pine: FilePin,
     /// The probe's `inputs.json`, when the probe dir carries one.
     #[serde(default)]
@@ -912,13 +970,10 @@ impl Registry {
     }
 
     /// Structural lint: every id referenced by a keyword file must exist
-    /// in `pins.toml`, every pinned `expected` must be a known disposition
-    /// label, every pinned probe must resolve a feed, and every `feed` in
-    /// `[probe_config]` must name a `[feeds]` group. A keyword pointing at an
-    /// unknown id means the registry is lying about what is selectable; an
-    /// unknown `expected` means the gate could never be satisfied; a missing
-    /// or unknown feed means the harness could not run the probe against the
-    /// data its oracle was taken on.
+    /// in `pins.toml`, every pinned probe must resolve a feed, and every
+    /// `feed` in `[probe_config]` must name a `[feeds]` group. `expected` is
+    /// deserialized as [`CorpusDisposition`], so an unknown label is refused
+    /// while loading rather than checked again here.
     pub fn lint(&self) -> Result<(), DevError> {
         let mut dangling: Vec<String> = Vec::new();
         for (keyword, ids) in &self.keywords {
@@ -926,14 +981,6 @@ impl Registry {
                 if !self.pins.contains_key(id) && !self.pending.contains_key(id) {
                     dangling.push(format!("{keyword}.toml -> {id}"));
                 }
-            }
-        }
-        let mut bad_expected: Vec<String> = Vec::new();
-        for (id, pin) in &self.pins {
-            if let Some(exp) = &pin.expected
-                && !is_disposition(exp)
-            {
-                bad_expected.push(format!("{id} -> expected = \"{exp}\""));
             }
         }
         let mut bad_feed: Vec<String> = Vec::new();
@@ -960,13 +1007,6 @@ impl Registry {
             errs.push(format!(
                 "keyword file(s) reference ids neither pinned nor [pending] in {PINS_FILE}:\n  {}",
                 dangling.join("\n  ")
-            ));
-        }
-        if !bad_expected.is_empty() {
-            errs.push(format!(
-                "pin(s) carry an unknown `expected` label (must be one of {}):\n  {}",
-                DISPOSITION_LABELS.join(", "),
-                bad_expected.join("\n  ")
             ));
         }
         if !bad_feed.is_empty() {
@@ -1059,6 +1099,8 @@ pub fn verify_probe(
             pin.probe_dir().display()
         )]));
     }
+    // Reseed and verification share the fixed-name constants; a pin cannot
+    // make the verifier hash a different file than the harness reads.
     verify_one(&subject, PINE_FILE, &pin.pine, corpus_root, project_root)?;
     let dir = corpus_root.join(pin.probe_dir());
     for (name, file) in pin.optional_files() {
@@ -1939,10 +1981,14 @@ csv = { path = "p/old/tv_trades.csv", xxh128 = "bb" }
     }
 
     #[test]
-    fn lint_fails_on_unknown_expected_label() {
-        let mut r = registry_with(&[], &["a"]);
-        r.pins.get_mut("a").unwrap().expected = Some("totally-bogus".to_owned());
-        let err = r.lint().unwrap_err();
+    fn loading_refuses_an_unknown_expected_label() {
+        let err = parse_pins(
+            "[probes.a]\nexpected = \"totally-bogus\"\n\
+             pine = { path = \"p/strategy.pine\", xxh128 = \"aa\" }\n\
+             csv = { path = \"p/tv_trades.csv\", xxh128 = \"bb\" }\n",
+            Path::new("pins.toml"),
+        )
+        .unwrap_err();
         assert!(format!("{err:?}").contains("totally-bogus"));
     }
 }

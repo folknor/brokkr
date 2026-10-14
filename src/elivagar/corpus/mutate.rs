@@ -30,7 +30,8 @@ pub enum MutationOp {
 }
 
 impl MutationOp {
-    /// Parse the CLI `--op` value.
+    /// Parse the CLI `--op` value. The clap command currently stores it as a
+    /// `String`, so validation remains at the dispatch adapter.
     #[must_use]
     pub fn parse(s: &str) -> Option<Self> {
         Some(match s {

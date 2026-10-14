@@ -767,7 +767,9 @@ mod selection {
                     Some(_) => admit(sweep, overrides, phase),
                     None => Admission::default(),
                 };
-                if phase == SelectionPhase::Rustdoc && sweep.doc_only {
+                if phase == SelectionPhase::Rustdoc
+                    && matches!(sweep.lane_exec(), crate::profile::LaneExec::DocOnly { .. })
+                {
                     entries.push(LaneEntry::NotApplicable(NotApplicable { reason: DOCTEST_CARRIER, admission }));
                     continue;
                 }
@@ -908,7 +910,11 @@ mod selection {
 
     impl ExecProjection {
         fn of(sweep: &ResolvedSweep, attempt: &Attempt, debug: bool) -> Self {
-            Self { key: attempt.effective_key(sweep, None), debug, doc_only: sweep.doc_only }
+            Self {
+                key: attempt.effective_key(sweep, None),
+                debug,
+                doc_only: matches!(sweep.lane_exec(), crate::profile::LaneExec::DocOnly { .. }),
+            }
         }
     }
 

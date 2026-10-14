@@ -58,13 +58,11 @@ use crate::output;
 use crate::piners::cmd::CorpusArgs;
 use crate::piners::pins_write;
 use crate::piners::registry::{
-    self, CSV_FILE, FeedGroup, FilePin, HarnessFile, INPUTS_FILE, PINE_FILE, Pin, PinsData,
-    ProbeFiles, RECORD_FILE,
+    self, CSV_FILE, FeedGroup, FilePin, HarnessFile, INPUTS_FILE, PINE_FILE, PINS_FILE, Pin,
+    PinsData, ProbeFiles, RECORD_FILE,
 };
 use crate::piners::registry_io;
 use crate::preflight;
-
-const PINS_FILE: &str = "pins.toml";
 
 /// Entry point for `brokkr corpus --reseed`.
 pub fn run(project_root: &Path, cfg: &PinersConfig, args: &CorpusArgs) -> Result<(), DevError> {
@@ -447,7 +445,7 @@ fn stamp_file(
 fn carry_expected(new: &mut BTreeMap<String, Pin>, old: &BTreeMap<String, Pin>) {
     for (id, pin) in new.iter_mut() {
         if let Some(prev) = old.get(id) {
-            pin.expected = prev.expected.clone();
+            pin.expected = prev.expected;
         }
     }
 }
@@ -583,7 +581,7 @@ mod tests {
     fn carry_expected_keeps_the_blessing_across_restamp() {
         let mut old = BTreeMap::new();
         let mut blessed = pin("keep", "old-hash");
-        blessed.expected = Some("accepted".to_owned());
+        blessed.expected = Some(registry::CorpusDisposition::Accepted);
         old.insert("keep".to_owned(), blessed);
         old.insert("vanished".to_owned(), pin("vanished", "x"));
 
@@ -593,7 +591,10 @@ mod tests {
 
         carry_expected(&mut new, &old);
 
-        assert_eq!(new["keep"].expected.as_deref(), Some("accepted"));
+        assert_eq!(
+            new["keep"].expected,
+            Some(registry::CorpusDisposition::Accepted)
+        );
         assert_eq!(new["keep"].pine.xxh128, "new-hash"); // content still updated
         assert_eq!(new["fresh"].expected, None); // unblessed newcomer
     }
@@ -754,7 +755,10 @@ bar_budget = 20200
         let facts = live_facts(&again.text, &pins_path);
         assert_eq!(facts.feed.as_deref(), Some("eth-15m-live"));
         let data = registry::parse_pins(&again.text, &pins_path).unwrap();
-        assert_eq!(data.probes["live-01"].expected.as_deref(), Some("accepted"));
+        assert_eq!(
+            data.probes["live-01"].expected,
+            Some(registry::CorpusDisposition::Accepted)
+        );
         assert!(
             !first.text.contains("\n\n\n"),
             "stray blank line:\n{}",
@@ -926,7 +930,7 @@ bar_budget = 20200
         assert!(p.text.contains("# alpha is the flagship"));
         let data = registry::parse_pins(&p.text, &pins_path).unwrap();
         let alpha = &data.probes["alpha"];
-        assert_eq!(alpha.expected.as_deref(), Some("accepted")); // carried
+        assert_eq!(alpha.expected, Some(registry::CorpusDisposition::Accepted)); // carried
         assert!(alpha.csv.is_none());
         assert!(alpha.record.is_some());
 
@@ -959,7 +963,10 @@ bar_budget = 20200
         let p = plan(Some(broken), &pins_path, &root, &registry, &args_all()).unwrap();
         let data = registry::parse_pins(&p.text, &pins_path).unwrap();
         assert!(data.probes["alpha"].csv.is_some());
-        assert_eq!(data.probes["alpha"].expected.as_deref(), Some("accepted"));
+        assert_eq!(
+            data.probes["alpha"].expected,
+            Some(registry::CorpusDisposition::Accepted)
+        );
     }
 
     #[test]

@@ -15,4 +15,6 @@ pub mod discover;
 pub mod gate;
 pub mod process;
 pub mod saehrimnir;
+pub mod service;
 pub mod sync;
+pub mod timing;

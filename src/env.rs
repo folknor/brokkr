@@ -4,6 +4,9 @@ use std::process::Command;
 use std::collections::HashMap;
 
 use crate::config::{Dataset, ResolvedPaths};
+use crate::context::{acquire_cmd_lock, bootstrap, bootstrap_config};
+use crate::error::DevError;
+use crate::output;
 use crate::project::Project;
 
 /// Environment information for the `dev env` subcommand.
@@ -97,6 +100,37 @@ pub fn collect(paths: &ResolvedPaths, project: Project, project_root: &Path) -> 
         datasets: check_datasets(&paths.datasets, &paths.data_dir, project_root),
         user_config: collect_user_config(project_root),
     }
+}
+
+/// Collect and print the environment report for `brokkr env`.
+pub(crate) fn cmd_env(
+    dev_config: &crate::config::DevConfig,
+    project: Project,
+    project_root: &Path,
+) -> Result<(), DevError> {
+    // `bootstrap` shells out to `cargo metadata`, which rustup mediates - so in
+    // a tree pinning a toolchain we don't have installed, `env` fails outright
+    // unless the pin is moved aside. That window is the *locked* window (see
+    // `crate::toolchain`), so reporting the environment has to take the lock
+    // for the same reason `fmt` does, despite touching nothing. Only when
+    // `disable_toolchain` is set: with nothing to move, `env` stays lock-free
+    // and can still be run alongside a long build.
+    let _lock = if dev_config.disable_toolchain {
+        Some(acquire_cmd_lock(project, project_root, "env")?)
+    } else {
+        None
+    };
+    let pi = bootstrap(None)?;
+    let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
+
+    let info = collect(&paths, project, project_root);
+    print(&info);
+    if let Some(note) = crate::config::unmatched_host_note(dev_config, &paths.hostname) {
+        output::warn(&format!(
+            "{note}. Host-specific settings are ignored and defaults apply."
+        ));
+    }
+    Ok(())
 }
 
 /// Report the user layer from the same composition path used by project

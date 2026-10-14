@@ -41,7 +41,9 @@ pub fn run(
     output::bench_msg(&format!("bench_pmtiles: {tiles} tiles, {runs} runs"));
 
     let config = BenchConfig {
-        command: "pmtiles".into(),
+        // The CLI id of `brokkr pmtiles-writer`, the same name the hotpath
+        // path records under (`ExampleCommand::id`).
+        command: "pmtiles-writer".into(),
         // Tiles count is in cli_args (`--tiles N`) and brokkr_args.
         // Measurement mode comes from the harness.
         mode: None,

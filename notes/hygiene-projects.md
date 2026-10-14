@@ -153,21 +153,11 @@ Reported by: elivagar.
 
 Design hunt (map-projects): `run_elivagar_hotpath` removes `hotpath-{alloc-}output.pmtiles` while `ElivagarCommand::build_args` always writes `bench-self-output.pmtiles`, and the hotpath path also deletes the tilegen output where run and bench archive it via `rename_elivagar_output` - deleting may be intended, but nothing names the policy. `<data>/tilegen_tmp` is built independently in `elivagar/commands.rs::build_args`, `elivagar/dispatch.rs::rename_elivagar_output` (the "output dir coincides with tmp" guard) and `main_parts/commands.rs` (clean), and documented in `config_parts/schema.rs`; `bench-self-output.pmtiles` is spelled twice inside `commands.rs` (`output_files`, `build_args`). Proposed: one `elivagar::paths::tilegen_tmp(data_dir)`, ideally on elivagar's `ResolvedPaths`.
 
-## PRJ-021 - elivagar corpus layout and vocabulary are strings
+## PRJ-021 - elivagar corpus mode and op are strings at the CLI
 
 Reported by: elivagar.
 
-Corpus file names: `"digest"` ×5, `"contract.json"` ×5, `"manifest.toml"` ×4, `"leaves"` ×4, `"tiles"`, `build_root.join("corpus")` ×3. `DigestMode` spellings `"leaves"`/`"buckets"` in `digest_text`, `parse_baseline_text`, `cmd.rs::parse_mode` and the bless message; `MutationOp` spellings only in `parse`, CLI takes a `String`, help lists them by hand. Header strings `elivagar-corpus-digest v1`/`-leaves v1` written by writer and parser separately. Tile SVG names `z{z}-x{x}-y{y}` built in `manifest::file_name` and `overlay::dump_overlays`.
-
-Enforcement proposed: a `CorpusLayout` type; clap `ValueEnum` for mode/op; a corpus verdict type owning the exit mapping (BUG-061).
-
-## PRJ-022 - elivagar hashing and outcome accounting duplicated
-
-Reported by: elivagar.
-
-`CanonSink`, `HashSink`, `write_len`, `write_string`, `write_detail_attr` (attr tag bytes 1..7) and `detail_attrs_hash` are duplicated verbatim in `corpus/canonical.rs` and `regress/prepared.rs`; `compare_prepared_component_slices` restates `compare_detail_component_slices`. The eight outcome classes are listed in `DiffTotals`, `LayerCounters`, `ContentCounts`, `add_event_counters`, `DetailOutcome::record`, `passed()`, `counters_are_zero`, `print_text`, `to_json`; `passed()` is a hand-written field list, so a new class wouldn't be gated. The same per-blob semantic hash runs sequentially in `corpus::compute` and in parallel in `regress::fingerprint_blobs`.
-
-Enforcement proposed: a shared canon-sink module; counters as `[u64; N]` indexed by `OutcomeClass`.
+Corpus file names, SVG names, digest mode spellings and headers now live in `elivagar/corpus/layout.rs` and shared definitions. Residue: clap still takes `mode: Option<String>` and `op: String` with the mutation list hand-written in help, and `elivagar/cmd.rs` keeps a manual `parse_mode` adapter; a `ValueEnum` on the mode and op types needs `cli/schema.rs` and `elivagar/cmd.rs`.
 
 ## PRJ-023 - elivagar magic numbers, copied values and scattered defaults
 
@@ -197,12 +187,6 @@ Capture-then-print commands and `compare_tiles`/`pmtiles::run` printing: PLT-004
 Reported by: elivagar.
 
 `create_dir_all(...).ok()` in the mutate default; `render_archive_tile` renders an absent manifest tile as a blank SVG with no warning; `DevError::Verify` for plain IO in `compare_tiles`; production `expect`/`unreachable!` (PLT-009). Swallowed failures with user-visible consequences: BUG-062, BUG-063, BUG-065.
-
-## PRJ-027 - elivagar hash tests pin the wrong function
-
-Reported by: elivagar.
-
-The equivalence tests pin the streaming hash against `detail_tile_hash`, which production never calls (`#[allow(dead_code)]`, "until that port lands"); regress's pass 3 uses `prepared.rs` digests, so "digest and regress can never silently disagree" is guarded against a function not in the path. There is no golden-value test for the "frozen" canonical hash or the digest domains, so a quiet edit to both hash paths passes. `fixture.rs::TestDir`: PLT-038.
 
 ## PRJ-028 - elivagar's decoding seam and command shape are claimed, not held
 
@@ -265,11 +249,11 @@ Enforcement proposed: reject unknown/unparseable frontmatter keys; parse-time re
 
 Design hunt (other-projects): `ScriptInfo` is one struct for two script kinds - `fixture`/`protocol` are "sync-only, service scripts leave None" - so a sync script with no fixture gets all the way to `resolve_info` before it is refused; proposed `ScriptInfo { common, kind: Service | Sync { fixture, protocol } }`. `list_smoke::select_cohort` filters `s.expected.as_str() != "ignored"` on a value that is already the `Expected` enum, while `service_suite` compares the enum; `Ignored` only excludes from selection, so the variant is really `Skip`. Frontmatter typo handling is filed in `bugs.md`.
 
-## PRJ-035 - ratatoskr timing constants and small helpers duplicated
+## PRJ-035 - ratatoskr timing residue
 
 Reported by: ratatoskr.
 
-`SIGTERM_FORWARD_BUDGET` (`output.rs`) copies `SHUTDOWN_BUDGET` "in spirit" at 1500 ms; the "50 ms, matching `ServiceClient`" poll is defined in `process.rs` and `output.rs` and is a bare literal twice more in `saehrimnir.rs` beside a 25 ms literal. `READINESS_BUDGET` (10s), `SHUTDOWN_BUDGET`, `DEFAULT_CEILING` (60s), both polls, the 5-line stderr tail and the default `--bench 3` (a clap string) are spread over five files with no injection (hence real `sleep`s in tests). `discover::parse_duration` and `service_test::format_duration` are inverse halves of one grammar in two files, no round-trip test. `summary_to_kv` drops bools, `meta_to_json` keeps them, and `meta_to_json`'s doc ("Same scalar-only rule as `summary_to_kv`: bools pass through") contradicts itself. Gate JSON helpers: MEA-021.
+Budgets, polls, duration parsing and formatting, and the stderr tail now live in `ratatoskr/timing.rs`. Residue: `output.rs` still owns its own copies of the poll interval and the SIGTERM forward budget; the default `--bench 3` is a clap string in `cli/schema.rs`; nothing is injectable, so tests still sleep; and there is no round-trip test between the duration parser and formatter.
 
 ## PRJ-036 - ratatoskr output
 
@@ -315,27 +299,11 @@ Reported by: ratatoskr.
 
 Artefact placement: sync gets a per-run `mock/`, service shares `.brokkr/ratatoskr/mock/<fixture>`. Mock-pid bookkeeping: `remove` then `clear_mock_pids` in service, `clear` only in sync. Process-group decision: `true` in smoke/service, `false` in bench, each with a paragraph-long justification. Interrupt policy and validate-before-build: PLT-012, PRJ-034. `unix_now()`, `Instant::now` everywhere, the hostname in `run_gate_hook`, and a cwd-relative `canonicalize` of the script are ambient dependencies.
 
-## PRJ-042 - Dead code and module shape in ratatoskr
+## PRJ-042 - ratatoskr entry-point waivers
 
 Reported by: ratatoskr.
 
-`pid_is_alive`, `wait_for_sentinel`, `SentinelOutcome` are test-only, hidden by `#[allow(dead_code)]`; `send_signal`, `send_signal_pgrp`, `snapshot_proc` carry the same stale allow though used. `write_run_toml`'s `mock_dir` is an unused placeholder (`let _mock_dir_anchor = mock_dir; // future`). `cmd.rs` and `sync.rs` are `include!` shims; `service_suite.rs` depends on imports declared in `service_test.rs` and can't carry `//!` docs; file names (`service_test`, `service_suite`, `list_smoke`, `bench_gate`) are the retired command names; `src/ratatoskr_sync/` isn't a module. Request structs would remove the `too_many_arguments`/`too_many_lines` waivers (PLT-002).
-
-Design hunt (other-projects): the hunter reads the shims as a way under the `wc` 800-line threshold without deciding boundaries; the spliced files leak private items across what look like file boundaries, and the directory tree misdescribes the module tree. Proposed: `ratatoskr::service::{single, suite, list}` and `ratatoskr::sync::{list, smoke, all, bench, gate_hook}`, with `ratatoskr_sync/` moved under `ratatoskr/sync/`; `bench_gate.rs` alone (1643 lines) holds cohort selection, the bench loop, the gate hook, baseline lookup, identity checks and sidecar-to-JSON projection - at least three modules.
-
-## PRJ-043 - piners registry names, paths and vocabulary have several owners
-
-Reported by: piners.
-
-- `PINS_FILE` in `registry.rs` and `reseed.rs`, bare `"pins.toml"` in `cmd.rs`; `LINTS_FILE` in `lint/registry.rs` and `lint/reseed.rs`, bare `"lints.toml"` in `lint/cmd.rs`; marker names `strategy.pine`/`tv_trades.csv` constants in `reseed.rs` but literals in `registry::verify_probe`; `lint/registry.rs` copies the `"strategy.pine"` label onto lint snippets, where it is wrong.
-- `.brokkr/piners/corpus` has three owners (PLT-001); the lint tree is separate again.
-- Selector JSON: written by `cmd::selector_json` and `lint/cmd.rs::selector_json`, read by `format::fmt_selector`, `measured::selector_label`, `query::selection_covered`; `selector_label` claims to mirror `fmt_selector` but drops keywords when `--probe` is also given; lint's run table prints raw JSON with every id (what `fmt_selector` was written to fix).
-- Disposition labels as strings: corpus `DISPOSITION_LABELS`, match arms and fields in `report.rs::summarize`/`Summary`, `format_summary`; lint `DISPOSITION_LABELS`, literals in `diff::classify`, `== "piners_error"` twice in `lint/cmd.rs`. `const _: () = assert!(len == 8)` checks only the count.
-- The "no `[piners.harness]`" message is duplicated word for word in `cmd.rs` and `measured.rs`, as is the whole load → lint → select → verify → feeds pipeline.
-
-Enforcement proposed: text rules for file names and env literals; a serde enum for dispositions.
-
-Design hunt (other-projects): the corpus vocabulary is `report::PARITY_TIERS` (4), `report::NON_PARITY_OUTCOMES` (5), `report::HARNESS_ABORT`, `registry::DISPOSITION_LABELS` (9, documented as "must equal PARITY_TIERS followed by NON_PARITY_OUTCOMES; a test holds them together") and `gate::BREAK_DISPOSITIONS` (3); `corpus_query::shown_by_default` compares a DB string and `Pin::expected` is `Option<String>` - the textbook pairwise-agreement case. Proposed: `enum Disposition { Parity(Tier), CompileFail, RuntimeFail, NoTvData, NoOverlap, HarnessAbort }` with `enum Tier { ByteExact, Accepted, ActionableDrift, CountDivergent }`, `Disposition::parse(outcome, tier)` as the single validator (today's `valid_label`), `is_break()` and `is_crash()` replacing the lists, and `Pin::expected: Option<Disposition>` deserialized directly so `registry.lint()`'s `bad_expected` check disappears into serde; the DB keeps the `as_str` spelling. The raw-outcome abort check and the unpinnable lint dispositions are filed in `bugs.md`.
+The service and sync `include!` shims are real modules and internal argument-count waivers became context structs. Residue: the service entry points still carry `too_many_arguments`/`too_many_lines` waivers because their callers in `main_parts/bootstrap.rs` pass loose arguments (request structs would remove them), and `harness_mod/foreign_loop.rs` has a comment naming the old module path.
 
 ## PRJ-044 - piners has two registry stacks copied almost line for line
 
@@ -344,12 +312,6 @@ Reported by: piners.
 `Registry::load`/`lint` vs `LintRegistry::load`/`lint`; `select.rs` vs `lint/select.rs` ("mirrors"); `pins_write.rs` vs `lints_write.rs` (`set_value`, `sync_opt`, `sort_fields`, `rank`, `set_block_prefix`, `pin_value`, `parse_value`, `toml_str` - a third copy is `rustflags::toml_string`); reseed diff/carry-forward; `grid` in `corpus_db/format.rs` and `lint/db.rs`. Bless is implemented twice with different rules (BUG-090). Directory walks differ: corpus reseed `file_type()` (no symlink follow), lint reseed `is_dir()` (follows; a symlink loop recurses). `lint/cmd.rs` rebuilds a `HarnessConfig` by hand from `LintConfig`'s package/binary/features/debug fields; the config could embed `HarnessConfig`. Hunter's recommendation: a single generic registry, selector, writer and run store with a per-corpus pin type - a rewrite with real payoff.
 
 Design hunt (other-projects): the run verdict is decided in both `piners/cmd.rs::corpus` and `piners/lint/cmd.rs::lint_corpus` - `gate_blocks = !args.bless && !args.no_gate && <deviations>`, a separate `gated = !args.no_gate && !args.bless` for the DB row (four sites for one fact), `run_pass`, the `fail_reason` precedence chain, the `"pass"`/`"fail"` string, the bless short-circuit and its "tool/harness failed: nothing blessed" exit, the final `PASS`/`FAIL` line and `ExitCode(1)`. The run mode is spread over `reseed`, `reanchor`, `bless`, `verify_only` and `no_gate` bools held exclusive by clap `conflicts_with` and "dispatch-rejected" comments. `RunRecord::result: &str` and `RunMeta::result: &str` are documented as `"pass"`/`"fail"` but also receive `"error"` and `"interrupted"`, with `fail_reason: Option<String>` beside them admitting pass-with-reason and fail-without. Inside `cmd.rs` (1295 lines), `classify_attempt`, `store_attempt_streams`, `AttemptEnv` and `diagnose` are isolation machinery belonging in `isolate.rs`, and `reserve_run_id`/`record_unfinished` belong in `corpus_db`. `registry.rs` (1885 lines) holds schema, loading, keyword index, lint, feed groups, harness-file pins and xxh128 verification, with `cmd.rs::verify_selected_feeds` a third piece of verification outside it; `report.rs` (1412 lines) mixes NDJSON parsing, the disposition vocabulary, aggregation and terminal rendering. Proposed: `enum CorpusMode { Verify, Run { gate: Enforce | ReportOnly }, Bless, Reseed, Reanchor }`, `enum RunResult { Pass, Fail(Reason), Error(Reason), Interrupted }`, one `RunVerdict::decide(integrity_failures, gate_deviations, mode)` with one test table, a `corpus_engine` with a `Subject` trait (select/verify/execute/classify) giving both commands one protocol implementation, `registry::{schema, load, lint, verify}`, and rendering in its own file.
-
-## PRJ-046 - piners configuration and tunables
-
-Reported by: piners.
-
-`RUNTIME_CEILING_MS` is a const with no config key and no injection; its refusal path, `--force` bypass and no-database path are untested (only `estimated_wall_ms` is). The harness exit-code contract (0/1/2) is only a `match` and prose (PLT-028). Checked late: a missing `[piners.harness]` is noticed after full hashing and the ceiling check; a missing `pine_lint_bin` shows as `lint_error` on every probe (which bless then pins, BUG-090); nothing stops `[piners] registry_dir` and `[piners.lint] registry_dir` being the same directory, in which case each loads the other's file as a keyword file and fails to parse. An unknown `TvDiag` severity is dropped by `filter_map` in `tv_anchor` and `LintRegistry::lint` never validates it (serde enum proposed). `measured.rs` debug handling: BUG-047.
 
 ## PRJ-047 - piners logging gaps
 

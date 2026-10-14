@@ -424,22 +424,19 @@ where
             // so the build and measurement run under the same hold rather than
             // leaving a window between housekeeping and build.
             //
-            // Disarmed for the acquisition: the lock activates whatever
-            // toolchain-disable is armed, and at this point that is the live
-            // build root, which a `--commit` run never builds in. The
-            // worktree's own pin is disabled explicitly below, once the
-            // worktree exists - re-arming would do nothing, since every later
-            // acquire in this run re-enters this hold and activates nothing.
-            let saved_arm = crate::toolchain::arm(None);
-            //
             // The record this acquisition writes is the one `brokkr lock` and a
             // waiter's message show for the whole run (the closure's re-entrant
             // acquires never rewrite it), so it carries the caller's project
             // and the invoked command, not a bookkeeping name.
             let invoked = invoked_command();
-            let lock = acquire_cmd_lock_opt(project, project_root, &invoked);
-            crate::toolchain::arm(saved_arm);
-            let lock = lock?;
+            // The live build root's armed pin is unrelated to this run. Keep
+            // the configured arm untouched and explicitly activate the
+            // worktree's pin below, once its checkout exists.
+            let lock = lockfile::acquire_without_toolchain(&lockfile::LockContext {
+                project: project.map_or("brokkr", Project::name),
+                command: &invoked,
+                project_root: &project_root.display().to_string(),
+            })?;
 
             // Retention runs from `create`'s cut hook: only when a worktree is
             // actually cut, never on reuse, so the cost lands beside a build
@@ -475,8 +472,12 @@ where
             } else {
                 None
             };
+            let _toolchain_registration = toolchain_guard
+                .as_ref()
+                .map(|_| lock.track_toolchain_dir(&wt.path));
             let result = f(Some(&wt.path));
             drop(toolchain_guard);
+            drop(_toolchain_registration);
             drop(lock);
             result
         }

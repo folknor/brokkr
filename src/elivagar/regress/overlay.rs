@@ -17,6 +17,7 @@ use std::io;
 use std::path::Path;
 use std::sync::Arc;
 
+use super::super::corpus::layout::tile_svg_file_name;
 use super::super::corpus::render::{path_data, xml_attr, xml_text};
 use super::super::eliv::{
     ArchiveView, DetailAttr, Strictness, find_entry, gzip_decompress, tile_id_to_zxy,
@@ -207,7 +208,7 @@ pub(crate) fn render_overlay(collector: &OverlayCollector, background: &str) -> 
                     draw(&mut out, f, "#2196f3", e.class.name(), "0.7");
                 }
             }
-            OutcomeClass::ExtentMismatch => {}
+            OutcomeClass::ExtentMismatch | OutcomeClass::Count => {}
         }
     }
     out.push_str("<g font-family=\"monospace\" font-size=\"20\"><text x=\"20\" y=\"4140\">grey unchanged; pink current; blue comparand; orange attributes</text>");
@@ -286,7 +287,7 @@ pub(crate) fn dump_overlays(
             let collector = compare_detail_tiles::<OverlayCollector>(&cur, &bl, cfg);
             let (z, x, y) = tile_id_to_zxy(tile_id);
             fs::write(
-                dir.join(format!("z{z}-x{x}-y{y}.svg")),
+                dir.join(tile_svg_file_name(z, x, y, &[])),
                 render_overlay(&collector, background),
             )?;
             written += 1;

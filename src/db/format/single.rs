@@ -1,4 +1,4 @@
-use super::super::types::short_uuid;
+use super::super::types::{KvClass, short_uuid};
 use super::super::{Distribution, KvPair, StoredRow};
 use super::table::{format_us_as_ms, format_wall};
 
@@ -242,21 +242,17 @@ fn extras_fields(row: &StoredRow) -> Vec<(String, String)> {
     let mut meta_kv: Vec<&KvPair> = row
         .kv
         .iter()
-        .filter(|kv| kv.key.starts_with("meta."))
+        .filter(|kv| kv.class() == KvClass::Metadata)
         .collect();
     meta_kv.sort_by_key(|kv| &kv.key);
     for kv in &meta_kv {
-        let label = kv
-            .key
-            .strip_prefix("meta.")
-            .unwrap_or(&kv.key)
-            .replace('_', " ");
+        let label = kv.class().suffix(&kv.key).replace('_', " ");
         fields.push((label, kv.value.to_string()));
     }
     let mut runtime_kv: Vec<&KvPair> = row
         .kv
         .iter()
-        .filter(|kv| !kv.key.starts_with("meta.") && !kv.key.starts_with("threads."))
+        .filter(|kv| matches!(kv.class(), KvClass::Counter | KvClass::Predecessor))
         .collect();
     runtime_kv.sort_by_key(|kv| &kv.key);
     for kv in &runtime_kv {

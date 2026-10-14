@@ -330,7 +330,7 @@ pub(crate) fn run_wallclock_core(
     let (basename, file_mb) = result_input_metadata(command, cmd_ctx)?;
 
     let config = BenchConfig {
-        command: command.result_command(),
+        command: command.id().into(),
         mode: None,
         input_file: Some(basename),
         input_mb: Some(file_mb),
@@ -458,7 +458,7 @@ fn run_pbfhogg_hotpath(
     let metadata = command.metadata(&cmd_ctx);
 
     let config = BenchConfig {
-        command: command.result_command(),
+        command: command.id().into(),
         mode: None,
         input_file: Some(basename),
         input_mb: Some(file_mb),

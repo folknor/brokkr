@@ -57,7 +57,7 @@ pub fn run(
     // everything the tilegen block expands to, ocean inputs included) lands in
     // cli_args verbatim, and `brokkr results --grep` selects on it.
     let config = BenchConfig {
-        command: command.result_command().into(),
+        command: command.id().into(),
         mode: None,
         input_file: Some(basename),
         input_mb: Some(file_mb),

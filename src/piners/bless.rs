@@ -67,7 +67,7 @@ pub fn apply(
 
     // Each line's derived label (for naming a refusal) and its validated one
     // (`report::valid_label`, the validator integrity and the gate share).
-    let actual: BTreeMap<&str, (String, Option<&'static str>)> = report
+    let actual: BTreeMap<&str, (String, Option<crate::piners::registry::CorpusDisposition>)> = report
         .probes
         .iter()
         .map(|p| (p.probe.as_str(), (p.disposition(), p.valid_disposition())))
@@ -115,9 +115,9 @@ pub fn apply(
             continue; // unreachable: validated above
         };
         blessed += 1;
-        if pin.expected.as_deref() != Some(*disp) {
+        if pin.expected != Some(*disp) {
             changed += 1;
-            pin.expected = Some((*disp).to_owned());
+            pin.expected = Some(*disp);
         }
     }
 
@@ -154,7 +154,9 @@ mod tests {
                 xxh128: "11".into(),
             },
         );
-        p.expected = expected.map(str::to_owned);
+        p.expected = expected.map(|label| {
+            registry::CorpusDisposition::from_label(label).expect("test disposition is recognized")
+        });
         p
     }
 
@@ -192,11 +194,17 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(reg.pins["a"].expected.as_deref(), Some("count_divergent"));
-        assert_eq!(reg.pins["b"].expected.as_deref(), Some("compile_fail"));
         assert_eq!(
-            reg.pins["untouched"].expected.as_deref(),
-            Some("byte_exact")
+            reg.pins["a"].expected,
+            Some(registry::CorpusDisposition::CountDivergent)
+        );
+        assert_eq!(
+            reg.pins["b"].expected,
+            Some(registry::CorpusDisposition::CompileFail)
+        );
+        assert_eq!(
+            reg.pins["untouched"].expected,
+            Some(registry::CorpusDisposition::ByteExact)
         );
     }
 
@@ -308,7 +316,10 @@ mod tests {
         let written = std::fs::read_to_string(&pins_path).unwrap();
         assert!(written.contains("# keep me"));
         let data = registry::parse_pins(&written, &pins_path).unwrap();
-        assert_eq!(data.probes["a"].expected.as_deref(), Some("accepted"));
+        assert_eq!(
+            data.probes["a"].expected,
+            Some(registry::CorpusDisposition::Accepted)
+        );
         assert_eq!(reg.pins_text, written);
     }
 

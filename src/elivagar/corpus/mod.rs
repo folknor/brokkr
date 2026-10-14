@@ -5,6 +5,8 @@
 //!
 //! Module map:
 //! - `digest`   - leaf runs, the fold, `digest`/`leaves` formats, self-integrity.
+//! - `canon_sink` - shared byte writer for the frozen tile hash and regress.
+//! - `layout`   - committed corpus paths and tile SVG names.
 //! - `diff`     - the localized content diff (leaves / zooms / buckets).
 //! - `contract` - the comparability gate (provenance read + gating policy).
 //! - `manifest` - the hard-tiles ledger.
@@ -17,12 +19,14 @@
 //! staleness (step 4) does not and is strictly subordinate to the content
 //! verdict, so it can never mask a regression.
 
+pub(crate) mod canon_sink;
 pub mod canonical;
 pub mod contract;
 pub mod diff;
 pub mod digest;
 #[cfg(test)]
 pub(crate) mod fixture;
+pub(crate) mod layout;
 pub mod manifest;
 pub mod mutate;
 pub mod render;
@@ -41,8 +45,8 @@ use digest::{Baseline, Digest, LeafRun};
 pub use digest::DigestMode;
 pub use mutate::MutationOp;
 
-/// The gate's verdict, mapped 1:1 to the process exit code the caller contract
-/// pins (`brokkr.md`, Signals). 0 pass / 1 content changed / 2 archive cannot be
+/// The gate verdict and sole owner of its process exit mapping, as pinned by
+/// `brokkr.md` (Signals). 0 pass / 1 content changed / 2 archive cannot be
 /// judged / 3 the baseline is the problem (damage OR staleness).
 ///
 /// A run that reaches no verdict at all - lock, bootstrap, archive resolution,
@@ -175,6 +179,8 @@ pub fn compute(archive: &ArchiveView, mode: DigestMode) -> io::Result<(Digest, V
     let mut scratch = DecodeScratch::default();
     let mut hashes: HashMap<BlobRef, u128> = HashMap::new();
     for b in &blobs {
+        // Regress uses this same canonical function in its parallel pass; only
+        // the scheduling differs between the two archive walks.
         let h = semantic_hash(archive.raw_blob(*b)?, &mut scratch)?;
         hashes.insert(*b, h);
     }
@@ -266,22 +272,18 @@ struct Passed {
 
 #[allow(clippy::too_many_lines)]
 fn gate_through_walk(archive: &Path, corpus_dir: &Path) -> io::Result<Gate> {
+    let layout = layout::CorpusLayout::new(corpus_dir);
     // STEP 1 - baseline integrity (subject: the baseline; exit 3 on damage).
     // Every read here goes through `baseline_material`, so an absent or
     // corrupted committed file is the exit-3 verdict rather than an escaping
     // io::Error the dispatch would flatten into exit 1 (content mismatch).
-    let base = match baseline_material(
-        "baseline digest",
-        digest::parse_baseline(&corpus_dir.join("digest")),
-    )? {
+    let base = match baseline_material("baseline digest", digest::parse_baseline(&layout.digest()))?
+    {
         Ok(b) => b,
         Err(msg) => return Ok(refused(baseline_trouble(msg))),
     };
     let committed_leaves = if base.mode == DigestMode::Leaves {
-        match baseline_material(
-            "baseline leaves",
-            digest::parse_leaves(&corpus_dir.join("leaves")),
-        )? {
+        match baseline_material("baseline leaves", digest::parse_leaves(&layout.leaves()))? {
             Ok(l) => Some(l),
             Err(msg) => return Ok(refused(baseline_trouble(msg))),
         }
@@ -299,7 +301,7 @@ fn gate_through_walk(archive: &Path, corpus_dir: &Path) -> io::Result<Gate> {
     if let Some(msg) = format_guard(&view) {
         return Ok(refused(archive_refused(msg)));
     }
-    let base_contract = match contract_from_file(&corpus_dir.join("contract.json"))? {
+    let base_contract = match contract_from_file(&layout.contract())? {
         Ok(c) => c,
         Err(msg) => return Ok(refused(baseline_trouble(msg))),
     };
@@ -438,11 +440,12 @@ fn svg_staleness(
     corpus_dir: &Path,
     _base: &Baseline,
 ) -> io::Result<Result<Vec<String>, String>> {
-    let manifest_path = corpus_dir.join("manifest.toml");
+    let layout = layout::CorpusLayout::new(corpus_dir);
+    let manifest_path = layout.manifest();
     if !manifest_path.exists() {
         return Ok(Ok(Vec::new()));
     }
-    let contract_read = std::fs::read_to_string(corpus_dir.join("contract.json")).and_then(|t| {
+    let contract_read = std::fs::read_to_string(layout.contract()).and_then(|t| {
         serde_json::from_str::<serde_json::Value>(&t)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
     });
@@ -477,7 +480,7 @@ fn svg_staleness(
         Ok(m) => m,
         Err(msg) => return Ok(Err(msg)),
     };
-    let tiles = corpus_dir.join("tiles");
+    let tiles = layout.tiles();
     let mut expected = BTreeSet::new();
     let mut stale = Vec::new();
     for entry in &manifest.tile {
@@ -539,7 +542,8 @@ pub fn render_manifest(
         Gate::Refused(o, r) => return Ok((o, r)),
         Gate::Passed(p) => p.view,
     };
-    let manifest_path = corpus_dir.join("manifest.toml");
+    let layout = layout::CorpusLayout::new(corpus_dir);
+    let manifest_path = layout.manifest();
     if !manifest_path.exists() {
         return Ok(baseline_trouble("manifest.toml is absent"));
     }
@@ -569,7 +573,7 @@ pub fn render_manifest(
             canonical_style.display()
         ));
     }
-    let tiles = corpus_dir.join("tiles");
+    let tiles = layout.tiles();
     std::fs::create_dir_all(&tiles)?;
     let mut wanted = BTreeSet::new();
     for entry in &manifest.tile {
@@ -604,7 +608,7 @@ pub fn render_manifest(
         "xxh3_128": style.hash_hex(),
     });
     crate::atomic_write::replace(
-        &corpus_dir.join("contract.json"),
+        &layout.contract(),
         contract_text(&view_contract, Some(style_json))?.as_bytes(),
     )?;
     Ok((
@@ -700,6 +704,7 @@ pub fn bless(
     mode: DigestMode,
     rotate: bool,
 ) -> io::Result<(Outcome, CheckReport)> {
+    let layout = layout::CorpusLayout::new(corpus_dir);
     let a = ArchiveView::open(archive)?;
     if let Some(msg) = format_guard(&a) {
         return Ok(archive_refused(msg));
@@ -725,40 +730,34 @@ pub fn bless(
     {
         return Ok(archive_refused("candidate is not locations-generated"));
     }
-    if corpus_dir.join("digest").exists() && !rotate {
+    if layout.digest().exists() && !rotate {
         // A damaged existing baseline is exit 3, like `check`'s step 1 - not
         // an escaping io::Error, and not the exit 1 this branch otherwise
         // returns for "rotation not adjudicated". `--rotate` overwrites it.
-        let base = match baseline_material(
-            "baseline digest",
-            digest::parse_baseline(&corpus_dir.join("digest")),
-        )? {
-            Ok(b) => b,
-            Err(msg) => {
-                return Ok(baseline_trouble(format!(
-                    "{msg} (bless --rotate replaces it)"
-                )));
-            }
-        };
-        let committed_leaves =
-            if base.mode == DigestMode::Leaves && corpus_dir.join("leaves").is_file() {
-                match baseline_material(
-                    "baseline leaves",
-                    digest::parse_leaves(&corpus_dir.join("leaves")),
-                )? {
-                    Ok(l) => Some(l),
-                    Err(msg) => {
-                        return Ok(baseline_trouble(format!(
-                            "{msg} (bless --rotate replaces it)"
-                        )));
-                    }
+        let base =
+            match baseline_material("baseline digest", digest::parse_baseline(&layout.digest()))? {
+                Ok(b) => b,
+                Err(msg) => {
+                    return Ok(baseline_trouble(format!(
+                        "{msg} (bless --rotate replaces it)"
+                    )));
                 }
-            } else {
-                None
             };
+        let committed_leaves = if base.mode == DigestMode::Leaves && layout.leaves().is_file() {
+            match baseline_material("baseline leaves", digest::parse_leaves(&layout.leaves()))? {
+                Ok(l) => Some(l),
+                Err(msg) => {
+                    return Ok(baseline_trouble(format!(
+                        "{msg} (bless --rotate replaces it)"
+                    )));
+                }
+            }
+        } else {
+            None
+        };
         let (d, current_leaves) = compute(&a, base.mode)?;
         let mut lines = vec!["rotation requires --rotate".to_string()];
-        if let Ok(Ok(base_contract)) = contract_from_file(&corpus_dir.join("contract.json")) {
+        if let Ok(Ok(base_contract)) = contract_from_file(&layout.contract()) {
             for path in contract::contract_diff(&base_contract, &contract) {
                 lines.push(format!("contract {path}"));
             }
@@ -786,9 +785,9 @@ pub fn bless(
     }
     let (d, l) = compute(&a, mode)?;
     std::fs::create_dir_all(corpus_dir)?;
-    let digest_path = corpus_dir.join("digest");
-    let contract_path = corpus_dir.join("contract.json");
-    let leaves_path = corpus_dir.join("leaves");
+    let digest_path = layout.digest();
+    let contract_path = layout.contract();
+    let leaves_path = layout.leaves();
     crate::atomic_write::replace(&digest_path, digest::digest_text(&d).as_bytes())?;
     crate::atomic_write::replace(&contract_path, contract_text(&contract, None)?.as_bytes())?;
     if mode == DigestMode::Leaves {
@@ -796,7 +795,7 @@ pub fn bless(
     } else if leaves_path.exists() {
         std::fs::remove_file(&leaves_path)?;
     }
-    if corpus_dir.join("manifest.toml").exists() {
+    if layout.manifest().exists() {
         let (verdict, r) = render_manifest(archive, corpus_dir, &corpus_style_path(corpus_dir))?;
         if verdict != Outcome::Pass {
             return Ok((verdict, r));
@@ -806,15 +805,7 @@ pub fn bless(
     Ok((
         Outcome::Pass,
         CheckReport {
-            message: format!(
-                "blessed {} tiles ({})",
-                d.tiles,
-                if mode == DigestMode::Leaves {
-                    "leaves"
-                } else {
-                    "buckets"
-                }
-            ),
+            message: format!("blessed {} tiles ({})", d.tiles, mode.as_str()),
             warnings,
             ..Default::default()
         },
@@ -859,17 +850,19 @@ mod baseline_verdict_tests {
     use super::super::eliv::xy_to_tile_id;
     use super::digest::{digest_text, fold_leaves, leaves_text};
     use super::fixture::TestDir;
+    use super::layout::CorpusLayout;
     use super::{DigestMode, LeafRun, Outcome, Path, check};
 
     fn intact_baseline(dir: &Path) {
+        let layout = CorpusLayout::new(dir);
         let leaves = vec![LeafRun {
             tile_id: xy_to_tile_id(2, 1, 1),
             run_length: 1,
             hash: 0xABCD,
         }];
         let d = fold_leaves(&leaves, DigestMode::Leaves);
-        std::fs::write(dir.join("digest"), digest_text(&d)).unwrap();
-        std::fs::write(dir.join("leaves"), leaves_text(&leaves)).unwrap();
+        std::fs::write(layout.digest(), digest_text(&d)).unwrap();
+        std::fs::write(layout.leaves(), leaves_text(&leaves)).unwrap();
     }
 
     fn verdict(corpus_dir: &Path) -> Outcome {
@@ -888,7 +881,11 @@ mod baseline_verdict_tests {
     fn a_malformed_digest_is_baseline_trouble() {
         let dir = TestDir::new("corpus-baseline-malformed-digest");
         intact_baseline(&dir.path);
-        std::fs::write(dir.path.join("digest"), "mode leaves\nroot 00\n").unwrap();
+        std::fs::write(
+            CorpusLayout::new(&dir.path).digest(),
+            "mode leaves\nroot 00\n",
+        )
+        .unwrap();
         assert_eq!(verdict(&dir.path), Outcome::BaselineTrouble);
     }
 
@@ -896,13 +893,10 @@ mod baseline_verdict_tests {
     fn missing_and_malformed_leaves_are_both_baseline_trouble() {
         let dir = TestDir::new("corpus-baseline-leaves");
         intact_baseline(&dir.path);
-        std::fs::remove_file(dir.path.join("leaves")).unwrap();
+        let leaves_path = CorpusLayout::new(&dir.path).leaves();
+        std::fs::remove_file(&leaves_path).unwrap();
         assert_eq!(verdict(&dir.path), Outcome::BaselineTrouble);
-        std::fs::write(
-            dir.path.join("leaves"),
-            "elivagar-corpus-leaves v1\nnot a row\n",
-        )
-        .unwrap();
+        std::fs::write(&leaves_path, format!("{}not a row\n", leaves_text(&[]))).unwrap();
         assert_eq!(verdict(&dir.path), Outcome::BaselineTrouble);
     }
 

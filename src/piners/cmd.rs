@@ -58,13 +58,10 @@ use crate::piners::isolate::{self, AttemptOutcome, StopReason};
 use crate::piners::manifest::Manifest;
 use crate::piners::registry::{self, Registry, VerifiedProbe};
 use crate::piners::report;
-use crate::piners::select::{self, SelectArgs};
+use crate::piners::select::SelectArgs;
 use crate::ratatoskr::build;
 use crate::resolve::corpus_runs_db_path;
 
-/// Where corpus run dirs live, relative to the project root:
-/// `<this>/corpus/run-<run id>/`.
-const ARTEFACT_PARENT: &str = ".brokkr/piners";
 const ARTEFACT_TEST_ID: &str = "corpus";
 
 /// Wall-clock backstop on the harness subprocess. Not a budget - a run is let
@@ -72,6 +69,8 @@ const ARTEFACT_TEST_ID: &str = "corpus";
 /// harness would otherwise hold the global lock until someone runs `brokkr
 /// kill`. Set far above any real run (a full pass included), so only a hang
 /// reaches it; the run is then recorded as failed.
+/// This fixed guard does not estimate from run history or use a dirty-tree
+/// bypass; those checks belong to measured commands, not parity runs.
 /// Shared with the measured path (`measured.rs`), which applies it per
 /// iteration through `sidecar::DeadlineScope`.
 pub(crate) const HARNESS_HANG_BACKSTOP: Duration = Duration::from_secs(60 * 60);
@@ -109,6 +108,15 @@ pub struct CorpusArgs {
     pub harness_args: Vec<String>,
 }
 
+pub(crate) fn missing_harness_config_error() -> DevError {
+    DevError::Config(
+        "corpus: no [piners.harness] section in brokkr.toml. \
+         Declare `[piners.harness]` with `package = \"<crate>\"` \
+         (and optional `binary`, `features`, `debug`)."
+            .into(),
+    )
+}
+
 /// Entry point for `brokkr corpus`.
 #[allow(clippy::too_many_lines, clippy::cognitive_complexity)] // linear orchestration: load, select, verify, build, run, report, diagnose
 pub fn corpus(
@@ -117,12 +125,25 @@ pub fn corpus(
     args: &CorpusArgs,
 ) -> Result<(), DevError> {
     let cfg = dev_config.piners.clone().unwrap_or_default();
+    crate::piners::layout::ensure_distinct_registry_dirs(project_root, &cfg)?;
 
     // Reseed stamps pins.toml from the corpus filesystem - no registry to
     // load (it may not exist yet), no build, no harness. Route early.
     if args.reseed {
         return crate::piners::reseed::run(project_root, &cfg, args);
     }
+
+    // `--verify-only` deliberately needs no harness config. Every other
+    // parity run can refuse a missing harness before hashing the selection.
+    let harness_cfg = if args.verify_only {
+        None
+    } else {
+        Some(
+            cfg.harness
+                .as_ref()
+                .ok_or_else(missing_harness_config_error)?,
+        )
+    };
 
     // The lock comes before anything is read. Reseed and bless write
     // pins.toml under it, so a run that loaded and verified first could wait
@@ -138,46 +159,22 @@ pub fn corpus(
     })?;
     let _sigterm = crate::shutdown::SigtermGuard::install();
 
-    let registry_dir = project_root.join(cfg.registry_dir());
-    let corpus_root = project_root.join(cfg.corpus_root());
-    let mut registry = Registry::load(&registry_dir, &corpus_root, &lock)?;
-    registry.lint()?;
-
     let sel_args = SelectArgs {
         keywords: args.keywords.clone(),
         probe: args.probe.clone(),
         all: args.all,
         verify_only: args.verify_only,
     };
-    let ids = select::resolve(&registry, &sel_args)?;
-
-    // Hard correctness gate: verify every selected pin before running.
-    output::corpus_msg(&format!(
-        "verifying {} against {}",
-        output::count(ids.len(), "probe"),
-        corpus_root.display()
-    ));
-    let mut verified = Vec::with_capacity(ids.len());
-    for id in &ids {
-        let (pin, config) = registry
-            .pins
-            .get(id)
-            .zip(registry.config(id))
-            .ok_or_else(|| {
-                DevError::Config(format!(
-                    "piners: internal: selected id '{id}' absent from pins"
-                ))
-            })?;
-        verified.push(registry::verify_probe(
-            id,
-            pin,
-            config,
-            &corpus_root,
-            project_root,
-        )?);
-    }
-    let feed_count = verify_selected_feeds(&ids, &registry, &corpus_root, project_root)?;
-    let file_count = registry::verify_harness_files(&registry, &corpus_root, project_root)?;
+    let prepared = crate::piners::prepare::prepare(project_root, &cfg, &lock, &sel_args)?;
+    let crate::piners::prepare::PreparedSelection {
+        mut registry,
+        registry_dir,
+        corpus_root,
+        ids,
+        verified,
+        feed_count,
+        file_count,
+    } = prepared;
 
     if args.verify_only {
         output::corpus_msg(&format!(
@@ -189,16 +186,7 @@ pub fn corpus(
         return Ok(());
     }
 
-    // Required only once something is to be built: verification needs no
-    // harness, so a registry-only checkout can still `--verify-only`.
-    let harness_cfg = cfg.harness.as_ref().ok_or_else(|| {
-        DevError::Config(
-            "corpus: no [piners.harness] section in brokkr.toml. \
-             Declare `[piners.harness]` with `package = \"<crate>\"` \
-             (and optional `binary`, `features`, `debug`)."
-                .into(),
-        )
-    })?;
+    let harness_cfg = harness_cfg.ok_or_else(missing_harness_config_error)?;
 
     // Default profile is debug: parity is opt-level-independent, and the
     // debug build keeps the edit/run loop inside the cache-warm window.
@@ -239,10 +227,20 @@ pub fn corpus(
     // the same id. Reserved under the lock, past both every stored run and
     // every dir on disk (an unrecorded run - a SIGKILL, a failed ingest -
     // leaves its dir, which holds the number until a clean removes it).
-    let artefact_parent = project_root.join(ARTEFACT_PARENT);
+    // Derive the artefact parent from the shared run-store path so the
+    // writable run directory stays beside `runs.db` if its root moves.
+    let artefact_parent = corpus_db_path
+        .parent()
+        .and_then(Path::parent)
+        .ok_or_else(|| {
+            DevError::Config(format!(
+                "piners: cannot derive the artefact parent from {}",
+                corpus_db_path.display()
+            ))
+        })?;
     let run_id = reserve_run_id(&corpus_db_path, &artefact_parent.join(ARTEFACT_TEST_ID))?;
     let artefacts = ArtefactDir::allocate_at(
-        &artefact_parent,
+        artefact_parent,
         ARTEFACT_TEST_ID,
         run_id,
         args.keep_artefacts,
@@ -443,7 +441,11 @@ pub fn corpus(
     let expected: BTreeMap<String, Option<String>> = ids
         .iter()
         .map(|id| {
-            let exp = registry.pins.get(id).and_then(|p| p.expected.clone());
+            let exp = registry
+                .pins
+                .get(id)
+                .and_then(|p| p.expected)
+                .map(|disposition| disposition.as_str().to_owned());
             (id.clone(), exp)
         })
         .collect();
@@ -581,7 +583,7 @@ pub fn corpus(
             ));
             return Err(DevError::ExitCode(1));
         }
-        let pins_path = registry_dir.join("pins.toml");
+        let pins_path = registry_dir.join(registry::PINS_FILE);
         crate::piners::bless::apply(&pins_path, &mut registry, report, &ids)?;
         finish(artefacts)?;
         return Ok(());
@@ -819,34 +821,6 @@ fn stored_violations(a: &integrity::RunAssessment, evidence_failed: bool) -> i64
     i64::try_from(n).unwrap_or(i64::MAX)
 }
 
-/// Hard-verify the feed groups referenced by the selection, the feed leg of
-/// the content gate: the feed is part of each probe's oracle identity (the
-/// same script and oracle against the wrong feed gates as a fake
-/// regression), so its files get the same hash-or-abort policy as the probe
-/// files. Returns the
-/// number of groups verified. Shared by the parity and measured paths.
-pub(crate) fn verify_selected_feeds(
-    ids: &[String],
-    registry: &Registry,
-    corpus_root: &Path,
-    project_root: &Path,
-) -> Result<usize, DevError> {
-    let referenced: std::collections::BTreeSet<String> = ids
-        .iter()
-        .filter_map(|id| registry.config(id).and_then(|c| c.feed))
-        .collect();
-    for name in &referenced {
-        // lint guarantees the group exists; the ok_or_else is belt-and-braces.
-        let group = registry.feeds.get(name).ok_or_else(|| {
-            DevError::Config(format!(
-                "piners: internal: referenced feed group '{name}' absent from [feeds]"
-            ))
-        })?;
-        registry::verify_feed_group(name, group, corpus_root, project_root)?;
-    }
-    Ok(referenced.len())
-}
-
 /// Build the `selector` JSON stored on the run row: the resolved probe ids
 /// plus the raw selection flags - enough to group by and to reproduce.
 /// Forwarded harness flags and the build profile are part of the run's
@@ -854,16 +828,14 @@ pub(crate) fn verify_selected_feeds(
 /// they remain in this selection record too; `RunContext` also stores them in
 /// dedicated columns for strict comparison.
 fn selector_json(args: &CorpusArgs, ids: &[String], context: &RunContext) -> String {
-    serde_json::json!({
-        "all": args.all,
-        "keywords": args.keywords,
-        "probe": args.probe,
-        "bless": args.bless,
-        "harness_args": &context.harness_args,
-        "debug": context.debug,
-        "ids": ids,
-    })
-    .to_string()
+    crate::piners::selector::json(
+        args.all,
+        &args.keywords,
+        &args.probe,
+        args.bless,
+        ids,
+        Some((context.debug, &context.harness_args)),
+    )
 }
 
 /// What a run knows about itself before it executes: when it started, and

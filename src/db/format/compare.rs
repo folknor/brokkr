@@ -1,3 +1,4 @@
+use super::super::types::KvClass;
 use super::super::{HotpathData, KvPair, StoredRow};
 use super::DatasetMatcher;
 use super::table::{
@@ -200,15 +201,12 @@ struct RowData {
 
 /// Collect a row's runtime counters, keyed by name.
 ///
-/// `meta.`, `env.` and `prev.` pairs are provenance rather than measurement and
-/// are excluded: they legitimately differ between two runs without meaning the
-/// work did. `prev.*` in particular describes what the machine ran immediately
-/// beforehand, so it differs on essentially every pair.
+/// Only unprefixed runtime counters describe the work. Metadata, captured env,
+/// predecessor state, and thread summaries are separate comparison axes or
+/// display data and must not be reported as moved work-size counters.
 fn collect_counters(kv: &[KvPair]) -> std::collections::BTreeMap<String, String> {
     kv.iter()
-        .filter(|p| {
-            !p.key.starts_with("meta.") && !p.key.starts_with("env.") && !p.key.starts_with("prev.")
-        })
+        .filter(|p| p.class() == KvClass::Counter)
         .map(|p| (p.key.clone(), p.value.to_string()))
         .collect()
 }

@@ -3,7 +3,10 @@
 use super::ResultsDb;
 use super::run_store::RunId;
 use super::schema::INSERT_SQL;
-use super::types::{HotpathData, KvPair, KvValue, RunRow, generate_uuid, short_uuid};
+use super::types::{
+    HotpathData, KvClass, KvPair, KvValue, RunRow, canonical_cargo_features, generate_uuid,
+    short_uuid,
+};
 use crate::error::DevError;
 
 // ---------------------------------------------------------------------------
@@ -57,6 +60,10 @@ impl ResultsDb {
 // ---------------------------------------------------------------------------
 
 fn insert_inner(conn: &rusqlite::Connection, row: &RunRow, uuid: &str) -> Result<String, DevError> {
+    // Store one stable spelling regardless of whether the feature list came
+    // from a host config, a request, or a per-row variant.
+    let cargo_features = canonical_cargo_features(row.cargo_features.as_deref());
+
     // Envelope row.
     conn.execute(
         INSERT_SQL,
@@ -71,7 +78,7 @@ fn insert_inner(conn: &rusqlite::Connection, row: &RunRow, uuid: &str) -> Result
             row.elapsed_ms,
             row.elapsed_us,
             row.peak_rss_mb,
-            row.cargo_features,
+            cargo_features,
             row.cargo_profile.as_str(),
             row.kernel,
             row.cpu_governor,
@@ -195,7 +202,12 @@ fn insert_hotpath(
     // Thread summary stats into run_kv. These yield to anything already
     // in `row.kv` under the same key: the run's own report is primary.
     for kv in &hp.thread_summary {
-        insert_kv_row(conn, run_id, kv, OnConflict::Ignore)?;
+        let key = KvClass::ThreadSummary.qualify(KvClass::ThreadSummary.suffix(&kv.key));
+        let pair = KvPair {
+            key,
+            value: kv.value.clone(),
+        };
+        insert_kv_row(conn, run_id, &pair, OnConflict::Ignore)?;
     }
     Ok(())
 }

@@ -1,3 +1,25 @@
+//! Service cohort orchestration and shared fixture sessions.
+
+use std::collections::HashMap;
+use std::fs;
+use std::os::unix::process::ExitStatusExt;
+use std::path::{Path, PathBuf};
+
+use serde::Serialize;
+
+use crate::artefacts::{self, ArtefactDir};
+use crate::config::DevConfig;
+use crate::error::DevError;
+use crate::lockfile::{self, LockContext};
+use crate::output::{self, CapturedOutput};
+use crate::ratatoskr::build::{self, HarnessBuild};
+use crate::ratatoskr::discover::{self, Expected, PreserveDataDir, SCRIPT_DIR, ScriptInfo};
+use crate::ratatoskr::saehrimnir::{MockServer, endpoint_env_pairs, require_path, resolve_fixture};
+
+#[cfg(test)]
+use super::single::{format_iter_line, format_soak_summary};
+use super::single::{ARTEFACT_PARENT, RunResult, SERVICE_MOCK_PARENT, spawn_and_capture};
+
 /// `brokkr service --all` - run every discovered script (optionally
 /// filtered) against a single shared harness build.
 ///
@@ -99,7 +121,9 @@ pub fn service_suite(
 
     let artefact_parent = project_root.join(ARTEFACT_PARENT);
     let total = runnable.len();
-    let total_runs = u32::try_from(total).unwrap_or(u32::MAX).saturating_mul(cycles);
+    let total_runs = u32::try_from(total)
+        .unwrap_or(u32::MAX)
+        .saturating_mul(cycles);
     let mut results: Vec<CycleRun> = Vec::with_capacity(total * cycles as usize);
     let mut bailed = false;
     // Suite-scoped fixture reuse: one sæhrimnir per distinct fixture
@@ -162,8 +186,7 @@ pub fn service_suite(
                     .saturating_mul(u32::try_from(total).unwrap_or(u32::MAX))
                     .saturating_add(u32::try_from(pos).unwrap_or(u32::MAX));
                 _lock.set_progress(run_index, total_runs);
-                let artefacts =
-                    ArtefactDir::allocate(&artefact_parent, &test_id, keep_on_success)?;
+                let artefacts = ArtefactDir::allocate(&artefact_parent, &test_id, keep_on_success)?;
                 // Inject endpoint env vars only if THIS script declares a
                 // fixture. No-fixture scripts run as if no mock exists,
                 // even when other scripts in the suite have mocks alive.
@@ -183,7 +206,12 @@ pub fn service_suite(
                     &_lock,
                 )?;
                 output::ratatoskr_msg(&format_suite_iter_line(
-                    cycle, cycles, pos, total, &script.name, &result,
+                    cycle,
+                    cycles,
+                    pos,
+                    total,
+                    &script.name,
+                    &result,
                 ));
                 let stop = !result.succeeded && !keep_going;
                 results.push(CycleRun {
@@ -237,7 +265,7 @@ struct CycleRun {
 /// path with a trailing slash so `t1` cannot match `t1abc`. Returns an
 /// empty string when the directory IS the script root - the suite
 /// treats `Some("")` as "match everything", same as `None`.
-fn directory_filter(project_root: &Path, dir: &Path) -> Result<String, DevError> {
+pub(super) fn directory_filter(project_root: &Path, dir: &Path) -> Result<String, DevError> {
     let canon = dir.canonicalize().map_err(|e| {
         DevError::Config(format!(
             "service: failed to canonicalize directory {}: {e}",
@@ -315,7 +343,10 @@ fn format_suite_header(
     filter: Option<&str>,
     cycles: u32,
 ) -> String {
-    let mut head = format!("suite: {runnable} script{}", if runnable == 1 { "" } else { "s" });
+    let mut head = format!(
+        "suite: {runnable} script{}",
+        if runnable == 1 { "" } else { "s" }
+    );
     if cycles > 1 {
         let total_runs = runnable as u64 * cycles as u64;
         head = format!("{head} \u{00d7} {cycles} cycles ({total_runs} runs)");
@@ -348,9 +379,7 @@ fn format_empty_suite(
     }
     if let Some(f) = filter {
         if filtered_out == total_discovered {
-            return format!(
-                "filter \"{f}\" matched no scripts ({total_discovered} discovered)"
-            );
+            return format!("filter \"{f}\" matched no scripts ({total_discovered} discovered)");
         }
         if skipped_ignored > 0 {
             return format!(
@@ -407,12 +436,7 @@ fn format_suite_iter_line(
 /// (`cycles > 1`) emits a cohort-level header line followed by an
 /// indented per-script `pass/total` table so the user can see which
 /// script broke without scrolling through 500 status lines.
-fn format_suite_summary(
-    results: &[CycleRun],
-    total: usize,
-    cycles: u32,
-    bailed: bool,
-) -> String {
+fn format_suite_summary(results: &[CycleRun], total: usize, cycles: u32, bailed: bool) -> String {
     if cycles <= 1 {
         return format_single_cycle_summary(results, total, bailed);
     }
@@ -436,7 +460,10 @@ fn format_suite_summary(
         )
     } else if bailed {
         // First failure stops the cohort; report the cycle and script.
-        let first_fail = results.iter().find(|r| !r.result.succeeded).expect("bailed implies a failure");
+        let first_fail = results
+            .iter()
+            .find(|r| !r.result.succeeded)
+            .expect("bailed implies a failure");
         format!(
             "soak: stopped at cycle {}/{cycles} {} ({pass_count} passed, {fail_count} failed)",
             first_fail.cycle, first_fail.name
@@ -468,7 +495,9 @@ fn format_suite_summary(
     for name in &order {
         let (pass, runs) = stats[name];
         let marker = if pass == runs { " " } else { "!" };
-        head.push_str(&format!("\n    {marker} {name:<name_width$}  {pass}/{runs}"));
+        head.push_str(&format!(
+            "\n    {marker} {name:<name_width$}  {pass}/{runs}"
+        ));
     }
     head
 }
@@ -499,9 +528,7 @@ fn format_single_cycle_summary(results: &[CycleRun], total: usize, bailed: bool)
         format!("suite: {pass_count}/{total} passed (min {min}ms, max {max}ms, avg {avg}ms)")
     } else if bailed {
         let first_fail = fail_names[0];
-        format!(
-            "suite: stopped at {first_fail} ({pass_count} passed, {fail_count} failed)"
-        )
+        format!("suite: stopped at {first_fail} ({pass_count} passed, {fail_count} failed)")
     } else {
         let names = fail_names.join(", ");
         format!("suite: {pass_count}/{total} passed, {fail_count} failed ({names})")
@@ -533,7 +560,7 @@ struct RunMetadata {
 /// Write the per-run artefact files: captured stdout/stderr, a copy of
 /// the script (so the dir is self-contained), and a `run.toml` with
 /// reproducibility metadata. Called after the harness binary has exited.
-fn write_artefacts(
+pub(super) fn write_artefacts(
     artefact_dir: &Path,
     script_abs: &Path,
     built: &HarnessBuild,
@@ -562,9 +589,8 @@ fn write_artefacts(
         git_subject: git.as_ref().map(|g| g.subject.clone()),
         git_clean: git.as_ref().map(|g| g.is_clean),
     };
-    let serialized = toml::to_string(&meta).map_err(|e| {
-        DevError::Config(format!("service: failed to serialize run.toml: {e}"))
-    })?;
+    let serialized = toml::to_string(&meta)
+        .map_err(|e| DevError::Config(format!("service: failed to serialize run.toml: {e}")))?;
     fs::write(artefact_dir.join("run.toml"), serialized)?;
     Ok(())
 }
@@ -578,7 +604,7 @@ fn write_artefacts(
 /// The single-script shape creates one before iteration and drains it
 /// after; the cohort creates one per distinct fixture, lazily on first
 /// use (see the suite loop's `mocks` map).
-struct FixtureSession {
+pub(super) struct FixtureSession {
     fixture_name: String,
     mock: MockServer,
     env_owned: Vec<(String, String)>,
@@ -589,7 +615,7 @@ impl FixtureSession {
     /// sæhrimnir, parse endpoints, and emit a one-line "mock-server up"
     /// status. Errors out with the same shape `mock-serve` uses when
     /// config is missing or the binary isn't built.
-    fn start(
+    pub(super) fn start(
         project_root: &Path,
         dev_config: &crate::config::DevConfig,
         owner_label: &str,
@@ -648,7 +674,7 @@ impl FixtureSession {
     /// Borrowed `&str` view over the owned env strings, ready to hand to
     /// `output::run_captured_with_env_and_deadline` via
     /// `spawn_and_capture`'s `extra_env` parameter.
-    fn env_pair_refs(&self) -> Vec<(&str, &str)> {
+    pub(super) fn env_pair_refs(&self) -> Vec<(&str, &str)> {
         self.env_owned
             .iter()
             .map(|(k, v)| (k.as_str(), v.as_str()))
@@ -658,7 +684,7 @@ impl FixtureSession {
     /// SIGTERM sæhrimnir and reap (with the standard 1.5s budget then
     /// SIGKILL escalation). Logs only if the shutdown went forceful so
     /// the happy path stays quiet.
-    fn shutdown(self, lock: &lockfile::LockGuard) {
+    pub(super) fn shutdown(self, lock: &lockfile::LockGuard) {
         let pid = self.mock.pid();
         let outcome = self.mock.shutdown();
         lock.remove_mock_pid(pid);
@@ -715,7 +741,12 @@ mod tests {
     /// subprocess. Uses [`ExitStatus::from_raw`] which encodes the wait
     /// status the same way the kernel does (low byte = signal, next
     /// byte = exit code when no signal).
-    fn captured(stdout: &[u8], stderr: &[u8], exit_code: Option<i32>, signal: Option<i32>) -> CapturedOutput {
+    fn captured(
+        stdout: &[u8],
+        stderr: &[u8],
+        exit_code: Option<i32>,
+        signal: Option<i32>,
+    ) -> CapturedOutput {
         let raw = match (exit_code, signal) {
             (_, Some(sig)) => sig,
             (Some(code), None) => code << 8,
@@ -897,10 +928,7 @@ mod tests {
             (3, fail(380, "exit=1", "/tmp/run-3")),
         ];
         let summary = format_soak_summary(&results, 10);
-        assert_eq!(
-            summary,
-            "soak: stopped at iter 3/10 (2 passed, 1 failed)"
-        );
+        assert_eq!(summary, "soak: stopped at iter 3/10 (2 passed, 1 failed)");
     }
 
     #[test]
@@ -1047,14 +1075,8 @@ mod tests {
 
     #[test]
     fn suite_iter_line_fail() {
-        let line = format_suite_iter_line(
-            1,
-            1,
-            3,
-            7,
-            "boot/ping",
-            &fail(380, "exit=1", "/tmp/run-1"),
-        );
+        let line =
+            format_suite_iter_line(1, 1, 3, 7, "boot/ping", &fail(380, "exit=1", "/tmp/run-1"));
         assert_eq!(
             line,
             "[3/7] FAIL boot/ping exit=1 in 380ms (artefacts: /tmp/run-1)"
@@ -1138,9 +1160,7 @@ mod tests {
         ];
         let summary = format_suite_summary(&results, 2, 50, true);
         assert!(
-            summary.starts_with(
-                "soak: stopped at cycle 2/50 beta (3 passed, 1 failed)"
-            ),
+            summary.starts_with("soak: stopped at cycle 2/50 beta (3 passed, 1 failed)"),
             "got: {summary}"
         );
         // Per-script totals show alpha 2/2 (pass marker) and beta 1/2 (fail marker).
@@ -1161,9 +1181,7 @@ mod tests {
         ];
         let summary = format_suite_summary(&results, 2, 3, false);
         assert!(
-            summary.starts_with(
-                "soak: 5/6 cohort runs passed, 1 failed across 3 cycles"
-            ),
+            summary.starts_with("soak: 5/6 cohort runs passed, 1 failed across 3 cycles"),
             "got: {summary}"
         );
         assert!(summary.contains("\n      alpha  3/3"), "got: {summary}");

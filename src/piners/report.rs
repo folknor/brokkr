@@ -25,7 +25,7 @@ use std::collections::{BTreeMap, HashSet};
 use serde::Deserialize;
 
 use crate::output;
-use crate::piners::registry;
+use crate::piners::registry::CorpusDisposition;
 
 /// Acceptance detail, present only when `outcome == "parity"`. Models what
 /// brokkr reads for the gate and the console; the p90 magnitudes and anything
@@ -154,47 +154,15 @@ where
         .collect())
 }
 
-/// The acceptance tiers a `parity` outcome may carry.
-pub const PARITY_TIERS: [&str; 4] = [
-    "byte_exact",
-    "accepted",
-    "actionable_drift",
-    "count_divergent",
-];
-
-/// The outcomes other than `parity`; each is its own gate label and carries
-/// no acceptance tier. `harness_abort` is the harness supervisor's verdict on
-/// a probe process that died or replied with no complete record set: a
-/// break, pinnable like `runtime_fail`.
-pub const NON_PARITY_OUTCOMES: [&str; 5] = [
-    "compile_fail",
-    "runtime_fail",
-    "no_tv_data",
-    "no_overlap",
-    "harness_abort",
-];
-
-/// The crash label. Its lines stay visible even when pinned, and a run that
-/// carries one is no performance sample.
-pub const HARNESS_ABORT: &str = "harness_abort";
-
 /// The one disposition validator: the gate label an `outcome` plus its
 /// acceptance `tier` (empty counts as absent) stand for, or `None` when the
-/// pair is not a valid disposition. `parity` needs one of
-/// [`PARITY_TIERS`]; any other outcome must be one of
-/// [`NON_PARITY_OUTCOMES`] and carry no tier. So `{"outcome":"accepted"}`
+/// pair is not a valid disposition. `parity` needs a parity-tier variant of
+/// [`CorpusDisposition`]; any other outcome must be a non-parity variant and
+/// carry no tier. So `{"outcome":"accepted"}`
 /// (a tier posing as an outcome) and `parity` with tier `runtime_fail` are
 /// both invalid, though each derives a label that looks pinnable.
-pub fn valid_label(outcome: &str, tier: Option<&str>) -> Option<&'static str> {
-    let tier = tier.filter(|t| !t.is_empty());
-    if outcome == "parity" {
-        let t = tier?;
-        PARITY_TIERS.iter().copied().find(|p| *p == t)
-    } else if tier.is_none() {
-        NON_PARITY_OUTCOMES.iter().copied().find(|o| *o == outcome)
-    } else {
-        None
-    }
+pub fn valid_label(outcome: &str, tier: Option<&str>) -> Option<CorpusDisposition> {
+    CorpusDisposition::from_fields(outcome, tier)
 }
 
 /// The record-level disposition validator: the gate label a disposition
@@ -209,7 +177,7 @@ pub fn record_label(
     outcome: &str,
     tier: Option<&str>,
     declared: Option<&serde_json::Value>,
-) -> Result<&'static str, String> {
+) -> Result<CorpusDisposition, String> {
     let Some(label) = valid_label(outcome, tier) else {
         return Err(format!(
             "outcome '{outcome}' with tier '{}' is not a valid disposition",
@@ -218,9 +186,10 @@ pub fn record_label(
     };
     match declared {
         None => Ok(label),
-        Some(serde_json::Value::String(s)) if s == label => Ok(label),
+        Some(serde_json::Value::String(s)) if s == label.as_str() => Ok(label),
         Some(other) => Err(format!(
-            "its disposition field {other} contradicts the derived label \"{label}\""
+            "its disposition field {other} contradicts the derived label \"{}\"",
+            label.as_str()
         )),
     }
 }
@@ -304,7 +273,7 @@ impl ProbeLine {
     /// tier together, and the harness's own `disposition` field, when
     /// present, agreeing with them. Shared by integrity, the gate, the break
     /// checks and bless.
-    pub fn valid_disposition(&self) -> Option<&'static str> {
+    pub fn valid_disposition(&self) -> Option<CorpusDisposition> {
         self.record_check().ok()
     }
 
@@ -313,7 +282,7 @@ impl ProbeLine {
         self.record_check().err()
     }
 
-    fn record_check(&self) -> Result<&'static str, String> {
+    fn record_check(&self) -> Result<CorpusDisposition, String> {
         record_label(
             &self.outcome,
             self.acceptance.as_ref().map(|a| a.tier.as_str()),
@@ -723,31 +692,30 @@ pub fn summarize(probes: &[ProbeLine]) -> Summary {
         // The summary normally receives the reconciliation's scored set.
         // Keep its classification tied to the record validator as well, so
         // malformed raw outcomes cannot enter a disposition total directly.
-        match (p.outcome.as_str(), p.valid_disposition()) {
-            ("parity", Some(_)) => {
-                s.parity += 1;
-                match p.count_tier.as_deref() {
-                    Some("exact") => s.exact += 1,
-                    Some("near") => s.near += 1,
-                    Some("drift") => s.drift += 1,
-                    _ => {}
-                }
-                if let Some(a) = &p.acceptance {
-                    match a.tier.as_str() {
-                        "byte_exact" => s.byte_exact += 1,
-                        "accepted" => s.accepted += 1,
-                        "actionable_drift" => s.actionable_drift += 1,
-                        "count_divergent" => s.count_divergent += 1,
+        match p.valid_disposition() {
+            Some(disposition) => {
+                if disposition.is_parity() {
+                    s.parity += 1;
+                    match p.count_tier.as_deref() {
+                        Some("exact") => s.exact += 1,
+                        Some("near") => s.near += 1,
+                        Some("drift") => s.drift += 1,
                         _ => {}
                     }
                 }
+                match disposition {
+                    CorpusDisposition::ByteExact => s.byte_exact += 1,
+                    CorpusDisposition::Accepted => s.accepted += 1,
+                    CorpusDisposition::ActionableDrift => s.actionable_drift += 1,
+                    CorpusDisposition::CountDivergent => s.count_divergent += 1,
+                    CorpusDisposition::CompileFail => s.compile_fail += 1,
+                    CorpusDisposition::RuntimeFail => s.runtime_fail += 1,
+                    CorpusDisposition::NoTvData => s.no_tv_data += 1,
+                    CorpusDisposition::NoOverlap => s.no_overlap += 1,
+                    CorpusDisposition::HarnessAbort => s.harness_abort += 1,
+                }
             }
-            (_, Some("compile_fail")) => s.compile_fail += 1,
-            (_, Some("runtime_fail")) => s.runtime_fail += 1,
-            (_, Some("no_tv_data")) => s.no_tv_data += 1,
-            (_, Some("no_overlap")) => s.no_overlap += 1,
-            (_, Some(HARNESS_ABORT)) => s.harness_abort += 1,
-            _ => s.other += 1,
+            None => s.other += 1,
         }
         // Window-boundary discounting is orthogonal to outcome: tally it for
         // every probe so the "log what was dropped" line covers the full set.
@@ -865,7 +833,8 @@ impl<'a> RenderPlan<'a> {
             // which already excludes malformed records. Recheck the shared
             // validator here so the special crash display cannot key off a
             // raw outcome if that caller contract ever changes.
-            if deviating.contains(p.probe.as_str()) || p.valid_disposition() == Some(HARNESS_ABORT)
+            if deviating.contains(p.probe.as_str())
+                || p.valid_disposition() == Some(CorpusDisposition::HarnessAbort)
             {
                 plan.shown.push(p);
             } else {
@@ -1029,12 +998,6 @@ fn format_summary(s: &Summary, reconciliation: &str) -> String {
     }
     out
 }
-
-/// Assert at compile time that brokkr models every disposition label the
-/// gate can pin: the four acceptance tiers plus the five non-parity
-/// outcomes. If `registry` grows a label, the summary tally above must too.
-const _: () =
-    assert!(registry::DISPOSITION_LABELS.len() == PARITY_TIERS.len() + NON_PARITY_OUTCOMES.len());
 
 #[cfg(test)]
 mod tests {
@@ -1310,9 +1273,18 @@ mod tests {
 
     #[test]
     fn the_validator_checks_outcome_and_tier_together() {
-        assert_eq!(valid_label("parity", Some("accepted")), Some("accepted"));
-        assert_eq!(valid_label("compile_fail", None), Some("compile_fail"));
-        assert_eq!(valid_label("no_overlap", Some("")), Some("no_overlap"));
+        assert_eq!(
+            valid_label("parity", Some("accepted")),
+            Some(CorpusDisposition::Accepted)
+        );
+        assert_eq!(
+            valid_label("compile_fail", None),
+            Some(CorpusDisposition::CompileFail)
+        );
+        assert_eq!(
+            valid_label("no_overlap", Some("")),
+            Some(CorpusDisposition::NoOverlap)
+        );
         // A tier posing as an outcome.
         assert_eq!(valid_label("accepted", None), None);
         // An outcome posing as a tier.
@@ -1324,15 +1296,31 @@ mod tests {
     }
 
     #[test]
-    fn harness_abort_is_a_valid_label_and_the_lists_match_the_registry() {
-        assert_eq!(valid_label("harness_abort", None), Some("harness_abort"));
+    fn harness_abort_is_a_valid_label_and_vocabulary_is_single_sourced() {
+        assert_eq!(
+            valid_label("harness_abort", None),
+            Some(CorpusDisposition::HarnessAbort)
+        );
         assert_eq!(valid_label("harness_abort", Some("accepted")), None);
-        let joined: Vec<&str> = PARITY_TIERS
+        let labels: Vec<&str> = crate::piners::registry::ALL_DISPOSITIONS
             .iter()
-            .chain(NON_PARITY_OUTCOMES.iter())
-            .copied()
+            .map(|disposition| disposition.as_str())
             .collect();
-        assert_eq!(joined, registry::DISPOSITION_LABELS.to_vec());
+        assert_eq!(labels.len(), 9);
+        assert_eq!(
+            labels,
+            vec![
+                "byte_exact",
+                "accepted",
+                "actionable_drift",
+                "count_divergent",
+                "compile_fail",
+                "runtime_fail",
+                "no_tv_data",
+                "no_overlap",
+                "harness_abort",
+            ]
+        );
     }
 
     #[test]
@@ -1402,7 +1390,10 @@ mod tests {
             b"{\"probe\":\"a\",\"outcome\":\"no_overlap\"}\n{\"probe\":\"b\",\"outcome\":\"no_overlap\",\"disposition\":null}\n",
         );
         assert_eq!(r.probes[0].declared, None);
-        assert_eq!(r.probes[0].valid_disposition(), Some("no_overlap"));
+        assert_eq!(
+            r.probes[0].valid_disposition(),
+            Some(CorpusDisposition::NoOverlap)
+        );
         assert_eq!(r.probes[1].declared, Some(serde_json::Value::Null));
         assert_eq!(r.probes[1].valid_disposition(), None);
         // The defective record is kept whole (stored) and listed invalid.

@@ -31,8 +31,6 @@ use crate::piners::registry::FilePin;
 use crate::piners::registry_io;
 use crate::preflight;
 
-const LINTS_FILE: &str = "lints.toml";
-
 /// Entry point for `brokkr lint-corpus --reseed`.
 pub fn run(
     project_root: &Path,
@@ -56,7 +54,7 @@ pub fn run(
     let corpus_root = project_root.join(piners_cfg.corpus_root());
     let snippets_dir = project_root.join(lint_cfg.snippets_dir());
     let registry_dir = project_root.join(lint_cfg.registry_dir());
-    let lints_path = registry_dir.join(LINTS_FILE);
+    let lints_path = registry_dir.join(registry::LINTS_FILE);
 
     // Held across the read-modify-write, so a concurrent `--bless`/
     // `--reanchor` (which hold the same lock) cannot interleave with it.
@@ -260,7 +258,7 @@ mod tests {
             tv: vec![registry::TvDiag {
                 line: 1,
                 col: Some(1),
-                severity: "error".to_owned(),
+                severity: crate::piners::lint::Severity::Error,
             }],
             pine: FilePin {
                 path: PathBuf::from("lint/keep.pine"),

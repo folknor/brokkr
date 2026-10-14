@@ -17,6 +17,82 @@ pub struct KvPair {
     pub value: KvValue,
 }
 
+/// The meaning assigned to a stored key-value pair by its key namespace.
+/// Keep the prefix vocabulary here so query and display paths agree about
+/// which values are provenance, thread summaries, or runtime counters.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum KvClass {
+    Metadata,
+    Environment,
+    Predecessor,
+    ThreadSummary,
+    Counter,
+}
+
+impl KvClass {
+    pub(crate) fn for_key(key: &str) -> Self {
+        if key.starts_with("meta.") {
+            Self::Metadata
+        } else if key.starts_with("env.") {
+            Self::Environment
+        } else if key.starts_with("prev.") {
+            Self::Predecessor
+        } else if key.starts_with("threads.") {
+            Self::ThreadSummary
+        } else {
+            Self::Counter
+        }
+    }
+
+    fn prefix(self) -> Option<&'static str> {
+        match self {
+            Self::Metadata => Some("meta."),
+            Self::Environment => Some("env."),
+            Self::Predecessor => Some("prev."),
+            Self::ThreadSummary => Some("threads."),
+            Self::Counter => None,
+        }
+    }
+
+    pub(crate) fn suffix(self, key: &str) -> &str {
+        self.prefix()
+            .and_then(|prefix| key.strip_prefix(prefix))
+            .unwrap_or(key)
+    }
+
+    pub(crate) fn qualify(self, key: &str) -> String {
+        let Some(prefix) = self.prefix() else {
+            return key.to_owned();
+        };
+        if key.starts_with(prefix) {
+            key.to_owned()
+        } else {
+            format!("{prefix}{key}")
+        }
+    }
+}
+
+impl KvPair {
+    pub(crate) fn class(&self) -> KvClass {
+        KvClass::for_key(&self.key)
+    }
+}
+
+/// Stable display and comparison label for a comma-separated Cargo feature
+/// set. Cargo treats feature order and duplicate requests as immaterial, so
+/// persisted rows use the same sorted, unique spelling regardless of which
+/// caller assembled the build configuration.
+pub(crate) fn canonical_cargo_features(features: Option<&str>) -> Option<String> {
+    let mut names: Vec<&str> = features?
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    (!names.is_empty()).then(|| names.join(","))
+}
+
 /// Typed value for a key-value pair.
 #[derive(Clone)]
 pub enum KvValue {

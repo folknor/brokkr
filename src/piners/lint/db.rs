@@ -1,7 +1,8 @@
 //! `runs.db` - the piners lint corpus run store.
 //!
 //! Persists every `brokkr lint-corpus` run's per-probe agreement disposition
-//! into a per-project SQLite database at `.brokkr/piners/lint/runs.db`. The
+//! into the per-project SQLite database returned by
+//! `resolve::lint_runs_db_path`. The
 //! lint analogue of the trade-parity corpus store (`src/piners/corpus_db`):
 //! once a run is in the DB its scratch state can be discarded and its data
 //! stays queryable across runs.
@@ -193,7 +194,7 @@ impl LintDb {
                 r.get::<_, i64>("probe_count")?.to_string(),
                 r.get::<_, Option<String>>("fail_reason")?
                     .unwrap_or_default(),
-                r.get::<_, String>("selector")?,
+                crate::piners::selector::compact(&r.get::<_, String>("selector")?),
             ])
         })?;
         let cells = rows.collect::<Result<Vec<_>, _>>()?;

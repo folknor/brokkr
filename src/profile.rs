@@ -5,14 +5,16 @@
 //! `brokkr test`) to execute. Each resolved sweep carries:
 //!
 //! - the `[[check]]` entry that supplies feature flags + build_packages
-//! - the libtest filter args derived from the merged profile fields
-//!   (`tests` / `only` / `skip` / `include_ignored` / `test_threads`)
+//! - typed target and libtest filters derived from the merged profile fields
+//!   (`tests` / `only` / `skip` / `include_ignored`)
+//! - one resolved lane execution mode, including the thread policy
 //! - any env vars the profile exports
 //!
 //! The resolver is intentionally pure-data: it does not run cargo, does
 //! not touch disk, and does not depend on `Project`.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 
 use crate::config::ParallelBinaries;
@@ -47,20 +49,20 @@ pub struct ResolvedSweep {
     /// `--workspace --exclude <pkg>`. From the `[[check]]` entry's
     /// `test_exclude_packages`. Test phase only; clippy stays workspace-wide.
     pub test_exclude_packages: Vec<String>,
-    /// The profile's resolved `test_threads`, carried raw so the check test
-    /// phase can decide serial vs parallel: `None`/`Some(1)` run under the
-    /// per-test watchdog (`--test-threads=1`); `Some(0)` runs at libtest's
-    /// default parallelism; `Some(n>=2)` runs `--test-threads=n`. The last two
-    /// bypass the watchdog for a whole-sweep timeout. `brokkr test` ignores
-    /// this and is always serial.
+    /// Raw configured value retained for callers that still need nextest's
+    /// exact setting. Cargo-mediated libtest policy is resolved once in
+    /// `lane_exec` as `Threads`.
     pub test_threads: Option<u32>,
-    /// `--include-ignored`, `--test-threads=N`, `--skip` flags emitted
-    /// after `--` to libtest. Derived from the merged profile.
+    /// Compatibility argv projection of `filters`, emitted after `--` to
+    /// libtest. New launch code renders the typed filters at the boundary.
     pub libtest_args: Vec<String>,
-    /// `--test <name>` flags emitted to cargo (before `--`).
+    /// Compatibility argv projection of `filters.targets`.
     pub cargo_test_filters: Vec<String>,
-    /// Positional substring filters passed to libtest after `--`.
+    /// Compatibility projection of `filters`' positional filters.
     pub name_filters: Vec<String>,
+    /// Canonical typed selection. The argv fields above remain compatibility
+    /// projections for call sites outside profile resolution.
+    pub filters: LaneFilters,
     /// Env vars to export to the cargo subprocess.
     pub env: BTreeMap<String, String>,
     /// Extra `rustc` flags appended to `RUSTFLAGS` for this sweep's cargo runs.
@@ -77,27 +79,21 @@ pub struct ResolvedSweep {
     /// its own process, the other runs many binaries' tests at once, and a
     /// sweep cannot mean both.
     pub parallel_budget: Option<u32>,
-    /// Run each test in its own `cargo test -- --exact` process (the
-    /// profile's `isolation = "process"`). Execution policy only - never
-    /// part of the build shape.
+    /// Compatibility flag for `lane_exec = Isolated`.
     pub process_isolation: bool,
-    /// Package-qualified skips, filtered out of the enumerated set
-    /// (never expressed as cargo selection). Non-empty only on
-    /// process-isolated sweeps (enforced at resolve time). A filter,
-    /// never part of the build shape.
+    /// Resolved execution policy. Config resolution stores `Some`; `None`
+    /// remains available to synthetic sweeps and older struct literals.
+    pub lane_exec: Option<LaneExec>,
+    /// Compatibility projection of package-scoped skip filters.
     pub qualified_skips: Vec<QualifiedSkip>,
     /// From the `[[check]]` entry's `curated`: the entry runs a hand-picked
     /// subset, and its shape's non-run pairs are exempt from the coverage
     /// universe. Audit policy only - never part of the build shape, and the
     /// audit exempts a shape only when *every* sweep producing it is curated.
     pub curated: bool,
-    /// Every `skip` / `only` filter this sweep carries, each still knowing
-    /// where it was written. The executable forms above are flattened past
-    /// recovery - profile `skip` and entry `skip` both become `--skip X` pairs
-    /// in `libtest_args`, and both `only` lists concatenate into
-    /// `name_filters` - so a dead-filter report built from those could only
-    /// name the sweep, not the line to delete. Audit provenance only: never
-    /// part of the build shape, never read by an execution path.
+    /// Deprecated compatibility slot. Resolved sweeps leave it empty; old
+    /// synthetic sweeps may still populate it, in which case
+    /// [`ResolvedSweep::lane_filters`] adapts it.
     pub declared_filters: Vec<DeclaredFilter>,
     /// The `[[check]]` entry's `profile`: the cargo profile this sweep
     /// compiles and runs under, or `None` for the command's default (dev
@@ -147,6 +143,139 @@ pub struct ResolvedSweep {
     /// ever see gate sweeps, and the one sweep that can carry this
     /// runs alone under `cmd_clippy` with nothing to dedupe against.
     pub lib_only: bool,
+}
+
+/// libtest thread policy for a cargo-mediated harness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum Threads {
+    /// The watchdog owns one test at a time.
+    #[default]
+    Watchdogged,
+    /// `test_threads = 0`: use libtest's default count.
+    CargoDefault,
+    /// An explicit libtest count greater than one.
+    Cargo(NonZeroU32),
+}
+
+impl Threads {
+    fn from_config(value: Option<u32>) -> Self {
+        match value {
+            None | Some(1) => Self::Watchdogged,
+            Some(0) => Self::CargoDefault,
+            Some(n) => NonZeroU32::new(n).map_or(Self::Watchdogged, Self::Cargo),
+        }
+    }
+
+    /// Whether concurrency is delegated to libtest inside cargo's shared
+    /// output stream, where per-test attribution is unavailable.
+    pub fn is_cargo_mediated(self) -> bool {
+        !matches!(self, Self::Watchdogged)
+    }
+
+    /// Configured libtest count, preserving the special zero meaning.
+    pub fn configured_count(self) -> Option<u32> {
+        match self {
+            Self::Watchdogged => None,
+            Self::CargoDefault => Some(0),
+            Self::Cargo(n) => Some(n.get()),
+        }
+    }
+}
+
+/// The one resolved execution mode of a sweep.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LaneExec {
+    /// One libtest harness at a time, with the watchdog unless threads are
+    /// delegated to libtest.
+    Serial { threads: Threads },
+    /// Several binaries run concurrently under brokkr's in-flight budget.
+    Parallel { budget: u32 },
+    /// Each selected test runs in its own cargo invocation.
+    Isolated,
+    /// Nextest owns process-per-test execution and its concurrency limit.
+    Nextest { threads: Option<u32> },
+    /// Cargo's doctest pseudo-target, with no test binaries.
+    DocOnly { threads: Threads },
+}
+
+impl Default for LaneExec {
+    fn default() -> Self {
+        Self::Serial {
+            threads: Threads::Watchdogged,
+        }
+    }
+}
+
+impl LaneExec {
+    fn resolve(
+        label: &str,
+        harness: Harness,
+        doc_only: bool,
+        parallel_budget: Option<u32>,
+        process_isolation: bool,
+        configured_threads: Option<u32>,
+    ) -> Result<Self, DevError> {
+        if doc_only
+            && (parallel_budget.is_some() || process_isolation || harness == Harness::Nextest)
+        {
+            return Err(DevError::Config(format!(
+                "sweep '{label}' combines doc-only execution with another lane execution mode"
+            )));
+        }
+        if harness == Harness::Nextest && process_isolation {
+            return Err(DevError::Config(format!(
+                "sweep '{label}' combines nextest with `isolation = \"process\"`; \
+                 nextest already runs process-per-test"
+            )));
+        }
+        if harness == Harness::Nextest && parallel_budget.is_some() {
+            return Err(DevError::Config(format!(
+                "sweep '{label}' combines nextest with a parallel-binaries budget"
+            )));
+        }
+        if parallel_budget.is_some() && process_isolation {
+            return Err(DevError::Config(format!(
+                "sweep '{label}' combines process isolation with a parallel-binaries budget"
+            )));
+        }
+
+        let threads = Threads::from_config(configured_threads);
+        if process_isolation && threads.is_cargo_mediated() {
+            return Err(DevError::Config(format!(
+                "sweep '{label}' combines `isolation = \"process\"` with `test_threads = {}`, \
+                 but isolated execution is serial by construction",
+                configured_threads.unwrap_or_default()
+            )));
+        }
+
+        Ok(if doc_only {
+            Self::DocOnly { threads }
+        } else if harness == Harness::Nextest {
+            Self::Nextest {
+                threads: configured_threads,
+            }
+        } else if let Some(budget) = parallel_budget {
+            Self::Parallel { budget }
+        } else if process_isolation {
+            Self::Isolated
+        } else {
+            Self::Serial { threads }
+        })
+    }
+
+    /// Whether this execution can apply package-qualified skips because it
+    /// attributes tests to individual processes and packages.
+    pub fn applies_qualified_skips(self) -> bool {
+        matches!(self, Self::Isolated | Self::Nextest { .. })
+    }
+
+    /// Cargo-mediated thread policy, where applicable.
+    pub fn threads(self) -> Option<Threads> {
+        match self {
+            Self::Serial { threads } | Self::DocOnly { threads } => Some(threads),
+            _ => None,
+        }
+    }
 }
 
 /// Whether a sweep shares cargo's target directory or owns an isolated one.
@@ -274,9 +403,9 @@ impl FeatureConfig {
     }
 }
 
-/// Which half of the filter surface a [`DeclaredFilter`] is, because the two
-/// are dead for different reasons and are checked against different sets.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Which half of the filter surface a [`Filter`] is, because the two are dead
+/// for different reasons and are checked against different sets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FilterKind {
     /// A `skip` entry: dead when nothing it could remove exists.
     Skip,
@@ -293,23 +422,37 @@ impl FilterKind {
     }
 }
 
-/// One `skip` / `only` filter with the config location it came from - the
-/// input to the coverage phase's alive-check.
+/// Config address for a filter's declaration.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum FilterOrigin {
+    Profile(String),
+    Entry(String),
+}
+
+impl FilterOrigin {
+    /// Render the config block named by this provenance.
+    pub fn display(&self) -> String {
+        match self {
+            Self::Profile(name) => format!("[test.profiles.{name}]"),
+            Self::Entry(name) => format!("[[check]] '{name}'"),
+        }
+    }
+}
+
+/// One `skip` / `only` filter with typed provenance.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DeclaredFilter {
+pub struct Filter {
     pub kind: FilterKind,
     /// The test-name substring, as written.
     pub pattern: String,
     /// Set on a package-qualified skip; the pattern then applies within this
     /// package only, exactly as a `[[quarantine]]` entry's `package` scopes it.
     pub package: Option<String>,
-    /// Where it was written: `[test.profiles.tier2]` or `[[check]] 'serial'`.
-    /// Carried as rendered text because the report's whole job is to name a
-    /// line, and the two sources have no common address type.
-    pub origin: String,
+    /// The profile or check entry that declared this filter.
+    pub origin: FilterOrigin,
 }
 
-impl DeclaredFilter {
+impl Filter {
     /// Does this filter match `test` in `package`? Substring semantics, the
     /// same libtest applies to both `--skip` and a positional filter, with the
     /// package scoping that only a qualified skip carries.
@@ -330,7 +473,205 @@ impl DeclaredFilter {
     }
 }
 
+/// Compatibility name used by the check phase while its call sites migrate.
+pub type DeclaredFilter = Filter;
+
+/// A check target selected through `[[check]].tests` or a profile's `tests`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TargetName(String);
+
+impl TargetName {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Semantic filters and target selection for one resolved sweep.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LaneFilters {
+    /// Ordered skips and positional filters, each retaining provenance.
+    pub filters: Vec<Filter>,
+    /// Cargo integration-test targets selected by name.
+    pub targets: Vec<TargetName>,
+    /// Whether this lane executes ignored tests before forwarded args are
+    /// considered.
+    pub include_ignored: bool,
+}
+
+impl LaneFilters {
+    pub fn skips(&self) -> impl Iterator<Item = &Filter> {
+        self.filters.iter().filter(|f| f.kind == FilterKind::Skip)
+    }
+
+    pub fn only(&self) -> impl Iterator<Item = &Filter> {
+        self.filters.iter().filter(|f| f.kind == FilterKind::Only)
+    }
+
+    /// Whether the complete launch argv executes ignored tests.
+    pub fn runs_ignored_with<'a>(&self, extra: impl IntoIterator<Item = &'a str>) -> bool {
+        if self.include_ignored {
+            return true;
+        }
+        let mut args = extra.into_iter();
+        while let Some(arg) = args.next() {
+            match arg {
+                "--skip" => {
+                    args.next();
+                }
+                "--include-ignored" | "--ignored" => return true,
+                _ => {}
+            }
+        }
+        false
+    }
+
+    /// Render cargo's target selector pairs at the launch boundary.
+    pub fn cargo_args(&self) -> Vec<String> {
+        self.targets
+            .iter()
+            .flat_map(|target| ["--test".to_owned(), target.0.clone()])
+            .collect()
+    }
+
+    /// Render libtest's configured `--skip` flags and ignored-test switch.
+    pub fn libtest_args(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if self.include_ignored {
+            out.push("--include-ignored".into());
+        }
+        for filter in self.skips().filter(|f| f.package.is_none()) {
+            out.push("--skip".into());
+            out.push(filter.pattern.clone());
+        }
+        out
+    }
+
+    /// Render positional filters passed after `--` to libtest.
+    pub fn name_filters(&self) -> Vec<String> {
+        self.only().map(|filter| filter.pattern.clone()).collect()
+    }
+
+    fn qualified_skips(&self) -> Vec<QualifiedSkip> {
+        self.skips()
+            .filter_map(|filter| {
+                filter.package.as_ref().map(|package| QualifiedSkip {
+                    package: package.clone(),
+                    pattern: filter.pattern.clone(),
+                })
+            })
+            .collect()
+    }
+}
+
 impl ResolvedSweep {
+    /// The resolved execution policy, with a compatibility derivation for
+    /// synthetic sweeps that still use `ResolvedSweep { ..Default::default() }`.
+    pub fn lane_exec(&self) -> LaneExec {
+        self.lane_exec.unwrap_or_else(|| {
+            let budget = self.parallel_budget;
+            LaneExec::resolve(
+                &self.label,
+                self.harness,
+                self.doc_only,
+                budget,
+                self.process_isolation,
+                self.test_threads,
+            )
+            .unwrap_or_else(|_| {
+                // The configuration parser rejects conflicting combinations.
+                // Keep a deterministic projection for hand-built legacy
+                // sweeps so their callers can still report the state.
+                if self.harness == Harness::Nextest {
+                    LaneExec::Nextest {
+                        threads: self.test_threads,
+                    }
+                } else if self.doc_only {
+                    LaneExec::DocOnly {
+                        threads: Threads::from_config(self.test_threads),
+                    }
+                } else if let Some(budget) = budget {
+                    LaneExec::Parallel { budget }
+                } else if self.process_isolation {
+                    LaneExec::Isolated
+                } else {
+                    LaneExec::Serial {
+                        threads: Threads::from_config(self.test_threads),
+                    }
+                }
+            })
+        })
+    }
+
+    /// The sweep's semantic filters. The compatibility projection is used
+    /// when an older caller has directly edited one of the argv fields.
+    pub fn lane_filters(&self) -> LaneFilters {
+        let canonical = &self.filters;
+        let argv_matches = canonical.libtest_args() == self.libtest_args
+            && canonical.name_filters() == self.name_filters
+            && canonical.cargo_args() == self.cargo_test_filters
+            && canonical.qualified_skips() == self.qualified_skips;
+        if argv_matches
+            && (self.declared_filters.is_empty() || canonical.filters == self.declared_filters)
+            && !(canonical.filters.is_empty() && !self.declared_filters.is_empty())
+        {
+            return canonical.clone();
+        }
+
+        let mut filters = self.declared_filters.clone();
+        if filters.is_empty() {
+            let mut args = self.libtest_args.iter();
+            while let Some(arg) = args.next() {
+                if arg == "--skip"
+                    && let Some(pattern) = args.next()
+                {
+                    filters.push(Filter {
+                        kind: FilterKind::Skip,
+                        pattern: pattern.clone(),
+                        package: None,
+                        origin: FilterOrigin::Entry(self.entry_name.clone()),
+                    });
+                }
+            }
+            filters.extend(self.name_filters.iter().map(|pattern| Filter {
+                kind: FilterKind::Only,
+                pattern: pattern.clone(),
+                package: None,
+                origin: FilterOrigin::Entry(self.entry_name.clone()),
+            }));
+        }
+        for skip in &self.qualified_skips {
+            if !filters.iter().any(|filter| {
+                filter.kind == FilterKind::Skip
+                    && filter.package.as_deref() == Some(skip.package.as_str())
+                    && filter.pattern == skip.pattern
+            }) {
+                filters.push(Filter {
+                    kind: FilterKind::Skip,
+                    pattern: skip.pattern.clone(),
+                    package: Some(skip.package.clone()),
+                    origin: FilterOrigin::Entry(self.entry_name.clone()),
+                });
+            }
+        }
+        let mut targets = Vec::new();
+        let mut cargo_args = self.cargo_test_filters.iter();
+        while let Some(arg) = cargo_args.next() {
+            if arg == "--test"
+                && let Some(name) = cargo_args.next()
+            {
+                targets.push(TargetName(name.clone()));
+            }
+        }
+        LaneFilters {
+            filters,
+            targets,
+            include_ignored: self
+                .libtest_args
+                .iter()
+                .any(|arg| arg == "--include-ignored"),
+        }
+    }
+
     /// Wall-clock-ordered argv for the libtest (post-`--`) section.
     /// Helper for tests.
     #[cfg(test)]
@@ -485,17 +826,24 @@ pub fn resolve_unification(
 /// `[[check]]` is configured but no profile is selected.
 pub fn sweep_from_check_entry(entry: &CheckEntry) -> ResolvedSweep {
     // No profile in play, so the entry's own filters are all there is.
-    let mut libtest_args: Vec<String> = Vec::new();
-    for s in &entry.skip {
-        libtest_args.push("--skip".into());
-        libtest_args.push(s.clone());
-    }
-    let declared_filters = entry_filters(entry);
-    let mut cargo_test_filters: Vec<String> = Vec::new();
-    for t in &entry.tests {
-        cargo_test_filters.push("--test".into());
-        cargo_test_filters.push(t.clone());
-    }
+    let filters = LaneFilters {
+        filters: entry_filters(entry),
+        targets: entry.tests.iter().cloned().map(TargetName).collect(),
+        include_ignored: false,
+    };
+    let libtest_args = filters.libtest_args();
+    let cargo_test_filters = filters.cargo_args();
+    let name_filters = filters.name_filters();
+    let qualified_skips = filters.qualified_skips();
+    let lane_exec = LaneExec::resolve(
+        &entry.name,
+        entry.harness,
+        entry.doc_only,
+        entry.parallel.map(ParallelBinaries::resolved_budget),
+        false,
+        None,
+    )
+    .expect("parsed check entries have a valid execution mode");
 
     ResolvedSweep {
         label: entry.name.clone(),
@@ -505,7 +853,8 @@ pub fn sweep_from_check_entry(entry: &CheckEntry) -> ResolvedSweep {
         test_exclude_packages: entry.test_exclude_packages.clone(),
         libtest_args,
         cargo_test_filters,
-        name_filters: entry.only.clone(),
+        name_filters,
+        filters: filters.clone(),
         env: entry.env.clone(),
         test_threads: None,
         rustflags: entry.rustflags.clone(),
@@ -515,8 +864,9 @@ pub fn sweep_from_check_entry(entry: &CheckEntry) -> ResolvedSweep {
         effective_unification: EffectiveUnification::Ambient,
         parallel_budget: entry.parallel.map(ParallelBinaries::resolved_budget),
         process_isolation: false,
-        qualified_skips: Vec::new(),
-        declared_filters,
+        lane_exec: Some(lane_exec),
+        qualified_skips,
+        declared_filters: Vec::new(),
         curated: entry.curated,
         profile: entry.profile,
         harness: entry.harness,
@@ -530,7 +880,7 @@ pub fn sweep_from_check_entry(entry: &CheckEntry) -> ResolvedSweep {
 
 /// The `[[check]]` entry's own filters, provenance attached.
 fn entry_filters(entry: &CheckEntry) -> Vec<DeclaredFilter> {
-    let origin = format!("[[check]] '{}'", entry.name);
+    let origin = FilterOrigin::Entry(entry.name.clone());
     let skips = entry.skip.iter().map(|s| DeclaredFilter {
         kind: FilterKind::Skip,
         pattern: s.clone(),
@@ -602,6 +952,35 @@ pub fn resolve(
     resolve_single(cfg, checks, name)
 }
 
+/// Validate every runnable profile's resolved lane execution policy. Profile
+/// bases with no inherited sweeps are allowed and need no sweep construction;
+/// all other profiles go through the same extends and lane resolver used at
+/// invocation time.
+pub(crate) fn resolve_profiles_for_validation(
+    cfg: &TestConfig,
+    checks: &[CheckEntry],
+) -> Result<BTreeMap<String, Vec<ResolvedSweep>>, DevError> {
+    let mut resolved = BTreeMap::new();
+    for name in cfg.profiles.keys() {
+        let sweeps = if cfg
+            .profiles
+            .get(name)
+            .is_some_and(|def| def.lanes.is_some())
+        {
+            resolve(cfg, checks, name)?
+        } else if resolve_profile_chain(&cfg.profiles, name)?
+            .sweeps
+            .is_empty()
+        {
+            Vec::new()
+        } else {
+            resolve_single(cfg, checks, name)?
+        };
+        resolved.insert(name.clone(), sweeps);
+    }
+    Ok(resolved)
+}
+
 /// Resolve one non-`lanes` profile (the pre-lanes `resolve` body).
 fn resolve_single(
     cfg: &TestConfig,
@@ -628,7 +1007,7 @@ fn resolve_single(
                      but no `[[check]]` entry with that name exists."
                 ))
             })?;
-        out.push(build_resolved_sweep(entry, &merged, name));
+        out.push(build_resolved_sweep(entry, &merged, name)?);
     }
 
     // Package-qualified skips are filtered out of the enumerated set, and
@@ -637,7 +1016,10 @@ fn resolve_single(
     // translation carries the package scope natively). A shared-process
     // libtest run has neither.
     if out.iter().any(|s| {
-        !s.qualified_skips.is_empty() && !s.process_isolation && s.harness != Harness::Nextest
+        s.lane_filters()
+            .skips()
+            .any(|filter| filter.package.is_some())
+            && !s.lane_exec().applies_qualified_skips()
     }) {
         return Err(DevError::Config(format!(
             "[test.profiles.{name}] has package-qualified skip entries; these \
@@ -736,11 +1118,12 @@ pub struct RunShaping {
     libtest_args: Vec<String>,
     cargo_test_filters: Vec<String>,
     name_filters: Vec<String>,
+    filters: LaneFilters,
     env: BTreeMap<String, String>,
     test_threads: Option<u32>,
     process_isolation: bool,
+    lane_exec: Option<LaneExec>,
     qualified_skips: Vec<QualifiedSkip>,
-    declared_filters: Vec<DeclaredFilter>,
 }
 
 impl RunShaping {
@@ -763,11 +1146,13 @@ impl RunShaping {
         sweep.libtest_args = self.libtest_args;
         sweep.cargo_test_filters = self.cargo_test_filters;
         sweep.name_filters = self.name_filters;
+        sweep.filters = self.filters;
         sweep.env = self.env;
         sweep.test_threads = self.test_threads;
         sweep.process_isolation = self.process_isolation;
+        sweep.lane_exec = self.lane_exec;
         sweep.qualified_skips = self.qualified_skips;
-        sweep.declared_filters = self.declared_filters;
+        sweep.declared_filters.clear();
     }
 }
 
@@ -789,8 +1174,21 @@ pub fn run_shaping(cfg: &TestConfig, name: &str) -> Result<RunShaping, DevError>
     if cfg.profiles.get(name).is_some_and(|d| d.lanes.is_some()) {
         return Ok(RunShaping::default());
     }
-    let shaping = shaping_from(&resolve_profile_chain(&cfg.profiles, name)?, name);
-    if !shaping.qualified_skips.is_empty() && !shaping.process_isolation {
+    let mut shaping = shaping_from(&resolve_profile_chain(&cfg.profiles, name)?, name);
+    let lane_exec = LaneExec::resolve(
+        name,
+        Harness::Libtest,
+        false,
+        None,
+        shaping.process_isolation,
+        shaping.test_threads,
+    )?;
+    if shaping
+        .filters
+        .skips()
+        .any(|filter| filter.package.is_some())
+        && !lane_exec.applies_qualified_skips()
+    {
         return Err(DevError::Config(format!(
             "[test.profiles.{name}] has package-qualified skip entries, and an ad-hoc \
              `--features`/`--no-default-features` run replaces its sweeps with one \
@@ -799,6 +1197,7 @@ pub fn run_shaping(cfg: &TestConfig, name: &str) -> Result<RunShaping, DevError>
              skips (`--profile`), or set `isolation = \"process\"` on it."
         )));
     }
+    shaping.lane_exec = Some(lane_exec);
     Ok(shaping)
 }
 
@@ -810,101 +1209,80 @@ fn shaping_from(profile: &ResolvedProfile, profile_name: &str) -> RunShaping {
     // on the sweep so each consumer applies its own policy: the check test
     // phase turns it into `--test-threads=N` (or a parallel run), while
     // `brokkr test` ignores it and forces `--test-threads=1`.
-    let mut libtest_args: Vec<String> = Vec::new();
-    if profile.include_ignored {
-        libtest_args.push("--include-ignored".into());
-    }
-    // Name entries become libtest `--skip` flags; qualified entries are
-    // carried separately and filtered out of the enumerated set instead.
-    let mut qualified_skips: Vec<QualifiedSkip> = Vec::new();
-    for spec in &profile.skip {
-        match spec {
-            SkipSpec::Name(s) => {
-                libtest_args.push("--skip".into());
-                libtest_args.push(s.clone());
-            }
-            SkipSpec::Qualified(q) => qualified_skips.push(q.clone()),
-        }
-    }
-
-    let mut cargo_test_filters: Vec<String> = Vec::new();
-    for t in &profile.tests {
-        cargo_test_filters.push("--test".into());
-        cargo_test_filters.push(t.clone());
-    }
-
     // Provenance is per list, not per profile: `extends` replaces `only` and
     // `skip` wholesale, so each names the def that actually declared it.
-    let skip_at = at_profile(profile.skip_from.as_deref(), profile_name);
-    let only_at = at_profile(profile.only_from.as_deref(), profile_name);
-    let mut declared_filters: Vec<DeclaredFilter> = Vec::new();
+    let skip_at = FilterOrigin::Profile(
+        profile
+            .skip_from
+            .as_deref()
+            .unwrap_or(profile_name)
+            .to_owned(),
+    );
+    let only_at = FilterOrigin::Profile(
+        profile
+            .only_from
+            .as_deref()
+            .unwrap_or(profile_name)
+            .to_owned(),
+    );
+    let mut filters: Vec<Filter> = Vec::new();
     for spec in &profile.skip {
         let (pattern, package) = match spec {
             SkipSpec::Name(s) => (s.clone(), None),
             SkipSpec::Qualified(q) => (q.pattern.clone(), Some(q.package.clone())),
         };
-        declared_filters.push(DeclaredFilter {
+        filters.push(Filter {
             kind: FilterKind::Skip,
             pattern,
             package,
             origin: skip_at.clone(),
         });
     }
-    declared_filters.extend(profile.only.iter().map(|o| DeclaredFilter {
+    filters.extend(profile.only.iter().map(|o| Filter {
         kind: FilterKind::Only,
         pattern: o.clone(),
         package: None,
         origin: only_at.clone(),
     }));
 
+    let filters = LaneFilters {
+        filters,
+        targets: profile.tests.iter().cloned().map(TargetName).collect(),
+        include_ignored: profile.include_ignored,
+    };
+    let libtest_args = filters.libtest_args();
+    let cargo_test_filters = filters.cargo_args();
+    let name_filters = filters.name_filters();
+    let qualified_skips = filters.qualified_skips();
+
     RunShaping {
         libtest_args,
         cargo_test_filters,
-        declared_filters,
-        name_filters: profile.only.clone(),
+        name_filters,
+        filters,
         env: profile.env.clone(),
         test_threads: profile.test_threads,
         process_isolation: profile.isolation == Some(Isolation::Process),
+        lane_exec: None,
         qualified_skips,
     }
-}
-
-/// Render a filter's origin block, falling back to the resolved profile when
-/// the chain recorded no declaring def (the list is empty in that case, so the
-/// fallback never actually labels a filter).
-fn at_profile(declared_in: Option<&str>, resolved: &str) -> String {
-    format!("[test.profiles.{}]", declared_in.unwrap_or(resolved))
 }
 
 fn build_resolved_sweep(
     entry: &CheckEntry,
     profile: &ResolvedProfile,
     profile_name: &str,
-) -> ResolvedSweep {
+) -> Result<ResolvedSweep, DevError> {
     let shaping = shaping_from(profile, profile_name);
-    // Profile `skip` then the entry's own `skip` - they AND (both apply), never
-    // replace, so a sweep can pin its own exclusions on top of the profile's.
-    let mut libtest_args = shaping.libtest_args;
-    let qualified_skips = shaping.qualified_skips;
-    for s in &entry.skip {
-        libtest_args.push("--skip".into());
-        libtest_args.push(s.clone());
-    }
-
-    let mut cargo_test_filters = shaping.cargo_test_filters;
-    for t in &entry.tests {
-        cargo_test_filters.push("--test".into());
-        cargo_test_filters.push(t.clone());
-    }
-
-    // Profile `only` (positional substring filters) then the entry's own.
-    let mut name_filters = shaping.name_filters;
-    name_filters.extend(entry.only.iter().cloned());
-
-    // The profile's filters and the entry's own AND together, so the audit
-    // sees both lists - each still pointing at its own block.
-    let mut declared_filters = shaping.declared_filters;
-    declared_filters.extend(entry_filters(entry));
+    let mut filters = shaping.filters;
+    filters.filters.extend(entry_filters(entry));
+    filters
+        .targets
+        .extend(entry.tests.iter().cloned().map(TargetName));
+    let libtest_args = filters.libtest_args();
+    let cargo_test_filters = filters.cargo_args();
+    let name_filters = filters.name_filters();
+    let qualified_skips = filters.qualified_skips();
 
     // Profile env is the base; the entry's own env overlays it so a
     // sweep-specific var wins on a key collision.
@@ -913,7 +1291,19 @@ fn build_resolved_sweep(
         env.insert(k.clone(), v.clone());
     }
 
-    ResolvedSweep {
+    let parallel_budget = entry.parallel.map(ParallelBinaries::resolved_budget);
+    let process_isolation = profile.isolation == Some(Isolation::Process);
+    let lane_exec = LaneExec::resolve(
+        &entry.name,
+        entry.harness,
+        entry.doc_only,
+        parallel_budget,
+        process_isolation,
+        profile.test_threads,
+    )
+    .map_err(|error| DevError::Config(format!("[test.profiles.{profile_name}]: {error}")))?;
+
+    Ok(ResolvedSweep {
         label: entry.name.clone(),
         features: FeatureConfig::from_entry(entry),
         build_packages: entry.build_packages.clone(),
@@ -922,15 +1312,17 @@ fn build_resolved_sweep(
         libtest_args,
         cargo_test_filters,
         name_filters,
+        filters,
         env,
         test_threads: profile.test_threads,
         rustflags: entry.rustflags.clone(),
         feature_unification: entry.feature_unification,
         effective_unification: EffectiveUnification::Ambient,
-        parallel_budget: entry.parallel.map(ParallelBinaries::resolved_budget),
-        process_isolation: profile.isolation == Some(Isolation::Process),
+        parallel_budget,
+        process_isolation,
+        lane_exec: Some(lane_exec),
         qualified_skips,
-        declared_filters,
+        declared_filters: Vec::new(),
         curated: entry.curated,
         profile: entry.profile,
         harness: entry.harness,
@@ -939,7 +1331,7 @@ fn build_resolved_sweep(
         // A gate sweep always lints every target; only the investigative
         // `brokkr clippy --lib` narrows, and it sets this after construction.
         lib_only: false,
-    }
+    })
 }
 
 #[cfg(test)]
@@ -1263,7 +1655,7 @@ sweeps = ["timing"]
     }
 
     #[test]
-    fn declared_filters_name_the_block_that_actually_declared_them() {
+    fn typed_filters_name_the_block_that_actually_declared_them() {
         // The report's whole job is to name a line to delete. `extends`
         // replaces `skip` / `only` wholesale, so a filter inherited from a
         // parent is written in the PARENT - naming the resolved profile would
@@ -1285,20 +1677,21 @@ only = ["own_only"]
 "#,
         );
         let s = &resolve(&cfg, &checks, "tier2").unwrap()[0];
-        let seen: Vec<(&str, &str, &str)> = s
-            .declared_filters
+        let seen: Vec<(&str, &str, String)> = s
+            .filters
+            .filters
             .iter()
-            .map(|f| (f.kind.as_str(), f.pattern.as_str(), f.origin.as_str()))
+            .map(|f| (f.kind.as_str(), f.pattern.as_str(), f.origin.display()))
             .collect();
         assert_eq!(
             seen,
             vec![
                 // Inherited: declared in base, not in tier2.
-                ("skip", "inherited_skip", "[test.profiles.base]"),
-                ("only", "own_only", "[test.profiles.tier2]"),
+                ("skip", "inherited_skip", "[test.profiles.base]".into()),
+                ("only", "own_only", "[test.profiles.tier2]".into()),
                 // The entry's own filters AND with the profile's and keep
                 // their own address.
-                ("skip", "entry_skip", "[[check]] 'unit'"),
+                ("skip", "entry_skip", "[[check]] 'unit'".into()),
             ]
         );
     }

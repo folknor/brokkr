@@ -16,10 +16,35 @@ use xxhash_rust::xxh3::Xxh3;
 
 use super::super::eliv::{next_zoom_boundary, tile_id_to_zxy, xy_to_tile_id};
 
+const DIGEST_HEADER: &str = "elivagar-corpus-digest v1";
+const LEAVES_HEADER: &str = "elivagar-corpus-leaves v1";
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DigestMode {
     Leaves,
     Buckets,
+}
+
+impl DigestMode {
+    /// Canonical spelling shared by digest output and the baseline parser.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Leaves => "leaves",
+            Self::Buckets => "buckets",
+        }
+    }
+
+    /// Parse a mode spelling. `cmd::parse_mode` remains the adapter for the
+    /// clap command's current `Option<String>` field.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "leaves" => Some(Self::Leaves),
+            "buckets" => Some(Self::Buckets),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -180,12 +205,8 @@ fn parse_hex(s: &str) -> io::Result<u128> {
 #[must_use]
 pub fn digest_text(d: &Digest) -> String {
     let mut out = format!(
-        "elivagar-corpus-digest v1\nmode {}\nroot {}\n",
-        if d.mode == DigestMode::Leaves {
-            "leaves"
-        } else {
-            "buckets"
-        },
+        "{DIGEST_HEADER}\nmode {}\nroot {}\n",
+        d.mode.as_str(),
         hex(d.root),
     );
     if let Some(broot) = d.broot {
@@ -217,7 +238,7 @@ pub fn digest_text(d: &Digest) -> String {
 
 #[must_use]
 pub fn leaves_text(leaves: &[LeafRun]) -> String {
-    let mut out = "elivagar-corpus-leaves v1\n".to_string();
+    let mut out = format!("{LEAVES_HEADER}\n");
     for l in leaves {
         let (z, x, y) = tile_id_to_zxy(l.tile_id);
         out.push_str(&format!("{z} {x} {y} {} {}\n", l.run_length, hex(l.hash)));
@@ -263,7 +284,7 @@ fn parse_baseline_text(text: &str) -> io::Result<Baseline> {
         // would let merge damage that truncated the first line - or a future
         // v2 written by a newer brokkr - parse as a v1 baseline.
         if n == 0 {
-            if line != "elivagar-corpus-digest v1" {
+            if line != DIGEST_HEADER {
                 return Err(invalid("digest header invalid"));
             }
             continue;
@@ -271,11 +292,11 @@ fn parse_baseline_text(text: &str) -> io::Result<Baseline> {
         let p: Vec<&str> = line.split_whitespace().collect();
         match p.first().copied() {
             Some("mode") => {
-                mode = match p.get(1) {
-                    Some(&"leaves") => Some(DigestMode::Leaves),
-                    Some(&"buckets") => Some(DigestMode::Buckets),
-                    _ => return Err(invalid("digest mode invalid")),
-                };
+                mode = Some(
+                    p.get(1)
+                        .and_then(|value| DigestMode::parse(value))
+                        .ok_or_else(|| invalid("digest mode invalid"))?,
+                );
             }
             Some("root") => {
                 root = Some(parse_hex(
@@ -338,7 +359,7 @@ fn parse_leaves_text(text: &str) -> io::Result<Vec<LeafRun>> {
     let mut out = Vec::new();
     for (n, line) in text.lines().enumerate() {
         if n == 0 {
-            if line != "elivagar-corpus-leaves v1" {
+            if line != LEAVES_HEADER {
                 return Err(invalid("leaves header invalid"));
             }
             continue;
@@ -485,6 +506,66 @@ mod tests {
     use super::*;
 
     #[test]
+    fn committed_digest_domains_and_text_have_frozen_values() {
+        let leaves = [LeafRun {
+            tile_id: 0,
+            run_length: 1,
+            hash: 0xf009_d6ca_413d_6a83_596d_8ad9_b611_1e24,
+        }];
+
+        let leaf_digest = fold_leaves(&leaves, DigestMode::Leaves);
+        assert_eq!(
+            hex(leaf_digest.zooms[0].hash),
+            "ae8de239a0984a01ee78f7c2852ab8f0"
+        );
+        assert_eq!(hex(leaf_digest.root), "639b1ae66c8508cec5c35f6903946d8a");
+        assert_eq!(
+            digest_text(&leaf_digest),
+            concat!(
+                "elivagar-corpus-digest v1\n",
+                "mode leaves\n",
+                "root 639b1ae66c8508cec5c35f6903946d8a\n",
+                "tiles 1 entries 1 unique 1\n",
+                "zoom 0 tiles 1 hash ae8de239a0984a01ee78f7c2852ab8f0\n",
+            )
+        );
+        assert_eq!(
+            leaves_text(&leaves),
+            concat!(
+                "elivagar-corpus-leaves v1\n",
+                "0 0 0 1 f009d6ca413d6a83596d8ad9b6111e24\n",
+            )
+        );
+
+        let bucket_digest = fold_leaves(&leaves, DigestMode::Buckets);
+        assert_eq!(
+            hex(bucket_digest.zooms[0].hash),
+            "ae8de239a0984a01ee78f7c2852ab8f0"
+        );
+        assert_eq!(hex(bucket_digest.root), "639b1ae66c8508cec5c35f6903946d8a");
+        assert_eq!(
+            hex(bucket_digest.broot.unwrap()),
+            "eeaaa54af46b2afceffd8abbd10e74d6"
+        );
+        assert_eq!(
+            hex(bucket_digest.buckets[0].hash),
+            "867263213ced0147bcae9a3a9d2e96da"
+        );
+        assert_eq!(
+            digest_text(&bucket_digest),
+            concat!(
+                "elivagar-corpus-digest v1\n",
+                "mode buckets\n",
+                "root 639b1ae66c8508cec5c35f6903946d8a\n",
+                "broot eeaaa54af46b2afceffd8abbd10e74d6\n",
+                "tiles 1 entries 1 unique 1\n",
+                "zoom 0 tiles 1 hash ae8de239a0984a01ee78f7c2852ab8f0\n",
+                "bucket z=0 cell=0/0/0 tiles=1 hash 867263213ced0147bcae9a3a9d2e96da\n",
+            )
+        );
+    }
+
+    #[test]
     fn leaves_digest_round_trips_and_self_checks() {
         let leaves = vec![
             LeafRun {
@@ -567,7 +648,7 @@ mod tests {
 
     #[test]
     fn leaves_reject_out_of_range_coordinates_and_zoom_crossing_runs() {
-        let head = "elivagar-corpus-leaves v1\n";
+        let head = format!("{LEAVES_HEADER}\n");
         let h = hex(1);
         // x beyond the z2 grid.
         assert!(parse_leaves_text(&format!("{head}2 4 0 1 {h}\n")).is_err());

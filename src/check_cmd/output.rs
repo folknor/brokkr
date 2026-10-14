@@ -253,33 +253,37 @@ pub(crate) fn describe_sweep(
     }
 
     if for_test {
-        let skips = sweep.libtest_args.iter().filter(|a| *a == "--skip").count();
+        let filters = sweep.lane_filters();
+        let execution = sweep.lane_exec();
+        let skips = filters.skips().filter(|f| f.package.is_none()).count();
         if skips > 0 {
             parts.push(format!("{skips} skips"));
         }
-        if sweep.libtest_args.iter().any(|a| a == "--include-ignored") {
+        if filters.include_ignored {
             parts.push("include-ignored".into());
         }
-        // `cargo_test_filters` is stored flattened as `["--test", name, ...]`;
-        // pair each flag back with its name so one filter reads as one item,
-        // not `--test` and the bare name as two comma-separated fragments.
-        let mut filters = sweep.cargo_test_filters.iter();
-        while let Some(flag) = filters.next() {
-            match filters.next() {
-                Some(name) => parts.push(format!("{flag} {name}")),
-                None => parts.push(flag.clone()),
-            }
+        for target in &filters.targets {
+            parts.push(format!("--test {}", target.as_str()));
         }
-        for name in &sweep.name_filters {
-            parts.push(format!("filter {name}"));
+        for filter in filters.only() {
+            parts.push(format!("filter {}", filter.pattern));
         }
         parts.push(
-            if sweep.doc_only {
+            if matches!(execution, crate::profile::LaneExec::DocOnly { .. }) {
                 // Serial by construction, and the lane's whole identity: an
                 // unexplained `--doc` invocation is the one thing a collapsed
                 // log must not hide.
                 "doc-only"
-            } else if matches!(sweep.test_threads, Some(n) if n != 1) {
+            } else if matches!(execution, crate::profile::LaneExec::Parallel { .. })
+                || matches!(
+                    execution,
+                    crate::profile::LaneExec::Serial { threads } if threads.is_cargo_mediated()
+                )
+                || matches!(
+                    execution,
+                    crate::profile::LaneExec::Nextest { threads } if threads != Some(1)
+                )
+            {
                 "parallel"
             } else {
                 "serial"
@@ -287,12 +291,13 @@ pub(crate) fn describe_sweep(
             .into(),
         );
 
-        if sweep.process_isolation {
+        if matches!(execution, crate::profile::LaneExec::Isolated) {
             parts.push("process-isolated".into());
         }
 
-        if !sweep.qualified_skips.is_empty() {
-            parts.push(format!("{} pkg-skips", sweep.qualified_skips.len()));
+        let package_skips = filters.skips().filter(|f| f.package.is_some()).count();
+        if package_skips > 0 {
+            parts.push(format!("{package_skips} pkg-skips"));
         }
     }
 
@@ -588,9 +593,7 @@ fn sweep_selection_args(sweep: &ResolvedSweep, run: &ResolutionRun) -> Vec<Strin
     // `-p <pkg>` scoping is also what makes `--features` valid in a virtual
     // workspace. The features are the request's projection onto it.
     args.extend(run.cargo_args());
-    for f in &sweep.cargo_test_filters {
-        args.push(f.clone());
-    }
+    args.extend(sweep.lane_filters().cargo_args());
     args
 }
 
@@ -719,11 +722,14 @@ fn run_one_test_sweep(
     observe: &SerialObserve<'_>,
 ) -> Result<bool, DevError> {
     let (cargo_extra, libtest_extra) = split_extra_args(extra_args);
-    // A parallel sweep (test_threads != 1) takes the parallel runner below and
-    // never isolates; a serial one isolates its harnesses unless it cannot.
+    // Cargo-mediated test threads take the unisolated runner; a watchdogged
+    // serial lane isolates its harnesses unless it cannot.
     // (Under a complete profile neither escape exists: preparation refused
     // both, since neither can be attributed.)
-    let parallel_threads = matches!(sweep.test_threads, Some(n) if n != 1);
+    let execution = sweep.lane_exec();
+    let parallel_threads = execution
+        .threads()
+        .is_some_and(crate::profile::Threads::is_cargo_mediated);
     let shim_reason = if parallel_threads {
         None
     } else {
@@ -782,29 +788,26 @@ fn run_one_test_sweep(
     // that already carries an explicit target selector (e.g. a profile's
     // `--test <name>`) excludes doctests on its own, and `--tests` would
     // wrongly broaden it, so only inject when no selector is present.
-    if sweep.doc_only {
+    if matches!(execution, crate::profile::LaneExec::DocOnly { .. }) {
         args.push("--doc".into());
-    } else if !doctests && !has_target_selector(&args) {
+    } else if !doctests
+        && sweep.lane_filters().targets.is_empty()
+        && !has_target_selector(cargo_extra)
+    {
         args.push("--tests".into());
     }
 
-    // Thread policy. A serial sweep (`test_threads` unset or 1) runs under the
-    // per-test hang watchdog, which requires `--test-threads=1`. A sweep whose
-    // profile set `test_threads` to 0 (libtest default parallelism) or >=2 runs
-    // in parallel - no watchdog, one whole-sweep timeout instead.
-    let parallel = matches!(sweep.test_threads, Some(n) if n != 1);
-
-    let mut libtest_args = Vec::new();
-    for s in &sweep.libtest_args {
-        libtest_args.push(s.clone());
-    }
-    for n in &sweep.name_filters {
-        libtest_args.push(n.clone());
-    }
+    // Thread policy comes from the resolved lane. Cargo-mediated threads skip
+    // the per-test watchdog; a watchdogged serial lane forces one thread.
+    let parallel = parallel_threads;
+    let filters = sweep.lane_filters();
+    let mut libtest_args = filters.libtest_args();
+    libtest_args.extend(filters.name_filters());
     if parallel {
-        // Some(0) leaves the flag off (libtest default); Some(n>=2) sets n.
-        if let Some(n) = sweep.test_threads
-            && n >= 2
+        // The default count leaves the flag off; an explicit count sets it.
+        if let Some(threads) = execution.threads()
+            && let Some(n) = threads.configured_count()
+            && n > 1
         {
             libtest_args.push(format!("--test-threads={n}"));
         }

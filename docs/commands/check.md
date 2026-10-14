@@ -745,7 +745,7 @@ is worse than one that refuses, since a green audit is taken as evidence.
 
 ### The clocks, per lane
 
-`Ceilings` in `src/test_runner.rs` carries the cap, an optional wall backstop, and
+`Ceilings` in `src/test_runner/deadline.rs` carries the cap, an optional wall backstop, and
 a `WallShape` saying what a kill may be *called*. Every lane enforces the same 20s
 cap; they differ only in how exactly a kill can be attributed.
 
@@ -780,8 +780,9 @@ process group may already be gone and its id reused; a leaked process carrying
 the run token is reaped at the next hold (see Strays).
 
 The limits are constants in `src/check_cmd/watchdog.rs` (`CHECK_CEILING` and
-`phase_ceiling`) and `src/test_runner.rs` (`IDLE_TIMEOUT`, `TEST_TIMEOUT`,
-`SWEEP_WALL_TIMEOUT`, `PARALLEL_SWEEP_TIMEOUT`); there is no config key or flag.
+`phase_ceiling`), `src/test_runner/deadline.rs` (`IDLE_TIMEOUT`, `TEST_TIMEOUT`,
+`SWEEP_WALL_TIMEOUT`, `PARALLEL_SWEEP_TIMEOUT`) and `src/test_runner/procgroup.rs`
+(`DRAIN_GRACE`); there is no config key or flag.
 
 ## Strays
 

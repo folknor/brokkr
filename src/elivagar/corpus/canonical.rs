@@ -29,14 +29,15 @@
     clippy::unnecessary_sort_by
 )]
 
+use std::cmp::Ordering;
 use std::io::{self, Read};
 use std::sync::Arc;
 
 use flate2::read::GzDecoder;
 use protohoggr::{Cursor, WIRE_LEN, WIRE_VARINT};
-use xxhash_rust::xxh3::Xxh3;
 
 use super::super::eliv::{CanonRingRole, DetailAttr, Strictness, decode_detail_attr};
+use super::canon_sink::{CanonSink, HashSink, detail_attrs_hash, write_len, write_string};
 
 // ---------------------------------------------------------------------------
 // Public entry: decompress + streaming hash. Signature preserved from the
@@ -76,9 +77,9 @@ pub fn semantic_hash(raw: &[u8], scratch: &mut DecodeScratch) -> io::Result<u128
 // the same `elivagar-stream-*` domains - so the two are value-identical exactly
 // when the two independent decode paths agree, which the equivalence tests pin.
 //
-// It is regress's production "same tile" oracle: `brokkr regress`'s identical-
-// tile fast path will call it, giving one source of truth for tile equality.
-// (dead_code until that port lands; the equivalence tests exercise it now.)
+// It remains an independent detail-decoder oracle for the equivalence tests.
+// Production's raw-blob fingerprint is `semantic_hash`; regress calls that
+// same function in its parallel canonical pass.
 // ---------------------------------------------------------------------------
 
 #[allow(dead_code)]
@@ -162,7 +163,7 @@ pub(crate) fn compare_detail_features(
     a.id.cmp(&b.id)
         .then_with(|| a.geom_type.cmp(&b.geom_type))
         .then_with(|| a.attrs.cmp(&b.attrs))
-        .then_with(|| compare_detail_component_slices(&a.components, &b.components))
+        .then_with(|| compare_component_slices(&a.components, &b.components))
 }
 
 /// Canonical order of two components (ring count, then per-ring role + points).
@@ -174,24 +175,55 @@ pub(crate) fn compare_detail_components(
     a: &super::super::eliv::DetailComponent,
     b: &super::super::eliv::DetailComponent,
 ) -> std::cmp::Ordering {
-    compare_detail_component_slices(std::slice::from_ref(a), std::slice::from_ref(b))
+    compare_component_slices(std::slice::from_ref(a), std::slice::from_ref(b))
 }
 
-fn compare_detail_component_slices(
-    a: &[super::super::eliv::DetailComponent],
-    b: &[super::super::eliv::DetailComponent],
-) -> std::cmp::Ordering {
-    use std::cmp::Ordering;
+pub(crate) trait CanonicalRingOrder {
+    fn role(&self) -> CanonRingRole;
+    fn points(&self) -> &[(i32, i32)];
+}
+
+pub(crate) trait CanonicalComponentOrder {
+    type Ring: CanonicalRingOrder;
+
+    fn rings(&self) -> &[Self::Ring];
+}
+
+impl CanonicalRingOrder for super::super::eliv::DetailRing {
+    fn role(&self) -> CanonRingRole {
+        self.role
+    }
+
+    fn points(&self) -> &[(i32, i32)] {
+        &self.points
+    }
+}
+
+impl CanonicalComponentOrder for super::super::eliv::DetailComponent {
+    type Ring = super::super::eliv::DetailRing;
+
+    fn rings(&self) -> &[Self::Ring] {
+        &self.rings
+    }
+}
+
+pub(crate) fn compare_component_slices<A, B>(a: &[A], b: &[B]) -> Ordering
+where
+    A: CanonicalComponentOrder,
+    B: CanonicalComponentOrder,
+{
     for (left, right) in a.iter().zip(b) {
-        let rings = left.rings.len().cmp(&right.rings.len());
+        let left_rings = left.rings();
+        let right_rings = right.rings();
+        let rings = left_rings.len().cmp(&right_rings.len());
         if rings != Ordering::Equal {
             return rings;
         }
-        for (left_ring, right_ring) in left.rings.iter().zip(&right.rings) {
+        for (left_ring, right_ring) in left_rings.iter().zip(right_rings) {
             let ring = left_ring
-                .role
-                .cmp(&right_ring.role)
-                .then_with(|| left_ring.points.cmp(&right_ring.points));
+                .role()
+                .cmp(&right_ring.role())
+                .then_with(|| left_ring.points().cmp(right_ring.points()));
             if ring != Ordering::Equal {
                 return ring;
             }
@@ -211,80 +243,6 @@ fn detail_ring_hash(ring: &super::super::eliv::DetailRing) -> u128 {
     sink.bytes(&[ring.role as u8]);
     write_len(&mut sink, ring.points.len());
     sink.bytes(&points.finish().to_le_bytes());
-    sink.finish()
-}
-
-// ---------------------------------------------------------------------------
-// Hash sink.
-// ---------------------------------------------------------------------------
-
-trait CanonSink {
-    fn bytes(&mut self, bytes: &[u8]);
-}
-
-struct HashSink(Xxh3);
-
-impl HashSink {
-    fn new() -> Self {
-        Self(Xxh3::new())
-    }
-    fn finish(self) -> u128 {
-        self.0.digest128()
-    }
-}
-
-impl CanonSink for HashSink {
-    fn bytes(&mut self, bytes: &[u8]) {
-        self.0.update(bytes);
-    }
-}
-
-fn write_len(sink: &mut impl CanonSink, len: usize) {
-    sink.bytes(&u64::try_from(len).unwrap_or(u64::MAX).to_le_bytes());
-}
-
-fn write_string(sink: &mut impl CanonSink, value: &str) {
-    write_len(sink, value.len());
-    sink.bytes(value.as_bytes());
-}
-
-fn write_detail_attr(sink: &mut impl CanonSink, value: &DetailAttr) {
-    match value {
-        DetailAttr::String(value) => {
-            sink.bytes(&[1]);
-            write_string(sink, value);
-        }
-        DetailAttr::Float(value) => {
-            sink.bytes(&[2]);
-            sink.bytes(&value.to_le_bytes());
-        }
-        DetailAttr::Double(value) => {
-            sink.bytes(&[3]);
-            sink.bytes(&value.to_le_bytes());
-        }
-        DetailAttr::Int(value) => {
-            sink.bytes(&[4]);
-            sink.bytes(&value.to_le_bytes());
-        }
-        DetailAttr::UInt(value) => {
-            sink.bytes(&[5]);
-            sink.bytes(&value.to_le_bytes());
-        }
-        DetailAttr::SInt(value) => {
-            sink.bytes(&[6]);
-            sink.bytes(&value.to_le_bytes());
-        }
-        DetailAttr::Bool(value) => sink.bytes(&[7, u8::from(*value)]),
-    }
-}
-
-fn detail_attrs_hash(attrs: &[(Arc<str>, DetailAttr)]) -> u128 {
-    let mut sink = HashSink::new();
-    write_len(&mut sink, attrs.len());
-    for (key, value) in attrs {
-        write_string(&mut sink, key);
-        write_detail_attr(&mut sink, value);
-    }
     sink.finish()
 }
 
@@ -816,11 +774,11 @@ mod equivalence {
     use super::super::super::eliv::Strictness;
     use super::super::fixture::{
         Feature, GeomType, LayerBuilder, Value, command, duplicate_name_layers_tile,
-        encode_linestring, encode_tile, float_attr_tile, line_tile, multiline_tile, point_tile,
-        polygon_tile, raw_geometry_tile, repeated_feature_tile, split_geometry_tile,
+        encode_linestring, encode_tile, float_attr_tile, gzip, line_tile, multiline_tile,
+        point_tile, polygon_tile, raw_geometry_tile, repeated_feature_tile, split_geometry_tile,
         split_tags_tile, two_named_layers_tile, versioned_layer_tile, zigzag,
     };
-    use super::streaming_tile_hash;
+    use super::{DecodeScratch, semantic_hash, streaming_tile_hash};
 
     type FeatureSpec<'a> = (Option<u64>, &'a [(i32, i32)]);
 
@@ -845,6 +803,18 @@ mod equivalence {
             stream(left).expect("hash left") == stream(right).expect("hash right");
         assert_eq!(detail_equal, expect_equal, "detail verdict");
         assert_eq!(streaming_equal, expect_equal, "streaming verdict");
+    }
+
+    #[test]
+    fn streaming_fingerprint_has_a_frozen_value() {
+        let tile = line_tile(Some(1), "primary", &[(0, 0), (10, 10)]);
+        let expected = 0xf009_d6ca_413d_6a83_596d_8ad9_b611_1e24;
+        assert_eq!(stream(&tile).unwrap(), expected,);
+        let compressed = gzip(&tile);
+        assert_eq!(
+            semantic_hash(&compressed, &mut DecodeScratch::default()).unwrap(),
+            expected,
+        );
     }
 
     // --- the equivalence tests ---

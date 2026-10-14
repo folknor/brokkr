@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
@@ -107,11 +108,13 @@ struct LockInner {
     /// rust-toolchain is moved aside for exactly the locked window. See
     /// [`crate::toolchain`].
     toolchain: Option<crate::toolchain::DisabledToolchain>,
-    /// Whether this hold put its nonce into the process-global capability slot
-    /// ([`HoldEffects::publish_capability`]). Only a hold that published may
-    /// clear it: a test hold on a scratch path must not wipe a capability it
-    /// never owned.
-    owns_capability: bool,
+    /// The compilation capability belongs to this hold. Nested guards share
+    /// the `LockInner`, and dropping the last guard drops this nonce with it.
+    capability: Option<Nonce>,
+    /// Directories whose disabled toolchain pins need watchdog restoration.
+    /// The primary lock-scoped guard is inserted at construction; worktree
+    /// guards register their paths for exactly their own lifetime.
+    active_toolchain_dirs: Mutex<HashMap<PathBuf, usize>>,
     /// This acquisition's control socket. Dropped first on release, while the
     /// flock is still held: a stop that has not committed by then is refused.
     service: Option<crate::lock_service::Service>,
@@ -150,13 +153,6 @@ impl Drop for LockInner {
         // but the kernel has released the flock so `status()`'s probe
         // reports no holder and the next acquirer rewrites it.
         invalidate_metadata(self.fd.as_raw_fd());
-        // Forget this hold's compilation capability. A child spawned after
-        // release must not carry a mark for a hold that is over: the next
-        // holder publishes its own nonce, and a stale mark would be refused
-        // anyway - forgetting it makes that explicit rather than incidental.
-        if self.owns_capability {
-            crate::hold::clear_capability();
-        }
         // Restore the disabled toolchain (if any) while we still hold the flock,
         // then release. Doing it before LOCK_UN keeps the moved-aside window
         // inside the locked window, so a concurrent brokkr can never observe it.
@@ -197,6 +193,23 @@ fn held_registry() -> std::sync::MutexGuard<'static, Vec<Weak<LockInner>>> {
 }
 
 impl LockGuard {
+    /// Register an additional disabled toolchain directory for the lifetime
+    /// of this worktree guard, so the watchdog can restore it if the main
+    /// thread cannot unwind.
+    pub(crate) fn track_toolchain_dir(&self, dir: &Path) -> ToolchainRegistration {
+        let dir = dir.to_owned();
+        let mut active = self
+            .inner
+            .active_toolchain_dirs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *active.entry(dir.clone()).or_default() += 1;
+        ToolchainRegistration {
+            inner: Arc::downgrade(&self.inner),
+            dir,
+        }
+    }
+
     /// Record the PID of the child process currently running under the lock
     /// (with its starttime identity token), and rewrite the lock file so
     /// concurrent `brokkr lock` invocations can see it.
@@ -272,6 +285,37 @@ pub struct LockContext<'a> {
     pub command: &'a str,
     /// Display identity only, not a cargo cwd or a disk-probe path.
     pub project_root: &'a str,
+}
+
+/// Registration of a toolchain directory whose pin is currently held aside.
+/// It is separate from the file-moving guard so a watchdog thread can find the
+/// directory while that guard remains on a blocked main-thread stack.
+pub(crate) struct ToolchainRegistration {
+    inner: Weak<LockInner>,
+    dir: PathBuf,
+}
+
+impl Drop for ToolchainRegistration {
+    fn drop(&mut self) {
+        let Some(inner) = self.inner.upgrade() else {
+            return;
+        };
+        let mut active = inner
+            .active_toolchain_dirs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let remove = match active.get_mut(&self.dir) {
+            Some(count) if *count > 1 => {
+                *count -= 1;
+                false
+            }
+            Some(_) => true,
+            None => false,
+        };
+        if remove {
+            active.remove(&self.dir);
+        }
+    }
 }
 
 /// Info read back from the lock file. `starttime` and `boot_id` are the
@@ -376,6 +420,15 @@ pub fn acquire(ctx: &LockContext<'_>) -> Result<LockGuard, DevError> {
     acquire_at(&path, ctx, &HOST_EFFECTS)
 }
 
+/// Acquire the global lock without applying the process's armed build-root
+/// toolchain setting. Worktree execution uses this because its own pin is
+/// activated explicitly after the checkout exists, and mutating the armed
+/// setting around an acquisition would leak that choice across threads.
+pub(crate) fn acquire_without_toolchain(ctx: &LockContext<'_>) -> Result<LockGuard, DevError> {
+    let path = lock_path()?;
+    acquire_at(&path, ctx, &HOST_EFFECTS_WITHOUT_TOOLCHAIN)
+}
+
 /// This process's live hold on the global lock, as one more guard on it, or
 /// `None` when the process holds nothing.
 ///
@@ -398,15 +451,45 @@ pub fn current_hold() -> Option<LockGuard> {
         .map(|inner| LockGuard { inner })
 }
 
-/// What a fresh hold does beyond taking the flock: the host-wide and
-/// process-global effects.
+/// The capability for the live global hold, without the admission check used
+/// by `current_hold`. A committed stop forbids new work, but retaining the
+/// capability until the hold drops preserves the child-stamping contract for
+/// any spawn already in progress.
+pub(crate) fn current_capability() -> Option<Nonce> {
+    let mut held = held_registry();
+    held.retain(|w| w.strong_count() > 0);
+    held.iter()
+        .filter_map(Weak::upgrade)
+        .find_map(|inner| inner.capability.clone())
+}
+
+/// Toolchain paths attached to the active global hold, or `None` if no such
+/// hold exists. `Some([])` is meaningful: the live hold intentionally has no
+/// disabled pin, so a watchdog must not fall back to the command's armed path.
+pub(crate) fn current_hold_toolchain_dirs() -> Option<Vec<PathBuf>> {
+    let path = lock_path().ok()?;
+    let mut held = held_registry();
+    held.retain(|w| w.strong_count() > 0);
+    let inner = held
+        .iter()
+        .filter_map(Weak::upgrade)
+        .find(|inner| inner.path == path)?;
+    let active = inner
+        .active_toolchain_dirs
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut dirs = active.keys().cloned().collect::<Vec<_>>();
+    dirs.sort();
+    Some(dirs)
+}
+
+/// What a fresh hold does beyond taking the flock: the host-wide effects.
 ///
 /// A seam, so unit tests can take real flocks on scratch paths without any of
 /// them. Before it existed the test entry point ran the production drain on
 /// the real `~/.brokkr/compile.lock` - which, 20 s into a wait behind a live
 /// build, SIGKILLs whatever the stray reaper finds on the host, rust-analyzer's
-/// cargo included - and mutated the process-global capability and
-/// toolchain-disable state that other tests read.
+/// cargo included - and mutated toolchain-disable state that other tests read.
 struct HoldEffects {
     /// Wait out earlier compilation leases; the returned descriptor is the
     /// exclusive lease held while the capability is published. `None` means
@@ -414,8 +497,8 @@ struct HoldEffects {
     drain: fn() -> Result<Option<OwnedFd>, DevError>,
     /// Activate the armed toolchain-disable ([`crate::toolchain`]).
     toolchain: fn() -> Result<Option<crate::toolchain::DisabledToolchain>, DevError>,
-    /// Install the minted nonce as this process's capability (`crate::hold`).
-    publish_capability: bool,
+    /// Attach the minted nonce to this hold for child stamping.
+    attach_capability: bool,
     /// Runs once the fresh hold is registered: the stray reap and the stale
     /// guard warning.
     after_fresh_hold: fn(),
@@ -430,7 +513,20 @@ struct HoldEffects {
 const HOST_EFFECTS: HoldEffects = HoldEffects {
     drain: host_drain,
     toolchain: crate::toolchain::activate_for_lock,
-    publish_capability: true,
+    attach_capability: true,
+    after_fresh_hold: host_after_fresh_hold,
+    disk_gate: crate::disk_gate::check,
+    service: true,
+};
+
+fn no_toolchain() -> Result<Option<crate::toolchain::DisabledToolchain>, DevError> {
+    Ok(None)
+}
+
+const HOST_EFFECTS_WITHOUT_TOOLCHAIN: HoldEffects = HoldEffects {
+    drain: host_drain,
+    toolchain: no_toolchain,
+    attach_capability: true,
     after_fresh_hold: host_after_fresh_hold,
     disk_gate: crate::disk_gate::check,
     service: true,
@@ -562,20 +658,22 @@ fn acquire_at(
         service.update(snapshot_of(&state));
     }
 
-    // Construct the owner first, then hand the process registry the nonce.
-    // Nothing fallible may sit between these two statements: an error there
-    // would leave a capability installed that no `Drop` will ever clear.
+    // Construct the owner with its capability before registering it. No
+    // process-global nonce is published, so a test hold or a later hold cannot
+    // clear or replace the capability owned by this one.
+    let mut active_toolchain_dirs = HashMap::new();
+    if let Some(disabled) = &toolchain {
+        active_toolchain_dirs.insert(disabled.directory().to_owned(), 1);
+    }
     let inner = Arc::new(LockInner {
         fd: owned,
         path: path.to_owned(),
         state: Mutex::new(state),
         toolchain,
-        owns_capability: effects.publish_capability,
+        capability: effects.attach_capability.then_some(nonce),
+        active_toolchain_dirs: Mutex::new(active_toolchain_dirs),
         service,
     });
-    if effects.publish_capability {
-        crate::hold::publish_capability(&nonce);
-    }
     // Register weakly so a later acquire in this process re-enters this hold
     // instead of self-deadlocking on a second fd.
     held_registry().push(Arc::downgrade(&inner));
@@ -1074,6 +1172,20 @@ pub fn compile_lock_path() -> Result<PathBuf, DevError> {
 /// seconds let a nearly-finished check end on its own rather than be killed.
 const DRAIN_BUDGET: Duration = Duration::from_secs(120);
 const DRAIN_REAP_AFTER: Duration = Duration::from_secs(3);
+const DRAIN_POLL: Duration = Duration::from_millis(100);
+
+#[derive(Clone, Copy)]
+struct DrainPolicy {
+    budget: Duration,
+    reap_after: Duration,
+    poll: Duration,
+}
+
+const DEFAULT_DRAIN_POLICY: DrainPolicy = DrainPolicy {
+    budget: DRAIN_BUDGET,
+    reap_after: DRAIN_REAP_AFTER,
+    poll: DRAIN_POLL,
+};
 
 /// Wait for every participating compilation lease to be released, and return
 /// the exclusive descriptor that proves it.
@@ -1100,7 +1212,18 @@ const DRAIN_REAP_AFTER: Duration = Duration::from_secs(3);
 /// measuring alongside a compiler it failed to clear.
 fn drain_compile_leases() -> Result<OwnedFd, DevError> {
     let path = compile_lock_path()?;
-    let c_path = path_to_cstring(&path)?;
+    drain_compile_leases_at(&path, DEFAULT_DRAIN_POLICY, crate::stray::reap_for_drain)
+}
+
+/// Parameterized drain used by the production wrapper and any focused drain
+/// checks. Callers can use a scratch lock, short deadlines and an inert reaper
+/// without waiting on or signalling host compilers.
+fn drain_compile_leases_at(
+    path: &Path,
+    policy: DrainPolicy,
+    reap: fn(),
+) -> Result<OwnedFd, DevError> {
+    let c_path = path_to_cstring(path)?;
     let fd = open_lock_file(&c_path)?;
     let owned = unsafe { OwnedFd::from_raw_fd(fd) };
 
@@ -1133,24 +1256,24 @@ fn drain_compile_leases() -> Result<OwnedFd, DevError> {
             );
         }
         let waited = start.elapsed();
-        if waited >= DRAIN_BUDGET {
+        if waited >= policy.budget {
             return Err(DevError::Lock(format!(
                 "compilation leases did not drain within {}s. A compiler started before this \
                  hold is still holding its lease, or a process that inherited its \
                  descriptor is. This is not a transient busy signal - an unchanged blocker \
                  will fail every retry. `brokkr strays` shows what is running; \
                  `brokkr lock` shows the holder.",
-                DRAIN_BUDGET.as_secs()
+                policy.budget.as_secs()
             )));
         }
-        if !reaped && waited >= DRAIN_REAP_AFTER {
+        if !reaped && waited >= policy.reap_after {
             reaped = true;
             crate::output::lock_msg(
                 "compilers have not drained; reaping strays once, then waiting again",
             );
-            crate::stray::reap_for_drain();
+            reap();
         }
-        std::thread::sleep(Duration::from_millis(100));
+        std::thread::sleep(policy.poll);
     }
 }
 
@@ -1201,13 +1324,10 @@ fn drain_and_authorize(
     })?;
 
     // Activate the armed toolchain-disable here: after the drain, so the
-    // moved-aside window never spans a wait on other processes, and *before*
-    // the capability enters the process registry, so a failure cannot leave a
-    // nonce installed with no `LockInner` to own it. That was a real defect -
-    // publishing the capability and then doing fallible work meant an
-    // activation failure released `brokkr.lock` without ever constructing the
-    // guard whose `Drop` clears the registry, and the process went on able to
-    // stamp a nonce belonging to no hold.
+    // moved-aside window never spans a wait on other processes, and before the
+    // new `LockInner` takes ownership of the nonce. If activation fails, the
+    // published lock-file hash has no matching child capability and the hold
+    // is refused before protected work starts.
     let toolchain = (effects.toolchain)()?;
 
     drop(compile_lease);
@@ -1220,9 +1340,8 @@ fn drain_and_authorize(
 
 /// A drained, authorized hold, ready for its [`LockInner`] to take ownership.
 ///
-/// The nonce is carried out rather than published here on purpose: nothing
-/// fallible may run between "the process registry names this nonce" and "a
-/// `LockInner` exists whose `Drop` clears it".
+/// The nonce is carried out rather than attached here on purpose: it only
+/// becomes available to child stamping when the owning `LockInner` is built.
 struct Authorized {
     state: LockState,
     nonce: Nonce,
@@ -1612,14 +1731,14 @@ mod tests {
 
     /// The effects every test hold uses: no drain of the real compile lease
     /// (and so no stray reap, which SIGKILLs host processes), no toolchain
-    /// activation, no capability published into the process-global slot, no
+    /// activation, no capability attached to the hold, no
     /// post-hold reap, and no free-space gate (a test must not fail because
     /// the host's disk is full). What remains is exactly what these tests are
     /// about: the flock, re-entry, and the lock-file metadata.
     const INERT: HoldEffects = HoldEffects {
         drain: no_drain,
         toolchain: no_toolchain,
-        publish_capability: false,
+        attach_capability: false,
         after_fresh_hold: nothing_after,
         disk_gate: no_disk_gate,
         service: false,
@@ -1772,31 +1891,24 @@ mod tests {
         );
     }
 
-    /// A test hold neither installs nor clears the process-global capability:
-    /// it did not publish one, so it has none to forget. Before the seam the
-    /// test holds did both, racing `hold`'s own capability test.
+    /// An inert test hold has no capability of its own and cannot replace the
+    /// capability returned by another live hold.
     #[test]
-    fn inert_hold_leaves_the_capability_slot_alone() {
+    fn inert_hold_does_not_gain_or_replace_a_capability() {
         let _serial = crate::test_scratch::process_global_lock();
         let before = crate::hold::capability();
-        let sentinel = Nonce::parse("0123456789abcdef0123456789abcdef").unwrap();
-        crate::hold::publish_capability(&sentinel);
         let path = tmp_lock("capability.lock");
         let guard = acquire_at(&path, &ctx(), &INERT).unwrap();
         assert_eq!(
             crate::hold::capability().as_ref().map(Nonce::expose),
-            Some(sentinel.expose())
+            before.as_ref().map(Nonce::expose)
         );
         drop(guard);
         assert_eq!(
             crate::hold::capability().as_ref().map(Nonce::expose),
-            Some(sentinel.expose()),
-            "a hold that never published must not clear the slot on release"
+            before.as_ref().map(Nonce::expose),
+            "a hold without a capability must not replace another hold's nonce"
         );
-        match before {
-            Some(n) => crate::hold::publish_capability(&n),
-            None => crate::hold::clear_capability(),
-        }
     }
 
     fn ctx() -> LockContext<'static> {

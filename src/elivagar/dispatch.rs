@@ -259,7 +259,7 @@ fn run_elivagar_wallclock(
     ));
 
     let bench_config = BenchConfig {
-        command: command.result_command().into(),
+        command: command.id().into(),
         mode: None,
         input_file: Some(basename),
         input_mb: Some(file_mb),
@@ -373,7 +373,7 @@ fn run_elivagar_hotpath(req: &MeasureRequest, command: &BuiltCommand<'_>) -> Res
             let metadata = command.metadata();
 
             let config = BenchConfig {
-                command: command.result_command().into(),
+                command: command.id().into(),
                 mode: None,
                 input_file: Some(basename),
                 input_mb: Some(file_mb),
@@ -445,7 +445,7 @@ fn run_elivagar_hotpath(req: &MeasureRequest, command: &BuiltCommand<'_>) -> Res
             let metadata = command.metadata();
 
             let config = BenchConfig {
-                command: command.result_command().into(),
+                command: command.id().into(),
                 mode: None,
                 input_file: None,
                 input_mb: None,

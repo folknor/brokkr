@@ -1,7 +1,7 @@
 use crate::error::DevError;
 
 /// Current schema version. Increment when adding new migrations.
-pub(super) const SCHEMA_VERSION: i64 = 20;
+pub(super) const SCHEMA_VERSION: i64 = 21;
 
 /// Run all pending migrations based on `PRAGMA user_version`.
 pub(super) fn run_migrations(conn: &rusqlite::Connection) -> Result<(), DevError> {
@@ -82,6 +82,9 @@ pub(super) fn run_migrations(conn: &rusqlite::Connection) -> Result<(), DevError
     }
     if current < 20 {
         migrate_v19_to_v20(conn)?;
+    }
+    if current < 21 {
+        migrate_v20_to_v21(conn)?;
     }
 
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -815,6 +818,20 @@ fn migrate_v19_to_v20(conn: &rusqlite::Connection) -> Result<(), DevError> {
     Ok(())
 }
 
+/// v20 -> v21: use the CLI command ID for historical Elivagar and Nidhogg
+/// result rows as well as newly recorded rows.
+fn migrate_v20_to_v21(conn: &rusqlite::Connection) -> Result<(), DevError> {
+    conn.execute_batch(
+        "UPDATE runs SET command = 'tilegen' \
+         WHERE project = 'elivagar' AND command = 'self'; \
+         UPDATE runs SET command = 'pmtiles-writer' \
+         WHERE project = 'elivagar' AND command = 'pmtiles'; \
+         UPDATE runs SET command = 'nid-ingest' \
+         WHERE project = 'nidhogg' AND command = 'ingest';",
+    )?;
+    Ok(())
+}
+
 /// Parse existing extra/metadata JSON and insert into child tables.
 fn migrate_json_to_children(conn: &rusqlite::Connection) -> Result<(), DevError> {
     let mut stmt = conn.prepare(
@@ -1538,8 +1555,9 @@ mod tests {
 
         // Row 10: elivagar `bench self` / `tags-count` - v3→v4 skipped
         // (project filter); v11→v12 skipped (not `bench commands`);
-        // v12→v13 strips `bench ` and overwrites variant with `bench`.
-        assert_eq!(row_of(10), ("self".into(), Some("bench".into())));
+        // v12→v13 strips `bench ` and overwrites variant with `bench`;
+        // v20→v21 normalizes the stored command to its CLI ID.
+        assert_eq!(row_of(10), ("tilegen".into(), Some("bench".into())));
 
         drop(db);
         cleanup(&dir, &db_path);
@@ -1671,7 +1689,7 @@ mod tests {
         assert_eq!(row_of(4), ("merge-changes".into(), Some("bench".into())));
         assert_eq!(row_of(5), ("diff-snapshots".into(), Some("bench".into())));
         assert_eq!(row_of(6), ("extract".into(), Some("bench".into())));
-        assert_eq!(row_of(7), ("self".into(), Some("bench".into())));
+        assert_eq!(row_of(7), ("tilegen".into(), Some("bench".into())));
         // Hotpath rows. Rows 8-9 were `hotpath inspect-tags` / alloc
         // marker - v14→v15 collapses preset name to `inspect`.
         assert_eq!(row_of(8), ("inspect".into(), Some("hotpath".into())));
@@ -1805,8 +1823,8 @@ mod tests {
         assert_eq!(row_of(3), ("apply-changes".into(), Some("hotpath".into())));
         assert_eq!(row_of(4), ("apply-changes".into(), Some("alloc".into())));
         assert_eq!(row_of(5), ("tilegen".into(), Some("alloc".into())));
-        assert_eq!(row_of(6), ("pmtiles".into(), Some("hotpath".into())));
-        assert_eq!(row_of(7), ("self".into(), Some("bench".into())));
+        assert_eq!(row_of(6), ("pmtiles-writer".into(), Some("hotpath".into())));
+        assert_eq!(row_of(7), ("tilegen".into(), Some("bench".into())));
         assert_eq!(row_of(8), ("api".into(), Some("bench".into())));
 
         // run_kv: meta.compression deleted, meta.merged_cache kept.

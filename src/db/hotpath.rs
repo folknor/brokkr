@@ -20,7 +20,7 @@
 //! Generalising to dynamic percentile columns means a DB migration plus
 //! parser/schema/formatter changes - it's a real project, not a tweak.
 
-use super::{HotpathData, HotpathFunction, HotpathThread, KvPair};
+use super::{HotpathData, HotpathFunction, HotpathThread, KvClass, KvPair};
 
 /// Convert a hotpath JSON report (from the hotpath crate) into a `HotpathData` struct.
 ///
@@ -58,7 +58,7 @@ pub fn hotpath_data_from_json(extra: &serde_json::Value) -> Option<HotpathData> 
             "alloc_dealloc_diff",
         ] {
             if let Some(v) = threads_obj.get(*key).and_then(|v| v.as_str()) {
-                thread_summary.push(KvPair::text(format!("threads.{key}"), v));
+                thread_summary.push(KvPair::text(KvClass::ThreadSummary.qualify(key), v));
             }
         }
         if let Some(data) = threads_obj.get("data").and_then(|v| v.as_array()) {

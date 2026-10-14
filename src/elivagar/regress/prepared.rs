@@ -17,15 +17,17 @@
 //!
 //! The digests here are engine-internal bucketing keys, not the canonical
 //! semantic hash: they only ever compare two tiles inside one run, and nothing
-//! committed depends on their values. The frozen cross-version hash is
-//! `corpus::canonical` and is not reachable from this module.
+//! committed depends on their values. This module shares the canonical byte
+//! sink, but does not call the frozen `corpus::canonical::semantic_hash` entry.
 
 use std::cmp::Ordering;
 use std::sync::Arc;
 
-use xxhash_rust::xxh3::Xxh3;
-
-use super::super::corpus::canonical::compare_detail_components;
+use super::super::corpus::canon_sink::{CanonSink, HashSink, detail_attrs_hash, write_len};
+use super::super::corpus::canonical::{
+    CanonicalComponentOrder, CanonicalRingOrder, compare_component_slices,
+    compare_detail_components,
+};
 use super::super::eliv::{self, CanonRingRole, DetailAttr};
 use super::geometry::Bbox;
 
@@ -94,6 +96,24 @@ pub(crate) struct PreparedLayer {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct PreparedTile {
     pub(crate) layers: Vec<PreparedLayer>,
+}
+
+impl CanonicalRingOrder for PreparedRing {
+    fn role(&self) -> eliv::CanonRingRole {
+        self.role
+    }
+
+    fn points(&self) -> &[(i32, i32)] {
+        &self.points
+    }
+}
+
+impl CanonicalComponentOrder for PreparedComponent {
+    type Ring = PreparedRing;
+
+    fn rings(&self) -> &[Self::Ring] {
+        &self.rings
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -241,56 +261,7 @@ pub(crate) fn compare_prepared_component_slices(
     a: &[PreparedComponent],
     b: &[PreparedComponent],
 ) -> Ordering {
-    for (left, right) in a.iter().zip(b) {
-        let rings = left.rings.len().cmp(&right.rings.len());
-        if rings != Ordering::Equal {
-            return rings;
-        }
-        for (left_ring, right_ring) in left.rings.iter().zip(&right.rings) {
-            let ring = left_ring
-                .role
-                .cmp(&right_ring.role)
-                .then_with(|| left_ring.points.cmp(&right_ring.points));
-            if ring != Ordering::Equal {
-                return ring;
-            }
-        }
-    }
-    a.len().cmp(&b.len())
-}
-
-// ---------------------------------------------------------------------------
-// The engine-internal digest sink.
-// ---------------------------------------------------------------------------
-
-trait CanonSink {
-    fn bytes(&mut self, bytes: &[u8]);
-}
-
-struct HashSink(Xxh3);
-
-impl HashSink {
-    fn new() -> Self {
-        Self(Xxh3::new())
-    }
-    fn finish(self) -> u128 {
-        self.0.digest128()
-    }
-}
-
-impl CanonSink for HashSink {
-    fn bytes(&mut self, bytes: &[u8]) {
-        self.0.update(bytes);
-    }
-}
-
-fn write_len(sink: &mut impl CanonSink, len: usize) {
-    sink.bytes(&u64::try_from(len).unwrap_or(u64::MAX).to_le_bytes());
-}
-
-fn write_string(sink: &mut impl CanonSink, value: &str) {
-    write_len(sink, value.len());
-    sink.bytes(value.as_bytes());
+    compare_component_slices(a, b)
 }
 
 fn write_detail_component(sink: &mut impl CanonSink, rings: &[PreparedRing]) {
@@ -303,46 +274,6 @@ fn write_detail_component(sink: &mut impl CanonSink, rings: &[PreparedRing]) {
             sink.bytes(&y.to_le_bytes());
         }
     }
-}
-
-fn write_detail_attr(sink: &mut impl CanonSink, value: &DetailAttr) {
-    match value {
-        DetailAttr::String(value) => {
-            sink.bytes(&[1]);
-            write_string(sink, value);
-        }
-        DetailAttr::Float(value) => {
-            sink.bytes(&[2]);
-            sink.bytes(&value.to_le_bytes());
-        }
-        DetailAttr::Double(value) => {
-            sink.bytes(&[3]);
-            sink.bytes(&value.to_le_bytes());
-        }
-        DetailAttr::Int(value) => {
-            sink.bytes(&[4]);
-            sink.bytes(&value.to_le_bytes());
-        }
-        DetailAttr::UInt(value) => {
-            sink.bytes(&[5]);
-            sink.bytes(&value.to_le_bytes());
-        }
-        DetailAttr::SInt(value) => {
-            sink.bytes(&[6]);
-            sink.bytes(&value.to_le_bytes());
-        }
-        DetailAttr::Bool(value) => sink.bytes(&[7, u8::from(*value)]),
-    }
-}
-
-fn detail_attrs_hash(attrs: &[(Arc<str>, DetailAttr)]) -> u128 {
-    let mut sink = HashSink::new();
-    write_len(&mut sink, attrs.len());
-    for (key, value) in attrs {
-        write_string(&mut sink, key);
-        write_detail_attr(&mut sink, value);
-    }
-    sink.finish()
 }
 
 fn detail_geometry_hash(geom_type: u8, components: &[PreparedComponent]) -> u128 {

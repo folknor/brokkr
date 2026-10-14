@@ -125,23 +125,17 @@ Reported by: process-control.
 
 Design hunt (process-control): none of these copies is tested pairwise, and `hold.rs` carries a comment block explaining why `BROKKR_CARGO` cannot be a shared constant. The hunter's `src/protocol.rs`, included by the guard via `#[path]` and dependency-free apart from `libc` and `xxhash`, would hold the paths, env names, the token types and `AuthHash`, the shared held-probe, `read_auth`/the lock-record decoder for `auth`, `GUARD_PROTOCOL` with the handshake line format (printed by one side, parsed by the other) and the compile-lease open/flock; the guard keeps `classify`, `Decision` and `main`, and every "keep them edited together" comment becomes a compile error. The held-probe disagreement this would also fix is filed in `bugs.md`.
 
-## PLT-012 - `SigtermGuard` is not re-entrant; interrupt policy differs per caller
+## PLT-012 - Interrupt handling residue outside `SigtermGuard`
 
 Reported by: process-control, ratatoskr.
 
-`install` resets `SHUTDOWN_REQUESTED`; `Drop` restores `SIG_DFL` and clears the flag. Outer guards exist in ratatoskr, piners and `list_smoke`; inner guards in `run_passthrough_in` and `run_sidecar`. Nesting silently drops a pending request, and after the inner guard drops, Ctrl-C kills brokkr outright with no mock teardown or toolchain restore (process-control found no live nesting path; ratatoskr's BUG-067 is the flag reset in practice). Because the guard can't nest, the ratatoskr bench path runs unguarded (BUG-069). Interrupt handling per cohort: stop (service), continue (sync --all, BUG-066), continue with flag reset (gate sweep, BUG-067). `MockServeSignalGuard` is a second signal-flag implementation. About a dozen call sites carry `true, // isolate_pg: caller's SigtermGuard active`, unchecked. The lock solved the same nesting with refcounting.
+`SigtermGuard` is re-entrant and the stop state is one state machine. Residue: ratatoskr's mock-serve keeps a second signal-flag implementation (`AtomicBool`) in `saehrimnir.rs`, and nine call sites still pass `isolate_pg: true` with a "caller's SigtermGuard active" comment that nothing checks; a signature such as `Isolation::Pg(&SigtermGuard)` would make it structural.
 
-Enforcement proposed: a refcounted guard; a signature like `Isolation::Pg(&SigtermGuard)`.
-
-Design hunt (process-control): `shutdown.rs` mixes three jobs - signal dispositions and the stop state (`SigtermGuard`, `STOP_COMMITTED`, `EXIT_CLEANUP`); the test-group reaper table (`GroupReaper`, `REAP_PGIDS`) and `die_with_parent`, which are test-runner containment (the latter a pre-exec spawn step); and `/proc` tree walking and killing (`descendants`, `kill_descendants`, `isolate_process_group`). `GroupReaper` coordinates with `SigtermGuard` through `GUARD_ACTIVE` because both install handlers for the same signals. Proposed: one module owning SIGINT/SIGTERM dispositions - a single handler that kills registered groups, then sets the flag or re-raises depending on whether a guard window is open - removing `reinstall_reaper_if_needed` and the saved dispositions; the tree walking moves to the shared process module.
-
-## PLT-013 - Hold-scoped state lives in process globals
+## PLT-013 - Hold-scoped state still partly in process globals
 
 Reported by: process-control.
 
-`CAPABILITY`, `DISABLE_DIR`, `HELD`, `SHUTDOWN_REQUESTED` are process statics; production and tests share every global (BUG-027). Re-entrant acquire keeps the outer hold's toolchain arm and context, so a `with_worktree` re-arm under an already-held lock would silently not disable the worktree's pin (latent, undetected). Drain constants (`DRAIN_BUDGET`, `DRAIN_REAP_AFTER`) have no injection point, so a drain test waits 20s or 120s. `toolchain::DisabledToolchain::activate` is `pub` but reached only via `activate_for_lock` and tests; making it private would enforce "only via the lock". Hunter's view: capability, toolchain arm and signal state belong on the hold (`LockInner`).
-
-Design hunt (process-control): `toolchain::DISABLE_DIR` is a parameter of the acquisition smuggled through a global; `with_worktree` disarms and re-arms it around its acquire (`arm` returns the previous value and the caller must restore it), and `restore_armed` is a second copy of the restore rule. Proposed: `LockContext` (or `AcquireOptions`) carries `disable_toolchain_in: Option<&Path>`, the `--commit` path passes its worktree path explicitly, and the watchdog backstop reads the path from the live `LockInner` via `current_hold()`.
+The compilation capability and a worktree's toolchain pin now live on the hold (`LockInner`), and the drain takes injectable timing and paths. Residue: `toolchain::DISABLE_DIR` remains the startup default for ordinary acquisitions (replacing it means passing `disable_toolchain_in` through every `LockContext` construction), and `HELD` stays process-wide by necessity for same-process re-entry.
 
 ## PLT-014 - Reserved env vars are documented, not enforced
 
@@ -430,12 +424,6 @@ Reported by: config-cli-bootstrap, process-control.
 - `HarnessConfig::binary_name` is `#[cfg(test)]`-only; its doc says it exists "to lock the defaulting rule into the schema", but production re-implements the rule, so the test pins a copy.
 - `history::fresh_db_schema_version` cannot fail (`test_db()` writes `SCHEMA_VERSION` and the test reads it back); `test_db` duplicates `open()`'s setup, so `run_migrations`/`open` are never exercised.
 - `hold::tests::stamp_is_a_no_op_without_a_capability` never inspects `cmd.get_envs()`.
-
-## PLT-046 - Host features changed what `cargo_features` records for several commands
-
-Reported by: the wave-5 reviewer, laterally.
-
-Every `BenchContext` build now merges `[<host>] features` first. Commands that used to pass an explicit list (pbfhogg bench read/write, nidhogg bench tiles, elivagar paths) now build and record the host features too, and the recorded label's order can change (`hotpath,linux-direct-io` becomes `linux-direct-io,hotpath`). `results --compare` across that boundary pairs rows with different labels. If anything keys on the `cargo_features` text, canonicalise it (sort) at write time.
 
 ## PLT-047 - Detection errors now fail commands that may previously have tolerated a broken `brokkr.toml`
 

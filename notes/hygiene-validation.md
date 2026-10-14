@@ -370,14 +370,6 @@ Globs, adapter groups, `version_align` and the dead-scope checks for gremlins, t
 - Unmatched `[deps].workspace_dep_ignore` and `dependency_rule.except` entries are still silent.
 - The dead-scope checks are scan-time, so a skipped phase, the prose-only shortcut or an unselected `--textlint` rule still bypasses them; moving them to config load needs the tracked-file list at parse time.
 
-## VAL-041 - Stale claims in convention-engine and deps code/docs
-
-Reported by: convention-engines.
-
-Residue after the convention-engine and deps docs were corrected:
-- `deps` CLI help in `src/cli/schema.rs` still says "v1 ships `duplicate_version`".
-- `src/config_parts/schema.rs` and `src/check_cmd/phase.rs` still call `[header]` a "required file header", while the scan accepts the text anywhere in a selected file.
-
 ## VAL-042 - Convention-engine policy invented per site
 
 Reported by: convention-engines.

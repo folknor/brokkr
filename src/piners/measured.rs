@@ -28,8 +28,8 @@ use crate::output;
 use crate::piners::cmd::CorpusArgs;
 use crate::piners::integrity::{self, HarnessEnd};
 use crate::piners::manifest::Manifest;
-use crate::piners::registry::{self, Registry};
-use crate::piners::select::{self, SelectArgs};
+use crate::piners::prepare::{self, PreparedSelection};
+use crate::piners::select::SelectArgs;
 use crate::project::{self, Project};
 
 /// Run a measured corpus selection (`--hotpath`/`--alloc`). Routed here from
@@ -55,14 +55,11 @@ pub(crate) fn run(req: &MeasureRequest, args: &CorpusArgs) -> Result<(), DevErro
     };
 
     let cfg = req.dev_config.piners.clone().unwrap_or_default();
-    let harness_cfg = cfg.harness.as_ref().ok_or_else(|| {
-        DevError::Config(
-            "corpus: no [piners.harness] section in brokkr.toml. \
-             Declare `[piners.harness]` with `package = \"<crate>\"` \
-             (and optional `binary`, `features`, `debug`)."
-                .to_owned(),
-        )
-    })?;
+    crate::piners::layout::ensure_distinct_registry_dirs(req.project_root, &cfg)?;
+    let harness_cfg = cfg
+        .harness
+        .as_ref()
+        .ok_or_else(crate::piners::cmd::missing_harness_config_error)?;
 
     let lock_command = if alloc {
         "corpus --alloc"
@@ -80,43 +77,21 @@ pub(crate) fn run(req: &MeasureRequest, args: &CorpusArgs) -> Result<(), DevErro
         project_root: &project_root_str,
     })?;
 
-    // Selection + hard verification, shared with the parity path. No gate,
-    // bless or reseed apply to a measured run (those are dispatch-rejected as
-    // conflicting flags).
-    let registry_dir = req.project_root.join(cfg.registry_dir());
-    let corpus_root = req.project_root.join(cfg.corpus_root());
-    let reg = Registry::load(&registry_dir, &corpus_root, &lock)?;
-    reg.lint()?;
+    // Selection and hash verification use the same preparation path as a
+    // parity run. The measured lifecycle still owns its benchmark context.
     let sel = SelectArgs {
         keywords: args.keywords.clone(),
         probe: args.probe.clone(),
         all: args.all,
         verify_only: false,
     };
-    let ids = select::resolve(&reg, &sel)?;
-
-    output::corpus_msg(&format!(
-        "verifying {} against {}",
-        output::count(ids.len(), "probe"),
-        corpus_root.display()
-    ));
-    let mut verified = Vec::with_capacity(ids.len());
-    for id in &ids {
-        let (pin, config) = reg.pins.get(id).zip(reg.config(id)).ok_or_else(|| {
-            DevError::Config(format!(
-                "piners: internal: selected id '{id}' absent from pins"
-            ))
-        })?;
-        verified.push(registry::verify_probe(
-            id,
-            pin,
-            config,
-            &corpus_root,
-            req.project_root,
-        )?);
-    }
-    crate::piners::cmd::verify_selected_feeds(&ids, &reg, &corpus_root, req.project_root)?;
-    registry::verify_harness_files(&reg, &corpus_root, req.project_root)?;
+    let PreparedSelection {
+        registry: reg,
+        corpus_root,
+        ids,
+        verified,
+        ..
+    } = prepare::prepare(req.project_root, &cfg, &lock, &sel)?;
 
     // Measured runs default to release (meaningful timing); `--debug` profiles
     // the dev build instead. Parity runs default debug - see `cmd.rs`.
@@ -263,14 +238,13 @@ fn check_iteration(
 /// `input_file` column and a `selector` metadata key. Mirrors the intent
 /// rendering used by the corpus run-store views (`all` / `kw=...` / `probe=...`).
 fn selector_label(args: &CorpusArgs) -> String {
-    if args.all {
-        "all".to_owned()
-    } else if !args.probe.is_empty() {
-        format!("probe={}", args.probe.join(","))
-    } else if !args.keywords.is_empty() {
-        format!("kw={}", args.keywords.join(","))
-    } else {
+    let raw =
+        crate::piners::selector::json(args.all, &args.keywords, &args.probe, false, &[], None);
+    let label = crate::piners::selector::compact(&raw);
+    if label == raw {
         "selection".to_owned()
+    } else {
+        label
     }
 }
 

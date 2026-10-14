@@ -37,6 +37,39 @@ use serde_json::Value;
 use crate::piners::integrity::HarnessEnd;
 use crate::piners::report::{ContractLine, HarnessReport};
 
+/// The harness process codes brokkr assigns contract meaning to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HarnessExitCode {
+    Success,
+    Breaks,
+    RunError,
+}
+
+impl HarnessExitCode {
+    fn from_process(code: i32) -> Option<Self> {
+        match code {
+            0 => Some(Self::Success),
+            1 => Some(Self::Breaks),
+            2 => Some(Self::RunError),
+            _ => None,
+        }
+    }
+
+    fn from_run_end(value: i64) -> Option<Self> {
+        let code = i32::try_from(value).ok()?;
+        let parsed = Self::from_process(code)?;
+        (parsed != Self::RunError).then_some(parsed)
+    }
+
+    const fn code(self) -> i32 {
+        match self {
+            Self::Success => 0,
+            Self::Breaks => 1,
+            Self::RunError => 2,
+        }
+    }
+}
+
 /// The contract version brokkr speaks.
 pub const CONTRACT_VERSION: u64 = 1;
 
@@ -142,7 +175,7 @@ pub struct ContractAssessment {
     /// The (first, valid) `run_error`.
     pub run_error: Option<RunErrorRecord>,
     /// The (first, valid) `run_end` exit.
-    pub run_end: Option<i64>,
+    pub run_end: Option<HarnessExitCode>,
     /// The last valid `setup_stage`.
     pub last_stage: Option<StageInfo>,
     pub setup_complete: bool,
@@ -321,7 +354,7 @@ pub fn assess_contract(
                     .value
                     .get("exit")
                     .and_then(Value::as_i64)
-                    .filter(|e| *e == 0 || *e == 1);
+                    .and_then(HarnessExitCode::from_run_end);
                 match exit {
                     None => b.add(
                         "run_end exit not integer 0 or 1",
@@ -336,8 +369,8 @@ pub fn assess_contract(
                     Some(_) if run_end_line.is_some() => {
                         b.add("second run_end", format!("line {}", c.line));
                     }
-                    Some(e) => {
-                        a.run_end = Some(e);
+                    Some(exit) => {
+                        a.run_end = Some(exit);
                         run_end_line = Some(c.line);
                     }
                 }
@@ -382,15 +415,18 @@ pub fn assess_contract(
 
     // Terminal records against the process exit.
     let brokkr_killed = matches!(end, HarnessEnd::Backstop | HarnessEnd::Interrupted);
-    if let Some(e) = a.run_end
-        && end != HarnessEnd::Code(i32::try_from(e).unwrap_or(-1))
+    if let Some(exit) = a.run_end
+        && end != HarnessEnd::Code(exit.code())
     {
         b.add(
             "run_end disagrees with the process exit",
-            format!("run_end {e}, process {}", end.short()),
+            format!("run_end {}, process {}", exit.code(), end.short()),
         );
     }
-    if a.run_error.is_some() && end != HarnessEnd::Code(2) && !brokkr_killed {
+    if a.run_error.is_some()
+        && end != HarnessEnd::Code(HarnessExitCode::RunError.code())
+        && !brokkr_killed
+    {
         b.add(
             "run_error without process exit 2",
             format!("process {}", end.short()),
@@ -503,7 +539,7 @@ mod tests {
         let a = assess(&clean(&["a", "b"], 0), &["a", "b"], HarnessEnd::Code(0));
         assert!(a.observed);
         assert!(a.violations.is_empty(), "{:?}", a.violations);
-        assert_eq!(a.run_end, Some(0));
+        assert_eq!(a.run_end, Some(HarnessExitCode::Success));
         assert!(a.outstanding.is_empty());
     }
 

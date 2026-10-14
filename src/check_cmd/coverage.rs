@@ -158,7 +158,10 @@ fn declared_narrowing(sweeps: &[ResolvedSweep], curated_pairs: usize) -> Vec<Str
 /// reported like `test_exclude_packages`: visible on every run rather than
 /// silently absent.
 fn doc_only_exclusion(sweeps: &[ResolvedSweep]) -> Option<String> {
-    let doc_only = sweeps.iter().filter(|s| s.doc_only).count();
+    let doc_only = sweeps
+        .iter()
+        .filter(|s| matches!(s.lane_exec(), crate::profile::LaneExec::DocOnly { .. }))
+        .count();
     (doc_only > 0).then(|| {
         format!(
             "{} (doctests are not enumerable)",
@@ -362,44 +365,36 @@ pub(crate) fn report_policy(
 /// family this check exists for.
 ///
 /// The post-skip set is computed here rather than read from a second listing.
-/// libtest's `--skip` and positional filters are plain substring matches (no
-/// `--exact` is ever in a lane's argv - `libtest_args` is built from
-/// include-ignored, skips and thread count alone), so the local computation is
-/// exact, and a listing per binary per filter is not.
-fn filter_liveness<'a>(
-    sweep: &'a ResolvedSweep,
+/// libtest's skip and positional filters are plain substring matches (no
+/// `--exact` is part of the typed profile filters), so the local computation
+/// is exact, and a listing per binary per filter is not.
+fn filter_liveness(
+    sweep: &ResolvedSweep,
     candidates: &[(String, String)],
     ignored: &BTreeSet<(String, String)>,
-) -> Vec<(&'a DeclaredFilter, bool)> {
-    let include_ignored = sweep.libtest_args.iter().any(|a| a == "--include-ignored");
-    let name_skips: Vec<&DeclaredFilter> = sweep
-        .declared_filters
-        .iter()
-        .filter(|f| f.kind == FilterKind::Skip)
-        .collect();
+) -> Vec<(DeclaredFilter, bool)> {
+    let filters = sweep.lane_filters();
+    let name_skips: Vec<&DeclaredFilter> = filters.skips().collect();
 
     let evaluated: Vec<&(String, String)> = candidates
         .iter()
         .filter(|(pkg, test)| {
-            if !include_ignored && ignored.contains(&((*pkg).clone(), (*test).clone())) {
-                return false;
-            }
-            if sweep.qualified_skips.iter().any(|q| q.matches(pkg, test)) {
+            if !filters.include_ignored && ignored.contains(&((*pkg).clone(), (*test).clone())) {
                 return false;
             }
             !name_skips.iter().any(|f| f.matches(pkg, test))
         })
         .collect();
 
-    sweep
-        .declared_filters
+    filters
+        .filters
         .iter()
         .map(|f| {
             let live = match f.kind {
                 FilterKind::Skip => candidates.iter().any(|(pkg, test)| f.matches(pkg, test)),
                 FilterKind::Only => evaluated.iter().any(|(pkg, test)| f.matches(pkg, test)),
             };
-            (f, live)
+            (f.clone(), live)
         })
         .collect()
 }
@@ -438,8 +433,7 @@ struct FilterLedger {
 }
 
 struct FilterTally {
-    origin: String,
-    label: String,
+    filter: DeclaredFilter,
     /// Matched something in at least one sweep it applies to.
     live: bool,
     /// Some sweep it applies to was never listed.
@@ -451,17 +445,15 @@ struct FilterTally {
 
 impl FilterLedger {
     fn tally(&mut self, filter: &DeclaredFilter, sweep: &str) -> &mut FilterTally {
-        let label = filter.label();
         let pos = match self
             .tallies
             .iter()
-            .position(|t| t.origin == filter.origin && t.label == label)
+            .position(|t| t.filter == *filter)
         {
             Some(p) => p,
             None => {
                 self.tallies.push(FilterTally {
-                    origin: filter.origin.clone(),
-                    label,
+                    filter: filter.clone(),
                     live: false,
                     unknown: false,
                     sweeps: Vec::new(),
@@ -492,8 +484,8 @@ impl FilterLedger {
             .filter(|t| !t.live && !t.unknown)
             .map(|t| DeadFilter {
                 sweeps: t.sweeps.join(", "),
-                origin: t.origin,
-                label: t.label,
+                origin: t.filter.origin.display(),
+                label: t.filter.label(),
             })
             .collect()
     }
@@ -631,10 +623,12 @@ mod coverage_tests {
 
     use super::{
         classify, filter_liveness, shape_enumeration_args, BinaryUnit, CoverageStats, DeclaredFilter,
-        FeatureOracle, FilterKind, FilterLedger, PhaseSelection, QuarantineEntry, ResolutionRun, ResolvedSweep,
+        FeatureOracle, FilterKind, FilterLedger, PhaseSelection, QuarantineEntry,
+        ResolutionRun, ResolvedSweep,
         SelectionPhase, ShapeCoverage,
     };
     use crate::config::QualifiedSkip;
+    use crate::profile::FilterOrigin;
     use std::collections::BTreeSet;
 
     #[test]
@@ -707,7 +701,7 @@ mod coverage_tests {
             kind,
             pattern: pattern.into(),
             package: None,
-            origin: "[test.profiles.tier1]".into(),
+            origin: FilterOrigin::Profile("tier1".into()),
         }
     }
 
@@ -726,7 +720,7 @@ mod coverage_tests {
         let mut ledger = FilterLedger::default();
         for (sweep, cands) in lanes {
             for (f, live) in filter_liveness(sweep, cands, &ignored) {
-                ledger.record(f, live, &sweep.label);
+                ledger.record(&f, live, &sweep.label);
             }
         }
         ledger.dead().into_iter().map(|d| d.label).collect()
@@ -739,7 +733,7 @@ mod coverage_tests {
     ) -> Vec<String> {
         let mut ledger = FilterLedger::default();
         for (f, live) in filter_liveness(sweep, cands, ignored) {
-            ledger.record(f, live, &sweep.label);
+            ledger.record(&f, live, &sweep.label);
         }
         ledger.dead().into_iter().map(|d| d.label).collect()
     }
@@ -754,7 +748,7 @@ mod coverage_tests {
             kind: FilterKind::Skip,
             pattern: "server_only".into(),
             package: None,
-            origin: "[test.profiles.gate]".into(),
+            origin: FilterOrigin::Profile("gate".into()),
         };
         let workspace = ResolvedSweep {
             label: "workspace".into(),
@@ -795,7 +789,7 @@ mod coverage_tests {
         let cands = candidates(&[("core", "plain")]);
         let mut ledger = FilterLedger::default();
         for (f, live) in filter_liveness(&listed, &cands, &BTreeSet::new()) {
-            ledger.record(f, live, &listed.label);
+            ledger.record(&f, live, &listed.label);
         }
         ledger.record_unknown(&skip, "unprepared");
         assert!(ledger.dead().is_empty());
@@ -812,7 +806,7 @@ mod coverage_tests {
                 kind: FilterKind::Skip,
                 pattern: "shared_name".into(),
                 package: None,
-                origin: "[[check]] 'workspace'".into(),
+                origin: FilterOrigin::Entry("workspace".into()),
             }],
             ..ResolvedSweep::default()
         };
@@ -822,7 +816,7 @@ mod coverage_tests {
                 kind: FilterKind::Skip,
                 pattern: "shared_name".into(),
                 package: None,
-                origin: "[[check]] 'instrumented'".into(),
+                origin: FilterOrigin::Entry("instrumented".into()),
             }],
             ..ResolvedSweep::default()
         };

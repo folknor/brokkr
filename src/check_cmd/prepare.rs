@@ -88,16 +88,12 @@ pub(crate) fn lane_env(inputs: &LaneInputs<'_>, sweep: &ResolvedSweep) -> LaneEn
 
 /// How a sweep's tests execute.
 pub(crate) fn lane_kind(sweep: &ResolvedSweep) -> LaneKind {
-    if sweep.harness == crate::config::Harness::Nextest {
-        LaneKind::Nextest
-    } else if sweep.doc_only {
-        LaneKind::DocOnly
-    } else if sweep.parallel_budget.is_some() {
-        LaneKind::Parallel
-    } else if sweep.process_isolation {
-        LaneKind::Isolated
-    } else {
-        LaneKind::Serial
+    match sweep.lane_exec() {
+        crate::profile::LaneExec::Serial { .. } => LaneKind::Serial,
+        crate::profile::LaneExec::Parallel { .. } => LaneKind::Parallel,
+        crate::profile::LaneExec::Isolated => LaneKind::Isolated,
+        crate::profile::LaneExec::Nextest { .. } => LaneKind::Nextest,
+        crate::profile::LaneExec::DocOnly { .. } => LaneKind::DocOnly,
     }
 }
 
@@ -148,7 +144,7 @@ pub(crate) struct PreparedResolution {
 pub(crate) struct PreparedLane {
     pub(crate) env: LaneEnv,
     /// Whether the lane executes the ignored tests it selects, resolved from
-    /// the lane's complete launch argv ([`args_run_ignored`]).
+    /// the lane's complete launch argv (`LaneFilters::runs_ignored_with`).
     pub(crate) include_ignored: bool,
     /// Names a package-qualified skip removed, for the lane's report.
     pub(crate) pkg_skipped: usize,
@@ -303,8 +299,9 @@ fn resolution_selection(sweep: &ResolvedSweep, run: &ResolutionRun) -> Vec<Strin
 /// The libtest argv that selects what a lane runs: its positional filters,
 /// its `skip`/`include_ignored` args, and any forwarded ones.
 fn lane_filter_args(sweep: &ResolvedSweep, libtest_extra: &[String]) -> Vec<String> {
-    let mut args: Vec<String> = sweep.name_filters.clone();
-    args.extend(sweep.libtest_args.iter().cloned());
+    let filters = sweep.lane_filters();
+    let mut args = filters.name_filters();
+    args.extend(filters.libtest_args());
     args.extend(libtest_extra.iter().cloned());
     args
 }
@@ -312,28 +309,15 @@ fn lane_filter_args(sweep: &ResolvedSweep, libtest_extra: &[String]) -> Vec<Stri
 /// Whether a libtest argv executes `#[ignore]`d tests: `--include-ignored`
 /// runs every test, `--ignored` runs only the ignored ones. The value of
 /// `--skip` is never read as a flag.
-fn args_run_ignored<'a>(args: impl IntoIterator<Item = &'a str>) -> bool {
-    let mut it = args.into_iter();
-    while let Some(a) = it.next() {
-        match a {
-            "--skip" => {
-                it.next();
-            }
-            "--include-ignored" | "--ignored" => return true,
-            _ => {}
-        }
-    }
-    false
-}
-
 /// Whether a lane executes the ignored tests it selects, from its complete
 /// launch argv: the sweep's positional filters and libtest args and whatever
 /// was forwarded after `--` ([`lane_filter_args`]). Resolved from all of it,
 /// because a forwarded `--ignored` changes which tests the lane executes
 /// exactly as a profile's `include_ignored` does.
 fn lane_runs_ignored(sweep: &ResolvedSweep, libtest_extra: &[String]) -> bool {
-    let args = lane_filter_args(sweep, libtest_extra);
-    args_run_ignored(args.iter().map(String::as_str))
+    sweep
+        .lane_filters()
+        .runs_ignored_with(libtest_extra.iter().map(String::as_str))
 }
 
 /// The argv of a lane's ignored-only listing: its filter args with
@@ -375,8 +359,13 @@ fn list_binary(
         return Ok(None);
     };
     let mut selected = Vec::new();
+    let filters = sweep.lane_filters();
     for t in listed.tests {
-        if sweep.qualified_skips.iter().any(|q| q.matches(&binary.package, &t)) {
+        if filters
+            .skips()
+            .filter(|skip| skip.package.is_some())
+            .any(|skip| skip.matches(&binary.package, &t))
+        {
             *pkg_skipped += 1;
             continue;
         }
@@ -617,7 +606,10 @@ fn serial_unattributable(
     env: &LaneEnv,
     extra_args: &[String],
 ) -> Option<Unattributable> {
-    if !sweep.doc_only && matches!(sweep.test_threads, Some(n) if n != 1) {
+    if matches!(
+        sweep.lane_exec(),
+        crate::profile::LaneExec::Serial { threads } if threads.is_cargo_mediated()
+    ) {
         return Some(Unattributable {
             short: "cargo-mediated parallelism (`test_threads` other than 1) shares one output \
                     stream across tests and harnesses, so no test can be attributed to a binary"
@@ -813,7 +805,7 @@ fn prepare_serial(
     prepared.doc_obligation = doc_obligation;
     prepared.include_ignored = lane_runs_ignored(sweep, libtest_extra);
     prepared.libtest_extra = libtest_extra.to_vec();
-    prepared.target_filters = sweep.cargo_test_filters.clone();
+    prepared.target_filters = sweep.lane_filters().cargo_args();
     for (resolution, selection, binaries) in built {
         prepared.enumerated += binaries.len();
         let mut out = Vec::new();
@@ -939,7 +931,7 @@ fn prepare_direct(
     // matching cargo's semantics for repeated selection flags. Under package
     // mode the sweep's filters cannot ride the per-package prebuild (cargo
     // refuses a target a package lacks), so this is where they narrow.
-    prepared.target_filters = sweep.cargo_test_filters.clone();
+    prepared.target_filters = sweep.lane_filters().cargo_args();
     prepared.target_filters.extend(extra_selectors.iter().cloned());
     prepared.cargo_extra = cargo_extra;
     prepared.libtest_extra = libtest_extra.to_vec();
@@ -1219,6 +1211,13 @@ fn universe_from_binaries(
 /// without cargo. Both are only ever asked about a lane the test selection
 /// attempts: a lane it excludes builds nothing, support binaries included.
 pub(crate) trait Preparer {
+    /// The ignored-test policy of the complete launch argv. A real preparer
+    /// folds forwarded libtest args in; test seams default to the resolved
+    /// profile policy.
+    fn include_ignored(&self, sweep: &ResolvedSweep) -> bool {
+        sweep.lane_filters().include_ignored
+    }
+
     /// Build the lane's declared support binaries (`build_packages`), each
     /// under its own explicit single-package selection - never the lane's
     /// test selection. Runs before the lane's listings: a binary whose static
@@ -1412,6 +1411,13 @@ impl<'a> CargoPreparer<'a> {
 }
 
 impl Preparer for CargoPreparer<'_> {
+    fn include_ignored(&self, sweep: &ResolvedSweep) -> bool {
+        let (_, libtest_extra) = split_extra_args(self.extra_args);
+        sweep
+            .lane_filters()
+            .runs_ignored_with(libtest_extra.iter().map(String::as_str))
+    }
+
     /// Hand over the lane's build - the build step's, or a fresh one when it
     /// has none or a later build in its target dir replaced its files in
     /// place - and its support executables. Every fact of what `lane` then
@@ -1543,7 +1549,7 @@ pub(crate) fn prepare_profile(
         let kind = lane_kind(sweep);
         let shape = shape_id(sweep);
         let mut record = LaneRecord {
-            include_ignored: args_run_ignored(sweep.libtest_args.iter().map(String::as_str)),
+            include_ignored: sweep.lane_filters().include_ignored,
             doc_carrier: lane_runs_doctests(sweep, doctests),
             // A doc-only lane always; a serial carrier once its binaries are
             // known to hold a library (below).
@@ -1556,10 +1562,11 @@ pub(crate) fn prepare_profile(
             }
             stopped = true;
             if certifying {
-                for f in &sweep.declared_filters {
+                for f in &sweep.lane_filters().filters {
                     ledger.record_unknown(f, &sweep.label);
                 }
             }
+            record.include_ignored = preparer.include_ignored(sweep);
             record.unavailable = Some("preparation was stopped before this lane".into());
             plan.lanes.push(record);
             lanes.push(None);
@@ -1619,10 +1626,11 @@ pub(crate) fn prepare_profile(
                     plan.incomplete.push(format!("sweep '{}': {e}", sweep.label));
                 }
                 if certifying {
-                    for f in &sweep.declared_filters {
+                    for f in &sweep.lane_filters().filters {
                         ledger.record_unknown(f, &sweep.label);
                     }
                 }
+                record.include_ignored = preparer.include_ignored(sweep);
                 let why = if held.is_empty() { e.to_string() } else { held.join(" - ") };
                 record.unavailable = Some(format!("preparation failed: {why}"));
                 if !held.is_empty() {
@@ -1650,7 +1658,7 @@ pub(crate) fn prepare_profile(
             // no inventory, and the filters it declares cannot be judged.
             record.unavailable = Some(reason.clone());
             if certifying {
-                for f in &sweep.declared_filters {
+                for f in &sweep.lane_filters().filters {
                     ledger.record_unknown(f, &sweep.label);
                 }
             }
@@ -1729,10 +1737,10 @@ pub(crate) fn prepare_profile(
                 }
             }
             for (filter, live) in filter_liveness(sweep, &candidates, &ignored) {
-                ledger.record(filter, live, &sweep.label);
+                ledger.record(&filter, live, &sweep.label);
             }
         } else if certifying && kind != LaneKind::DocOnly {
-            for f in &sweep.declared_filters {
+            for f in &sweep.lane_filters().filters {
                 ledger.record_unknown(f, &sweep.label);
             }
         }
@@ -2046,7 +2054,7 @@ mod prepare_tests {
         let lifting = ResolvedSweep { libtest_args: forwarded(&["--include-ignored"]), ..ResolvedSweep::default() };
         assert!(lane_runs_ignored(&lifting, &[]));
         // `--skip`'s value is never read as a flag.
-        assert!(!args_run_ignored(["--skip", "--ignored", "x"]));
+        assert!(!plain.lane_filters().runs_ignored_with(["--skip", "--ignored", "x"]));
 
         let mut p = PreparedLane::bare(LaneEnv::default());
         p.include_ignored = lane_runs_ignored(&plain, &forwarded(&["--ignored"]));

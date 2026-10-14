@@ -35,6 +35,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::error::DevError;
+use crate::ratatoskr::timing::parse_duration;
 
 /// Where service-harness scripts live, relative to the project root.
 pub const SCRIPT_DIR: &str = "crates/app/tests/service-harness";
@@ -42,7 +43,7 @@ pub const SCRIPT_DIR: &str = "crates/app/tests/service-harness";
 /// Default per-script wall-clock ceiling when no `ceiling` frontmatter
 /// is present. Generous enough that a healthy script finishes well
 /// inside it, tight enough to catch a runaway before it eats a soak.
-pub const DEFAULT_CEILING: Duration = Duration::from_secs(60);
+pub use crate::ratatoskr::timing::DEFAULT_CEILING;
 
 /// Whether the script is expected to pass or to remain ignored (e.g. a
 /// reproducer for an open Service bug). The `service` runner can
@@ -315,37 +316,6 @@ fn parse_frontmatter(body: &str) -> Result<ParsedFrontmatter, String> {
 
 fn invalid_frontmatter_value(line: usize, key: &str, value: &str, expected: &str) -> String {
     format!("frontmatter line {line}: invalid `{key}` value {value:?}; expected {expected}")
-}
-
-/// Parse a duration spelled in the brokkr/architecture style: a positive
-/// integer optionally followed by a unit suffix (`s`, `m`, `h`, `ms`).
-/// Bare numbers are seconds. Returns `None` on any parse failure.
-fn parse_duration(value: &str) -> Option<Duration> {
-    let value = value.trim();
-    if value.is_empty() {
-        return None;
-    }
-    let (num_part, unit) = split_unit(value);
-    let n: u64 = num_part.parse().ok()?;
-    if n == 0 {
-        return None;
-    }
-    match unit {
-        "" | "s" => Some(Duration::from_secs(n)),
-        "ms" => Some(Duration::from_millis(n)),
-        "m" => Some(Duration::from_secs(n.checked_mul(60)?)),
-        "h" => Some(Duration::from_secs(n.checked_mul(3600)?)),
-        _ => None,
-    }
-}
-
-fn split_unit(value: &str) -> (&str, &str) {
-    let split = value
-        .char_indices()
-        .find(|(_, c)| !c.is_ascii_digit())
-        .map(|(i, _)| i)
-        .unwrap_or(value.len());
-    (&value[..split], &value[split..])
 }
 
 #[cfg(test)]

@@ -18,7 +18,6 @@
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use flate2::Compression;
 use flate2::write::GzEncoder;
@@ -570,26 +569,15 @@ pub(crate) fn split_tags_tile(chunks: &[&[u32]]) -> Vec<u8> {
 // PMTiles archive fixtures
 // ---------------------------------------------------------------------------
 
-static TEST_DIR_ID: AtomicU64 = AtomicU64::new(0);
-
-/// A scratch directory under `target/`, removed on drop. The atomic suffix keeps
-/// concurrently running tests from sharing one.
-///
-/// Anchored at `CARGO_MANIFEST_DIR` rather than the cwd: a test that changes
-/// directory, or a runner that starts somewhere other than the crate root,
-/// would otherwise scatter scratch trees outside the repo.
+/// A per-test scratch directory, removed on drop. The shared allocator enforces
+/// unique names across the corpus fixtures and clears stale paths before use.
 pub(crate) struct TestDir {
     pub(crate) path: PathBuf,
 }
 
 impl TestDir {
     pub(crate) fn new(name: &str) -> Self {
-        let id = TEST_DIR_ID.fetch_add(1, Ordering::Relaxed);
-        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("target")
-            .join("regress-tests")
-            .join(format!("{name}-{id}"));
-        fs::create_dir_all(&path).expect("create test dir");
+        let path = crate::test_scratch::scratch("elivagar-corpus-fixture", name);
         Self { path }
     }
 }

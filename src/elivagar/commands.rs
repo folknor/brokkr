@@ -149,16 +149,6 @@ impl BuiltCommand<'_> {
         }
     }
 
-    /// Historical command label stored in the results database. Measurement
-    /// mode is recorded separately in the `variant` column.
-    pub fn result_command(&self) -> &'static str {
-        match self {
-            Self::MainBinary { .. } => "self",
-            Self::Example(ExampleCommand::PmtilesWriter { .. }) => "pmtiles",
-            Self::Example(ExampleCommand::NodeStore { .. }) => "node-store",
-        }
-    }
-
     /// Files this command may produce in the scratch directory.
     pub fn output_files(&self, scratch_dir: &Path) -> Vec<PathBuf> {
         match self {

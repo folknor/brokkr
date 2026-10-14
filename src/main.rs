@@ -6,6 +6,7 @@ mod cargo_env;
 mod cargo_filter;
 mod cargo_json;
 mod check_cmd;
+mod clean;
 mod cli;
 mod config;
 mod context;
@@ -31,6 +32,7 @@ mod hotpath_fmt;
 mod invalidate_cmd;
 mod lex;
 mod litehtml;
+mod lock_cmd;
 mod lock_service;
 mod lockfile;
 mod man;
@@ -82,6 +84,7 @@ use std::time::{Duration, Instant};
 
 use clap::Parser;
 
+pub(crate) use clean::{CORPUS_CALIBRAND_DIR, CleanOpts};
 use cli::{Cli, Command, VerifyCommand};
 use context::{acquire_cmd_lock, acquire_cmd_lock_opt, bootstrap, bootstrap_config, with_worktree};
 use error::DevError;

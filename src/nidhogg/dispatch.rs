@@ -137,7 +137,7 @@ fn run_nidhogg_ingest_bench(
     let args: Vec<&str> = vec!["ingest", pbf_str, &output_str];
 
     let config = BenchConfig {
-        command: command.result_command().into(),
+        command: command.id().into(),
         mode: None,
         input_file: Some(basename),
         input_mb: Some(file_mb),
@@ -222,7 +222,7 @@ fn run_nidhogg_hotpath(
     let args: Vec<&str> = vec!["ingest", pbf_str, &output_str];
 
     let config = BenchConfig {
-        command: command.result_command().into(),
+        command: command.id().into(),
         mode: None,
         input_file: Some(basename),
         input_mb: Some(file_mb),

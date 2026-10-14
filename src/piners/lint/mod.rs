@@ -48,7 +48,8 @@ impl PinnableDisposition {
 /// The two gated diagnostic severities. piners also emits `hint`, but
 /// pine-lint has no counterpart, so hints are dropped before the diff
 /// (informational only - never a `piners_only` divergence).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Severity {
     Error,
     Warning,

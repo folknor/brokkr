@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use crate::build::CargoProfile;
 use crate::config::DriveConfig;
 use crate::db::{
-    self, Distribution, DistributionUs, HotpathData, KvPair, KvValue, ResultsDb, RunRow,
+    self, Distribution, DistributionUs, HotpathData, KvClass, KvPair, KvValue, ResultsDb, RunRow,
 };
 use crate::env::EnvInfo;
 use crate::error::DevError;
@@ -29,6 +29,9 @@ pub struct BenchConfig {
     pub mode: Option<String>,
     pub input_file: Option<String>,
     pub input_mb: Option<f64>,
+    /// Optional per-row feature label. When present, it takes precedence over
+    /// the harness-wide build feature label; the DB writer stores a sorted,
+    /// duplicate-free spelling so equivalent feature sets compare alike.
     pub cargo_features: Option<String>,
     pub cargo_profile: CargoProfile,
     pub runs: usize,
@@ -232,15 +235,16 @@ impl BenchHarness {
     ///
     /// When set, this value is used as the default `cargo_features` for all
     /// results recorded by this harness. Individual `BenchConfig.cargo_features`
-    /// values override the harness default when set.
+    /// values override the harness default when set. The DB writer canonicalizes
+    /// whichever label wins before persisting it.
     pub fn with_cargo_features(mut self, features: Option<String>) -> Self {
         self.cargo_features = features;
         self
     }
 
     /// Set the literal `brokkr <...>` invocation string for this harness.
-    /// All rows recorded by this harness will carry it in the `brokkr_args`
-    /// column unless the individual `BenchConfig` overrides it explicitly.
+    /// This value takes precedence over `BenchConfig.brokkr_args`; the config
+    /// value is a fallback for harnesses that do not carry an invocation.
     pub fn with_brokkr_args(mut self, args: String) -> Self {
         self.brokkr_args = Some(args);
         self
@@ -1111,19 +1115,25 @@ fn previous_run_kv(db: &ResultsDb, measure_start_epoch: i64) -> Vec<KvPair> {
     // Clamped at 0 - a backwards system clock shouldn't record a negative gap.
     let gap_seconds = (start - prev.timestamp_epoch).max(0);
     let mut kv = vec![
-        KvPair::text("prev.command", prev.command),
-        KvPair::int("prev.gap_seconds", gap_seconds),
+        KvPair::text(KvClass::Predecessor.qualify("command"), prev.command),
+        KvPair::int(
+            KvClass::Predecessor.qualify("gap_seconds"),
+            gap_seconds,
+        ),
     ];
     if !prev.uuid.is_empty() {
         // Short form, matching what `brokkr results` prints and accepts as a
         // prefix - so the recorded value is directly pasteable.
         kv.push(KvPair::text(
-            "prev.uuid",
+            KvClass::Predecessor.qualify("uuid"),
             &prev.uuid[..8.min(prev.uuid.len())],
         ));
     }
     if let Some(input) = prev.input_file {
-        kv.push(KvPair::text("prev.input_file", input));
+        kv.push(KvPair::text(
+            KvClass::Predecessor.qualify("input_file"),
+            input,
+        ));
     }
     kv
 }

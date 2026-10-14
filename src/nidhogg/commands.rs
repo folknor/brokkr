@@ -71,17 +71,6 @@ impl NidhoggCommand {
         }
     }
 
-    /// The result command label for the DB - the bare subcommand id. The
-    /// measurement mode (`bench`/`hotpath`/`alloc`) is recorded in the
-    /// `variant` column.
-    pub fn result_command(&self) -> &'static str {
-        match self {
-            Self::Api { .. } => "api",
-            Self::Ingest => "ingest",
-            Self::Tiles { .. } => "tiles",
-        }
-    }
-
     /// Build metadata key-value pairs for the result DB.
     ///
     /// Post-v13 this is reserved for runtime observations. Axis-like
@@ -206,20 +195,6 @@ mod tests {
             }
             .package(),
             Some("nidhogg")
-        );
-    }
-
-    #[test]
-    fn result_command_labels() {
-        assert_eq!(NidhoggCommand::Api { query: None }.result_command(), "api");
-        assert_eq!(NidhoggCommand::Ingest.result_command(), "ingest");
-        assert_eq!(
-            NidhoggCommand::Tiles {
-                tiles_variant: None,
-                uring: false,
-            }
-            .result_command(),
-            "tiles"
         );
     }
 

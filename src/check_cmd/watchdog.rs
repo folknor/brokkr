@@ -372,10 +372,10 @@ mod watchdog_tests {
         let (locked_tx, locked_rx) = std::sync::mpsc::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
         let wedged = std::thread::spawn(move || {
-            let guard = JOURNAL.lock().expect("journal lock");
-            locked_tx.send(()).expect("signal");
-            release_rx.recv().ok();
-            drop(guard);
+            with_journal_locked(|| {
+                locked_tx.send(()).expect("signal");
+                release_rx.recv().ok();
+            });
         });
         locked_rx.recv().expect("the wedged thread holds the lock");
         let disarmed = std::sync::atomic::AtomicBool::new(true);

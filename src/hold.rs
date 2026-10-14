@@ -38,8 +38,6 @@
 //! `/proc/<pid>/environ` of any descendant, and this fence never claimed
 //! otherwise.
 
-use std::sync::Mutex;
-
 use crate::lockfile::{AuthHash, Nonce};
 
 /// The capability handed to descendants: the current hold's nonce.
@@ -78,47 +76,14 @@ pub const LEASE_MARKER_ENV: &str = "BROKKR_COMPILE_LEASE";
 // authorized for, which is the whole failure the per-acquisition nonce exists
 // to prevent.
 
-/// This process's capability for the hold it currently owns.
-///
-/// A `Mutex`, not `std::env::set_var`: setting a process-wide environment
-/// variable is unsound once any other thread is running, and brokkr has drain
-/// and watchdog threads. This is read at every spawn choke point instead, which
-/// costs nothing and cannot race.
-///
-/// Mutable rather than write-once, which was a real bug on the way here. A
-/// `OnceLock` keeps the *first* hold's nonce forever, so a process that takes
-/// two holds in sequence - acquire, release, acquire - would publish nonce two
-/// to the lock file while still stamping nonce one on its children, and the
-/// guard would refuse every single one of them. Nested acquires share a nonce by
-/// construction and never reach this, so only the sequential case was exposed;
-/// it fails totally when it happens, and no live descendant of the released hold
-/// has any claim on the new one.
-static CAPABILITY: Mutex<Option<Nonce>> = Mutex::new(None);
-
-/// Take the capability lock, treating poison as recoverable. The critical
-/// section is a single clone; failing closed here would mean refusing to stamp,
-/// which turns into the guard refusing brokkr's own compiles.
-fn slot() -> std::sync::MutexGuard<'static, Option<Nonce>> {
-    CAPABILITY
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
-/// Publish the capability for a newly acquired hold, replacing any previous
-/// one.
-pub fn publish_capability(nonce: &Nonce) {
-    *slot() = Some(nonce.clone());
-}
-
-/// Forget the capability when a hold is released, so a child spawned outside any
-/// hold does not carry a mark for a hold that is over.
-pub fn clear_capability() {
-    *slot() = None;
-}
-
 /// The capability to stamp onto a child, if this process holds one.
+///
+/// The nonce lives on the active `LockInner`; looking it up there ties the
+/// capability to the hold whose lock-file record publishes its hash. Cloning
+/// the nonce here lets a spawn finish constructing its environment without
+/// extending the lock's lifetime.
 pub fn capability() -> Option<Nonce> {
-    slot().clone()
+    crate::lockfile::current_capability()
 }
 
 /// The published hash of the capability this process INHERITED - the nonce
@@ -281,43 +246,10 @@ mod tests {
 
     #[test]
     fn stamp_is_a_no_op_without_a_capability() {
-        // The capability is process-global and this test must not depend on
-        // whether another test published one, so assert only the invariant
-        // that holds either way: stamping never panics and never sets an
-        // empty value.
         let mut cmd = std::process::Command::new("/bin/true");
         stamp(&mut cmd);
         if let Some(c) = capability() {
             assert!(!c.expose().is_empty());
         }
-    }
-
-    /// The bug this replaced a `OnceLock` to fix: a second sequential hold must
-    /// stamp its own nonce, or every child of it is refused by the guard.
-    ///
-    /// Serialized with every other test that touches process-global state
-    /// through the crate's one shared lock, and restoring the previous value,
-    /// because the slot is process-global and `cargo test` shares a process
-    /// across tests.
-    #[test]
-    fn a_second_hold_replaces_the_first_holds_capability() {
-        let _seq = crate::test_scratch::process_global_lock();
-        let before = capability();
-        let first = Nonce::parse("0123456789abcdef0123456789abcdef").unwrap();
-        let second = Nonce::parse("fedcba9876543210fedcba9876543210").unwrap();
-        publish_capability(&first);
-        assert_eq!(
-            capability().as_ref().map(Nonce::expose),
-            Some(first.expose())
-        );
-        publish_capability(&second);
-        assert_eq!(
-            capability().as_ref().map(Nonce::expose),
-            Some(second.expose()),
-            "a sequential second hold must replace the first hold's nonce"
-        );
-        clear_capability();
-        assert_eq!(capability(), None, "release must forget the capability");
-        *slot() = before;
     }
 }

@@ -201,7 +201,12 @@ fn fill_harness_file(table: &mut Table, file: &HarnessFile) -> Result<(), DevErr
 
 /// Stamp a `[probes.<id>]` entry's fields in place.
 fn fill_probe(table: &mut Table, pin: &Pin) -> Result<(), DevError> {
-    sync_opt(table, "expected", pin.expected.as_deref().map(Value::from));
+    sync_opt(
+        table,
+        "expected",
+        pin.expected
+            .map(|disposition| Value::from(disposition.as_str())),
+    );
     set_value(table, "pine", pin_value(&pin.pine)?);
     sync_opt(
         table,
@@ -473,7 +478,7 @@ b = \"piners/b\"
         feeds.insert("eth-15m".to_owned(), group);
         let mut probes = BTreeMap::new();
         let mut p = pin("alpha-01", "aa");
-        p.expected = Some("accepted".to_owned());
+        p.expected = Some(registry::CorpusDisposition::Accepted);
         probes.insert("alpha-01".to_owned(), p);
 
         let text = render(None, &feeds, &BTreeMap::new(), &probes).unwrap();
@@ -495,7 +500,7 @@ b = \"piners/b\"
             other => panic!("expected role form, got {other:?}"),
         }
         let p = &data.probes["alpha-01"];
-        assert_eq!(p.expected.as_deref(), Some("accepted"));
+        assert_eq!(p.expected, Some(registry::CorpusDisposition::Accepted));
         assert_eq!(p.pine.xxh128, "aa");
     }
 
@@ -541,7 +546,7 @@ csv = { path = \"validation/zulu-09/tv_trades.csv\", xxh128 = \"zz\" }
         let feeds = commented_feeds();
         let mut probes = BTreeMap::new();
         let mut alpha = pin("alpha-01", "a-new");
-        alpha.expected = Some("byte_exact".to_owned()); // changed by a bless
+        alpha.expected = Some(registry::CorpusDisposition::ByteExact); // changed by a bless
         probes.insert("alpha-01".to_owned(), alpha);
         probes.insert("mid-05".to_owned(), pin("mid-05", "mm")); // newly discovered
         // zulu-09 vanished from the corpus.
@@ -575,8 +580,8 @@ csv = { path = \"validation/zulu-09/tv_trades.csv\", xxh128 = \"zz\" }
 
         let data = reparse(&text);
         assert_eq!(
-            data.probes["alpha-01"].expected.as_deref(),
-            Some("byte_exact")
+            data.probes["alpha-01"].expected,
+            Some(registry::CorpusDisposition::ByteExact)
         );
         assert_eq!(data.probes["mid-05"].expected, None);
         assert_eq!(data.feeds["eth-15m"].roles()[0].1.xxh128, "f-new");
@@ -602,10 +607,10 @@ csv = { path = \"validation/zulu-09/tv_trades.csv\", xxh128 = \"zz\" }
         let feeds = commented_feeds();
         let mut probes = BTreeMap::new();
         let mut alpha = pin("alpha-01", "a-old");
-        alpha.expected = Some("accepted".to_owned());
+        alpha.expected = Some(registry::CorpusDisposition::Accepted);
         probes.insert("alpha-01".to_owned(), alpha);
         let mut zulu = pin("zulu-09", "zz");
-        zulu.expected = Some("compile_fail".to_owned()); // first bless
+        zulu.expected = Some(registry::CorpusDisposition::CompileFail); // first bless
         probes.insert("zulu-09".to_owned(), zulu);
 
         let text = render(Some(COMMENTED), &feeds, &BTreeMap::new(), &probes).unwrap();

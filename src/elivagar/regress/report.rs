@@ -15,7 +15,7 @@ use std::sync::Arc;
 use serde_json::json;
 
 use super::super::eliv::tile_id_to_zxy;
-use super::compare::OutcomeClass;
+use super::compare::{OutcomeClass, OutcomeCounts};
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -58,26 +58,24 @@ pub struct TileRange {
 pub struct DiffTotals {
     pub only_in_current: u64,
     pub only_in_baseline: u64,
-    pub layers_added: u64,
-    pub layers_removed: u64,
-    pub extent_mismatch: u64,
-    pub missing_features: u64,
-    pub added_features: u64,
-    pub attr_changed: u64,
-    pub tolerance_moved: u64,
-    pub structural_moved: u64,
+    pub(crate) outcomes: OutcomeCounts,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LayerCounters {
-    pub layers_added: u64,
-    pub layers_removed: u64,
-    pub extent_mismatch: u64,
-    pub missing_features: u64,
-    pub added_features: u64,
-    pub attr_changed: u64,
-    pub tolerance_moved: u64,
-    pub structural_moved: u64,
+    pub(crate) outcomes: OutcomeCounts,
+}
+
+impl DiffTotals {
+    pub(crate) fn count(&self, class: OutcomeClass) -> u64 {
+        self.outcomes.get(class)
+    }
+}
+
+impl LayerCounters {
+    pub(crate) fn count(&self, class: OutcomeClass) -> u64 {
+        self.outcomes.get(class)
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -172,14 +170,14 @@ impl RegressReport {
     pub fn passed(&self, cfg: &RegressConfig) -> bool {
         self.totals.only_in_current == 0
             && self.totals.only_in_baseline == 0
-            && self.totals.layers_added == 0
-            && self.totals.layers_removed == 0
-            && self.totals.extent_mismatch == 0
-            && self.totals.missing_features == 0
-            && self.totals.added_features == 0
-            && self.totals.attr_changed == 0
-            && self.totals.structural_moved == 0
-            && self.totals.tolerance_moved <= cfg.max_moved
+            && OutcomeClass::ALL.iter().all(|class| {
+                let count = self.totals.count(*class);
+                if *class == OutcomeClass::ToleranceMoved {
+                    count <= cfg.max_moved
+                } else {
+                    count == 0
+                }
+            })
     }
 
     pub fn print_text(&self) {
@@ -189,9 +187,9 @@ impl RegressReport {
             self.diff_count,
             self.totals.only_in_current,
             self.totals.only_in_baseline,
-            self.totals.tolerance_moved,
-            self.totals.structural_moved,
-            self.totals.attr_changed
+            self.totals.count(OutcomeClass::ToleranceMoved),
+            self.totals.count(OutcomeClass::StructuralMoved),
+            self.totals.count(OutcomeClass::AttrChanged)
         );
         println!(
             "regress addressed_tiles={} directory_runs={} unique_blobs={} unique_blob_pairs={} raw_equal_pairs={} raw_equal_tiles={} canonical_equal_pairs={} canonical_equal_tiles={} detailed_pairs={} detailed_tiles={} raw_ms={} canonical_ms={} detail_ms={} peak_rss_kb={}",
@@ -215,17 +213,11 @@ impl RegressReport {
             if counters_are_zero(c) {
                 continue;
             }
-            println!(
-                "z{z} {layer} added_layers={} removed_layers={} extent={} missing={} added={} attrs={} tol={} structural={}",
-                c.layers_added,
-                c.layers_removed,
-                c.extent_mismatch,
-                c.missing_features,
-                c.added_features,
-                c.attr_changed,
-                c.tolerance_moved,
-                c.structural_moved
-            );
+            print!("z{z} {layer}");
+            for class in OutcomeClass::ALL {
+                print!(" {}={}", class.text_label(), c.count(class));
+            }
+            println!();
         }
 
         for ((z, layer), values) in &self.displacement {
@@ -255,18 +247,11 @@ impl RegressReport {
             .per_zoom_layer
             .iter()
             .map(|((z, layer), c)| {
-                json!({
-                    "z": z,
-                    "layer": layer.as_ref(),
-                    "layers_added": c.layers_added,
-                    "layers_removed": c.layers_removed,
-                    "extent_mismatch": c.extent_mismatch,
-                    "missing_features": c.missing_features,
-                    "added_features": c.added_features,
-                    "attr_changed": c.attr_changed,
-                    "tolerance_moved": c.tolerance_moved,
-                    "structural_moved": c.structural_moved,
-                })
+                let mut fields = serde_json::Map::new();
+                fields.insert("z".into(), json!(z));
+                fields.insert("layer".into(), json!(layer.as_ref()));
+                insert_outcome_counts(&mut fields, &c.outcomes);
+                serde_json::Value::Object(fields)
             })
             .collect();
         let displacement: Vec<_> = self
@@ -300,22 +285,19 @@ impl RegressReport {
             })
             .collect();
 
+        let mut totals = serde_json::Map::new();
+        totals.insert("only_in_current".into(), json!(self.totals.only_in_current));
+        totals.insert(
+            "only_in_baseline".into(),
+            json!(self.totals.only_in_baseline),
+        );
+        insert_outcome_counts(&mut totals, &self.totals.outcomes);
+
         json!({
             "passed": passed,
             "identical_tiles": self.identical_tiles,
             "diffs": self.diff_count,
-            "totals": {
-                "only_in_current": self.totals.only_in_current,
-                "only_in_baseline": self.totals.only_in_baseline,
-                "layers_added": self.totals.layers_added,
-                "layers_removed": self.totals.layers_removed,
-                "extent_mismatch": self.totals.extent_mismatch,
-                "missing_features": self.totals.missing_features,
-                "added_features": self.totals.added_features,
-                "attr_changed": self.totals.attr_changed,
-                "tolerance_moved": self.totals.tolerance_moved,
-                "structural_moved": self.totals.structural_moved,
-            },
+            "totals": serde_json::Value::Object(totals),
             "per_zoom_layer": per_zoom_layer,
             "displacement": displacement,
             "examples": examples,
@@ -341,16 +323,17 @@ impl RegressReport {
     }
 }
 
+fn insert_outcome_counts(
+    fields: &mut serde_json::Map<String, serde_json::Value>,
+    counts: &OutcomeCounts,
+) {
+    for class in OutcomeClass::ALL {
+        fields.insert(class.field_name().to_owned(), json!(counts.get(class)));
+    }
+}
+
 pub(crate) fn counters_are_zero(counters: &LayerCounters) -> bool {
-    counters.layers_added
-        + counters.layers_removed
-        + counters.extent_mismatch
-        + counters.missing_features
-        + counters.added_features
-        + counters.attr_changed
-        + counters.tolerance_moved
-        + counters.structural_moved
-        == 0
+    counters.outcomes.is_zero()
 }
 
 // ---------------------------------------------------------------------------

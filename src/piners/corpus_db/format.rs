@@ -5,8 +5,6 @@
 //! generic [`grid`] primitive does the width computation; the typed renderers
 //! just project their rows into cells.
 
-use serde_json::Value;
-
 use super::compare::{self, Comparison, Presence, ProbeDelta};
 use super::query::{
     DispositionRow, GateMissRow, RawTable, RunRow, RuntimeRow, ShiftCensus, TradeDiffRow, TrendRow,
@@ -90,51 +88,7 @@ fn bnd(v: i64) -> String {
 /// instead. Falls back to the raw string if the JSON is an unexpected shape,
 /// so nothing is silently blanked.
 fn fmt_selector(raw: &str) -> String {
-    let Ok(v) = serde_json::from_str::<Value>(raw) else {
-        return raw.to_owned();
-    };
-    let mut parts: Vec<String> = Vec::new();
-    if v.get("all").and_then(Value::as_bool) == Some(true) {
-        parts.push("all".to_owned());
-    }
-    match v.get("probe") {
-        // Current shape: an array of ids (repeatable `--probe`).
-        Some(Value::Array(ps)) => {
-            let names: Vec<&str> = ps.iter().filter_map(Value::as_str).collect();
-            if !names.is_empty() {
-                parts.push(format!("probe={}", names.join(",")));
-            }
-        }
-        // Legacy shape (pre-repeatable `--probe`): a single string. Old
-        // runs.db rows still carry it, so keep rendering them.
-        Some(Value::String(p)) => parts.push(format!("probe={p}")),
-        _ => {}
-    }
-    if let Some(kws) = v.get("keywords").and_then(Value::as_array) {
-        let names: Vec<&str> = kws.iter().filter_map(Value::as_str).collect();
-        if !names.is_empty() {
-            parts.push(format!("kw={}", names.join(",")));
-        }
-    }
-    if v.get("bless").and_then(Value::as_bool) == Some(true) {
-        parts.push("bless".to_owned());
-    }
-    // Debug is the parity default; only the exception is worth a column.
-    if v.get("debug").and_then(Value::as_bool) == Some(false) {
-        parts.push("release".to_owned());
-    }
-    // Forwarded harness flags perturb harness behavior - render them so a
-    // perturbed run is never mistaken for a clean one in the table.
-    if let Some(extra) = v.get("harness_args").and_then(Value::as_array) {
-        let flags: Vec<&str> = extra.iter().filter_map(Value::as_str).collect();
-        if !flags.is_empty() {
-            parts.push(format!("-- {}", flags.join(" ")));
-        }
-    }
-    if parts.is_empty() {
-        return raw.to_owned();
-    }
-    parts.join(" ")
+    crate::piners::selector::compact(raw)
 }
 
 /// The recent-runs table (bare `brokkr corpus-results`).

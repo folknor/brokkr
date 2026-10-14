@@ -1689,34 +1689,6 @@ fn validate_check_against_test(
                 .into(),
         ));
     }
-    // `isolation = "process"` on a profile referencing a nextest sweep is
-    // redundant by construction (the engine already runs process-per-test)
-    // and refused so the config carries one spelling of the intent - resolved
-    // through the same lanes/extends walk the complete-universe check uses so
-    // a reference through a lane cannot slip past it. `test_threads` is
-    // honoured (it maps onto the engine's in-flight count), and a `complete`
-    // claim over a nextest sweep is legal: the coverage audit enumerates
-    // nextest lanes through the engine, keyed (binary-id, test).
-    for (profile_name, def) in &t.profiles {
-        if def.isolation.is_none() {
-            continue;
-        }
-        let mut referenced: BTreeSet<String> = BTreeSet::new();
-        let mut visited: BTreeSet<String> = BTreeSet::new();
-        referenced_check_entries(&t.profiles, profile_name, &mut visited, &mut referenced);
-        let nextest_sweep = check
-            .iter()
-            .find(|e| referenced.contains(&e.name) && e.harness == Harness::Nextest);
-        if let Some(sweep) = nextest_sweep {
-            return Err(DevError::Config(format!(
-                "[test.profiles.{profile_name}] sets `isolation = \"process\"` and runs the \
-                 nextest sweep '{}'. The nextest engine already runs every test in its own \
-                 process, so the key is redundant here - drop it, or move the sweep to a \
-                 libtest entry.",
-                sweep.name
-            )));
-        }
-    }
     // `default_profile` must name an existing profile - catch a typo at load
     // time instead of at `brokkr check` time. (Checked even when `profiles` is
     // empty: a `default_profile` set with no profiles defined is always wrong.)
@@ -1794,19 +1766,6 @@ fn validate_check_against_test(
                 SkipSpec::Qualified(q) => validate_filter_floor("skip", &q.pattern, &at)?,
             }
         }
-        // Per-process execution is serial by construction: a parallel
-        // thread count under `isolation = "process"` has no meaning.
-        if def.isolation == Some(Isolation::Process)
-            && matches!(def.test_threads, Some(n) if n != 1)
-        {
-            return Err(DevError::Config(format!(
-                "[test.profiles.{profile_name}] combines `isolation = \
-                 \"process\"` with `test_threads = {}` - per-process \
-                 execution is serial by construction; drop `test_threads` \
-                 or set it to 1.",
-                def.test_threads.unwrap_or_default()
-            )));
-        }
         // A `lanes` profile is a list of runs, not a merged run: it carries
         // no run-shaping fields of its own, its lanes exist, don't nest,
         // and don't declare claims of their own.
@@ -1840,7 +1799,8 @@ fn validate_check_against_test(
         }
     }
     validate_doctest_ledger(t, check, quarantine)?;
-    validate_complete_test_threads(t, check)?;
+    let resolved_profiles = crate::profile::resolve_profiles_for_validation(t, check)?;
+    validate_complete_test_threads(t, &resolved_profiles)?;
     Ok(())
 }
 
@@ -1850,7 +1810,10 @@ fn validate_check_against_test(
 /// and every build - and then nothing runs. Decided here from the config
 /// alone, naming the profile and entry to change. Parallel-binaries, nextest
 /// and doc-only entries carry their own concurrency and are not affected.
-fn validate_complete_test_threads(t: &TestConfig, check: &[CheckEntry]) -> Result<(), DevError> {
+fn validate_complete_test_threads(
+    t: &TestConfig,
+    resolved_profiles: &BTreeMap<String, Vec<crate::profile::ResolvedSweep>>,
+) -> Result<(), DevError> {
     for (claim, def) in &t.profiles {
         if def.certifies != Some(Certifies::Complete) {
             continue;
@@ -1858,18 +1821,16 @@ fn validate_complete_test_threads(t: &TestConfig, check: &[CheckEntry]) -> Resul
         let mut runs: BTreeSet<String> = BTreeSet::new();
         collect_run_profiles(&t.profiles, claim, &mut BTreeSet::new(), &mut runs);
         for run in &runs {
-            let threads = effective_test_threads(&t.profiles, run);
-            if !matches!(threads, Some(n) if n != 1) {
-                continue;
+            let mut serial = BTreeSet::new();
+            let mut configured_threads = None;
+            for sweep in resolved_profiles.get(run).into_iter().flatten() {
+                if let crate::profile::LaneExec::Serial { threads } = sweep.lane_exec()
+                    && threads.is_cargo_mediated()
+                {
+                    configured_threads = threads.configured_count();
+                    serial.insert(sweep.entry_name.clone());
+                }
             }
-            let mut referenced: BTreeSet<String> = BTreeSet::new();
-            referenced_check_entries(&t.profiles, run, &mut BTreeSet::new(), &mut referenced);
-            let serial: Vec<&str> = check
-                .iter()
-                .filter(|e| referenced.contains(&e.name))
-                .filter(|e| e.parallel.is_none() && e.harness != Harness::Nextest && !e.doc_only)
-                .map(|e| e.name.as_str())
-                .collect();
             if serial.is_empty() {
                 continue;
             }
@@ -1879,7 +1840,7 @@ fn validate_complete_test_threads(t: &TestConfig, check: &[CheckEntry]) -> Resul
                  Cargo-mediated parallelism shares one output stream across tests and \
                  harnesses, so those executions cannot be attributed. Set `parallel = {{ \
                  budget = N }}` on {}, or move {} to a profile without `test_threads`.",
-                threads.unwrap_or_default(),
+                configured_threads.unwrap_or_default(),
                 if serial.len() == 1 { "y" } else { "ies" },
                 serial.iter().map(|s| format!("'{s}'")).collect::<Vec<_>>().join(", "),
                 if serial.len() == 1 { "that entry" } else { "each entry" },
@@ -1910,23 +1871,6 @@ fn collect_run_profiles(
             out.insert(name.to_owned());
         }
     }
-}
-
-/// `test_threads` as the `extends` chain resolves it: the closest declaration.
-fn effective_test_threads(profiles: &BTreeMap<String, ProfileDef>, name: &str) -> Option<u32> {
-    let mut seen: BTreeSet<&str> = BTreeSet::new();
-    let mut cur = Some(name);
-    while let Some(n) = cur {
-        if !seen.insert(n) {
-            return None;
-        }
-        let d = profiles.get(n)?;
-        if d.test_threads.is_some() {
-            return d.test_threads;
-        }
-        cur = d.extends.as_deref();
-    }
-    None
 }
 
 /// Composition rules for a `lanes` profile,
