@@ -152,7 +152,7 @@ const ERROR_BODY_PREVIEW: usize = 300;
 fn run_curl_body(request_args: &[&str]) -> Result<String, DevError> {
     let mut args = vec!["-sS", "--compressed", "--fail-with-body"];
     args.extend_from_slice(request_args);
-    let output = run_curl(&args, super::policy::CLIENT_REQUEST_TIMEOUT)?;
+    let mut output = run_curl(&args, super::policy::CLIENT_REQUEST_TIMEOUT)?;
 
     if !output.success() {
         let mut stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
@@ -166,22 +166,19 @@ fn run_curl_body(request_args: &[&str]) -> Result<String, DevError> {
             stderr.push_str("response body: ");
             stderr.push_str(&preview);
         }
-        return Err(DevError::Subprocess {
-            program: "curl".into(),
-            ending: output
-                .ending
-                .process_ending()
-                .ok_or_else(|| DevError::Verify("curl ended without an exit status".into()))?,
-            stderr,
-        });
+        output.stderr = stderr.into_bytes();
     }
 
+    output.check_success("curl")?;
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 /// Run a curl request under the shared child supervisor's wall deadline.
 /// This keeps nidhogg's request budgets in its policy module while making
 /// deadline enforcement, signal handling, and cleanup use the common runner.
+/// A deadline kill is returned as an error here; consumers classify every
+/// other ending (interrupt, wait failure, exit, signal) through
+/// `check_success` rather than inventing a no-exit-status fallback.
 pub(super) fn run_curl(
     args: &[&str],
     timeout: Duration,

@@ -936,15 +936,14 @@ pub(super) fn resolve_profile(
     test_cfg: Option<&crate::config::TestConfig>,
     sweep_profile: Option<crate::config::SweepProfile>,
 ) -> SweepProfile {
-    crate::build_purpose::profile(
-        crate::build_purpose::Purpose::Test,
+    crate::build_purpose::profile_for_sweep(
+        crate::build_purpose::SweepPurpose::Test,
         crate::build_purpose::Profiles {
             invocation: profile_override,
             sweep: sweep_profile,
             configured: test_cfg.map(|t| t.debug),
         },
     )
-    .sweep()
 }
 
 /// The selection planner compares debug/release as a boolean; command argv

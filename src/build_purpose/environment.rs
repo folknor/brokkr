@@ -106,14 +106,7 @@ pub(crate) fn sweep_cargo_env(
     meta_target_dir: &Path,
     allow_flags: &[String],
 ) -> Result<Vec<(String, String)>, crate::error::DevError> {
-    resolve_sweep_env(
-        super::Purpose::Clippy,
-        sweep,
-        None,
-        meta_target_dir,
-        "debug",
-        allow_flags,
-    )
+    resolve_sweep_env(false, sweep, None, meta_target_dir, "debug", allow_flags)
 }
 
 /// The full base env for one sweep's test/pre-build cargo runs: `build_test_env`
@@ -133,7 +126,7 @@ pub(crate) fn sweep_runtime_env(
     allow_flags: &[String],
 ) -> Result<Vec<(String, String)>, crate::error::DevError> {
     resolve_sweep_env(
-        super::Purpose::Check,
+        true,
         sweep,
         project,
         meta_target_dir,
@@ -143,7 +136,7 @@ pub(crate) fn sweep_runtime_env(
 }
 
 fn resolve_sweep_env(
-    purpose: super::Purpose,
+    runtime_env: bool,
     sweep: &PlannedSweep,
     project: Option<&Project>,
     meta_target_dir: &Path,
@@ -152,7 +145,7 @@ fn resolve_sweep_env(
 ) -> Result<Vec<(String, String)>, crate::error::DevError> {
     let isolated = isolated_target_dir(sweep, meta_target_dir);
     let effective = isolated.as_deref().unwrap_or(meta_target_dir);
-    let mut out = if purpose.policy().runtime_env {
+    let mut out = if runtime_env {
         build_test_env(project, effective, profile_dir)
     } else {
         Vec::new()

@@ -85,7 +85,7 @@ pub fn run(
 /// (`--fail` rather than `--fail-with-body`: the body goes to `/dev/null`
 /// here either way, and curl's `-S` error line names the status.)
 fn run_curl_timed(url: &str, body: &str) -> Result<std::time::Duration, DevError> {
-    let output = super::client::run_curl(
+    let mut output = super::client::run_curl(
         &[
             "-sS",
             "--compressed",
@@ -105,18 +105,13 @@ fn run_curl_timed(url: &str, body: &str) -> Result<std::time::Duration, DevError
         super::policy::API_BENCH_REQUEST_TIMEOUT,
     )?;
 
-    if !output.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let ending = output
-            .ending
-            .process_ending()
-            .ok_or_else(|| DevError::Verify("curl ended without an exit status".into()))?;
-        return Err(DevError::Subprocess {
-            program: "curl".into(),
-            ending,
-            stderr: stderr.trim().to_owned(),
-        });
-    }
+    output.stderr = String::from_utf8_lossy(&output.stderr)
+        .trim()
+        .as_bytes()
+        .to_vec();
+    // The shared verdict classifies every returned ending, carrying the
+    // request's diagnostic context in its stderr.
+    output.check_success("curl")?;
 
     // curl writes the time_total after a newline in stdout (via -w).
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -155,7 +150,7 @@ fn parse_time_total(time_str: &str) -> Result<std::time::Duration, DevError> {
 /// "0 elements, 0 bytes response" - indistinguishable from a real empty
 /// result, right after a timing run that may have been measuring errors.
 fn report_response_stats(url: &str, body: &str, name: &str) -> Result<(), DevError> {
-    let output = super::client::run_curl(
+    let mut output = super::client::run_curl(
         &[
             "-sS",
             "--compressed",
@@ -175,16 +170,11 @@ fn report_response_stats(url: &str, body: &str, name: &str) -> Result<(), DevErr
 
     if !output.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        let ending = output
-            .ending
-            .process_ending()
-            .ok_or_else(|| DevError::Verify("curl ended without an exit status".into()))?;
-        return Err(DevError::Subprocess {
-            program: "curl".into(),
-            ending,
-            stderr: format!("{name} stats request: {}", stderr.trim()),
-        });
+        output.stderr = format!("{name} stats request: {}", stderr.trim()).into_bytes();
     }
+    // The shared verdict classifies every returned ending, carrying the
+    // request's diagnostic context in its stderr.
+    output.check_success("curl")?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let (download_bytes, count) = parse_response_stats(&stdout)

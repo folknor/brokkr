@@ -4,6 +4,38 @@ use crate::config::{CheckEntry, TestConfig};
 use crate::error::DevError;
 use crate::profile::{self, SweepDecl};
 
+#[derive(Clone, Copy)]
+enum ActivationPurpose {
+    Check,
+    Clippy,
+}
+
+struct SweepPolicy {
+    always_adhoc: bool,
+    profile_shaping: bool,
+    label: &'static str,
+    env_remedy: &'static str,
+}
+
+impl ActivationPurpose {
+    fn sweep_policy(self) -> SweepPolicy {
+        match self {
+            Self::Clippy => SweepPolicy {
+                always_adhoc: true,
+                profile_shaping: false,
+                label: "clippy",
+                env_remedy: "`brokkr clippy` can't pick one; pass `--env KEY=...` to choose, or `--sweep NAME` to run one entry.",
+            },
+            Self::Check => SweepPolicy {
+                always_adhoc: false,
+                profile_shaping: true,
+                label: "default",
+                env_remedy: "an ad-hoc `--features` run takes no `[[check]]` entry and can't pick one; run a profile (or `-p` with no `--features`) instead, or reconcile the entries' `env`.",
+            },
+        }
+    }
+}
+
 /// Build the list of sweep declarations both phases iterate, applying the
 /// priority ladder from the check-purpose policy. The caller plans them
 /// once the invocation's scope is known.
@@ -19,7 +51,7 @@ pub(crate) fn decide_active_sweeps(
     no_default_features: bool,
 ) -> Result<Vec<SweepDecl>, DevError> {
     resolve_sweeps(
-        super::Purpose::Check,
+        ActivationPurpose::Check,
         SweepInputs {
             check_entries,
             test_cfg,
@@ -48,7 +80,7 @@ struct SweepInputs<'a> {
 }
 
 fn resolve_sweeps(
-    purpose: super::Purpose,
+    purpose: ActivationPurpose,
     inputs: SweepInputs<'_>,
 ) -> Result<Vec<SweepDecl>, DevError> {
     let policy = purpose.sweep_policy();
@@ -174,7 +206,7 @@ pub(crate) fn build_clippy_sweep(
     env_overrides: &[(String, String)],
 ) -> Result<SweepDecl, DevError> {
     let mut sweeps = resolve_sweeps(
-        super::Purpose::Clippy,
+        ActivationPurpose::Clippy,
         SweepInputs {
             check_entries,
             test_cfg: None,
@@ -271,9 +303,7 @@ mod clippy_sweep_tests {
         let merged = merge_check_envs(
             &entries,
             &BTreeSet::new(),
-            crate::build_purpose::Purpose::Clippy
-                .sweep_policy()
-                .env_remedy,
+            ActivationPurpose::Clippy.sweep_policy().env_remedy,
         )
         .unwrap();
         assert_eq!(merged.get("FOO").map(String::as_str), Some("1"));
@@ -286,9 +316,7 @@ mod clippy_sweep_tests {
         let merged = merge_check_envs(
             &entries,
             &BTreeSet::new(),
-            crate::build_purpose::Purpose::Clippy
-                .sweep_policy()
-                .env_remedy,
+            ActivationPurpose::Clippy.sweep_policy().env_remedy,
         )
         .unwrap();
         assert_eq!(merged.get("HP").map(String::as_str), Some("1"));
@@ -300,9 +328,7 @@ mod clippy_sweep_tests {
         let err = merge_check_envs(
             &entries,
             &BTreeSet::new(),
-            crate::build_purpose::Purpose::Clippy
-                .sweep_policy()
-                .env_remedy,
+            ActivationPurpose::Clippy.sweep_policy().env_remedy,
         )
         .unwrap_err();
         assert!(err.to_string().contains("HP"), "got: {err}");
@@ -317,9 +343,7 @@ mod clippy_sweep_tests {
         let merged = merge_check_envs(
             &entries,
             &overridden,
-            crate::build_purpose::Purpose::Clippy
-                .sweep_policy()
-                .env_remedy,
+            ActivationPurpose::Clippy.sweep_policy().env_remedy,
         )
         .unwrap();
         // The overridden key is skipped entirely here; build_clippy_sweep layers

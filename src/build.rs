@@ -478,11 +478,12 @@ fn build_args(config: &BuildConfig) -> Result<Vec<String>, DevError> {
             .package
             .as_ref()
             .map_or_else(Vec::new, |pkg| vec!["-p".into(), pkg.clone()]),
-        features: crate::build_purpose::Features::Joined {
-            values: &config.features,
-            all: config.all_features,
-            no_default: !config.default_features,
-        },
+        features: crate::build_purpose::Features::values(
+            &config.features,
+            config.all_features,
+            !config.default_features,
+            crate::build_purpose::FeatureRendering::CommaJoined,
+        ),
         unification: Vec::new(),
         targets: config
             .bin

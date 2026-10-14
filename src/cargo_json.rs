@@ -72,7 +72,12 @@ pub fn parse_cargo_diagnostics(stdout: &str) -> Vec<Diagnostic> {
             "note" | "help" | "failure-note" => continue,
             // A future severity is a schema extension, not a malformed cargo
             // record. Cargo's exit status still reports any fatal diagnostic.
-            _ => continue,
+            _ => {
+                crate::output::detail(&format!(
+                    "cargo stdout line {line_number}: skipped diagnostic level {level_name:?}"
+                ));
+                continue;
+            }
         };
 
         // Only the levels a finding is reported at. rustc also emits top-level

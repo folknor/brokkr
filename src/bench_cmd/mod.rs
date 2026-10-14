@@ -479,7 +479,7 @@ fn cargo_bench(
         purpose: crate::build_purpose::Purpose::Bench,
         profiles: Default::default(),
         packages: vec!["-p".into(), target.package.clone()],
-        features: crate::build_purpose::Features::Default,
+        features: crate::build_purpose::Features::default(),
         unification: Vec::new(),
         targets: vec!["--bench".into(), target.name.clone()],
         env: vec![(

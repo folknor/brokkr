@@ -10,10 +10,9 @@
 //! values remain spawn-time inputs: resolving a shape must not evaluate or
 //! cache commands that the contract requires before every Cargo launch.
 
-pub(crate) mod activation;
 pub(crate) mod environment;
 pub(crate) mod features;
-pub(crate) mod selection;
+pub(crate) mod requests;
 
 use std::path::Path;
 
@@ -27,7 +26,6 @@ pub(crate) enum Purpose {
     Install,
     InstallCheck,
     Check,
-    Clippy,
     Test,
     Bench,
 }
@@ -39,47 +37,10 @@ pub(crate) enum Profile {
     Bench,
 }
 
-impl Profile {
-    pub(crate) fn sweep(self) -> SweepProfile {
-        match self {
-            Self::Dev => SweepProfile::Dev,
-            Self::Release => SweepProfile::Release,
-            Self::Bench => panic!("bench is not a test sweep profile"),
-        }
-    }
-}
-
-struct SweepPolicy {
-    always_adhoc: bool,
-    profile_shaping: bool,
-    label: &'static str,
-    env_remedy: &'static str,
-}
-
-impl Purpose {
-    fn sweep_policy(self) -> SweepPolicy {
-        match self {
-            Self::Clippy => SweepPolicy {
-                always_adhoc: true,
-                profile_shaping: false,
-                label: "clippy",
-                env_remedy: "`brokkr clippy` can't pick one; pass `--env KEY=...` to choose, or `--sweep NAME` to run one entry.",
-            },
-            _ => SweepPolicy {
-                always_adhoc: false,
-                profile_shaping: true,
-                label: "default",
-                env_remedy: "an ad-hoc `--features` run takes no `[[check]]` entry and can't pick one; run a profile (or `-p` with no `--features`) instead, or reconcile the entries' `env`.",
-            },
-        }
-    }
-}
-
 struct Policy {
     default_profile: Profile,
     configurable_profile: bool,
     features: bool,
-    runtime_env: bool,
     worktree_target: bool,
     dev_flag: Option<&'static str>,
     release_flag: Option<&'static str>,
@@ -94,7 +55,6 @@ impl Purpose {
                 default_profile: Profile::Release,
                 configurable_profile: true,
                 features: true,
-                runtime_env: false,
                 // `build::cargo_build` isolates a worktree's target dir itself,
                 // because the same override must reach its metadata query and
                 // executable lookup too; `run --commit` builds through it.
@@ -106,7 +66,6 @@ impl Purpose {
                 default_profile: Profile::Release,
                 configurable_profile: true,
                 features: true,
-                runtime_env: true,
                 worktree_target: false,
                 dev_flag: None,
                 release_flag: Some("--release"),
@@ -115,7 +74,6 @@ impl Purpose {
                 default_profile: Profile::Release,
                 configurable_profile: true,
                 features: false,
-                runtime_env: false,
                 worktree_target: false,
                 dev_flag: Some("--debug"),
                 release_flag: None,
@@ -124,16 +82,6 @@ impl Purpose {
                 default_profile: Profile::Release,
                 configurable_profile: true,
                 features: false,
-                runtime_env: false,
-                worktree_target: false,
-                dev_flag: None,
-                release_flag: Some("--release"),
-            },
-            Self::Clippy => Policy {
-                default_profile: Profile::Dev,
-                configurable_profile: true,
-                features: true,
-                runtime_env: false,
                 worktree_target: false,
                 dev_flag: None,
                 release_flag: Some("--release"),
@@ -142,7 +90,6 @@ impl Purpose {
                 default_profile: Profile::Dev,
                 configurable_profile: true,
                 features: true,
-                runtime_env: true,
                 worktree_target: false,
                 dev_flag: None,
                 release_flag: Some("--release"),
@@ -151,7 +98,6 @@ impl Purpose {
                 default_profile: Profile::Bench,
                 configurable_profile: false,
                 features: false,
-                runtime_env: false,
                 worktree_target: true,
                 dev_flag: None,
                 release_flag: None,
@@ -202,62 +148,80 @@ pub(crate) fn profile(purpose: Purpose, inputs: Profiles) -> Profile {
         .unwrap_or(policy.default_profile)
 }
 
-/// Invocation values stay verbatim; a build config can request a joined list;
-/// a sweep request has already crossed the projection boundary in selection.
+/// Sweep callers can only select profiles valid for cargo check/test/clippy.
 #[derive(Clone, Copy)]
-pub(crate) enum Features<'a> {
-    Verbatim {
-        values: &'a [String],
-        all: bool,
-        no_default: bool,
-    },
-    Joined {
-        values: &'a [String],
-        all: bool,
-        no_default: bool,
-    },
-    Projected(&'a [String]),
-    Default,
+pub(crate) enum SweepPurpose {
+    Check,
+    Test,
 }
 
-fn feature_args(features: Features<'_>) -> Vec<String> {
-    match features {
-        Features::Default => Vec::new(),
-        Features::Projected(args) => args.to_vec(),
-        Features::Verbatim {
-            values,
-            all,
-            no_default,
-        } => {
-            let mut args = Vec::new();
-            for value in values {
-                args.extend(["--features".into(), value.clone()]);
-            }
-            if all {
-                args.push("--all-features".into());
-            }
-            if no_default {
-                args.push("--no-default-features".into());
-            }
-            args
+pub(crate) fn profile_for_sweep(purpose: SweepPurpose, inputs: Profiles) -> SweepProfile {
+    let default = match purpose {
+        SweepPurpose::Check => Purpose::Check,
+        SweepPurpose::Test => Purpose::Test,
+    }
+    .policy()
+    .default_profile;
+    let from_debug = |debug| {
+        if debug {
+            SweepProfile::Dev
+        } else {
+            SweepProfile::Release
         }
-        Features::Joined {
-            values,
-            all,
-            no_default,
-        } => {
-            let mut args = Vec::new();
-            if no_default {
-                args.push("--no-default-features".into());
+    };
+    inputs
+        .invocation
+        .map(from_debug)
+        .or(inputs.sweep)
+        .or_else(|| inputs.configured.map(from_debug))
+        .unwrap_or_else(|| from_debug(default == Profile::Dev))
+}
+
+/// Feature values retain their caller's rendering contract. Joining values
+/// changes whitespace-containing requests, so it must be an explicit choice.
+#[derive(Clone, Copy)]
+pub(crate) enum FeatureRendering {
+    Occurrences,
+    CommaJoined,
+}
+
+/// One prepared feature argv representation for every build request.
+#[derive(Default)]
+pub(crate) struct Features(Vec<String>);
+
+impl Features {
+    pub(crate) fn values(
+        values: &[String],
+        all: bool,
+        no_default: bool,
+        rendering: FeatureRendering,
+    ) -> Self {
+        let mut args = Vec::new();
+        match rendering {
+            FeatureRendering::Occurrences => {
+                for value in values {
+                    args.extend(["--features".into(), value.clone()]);
+                }
+                if all {
+                    args.push("--all-features".into());
+                }
+                if no_default {
+                    args.push("--no-default-features".into());
+                }
             }
-            if all {
-                args.push("--all-features".into());
+            FeatureRendering::CommaJoined => {
+                if no_default {
+                    args.push("--no-default-features".into());
+                }
+                if all {
+                    args.push("--all-features".into());
+                }
+                if !values.is_empty() {
+                    args.extend(["--features".into(), values.join(",")]);
+                }
             }
-            if !values.is_empty() {
-                args.extend(["--features".into(), values.join(",")]);
-            }
-            args
         }
+        Self(args)
     }
 }
 
@@ -267,7 +231,7 @@ pub(crate) struct Request<'a> {
     /// Canonical package selection argv, produced by metadata discovery or
     /// the selection planner. The resolver never guesses workspace members.
     pub(crate) packages: Vec<String>,
-    pub(crate) features: Features<'a>,
+    pub(crate) features: Features,
     pub(crate) unification: Vec<String>,
     pub(crate) targets: Vec<String>,
     pub(crate) env: Vec<(String, String)>,
@@ -301,7 +265,7 @@ pub(crate) fn resolve(request: Request<'_>) -> Shape {
     args.extend(request.unification);
     args.extend(request.packages);
     if policy.features {
-        args.extend(feature_args(request.features));
+        args.extend(request.features.0);
     }
     args.extend(request.targets);
     let mut env = request.env;
@@ -325,6 +289,8 @@ pub(crate) fn sweep_args(
     profile: SweepProfile,
     targets: Vec<String>,
 ) -> Vec<String> {
+    // Features arrive already projected by check's selection; they pass
+    // through as argv, so the resolver does not re-render them.
     resolve(Request {
         purpose: Purpose::Check,
         profiles: Profiles {
@@ -332,7 +298,7 @@ pub(crate) fn sweep_args(
             ..Default::default()
         },
         packages,
-        features: Features::Projected(features),
+        features: Features(features.to_vec()),
         unification: sweep.unification_args(),
         targets,
         env: Vec::new(),
@@ -352,7 +318,6 @@ mod tests {
             (Purpose::Install, Profile::Release),
             (Purpose::Test, Profile::Release),
             (Purpose::Check, Profile::Dev),
-            (Purpose::Clippy, Profile::Dev),
             (Purpose::Bench, Profile::Bench),
         ] {
             assert_eq!(profile(purpose, Profiles::default()), expected);
@@ -398,7 +363,6 @@ mod tests {
             Purpose::Run,
             Purpose::Install,
             Purpose::Check,
-            Purpose::Clippy,
             Purpose::Test,
             Purpose::Bench,
         ] {
@@ -406,11 +370,7 @@ mod tests {
                 purpose,
                 profiles: Profiles::default(),
                 packages: vec!["-p".into(), "pkg".into()],
-                features: Features::Verbatim {
-                    values: &values,
-                    all: false,
-                    no_default: true,
-                },
+                features: Features::values(&values, false, true, FeatureRendering::Occurrences),
                 unification: Vec::new(),
                 targets: Vec::new(),
                 env: Vec::new(),
@@ -453,7 +413,7 @@ mod tests {
                     ..Default::default()
                 },
                 packages: Vec::new(),
-                features: Features::Default,
+                features: Features::default(),
                 unification: Vec::new(),
                 targets: Vec::new(),
                 env: Vec::new(),

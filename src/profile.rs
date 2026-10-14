@@ -141,14 +141,13 @@ impl PlannedSweep {
 
     /// The profile cargo uses when this sweep leaves the key unset.
     pub(crate) fn cargo_profile(&self) -> SweepProfile {
-        crate::build_purpose::profile(
-            crate::build_purpose::Purpose::Check,
+        crate::build_purpose::profile_for_sweep(
+            crate::build_purpose::SweepPurpose::Check,
             crate::build_purpose::Profiles {
                 sweep: self.profile,
                 ..Default::default()
             },
         )
-        .sweep()
     }
 
     /// The declaration this sweep was planned from, for fixtures that revise

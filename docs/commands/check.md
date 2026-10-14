@@ -4,8 +4,11 @@ Both commands share the sweep + profile machinery in `src/profile.rs` and the
 test-phase driver in `src/check_cmd/test_phase.rs`, with serial test execution
 in `src/check_cmd/test_execution.rs` and its environment in
 `src/build_purpose/environment.rs`. Cargo shapes are owned by
-`src/build_purpose.rs`, including the package/feature planner in
-`src/build_purpose/selection.rs`. They differ in scope: `check` is the
+`src/build_purpose.rs`, with package/feature request construction in
+`src/build_purpose/requests.rs` and feature routing in
+`src/build_purpose/features.rs`. Lane eligibility and repro rendering live in
+`src/check_cmd/selection.rs`; sweep activation lives in
+`src/check_cmd/activation.rs`. They differ in scope: `check` is the
 full validation pass (gremlins + header + textlint + manifest + script checks +
 dependency rules + publish cycle + clippy + optional rustdoc + prepare + tests,
 with coverage under a complete claim and install-feature when configured);
@@ -269,7 +272,7 @@ Output:
 
 Which lanes each phase of `check` (and `brokkr test`) is eligible to attempt,
 and with which packages, is decided once, before any phase runs
-(`src/build_purpose/selection.rs`), and every consumer reads that answer: clippy
+(`src/check_cmd/selection.rs`), and every consumer reads that answer: clippy
 and rustdoc, the test phase, `prepare`, the lane runners (serial, parallel,
 isolated, nextest), install-feature, `brokkr clippy`, `brokkr test`, and the
 `package rules` and `brokkr test` plan announcements. Nothing re-derives it.

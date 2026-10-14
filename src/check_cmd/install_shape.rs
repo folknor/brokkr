@@ -272,7 +272,7 @@ fn install_check_args(
             invocation: Some(debug), ..Default::default()
         },
         packages: vec!["-p".into(), package.to_owned()],
-        features: crate::build_purpose::Features::Default,
+        features: crate::build_purpose::Features::default(),
         unification: Vec::new(), targets: target_selector.to_vec(),
         env: Vec::new(), build_root: None,
     });

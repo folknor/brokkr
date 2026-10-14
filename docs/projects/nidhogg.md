@@ -45,7 +45,10 @@ The persistent server uses the shared plain spawn policy, carrying OOM and
 hold protection while surviving the `serve` command. The server started for
 a tiles measurement uses service policy, including parent-death termination
 and the orphan-reap token. HTTP requests use the shared captured child
-supervisor; incomplete captured output fails rather than being parsed.
+supervisor; incomplete captured output fails rather than being parsed. A
+request that hits its deadline fails as a deadline; every other ending goes
+through the runner's shared ending verdict (`check_success`), with curl's
+error text and any response preview carried in the failure.
 
 The port is `[<host>] port` in `brokkr.toml`, defaulting to 3033. brokkr hands
 it to the server as `PORT` but does not read `PORT` from its own environment.

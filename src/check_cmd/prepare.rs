@@ -721,7 +721,7 @@ impl DocFacts {
     }
 
     /// The members one resolution of a serial lane runs `cargo test` over -
-    /// the same selection `package_args` in `build_purpose/selection.rs` spells.
+    /// the same selection `package_args` in `build_purpose/requests.rs` spells.
     fn selected<'a>(&'a self, selection: &'a Selection) -> Vec<&'a str> {
         match selection {
             Selection::Explicit(p) | Selection::Override { packages: p, .. } => {

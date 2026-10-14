@@ -1,4 +1,5 @@
-use crate::build_purpose::activation;
+mod activation;
+pub(crate) mod selection;
 use crate::output::format_duration as fmt_wall;
 mod conventions;
 mod reporter;
@@ -24,13 +25,26 @@ include!("check_cmd/diagnostics.rs");
 include!("check_cmd/clippy_cmd.rs");
 include!("check_cmd/test_phase.rs");
 include!("check_cmd/concurrency.rs");
-pub(crate) use crate::build_purpose::environment::*;
+pub(crate) use crate::build_purpose::environment::{
+    isolated_target_dir, merged_env, sweep_cargo_env, sweep_runtime_env,
+};
+#[cfg(test)]
+pub(crate) use crate::build_purpose::environment::build_test_env;
+#[cfg(test)]
+use crate::build_purpose::features;
 pub(crate) use crate::build_purpose::features::FeatureOracle;
 #[cfg(test)]
 pub(crate) use crate::build_purpose::features::feature_fixture;
+pub(crate) use crate::build_purpose::requests::SupportRequest;
+pub(crate) use selection::{
+    AdmissionNote, AdmissionRule, Attempt, CheckSelections, DeclaredShape, ForwardedArgs,
+    InstallSelection, LaneEntry, PackageSource, PhaseSelection, ReachLedger, ReproLine, Resolution,
+    ResolutionRun, Selection, SelectionPhase, ShapeId, feature_drop_lines, join_notes,
+    reject_direct_execution_args, reject_forwarded_package_selectors, resolve_invocation_sweeps,
+    resolve_planned_sweep,
+};
 #[cfg(test)]
-use crate::build_purpose::features::routing as features;
-pub(crate) use crate::build_purpose::selection::*;
+pub(crate) use selection::{package_args, resolve_unification};
 include!("check_cmd/test_execution.rs");
 include!("check_cmd/test_execution_tests.rs");
 include!("check_cmd/isolate.rs");

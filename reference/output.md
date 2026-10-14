@@ -35,3 +35,7 @@ one hour, then hours/minutes. `format_duration_ms` adapts stored millisecond
 counts. Numeric measurement fields, data tables and the positive-integer
 frontmatter duration grammar are separate wire formats. Allocation-profile
 caveats are emitted by `measure::ProfiledMode::print_note`.
+
+Unknown cargo diagnostic levels are schema extensions: they are skipped as
+findings, with the level and stdout line number recorded through
+`output::detail` in an open run log. Cargo exit status still determines failure.

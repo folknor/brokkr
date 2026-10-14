@@ -808,7 +808,7 @@ mod parallel_lane_tests {
     // silently run nothing for every unit-test binary in the fan-out.
     #[test]
     fn each_target_kind_gets_the_selector_that_actually_selects_it() {
-        use crate::build_purpose::selection::cargo_target_selector;
+        use crate::check_cmd::selection::cargo_target_selector;
         assert_eq!(cargo_target_selector("test", "integration"), vec!["--test", "integration"]);
         assert_eq!(cargo_target_selector("bin", "cli"), vec!["--bin", "cli"]);
         assert_eq!(cargo_target_selector("lib", "pkg"), vec!["--lib"]);
