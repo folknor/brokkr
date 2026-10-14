@@ -151,7 +151,14 @@ impl BenchHarness {
     {
         let runs = std::num::NonZeroUsize::new(config.runs)
             .ok_or_else(|| DevError::Config("benchmark requires at least 1 run".into()))?;
-        let fifo = if sidecar { Some(crate::sidecar::SidecarFifo::create(self.state.root())?) } else { None };
+        let fifo = if sidecar {
+            Some(crate::sidecar::SidecarFifo::create(
+                self.state.root(),
+                &crate::sidecar::DEFAULT_MEASUREMENT_TUNABLES,
+            )?)
+        } else {
+            None
+        };
         Ok(MeasurementLoop { harness: self, runs, source, fifo }.run(program, f))
     }
 

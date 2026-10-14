@@ -544,30 +544,11 @@ fn fetch_verified(url: &str, dest: &Path, sha256: Option<&str>) -> Result<(), De
     Ok(())
 }
 
-/// SHA-256 of a file as lowercase hex, via `sha256sum` (coreutils) or, where
-/// that is absent (macOS), `shasum -a 256`. Shelled out like the rest of this
-/// module's tooling rather than linking a hash crate for one caller.
+/// SHA-256 of a file, computed in-process so verification does not depend on a
+/// platform-specific hashing command.
 fn sha256_file(path: &Path) -> Result<Sha256, DevError> {
-    let path_str = path.display().to_string();
-    let coreutils = output::run_captured("sha256sum", &[&path_str], Path::new("."));
-    let (program, captured) = match coreutils {
-        Err(DevError::Spawn { .. }) => (
-            "shasum",
-            output::run_captured("shasum", &["-a", "256", &path_str], Path::new("."))?,
-        ),
-        other => ("sha256sum", other?),
-    };
-    captured.check_success(program)?;
-    let stdout = String::from_utf8_lossy(&captured.stdout);
-    let digest = stdout
-        .split_whitespace()
-        .next()
-        .ok_or_else(|| DevError::Config(format!("{program} printed no digest for {path_str}")))?;
-    digest.parse().map_err(|error| {
-        DevError::Config(format!(
-            "{program} printed an invalid SHA-256 digest for {path_str}: {error}"
-        ))
-    })
+    let file = fs::File::open(path)?;
+    Sha256::from_reader(file).map_err(DevError::Io)
 }
 
 /// Result of an HTTP HEAD request to a URL. Used by `download::run_refresh`
@@ -753,7 +734,7 @@ pub fn ensure_tilemaker(data_dir: &Path) -> Result<TilemakerTools, DevError> {
     )?;
     captured.check_success("cmake")?;
 
-    let nproc = std::thread::available_parallelism().map_or(4, std::num::NonZero::get);
+    let nproc = crate::cpu_topology::available_parallelism_or_default();
     let jobs = format!("-j{nproc}");
     output::bench_msg("building tilemaker");
     let captured =

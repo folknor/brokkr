@@ -120,11 +120,6 @@ fn find_mount_for<'a>(path: &Path, mounts: &'a [MountEntry]) -> Option<&'a Mount
         .max_by_key(|m| m.mount_point.len())
 }
 
-/// Available bytes for an unprivileged process, matching `df`'s `Avail`.
-pub(crate) fn available_bytes(path: &Path) -> Option<u64> {
-    statvfs_bytes(path).map(|(free, _)| free)
-}
-
 fn statvfs_bytes(path: &Path) -> Option<(u64, u64)> {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;

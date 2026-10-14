@@ -74,6 +74,7 @@ fn resolve_run_filter(
         })?),
         None => Some(best_idx),
     };
+    warn_if_capture_truncated(store, id, run_filter)?;
     if total > 1 {
         let showing = match run_filter {
             Some(idx) => format!("run {idx}/{total}"),
@@ -82,6 +83,17 @@ fn resolve_run_filter(
         output::sidecar_msg(&format!("showing {showing} (use --run to override)"));
     }
     Ok(run_filter)
+}
+
+fn warn_if_capture_truncated(
+    store: &db::RunStore,
+    id: &db::RunId,
+    run_idx: Option<usize>,
+) -> Result<(), DevError> {
+    if store.query_sidecar_capture_truncated(id, run_idx)? {
+        output::warn("stored sidecar trajectory is incomplete because a capture limit was reached");
+    }
+    Ok(())
 }
 
 pub(crate) fn cmd_sidecar(project_root: &Path, q: &SidecarQuery) -> Result<(), DevError> {
@@ -331,6 +343,8 @@ fn run_compare(
     };
     let (best_a, _) = store.query_sidecar_meta(&id_a)?;
     let (best_b, _) = store.query_sidecar_meta(&id_b)?;
+    warn_if_capture_truncated(store, &id_a, Some(best_a))?;
+    warn_if_capture_truncated(store, &id_b, Some(best_b))?;
     let samples_a = store.query_sidecar_samples(&id_a, Some(best_a))?;
     let samples_b = store.query_sidecar_samples(&id_b, Some(best_b))?;
     if samples_a.is_empty() || samples_b.is_empty() {

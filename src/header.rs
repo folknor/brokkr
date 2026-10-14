@@ -87,7 +87,7 @@ pub fn scan(
 
     let files = tree.files();
     // Dead scope is warned about, not refused - see `globs::warn_unmatched`.
-    globs::warn_unmatched(&cfg.paths, files,"[header].paths")?;
+    globs::warn_unmatched(&cfg.paths, files, "[header].paths")?;
     let selected: Vec<PathBuf> = files
         .iter()
         .filter(|rel| globs::matches(&paths, rel))

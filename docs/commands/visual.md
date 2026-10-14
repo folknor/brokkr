@@ -56,11 +56,10 @@ its project-specific config block.
   viewport, timestamp) so a silent Chrome update is attributable rather than
   looking like drift across all fixtures at once. The screenshot is
   `fullPage` at the measurement viewport - the viewport is never resized
-  between the JSON dump and the PNG. A capture failing with puppeteer's
-  "Could not find Chrome" gets a hint to run `npx puppeteer browsers
-  install chrome`. Puppeteer selects its browser build from the installed
-  version, so changing the globally installed Puppeteer may require installing
-  that version's Chrome again.
+  between the JSON dump and the PNG. The pinned Puppeteer package and its
+  matching Chrome build are installed in the per-user script cache. If Chrome
+  is missing, the error prints `PUPPETEER_CACHE_DIR=puppeteer pnpm exec
+  puppeteer browsers install chrome` and the cache directory to run it from.
 - `list` - show configured fixtures with tags, expected outcome, and approval
   state.
 - `approve <ID>... | --all` - record current divergence as accepted baseline.
@@ -81,10 +80,10 @@ its project-specific config block.
   Requires a clean git tree, so that the commit an approval is pinned to
   actually describes what rendered the image. Sluggrs' own
   `snapshots/*/approved.png` is exempt from that check (`check_clean` in
-  `src/git.rs`, alongside `results.db`, `*.md` and `brokkr.toml`) - it is the
-  approve operation's *output*, so it cannot invalidate the pin. Without the
-  exemption `approve` was self-blocking: the first one succeeded and every
-  later one failed until you committed.
+  `src/git/tree_state.rs`, alongside `results.db`, `*.md` and `brokkr.toml`)
+  because it is the approve operation's *output*, so it cannot invalidate the
+  pin. Without the exemption, `approve` was self-blocking: the first one
+  succeeded and every later one failed until you committed.
   The latest scored result must also point to a run recorded as clean at the
   same commit as the current checkout. If the checkout moved or the image came
   from a dirty run, rerun the visual command from the current clean tree before

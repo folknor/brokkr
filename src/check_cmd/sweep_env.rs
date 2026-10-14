@@ -1,8 +1,8 @@
 /// Project + profile-aware env vars set on every cargo test/build
-/// subprocess. Owned `String`s (B7: avoids borrow-from-local traps the
-/// previous `Vec<(&str, &str)>` shape allowed) and absolute paths
-/// (B8: `CARGO_TARGET_TMPDIR` was relative `target/tmp`, fragile if
-/// the cargo subprocess ever ran with a different cwd).
+/// subprocess. Owned `String`s (a `Vec<(&str, &str)>` invites
+/// borrow-from-local traps) and absolute paths (a relative
+/// `CARGO_TARGET_TMPDIR` breaks if the cargo subprocess runs with a
+/// different cwd).
 ///
 /// `target_dir` is cargo's resolved `target_directory` (from
 /// `cargo metadata --no-deps`) - workspaces can place it outside the
@@ -41,7 +41,8 @@ pub(crate) fn build_test_env(
 /// metadata`), not `<project_root>/target`: a workspace `.cargo/config.toml`
 /// `[build] target-dir` can place it on another drive entirely, and the
 /// isolated dir must sit beside the real one so `brokkr clean` and the plain
-/// sweeps find it (S3-20).
+/// sweeps find it.
+///
 /// A package-mode sweep isolates too, even with no `rustflags`: it resolves a
 /// different feature graph for the same source, so sharing the common dir would
 /// have it rebuild against every ordinary sweep on every run, in both
@@ -49,7 +50,6 @@ pub(crate) fn build_test_env(
 /// the resolution boundary is not the artifact boundary, and a lane exports one
 /// `BROKKR_TEST_BIN_DIR`, so a directory per package would leave a multi-package
 /// lane with no single directory holding the binaries its tests spawn.
-///
 pub(crate) fn isolated_target_dir(
     sweep: &PlannedSweep,
     meta_target_dir: &Path,

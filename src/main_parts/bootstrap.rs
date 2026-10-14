@@ -75,7 +75,7 @@ where
 /// an unreadable cwd - leaves the full command list visible rather than
 /// hiding commands on the strength of a guess. A `brokkr.toml` so broken that
 /// the project is unknown must not also cost the user their `--help`.
-fn parse_cli(project: Option<Project>) -> Cli {
+fn parse_cli(project: Option<Project>) -> (Cli, cli::CommandId) {
     let argv = crate::runnables::bare_run_sentinel(std::env::args().collect());
 
     let mut cmd = <Cli as clap::CommandFactory>::command();
@@ -103,6 +103,16 @@ fn parse_cli(project: Option<Project>) -> Cli {
     }
 
     let matches = cmd.get_matches_from(argv);
+    let Some(command_id) = matches
+        .subcommand_name()
+        .and_then(cli::CommandId::from_name)
+    else {
+        clap::Error::raw(
+            clap::error::ErrorKind::InvalidSubcommand,
+            "parsed subcommand is missing from the command specification",
+        )
+        .exit();
+    };
     let cli = match <Cli as clap::FromArgMatches>::from_arg_matches(&matches) {
         Ok(cli) => cli,
         // The matches came from the same derived command, so a conversion
@@ -125,7 +135,7 @@ fn parse_cli(project: Option<Project>) -> Cli {
         )
         .exit();
     }
-    cli
+    (cli, command_id)
 }
 
 fn main() {
@@ -143,8 +153,8 @@ fn main() {
         Err(error) => (None, Some(error)),
     };
     let help_project = detection.as_ref().map(|d| d.project);
-    let cli = parse_cli(help_project);
-    cli::set_invocation(cli.command.id());
+    let (cli, command_id) = parse_cli(help_project);
+    cli::set_invocation(command_id);
 
     // Lead our own process group before spawning anything or acquiring the
     // lock, so brokkr's internal `kill(-pgid, …)` sweeps can't escape upward
@@ -160,7 +170,7 @@ fn main() {
     // history and choose the process exit, including propagated child codes.
     // A `[cargo_env]` failure some path tolerated still fails the command.
     let result = crate::cargo_env::seal(match detection_error {
-        Some(error) if !detection_error_is_ignored(&cli.command) => Err(error),
+        Some(error) if !detection_error_is_ignored(command_id) => Err(error),
         _ => run(cli, detection.as_ref()),
     });
     let elapsed_ms = duration_ms(start.elapsed());
@@ -201,10 +211,10 @@ fn main() {
 }
 
 /// Only commands that never read a project config run past a detection error.
-/// An optional-config command (`check`, `clippy`, `run`, ...) must not fall
-/// back to its no-config path when a `brokkr.toml` exists but is malformed:
-/// `check` would then run without the project's gates and report green.
-fn detection_error_is_ignored(command: &Command) -> bool {
+/// `Optional` means a command can run when no config file exists; it does not
+/// mean a malformed file may be ignored. Otherwise `check` could run without
+/// the project's gates and report green.
+fn detection_error_is_ignored(command: cli::CommandId) -> bool {
     command.spec().config == cli::ConfigNeed::None
 }
 
@@ -709,7 +719,7 @@ fn run_deps(
 // The command table: one arm per subcommand, so its size tracks the CLI's.
 #[allow(clippy::too_many_lines, clippy::cognitive_complexity)]
 fn run(cli: Cli, detection: Option<&project::Detection>) -> Result<(), DevError> {
-    let spec = cli.command.spec();
+    let spec = cli::invocation().spec();
     if spec.config == cli::ConfigNeed::Required {
         spec.require(require_detection(detection)?.project)?;
     } else if let Some(detection) = detection {
@@ -728,7 +738,7 @@ fn run(cli: Cli, detection: Option<&project::Detection>) -> Result<(), DevError>
         cli::LockPolicy::Blocking | cli::LockPolicy::NonBlocking => {
             let ctx = lockfile::LockContext {
                 project: project.map_or("brokkr", Project::name),
-                command: cli.command.id(),
+                command: cli::invocation(),
                 project_root: state_root.expect("locking commands resolve a state root"),
                 build_root: detection.map(|d| &d.build_root)
                     .or_else(|| fallback_roots.as_ref().map(|roots| &roots.1))
@@ -769,7 +779,6 @@ fn run(cli: Cli, detection: Option<&project::Detection>) -> Result<(), DevError>
             id,
             command,
             project,
-            project_dir,
             failed,
             status,
             since,
@@ -781,7 +790,6 @@ fn run(cli: Cli, detection: Option<&project::Detection>) -> Result<(), DevError>
             id: *id,
             command: command.clone(),
             project: project.clone(),
-            project_dir: project_dir.clone(),
             failed: *failed,
             status: *status,
             since: since.clone(),
@@ -1685,7 +1693,6 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
                     &detection.project_root,
                     &detection.build_root,
                     &cmd,
-                    Some(&_lock),
                 )
             })
         }

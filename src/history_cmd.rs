@@ -1,6 +1,5 @@
 //! Implementation of the `history` command and best-effort history recording.
 
-use crate::config;
 use crate::error::DevError;
 use crate::git;
 use crate::history;
@@ -11,7 +10,6 @@ pub(crate) struct HistoryQuery {
     pub id: Option<i64>,
     pub command: Option<String>,
     pub project: Option<String>,
-    pub project_dir: Option<String>,
     pub failed: bool,
     pub status: Option<i32>,
     pub since: Option<String>,
@@ -33,7 +31,6 @@ pub(crate) fn cmd_history(q: HistoryQuery) -> Result<(), DevError> {
     let filter = history::HistoryFilter {
         command: q.command,
         project: q.project,
-        project_dir: q.project_dir,
         failed: q.failed,
         status: q.status,
         since: q.since,
@@ -66,12 +63,6 @@ pub(crate) fn record_history(argv: &[String], elapsed_ms: u64, exit_code: i32) {
             )))
         })?;
 
-        // Best-effort metadata collection. Each item can fail independently.
-        let hostname = config::hostname().unwrap_or_else(|_| "unknown".into());
-        let cwd = std::env::current_dir()
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|_| "unknown".into());
-
         // Try to detect project and git info - these are optional.
         let (project_name, commit_hash, dirty) = match project::detect() {
             // Git info describes the code under test, so collect it from the
@@ -96,11 +87,9 @@ pub(crate) fn record_history(argv: &[String], elapsed_ms: u64, exit_code: i32) {
 
         db.insert(&history::HistoryRow {
             project: project_name,
-            cwd,
             command,
             elapsed_ms: elapsed,
             exit_status: exit_code,
-            hostname,
             commit_hash,
             dirty,
             kernel,

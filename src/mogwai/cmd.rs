@@ -73,44 +73,35 @@ pub(crate) fn run(
         metadata: vec![],
     };
 
-    // The instrumented modes need their own runner, not just their own build.
-    // `run_external` measures a wall and stores nothing else, so a `--hotpath`
-    // run built with every right feature still records a row with no profile in
-    // it - the hotpath report is written to a file the child is told about, and
-    // something has to set that up and read it back.
-    if req.mode.profiled().is_some() {
-        let label = req
-            .mode
-            .profiled()
-            .map_or("", crate::measure::ProfiledMode::feature);
-        output::detail(&format!("mogwai {label}: {}", resolved.name));
-        if let Some(profiling) = req.mode.profiled() {
-            profiling.print_note();
-        }
-
-        ctx.harness.run_hotpath(&config, ctx.binary()?, |i, fifo| {
-            ctx.harness.capture_hotpath(
-                ctx.binary()?,
-                &argv,
-                req.project_root.as_path(),
-                &[],
-                &[],
-                fifo,
-                i,
-                None,
-            )
-        })?;
-        return Ok(());
-    }
-
-    output::bench_msg(&format!("mogwai {}: {} run(s)", resolved.name, config.runs));
-
-    // External wall-clock, with the stderr counters that ride along for free.
-    // Phase decomposition is the sidecar's job, not a second definition of
-    // what `elapsed` means: markers keep the excluded setup visible as its own
-    // phase instead of deleting it from the record.
-    ctx.harness
-        .run_external(&config, ctx.binary()?, &argv, req.project_root.as_path())?;
+    crate::measure_dispatch::dispatch_profiled(
+        req,
+        "mogwai",
+        &resolved.name,
+        || {
+            // The profiling runner writes and reads the hotpath report as
+            // well as timing the child.
+            ctx.harness.run_hotpath(&config, ctx.binary()?, |i, fifo| {
+                ctx.harness.capture_hotpath(
+                    ctx.binary()?,
+                    &argv,
+                    req.project_root.as_path(),
+                    &[],
+                    &[],
+                    fifo,
+                    i,
+                    None,
+                )
+            })
+        },
+        || {
+            // External wall-clock, with the stderr counters that ride along
+            // for free. Markers keep the excluded setup visible as its own
+            // phase instead of deleting it from the record.
+            output::bench_msg(&format!("mogwai {}: {} run(s)", resolved.name, config.runs));
+            ctx.harness
+                .run_external(&config, ctx.binary()?, &argv, req.project_root.as_path())
+        },
+    )?;
 
     Ok(())
 }

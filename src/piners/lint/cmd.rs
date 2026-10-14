@@ -161,27 +161,17 @@ pub fn lint_corpus(
 
     // A captured subprocess run, PID-tracked so `brokkr kill` reaches it, and
     // killed at `deadline` (reported as an error naming the limit).
-    let run =
-        |program: &str, argv: &[&str], deadline: Duration| -> Result<CapturedOutput, DevError> {
-            let r = output::run_captured_with_env_and_deadline(
-                program,
-                argv,
-                project_root,
-                &[],
-                deadline,
-                Some(&|pid| _lock.set_child_pid(pid)),
-                crate::shutdown::ChildIsolation::Inherit,
-            );
-            _lock.clear_child_pid();
-            let r = r?;
-            if r.killed_on_deadline() {
-                return Err(DevError::Verify(format!(
-                    "{program} did not finish within {}s and was killed",
-                    deadline.as_secs()
-                )));
-            }
-            Ok(r.captured)
-        };
+    let run = |program: &str, argv: &[&str], deadline: Duration| {
+        run_captured_checked(
+            program,
+            argv,
+            project_root,
+            deadline,
+            Some(&|pid| _lock.set_child_pid(pid)),
+            Some(&|| _lock.clear_child_pid()),
+            crate::shutdown::ChildIsolation::Inherit,
+        )
+    };
 
     let scope = validators::Scope {
         include_warnings: args.warnings,
@@ -512,6 +502,40 @@ fn diag_to_tv(key: &lint::DiagKey) -> TvDiag {
     }
 }
 
+/// Capture one lint validator call and turn a deadline kill into a tool error.
+/// The command supplies its per-call limit; keeping the enforcement here lets
+/// command tests exercise a short limit without waiting for production policy.
+fn run_captured_checked(
+    program: &str,
+    argv: &[&str],
+    cwd: &Path,
+    deadline: Duration,
+    on_spawn: Option<&dyn Fn(u32)>,
+    on_done: Option<&dyn Fn()>,
+    isolation: crate::shutdown::ChildIsolation<'_>,
+) -> Result<CapturedOutput, DevError> {
+    let result = output::run_captured_with_env_and_deadline(
+        program,
+        argv,
+        cwd,
+        &[],
+        deadline,
+        on_spawn,
+        isolation,
+    );
+    if let Some(done) = on_done {
+        done();
+    }
+    let result = result?;
+    if result.killed_on_deadline() {
+        return Err(DevError::Verify(format!(
+            "{program} did not finish within {}s and was killed",
+            deadline.as_secs()
+        )));
+    }
+    Ok(result.captured)
+}
+
 /// Edit the `lints.toml` text the run loaded: let `apply` change the fields
 /// this writer owns on a copy of the loaded pins, render that into
 /// [`LintRegistry::lints_text`] (preserving comments), and replace the file
@@ -765,5 +789,26 @@ mod tests {
         );
         assert_eq!(reg.lints_text, LOADED);
         assert!(reg.pins["a"].expected.is_none());
+    }
+
+    #[test]
+    fn validator_deadline_kills_the_child_and_returns_a_tool_error() {
+        let result = run_captured_checked(
+            "/bin/sleep",
+            &["30"],
+            Path::new("."),
+            Duration::from_millis(250),
+            None,
+            None,
+            crate::shutdown::ChildIsolation::Inherit,
+        );
+        let err = match result {
+            Ok(_) => panic!("validator unexpectedly outlived its deadline"),
+            Err(err) => err,
+        };
+        assert!(
+            matches!(&err, DevError::Verify(message) if message.contains("was killed")),
+            "{err:?}"
+        );
     }
 }

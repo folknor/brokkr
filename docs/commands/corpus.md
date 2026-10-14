@@ -724,7 +724,9 @@ written) is still recorded under its id (`result` `interrupted`, `fail` or
 `error`) and keeps its dir. Only a run killed outright (SIGKILL, a crash) or
 whose ingest itself failed leaves a dir with no row - which keeps its number
 taken until `brokkr clean` removes it. Clean removes the `run-*/` dirs but
-spares `runs.db`.
+spares `runs.db`. Each ingest keeps a fixed number of the newest run IDs in
+that database (`RUN_RETENTION_LIMIT` in `src/piners/corpus_db/ingest.rs`) and
+prunes older runs together with their disposition and diagnostic rows.
 
 ## See also
 

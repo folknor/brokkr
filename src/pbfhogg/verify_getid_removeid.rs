@@ -34,6 +34,9 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, direct_io: bool) -> Result<Findi
                 .into(),
         ));
     }
+    // Verification commands have no result row; keep the dataset-dependent
+    // hit counts in the verification transcript instead of treating the
+    // fixed ID list itself as evidence that any IDs were selected.
     verify_msg(&format!(
         "  fixed IDs selected: {} nodes, {} ways, {} relations",
         selected.nodes, selected.ways, selected.relations

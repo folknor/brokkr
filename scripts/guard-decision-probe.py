@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Exercise brokkr-rustc-guard's admission paths against a scratch HOME.
+"""Exercise brokkr-rustc-guard's admission paths against a project-local scratch HOME.
 
 The guard resolves both lock files under `$HOME/.brokkr`, so pointing HOME at a
-temporary directory lets us hold the exclusive lock and publish authorization
-records by hand, without touching the real lock or needing a live brokkr.
+temporary directory inside this checkout's `.brokkr` lets us hold the exclusive
+lock and publish authorization records by hand, without touching the real lock
+or needing a live brokkr. The probe never uses the system temporary directory.
 
 Covers every path except the admitted one: matching the published hash requires
 computing xxh3_128, which is what the guard itself does, so asserting it here
@@ -25,12 +26,27 @@ guard = sys.argv[1] if len(sys.argv) > 1 else str(
     pathlib.Path.home() / ".cargo" / "bin" / "brokkr-rustc-guard"
 )
 real = "/usr/bin/true"
+project_state = pathlib.Path(__file__).resolve().parents[1] / ".brokkr"
+system_tmp = pathlib.Path("/tmp").resolve()
+
+
+def scratch_home():
+    resolved_state = project_state.resolve()
+    try:
+        resolved_state.relative_to(system_tmp)
+    except ValueError:
+        pass
+    else:
+        raise SystemExit("project state resolves inside /tmp; refusing to write there")
+
+    project_state.mkdir(parents=True, exist_ok=True)
+    return tempfile.TemporaryDirectory(prefix="guard-decision-", dir=project_state)
 
 failures = []
 
 
 def run(label, *, auth, hold_lock, env_extra, expect_pass, rustc_args=()):
-    with tempfile.TemporaryDirectory() as home:
+    with scratch_home() as home:
         bd = pathlib.Path(home) / ".brokkr"
         bd.mkdir()
         lock = bd / "brokkr.lock"

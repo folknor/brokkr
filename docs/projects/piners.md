@@ -196,12 +196,13 @@ dispositions arrive in completion order.
 ## The corpus run store (`runs.db`)
 
 Every run's harness NDJSON is ingested into a per-project SQLite store at
-`.brokkr/piners/corpus/runs.db` (gitignore it - unbounded, regenerable run
-history). One transaction after the harness exits: a `run` row plus child
-`disposition` / `trade_diff` / `gate_miss` / `dense_na_site` rows. Append-only
-(the bundled SQLite enforces the FK clauses; ingest writes the `run` row
-first), per-db `PRAGMA user_version` migrations, WAL - mirroring `src/db`
-(`ResultsDb`). Code: `src/piners/corpus_db/`.
+`.brokkr/piners/corpus/runs.db` (gitignore it). One transaction after the
+harness exits writes a `run` row plus child `disposition` / `trade_diff` /
+`gate_miss` / `dense_na_site` rows. Each ingest retains a fixed number of the
+newest run IDs (`RUN_RETENTION_LIMIT`) and removes older run rows with their
+children, bounding retained history.
+The store has per-db `PRAGMA user_version` migrations and WAL, mirroring
+`src/db` (`ResultsDb`). Code: `src/piners/corpus_db/`.
 
 - `run` - `run_id` (the number the run's artefact dir carries - see
   `docs/commands/corpus.md`), `started_at` (UTC, `YYYY-MM-DD HH:MM:SS`,

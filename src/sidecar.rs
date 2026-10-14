@@ -66,13 +66,26 @@ pub(crate) struct MeasurementTunables {
     pub sidecar_backup_copies: usize,
     pub stderr_preview_chars: usize,
     pub hotpath_report_filename: &'static str,
+    /// Maximum profile samples retained across every run in one measurement.
+    pub max_samples: usize,
+    /// Maximum phase markers retained across every run in one measurement.
+    pub max_markers: usize,
+    /// Maximum application counters retained across every run in one measurement.
+    pub max_counters: usize,
+    /// Maximum bytes retained from one FIFO protocol line.
+    pub max_fifo_line_bytes: usize,
 }
 
 pub(crate) const DEFAULT_MEASUREMENT_TUNABLES: MeasurementTunables = MeasurementTunables {
     sample_interval: Duration::from_micros(100_000),
+    // A bounded recovery history: the current snapshot plus two prior copies.
     sidecar_backup_copies: 3,
     stderr_preview_chars: 500,
     hotpath_report_filename: "hotpath-report.json",
+    max_samples: 100_000,
+    max_markers: 10_000,
+    max_counters: 20_000,
+    max_fifo_line_bytes: 1_024,
 };
 
 /// Compute a percentile from a sorted sample using linear interpolation.
@@ -222,7 +235,7 @@ pub(crate) struct TimelineSegment {
 ///
 /// The FIFO protocol remains a sequence of point markers. This model exposes
 /// the documented projections over that sequence: adjacent-marker segments,
-/// `_START`/`_END` spans, phase-name lookup, and stop-marker resolution.
+/// `_START`/`_END` spans, and phase-name lookup.
 pub(crate) struct Timeline<'a> {
     markers: &'a [Marker],
     final_us: i64,
@@ -237,15 +250,6 @@ impl<'a> Timeline<'a> {
             markers,
             final_us: samples.last().map_or(0, |s| s.timestamp_us + 1),
             first_sample_us: samples.first().map(|s| s.timestamp_us),
-        }
-    }
-
-    /// Build a timeline over a fresh marker batch while a child is running.
-    fn marker_batch(markers: &'a [Marker]) -> Self {
-        Self {
-            markers,
-            final_us: 0,
-            first_sample_us: None,
         }
     }
 
@@ -351,17 +355,6 @@ impl<'a> Timeline<'a> {
             })
     }
 
-    /// Resolve the parsed stop spelling against this marker batch.
-    fn stop_marker(&self, spec: &StopSpec) -> Option<&'a Marker> {
-        let first_named = |name: &str| self.markers.iter().find(|marker| marker.name == name);
-        match spec {
-            StopSpec::Exact(name) | StopSpec::SpanEnd(name) => first_named(name),
-            StopSpec::Lenient { exact, span_end } => {
-                first_named(exact).or_else(|| first_named(span_end))
-            }
-        }
-    }
-
     pub(crate) fn marker_names(&self) -> Vec<&str> {
         self.markers
             .iter()
@@ -385,6 +378,9 @@ pub struct SidecarSummary {
     pub sample_count: i32,
     pub marker_count: i32,
     pub wall_time_ms: i64,
+    /// At least one sample, marker, counter, or FIFO record was omitted after
+    /// a configured storage limit was reached.
+    pub capture_truncated: bool,
 }
 
 /// Complete sidecar data for one run of a benchmark.
@@ -683,6 +679,11 @@ pub(crate) fn read_status(holder_pid: u32) -> Option<String> {
 pub(crate) struct SidecarFifo {
     path: PathBuf,
     reader: BufReader<File>,
+    pending_line: Vec<u8>,
+    pending_line_too_long: bool,
+    samples_remaining: usize,
+    markers_remaining: usize,
+    counters_remaining: usize,
     /// Resolved once at creation; see [`status_path`].
     status: Option<PathBuf>,
 }
@@ -692,7 +693,10 @@ impl SidecarFifo {
     ///
     /// Must be called BEFORE spawning the child so the reader exists when
     /// the child tries to open the write end with `O_NONBLOCK`.
-    pub(crate) fn create(scratch_dir: &Path) -> Result<Self, DevError> {
+    pub(crate) fn create(
+        scratch_dir: &Path,
+        tunables: &MeasurementTunables,
+    ) -> Result<Self, DevError> {
         let pid = std::process::id();
         let path = scratch_dir.join(format!(".sidecar-{pid}.fifo"));
 
@@ -722,6 +726,11 @@ impl SidecarFifo {
         Ok(Self {
             path,
             reader: BufReader::new(file),
+            pending_line: Vec::with_capacity(tunables.max_fifo_line_bytes.min(256)),
+            pending_line_too_long: false,
+            samples_remaining: tunables.max_samples,
+            markers_remaining: tunables.max_markers,
+            counters_remaining: tunables.max_counters,
             status,
         })
     }
@@ -743,6 +752,8 @@ impl SidecarFifo {
     pub(crate) fn reopen(&mut self) -> Result<(), DevError> {
         let file = Self::open_read_end(&self.path)?;
         self.reader = BufReader::new(file);
+        self.pending_line.clear();
+        self.pending_line_too_long = false;
         Ok(())
     }
 
@@ -772,15 +783,26 @@ impl SidecarFifo {
         markers: &mut Vec<Marker>,
         next_marker_idx: &mut i32,
         counters: &mut Vec<Counter>,
-    ) {
+        stop_spec: Option<&StopSpec>,
+        max_line_bytes: usize,
+        capture_truncated: &mut bool,
+    ) -> Option<String> {
         let mut rejected_lines = 0usize;
         let mut last_name: Option<String> = None;
-        let mut line = String::new();
+        let mut preferred_stop: Option<String> = None;
+        let mut fallback_stop: Option<String> = None;
         loop {
-            line.clear();
-            match self.reader.read_line(&mut line) {
-                Ok(0) => break, // EOF
-                Ok(_) => {
+            match self.read_bounded_line(max_line_bytes) {
+                Ok(BoundedLine::Pending) => break,
+                Ok(BoundedLine::TooLong) => {
+                    rejected_lines += 1;
+                    *capture_truncated = true;
+                }
+                Ok(BoundedLine::Line(line)) => {
+                    let Ok(line) = std::str::from_utf8(&line) else {
+                        rejected_lines += 1;
+                        continue;
+                    };
                     let trimmed = line.trim();
                     if let Some((ts_str, payload)) = trimmed.split_once(' ') {
                         let Ok(ts) = ts_str.parse::<i64>() else {
@@ -792,23 +814,44 @@ impl SidecarFifo {
                             if let Some((name, val_str)) = counter_body.split_once('=')
                                 && let Ok(val) = val_str.parse::<i64>()
                             {
-                                counters.push(Counter {
-                                    timestamp_us: ts,
-                                    name: name.to_owned(),
-                                    value: val,
-                                });
+                                if self.counters_remaining > 0 {
+                                    counters.push(Counter {
+                                        timestamp_us: ts,
+                                        name: name.to_owned(),
+                                        value: val,
+                                    });
+                                    self.counters_remaining -= 1;
+                                } else {
+                                    *capture_truncated = true;
+                                }
                             } else {
                                 rejected_lines += 1;
                             }
                         } else {
                             // Phase marker
                             last_name = Some(payload.to_owned());
-                            markers.push(Marker {
-                                marker_idx: *next_marker_idx,
-                                timestamp_us: ts,
-                                name: payload.to_owned(),
-                            });
-                            *next_marker_idx += 1;
+                            if self.markers_remaining > 0 {
+                                markers.push(Marker {
+                                    marker_idx: *next_marker_idx,
+                                    timestamp_us: ts,
+                                    name: payload.to_owned(),
+                                });
+                                self.markers_remaining -= 1;
+                            } else {
+                                *capture_truncated = true;
+                            }
+                            *next_marker_idx = (*next_marker_idx).saturating_add(1);
+                            if let Some(spec) = stop_spec {
+                                match spec.match_priority(payload) {
+                                    Some(true) if preferred_stop.is_none() => {
+                                        preferred_stop = Some(payload.to_owned());
+                                    }
+                                    Some(false) if fallback_stop.is_none() => {
+                                        fallback_stop = Some(payload.to_owned());
+                                    }
+                                    _ => {}
+                                }
+                            }
                         }
                     } else if !trimmed.is_empty() {
                         rejected_lines += 1;
@@ -826,6 +869,73 @@ impl SidecarFifo {
         if let Some(name) = last_name {
             self.update_status(&name);
         }
+        preferred_stop.or(fallback_stop)
+    }
+
+    /// Read one FIFO line without allowing a child to make the sidecar's
+    /// temporary line buffer grow beyond `max_bytes`. An overlong record is
+    /// consumed through its newline and reported as `TooLong`.
+    fn read_bounded_line(&mut self, max_bytes: usize) -> std::io::Result<BoundedLine> {
+        loop {
+            let next = {
+                let available = self.reader.fill_buf()?;
+                if available.is_empty() {
+                    None
+                } else {
+                    let line_end = available.iter().position(|byte| *byte == b'\n');
+                    let consume = line_end.map_or(available.len(), |index| index + 1);
+                    let body_len = line_end.unwrap_or(consume);
+                    let copy_len = if self.pending_line_too_long {
+                        0
+                    } else {
+                        body_len.min(max_bytes.saturating_sub(self.pending_line.len()))
+                    };
+                    Some((consume, line_end.is_some(), body_len, copy_len))
+                }
+            };
+            let Some((consume, line_end, body_len, copy_len)) = next else {
+                return Ok(self.finish_pending_line(false));
+            };
+            if copy_len > 0 {
+                // The buffer borrow from `fill_buf` ends before `consume`.
+                let available = self.reader.fill_buf()?;
+                self.pending_line.extend_from_slice(&available[..copy_len]);
+            }
+            let line_bytes_before = self.pending_line.len().saturating_sub(copy_len);
+            if !self.pending_line_too_long && body_len > max_bytes.saturating_sub(line_bytes_before)
+            {
+                self.pending_line_too_long = true;
+                self.pending_line.clear();
+            }
+            self.reader.consume(consume);
+            if line_end {
+                return Ok(self.finish_pending_line(true));
+            }
+        }
+    }
+
+    fn finish_pending_line(&mut self, complete: bool) -> BoundedLine {
+        if self.pending_line_too_long {
+            self.pending_line_too_long = false;
+            self.pending_line.clear();
+            BoundedLine::TooLong
+        } else if self.pending_line.is_empty() {
+            if complete {
+                BoundedLine::Line(Vec::new())
+            } else {
+                BoundedLine::Pending
+            }
+        } else {
+            BoundedLine::Line(std::mem::take(&mut self.pending_line))
+        }
+    }
+
+    fn keep_sample(&mut self) -> bool {
+        if self.samples_remaining == 0 {
+            return false;
+        }
+        self.samples_remaining -= 1;
+        true
     }
 
     /// The FIFO path, for passing to child processes via environment variable.
@@ -834,6 +944,12 @@ impl SidecarFifo {
             .to_str()
             .ok_or_else(|| DevError::Config("FIFO path not UTF-8".into()))
     }
+}
+
+enum BoundedLine {
+    Pending,
+    TooLong,
+    Line(Vec<u8>),
 }
 
 impl Drop for SidecarFifo {
@@ -861,7 +977,7 @@ fn monotonic_ns() -> i64 {
 // ---------------------------------------------------------------------------
 
 /// A parsed `--stop` request. Resolve the spelling once before entering the
-/// sidecar loop, then compare each fresh marker batch against the stored names.
+/// sidecar loop, then compare each fresh FIFO drain against the requested name.
 enum StopSpec {
     /// An explicit marker name, such as `FOO_END`.
     Exact(String),
@@ -885,9 +1001,28 @@ impl StopSpec {
         }
     }
 
-    /// Return the actual marker name that matched in this fresh batch.
-    fn matching_marker(&self, timeline: &Timeline<'_>) -> Option<String> {
-        timeline.stop_marker(self).map(|marker| marker.name.clone())
+    /// Whether a marker name matches the preferred or fallback spelling.
+    /// Lenient requests prefer an exact marker over the `_END` fallback even
+    /// when the fallback arrived first in the same FIFO drain.
+    fn match_priority(&self, name: &str) -> Option<bool> {
+        match self {
+            Self::Exact(expected) | Self::SpanEnd(expected) => (name == expected).then_some(true),
+            Self::Lenient { exact, .. } if name == exact => Some(true),
+            Self::Lenient { span_end, .. } if name == span_end => Some(false),
+            Self::Lenient { .. } => None,
+        }
+    }
+}
+
+/// Say why the supervisor ended the child early, when it did.
+fn announce_ending(ending: &Ending) {
+    if let Ending::Deadline(limit) = ending {
+        console::sidecar_msg(&format!(
+            "child exceeded its {:.1}s deadline, killing it",
+            limit.as_secs_f64()
+        ));
+    } else if matches!(ending, Ending::Interrupted) {
+        console::sidecar_msg("shutdown requested, killing child");
     }
 }
 
@@ -919,6 +1054,7 @@ pub(crate) fn run_sidecar_with_deadline(
     let mut last_hwm = 0;
     let mut sample_idx = 0;
     let mut marker_idx = 0;
+    let mut capture_truncated = false;
     let requested_stop = stop_marker.unwrap_or_default().to_owned();
     let stop_spec = stop_marker.map(StopSpec::parse);
     let mut fired_stop_marker = None;
@@ -942,18 +1078,24 @@ pub(crate) fn run_sidecar_with_deadline(
             let elapsed_us =
                 i64::try_from(sampler.elapsed_since(start).as_micros()).unwrap_or(i64::MAX);
             if let Some(sample) = sampler.sample(pid, sample_idx, elapsed_us) {
+                sample_idx = sample_idx.saturating_add(1);
                 last_hwm = last_hwm.max(sample.vm_hwm_kb);
-                samples.push(sample);
-                sample_idx += 1;
+                if fifo.keep_sample() {
+                    samples.push(sample);
+                } else {
+                    capture_truncated = true;
+                }
             }
 
-            let marker_count_before = markers.len();
-            fifo.drain(&mut markers, &mut marker_idx, &mut counters);
-            let Some(spec) = &stop_spec else {
-                return None;
-            };
-            let timeline = Timeline::marker_batch(&markers[marker_count_before..]);
-            let matched = spec.matching_marker(&timeline)?;
+            let matched = fifo.drain(
+                &mut markers,
+                &mut marker_idx,
+                &mut counters,
+                stop_spec.as_ref(),
+                tunables.max_fifo_line_bytes,
+                &mut capture_truncated,
+            );
+            let matched = matched?;
             fired_stop_marker = Some(matched.clone());
             let display = if matched == requested_stop {
                 format!("stop marker \"{requested_stop}\" received, killing child")
@@ -965,15 +1107,20 @@ pub(crate) fn run_sidecar_with_deadline(
         },
     );
 
-    fifo.drain(&mut markers, &mut marker_idx, &mut counters);
-    if let Ending::Deadline(limit) = &run.ending {
-        console::sidecar_msg(&format!(
-            "child exceeded its {:.1}s deadline, killing it",
-            limit.as_secs_f64()
-        ));
-    } else if matches!(&run.ending, Ending::Interrupted) {
-        console::sidecar_msg("shutdown requested, killing child");
+    fifo.drain(
+        &mut markers,
+        &mut marker_idx,
+        &mut counters,
+        None,
+        tunables.max_fifo_line_bytes,
+        &mut capture_truncated,
+    );
+    if capture_truncated {
+        console::warn(
+            "sidecar profile reached a storage limit; later trajectory records were omitted",
+        );
     }
+    announce_ending(&run.ending);
 
     // The shared nearest-millisecond rule, so the sidecar summary agrees with
     // the results row's rounded wall.
@@ -985,6 +1132,9 @@ pub(crate) fn run_sidecar_with_deadline(
         markers.len(),
         counters.len(),
     ));
+
+    let sample_count = i32::try_from(samples.len()).unwrap_or(i32::MAX);
+    let marker_count = i32::try_from(markers.len()).unwrap_or(i32::MAX);
 
     SidecarRunResult {
         stdout: run.stdout,
@@ -998,9 +1148,10 @@ pub(crate) fn run_sidecar_with_deadline(
             ending: run.ending,
             summary: SidecarSummary {
                 vm_hwm_kb: last_hwm,
-                sample_count: sample_idx,
-                marker_count: marker_idx,
+                sample_count,
+                marker_count,
                 wall_time_ms,
+                capture_truncated,
             },
         },
     }

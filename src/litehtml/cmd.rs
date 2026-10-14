@@ -97,7 +97,8 @@ struct CaptureScript {
 }
 
 impl CaptureScript {
-    fn write() -> Result<Self, DevError> {
+    fn write(project_root: &Path) -> Result<Self, DevError> {
+        ensure_pinned_chrome(project_root)?;
         Ok(Self {
             path: write_capture_script()?,
         })
@@ -265,7 +266,7 @@ fn run_fixture(ctx: &TestContext, fixture: &LitehtmlFixture) -> Result<FixtureOu
                  approved baseline measured against it - restore it, or rerun with --recapture",
             );
         }
-        let script = CaptureScript::write()?;
+        let script = CaptureScript::write(ctx.project_root)?;
         if let Err(e) = capture_fixture(fixture, ctx.config, ctx.project_root, &script.path) {
             return record_error(ctx, fixture, &e.to_string());
         }
@@ -557,7 +558,7 @@ pub(crate) fn test(
     // Materialize the capture script once if --recapture was requested; it
     // stays in the versioned per-user cache for later runs.
     let recapture_script = if litehtml.recapture {
-        Some(CaptureScript::write()?)
+        Some(CaptureScript::write(project_root)?)
     } else {
         None
     };
@@ -656,19 +657,6 @@ fn write_capture_script() -> Result<PathBuf, DevError> {
     Ok(script_path)
 }
 
-fn npm_global_root() -> Result<String, DevError> {
-    let out = std::process::Command::new("npm")
-        .args(["root", "-g"])
-        .output()
-        .map_err(|e| DevError::Verify(format!("cannot run `npm root -g`: {e}")))?;
-
-    if !out.status.success() {
-        return Err(DevError::Verify("npm root -g failed".into()));
-    }
-
-    Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
-}
-
 fn capture_fixture(
     fixture: &LitehtmlFixture,
     config: &LitehtmlConfig,
@@ -692,18 +680,23 @@ fn capture_fixture(
     let chrome_png = fixture_dir.join("chrome.png");
     let chrome_json = fixture_dir.join("chrome.json");
 
-    let node_path = npm_global_root()?;
     let script_str = capture_script.display().to_string();
     let html_str = fixture_html.display().to_string();
     let png_str = chrome_png.display().to_string();
     let json_str = chrome_json.display().to_string();
     let vp_str = viewport.to_string();
+    let Some(cache_dir) = capture_script.parent() else {
+        return Err(DevError::Internal(
+            "capture script has no parent directory".into(),
+        ));
+    };
+    let browser_cache = cache_dir.join("puppeteer").display().to_string();
 
     let captured = output::run_captured_with_env(
         "node",
         &[&script_str, &html_str, &png_str, &json_str, &vp_str],
         project_root,
-        &[("NODE_PATH", &node_path)],
+        &[("PUPPETEER_CACHE_DIR", &browser_cache)],
     )?;
 
     if !captured.success() {
@@ -714,7 +707,12 @@ fn capture_fixture(
             output::litehtml_msg(
                 "  puppeteer's pinned Chrome is not installed (a puppeteer bump changes the pinned build)",
             );
-            output::litehtml_msg("  install it with: npx puppeteer browsers install chrome");
+            if let Some(cache_dir) = capture_script.parent() {
+                output::litehtml_msg(&format!(
+                    "  from {}, run `PUPPETEER_CACHE_DIR=puppeteer pnpm exec puppeteer browsers install chrome`",
+                    cache_dir.display()
+                ));
+            }
         }
         return Err(DevError::Verify(format!(
             "Chrome capture failed for {}: {stderr}",
@@ -759,7 +757,12 @@ pub(crate) fn approve(
     // and a missing element score would disable the element ratchet for good.
     let (pixel_pct, element_pct) = approval_scores(&fixture.id, &result)?;
     let run = db.run_summary(&result.run_id)?;
-    engine::validate_approval_origin("litehtml", &result.run_id, run.as_ref(), git_info.commit.as_str())?;
+    engine::validate_approval_origin(
+        "litehtml",
+        &result.run_id,
+        run.as_ref(),
+        git_info.commit.as_str(),
+    )?;
 
     db.set_approval(
         &fixture.id,
@@ -872,10 +875,10 @@ const PREPARE_JS: &str = include_str!("../../scripts/litehtml-prepare/prepare.js
 const PREPARE_PACKAGE_JSON: &str = include_str!("../../scripts/litehtml-prepare/package.json");
 const PREPARE_PNPM_LOCK: &str = include_str!("../../scripts/litehtml-prepare/pnpm-lock.yaml");
 
-/// Wall bound on the one-time `pnpm install` of the prepare dependencies. A
-/// frozen install of three small packages takes seconds; this only stops a
-/// hung registry from stalling the command forever.
+/// Wall bound on installing the bundled scripts' package dependencies.
 const PNPM_INSTALL_DEADLINE: std::time::Duration = std::time::Duration::from_secs(600);
+/// Wall bound on downloading Puppeteer's pinned Chrome build.
+const PUPPETEER_INSTALL_DEADLINE: std::time::Duration = std::time::Duration::from_secs(600);
 
 /// `$XDG_CACHE_HOME/brokkr/litehtml-prepare`: one subdirectory per bundled
 /// script version. Regenerable - a swept cache costs one reinstall.
@@ -937,9 +940,9 @@ fn write_cached_file(path: &Path, contents: &str) -> Result<(), DevError> {
     Ok(())
 }
 
-/// Ensure dependencies for the bundled prepare script are installed in the
-/// per-user cache, then return the script path.
-fn ensure_prepare_script(project_root: &Path) -> Result<PathBuf, DevError> {
+/// Ensure package dependencies for the bundled litehtml scripts are installed
+/// in the per-user cache, then return the prepare path.
+fn ensure_litehtml_scripts(project_root: &Path) -> Result<PathBuf, DevError> {
     let dir = runtime_scripts_dir()?;
     let script = dir.join("prepare.js");
     let node_modules = dir.join("node_modules");
@@ -963,13 +966,13 @@ fn ensure_prepare_script(project_root: &Path) -> Result<PathBuf, DevError> {
         return Ok(script);
     }
 
-    output::litehtml_msg("installing prepare dependencies...");
+    output::litehtml_msg("installing litehtml script dependencies...");
     let dir_str = dir.display().to_string();
     let run = output::run_captured_with_env_and_deadline(
         "pnpm",
         &["install", "--frozen-lockfile", "--dir", &dir_str],
         project_root,
-        &[],
+        &[("PUPPETEER_SKIP_DOWNLOAD", "true")],
         PNPM_INSTALL_DEADLINE,
         None,
         crate::shutdown::ChildIsolation::Inherit,
@@ -987,10 +990,72 @@ fn ensure_prepare_script(project_root: &Path) -> Result<PathBuf, DevError> {
             "pnpm install failed in {dir_str}: {why}"
         )));
     }
+
     crate::atomic_write::replace(&ready, b"ready\n")?;
     drop(install_lock);
 
     Ok(script)
+}
+
+/// Install Puppeteer's pinned Chrome build into this version of the script
+/// cache. Preparation uses the same package cache without downloading Chrome.
+fn ensure_pinned_chrome(project_root: &Path) -> Result<(), DevError> {
+    let dir = runtime_scripts_dir()?;
+    ensure_litehtml_scripts(project_root)?;
+
+    let browser_cache = dir.join("puppeteer");
+    let ready = dir.join(".puppeteer-browser-ready");
+    let installed = || ready.is_file() && browser_cache.is_dir();
+    if installed() {
+        return Ok(());
+    }
+
+    let install_lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(dir.join(".browser-install.lock"))?;
+    install_lock.lock()?;
+    if installed() {
+        return Ok(());
+    }
+
+    output::litehtml_msg("installing Puppeteer's pinned Chrome build...");
+    let dir_str = dir.display().to_string();
+    let browser_cache_str = browser_cache.display().to_string();
+    let browser = output::run_captured_with_env_and_deadline(
+        "pnpm",
+        &[
+            "--dir",
+            &dir_str,
+            "exec",
+            "puppeteer",
+            "browsers",
+            "install",
+            "chrome",
+        ],
+        project_root,
+        &[("PUPPETEER_CACHE_DIR", &browser_cache_str)],
+        PUPPETEER_INSTALL_DEADLINE,
+        None,
+        crate::shutdown::ChildIsolation::Inherit,
+    )?;
+    if browser.killed_on_deadline() || !browser.captured.success() {
+        let why = if browser.killed_on_deadline() {
+            format!("timed out after {}s", PUPPETEER_INSTALL_DEADLINE.as_secs())
+        } else {
+            String::from_utf8_lossy(&browser.captured.stderr)
+                .trim()
+                .to_owned()
+        };
+        return Err(DevError::Verify(format!(
+            "installing litehtml's pinned Chrome failed in {dir_str}: {why}"
+        )));
+    }
+    crate::atomic_write::replace(&ready, b"ready\n")?;
+    drop(install_lock);
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1007,7 +1072,7 @@ pub(crate) fn prepare(
     project::require(project, Project::Litehtml, "prepare")?;
     let ratio = effective_fallback_aspect_ratio(litehtml_config)?;
 
-    let script = ensure_prepare_script(project_root)?;
+    let script = ensure_litehtml_scripts(project_root)?;
     let script_str = script.display().to_string();
 
     let input_path = project_root.join(input);
@@ -1087,7 +1152,7 @@ pub(crate) fn extract(
 ) -> Result<(), DevError> {
     project::require(project, Project::Litehtml, "html-extract")?;
 
-    let script = ensure_prepare_script(project_root)?;
+    let script = ensure_litehtml_scripts(project_root)?;
     let script_str = script.display().to_string();
 
     let input_path = project_root.join(input);
@@ -1152,7 +1217,7 @@ pub(crate) fn outline(
 ) -> Result<(), DevError> {
     project::require(project, Project::Litehtml, "outline")?;
 
-    let script = ensure_prepare_script(project_root)?;
+    let script = ensure_litehtml_scripts(project_root)?;
     let script_str = script.display().to_string();
 
     let input_path = project_root.join(input);

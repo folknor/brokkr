@@ -106,11 +106,10 @@ pub(crate) fn cmd_check(
     // complete claim - the policy and execution-accounting blocks.
     let mut run_report = RunReport::default();
     // Which sweeps each phase group actually started work on, for the
-    // trailer's `sweeps` list (S3-33): a sweep runs in clippy/rustdoc, in the
+    // trailer's `sweeps` list: a sweep runs in clippy/rustdoc, in the
     // test phase, or both, and the trailer lists the union. Two flags rather
     // than one because clippy runs first - folding it into the test flag
-    // would mark lanes an earlier test-phase fail-fast never reached, the
-    // exact bug S3-18 fixed. Policy coverage never reads this - it reads the
+    // would mark lanes an earlier test-phase fail-fast never reached. Policy coverage never reads this - it reads the
     // plan.
     let mut ledger = ReachLedger::new(&active_sweeps);
     // Doctests off unless `[test] doctests = true` (nextest/CI never runs them).
@@ -737,8 +736,8 @@ struct RunReport {
     continuation: Option<ContinuationReport>,
 }
 
-// Compatibility name used by `test_phase.rs`, which is owned by another
-// fixer in this wave. Its result is adapted to `PhaseFailure` at the caller.
+// The message `test_phase.rs` carries in `DevError::Build` when a lane's tests
+// failed. The caller adapts that result to `PhaseFailure`.
 const TESTS_FAILED: &str = "tests failed";
 
 /// The prepared profile and where its record lives on disk.
@@ -833,10 +832,8 @@ fn run_build_phases(
             )
             .err()
             .map(|error| match error {
-                // `test_phase.rs` is owned by the test-execution fixer in this
-                // wave. Adapt its legacy result at this boundary; the producer
-                // can return `PhaseFailure` when that interface is in its
-                // owned files.
+                // The test phase reports red tests as a `DevError::Build`
+                // sentinel; adapt it to a printed failure at this boundary.
                 DevError::Build(message) if message == TESTS_FAILED => {
                     PhaseFailure::Printed(DevError::Reported(message))
                 }
@@ -1450,7 +1447,7 @@ fn active_sweeps_resolved(
 
 /// The certifies permission table governs CLI flags too: `-p` scopes the
 /// build, and a scoped green is not comparable to the full green (feature
-/// unification changes with the package set - the B41 hazard), so a
+/// unification changes with the package set), so a
 /// complete profile rejects it before anything compiles.
 fn reject_scoped_complete(
     claim: Claim,
@@ -1574,7 +1571,7 @@ mod ran_labels_tests {
 
     #[test]
     fn omits_sweeps_skipped_in_both_phases() {
-        // S3-33: profile `tier1` selects [default, ffi, live]; a `-p` scope
+        // Profile `tier1` selects [default, ffi, live]; a `-p` scope
         // rules ffi/live out of both clippy and the test phase, so only
         // `default` ran. The trailer must not list ffi/live as green.
         let sweeps = [sweep("default"), sweep("ffi"), sweep("live")];
@@ -1688,7 +1685,7 @@ mod complete_rejection_tests {
 
     #[test]
     fn complete_rejects_trailing_args() {
-        // S3-13: `--gate -- -- --skip expensive_` (or `-- --lib`) narrows the
+        // `--gate -- -- --skip expensive_` (or `-- --lib`) narrows the
         // real run but not the plan, so the skipped pairs would stay expected
         // with nothing running them. Rejected before anything compiles.
         let args = vec!["--".to_owned(), "--skip".to_owned(), "expensive_".to_owned()];

@@ -2,7 +2,7 @@
 //!
 //! One transaction per run (BEGIN -> insert `run` envelope ->
 //! `last_insert_rowid()` -> bulk-insert disposition / dense_na_site /
-//! trade_diff / gate_miss children -> COMMIT), mirroring
+//! trade_diff / gate_miss children -> prune history -> COMMIT), mirroring
 //! `src/db/write.rs::insert_inner`. `expected`/`gate_ok` come from the
 //! registry's pinned expectations and the gate's own verdict
 //! (`gate::evaluate`), never a second computation of it; `gate_miss` rows
@@ -20,6 +20,9 @@ use crate::error::DevError;
 use crate::piners::gate::GateDiff;
 use crate::piners::report::{HarnessReport, ProbeLine, TradeDiffLine};
 use crate::piners::run_model::RunVerdict;
+
+/// Keep the most recent corpus runs and their detail rows in `runs.db`.
+pub(crate) const RUN_RETENTION_LIMIT: i64 = 1_000;
 
 /// Execution context resolved before building/running the corpus harness.
 /// The same values are stored in dedicated run columns so comparisons do not
@@ -87,7 +90,11 @@ impl CorpusDb {
         gate_diffs: &[GateDiff],
     ) -> Result<i64, DevError> {
         self.conn().execute("BEGIN", [])?;
-        let result = record_inner(self.conn(), run, report, expected, gate_diffs);
+        let result =
+            record_inner(self.conn(), run, report, expected, gate_diffs).and_then(|run_id| {
+                prune_run_history(self.conn(), RUN_RETENTION_LIMIT)?;
+                Ok(run_id)
+            });
         match result {
             Ok(run_id) => {
                 self.conn().execute("COMMIT", [])?;
@@ -120,6 +127,24 @@ impl CorpusDb {
         }
         Ok(())
     }
+}
+
+/// Remove older runs and all of their detail rows within the ingest
+/// transaction. The store enforces foreign keys, so children are pruned first.
+fn prune_run_history(conn: &rusqlite::Connection, keep: i64) -> Result<(), DevError> {
+    for table in ["disposition", "dense_na_site", "trade_diff", "gate_miss"] {
+        let sql = format!(
+            "DELETE FROM {table} WHERE run_id IN \
+             (SELECT run_id FROM run ORDER BY run_id DESC LIMIT -1 OFFSET ?1)"
+        );
+        conn.execute(&sql, [keep])?;
+    }
+    conn.execute(
+        "DELETE FROM run WHERE run_id IN \
+         (SELECT run_id FROM run ORDER BY run_id DESC LIMIT -1 OFFSET ?1)",
+        [keep],
+    )?;
+    Ok(())
 }
 
 /// SQLite stores signed i64; harness counts are `u64`/`usize`. Clamp rather
@@ -576,5 +601,76 @@ mod tests {
         );
         assert_eq!(row.result, "fail");
         assert!(db.append_diagnosis(8, "x").is_err());
+    }
+
+    #[test]
+    fn run_retention_prunes_old_runs_and_every_child_table() {
+        let db = CorpusDb::open_in_memory().unwrap();
+        for id in 1..=4 {
+            let verdict = RunVerdict::Pass;
+            let run = RunRecord {
+                run_id: Some(id),
+                started_at: None,
+                commit_sha: None,
+                dirty: None,
+                selector: "{}",
+                context: None,
+                gated: true,
+                verdict: &verdict,
+                harness_exit_code: Some(0),
+                stderr: "",
+                wall_ms: None,
+                protocol_violations: Some(0),
+                run_error: None,
+            };
+            db.record_run(&run, &parse(b""), &BTreeMap::new(), &[])
+                .unwrap();
+        }
+
+        db.conn()
+            .execute(
+                "INSERT INTO disposition \
+                 (run_id, probe, disposition, gate_ok, raw_source, raw_json) \
+                 VALUES (1, 'p', 'accepted', 1, 'harness', '{}')",
+                [],
+            )
+            .unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO dense_na_site (run_id, probe, name, call_site, na_count) \
+                 VALUES (1, 'p', 'f', 'site', 1)",
+                [],
+            )
+            .unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO trade_diff \
+                 (run_id, probe, our_index, tv_index, our_entry_ts, our_exit_ts, \
+                  our_entry_price, our_exit_price, our_qty, our_pnl) \
+                 VALUES (1, 'p', 0, 0, 0, 0, 0, 0, 0, 0)",
+                [],
+            )
+            .unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO gate_miss (run_id, probe, expected, actual) \
+                 VALUES (1, 'p', 'accepted', NULL)",
+                [],
+            )
+            .unwrap();
+
+        prune_run_history(db.conn(), 2).unwrap();
+
+        let runs = db.recent_runs(10).unwrap();
+        assert_eq!(
+            runs.iter().map(|run| run.run_id).collect::<Vec<_>>(),
+            vec![4, 3]
+        );
+        assert!(db.run(1).unwrap().is_none());
+        for table in ["disposition", "dense_na_site", "trade_diff", "gate_miss"] {
+            let sql = format!("SELECT COUNT(*) FROM {table} WHERE run_id = 1");
+            let count: i64 = db.conn().query_row(&sql, [], |row| row.get(0)).unwrap();
+            assert_eq!(count, 0, "old {table} rows were retained");
+        }
     }
 }

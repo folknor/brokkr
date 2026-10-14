@@ -28,7 +28,100 @@ pub mod verify_renumber;
 pub mod verify_sort;
 pub mod verify_tags_filter;
 
+use std::fmt;
+use std::str::FromStr;
+
 use crate::error::DevError;
+
+/// Default compression list used by the `bench all` write preset.
+pub const DEFAULT_BENCH_WRITE_COMPRESSIONS: &str = "none,zlib:6,zstd:3";
+
+/// Default compression list used by the `bench all` merge preset.
+pub const DEFAULT_BENCH_MERGE_COMPRESSIONS: &str = "zlib,none";
+
+const DEFAULT_ZLIB_LEVEL: u8 = 6;
+const DEFAULT_ZSTD_LEVEL: u32 = 3;
+
+/// One validated compression choice accepted by pbfhogg.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Compression {
+    codec: CompressionCodec,
+    spelling: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CompressionCodec {
+    None,
+    Zlib(Option<u8>),
+    Zstd(Option<u32>),
+}
+
+impl Compression {
+    fn with_default_level(self) -> Self {
+        match self.codec {
+            CompressionCodec::Zlib(None) => Self {
+                codec: CompressionCodec::Zlib(Some(DEFAULT_ZLIB_LEVEL)),
+                spelling: format!("zlib:{DEFAULT_ZLIB_LEVEL}"),
+            },
+            CompressionCodec::Zstd(None) => Self {
+                codec: CompressionCodec::Zstd(Some(DEFAULT_ZSTD_LEVEL)),
+                spelling: format!("zstd:{DEFAULT_ZSTD_LEVEL}"),
+            },
+            _ => self,
+        }
+    }
+}
+
+impl FromStr for Compression {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "none" => Ok(Self {
+                codec: CompressionCodec::None,
+                spelling: value.to_owned(),
+            }),
+            "zlib" => Ok(Self {
+                codec: CompressionCodec::Zlib(None),
+                spelling: value.to_owned(),
+            }),
+            "zstd" => Ok(Self {
+                codec: CompressionCodec::Zstd(None),
+                spelling: value.to_owned(),
+            }),
+            value if value.starts_with("zlib:") => {
+                let level_text = &value["zlib:".len()..];
+                let level = level_text
+                    .parse::<u8>()
+                    .map_err(|_| format!("invalid compression level: {value}"))?;
+                if !(1..=9).contains(&level) {
+                    return Err(format!("zlib level {level} out of range, expected 1-9"));
+                }
+                Ok(Self {
+                    codec: CompressionCodec::Zlib(Some(level)),
+                    spelling: value.to_owned(),
+                })
+            }
+            value if value.starts_with("zstd:") => {
+                let level_text = &value["zstd:".len()..];
+                let level = level_text
+                    .parse::<u32>()
+                    .map_err(|_| format!("invalid compression level: {value}"))?;
+                Ok(Self {
+                    codec: CompressionCodec::Zstd(Some(level)),
+                    spelling: value.to_owned(),
+                })
+            }
+            _ => Err(format!("unknown compression: {value}")),
+        }
+    }
+}
+
+impl fmt::Display for Compression {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.spelling)
+    }
+}
 
 /// Parse a comma-separated compression list (e.g. "none,zlib,zstd:5").
 ///
@@ -38,35 +131,13 @@ pub fn parse_compressions(input: &str, add_default_levels: bool) -> Result<Vec<S
     let mut result = Vec::new();
     for token in input.split(',') {
         let trimmed = token.trim();
-        let label = match trimmed {
-            "none" => "none".to_owned(),
-            "zlib" if add_default_levels => "zlib:6".to_owned(),
-            "zstd" if add_default_levels => "zstd:3".to_owned(),
-            "zlib" | "zstd" => trimmed.to_owned(),
-            s if s.starts_with("zlib:") => {
-                let level = &s["zlib:".len()..];
-                let level = level.parse::<u8>().map_err(|_| {
-                    DevError::Config(format!("invalid compression level: {trimmed}"))
-                })?;
-                if !(1..=9).contains(&level) {
-                    return Err(DevError::Config(format!(
-                        "zlib level {level} out of range, expected 1-9"
-                    )));
-                }
-                trimmed.to_owned()
-            }
-            s if s.starts_with("zstd:") => {
-                let level = &s["zstd:".len()..];
-                level.parse::<u32>().map_err(|_| {
-                    DevError::Config(format!("invalid compression level: {trimmed}"))
-                })?;
-                trimmed.to_owned()
-            }
-            _ => {
-                return Err(DevError::Config(format!("unknown compression: {trimmed}")));
-            }
+        let compression = trimmed.parse::<Compression>().map_err(DevError::Config)?;
+        let compression = if add_default_levels {
+            compression.with_default_level()
+        } else {
+            compression
         };
-        result.push(label);
+        result.push(compression.to_string());
     }
     Ok(result)
 }

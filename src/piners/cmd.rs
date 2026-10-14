@@ -280,12 +280,8 @@ pub fn corpus(
     // so `brokkr kill` reaches the harness.
     let binary_str = built.binary.display().to_string();
     let manifest_str = manifest_path.display().to_string();
-    let artefact_str = artefacts.path().display().to_string();
-    let bin_dir_str = built.bin_dir.display().to_string();
-    let env_pairs: Vec<(&str, &str)> = vec![
-        ("BROKKR_HARNESS_ARTEFACT_DIR", &artefact_str),
-        ("BROKKR_TEST_BIN_DIR", &bin_dir_str),
-    ];
+    let harness_env = crate::ratatoskr::harness_env(artefacts.path(), &built.bin_dir);
+    let env_pairs = harness_env.as_pairs();
 
     let mut harness_argv: Vec<&str> = vec!["--manifest", &manifest_str];
     harness_argv.extend(context.harness_args.iter().map(String::as_str));
@@ -302,7 +298,7 @@ pub fn corpus(
     // buffer; integrity reconciliation and isolation use the same original
     // report after the harness exits.
     let launched = Instant::now();
-    let capture = match output::run_captured_with_env_and_deadline(
+    let capture = match capture_harness(
         &binary_str,
         &harness_argv,
         project_root,
@@ -510,7 +506,7 @@ pub fn corpus(
                 registry: &registry,
                 binary: &binary_str,
                 harness_args: &context.harness_args,
-                bin_dir: &bin_dir_str,
+                bin_dir: &built.bin_dir,
                 project_root,
                 lock: &lock,
                 launched,
@@ -661,7 +657,7 @@ struct AttemptEnv<'a> {
     registry: &'a Registry,
     binary: &'a str,
     harness_args: &'a [String],
-    bin_dir: &'a str,
+    bin_dir: &'a Path,
     project_root: &'a Path,
     lock: &'a LockGuard,
     /// When the original harness launched; the backstop counts from here.
@@ -701,11 +697,8 @@ impl AttemptEnv<'_> {
             return AttemptOutcome::Stop(StopReason::Setup(format!("{}: {e}", dir.display())));
         }
         let manifest_str = manifest_path.display().to_string();
-        let dir_str = dir.display().to_string();
-        let env: [(&str, &str); 2] = [
-            ("BROKKR_HARNESS_ARTEFACT_DIR", &dir_str),
-            ("BROKKR_TEST_BIN_DIR", self.bin_dir),
-        ];
+        let harness_env = crate::ratatoskr::harness_env(&dir, self.bin_dir);
+        let env = harness_env.as_pairs();
         let mut argv: Vec<&str> = vec!["--manifest", &manifest_str];
         argv.extend(self.harness_args.iter().map(String::as_str));
         let lock = self.lock;
@@ -911,6 +904,24 @@ impl<'a> Envelope<'a> {
     }
 }
 
+/// Run one harness attempt under its caller's wall-clock deadline.
+///
+/// Kept as the corpus command's boundary so its timeout policy can be tested
+/// with a short deadline without changing the production backstop.
+fn capture_harness(
+    program: &str,
+    argv: &[&str],
+    cwd: &Path,
+    env: &[(&str, &str)],
+    deadline: Duration,
+    on_spawn: Option<&dyn Fn(u32)>,
+    isolation: crate::shutdown::ChildIsolation<'_>,
+) -> Result<output::DeadlineCapture, DevError> {
+    output::run_captured_with_env_and_deadline(
+        program, argv, cwd, env, deadline, on_spawn, isolation,
+    )
+}
+
 /// The next run id: one past the highest of every stored run and every
 /// `run-N` dir on disk. Called under the lock, so no other corpus run can
 /// take the same number between this read and the dir's creation.
@@ -1088,6 +1099,26 @@ mod tests {
         store_run(&db_path, i64::MAX);
         let result = reserve_run_id(&db_path, &root.join("corpus"));
         assert!(matches!(result, Err(DevError::Database(_))), "{result:?}");
+    }
+
+    #[test]
+    fn harness_deadline_is_reported_as_the_backstop() {
+        let capture = capture_harness(
+            "/bin/sleep",
+            &["30"],
+            Path::new("."),
+            &[],
+            Duration::from_millis(250),
+            None,
+            crate::shutdown::ChildIsolation::Inherit,
+        )
+        .unwrap();
+
+        assert!(capture.killed_on_deadline());
+        assert_eq!(
+            HarnessEnd::from_ending(&capture.captured.ending),
+            HarnessEnd::Backstop
+        );
     }
 
     #[test]

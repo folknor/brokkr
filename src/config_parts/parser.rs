@@ -1983,9 +1983,8 @@ fn validate_complete_doctest_carriers(
         }
         let carries_doctests = profiles.get(name).is_some_and(|sweeps| {
             sweeps.iter().any(|declaration| {
-                crate::profile::PlannedSweep::resolve(declaration.clone(), false).is_ok_and(
-                    |sweep| crate::check_cmd::lane_runs_doctests(&sweep, config.doctests),
-                )
+                let sweep = crate::profile::PlannedSweep::resolve(declaration.clone(), false);
+                crate::check_cmd::lane_runs_doctests(&sweep, config.doctests)
             })
         });
         if !carries_doctests {

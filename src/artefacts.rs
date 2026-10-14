@@ -17,13 +17,11 @@
 //! - **Success** -> directory removed unless the caller asked to keep
 //!   artefacts (e.g. via the CLI `--keep-artefacts` flag).
 //!
-//! If neither finalizer is called (panic, early return) the `Drop` impl
-//! preserves the directory: losing diagnostics by default is the worst
-//! possible failure mode for a test harness, so the safe behaviour is
-//! "keep what we have."
-//!
-//! The API takes a generic parent path, so each project supplies its own
-//! `.brokkr/<project>` root.
+//! If neither finalizer is called (panic, early return) the directory stays:
+//! only [`ArtefactDir::finalize_success`] ever deletes, and dropping the
+//! handle does nothing. Losing diagnostics by default is the worst possible
+//! failure mode for a test harness, so the safe behaviour is "keep what we
+//! have."
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -61,9 +59,6 @@ fn emit_once(emitted: &AtomicBool, print: fn(&str)) {
 pub struct ArtefactDir {
     path: PathBuf,
     keep_on_success: bool,
-    /// `true` means no finalizer has run yet. Drop preserves in that
-    /// case; `finalize_success` / `finalize_failure` clear it.
-    armed: bool,
 }
 
 impl ArtefactDir {
@@ -127,7 +122,6 @@ impl ArtefactDir {
         Ok(Self {
             path: run_dir,
             keep_on_success,
-            armed: true,
         })
     }
 
@@ -140,10 +134,8 @@ impl ArtefactDir {
     ///
     /// Removes the directory unless the caller asked to keep artefacts
     /// at allocation time. Returns any I/O error from the removal so
-    /// the caller can surface it; the directory state is "armed=false"
-    /// regardless of whether removal succeeded.
-    pub fn finalize_success(mut self) -> Result<(), DevError> {
-        self.armed = false;
+    /// the caller can surface it.
+    pub fn finalize_success(self) -> Result<(), DevError> {
         if self.keep_on_success {
             return Ok(());
         }
@@ -155,17 +147,7 @@ impl ArtefactDir {
     }
 
     /// Mark the run as failed. The directory is preserved unconditionally.
-    pub fn finalize_failure(mut self) {
-        self.armed = false;
-    }
-}
-
-impl Drop for ArtefactDir {
-    fn drop(&mut self) {
-        // No finalizer ran (panic, early return, ?) - preserve. Losing
-        // diagnostics by default is the worst possible behaviour for a
-        // test-harness artefact dir.
-    }
+    pub fn finalize_failure(self) {}
 }
 
 fn validate_test_id(test_id: &str) -> Result<(), DevError> {

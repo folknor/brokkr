@@ -6,7 +6,6 @@ use crate::cli::{CorpusArchiveArgs, PmtilesCorpusCommand};
 use crate::config;
 use crate::context::{MeasurementSession, bootstrap, bootstrap_config};
 use crate::error::DevError;
-use crate::lockfile::LockGuard;
 use crate::measure::MeasureRequest;
 use crate::project::{self, Project};
 
@@ -292,9 +291,9 @@ where
 /// wraps this in [`operational`] with `corpus::INCOMPLETE_EXIT` (4), so any
 /// error that is not a verdict exits 4.
 ///
-/// `lock` is currently unused: the gate is read-only on the archive (check /
-/// render) or writes only into the committed corpus dir (bless / render-manifest
-/// / mutate output), neither of which touches tilegen scratch or the global lock.
+/// The caller holds the command lock for the duration; the gate itself takes
+/// no lock-scoped action - it reads the archive (check / render) or writes
+/// only into the committed corpus dir (bless / render-manifest / mutate output).
 #[allow(clippy::too_many_lines)]
 pub(crate) fn corpus(
     dev_config: &config::DevConfig,
@@ -302,7 +301,6 @@ pub(crate) fn corpus(
     project_root: &crate::project::ProjectRoot,
     build_root: &crate::project::BuildRoot,
     cmd: &PmtilesCorpusCommand,
-    _lock: Option<&LockGuard>,
 ) -> Result<(), DevError> {
     use super::corpus as gate;
 

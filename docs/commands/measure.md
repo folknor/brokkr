@@ -469,6 +469,17 @@ switches to fixed-width tables. Rendering lives in `src/sidecar_fmt.rs`.
   kernel OOM killer's preferred target (`src/oom.rs`) so a memory blow-up
   takes the benchmarked process, not the host.
 
+## Trajectory capture limits
+
+Samples, markers, counters, and FIFO records have explicit limits in
+`MeasurementTunables`. The sample, marker, and counter budgets apply across
+all iterations in one measurement, so a large `--bench N` request cannot
+multiply the retained trajectory without bound. Overlong FIFO records are
+discarded through their newline without growing the temporary line buffer.
+When any limit omits data, the run warns and stores a truncation flag beside
+that iteration's sidecar rows; querying an affected run with `brokkr sidecar`
+warns that the stored trajectory is incomplete.
+
 ## Sidecar backup & rotation
 
 After each stored run (while the bench lock is still held), `backup_sidecar`

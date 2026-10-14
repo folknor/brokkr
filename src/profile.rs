@@ -119,7 +119,7 @@ impl std::ops::Deref for PlannedSweep {
 }
 
 impl PlannedSweep {
-    pub fn resolve(declaration: SweepDecl, promotion_eligible: bool) -> Result<Self, DevError> {
+    pub fn resolve(declaration: SweepDecl, promotion_eligible: bool) -> Self {
         crate::check_cmd::resolve_planned_sweep(declaration, promotion_eligible)
     }
 
@@ -164,7 +164,7 @@ impl PlannedSweep {
 #[cfg(test)]
 impl From<SweepDecl> for PlannedSweep {
     fn from(declaration: SweepDecl) -> Self {
-        Self::resolve(declaration, false).expect("unification resolution does not fail")
+        Self::resolve(declaration, false)
     }
 }
 
@@ -1150,7 +1150,7 @@ mod tests {
     use crate::check_cmd::resolve_unification;
 
     fn plan_decl(declaration: SweepDecl) -> PlannedSweep {
-        PlannedSweep::resolve(declaration, false).unwrap()
+        PlannedSweep::resolve(declaration, false)
     }
 
     /// Parse the body of a fake `brokkr.toml`-shaped fragment into

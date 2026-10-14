@@ -45,7 +45,9 @@ impl Command {
                     command: PbfhoggCommand::Inspect {
                         mode: if tags {
                             InspectMode::Tags {
-                                type_filter: type_filter.as_deref().map(InspectTypeFilter::from_cli),
+                                type_filter: type_filter
+                                    .as_deref()
+                                    .map(InspectTypeFilter::from_cli),
                             }
                         } else if nodes {
                             InspectMode::Nodes

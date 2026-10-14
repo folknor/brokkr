@@ -389,8 +389,8 @@ fn clean_artifact_children(
     };
     let mut removed = 0usize;
     for entry in entries {
-        let entry =
-            entry.map_err(|error| clean_io_error("cannot read directory entry in", root, &error))?;
+        let entry = entry
+            .map_err(|error| clean_io_error("cannot read directory entry in", root, &error))?;
         let path = entry.path();
         let kind = entry
             .file_type()

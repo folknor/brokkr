@@ -960,9 +960,9 @@ mod parallel_lane_tests {
     fn promotion_pins_auto_to_the_workspace() {
         let mut parallel = bare_decl();
         parallel.lane_exec = crate::profile::LaneExec::Parallel { budget: 4 };
-        let promoted = resolve_planned_sweep(parallel.clone(), true).unwrap();
+        let promoted = resolve_planned_sweep(parallel.clone(), true);
         assert!(promoted.unification_args().iter().any(|a| a.contains("feature-unification")));
-        let ambient = resolve_planned_sweep(parallel, false).unwrap();
+        let ambient = resolve_planned_sweep(parallel, false);
         assert!(ambient.unification_args().is_empty());
     }
 

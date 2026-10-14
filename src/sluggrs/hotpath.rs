@@ -165,35 +165,32 @@ fn run(
 
     // Keep the child in the same tree as the built example. `--commit` may
     // make this a worktree distinct from the project root that stores results.
-    if req.mode.profiled().is_some() {
-        let label = req
-            .mode
-            .profiled()
-            .map_or("", crate::measure::ProfiledMode::feature);
-        output::detail(&format!("sluggrs {label}: {command_label}"));
-        if let Some(profiling) = req.mode.profiled() {
-            profiling.print_note();
-        }
-
-        ctx.harness.run_hotpath(&config, ctx.binary()?, |i, fifo| {
+    crate::measure_dispatch::dispatch_profiled(
+        req,
+        "sluggrs",
+        command_label,
+        || {
+            ctx.harness.run_hotpath(&config, ctx.binary()?, |i, fifo| {
+                ctx.harness
+                    .capture_hotpath(ctx.binary()?, &[], build_root, &[], &[], fifo, i, None)
+            })
+        },
+        || {
+            output::bench_msg(&format!("sluggrs {command_label}: {runs} run(s)"));
+            // The kv path, not the plain external one: sluggrs' examples
+            // self-report `elapsed_ms=` on stderr covering only the measured
+            // region. Brokkr's own wall would instead time the whole process,
+            // which here is dominated by device init, shader compilation and
+            // font loading - hundreds of milliseconds of setup around a
+            // single-digit millisecond measurement. That wall is nearly
+            // constant, so it does not just add noise, it hides the signal.
+            //
+            // The trade is that `elapsed_ms=` becomes mandatory on stderr: a run
+            // that omits it fails rather than being silently mistimed.
             ctx.harness
-                .capture_hotpath(ctx.binary()?, &[], build_root, &[], &[], fifo, i, None)
-        })?;
-    } else {
-        output::bench_msg(&format!("sluggrs {command_label}: {runs} run(s)"));
-        // The kv path, not the plain external one: sluggrs' examples
-        // self-report `elapsed_ms=` on stderr covering only the measured
-        // region. Brokkr's own wall would instead time the whole process,
-        // which here is dominated by device init, shader compilation and font
-        // loading - hundreds of milliseconds of setup around a single-digit
-        // millisecond measurement. That wall is nearly constant, so it does
-        // not just add noise, it hides the signal entirely.
-        //
-        // The trade is that `elapsed_ms=` becomes mandatory on stderr: a run
-        // that omits it fails rather than being silently mistimed.
-        ctx.harness
-            .run_external_with_kv(&config, ctx.binary()?, &[], build_root)?;
-    }
+                .run_external_with_kv(&config, ctx.binary()?, &[], build_root)
+        },
+    )?;
 
     Ok(())
 }

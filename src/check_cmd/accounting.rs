@@ -749,7 +749,7 @@ mod accounting_tests {
     /// switches cargo's doctest pass off; a direct lane never does.
     #[test]
     fn only_lanes_that_run_doctests_are_carriers() {
-        let planned = |declaration| PlannedSweep::resolve(declaration, false).unwrap();
+        let planned = |declaration| PlannedSweep::resolve(declaration, false);
         let serial = planned(SweepDecl { label: "serial".into(), ..SweepDecl::default() });
         assert!(lane_runs_doctests(&serial, true));
         assert!(!lane_runs_doctests(&serial, false));
@@ -829,16 +829,17 @@ mod accounting_tests {
     #[test]
     fn retention_keeps_only_the_newest_runs() {
         let name = |i: u32| format!("{}-{i}", 1_700_000_000_000_u64 + u64::from(i) * 60_000);
-        let few: Vec<String> = (0..u32::try_from(journal::ACCOUNTING_RUNS_KEPT).unwrap()).map(name).collect();
-        assert!(journal::runs_to_prune(&few, "none").is_empty());
+        let keep = 6;
+        let few: Vec<String> = (0..keep).map(|i| name(u32::try_from(i).unwrap())).collect();
+        assert!(journal::runs_to_prune(&few, "none", keep).is_empty());
         let many: Vec<String> = (0..25_u32).map(name).collect();
-        let pruned = journal::runs_to_prune(&many, "none");
-        assert_eq!(pruned.len(), 25 - journal::ACCOUNTING_RUNS_KEPT, "{pruned:?}");
+        let pruned = journal::runs_to_prune(&many, "none", keep);
+        assert_eq!(pruned.len(), 25 - keep, "{pruned:?}");
         // Newest first: what goes is the oldest.
-        assert!(pruned.iter().all(|p| many.iter().position(|m| m == p).unwrap() < 25 - journal::ACCOUNTING_RUNS_KEPT));
+        assert!(pruned.iter().all(|p| many.iter().position(|m| m == p).unwrap() < 25 - keep));
         // The run being opened is never removed.
         let opening = many[0].clone();
-        assert!(!journal::runs_to_prune(&many, &opening).contains(&opening));
+        assert!(!journal::runs_to_prune(&many, &opening, keep).contains(&opening));
         assert!(is_run_id("1700000000000-42"));
         for bad in ["", "-", "1-", "-1", "../x", "1-2/../3", "a-b", "1-2-3"] {
             assert!(!is_run_id(bad), "{bad}");

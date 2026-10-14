@@ -83,12 +83,6 @@ impl Project {
             | Self::Other(_) => None,
         }
     }
-
-    /// Whether this is one of the built-in projects with dedicated modules.
-    #[allow(dead_code)]
-    pub fn is_builtin(self) -> bool {
-        !matches!(self, Self::Other(_))
-    }
 }
 
 impl std::fmt::Display for Project {

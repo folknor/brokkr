@@ -7,7 +7,7 @@
 //
 // The unit of coverage is the pair - (build shape, resolution, binary, test) -
 // not the test name: a pass under one feature graph is not evidence about
-// another (the B41 argument), and two binaries of one package defining the
+// another (feature unification changes with the package set), and two binaries of one package defining the
 // same test path are two tests. Enumeration is ground truth, not
 // reimplementation: the universe is each binary's `--list --include-ignored`
 // with no filters, each lane's selection is `--list` under the lane's real
@@ -805,7 +805,7 @@ mod coverage_tests {
     use std::collections::BTreeSet;
 
     fn planned(declaration: SweepDecl) -> PlannedSweep {
-        PlannedSweep::resolve(declaration, false).unwrap()
+        PlannedSweep::resolve(declaration, false)
     }
 
     #[test]
@@ -1215,7 +1215,7 @@ mod coverage_tests {
 
     #[test]
     fn narrower_nested_pattern_is_not_starved() {
-        // The S3-16 bug: a broad `test_bar` entry declared before a narrower
+        // A broad `test_bar` entry declared before a narrower
         // `test_bar_roundtrip` used to absorb the roundtrip pair.
         let core = lib("core");
         let shapes = vec![ShapeCoverage {
@@ -1268,7 +1268,7 @@ mod coverage_tests {
         assert_eq!(report.orphans, vec!["sim/sim-common/common/b"]);
     }
 
-    // The B51 collision shape, measured on nautilus-infrastructure: two
+    // The collision shape measured on nautilus-infrastructure: two
     // binaries in one package define the same test path. Two pairs, and one
     // package-scoped quarantine entry spans both.
     #[test]

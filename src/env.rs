@@ -9,7 +9,7 @@ use crate::output;
 use crate::project::Project;
 use crate::resolve::DatasetStatus;
 
-/// Environment information for the `dev env` subcommand.
+/// Environment information for `brokkr env`.
 pub struct EnvInfo {
     pub hostname: String,
     pub kernel: crate::host::kernel::KernelInfo,

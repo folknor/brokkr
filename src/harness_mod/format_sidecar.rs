@@ -151,10 +151,15 @@ fn sidecar_summary_line(
     };
     let counts = runs.get(best_run_idx).map_or_else(String::new, |d| {
         format!(
-            "{which}{} samples, {} markers, {} counters ",
+            "{which}{} samples, {} markers, {} counters{} ",
             d.samples.len(),
             d.markers.len(),
-            d.counters.len()
+            d.counters.len(),
+            if d.summary.capture_truncated {
+                " (capture limited)"
+            } else {
+                ""
+            }
         )
     });
     // A profile with a results row shares its id, which the `results.db` line

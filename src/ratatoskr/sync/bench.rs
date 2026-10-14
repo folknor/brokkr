@@ -49,7 +49,7 @@ use super::runner::{resolve_single, validate_sync_config};
 ///    metrics are stored as `meta.<key>` rows alongside the result;
 ///    sidecar data for the best iteration is what `brokkr sidecar
 ///    <uuid>` surfaces.
-/// 8. Tear down sæhrimnir with the standard 1.5s budget.
+/// 8. Tear down sæhrimnir with the standard graceful-shutdown budget.
 #[allow(clippy::too_many_lines)] // entry point: validate + bootstrap + build + spawn + dispatch
 pub fn run_sync_bench(req: &SyncBenchRequest<'_>) -> Result<(), DevError> {
     let cfg = req.ratatoskr;

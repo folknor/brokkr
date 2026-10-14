@@ -575,12 +575,7 @@ pub(super) fn run_pre_build(
     output::run_msg(&line);
 
     let stderr = String::from_utf8_lossy(&captured.stderr);
-    // The diagnostics come out of `filter_clippy`, but the command that
-    // produced them is `cargo build` - label it as such.
-    let mut filtered = cargo_filter::filter_clippy(&stderr);
-    if filtered.starts_with("cargo clippy:") {
-        filtered = filtered.replacen("cargo clippy:", "cargo build:", 1);
-    }
+    let filtered = cargo_filter::filter_cargo_build_failure(&stderr);
     if !filtered.is_empty() {
         output::error(&filtered);
     }
@@ -883,8 +878,7 @@ pub(super) fn matches_whole_suite(listed: &[String], name: &str) -> bool {
 /// artifacts in the same directory rather than each deriving its own. The
 /// profile-declared env is merged on top of the project's always-set vars, and
 /// wins on collision so a profile can shadow defaults when it really needs to
-/// (request 3 / B3: brokkr test was dropping this and a `default_profile` env
-/// didn't apply).
+/// (`brokkr test` once dropped this, so a `default_profile` env didn't apply).
 pub(super) fn sweep_env(
     sweep: &PlannedSweep,
     project: Project,
@@ -1038,15 +1032,14 @@ pub(super) fn resolve_sweeps(
 /// `--profile` override - resolution falls through to
 /// `[test] default_profile` -> `[[check]]` entries -> legacy
 /// `--all-features`), then drops the libtest filters that would
-/// fight with the user's `<name>` argument. `env` is preserved (B3:
-/// silent profile-env drop fixed by this consolidation).
-///
+/// fight with the user's `<name>` argument. `env` is preserved, so a
+/// profile's env reaches `brokkr test` exactly as it reaches `check`.
 pub(super) fn decide_sweeps(
     test_cfg: Option<&crate::config::TestConfig>,
     check_entries: &[crate::config::CheckEntry],
 ) -> Result<Vec<PlannedSweep>, DevError> {
     let sweeps = check_cmd::decide_active_sweeps(check_entries, test_cfg, None, &[], false)?;
-    sweeps
+    Ok(sweeps
         .into_iter()
         .map(|mut s| {
             // The user's `<name>` is the libtest filter. Profile-level
@@ -1063,7 +1056,7 @@ pub(super) fn decide_sweeps(
             // `check` never runs.
             PlannedSweep::resolve(s, false)
         })
-        .collect()
+        .collect())
 }
 
 /// Narrow the resolved sweep set to a single `--sweep <label>`. Passing

@@ -14,6 +14,7 @@ use crate::pbfhogg::{
     bench_allocator, bench_blob_filter, bench_commands, bench_extract, bench_merge,
     bench_planetiler, bench_read, bench_write,
 };
+use crate::project::BuildRoot;
 
 // ---------------------------------------------------------------------------
 // Public entry point
@@ -27,12 +28,13 @@ use crate::pbfhogg::{
 pub fn run(
     harness: &BenchHarness,
     paths: &ResolvedPaths,
-    project_root: &Path,
+    build_root: &BuildRoot,
     pbf_path: &Path,
     file_mb: f64,
     runs: usize,
     dataset: &str,
 ) -> Result<(), DevError> {
+    let project_root = build_root.as_path();
     // 1. command presets; extract runs later with the dataset's configured bbox.
     output::bench_msg("=== bench commands ===");
     let binary = build::cargo_build(
@@ -82,7 +84,8 @@ pub fn run(
 
     // 3. bench write -- sync + pipelined x default compressions
     output::bench_msg("=== bench write ===");
-    let write_compressions = super::parse_compressions("none,zlib,zstd", true)?;
+    let write_compressions =
+        super::parse_compressions(super::DEFAULT_BENCH_WRITE_COMPRESSIONS, false)?;
     bench_write::run(
         harness,
         &binary,
@@ -111,7 +114,7 @@ pub fn run(
     output::bench_msg("=== bench allocator ===");
     bench_allocator::run(harness, pbf_path, file_mb, runs, project_root)?;
 
-    run_baselines(harness, paths, project_root, pbf_path, file_mb, runs)
+    run_baselines(harness, paths, build_root, pbf_path, file_mb, runs)
 }
 
 /// Run benchmarks that depend on optional dataset config fields (osc, bbox, pbf_raw).
@@ -134,7 +137,8 @@ fn run_dataset_dependent(
 
     if let Some(osc_path) = osc_path {
         output::bench_msg("=== bench merge ===");
-        let merge_compressions = super::parse_compressions("zlib,none", false)?;
+        let merge_compressions =
+            super::parse_compressions(super::DEFAULT_BENCH_MERGE_COMPRESSIONS, false)?;
         bench_merge::run(
             harness,
             binary,
@@ -213,11 +217,12 @@ fn run_dataset_dependent(
 fn run_baselines(
     harness: &BenchHarness,
     paths: &ResolvedPaths,
-    project_root: &Path,
+    build_root: &BuildRoot,
     pbf_path: &Path,
     file_mb: f64,
     runs: usize,
 ) -> Result<(), DevError> {
+    let project_root = build_root.as_path();
     // osmpbf baseline -- build and run
     // Same shape as the suite's other optional sections: a header only when
     // the section runs, a one-line reason when it does not.
@@ -226,7 +231,7 @@ fn run_baselines(
         output::bench_msg("=== osmpbf baseline ===");
         skip_on_error(
             "osmpbf baseline",
-            run_osmpbf_baseline(harness, &manifest, pbf_path, file_mb, runs, project_root),
+            run_osmpbf_baseline(harness, &manifest, pbf_path, file_mb, runs, build_root),
         )?;
     } else {
         output::bench_msg("=== osmpbf baseline === (skipped, no bench/osmpbf-baseline project)");
@@ -295,12 +300,14 @@ fn run_osmpbf_baseline(
     pbf_path: &Path,
     file_mb: f64,
     runs: usize,
-    project_root: &Path,
+    build_root: &BuildRoot,
 ) -> Result<(), DevError> {
+    let project_root = build_root.as_path();
     let manifest_str = manifest.display().to_string();
 
-    // Build the baseline binary.
-    let captured = output::run_cargo(
+    // Build the baseline binary under the hold, with the worktree's isolated
+    // target dir when this is a `--commit` run.
+    let captured = build::run_cargo_for_root(
         &[
             "build",
             "--release",
@@ -308,9 +315,10 @@ fn run_osmpbf_baseline(
             &manifest_str,
             "--message-format=json",
         ],
-        project_root,
+        build_root,
         &[],
         None,
+        crate::shutdown::ChildIsolation::Inherit,
     )?;
 
     if !captured.success() {

@@ -49,7 +49,11 @@ pub(crate) fn run(req: &MeasureRequest, args: &CorpusArgs) -> Result<(), DevErro
                     .to_owned(),
             ));
         }
-        MeasureMode::Run => unreachable!("Run mode routes to the parity path in dispatch"),
+        MeasureMode::Run => {
+            return Err(DevError::Internal(
+                "unmeasured corpus runs route to the parity path, not the measured one".into(),
+            ));
+        }
     };
 
     let cfg = req.project_config.piners()?.clone();
@@ -113,8 +117,7 @@ pub(crate) fn run(req: &MeasureRequest, args: &CorpusArgs) -> Result<(), DevErro
 
     let binary_str = binary.display().to_string();
     let manifest_str = manifest_path.display().to_string();
-    let scratch_str = ctx.paths.scratch_dir.display().to_string();
-    let bin_dir_str = bin_dir.display().to_string();
+    let harness_env = crate::ratatoskr::harness_env(&ctx.paths.scratch_dir, bin_dir);
 
     output::detail(&format!(
         "corpus {} ({})",
@@ -151,10 +154,7 @@ pub(crate) fn run(req: &MeasureRequest, args: &CorpusArgs) -> Result<(), DevErro
         metadata,
     };
 
-    let env = [
-        ("BROKKR_HARNESS_ARTEFACT_DIR", scratch_str.as_str()),
-        ("BROKKR_TEST_BIN_DIR", bin_dir_str.as_str()),
-    ];
+    let env = harness_env.as_pairs();
     let project_root = req.project_root.as_path().to_path_buf();
     ctx.harness.run_hotpath(&config, binary, |i, fifo| {
         let mut iteration = ctx.harness.capture_hotpath(

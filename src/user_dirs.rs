@@ -31,11 +31,6 @@ pub(crate) fn test_runs_dir() -> Option<PathBuf> {
     brokkr_state_dir().map(|dir| dir.join("test-runs"))
 }
 
-/// The cargo config that carries the live hold's nextest environment.
-pub(crate) fn nextest_env() -> Option<PathBuf> {
-    brokkr_state_dir().map(|dir| dir.join("nextest-env.toml"))
-}
-
 /// Private state for isolated harness and rustdoc output.
 pub(crate) fn harness_dir() -> Option<PathBuf> {
     brokkr_state_dir().map(|dir| dir.join("harness"))

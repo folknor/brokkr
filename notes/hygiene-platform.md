@@ -15,7 +15,7 @@ Hygiene findings from the hunt for process control (lock, hold, guard, strays, s
 
 Reported by: every hunter (check-core, process-control, config-cli-bootstrap, measurement-storage, pbfhogg-nidhogg, ratatoskr, piners, small-benches).
 
-Residue: broader print/panic/indexing/expect denies and transient labels elsewhere in the tree remain.
+Residue: no broader print/panic/indexing/expect denies were added.
 
 ## PLT-004 - Output bypasses the output channel
 
@@ -48,31 +48,19 @@ Enforcement proposed: a prefix table with a width test; textlint bans on `\[warn
 
 Reported by: process-control, config-cli-bootstrap, ratatoskr, pbfhogg-nidhogg, convention-engines, elivagar.
 
-Residue: direct `Command` construction outside the choke point remains in `test_runner/procgroup.rs`, `ratatoskr/saehrimnir.rs`, nidhogg server/bench/client, `env.rs`, `gremlins.rs`, `litehtml/cmd.rs`, `tools.rs`, `worktree.rs`, `scope.rs`, `git.rs`, `git/tree_state.rs`, the elivagar downloads and pbfhogg verify.
-
-## PLT-008 - Errors swallowed into defaults (platform code)
-
-Reported by: config-cli-bootstrap, process-control.
-
-Residue: `history.rs` drops row decode errors, `preflight/digest.rs` ignores `cache.save()` results, and history metadata falls back to `"unknown"`.
-
-## PLT-009 - Panics on input an operator or file controls
-
-Reported by: elivagar, pbfhogg-nidhogg, piners, measurement-storage, ratatoskr.
-
-Residue: production panic branches remain in `ratatoskr/sync/gate.rs` and `piners/measured.rs`.
+Residue: direct `Command` construction remains in `test_runner/procgroup.rs`, `ratatoskr/saehrimnir.rs`, nidhogg, `env.rs`, `gremlins.rs`, `litehtml/cmd.rs`, `tools.rs`, `worktree.rs`, `scope.rs`, `git.rs` and `git/tree_state.rs`.
 
 ## PLT-012 - Interrupt handling residue outside `SigtermGuard`
 
 Reported by: process-control, ratatoskr.
 
-Residue: ratatoskr's mock-serve `AtomicBool` signal guard is not migrated to the shared guard.
+Residue: ratatoskr's `MOCK_SIGNAL_FLAG` `AtomicBool` is not migrated to the shared guard.
 
 ## PLT-013 - Hold-scoped state still partly in process globals
 
 Reported by: process-control.
 
-Residue: the toolchain path reaches fresh holds through a write-once process global in `context.rs` rather than being passed from detection, and `HELD` stays process-wide.
+Residue: the toolchain-path write-once global in `context.rs` and the process-wide `HELD` registry remain.
 
 ## PLT-015 - `cargo metadata` is spawned and deserialized many times
 
@@ -84,31 +72,31 @@ Residue: `nextest_lane.rs` still spawns metadata directly, `direct_runtime.rs`/`
 
 Reported by: convention-engines, process-control, config-cli-bootstrap.
 
-Residue: the convention scanners share one snapshot, but the prose-only shortcut still runs its own `git status` through `scope::dirt` rather than reading the snapshot.
+Residue: the prose-only shortcut still runs its own `git status` through `scope::dirt`.
 
 ## PLT-017 - "Dirty tree" has several definitions
 
 Reported by: process-control, measurement-storage, small-benches.
 
-Residue: `scope.rs` still has its own status reader, and `TreeState` still names the toolchain's `FILES`/`SUFFIX` itself.
+Residue: `scope.rs` keeps its own status reader and `TreeState` still names the toolchain's `FILES`/`SUFFIX`.
 
 ## PLT-019 - Build profile is a bare string or bool
 
 Reported by: process-control, ratatoskr, test-execution, piners.
 
-Residue: profile resolution is still bool-based, and some DB writers record `Release` regardless of the built artifact.
+Residue: harness profile resolution is still bool-based at the ratatoskr/piners callers, and the DB writers that record `Release` regardless are unchanged.
 
 ## PLT-021 - `brokkr.toml` is parsed more than once per invocation
 
 Reported by: config-cli-bootstrap, process-control.
 
-Residue: `env.rs`, `bench_cmd` and `git::collect` still compose or resolve config independently of the startup detection.
+Residue: `env.rs`, `bench_cmd` and `git::collect` still compose or resolve config independently of startup detection.
 
 ## PLT-023 - "Which command runs in which project" has two owners
 
 Reported by: config-cli-bootstrap, small-benches, elivagar.
 
-Residue: nested or duplicate project checks remain in `verify_cmd.rs`, `visual_approve_cmd.rs`, `pmtiles_stats_cmd.rs` and project handlers.
+Residue: duplicate project checks remain in `verify_cmd.rs`, `visual_approve_cmd.rs`, `pmtiles_stats_cmd.rs` and project handlers.
 
 ## PLT-024 - Project name ↔ variant mapping is duplicated
 
@@ -120,13 +108,13 @@ Residue: `Project::Other` still uses `Box::leak` in the parser.
 
 Reported by: config-cli-bootstrap, process-control.
 
-Residue: project-specific string validation is still at use time across pbfhogg, elivagar, ratatoskr, piners and litehtml.
+Residue: project-specific string validation is still at use time.
 
 ## PLT-026 - CLI values are parsed or checked twice
 
 Reported by: config-cli-bootstrap, measurement-storage, pbfhogg-nidhogg.
 
-Residue: validation for `--osc-range`, compression and some run counts is still duplicated.
+Residue: `--osc-range`, compression and run-count validation are still duplicated.
 
 ## PLT-030 - External tools: unpinned, unverified, re-discovered per site
 
@@ -134,77 +122,29 @@ Reported by: config-cli-bootstrap, elivagar.
 
 Residue: nidhogg's separate curl timeout contract and mutable map-data URLs remain.
 
-## PLT-031 - Assorted duplicated platform constants
-
-Reported by: config-cli-bootstrap.
-
-Residue: the CPU fallback of 4 is still duplicated in `tools.rs` and `cpu_topology.rs`.
-
-## PLT-032 - Build-path rules written per call site
-
-Reported by: process-control.
-
-Residue: `pbfhogg/bench_all.rs::run_osmpbf_baseline` bypasses the shared build path, and there is no `BuildRoot` cargo spawn API.
-
 ## PLT-036 - Guard verification scripts are claims, not gates
 
 Reported by: process-control.
 
-Residue: the guard decision probe has no script_check gate and writes to `/tmp` through `tempfile`.
+Residue: the guard decision probe still has no `[[script_check]]` gate (its `/tmp` use is fixed).
 
 ## PLT-037 - Secrets and personal data can reach durable logs
 
 Reported by: config-cli-bootstrap, check-core.
 
-Residue: argv and `env.*` redaction in `db/write.rs`, raw script-check output rendering, and stored cwd/hostname remain.
+Residue: argv and `env.*` redaction in `db/write.rs` and raw script-check output rendering remain (stored cwd/hostname are gone).
 
 ## PLT-038 - Tests write to `/tmp` and use ad-hoc scratch allocators
 
 Reported by: test-execution, measurement-storage, piners, config-cli-bootstrap, pbfhogg-nidhogg, elivagar.
 
-Residue: ad-hoc temp paths in tests remain in `db/{write,query,sidecar,migrate}.rs`, `harness_mod/tests.rs`, piners tests, `resolve_parts/tests.rs`, `pbfhogg_mod/download_modes.rs` and `elivagar/corpus/fixture.rs`.
+Residue: `std::env::temp_dir()` test paths remain in `db/{write,query,sidecar,migrate}.rs` and `harness_mod/tests.rs`, plus ad-hoc paths in `resolve_parts/tests.rs`.
 
 ## PLT-039 - Tests mutate process state or depend on the host
 
 Reported by: config-cli-bootstrap, process-control, measurement-storage, ratatoskr, check-core, test-execution.
 
-Residue: `config_parts/tests.rs` still mutates `BROKKR_USER_CONFIG`, other host-dependent tests remain, and `tools::sha256_file` shells out to `sha256sum`/`shasum`.
-
-## PLT-040 - Durable text cites transient IDs; the notes-citation rules are too narrow
-
-Reported by: convention-engines, config-cli-bootstrap, ratatoskr, pbfhogg-nidhogg.
-
-Residue: transient labels remain in `check_cmd/phase.rs`, `test_cmd.rs`, `osc.rs`, `resolve_parts/schema.rs` and `scripts/smoke-certifies.sh`.
-
-## PLT-041 - Docs and comments hard-code counts that drift
-
-Reported by: process-control, ratatoskr, pbfhogg-nidhogg, config-cli-bootstrap, test-execution, check-core, piners, elivagar.
-
-Residue: the repeated `1.5s` comments in `ratatoskr/service/suite.rs` and `sync/bench.rs` remain.
-
-## PLT-042 - Stale claims in CLI help, README, CLAUDE.md and config docs
-
-Reported by: config-cli-bootstrap, piners, elivagar.
-
-Residue: the `dev env` wording in `env.rs` remains.
-
-## PLT-043 - Stale claims in process-control code and docs
-
-Reported by: process-control.
-
-Residue: `worktree_record.rs`'s size-cache description and `oom.rs`'s non-Linux wording are still stale.
-
-## PLT-045 - Dead code in platform modules
-
-Reported by: config-cli-bootstrap, process-control.
-
-Residue: `Record.size_bytes` has no production writer, and `Project::is_builtin` and unused preflight variants remain.
-
-## PLT-047 - Detection errors now fail commands that may previously have tolerated a broken `brokkr.toml`
-
-Reported by: the wave-5 reviewer, laterally.
-
-Residue: the widening was reverted because it let `check` run green on a malformed config; which optional-config commands may ignore a detection error needs a decision.
+Residue: host-dependent tests remain (`resolve_parts/tests.rs` builds paths from `current_dir` and the clock).
 
 ## PLT-049 - `env` composes the config a second time to read the user layer
 
@@ -212,14 +152,8 @@ Reported by: the wave-5 reviewer, laterally.
 
 Residue: `env` still recomposes config instead of receiving `ConfigSources` from detection.
 
-## PLT-050 - Smaller leftovers the wave-7 review surfaced
-
-Reported by: the wave-7 reviewer, laterally.
-
-Residue: nidhogg ingest planning can still write the hash cache, and S3 references remain in `test_cmd.rs`, `check_cmd/coverage.rs` and `check_cmd/phase.rs`.
-
 ## PLT-051 - Decisions and leftovers from the command-spec wave
 
 Reported by: the wave-9 reviewer.
 
-Residue: the stale no-lock comment in `verify_cmd.rs` and the phase-type, threaded-test wall, typed-root and dispatch-table cleanup remain.
+Residue: the phase-type, threaded-test-wall, typed-root and dispatch-table cleanup remain (the `verify_cmd.rs` comment is fixed).

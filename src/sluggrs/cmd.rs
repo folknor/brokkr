@@ -554,7 +554,12 @@ pub(crate) fn approve(
         ))
     })?;
     let run = db.run_summary(&result.run_id)?;
-    engine::validate_approval_origin("sluggrs", &result.run_id, run.as_ref(), git_info.commit.as_str())?;
+    engine::validate_approval_origin(
+        "sluggrs",
+        &result.run_id,
+        run.as_ref(),
+        git_info.commit.as_str(),
+    )?;
 
     // Approving makes this output the image every later run is compared
     // against, so the ratchet value that belongs with it is its diff against

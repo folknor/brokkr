@@ -432,7 +432,10 @@ pub enum ChildIsolation<'guard> {
     Inherit,
     /// Put the child in its own process group while this guard remains alive.
     // The reference is a lifetime proof and is never read.
-    #[allow(dead_code, reason = "held only to tie the child to a live shutdown guard")]
+    #[allow(
+        dead_code,
+        reason = "held only to tie the child to a live shutdown guard"
+    )]
     ProcessGroup(&'guard SigtermGuard),
 }
 

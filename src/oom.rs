@@ -5,7 +5,9 @@ use std::process::Command;
 /// Writes `1000` to `/proc/self/oom_score_adj` in the child process before
 /// exec, so the Linux OOM killer targets the benchmark rather than the desktop.
 /// Uses raw libc syscalls (async-signal-safe between fork and exec).
-/// Silently ignores errors - works in containers, degrades on non-Linux.
+/// Silently ignores errors: where `/proc/self/oom_score_adj` cannot be opened
+/// or written (a restricted container, a kernel without it), the child simply
+/// keeps its inherited score.
 pub fn protect_child(cmd: &mut Command) {
     use std::os::unix::process::CommandExt;
 

@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS sidecar_markers (
 CREATE TABLE IF NOT EXISTS sidecar_summary (
     result_uuid  TEXT NOT NULL,
     run_idx      INTEGER NOT NULL DEFAULT 0,
+    capture_truncated INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (result_uuid, run_idx)
 );
 
@@ -85,7 +86,7 @@ fn sidecar_schema() -> String {
 // ---------------------------------------------------------------------------
 
 /// Current sidecar schema version.
-const SIDECAR_VERSION: i64 = 7;
+const SIDECAR_VERSION: i64 = 8;
 
 /// Apply migrations newer than `current`; version checks and stamping are
 /// centralized in `db::store`.
@@ -137,6 +138,13 @@ fn run_sidecar_migrations(conn: &rusqlite::Connection, current: i64) -> Result<(
     // authoritative values.
     if current < 7 {
         drop_summary_payload(conn)?;
+    }
+    // v7 -> v8: record whether the bounded in-memory trajectory omitted any
+    // samples, markers, counters, or overlong FIFO records.
+    if current < 8 && !super::store::column_exists(conn, "sidecar_summary", "capture_truncated")? {
+        conn.execute_batch(
+            "ALTER TABLE sidecar_summary ADD COLUMN capture_truncated INTEGER NOT NULL DEFAULT 0",
+        )?;
     }
 
     Ok(())
@@ -266,6 +274,8 @@ impl SidecarDb {
     // -------------------------------------------------------------------
 
     /// Bulk-insert sidecar profile data for one benchmark run.
+    /// Sidecar rows share the durable lifetime of results; only an explicit
+    /// `invalidate` removes them, so the store has no age-based pruning.
     #[allow(clippy::cast_possible_wrap)]
     pub fn store_run(
         &self,
@@ -335,8 +345,17 @@ impl SidecarDb {
         }
 
         tx.execute(
-            "INSERT INTO sidecar_summary (result_uuid, run_idx) VALUES (?1, ?2)",
-            rusqlite::params![result_uuid, run_idx as i64],
+            "INSERT INTO sidecar_summary (result_uuid, run_idx, capture_truncated)
+             VALUES (?1, ?2, ?3)",
+            rusqlite::params![
+                result_uuid,
+                run_idx as i64,
+                if data.summary.capture_truncated {
+                    1_i64
+                } else {
+                    0_i64
+                }
+            ],
         )?;
 
         tx.commit()?;
@@ -401,6 +420,34 @@ impl SidecarDb {
             )
             .optional()?;
         Ok(found.unwrap_or((0, 1)))
+    }
+
+    /// Whether any selected sidecar run was stored after a trajectory limit
+    /// omitted data. `None` selects every run in the session.
+    pub(crate) fn query_capture_truncated_for(
+        &self,
+        id: &RunId,
+        run_idx: Option<usize>,
+    ) -> Result<bool, DevError> {
+        let truncated = match run_idx {
+            Some(idx) => self.conn.query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM sidecar_summary
+                    WHERE result_uuid = ?1 AND run_idx = ?2 AND capture_truncated != 0
+                 )",
+                rusqlite::params![id.as_str(), i64::try_from(idx).unwrap_or(i64::MAX)],
+                |row| row.get::<_, bool>(0),
+            )?,
+            None => self.conn.query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM sidecar_summary
+                    WHERE result_uuid = ?1 AND capture_truncated != 0
+                 )",
+                rusqlite::params![id.as_str()],
+                |row| row.get::<_, bool>(0),
+            )?,
+        };
+        Ok(truncated)
     }
 
     /// Query provenance for one identity already resolved by `RunStore`.
@@ -779,13 +826,14 @@ mod tests {
         let raw = rusqlite::Connection::open(&path).unwrap();
         raw.execute_batch(
             "ALTER TABLE sidecar_meta DROP COLUMN ending;
+             ALTER TABLE sidecar_summary DROP COLUMN capture_truncated;
              ALTER TABLE sidecar_summary ADD COLUMN vm_hwm_kb INTEGER;
              ALTER TABLE sidecar_summary ADD COLUMN sample_count INTEGER;
              ALTER TABLE sidecar_summary ADD COLUMN marker_count INTEGER;
              ALTER TABLE sidecar_summary ADD COLUMN wall_time_ms INTEGER;",
         )
         .unwrap();
-        raw.pragma_update(None, "user_version", SIDECAR_VERSION - 2)
+        raw.pragma_update(None, "user_version", SIDECAR_VERSION - 3)
             .unwrap();
         drop(raw);
 

@@ -24,6 +24,10 @@ const LONG_VERSION: &str = env!("BROKKR_LONG_VERSION");
 /// help text, so the doc comment does not repeat it.
 const DEFAULT_OUTLINE_DEPTH: usize = 4;
 
+/// Run count a bare `--bench` (no COUNT) means, for every command that takes
+/// one. A string because clap's `default_missing_value` is parsed like argv.
+const DEFAULT_BENCH_RUNS: &str = "3";
+
 #[derive(Parser)]
 #[command(name = "brokkr", about = "Shared development tooling", version = LONG_VERSION)]
 pub(crate) struct Cli {
@@ -1525,7 +1529,6 @@ Examples:
   brokkr history --all                  # everything
   brokkr history --command bench        # filter by command substring
   brokkr history --project pbfhogg      # filter by project
-  brokkr history --project-dir /clone2  # filter by cwd substring
   brokkr history --failed               # only non-zero exit
   brokkr history --status 130           # filter by exit code (e.g. 130 = interrupt)
   brokkr history --since 2026-03-01     # from date (YYYY-MM-DD)
@@ -1543,10 +1546,6 @@ Examples:
         /// Filter by project name
         #[arg(long, conflicts_with = "id")]
         project: Option<String>,
-
-        /// Filter by cwd substring (useful for multiple clones of the same project)
-        #[arg(long, conflicts_with = "id")]
-        project_dir: Option<String>,
 
         /// Show only failed commands (non-zero exit)
         #[arg(long, conflicts_with_all = ["id", "status"])]
@@ -1836,7 +1835,8 @@ In depth: `brokkr man elivagar`.",
         /// Per-class example cap
         #[arg(long, default_value_t = crate::elivagar::constants::DEFAULT_MAX_EXAMPLES)]
         max_examples: usize,
-        /// Dump side-by-side overlay pairs for the worst structural diffs to DIR
+        /// Dump side-by-side overlay pairs for differing tiles to DIR, in report
+        /// order, up to the overlay cap
         #[arg(long)]
         overlay: Option<std::path::PathBuf>,
         /// Cap on the number of overlay pairs emitted
@@ -2366,11 +2366,12 @@ In depth: `brokkr man nidhogg`."
 
         /// Measure instead of just running: N iterations, best-of-N on the
         /// `SYNC_START`/`SYNC_END` marker span, recorded in `results.db`.
-        /// Bare `--bench` means 3. Needs a SCRIPT, or `--gate all`.
+        /// Bare `--bench` means the default run count. Needs a SCRIPT, or
+        /// `--gate all`.
         #[arg(
             long,
             num_args = 0..=1,
-            default_missing_value = "3",
+            default_missing_value = DEFAULT_BENCH_RUNS,
             value_name = "COUNT",
             conflicts_with = "all"
         )]
@@ -2828,8 +2829,9 @@ In depth: `brokkr man lint-corpus`."
 
 #[derive(Args, Clone)]
 pub(crate) struct ModeArgs {
-    /// Full benchmark: lockfile, N runs (default 3), DB storage
-    #[arg(long, conflicts_with_all = ["hotpath", "alloc"], num_args = 0..=1, default_missing_value = "3")]
+    /// Full benchmark: lockfile, N runs (bare `--bench` means the default
+    /// run count), DB storage
+    #[arg(long, conflicts_with_all = ["hotpath", "alloc"], num_args = 0..=1, default_missing_value = DEFAULT_BENCH_RUNS)]
     pub(crate) bench: Option<std::num::NonZeroUsize>,
 
     /// Function-level timing via hotpath feature (optional run count, default 1)
@@ -2920,9 +2922,10 @@ pub(crate) struct VerifyPbfArgs {
     /// dataset's primary data; pass a key registered under
     /// `[dataset.snapshot.<key>]` for a historical or adversarial encoding
     /// (e.g. one produced by `brokkr degrade --unsort --as-snapshot` or
-    /// `brokkr repack --as-snapshot`). Overrides only the PBF input; OSC
-    /// changes (for merge/derive-changes verifies) still resolve from the
-    /// dataset's primary chain. Mutually exclusive with `--input`.
+    /// `brokkr repack --as-snapshot`). OSC changes (for merge/derive-changes
+    /// verifies) come from the snapshot's own OSC table when it has one, and
+    /// from the dataset's primary chain when it has none (encoding-only
+    /// snapshots). Mutually exclusive with `--input`.
     #[arg(long, conflicts_with = "input")]
     pub(crate) snapshot: Option<String>,
     /// Use O_DIRECT for file I/O (requires linux-direct-io feature in pbfhogg)
@@ -3048,9 +3051,9 @@ pub(crate) enum VerifyCommand {
         #[arg(long, value_name = "PATH")]
         input: Option<std::path::PathBuf>,
         /// Snapshot key to cross-validate (see `--snapshot` on other verify
-        /// subcommands). Overrides only the PBF input; the OSC still
-        /// resolves from the dataset's primary chain. Mutually exclusive
-        /// with `--input`.
+        /// subcommands). The OSC comes from the snapshot's own OSC table when
+        /// it has one, and from the dataset's primary chain otherwise.
+        /// Mutually exclusive with `--input`.
         #[arg(long, conflicts_with = "input")]
         snapshot: Option<String>,
         #[arg(long)]
@@ -3194,10 +3197,10 @@ pub(crate) enum PmtilesCorpusCommand {
         /// Corpus directory (default: corpus/<dataset> under the repo root)
         #[arg(long)]
         corpus: Option<std::path::PathBuf>,
-        /// Replace an existing baseline (elivagar refuses to overwrite otherwise)
+        /// Replace an existing baseline (bless refuses to overwrite otherwise)
         #[arg(long)]
         rotate: bool,
-        /// Digest mode passed through to elivagar
+        /// Digest mode for the baseline
         #[arg(long, value_enum, default_value = "leaves")]
         mode: crate::elivagar::corpus::DigestMode,
     },
@@ -3209,7 +3212,7 @@ pub(crate) enum PmtilesCorpusCommand {
         /// Corpus directory (default: corpus/<dataset> under the repo root)
         #[arg(long)]
         corpus: Option<std::path::PathBuf>,
-        /// Style TOML passed through to elivagar
+        /// Style TOML for the SVG renderer
         #[arg(long)]
         style: Option<std::path::PathBuf>,
     },
@@ -3223,10 +3226,10 @@ pub(crate) enum PmtilesCorpusCommand {
         x: u32,
         #[arg(short = 'y', long)]
         y: u32,
-        /// Comma-separated layer names passed through to elivagar
+        /// Comma-separated layer names to render
         #[arg(long)]
         layers: Option<String>,
-        /// Style TOML passed through to elivagar
+        /// Style TOML for the SVG renderer
         #[arg(long)]
         style: Option<std::path::PathBuf>,
         /// Output file path
@@ -3249,7 +3252,7 @@ pub(crate) enum PmtilesCorpusCommand {
         /// data/corpus-calibrands/ that a routine `brokkr clean` clears.
         #[arg(short = 'o', long)]
         output: Option<std::path::PathBuf>,
-        /// Mutation op passed through to elivagar
+        /// Mutation to apply
         #[arg(long, value_enum)]
         op: crate::elivagar::corpus::MutationOp,
         /// Target tile z/x/y for ops that need one

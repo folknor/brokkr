@@ -169,9 +169,14 @@ pub(crate) fn cache_domain_cores() -> Option<usize> {
 /// part - accepted because a default that is too high is a slow test run,
 /// while a default of zero is no test run at all.
 pub(crate) fn cache_domain_cores_or_default() -> u32 {
-    let n = cache_domain_cores()
-        .unwrap_or_else(|| std::thread::available_parallelism().map_or(4, std::num::NonZero::get));
+    let n = cache_domain_cores().unwrap_or_else(available_parallelism_or_default);
     u32::try_from(n).unwrap_or(u32::MAX).max(1)
+}
+
+/// Threads this process may run in parallel, or a fixed guess of 4 when the
+/// platform cannot say. The one place that guess lives.
+pub(crate) fn available_parallelism_or_default() -> usize {
+    std::thread::available_parallelism().map_or(4, std::num::NonZero::get)
 }
 
 /// How to describe the domain in a report, given the CPU model string.

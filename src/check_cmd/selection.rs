@@ -277,7 +277,7 @@ mod selection {
                     && packages.is_empty()
                     && whole_workspace
                     && !forwarded.narrows_package_selection();
-                let planned = resolve_planned_sweep(sweep, promotion_eligible)?;
+                let planned = resolve_planned_sweep(sweep, promotion_eligible);
                 reject_forwarded_package_selectors(&planned, forwarded)?;
                 Ok(planned)
             })
@@ -293,9 +293,9 @@ mod selection {
     pub(crate) fn resolve_planned_sweep(
         declaration: SweepDecl,
         promotion_eligible: bool,
-    ) -> Result<PlannedSweep, DevError> {
+    ) -> PlannedSweep {
         let effective = resolve_unification(&declaration, promotion_eligible);
-        Ok(PlannedSweep::with_effective_unification(declaration, effective))
+        PlannedSweep::with_effective_unification(declaration, effective)
     }
 
     pub(crate) fn resolve_unification(
@@ -1823,7 +1823,7 @@ mod selection {
         use crate::config::{FeatureUnification, SweepProfile};
 
         fn planned(declaration: crate::profile::SweepDecl) -> PlannedSweep {
-            PlannedSweep::resolve(declaration, false).unwrap()
+            PlannedSweep::resolve(declaration, false)
         }
 
         fn with_sweep(

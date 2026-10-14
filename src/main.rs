@@ -46,6 +46,7 @@ mod lockfile;
 mod man;
 mod manifest;
 mod measure;
+mod measure_dispatch;
 mod mogwai;
 mod nidhogg;
 mod oom;

@@ -302,11 +302,10 @@ pub(crate) fn bench_all(req: &MeasureRequest) -> Result<(), DevError> {
         &ctx.paths,
         req.project_root.as_path(),
     )?;
-    let effective = req.build_root.as_path();
     super::bench_all::run(
         &ctx.harness,
         &ctx.paths,
-        effective,
+        req.build_root,
         &pbf_path,
         file_mb,
         req.runs(),

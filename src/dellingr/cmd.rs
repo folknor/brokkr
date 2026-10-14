@@ -83,37 +83,34 @@ pub(crate) fn run(req: &MeasureRequest, lua: &str) -> Result<(), DevError> {
         metadata: vec![],
     };
 
-    if req.mode.profiled().is_some() {
-        let label = req
-            .mode
-            .profiled()
-            .map_or("", crate::measure::ProfiledMode::feature);
-        output::detail(&format!("dellingr {label}: {}", resolved.name));
-        if let Some(profiling) = req.mode.profiled() {
-            profiling.print_note();
-        }
-
-        ctx.harness.run_hotpath(&config, ctx.binary()?, |i, fifo| {
-            ctx.harness.capture_hotpath(
-                ctx.binary()?,
-                &args,
-                req.project_root.as_path(),
-                &[],
-                &[],
-                fifo,
-                i,
-                None,
-            )
-        })?;
-    } else {
-        output::bench_msg(&format!(
-            "dellingr workload {}: {} run(s)",
-            resolved.name,
-            req.runs()
-        ));
-        ctx.harness
-            .run_external(&config, ctx.binary()?, &args, req.project_root.as_path())?;
-    }
+    crate::measure_dispatch::dispatch_profiled(
+        req,
+        "dellingr",
+        &resolved.name,
+        || {
+            ctx.harness.run_hotpath(&config, ctx.binary()?, |i, fifo| {
+                ctx.harness.capture_hotpath(
+                    ctx.binary()?,
+                    &args,
+                    req.project_root.as_path(),
+                    &[],
+                    &[],
+                    fifo,
+                    i,
+                    None,
+                )
+            })
+        },
+        || {
+            output::bench_msg(&format!(
+                "dellingr workload {}: {} run(s)",
+                resolved.name,
+                req.runs()
+            ));
+            ctx.harness
+                .run_external(&config, ctx.binary()?, &args, req.project_root.as_path())
+        },
+    )?;
 
     Ok(())
 }

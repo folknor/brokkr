@@ -548,7 +548,7 @@ fn flush_parsed_failure(
 /// ```
 ///
 /// On compilation error (no test results):
-/// Falls back to `filter_clippy` to show the build errors.
+/// Falls back to `cargo_filter::filter_test_build_failure` to show the build errors.
 pub(crate) fn filter_test(stdout: &str, stderr: &str) -> String {
     // Compilation failure - no test results, just build errors.
     let has_test_result = stdout.lines().any(|l| l.starts_with("test result:"));

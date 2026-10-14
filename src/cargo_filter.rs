@@ -74,26 +74,6 @@ pub fn parse_clippy(output: &str) -> ClippyParse {
     }
 }
 
-/// Filter cargo clippy output into one line per diagnostic.
-///
-/// Output format:
-/// ```text
-/// cargo clippy: 2 errors, 3 warnings
-///   error[E0308] src/foo.rs:10:5 mismatched types
-///   error[E0425] src/bar.rs:20:3 cannot find value `x` in this scope
-///   warning[unused_variables] src/a.rs:1:9 unused variable: `x`
-///   warning[clippy::needless_return] src/d.rs:4:5 this could be simplified
-/// ```
-pub fn filter_clippy(output: &str) -> String {
-    filter_clippy_with_owners(output, None)
-}
-
-/// Like [`filter_clippy`], resolving warning ownership from cargo metadata.
-pub fn filter_clippy_with_owners(output: &str, owners: Option<&OwnerIndex>) -> String {
-    format_clippy_for(output, "cargo clippy", owners)
-        .unwrap_or_else(|| "cargo clippy: no issues".into())
-}
-
 /// Format diagnostics for a cargo command. `None` means there was no finding;
 /// parse failures retain the raw stream so the caller never loses an
 /// unexplained build failure.
@@ -134,8 +114,25 @@ fn format_clippy_for(output: &str, tool: &str, owners: Option<&OwnerIndex>) -> O
 /// [`crate::test_runner::filter_test`]'s compile-error branch and `brokkr test`'s BUILD FAILED
 /// reporter, so both paths label the failure identically.
 pub(crate) fn filter_test_build_failure(stderr: &str) -> String {
-    let mut filtered = format_clippy_for(stderr, "cargo test", None)
-        .unwrap_or_else(|| "cargo test: build failed without a parsed diagnostic".into());
+    format_cargo_build_failure(
+        stderr,
+        "cargo test",
+        "cargo test: build failed without a parsed diagnostic",
+    )
+}
+
+/// Format a `cargo build` failure with its own command label.
+pub(crate) fn filter_cargo_build_failure(stderr: &str) -> String {
+    format_cargo_build_failure(
+        stderr,
+        "cargo build",
+        "cargo build: build failed without a parsed diagnostic",
+    )
+}
+
+fn format_cargo_build_failure(stderr: &str, tool: &str, empty_message: &str) -> String {
+    let mut filtered =
+        format_clippy_for(stderr, tool, None).unwrap_or_else(|| empty_message.to_owned());
     if let Some(extra) = linker_failure_detail(stderr) {
         filtered.push('\n');
         filtered.push_str(&extra);
@@ -379,9 +376,14 @@ mod tests {
     use super::*;
     use crate::test_runner::filter_test;
 
+    fn formatted_clippy(output: &str) -> String {
+        format_clippy_for(output, "cargo clippy", None)
+            .unwrap_or_else(|| "cargo clippy: no issues".into())
+    }
+
     /// Filter with ownership resolved against a workspace at `/home/me/proj`
     /// whose one member is the root package.
-    fn filter_clippy_in_tree(output: &str) -> String {
+    fn formatted_clippy_in_tree(output: &str) -> String {
         let root = Path::new("/home/me/proj");
         let manifests = std::collections::HashMap::from([(
             root.join("Cargo.toml"),
@@ -389,7 +391,8 @@ mod tests {
         )]);
         let owners =
             OwnerIndex::from_metadata_at(root, root, &std::collections::HashMap::new(), &manifests);
-        filter_clippy_with_owners(output, Some(&owners))
+        format_clippy_for(output, "cargo clippy", Some(&owners))
+            .unwrap_or_else(|| "cargo clippy: no issues".into())
     }
 
     #[test]
@@ -400,7 +403,7 @@ warning: /home/me/proj/Cargo.toml: `lints.clippy.map-entry` is deprecated
 warning: unused variable: `x`
  --> src/a.rs:1:9
 ";
-        let filtered = filter_clippy_in_tree(output);
+        let filtered = formatted_clippy_in_tree(output);
         assert!(!filtered.contains("/elsewhere/"));
         assert!(filtered.contains("/home/me/proj/Cargo.toml"));
         assert!(filtered.contains("unused variable"));
@@ -411,8 +414,8 @@ warning: unused variable: `x`
     fn foreign_manifest_warnings_only_dropped_when_scoped() {
         let output =
             "warning: /elsewhere/iced/Cargo.toml: `lints.clippy.map-entry` is deprecated\n";
-        assert!(filter_clippy(output).contains("/elsewhere/"));
-        assert_eq!(filter_clippy_in_tree(output), "cargo clippy: no issues");
+        assert!(formatted_clippy(output).contains("/elsewhere/"));
+        assert_eq!(formatted_clippy_in_tree(output), "cargo clippy: no issues");
     }
 
     #[test]
@@ -462,7 +465,7 @@ error: could not compile `mycrate` (bin \"mycrate\") due to 1 previous error
     #[test]
     fn clippy_clean() {
         let output = "    Checking pbfhogg v0.1.0\n    Finished dev target(s) in 1.53s\n";
-        let result = filter_clippy(output);
+        let result = formatted_clippy(output);
         assert_eq!(result, "cargo clippy: no issues");
     }
 
@@ -494,7 +497,7 @@ error[E0308]: mismatched types
 warning: `pbfhogg` (lib) generated 1 warning
 error: aborting due to 1 previous error
 ";
-        let result = filter_clippy(output);
+        let result = formatted_clippy(output);
         assert!(
             result.starts_with("cargo clippy: 1 error, 1 warning"),
             "got: {result}"
@@ -529,7 +532,7 @@ error[E0308]: mismatched types
  --> src/foo.rs:20:5
   |
 ";
-        let result = filter_clippy(output);
+        let result = formatted_clippy(output);
         let error_pos = result.find("error[E0308]").unwrap();
         let warning_pos = result.find("warning[unused_variables]").unwrap();
         assert!(
@@ -558,7 +561,7 @@ warning: this could be simplified [clippy::needless_return]
   |
 
 ";
-        let result = filter_clippy(output);
+        let result = formatted_clippy(output);
         assert!(result.contains("0 errors, 4 warnings"), "got: {result}");
         // Each warning is its own line - no grouping.
         assert_eq!(
@@ -581,7 +584,7 @@ error[E0425]: cannot find value `x` in this scope
 
 warning: build failed, waiting for other jobs to finish...
 ";
-        let result = filter_clippy(output);
+        let result = formatted_clippy(output);
         assert!(!result.contains("build failed"), "got: {result}");
         assert!(result.contains("1 error, 0 warnings"), "got: {result}");
     }
@@ -600,7 +603,7 @@ error[E0308]: mismatched types
 
 error: aborting due to 1 previous error
 ";
-        let result = filter_clippy(output);
+        let result = formatted_clippy(output);
         // The inline expected/found line should be captured.
         assert!(
             result.contains("- expected `RenumberStats`, found `GetparentsStats`"),
@@ -626,7 +629,7 @@ warning: this `if` statement can be collapsed
   |
   = note: `#[warn(clippy::collapsible_if)]` on by default
 ";
-        let result = filter_clippy(output);
+        let result = formatted_clippy(output);
         assert!(
             result.contains("warning[unused_imports] src/db/compare.rs:78:21 unused imports: `QueryFilter` and `ResultsDb`"),
             "got: {result}"
@@ -653,7 +656,7 @@ error[E0308]: mismatched types
 
 error: aborting due to 1 previous error
 ";
-        let result = filter_clippy(output);
+        let result = formatted_clippy(output);
         assert!(
             result.contains("- expected reference `&Vec<u8>`, found reference `&Vec<i32>`"),
             "got: {result}"

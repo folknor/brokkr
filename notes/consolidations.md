@@ -31,4 +31,4 @@ Residue: there is still no single build-purpose resolver across run, install, ch
 
 Reported by: the wave-6 and wave-7 reviewers, laterally.
 
-Residue: the sidecar database still keeps its own command column and migration sequence.
+Residue: `sidecar.db` still keeps its own `command` column and migration sequence.

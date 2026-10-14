@@ -44,9 +44,10 @@
 //! A per-project count. It is a **growth damper, not a bound**: each project
 //! keeps its own N, so the disk-wide total scales with how many projects you
 //! have touched. Only a global byte budget could promise "never fills the
-//! disk", and count is a proxy for the real constraint, which is bytes. The
-//! cached `size_bytes` in each record exists so that a size-based rule can be
-//! added later without walking a hundred thousand files at eviction time.
+//! disk", and count is a proxy for the real constraint, which is bytes. A
+//! record stores no size: a size-based rule would have to measure the trees.
+//! Records written when a `size_bytes` key existed still load - serde skips
+//! the unknown key.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -72,10 +73,6 @@ pub struct Record {
     /// Unix seconds when a run last created or reused this worktree.
     #[serde(default)]
     pub last_used: u64,
-    /// Measured size, cached so a future size-based rule need not walk the
-    /// tree. `None` when never measured.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub size_bytes: Option<u64>,
 }
 
 /// The whole file: worktree directory name -> record.
@@ -284,7 +281,6 @@ mod tests {
                 (*name).to_owned(),
                 Record {
                     last_used: *last_used,
-                    size_bytes: None,
                 },
             );
         }
@@ -346,16 +342,18 @@ mod tests {
 
     #[test]
     fn a_name_needing_escapes_round_trips() {
-        let mut store = store_with(&[("quote\"back\\slash\nnewline", 7), ("plain", 9)]);
-        if let Some(r) = store.entries.get_mut("plain") {
-            r.size_bytes = Some(1234);
-        }
+        let store = store_with(&[("quote\"back\\slash\nnewline", 7), ("plain", 9)]);
         let text = store.render().expect("render");
         let back = Store::parse(&text).expect("parse");
         assert_eq!(back.entries.len(), 2);
         assert_eq!(back.entries["quote\"back\\slash\nnewline"].last_used, 7);
-        assert_eq!(back.entries["plain"].size_bytes, Some(1234));
-        assert_eq!(back.entries["quote\"back\\slash\nnewline"].size_bytes, None);
+        assert_eq!(back.entries["plain"].last_used, 9);
+    }
+
+    #[test]
+    fn a_record_from_before_size_bytes_was_dropped_still_loads() {
+        let back = Store::parse("[plain]\nlast_used = 9\nsize_bytes = 1234\n").expect("parse");
+        assert_eq!(back.entries["plain"].last_used, 9);
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! Command history database.
 //!
 //! Global SQLite database at `$XDG_DATA_HOME/brokkr/history.db` that records
-//! every brokkr invocation with timing, exit status, and system context.
+//! every brokkr invocation with timing, exit status, and sanitized system context.
 
 use std::path::PathBuf;
 
@@ -15,18 +15,16 @@ use crate::git::ShortCommit;
 // Schema
 // ---------------------------------------------------------------------------
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 const CREATE_TABLE: &str = "\
     CREATE TABLE IF NOT EXISTS history (
         id              INTEGER PRIMARY KEY,
         timestamp       TEXT NOT NULL DEFAULT (datetime('now')),
         project         TEXT,
-        cwd             TEXT NOT NULL,
         command         TEXT NOT NULL,
         elapsed_ms      INTEGER,
         exit_status     INTEGER NOT NULL,
-        hostname        TEXT NOT NULL,
         commit_hash     TEXT,
         dirty           INTEGER,
         kernel          TEXT,
@@ -160,20 +158,17 @@ impl HistoryDb {
     }
 
     /// Insert a history row.
-    #[allow(clippy::too_many_arguments)]
     pub fn insert(&self, row: &HistoryRow) -> Result<(), StoreError> {
         let commit_hash = row.commit_hash.as_ref().map(ShortCommit::as_str);
         self.conn.execute(
-            "INSERT INTO history (project, cwd, command, elapsed_ms, exit_status, \
-                hostname, commit_hash, dirty, kernel, avail_memory_mb) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            "INSERT INTO history (project, command, elapsed_ms, exit_status, \
+                commit_hash, dirty, kernel, avail_memory_mb) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             rusqlite::params![
                 row.project,
-                row.cwd,
                 row.command,
                 row.elapsed_ms,
                 row.exit_status,
-                row.hostname,
                 commit_hash,
                 row.dirty,
                 row.kernel,
@@ -187,8 +182,8 @@ impl HistoryDb {
     /// doesn't exist.
     pub fn get_by_id(&self, id: i64) -> Result<Option<HistoryEntry>, DevError> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, timestamp, project, cwd, command, elapsed_ms, exit_status, \
-                    hostname, commit_hash, dirty, kernel, avail_memory_mb \
+            "SELECT id, timestamp, project, command, elapsed_ms, exit_status, \
+                    commit_hash, dirty, kernel, avail_memory_mb \
              FROM history WHERE id = ?1",
         )?;
         let mut rows = stmt.query([id])?;
@@ -197,15 +192,13 @@ impl HistoryDb {
                 id: row.get(0)?,
                 timestamp: row.get(1)?,
                 project: row.get(2)?,
-                cwd: row.get(3)?,
-                command: row.get(4)?,
-                elapsed_ms: row.get(5)?,
-                exit_status: row.get(6)?,
-                hostname: row.get(7)?,
-                commit_hash: row.get(8)?,
-                dirty: row.get(9)?,
-                kernel: row.get(10)?,
-                avail_memory_mb: row.get(11)?,
+                command: row.get(3)?,
+                elapsed_ms: row.get(4)?,
+                exit_status: row.get(5)?,
+                commit_hash: row.get(6)?,
+                dirty: row.get(7)?,
+                kernel: row.get(8)?,
+                avail_memory_mb: row.get(9)?,
             }))
         } else {
             Ok(None)
@@ -224,10 +217,6 @@ impl HistoryDb {
         if let Some(ref project) = filter.project {
             params.push(Box::new(project.clone()));
             clauses.push(format!("project = ?{}", params.len()));
-        }
-        if let Some(ref dir) = filter.project_dir {
-            params.push(Box::new(like::contains_pattern(dir)));
-            clauses.push(format!("cwd LIKE ?{} {}", params.len(), like::ESCAPE));
         }
         if filter.failed {
             clauses.push("exit_status != 0".to_owned());
@@ -270,8 +259,8 @@ impl HistoryDb {
         };
 
         let sql = format!(
-            "SELECT id, timestamp, project, cwd, command, elapsed_ms, exit_status, \
-                    hostname, commit_hash, dirty, kernel, avail_memory_mb \
+            "SELECT id, timestamp, project, command, elapsed_ms, exit_status, \
+                    commit_hash, dirty, kernel, avail_memory_mb \
              FROM history{where_clause} ORDER BY id DESC{limit}"
         );
 
@@ -285,19 +274,16 @@ impl HistoryDb {
                     id: row.get(0)?,
                     timestamp: row.get(1)?,
                     project: row.get(2)?,
-                    cwd: row.get(3)?,
-                    command: row.get(4)?,
-                    elapsed_ms: row.get(5)?,
-                    exit_status: row.get(6)?,
-                    hostname: row.get(7)?,
-                    commit_hash: row.get(8)?,
-                    dirty: row.get(9)?,
-                    kernel: row.get(10)?,
-                    avail_memory_mb: row.get(11)?,
+                    command: row.get(3)?,
+                    elapsed_ms: row.get(4)?,
+                    exit_status: row.get(5)?,
+                    commit_hash: row.get(6)?,
+                    dirty: row.get(7)?,
+                    kernel: row.get(8)?,
+                    avail_memory_mb: row.get(9)?,
                 })
             })?
-            .filter_map(Result::ok)
-            .collect();
+            .collect::<Result<Vec<_>, _>>()?;
 
         Ok(rows)
     }
@@ -310,11 +296,9 @@ impl HistoryDb {
 /// Row data for insertion.
 pub struct HistoryRow {
     pub project: Option<String>,
-    pub cwd: String,
     pub command: String,
     pub elapsed_ms: i64,
     pub exit_status: i32,
-    pub hostname: String,
     pub commit_hash: Option<ShortCommit>,
     pub dirty: Option<bool>,
     pub kernel: Option<String>,
@@ -327,11 +311,9 @@ pub struct HistoryEntry {
     pub id: i64,
     pub timestamp: String,
     pub project: Option<String>,
-    pub cwd: String,
     pub command: String,
     pub elapsed_ms: Option<i64>,
     pub exit_status: i32,
-    pub hostname: String,
     pub commit_hash: Option<String>,
     pub dirty: Option<bool>,
     pub kernel: Option<String>,
@@ -343,7 +325,6 @@ pub struct HistoryEntry {
 pub struct HistoryFilter {
     pub command: Option<String>,
     pub project: Option<String>,
-    pub project_dir: Option<String>,
     pub failed: bool,
     pub since: Option<String>,
     pub until: Option<String>,
@@ -367,13 +348,11 @@ pub fn format_detail(entry: &HistoryEntry) -> String {
     if let Some(ref p) = entry.project {
         fields.push(("project", p.clone()));
     }
-    fields.push(("cwd", entry.cwd.clone()));
     fields.push(("command", format_history_command(&entry.command)));
     if let Some(ms) = entry.elapsed_ms {
         fields.push(("elapsed", format!("{ms} ms")));
     }
     fields.push(("exit_status", entry.exit_status.to_string()));
-    fields.push(("hostname", entry.hostname.clone()));
     if let Some(ref c) = entry.commit_hash {
         let dirty = if entry.dirty == Some(true) {
             " (dirty)"
@@ -461,9 +440,9 @@ fn format_history_command(command: &str) -> String {
     )
 }
 
-/// Return argv safe for durable storage. The value following `--env` is
-/// always redacted because an environment name can be project-specific and
-/// may not use a recognizable secret suffix.
+/// Return argv safe for durable storage. Values following `--env` and
+/// `--project-dir` are always redacted because they can contain private
+/// environment settings or local filesystem paths.
 pub(crate) fn redact_argv(argv: &[String]) -> Vec<String> {
     #[derive(Clone, Copy)]
     enum NextValue {
@@ -484,6 +463,15 @@ pub(crate) fn redact_argv(argv: &[String]) -> Vec<String> {
             continue;
         }
 
+        if arg == "--project-dir" {
+            redacted.push(arg.clone());
+            next = Some(NextValue::Secret);
+            continue;
+        }
+        if arg.starts_with("--project-dir=") {
+            redacted.push("--project-dir=<redacted>".to_owned());
+            continue;
+        }
         if arg == "--env" {
             redacted.push(arg.clone());
             next = Some(NextValue::Environment);
@@ -650,12 +638,61 @@ fn db_path() -> Result<PathBuf, DevError> {
 /// repeat it. A store stamped newer than this binary is refused by the
 /// shared store policy instead of being stamped down.
 fn run_migrations(conn: &Connection) -> Result<(), StoreError> {
-    crate::db::store::migrate(conn, "command history", SCHEMA_VERSION, |conn, _current| {
+    crate::db::store::migrate(conn, "command history", SCHEMA_VERSION, |conn, current| {
+        let has_history: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='history')",
+            [],
+            |row| row.get(0),
+        )?;
+        if current < 2 && has_history {
+            // Version 1 stored absolute working directories and machine
+            // hostnames. Rebuild the table so those values leave the store.
+            conn.execute_batch("ALTER TABLE history RENAME TO history_v1;")?;
+        }
         conn.execute_batch(CREATE_TABLE)?;
+        if current < 2 && has_history {
+            conn.execute_batch(
+                "INSERT INTO history \
+                 (id, timestamp, project, command, elapsed_ms, exit_status, \
+                  commit_hash, dirty, kernel, avail_memory_mb) \
+                 SELECT id, timestamp, project, command, elapsed_ms, exit_status, \
+                        commit_hash, dirty, kernel, avail_memory_mb \
+                 FROM history_v1; \
+                 DROP TABLE history_v1;",
+            )?;
+            redact_project_dir_commands(conn)?;
+        }
         conn.execute_batch(CREATE_INDEXES)?;
         Ok(())
     })
     .map_err(StoreError::Other)
+}
+
+fn redact_project_dir_commands(conn: &Connection) -> Result<(), DevError> {
+    let commands = {
+        let mut statement =
+            conn.prepare("SELECT id, command FROM history WHERE command LIKE '%--project-dir%'")?;
+        statement
+            .query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+
+    for (id, command) in commands {
+        let command = match serde_json::from_str::<Vec<String>>(&command) {
+            Ok(argv) => serde_json::to_string(&redact_argv(&argv)).map_err(|error| {
+                DevError::Database(format!("cannot redact stored history argv: {error}"))
+            })?,
+            Err(_) => "history --project-dir=<redacted>".to_owned(),
+        };
+        conn.execute(
+            "UPDATE history SET command = ?1 WHERE id = ?2",
+            rusqlite::params![command, id],
+        )?;
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -736,11 +773,9 @@ mod tests {
     fn make_row(command: &str, exit_status: i32) -> HistoryRow {
         HistoryRow {
             project: Some("pbfhogg".into()),
-            cwd: "/home/folk/Programs/pbfhogg".into(),
             command: command.into(),
             elapsed_ms: 1234,
             exit_status,
-            hostname: "testhost".into(),
             commit_hash: Some("abc123".parse().unwrap()),
             dirty: Some(false),
             kernel: Some("6.18.0".into()),

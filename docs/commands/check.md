@@ -1187,11 +1187,13 @@ policy.
 The nextest lane (`src/check_cmd/nextest_lane.rs`) launches test processes
 through the linked engine's `TestList::new` and `runner.try_execute`, which
 construct their own commands with no `Command::new` for the choke point to
-catch. The capability travels the engine's documented route instead: both call
-sites build their `CargoConfigs` from `hold::cargo_config_overrides`, which
-writes a generated config file (`~/.brokkr/nextest-env.toml`, owner-only,
-rewritten on every call) whose forced `[env]` entries the engine applies to
-every process it spawns (the same route carries the rustc-info cache disable).
+catch. The capability travels the engine's documented route instead: each
+`CargoConfigs` discovery owns a private, owner-only generated file containing
+forced `[env]` entries from the sweep and the shared child policy. The engine
+applies them to every process it spawns, including the rustc-info cache
+disable. The file is removed after eager discovery, including on failure;
+concurrent callers without a hold cannot replace another reader's environment.
+The synthesized nextest profile uses the same private-file lifecycle.
 A file rather than CLI `--config` expressions because the engine's CLI parser
 accepts neither shape that can carry `force`: inline tables are rejected as
 not-a-dotted-key, and split dotted keys fail because each argument
@@ -1230,6 +1232,7 @@ values are not copied here.
 | Guard protocol | handshake probe budget in `src/guard.rs`; protocol fields shared with `src/bin/rustc_guard.rs` |
 | Process cleanup | ancestry and descendant depth limits in `src/stray.rs`; orphan grace and reap policy in `src/test_orphans.rs`; child OOM adjustment in `src/oom.rs` |
 | User-facing defaults | worktree retention in `src/worktree_record.rs`; short config-filter rejection in `src/config_parts/parser.rs`; `brokkr wc` default in `src/wc.rs`; man section-index threshold in `src/man.rs` |
+| Check/test accounting retention | `ACCOUNTING_RUNS_KEPT` in `src/check_cmd/accounting/journal.rs`; the pruning selector accepts an explicit retention count for focused checks |
 | External tool versions | release and checksum pins in `src/tools.rs` |
 | Tilegen archive retention | `TILEGEN_RETENTION` in `src/elivagar/archive_store.rs` (the older `OUTPUT_RETENTION` name is no longer present) |
 
@@ -1978,8 +1981,9 @@ genuinely missing foreign symbol matches neither test, so ordinary link
 errors get the notes but no hint. Detection is `linker_failure_detail` in
 `src/cargo_filter.rs`, on the `filter_test` fallback path (shared with
 `brokkr test`'s BUILD FAILED reporter via `filter_test_build_failure`, which
-also relabels the summary line `cargo test:` - the diagnostics ride through
-`filter_clippy`, but the command that produced them was `cargo test`).
+labels the summary line `cargo test:`; the support-build reporter uses
+`filter_cargo_build_failure`, labelled `cargo build:`, over the same
+formatter and linker detail).
 
 The stale-incremental family has a second, hintless face: cargo's
 mtime-based fingerprinting fails to invalidate a dependency crate's rlib

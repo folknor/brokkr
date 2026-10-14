@@ -46,10 +46,11 @@ pub(crate) fn cmd_verify(
         }
 
         // ----- nidhogg verify variants -----
-        // `batch` and `geocode` only query an already-running server - no
-        // build, no files touched - so they take no lock. `readonly` builds
-        // the server, stops and restarts it, and chmods the index, so it does
-        // (and `cargo_build` refuses to run without it).
+        // Every verify subcommand runs under the command lock the dispatch
+        // takes. `batch` and `geocode` only query an already-running server;
+        // `readonly` also builds the server, stops and restarts it, and chmods
+        // the index, so it re-enters that hold explicitly (and `cargo_build`
+        // refuses to run without one).
         VerifyCommand::Batch { dataset } => {
             project::require(project, Project::Nidhogg, "verify batch")?;
             nidhogg::cmd::verify_batch(dev_config, project, project_root, build_root, &dataset)

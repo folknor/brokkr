@@ -237,7 +237,7 @@ pub(crate) fn service_suite(req: &crate::request::ServiceSuiteRequest<'_>) -> Re
 
     // Drain every fixture gracefully, regardless of whether the loop
     // succeeded or errored. Each `shutdown` SIGTERMs sæhrimnir with the
-    // standard 1.5s budget; the alternative (FixtureSession::Drop on
+    // standard graceful-shutdown budget; the alternative (FixtureSession::Drop on
     // error unwind) is the SIGKILL fast-path. We do this BEFORE
     // propagating the error so a failing suite doesn't leave the user
     // with an SIGKILLed mock and uninformative artefacts.
@@ -683,7 +683,7 @@ impl<'a> FixtureSession<'a> {
         self.mock.env_pair_refs()
     }
 
-    /// SIGTERM sæhrimnir and reap (with the standard 1.5s budget then
+    /// SIGTERM sæhrimnir and reap (with the standard graceful budget then
     /// SIGKILL escalation). Logs only if the shutdown went forceful so
     /// the happy path stays quiet.
     pub(super) fn shutdown(self) -> Result<(), DevError> {

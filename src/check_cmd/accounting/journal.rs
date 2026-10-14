@@ -333,7 +333,7 @@ pub(crate) fn accounting_open(state_root: &Path, plan: &AccountingPlan) -> Resul
     let base = accounting_base(state_root);
     let dir = base.join(&plan.run_id);
     std::fs::create_dir_all(&dir)?;
-    prune_accounting_runs(&base, &plan.run_id);
+    prune_accounting_runs(&base, &plan.run_id, ACCOUNTING_RUNS_KEPT);
     let plan_path = dir.join("plan.json");
     // Compact: a workspace's plan names every pair of every lane, and the
     // file is read by tools, not by eye.
@@ -361,21 +361,20 @@ fn run_id_millis(name: &str) -> u128 {
 }
 
 /// Which of `names` (run ids, any order) retention removes: everything beyond
-/// the newest [`ACCOUNTING_RUNS_KEPT`]. `opening`, the run being opened, never
-/// goes.
-pub(super) fn runs_to_prune(names: &[String], opening: &str) -> Vec<String> {
+/// the newest `keep`. `opening`, the run being opened, never goes.
+pub(super) fn runs_to_prune(names: &[String], opening: &str, keep: usize) -> Vec<String> {
     let mut sorted: Vec<&String> = names.iter().collect();
     sorted.sort_by_key(|n| std::cmp::Reverse((run_id_millis(n), n.as_str())));
     sorted
         .into_iter()
-        .skip(ACCOUNTING_RUNS_KEPT)
+        .skip(keep)
         .filter(|n| n.as_str() != opening)
         .cloned()
         .collect()
 }
 
 /// Apply the retention rule to the run directories under `base`.
-fn prune_accounting_runs(base: &Path, opening: &str) {
+fn prune_accounting_runs(base: &Path, opening: &str, keep: usize) {
     let Ok(entries) = std::fs::read_dir(base) else {
         return;
     };
@@ -385,7 +384,7 @@ fn prune_accounting_runs(base: &Path, opening: &str) {
         .filter_map(|e| e.file_name().to_str().map(str::to_owned))
         .filter(|n| is_run_id(n))
         .collect();
-    for name in runs_to_prune(&names, opening) {
+    for name in runs_to_prune(&names, opening, keep) {
         std::fs::remove_dir_all(base.join(name)).ok();
     }
 }

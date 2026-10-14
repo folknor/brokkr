@@ -461,6 +461,26 @@ file that cannot be read at all fails the phase naming it - the same holds for
 the header, textlint and manifest phases. Only a path deleted from the working
 tree (still listed by `git ls-files`) is passed over.
 
+## Shared convention path selectors
+
+`[header]`, `[[textlint]]`, and `[manifest]` use the same project-root-relative
+glob syntax over the check's tracked and untracked-not-ignored file snapshot.
+`**` crosses directory separators; `*` stays within one path component. Each
+phase checks every configured glob against the candidate paths in its scope
+when that phase runs. An unmatched glob is a warning, not a failure: an
+exclusion may reserve a path that is absent today, and user-wide rules often
+name paths most projects do not contain.
+
+| Selector | Effect |
+| --- | --- |
+| `[header].paths`, `[header].exempt` | Select files for the header check, then excuse matching selected files. |
+| `[[textlint]].paths`, `[[textlint]].exclude` | Select files for each rule, then excuse matching files from that rule. |
+| `[manifest].paths`, `[manifest].exclude` | Select manifests for all enabled checks (default `**/Cargo.toml`), then excuse matching manifests from all checks. |
+| `[manifest].shape_exclude` | Skip structural and target-shape checks for matching included manifests; dependency-content checks still run. |
+
+`[gremlins].exclude` is a directory-prefix list rather than a glob selector;
+its path rules are described in the gremlins section above.
+
 ## `[header]` section
 
 The header phase checks that each selected file contains the configured
@@ -475,15 +495,10 @@ pattern = "Copyright (C) 2015-{year}"
 exempt = ["**/examples/**", "**/core/rust/**"]
 ```
 
-`paths`/`exempt` are globs (`**` matches any directories; a single `*` stays
-within one path component, so `src/*.rs` does not reach `src/a/b.rs`). The
-same glob rules hold for `[[textlint]]` and `[manifest]`. A glob in any of
-these lists that matches no tracked path in its scope is printed as a warning
-on every run but does not fail the check: an exclusion may legitimately guard
-a file that is absent today, and a user-wide rule names paths most trees lack.
-The byte search also works on files that are not valid UTF-8, so they are
-judged on their content rather than skipped. The current year comes from libc
-`gmtime` (no date-crate dependency). Ported from
+Path selection and unmatched-glob warnings follow the shared convention rules
+above. The byte search also works on files that are not valid UTF-8, so they
+are judged on their content rather than skipped. The current year comes from
+libc `gmtime` (no date-crate dependency). Ported from
 nautilus_trader's `check_copyright_year` hook; see `src/header.rs`.
 
 ## `[[textlint]]` array
@@ -517,10 +532,12 @@ message = "adapters must use get_runtime().spawn()"
 ```
 
 Fields: `name`, `pattern` (a linear-time `regex`; a match is a violation),
-`paths`, `message`, plus optional bounded modifiers:
+`paths`, `message`, plus optional bounded modifiers. `paths` and `exclude` use
+the shared convention path-selector rules above; the remaining selectors and
+predicates are rule-local:
 
-- `exclude` (globs; files matching are excused, checked after `paths`) - for
-  docs that deliberately show the forbidden pattern, or `tests/` trees.
+- `exclude` - files matching are excused after `paths`, for docs that
+  deliberately show the forbidden pattern or `tests/` trees.
 - `allow_marker` (a line containing this literal, e.g. an author's
   `// allow-...` comment, is skipped). `allow_marker_above = N` widens it to
   also suppress when the marker is on one of the N lines above (0 = same line
@@ -765,8 +782,9 @@ exclude = ["fuzz/**"]
 sort_dependencies = true    # keys sorted within each blank-line dependency group
 ```
 
-- `paths` / `exclude` - globs for the manifests checked (default
-  `["**/Cargo.toml"]`) and any excused from every check.
+- `paths` / `exclude` / `shape_exclude` - see the shared convention
+  path-selector rules above. `shape_exclude` skips structural and target-shape
+  checks while dependency-content checks still apply.
 - `sort_dependencies` (default `false`) - dependency keys must be alphabetical
   within each blank-line-separated group of a `[dependencies]` /
   `[dev-dependencies]` / `[build-dependencies]` / `[workspace.dependencies]`

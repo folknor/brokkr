@@ -1723,7 +1723,7 @@ mod prepare_tests {
     use super::*;
 
     fn planned(declaration: crate::profile::SweepDecl) -> PlannedSweep {
-        PlannedSweep::resolve(declaration, false).unwrap()
+        PlannedSweep::resolve(declaration, false)
     }
 
     fn revise(

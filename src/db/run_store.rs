@@ -117,6 +117,15 @@ impl RunStore {
         self.sidecar_required()?.query_meta_for(id)
     }
 
+    pub(crate) fn query_sidecar_capture_truncated(
+        &self,
+        id: &RunId,
+        run_idx: Option<usize>,
+    ) -> Result<bool, DevError> {
+        self.sidecar_required()?
+            .query_capture_truncated_for(id, run_idx)
+    }
+
     pub(crate) fn query_sidecar_samples(
         &self,
         id: &RunId,

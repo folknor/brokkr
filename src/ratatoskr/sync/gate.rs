@@ -226,11 +226,12 @@ pub(super) struct GateHookCtx<'a> {
 /// per-hostname baseline and evaluate every metric rule. Returns
 /// `DevError::Verify` on a measured rule breach so the run exits non-zero.
 pub(super) fn run_gate_hook(ctx: &GateHookCtx<'_>) -> Result<(), DevError> {
-    let gate = ctx
-        .cfg
-        .gate
-        .get(ctx.gate_name)
-        .expect("gate existence already validated upstream");
+    let gate = ctx.cfg.gate.get(ctx.gate_name).ok_or_else(|| {
+        DevError::Config(format!(
+            "gate `{}` is not defined under [ratatoskr.gate]",
+            ctx.gate_name
+        ))
+    })?;
 
     // Validate the gate's configured script matches the current
     // invocation. The gate is bound to a specific script; mixing them
@@ -619,6 +620,7 @@ fn sidecar_to_json(data: &sidecar::SidecarData) -> serde_json::Value {
         "sample_count": data.summary.sample_count,
         "marker_count": data.summary.marker_count,
         "wall_time_ms": data.summary.wall_time_ms,
+        "capture_truncated": data.summary.capture_truncated,
         "num_threads_max": max_threads,
         "read_bytes": read_bytes,
         "write_bytes": write_bytes,

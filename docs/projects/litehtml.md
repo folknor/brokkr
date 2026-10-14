@@ -20,11 +20,13 @@ visual-test surface, different pipeline binary).
   database operations, and common command formatting. Run IDs use the shared
   UUID helpers in `src/db/types.rs`.
 - `scripts/litehtml-prepare/` - Node.js fixture preprocessing (cheerio,
-  image-size, and pngjs). `prepare.js` handles `prepare`, `extract`, and `outline`
-  subcommands. Dependencies managed via pnpm (`package.json`,
-  `pnpm-lock.yaml`). A Rust unit test parses its `INLINE_ELEMENTS` and checks
-  that it covers every tag in `compare.rs`'s `is_inline_tag`. The sibling
-  litehtml-rs repository's pipeline keeps a separate copy of that list.
+  image-size, and pngjs) and the pinned Puppeteer dependency used by reference
+  capture. `prepare.js` handles `prepare`, `extract`, and `outline` subcommands.
+  Dependencies are managed via pnpm (`package.json`, `pnpm-lock.yaml`) and
+  installed in the per-user runtime cache with Puppeteer's matching Chrome
+  build in a versioned subdirectory. A Rust unit test parses `INLINE_ELEMENTS`
+  and checks that it covers every tag in `compare.rs`'s `is_inline_tag`. The
+  sibling litehtml-rs repository's pipeline keeps a separate copy of that list.
 
 ## Commands
 

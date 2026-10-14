@@ -15,7 +15,6 @@ pub struct SluggrsConfig {
 /// A single sluggrs snapshot definition.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-#[allow(dead_code)]
 pub struct SluggrsSnapshot {
     pub id: String,
     pub description: String,

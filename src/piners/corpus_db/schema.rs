@@ -2,7 +2,8 @@
 //!
 //! Mirrors `src/db/schema.rs`. The bundled SQLite enforces the FK
 //! `REFERENCES` clauses (ingest writes the `run` row before its children, so
-//! they hold), and the DB is append-only, so there is no cascade-delete path.
+//! they hold). Retention deletes child rows before their parent run rows; the
+//! foreign keys do not use cascades.
 //!
 //! The `disposition` table stores each harness line whole, as `raw_json`, and
 //! every harness field is a generated column projected from it. The harness

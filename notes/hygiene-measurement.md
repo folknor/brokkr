@@ -21,28 +21,22 @@ Residue: table/column helper copies remain in `history.rs`, `visual/db.rs` and p
 
 Reported by: measurement-storage.
 
-Residue: the `RunRow` API still takes prefixed key strings, and config parsing and the ratatoskr gate still handle prefixes themselves.
+Residue: `RunRow` still takes prefixed key strings, and config parsing and the ratatoskr gate still handle prefixes themselves.
 
 ## MEA-016 - Measurement resources grow without bound
 
 Reported by: measurement-storage, ratatoskr.
 
-Residue: the sidecar retention choice is pending, and sample/marker/counter and output-capture buffers stay unbounded.
+Residue: stdout/stderr capture through `child::supervise_child` is still unbounded.
 
 ## MEA-017 - Measurement tests that prove nothing
 
 Reported by: measurement-storage.
 
-Residue: the weak artefact-drop test in `src/artefacts.rs` remains, and the gate store's `open_mem` still bypasses file opening and WAL setup.
-
-## MEA-018 - Stale claims in measurement docs and code
-
-Reported by: measurement-storage, pbfhogg-nidhogg, elivagar, ratatoskr.
-
-Residue: the duplicated parent-path paragraph in `src/artefacts.rs` remains.
+Residue: the artefact drop test is still weak, and the gate store's `open_mem` still bypasses file opening and WAL setup.
 
 ## MEA-020 - Dead fields, columns and migrations in the stores
 
 Reported by: measurement-storage.
 
-Residue: `ArtefactDir.armed` and the `GateEntry` dead-code allowance remain.
+Residue: the `GateEntry` `#[allow(dead_code)]` in `ratatoskr/gate_store.rs` remains.

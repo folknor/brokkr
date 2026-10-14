@@ -170,6 +170,16 @@ impl BuildConfig {
     /// building) - both build the same engine, so the config mapping lives once
     /// here rather than being duplicated per caller.
     pub fn for_harness(harness_cfg: &crate::config::HarnessConfig, debug: bool) -> Self {
+        Self::for_harness_with_profile(harness_cfg, CargoProfile::for_debug(debug))
+    }
+
+    /// Build config for a harness when its profile has already been resolved.
+    /// This keeps the artifact identity typed across callers that know the
+    /// effective profile rather than reconstructing it from a debug flag.
+    pub fn for_harness_with_profile(
+        harness_cfg: &crate::config::HarnessConfig,
+        profile: CargoProfile,
+    ) -> Self {
         Self {
             package: Some(harness_cfg.package.clone()),
             bin: harness_cfg.binary.clone(),
@@ -177,7 +187,7 @@ impl BuildConfig {
             features: harness_cfg.features.clone(),
             default_features: true,
             all_features: false,
-            profile: CargoProfile::for_debug(debug),
+            profile,
         }
     }
 }
@@ -269,6 +279,35 @@ pub fn cargo_build(config: &BuildConfig, project_root: &Path) -> Result<BuiltArt
     )
 }
 
+/// Run a Cargo command rooted at the detected checkout, including Cargo's
+/// configured environment and the isolated target directory for worktrees.
+/// The lock's child PID is published for the command's lifetime.
+pub fn run_cargo_for_root(
+    args: &[&str],
+    build_root: &crate::project::BuildRoot,
+    env: &[(&str, &str)],
+    on_spawn: Option<&dyn Fn(u32)>,
+    isolation: crate::shutdown::ChildIsolation<'_>,
+) -> Result<output::CapturedOutput, DevError> {
+    with_published_cargo(on_spawn, |publish| {
+        let target_override = cargo_target_dir_override(build_root.as_path());
+        let mut cargo_env = env.to_vec();
+        cargo_env.extend(target_dir_env(target_override.as_deref()));
+        if let Some(dir) = &target_override {
+            output::detail_or_console(&format!("isolating worktree Cargo target dir -> {dir}"));
+        }
+        output::run_captured_observed(
+            "cargo",
+            args,
+            build_root.as_path(),
+            &cargo_env,
+            Some(publish),
+            isolation,
+            output::SpawnProfile::Cargo { phase: None },
+        )
+    })
+}
+
 /// As [`cargo_build`], but takes an extra `on_spawn` observer that fires with
 /// the cargo PID, and an isolation policy. Process-group isolation borrows the
 /// caller's live `SigtermGuard`, the proof that terminal signals bridge to
@@ -289,10 +328,19 @@ pub fn cargo_build_observed(
     on_spawn: Option<&dyn Fn(u32)>,
     isolation: crate::shutdown::ChildIsolation<'_>,
 ) -> Result<BuiltArtifact, DevError> {
+    with_published_cargo(on_spawn, |publish| {
+        cargo_build_locked(config, project_root, publish, isolation)
+    })
+}
+
+fn with_published_cargo<T>(
+    on_spawn: Option<&dyn Fn(u32)>,
+    run: impl FnOnce(&dyn Fn(u32)) -> Result<T, DevError>,
+) -> Result<T, DevError> {
     let hold = crate::lockfile::current_hold().ok_or_else(|| {
         DevError::Lock(
-            "refusing to run cargo build outside the brokkr lock - this is a brokkr bug: \
-             the command that reached this build must take the lock first"
+            "refusing to run cargo outside the brokkr lock - this is a brokkr bug: \
+             the command that reached this Cargo spawn must take the lock first"
                 .into(),
         )
     })?;
@@ -302,9 +350,9 @@ pub fn cargo_build_observed(
             cb(pid);
         }
     };
-    let built = cargo_build_locked(config, project_root, &publish, isolation);
+    let result = run(&publish);
     hold.clear_child_pid();
-    built
+    result
 }
 
 /// Body of [`cargo_build_observed`], run once the hold is established.

@@ -962,10 +962,10 @@ pub struct CheckEntry {
     /// Which test harness runs this sweep. `libtest` (the default) is
     /// brokkr's own lanes - serial, `test_threads`, `parallel`,
     /// `isolation = "process"`. `nextest` hands the sweep to the linked
-    /// nextest engine: process-per-test under the project's own
-    /// `.config/nextest.toml` (its default profile, retries, timeouts,
-    /// default-filter), for consumers whose CI runs nextest and whose suite
-    /// relies on its isolation contract. See [`Harness`].
+    /// nextest engine as a process-per-test executor, for suites that rely on
+    /// that isolation contract. brokkr synthesizes the engine's config: the
+    /// checkout's `.config/nextest.toml` is never read, and brokkr owns the
+    /// filters, concurrency and per-test timeout. See [`Harness`].
     ///
     /// NOT part of the compile shape: a nextest and a libtest sweep with
     /// equal compile inputs share the target dir and dedupe in clippy - the
@@ -993,11 +993,12 @@ pub struct CheckEntry {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Harness {
-    /// Brokkr's own libtest lanes - the pre-existing behaviour.
+    /// Brokkr's own libtest lanes.
     #[default]
     Libtest,
-    /// The linked nextest engine: nextest owns build, list and run for the
-    /// sweep, under the project's `.config/nextest.toml`.
+    /// The linked nextest engine as a process-per-test executor, under a
+    /// config brokkr synthesizes (the checkout's `.config/nextest.toml` is
+    /// never read); brokkr owns the compile shape.
     Nextest,
 }
 
@@ -1124,13 +1125,14 @@ pub struct TestConfig {
 /// What a green result from this profile claims.
 ///
 /// `Complete` may print the success verdict and exit 0, and in exchange
-/// rejects everything that narrows the run: `skip_phases`, package
-/// scoping (`-p`), and - until coverage accounting exists - any libtest
-/// filtering at all. `Partial` gets the narrowing permissions and pays
-/// with exit code 10 and a `check partial` verdict that no `passed`
-/// grep can mistake for a gate result. Profiles without `certifies`
-/// behave exactly as before this key existed: binary exit codes,
-/// `check passed`, no new permissions or restrictions.
+/// rejects what narrows the run outside the plan: `skip_phases`, package
+/// scoping (`-p`) and trailing `-- ...` test args. The profile's own
+/// `skip`/`only` filters are allowed, because the plan is built from them
+/// and the coverage audit accounts for every pair they remove. `Partial`
+/// gets the narrowing permissions and pays with exit code 10 and a
+/// `check partial` verdict that no `passed` grep can mistake for a gate
+/// result. Profiles without `certifies` keep binary exit codes and
+/// `check passed`, with neither set of permissions or restrictions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Certifies {

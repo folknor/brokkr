@@ -65,19 +65,20 @@ pub fn mutate(
     let target_id = target.map(|(z, x, y)| xy_to_tile_id(z, x, y));
     let mut found = op == MutationOp::Regzip;
     let header = archive.header();
-    let e7 = |offset| f64::from(read_i32_le(header, offset)) / 10_000_000.0;
+    let e7 =
+        |offset| -> io::Result<f64> { Ok(f64::from(read_i32_le(header, offset)?) / 10_000_000.0) };
     let config = PmtilesConfig {
         min_zoom: archive.min_zoom(),
         max_zoom: archive.max_zoom(),
         bounds: (
-            e7(pmtiles_constants::HEADER_BOUNDS_LEFT),
-            e7(pmtiles_constants::HEADER_BOUNDS_BOTTOM),
-            e7(pmtiles_constants::HEADER_BOUNDS_RIGHT),
-            e7(pmtiles_constants::HEADER_BOUNDS_TOP),
+            e7(pmtiles_constants::HEADER_BOUNDS_LEFT)?,
+            e7(pmtiles_constants::HEADER_BOUNDS_BOTTOM)?,
+            e7(pmtiles_constants::HEADER_BOUNDS_RIGHT)?,
+            e7(pmtiles_constants::HEADER_BOUNDS_TOP)?,
         ),
         center: (
-            e7(pmtiles_constants::HEADER_CENTER_LONGITUDE),
-            e7(pmtiles_constants::HEADER_CENTER_LATITUDE),
+            e7(pmtiles_constants::HEADER_CENTER_LONGITUDE)?,
+            e7(pmtiles_constants::HEADER_CENTER_LATITUDE)?,
             header[pmtiles_constants::HEADER_CENTER_ZOOM],
         ),
     };

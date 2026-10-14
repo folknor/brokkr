@@ -776,7 +776,7 @@ lanes = ["tier1", "serial"]
 
     #[test]
     fn select_then_dedupe_resolves_lane_qualified_label() {
-        // S3-07: `--sweep serial/all` must resolve even though serial/all
+        // `--sweep serial/all` must resolve even though serial/all
         // executes what tier1/all does and would be deduped away. Selecting
         // before deduping is what makes the documented lane-qualified label
         // reachable.
@@ -787,7 +787,7 @@ lanes = ["tier1", "serial"]
 
     #[test]
     fn the_selection_spares_sweeps_differing_only_in_test_exclusions() {
-        // S3-08: two lanes with the same build shape but different
+        // Two lanes with the same build shape but different
         // `test_exclude_packages` are NOT identical `brokkr test` runs - one
         // skips the `-p` target, the other runs it. The selection keeps the
         // permitting one, so declaration order can't decide whether
@@ -840,7 +840,7 @@ lanes = ["tier1", "serial"]
 
     #[test]
     fn decide_sweeps_carries_profile_env_through() {
-        // B3 regression: a profile that exports `env = { FOO = "1" }`
+        // Regression: a profile that exports `env = { FOO = "1" }`
         // used to round-trip through `brokkr check` but get silently
         // dropped on `brokkr test`. After consolidation, both paths
         // share decide_active_sweeps and env is preserved.

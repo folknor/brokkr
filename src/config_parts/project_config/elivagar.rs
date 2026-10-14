@@ -16,7 +16,6 @@ use std::collections::BTreeMap;
 /// `brokkr results --grep` select an arm off `cli_args`.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
-#[allow(dead_code)]
 pub struct TilegenConfig {
     /// Ocean inputs. Absent or empty means no ocean - the same statement
     /// elivagar's removed `--no-ocean` used to make.

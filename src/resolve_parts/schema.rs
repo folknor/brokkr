@@ -384,9 +384,8 @@ pub(crate) fn resolve_snapshot_pbf_entry<'a>(
             })?;
             // Custom missing-variant error: name the available variants and
             // suggest both a one-shot workaround (--variant <X>) and the
-            // proper fix (re-download to auto-generate). This is the
-            // first-time-user papercut from TODO #5 - closing it inline
-            // instead of adding the per-side --variant-from / --variant-to
+            // proper fix (re-download to auto-generate). This closes a
+            // first-time-user papercut inline instead of adding the per-side --variant-from / --variant-to
             // flags, since no concrete asymmetric use case has surfaced yet.
             let entry = snap.pbf.get(variant).ok_or_else(|| {
                 let mut available: Vec<&str> = snap.pbf.keys().map(String::as_str).collect();
