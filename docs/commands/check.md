@@ -187,15 +187,17 @@ Output:
   does not poll cannot swallow the interrupt. `--json` still emits its
   trailer, with verdict `"failed"`. `brokkr test` and `brokkr clippy` behave
   the same way.
-- **The run log.** Every run writes `.brokkr/check-logs/check-<ms>.log`
+- **The run log.** Each run attempts to write `.brokkr/check-logs/check-<ms>.log`
   (under the config dir), the newest ten `check-` logs kept (`brokkr test`,
   measured runs and `brokkr bench` write `test-`, `measure-` and `bench-`
   logs beside them, each kind pruned only against its own ten). Reserved before
   the lock and opened under it, before the compile-lease drain and toolchain
-  narration. Waiting commands cannot open or prune logs; a failed open
-  preserves history, and retention protects the current file even after a
-  clock rollback. The log keeps every line printed after opening, plus the
-  narration a green run no longer prints - shapes, full cargo argv, the
+  narration. Waiting commands cannot open or prune logs; an open failure warns
+  and preserves history. Names advance past the newest same-kind stamp after a
+  clock rollback, so retention still prunes in creation order. If listing the
+  directory fails, brokkr warns and skips retention for that run. The log keeps
+  every line printed after opening, plus the narration a green run no longer
+  prints: shapes, full cargo argv, the
   `[lints]` sink, per-unit counts, build and fan-out times, the parallel plan
   and per-sweep slowest binary, the roll-call. Written and flushed as each
   event happens, so a watchdog-killed or panicked run keeps everything up to
@@ -470,10 +472,15 @@ doctest or rustdoc break from a docs edit surfaces on the next full run, and
 script checks are the exception inside `script_check`: they judge a test phase,
 and with none having run they are skipped and counted on a `script-check: N
 post-test checks skipped` line, as under a profile that skips `test`.
+Selector-scope warnings for skipped gremlins, header, textlint, and
+manifest scans still run against the shared tree snapshot; skipping a scan does
+not hide a configured path or exclusion that currently selects nothing.
+`[gremlins].disable = true` disables that phase and its exclusion warnings too.
 
-The classifier is `scope::dirt` (`git status --porcelain=v1 -z
---untracked-files=all`): staged, unstaged and untracked-not-ignored paths all
-count, `.md` and `.markdown` are prose, and a rename record's *origin* path
+The classifier is `scope::dirt`, backed by `git::TreeState`
+(`git status --porcelain=v1 -z --no-renames --untracked-files=all`). The same
+parser supplies unstaged diagnostic priority. Staged, unstaged and
+untracked-not-ignored paths all count, `.md` and `.markdown` are prose, and a rename record's *origin* path
 counts too - `git mv notes.md src/lib.rs` is not a documentation edit. Four
 outcomes, only one of which shortens the run:
 
@@ -569,8 +576,9 @@ per-test watchdog ages a test only after
 libtest announces it, so it is blind to everything around the tests - the
 compile and link inside `cargo test`, the binary's teardown after the last
 result. When no test has been in flight for five minutes the watchdog kills
-the cargo process group and reports it through the hung-test path, blamed as
-`(no test in flight)` with the usual `/proc` snapshot. The case it was built
+the process group led by cargo or by a directly run test binary and reports
+which process group it killed through the hung-test path, blamed as `(no test
+in flight)` with the usual `/proc` snapshot. The cargo-led case it was built
 for: cargo parked on `Blocking waiting for file lock on build directory`
 because a rust-analyzer `cargo check` held the target lock - over an hour,
 with nothing for the per-test clock to age. `brokkr test`'s sweep pre-build
@@ -1209,12 +1217,15 @@ install. `--remove` can unset another exact-name brokkr guard too, including
 one whose install is gone, but still refuses an unrelated wrapper. Works with
 no `brokkr.toml`.
 
-`scripts/guard-decision-probe.py <guard-binary>` covers the capability
-paths against a scratch `$HOME` - idle, a stale record left by a crash, a
-draining hold, a mismatched capability, no capability, the `BROKKR_CARGO`
-hatch, and query admission against a refusing hold (with its
-compile-continuing-print counterexample) - and is worth running after any
-change to `decide()` or `classify()`: it is what caught
+`scripts/guard-decision-probe.py` builds this checkout's
+`brokkr-rustc-guard` and covers the capability paths against a scratch `$HOME`.
+It includes an idle machine, a stale record left by a crash, a draining hold,
+a mismatched capability, no capability, the `BROKKR_CARGO` hatch, and query
+admission against a refusing hold (with its compile-continuing-print
+counterexample).
+The `rustc-guard-decision-probe` script-check runs it at the `pre-test` stage,
+so it does not depend on the binary installed by `brokkr install`. Run it after
+any change to `decide()` or `classify()`: it is what caught
 the stale-record refusal described above. The admitted path is covered end to end
 by `brokkr check` compiling anything at all while brokkr holds its own lock; if
 it were broken, no build on the machine would work.

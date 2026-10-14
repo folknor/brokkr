@@ -518,6 +518,65 @@ pub(crate) fn redact_argv(argv: &[String]) -> Vec<String> {
     redacted
 }
 
+/// Return argv with credentials removed and nothing else: the rule for
+/// results rows, whose argv is the identity `results --compare` pairs by and
+/// `--grep` selects on. Unlike `redact_argv` (history's rule), `--env` values
+/// and `--project-dir` survive unless the name is a credential name, and a
+/// bare token only hides the next argument when it is itself a flag
+/// (`--token VALUE`), so a positional such as a workload named
+/// `session_bench` cannot swallow the flag after it.
+pub(crate) fn redact_secret_argv(argv: &[String]) -> Vec<String> {
+    let mut redacted = Vec::with_capacity(argv.len());
+    let mut next_secret = false;
+    let mut next_env = false;
+    let mut next_header = false;
+    for arg in argv {
+        if std::mem::take(&mut next_secret) {
+            redacted.push("<redacted>".to_owned());
+            continue;
+        }
+        if std::mem::take(&mut next_env) {
+            redacted.push(redact_assignment(arg, false));
+            continue;
+        }
+        if std::mem::take(&mut next_header) {
+            redacted.push(redact_header(arg));
+            continue;
+        }
+        if arg == "--env" {
+            redacted.push(arg.clone());
+            next_env = true;
+            continue;
+        }
+        if let Some(value) = arg.strip_prefix("--env=") {
+            redacted.push(format!("--env={}", redact_assignment(value, false)));
+            continue;
+        }
+        if matches!(arg.as_str(), "-H" | "--header") {
+            redacted.push(arg.clone());
+            next_header = true;
+            continue;
+        }
+        if let Some(value) = arg.strip_prefix("--header=") {
+            redacted.push(format!("--header={}", redact_header(value)));
+            continue;
+        }
+        if let Some((name, _)) = arg.split_once('=')
+            && sensitive_name(name)
+        {
+            redacted.push(format!("{name}=<redacted>"));
+            continue;
+        }
+        if arg.starts_with('-') && arg.len() > 1 && sensitive_name(arg) {
+            redacted.push(arg.clone());
+            next_secret = true;
+            continue;
+        }
+        redacted.push(redact_url_credentials(arg));
+    }
+    redacted
+}
+
 fn redact_assignment(value: &str, redact_all: bool) -> String {
     match value.split_once('=') {
         Some((name, _)) if redact_all || sensitive_name(name) => {

@@ -66,8 +66,23 @@ fn snapshots_dir(project_root: &Path) -> PathBuf {
     project_root.join("snapshots")
 }
 
-fn snapshot_dir(project_root: &Path, id: &str) -> PathBuf {
+fn snapshot_dir(project_root: &Path, id: impl AsRef<Path>) -> PathBuf {
     snapshots_dir(project_root).join(id)
+}
+
+/// The durable approved image path, shared by rendering, approval, and git's
+/// measurement-cleanliness exemption.
+fn approved_baseline_path(project_root: &Path, id: impl AsRef<Path>) -> PathBuf {
+    snapshot_dir(project_root, id).join("approved.png")
+}
+
+/// Recognise repository-relative approved images using the writer's layout.
+/// Keep path bytes intact: git can report non-UTF-8 snapshot directory names.
+pub(crate) fn is_approved_baseline(path: &Path) -> bool {
+    let Some(id) = path.parent().and_then(Path::file_name) else {
+        return false;
+    };
+    path == approved_baseline_path(Path::new(""), Path::new(id))
 }
 
 fn resolve_snapshot<'a>(
@@ -192,7 +207,7 @@ fn run_snapshot(
     std::fs::create_dir_all(&snap_dir)?;
 
     let output_png = snap_dir.join("output.png");
-    let approved_png = snap_dir.join("approved.png");
+    let approved_png = approved_baseline_path(project_root, &snapshot.id);
     let diff_png = snap_dir.join("diff.png");
 
     let width_str = config.width.to_string();
@@ -541,7 +556,7 @@ pub(crate) fn approve(
 
     let snap_dir = snapshot_dir(project_root, &snapshot.id);
     let output_png = snap_dir.join("output.png");
-    let approved_png = snap_dir.join("approved.png");
+    let approved_png = approved_baseline_path(project_root, &snapshot.id);
 
     // Only approve an output the latest run actually produced and scored:
     // an ERROR row means output.png is missing or untrustworthy.

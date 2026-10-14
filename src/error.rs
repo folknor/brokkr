@@ -312,6 +312,9 @@ pub enum DevError {
     Internal(String),
     /// Build failure (cargo returned non-zero, or compilation error).
     Build(String),
+    /// Data supplied by an external process did not satisfy its documented
+    /// output contract.
+    ContractViolation(String),
     /// One or more preflight checks failed.
     Preflight(Vec<String>),
     /// A subprocess ran and ended unsuccessfully, with how it ended carried
@@ -391,6 +394,7 @@ impl fmt::Display for DevError {
             ),
             DevError::Internal(msg) => write_message(f, policy, msg),
             DevError::Build(msg) => write_message(f, policy, msg),
+            DevError::ContractViolation(msg) => write_message(f, policy, msg),
             DevError::Preflight(failures) => {
                 write!(f, "{}:", prefix(policy, "preflight failed"))?;
                 for failure in failures {
@@ -455,6 +459,7 @@ impl DevError {
             Self::WrongProject { .. } => RenderingPolicy::Prefixed("wrong project"),
             Self::Internal(_) => RenderingPolicy::Prefixed("internal"),
             Self::Build(_) => RenderingPolicy::Prefixed("build"),
+            Self::ContractViolation(_) => RenderingPolicy::Prefixed("contract violation"),
             Self::Preflight(_) => RenderingPolicy::Prefixed("preflight failed"),
             Self::Lock(_) => RenderingPolicy::Prefixed("lock"),
             Self::Database(_) => RenderingPolicy::Prefixed("database"),
@@ -491,6 +496,7 @@ impl StdError for DevError {
             | DevError::WrongProject { .. }
             | DevError::Internal(_)
             | DevError::Build(_)
+            | DevError::ContractViolation(_)
             | DevError::Preflight(_)
             | DevError::Subprocess { .. }
             | DevError::ChildFailure { .. }
@@ -519,6 +525,9 @@ impl From<toml::de::Error> for DevError {
 
 impl From<serde_json::Error> for DevError {
     fn from(err: serde_json::Error) -> DevError {
+        // A bare serde error does not identify who supplied the JSON. Keep
+        // the default for brokkr-owned data; external-contract readers must
+        // classify failures at their parsing boundary.
         DevError::Internal(format!("json: {err}"))
     }
 }

@@ -9,7 +9,7 @@
 //!
 use std::collections::BTreeMap;
 
-use super::{HotpathData, HotpathFunction, HotpathThread, KvClass, KvPair, Percentile, Quantity};
+use super::{HotpathData, HotpathFunction, HotpathThread, KvKey, KvPair, Percentile, Quantity};
 
 /// Convert a hotpath JSON report (from the hotpath crate) into a `HotpathData` struct.
 ///
@@ -47,7 +47,7 @@ pub fn hotpath_data_from_json(extra: &serde_json::Value) -> Option<HotpathData> 
             "alloc_dealloc_diff",
         ] {
             if let Some(v) = threads_obj.get(*key).and_then(|v| v.as_str()) {
-                thread_summary.push(KvPair::text(KvClass::ThreadSummary.qualify(key), v));
+                thread_summary.push(KvPair::text(KvKey::thread_summary(*key), v));
             }
         }
         if let Some(data) = threads_obj.get("data").and_then(|v| v.as_array()) {

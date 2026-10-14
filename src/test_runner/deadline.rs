@@ -247,7 +247,7 @@ impl Ceilings {
 
 pub(super) fn enforce_deadline(
     state_root: &Path,
-    pid: u32,
+    leader_pid: u32,
     leader: Leader,
     verdict: DeadlineVerdict,
     hung: &Mutex<Option<HungTest>>,
@@ -255,7 +255,7 @@ pub(super) fn enforce_deadline(
     context: &RunContext,
 ) {
     // Freeze before diagnosis: collection must not extend the execution budget.
-    crate::process::signal_process_group(pid, libc::SIGSTOP).ok();
+    crate::process::signal_process_group(leader_pid, libc::SIGSTOP).ok();
     if matches!(
         &verdict.attribution,
         Attribution::Suspect { stale: true, .. }
@@ -274,7 +274,7 @@ pub(super) fn enforce_deadline(
     }
     let report = capture_hung_test(
         state_root,
-        pid,
+        leader_pid,
         leader,
         verdict.reason,
         verdict.attribution,
@@ -284,17 +284,18 @@ pub(super) fn enforce_deadline(
     if let Ok(mut slot) = hung.lock() {
         *slot = Some(report);
     }
-    crate::process::signal_process_group(pid, libc::SIGKILL).ok();
+    crate::process::signal_process_group(leader_pid, libc::SIGKILL).ok();
 }
 
 #[derive(Clone, Debug)]
 pub(crate) struct HungTest {
     pub(crate) reason: TimeoutReason,
     pub(crate) attribution: Attribution,
+    pub(crate) leader: Leader,
     pub(crate) elapsed: Duration,
     pub(crate) ceiling: Duration,
     pub(crate) snapshot_dir: PathBuf,
-    pub(crate) cargo_pid: u32,
+    pub(crate) leader_pid: u32,
     pub(crate) test_pids: Vec<u32>,
     pub(crate) snapshot_pid: Option<u32>,
     pub(crate) wchan: Option<String>,
@@ -545,7 +546,7 @@ pub(super) fn watchdog_loop(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn watchdog_loop_with_timing(
     state_root: PathBuf,
-    cargo_pid: u32,
+    leader_pid: u32,
     leader: Leader,
     tracker: Arc<Mutex<TestTracker>>,
     done: Arc<AtomicBool>,
@@ -599,7 +600,15 @@ pub(super) fn watchdog_loop_with_timing(
         if done.load(Ordering::SeqCst) {
             return;
         }
-        enforce_deadline(&state_root, cargo_pid, leader, verdict, &hung, tap, context);
+        enforce_deadline(
+            &state_root,
+            leader_pid,
+            leader,
+            verdict,
+            &hung,
+            tap,
+            context,
+        );
         return;
     }
 }

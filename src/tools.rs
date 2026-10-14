@@ -493,17 +493,18 @@ pub(crate) fn download_file(url: &str, dest: &Path) -> Result<(), DevError> {
 
     // No `--max-time`: see `CURL_STALL_ARGS` for why a stall detector bounds
     // this rather than a total-duration cap.
-    let status = std::process::Command::new("curl")
-        .args(CURL_STALL_ARGS)
-        .args(CURL_RETRY_ARGS)
-        .args(["-fL", "--progress-bar", "-o", &tmp_str, url])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::inherit())
-        .status()
-        .map_err(|error| DevError::Spawn {
-            program: "curl".into(),
-            error,
-        })?;
+    let status = crate::output::child::command_status(
+        crate::process::spawn::ChildPolicy::plain_command("curl")
+            .args(CURL_STALL_ARGS)
+            .args(CURL_RETRY_ARGS)
+            .args(["-fL", "--progress-bar", "-o", &tmp_str, url])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::inherit()),
+    )
+    .map_err(|error| DevError::Spawn {
+        program: "curl".into(),
+        error,
+    })?;
 
     if !status.success() {
         // Dropping `staged` removes the partial download.
@@ -568,15 +569,16 @@ pub(crate) struct HeadResponse {
 pub(crate) fn head_url(url: &str) -> Result<HeadResponse, DevError> {
     // A HEAD carries no body, so unlike the downloads it can take a hard cap:
     // a server that accepts the connection and never answers fails in 60s.
-    let output = std::process::Command::new("curl")
-        .args(["--connect-timeout", "30", "--max-time", "60"])
-        .args(CURL_RETRY_ARGS)
-        .args(["-fsIL", url])
-        .output()
-        .map_err(|error| DevError::Spawn {
-            program: "curl".into(),
-            error,
-        })?;
+    let output = crate::output::child::command_output(
+        crate::process::spawn::ChildPolicy::plain_command("curl")
+            .args(["--connect-timeout", "30", "--max-time", "60"])
+            .args(CURL_RETRY_ARGS)
+            .args(["-fsIL", url]),
+    )
+    .map_err(|error| DevError::Spawn {
+        program: "curl".into(),
+        error,
+    })?;
 
     if !output.status.success() {
         return Err(DevError::Subprocess {

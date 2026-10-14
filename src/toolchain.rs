@@ -83,9 +83,9 @@ pub fn restore_active_hold() {
 }
 
 fn restore_dir(dir: &Path) {
-    for name in FILES {
+    for (name, sidecar) in moved_paths() {
         let orig = dir.join(name);
-        let aside = dir.join(format!("{name}{SUFFIX}"));
+        let aside = dir.join(sidecar);
         let should_restore = match path_exists(&aside).and_then(|exists| {
             if exists {
                 path_exists(&orig).map(|original_exists| !original_exists)
@@ -125,6 +125,14 @@ pub const FILES: [&str; 2] = ["rust-toolchain.toml", "rust-toolchain"];
 /// Suffix appended to a disabled toolchain file while it is moved aside.
 pub const SUFFIX: &str = ".brokkr-disabled";
 
+/// Relative pin and sidecar paths, shared by moves, restoration, and git's
+/// cleanliness policies. Consumers do not construct sidecar names themselves.
+pub(crate) fn moved_paths() -> impl Iterator<Item = (&'static str, PathBuf)> {
+    FILES
+        .into_iter()
+        .map(|name| (name, PathBuf::from(format!("{name}{SUFFIX}"))))
+}
+
 /// Guard that has moved a project's toolchain file(s) aside and restores them
 /// when dropped. An empty guard (no files found) is a harmless no-op.
 pub struct DisabledToolchain {
@@ -147,9 +155,9 @@ impl DisabledToolchain {
     /// the next clean run heals it.
     pub fn activate(dir: &Path) -> Result<Self, DevError> {
         let mut moved = Vec::new();
-        for name in FILES {
+        for (name, sidecar) in moved_paths() {
             let orig = dir.join(name);
-            let aside = dir.join(format!("{name}{SUFFIX}"));
+            let aside = dir.join(sidecar);
             if path_exists(&orig)? {
                 // Both-exist case: a stale sidecar from a prior hard-killed run
                 // sits next to a current original (rustup/the user recreated the

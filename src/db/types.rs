@@ -11,54 +11,56 @@ use crate::git::ShortCommit;
 // Key-value pairs
 // ---------------------------------------------------------------------------
 
-/// A typed key-value pair for benchmark metadata and subprocess metrics.
-#[derive(Clone)]
-pub struct KvPair {
-    pub key: String,
-    pub value: KvValue,
-}
-
 /// The meaning assigned to a stored key-value pair by its key namespace.
-/// Keep the prefix vocabulary here so query and display paths agree about
-/// which values are provenance, thread summaries, or runtime counters.
+/// Keep the prefix vocabulary here so query, config, gate, and display paths
+/// agree about namespaced keys.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum KvClass {
     Metadata,
     Environment,
     Predecessor,
     ThreadSummary,
+    Sidecar,
     Counter,
 }
 
 impl KvClass {
-    pub(crate) fn for_key(key: &str) -> Self {
-        if key.starts_with("meta.") {
-            Self::Metadata
-        } else if key.starts_with("env.") {
-            Self::Environment
-        } else if key.starts_with("prev.") {
-            Self::Predecessor
-        } else if key.starts_with("threads.") {
-            Self::ThreadSummary
-        } else {
-            Self::Counter
-        }
-    }
-
     fn prefix(self) -> Option<&'static str> {
         match self {
             Self::Metadata => Some("meta."),
             Self::Environment => Some("env."),
             Self::Predecessor => Some("prev."),
             Self::ThreadSummary => Some("threads."),
+            Self::Sidecar => Some("sidecar."),
             Self::Counter => None,
         }
     }
 
-    pub(crate) fn suffix(self, key: &str) -> &str {
-        self.prefix()
-            .and_then(|prefix| key.strip_prefix(prefix))
-            .unwrap_or(key)
+    /// Split a shared dotted namespace from its bare key. `Sidecar` is used
+    /// by ratatoskr gate selectors; the other classes also describe result
+    /// row key/value pairs.
+    pub(crate) fn split_prefixed(key: &str) -> Option<(Self, &str)> {
+        [
+            Self::Metadata,
+            Self::Environment,
+            Self::Predecessor,
+            Self::ThreadSummary,
+            Self::Sidecar,
+        ]
+        .into_iter()
+        .find_map(|class| {
+            class
+                .prefix()
+                .and_then(|prefix| key.strip_prefix(prefix).map(|suffix| (class, suffix)))
+        })
+    }
+
+    pub(crate) fn suffix(self, key: &KvKey) -> &str {
+        if key.class() == self {
+            key.name()
+        } else {
+            key.as_str()
+        }
     }
 
     pub(crate) fn qualify(self, key: &str) -> String {
@@ -73,9 +75,145 @@ impl KvClass {
     }
 }
 
+/// A key namespace and its unprefixed name.
+///
+/// SQLite retains the established dotted spelling, but rows carry this typed
+/// form between the harness, result writer, and query/format paths. Parsing
+/// old or external dotted keys happens at construction, not at each use site.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct KvKey {
+    class: KvClass,
+    name: String,
+    qualified: String,
+}
+
+impl KvKey {
+    fn new(class: KvClass, name: impl Into<String>) -> Self {
+        let name = name.into();
+        let name = class
+            .prefix()
+            .and_then(|prefix| name.strip_prefix(prefix))
+            .unwrap_or(&name)
+            .to_owned();
+        let qualified = class.qualify(&name);
+        Self {
+            class,
+            name,
+            qualified,
+        }
+    }
+
+    /// Build a metadata key from its bare name.
+    pub fn metadata(name: impl Into<String>) -> Self {
+        Self::new(KvClass::Metadata, name)
+    }
+
+    /// Build an environment key from the variable name, without `env.`.
+    pub fn environment(name: impl Into<String>) -> Self {
+        Self::new(KvClass::Environment, name)
+    }
+
+    /// Build a predecessor-provenance key from its bare name.
+    pub fn predecessor(name: impl Into<String>) -> Self {
+        Self::new(KvClass::Predecessor, name)
+    }
+
+    /// Build a hotpath thread-summary key from its bare name.
+    pub fn thread_summary(name: impl Into<String>) -> Self {
+        Self::new(KvClass::ThreadSummary, name)
+    }
+
+    /// The established dotted key written to and read from SQLite.
+    pub fn as_str(&self) -> &str {
+        &self.qualified
+    }
+
+    /// The name without its namespace prefix.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub(crate) fn class(&self) -> KvClass {
+        self.class
+    }
+
+    /// Parse a key from the established database or external spelling.
+    pub(crate) fn from_stored(key: impl Into<String>) -> Self {
+        let qualified = key.into();
+        if let Some((class, name)) = KvClass::split_prefixed(&qualified) {
+            Self::new(class, name)
+        } else {
+            Self::new(KvClass::Counter, qualified)
+        }
+    }
+}
+
+impl From<&str> for KvKey {
+    fn from(key: &str) -> Self {
+        Self::from_stored(key)
+    }
+}
+
+impl From<String> for KvKey {
+    fn from(key: String) -> Self {
+        Self::from_stored(key)
+    }
+}
+
+impl From<&String> for KvKey {
+    fn from(key: &String) -> Self {
+        Self::from_stored(key.clone())
+    }
+}
+
+impl std::fmt::Display for KvKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.qualified)
+    }
+}
+
+impl std::ops::Deref for KvKey {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.as_str()
+    }
+}
+
+impl PartialEq<&str> for KvKey {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+
+impl PartialEq<str> for KvKey {
+    fn eq(&self, other: &str) -> bool {
+        self.as_str() == other
+    }
+}
+
+impl PartialOrd for KvKey {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for KvKey {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.as_str().cmp(other.as_str())
+    }
+}
+
+/// A typed key-value pair for benchmark metadata and subprocess metrics.
+#[derive(Clone)]
+pub struct KvPair {
+    pub key: KvKey,
+    pub value: KvValue,
+}
+
 impl KvPair {
     pub(crate) fn class(&self) -> KvClass {
-        KvClass::for_key(&self.key)
+        self.key.class()
     }
 }
 
@@ -103,19 +241,19 @@ pub enum KvValue {
 }
 
 impl KvPair {
-    pub fn int(key: impl Into<String>, value: i64) -> Self {
+    pub fn int(key: impl Into<KvKey>, value: i64) -> Self {
         Self {
             key: key.into(),
             value: KvValue::Int(value),
         }
     }
-    pub fn real(key: impl Into<String>, value: f64) -> Self {
+    pub fn real(key: impl Into<KvKey>, value: f64) -> Self {
         Self {
             key: key.into(),
             value: KvValue::Real(value),
         }
     }
-    pub fn text(key: impl Into<String>, value: impl Into<String>) -> Self {
+    pub fn text(key: impl Into<KvKey>, value: impl Into<String>) -> Self {
         Self {
             key: key.into(),
             value: KvValue::Text(value.into()),

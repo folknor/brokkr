@@ -7,18 +7,18 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::{Arc, Mutex};
 
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::panic)]
 pub(crate) fn test_git_tree(module: &str, name: &str) -> PathBuf {
     let root = crate::test_scratch::scratch(module, name);
-    let status = Command::new("git")
-        .args(["init", "--quiet"])
-        .current_dir(&root)
-        .status()
-        .expect("git is available");
+    let status = crate::output::child::command_status(
+        crate::process::spawn::ChildPolicy::plain_command("git")
+            .args(["init", "--quiet"])
+            .current_dir(&root),
+    )
+    .expect("git is available");
     assert!(status.success(), "git init failed in {}", root.display());
     root
 }
@@ -78,13 +78,8 @@ pub fn dirt(project_root: &Path) -> Dirt {
 }
 
 fn status_snapshot(project_root: &Path) -> Option<(Dirt, Option<HashSet<PathBuf>>)> {
-    let output = Command::new("git")
-        .args(["status", "--porcelain=v1", "-z", "--untracked-files=all"])
-        .current_dir(project_root)
-        .output()
-        .ok()
-        .filter(|o| o.status.success())?;
-    Some(parse_status(&output.stdout))
+    let state = crate::git::TreeState::read(project_root)?;
+    Some((state.for_check(), state.unstaged_files()))
 }
 
 /// One check invocation's view of the working tree. Git paths are enumerated
@@ -168,61 +163,9 @@ fn classify_status(stdout: &[u8]) -> Dirt {
     parse_status(stdout).0
 }
 
+#[cfg(test)]
 fn parse_status(stdout: &[u8]) -> (Dirt, Option<HashSet<PathBuf>>) {
-    let mut seen = false;
-    let mut prose_only = true;
-    let mut unstaged = HashSet::new();
-    // A rename/copy record is followed by its origin path as a bare field.
-    // That path is part of the change too: `git mv notes.md src/lib.rs` is not
-    // a documentation edit.
-    let mut expect_origin = false;
-    let mut origin_unstaged = false;
-    for field in stdout.split(|b| *b == 0) {
-        if field.is_empty() {
-            continue;
-        }
-        let Ok(text) = std::str::from_utf8(field) else {
-            // A path we cannot read is a path we cannot vouch for.
-            return (Dirt::Code, None);
-        };
-        let (path, changed_in_worktree) = if expect_origin {
-            expect_origin = false;
-            (text, origin_unstaged)
-        } else {
-            // `XY <path>`: two status columns, a space, then the path.
-            let Some(status) = text.get(..2) else {
-                return (Dirt::Code, None);
-            };
-            let Some(path) = text.get(3..) else {
-                return (Dirt::Code, None);
-            };
-            expect_origin = status.starts_with('R') || status.starts_with('C');
-            origin_unstaged = status.as_bytes()[1] != b' ' || status == "??";
-            (path, origin_unstaged)
-        };
-        seen = true;
-        if changed_in_worktree {
-            unstaged.insert(PathBuf::from(path));
-        }
-        let is_prose = Path::new(path)
-            .extension()
-            .and_then(|e| e.to_str())
-            .is_some_and(crate::globs::is_prose_extension);
-        if !is_prose {
-            prose_only = false;
-        }
-    }
-    if expect_origin {
-        return (Dirt::Code, None);
-    }
-    let dirt = if !seen {
-        Dirt::Clean
-    } else if prose_only {
-        Dirt::ProseOnly
-    } else {
-        Dirt::Code
-    };
-    (dirt, Some(unstaged))
+    crate::git::TreeState::check_status(stdout)
 }
 
 /// Order a diagnostic list for display.

@@ -962,7 +962,7 @@ capture_env = ["  PBFHOGG*  ", "MALLOC_CONF"]
         host_ds.insert(
             "dk".into(),
             Dataset {
-                bbox: Some("1,2,3,4".into()),
+                bbox: Some("1,2,3,4".parse().unwrap()),
                 pbf,
                 ..empty_dataset()
             },
@@ -987,7 +987,10 @@ capture_env = ["  PBFHOGG*  ", "MALLOC_CONF"]
         let resolved = resolve_paths(&config, "myhost", Path::new("/proj"), Path::new("/target"));
         let dk = resolved.datasets.get("dk").unwrap();
         assert_eq!(dk.pbf.get("indexed").unwrap().file, "dk-indexed.osm.pbf");
-        assert_eq!(dk.bbox.as_deref(), Some("1,2,3,4"));
+        assert_eq!(
+            dk.bbox.as_ref().map(crate::resolve::Bbox::as_str),
+            Some("1,2,3,4")
+        );
     }
 
     #[test]
@@ -1138,7 +1141,10 @@ xxhash = "cccccccccccccccccccccccccccccccc"
         let dk = host.datasets.get("denmark").unwrap();
         assert_eq!(dk.origin.as_deref(), Some("Geofabrik"));
         assert_eq!(dk.download_date.as_deref(), Some("2026-02-20"));
-        assert_eq!(dk.bbox.as_deref(), Some("8.0,54.5,13.0,58.0"));
+        assert_eq!(
+            dk.bbox.as_ref().map(crate::resolve::Bbox::as_str),
+            Some("8.0,54.5,13.0,58.0")
+        );
         assert_eq!(dk.pbf.get("raw").unwrap().file, "dk-raw.osm.pbf");
         assert_eq!(dk.pbf.get("raw").unwrap().seq, Some(4704));
         // Upper-case hex is accepted and normalised to lower case.
@@ -2258,7 +2264,10 @@ debug = true
         tilegen.insert(
             "default".into(),
             project_config::elivagar::TilegenConfig {
-                ocean: ocean.iter().map(|s| (*s).to_owned()).collect(),
+                ocean: ocean
+                    .iter()
+                    .map(|spec| OceanSpec::parse(spec).expect("valid ocean spec"))
+                    .collect(),
                 ..Default::default()
             },
         );
@@ -2314,8 +2323,8 @@ debug = true
 
     #[test]
     fn ocean_rejects_an_unimplemented_band() {
-        let err = validate_tilegen(&hosts_with_ocean(&["z0-z5:simplified.shp"])).unwrap_err();
-        assert!(format!("{err}").contains("z0-z5"));
+        let err = OceanSpec::parse("z0-z5:simplified.shp").unwrap_err();
+        assert!(err.contains("z0-z5"));
     }
 
     #[test]
@@ -2348,8 +2357,8 @@ debug = true
 
     #[test]
     fn ocean_rejects_a_shapefile_without_a_band() {
-        let err = validate_tilegen(&hosts_with_ocean(&["full.shp"])).unwrap_err();
-        assert!(format!("{err}").contains("needs a zoom band prefix"));
+        let err = OceanSpec::parse("full.shp").unwrap_err();
+        assert!(err.contains("needs a zoom band prefix"));
     }
 
     #[test]

@@ -826,25 +826,47 @@ warning: `b` (manifest) generated 1 warning
 
     #[test]
     fn merge_clippy_dedups_and_combines_sweeps() {
-        let stderr_a = "\
-warning: x [unused_variables]
- --> src/foo.rs:1:1
-  |
-warning: y [needless_pass_by_value]
- --> src/bar.rs:2:1
-  |
-";
-        let stderr_b = "\
-warning: x [unused_variables]
- --> src/foo.rs:1:1
-  |
-warning: z [too_many_lines]
- --> src/baz.rs:3:1
-  |
-";
+        let json_a = [
+            json_compiler_message(
+                "warning",
+                Some("unused_variables"),
+                "x",
+                "src/foo.rs",
+                1,
+                1,
+            ),
+            json_compiler_message(
+                "warning",
+                Some("needless_pass_by_value"),
+                "y",
+                "src/bar.rs",
+                2,
+                1,
+            ),
+        ]
+        .join("\n");
+        let json_b = [
+            json_compiler_message(
+                "warning",
+                Some("unused_variables"),
+                "x",
+                "src/foo.rs",
+                1,
+                1,
+            ),
+            json_compiler_message(
+                "warning",
+                Some("too_many_lines"),
+                "z",
+                "src/baz.rs",
+                3,
+                1,
+            ),
+        ]
+        .join("\n");
         let parses = vec![
-            ("all-features".to_owned(), cargo_filter::parse_clippy(stderr_a)),
-            ("consumer".to_owned(), cargo_filter::parse_clippy(stderr_b)),
+            ("all-features".to_owned(), parse_clippy_from_json(&json_a, false, &[])),
+            ("consumer".to_owned(), parse_clippy_from_json(&json_b, false, &[])),
         ];
         let merged = merge_clippy(&parses);
         // 3 unique diagnostics: foo (both), bar (a), baz (b).

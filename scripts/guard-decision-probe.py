@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise brokkr-rustc-guard's admission paths against a project-local scratch HOME.
+"""Build this checkout's guard and exercise its admission paths in a scratch HOME.
 
 The guard resolves both lock files under `$HOME/.brokkr`, so pointing HOME at a
 temporary directory inside this checkout's `.brokkr` lets us hold the exclusive
@@ -12,26 +12,69 @@ would only restate the implementation. The admit path is covered end to end by
 `brokkr check` succeeding while brokkr holds its own lock - if it did not, no
 build on this machine would work.
 
-Usage: python3 scripts/guard-decision-probe.py <path-to-brokkr-rustc-guard>
+Usage: python3 scripts/guard-decision-probe.py
 """
 
 import fcntl
+import json
 import os
 import pathlib
 import subprocess
 import sys
 import tempfile
 
-guard = sys.argv[1] if len(sys.argv) > 1 else str(
-    pathlib.Path.home() / ".cargo" / "bin" / "brokkr-rustc-guard"
-)
-if not os.access(guard, os.X_OK):
-    # Fail, not skip: `brokkr install` installs this bin beside brokkr, so a
-    # host that runs brokkr's own check without it has an incomplete install.
-    print(f"FAILED: no executable guard at {guard}; run `brokkr install` first")
+root = pathlib.Path(__file__).resolve().parents[1]
+
+
+def build_guard():
+    """Build and return the executable reported for this tree's guard target."""
+    result = subprocess.run(
+        [
+            "cargo",
+            "build",
+            "--locked",
+            "--bin",
+            "brokkr-rustc-guard",
+            "--message-format=json-render-diagnostics",
+        ],
+        cwd=root,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        print("FAILED: could not build this tree's brokkr-rustc-guard")
+        if result.stderr:
+            print(result.stderr, file=sys.stderr, end="")
+        return None
+
+    executable = None
+    for line in result.stdout.splitlines():
+        try:
+            message = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if (
+            message.get("reason") == "compiler-artifact"
+            and message.get("target", {}).get("name") == "brokkr-rustc-guard"
+        ):
+            executable = message.get("executable")
+
+    if executable is None:
+        print("FAILED: cargo did not report the brokkr-rustc-guard executable")
+        return None
+
+    guard = pathlib.Path(executable).resolve()
+    if not os.access(guard, os.X_OK):
+        print(f"FAILED: built guard is not executable: {guard}")
+        return None
+    return str(guard)
+
+
+guard = build_guard()
+if guard is None:
     sys.exit(1)
 real = "/usr/bin/true"
-project_state = pathlib.Path(__file__).resolve().parents[1] / ".brokkr"
+project_state = root / ".brokkr"
 system_tmp = pathlib.Path("/tmp").resolve()
 
 

@@ -31,6 +31,7 @@ mod features {
     use std::cell::OnceCell;
     use std::collections::{BTreeSet, HashMap};
     use std::path::Path;
+    use std::sync::Arc;
 
     use crate::cargo::metadata::{CargoMetadata, Query};
     use crate::error::DevError;
@@ -230,7 +231,7 @@ mod features {
     /// subprocess.
     pub(crate) struct FeatureOracle<'a> {
         root: Option<&'a Path>,
-        snapshot: OnceCell<Result<WorkspaceFeatures, String>>,
+        snapshot: OnceCell<Result<WorkspaceFeatures, Arc<DevError>>>,
     }
 
     impl<'a> FeatureOracle<'a> {
@@ -264,11 +265,13 @@ mod features {
             let snap = self.snapshot.get_or_init(|| match self.root {
                 Some(root) => crate::cargo::metadata::load(root, Query::workspace(), &[], None)
                     .map(|metadata| WorkspaceFeatures::from_metadata(&metadata))
-                    .map_err(|e| e.to_string()),
-                None => Err("no workspace metadata is available".to_owned()),
+                    .map_err(Arc::new),
+                None => Err(Arc::new(DevError::Build(
+                    "no workspace metadata is available".to_owned(),
+                ))),
             });
             snap.as_ref()
-                .map_err(|e| DevError::Build(format!("routing a sweep's features needs cargo metadata: {e}")))
+                .map_err(|error| crate::cargo::metadata::clone_error(error.as_ref()))
         }
     }
 

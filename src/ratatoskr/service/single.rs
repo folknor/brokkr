@@ -138,7 +138,7 @@ pub(crate) fn service_test(req: &crate::request::ServiceTestRequest<'_>) -> Resu
 
     let state = ProjectState::new(project_root);
     let artefact_parent = state.ratatoskr().service_artifacts();
-    let repeat = repeat.max(1);
+    let repeat = repeat.get();
 
     // If the script's frontmatter declares a fixture, spawn sæhrimnir
     // once before iteration starts and inject the per-protocol endpoint

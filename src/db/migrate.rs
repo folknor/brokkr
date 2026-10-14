@@ -4,7 +4,7 @@ use super::store::{column_exists, table_exists};
 use crate::error::DevError;
 
 /// Current schema version. Increment when adding new migrations.
-pub(super) const SCHEMA_VERSION: i64 = 24;
+pub(super) const SCHEMA_VERSION: i64 = 25;
 
 /// Apply all migrations newer than `current`. Version checks and stamping are
 /// centralized in `db::store`.
@@ -90,6 +90,9 @@ pub(super) fn run_migrations(conn: &rusqlite::Connection, current: i64) -> Resul
     if current < 24 {
         migrate_v23_to_v24(conn)?;
     }
+    if current < 25 {
+        migrate_v24_to_v25(conn)?;
+    }
 
     Ok(())
 }
@@ -110,6 +113,102 @@ fn migrate_v23_to_v24(conn: &rusqlite::Connection) -> Result<(), DevError> {
     for column in ["extra", "metadata"] {
         if column_exists(conn, "runs", column)? {
             conn.execute_batch(&format!("ALTER TABLE runs DROP COLUMN {column}"))?;
+        }
+    }
+    Ok(())
+}
+
+/// v24 -> v25: redact credentials from already stored invocation arguments
+/// and captured environment values. Non-sensitive values and row identities
+/// remain intact; legacy joined argv strings are left alone because their
+/// original argument boundaries cannot be recovered safely.
+fn migrate_v24_to_v25(conn: &rusqlite::Connection) -> Result<(), DevError> {
+    let has_brokkr_args = column_exists(conn, "runs", "brokkr_args")?;
+    let has_arm_key = column_exists(conn, "runs", "arm_key")?;
+    if has_brokkr_args {
+        let argv_rows = {
+            let arm_column = if has_arm_key { ", arm_key" } else { "" };
+            let mut statement = conn.prepare(&format!(
+                "SELECT id, brokkr_args{arm_column} FROM runs WHERE brokkr_args IS NOT NULL"
+            ))?;
+            statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        if has_arm_key {
+                            row.get::<_, Option<String>>(2)?
+                        } else {
+                            None
+                        },
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+
+        for (id, encoded, arm_key) in argv_rows {
+            let Ok(argv) = serde_json::from_str::<Vec<String>>(&encoded) else {
+                continue;
+            };
+            let redacted = crate::history::redact_secret_argv(&argv);
+            if redacted == argv {
+                continue;
+            }
+            let encoded = serde_json::to_string(&redacted).map_err(|error| {
+                DevError::Database(format!("could not encode redacted brokkr argv: {error}"))
+            })?;
+            if has_arm_key {
+                let safe_arm = arm_key
+                    .filter(|key| !key.is_empty())
+                    .map(|_| crate::run_invocation::arm_key(&redacted));
+                conn.execute(
+                    "UPDATE runs SET brokkr_args = ?1, arm_key = ?2 WHERE id = ?3",
+                    rusqlite::params![encoded, safe_arm, id],
+                )?;
+            } else {
+                conn.execute(
+                    "UPDATE runs SET brokkr_args = ?1 WHERE id = ?2",
+                    rusqlite::params![encoded, id],
+                )?;
+            }
+        }
+    }
+
+    if table_exists(conn, "run_kv")? {
+        let env_rows = {
+            let mut statement = conn.prepare(
+                "SELECT run_id, key, value_int, value_real, value_text \
+                 FROM run_kv WHERE key LIKE 'env.%'",
+            )?;
+            statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<i64>>(2)?,
+                        row.get::<_, Option<f64>>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+
+        for (run_id, key, value_int, value_real, value_text) in env_rows {
+            let original = value_text.unwrap_or_else(|| {
+                value_int
+                    .map(|value| value.to_string())
+                    .or_else(|| value_real.map(|value| value.to_string()))
+                    .unwrap_or_default()
+            });
+            let name = key.strip_prefix("env.").unwrap_or(&key);
+            let redacted = crate::history::redact_env_value(name, &original);
+            if redacted != original {
+                conn.execute(
+                    "UPDATE run_kv SET value_int = NULL, value_real = NULL, value_text = ?1 \
+                     WHERE run_id = ?2 AND key = ?3",
+                    rusqlite::params![redacted, run_id, key],
+                )?;
+            }
         }
     }
     Ok(())

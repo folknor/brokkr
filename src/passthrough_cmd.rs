@@ -6,12 +6,13 @@ use crate::{
     lockfile, output,
     project::{self, Project},
 };
+use std::num::NonZeroUsize;
 use std::time::{Duration, Instant};
 
 pub(crate) struct RunOptions {
     pub(crate) time: bool,
     pub(crate) json: bool,
-    pub(crate) runs: usize,
+    pub(crate) runs: NonZeroUsize,
     pub(crate) no_build: bool,
 }
 
@@ -63,11 +64,12 @@ pub(crate) fn print_run_timing(
     run_ms: u64,
     samples_ms: &[u64],
 ) -> Result<(), DevError> {
+    let runs = opts.runs.get();
     let elapsed_ms = build_ms.saturating_add(run_ms);
     let stats = summarize_runs(samples_ms)?;
 
     if opts.json {
-        if opts.runs == 1 {
+        if runs == 1 {
             println!(
                 "{}",
                 serde_json::json!({
@@ -83,7 +85,7 @@ pub(crate) fn print_run_timing(
                     "build_ms": build_ms,
                     "run_ms": run_ms,
                     "elapsed_ms": elapsed_ms,
-                    "runs": opts.runs,
+                    "runs": runs,
                     "min_ms": stats.min_ms,
                     "median_ms": stats.median_ms,
                     "p95_ms": stats.p95_ms,
@@ -95,21 +97,21 @@ pub(crate) fn print_run_timing(
     }
 
     if opts.time {
-        if opts.runs == 1 {
+        if runs == 1 {
             println!("elapsed_ms={elapsed_ms} build_ms={build_ms} run_ms={run_ms}");
         } else {
             println!(
                 "elapsed_ms={elapsed_ms} build_ms={build_ms} run_ms={run_ms} runs={} min_ms={} median_ms={} p95_ms={}",
-                opts.runs, stats.min_ms, stats.median_ms, stats.p95_ms,
+                runs, stats.min_ms, stats.median_ms, stats.p95_ms,
             );
         }
         return Ok(());
     }
 
-    if opts.runs > 1 {
+    if runs > 1 {
         output::run_msg(&format!(
             "runs={} min={}ms median={}ms p95={}ms total={}ms",
-            opts.runs, stats.min_ms, stats.median_ms, stats.p95_ms, run_ms,
+            runs, stats.min_ms, stats.median_ms, stats.p95_ms, run_ms,
         ));
     }
 
@@ -127,9 +129,7 @@ pub(crate) fn cmd_run(
     opts: &RunOptions,
     lock: Option<&lockfile::LockGuard>,
 ) -> Result<(), DevError> {
-    if opts.runs == 0 {
-        return Err(DevError::Usage("--runs must be >= 1".into()));
-    }
+    let runs = opts.runs.get();
 
     let package = project.cli_package();
     let feature_refs: Vec<&str> = features.iter().map(String::as_str).collect();
@@ -156,11 +156,11 @@ pub(crate) fn cmd_run(
     std::fs::create_dir_all(&paths.scratch_dir)?;
 
     let mut run_total = Duration::ZERO;
-    let mut samples_ms = Vec::with_capacity(opts.runs);
+    let mut samples_ms = Vec::with_capacity(runs);
 
-    for idx in 0..opts.runs {
-        if opts.runs > 1 {
-            output::run_msg(&format!("run {}/{}", idx + 1, opts.runs));
+    for idx in 0..runs {
+        if runs > 1 {
+            output::run_msg(&format!("run {}/{}", idx + 1, runs));
         }
         let binary_str = binary.display().to_string();
         let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();

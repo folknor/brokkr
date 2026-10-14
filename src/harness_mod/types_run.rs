@@ -4,7 +4,7 @@ use std::time::Duration;
 use crate::build::CargoProfile;
 use crate::config::DriveConfig;
 use crate::db::{
-    self, Distribution, HotpathData, KvClass, KvPair, KvValue, ResultsDb, RunRow, Wall,
+    self, Distribution, HotpathData, KvKey, KvPair, KvValue, ResultsDb, RunRow, Wall,
 };
 use crate::error::DevError;
 use crate::git::GitInfo;
@@ -173,20 +173,22 @@ impl BenchHarness {
     /// Create a new harness with a pre-acquired lock.
     ///
     /// Use this when the lock must be held before other work (e.g. cargo build)
-    /// to prevent concurrent builds from contaminating timing.
+    /// to prevent concurrent builds from contaminating timing. Git provenance
+    /// comes from the build root (the code that was measured, a `--commit`
+    /// worktree included); the results store lives under the project root.
     pub fn new_with_lock(
         lock: LockGuard,
         paths: &crate::config::ResolvedPaths,
-        project_root: &Path,
-        db_root: Option<&Path>,
+        build_root: &crate::project::BuildRoot,
+        project_root: &crate::project::ProjectRoot,
         project: crate::project::Project,
         force: bool,
         stop_marker: Option<String>,
     ) -> Result<Self, DevError> {
         std::fs::create_dir_all(&paths.scratch_dir)?;
         let host = HostFacts::collect(&paths.hostname);
-        let git = crate::git::collect(project_root)?;
-        let state = crate::clean::layout::ProjectState::new(db_root.unwrap_or(project_root));
+        let git = crate::git::collect(build_root.as_path())?;
+        let state = crate::clean::layout::ProjectState::new(project_root.as_path());
         std::fs::create_dir_all(state.root())?;
         let db = ResultsDb::open(&state.results_db())?;
         let storage_notes = format_storage_notes(&paths.drives);
@@ -466,7 +468,13 @@ impl BenchHarness {
             sidecar_db.store_run(&store_uuid, i, data)?;
         }
 
-        sidecar_db.store_meta(&store_uuid, best_run_idx, sidecar_runs.len(), run_info)?;
+        sidecar_db.store_meta(
+            &store_uuid,
+            best_run_idx,
+            sidecar_runs.len(),
+            run_info,
+            is_dirty,
+        )?;
 
         if is_dirty {
             sidecar_db.set_latest("dirty", &store_uuid)?;
@@ -622,25 +630,19 @@ fn previous_run_kv(
     // Clamped at 0 - a backwards system clock shouldn't record a negative gap.
     let gap_seconds = (start - prev.timestamp_epoch).max(0);
     let mut kv = vec![
-        KvPair::text(KvClass::Predecessor.qualify("command"), prev.command),
-        KvPair::int(
-            KvClass::Predecessor.qualify("gap_seconds"),
-            gap_seconds,
-        ),
+        KvPair::text(KvKey::predecessor("command"), prev.command),
+        KvPair::int(KvKey::predecessor("gap_seconds"), gap_seconds),
     ];
     if !prev.uuid.is_empty() {
         // Short form, matching what `brokkr results` prints and accepts as a
         // prefix - so the recorded value is directly pasteable.
         kv.push(KvPair::text(
-            KvClass::Predecessor.qualify("uuid"),
+            KvKey::predecessor("uuid"),
             &prev.uuid[..8.min(prev.uuid.len())],
         ));
     }
     if let Some(input) = prev.input_file {
-        kv.push(KvPair::text(
-            KvClass::Predecessor.qualify("input_file"),
-            input,
-        ));
+        kv.push(KvPair::text(KvKey::predecessor("input_file"), input));
     }
     Ok(kv)
 }

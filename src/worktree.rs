@@ -51,7 +51,6 @@
 //! ([`isolated_target_dir`]).
 
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
 
 use crate::error::DevError;
 use crate::output;
@@ -605,14 +604,15 @@ pub fn is_pristine(path: &Path) -> bool {
 
 /// Run a git command in the given directory and return trimmed stdout.
 fn run_git(cwd: &Path, args: &[&str]) -> Result<String, DevError> {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(cwd)
-        .output()
-        .map_err(|error| DevError::Spawn {
-            program: "git".into(),
-            error,
-        })?;
+    let output = crate::output::child::command_output(
+        crate::process::spawn::ChildPolicy::plain_command("git")
+            .args(args)
+            .current_dir(cwd),
+    )
+    .map_err(|error| DevError::Spawn {
+        program: "git".into(),
+        error,
+    })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);

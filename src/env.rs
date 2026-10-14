@@ -1,5 +1,4 @@
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use crate::config::ResolvedPaths;
 use crate::context::{acquire_cmd_lock, bootstrap, bootstrap_config};
@@ -348,7 +347,9 @@ fn collect_tools(project: Project, project_root: &Path) -> Vec<(String, String)>
 
 /// Run a command and extract the version from its first line of stdout.
 fn read_tool_version(name: &str, args: &[&str]) -> String {
-    let output = match Command::new(name).args(args).output() {
+    let output = match crate::output::child::command_output(
+        crate::process::spawn::ChildPolicy::plain_command(name).args(args),
+    ) {
         Ok(o) => o,
         Err(_) => return "not found".to_owned(),
     };
@@ -374,11 +375,11 @@ fn extract_version_from_stdout(stdout: &[u8]) -> String {
 
 /// Get the current fixed-width git short rev for the project.
 fn read_git_rev(project_root: &Path) -> String {
-    let output = match Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .current_dir(project_root)
-        .output()
-    {
+    let output = match crate::output::child::command_output(
+        crate::process::spawn::ChildPolicy::plain_command("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(project_root),
+    ) {
         Ok(o) => o,
         Err(_) => return "unknown".to_owned(),
     };

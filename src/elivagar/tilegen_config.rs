@@ -1,16 +1,9 @@
-//! Typed values and validation for elivagar's tilegen command-line contract.
+//! Typed values deserialized from elivagar's tilegen config blocks.
 
 use std::fmt;
 use std::str::FromStr;
 
 use serde::Deserialize;
-
-use crate::config::project_config::elivagar::TilegenConfig;
-use crate::error::DevError;
-
-const MIB: usize = 1_024 * 1_024;
-const SORT_BUDGET_MIN_BYTES: usize = 64 * MIB;
-const STREAM_BUDGET_MIN_BYTES: usize = MIB;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -25,18 +18,6 @@ impl fmt::Display for TileFormat {
             Self::Mvt => "mvt",
             Self::Mlt => "mlt",
         })
-    }
-}
-
-impl FromStr for TileFormat {
-    type Err = String;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value {
-            "mvt" => Ok(Self::Mvt),
-            "mlt" => Ok(Self::Mlt),
-            _ => Err(format!("expected mvt or mlt, got {value:?}")),
-        }
     }
 }
 
@@ -56,18 +37,6 @@ impl fmt::Display for TileCompression {
     }
 }
 
-impl FromStr for TileCompression {
-    type Err = String;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value {
-            "gzip" => Ok(Self::Gzip),
-            "brotli" => Ok(Self::Brotli),
-            _ => Err(format!("expected gzip or brotli, got {value:?}")),
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SortChunkCompression {
@@ -84,18 +53,7 @@ impl fmt::Display for SortChunkCompression {
     }
 }
 
-impl FromStr for SortChunkCompression {
-    type Err = String;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value {
-            "lz4" => Ok(Self::Lz4),
-            "snappy" => Ok(Self::Snappy),
-            _ => Err(format!("expected lz4 or snappy, got {value:?}")),
-        }
-    }
-}
-
+/// A byte count parsed from a config string with bytes or MiB/GiB suffixes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ByteSize(usize);
 
@@ -110,6 +68,8 @@ impl FromStr for ByteSize {
     type Err = String;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
+        const MIB: usize = 1_024 * 1_024;
+
         let value = value.trim();
         let (digits, multiplier) = if let Some(digits) =
             value.strip_suffix('M').or_else(|| value.strip_suffix('m'))
@@ -131,73 +91,98 @@ impl FromStr for ByteSize {
     }
 }
 
+impl<'de> Deserialize<'de> for ByteSize {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error as _;
+
+        let value = String::deserialize(deserializer)?;
+        value.parse().map_err(D::Error::custom)
+    }
+}
+
 impl fmt::Display for ByteSize {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.fmt(f)
     }
 }
 
-fn validate_enum<T>(name: &str, value: &impl fmt::Display) -> Result<(), DevError>
-where
-    T: FromStr,
-    T::Err: fmt::Display,
-{
-    value
-        .to_string()
-        .parse::<T>()
-        .map(|_| ())
-        .map_err(|error| DevError::Config(format!("tilegen {name}: {error}")))
+/// A gzip compression level whose config value has already been range checked.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CompressionLevel(u8);
+
+impl<'de> Deserialize<'de> for CompressionLevel {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error as _;
+
+        let level = u32::deserialize(deserializer)?;
+        match u8::try_from(level) {
+            Ok(level) if level <= 10 => Ok(Self(level)),
+            _ => Err(D::Error::custom(
+                "tilegen compression_level must be between 0 and 10",
+            )),
+        }
+    }
 }
 
-fn validate_budget(name: &str, value: &impl fmt::Display, minimum: usize) -> Result<(), DevError> {
-    let rendered = value.to_string();
-    let size = rendered
+impl fmt::Display for CompressionLevel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+const MIB: usize = 1_024 * 1_024;
+const SORT_BUDGET_MIN_BYTES: usize = 64 * MIB;
+const STREAM_BUDGET_MIN_BYTES: usize = MIB;
+
+pub(crate) fn deserialize_sort_budget<'de, D>(deserializer: D) -> Result<Option<ByteSize>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_budget(deserializer, "sort_budget", SORT_BUDGET_MIN_BYTES)
+}
+
+pub(crate) fn deserialize_way_budget<'de, D>(deserializer: D) -> Result<Option<ByteSize>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_budget(deserializer, "way_budget", STREAM_BUDGET_MIN_BYTES)
+}
+
+pub(crate) fn deserialize_assemble_budget<'de, D>(
+    deserializer: D,
+) -> Result<Option<ByteSize>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_budget(deserializer, "assemble_budget", STREAM_BUDGET_MIN_BYTES)
+}
+
+fn deserialize_budget<'de, D>(
+    deserializer: D,
+    name: &str,
+    minimum: usize,
+) -> Result<Option<ByteSize>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as _;
+
+    let Some(value) = Option::<String>::deserialize(deserializer)? else {
+        return Ok(None);
+    };
+    let size = value
         .parse::<ByteSize>()
-        .map_err(|error| DevError::Config(format!("tilegen {name}: {error}")))?;
+        .map_err(|error| D::Error::custom(format!("tilegen {name}: {error}")))?;
     if size.bytes() < minimum {
-        return Err(DevError::Config(format!(
+        return Err(D::Error::custom(format!(
             "tilegen {name} must be at least {minimum} bytes"
         )));
     }
-    Ok(())
-}
-
-/// Validate every forwarded knob before cargo starts building elivagar.
-/// `TilegenConfig` currently deserializes enum and budget fields as strings and
-/// compression_level as an unchecked u32; this rejects invalid values before
-/// the build.
-pub(crate) fn validate(config: &TilegenConfig) -> Result<(), DevError> {
-    if let Some(value) = &config.tile_format {
-        validate_enum::<TileFormat>("tile_format", value)?;
-    }
-    if let Some(value) = &config.tile_compression {
-        validate_enum::<TileCompression>("tile_compression", value)?;
-    }
-    if let Some(value) = &config.compress_sort_chunks {
-        validate_enum::<SortChunkCompression>("compress_sort_chunks", value)?;
-    }
-    if let Some(value) = &config.sort_budget {
-        validate_budget("sort_budget", value, SORT_BUDGET_MIN_BYTES)?;
-    }
-    if let Some(value) = &config.way_budget {
-        validate_budget("way_budget", value, STREAM_BUDGET_MIN_BYTES)?;
-    }
-    if let Some(value) = &config.assemble_budget {
-        validate_budget("assemble_budget", value, STREAM_BUDGET_MIN_BYTES)?;
-    }
-    if let Some(level) = config.compression_level {
-        let level = level
-            .to_string()
-            .parse::<u32>()
-            .map_err(|error| DevError::Config(format!("tilegen compression_level: {error}")))?;
-        if level > 10 {
-            return Err(DevError::Config(
-                "tilegen compression_level must be between 0 and 10".into(),
-            ));
-        }
-    }
-    config
-        .ocean_specs()
-        .map_err(|error| DevError::Config(format!("tilegen ocean: {error}")))?;
-    Ok(())
+    Ok(Some(size))
 }

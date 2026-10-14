@@ -378,7 +378,7 @@ fn run_sync(
     all: &bool,
     filter: &Option<String>,
     include_ignored: &bool,
-    bench: &Option<usize>,
+    bench: &Option<std::num::NonZeroUsize>,
     force: &bool,
     keep_artefacts: &bool,
     debug: &bool,
@@ -593,7 +593,7 @@ fn run_check(
     // SIGKILLing every descendant and letting this command unwind to
     // exit 124. Declared after `_lock`, so it disarms before the lock's
     // drop restores the toolchain pin.
-    let _ceiling = check_cmd::CheckWatchdog::arm(check_cmd::CHECK_CEILING);
+    let _ceiling = check_cmd::CheckWatchdog::arm(check_cmd::CHECK_CEILING)?;
     // The `[lints]` config, loaded once; a tree without one allows nothing.
     let no_lints = config::LintsConfig::default();
     let lints = clippy_cfg.unwrap_or(&no_lints);
@@ -757,7 +757,7 @@ fn run(cli: Cli, detection: Option<&project::Detection>) -> Result<(), DevError>
     let disable_dir = detection.filter(|d| d.config.disable_toolchain)
         .map(|d| d.build_root.as_path().to_path_buf());
     context::set_configured_toolchain_dir(disable_dir);
-    let historical = cli.command.uses_worktree();
+    let historical = spec.uses_worktree(&cli.command)?;
     let _toolchain = if !historical && spec.lock != cli::LockPolicy::None {
         detection.filter(|d| d.config.disable_toolchain)
             .map(|d| toolchain::DisabledToolchain::activate(d.build_root.as_path())).transpose()?

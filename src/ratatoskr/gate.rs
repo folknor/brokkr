@@ -11,6 +11,7 @@ use std::fmt::{self, Write};
 use serde_json::{Map, Value};
 
 use crate::config::project_config::ratatoskr::{GateConfig, MetricRule};
+use crate::db::KvClass;
 use crate::error::DevError;
 use crate::ratatoskr::gate_store::GateEntry;
 
@@ -138,19 +139,27 @@ fn validate_baseline_pins(gate_name: &str, gate: &GateConfig) -> Result<(), DevE
 
 impl MetricKey {
     fn parse(name: &str) -> Result<Self, String> {
-        if let Some(key) = name.strip_prefix("sidecar.") {
-            return if key.is_empty() {
-                Err("metric `sidecar.` has an empty key".into())
-            } else {
-                Ok(Self::Sidecar(key.to_owned()))
-            };
-        }
-        if let Some(key) = name.strip_prefix("meta.") {
-            return if key.is_empty() {
-                Err("metric `meta.` has an empty key".into())
-            } else {
-                Ok(Self::Meta(key.to_owned()))
-            };
+        if let Some((class, key)) = KvClass::split_prefixed(name) {
+            match class {
+                KvClass::Sidecar => {
+                    return if key.is_empty() {
+                        Err("metric `sidecar.` has an empty key".into())
+                    } else {
+                        Ok(Self::Sidecar(key.to_owned()))
+                    };
+                }
+                KvClass::Metadata => {
+                    return if key.is_empty() {
+                        Err("metric `meta.` has an empty key".into())
+                    } else {
+                        Ok(Self::Meta(key.to_owned()))
+                    };
+                }
+                KvClass::Environment
+                | KvClass::Predecessor
+                | KvClass::ThreadSummary
+                | KvClass::Counter => {}
+            }
         }
         match name {
             "elapsed_ms" => Ok(Self::ElapsedMs),

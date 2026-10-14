@@ -44,7 +44,7 @@ pub(crate) fn service_suite(req: &crate::request::ServiceSuiteRequest<'_>) -> Re
         include_ignored,
         repeat,
     } = *req;
-    let cycles = repeat.max(1);
+    let cycles = repeat.get();
     let all = discover::discover(project_root)?;
     let total_discovered = all.len();
     let SuiteSelection {

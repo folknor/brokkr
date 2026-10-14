@@ -47,6 +47,21 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 const CPU_ROOT: &str = "/sys/devices/system/cpu";
+const PROC_STATUS: &str = "/proc/thread-self/status";
+
+/// CPU topology inputs that shape the default parallel-test budget.
+///
+/// The paths are parameters to the discovery helpers below, so callers can
+/// supply a synthetic procfs/sysfs tree. The fallback is used only when
+/// neither tree provides a usable count and the OS cannot report affinity.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CpuTopologyTunables {
+    pub(crate) fallback_parallelism: usize,
+}
+
+pub(crate) const DEFAULT_CPU_TOPOLOGY_TUNABLES: CpuTopologyTunables = CpuTopologyTunables {
+    fallback_parallelism: 4,
+};
 
 /// Parse a sysfs CPU list (`"0-3,8,12-15"`) into its members.
 ///
@@ -88,10 +103,10 @@ fn read_trimmed(path: &Path) -> Option<String> {
 /// Keyed on `(physical_package_id, core_id)`: `core_id` is only unique within
 /// a package, so a two-socket box would otherwise fold socket 1's core 0 into
 /// socket 0's.
-fn physical_cores(logical: &BTreeSet<u32>) -> usize {
+fn physical_cores_at(cpu_root: &Path, logical: &BTreeSet<u32>) -> usize {
     let mut cores: BTreeSet<(String, String)> = BTreeSet::new();
     for cpu in logical {
-        let topo = Path::new(CPU_ROOT).join(format!("cpu{cpu}/topology"));
+        let topo = cpu_root.join(format!("cpu{cpu}/topology"));
         let Some(core) = read_trimmed(&topo.join("core_id")) else {
             continue;
         };
@@ -103,8 +118,8 @@ fn physical_cores(logical: &BTreeSet<u32>) -> usize {
 }
 
 /// Every logical CPU the kernel reports as online.
-fn online_cpus() -> BTreeSet<u32> {
-    read_trimmed(&Path::new(CPU_ROOT).join("online"))
+fn online_cpus_at(cpu_root: &Path) -> BTreeSet<u32> {
+    read_trimmed(&cpu_root.join("online"))
         .map(|s| parse_cpu_list(&s))
         .unwrap_or_default()
 }
@@ -120,10 +135,10 @@ fn parse_allowed_cpus(status: &str) -> Option<BTreeSet<u32>> {
 
 /// The calling thread's affinity, restricted to CPUs sysfs reports online.
 /// If the online list is unavailable, keep the kernel-provided affinity list.
-fn allowed_cpus() -> Option<BTreeSet<u32>> {
-    let status = read_trimmed(Path::new("/proc/thread-self/status"))?;
+fn allowed_cpus_at(status_path: &Path, cpu_root: &Path) -> Option<BTreeSet<u32>> {
+    let status = read_trimmed(status_path)?;
     let allowed = parse_allowed_cpus(&status)?;
-    let online = online_cpus();
+    let online = online_cpus_at(cpu_root);
     if online.is_empty() {
         return Some(allowed);
     }
@@ -146,12 +161,20 @@ fn allowed_domain(allowed: &BTreeSet<u32>, cache: &BTreeSet<u32>) -> BTreeSet<u3
 /// "not detected" from a plausible-looking number they would otherwise have
 /// to trust.
 pub(crate) fn cache_domain_cores() -> Option<usize> {
-    let allowed = allowed_cpus()?;
+    cache_domain_cores_at(Path::new(PROC_STATUS), Path::new(CPU_ROOT))
+}
+
+/// Discover a cache-domain count from explicit procfs and sysfs paths.
+///
+/// This keeps the production probe testable without changing process-global
+/// affinity or depending on the host's CPU layout.
+pub(crate) fn cache_domain_cores_at(status_path: &Path, cpu_root: &Path) -> Option<usize> {
+    let allowed = allowed_cpus_at(status_path, cpu_root)?;
     for cpu in &allowed {
-        let l3 = Path::new(CPU_ROOT).join(format!("cpu{cpu}/cache/index3/shared_cpu_list"));
+        let l3 = cpu_root.join(format!("cpu{cpu}/cache/index3/shared_cpu_list"));
         if let Some(list) = read_trimmed(&l3) {
             let domain = allowed_domain(&allowed, &parse_cpu_list(&list));
-            let n = physical_cores(&domain);
+            let n = physical_cores_at(cpu_root, &domain);
             if n > 0 {
                 return Some(n);
             }
@@ -159,7 +182,7 @@ pub(crate) fn cache_domain_cores() -> Option<usize> {
     }
     // No L3 (or no sysfs cache tree): erase the cache boundary while retaining
     // the calling thread's affinity restriction.
-    let n = physical_cores(&allowed);
+    let n = physical_cores_at(cpu_root, &allowed);
     (n > 0).then_some(n)
 }
 
@@ -169,14 +192,41 @@ pub(crate) fn cache_domain_cores() -> Option<usize> {
 /// part - accepted because a default that is too high is a slow test run,
 /// while a default of zero is no test run at all.
 pub(crate) fn cache_domain_cores_or_default() -> u32 {
-    let n = cache_domain_cores().unwrap_or_else(available_parallelism_or_default);
+    cache_domain_cores_or_default_at(
+        Path::new(PROC_STATUS),
+        Path::new(CPU_ROOT),
+        &DEFAULT_CPU_TOPOLOGY_TUNABLES,
+        std::thread::available_parallelism,
+    )
+}
+
+pub(crate) fn cache_domain_cores_or_default_at(
+    status_path: &Path,
+    cpu_root: &Path,
+    tunables: &CpuTopologyTunables,
+    available: impl FnOnce() -> std::io::Result<std::num::NonZeroUsize>,
+) -> u32 {
+    let n = cache_domain_cores_at(status_path, cpu_root).unwrap_or_else(|| {
+        available_parallelism_or_default_with(tunables.fallback_parallelism, available)
+    });
     u32::try_from(n).unwrap_or(u32::MAX).max(1)
 }
 
 /// Threads this process may run in parallel, or a fixed guess of 4 when the
 /// platform cannot say. The one place that guess lives.
 pub(crate) fn available_parallelism_or_default() -> usize {
-    std::thread::available_parallelism().map_or(4, std::num::NonZero::get)
+    available_parallelism_or_default_with(
+        DEFAULT_CPU_TOPOLOGY_TUNABLES.fallback_parallelism,
+        std::thread::available_parallelism,
+    )
+}
+
+/// Resolve the fallback with an injectable OS probe and its explicit default.
+pub(crate) fn available_parallelism_or_default_with(
+    fallback: usize,
+    available: impl FnOnce() -> std::io::Result<std::num::NonZeroUsize>,
+) -> usize {
+    available().map_or(fallback.max(1), std::num::NonZero::get)
 }
 
 /// How to describe the domain in a report, given the CPU model string.

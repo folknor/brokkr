@@ -2,7 +2,9 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::config::OscRange;
 use crate::error::DevError;
+use crate::pbfhogg::Compression;
 use crate::resolve::Bbox;
 
 /// Pbfhogg I/O switches and their cargo/argv representation.
@@ -42,8 +44,8 @@ impl IoMode {
 #[derive(Debug, Default, Clone)]
 pub struct CommandParams {
     pub io: IoMode,
-    pub compression: Option<String>,
-    pub bbox: Option<String>,
+    pub compression: Option<Compression>,
+    pub bbox: Option<Bbox>,
     pub index_type: Option<String>,
     /// Forward the pbfhogg injected-prepass wire-format option.
     pub inject_prepass: bool,
@@ -53,7 +55,7 @@ pub struct CommandParams {
     pub snapshot: Option<String>,
     pub from_snapshot: Option<String>,
     pub to_snapshot: Option<String>,
-    pub osc_range: Option<String>,
+    pub osc_range: Option<OscRange>,
     pub keep_cache: bool,
     /// `0` asks pbfhogg to resolve the worker count from available CPUs.
     pub jobs: Option<usize>,

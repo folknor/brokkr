@@ -113,7 +113,7 @@ pub(crate) fn load(
     result
 }
 
-fn clone_error(error: &DevError) -> DevError {
+pub(crate) fn clone_error(error: &DevError) -> DevError {
     match error {
         DevError::Io(error) => DevError::Io(std::io::Error::new(error.kind(), error.to_string())),
         DevError::Config(message) => DevError::Config(message.clone()),
@@ -129,6 +129,7 @@ fn clone_error(error: &DevError) -> DevError {
         },
         DevError::Internal(message) => DevError::Internal(message.clone()),
         DevError::Build(message) => DevError::Build(message.clone()),
+        DevError::ContractViolation(message) => DevError::ContractViolation(message.clone()),
         DevError::Preflight(failures) => DevError::Preflight(failures.clone()),
         DevError::Subprocess {
             program,
@@ -152,12 +153,63 @@ fn clone_error(error: &DevError) -> DevError {
         DevError::Lock(crate::error::LockError::Other(message)) => {
             DevError::Lock(crate::error::LockError::Other(message.clone()))
         }
-        DevError::Lock(_) => DevError::Build(error.to_string()),
+        DevError::Lock(crate::error::LockError::Acquisition(refusal)) => DevError::Lock(
+            crate::error::LockError::Acquisition(clone_lock_refusal(refusal)),
+        ),
         DevError::Database(message) => DevError::Database(message.clone()),
         DevError::Verify(message) => DevError::Verify(message.clone()),
         DevError::ExitCode(code) => DevError::ExitCode(*code),
         DevError::CargoEnv(label) => DevError::CargoEnv(label.clone()),
         DevError::Interrupted => DevError::Interrupted,
+    }
+}
+
+fn clone_lock_refusal(refusal: &crate::error::AcquireRefusal) -> crate::error::AcquireRefusal {
+    use crate::error::AcquireRefusal;
+
+    let clone_io = |error: &std::io::Error| std::io::Error::new(error.kind(), error.to_string());
+    match refusal {
+        AcquireRefusal::NestedDescendant { command } => AcquireRefusal::NestedDescendant {
+            command: command.clone(),
+        },
+        AcquireRefusal::Busy { holder } => AcquireRefusal::Busy {
+            holder: holder.clone(),
+        },
+        AcquireRefusal::InsideCompilation { marker } => {
+            AcquireRefusal::InsideCompilation { marker }
+        }
+        AcquireRefusal::DiskGate(failures) => AcquireRefusal::DiskGate(failures.clone()),
+        AcquireRefusal::DrainTimeout { waited } => AcquireRefusal::DrainTimeout { waited: *waited },
+        AcquireRefusal::LockFileOpen { path, source } => AcquireRefusal::LockFileOpen {
+            path: path.clone(),
+            source: clone_io(source),
+        },
+        AcquireRefusal::LockFlock { source } => AcquireRefusal::LockFlock {
+            source: clone_io(source),
+        },
+        AcquireRefusal::CompileLeaseOpen { path, source } => AcquireRefusal::CompileLeaseOpen {
+            path: path.clone(),
+            source: clone_io(source),
+        },
+        AcquireRefusal::CompileLeaseFlock { path, source } => AcquireRefusal::CompileLeaseFlock {
+            path: path.clone(),
+            source: clone_io(source),
+        },
+        AcquireRefusal::MetadataPublish { stage, source } => AcquireRefusal::MetadataPublish {
+            stage: *stage,
+            source: clone_io(source),
+        },
+        AcquireRefusal::Entropy { purpose } => AcquireRefusal::Entropy { purpose: *purpose },
+        AcquireRefusal::SocketBind { path, source } => AcquireRefusal::SocketBind {
+            path: path.clone(),
+            source: clone_io(source),
+        },
+        AcquireRefusal::SocketDirectory { reason } => AcquireRefusal::SocketDirectory {
+            reason: reason.clone(),
+        },
+        AcquireRefusal::ServiceThread { source } => AcquireRefusal::ServiceThread {
+            source: clone_io(source),
+        },
     }
 }
 
@@ -194,7 +246,10 @@ fn load_uncached(
         };
         return Err(with_locked_metadata_hint(error, query.locked));
     }
-    let mut metadata: CargoMetadata = serde_json::from_slice(&captured.stdout)?;
+    let mut metadata: CargoMetadata =
+        serde_json::from_slice(&captured.stdout).map_err(|error| {
+            DevError::ContractViolation(format!("cargo metadata returned invalid JSON: {error}"))
+        })?;
     metadata.raw_json = Some(Arc::from(
         String::from_utf8_lossy(&captured.stdout).as_ref(),
     ));

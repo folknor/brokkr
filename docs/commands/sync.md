@@ -57,6 +57,10 @@ returns), and the readiness wait polls the same flag, so a `brokkr kill`
 arriving during the readiness window aborts cleanly with the child reaped
 - it can't orphan sæhrimnir.
 
+Managed mock children use the shared service spawn policy: OOM marking,
+parent-death termination, the orphan-reap token for descendants, and the hold
+capability applied after caller environment.
+
 Auto-build of sæhrimnir is not yet wired - the binary must already exist at
 `mock_server_binary`.
 

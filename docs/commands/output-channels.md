@@ -19,8 +19,9 @@ binary itself never knows what mode it runs under. This file is the map.
   v8->v9). Per-run `/proc` sample trajectories, phase markers, and
   application counters. Queried with `brokkr sidecar <uuid>`.
 
-Both live under `<db_root>/.brokkr/` and are resolved identically for every
-project by `BenchHarness::new_with_lock` (`src/harness_mod/types_run.rs`).
+Both live under the project root's `.brokkr/` (never a `--commit` worktree's)
+and are resolved identically for every project by `BenchHarness::new_with_lock`
+(`src/harness_mod/types_run.rs`), which reads git provenance from the build root.
 See `docs/commands/measure.md` for the sidecar's sampling/marker protocol.
 
 What brokkr itself prints around a measured run (the `run i/n` line, the

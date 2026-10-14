@@ -4,7 +4,7 @@ use super::ResultsDb;
 use super::run_store::RunId;
 use super::schema::INSERT_SQL;
 use super::types::{
-    HotpathData, KvClass, KvPair, KvValue, Quantity, RunRow, canonical_cargo_features,
+    HotpathData, KvClass, KvKey, KvPair, KvValue, Quantity, RunRow, canonical_cargo_features,
 };
 use super::{generate_uuid, short_uuid};
 use crate::error::DevError;
@@ -63,12 +63,16 @@ fn insert_inner(conn: &rusqlite::Connection, row: &RunRow, uuid: &str) -> Result
     // Store one stable spelling regardless of whether the feature list came
     // from a host config, a request, or a per-row variant.
     let cargo_features = canonical_cargo_features(row.cargo_features.as_deref());
-    let brokkr_args = serde_json::to_string(&row.invocation.argv).map_err(|error| {
+    let stored_argv = crate::history::redact_secret_argv(&row.invocation.argv);
+    let brokkr_args = serde_json::to_string(&stored_argv).map_err(|error| {
         DevError::Database(format!("could not encode brokkr argv array: {error}"))
     })?;
     // An empty key would pair every such row with every other; store none,
-    // which pairs by the stored argv like a historical row.
-    let arm_key = (!row.invocation.arm_key.is_empty()).then_some(row.invocation.arm_key.as_str());
+    // which pairs by the stored argv like a historical row. Recompute from
+    // its redacted form so credentials cannot escape through the opaque key.
+    let stored_arm_key =
+        (!row.invocation.arm_key.is_empty()).then(|| crate::run_invocation::arm_key(&stored_argv));
+    let arm_key = stored_arm_key.as_deref();
 
     // Envelope row.
     conn.execute(
@@ -277,9 +281,8 @@ fn insert_hotpath(
     // Thread summary stats into run_kv. These yield to anything already
     // in `row.kv` under the same key: the run's own report is primary.
     for kv in &hp.thread_summary {
-        let key = KvClass::ThreadSummary.qualify(KvClass::ThreadSummary.suffix(&kv.key));
         let pair = KvPair {
-            key,
+            key: KvKey::thread_summary(kv.key.name()),
             value: kv.value.clone(),
         };
         insert_kv_row(conn, run_id, &pair, OnConflict::Ignore)?;
@@ -324,6 +327,30 @@ fn insert_kv_row(
     kv: &KvPair,
     on_conflict: OnConflict,
 ) -> Result<(), DevError> {
+    // Captured environment values are useful result axes, but credentials and
+    // URL secrets must not become durable just because a capture pattern
+    // selected them. Preserve typed non-secret values; replace a redacted
+    // value with text so its original numeric type cannot leak through.
+    if kv.class() == KvClass::Environment {
+        let original = kv.value.to_string();
+        let value = crate::history::redact_env_value(kv.key.name(), &original);
+        if value != original {
+            let safe = KvPair {
+                key: kv.key.clone(),
+                value: KvValue::Text(value),
+            };
+            return insert_kv_value(conn, run_id, &safe, on_conflict);
+        }
+    }
+    insert_kv_value(conn, run_id, kv, on_conflict)
+}
+
+fn insert_kv_value(
+    conn: &rusqlite::Connection,
+    run_id: i64,
+    kv: &KvPair,
+    on_conflict: OnConflict,
+) -> Result<(), DevError> {
     // REPLACE deletes the old row and inserts the new one whole, so a key
     // that changes type (Int then Text) leaves no stale value column behind.
     let verb = match on_conflict {
@@ -333,15 +360,15 @@ fn insert_kv_row(
     match &kv.value {
         KvValue::Int(v) => conn.execute(
             &format!("INSERT OR {verb} INTO run_kv (run_id, key, value_int) VALUES (?1, ?2, ?3)"),
-            rusqlite::params![run_id, kv.key, v],
+            rusqlite::params![run_id, kv.key.as_str(), v],
         )?,
         KvValue::Real(v) => conn.execute(
             &format!("INSERT OR {verb} INTO run_kv (run_id, key, value_real) VALUES (?1, ?2, ?3)"),
-            rusqlite::params![run_id, kv.key, v],
+            rusqlite::params![run_id, kv.key.as_str(), v],
         )?,
         KvValue::Text(v) => conn.execute(
             &format!("INSERT OR {verb} INTO run_kv (run_id, key, value_text) VALUES (?1, ?2, ?3)"),
-            rusqlite::params![run_id, kv.key, v],
+            rusqlite::params![run_id, kv.key.as_str(), v],
         )?,
     };
     Ok(())
@@ -422,7 +449,14 @@ mod tests {
         assert_eq!(rows[0].elapsed, Wall::LegacyMillis(1234));
         assert_eq!(rows[0].cli_args, "--fast");
         assert_eq!(rows[0].brokkr_args, r#"["brokkr","test","--fast"]"#);
-        assert_eq!(rows[0].arm_key.as_deref(), Some("test/fast"));
+        // The writer derives the stored arm key from the stored (redacted)
+        // argv, so the caller's opaque key is only a presence flag.
+        let expected_arm = crate::run_invocation::arm_key(&[
+            String::from("brokkr"),
+            String::from("test"),
+            String::from("--fast"),
+        ]);
+        assert_eq!(rows[0].arm_key.as_deref(), Some(expected_arm.as_str()));
 
         // Clean up.
         drop(std::fs::remove_file(&db_path));

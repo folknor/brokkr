@@ -467,7 +467,8 @@ tree (still listed by `git ls-files`) is passed over.
 glob syntax over the check's tracked and untracked-not-ignored file snapshot.
 `**` crosses directory separators; `*` stays within one path component. Each
 phase checks every configured glob against the candidate paths in its scope
-when that phase runs. An unmatched glob is a warning, not a failure: an
+when that phase runs, and also when the scan is skipped by a profile or the
+markdown-only shortcut. An unmatched glob is a warning, not a failure: an
 exclusion may reserve a path that is absent today, and user-wide rules often
 name paths most projects do not contain.
 

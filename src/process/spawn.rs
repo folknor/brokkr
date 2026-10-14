@@ -49,7 +49,6 @@ impl ChildPolicy {
         }
     }
 
-    #[allow(dead_code)]
     pub(crate) const fn service() -> Self {
         Self {
             cargo: CargoProfile::Plain,
@@ -57,7 +56,6 @@ impl ChildPolicy {
         }
     }
 
-    #[allow(dead_code)]
     pub(crate) const fn cargo_test(phase: Option<Phase>) -> Self {
         Self {
             cargo: CargoProfile::Cargo { phase },
@@ -105,20 +103,33 @@ impl ChildPolicy {
         }
 
         cargo_env::apply(&mut cmd, self.cargo, args, cwd, env)?;
-        crate::oom::protect_child(&mut cmd);
-        if self.needs_parent_death() {
-            crate::shutdown::die_with_parent(&mut cmd);
-        }
-        if self.carries_orphan_token() {
-            crate::test_orphans::stamp(&mut cmd);
-        }
-        crate::hold::stamp(&mut cmd);
+        self.apply_runtime_policy(&mut cmd);
 
         if isolation.is_process_group() {
             use std::os::unix::process::CommandExt;
             cmd.process_group(0);
         }
         Ok(cmd)
+    }
+
+    /// Apply capability and lifecycle policy after the caller finishes its
+    /// command environment. Cargo evaluation remains in `command`.
+    pub(crate) fn apply_runtime_policy(self, cmd: &mut Command) {
+        crate::oom::protect_child(cmd);
+        if self.needs_parent_death() {
+            crate::shutdown::die_with_parent(cmd);
+        }
+        if self.carries_orphan_token() {
+            crate::test_orphans::stamp(cmd);
+        }
+        crate::hold::stamp(cmd);
+    }
+
+    /// Construct a plain command for callers needing non-text arguments or
+    /// custom streams. `output::child::command_output` / `command_status`
+    /// apply the policy after all caller configuration.
+    pub(crate) fn plain_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
+        Command::new(program)
     }
 
     fn needs_parent_death(self) -> bool {

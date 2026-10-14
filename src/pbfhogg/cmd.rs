@@ -139,7 +139,11 @@ fn osc_configured(
 
 /// Whether `verify all` has a bbox to resolve: `--bbox`, or the dataset's
 /// configured `bbox`. Same skip-versus-error split as [`osc_configured`].
-fn bbox_configured(bbox: Option<&str>, dataset: &str, paths: &config::ResolvedPaths) -> bool {
+fn bbox_configured(
+    bbox: Option<&crate::resolve::Bbox>,
+    dataset: &str,
+    paths: &config::ResolvedPaths,
+) -> bool {
     bbox.is_some()
         || paths
             .datasets
@@ -194,12 +198,14 @@ pub(crate) fn bench_read(
     )
 }
 
-pub(crate) fn bench_write(req: &MeasureRequest, compression_str: &str) -> Result<(), DevError> {
+pub(crate) fn bench_write(
+    req: &MeasureRequest,
+    compressions: &super::CompressionList,
+) -> Result<(), DevError> {
     if req.dry_run {
         let paths = dry_run_paths(req)?;
         let _ =
             resolve_pbf_with_size(req.dataset, req.variant, &paths, req.project_root.as_path())?;
-        let _ = super::parse_compressions(compression_str, true)?;
         output::dry_run_msg("ok (bench write)");
         return Ok(());
     }
@@ -217,7 +223,7 @@ pub(crate) fn bench_write(req: &MeasureRequest, compression_str: &str) -> Result
         &ctx.paths,
         req.project_root.as_path(),
     )?;
-    let compressions = super::parse_compressions(compression_str, true)?;
+    let compressions = super::compression_args(compressions.as_slice(), true);
     super::bench_write::run(
         &ctx.harness,
         ctx.binary()?,
@@ -233,7 +239,7 @@ pub(crate) fn bench_merge(
     req: &MeasureRequest,
     osc_seq: Option<&str>,
     uring: bool,
-    compression_str: &str,
+    compressions: &super::CompressionList,
 ) -> Result<(), DevError> {
     if req.dry_run {
         if uring {
@@ -243,7 +249,6 @@ pub(crate) fn bench_merge(
         let (pbf_path, _file_mb) =
             resolve_pbf_with_size(req.dataset, req.variant, &paths, req.project_root.as_path())?;
         let osc_path = resolve_bench_osc(req.dataset, osc_seq, &paths, req.project_root.as_path())?;
-        let _ = super::parse_compressions(compression_str, false)?;
         output::dry_run_msg(&format!("pbf: {}", pbf_path.display()));
         output::dry_run_msg(&format!("osc: {}", osc_path.display()));
         output::dry_run_msg("ok (bench merge)");
@@ -271,7 +276,7 @@ pub(crate) fn bench_merge(
         req.project_root.as_path(),
     )?;
     let osc_path = resolve_bench_osc(req.dataset, osc_seq, &ctx.paths, req.project_root.as_path())?;
-    let compressions = super::parse_compressions(compression_str, false)?;
+    let compressions = super::compression_args(compressions.as_slice(), false);
     super::bench_merge::run(
         &ctx.harness,
         ctx.binary()?,
@@ -396,8 +401,8 @@ pub(crate) fn verify(
         } else {
             None
         };
-        let resolved_bbox = if bbox_configured(bbox.as_deref(), &pbf.dataset, &paths) {
-            Some(resolve_bbox(bbox.as_deref(), &pbf.dataset, &paths)?)
+        let resolved_bbox = if bbox_configured(bbox.as_ref(), &pbf.dataset, &paths) {
+            Some(resolve_bbox(bbox.as_ref(), &pbf.dataset, &paths)?)
         } else {
             None
         };
@@ -475,7 +480,7 @@ pub(crate) fn verify(
                 &paths,
                 project_root,
             )?;
-            let bbox = resolve_bbox(bbox.as_deref(), &pbf.dataset, &paths)?;
+            let bbox = resolve_bbox(bbox.as_ref(), &pbf.dataset, &paths)?;
             super::verify_extract::run(&harness, &pbf_path, &bbox, pbf.direct_io)
         }
         VerifyCommand::MultiExtract { pbf, bbox, regions } => {
@@ -487,7 +492,7 @@ pub(crate) fn verify(
                 &paths,
                 project_root,
             )?;
-            let bbox = resolve_bbox(bbox.as_deref(), &pbf.dataset, &paths)?;
+            let bbox = resolve_bbox(bbox.as_ref(), &pbf.dataset, &paths)?;
             super::verify_multi_extract::run(&harness, &pbf_path, &bbox, regions, pbf.direct_io)
         }
         VerifyCommand::TagsFilter { pbf } => {

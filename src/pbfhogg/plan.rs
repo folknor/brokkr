@@ -422,7 +422,7 @@ fn build_pbfhogg_context(
             origin: TwoPbfOrigin::Merged,
         },
         PbfhoggCommand::Extract { .. } | PbfhoggCommand::MultiExtract { .. } => {
-            let bbox = resolve_bbox(extra_params.bbox.as_deref(), req.dataset, paths)?;
+            let bbox = resolve_bbox(extra_params.bbox.as_ref(), req.dataset, paths)?;
             ResolvedInputs::PbfAndBbox {
                 pbf: pbf_path
                     .ok_or_else(|| DevError::Internal("extract requires a resolved PBF".into()))?,

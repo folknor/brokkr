@@ -20,7 +20,6 @@
 //! and table output).
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use crate::config::{CodepointSet, GremlinsConfig};
 use crate::error::DevError;
@@ -522,20 +521,21 @@ fn is_scannable(rel: &Path) -> bool {
 
 /// Tracked plus untracked-not-ignored files, via `git ls-files`.
 pub(crate) fn tracked_files(project_root: &Path) -> Result<Vec<PathBuf>, DevError> {
-    let output = Command::new("git")
-        .args([
-            "ls-files",
-            "-z",
-            "--cached",
-            "--others",
-            "--exclude-standard",
-        ])
-        .current_dir(project_root)
-        .output()
-        .map_err(|error| DevError::Spawn {
-            program: "git ls-files".into(),
-            error,
-        })?;
+    let output = crate::output::child::command_output(
+        crate::process::spawn::ChildPolicy::plain_command("git")
+            .args([
+                "ls-files",
+                "-z",
+                "--cached",
+                "--others",
+                "--exclude-standard",
+            ])
+            .current_dir(project_root),
+    )
+    .map_err(|error| DevError::Spawn {
+        program: "git ls-files".into(),
+        error,
+    })?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
         return Err(DevError::Subprocess {

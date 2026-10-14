@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 use crate::preflight::{FileDigest, Xxh128};
 
@@ -8,10 +9,113 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::error::DevError;
 use crate::project::Project;
+use crate::resolve::Bbox;
 
 // ---------------------------------------------------------------------------
 // Data structures
 // ---------------------------------------------------------------------------
+
+/// Inclusive OSC sequence range used by the CLI and resolver.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OscRange {
+    lo: u64,
+    hi: u64,
+    source: String,
+}
+
+impl OscRange {
+    pub(crate) const fn lo(&self) -> u64 {
+        self.lo
+    }
+
+    pub(crate) const fn hi(&self) -> u64 {
+        self.hi
+    }
+}
+
+impl FromStr for OscRange {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let (lo, hi) = value
+            .split_once("..")
+            .ok_or_else(|| format!("expected LO..HI, got '{value}'"))?;
+        let lo = lo
+            .parse::<u64>()
+            .map_err(|error| format!("invalid LO '{lo}': {error}"))?;
+        let hi = hi
+            .parse::<u64>()
+            .map_err(|error| format!("invalid HI '{hi}': {error}"))?;
+        if lo > hi {
+            return Err(format!("LO ({lo}) must be <= HI ({hi})"));
+        }
+        Ok(Self {
+            lo,
+            hi,
+            source: value.to_owned(),
+        })
+    }
+}
+
+impl std::fmt::Display for OscRange {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.source)
+    }
+}
+
+impl<'de> Deserialize<'de> for OscRange {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        value.parse().map_err(de::Error::custom)
+    }
+}
+
+/// The one bbox text parser used by clap and host dataset deserialization.
+/// `resolve::Bbox::parse` owns the token and finite-number parsing; this
+/// adapter adds the geographic bounds and min/max ordering required by every
+/// configured or CLI bbox.
+impl FromStr for Bbox {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let bbox = Self::parse(value).map_err(|error| error.to_string())?;
+        let [lon_min, lat_min, lon_max, lat_max] = bbox.coordinates();
+        if !(-180.0..=180.0).contains(&lon_min) || !(-180.0..=180.0).contains(&lon_max) {
+            return Err(format!(
+                "bbox longitude coordinates must be between -180 and 180: '{value}'"
+            ));
+        }
+        if !(-90.0..=90.0).contains(&lat_min) || !(-90.0..=90.0).contains(&lat_max) {
+            return Err(format!(
+                "bbox latitude coordinates must be between -90 and 90: '{value}'"
+            ));
+        }
+        if lon_min > lon_max {
+            return Err(format!(
+                "bbox longitude minimum ({lon_min}) must be <= maximum ({lon_max})"
+            ));
+        }
+        if lat_min > lat_max {
+            return Err(format!(
+                "bbox latitude minimum ({lat_min}) must be <= maximum ({lat_max})"
+            ));
+        }
+        Ok(bbox)
+    }
+}
+
+impl<'de> Deserialize<'de> for Bbox {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        value.parse().map_err(de::Error::custom)
+    }
+}
 
 #[derive(Debug)]
 pub struct DevConfig {
@@ -1384,7 +1488,9 @@ pub struct Snapshot {
 pub struct Dataset {
     pub origin: Option<String>,
     pub download_date: Option<String>,
-    pub bbox: Option<String>,
+    /// Validated longitude/latitude bounds in
+    /// `lon_min,lat_min,lon_max,lat_max` order.
+    pub bbox: Option<Bbox>,
     pub data_dir: Option<String>,
     /// PBF variants keyed by name (e.g. "raw", "indexed", "locations").
     /// These are the variants of the dataset's primary (legacy / `base`) snapshot.

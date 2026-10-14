@@ -49,6 +49,28 @@ pub struct Compression {
     spelling: String,
 }
 
+/// Parsed comma-separated compression choices for the benchmark CLI.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CompressionList(Vec<Compression>);
+
+impl CompressionList {
+    pub(crate) fn as_slice(&self) -> &[Compression] {
+        &self.0
+    }
+}
+
+impl FromStr for CompressionList {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        value
+            .split(',')
+            .map(str::parse::<Compression>)
+            .collect::<Result<Vec<_>, _>>()
+            .map(Self)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CompressionCodec {
     None,
@@ -72,10 +94,32 @@ impl Compression {
     }
 }
 
+/// Keep the CLI's already-parsed compression choices typed until the
+/// benchmark builds the child argv. Bare codecs get their command-specific
+/// defaults here without parsing their spelling a second time.
+pub(crate) fn compression_args(
+    compressions: &[Compression],
+    add_default_levels: bool,
+) -> Vec<String> {
+    compressions
+        .iter()
+        .cloned()
+        .map(|compression| {
+            if add_default_levels {
+                compression.with_default_level()
+            } else {
+                compression
+            }
+        })
+        .map(|compression| compression.to_string())
+        .collect()
+}
+
 impl FromStr for Compression {
     type Err = String;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let value = value.trim();
         match value {
             "none" => Ok(Self {
                 codec: CompressionCodec::None,
@@ -128,18 +172,8 @@ impl fmt::Display for Compression {
 /// When `add_default_levels` is true, bare `"zlib"` becomes `"zlib:6"` and
 /// bare `"zstd"` becomes `"zstd:3"`. When false, they pass through as-is.
 pub fn parse_compressions(input: &str, add_default_levels: bool) -> Result<Vec<String>, DevError> {
-    let mut result = Vec::new();
-    for token in input.split(',') {
-        let trimmed = token.trim();
-        let compression = trimmed.parse::<Compression>().map_err(DevError::Config)?;
-        let compression = if add_default_levels {
-            compression.with_default_level()
-        } else {
-            compression
-        };
-        result.push(compression.to_string());
-    }
-    Ok(result)
+    let parsed = input.parse::<CompressionList>().map_err(DevError::Config)?;
+    Ok(compression_args(parsed.as_slice(), add_default_levels))
 }
 
 #[cfg(test)]

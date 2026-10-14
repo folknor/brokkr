@@ -41,6 +41,12 @@ never signalled, and there is no name-based `pkill` fallback. `ingest`,
 the on-disk data dir directly; `ingest` creates the dataset's `data_dir` if it
 does not exist yet.
 
+The persistent server uses the shared plain spawn policy, carrying OOM and
+hold protection while surviving the `serve` command. The server started for
+a tiles measurement uses service policy, including parent-death termination
+and the orphan-reap token. HTTP requests use the shared captured child
+supervisor; incomplete captured output fails rather than being parsed.
+
 The port is `[<host>] port` in `brokkr.toml`, defaulting to 3033. brokkr hands
 it to the server as `PORT` but does not read `PORT` from its own environment.
 

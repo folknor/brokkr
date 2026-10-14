@@ -1,6 +1,5 @@
 use std::fmt;
 use std::path::Path;
-use std::process::Command;
 use std::str::FromStr;
 
 use crate::error::DevError;
@@ -129,14 +128,15 @@ impl fmt::Display for ShortCommit {
 /// pasted at any width names the same worktree, baseline and archive.
 pub fn resolve_commit(repo: &Path, rev: &str) -> Result<Commit, DevError> {
     let spec = format!("{rev}^{{commit}}");
-    let output = Command::new("git")
-        .args(["rev-parse", "--verify", "--quiet", &spec])
-        .current_dir(repo)
-        .output()
-        .map_err(|error| DevError::Spawn {
-            program: "git".to_owned(),
-            error,
-        })?;
+    let output = crate::output::child::command_output(
+        crate::process::spawn::ChildPolicy::plain_command("git")
+            .args(["rev-parse", "--verify", "--quiet", &spec])
+            .current_dir(repo),
+    )
+    .map_err(|error| DevError::Spawn {
+        program: "git".to_owned(),
+        error,
+    })?;
     if !output.status.success() {
         return Err(DevError::Config(format!(
             "{rev:?} does not name a commit in {}",
@@ -215,14 +215,15 @@ pub(crate) fn collect_with_config_paths(
 }
 
 fn read_commit_hash(workspace_root: &Path) -> Result<Commit, DevError> {
-    let output = Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .current_dir(workspace_root)
-        .output()
-        .map_err(|error| DevError::Spawn {
-            program: "git".to_owned(),
-            error,
-        })?;
+    let output = crate::output::child::command_output(
+        crate::process::spawn::ChildPolicy::plain_command("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(workspace_root),
+    )
+    .map_err(|error| DevError::Spawn {
+        program: "git".to_owned(),
+        error,
+    })?;
 
     if !output.status.success() {
         return Err(DevError::Subprocess {
@@ -241,14 +242,15 @@ fn read_commit_hash(workspace_root: &Path) -> Result<Commit, DevError> {
 }
 
 fn read_commit_subject(workspace_root: &Path) -> Result<String, DevError> {
-    let output = Command::new("git")
-        .args(["log", "-1", "--format=%s"])
-        .current_dir(workspace_root)
-        .output()
-        .map_err(|error| DevError::Spawn {
-            program: "git".to_owned(),
-            error,
-        })?;
+    let output = crate::output::child::command_output(
+        crate::process::spawn::ChildPolicy::plain_command("git")
+            .args(["log", "-1", "--format=%s"])
+            .current_dir(workspace_root),
+    )
+    .map_err(|error| DevError::Spawn {
+        program: "git".to_owned(),
+        error,
+    })?;
 
     if !output.status.success() {
         return Err(DevError::Subprocess {

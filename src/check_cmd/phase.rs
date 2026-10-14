@@ -654,22 +654,30 @@ fn run_convention_phases_inner(
     // One working-tree snapshot for every file scanner below.
     let tree = LazyTree::new(a.project_root);
 
-    if !skip(Phase::Gremlins) {
+    if skip(Phase::Gremlins) {
+        audit_skipped_scopes(Phase::Gremlins, &tree, a, failing_phase)?;
+    } else {
         start_phase(failing_phase, Phase::Gremlins);
         run_gremlins(&tree, a.gremlins_cfg, a.fix_gremlins)?;
     }
 
-    if !skip(Phase::Header) {
+    if skip(Phase::Header) {
+        audit_skipped_scopes(Phase::Header, &tree, a, failing_phase)?;
+    } else {
         start_phase(failing_phase, Phase::Header);
         run_header(&tree, a.header_cfg)?;
     }
 
-    if !skip(Phase::Textlint) {
+    if skip(Phase::Textlint) {
+        audit_skipped_scopes(Phase::Textlint, &tree, a, failing_phase)?;
+    } else {
         start_phase(failing_phase, Phase::Textlint);
         run_textlint(&tree, a.textlint_rules)?;
     }
 
-    if !skip(Phase::Manifest) {
+    if skip(Phase::Manifest) {
+        audit_skipped_scopes(Phase::Manifest, &tree, a, failing_phase)?;
+    } else {
         start_phase(failing_phase, Phase::Manifest);
         run_manifest(&tree, a.manifest_cfg)?;
     }
@@ -689,6 +697,41 @@ fn run_convention_phases_inner(
         run_publish_cycle(a.project_root, a.commands)?;
     }
     Ok(())
+}
+
+fn audit_skipped_scopes(
+    phase: Phase,
+    tree: &LazyTree<'_>,
+    args: &ConventionPhaseArgs<'_>,
+    failing_phase: &mut Option<Phase>,
+) -> Result<(), DevError> {
+    let configured = match phase {
+        Phase::Gremlins => args
+            .gremlins_cfg
+            .is_some_and(|config| !config.disable && !config.exclude.is_empty()),
+        Phase::Header => args.header_cfg.is_some(),
+        Phase::Textlint => !args.textlint_rules.is_empty(),
+        Phase::Manifest => args.manifest_cfg.is_some(),
+        _ => false,
+    };
+    if !configured {
+        return Ok(());
+    }
+    // Bound the scope lookup as this phase without announcing the skipped scan as a run.
+    *failing_phase = Some(phase);
+    enter_phase(phase);
+    let result = conventions::warn_skipped_scopes(
+        phase,
+        tree,
+        args.gremlins_cfg,
+        args.header_cfg,
+        args.textlint_rules,
+        args.manifest_cfg,
+    );
+    if result.is_ok() {
+        *failing_phase = None;
+    }
+    result
 }
 
 struct BuildPhaseArgs<'a> {

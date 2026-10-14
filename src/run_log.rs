@@ -1,12 +1,25 @@
 //! Per-invocation run-log reservation and retention.
 
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// How many recent run logs to keep, per kind. Enough that a watchdog-killed
 /// run survives the retries that follow it; bounded so the directory cannot
 /// grow without limit on a machine that runs `check` all day. Per kind, so a
 /// burst of `brokkr test` runs cannot evict the `check` log being investigated.
 const RUN_LOGS_KEPT: usize = 10;
+
+/// Retention policy for the human-readable run logs.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct RunLogTunables {
+    pub(crate) retained: usize,
+    pub(crate) name_attempts: usize,
+}
+
+pub(crate) const DEFAULT_RUN_LOG_TUNABLES: RunLogTunables = RunLogTunables {
+    retained: RUN_LOGS_KEPT,
+    name_attempts: 1_000,
+};
 
 /// The kinds of run log, one name prefix (and one retention budget) each.
 pub(crate) mod run_log_kind {
@@ -90,34 +103,73 @@ impl Drop for RunLog {
 /// [`RUN_LOGS_KEPT`] remain. Best-effort: a log that cannot be opened costs the
 /// record, never the run.
 fn open_run_log(state_root: &Path, kind: &str) {
+    open_run_log_with(state_root, kind, &DEFAULT_RUN_LOG_TUNABLES, SystemTime::now);
+}
+
+/// Open with explicit policy and clock inputs so naming and retention do not
+/// depend on a test machine's wall clock or the production retention budget.
+fn open_run_log_with(
+    state_root: &Path,
+    kind: &str,
+    tunables: &RunLogTunables,
+    now: impl FnOnce() -> SystemTime,
+) {
     let dir = crate::clean::layout::ProjectState::new(state_root).check_logs_dir();
-    if std::fs::create_dir_all(&dir).is_err() {
+    if let Err(error) = std::fs::create_dir_all(&dir) {
+        crate::output::warn(&format!(
+            "could not create run-log directory {}: {error}; continuing without a run log",
+            dir.display()
+        ));
         return;
     }
-    let millis = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or_default();
-    // `create_new`, stepping the stamp past a name already taken: two runs
-    // resolving the same millisecond must not truncate one another's log.
-    // Stepping (rather than a suffix) keeps the name all digits, so name
-    // order stays age order for retention.
-    let opened = (0..1000u128).find_map(|step| {
-        let path = dir.join(format!("{kind}-{:015}.log", millis + step));
-        std::fs::OpenOptions::new()
+    let (mut before, retention_ready): (Vec<PathBuf>, bool) = match std::fs::read_dir(&dir) {
+        Ok(entries) => (entries.flatten().map(|entry| entry.path()).collect(), true),
+        Err(error) => {
+            crate::output::warn(&format!(
+                "could not list existing run logs in {}: {error}; this run's name order and retention may be inaccurate",
+                dir.display()
+            ));
+            (Vec::new(), false)
+        }
+    };
+    let first_stamp = next_log_stamp(&before, kind, now());
+    // The epoch stamp is raised past the greatest existing stamp. That keeps
+    // lexicographic retention order chronological when the system clock moves
+    // backwards, and create_new protects against another writer at the same
+    // time without truncating its log.
+    let mut opened = None;
+    let mut open_error = None;
+    for step in 0..tunables.name_attempts.max(1) {
+        let step = u128::try_from(step).unwrap_or(u128::MAX);
+        let path = dir.join(format!(
+            "{kind}-{:015}.log",
+            first_stamp.saturating_add(step)
+        ));
+        match std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&path)
-            .ok()
-            .map(|file| (path, file))
-    });
+        {
+            Ok(file) => {
+                opened = Some((path, file));
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                open_error = Some(error);
+            }
+            Err(error) => {
+                open_error = Some(error);
+                break;
+            }
+        }
+    }
     if let Some((current, file)) = opened {
-        let existing: Vec<PathBuf> = std::fs::read_dir(&dir)
-            .map(|rd| rd.flatten().map(|entry| entry.path()).collect())
-            .unwrap_or_default();
         // Prune only after creating it: a failed open must not evict history.
-        for oldest in logs_to_prune(existing, kind, &current) {
-            std::fs::remove_file(oldest).ok();
+        if retention_ready {
+            before.push(current.clone());
+            for oldest in logs_to_prune_with(before, kind, &current, tunables.retained) {
+                std::fs::remove_file(oldest).ok();
+            }
         }
         crate::output::open_run_log(file);
         let argv: Vec<String> = std::env::args().collect();
@@ -125,15 +177,62 @@ fn open_run_log(state_root: &Path, kind: &str) {
         if let Ok(cwd) = std::env::current_dir() {
             crate::output::detail(&format!("cwd: {}", cwd.display()));
         }
+    } else {
+        let detail = open_error.map_or_else(
+            || "no filename was attempted".to_owned(),
+            |error| error.to_string(),
+        );
+        crate::output::warn(&format!(
+            "could not open a unique {kind} run log in {}: {detail}; continuing without a run log",
+            dir.display()
+        ));
     }
+}
+
+/// Choose a millisecond-shaped name that sorts after every existing log of
+/// this kind, even when the wall clock has moved backwards.
+fn next_log_stamp(existing: &[PathBuf], kind: &str, now: SystemTime) -> u128 {
+    let wall_stamp = now
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_millis());
+    let latest = existing
+        .iter()
+        .filter_map(|path| run_log_stamp(path, kind))
+        .max();
+    latest.map_or(wall_stamp, |latest| {
+        wall_stamp.max(latest.saturating_add(1))
+    })
+}
+
+fn run_log_stamp(path: &Path, kind: &str) -> Option<u128> {
+    if !is_run_log_name(path, kind) {
+        return None;
+    }
+    path.file_name()?
+        .to_str()?
+        .strip_prefix(kind)?
+        .strip_prefix('-')?
+        .strip_suffix(".log")?
+        .parse()
+        .ok()
 }
 
 /// Reserve one retention slot for the current file, even after a clock
 /// rollback. Other kinds never enter this kind's retention budget.
-fn logs_to_prune(mut existing: Vec<PathBuf>, kind: &str, current: &Path) -> Vec<PathBuf> {
+#[cfg(test)]
+fn logs_to_prune(existing: Vec<PathBuf>, kind: &str, current: &Path) -> Vec<PathBuf> {
+    logs_to_prune_with(existing, kind, current, DEFAULT_RUN_LOG_TUNABLES.retained)
+}
+
+fn logs_to_prune_with(
+    mut existing: Vec<PathBuf>,
+    kind: &str,
+    current: &Path,
+    retained: usize,
+) -> Vec<PathBuf> {
     existing.retain(|path| is_run_log_name(path, kind) && path != current);
     existing.sort();
-    let count = existing.len().saturating_sub(RUN_LOGS_KEPT - 1);
+    let count = existing.len().saturating_sub(retained.max(1) - 1);
     existing.into_iter().take(count).collect()
 }
 

@@ -70,8 +70,6 @@ fn run_test_phase(
     // profile guess (which silently lies when a workspace pins
     // `[profile.test]` overrides, and now also when a sweep opts into
     // release).
-    // `whole_workspace` is a property of the tree, not of any sweep. It now
-    // feeds `resolve_unification` rather than the parallel lane directly.
     let info = build::project_info(Some(project_root))?;
     let owners = OwnerIndex::from_metadata_at(
         &info.workspace_root,

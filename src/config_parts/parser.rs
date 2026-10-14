@@ -88,6 +88,8 @@ fn parse_project(table: &toml::Table) -> Result<Project, DevError> {
         .and_then(|v| v.as_str())
         .ok_or_else(|| DevError::Config("brokkr.toml missing required 'project' field".into()))?;
 
+    // `Project::Other` is static so `Project` can stay `Copy`. Removing this
+    // leak requires changing that representation and coordinating its consumers.
     let project = Project::from_builtin_name(project_str)
         .unwrap_or_else(|| Project::Other(Box::leak(project_str.to_owned().into_boxed_str())));
     Ok(project)
@@ -2101,13 +2103,11 @@ fn validate_tilegen(hosts: &HashMap<String, HostConfig>) -> Result<(), DevError>
     for (host, hc) in hosts {
         for (name, tg) in &hc.tilegen {
             let at = format!("{host}.tilegen.{name}");
-            let specs = tg
-                .ocean_specs()
-                .map_err(|e| DevError::Config(format!("{at}.ocean: {e}")))?;
+            let specs = tg.ocean_specs();
 
             let mut bands: BTreeSet<&'static str> = BTreeSet::new();
             let mut artifacts = 0usize;
-            for spec in &specs {
+            for spec in specs {
                 if spec.file().is_empty() {
                     return Err(DevError::Config(format!("{at}.ocean: file name is empty")));
                 }
@@ -2223,7 +2223,10 @@ fn captured_env_pairs_from(
     let mut out: Vec<crate::db::KvPair> = Vec::new();
     for (name, value) in vars {
         if matches_capture(&name, &config.capture_env) {
-            out.push(crate::db::KvPair::text(format!("env.{name}"), value));
+            out.push(crate::db::KvPair::text(
+                crate::db::KvKey::environment(name),
+                value,
+            ));
         }
     }
     out.sort_by(|a, b| a.key.cmp(&b.key));

@@ -75,15 +75,15 @@ impl PipelineOpts {
         }
         if let Some(fmt) = &tg.tile_format {
             args.push("--tile-format".into());
-            args.push(fmt.clone());
+            args.push(fmt.to_string());
         }
         if let Some(comp) = &tg.tile_compression {
             args.push("--tile-compression".into());
-            args.push(comp.clone());
+            args.push(comp.to_string());
         }
         if let Some(algo) = &tg.compress_sort_chunks {
             args.push("--compress-sort-chunks".into());
-            args.push(algo.clone());
+            args.push(algo.to_string());
         }
         if tg.in_memory {
             args.push("--in-memory".into());
@@ -94,15 +94,15 @@ impl PipelineOpts {
         }
         if let Some(s) = &tg.sort_budget {
             args.push("--sort-budget".into());
-            args.push(s.clone());
+            args.push(s.to_string());
         }
         if let Some(s) = &tg.way_budget {
             args.push("--way-budget".into());
-            args.push(s.clone());
+            args.push(s.to_string());
         }
         if let Some(s) = &tg.assemble_budget {
             args.push("--assemble-budget".into());
-            args.push(s.clone());
+            args.push(s.to_string());
         }
         if let Some(n) = tg.dedup_cap {
             args.push("--dedup-cap".into());
@@ -135,12 +135,9 @@ impl PipelineOpts {
             args.push(f.to_string());
         }
 
-        // Syntax is validated when the named tilegen block is selected. Parse
-        // again here to resolve each spec's bare path against the data dir.
-        let specs = tg
-            .ocean_specs()
-            .map_err(|e| DevError::Config(format!("tilegen ocean: {e}")))?;
-        for spec in &specs {
+        // Ocean syntax is validated while loading the config. Resolve each
+        // parsed spec's bare path against the data dir here.
+        for spec in tg.ocean_specs() {
             let path = data_dir.join(spec.file());
             if !path.exists() {
                 return Err(DevError::Config(format!(
@@ -209,6 +206,5 @@ pub fn resolve_tilegen<'a>(
             known.join(", ")
         ))
     })?;
-    tilegen_config::validate(config)?;
     Ok(config)
 }

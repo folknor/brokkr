@@ -9,7 +9,7 @@ use crate::process::snapshot_proc;
 
 pub(super) fn capture_hung_test(
     state_root: &Path,
-    cargo_pid: u32,
+    leader_pid: u32,
     leader: Leader,
     reason: TimeoutReason,
     attribution: Attribution,
@@ -26,10 +26,10 @@ pub(super) fn capture_hung_test(
             TimeoutReason::Watched => "watched".to_owned(),
             TimeoutReason::OneTestWall => "one-test-wall".to_owned(),
         });
-    let test_pids = direct_child_pids(cargo_pid);
+    let test_pids = direct_child_pids(leader_pid);
     let snapshot_pid = match leader {
-        Leader::Cargo => test_pids.first().copied().or(Some(cargo_pid)),
-        Leader::TestBinary => Some(cargo_pid),
+        Leader::Cargo => test_pids.first().copied().or(Some(leader_pid)),
+        Leader::TestBinary => Some(leader_pid),
     };
     // Diagnostic snapshots are brokkr-owned state, so they live under the
     // config-dir `project_root` (`state_root`), not the code tree cargo runs
@@ -44,7 +44,7 @@ pub(super) fn capture_hung_test(
     let snapshot_dir = snapshots.join(format!(
         "{}-{}-{}",
         unix_secs(),
-        cargo_pid,
+        leader_pid,
         sanitize_path_component(&component)
     ));
 
@@ -69,10 +69,11 @@ pub(super) fn capture_hung_test(
     HungTest {
         reason,
         attribution,
+        leader,
         elapsed,
         ceiling,
         snapshot_dir,
-        cargo_pid,
+        leader_pid,
         test_pids,
         snapshot_pid,
         wchan,
@@ -176,8 +177,29 @@ fn snapshot_line(hung: &HungTest, cwd: &Path) -> String {
     }
 }
 
-pub(crate) fn format_hung_test(hung: &HungTest, cwd: &Path) -> String {
-    let child_text = match hung.test_pids.as_slice() {
+fn idle_cause(leader: Leader) -> &'static str {
+    match leader {
+        Leader::Cargo => {
+            "cargo produced no test progress before the first test or after the last; a build-directory lock held by another cargo can cause this"
+        }
+        Leader::TestBinary => {
+            "the directly run test binary produced no test progress before the first test or after the last"
+        }
+    }
+}
+
+fn wall_context(blamed: &[String]) -> String {
+    match blamed {
+        [] => "no test was in flight".to_owned(),
+        names => format!(
+            "in flight when it expired (unverified): {}",
+            names.join(", ")
+        ),
+    }
+}
+
+fn child_text(pids: &[u32]) -> String {
+    match pids {
         [] => "no test child found".to_owned(),
         [pid] => format!("test child (pid {pid})"),
         pids => format!(
@@ -187,7 +209,11 @@ pub(crate) fn format_hung_test(hung: &HungTest, cwd: &Path) -> String {
                 .collect::<Vec<_>>()
                 .join(",")
         ),
-    };
+    }
+}
+
+pub(crate) fn format_hung_test(hung: &HungTest, cwd: &Path) -> String {
+    let child_text = child_text(&hung.test_pids);
     let proc_pid = hung
         .snapshot_pid
         .map(|pid| pid.to_string())
@@ -212,13 +238,7 @@ pub(crate) fn format_hung_test(hung: &HungTest, cwd: &Path) -> String {
     let headline = match (&hung.reason, &hung.attribution) {
         (TimeoutReason::Wall { blamed }, Attribution::None) => {
             // Active when a wall deadline expired is context, not cause.
-            let context = match blamed.as_slice() {
-                [] => "no test was in flight".to_owned(),
-                names => format!(
-                    "in flight when it expired (unverified): {}",
-                    names.join(", ")
-                ),
-            };
+            let context = wall_context(blamed);
             let run = if ran == limit {
                 format!("the run exceeded its {limit}s wall deadline")
             } else {
@@ -226,20 +246,31 @@ pub(crate) fn format_hung_test(hung: &HungTest, cwd: &Path) -> String {
             };
             format!("{run} and was killed\n  {context}")
         }
-        (TimeoutReason::Idle, _) => format!(
-            "no test in flight for {ran}s ({}) - cargo wedged before the first test or after the last; \
-             a build-directory lock held by another cargo (rust-analyzer) looks exactly like this",
-            if ran == limit {
-                "the idle ceiling".to_owned()
+        (TimeoutReason::Idle, _) => {
+            let cause = idle_cause(hung.leader);
+            format!(
+                "no test in flight for {ran}s ({}) - {cause}",
+                if ran == limit {
+                    "the idle ceiling".to_owned()
+                } else {
+                    format!("past the {limit}s idle ceiling")
+                },
+            )
+        }
+        (TimeoutReason::NoCompletion, Attribution::Exact { name }) => {
+            if hung.leader == Leader::TestBinary {
+                format!(
+                    "the direct test binary running `{name}` {} with no completion record observed",
+                    timing("process ceiling"),
+                )
             } else {
-                format!("past the {limit}s idle ceiling")
-            },
-        ),
-        (TimeoutReason::NoCompletion, Attribution::Exact { name }) => format!(
-            "{} {} with no completion record observed",
-            named(name),
-            timing("per-test timeout"),
-        ),
+                format!(
+                    "{} {} with no completion record observed",
+                    named(name),
+                    timing("per-test timeout"),
+                )
+            }
+        }
         (TimeoutReason::NoCompletion, _) => format!(
             "no test completed for {ran}s ({}) - the test in progress could not be named",
             if ran == limit {
@@ -249,7 +280,14 @@ pub(crate) fn format_hung_test(hung: &HungTest, cwd: &Path) -> String {
             },
         ),
         (TimeoutReason::Watched | TimeoutReason::OneTestWall, Attribution::Exact { name }) => {
-            format!("{} {}", named(name), timing("per-test timeout"))
+            if hung.leader == Leader::TestBinary {
+                format!(
+                    "the direct test binary running `{name}` {}",
+                    timing("process ceiling")
+                )
+            } else {
+                format!("{} {}", named(name), timing("per-test timeout"))
+            }
         }
         (
             TimeoutReason::Watched | TimeoutReason::OneTestWall,
@@ -260,9 +298,13 @@ pub(crate) fn format_hung_test(hung: &HungTest, cwd: &Path) -> String {
         }
         (TimeoutReason::Wall { .. }, _) => "the run wall deadline expired".to_owned(),
     };
+    let group = match hung.leader {
+        Leader::Cargo => "cargo process group",
+        Leader::TestBinary => "the direct test binary's process group",
+    };
     let mut out = format!(
-        "{headline}\n  killed cargo process group (pgid {}) and {child_text}",
-        hung.cargo_pid,
+        "{headline}\n  killed {group} (pgid {}) and {child_text}",
+        hung.leader_pid,
     );
     // Only what was actually read: /proc/<pid>/stack in particular is
     // unreadable for a non-root brokkr, and a line saying so is noise.

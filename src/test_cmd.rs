@@ -1440,10 +1440,11 @@ include_ignored = false
         let mut hung = HungTest {
             reason: TimeoutReason::Watched,
             attribution: exact(),
+            leader: test_runner::Leader::Cargo,
             elapsed: Duration::from_secs(20),
             ceiling: Duration::from_secs(20),
             snapshot_dir: PathBuf::new(),
-            cargo_pid: 0,
+            leader_pid: 0,
             test_pids: Vec::new(),
             snapshot_pid: None,
             wchan: None,

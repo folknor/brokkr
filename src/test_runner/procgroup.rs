@@ -3,7 +3,7 @@
 use std::fs;
 use std::io::Read;
 use std::path::Path;
-use std::process::{ChildStderr, Command, Stdio};
+use std::process::ChildStderr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -68,39 +68,24 @@ pub(super) fn spawn_process_group(
         return Err(DevError::Interrupted);
     }
 
-    let mut cmd = Command::new(program);
-    cmd.args(args)
-        .current_dir(cwd)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .process_group(0);
-
-    for &(key, value) in env {
-        cmd.env(key, value);
-    }
-    crate::cargo_env::apply(&mut cmd, profile, args, Some(cwd), env)?;
-    crate::oom::protect_child(&mut cmd);
-    // The group is outside brokkr's own, so nothing aimed at brokkr reaches it.
-    // Both runners register it with `shutdown::GroupReaper` for SIGINT/SIGTERM;
-    // this covers the direct child when brokkr is SIGKILLed by anything that
-    // does not walk its tree first (`brokkr kill --hard` does - see
-    // `shutdown::kill_descendants` - and so reaches a test binary under cargo;
-    // this reaches only the direct child). Both runners wait on the child from
-    // the spawning thread, which the death signal requires.
-    crate::shutdown::die_with_parent(&mut cmd);
-    // What the death signal cannot reach - the test binary under cargo, a
-    // doctest under rustdoc, anything a test spawned - carries this run's
-    // token, and the next fresh hold reaps it once this brokkr is gone. See
-    // `crate::test_orphans`. After the caller's env, so a sweep env cannot
-    // displace it.
-    crate::test_orphans::stamp(&mut cmd);
-    // Last, after every caller-supplied env var: see `crate::hold`.
-    crate::hold::stamp(&mut cmd);
-
-    cmd.spawn().map_err(|error| DevError::Spawn {
-        program: program.into(),
-        error,
-    })
+    let policy = match profile {
+        crate::cargo_env::SpawnProfile::Plain => crate::process::spawn::ChildPolicy::test_process(),
+        crate::cargo_env::SpawnProfile::Cargo { phase } => {
+            crate::process::spawn::ChildPolicy::cargo_test(phase)
+        }
+    };
+    // Both runners register and reap this group from the spawning thread.
+    // Parent death covers the direct child; the orphan token covers descendants.
+    let mut cmd = policy.command(
+        program,
+        args,
+        Some(cwd),
+        env,
+        crate::shutdown::ChildIsolation::Inherit,
+    )?;
+    crate::process::spawn::capture_stdio(&mut cmd);
+    cmd.process_group(0);
+    crate::process::spawn::spawn(cmd, None)
 }
 
 pub(super) fn clone_buffer(buf: &Arc<Mutex<Vec<u8>>>, label: &str) -> Result<Vec<u8>, DevError> {

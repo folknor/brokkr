@@ -48,25 +48,7 @@ Enforcement proposed: a prefix table with a width test; textlint bans on `\[warn
 
 Reported by: process-control, config-cli-bootstrap, ratatoskr, pbfhogg-nidhogg, convention-engines, elivagar.
 
-Residue: direct `Command` construction remains in `test_runner/procgroup.rs`, `ratatoskr/saehrimnir.rs`, nidhogg, `env.rs`, `gremlins.rs`, `litehtml/cmd.rs`, `tools.rs`, `worktree.rs`, `scope.rs`, `git.rs` and `git/tree_state.rs`.
-
-## PLT-015 - `cargo metadata` is spawned and deserialized many times
-
-Reported by: convention-engines, check-core, process-control.
-
-Residue: `nextest_lane.rs` still spawns metadata directly, `direct_runtime.rs`/`prepare.rs` reparse `raw_json`, and `dependency_rules.rs` keeps its own schema.
-
-## PLT-016 - Git invocations and the tracked-file walk have many owners
-
-Reported by: convention-engines, process-control, config-cli-bootstrap.
-
-Residue: the prose-only shortcut still runs its own `git status` through `scope::dirt`.
-
-## PLT-017 - "Dirty tree" has several definitions
-
-Reported by: process-control, measurement-storage, small-benches.
-
-Residue: `scope.rs` keeps its own status reader and `TreeState` still names the toolchain's `FILES`/`SUFFIX`.
+Residue: a raw osmosis capture remains in `src/pbfhogg/verify_merge.rs`.
 
 ## PLT-019 - Build profile is a bare string or bool
 
@@ -90,19 +72,13 @@ Residue: handler-side `project::require` checks remain in `elivagar/cmd.rs`, `li
 
 Reported by: config-cli-bootstrap, ratatoskr, pbfhogg-nidhogg.
 
-Residue: `Project::Other` still uses `Box::leak` in `config_parts/parser.rs`.
+Residue: `Project::Other` still uses `Box::leak` in `config_parts/parser.rs`. Removing it means changing `Project::Other`'s `&'static str` (which keeps `Project` `Copy`) in `project.rs` together with the parser.
 
 ## PLT-025 - Configuration is validated at use instead of at load
 
 Reported by: config-cli-bootstrap, process-control.
 
 Residue: project-specific string validation is still at use time.
-
-## PLT-026 - CLI values are parsed or checked twice
-
-Reported by: config-cli-bootstrap, measurement-storage, pbfhogg-nidhogg.
-
-Residue: `--osc-range`, compression and run-count validation are still duplicated.
 
 ## PLT-030 - External tools: unpinned, unverified, re-discovered per site
 
@@ -114,22 +90,28 @@ Residue: nidhogg's separate curl timeout contract and mutable map-data URLs rema
 
 Reported by: config-cli-bootstrap, check-core.
 
-Residue: argv and `env.*` redaction in `db/write.rs` and raw script-check output rendering remain (stored cwd/hostname are gone).
+Residue: raw script-check output is rendered unsanitized in `check_cmd/conventions.rs`.
 
-## PLT-052 - The guard-decision script check tests the installed guard, not the tree's
+## PLT-053 - Malformed external JSON is skipped or misclassified
 
-Reported by: the wave-1 reviewer, laterally.
+Reported by: the wave-1 reviewer and a wave-2 fixer, laterally.
 
-`scripts/guard-decision-probe.py` (a pre-clippy `[[script_check]]`) runs the `brokkr-rustc-guard` installed in `CARGO_HOME`, so a change to `src/bin/rustc_guard.rs` is only gated after the next `brokkr install`: check can pass on stale code or fail on a fixed one. It should target the freshly built guard from this tree.
+`ContractViolation` now covers cargo metadata. Residue: `cargo_json.rs` and two parsers in `build.rs` silently skip malformed JSON lines, so cargo output can be dropped unnoticed.
 
-## PLT-053 - Malformed external JSON now renders as an internal error
+## PLT-054 - history.db argv redaction over-redacts
 
-Reported by: the wave-1 reviewer, laterally.
+Reported by: the wave-2 reviewer, laterally.
 
-`DevError::from(serde_json::Error)` moved from `Build` to `Internal`. Sites where the JSON is an external contract (cargo output, harness reports) are not brokkr bugs; they should map to a contract-violation kind at the call site rather than through the blanket conversion.
+`history::redact_argv` lets a bare positional whose text contains `session`/`token`/`auth` swallow the next argument, and `sensitive_name`'s substring match also hits `author`, `oauth` and `authority`. `history::redact_secret_argv` (used for results.db) is the narrower credential-names-only rule; history should adopt it or share its predicate.
+
+## PLT-055 - The guard-decision probe builds into the shared target dir
+
+Reported by: the wave-2 reviewer, laterally.
+
+`scripts/guard-decision-probe.py` runs a plain `cargo build --bin brokkr-rustc-guard` into `target/` inside check's script_check stage, without check's cargo env (`CARGO_CACHE_RUSTC_INFO=0`, `[lints] allow` rustflags). A cold `target/debug` compiles the full dependency set under the phase ceiling. A dedicated target dir, or reusing the artifact check already builds, would bound it.
 
 ## PLT-051 - Decisions and leftovers from the command-spec wave
 
 Reported by: the wave-9 reviewer.
 
-Residue: the phase-type, threaded-test-wall, typed-root and dispatch-table cleanup remain (the `verify_cmd.rs` comment is fixed).
+Residue: the exhaustive dispatch tables in `command_input.rs` (the bootstrap ones are commented as deliberate one-arm-per-command routing).

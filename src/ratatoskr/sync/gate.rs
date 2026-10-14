@@ -129,7 +129,7 @@ pub fn run_gate_cohort(req: &SyncBenchRequest<'_>) -> Result<(), DevError> {
     output::ratatoskr_msg(&format!(
         "gate cohort: {}, {} each",
         output::count(plan.len(), "gate"),
-        output::count(req.bench, "iteration")
+        output::count(req.bench.get(), "iteration")
     ));
 
     // Hold the global measurement lock for the entire sweep. Each

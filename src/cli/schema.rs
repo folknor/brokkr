@@ -27,6 +27,7 @@ const DEFAULT_OUTLINE_DEPTH: usize = 4;
 /// Run count a bare `--bench` (no COUNT) means, for every command that takes
 /// one. A string because clap's `default_missing_value` is parsed like argv.
 const DEFAULT_BENCH_RUNS: &str = "3";
+const DEFAULT_SINGLE_RUNS: &str = "1";
 
 #[derive(Parser)]
 #[command(name = "brokkr", about = "Shared development tooling", version = LONG_VERSION)]
@@ -683,8 +684,8 @@ In depth: `brokkr man clippy`."
         #[arg(long, conflicts_with = "osc_range")]
         osc_seq: Option<String>,
         /// OSC sequence range LO..HI (inclusive) to merge in a single invocation
-        #[arg(long, value_parser = validate_osc_range)]
-        osc_range: Option<String>,
+        #[arg(long)]
+        osc_range: Option<crate::config::OscRange>,
         /// Snapshot key to read OSCs from. Use `base` (or omit) for the
         /// dataset's primary/legacy OSC chain; pass a snapshot key to read
         /// from a historical snapshot's OSC table.
@@ -842,7 +843,7 @@ In depth: `brokkr man clippy`."
         /// Source bounding box to carve regions from (lon_min,lat_min,lon_max,lat_max).
         /// Falls back to the dataset's configured bbox if omitted.
         #[arg(long)]
-        bbox: Option<String>,
+        bbox: Option<crate::resolve::Bbox>,
         /// Extract strategy: simple, complete, smart, or all (runs all
         /// three back-to-back, like `brokkr extract --strategy all`).
         #[arg(long, default_value = "simple")]
@@ -970,7 +971,7 @@ Examples:
         strategy: String,
         /// Bounding box (lon_min,lat_min,lon_max,lat_max)
         #[arg(long)]
-        bbox: Option<String>,
+        bbox: Option<crate::resolve::Bbox>,
         /// Snapshot key to read input from. Use `base` (or omit) for the
         /// dataset's primary data; pass a key registered under
         /// `[dataset.snapshot.<key>]` for a historical snapshot.
@@ -1003,8 +1004,11 @@ Examples:
         #[command(flatten)]
         pbf: PbfArgs,
         /// Compressions to benchmark (comma-separated: none,zlib:6,zstd:3)
-        #[arg(long, default_value = "none,zlib:6,zstd:3")]
-        compressions: String,
+        #[arg(
+            long,
+            default_value = crate::pbfhogg::DEFAULT_BENCH_WRITE_COMPRESSIONS
+        )]
+        compressions: crate::pbfhogg::CompressionList,
     },
     /// Merge benchmark
     #[command(name = "merge", display_order = 2)]
@@ -1014,8 +1018,11 @@ Examples:
         #[command(flatten)]
         pbf: PbfArgs,
         /// Compressions to benchmark (comma-separated: zlib,none)
-        #[arg(long, default_value = "zlib,none")]
-        compressions: String,
+        #[arg(
+            long,
+            default_value = crate::pbfhogg::DEFAULT_BENCH_MERGE_COMPRESSIONS
+        )]
+        compressions: crate::pbfhogg::CompressionList,
         /// Use io-uring
         #[arg(long)]
         uring: bool,
@@ -1175,8 +1182,8 @@ Examples:
         #[arg(long)]
         json: bool,
         /// Number of times to run the command (build happens once)
-        #[arg(long, default_value_t = 1)]
-        runs: usize,
+        #[arg(long, default_value_t = std::num::NonZeroUsize::MIN)]
+        runs: std::num::NonZeroUsize,
         /// Skip build step and run existing release binary
         #[arg(long)]
         no_build: bool,
@@ -2021,8 +2028,8 @@ In depth: `brokkr man nidhogg`."
         #[arg(short = 'p', long = "package")]
         package: Option<String>,
         /// Repeat the test this many times per sweep (flaky-test hunting)
-        #[arg(short = 'N', long = "repeat", default_value = "1")]
-        repeat: u32,
+        #[arg(short = 'N', long = "repeat", default_value_t = std::num::NonZeroU32::MIN)]
+        repeat: std::num::NonZeroU32,
         /// Parallel cargo compile jobs (`cargo test -j N`)
         #[arg(short = 'j', long = "jobs")]
         jobs: Option<u32>,
@@ -2292,11 +2299,11 @@ In depth: `brokkr man nidhogg`."
         #[arg(
             short = 'N',
             long = "repeat",
-            default_value = "1",
+            default_value_t = std::num::NonZeroU32::MIN,
             value_name = "COUNT",
             requires = "service_target"
         )]
-        repeat: u32,
+        repeat: std::num::NonZeroU32,
 
         /// Keep going after a failed iteration. Default is to stop on
         /// the first failure so the artefact dir lands fast for triage.
@@ -2375,7 +2382,7 @@ In depth: `brokkr man nidhogg`."
             value_name = "COUNT",
             conflicts_with = "all"
         )]
-        bench: Option<usize>,
+        bench: Option<std::num::NonZeroUsize>,
 
         /// Allow recording on a dirty git tree (a gated run that records a
         /// row tags it `dirty`; `results.db` still skips it). Requires
@@ -2835,11 +2842,21 @@ pub(crate) struct ModeArgs {
     pub(crate) bench: Option<std::num::NonZeroUsize>,
 
     /// Function-level timing via hotpath feature (optional run count, default 1)
-    #[arg(long, conflicts_with_all = ["bench", "alloc"], num_args = 0..=1, default_missing_value = "1")]
+    #[arg(
+        long,
+        conflicts_with_all = ["bench", "alloc"],
+        num_args = 0..=1,
+        default_missing_value = DEFAULT_SINGLE_RUNS
+    )]
     pub(crate) hotpath: Option<std::num::NonZeroUsize>,
 
     /// Per-function allocation tracking via hotpath-alloc feature (optional run count, default 1)
-    #[arg(long, conflicts_with_all = ["bench", "hotpath"], num_args = 0..=1, default_missing_value = "1")]
+    #[arg(
+        long,
+        conflicts_with_all = ["bench", "hotpath"],
+        num_args = 0..=1,
+        default_missing_value = DEFAULT_SINGLE_RUNS
+    )]
     pub(crate) alloc: Option<std::num::NonZeroUsize>,
 
     /// Print full build/bench/result output
@@ -2890,9 +2907,9 @@ pub(crate) struct PbfArgs {
     /// Use io_uring for I/O (requires linux-io-uring feature in pbfhogg)
     #[arg(long)]
     pub(crate) io_uring: bool,
-    /// Output compression: zlib:N (N=1-9), zstd:N, or none
-    #[arg(long, value_parser = validate_compression)]
-    pub(crate) compression: Option<String>,
+    /// Output compression: zlib[:N] (N=1-9), zstd[:N], or none
+    #[arg(long)]
+    pub(crate) compression: Option<crate::pbfhogg::Compression>,
 }
 
 /// Shared dataset/variant/direct_io args for pbfhogg verify subcommands.
@@ -2953,7 +2970,7 @@ pub(crate) enum VerifyCommand {
         #[command(flatten)]
         pbf: VerifyPbfArgs,
         #[arg(long)]
-        bbox: Option<String>,
+        bbox: Option<crate::resolve::Bbox>,
     },
     /// Cross-validate multi-extract (single-pass vs sequential)
     #[command(name = "multi-extract", display_order = 2)]
@@ -2961,7 +2978,7 @@ pub(crate) enum VerifyCommand {
         #[command(flatten)]
         pbf: VerifyPbfArgs,
         #[arg(long)]
-        bbox: Option<String>,
+        bbox: Option<crate::resolve::Bbox>,
         /// Number of non-overlapping bbox regions
         #[arg(long, default_value_t = crate::pbfhogg::commands::DEFAULT_MULTI_EXTRACT_REGIONS)]
         regions: usize,
@@ -3067,7 +3084,7 @@ pub(crate) enum VerifyCommand {
         #[arg(long)]
         osc_seq: Option<String>,
         #[arg(long)]
-        bbox: Option<String>,
+        bbox: Option<crate::resolve::Bbox>,
     },
 
     /// Verify PMTiles output integrity

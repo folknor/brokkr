@@ -37,7 +37,10 @@ paths still resolve against each including project's root.
   `elivagar`). Each has `file`, optional `xxhash` (XXH128).
   Used by nidhogg `serve` and `bench tiles`.
 - Top-level dataset fields: `origin`, `download_date`, `bbox`, `data_dir`
-  (nidhogg only).
+  (nidhogg only). `bbox` is parsed at config load as four finite
+  `lon_min,lat_min,lon_max,lat_max` coordinates; longitude must be within
+  -180..180, latitude within -90..90, and each minimum must not exceed its
+  maximum.
 
 ```toml
 [plantasjen.datasets.denmark]

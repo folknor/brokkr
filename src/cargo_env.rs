@@ -54,6 +54,7 @@ use std::process::Command;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+pub use crate::check_cmd::Phase;
 use crate::error::DevError;
 use crate::output;
 
@@ -71,44 +72,6 @@ const STDERR_LIMIT: usize = 16 * 1024;
 pub enum SpawnProfile {
     Plain,
     Cargo { phase: Option<Phase> },
-}
-
-/// A check phase to attach to the first recorded evaluator failure.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Phase {
-    Gremlins,
-    Header,
-    Textlint,
-    Manifest,
-    ScriptCheck,
-    DependencyRules,
-    PublishCycle,
-    Clippy,
-    Rustdoc,
-    Prepare,
-    Test,
-    Coverage,
-    InstallFeature,
-}
-
-impl Phase {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Gremlins => "gremlins",
-            Self::Header => "header",
-            Self::Textlint => "textlint",
-            Self::Manifest => "manifest",
-            Self::ScriptCheck => "script_check",
-            Self::DependencyRules => "dependency_rules",
-            Self::PublishCycle => "publish_cycle",
-            Self::Clippy => "clippy",
-            Self::Rustdoc => "rustdoc",
-            Self::Prepare => "prepare",
-            Self::Test => "test",
-            Self::Coverage => "coverage",
-            Self::InstallFeature => "install_feature",
-        }
-    }
 }
 
 /// The configured entries, by name (sorted - entries are independent, so the

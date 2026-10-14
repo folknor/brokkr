@@ -141,12 +141,13 @@ mod tests {
     #[test]
     fn resolve_bbox_prefers_arg_then_dataset() {
         let mut ds = empty_dataset();
-        ds.bbox = Some(String::from("1,2,3,4"));
+        ds.bbox = Some("1,2,3,4".parse().unwrap());
         let mut datasets = HashMap::new();
         datasets.insert(String::from("denmark"), ds);
         let paths = mk_paths(Path::new("/irrelevant"), datasets);
 
-        let explicit = resolve_bbox(Some("9,9,9,9"), "denmark", &paths).expect("bbox");
+        let explicit_bbox = "9,9,9,9".parse().unwrap();
+        let explicit = resolve_bbox(Some(&explicit_bbox), "denmark", &paths).expect("bbox");
         assert_eq!(explicit.as_str(), "9,9,9,9");
 
         let from_dataset = resolve_bbox(None, "denmark", &paths).expect("bbox");
@@ -520,7 +521,7 @@ mod tests {
         let resolved = resolve_osc_range(
             "planet",
             &SnapshotRef::Named("20260411".into()),
-            "4969..4971",
+            &"4969..4971".parse().unwrap(),
             &paths,
             Path::new("."),
         )
@@ -582,7 +583,7 @@ mod tests {
         let resolved = resolve_osc_range(
             "planet",
             &SnapshotRef::Base,
-            "4914..4916",
+            &"4914..4916".parse().unwrap(),
             &paths,
             Path::new("."),
         )
@@ -618,7 +619,7 @@ mod tests {
         let err = resolve_osc_range(
             "planet",
             &SnapshotRef::Base,
-            "4914..4916",
+            &"4914..4916".parse().unwrap(),
             &paths,
             Path::new("."),
         )

@@ -49,14 +49,11 @@ block.
 statement elivagar's removed `--no-ocean` flag used to make. Each entry is
 either a zoom-banded shapefile (`z0-z14:<f.shp>`, `z0-z7:<f.shp>`,
 `z8-z14:<f.shp>`) or a bare `<f.pmtiles>` artifact. Paths are relative to the
-host's `data`, like every other path in the file. When brokkr resolves the
-selected block, it validates the closed value sets, budget syntax and ranges,
-and ocean spec syntax before starting a Cargo build.
-
-The selected-block validation currently runs while brokkr builds the command
-plan. The schema still deserializes the enum and size fields as strings; using
-the typed values during config deserialization requires the schema change in
-`src/config_parts/project_config/elivagar.rs`.
+host's `data`, like every other path in the file. While loading `brokkr.toml`,
+brokkr parses the enum, compression level, budget, and ocean values into typed
+values and validates their ranges and syntax. It checks every tilegen block
+before command planning, so an invalid unused block is still a config error.
+Budget sizes are normalized to byte counts in the expanded argv.
 
 The ocean rules are:
 

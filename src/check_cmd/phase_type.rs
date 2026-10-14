@@ -1,6 +1,41 @@
-/// Shared check-phase facts layered onto the phase type used when cargo env
-/// evaluation records its first failure.
-pub(super) use crate::cargo_env::Phase;
+/// A check phase. Cargo environment failures may be tagged with one, but the
+/// phase identity and its policy belong to the check command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Phase {
+    Gremlins,
+    Header,
+    Textlint,
+    Manifest,
+    ScriptCheck,
+    DependencyRules,
+    PublishCycle,
+    Clippy,
+    Rustdoc,
+    Prepare,
+    Test,
+    Coverage,
+    InstallFeature,
+}
+
+impl Phase {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Gremlins => "gremlins",
+            Self::Header => "header",
+            Self::Textlint => "textlint",
+            Self::Manifest => "manifest",
+            Self::ScriptCheck => "script_check",
+            Self::DependencyRules => "dependency_rules",
+            Self::PublishCycle => "publish_cycle",
+            Self::Clippy => "clippy",
+            Self::Rustdoc => "rustdoc",
+            Self::Prepare => "prepare",
+            Self::Test => "test",
+            Self::Coverage => "coverage",
+            Self::InstallFeature => "install_feature",
+        }
+    }
+}
 
 /// A check phase's outcome before the command boundary decides how to render
 /// it. Findings have already printed their report; operational errors have

@@ -17,10 +17,11 @@ fn hung(reason: TimeoutReason, attribution: Attribution, elapsed: u64, ceiling: 
     HungTest {
         reason,
         attribution,
+        leader: Leader::Cargo,
         elapsed: Duration::from_secs(elapsed),
         ceiling: Duration::from_secs(ceiling),
         snapshot_dir: PathBuf::from("/snap"),
-        cargo_pid: 7,
+        leader_pid: 7,
         test_pids: vec![9],
         snapshot_pid: Some(9),
         wchan: None,

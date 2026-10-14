@@ -86,32 +86,33 @@ pub fn run(
 /// here either way, and curl's `-S` error line names the status.)
 fn run_curl_timed(url: &str, body: &str) -> Result<std::time::Duration, DevError> {
     let max_time = super::policy::curl_seconds(super::policy::API_BENCH_REQUEST_TIMEOUT);
-    let output = std::process::Command::new("curl")
-        .args([
-            "-sS",
-            "--compressed",
-            "--fail",
-            "--max-time",
-            &max_time,
-            "-o",
-            "/dev/null",
-            "-w",
-            "\n%{time_total}",
-            "-X",
-            "POST",
-            url,
-            "-H",
-            "Content-Type: application/json",
-            "-d",
-            body,
-        ])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .output()
-        .map_err(|error| DevError::Spawn {
-            program: "curl".into(),
-            error,
-        })?;
+    let output = crate::output::child::command_output(
+        crate::process::spawn::ChildPolicy::plain_command("curl")
+            .args([
+                "-sS",
+                "--compressed",
+                "--fail",
+                "--max-time",
+                &max_time,
+                "-o",
+                "/dev/null",
+                "-w",
+                "\n%{time_total}",
+                "-X",
+                "POST",
+                url,
+                "-H",
+                "Content-Type: application/json",
+                "-d",
+                body,
+            ])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()),
+    )
+    .map_err(|error| DevError::Spawn {
+        program: "curl".into(),
+        error,
+    })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -160,30 +161,31 @@ fn parse_time_total(time_str: &str) -> Result<std::time::Duration, DevError> {
 /// result, right after a timing run that may have been measuring errors.
 fn report_response_stats(url: &str, body: &str, name: &str) -> Result<(), DevError> {
     let max_time = super::policy::curl_seconds(super::policy::API_BENCH_REQUEST_TIMEOUT);
-    let output = std::process::Command::new("curl")
-        .args([
-            "-sS",
-            "--compressed",
-            "--fail-with-body",
-            "--max-time",
-            &max_time,
-            "-w",
-            "\n%{size_download}",
-            "-X",
-            "POST",
-            url,
-            "-H",
-            "Content-Type: application/json",
-            "-d",
-            body,
-        ])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .output()
-        .map_err(|error| DevError::Spawn {
-            program: "curl".into(),
-            error,
-        })?;
+    let output = crate::output::child::command_output(
+        crate::process::spawn::ChildPolicy::plain_command("curl")
+            .args([
+                "-sS",
+                "--compressed",
+                "--fail-with-body",
+                "--max-time",
+                &max_time,
+                "-w",
+                "\n%{size_download}",
+                "-X",
+                "POST",
+                url,
+                "-H",
+                "Content-Type: application/json",
+                "-d",
+                body,
+            ])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()),
+    )
+    .map_err(|error| DevError::Spawn {
+        program: "curl".into(),
+        error,
+    })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);

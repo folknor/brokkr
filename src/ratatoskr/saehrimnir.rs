@@ -15,7 +15,7 @@
 //! model, and signal handling; brokkr only orchestrates.
 
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use crate::clean::layout::ProjectState;
@@ -520,7 +520,7 @@ impl MockServer {
         // install a signal guard before spawning, so cooperative signals use
         // the same group-aware cleanup path everywhere.
         use std::os::unix::process::CommandExt;
-        let mut cmd = Command::new(binary);
+        let mut cmd = crate::process::spawn::ChildPolicy::plain_command(binary);
         cmd.args([
             "--fixture",
             &fixture_str,
@@ -531,16 +531,9 @@ impl MockServer {
         .stdout(Stdio::null())
         .stderr(stderr_log);
         cmd.process_group(0);
-        // Every child of a hold carries its capability: see `crate::hold`.
-        crate::hold::stamp(&mut cmd);
-        let mut child = cmd.spawn().map_err(|error| DevError::Spawn {
-            program: binary.display().to_string(),
-            error,
-        })?;
+        crate::process::spawn::ChildPolicy::service().apply_runtime_policy(&mut cmd);
+        let mut child = crate::process::spawn::spawn(cmd, on_spawn)?;
         let pid = child.id();
-        if let Some(cb) = on_spawn {
-            cb(pid);
-        }
 
         let endpoints = match wait_for_endpoints(&mut child, &readiness, READINESS_BUDGET) {
             Ok(ep) => ep,
@@ -687,22 +680,18 @@ pub fn run_mock_serve(req: &MockServeRequest<'_>) -> Result<(), DevError> {
     // helper listeners via `kill(-pgid, ...)`. Safe here because
     // `SigtermGuard` (installed above) bridges terminal signals.
     use std::os::unix::process::CommandExt;
-    let mut child = Command::new(&binary)
-        .args([
-            "--fixture",
-            &fixture_str,
-            "--readiness-file",
-            &readiness_str,
-        ])
-        .stdin(Stdio::null())
-        // Inherit stdout/stderr so the user sees sæhrimnir's logs live.
-        // Capture-and-replay would obscure timing for a foreground tool.
-        .process_group(0)
-        .spawn()
-        .map_err(|error| DevError::Spawn {
-            program: binary.display().to_string(),
-            error,
-        })?;
+    let mut cmd = crate::process::spawn::ChildPolicy::plain_command(&binary);
+    cmd.args([
+        "--fixture",
+        &fixture_str,
+        "--readiness-file",
+        &readiness_str,
+    ])
+    .stdin(Stdio::null())
+    .process_group(0);
+    // Inherit the mock's logs for the foreground service.
+    crate::process::spawn::ChildPolicy::service().apply_runtime_policy(&mut cmd);
+    let mut child = crate::process::spawn::spawn(cmd, None)?;
     let child_pid = child.id();
     _lock.set_child_pid(child_pid);
 

@@ -105,7 +105,7 @@ pub(crate) struct ServiceSuiteRequest<'a> {
     pub(crate) profile_override: Option<bool>,
     pub(crate) keep_going: bool,
     pub(crate) include_ignored: bool,
-    pub(crate) repeat: u32,
+    pub(crate) repeat: std::num::NonZeroU32,
 }
 
 pub(crate) struct ServiceTestRequest<'a> {
@@ -116,6 +116,6 @@ pub(crate) struct ServiceTestRequest<'a> {
     pub(crate) script: &'a str,
     pub(crate) keep_artefacts: bool,
     pub(crate) profile_override: Option<bool>,
-    pub(crate) repeat: u32,
+    pub(crate) repeat: std::num::NonZeroU32,
     pub(crate) keep_going: bool,
 }

@@ -8,8 +8,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
+use crate::cargo::metadata::{CargoMetadata, CargoPackage};
 use crate::config::DependencyRule;
-use crate::deps::{CargoMetadata, CargoPackage};
 use crate::error::DevError;
 
 pub use crate::deps::DependencyKind;
@@ -70,21 +70,13 @@ pub fn check(project_root: &Path, rules: &[DependencyRule]) -> Result<Dependency
         &[],
         None,
     )?;
-    let raw = metadata
-        .raw_json()
-        .ok_or_else(|| DevError::Internal("cargo metadata snapshot kept no JSON".into()))?;
-    check_metadata(raw, rules)
+    check_metadata(&metadata, rules)
 }
 
 pub fn check_metadata(
-    metadata_json: &str,
+    metadata: &CargoMetadata,
     rules: &[DependencyRule],
 ) -> Result<DependencyReport, DevError> {
-    let metadata: CargoMetadata = serde_json::from_str(metadata_json).map_err(|error| {
-        DevError::Internal(format!(
-            "dependency_rules could not deserialize the cargo metadata snapshot: {error}"
-        ))
-    })?;
     let workspace_packages: Vec<&CargoPackage> = metadata
         .packages
         .iter()
@@ -154,7 +146,7 @@ pub fn check_metadata(
                 }
                 if !kinds.is_empty() {
                     if dep_kind == DependencyKind::Unknown {
-                        return Err(DevError::Build(format!(
+                        return Err(DevError::ContractViolation(format!(
                             "cargo metadata returned an unrecognized dependency kind for {} -> {} \
                              while applying a `kinds` filter",
                             pkg.name, dep.name,
@@ -211,8 +203,9 @@ mod tests {
 
     use super::*;
 
-    fn metadata() -> &'static str {
-        r#"{
+    fn metadata() -> CargoMetadata {
+        serde_json::from_str(
+            r#"{
   "packages": [
     {
       "name": "app",
@@ -250,7 +243,9 @@ mod tests {
     "path+file:///repo/crates/db#0.1.0",
     "path+file:///repo/crates/service-state#0.1.0"
   ]
-}"#
+}"#,
+        )
+        .unwrap()
     }
 
     #[test]
@@ -264,7 +259,7 @@ mod tests {
             kinds: Vec::new(),
             optional: None,
         }];
-        let report = check_metadata(metadata(), &rules).unwrap();
+        let report = check_metadata(&metadata(), &rules).unwrap();
         assert_eq!(report.violations.len(), 1);
         let violation = &report.violations[0];
         assert_eq!(violation.from, "app");
@@ -283,7 +278,7 @@ mod tests {
             kinds: Vec::new(),
             optional: None,
         }];
-        let report = check_metadata(metadata(), &rules).unwrap();
+        let report = check_metadata(&metadata(), &rules).unwrap();
         assert_eq!(report.violations.len(), 2);
         assert_eq!(report.violations[1].alias.as_deref(), Some("service_state"));
         assert_eq!(report.violations[1].kind, DependencyKind::Dev);
@@ -301,7 +296,7 @@ mod tests {
             kinds: Vec::new(),
             optional: None,
         }];
-        let err = check_metadata(metadata(), &rules).unwrap_err().to_string();
+        let err = check_metadata(&metadata(), &rules).unwrap_err().to_string();
         assert!(err.contains("missing"), "got: {err}");
     }
 
@@ -319,7 +314,10 @@ mod tests {
             optional: None,
         }];
         assert_eq!(
-            check_metadata(metadata(), &rules).unwrap().violations.len(),
+            check_metadata(&metadata(), &rules)
+                .unwrap()
+                .violations
+                .len(),
             1
         );
 
@@ -333,7 +331,7 @@ mod tests {
             optional: None,
         }];
         assert!(
-            check_metadata(metadata(), &excepted)
+            check_metadata(&metadata(), &excepted)
                 .unwrap()
                 .violations
                 .is_empty()
@@ -351,7 +349,7 @@ mod tests {
             kinds: Vec::new(),
             optional: None,
         }];
-        let error = check_metadata(metadata(), &rules).unwrap_err().to_string();
+        let error = check_metadata(&metadata(), &rules).unwrap_err().to_string();
         assert!(error.contains("except entry \"missing\""), "got: {error}");
     }
 
@@ -378,7 +376,7 @@ mod tests {
             None,
         )];
         assert!(
-            check_metadata(metadata(), &dev)
+            check_metadata(&metadata(), &dev)
                 .unwrap()
                 .violations
                 .is_empty()
@@ -386,7 +384,7 @@ mod tests {
 
         let normal = vec![app_rule("db", vec![DependencyKind::Normal], None)];
         assert_eq!(
-            check_metadata(metadata(), &normal)
+            check_metadata(&metadata(), &normal)
                 .unwrap()
                 .violations
                 .len(),
@@ -400,13 +398,13 @@ mod tests {
         // but not `db` (normal).
         let dev = vec![app_rule("service-state", vec![DependencyKind::Dev], None)];
         assert_eq!(
-            check_metadata(metadata(), &dev).unwrap().violations.len(),
+            check_metadata(&metadata(), &dev).unwrap().violations.len(),
             1
         );
 
         let normal = vec![app_rule("db", vec![DependencyKind::Dev], None)];
         assert!(
-            check_metadata(metadata(), &normal)
+            check_metadata(&metadata(), &normal)
                 .unwrap()
                 .violations
                 .is_empty()
@@ -419,11 +417,14 @@ mod tests {
         // false) trips, `service-state` (optional true) does not - i.e. the
         // rule fires on deps that are declared non-optional.
         let db = vec![app_rule("db", Vec::new(), Some(false))];
-        assert_eq!(check_metadata(metadata(), &db).unwrap().violations.len(), 1);
+        assert_eq!(
+            check_metadata(&metadata(), &db).unwrap().violations.len(),
+            1
+        );
 
         let svc = vec![app_rule("service-state", Vec::new(), Some(false))];
         assert!(
-            check_metadata(metadata(), &svc)
+            check_metadata(&metadata(), &svc)
                 .unwrap()
                 .violations
                 .is_empty()
@@ -448,7 +449,7 @@ mod tests {
         // `app` depends on `db` (normal) and `service-state` (dev); allowing
         // only `db` flags `service-state`, reported by real name + rename.
         let rules = vec![allow_rule(&["app"], &["db"], Vec::new())];
-        let report = check_metadata(metadata(), &rules).unwrap();
+        let report = check_metadata(&metadata(), &rules).unwrap();
         assert_eq!(report.violations.len(), 1);
         let v = &report.violations[0];
         assert_eq!(v.rule.as_deref(), Some("leaf"));
@@ -461,7 +462,10 @@ mod tests {
         // Listing the rename key does not permit the renamed package.
         let rules = vec![allow_rule(&["app"], &["db", "service_state"], Vec::new())];
         assert_eq!(
-            check_metadata(metadata(), &rules).unwrap().violations.len(),
+            check_metadata(&metadata(), &rules)
+                .unwrap()
+                .violations
+                .len(),
             1
         );
     }
@@ -470,7 +474,7 @@ mod tests {
     fn allow_scoped_by_kinds_leaves_dev_deps_unconstrained() {
         let rules = vec![allow_rule(&["app"], &["db"], vec![DependencyKind::Normal])];
         assert!(
-            check_metadata(metadata(), &rules)
+            check_metadata(&metadata(), &rules)
                 .unwrap()
                 .violations
                 .is_empty()
@@ -482,14 +486,14 @@ mod tests {
         // `allow = []` means no dependencies at all: both of `app`'s edges trip.
         let none = vec![allow_rule(&["app"], &[], Vec::new())];
         assert_eq!(
-            check_metadata(metadata(), &none).unwrap().violations.len(),
+            check_metadata(&metadata(), &none).unwrap().violations.len(),
             2
         );
 
         // An entry nothing depends on is not an error; leaves pass trivially.
         let unused = vec![allow_rule(&["db", "service-state"], &["libc"], Vec::new())];
         assert!(
-            check_metadata(metadata(), &unused)
+            check_metadata(&metadata(), &unused)
                 .unwrap()
                 .violations
                 .is_empty()
@@ -503,7 +507,7 @@ mod tests {
             ..allow_rule(&["*"], &[], Vec::new())
         }];
         assert!(
-            check_metadata(metadata(), &rules)
+            check_metadata(&metadata(), &rules)
                 .unwrap()
                 .violations
                 .is_empty()

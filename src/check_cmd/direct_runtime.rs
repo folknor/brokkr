@@ -363,53 +363,28 @@ fn workspace_pkg_meta(project_root: &Path) -> Result<HashMap<String, PkgRuntimeM
         &[],
         current_phase(),
     )?;
-    let raw = metadata
-        .raw_json()
-        .ok_or_else(|| DevError::Internal("cargo metadata snapshot kept no JSON".into()))?;
-    let val: serde_json::Value = serde_json::from_str(raw)
-        .map_err(|e| DevError::Build(format!("cargo metadata output unparseable: {e}")))?;
-    let Some(packages) = val.get("packages").and_then(serde_json::Value::as_array) else {
-        return Err(DevError::Build("cargo metadata missing packages".into()));
-    };
-
-    let s = |pkg: &serde_json::Value, key: &str| {
-        pkg.get(key)
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("")
-            .to_owned()
-    };
-    let mut out = HashMap::new();
-    for pkg in packages {
-        let Some(id) = pkg.get("id").and_then(serde_json::Value::as_str) else {
-            continue;
-        };
-        let authors = pkg
-            .get("authors")
-            .and_then(serde_json::Value::as_array)
-            .map(|a| {
-                a.iter()
-                    .filter_map(serde_json::Value::as_str)
-                    .map(str::to_owned)
-                    .collect()
-            })
-            .unwrap_or_default();
-        out.insert(
-            id.to_owned(),
-            PkgRuntimeMeta {
-                name: s(pkg, "name"),
-                version: s(pkg, "version"),
-                authors,
-                description: s(pkg, "description"),
-                homepage: s(pkg, "homepage"),
-                license: s(pkg, "license"),
-                license_file: s(pkg, "license_file"),
-                repository: s(pkg, "repository"),
-                rust_version: s(pkg, "rust_version"),
-                manifest_path: s(pkg, "manifest_path"),
-            },
-        );
-    }
-    Ok(out)
+    Ok(metadata
+        .packages
+        .iter()
+        .filter(|pkg| metadata.is_member(&pkg.id))
+        .map(|pkg| {
+            (
+                pkg.id.to_string(),
+                PkgRuntimeMeta {
+                    name: pkg.name.clone(),
+                    version: pkg.version.clone(),
+                    authors: pkg.authors.clone(),
+                    description: pkg.description.clone().unwrap_or_default(),
+                    homepage: pkg.homepage.clone().unwrap_or_default(),
+                    license: pkg.license.clone().unwrap_or_default(),
+                    license_file: pkg.license_file.clone().unwrap_or_default(),
+                    repository: pkg.repository.clone().unwrap_or_default(),
+                    rust_version: pkg.rust_version.clone().unwrap_or_default(),
+                    manifest_path: pkg.manifest_path.clone(),
+                },
+            )
+        })
+        .collect())
 }
 
 /// Refuse the direct-execution lane when a target runner is configured.

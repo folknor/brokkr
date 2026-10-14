@@ -3,7 +3,6 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 #[derive(Debug)]
 struct Entry {
@@ -65,25 +64,84 @@ impl TreeState {
         root: &Path,
         included_configs: &HashSet<PathBuf>,
     ) -> Option<Self> {
-        let output = Command::new("git")
-            .args([
-                "status",
-                "--porcelain=v1",
-                "-z",
-                "--no-renames",
-                "--untracked-files=all",
-            ])
-            .current_dir(root)
-            .output()
-            .ok()?;
+        let output = crate::output::child::command_output(
+            crate::process::spawn::ChildPolicy::plain_command("git")
+                .args([
+                    "status",
+                    "--porcelain=v1",
+                    "-z",
+                    "--no-renames",
+                    "--untracked-files=all",
+                ])
+                .current_dir(root),
+        )
+        .ok()?;
         if !output.status.success() {
             return None;
         }
-        let entries = parse_porcelain_z(&output.stdout, included_configs)?;
+        Self::from_porcelain(root, &output.stdout, included_configs)
+    }
+
+    fn from_porcelain(
+        root: &Path,
+        bytes: &[u8],
+        included_configs: &HashSet<PathBuf>,
+    ) -> Option<Self> {
         Some(Self {
             root: root.to_owned(),
-            entries,
+            entries: parse_porcelain_z(bytes, included_configs)?,
         })
+    }
+
+    /// Check's shortcut considers every path, including brokkr state and
+    /// config. Measurement and record exemptions do not certify a prose edit.
+    pub(crate) fn for_check(&self) -> crate::scope::Dirt {
+        if self.entries.is_empty() {
+            crate::scope::Dirt::Clean
+        } else if self
+            .entries
+            .iter()
+            .flat_map(|entry| &entry.paths)
+            .all(|path| {
+                path.path.to_str().is_some()
+                    && path
+                        .path
+                        .extension()
+                        .and_then(|ext| ext.to_str())
+                        .is_some_and(crate::globs::is_prose_extension)
+            })
+        {
+            crate::scope::Dirt::ProseOnly
+        } else {
+            crate::scope::Dirt::Code
+        }
+    }
+
+    /// Worktree edits and untracked files are diagnostic priority. Staged-only
+    /// entries remain visible to dirt policies but do not get edit priority.
+    pub(crate) fn unstaged_files(&self) -> Option<HashSet<PathBuf>> {
+        if self
+            .entries
+            .iter()
+            .flat_map(|entry| &entry.paths)
+            .any(|path| path.path.to_str().is_none())
+        {
+            return None;
+        }
+        Some(
+            self.entries
+                .iter()
+                .filter(|entry| entry.worktree != b' ')
+                .flat_map(|entry| entry.paths.iter().map(|path| path.path.clone()))
+                .collect(),
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn check_status(bytes: &[u8]) -> (crate::scope::Dirt, Option<HashSet<PathBuf>>) {
+        Self::from_porcelain(Path::new("."), bytes, &HashSet::new())
+            .map(|state| (state.for_check(), state.unstaged_files()))
+            .unwrap_or((crate::scope::Dirt::Code, None))
     }
 
     /// Whether a source or build-input change would make a commit hash
@@ -201,24 +259,11 @@ fn classify_path(path: &Path, included_configs: &HashSet<PathBuf>) -> PathClass 
         PathClass::RootConfig
     } else if included_configs.contains(path) {
         PathClass::IncludedConfig
-    } else if is_approved_baseline(path) {
+    } else if crate::sluggrs::cmd::is_approved_baseline(path) {
         PathClass::ApprovedBaseline
     } else {
         PathClass::Source
     }
-}
-
-fn is_approved_baseline(path: &Path) -> bool {
-    let mut components = path.components();
-    matches!(
-        (components.next(), components.next(), components.next(), components.next()),
-        (
-            Some(std::path::Component::Normal(root)),
-            Some(std::path::Component::Normal(_snapshot)),
-            Some(std::path::Component::Normal(file)),
-            None
-        ) if root == "snapshots" && file == "approved.png"
-    )
 }
 
 fn is_generated_reuse_entry(entry: &Entry) -> bool {
@@ -235,15 +280,11 @@ fn is_generated_reuse_entry(entry: &Entry) -> bool {
 }
 
 fn is_toolchain_original(path: &Path) -> bool {
-    crate::toolchain::FILES
-        .iter()
-        .any(|name| path == Path::new(name))
+    crate::toolchain::moved_paths().any(|(original, _)| path == Path::new(original))
 }
 
 fn is_toolchain_sidecar(path: &Path) -> bool {
-    crate::toolchain::FILES
-        .iter()
-        .any(|name| path == Path::new(&format!("{name}{}", crate::toolchain::SUFFIX)))
+    crate::toolchain::moved_paths().any(|(_, sidecar)| path == sidecar.as_path())
 }
 
 /// Paths from a toolchain pin and its sidecar are exempt only when the sidecar
@@ -251,9 +292,8 @@ fn is_toolchain_sidecar(path: &Path) -> bool {
 /// window must remain visible as dirty.
 fn unchanged_toolchain_moves(root: &Path, entries: &[Entry]) -> HashSet<PathBuf> {
     let mut unchanged = HashSet::new();
-    for name in crate::toolchain::FILES {
+    for (name, sidecar) in crate::toolchain::moved_paths() {
         let original = PathBuf::from(name);
-        let sidecar = PathBuf::from(format!("{name}{}", crate::toolchain::SUFFIX));
         let original_status = entries
             .iter()
             .find(|entry| entry.paths.iter().any(|path| path.path == original));
@@ -272,10 +312,11 @@ fn unchanged_toolchain_moves(root: &Path, entries: &[Entry]) -> HashSet<PathBuf>
             continue;
         }
 
-        let tree = Command::new("git")
-            .args(["ls-tree", "HEAD", "--", name])
-            .current_dir(root)
-            .output();
+        let tree = crate::output::child::command_output(
+            crate::process::spawn::ChildPolicy::plain_command("git")
+                .args(["ls-tree", "HEAD", "--", name])
+                .current_dir(root),
+        );
         let Ok(tree) = tree else { continue };
         if !tree.status.success() {
             continue;
@@ -284,10 +325,11 @@ fn unchanged_toolchain_moves(root: &Path, entries: &[Entry]) -> HashSet<PathBuf>
         let Some(mode) = tree_line.split_whitespace().next() else {
             continue;
         };
-        let head = Command::new("git")
-            .args(["show", &format!("HEAD:./{name}")])
-            .current_dir(root)
-            .output();
+        let head = crate::output::child::command_output(
+            crate::process::spawn::ChildPolicy::plain_command("git")
+                .args(["show", &format!("HEAD:./{name}")])
+                .current_dir(root),
+        );
         let Ok(head) = head else { continue };
         if !head.status.success() {
             continue;

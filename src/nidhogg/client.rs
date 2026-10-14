@@ -3,7 +3,7 @@
 //! Centralized URL construction, curl GET/POST wrappers, URL encoding,
 //! health check, and default query/geocode fixtures.
 
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use crate::error::DevError;
 use crate::resolve::Bbox;
@@ -158,15 +158,16 @@ fn run_curl_body(request_args: &[&str]) -> Result<String, DevError> {
         &max_time,
     ];
     args.extend_from_slice(request_args);
-    let output = Command::new("curl")
-        .args(&args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(|error| DevError::Spawn {
-            program: "curl".into(),
-            error,
-        })?;
+    let output = crate::output::child::command_output(
+        crate::process::spawn::ChildPolicy::plain_command("curl")
+            .args(&args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .map_err(|error| DevError::Spawn {
+        program: "curl".into(),
+        error,
+    })?;
 
     if !output.status.success() {
         let mut stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
@@ -203,26 +204,27 @@ pub fn health_check(port: u16) -> Result<bool, DevError> {
     let connect_timeout = super::policy::curl_seconds(super::policy::HEALTH_CONNECT_TIMEOUT);
     let max_time = super::policy::curl_seconds(super::policy::HEALTH_REQUEST_TIMEOUT);
 
-    let output = Command::new("curl")
-        .args([
-            "-s",
-            "-o",
-            "/dev/null",
-            "-w",
-            "%{http_code}",
-            "--connect-timeout",
-            &connect_timeout,
-            "--max-time",
-            &max_time,
-            &url,
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
-        .map_err(|error| DevError::Spawn {
-            program: "curl".into(),
-            error,
-        })?;
+    let output = crate::output::child::command_output(
+        crate::process::spawn::ChildPolicy::plain_command("curl")
+            .args([
+                "-s",
+                "-o",
+                "/dev/null",
+                "-w",
+                "%{http_code}",
+                "--connect-timeout",
+                &connect_timeout,
+                "--max-time",
+                &max_time,
+                &url,
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null()),
+    )
+    .map_err(|error| DevError::Spawn {
+        program: "curl".into(),
+        error,
+    })?;
 
     if !output.status.success() {
         return Ok(false);

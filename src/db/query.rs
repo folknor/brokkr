@@ -3,19 +3,32 @@
 use super::ResultsDb;
 use super::like::{ESCAPE, contains_pattern, prefix_pattern, require_prefix};
 use super::schema::SELECT_COLS;
-use super::types::{KvClass, Wall, canonical_cargo_features};
+use super::types::{KvClass, KvKey, Wall, canonical_cargo_features};
 use super::{
     Distribution, HotpathData, HotpathFunction, HotpathThread, KvPair, KvValue, Percentile,
     PreviousRun, Quantity, QueryFilter, RunId, StoredRow,
 };
 use crate::error::DevError;
 use crate::git::ShortCommit;
+use rusqlite::OptionalExtension;
 
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
 impl ResultsDb {
+    /// Read the canonical command identity for a shared result/sidecar UUID.
+    pub(crate) fn command_for_uuid(&self, id: &RunId) -> Result<Option<String>, DevError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT command FROM runs WHERE uuid = ?1",
+                rusqlite::params![id.as_str()],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
     /// Query exact run identities with the complete results filter. Returns
     /// the number omitted by `filter.limit` alongside the selected rows.
     pub(crate) fn query_by_run_ids(
@@ -507,20 +520,14 @@ pub(super) fn push_row_filter_clauses(
     // Metadata values are text-coalesced across run_kv's three value columns,
     // so numeric entries remain selectable through the same key=value form.
     for (key, value) in &filters.meta {
-        clauses.push(kv_equals_expr(
-            params,
-            &KvClass::Metadata.qualify(key),
-            value,
-        ));
+        let key = KvKey::metadata(key.as_str()).as_str().to_owned();
+        clauses.push(kv_equals_expr(params, &key, value));
     }
     // Missing captured environment keys do not match; callers select an
     // explicit baseline value when they need to compare an off arm.
     for (key, value) in &filters.env {
-        clauses.push(kv_equals_expr(
-            params,
-            &KvClass::Environment.qualify(key),
-            value,
-        ));
+        let key = KvKey::environment(key.as_str()).as_str().to_owned();
+        clauses.push(kv_equals_expr(params, &key, value));
     }
 }
 
@@ -610,7 +617,10 @@ fn load_kv(conn: &rusqlite::Connection, run_id: i64) -> Result<Vec<KvPair>, DevE
         } else {
             KvValue::Text(vt.unwrap_or_default())
         };
-        Ok(KvPair { key, value })
+        Ok(KvPair {
+            key: super::types::KvKey::from_stored(key),
+            value,
+        })
     })?;
     let mut result = Vec::new();
     for row in rows {

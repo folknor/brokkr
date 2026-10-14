@@ -13,7 +13,7 @@
 
 use std::os::unix::io::{AsRawFd, OwnedFd};
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::time::{Duration, Instant};
 
 use crate::error::DevError;
@@ -82,20 +82,17 @@ pub fn serve(
 
     let port_str = port.to_string();
 
-    // Spawn background process.
-    let mut cmd = Command::new(binary);
+    // This server intentionally survives the serve command. Plain policy
+    // carries OOM/hold protection without parent-death or run-orphan cleanup.
+    let mut cmd = crate::process::spawn::ChildPolicy::plain_command(binary);
     cmd.args(&args)
         .env("PORT", &port_str)
         .current_dir(project_root)
         .stdout(log_file)
         .stderr(log_file_err)
         .stdin(Stdio::null());
-    // Every child of a hold carries its capability: see `crate::hold`.
-    crate::hold::stamp(&mut cmd);
-    let mut child = cmd.spawn().map_err(|error| DevError::Spawn {
-        program: binary.display().to_string(),
-        error,
-    })?;
+    crate::process::spawn::ChildPolicy::plain().apply_runtime_policy(&mut cmd);
+    let mut child = crate::process::spawn::spawn(cmd, None)?;
 
     let pid = child.id();
 
@@ -410,13 +407,13 @@ mod tests {
     }
 
     fn spawn_sleeper() -> Child {
-        Command::new("sleep")
-            .arg("30")
+        let mut cmd = crate::process::spawn::ChildPolicy::plain_command("sleep");
+        cmd.arg("30")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn sleep")
+            .stderr(Stdio::null());
+        crate::process::spawn::ChildPolicy::test_process().apply_runtime_policy(&mut cmd);
+        crate::process::spawn::spawn(cmd, None).expect("spawn sleep")
     }
 
     #[test]

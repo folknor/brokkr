@@ -26,9 +26,3 @@ been verified.
 Reported by: config-cli.
 
 Residue: there is still no single build-purpose resolver across run, install, check, clippy, test and bench.
-
-## CON-033 - Residual second sources beside the typed lane and command identity
-
-Reported by: the wave-6 and wave-7 reviewers, laterally.
-
-Residue: `sidecar.db` still keeps its own `command` column and migration sequence.

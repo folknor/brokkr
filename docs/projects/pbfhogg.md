@@ -151,7 +151,9 @@ compare pairs automatically, no suffix required.
   `repack`, and `degrade`; brokkr rejects it for other commands before
   building.
 - `--compression <spec>` - output compression passed through to the binary.
-  Values: `zlib:N` (1-9), `zstd:N`, `none`. No cargo features required.
+  Values: `zlib` or `zlib:N` (1-9), `zstd` or `zstd:N`, `none`. Bare
+  `zlib` and `zstd` use the binary's default levels. No cargo features
+  required.
 - `--inject-prepass` - (`add-locations-to-ways` only) emit the injected-prepass
   wire extensions (BlobHeader field 5 way-member bitmaps, Way field 20
   shared-node pins; declared via the `pbfhogg.WayMembers-v1` /

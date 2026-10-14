@@ -142,7 +142,8 @@ impl RustflagsEnv {
                 }
             }
             Err(_) => {
-                notes.push("Cargo config could not be fully inspected for rustflags sources".into());
+                notes
+                    .push("Cargo config could not be fully inspected for rustflags sources".into());
             }
         }
         if std::env::var_os("CARGO_BUILD_RUSTFLAGS").is_some() {

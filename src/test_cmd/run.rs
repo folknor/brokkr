@@ -1,5 +1,6 @@
 //! Sweep preparation, execution order, and run accounting.
 
+use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -40,7 +41,7 @@ pub(crate) fn run(
     state_root: &Path,
     name: &str,
     package: Option<&str>,
-    repeat: u32,
+    repeat: NonZeroU32,
     jobs: Option<u32>,
     profile_override: Option<bool>,
     timeout: Option<u64>,
@@ -49,7 +50,7 @@ pub(crate) fn run(
     // Declared before the guard, so the guard drops first and the watchdog's
     // join is the last thing the command does. The run log is the caller's
     // (`main`, opened before the lock), so it outlives the join.
-    let _ceiling = check_cmd::CheckWatchdog::arm_for("brokkr test", None);
+    let _ceiling = check_cmd::CheckWatchdog::arm_for("brokkr test", None)?;
     let _interrupts = crate::shutdown::SigtermGuard::install();
     let result = run_sweeps(
         dev_config,
@@ -97,13 +98,13 @@ pub(super) fn run_sweeps(
     state_root: &Path,
     name: &str,
     package: Option<&str>,
-    repeat: u32,
+    repeat: NonZeroU32,
     jobs: Option<u32>,
     profile_override: Option<bool>,
     timeout: Option<u64>,
     sweep_filter: Option<&str>,
 ) -> Result<(), DevError> {
-    let repeat = repeat.max(1);
+    let repeat = repeat.get();
     let ceiling = test_ceiling(timeout)?;
     let sweeps = resolve_sweeps(dev_config.test.as_ref(), &dev_config.check, sweep_filter)?;
 
@@ -529,6 +530,9 @@ impl TestInventory {
             lanes,
             ..check_cmd::AccountingPlan::default()
         };
+        let record_dir = crate::clean::layout::ProjectState::new(cx.state_root)
+            .accounting_dir()
+            .join(&plan.run_id);
         match check_cmd::accounting_open(cx.state_root, &plan) {
             Ok(paths) => {
                 output::detail(&format!(
@@ -544,7 +548,10 @@ impl TestInventory {
                 })
             }
             Err(e) => {
-                output::error(&format!("test: the run's record could not be opened: {e}"));
+                output::error(&format!(
+                    "test: could not open run accounting at {}: {e}; continuing without an execution record",
+                    record_dir.display()
+                ));
                 None
             }
         }

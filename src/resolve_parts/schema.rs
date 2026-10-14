@@ -515,28 +515,15 @@ pub(crate) fn resolve_single_osc(
 ///
 /// Every integer seq in `[LO, HI]` must be present in the dataset's osc map;
 /// a missing seq fails fast with `missing osc.X`. Returns paths in ascending
-/// seq order. The range string must be pre-validated in `LO..HI` form.
+/// seq order. The CLI passes the range after its shared typed parse.
 pub(crate) fn resolve_osc_range(
     dataset: &str,
     snapshot: &SnapshotRef,
-    range: &str,
+    range: &config::OscRange,
     paths: &config::ResolvedPaths,
     project_root: &Path,
 ) -> Result<Vec<PathBuf>, DevError> {
-    let (lo_s, hi_s) = range
-        .split_once("..")
-        .ok_or_else(|| DevError::Config(format!("invalid osc range '{range}': expected LO..HI")))?;
-    let lo: u64 = lo_s
-        .parse()
-        .map_err(|e| DevError::Config(format!("invalid osc range LO '{lo_s}': {e}")))?;
-    let hi: u64 = hi_s
-        .parse()
-        .map_err(|e| DevError::Config(format!("invalid osc range HI '{hi_s}': {e}")))?;
-    if lo > hi {
-        return Err(DevError::Config(format!(
-            "osc range LO ({lo}) must be <= HI ({hi})"
-        )));
-    }
+    let (lo, hi) = (range.lo(), range.hi());
 
     let osc_map = snapshot_osc_map(dataset, snapshot, paths)?;
     let ds = get_dataset(dataset, paths)?;
@@ -551,8 +538,7 @@ pub(crate) fn resolve_osc_range(
         SnapshotRef::Named(k) => format!("dataset '{dataset}' snapshot '{k}'"),
     };
 
-    #[allow(clippy::cast_possible_truncation)]
-    let mut resolved = Vec::with_capacity((hi - lo + 1) as usize);
+    let mut resolved = Vec::new();
     for seq in lo..=hi {
         let key = seq.to_string();
         if !osc_map.contains_key(&key) {
@@ -596,30 +582,24 @@ pub(crate) fn resolve_default_osc_path(
     )
 }
 
-/// Resolve and parse the bbox from --bbox or dataset config.
-///
-/// The config and CLI keep their serialized string forms; callers receive one
-/// shared typed value before doing geometry or constructing tool arguments.
+/// Resolve the already-parsed bbox from --bbox or dataset config.
 pub(crate) fn resolve_bbox(
-    bbox: Option<&str>,
+    bbox: Option<&Bbox>,
     dataset: &str,
     paths: &config::ResolvedPaths,
 ) -> Result<Bbox, DevError> {
-    let value = if let Some(b) = bbox {
-        b.to_owned()
-    } else {
-        let ds = paths
-            .datasets
-            .get(dataset)
-            .ok_or_else(|| DevError::Config(format!("unknown dataset: {dataset}")))?;
-        ds.bbox.clone().ok_or_else(|| {
-            DevError::Config(format!(
-                "dataset '{dataset}' has no bbox configured (use --bbox)"
-            ))
-        })?
-    };
-
-    Bbox::parse(&value)
+    if let Some(bbox) = bbox {
+        return Ok(bbox.clone());
+    }
+    let ds = paths
+        .datasets
+        .get(dataset)
+        .ok_or_else(|| DevError::Config(format!("unknown dataset: {dataset}")))?;
+    ds.bbox.clone().ok_or_else(|| {
+        DevError::Config(format!(
+            "dataset '{dataset}' has no bbox configured (use --bbox)"
+        ))
+    })
 }
 
 /// Resolve the PMTiles path from --dataset + --tiles variant.

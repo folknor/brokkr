@@ -7,13 +7,14 @@ use crate::config::{
 };
 use crate::error::DevError;
 use crate::rustc_text::{self, Block, BlockKind, Level};
-use crate::{dependency_rules, gremlins, output, scope};
-use std::path::Path;
+use crate::{dependency_rules, globs, gremlins, output, scope};
+use std::path::{Path, PathBuf};
 
 /// One check invocation's working-tree snapshot, loaded the first time a
-/// convention scanner needs it. Lazy so a run whose file scanners are all
-/// skipped or unconfigured never walks git at all; once loaded, every scanner
-/// judges the same file list and the same bytes.
+/// convention scanner or skipped-scope audit needs it. Lazy so a run whose
+/// file scanners are skipped or unconfigured and has no selector scope to
+/// audit never walks git; once loaded, every scanner judges the same file list
+/// and the same bytes.
 pub(super) struct LazyTree<'a> {
     root: &'a Path,
     cell: std::cell::OnceCell<scope::TreeSnapshot>,
@@ -213,6 +214,167 @@ pub(super) fn run_manifest(
         &tree_order(violations, tree, |v| v.file.as_path()),
         crate::manifest::format_one,
     )
+}
+
+/// Keep selector-scope warnings visible when a file-scanning phase is skipped.
+/// These warnings do not run the omitted content checks; they only report
+/// configured paths that currently select nothing (or exclusions that leave
+/// nothing selected).
+pub(super) fn warn_skipped_scopes(
+    phase: Phase,
+    tree: &LazyTree<'_>,
+    gremlins_cfg: Option<&GremlinsConfig>,
+    header_cfg: Option<&HeaderConfig>,
+    textlint_rules: &[TextlintRule],
+    manifest_cfg: Option<&ManifestConfig>,
+) -> Result<(), DevError> {
+    match phase {
+        Phase::Gremlins => warn_gremlins_scope(tree, gremlins_cfg),
+        Phase::Header => warn_header_scope(tree, header_cfg),
+        Phase::Textlint => warn_textlint_scopes(tree, textlint_rules),
+        Phase::Manifest => warn_manifest_scope(tree, manifest_cfg),
+        _ => Ok(()),
+    }
+}
+
+fn warn_gremlins_scope(
+    tree: &LazyTree<'_>,
+    config: Option<&GremlinsConfig>,
+) -> Result<(), DevError> {
+    let Some(config) = config.filter(|config| !config.disable) else {
+        return Ok(());
+    };
+    if config.exclude.is_empty() {
+        return Ok(());
+    }
+    let files = tree.get()?.files();
+    let scannable: Vec<&Path> = files
+        .iter()
+        .filter(|path| {
+            path.extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(crate::globs::is_scanned_extension)
+        })
+        .map(PathBuf::as_path)
+        .collect();
+    for entry in &config.exclude {
+        let dir = Path::new(entry.trim_end_matches('/'));
+        if !scannable
+            .iter()
+            .any(|path| *path == dir || path.starts_with(dir))
+        {
+            output::warn(&format!(
+                "[gremlins].exclude entry {entry:?} matches no scannable tracked path"
+            ));
+        }
+    }
+    if !config.exclude.is_empty()
+        && !scannable.iter().any(|path| {
+            !config
+                .exclude
+                .iter()
+                .any(|entry| path.starts_with(Path::new(entry.trim_end_matches('/'))))
+        })
+    {
+        output::warn("[gremlins].exclude removes every scannable tracked path");
+    }
+    Ok(())
+}
+
+fn warn_header_scope(tree: &LazyTree<'_>, config: Option<&HeaderConfig>) -> Result<(), DevError> {
+    let Some(config) = config else {
+        return Ok(());
+    };
+    let files = tree.get()?.files();
+    let selected = select_glob_paths(files, &config.paths, "[header].paths")?;
+    warn_excluded_paths(
+        &config.exempt,
+        &selected,
+        "[header].exempt",
+        "[header].exempt excuses every file [header].paths selects",
+    )
+}
+
+fn warn_textlint_scopes(tree: &LazyTree<'_>, rules: &[TextlintRule]) -> Result<(), DevError> {
+    if rules.is_empty() {
+        return Ok(());
+    }
+    let files = tree.get()?.files();
+    for rule in rules {
+        let paths_field = format!("[[textlint]] {:?} paths", rule.name);
+        let selected = select_glob_paths(files, &rule.paths, &paths_field)?;
+        let exclude_field = format!("[[textlint]] {:?} exclude", rule.name);
+        let all_excluded = format!(
+            "[[textlint]] {:?}: exclude excuses every file paths selects",
+            rule.name
+        );
+        warn_excluded_paths(&rule.exclude, &selected, &exclude_field, &all_excluded)?;
+    }
+    Ok(())
+}
+
+fn warn_manifest_scope(
+    tree: &LazyTree<'_>,
+    config: Option<&ManifestConfig>,
+) -> Result<(), DevError> {
+    let Some(config) = config else {
+        return Ok(());
+    };
+    let default_paths = [String::from("**/Cargo.toml")];
+    let paths = if config.paths.is_empty() {
+        &default_paths[..]
+    } else {
+        &config.paths[..]
+    };
+    let files = tree.get()?.files();
+    let candidates = select_glob_paths(files, paths, "[manifest] paths")?;
+    let included = exclude_glob_paths(&config.exclude, &candidates, "[manifest] exclude")?;
+    if included.is_empty() {
+        output::warn("[manifest] paths and exclude leave no manifest to scan");
+    }
+    let _ = exclude_glob_paths(&config.shape_exclude, &included, "[manifest] shape_exclude")?;
+    Ok(())
+}
+
+fn select_glob_paths(
+    paths: &[PathBuf],
+    patterns: &[String],
+    field: &str,
+) -> Result<Vec<PathBuf>, DevError> {
+    let matcher = globs::build_set(patterns, field)?;
+    globs::warn_unmatched(patterns, paths, field)?;
+    Ok(paths
+        .iter()
+        .filter(|path| globs::matches(&matcher, path))
+        .cloned()
+        .collect())
+}
+
+fn exclude_glob_paths(
+    patterns: &[String],
+    candidates: &[PathBuf],
+    field: &str,
+) -> Result<Vec<PathBuf>, DevError> {
+    let matcher = globs::build_set(patterns, field)?;
+    globs::warn_unmatched(patterns, candidates, field)?;
+    Ok(candidates
+        .iter()
+        .filter(|path| !globs::matches(&matcher, path))
+        .cloned()
+        .collect())
+}
+
+fn warn_excluded_paths(
+    patterns: &[String],
+    candidates: &[PathBuf],
+    field: &str,
+    all_excluded_warning: &str,
+) -> Result<(), DevError> {
+    let remaining = exclude_glob_paths(patterns, candidates, field)?;
+    if !candidates.is_empty() && remaining.is_empty() {
+        output::warn(all_excluded_warning);
+    }
+    Ok(())
 }
 
 /// The shared finding block for file convention scans. Scanners own the

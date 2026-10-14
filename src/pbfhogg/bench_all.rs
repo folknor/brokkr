@@ -156,10 +156,7 @@ fn run_dataset_dependent(
     }
 
     // bench extract -- if bbox is available
-    let bbox = ds
-        .and_then(|dataset| dataset.bbox.as_deref())
-        .map(crate::resolve::Bbox::parse)
-        .transpose()?;
+    let bbox = ds.and_then(|dataset| dataset.bbox.clone());
 
     if let Some(bbox) = bbox.as_ref() {
         output::bench_msg("=== bench extract ===");

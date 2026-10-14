@@ -1,6 +1,7 @@
 //! Measured sync runs and best-of-N iteration handling.
 
 use std::fs;
+use std::num::NonZeroUsize;
 use std::path::Path;
 use std::time::Duration;
 
@@ -10,7 +11,7 @@ use crate::clean::layout::ProjectState;
 use crate::config::DevConfig;
 use crate::config::project_config::ratatoskr::RatatoskrConfig;
 use crate::context;
-use crate::db::{KvPair, KvValue};
+use crate::db::{KvKey, KvPair};
 use crate::error::DevError;
 use crate::harness::{BenchConfig, BenchHarness, WallSource};
 use crate::output;
@@ -55,10 +56,6 @@ pub fn run_sync_bench(req: &SyncBenchRequest<'_>) -> Result<(), DevError> {
     let cfg = req.ratatoskr;
     let (cfg, harness_cfg, mock_binary, fixtures_dir) =
         validate_sync_config(req.project_root.as_path(), cfg)?;
-    if req.bench == 0 {
-        return Err(DevError::Usage("sync: --bench must be >= 1".into()));
-    }
-
     // Validate `--gate <name>` references a configured gate before
     // building/running anything - errors here cost nothing.
     let gate_rules = if let Some(name) = req.gate {
@@ -318,7 +315,7 @@ fn bench_loop(ctx: BenchLoopCtx<'_>) -> Result<(), DevError> {
         // Cargo-built: the profile comes from the session's build identity
         // (`with_build_identity` above).
         external_build: None,
-        runs: req.bench,
+        runs: req.bench.get(),
         cli_args: Some(format!("{HARNESS_MODE_FLAG} {}", script_abs.display())),
         metadata: Vec::new(),
     };
@@ -328,7 +325,7 @@ fn bench_loop(ctx: BenchLoopCtx<'_>) -> Result<(), DevError> {
     // winner selection. Each iteration's `summary.json`, indexed by
     // iteration, is kept for the gate.
     let mut summaries: Vec<Option<serde_json::Map<String, serde_json::Value>>> =
-        Vec::with_capacity(req.bench);
+        Vec::with_capacity(req.bench.get());
     let measured = harness.measure(
         &bench_config,
         Some(&built.binary),
@@ -444,7 +441,7 @@ fn bench_loop(ctx: BenchLoopCtx<'_>) -> Result<(), DevError> {
 
     output::ratatoskr_msg(&format!(
         "best-of-{}: {} (iter {})",
-        req.bench,
+        req.bench.get(),
         format_elapsed_ms(elapsed_ms),
         best_idx + 1,
     ));
@@ -509,26 +506,17 @@ pub(super) fn read_summary_json(
 pub(super) fn summary_to_kv(map: &serde_json::Map<String, serde_json::Value>) -> Vec<KvPair> {
     let mut out = Vec::with_capacity(map.len());
     for (key, value) in map {
-        let prefixed = format!("meta.{key}");
+        let key = KvKey::metadata(key.as_str());
         match value {
             serde_json::Value::Number(n) => {
                 if let Some(i) = n.as_i64() {
-                    out.push(KvPair {
-                        key: prefixed,
-                        value: KvValue::Int(i),
-                    });
+                    out.push(KvPair::int(key, i));
                 } else if let Some(f) = n.as_f64() {
-                    out.push(KvPair {
-                        key: prefixed,
-                        value: KvValue::Real(f),
-                    });
+                    out.push(KvPair::real(key, f));
                 }
             }
             serde_json::Value::String(s) => {
-                out.push(KvPair {
-                    key: prefixed,
-                    value: KvValue::Text(s.clone()),
-                });
+                out.push(KvPair::text(key, s.as_str()));
             }
             _ => {}
         }
@@ -559,7 +547,7 @@ pub struct SyncBenchRequest<'a> {
     pub ratatoskr: &'a RatatoskrConfig,
     pub script: &'a str,
     /// Number of measured iterations. Best-of-N reported and stored.
-    pub bench: usize,
+    pub bench: NonZeroUsize,
     /// Allow a measurement on a dirty git tree. Results are not inserted into
     /// results.db; collected sidecar data uses its `dirty` latest pointer, and
     /// a completed gated run is recorded in gate.db with `dirty = true`.

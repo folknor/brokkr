@@ -420,26 +420,23 @@ fn build_nextest_shape(
             e
         }
     };
-    let metadata_command = format!(
-        "cargo metadata --format-version=1 --all-features --filter-platform {triple}"
-    );
-    let metadata = run_check_cargo(&["metadata", "--format-version=1", "--all-features", "--filter-platform", &triple],
+    let metadata_query = crate::cargo::metadata::Query {
+        platform: Some(triple),
+        all_features: true,
+        ..Default::default()
+    };
+    let metadata_command = metadata_query.display();
+    let metadata = crate::cargo::metadata::load(
         project_root,
+        metadata_query,
         &env_refs,
+        current_phase(),
     )
     .map_err(|e| report_launch(&metadata_command, e))?;
-    if !metadata.success() {
-        // The two-line failure form, for the metadata call as for any other
-        // command a test lane runs. The identity leads, since `check` does not
-        // echo the `Reported` label.
-        let failed = format!("sweep '{label}' could not be prepared: cargo metadata failed");
-        output::error(&failed);
-        output::error(&format!("failing command: {metadata_command}"));
-        output::error(&String::from_utf8_lossy(&metadata.stderr));
-        // `Reported`, as the build failure below: command and stderr are out.
-        return Err(DevError::Reported(failed));
-    }
-    let metadata_json = String::from_utf8_lossy(&metadata.stdout).into_owned();
+    let metadata_json = metadata
+        .raw_json()
+        .ok_or_else(|| DevError::Internal("cargo metadata snapshot kept no JSON".into()))?
+        .to_owned();
 
     // The build is brokkr's: the same compile-shape argv every other lane
     // uses, streamed into nextest's builder so the artifact facts (binary
@@ -504,7 +501,11 @@ pub(crate) fn assemble_nextest_lane(
     let build_platforms = build_platforms.clone();
     let graph: &'static PackageGraph = Box::leak(Box::new(
         PackageGraph::from_json(metadata_json)
-            .map_err(|e| DevError::Build(format!("cargo metadata unparseable: {e}")))?,
+            .map_err(|e| {
+                DevError::ContractViolation(format!(
+                    "nextest could not read the cargo metadata snapshot: {e}"
+                ))
+            })?,
     ));
     let workspace_root: Utf8PathBuf = graph.workspace().root().to_owned();
     let cargo_configs = engine_cargo_configs(inputs.project_root, inputs.state_root, &env_refs)?;
@@ -607,8 +608,9 @@ pub(crate) fn assemble_nextest_lane(
 
     if test_list.run_count() == 0 {
         return Err(DevError::Config(format!(
-            "cargo test: zero tests ran (sweep: {label}) - the sweep's filters selected no work; \
-             treat as a wrong-run."
+            "test {label}: nextest selected no tests to run ({} listed, 0 selected) - the \
+             sweep's filters selected no work; treat as a wrong-run.",
+            test_list.test_count()
         )));
     }
 

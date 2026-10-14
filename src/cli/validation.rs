@@ -49,47 +49,6 @@ fn validate_test_name(s: &str) -> Result<String, String> {
     Ok(s.to_owned())
 }
 
-fn validate_compression(s: &str) -> Result<String, String> {
-    if s == "none" {
-        return Ok(s.to_owned());
-    }
-    if let Some(level) = s.strip_prefix("zlib:") {
-        let n: u8 = level
-            .parse()
-            .map_err(|_| format!("invalid zlib level '{level}', expected 1-9"))?;
-        if (1..=9).contains(&n) {
-            return Ok(s.to_owned());
-        }
-        return Err(format!("zlib level {n} out of range, expected 1-9"));
-    }
-    if let Some(level) = s.strip_prefix("zstd:") {
-        level
-            .parse::<u32>()
-            .map_err(|_| format!("invalid zstd level '{level}', expected a positive integer"))?;
-        return Ok(s.to_owned());
-    }
-    Err(format!(
-        "invalid compression '{s}', expected 'none', 'zlib:N' (N=1-9), or 'zstd:N'"
-    ))
-}
-
-/// Validate `--osc-range` format: `LO..HI` where both are non-negative integers and LO <= HI.
-fn validate_osc_range(s: &str) -> Result<String, String> {
-    let (lo_s, hi_s) = s
-        .split_once("..")
-        .ok_or_else(|| format!("expected LO..HI, got '{s}'"))?;
-    let lo: u64 = lo_s
-        .parse()
-        .map_err(|e| format!("invalid LO '{lo_s}': {e}"))?;
-    let hi: u64 = hi_s
-        .parse()
-        .map_err(|e| format!("invalid HI '{hi_s}': {e}"))?;
-    if lo > hi {
-        return Err(format!("LO ({lo}) must be <= HI ({hi})"));
-    }
-    Ok(s.to_owned())
-}
-
 /// Validate `--since`/`--until` format: YYYY-MM-DD or YYYY-MM-DD HH:MM:SS, with
 /// every field in range (month 1-12, a day that exists in that month, hour
 /// 0-23, minute and second 0-59). The value is compared as a string against
@@ -207,7 +166,7 @@ mod tests {
         let plain = parse(["brokkr", "test", "some_test", "-p", "pkg", "-N", "3"]).expect("parse");
         let Command::Test { name, repeat, .. } = plain.command else { panic!("expected Test") };
         assert_eq!(name, "some_test");
-        assert_eq!(repeat, 3);
+        assert_eq!(repeat.get(), 3);
     }
 
     #[test]

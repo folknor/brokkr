@@ -82,6 +82,15 @@ where one arm is defined by an unset variable, record an explicit baseline
 value (`=0`) on the off runs rather than relying on absence - or use
 `--grep-v`, below, which can express absence.
 
+Before persistence, brokkr redacts recognized credential-bearing argv values
+and captured environment values, including URL credentials and sensitive URL
+parameters. Only a credential name is redacted (`--token`, `API_KEY=`,
+`--env PASSWORD=...`, an `Authorization` header): ordinary `--env` arms and
+paths are kept, so pairing and `--grep` still see them. Existing JSON argv and captured environment entries are scrubbed
+when the results store is upgraded. Older joined argv strings are kept as
+recorded because their original argument boundaries cannot be recovered
+reliably.
+
 These row filters also narrow UUID lookups and apply to both sides of
 `--compare`; the commit prefixes select the comparison axis.
 

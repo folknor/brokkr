@@ -48,6 +48,8 @@ CREATE TABLE IF NOT EXISTS sidecar_meta (
     total_runs     INTEGER NOT NULL DEFAULT 1,
     run_start_epoch INTEGER,
     pid            INTEGER,
+    -- Normally resolved from the linked results row. Kept for sidecar-only
+    -- dirty/failed runs, which have no results.db command to read back.
     command        TEXT,
     binary_path    TEXT,
     binary_xxh128  TEXT,
@@ -85,7 +87,9 @@ fn sidecar_schema() -> String {
 // Migrations
 // ---------------------------------------------------------------------------
 
-/// Current sidecar schema version.
+/// Current sidecar schema version. This database is independently readable
+/// and can exist without results.db, so its steps are local; `db::store` still
+/// owns the version stamp, transaction, and upgrade policy.
 const SIDECAR_VERSION: i64 = 8;
 
 /// Apply migrations newer than `current`; version checks and stamping are
@@ -222,6 +226,9 @@ fn ending_from_legacy_exit_code(code: i32) -> Ending {
 pub struct RunInfo {
     pub run_start_epoch: Option<i64>,
     pub pid: Option<i64>,
+    /// Command identity fallback for sidecar-only dirty/failed runs. When the
+    /// UUID also has a results row, `RunStore` reads the canonical command
+    /// from results.db instead.
     pub command: Option<String>,
     pub binary_path: Option<String>,
     pub binary_xxh128: Option<String>,
@@ -363,14 +370,21 @@ impl SidecarDb {
     }
 
     /// Store metadata about a sidecar session (best run index, total runs,
-    /// and optional run provenance).
+    /// and optional run provenance). `sidecar_only` keeps the command fallback
+    /// only when there is no linked results row to supply that identity.
     pub fn store_meta(
         &self,
         result_uuid: &str,
         best_run_idx: usize,
         total_runs: usize,
         run_info: Option<&RunInfo>,
+        sidecar_only: bool,
     ) -> Result<(), DevError> {
+        let command = if sidecar_only {
+            run_info.and_then(|run| run.command.as_deref())
+        } else {
+            None
+        };
         self.conn.execute(
             "INSERT OR REPLACE INTO sidecar_meta (
                 result_uuid, best_run_idx, total_runs,
@@ -383,7 +397,7 @@ impl SidecarDb {
                 i64::try_from(total_runs).unwrap_or(1),
                 run_info.and_then(|r| r.run_start_epoch),
                 run_info.and_then(|r| r.pid),
-                run_info.as_ref().and_then(|r| r.command.as_deref()),
+                command,
                 run_info.as_ref().and_then(|r| r.binary_path.as_deref()),
                 run_info.as_ref().and_then(|r| r.binary_xxh128.as_deref()),
                 run_info

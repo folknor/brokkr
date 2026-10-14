@@ -532,6 +532,7 @@ fn settle_drains(
     drains: Vec<Option<Drain>>,
     label: &str,
     drain_grace: Duration,
+    poll_interval: Duration,
 ) -> (Vec<DrainOutput>, bool) {
     let until = Instant::now() + drain_grace;
     while Instant::now() < until
@@ -540,7 +541,7 @@ fn settle_drains(
             .flatten()
             .all(|drain| drain.handle.is_finished())
     {
-        std::thread::sleep(Duration::from_millis(10));
+        std::thread::sleep(Duration::from_millis(10).min(poll_interval));
     }
     let cut = drains
         .iter()
@@ -751,7 +752,8 @@ fn supervise_child_capped(
     };
 
     let drains = vec![stdout_thread, stderr_thread];
-    let (bufs, output_cut) = settle_drains(drains, label, options.drain_grace);
+    let (bufs, output_cut) =
+        settle_drains(drains, label, options.drain_grace, options.poll_interval);
     let mut bufs = bufs.into_iter();
     let stdout = bufs.next().unwrap_or_default();
     let stderr = bufs.next().unwrap_or_default();
@@ -999,6 +1001,79 @@ pub fn run_passthrough_in(
             }),
         },
     }
+}
+
+/// Capture a caller-configured plain command under the shared supervisor.
+/// Keep the std::process return shape for byte-oriented probes and git readers.
+pub(crate) fn command_output(
+    command: &mut std::process::Command,
+) -> std::io::Result<std::process::Output> {
+    command.stdin(std::process::Stdio::null());
+    crate::process::spawn::capture_stdio(command);
+    // These include per-request HTTP probes. The workload runner's 50ms
+    // cadence would add that delay to every short request in a tiles sample.
+    run_prepared_plain(
+        command,
+        ChildOptions {
+            poll_interval: Duration::from_millis(1),
+            ..ChildOptions::DEFAULT
+        },
+    )
+}
+
+/// Run a caller-configured plain command with its chosen inherited streams.
+pub(crate) fn command_status(command: &mut std::process::Command) -> std::io::Result<ExitStatus> {
+    run_prepared_plain(command, ChildOptions::DEFAULT).map(|output| output.status)
+}
+
+fn run_prepared_plain(
+    command: &mut std::process::Command,
+    options: ChildOptions,
+) -> std::io::Result<std::process::Output> {
+    use std::os::unix::process::ExitStatusExt;
+    let _guard = crate::shutdown::SigtermGuard::install();
+    let start = Instant::now();
+    let label = command.get_program().to_string_lossy().into_owned();
+    crate::process::spawn::ChildPolicy::plain().apply_runtime_policy(command);
+    // Move the configured command out: the spawn choke point owns it.
+    let command = std::mem::replace(
+        command,
+        crate::process::spawn::ChildPolicy::plain_command(&label),
+    );
+    let child = crate::process::spawn::spawn(command, None).map_err(|error| match error {
+        DevError::Spawn { error, .. } => error,
+        error => std::io::Error::other(error.to_string()),
+    })?;
+    let run = supervise_child(
+        child,
+        &label,
+        start,
+        ChildLimit::None,
+        ChildIsolation::Inherit,
+        options,
+        || None,
+    );
+    if run.output_cut || run.stdout_truncated || run.stderr_truncated {
+        return Err(std::io::Error::other(format!(
+            "{label}: captured output was incomplete"
+        )));
+    }
+    let status = match run.ending {
+        Ending::Exited(code) => ExitStatus::from_raw(code << 8),
+        Ending::Signalled(signal) => ExitStatus::from_raw(signal),
+        Ending::Interrupted => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "child interrupted",
+            ));
+        }
+        ending => return Err(std::io::Error::other(format!("{label}: {ending:?}"))),
+    };
+    Ok(std::process::Output {
+        status,
+        stdout: run.stdout,
+        stderr: run.stderr,
+    })
 }
 
 #[cfg(test)]

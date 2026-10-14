@@ -196,7 +196,7 @@ struct RowData {
 fn collect_counters(kv: &[KvPair]) -> std::collections::BTreeMap<String, String> {
     kv.iter()
         .filter(|p| p.class() == KvClass::Counter)
-        .map(|p| (p.key.clone(), p.value.to_string()))
+        .map(|p| (p.key.as_str().to_owned(), p.value.to_string()))
         .collect()
 }
 

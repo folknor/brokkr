@@ -6,7 +6,7 @@
 
 use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::mpsc;
 use std::time::Instant;
 
@@ -342,19 +342,15 @@ fn spawn_server(
     // server's PID directly (single-PID, may leave helper threads but
     // those are part of the same PG-as-brokkr and will be reaped on
     // brokkr exit).
-    let mut cmd = Command::new(binary);
+    let mut cmd = crate::process::spawn::ChildPolicy::plain_command(binary);
     cmd.args(["serve", "--data-dir", data_dir, "--tiles", tiles])
         .env("PORT", &port_str)
         .current_dir(project_root)
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .stdin(Stdio::null());
-    // Every child of a hold carries its capability: see `crate::hold`.
-    crate::hold::stamp(&mut cmd);
-    cmd.spawn().map_err(|error| DevError::Spawn {
-        program: binary.display().to_string(),
-        error,
-    })
+    crate::process::spawn::ChildPolicy::service().apply_runtime_policy(&mut cmd);
+    crate::process::spawn::spawn(cmd, None)
 }
 
 /// Fire a single tile GET request. Non-fatal on HTTP errors (tile misses
@@ -364,24 +360,27 @@ fn curl_get_tile(port: u16, z: u32, x: u32, y: u32) -> Result<(), DevError> {
     let connect_timeout = super::policy::curl_seconds(super::policy::TILE_CONNECT_TIMEOUT);
     let max_time = super::policy::curl_seconds(super::policy::TILE_REQUEST_TIMEOUT);
 
-    let output = Command::new("curl")
-        .args([
-            "-sS",
-            "--connect-timeout",
-            &connect_timeout,
-            "--max-time",
-            &max_time,
-            "-o",
-            "/dev/null",
-            &url,
-        ])
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(|error| DevError::Spawn {
-            program: "curl".into(),
-            error,
-        })?;
+    let output = crate::output::child::command_output(
+        crate::process::spawn::ChildPolicy::plain_command("curl")
+            .args([
+                "-sS",
+                "-o",
+                "/dev/null",
+                "--connect-timeout",
+                &connect_timeout,
+                "--max-time",
+                &max_time,
+                "-o",
+                "/dev/null",
+                &url,
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped()),
+    )
+    .map_err(|error| DevError::Spawn {
+        program: "curl".into(),
+        error,
+    })?;
 
     // Don't fail on HTTP errors (404 = tile miss, still useful data).
     if !output.status.success() {

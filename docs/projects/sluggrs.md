@@ -37,7 +37,9 @@ not silently treated as a new snapshot.
 
 ## Module layout
 
-- `src/sluggrs/cmd.rs` - snapshot rendering, approval, and status commands.
+- `src/sluggrs/cmd.rs` - snapshot rendering, approval, and status commands;
+  its approved-image path helper also defines git's measurement-cleanliness
+  exemption, so rendering, approval, and dirty-tree checks share one layout.
 - `src/sluggrs/db.rs` - the sluggrs adapter for its versioned snapshot store;
   shared SQLite operations and the one-time import from the former shared
   file live in `src/visual/db.rs`. Snapshot tables now live in

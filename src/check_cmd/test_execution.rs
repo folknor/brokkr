@@ -540,9 +540,10 @@ fn first_isolation_notice(label: &str) -> bool {
     true
 }
 
-/// Run one cargo test invocation for the given sweep. Returns
-/// `Ok(true)` on pass, `Ok(false)` on test failure (already reported),
-/// `Err(...)` on subprocess spawn failure. `multi` controls whether
+/// Run one planned cargo test request for a sweep. Returns
+/// `Ok(true)` on pass, `Ok(false)` on a test failure already reported, and
+/// `Err(...)` when setup, spawning, execution or a stop prevents a verdict.
+/// `multi` controls whether
 /// the `cargo ... (sweep: <label>)` log line carries the suffix - in
 /// single-sweep mode (legacy `--all-features` path or one `[[check]]`
 /// entry) the label noise is unhelpful.

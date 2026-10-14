@@ -183,8 +183,8 @@ impl MeasurementSession {
         let harness = harness::BenchHarness::new_with_lock(
             lock,
             &paths,
-            build_root.as_path(),
-            Some(project_root.as_path()),
+            build_root,
+            project_root,
             project,
             force,
             stop_marker,

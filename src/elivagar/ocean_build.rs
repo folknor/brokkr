@@ -38,9 +38,7 @@ pub fn run(
     let build_root = build_root.as_path();
 
     let tg = resolve_tilegen(dev_config, DEFAULT_TILEGEN)?;
-    let specs = tg
-        .ocean_specs()
-        .map_err(|e| DevError::Config(format!("tilegen ocean: {e}")))?;
+    let specs = tg.ocean_specs();
 
     // Partition the ocean block by role: shapefiles are the inputs to build
     // from, the single .pmtiles artifact is where the result goes. The two
@@ -48,7 +46,7 @@ pub fn run(
     // shapefiles means nothing to build from.
     let mut shapefiles: Vec<&OceanSpec> = Vec::new();
     let mut artifact: Option<&OceanSpec> = None;
-    for spec in &specs {
+    for spec in specs {
         match spec {
             OceanSpec::Artifact(_) => {
                 if artifact.is_some() {

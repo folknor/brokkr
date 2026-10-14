@@ -16,7 +16,7 @@ pub(crate) fn cmd_clippy(
     // an observed 1h15m clippy hang, and this runner drives the same pipeline.
     // The caller already holds the lock, so a wait behind another command is
     // not charged. Declared before the guard, so the guard drops first.
-    let _ceiling = CheckWatchdog::arm_for("brokkr clippy", None);
+    let _ceiling = CheckWatchdog::arm_for("brokkr clippy", None)?;
     enter_phase(Phase::Clippy);
     let _interrupts = crate::shutdown::SigtermGuard::install();
     let mut declaration = build_clippy_sweep(

@@ -1039,12 +1039,24 @@ fn stop_marker_message(requested: &str, matched: &str) -> String {
 }
 
 /// The per-run summary: `counts` is samples, markers and counters in order.
-fn run_summary_line(run_idx: usize, counts: [usize; 3], wall_time_ms: impl std::fmt::Display) -> String {
+fn run_summary_line(
+    run_idx: usize,
+    counts: [usize; 3],
+    wall_time_ms: impl std::fmt::Display,
+) -> String {
     let [samples, markers, counters] = counts;
     format!(
         "sidecar run {}: {samples} samples, {markers} markers, {counters} counters, {wall_time_ms}ms",
         run_idx + 1,
     )
+}
+
+fn warn_if_truncated(truncated: bool) {
+    if truncated {
+        console::warn(
+            "sidecar profile reached a storage limit; trajectory records or child output were omitted",
+        );
+    }
 }
 
 /// Run one sidecar-observed child, killing its process group once it has run
@@ -1137,9 +1149,7 @@ pub(crate) fn run_sidecar_with_deadline(
     );
     let (stdout_truncated, stderr_truncated) = (run.stdout_truncated, run.stderr_truncated);
     capture_truncated |= stdout_truncated || stderr_truncated || run.output_cut;
-    if capture_truncated {
-        console::warn("sidecar profile reached a storage limit; trajectory records or child output were omitted");
-    }
+    warn_if_truncated(capture_truncated);
     announce_ending(&run.ending);
 
     // The shared nearest-millisecond rule, so the sidecar summary agrees with

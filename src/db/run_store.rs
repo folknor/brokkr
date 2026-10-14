@@ -110,7 +110,18 @@ impl RunStore {
         &self,
         id: &RunId,
     ) -> Result<Option<sidecar::RunInfo>, DevError> {
-        self.sidecar_required()?.query_run_info_for(id)
+        let Some(mut info) = self.sidecar_required()?.query_run_info_for(id)? else {
+            return Ok(None);
+        };
+        // For ordinary stored measurements, results.db owns the command
+        // identity. sidecar_meta.command remains a fallback for sidecar-only
+        // dirty/failed runs and for historical rows whose result was removed.
+        if let Some(results) = &self.results
+            && let Some(command) = results.command_for_uuid(id)?
+        {
+            info.command = Some(command);
+        }
+        Ok(Some(info))
     }
 
     pub(crate) fn query_sidecar_meta(&self, id: &RunId) -> Result<(usize, usize), DevError> {

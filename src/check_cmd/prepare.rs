@@ -682,59 +682,37 @@ pub(crate) struct DocFacts {
 }
 
 impl DocFacts {
-    pub(crate) fn from_metadata(meta: &serde_json::Value) -> Self {
-        let mut names: HashMap<&str, &str> = HashMap::new();
-        let mut doctestable = BTreeSet::new();
-        for pkg in meta.get("packages").and_then(serde_json::Value::as_array).into_iter().flatten() {
-            let (Some(id), Some(name)) = (
-                pkg.get("id").and_then(serde_json::Value::as_str),
-                pkg.get("name").and_then(serde_json::Value::as_str),
-            ) else {
-                continue;
-            };
-            names.insert(id, name);
-            let tested = pkg
-                .get("targets")
-                .and_then(serde_json::Value::as_array)
-                .into_iter()
-                .flatten()
-                .any(|t| {
-                    let doctest = t.get("doctest").and_then(serde_json::Value::as_bool).unwrap_or(false);
-                    let kinds = |key: &str| -> Vec<&str> {
-                        t.get(key)
-                            .and_then(serde_json::Value::as_array)
-                            .into_iter()
-                            .flatten()
-                            .filter_map(serde_json::Value::as_str)
-                            .collect()
-                    };
-                    let rustdoc_tests = kinds("crate_types")
-                        .into_iter()
-                        .chain(kinds("kind"))
-                        .any(|k| matches!(k, "lib" | "rlib" | "proc-macro"));
-                    doctest && rustdoc_tests
-                });
-            if tested {
-                doctestable.insert(name.to_owned());
-            }
-        }
-        let ids = |key: &str| -> Vec<String> {
-            meta.get(key)
-                .and_then(serde_json::Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter_map(serde_json::Value::as_str)
-                .filter_map(|id| names.get(id).map(|n| (*n).to_owned()))
-                .collect()
+    pub(crate) fn from_metadata(meta: &crate::cargo::metadata::CargoMetadata) -> Self {
+        let by_id: HashMap<_, _> = meta.packages.iter().map(|pkg| (pkg.id.clone(), pkg)).collect();
+        let names_of = |ids: &[crate::cargo::metadata::PackageId]| {
+            ids.iter()
+                .filter_map(|id| by_id.get(id).map(|pkg| pkg.name.clone()))
+                .collect::<Vec<_>>()
         };
-        let members = ids("workspace_members");
+        let members = names_of(&meta.workspace_members);
         // An older cargo omits the default set; the whole workspace is then
         // the conservative reading (it can only add an obligation).
-        let default_members = if meta.get("workspace_default_members").is_some() {
-            ids("workspace_default_members")
-        } else {
-            members.clone()
-        };
+        let default_members = names_of(
+            meta.workspace_default_members
+                .as_deref()
+                .unwrap_or(&meta.workspace_members),
+        );
+        let doctestable = meta
+            .packages
+            .iter()
+            .filter(|pkg| meta.is_member(&pkg.id))
+            .filter(|pkg| {
+                pkg.targets.iter().any(|target| {
+                    target.doctest.unwrap_or(false)
+                        && target
+                            .crate_types
+                            .iter()
+                            .chain(&target.kind)
+                            .any(|kind| matches!(kind.as_str(), "lib" | "rlib" | "proc-macro"))
+                })
+            })
+            .map(|pkg| pkg.name.clone())
+            .collect::<BTreeSet<_>>();
         Self { members, default_members, doctestable }
     }
 
@@ -771,12 +749,7 @@ fn workspace_doc_facts(project_root: &Path, env_refs: &[(&str, &str)]) -> Result
         env_refs,
         current_phase(),
     )?;
-    let raw = metadata
-        .raw_json()
-        .ok_or_else(|| DevError::Internal("cargo metadata snapshot kept no JSON".into()))?;
-    let val: serde_json::Value = serde_json::from_str(raw)
-        .map_err(|e| DevError::Build(format!("cargo metadata output unparseable: {e}")))?;
-    Ok(DocFacts::from_metadata(&val))
+    Ok(DocFacts::from_metadata(&metadata))
 }
 
 /// The serial lane's preparation: the same build `cargo test` will do, listed.
@@ -2398,6 +2371,7 @@ mod prepare_tests {
             ],
             "workspace_default_members": ["path+file:///x/harness_only#harness_only@0.1.0"],
         });
+        let meta: crate::cargo::metadata::CargoMetadata = serde_json::from_value(meta).unwrap();
         let facts = DocFacts::from_metadata(&meta);
         let only = |pkg: &str| Selection::Explicit(vec![pkg.into()]);
         assert!(!facts.obliges(&only("harness_only")), "a library harness without doctests obliges nothing");

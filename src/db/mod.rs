@@ -19,7 +19,7 @@ pub(crate) use run_store::{Resolved, RunId, RunRef, RunSelector, RunStore};
 #[cfg(test)]
 pub(crate) use types::RunRowBuilder;
 pub use types::{
-    Distribution, HotpathData, HotpathFunction, HotpathThread, KvPair, KvValue, Percentile,
+    Distribution, HotpathData, HotpathFunction, HotpathThread, KvKey, KvPair, KvValue, Percentile,
     PreviousRun, Quantity, QueryFilter, RunInvocation, RunRow, StoredRow, Wall,
 };
 pub(crate) use types::{KvClass, generate_uuid, short_uuid};

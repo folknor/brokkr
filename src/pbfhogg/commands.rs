@@ -598,7 +598,7 @@ impl PbfhoggCommand {
         args.extend(ctx.params.io.args());
         if let Some(compression) = &ctx.params.compression {
             args.push("--compression".into());
-            args.push(compression.clone());
+            args.push(compression.to_string());
         }
         Ok(args)
     }
@@ -1260,7 +1260,7 @@ mod tests {
         assert!(!bench.iter().any(|arg| arg == "--compression"));
         assert!(!hotpath.iter().any(|arg| arg == "--compression"));
 
-        ctx.params.compression = Some("zstd:5".into());
+        ctx.params.compression = Some("zstd:5".parse().unwrap());
         for mode in [ArgMode::Bench, ArgMode::Hotpath] {
             let args = cmd.build_args(&ctx, mode).unwrap();
             let option = args.iter().position(|arg| arg == "--compression").unwrap();

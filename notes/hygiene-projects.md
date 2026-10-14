@@ -11,18 +11,6 @@ Hygiene findings from the hunt for the per-project command layers: pbfhogg/nidho
    page - before the entry is removed, so the finding is not hunted again.
 4. Once all findings are resolved, the file gets deleted.
 
-## PRJ-005 - bbox parsing re-implemented
-
-Reported by: pbfhogg-nidhogg.
-
-Residue: bboxes are still strings in config and clap, with ranges and min/max ordering unvalidated.
-
-## PRJ-006 - Two compression validators that disagree
-
-Reported by: pbfhogg-nidhogg, config-cli-bootstrap.
-
-Residue: clap's `validate_compression` is still a separate validator (rejecting bare `zlib`/`zstd`) and schema default literals are not centralized.
-
 ## PRJ-008 - Denmark-only fixtures on dataset-parameterized commands
 
 Reported by: pbfhogg-nidhogg.
@@ -59,12 +47,6 @@ Reported by: pbfhogg-nidhogg.
 
 `bench_tiles::is_ready_line` keys on the substring "listening" in nidhogg's stderr; pbfhogg `inspect` and `diff` text formats and nidhogg's shutdown kv are parsed without a pinned contract. The hunter says these can't be enforced mechanically from here; they need a structured output mode in those tools or a pinned fixture test on each side.
 
-## PRJ-024 - elivagar configuration and tunables
-
-Reported by: elivagar.
-
-Residue: `TilegenConfig` still deserializes format and budget values as strings and validates them at planning time.
-
 ## PRJ-031 - Dead code in elivagar
 
 Reported by: elivagar.
@@ -82,12 +64,6 @@ Residue: `RatatoskrConfig` still has nine `test_endpoint_env_*` fields instead o
 Reported by: ratatoskr.
 
 Residue: the hard-coded saehrimnir binary path lives in the external ratatoskr checkout, which nothing in this repository can change.
-
-## PRJ-055 - Visual and small-bench defaults, paths and rules duplicated
-
-Reported by: small-benches.
-
-Residue: the `approved.png` exemption in `git/tree_state.rs` still restates sluggrs' output path separately.
 
 ## PRJ-056 - litehtml/sluggrs configuration is untyped
 

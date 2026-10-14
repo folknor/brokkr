@@ -59,10 +59,48 @@ use crate::test_runner::ceilings::UNWIND_GRACE;
 /// the first, or after the watchdog is disarmed).
 static PHASE_CLOCK: std::sync::Mutex<Option<(Phase, std::time::Instant)>> =
     std::sync::Mutex::new(None);
+static PHASE_CLOCK_POISON_REPORTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 /// Why a ceiling fired, once one has. Read by the command's exit path
 /// ([`watchdog_fired`]) to turn the unwound outcome into [`WATCHDOG_EXIT_CODE`].
 static WATCHDOG_FIRED: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+static WATCHDOG_FIRED_POISON_REPORTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Recover a poisoned phase clock instead of treating poison as no active
+/// phase, which would silently disable the phase deadline.
+fn phase_clock_lock() -> std::sync::MutexGuard<'static, Option<(Phase, std::time::Instant)>> {
+    match PHASE_CLOCK.lock() {
+        Ok(clock) => clock,
+        Err(poisoned) => {
+            let clock = poisoned.into_inner();
+            PHASE_CLOCK.clear_poison();
+            if !PHASE_CLOCK_POISON_REPORTED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                crate::output::warn_stderr(
+                    "phase clock mutex was poisoned; recovered its recorded state and will continue enforcing phase deadlines",
+                );
+            }
+            clock
+        }
+    }
+}
+
+fn watchdog_fired_lock() -> std::sync::MutexGuard<'static, Option<String>> {
+    match WATCHDOG_FIRED.lock() {
+        Ok(fired) => fired,
+        Err(poisoned) => {
+            let fired = poisoned.into_inner();
+            WATCHDOG_FIRED.clear_poison();
+            if !WATCHDOG_FIRED_POISON_REPORTED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                crate::output::warn_stderr(
+                    "watchdog result mutex was poisoned; recovered its recorded result",
+                );
+            }
+            fired
+        }
+    }
+}
 
 /// Mark `phase` as the phase in flight: points `failing_phase` at it (the
 /// summary's `failed_phase` on an error) and restarts the phase clock. Every
@@ -83,24 +121,20 @@ fn begin_phase_with(failing_phase: &mut Option<Phase>, phase: Phase, enter: impl
 /// Restart the phase clock for `phase` alone - for the commands that borrow
 /// check's ceilings without its summary (`brokkr test`, `brokkr clippy`).
 pub(crate) fn enter_phase(phase: Phase) {
-    if let Ok(mut clock) = PHASE_CLOCK.lock() {
-        *clock = Some((phase, std::time::Instant::now()));
-    }
+    *phase_clock_lock() = Some((phase, std::time::Instant::now()));
 }
 
 /// The phase in flight, if any: the phase a cargo launch inside it names on
 /// its spawn profile, so a `[cargo_env]` failure is attributed to it.
 pub(crate) fn current_phase() -> Option<Phase> {
-    PHASE_CLOCK.lock().ok().and_then(|c| c.map(|(phase, _)| phase))
+    phase_clock_lock().map(|(phase, _)| phase)
 }
 
 /// How long the phase in flight has been running - the wall time its grouped
 /// green line reports. Zero outside a phase.
 pub(crate) fn phase_elapsed() -> std::time::Duration {
-    PHASE_CLOCK
-        .lock()
-        .ok()
-        .and_then(|c| c.map(|(_, since)| since.elapsed()))
+    phase_clock_lock()
+        .map(|(_, since)| since.elapsed())
         .unwrap_or_default()
 }
 
@@ -109,7 +143,7 @@ pub(crate) fn phase_elapsed() -> std::time::Duration {
 /// should stay under, so its overrun fails that child rather than firing the
 /// watchdog on the whole run.
 pub(crate) fn phase_time_left() -> Option<std::time::Duration> {
-    PHASE_CLOCK.lock().ok().and_then(|c| phase_time_left_at(*c))
+    phase_time_left_at(*phase_clock_lock())
 }
 
 /// [`phase_time_left`] over a given clock reading.
@@ -123,7 +157,7 @@ fn phase_time_left_at(
 /// on its way out and exits [`WATCHDOG_EXIT_CODE`] when it is set, whatever
 /// error the kill surfaced as.
 pub(crate) fn watchdog_fired() -> Option<String> {
-    WATCHDOG_FIRED.lock().ok().and_then(|f| f.clone())
+    watchdog_fired_lock().clone()
 }
 
 /// Arms the ceilings; dropping it disarms. Hold it for the whole command.
@@ -134,15 +168,20 @@ pub(crate) struct CheckWatchdog {
 
 impl CheckWatchdog {
     /// `check`'s ceilings: `limit` on the whole run, plus the phase clock.
-    pub(crate) fn arm(limit: std::time::Duration) -> Self {
+    pub(crate) fn arm(limit: std::time::Duration) -> Result<Self, crate::error::DevError> {
         Self::arm_for("check", Some(limit))
     }
 
     /// Ceilings for `command`: an optional whole-run `limit`, plus the phase
     /// clock (which does nothing until a phase is entered). `brokkr test` arms
     /// no whole-run limit - a `-N` repeat run is bounded per iteration, not in
-    /// total.
-    pub(crate) fn arm_for(command: &'static str, limit: Option<std::time::Duration>) -> Self {
+    /// total. Returns an error before command work begins if the watchdog
+    /// thread cannot be started; these commands never run without their
+    /// configured phase ceilings.
+    pub(crate) fn arm_for(
+        command: &'static str,
+        limit: Option<std::time::Duration>,
+    ) -> Result<Self, crate::error::DevError> {
         let disarm = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let flag = std::sync::Arc::clone(&disarm);
         let started = std::time::Instant::now();
@@ -167,11 +206,9 @@ impl CheckWatchdog {
                         );
                         return;
                     }
-                    let overrun = PHASE_CLOCK.lock().ok().and_then(|clock| {
-                        clock.and_then(|(phase, since)| {
-                            let ceiling = crate::test_runner::ceilings::phase_ceiling(phase);
-                            (since.elapsed() >= ceiling).then_some((phase, ceiling))
-                        })
+                    let overrun = phase_clock_lock().and_then(|(phase, since)| {
+                        let ceiling = crate::test_runner::ceilings::phase_ceiling(phase);
+                        (since.elapsed() >= ceiling).then_some((phase, ceiling))
                     });
                     if let Some((phase, ceiling)) = overrun {
                         fire(
@@ -187,17 +224,21 @@ impl CheckWatchdog {
                     std::thread::park_timeout(std::time::Duration::from_secs(1));
                 }
             })
-            .ok();
-        Self { disarm, thread }
+            .map_err(|error| crate::error::DevError::Spawn {
+                program: format!("{command} time-limit watchdog thread"),
+                error,
+            })?;
+        Ok(Self {
+            disarm,
+            thread: Some(thread),
+        })
     }
 }
 
 impl Drop for CheckWatchdog {
     fn drop(&mut self) {
         self.disarm.store(true, std::sync::atomic::Ordering::SeqCst);
-        if let Ok(mut clock) = PHASE_CLOCK.lock() {
-            *clock = None;
-        }
+        *phase_clock_lock() = None;
         // Wait the thread out, so a fired watchdog's kill loop has stopped
         // before anything after the command (history's `git`, say) spawns a
         // process it would otherwise SIGKILL.
@@ -229,9 +270,7 @@ struct FireEffects {
 impl FireEffects {
     const REAL: Self = Self {
         mark: |why| {
-            if let Ok(mut fired) = WATCHDOG_FIRED.lock() {
-                *fired = Some(why.to_owned());
-            }
+            *watchdog_fired_lock() = Some(why.to_owned());
         },
         shutdown: crate::shutdown::request_shutdown,
         kill: || crate::shutdown::kill_descendants(std::process::id()),

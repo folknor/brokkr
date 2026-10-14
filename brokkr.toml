@@ -103,13 +103,11 @@ exclude = ["src/elivagar/eliv.rs", "src/main.rs", "src/main_parts/bootstrap.rs",
 region = "code"
 message = "reach the elivagar and protohoggr crates through src/elivagar/eliv.rs"
 
-# The probe gives each guard invocation a private HOME and private lock files.
-# It tests the installed wrapper directly and does not touch the live lock.
-# The installed wrapper is the last `brokkr install`, not this tree's code, and
-# a host without it fails the check with a pointer to `brokkr install`.
+# The probe builds this tree's guard and gives each invocation a private HOME
+# and private lock files. It does not touch the live lock or need `brokkr install`.
 [[script_check]]
 name = "rustc-guard-decision-probe"
-command = "python3 scripts/guard-decision-probe.py \"${CARGO_HOME:-$HOME/.cargo}/bin/brokkr-rustc-guard\""
+command = "python3 scripts/guard-decision-probe.py"
 expect = "all guard decision paths behaved as specified"
 match = "last-line"
-stage = "pre-clippy"
+stage = "pre-test"
