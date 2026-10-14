@@ -6,16 +6,16 @@
 //! real bytes, whose first line is
 //! `version https://git-lfs.github.com/spec/v1`. Hashing that pointer would
 //! poison the pin (a `--reseed` that stamps the pointer hash) or fail every
-//! future verify against the real hash - so every path that hashes a pinned
-//! file first calls [`ensure_materialized`], which hard-errors with a
-//! `git lfs pull` instruction rather than hashing a pointer.
+//! future verify against the real hash. Corpus pin verification and reseed
+//! call [`ensure_materialized`] before hashing pinned files; the separate lint
+//! registry hashes its `.pine` snippets without this feed-specific guard.
 //!
-//! Scope: only the engine submodule's feed is LFS; the bench feed lives in a
-//! different submodule and is plaintext. The guard is a cheap content sniff
-//! (it fires only on an actual pointer), so it is safe to call on every pinned
-//! file regardless of which submodule owns it. Because it hard-errors *before*
-//! hashing, the large one-time LFS fetch is an out-of-band pre-warm the user
-//! runs, never part of a corpus run.
+//! The engine submodule's base feed is currently the LFS input; the bench feed
+//! is plaintext. The guard is a cheap content sniff (it fires only on an actual
+//! pointer), so corpus pin hashing can call it for probe, feed, and harness
+//! files regardless of their owner. Because it hard-errors *before* hashing,
+//! the large one-time LFS fetch is an out-of-band pre-warm the user runs, never
+//! part of a corpus run.
 
 use std::io::Read;
 use std::path::Path;

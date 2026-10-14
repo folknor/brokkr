@@ -1,7 +1,6 @@
 //! `brokkr dellingr` - build the Lua bench harness and run one workload.
 
 use crate::build;
-use crate::clean::layout::ProjectState;
 use crate::context::MeasurementSession;
 use crate::error::DevError;
 use crate::harness::{self, BenchConfig};
@@ -60,14 +59,10 @@ pub(crate) fn run(req: &MeasureRequest, lua: &str) -> Result<(), DevError> {
         features,
         default_features: true,
         all_features: false,
-        profile: "release",
+        profile: crate::build::CargoProfile::Release,
     };
 
     let ctx = MeasurementSession::with_build_config_for_request(req, &build_config)?;
-
-    let state = ProjectState::new(req.project_root.as_path());
-    let scratch_dir = state.dellingr().scratch().to_path_buf();
-    std::fs::create_dir_all(&scratch_dir)?;
 
     let binary_str = ctx.binary()?.display().to_string();
     let args = [lua_path.as_str()];

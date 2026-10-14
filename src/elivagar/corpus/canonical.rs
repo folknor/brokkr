@@ -84,7 +84,7 @@ pub fn semantic_hash(raw: &[u8], scratch: &mut DecodeScratch) -> io::Result<u128
 // same function in its parallel canonical pass.
 // ---------------------------------------------------------------------------
 
-#[allow(dead_code)]
+#[cfg(test)]
 pub(crate) fn detail_tile_hash(tile: &super::super::eliv::DetailTile) -> u128 {
     let mut layers: Vec<(&str, u128)> = tile
         .layers
@@ -101,6 +101,7 @@ pub(crate) fn detail_tile_hash(tile: &super::super::eliv::DetailTile) -> u128 {
     sink.finish()
 }
 
+#[cfg(test)]
 fn detail_layer_hash(layer: &super::super::eliv::DetailLayer) -> u128 {
     let mut feature_hashes: Vec<u128> = layer.features.iter().map(detail_feature_hash).collect();
     let mut sink = HashSink::new();
@@ -112,6 +113,7 @@ fn detail_layer_hash(layer: &super::super::eliv::DetailLayer) -> u128 {
     sink.finish()
 }
 
+#[cfg(test)]
 fn detail_feature_hash(feature: &super::super::eliv::DetailFeature) -> u128 {
     let mut attrs = feature.attrs.clone();
     attrs.sort();
@@ -132,6 +134,7 @@ fn detail_feature_hash(feature: &super::super::eliv::DetailFeature) -> u128 {
     sink.finish()
 }
 
+#[cfg(test)]
 fn detail_geometry_hash(geom_type: u8, components: &[super::super::eliv::DetailComponent]) -> u128 {
     let mut comp_hashes: Vec<u128> = components.iter().map(detail_component_hash).collect();
     let mut sink = HashSink::new();
@@ -141,6 +144,7 @@ fn detail_geometry_hash(geom_type: u8, components: &[super::super::eliv::DetailC
     sink.finish()
 }
 
+#[cfg(test)]
 fn detail_component_hash(component: &super::super::eliv::DetailComponent) -> u128 {
     let mut sink = HashSink::new();
     sink.bytes(b"elivagar-stream-component-v1");
@@ -157,7 +161,6 @@ fn detail_component_hash(component: &super::super::eliv::DetailComponent) -> u12
 /// deterministic and matches the canonical form; regress diffs through it too.
 /// Verbatim from elivagar's `compare_detail_features` (needs none of the dropped
 /// bbox/structure fields).
-#[allow(dead_code)]
 pub(crate) fn compare_detail_features(
     a: &super::super::eliv::DetailFeature,
     b: &super::super::eliv::DetailFeature,
@@ -172,7 +175,6 @@ pub(crate) fn compare_detail_features(
 /// The new wire-order decoder does not sort a feature's attrs/components the way
 /// the old decoder did, so consumers must canonicalize a decoded feature through
 /// this + an attr sort before `compare_detail_features` is meaningful.
-#[allow(dead_code)]
 pub(crate) fn compare_detail_components(
     a: &super::super::eliv::DetailComponent,
     b: &super::super::eliv::DetailComponent,
@@ -234,6 +236,7 @@ where
     a.len().cmp(&b.len())
 }
 
+#[cfg(test)]
 fn detail_ring_hash(ring: &super::super::eliv::DetailRing) -> u128 {
     let mut points = HashSink::new();
     for &(x, y) in &ring.points {
@@ -685,7 +688,8 @@ fn streaming_polygons(data: &[u8]) -> Result<Vec<u128>, String> {
     let mut ring = None;
     let add_ring = |ring: StreamingRing,
                     component: &mut Option<StreamingComponent>,
-                    components: &mut Vec<u128>| {
+                    components: &mut Vec<u128>|
+     -> Result<(), String> {
         let role = if ring.area > 0 {
             CanonRingRole::Outer
         } else {
@@ -697,11 +701,11 @@ fn streaming_polygons(data: &[u8]) -> Result<Vec<u128>, String> {
             }
             *component = Some(StreamingComponent::new());
         }
-        component
-            .as_mut()
-            .expect("component initialized")
-            .rings
-            .push(ring.finish(role));
+        let Some(component) = component.as_mut() else {
+            return Err("polygon ring has no component".into());
+        };
+        component.rings.push(ring.finish(role));
+        Ok(())
     };
     while !cursor.is_empty() {
         let command = read_geometry_varint(&mut cursor, "polygon command")?;
@@ -712,7 +716,7 @@ fn streaming_polygons(data: &[u8]) -> Result<Vec<u128>, String> {
             (mvt::COMMAND_MOVE_TO, count) => {
                 for _ in 0..count {
                     if let Some(ring) = ring.take() {
-                        add_ring(ring, &mut component, &mut components);
+                        add_ring(ring, &mut component, &mut components)?;
                     }
                     let mut next = StreamingRing::new();
                     next.point(next_geometry_point(
@@ -748,7 +752,7 @@ fn streaming_polygons(data: &[u8]) -> Result<Vec<u128>, String> {
         }
     }
     if let Some(ring) = ring {
-        add_ring(ring, &mut component, &mut components);
+        add_ring(ring, &mut component, &mut components)?;
     }
     if let Some(component) = component {
         components.push(component.finish());

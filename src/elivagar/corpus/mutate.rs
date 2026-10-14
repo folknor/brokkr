@@ -90,7 +90,12 @@ pub fn mutate(
             });
         if is_target {
             found = true;
-            let id = target_id.expect("checked above");
+            let Some(id) = target_id else {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "targeted mutation is missing its tile id",
+                ));
+            };
             copy_run(&mut writer, &archive, run, run.tile_id, id - run.tile_id)?;
             match op {
                 MutationOp::DropTile => {}
@@ -102,7 +107,12 @@ pub fn mutate(
                     let edited = mutate_payload(raw, op)?;
                     writer.add_run(id, 1, &edited)?;
                 }
-                MutationOp::Regzip => unreachable!(),
+                MutationOp::Regzip => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "regzip cannot target one tile",
+                    ));
+                }
             }
             let after = id + 1;
             copy_run(
@@ -289,7 +299,12 @@ fn mutate_payload(raw: &[u8], op: MutationOp) -> io::Result<Vec<u8>> {
             geometry.value = nudge_geometry(&geometry.value)?;
             feature.value = encode_fields(&feature_fields);
         }
-        _ => unreachable!(),
+        MutationOp::DropTile | MutationOp::Regzip => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "mutation does not edit tile geometry or layer version",
+            ));
+        }
     }
     layer.value = encode_fields(&layer_fields);
     let mut encoder = GzEncoder::new(Vec::new(), Compression::new(6));
@@ -473,7 +488,8 @@ mod calibration {
         let input = dir.join("source.pmtiles");
         let target = source(&input);
         let before = ArchiveView::open(&input).unwrap();
-        let (before_digest, before_leaves) = compute(&before, DigestMode::Leaves, &sort_scratch).unwrap();
+        let (before_digest, before_leaves) =
+            compute(&before, DigestMode::Leaves, &sort_scratch).unwrap();
         let before_meta = before.metadata().unwrap();
 
         for (op, name) in [

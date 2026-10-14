@@ -266,13 +266,19 @@ impl<'a> PointIndex<'a> {
         if points.len() < super::super::constants::KD_TREE_THRESHOLD {
             Self::Small(points)
         } else {
-            Self::Tree(KdNode::build(points.to_vec(), 0))
+            match KdNode::build(points.to_vec(), 0) {
+                Some(tree) => Self::Tree(tree),
+                None => Self::Small(points),
+            }
         }
     }
 
     fn nearest(&self, point: (i32, i32), rolling_start: usize) -> (u64, usize) {
         match self {
             Self::Small(points) => {
+                if points.is_empty() {
+                    return (u64::MAX, 0);
+                }
                 let mut best = u64::MAX;
                 let mut best_idx = 0usize;
                 for step in 0..points.len() {
@@ -302,14 +308,25 @@ struct KdNode {
 }
 
 impl KdNode {
-    fn build(mut points: Vec<(i32, i32)>, depth: usize) -> Self {
+    fn build(mut points: Vec<(i32, i32)>, depth: usize) -> Option<Self> {
+        if points.is_empty() {
+            return None;
+        }
         let axis = depth % 2;
         points.sort_unstable_by_key(|point| if axis == 0 { point.0 } else { point.1 });
         let middle = points.len() / 2;
         let right = points.split_off(middle + 1);
-        let point = points.pop().expect("KD tree build has a median point");
-        let left = (!points.is_empty()).then(|| Box::new(Self::build(points, depth + 1)));
-        let right = (!right.is_empty()).then(|| Box::new(Self::build(right, depth + 1)));
+        let point = points.pop()?;
+        let left = if points.is_empty() {
+            None
+        } else {
+            Some(Box::new(Self::build(points, depth + 1)?))
+        };
+        let right = if right.is_empty() {
+            None
+        } else {
+            Some(Box::new(Self::build(right, depth + 1)?))
+        };
         let mut bbox = Bbox::from_points(&[point]);
         if let Some(left) = &left {
             bbox.include_bbox(left.bbox);
@@ -317,13 +334,13 @@ impl KdNode {
         if let Some(right) = &right {
             bbox.include_bbox(right.bbox);
         }
-        Self {
+        Some(Self {
             point,
             axis,
             bbox,
             left,
             right,
-        }
+        })
     }
 
     fn nearest(&self, point: (i32, i32), mut best: u64) -> u64 {

@@ -97,6 +97,35 @@ function check(name, ok) {
 	}
 }
 
+function rejectsUnknownOption(args, command) {
+	try {
+		execFileSync(
+			process.execPath,
+			[path.join(__dirname, "prepare.js"), ...args],
+			{ encoding: "utf-8" },
+		);
+		return false;
+	} catch (error) {
+		return (
+			error.status === 1 &&
+			String(error.stderr).includes(command + ": unknown option '--unknown'")
+		);
+	}
+}
+
+check(
+	"unknown prepare options are rejected",
+	rejectsUnknownOption(["prepare", inputPath, outputPath, "--unknown"], "prepare"),
+);
+check(
+	"unknown extract options are rejected",
+	rejectsUnknownOption(["extract", inputPath, outputPath, "--unknown"], "extract"),
+);
+check(
+	"unknown outline options are rejected",
+	rejectsUnknownOption(["outline", inputPath, "--unknown"], "outline"),
+);
+
 // Item 11: data-URI images are re-encoded to gray placeholders of the
 // same natural size.
 check("data-URI src replaced", !out.includes(redUri));

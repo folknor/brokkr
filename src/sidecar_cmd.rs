@@ -125,8 +125,8 @@ pub(crate) fn cmd_sidecar(project_root: &Path, q: &SidecarQuery) -> Result<(), D
     }
 }
 
-fn print_resolved_run_info(store: &db::RunStore, id: &db::RunId) {
-    print_run_info(store, id);
+fn print_resolved_run_info(store: &db::RunStore, id: &db::RunId) -> Result<(), DevError> {
+    print_run_info(store, id)
 }
 
 fn with_resolved(
@@ -174,7 +174,7 @@ fn run_phase_summary(
     id: &db::RunId,
     q: &SidecarQuery,
 ) -> Result<(), DevError> {
-    print_resolved_run_info(store, id);
+    print_resolved_run_info(store, id)?;
     let run_filter = resolve_run_filter(store, id, q.run.as_deref())?;
     let samples = store.query_sidecar_samples(id, run_filter)?;
     if samples.is_empty() {
@@ -187,7 +187,7 @@ fn run_phase_summary(
 }
 
 fn run_samples(store: &db::RunStore, id: &db::RunId, q: &SidecarQuery) -> Result<(), DevError> {
-    print_resolved_run_info(store, id);
+    print_resolved_run_info(store, id)?;
     let run_filter = resolve_run_filter(store, id, q.run.as_deref())?;
     let mut samples = store.query_sidecar_samples(id, run_filter)?;
     if samples.is_empty() {
@@ -218,7 +218,7 @@ fn run_samples(store: &db::RunStore, id: &db::RunId, q: &SidecarQuery) -> Result
 }
 
 fn run_markers(store: &db::RunStore, id: &db::RunId, q: &SidecarQuery) -> Result<(), DevError> {
-    print_resolved_run_info(store, id);
+    print_resolved_run_info(store, id)?;
     let run_filter = resolve_run_filter(store, id, q.run.as_deref())?;
     let markers = store.query_sidecar_markers(id, run_filter)?;
     if markers.is_empty() {
@@ -232,7 +232,7 @@ fn run_markers(store: &db::RunStore, id: &db::RunId, q: &SidecarQuery) -> Result
 }
 
 fn run_durations(store: &db::RunStore, id: &db::RunId, q: &SidecarQuery) -> Result<(), DevError> {
-    print_resolved_run_info(store, id);
+    print_resolved_run_info(store, id)?;
     let run_filter = resolve_run_filter(store, id, q.run.as_deref())?;
     let markers = store.query_sidecar_markers(id, run_filter)?;
     if markers.is_empty() {
@@ -248,7 +248,7 @@ fn run_durations(store: &db::RunStore, id: &db::RunId, q: &SidecarQuery) -> Resu
 }
 
 fn run_stalls(store: &db::RunStore, id: &db::RunId, q: &SidecarQuery) -> Result<(), DevError> {
-    print_resolved_run_info(store, id);
+    print_resolved_run_info(store, id)?;
     let run_filter = resolve_run_filter(store, id, q.run.as_deref())?;
     // Stalls roll up cumulative `*_wait_ns` counters (not markers - markers are
     // reserved for phase boundaries). print_stalls handles the empty case.
@@ -263,7 +263,7 @@ fn run_stalls(store: &db::RunStore, id: &db::RunId, q: &SidecarQuery) -> Result<
 }
 
 fn run_counters(store: &db::RunStore, id: &db::RunId, q: &SidecarQuery) -> Result<(), DevError> {
-    print_resolved_run_info(store, id);
+    print_resolved_run_info(store, id)?;
     let run_filter = resolve_run_filter(store, id, q.run.as_deref())?;
     let mut counters = store.query_sidecar_counters(id, run_filter)?;
     if counters.is_empty() {
@@ -294,7 +294,7 @@ fn run_stat(
     field: &str,
     q: &SidecarQuery,
 ) -> Result<(), DevError> {
-    print_resolved_run_info(store, id);
+    print_resolved_run_info(store, id)?;
     let run_filter = resolve_run_filter(store, id, q.run.as_deref())?;
     let mut samples = store.query_sidecar_samples(id, run_filter)?;
     if samples.is_empty() {

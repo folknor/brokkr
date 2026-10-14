@@ -28,7 +28,7 @@ use std::borrow::Cow;
 
 use crate::config::TextlintRule;
 use crate::error::DevError;
-use crate::{globs, gremlins, lex};
+use crate::{globs, lex};
 
 /// One forbidden-pattern hit.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -85,10 +85,18 @@ struct Compiled {
     require_below: Option<Window>,
 }
 
+/// Maximum character count in one rendered source line. This is a presentation
+/// bound shared by every rule, not a per-project matching option.
 const DISPLAY_CAP: usize = 200;
 
 fn cap(s: &str) -> String {
-    s.chars().take(DISPLAY_CAP).collect()
+    let mut chars = s.chars();
+    let prefix: String = chars.by_ref().take(DISPLAY_CAP - 1).collect();
+    if chars.next().is_some() {
+        format!("{prefix}…")
+    } else {
+        prefix
+    }
 }
 
 #[allow(clippy::too_many_lines)] // one pass compiling every optional pattern of a rule
@@ -276,15 +284,18 @@ pub struct TextlintScan {
     pub files: usize,
 }
 
-/// Scan tracked files against every rule, one pass per file.
-pub fn scan(project_root: &Path, rules: &[TextlintRule]) -> Result<TextlintScan, DevError> {
+/// Scan one tree snapshot against every rule, one pass per file.
+pub fn scan(
+    tree: &crate::scope::TreeSnapshot,
+    rules: &[TextlintRule],
+) -> Result<TextlintScan, DevError> {
     if rules.is_empty() {
         return Ok(TextlintScan {
             violations: Vec::new(),
             files: 0,
         });
     }
-    let files = gremlins::tracked_files(project_root)?;
+    let files = tree.files();
     for rule in rules {
         let paths_field = format!("[[textlint]] {:?} paths", rule.name);
         if rule.paths.is_empty() {
@@ -296,7 +307,7 @@ pub fn scan(project_root: &Path, rules: &[TextlintRule]) -> Result<TextlintScan,
         // Dead scope is warned about, not refused (`globs::warn_unmatched`):
         // user-wide rules reach every tree brokkr checks, and most trees lack
         // most of the paths a personal rule names.
-        globs::warn_unmatched(&rule.paths, &files, &paths_field)?;
+        globs::warn_unmatched(&rule.paths, files, &paths_field)?;
         let path_set = globs::build_set(&rule.paths, &paths_field)?;
         let in_scope: Vec<PathBuf> = files
             .iter()
@@ -320,19 +331,18 @@ pub fn scan(project_root: &Path, rules: &[TextlintRule]) -> Result<TextlintScan,
     let compiled = compile(rules)?;
     let mut out = Vec::new();
     let mut scanned = 0usize;
-    for rel in &files {
+    for rel in files {
         let applicable: Vec<&Compiled> = compiled.iter().filter(|c| applies(c, rel)).collect();
         if applicable.is_empty() {
             continue;
         }
-        let abs = project_root.join(rel);
         // An unreadable file is an error, not a skip (see
-        // `gremlins::read_in_scope`); only a path deleted from the working
+        // `TreeSnapshot::read_file`); only a path deleted from the working
         // tree is passed over.
-        let Some(bytes) = gremlins::read_in_scope(&abs, rel)? else {
+        let Some(bytes) = tree.read_file(rel)? else {
             continue;
         };
-        let Some(content) = text_of(&bytes) else {
+        let Some(content) = text_of(bytes.as_ref()) else {
             continue;
         };
         scanned += 1;
@@ -389,6 +399,10 @@ fn scan_file(rel: &Path, content: &str, rules: &[&Compiled], out: &mut Vec<Textl
             _ => true,
         })
         .collect();
+    let skip_after: Vec<Vec<bool>> = rules
+        .iter()
+        .map(|rule| skip_after_mask(rule, &lines))
+        .collect();
     // Lexical regions, tokenized once per file, only when a rule needs scoping.
     let base = content.as_ptr() as usize;
     let regions: Option<Vec<lex::Region>> = rules
@@ -396,27 +410,19 @@ fn scan_file(rel: &Path, content: &str, rules: &[&Compiled], out: &mut Vec<Textl
         .any(|r| r.region.is_some())
         .then(|| lex::classify(content));
     let mut section: Option<String> = None;
-    // Per-rule "past the skip_after boundary" latch, indexed alongside `rules`.
-    let mut skipping = vec![false; rules.len()];
     for (i, raw) in lines.iter().copied().enumerate() {
         let trimmed = raw.trim();
         if let Some(s) = toml_section(trimmed) {
             section = Some(s);
         }
         for (ri, rule) in rules.iter().enumerate() {
-            if !file_ok[ri] || skipping[ri] {
+            if !file_ok[ri] || skip_after[ri][i] {
                 continue;
             }
             // Whole-`use`-statement rules are handled in the join pass below,
             // not per physical line (a single-line `use` is one 1-line join).
             if rule.join_wrapped_use {
                 continue;
-            }
-            // Arm the latch on the boundary line so every *following* line is
-            // exempt; the boundary line itself is still evaluated below (it is
-            // not the offending pattern in practice, e.g. `#[cfg(test)]`).
-            if rule.skip_after.as_ref().is_some_and(|r| r.is_match(raw)) {
-                skipping[ri] = true;
             }
             if rule.table_row_only && !trimmed.starts_with('|') {
                 continue;
@@ -443,7 +449,7 @@ fn scan_file(rel: &Path, content: &str, rules: &[&Compiled], out: &mut Vec<Textl
             if !precondition_above_ok(rule, &lines, i) {
                 continue;
             }
-            if marker_suppresses(rule, &lines, i) {
+            if marker_suppresses(rule, &lines, i, i) {
                 continue;
             }
             if rule.except.iter().any(|r| r.is_match(raw)) {
@@ -467,7 +473,7 @@ fn scan_file(rel: &Path, content: &str, rules: &[&Compiled], out: &mut Vec<Textl
     // Whole-`use`-statement pass: reconstruct wrapped imports once, then match
     // each join rule against the joined text.
     if rules.iter().any(|r| r.join_wrapped_use) {
-        scan_use_statements(rel, content, &lines, rules, &file_ok, out);
+        scan_use_statements(rel, content, &lines, rules, &file_ok, &skip_after, out);
     }
 }
 
@@ -481,6 +487,7 @@ fn scan_use_statements(
     lines: &[&str],
     rules: &[&Compiled],
     file_ok: &[bool],
+    skip_after: &[Vec<bool>],
     out: &mut Vec<TextlintViolation>,
 ) {
     let stmts = lex::use_statements(content);
@@ -489,13 +496,10 @@ fn scan_use_statements(
             continue;
         }
         for st in &stmts {
-            // `skip_after`: the per-line pass never armed the latch for a join
-            // rule (it `continue`s above the arming), so the boundary is applied
-            // here instead - a statement whose first physical line sits past a
-            // boundary line (the regex matched strictly above it) is exempt,
-            // mirroring the latch that arms on the boundary and skips everything
-            // following.
-            if skip_after_suppresses(rule, lines, st.start_line) {
+            // The same precomputed boundary mask drives physical lines and
+            // joined statements: the boundary itself is checked and everything
+            // after it is skipped.
+            if skip_after[ri].get(st.start_line).copied().unwrap_or(false) {
                 continue;
             }
             if !rule.pattern.is_match(&st.joined) {
@@ -508,7 +512,7 @@ fn scan_use_statements(
             }
             // `allow_marker` matches on any physical line of the statement
             // (plus the `allow_marker_above` window at its start).
-            if use_marker_suppresses(rule, lines, st) {
+            if marker_suppresses(rule, lines, st.start_line, st.end_line) {
                 continue;
             }
             if rule.except.iter().any(|r| r.is_match(&st.joined)) {
@@ -530,29 +534,34 @@ fn scan_use_statements(
     }
 }
 
-/// Whether `rule`'s `skip_after` latch exempts a join statement beginning at
-/// physical line `start`: the boundary regex matches some raw line *strictly
-/// above* it. Mirrors the per-line latch, which arms on the boundary line (still
-/// evaluated) and skips every line after it - a `use` statement never lands on
-/// the boundary line (that is an attribute/comment), so `..start` is exact.
-fn skip_after_suppresses(rule: &Compiled, lines: &[&str], start: usize) -> bool {
+/// A per-line mask for `skip_after`. The boundary line itself is not skipped;
+/// all following lines are. Joined statements index the same mask at their
+/// first physical line, so the two passes share one boundary rule.
+fn skip_after_mask(rule: &Compiled, lines: &[&str]) -> Vec<bool> {
     let Some(re) = &rule.skip_after else {
-        return false;
+        return vec![false; lines.len()];
     };
+    let mut boundary_seen = false;
     lines
-        .get(..start)
-        .is_some_and(|above| above.iter().any(|l| re.is_match(l)))
+        .iter()
+        .map(|line| {
+            let skip = boundary_seen;
+            boundary_seen |= re.is_match(line);
+            skip
+        })
+        .collect()
 }
 
-/// `allow_marker` for a joined `use` statement: the marker on any physical line
-/// of the statement suppresses it, plus the `allow_marker_above` window above.
-fn use_marker_suppresses(rule: &Compiled, lines: &[&str], st: &lex::UseStmt) -> bool {
+/// Whether `allow_marker` suppresses a physical line or joined statement.
+/// The span is inclusive; the configured preceding window is anchored at its
+/// first line, and the marker may also appear anywhere inside the span.
+fn marker_suppresses(rule: &Compiled, lines: &[&str], start: usize, end: usize) -> bool {
     let Some(marker) = rule.allow_marker.as_deref() else {
         return false;
     };
-    let start = st.start_line.saturating_sub(rule.allow_marker_above);
+    let start = start.saturating_sub(rule.allow_marker_above);
     lines
-        .get(start..=st.end_line.min(lines.len().saturating_sub(1)))
+        .get(start..=end.min(lines.len().saturating_sub(1)))
         .is_some_and(|window| window.iter().any(|l| l.contains(marker)))
 }
 
@@ -623,22 +632,6 @@ fn precondition_above_ok(rule: &Compiled, lines: &[&str], anchor: usize) -> bool
         .is_some_and(|window| window.iter().any(|l| re.is_match(l)))
 }
 
-/// Whether `rule`'s allow-marker suppresses the match at line index `i`: on the
-/// line itself, or within `allow_marker_above` lines above it.
-fn marker_suppresses(rule: &Compiled, lines: &[&str], i: usize) -> bool {
-    let Some(marker) = rule.allow_marker.as_deref() else {
-        return false;
-    };
-    if lines[i].contains(marker) {
-        return true;
-    }
-    if rule.allow_marker_above > 0 {
-        let start = i.saturating_sub(rule.allow_marker_above);
-        return lines[start..i].iter().any(|l| l.contains(marker));
-    }
-    false
-}
-
 /// The section name inside a TOML section header (`[deps]` -> `deps`,
 /// `[[bin]]` -> `bin`), or `None` for a non-header line.
 fn toml_section(trimmed: &str) -> Option<String> {
@@ -675,9 +668,24 @@ mod tests {
     fn no_rules_scans_nothing_and_says_so() {
         // The early return must not report a file count it never earned - the
         // green line's whole value is that the number is falsifiable.
-        let scan = scan(Path::new("/nonexistent"), &[]).unwrap();
+        let root = crate::scope::test_git_tree("textlint", "no_rules");
+        let tree = crate::scope::TreeSnapshot::load(&root).unwrap();
+        let scan = scan(&tree, &[]).unwrap();
         assert!(scan.violations.is_empty());
         assert_eq!(scan.files, 0);
+    }
+
+    #[test]
+    fn scan_walks_git_files_and_applies_rule_globs() {
+        let root = crate::scope::test_git_tree("textlint", "scan_tree");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/lib.rs"), "unsafe { work(); }\n").unwrap();
+
+        let tree = crate::scope::TreeSnapshot::load(&root).unwrap();
+        let result = scan(&tree, &[rule("unsafe")]).unwrap();
+        assert_eq!(result.files, 1);
+        assert_eq!(result.violations.len(), 1);
+        assert_eq!(result.violations[0].file, PathBuf::from("src/lib.rs"));
     }
 
     /// Compile one rule and scan a source string; return (line, rule) hits.
@@ -711,6 +719,17 @@ mod tests {
             require_above: None,
             require_below: None,
         }
+    }
+
+    #[test]
+    fn displayed_content_marks_truncation() {
+        let short = "x".repeat(DISPLAY_CAP - 1);
+        assert_eq!(cap(&short), short);
+
+        let long = "x".repeat(DISPLAY_CAP + 1);
+        let displayed = cap(&long);
+        assert_eq!(displayed.chars().count(), DISPLAY_CAP);
+        assert!(displayed.ends_with('…'));
     }
 
     fn win(lines: usize, pattern: &str) -> crate::config::ContextWindow {
@@ -1071,7 +1090,7 @@ mod tests {
     }
 
     #[test]
-    fn gates_or_together_any_hit_suppresses() {
+    fn any_matching_context_window_suppresses() {
         let mut base = rule("select");
         base.except_above = Some(win(1, "cfg"));
         base.require_below = Some(win(1, "biased"));

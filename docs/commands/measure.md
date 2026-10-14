@@ -18,10 +18,11 @@ brokkr <command> [--bench [N] | --hotpath [N] | --alloc [N]] [command options]
   benchmarking a specific phase in isolation. The SIGKILL exit is treated as
   success.
 
-All measured modes automatically run a sidecar that samples `/proc` metrics at
-100ms and provides `BROKKR_MARKER_FIFO` for phase markers. Sidecar data is
-stored in `.brokkr/sidecar.db` (gitignored). Sidecar data is preserved even
-when the child is OOM-killed.
+Sidecar-enabled subprocess modes sample `/proc` metrics at 100ms and provide
+`BROKKR_MARKER_FIFO` for phase markers. Closure-only modes such as
+`run_internal` and `run_distribution` do not use a sidecar. Collected sidecar
+data is stored in `.brokkr/sidecar.db` (gitignored), including partial data
+when a measured child is OOM-killed.
 
 Dataset paths resolve from `brokkr.toml` automatically. All flags go after
 the command name.
@@ -47,6 +48,8 @@ HTTP/server lifecycle plans provide their own protocol operations. All use one
 
 Dry-run validates inputs and argv without acquiring a measurement session,
 building, downloading tools, starting servers, or creating run artifacts.
+It still follows the command's lock policy, so a measured command can wait for
+the brokkr lock before it reports the plan.
 Input hash verification may refresh `.brokkr/hash_cache`; this validation cache
 is the sole permitted planning write. Elivagar's argv construction creates no
 directories. API dry-run derives queries without contacting the running server.
@@ -211,7 +214,8 @@ same reason.
 
 Every stored row also records its predecessor as `prev.*` kv pairs:
 `prev.command`, `prev.uuid`, `prev.input_file`, `prev.gap_seconds`, read from
-the most recent row in the same results DB.
+the most recent row in the same project's results DB. Dirty runs and runs
+recorded by other projects are outside that store.
 
 `prev.gap_seconds` is measured from the previous run's timestamp to **the moment
 this run started**, not to the moment it was recorded. Rows are timestamped when
@@ -224,16 +228,19 @@ stamps the start of its measurement loop for exactly this reason.
 This is the cheapest available proxy for page-cache state. A cell that reads the
 same file its predecessor just read starts warm and reports a wall the code
 didn't earn; `prev.gap_seconds` + `prev.input_file` together usually distinguish
-"this baseline was warm" from "this baseline was fast". Best-effort: a lookup
-failure records nothing rather than failing the run.
+"this baseline was warm" from "this baseline was fast". If there is no prior
+row, no `prev.*` fields are added. A database lookup error is surfaced instead
+of recording a row without its predecessor provenance.
 
 ## Sidecar profiler
 
-The sidecar is always-on for all measured modes. It samples `/proc/{pid}/stat`,
-`/proc/{pid}/io`, and `/proc/{pid}/status` at 100ms intervals and reads phase
-markers from a FIFO. All data is buffered in memory during the run and
+Sidecar-enabled subprocess measurements sample `/proc/{pid}/stat`,
+`/proc/{pid}/io`, and `/proc/{pid}/status` at 100ms intervals and read phase
+markers from a FIFO. Their data is buffered in memory during the run and
 bulk-inserted to `.brokkr/sidecar.db` (gitignored) after the child exits.
-Results DB (`.brokkr/results.db`) stays small and git-tracked.
+Closure-only measurements such as `run_internal` and `run_distribution` do not
+attach a sidecar.
+Results DB (`.brokkr/results.db`) stays small and gitignored.
 
 Key files: `src/sidecar.rs` (sampler and FIFO),
 `src/harness_mod/measurement_loop.rs` (iteration collection, capture and recording),

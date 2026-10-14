@@ -36,31 +36,36 @@ pub fn run(
     // 1. command presets; extract runs later with the dataset's configured bbox.
     output::bench_msg("=== bench commands ===");
     let binary = build::cargo_build(
-        &build::BuildConfig::release_with_owned_features(Some("pbfhogg-cli"), &paths.features),
+        &build::BuildConfig::release_with_owned_features(
+            crate::project::Project::Pbfhogg.cli_package(),
+            &paths.features,
+        ),
         project_root,
     )?
     .path;
-    // The seq the OSC is registered under travels with it: it keys the
-    // merged-PBF cache (same rule as `get_default_osc_entry` - exactly one
-    // osc entry, or none).
-    let default_osc = paths
-        .datasets
-        .get(dataset)
-        .filter(|ds| ds.osc.len() == 1)
-        .and_then(|ds| ds.osc.iter().next())
-        .map(|(seq, entry)| (seq.as_str(), paths.data_dir.join(&entry.file)))
-        .filter(|(_, p)| p.exists());
+    // Resolve a configured OSC through the verified resolver. Ambiguous
+    // entries and stale hashes fail the suite instead of looking like an
+    // optional dataset field that was never configured.
+    let default_osc = match paths.datasets.get(dataset) {
+        Some(ds) if !ds.osc.is_empty() => Some(crate::resolve::resolve_single_osc(
+            dataset,
+            &crate::resolve::SnapshotRef::Base,
+            None,
+            paths,
+            project_root,
+        )?),
+        _ => None,
+    };
     bench_commands::run(
         harness,
         &binary,
         pbf_path,
-        default_osc.as_ref().map(|(_, p)| p.as_path()),
-        default_osc.as_ref().map(|(seq, _)| *seq),
-        Some(&paths.scratch_dir),
+        default_osc.as_ref().map(|(path, _)| path.as_path()),
+        default_osc.as_ref().map(|(_, seq)| seq.as_str()),
+        &paths.scratch_dir,
         runs,
         bench_commands::ALL_COMMANDS,
         project_root,
-        None,
     )?;
 
     // 2. bench read -- all 5 modes
@@ -97,6 +102,9 @@ pub fn run(
         file_mb,
         runs,
         project_root,
+        default_osc
+            .as_ref()
+            .map(|(path, seq)| (path.as_path(), seq.as_str())),
     )?;
 
     // bench allocator -- default, jemalloc, mimalloc
@@ -117,15 +125,14 @@ fn run_dataset_dependent(
     file_mb: f64,
     runs: usize,
     project_root: &Path,
+    default_osc: Option<(&Path, &str)>,
 ) -> Result<(), DevError> {
     let ds = paths.datasets.get(dataset);
 
     // bench merge -- if osc is available
-    let osc_path = crate::resolve::get_default_osc_entry(dataset, paths)
-        .map(|entry| paths.data_dir.join(&entry.file))
-        .filter(|p| p.exists());
+    let osc_path = default_osc.map(|(path, _)| path);
 
-    if let Some(ref osc_path) = osc_path {
+    if let Some(osc_path) = osc_path {
         output::bench_msg("=== bench merge ===");
         let merge_compressions = super::parse_compressions("zlib,none", false)?;
         bench_merge::run(
@@ -167,9 +174,16 @@ fn run_dataset_dependent(
     }
 
     // bench blob-filter -- if raw PBF is available
-    let raw_pbf_path = crate::resolve::get_pbf_entry(dataset, "raw", paths)
-        .map(|entry| paths.data_dir.join(&entry.file))
-        .filter(|p| p.exists());
+    let raw_pbf_path = if ds.is_some_and(|dataset| dataset.pbf.contains_key("raw")) {
+        Some(crate::resolve::resolve_pbf_path(
+            dataset,
+            "raw",
+            paths,
+            project_root,
+        )?)
+    } else {
+        None
+    };
 
     if let Some(ref raw_path) = raw_pbf_path {
         output::bench_msg("=== bench blob-filter ===");
@@ -449,8 +463,8 @@ fn run_osmium_baseline(
 
 /// Parse `---` delimited blocks from stderr output.
 ///
-/// Both the osmpbf-baseline and planetiler benchmark emit results as blocks
-/// separated by `---` lines, with `key=value` pairs on each line within a block.
+/// The osmpbf baseline emits results as blocks separated by `---` lines, with
+/// `key=value` pairs on each line. Planetiler has its own typed parser.
 fn parse_stderr_blocks(stderr: &str) -> Vec<HashMap<String, String>> {
     let mut blocks = Vec::new();
     let mut current: Option<HashMap<String, String>> = None;

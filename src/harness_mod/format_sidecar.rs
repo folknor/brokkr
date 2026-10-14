@@ -1,3 +1,4 @@
+use crate::sidecar::linear_percentile as percentile;
 
 // ---------------------------------------------------------------------------
 // Free functions
@@ -287,36 +288,6 @@ pub fn elapsed_to_us(duration: &Duration) -> i64 {
     i64::try_from(duration.as_micros()).unwrap_or(i64::MAX)
 }
 
-/// Compute a percentile from a sorted slice using linear interpolation.
-///
-/// Uses the "C = 1" variant (linear interpolation between adjacent ranks).
-/// This avoids the systematic underestimation of high percentiles (e.g. p95)
-/// that nearest-rank with integer truncation produces on small sample counts.
-fn percentile(sorted: &[i64], pct: usize) -> i64 {
-    if sorted.is_empty() {
-        return 0;
-    }
-    let len = sorted.len();
-    if len == 1 {
-        return sorted[0];
-    }
-    // Fractional index into the sorted array.
-    #[allow(clippy::cast_precision_loss)]
-    let pos = (pct as f64 / 100.0) * (len - 1) as f64;
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let lo = pos as usize;
-    let hi = (lo + 1).min(len - 1);
-    #[allow(clippy::cast_precision_loss)]
-    let frac = pos - lo as f64;
-    // Linear interpolation: sorted[lo] + frac * (sorted[hi] - sorted[lo])
-    #[allow(clippy::cast_precision_loss)]
-    let result = sorted[lo] as f64 + frac * (sorted[hi] - sorted[lo]) as f64;
-    #[allow(clippy::cast_possible_truncation)]
-    {
-        result.round() as i64
-    }
-}
-
 /// Summarise distribution samples, given in microseconds in any order, as
 /// min/p50/p95/max. Returns the summary and the fastest sample, or `None`
 /// when there are no samples.
@@ -380,9 +351,10 @@ fn push_drive_note(parts: &mut Vec<String>, label: &str, value: &Option<String>)
     }
 }
 
-/// Parse stderr bytes for `key=value` lines. Extracts `elapsed_ms` for timing,
-/// puts all other kv pairs into `BenchResult.kv`.
-/// Parse `key=value` lines from stderr, returning `(elapsed_ms, kv_pairs)`.
+/// Parse stderr `key=value` lines, returning the timing and non-timing pairs.
+/// `elapsed_ms`/`total_ms` are reserved timing names and are not added to the
+/// returned kv pairs; the last valid timing line wins.
+///
 /// `elapsed_ms` is `None` when no `elapsed_ms`/`total_ms` line is found.
 pub(crate) fn parse_kv_lines(stderr: &[u8]) -> (Option<i64>, Vec<KvPair>) {
     let (us, kv) = parse_kv_lines_us(stderr);

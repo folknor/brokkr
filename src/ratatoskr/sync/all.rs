@@ -79,7 +79,10 @@ pub fn run_sync_all(req: &SyncAllRequest<'_>) -> Result<(), DevError> {
         .map(|script| resolve_info(script, &fixtures_dir))
         .collect::<Result<Vec<_>, _>>()?;
 
-    output::ratatoskr_msg(&format!("sync cohort: {} script(s)", selected.len()));
+    output::ratatoskr_msg(&format!(
+        "sync cohort: {}",
+        output::count(selected.len(), "script")
+    ));
 
     // Hold the global lock for the whole sweep, so another brokkr can't
     // interleave a build or bench between two scripts and the sweep can't
@@ -90,7 +93,7 @@ pub fn run_sync_all(req: &SyncAllRequest<'_>) -> Result<(), DevError> {
     // One cooperative-SIGTERM guard for the whole sweep: the build and
     // every script run poll the same shutdown flag. See run_sync_smoke
     // for the mechanism.
-    let _sigterm = crate::shutdown::SigtermGuard::install();
+    let sigterm = crate::shutdown::SigtermGuard::install();
 
     let debug = req
         .profile_override
@@ -101,7 +104,7 @@ pub fn run_sync_all(req: &SyncAllRequest<'_>) -> Result<(), DevError> {
         debug,
         Some(&|pid| _lock.set_child_pid(pid)),
         Some(&|| _lock.clear_child_pid()),
-        true, // isolate_pg: SigtermGuard above bridges terminal signals
+        crate::shutdown::ChildIsolation::ProcessGroup(&sigterm),
     )?;
 
     let runner = SyncRunner {
@@ -172,9 +175,9 @@ pub fn run_sync_all(req: &SyncAllRequest<'_>) -> Result<(), DevError> {
     // Each failure already printed its full error inline; the exit error
     // names them without repeating the messages.
     Err(DevError::Reported(format!(
-        "sync --all: {} of {} script(s) failed: {}",
-        failures.len(),
-        selected.len(),
+        "sync --all: {} failed out of {}: {}",
+        output::count(failures.len(), "script"),
+        output::count(selected.len(), "script"),
         failures.join(", "),
     )))
 }

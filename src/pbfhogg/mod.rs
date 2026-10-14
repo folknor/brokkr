@@ -43,14 +43,23 @@ pub fn parse_compressions(input: &str, add_default_levels: bool) -> Result<Vec<S
             "zlib" if add_default_levels => "zlib:6".to_owned(),
             "zstd" if add_default_levels => "zstd:3".to_owned(),
             "zlib" | "zstd" => trimmed.to_owned(),
-            s if s.starts_with("zlib:") || s.starts_with("zstd:") => {
-                let colon = s.find(':').unwrap_or(0);
-                let level_str = &s[colon + 1..];
-                if level_str.parse::<i32>().is_err() {
+            s if s.starts_with("zlib:") => {
+                let level = &s["zlib:".len()..];
+                let level = level.parse::<u8>().map_err(|_| {
+                    DevError::Config(format!("invalid compression level: {trimmed}"))
+                })?;
+                if !(1..=9).contains(&level) {
                     return Err(DevError::Config(format!(
-                        "invalid compression level: {trimmed}"
+                        "zlib level {level} out of range, expected 1-9"
                     )));
                 }
+                trimmed.to_owned()
+            }
+            s if s.starts_with("zstd:") => {
+                let level = &s["zstd:".len()..];
+                level.parse::<u32>().map_err(|_| {
+                    DevError::Config(format!("invalid compression level: {trimmed}"))
+                })?;
                 trimmed.to_owned()
             }
             _ => {
@@ -153,10 +162,11 @@ mod tests {
     }
 
     #[test]
-    fn negative_level_is_valid_i32() {
-        // Negative levels are valid i32 parses (zstd supports negative levels).
-        let result = parse_compressions("zstd:-1", true).unwrap();
-        assert_eq!(result, vec!["zstd:-1"]);
+    fn compression_levels_follow_cli_ranges() {
+        assert!(parse_compressions("zlib:0", true).is_err());
+        assert!(parse_compressions("zlib:10", true).is_err());
+        assert!(parse_compressions("zstd:-1", true).is_err());
+        assert_eq!(parse_compressions("zstd:0", true).unwrap(), vec!["zstd:0"]);
     }
 
     #[test]

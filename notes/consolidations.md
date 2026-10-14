@@ -25,10 +25,10 @@ been verified.
 
 Reported by: config-cli.
 
-The policy is stated in `docs/brokkr.toml.md` and every measurement-session build applies host features. Residue: there is still no single build-purpose resolver; `run`, `install`, `check`, `clippy`, `test` and `bench` each decide by their own call path.
+Residue: there is still no single build-purpose resolver across run, install, check, clippy, test and bench.
 
 ## CON-033 - Residual second sources beside the typed lane and command identity
 
 Reported by: the wave-6 and wave-7 reviewers, laterally.
 
-The sweep argv projections and the duplicate `harness` field are gone; every reader uses `LaneExec`/`LaneFilters`. Residue: `sidecar.db` has its own `command` column, which results.db migration v21 did not rename, so historical sidecar sessions keep `self`, `pmtiles` and `ingest` while new ones use the CLI ids.
+Residue: the sidecar database still keeps its own command column and migration sequence.

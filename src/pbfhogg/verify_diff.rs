@@ -206,7 +206,7 @@ fn parse_osmium_diff_summary(text: &str) -> Option<(u64, u64)> {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
-    use super::{parse_osmium_diff_summary, parse_pbfhogg_diff_summary};
+    use super::{compare_diff_classes, parse_osmium_diff_summary, parse_pbfhogg_diff_summary};
 
     #[test]
     fn parse_pbfhogg_summary_standard() {
@@ -227,17 +227,16 @@ mod tests {
     }
 
     #[test]
-    fn denmark_numbers_reconcile() {
-        // The documented decomposition: D=14 on both sides.
-        let (created, modified, deleted) = parse_pbfhogg_diff_summary(
-            "10321 differences: 5589 created, 3489 modified, 1243 deleted (0 common)",
-        )
-        .unwrap();
-        let (left, right) =
-            parse_osmium_diff_summary("Summary: left=4746 right=9092 same=0 different=0").unwrap();
-        let d_left = i128::from(left) - i128::from(deleted) - i128::from(modified);
-        let d_right = i128::from(right) - i128::from(created) - i128::from(modified);
-        assert_eq!(d_left, 14);
-        assert_eq!(d_right, 14);
+    fn diff_class_summaries_reconcile_through_the_verifier() {
+        let pbfhogg = "19 differences: 10 created, 5 modified, 4 deleted (0 common)";
+        let osmium = "Summary: left=9 right=15 same=0 different=0";
+        assert!(compare_diff_classes(pbfhogg, osmium).is_ok());
+    }
+
+    #[test]
+    fn diff_class_summaries_reject_a_mismatch() {
+        let pbfhogg = "19 differences: 10 created, 5 modified, 4 deleted (0 common)";
+        let osmium = "Summary: left=9 right=16 same=0 different=0";
+        assert!(compare_diff_classes(pbfhogg, osmium).is_err());
     }
 }

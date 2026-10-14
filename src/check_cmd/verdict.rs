@@ -5,7 +5,7 @@ use super::{
     SummaryScope, TerminationCause, TerminationSummary, WATCHDOG_EXIT_CODE, render_continuation,
 };
 #[cfg(test)]
-use super::{DoctestObserved, TESTS_FAILED, already_reported};
+use super::{DoctestObserved, PhaseFailure};
 use crate::config::{Certifies, SitedAllow};
 use crate::error::DevError;
 use crate::output;
@@ -312,9 +312,9 @@ pub(super) fn finish_check(input: FinishInput<'_>) -> Result<(), DevError> {
 }
 
 /// The verdict line's parenthesised context: the profile, how many sweeps
-/// ran, and every lint suppression in force.
+/// ran, and a bounded preview of the lint suppressions in force.
 ///
-/// The suppressions are named here, once, rather than on each phase's line:
+/// The suppressions are summarized here, once, rather than on each phase's line:
 /// they narrow clippy (`-A`), rustdoc (dropped at ingestion) and every
 /// compiling phase (test, coverage enumeration, install-feature, through
 /// rustflags) alike, so a clause on any one phase's line would let the others
@@ -349,7 +349,7 @@ pub(super) fn verdict_context(
         parts.push(run.join(", "));
     }
     if !allow.is_empty() {
-        parts.push(format!("lints allowed: {}", allow.join(", ")));
+        parts.push(format!("lints allowed: {}", summarize_lint_names(&allow)));
     }
     if !allow_exact.is_empty() {
         // Only rustc's own lints reach a build (`test_phase_allow_flags`), so
@@ -370,10 +370,10 @@ pub(super) fn verdict_context(
         if !widened.is_empty() {
             // Where each is sited is constant: `brokkr man check` (the
             // `allow_exact` scope), not worth repeating on every verdict.
-            groups.push(widened.join(", "));
+            groups.push(summarize_lint_names(&widened));
         }
         if !sited.is_empty() {
-            groups.push(format!("{} (sited)", sited.join(", ")));
+            groups.push(format!("{} (sited)", summarize_lint_names(&sited)));
         }
         parts.push(format!("allow_exact: {}", groups.join(", ")));
     }
@@ -381,6 +381,36 @@ pub(super) fn verdict_context(
         String::new()
     } else {
         format!(" ({})", parts.join("; "))
+    }
+}
+
+fn summarize_lint_names(names: &[&str]) -> String {
+    const LIMIT: usize = 6;
+    let shown = names
+        .iter()
+        .take(LIMIT)
+        .copied()
+        .collect::<Vec<_>>()
+        .join(", ");
+    let omitted = names.len().saturating_sub(LIMIT);
+    if omitted == 0 {
+        shown
+    } else {
+        format!("{shown} (+{})", output::count(omitted, "additional lint"))
+    }
+}
+
+#[cfg(test)]
+mod verdict_context_tests {
+    use super::summarize_lint_names;
+
+    #[test]
+    fn lint_context_caps_names_and_reports_the_omitted_count() {
+        let names = ["a", "b", "c", "d", "e", "f", "g", "h"];
+        assert_eq!(
+            summarize_lint_names(&names),
+            "a, b, c, d, e, f (+2 additional lints)"
+        );
     }
 }
 
@@ -450,6 +480,44 @@ struct CheckSummary<'a> {
 }
 
 #[allow(clippy::too_many_arguments)]
+fn check_summary<'a>(
+    verdict: &Verdict,
+    certifies: Option<Certifies>,
+    profile: Option<&'a str>,
+    sweeps: &[&'a str],
+    package: Option<&'a str>,
+    failed_phase: Option<Phase>,
+    prose_only: bool,
+    report: RunReport,
+    elapsed: std::time::Duration,
+) -> CheckSummary<'a> {
+    let (policy_coverage, execution_accounting, doctests) = match report.accounting {
+        Some(blocks) => (
+            Some(blocks.policy_coverage),
+            Some(blocks.execution_accounting),
+            Some(blocks.doctests),
+        ),
+        None => (None, None, None),
+    };
+    CheckSummary {
+        schema: SUMMARY_SCHEMA,
+        certifies,
+        verdict: verdict.json_word(),
+        profile,
+        sweeps: sweeps.to_vec(),
+        package,
+        failed_phase,
+        scope: prose_only.then_some("prose_only"),
+        termination: report.termination,
+        policy_coverage,
+        execution_accounting,
+        doctests,
+        diagnostic_continuation: report.continuation,
+        elapsed_ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn emit_json_summary(
     verdict: &Verdict,
     certifies: Option<Certifies>,
@@ -461,30 +529,17 @@ fn emit_json_summary(
     report: RunReport,
     elapsed: std::time::Duration,
 ) {
-    let (policy_coverage, execution_accounting, doctests) = match report.accounting {
-        Some(b) => (
-            Some(b.policy_coverage),
-            Some(b.execution_accounting),
-            Some(b.doctests),
-        ),
-        None => (None, None, None),
-    };
-    let summary = CheckSummary {
-        schema: SUMMARY_SCHEMA,
+    let summary = check_summary(
+        verdict,
         certifies,
-        verdict: verdict.json_word(),
-        profile: profile.as_deref(),
-        sweeps: sweeps.to_vec(),
+        profile.as_deref(),
+        sweeps,
         package,
         failed_phase,
-        scope: prose_only.then_some("prose_only"),
-        termination: report.termination,
-        policy_coverage,
-        execution_accounting,
-        doctests,
-        diagnostic_continuation: report.continuation,
-        elapsed_ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
-    };
+        prose_only,
+        report,
+        elapsed,
+    );
     match serde_json::to_string(&summary) {
         // Unprefixed, but through the renderer so the run log records the
         // machine-readable verdict too.
@@ -544,33 +599,45 @@ mod json_summary_tests {
     #![allow(clippy::unwrap_used)]
 
     use super::{
-        CheckSummary, DoctestAccounting, DoctestObserved, ExecutionAccounting, Phase,
-        PolicyCoverage, SUMMARY_SCHEMA, SummaryScope, TerminationCause, TerminationSummary,
+        CheckSummary, DoctestAccounting, DoctestObserved, ExecutionAccounting, FailureKind, Phase,
+        PolicyCoverage, RunReport, SummaryScope, TerminationCause, TerminationSummary, Verdict,
+        check_summary,
     };
+    use crate::check_cmd::AccountingBlocks;
+    use crate::config::Certifies;
 
-    fn summary<'a>(verdict: &'a str, failed_phase: Option<Phase>) -> CheckSummary<'a> {
-        CheckSummary {
-            schema: SUMMARY_SCHEMA,
-            certifies: None,
+    fn summary<'a>(
+        verdict: &Verdict,
+        profile: Option<&'a str>,
+        package: Option<&'a str>,
+        failed_phase: Option<Phase>,
+        prose_only: bool,
+        report: RunReport,
+    ) -> CheckSummary<'a> {
+        check_summary(
             verdict,
-            profile: Some("tier1"),
-            sweeps: vec!["default", "ffi"],
-            package: None,
+            None,
+            profile,
+            &["default", "ffi"],
+            package,
             failed_phase,
-            scope: None,
-            termination: None,
-            policy_coverage: None,
-            execution_accounting: None,
-            doctests: None,
-            diagnostic_continuation: None,
-            elapsed_ms: 1234,
-        }
+            prose_only,
+            report,
+            std::time::Duration::from_millis(1234),
+        )
     }
 
     #[test]
     fn summary_carries_schema_and_null_certifies() {
-        let mut s = summary("passed", None);
-        s.scope = Some("prose_only");
+        let verdict = Verdict::Passed { prose_only: true };
+        let s = summary(
+            &verdict,
+            Some("tier1"),
+            None,
+            None,
+            true,
+            RunReport::default(),
+        );
         let line = serde_json::to_string(&s).unwrap();
         assert!(line.contains("\"scope\":\"prose_only\""), "{line}");
         // The two contract-critical fields: the version consumers key on,
@@ -585,9 +652,15 @@ mod json_summary_tests {
 
     #[test]
     fn failed_summary_names_the_phase() {
-        let mut s = summary("failed", Some(Phase::Clippy));
-        s.profile = None;
-        s.package = Some("nautilus-betfair");
+        let verdict = Verdict::Failed(FailureKind::Error);
+        let s = summary(
+            &verdict,
+            None,
+            Some("nautilus-betfair"),
+            Some(Phase::Clippy),
+            false,
+            RunReport::default(),
+        );
         let line = serde_json::to_string(&s).unwrap();
         assert!(line.contains("\"verdict\":\"failed\""), "{line}");
         assert!(line.contains("\"failed_phase\":\"clippy\""), "{line}");
@@ -601,39 +674,55 @@ mod json_summary_tests {
     /// the doctest block, and the termination - each its own claim.
     #[test]
     fn schema_two_keeps_policy_and_execution_apart() {
-        let mut s = summary("failed", Some(Phase::Test));
-        s.termination = Some(TerminationSummary {
-            kind: TerminationCause::PerTestDeadline,
-            scope: SummaryScope::Lane("serial".into()),
-        });
-        s.policy_coverage = Some(PolicyCoverage {
-            status: "passed",
-            plan_complete: true,
-            pairs: 10,
-            selected: 9,
-            ignored: 1,
-            quarantined: 0,
-            curated: 0,
-            orphaned: 0,
-            dead_filters: 0,
-        });
-        s.execution_accounting = Some(ExecutionAccounting {
-            scope: "binary_tests",
-            status: "incomplete",
-            expected_executions: 9,
-            passed: 4,
-            failed: 0,
-            timed_out: 1,
-            interrupted: 1,
-            ignored: 0,
-            unobserved: 3,
-            anomalies: 0,
-        });
-        s.doctests = Some(DoctestAccounting {
-            inventory: "unavailable",
-            accounting: "unknown",
-            observed: DoctestObserved::default(),
-        });
+        let verdict = Verdict::Failed(FailureKind::Error);
+        let report = RunReport {
+            termination: Some(TerminationSummary {
+                kind: TerminationCause::PerTestDeadline,
+                scope: SummaryScope::Lane("serial".into()),
+            }),
+            accounting: Some(AccountingBlocks {
+                policy_coverage: PolicyCoverage {
+                    status: "passed",
+                    plan_complete: true,
+                    pairs: 10,
+                    selected: 9,
+                    ignored: 1,
+                    quarantined: 0,
+                    curated: 0,
+                    orphaned: 0,
+                    dead_filters: 0,
+                },
+                execution_accounting: ExecutionAccounting {
+                    scope: "binary_tests",
+                    status: "incomplete",
+                    expected_executions: 9,
+                    passed: 4,
+                    failed: 0,
+                    timed_out: 1,
+                    interrupted: 1,
+                    ignored: 0,
+                    unobserved: 3,
+                    anomalies: 0,
+                },
+                doctests: DoctestAccounting {
+                    inventory: "unavailable",
+                    accounting: "unknown",
+                    observed: DoctestObserved::default(),
+                },
+            }),
+            continuation: None,
+        };
+        let s = check_summary(
+            &verdict,
+            Some(Certifies::Complete),
+            Some("tier1"),
+            &["default", "ffi"],
+            None,
+            Some(Phase::Test),
+            false,
+            report,
+            std::time::Duration::from_millis(1234),
+        );
         let v: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
         assert_eq!(v["termination"]["kind"], "per_test_timeout");
@@ -649,8 +738,7 @@ mod json_summary_tests {
 #[cfg(test)]
 mod failure_exit_tests {
     use super::{
-        Certifies, FinishInput, Phase, RunReport, RunStop, TESTS_FAILED, already_reported,
-        finish_check, run_stop,
+        Certifies, FinishInput, Phase, PhaseFailure, RunReport, RunStop, finish_check, run_stop,
     };
     use crate::error::DevError;
 
@@ -724,22 +812,14 @@ mod failure_exit_tests {
     }
 
     #[test]
-    fn only_the_named_sentinel_becomes_reported() {
+    fn typed_findings_keep_their_phase_at_the_command_boundary() {
         assert!(matches!(
-            already_reported(DevError::Build(TESTS_FAILED.into()), TESTS_FAILED),
-            DevError::Reported(_)
-        ));
-        // A different message is a diagnostic nobody has printed yet.
-        assert!(matches!(
-            already_reported(
-                DevError::Build("cargo metadata failed".into()),
-                TESTS_FAILED
-            ),
-            DevError::Build(_)
+            PhaseFailure::Findings(Phase::Clippy).into_dev_error(),
+            DevError::Reported(message) if message == "clippy failed"
         ));
         assert!(matches!(
-            already_reported(DevError::Interrupted, TESTS_FAILED),
-            DevError::Interrupted
+            PhaseFailure::from(DevError::Build("cargo metadata failed".into())),
+            PhaseFailure::Error(DevError::Build(message)) if message == "cargo metadata failed"
         ));
     }
 }

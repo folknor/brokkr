@@ -85,7 +85,7 @@ fn insert_inner(conn: &rusqlite::Connection, row: &RunRow, uuid: &str) -> Result
             row.elapsed.micros(),
             row.peak_rss_mb,
             cargo_features,
-            row.cargo_profile.as_str(),
+            row.cargo_profile.as_label(),
             row.kernel,
             row.cpu_governor,
             row.avail_memory_mb,

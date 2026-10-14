@@ -71,9 +71,8 @@ struct LockState {
     /// could leave behind.
     auth: Option<AuthHash>,
     /// True while this hold is waiting for earlier compilation leases to drain.
-    /// Published for diagnostics only - `brokkr lock` and the wait message -
-    /// so a waiter can tell "brokkr is clearing compilers" from "brokkr is
-    /// working".
+    /// Published in the control-service snapshot so `brokkr lock` can distinguish
+    /// acquisition from work.
     draining: bool,
     /// PID of the most recent child process brokkr spawned under the lock,
     /// paired with its starttime token (captured when recorded; empty if
@@ -321,6 +320,10 @@ pub struct LockContext<'a> {
     pub project_root: &'a crate::project::ProjectRoot,
     /// The code tree whose `target` the disk gate probes.
     pub build_root: &'a crate::project::BuildRoot,
+    /// The build root whose pinned toolchain should be moved aside for this
+    /// hold, when the detected project config enables `disable_toolchain`.
+    /// `None` keeps acquisition independent of any process-global setting.
+    pub disable_toolchain_dir: Option<&'a Path>,
 }
 
 /// Registration of a toolchain directory whose pin is currently held aside.
@@ -430,10 +433,9 @@ pub fn acquire(ctx: &LockContext<'_>) -> Result<LockGuard, DevError> {
     acquire_at(&path, ctx, &HOST_EFFECTS)
 }
 
-/// Acquire the global lock without applying the process's armed build-root
+/// Acquire the global lock without applying the configured build-root
 /// toolchain setting. Worktree execution uses this because its own pin is
-/// activated explicitly after the checkout exists, and mutating the armed
-/// setting around an acquisition would leak that choice across threads.
+/// activated explicitly after the checkout exists.
 pub(crate) fn acquire_without_toolchain(ctx: &LockContext<'_>) -> Result<LockGuard, DevError> {
     let path = lock_path()?;
     acquire_at(&path, ctx, &HOST_EFFECTS_WITHOUT_TOOLCHAIN)
@@ -650,7 +652,9 @@ mod tests {
         Ok(None)
     }
 
-    fn no_toolchain() -> Result<Option<crate::toolchain::DisabledToolchain>, DevError> {
+    fn no_toolchain(
+        _: &LockContext<'_>,
+    ) -> Result<Option<crate::toolchain::DisabledToolchain>, DevError> {
         Ok(None)
     }
 
@@ -865,6 +869,7 @@ mod tests {
             command: crate::cli::CommandId::Lock,
             project_root: &roots.0,
             build_root: &roots.1,
+            disable_toolchain_dir: None,
         }
     }
 

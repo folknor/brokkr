@@ -49,6 +49,7 @@ pub struct Measurement {
     pub winner: Option<usize>,
     start_epoch: i64,
     program: Option<PathBuf>,
+    binary_xxh128: Option<String>,
     error: Option<DevError>,
     recorded: bool,
 }
@@ -66,9 +67,17 @@ impl MeasurementLoop<'_> {
     where F: FnMut(usize, Option<&mut crate::sidecar::SidecarFifo>) -> Result<Iteration, DevError>,
     {
         let start_epoch = wall_clock_epoch();
+        // Capture binary identity before launching the first measured child;
+        // record-time hashing could describe a replacement made during the run.
+        let binary_xxh128 = program.and_then(|path| {
+            crate::preflight::compute_file_digest(path)
+                .ok()
+                .map(|digest| digest.to_string())
+        });
         self.harness.measure_start_epoch.set(start_epoch);
         let mut measurement = Measurement { iterations: Vec::with_capacity(self.runs.get()),
-            winner: None, start_epoch, program: program.map(Path::to_path_buf), error: None, recorded: false };
+            winner: None, start_epoch, program: program.map(Path::to_path_buf), binary_xxh128,
+            error: None, recorded: false };
         for i in 0..self.runs.get() {
             announce_run(i, self.runs.get());
             self.harness.lock.set_progress(clamp_u32(i + 1), clamp_u32(self.runs.get()));
@@ -164,7 +173,8 @@ impl BenchHarness {
         let info = measurement.program.as_deref().map(|program| {
             let iteration = measurement.iterations.get(index);
             self.build_run_info(config, program, measurement.start_epoch,
-                iteration.and_then(|i| i.pid), iteration.and_then(|i| i.ending.clone()))
+                measurement.binary_xxh128.clone(), iteration.and_then(|i| i.pid),
+                iteration.and_then(|i| i.ending.clone()))
         });
         let walls: Vec<i64> = measurement.iterations.iter().filter_map(|i| i.result.as_ref())
             .map(|result| result.elapsed_ms).collect();
@@ -216,14 +226,19 @@ impl BenchHarness {
         let mut env = extra_env.to_vec();
         env.push((crate::sidecar::MARKER_FIFO_ENV, &fifo_path));
         let program_str = program.display().to_string();
+        // Held until the sidecar has reaped the child: the grouped child leaves
+        // brokkr's terminal process group, so signals must be bridged to it.
+        let signal_guard = crate::shutdown::SigtermGuard::install();
         let start = std::time::Instant::now();
-        let process = child::spawn_captured(&program_str, args, cwd, &env, true,
+        let process = child::spawn_captured(&program_str, args, cwd, &env,
+            crate::shutdown::ChildIsolation::ProcessGroup(&signal_guard),
             crate::output::SpawnProfile::Plain)?;
         let pid = process.id();
         self.lock.set_child_pid(pid);
         let capture = crate::sidecar::run_sidecar_with_deadline(process, fifo, index, start,
             self.stop_marker.as_deref(), ceiling, &crate::sidecar::DEFAULT_MEASUREMENT_TUNABLES,
             &mut crate::sidecar::ProcSidecarSampler);
+        drop(signal_guard);
         self.lock.clear_child_pid();
         let ending = capture.data.ending.clone();
         let error = match child::verdict(&ending, &program_str, &capture.stderr, ok_codes) {

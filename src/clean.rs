@@ -46,9 +46,9 @@ impl CleanOpts {
 }
 
 /// Removal helper that honours `--dry-run`: in dry-run it reports the path and
-/// removes nothing; otherwise it deletes best-effort. Returns whether the path
-/// existed (i.e. something was, or would be, removed). Counts those hits so
-/// the caller can tell an empty sweep from a productive one.
+/// removes nothing; otherwise it deletes and propagates failures. Counts only
+/// paths that were removed or would be removed so the caller can tell an empty
+/// sweep from a productive one.
 struct Cleaner {
     dry_run: bool,
     hits: std::cell::Cell<usize>,
@@ -62,26 +62,44 @@ impl Cleaner {
         }
     }
 
-    fn dir(&self, path: &Path) -> bool {
-        if !path.exists() {
-            return false;
+    fn dir(&self, path: &Path) -> Result<bool, DevError> {
+        let removed = if self.dry_run {
+            match std::fs::symlink_metadata(path) {
+                Ok(metadata) => metadata.file_type().is_dir() || metadata.file_type().is_symlink(),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+                Err(error) => return Err(clean_io_error("cannot inspect", path, &error)),
+            }
+        } else {
+            match std::fs::remove_dir_all(path) {
+                Ok(()) => true,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+                Err(error) => return Err(clean_io_error("cannot remove directory", path, &error)),
+            }
+        };
+        if removed {
+            self.hits.set(self.hits.get() + 1);
         }
-        if !self.dry_run {
-            std::fs::remove_dir_all(path).ok();
-        }
-        self.hits.set(self.hits.get() + 1);
-        true
+        Ok(removed)
     }
 
-    fn file(&self, path: &Path) -> bool {
-        if !path.exists() {
-            return false;
+    fn file(&self, path: &Path) -> Result<bool, DevError> {
+        let removed = if self.dry_run {
+            match std::fs::symlink_metadata(path) {
+                Ok(metadata) => !metadata.file_type().is_dir() || metadata.file_type().is_symlink(),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+                Err(error) => return Err(clean_io_error("cannot inspect", path, &error)),
+            }
+        } else {
+            match std::fs::remove_file(path) {
+                Ok(()) => true,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+                Err(error) => return Err(clean_io_error("cannot remove file", path, &error)),
+            }
+        };
+        if removed {
+            self.hits.set(self.hits.get() + 1);
         }
-        if !self.dry_run {
-            std::fs::remove_file(path).ok();
-        }
-        self.hits.set(self.hits.get() + 1);
-        true
+        Ok(removed)
     }
 
     /// Verb for "N files" style messages.
@@ -101,6 +119,13 @@ impl Cleaner {
             "cleaned"
         }
     }
+}
+
+fn clean_io_error(action: &str, path: &Path, source: &std::io::Error) -> DevError {
+    DevError::Io(std::io::Error::new(
+        source.kind(),
+        format!("{action} {}: {source}", path.display()),
+    ))
 }
 
 pub(crate) fn cmd_clean(
@@ -141,7 +166,7 @@ pub(crate) fn cmd_clean(
     // The verify harness writes only under target/verify.
     if project == Project::Pbfhogg {
         let verify_dir = layout::PbfhoggLayout::new(&paths).verify_output();
-        if c.dir(&verify_dir) {
+        if c.dir(&verify_dir)? {
             output::run_msg(&format!("{} verify output", c.verb()));
         }
     }
@@ -151,31 +176,31 @@ pub(crate) fn cmd_clean(
     // cargo's real resolved target dir, where the check/test phase actually
     // built them - not `paths.target_dir` (which a host `target` override can
     // repoint). Routine scratch: reproducible, and nothing else reaches them.
-    clean_rustflags_target_dirs(&pi.target_dir, &c);
+    clean_rustflags_target_dirs(&pi.target_dir, &c)?;
 
-    clean_scratch(project, &paths, &c);
+    clean_scratch(project, &paths, &c)?;
 
     // Elivagar's default `-o` target for `pmtiles-corpus mutate` is a
     // brokkr-designated scratch location. `ocean-build_tmp` is not passed by
     // brokkr and belongs to the external tool, so clean leaves it alone.
     if project == Project::Elivagar {
         let elivagar = layout::ElivagarLayout::new(&paths);
-        if c.dir(&elivagar.corpus_calibrands()) {
+        if c.dir(&elivagar.corpus_calibrands())? {
             output::run_msg(&format!("{} corpus-calibrands", c.past()));
         }
         if archives {
-            clean_archives(&paths, keep, &c);
+            clean_archives(&paths, keep, &c)?;
         }
     }
 
-    clean_artefact_trees(project, &state, &c);
+    clean_artefact_trees(project, &state, &c)?;
 
-    if c.dir(&state.test_hung_dir()) {
+    if c.dir(&state.test_hung_dir())? {
         output::run_msg(&format!("{} test-hung snapshots", c.verb()));
     }
 
     if let Some(status) = crate::user_dirs::sidecar_status()
-        && c.file(&status)
+        && c.file(&status)?
     {
         output::run_msg(&format!("{} sidecar status", c.verb()));
     }
@@ -185,12 +210,12 @@ pub(crate) fn cmd_clean(
     // node_modules. There is no project-local `.brokkr/capture.js`; every stale
     // version goes and the current one stays so the next run does not reinstall.
     if project == Project::Litehtml {
-        if c.dir(state.litehtml().prepare_cache()) {
+        if c.dir(state.litehtml().prepare_cache())? {
             output::run_msg(&format!("{} litehtml prepare cache", c.verb()));
         }
         let stale = litehtml::cmd::stale_script_cache_dirs();
         for dir in &stale {
-            c.dir(dir);
+            c.dir(dir)?;
         }
         if !stale.is_empty() {
             output::run_msg(&format!(
@@ -214,7 +239,7 @@ pub(crate) fn cmd_clean(
         // spares it - retention already bounds its growth. Only the explicit
         // deep clean wipes it wholesale, alongside the worktrees.
         if project == Project::Elivagar {
-            clean_elivagar_outputs(&paths, &c);
+            clean_elivagar_outputs(&paths, &c)?;
         }
         // Legacy sibling worktrees (from before the `~/.brokkr/worktrees`
         // container) count and go too, or the move would orphan them.
@@ -277,27 +302,31 @@ pub(crate) fn cargo_clean_package(build_root: &Path, pkg: &str) -> Result<(), De
 }
 
 /// Clean the exact scratch paths named by each project's typed layout.
-fn clean_scratch(project: Project, paths: &config::ResolvedPaths, c: &Cleaner) {
+fn clean_scratch(
+    project: Project,
+    paths: &config::ResolvedPaths,
+    c: &Cleaner,
+) -> Result<(), DevError> {
     if project == Project::Elivagar {
         let elivagar = layout::ElivagarLayout::new(paths);
-        if c.dir(elivagar.scratch()) {
+        if c.dir(elivagar.scratch())? {
             if !c.dry_run {
-                std::fs::create_dir_all(elivagar.scratch()).ok();
+                std::fs::create_dir_all(elivagar.scratch())?;
             }
             output::run_msg(&format!("{} scratch", c.past()));
         }
         let tmp_dir = elivagar.tilegen_tmp();
-        if tmp_dir.as_path() != elivagar.scratch() && c.dir(&tmp_dir) {
+        if tmp_dir.as_path() != elivagar.scratch() && c.dir(&tmp_dir)? {
             output::run_msg(&format!("{} tilegen_tmp", c.past()));
         }
-        return;
+        return Ok(());
     }
 
     if project == Project::Nidhogg {
         // This is the ingest output path declared by NidhoggLayout. The
         // similarly named project-root tmp directories are not created by brokkr.
         let ingest_output = layout::NidhoggLayout::new(paths).bench_ingest_output();
-        if c.dir(&ingest_output) {
+        if c.dir(&ingest_output)? {
             output::run_msg(&format!("{} nidhogg ingest output", c.past()));
         }
     }
@@ -306,10 +335,10 @@ fn clean_scratch(project: Project, paths: &config::ResolvedPaths, c: &Cleaner) {
         let pbfhogg = layout::PbfhoggLayout::new(paths);
         let mut removed = 0usize;
         for file in pbfhogg.scratch_files() {
-            removed += usize::from(c.file(&file));
+            removed += usize::from(c.file(&file)?);
         }
         for dir in pbfhogg.scratch_dirs() {
-            removed += usize::from(c.dir(&dir));
+            removed += usize::from(c.dir(&dir)?);
         }
         if removed > 0 {
             output::run_msg(&format!(
@@ -324,7 +353,7 @@ fn clean_scratch(project: Project, paths: &config::ResolvedPaths, c: &Cleaner) {
     // clean does not decode a PID from its basename.
     let mut fifo_count = 0usize;
     for fifo in layout::SidecarFifos::new(&paths.scratch_dir).existing() {
-        if c.file(&fifo) {
+        if c.file(&fifo)? {
             fifo_count += 1;
         }
     }
@@ -335,6 +364,7 @@ fn clean_scratch(project: Project, paths: &config::ResolvedPaths, c: &Cleaner) {
             output::count(fifo_count, "sidecar FIFO")
         ));
     }
+    Ok(())
 }
 
 /// Remove child directories from a brokkr-designated artifact root while
@@ -343,52 +373,68 @@ fn clean_artifact_children(
     root: &Path,
     permanent_files: &[std::path::PathBuf],
     c: &Cleaner,
-) -> usize {
-    let Ok(metadata) = std::fs::symlink_metadata(root) else {
-        return 0;
+) -> Result<usize, DevError> {
+    let metadata = match std::fs::symlink_metadata(root) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(clean_io_error("cannot inspect", root, &error)),
     };
     if !metadata.file_type().is_dir() {
-        return 0;
+        return Ok(0);
     }
-    let Ok(entries) = std::fs::read_dir(root) else {
-        return 0;
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(clean_io_error("cannot read directory", root, &error)),
     };
     let mut removed = 0usize;
-    for entry in entries.flatten() {
+    for entry in entries {
+        let entry =
+            entry.map_err(|error| clean_io_error("cannot read directory entry in", root, &error))?;
         let path = entry.path();
-        if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+        let kind = entry
+            .file_type()
+            .map_err(|error| clean_io_error("cannot inspect", &path, &error))?;
+        if !kind.is_dir() {
             continue;
         }
         if permanent_files.iter().any(|file| file.starts_with(&path)) {
-            removed += clean_artifact_children(&path, permanent_files, c);
-        } else if c.dir(&path) {
+            removed += clean_artifact_children(&path, permanent_files, c)?;
+        } else if c.dir(&path)? {
             removed += 1;
         }
     }
-    removed
+    Ok(removed)
 }
 
 /// Remove one explicitly owned artifact tree, descending only if it contains
 /// a named permanent store.
-fn clean_artifact_root(root: &Path, permanent_files: &[std::path::PathBuf], c: &Cleaner) -> usize {
+fn clean_artifact_root(
+    root: &Path,
+    permanent_files: &[std::path::PathBuf],
+    c: &Cleaner,
+) -> Result<usize, DevError> {
     if permanent_files.iter().any(|file| file.starts_with(root)) {
         clean_artifact_children(root, permanent_files, c)
     } else {
-        usize::from(c.dir(root))
+        Ok(usize::from(c.dir(root)?))
     }
 }
 
 /// Clean each project's artifact roots from its typed layout. Durable stores
 /// are named separately and never inferred from the contents of a directory.
-fn clean_artefact_trees(project: Project, state: &layout::ProjectState, c: &Cleaner) {
+fn clean_artefact_trees(
+    project: Project,
+    state: &layout::ProjectState,
+    c: &Cleaner,
+) -> Result<(), DevError> {
     if project == Project::Ratatoskr {
         let ratatoskr = state.ratatoskr();
         let permanent = [ratatoskr.gate_db()];
-        let removed = ratatoskr
-            .artifact_roots()
-            .iter()
-            .map(|root| clean_artifact_root(root, &permanent, c))
-            .sum::<usize>();
+        let mut removed = 0usize;
+        for root in ratatoskr.artifact_roots() {
+            removed += clean_artifact_root(&root, &permanent, c)?;
+        }
         if removed > 0 {
             output::run_msg(&format!(
                 "{} {} in ratatoskr artefacts",
@@ -398,18 +444,18 @@ fn clean_artefact_trees(project: Project, state: &layout::ProjectState, c: &Clea
         }
     }
 
-    if project == Project::Dellingr && c.dir(state.dellingr().scratch()) {
+    if project == Project::Dellingr && c.dir(state.dellingr().scratch())? {
         output::run_msg(&format!("{} dellingr scratch dir", c.verb()));
     }
 
-    if project == Project::Mogwai && c.dir(state.mogwai().scratch()) {
+    if project == Project::Mogwai && c.dir(state.mogwai().scratch())? {
         output::run_msg(&format!("{} mogwai scratch dir", c.verb()));
     }
 
     if project == Project::Piners {
         let piners = state.piners();
         let corpus = piners.corpus_root();
-        let removed = clean_artifact_children(&corpus, &[piners.corpus_runs_db()], c);
+        let removed = clean_artifact_children(&corpus, &[piners.corpus_runs_db()], c)?;
         if removed > 0 {
             output::run_msg(&format!(
                 "{} {} in piners corpus",
@@ -421,6 +467,7 @@ fn clean_artefact_trees(project: Project, state: &layout::ProjectState, c: &Clea
         // SQLite sidecars); lint runs create no per-run artifact directories.
         // Keeping that path outside the artifact sweep is deliberate.
     }
+    Ok(())
 }
 
 /// Deep-clean (`--worktrees`) the durable tilegen output store: removes every
@@ -430,12 +477,12 @@ fn clean_artefact_trees(project: Project, state: &layout::ProjectState, c: &Clea
 /// with `output = "data"` it would have taken the hand-built ocean artifact
 /// `ocean-tiles.pmtiles` too. Skipped when the output dir coincides with
 /// scratch (already wiped by the caller).
-fn clean_elivagar_outputs(paths: &config::ResolvedPaths, c: &Cleaner) {
+fn clean_elivagar_outputs(paths: &config::ResolvedPaths, c: &Cleaner) -> Result<(), DevError> {
     let elivagar = layout::ElivagarLayout::new(paths);
     if elivagar.output() == elivagar.scratch() {
-        return;
+        return Ok(());
     }
-    clean_archives(paths, 0, c);
+    clean_archives(paths, 0, c)
 }
 
 /// `--archives`: prune canonical `<dataset>-<variant>-<commit>.pmtiles` archives
@@ -445,7 +492,7 @@ fn clean_elivagar_outputs(paths: &config::ResolvedPaths, c: &Cleaner) {
 /// `(dataset, variant)` name shapes - filenames are never parsed back, since
 /// dataset names carry hyphens. Anything outside the configured archive
 /// namespace (hand-named files, the ocean artifact, pre-rename archives) stays.
-fn clean_archives(paths: &config::ResolvedPaths, keep: usize, c: &Cleaner) {
+fn clean_archives(paths: &config::ResolvedPaths, keep: usize, c: &Cleaner) -> Result<(), DevError> {
     let elivagar = layout::ElivagarLayout::new(paths);
     let output_dir = elivagar.output();
     let groups = elivagar.datasets().iter().flat_map(|(dataset, config)| {
@@ -455,16 +502,25 @@ fn clean_archives(paths: &config::ResolvedPaths, keep: usize, c: &Cleaner) {
     });
     let store = crate::elivagar::archive_store::ArchiveStore::new(output_dir.to_path_buf())
         .with_groups(groups);
-    let removed = match store.prune(keep, |path| c.file(path)) {
-        Ok(removed) => removed,
-        Err(error) => {
-            output::error(&format!(
-                "cannot read output dir {}: {error} - archives not pruned",
-                output_dir.display()
-            ));
-            return;
+    let mut removal_error = None;
+    let removed = store.prune(keep, |path| {
+        if removal_error.is_some() {
+            return false;
         }
-    };
+        match c.file(path) {
+            Ok(removed) => removed,
+            Err(error) => {
+                removal_error = Some(error);
+                false
+            }
+        }
+    })?;
+    if let Some(error) = removal_error {
+        return Err(DevError::Config(format!(
+            "cannot prune archives in {}: {error}",
+            output_dir.display()
+        )));
+    }
     if removed > 0 {
         output::run_msg(&format!(
             "{} {}",
@@ -472,17 +528,18 @@ fn clean_archives(paths: &config::ResolvedPaths, keep: usize, c: &Cleaner) {
             output::count(removed, "archive")
         ));
     }
+    Ok(())
 }
 /// Remove the per-sweep isolated target dirs (`<target>/rustflags-<hash>`) that
 /// a `rustflags` `[[check]]` entry mints (see `check_cmd::sweep_env`'s
 /// `isolated_target_dir`). They are reproducible build scratch - a full rebuild
 /// recreates them - and nothing else reclaims them: `cargo clean -p` only
 /// touches the default target dir, and editing a sweep's `rustflags` orphans the
-/// old hash's tree permanently. A routine `brokkr clean` sweeps them (S3-06).
-fn clean_rustflags_target_dirs(target_dir: &Path, c: &Cleaner) {
+/// old hash's tree permanently. A routine `brokkr clean` sweeps them.
+fn clean_rustflags_target_dirs(target_dir: &Path, c: &Cleaner) -> Result<(), DevError> {
     let mut removed = 0usize;
     for path in layout::RustflagsTargets::new(target_dir).existing_dirs() {
-        if c.dir(&path) {
+        if c.dir(&path)? {
             removed += 1;
         }
     }
@@ -493,4 +550,5 @@ fn clean_rustflags_target_dirs(target_dir: &Path, c: &Cleaner) {
             output::count(removed, "isolated rustflags target dir")
         ));
     }
+    Ok(())
 }

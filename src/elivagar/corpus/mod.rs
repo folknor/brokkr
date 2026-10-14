@@ -10,7 +10,7 @@
 //! - `diff`     - the localized content diff (leaves / zooms / buckets).
 //! - `contract` - the comparability gate (provenance read + gating policy).
 //! - `manifest` - the hard-tiles ledger.
-//! - `render`   - the canonical SVG render core (scaffold pending decoder API).
+//! - `render`   - the canonical SVG render core.
 //! - `mutate`   - the calibration instrument.
 //!
 //! The `check` pipeline follows the ordering fixed in `brokkr.md`: a condition
@@ -40,7 +40,7 @@ use std::path::Path;
 use super::eliv::{ArchiveView, BlobRef, next_zoom_boundary, tile_id_to_zxy};
 use canonical::{DecodeScratch, semantic_hash};
 use contract::{ContractDoc, ContractState};
-use digest::{Baseline, Digest, LeafRun};
+use digest::{Digest, LeafRun};
 
 // Verdict-facing types the dispatch consumes.
 pub use digest::DigestMode;
@@ -86,6 +86,13 @@ pub struct CheckReport {
     pub contract_diffs: Vec<String>,
     pub warnings: Vec<String>,
     pub changed: u64,
+    pub changed_unit: Option<ChangedUnit>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ChangedUnit {
+    LeafRuns,
+    Buckets,
 }
 
 fn report(message: impl Into<String>) -> CheckReport {
@@ -162,8 +169,8 @@ fn format_guard(a: &ArchiveView) -> Option<String> {
 /// The blob-level canonical hash is decoded once per unique blob and the runs
 /// are split at zoom boundaries then merged within a zoom - a canonical run is a
 /// maximal span WITHIN one zoom sharing one hash, so a shared blob straddling a
-/// zoom boundary stays two runs. (Sequential in this scaffold; elivagar's
-/// original parallelized the per-blob decode.)
+/// zoom boundary stays two runs. Blob decoding is sequential here; elivagar's
+/// original parallelized the per-blob decode.
 ///
 /// `sort_scratch` is the directory the digest's external sort may spill into
 /// (`ProjectState::corpus_sort_dir`).
@@ -242,7 +249,7 @@ fn contract_from_file(path: &Path) -> io::Result<Result<ContractDoc, String>> {
     Ok(
         match contract::extract_contract(&format!("{{\"elivagar\":{text}}}")) {
             ContractState::Contract(c) => Ok(c),
-            s => Err(format!("invalid committed corpus contract: {s:?}")),
+            s => Err(format!("invalid committed corpus contract: {s}")),
         },
     )
 }
@@ -252,7 +259,7 @@ fn contract_from_file(path: &Path) -> io::Result<Result<ContractDoc, String>> {
 fn candidate_contract(a: &ArchiveView) -> io::Result<Result<ContractDoc, String>> {
     Ok(match contract::extract_contract(&a.metadata()?) {
         ContractState::Contract(c) => Ok(c),
-        s => Err(format!("archive contract refused: {s:?}")),
+        s => Err(format!("archive contract refused: {s}")),
     })
 }
 
@@ -272,7 +279,6 @@ enum Gate {
 
 struct Passed {
     view: ArchiveView,
-    base: Baseline,
     warnings: Vec<String>,
     tiles: u64,
     unique: u64,
@@ -347,17 +353,17 @@ fn gate_through_walk(archive: &Path, corpus_dir: &Path, sort_scratch: &Path) -> 
     if !content_ok {
         let mut lines = vec!["content mismatch".to_string()];
         lines.extend(diff::zoom_delta_lines(&base.zooms, &d.zooms));
-        let changed = match base.mode {
+        let (changed, changed_unit) = match base.mode {
             DigestMode::Leaves => {
                 let (n, diff_lines) =
                     diff::leaf_diff(committed_leaves.as_deref().unwrap_or(&[]), &current_leaves);
                 lines.extend(diff_lines);
-                n
+                (n, ChangedUnit::LeafRuns)
             }
             DigestMode::Buckets => {
                 let (n, diff_lines) = diff::bucket_delta_lines(&base.buckets, &d.buckets);
                 lines.extend(diff_lines);
-                n
+                (n, ChangedUnit::Buckets)
             }
         };
         return Ok(Gate::Refused(
@@ -366,13 +372,13 @@ fn gate_through_walk(archive: &Path, corpus_dir: &Path, sort_scratch: &Path) -> 
                 message: lines.join("\n"),
                 warnings,
                 changed,
+                changed_unit: Some(changed_unit),
                 ..Default::default()
             },
         ));
     }
     Ok(Gate::Passed(Box::new(Passed {
         view,
-        base,
         warnings,
         tiles: d.tiles,
         unique: d.unique,
@@ -389,15 +395,15 @@ pub fn check(
     corpus_dir: &Path,
     sort_scratch: &Path,
 ) -> io::Result<(Outcome, CheckReport)> {
-    let (view, base, mut warnings, tiles, unique) =
+    let (view, mut warnings, tiles, unique) =
         match gate_through_walk(archive, corpus_dir, sort_scratch)? {
             Gate::Refused(o, r) => return Ok((o, r)),
-            Gate::Passed(p) => (p.view, p.base, p.warnings, p.tiles, p.unique),
+            Gate::Passed(p) => (p.view, p.warnings, p.tiles, p.unique),
         };
 
     // STEP 4 - staleness (subject: the baseline; exit 3, strictly subordinate).
     // Only reached with a passing content walk, so it can never mask a mismatch.
-    let stale = match svg_staleness(&view, corpus_dir, &base)? {
+    let stale = match svg_staleness(&view, corpus_dir)? {
         Ok(stale) => stale,
         Err(msg) => {
             return Ok((
@@ -450,11 +456,7 @@ pub fn check(
 /// through `baseline_material` like step 1's reads, so they report as exit 3
 /// rather than escaping as an `io::Error` the dispatch would turn into a
 /// non-verdict failure.
-fn svg_staleness(
-    view: &ArchiveView,
-    corpus_dir: &Path,
-    _base: &Baseline,
-) -> io::Result<Result<Vec<String>, String>> {
+fn svg_staleness(view: &ArchiveView, corpus_dir: &Path) -> io::Result<Result<Vec<String>, String>> {
     let layout = layout::CorpusLayout::new(corpus_dir);
     let manifest_path = layout.manifest();
     if !manifest_path.exists() {
@@ -512,7 +514,12 @@ fn svg_staleness(
             (!entry.layers.is_empty()).then_some(entry.layers.as_slice()),
         )?;
         let path = tiles.join(&name);
-        if std::fs::read(&path).ok().as_deref() != Some(svg.bytes.as_slice()) {
+        let current = match std::fs::read(&path) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error),
+        };
+        if current.as_deref() != Some(svg.bytes.as_slice()) {
             stale.push(path.display().to_string());
         }
     }
@@ -898,7 +905,7 @@ mod baseline_verdict_tests {
             &corpus_dir.join("sort-scratch"),
         )
         .expect("baseline damage is a verdict, not an escaping io::Error")
-            .0
+        .0
     }
 
     #[test]

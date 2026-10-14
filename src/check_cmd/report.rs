@@ -56,26 +56,52 @@ struct Report {
 }
 
 static REPORT: std::sync::Mutex<Option<Report>> = std::sync::Mutex::new(None);
+static REPORT_POISON_REPORTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 fn with_report<R>(f: impl FnOnce(&mut Report) -> R) -> Option<R> {
-    let mut guard = REPORT
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut guard = match REPORT.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            drop(poisoned.into_inner());
+            report_poisoned();
+            return None;
+        }
+    };
     guard.as_mut().map(f)
 }
 
+fn report_poisoned() {
+    if !REPORT_POISON_REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        output::error("check report state is poisoned; check output may be incomplete");
+    }
+}
+
 /// Start a fresh report. Called once per `cmd_check`.
-fn report_begin() {
-    *REPORT
+fn report_begin() -> Result<(), crate::error::DevError> {
+    let mut report = REPORT
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Report::default());
+        .map_err(|_| crate::error::DevError::Build("check report state is poisoned".into()))?;
+    if report.is_some() {
+        return Err(crate::error::DevError::Build(
+            "a check report is already active in this process".into(),
+        ));
+    }
+    *report = Some(Report::default());
+    Ok(())
 }
 
 fn report_end() {
-    REPORT
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .take();
+    match REPORT.lock() {
+        Ok(mut report) => {
+            report.take();
+        }
+        Err(poisoned) => {
+            let mut report = poisoned.into_inner();
+            report.take();
+            report_poisoned();
+        }
+    }
 }
 
 /// Record a green phase. Collected into the conventions line while that
@@ -246,10 +272,10 @@ fn cargo_line(commands: bool, line: &str) {
 struct RunScope;
 
 impl RunScope {
-    fn begin() -> Self {
-        report_begin();
+    fn begin() -> Result<Self, crate::error::DevError> {
+        report_begin()?;
         output::enable_status_line();
-        RunScope
+        Ok(RunScope)
     }
 }
 

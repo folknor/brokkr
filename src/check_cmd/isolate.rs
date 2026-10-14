@@ -28,22 +28,12 @@ fn run_isolated_sweep(
     attempt: &Attempt,
     prepared: &PreparedLane,
     tap: &LaneTap,
-    doctests: bool,
     commands: bool,
     mut timings: Option<&mut Vec<TestTiming>>,
 ) -> Result<bool, DevError> {
-    // Doctests cannot be enumerated per test binary (they live in the
-    // `--doc` pseudo-target, which has no `--list`-able executable), so a
-    // process-isolated lane cannot run them. Announce the omission rather
-    // than swallow a project's `[test] doctests = true` in silence.
-    if doctests {
-        output::warn(&format!(
-            "{}: `doctests = true` has no effect on a process-isolated sweep - \
-             doctests cannot be enumerated per binary, so this lane runs none",
-            sweep.label
-        ));
-    }
-
+    // Doctests require a serial/doc-only carrier. This binary-only lane has
+    // no doctest executable; carrier admission belongs to invocation planning,
+    // as it does for parallel and nextest lanes.
     let env_refs = prepared.env.refs();
 
     announce_sweep(
@@ -278,10 +268,6 @@ fn isolated_args(name: &str, include_ignored: bool) -> Vec<&str> {
         "--exact",
         name,
         "--test-threads=1",
-        "-Z",
-        "unstable-options",
-        "--format",
-        "json",
     ];
     if include_ignored {
         args.push("--include-ignored");
@@ -326,7 +312,7 @@ fn run_one_isolated_test(
             program: &case.binary.executable,
         },
         test_runner::LibtestInvocation {
-            args: &args,
+            args: test_runner::LibtestArgs::from_argv(test_runner::Launch::Direct { program: &case.binary.executable }, &args)?,
             cwd: &cwd,
             state_root,
             env: &env_pairs,
@@ -585,11 +571,7 @@ mod isolate_tests {
             [
                 "--exact",
                 "module::case",
-                "--test-threads=1",
-                "-Z",
-                "unstable-options",
-                "--format",
-                "json"
+                "--test-threads=1"
             ]
         );
         assert_eq!(

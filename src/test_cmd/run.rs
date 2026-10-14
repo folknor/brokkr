@@ -75,6 +75,20 @@ pub(crate) fn run(
     result
 }
 
+/// The per-test wall ceiling for a run: the default, or `--timeout` when it
+/// lies within the hard limit.
+fn test_ceiling(timeout: Option<u64>) -> Result<Duration, DevError> {
+    if let Some(timeout) = timeout
+        && (timeout == 0 || timeout > test_runner::ceilings::MAX_TEST_TIMEOUT.as_secs())
+    {
+        return Err(DevError::Config(format!(
+            "--timeout must be between 1 and {} seconds",
+            test_runner::ceilings::MAX_TEST_TIMEOUT.as_secs()
+        )));
+    }
+    Ok(timeout.map_or(test_runner::TEST_TIMEOUT, Duration::from_secs))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn run_sweeps(
     dev_config: &DevConfig,
@@ -90,7 +104,7 @@ pub(super) fn run_sweeps(
     sweep_filter: Option<&str>,
 ) -> Result<(), DevError> {
     let repeat = repeat.max(1);
-    let ceiling = timeout.map_or(test_runner::TEST_TIMEOUT, Duration::from_secs);
+    let ceiling = test_ceiling(timeout)?;
     let sweeps = resolve_sweeps(dev_config.test.as_ref(), &dev_config.check, sweep_filter)?;
 
     let (pkg, source) = resolve_package(package, dev_config, project)?;

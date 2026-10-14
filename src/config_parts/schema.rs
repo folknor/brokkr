@@ -850,7 +850,7 @@ where
 /// `build_packages` rebuilds each listed cargo package with the same
 /// feature flags before the test phase, so `tests/cli_*.rs`
 /// `CliInvoker` calls hit a binary built for the sweep's feature set
-/// (request 2: CLI binary feature parity).
+/// so CLI integration tests use binaries built for the same feature set.
 ///
 /// `features` is a configured list, not an argv: each run projects it onto
 /// the packages that run selects, dropping a token that only a package

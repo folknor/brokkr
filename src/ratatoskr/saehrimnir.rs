@@ -1,8 +1,7 @@
 //! Sæhrimnir orchestration helpers for service and sync runs.
 //!
-//! Sæhrimnir is the mock email-protocol server (plan 2,
-//! `/home/folk/Programs/sæhrimnir/`). When brokkr spawns it for service
-//! or sync orchestration the contract is process-level only:
+//! Sæhrimnir is an external mock email-protocol server. When brokkr spawns
+//! it for service or sync orchestration the contract is process-level only:
 //!
 //! - argv: `--fixture <PATH> --readiness-file <PATH>` (plus optional
 //!   per-protocol port flags brokkr does not use in v0; ephemeral
@@ -25,6 +24,7 @@ use crate::config::project_config::ratatoskr::RatatoskrConfig;
 use crate::error::{DevError, ProcessEnding};
 use crate::lockfile::LockGuard;
 use crate::output;
+use crate::ratatoskr::resolve_config_path;
 use crate::ratatoskr::timing::{POLL_INTERVAL, SHUTDOWN_POLL_INTERVAL};
 pub use crate::ratatoskr::timing::{READINESS_BUDGET, SHUTDOWN_BUDGET};
 
@@ -665,7 +665,7 @@ pub fn run_mock_serve(req: &MockServeRequest<'_>) -> Result<(), DevError> {
     let mock_dir = state.ratatoskr().mock_artifacts();
     std::fs::create_dir_all(&mock_dir).map_err(DevError::Io)?;
     let readiness = mock_dir.join("readiness");
-    // Stale sentinel from a prior crashed run would fool wait_for_sentinel
+    // Stale sentinel from a prior crashed run would fool wait_for_endpoints
     // into resolving immediately with the wrong ports.
     if readiness.exists() {
         std::fs::remove_file(&readiness).map_err(DevError::Io)?;
@@ -766,11 +766,7 @@ pub fn require_path(
              Required to locate sæhrimnir's binary and fixtures."
         ))
     })?;
-    Ok(if raw.is_absolute() {
-        raw.clone()
-    } else {
-        project_root.join(raw)
-    })
+    Ok(resolve_config_path(project_root, raw))
 }
 
 /// Build a list of `(env_var_name, value)` pairs for the protocols whose

@@ -31,6 +31,7 @@ struct DatasetToml {
     shown: String,
     doc: toml_edit::DocumentMut,
     hostname: String,
+    host_namespace: bool,
     dataset_key: String,
     /// One narration line per change, printed only once the commit lands so
     /// the log never claims an edit that was rolled back.
@@ -38,16 +39,21 @@ struct DatasetToml {
 }
 
 impl DatasetToml {
-    /// Parse the file holding `[<hostname>.datasets.<dataset_key>]` for
-    /// editing. The composition is resolved afresh rather than taken from the
-    /// loaded config, so the choice of file reflects the files as they are
+    /// Parse the file holding this host's dataset table for editing, retaining
+    /// whether the config uses `[host.<hostname>]` or the legacy top-level
+    /// host table. The composition is resolved afresh rather than taken from
+    /// the loaded config, so the choice of file reflects the files as they are
     /// about to be edited.
     fn open(project_root: &Path, hostname: &str, dataset_key: &str) -> Result<Self, DevError> {
         let root = project_root.join("brokkr.toml");
         let (_, sources) = crate::config::compose(&root)?;
-        let path = sources
-            .owner_of_table(&[hostname, "datasets", dataset_key])?
-            .to_path_buf();
+        let host_namespace = !sources.table_files(&["host", hostname]).is_empty();
+        let table_path = if host_namespace {
+            vec!["host", hostname, "datasets", dataset_key]
+        } else {
+            vec![hostname, "datasets", dataset_key]
+        };
+        let path = sources.owner_of_table(&table_path)?.to_path_buf();
         let shown = if path == root {
             "brokkr.toml".to_owned()
         } else {
@@ -62,6 +68,7 @@ impl DatasetToml {
             shown,
             doc,
             hostname: hostname.to_owned(),
+            host_namespace,
             dataset_key: dataset_key.to_owned(),
             changes: Vec::new(),
         })
@@ -69,32 +76,53 @@ impl DatasetToml {
 
     /// Display form of a table path under this dataset, for narration.
     fn label(&self, rest: &[&str]) -> String {
-        let mut parts = vec![self.hostname.as_str(), "datasets", self.dataset_key.as_str()];
-        parts.extend_from_slice(rest);
+        let mut parts = self.table_path();
+        parts.extend(rest.iter().map(|part| (*part).to_owned()));
         format!("[{}]", parts.join("."))
+    }
+
+    fn table_path(&self) -> Vec<String> {
+        if self.host_namespace {
+            vec![
+                "host".into(),
+                self.hostname.clone(),
+                "datasets".into(),
+                self.dataset_key.clone(),
+            ]
+        } else {
+            vec![
+                self.hostname.clone(),
+                "datasets".into(),
+                self.dataset_key.clone(),
+            ]
+        }
     }
 
     /// The table at `<host>.datasets.<dataset>.<rest...>`, creating any
     /// missing level as an implicit table (no header of its own).
     fn table_mut(&mut self, rest: &[&str]) -> Result<&mut toml_edit::Table, DevError> {
-        let mut path: Vec<&str> = vec![self.hostname.as_str(), "datasets", self.dataset_key.as_str()];
-        path.extend_from_slice(rest);
+        let mut path = self.table_path();
+        path.extend(rest.iter().map(|part| (*part).to_owned()));
         let mut table = self.doc.as_table_mut();
         for (depth, key) in path.iter().enumerate() {
-            if !table.contains_key(key) {
+            if !table.contains_key(key.as_str()) {
                 let mut fresh = toml_edit::Table::new();
                 fresh.set_implicit(true);
-                table.insert(key, toml_edit::Item::Table(fresh));
+                table.insert(key.as_str(),toml_edit::Item::Table(fresh));
             }
             table = table
-                .get_mut(key)
+                .get_mut(key.as_str())
                 .and_then(toml_edit::Item::as_table_mut)
                 .ok_or_else(|| {
                     DevError::Config(format!(
                         "{}: [{}] is not a table (inline tables and dotted keys \
                          are not supported here)",
                         self.shown,
-                        path[..=depth].join(".")
+                        path[..=depth]
+                            .iter()
+                            .map(String::as_str)
+                            .collect::<Vec<_>>()
+                            .join(".")
                     ))
                 })?;
         }
@@ -104,10 +132,10 @@ impl DatasetToml {
     /// Whether `[<host>.datasets.<dataset>.<rest...>]` exists.
     fn has(&self, rest: &[&str]) -> bool {
         let mut item = self.doc.as_item();
-        let mut path: Vec<&str> = vec![self.hostname.as_str(), "datasets", self.dataset_key.as_str()];
-        path.extend_from_slice(rest);
+        let mut path = self.table_path();
+        path.extend(rest.iter().map(|part| (*part).to_owned()));
         for key in path {
-            match item.get(key) {
+            match item.get(key.as_str()) {
                 Some(next) => item = next,
                 None => return false,
             }
@@ -311,7 +339,7 @@ fn generate_indexed_pbf(
 ) -> Result<(), DevError> {
     output::download_msg(&format!("  generating indexed PBF via cat -> {}", dest.display()));
     let binary = build::cargo_build(
-        &build::BuildConfig::release(Some("pbfhogg-cli")),
+        &build::BuildConfig::release(crate::project::Project::Pbfhogg.cli_package()),
         build_root,
     )?
     .path;
@@ -332,4 +360,55 @@ fn generate_indexed_pbf(
     captured.check_success(&binary_str)?;
     staged.commit()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod toml_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    use super::*;
+
+    fn config_root(name: &str, contents: &str) -> PathBuf {
+        let root = crate::test_scratch::scratch("download_toml", name);
+        std::fs::write(root.join("brokkr.toml"), contents).unwrap();
+        root
+    }
+
+    #[test]
+    fn writer_keeps_the_explicit_host_namespace() {
+        let root = config_root(
+            "explicit_host_namespace",
+            "project = \"pbfhogg\"\n\n[host.local.datasets.denmark]\norigin = \"Geofabrik\"\n",
+        );
+        let mut config = DatasetToml::open(&root, "local", "denmark").unwrap();
+        config.set_pbf("raw", "denmark.osm.pbf", "digest").unwrap();
+        config.commit().unwrap();
+
+        let text = std::fs::read_to_string(root.join("brokkr.toml")).unwrap();
+        let parsed: toml::Value = toml::from_str(&text).unwrap();
+        assert_eq!(
+            parsed["host"]["local"]["datasets"]["denmark"]["pbf"]["raw"]["file"]
+                .as_str(),
+            Some("denmark.osm.pbf")
+        );
+        assert!(parsed.get("local").is_none(), "unexpected legacy host table:\n{text}");
+    }
+
+    #[test]
+    fn writer_keeps_the_legacy_host_namespace() {
+        let root = config_root(
+            "legacy_host_namespace",
+            "project = \"pbfhogg\"\n\n[local.datasets.denmark]\norigin = \"Geofabrik\"\n",
+        );
+        let mut config = DatasetToml::open(&root, "local", "denmark").unwrap();
+        config.set_pbf("raw", "denmark.osm.pbf", "digest").unwrap();
+        config.commit().unwrap();
+
+        let text = std::fs::read_to_string(root.join("brokkr.toml")).unwrap();
+        let parsed: toml::Value = toml::from_str(&text).unwrap();
+        assert_eq!(
+            parsed["local"]["datasets"]["denmark"]["pbf"]["raw"]["file"].as_str(),
+            Some("denmark.osm.pbf")
+        );
+        assert!(parsed.get("host").is_none(), "unexpected explicit host table:\n{text}");
+    }
 }

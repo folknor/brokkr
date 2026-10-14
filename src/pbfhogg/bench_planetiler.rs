@@ -14,7 +14,7 @@ struct ParsedResult {
     kv: Vec<KvPair>,
 }
 
-fn parse_planetiler_output(stderr: &str) -> Vec<ParsedResult> {
+fn parse_planetiler_output(stderr: &str) -> Result<Vec<ParsedResult>, DevError> {
     let mut results = Vec::new();
 
     for block in stderr.split("---") {
@@ -37,30 +37,51 @@ fn parse_planetiler_output(stderr: &str) -> Vec<ParsedResult> {
 
             match key {
                 "mode" => mode = Some(value.to_owned()),
-                "elapsed_ms" => elapsed_ms = value.parse().ok(),
-                "nodes" => nodes = value.parse().ok(),
-                "ways" => ways = value.parse().ok(),
-                "relations" => relations = value.parse().ok(),
+                "elapsed_ms" => elapsed_ms = Some(parse_metric(key, value)?),
+                "nodes" => nodes = Some(parse_metric(key, value)?),
+                "ways" => ways = Some(parse_metric(key, value)?),
+                "relations" => relations = Some(parse_metric(key, value)?),
                 _ => {}
             }
         }
 
-        if let (Some(mode), Some(elapsed_ms)) = (mode, elapsed_ms) {
-            let kv = vec![
-                KvPair::int("nodes", nodes.unwrap_or(0)),
-                KvPair::int("ways", ways.unwrap_or(0)),
-                KvPair::int("relations", relations.unwrap_or(0)),
-            ];
+        let Some(mode) = mode else { continue };
+        let elapsed_ms = required_metric("elapsed_ms", elapsed_ms)?;
+        let nodes = required_metric("nodes", nodes)?;
+        let ways = required_metric("ways", ways)?;
+        let relations = required_metric("relations", relations)?;
+        let kv = vec![
+            KvPair::int("nodes", nodes),
+            KvPair::int("ways", ways),
+            KvPair::int("relations", relations),
+        ];
 
-            results.push(ParsedResult {
-                mode,
-                elapsed_ms,
-                kv,
-            });
-        }
+        results.push(ParsedResult {
+            mode,
+            elapsed_ms,
+            kv,
+        });
     }
 
-    results
+    Ok(results)
+}
+
+fn parse_metric(key: &str, value: &str) -> Result<i64, DevError> {
+    let parsed = value.parse::<i64>().map_err(|_| {
+        DevError::Build(format!(
+            "planetiler benchmark emitted invalid {key}: {value}"
+        ))
+    })?;
+    if parsed < 0 {
+        return Err(DevError::Build(format!(
+            "planetiler benchmark emitted negative {key}: {parsed}"
+        )));
+    }
+    Ok(parsed)
+}
+
+fn required_metric(key: &str, value: Option<i64>) -> Result<i64, DevError> {
+    value.ok_or_else(|| DevError::Build(format!("planetiler benchmark result is missing {key}")))
 }
 
 fn run_planetiler_subprocess(
@@ -90,7 +111,7 @@ fn run_planetiler_subprocess(
     captured.check_success(java_str)?;
 
     let stderr = String::from_utf8_lossy(&captured.stderr);
-    Ok(parse_planetiler_output(&stderr))
+    parse_planetiler_output(&stderr)
 }
 
 pub fn run(

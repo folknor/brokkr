@@ -6,7 +6,7 @@ mod verdict;
 pub(crate) use activation::decide_active_sweeps;
 use activation::{build_clippy_sweep, effective_profile_name};
 use conventions::{
-    report_script_stage, run_dependency_rules, run_gremlins, run_header, run_manifest,
+    LazyTree, report_script_stage, run_dependency_rules, run_gremlins, run_header, run_manifest,
     run_publish_cycle, run_script_checks, run_textlint, scope_order,
 };
 use reporter::Reporter;

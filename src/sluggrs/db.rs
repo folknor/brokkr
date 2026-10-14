@@ -66,11 +66,6 @@ impl SnapshotDb {
             .set_approval(snapshot_id, commit, pixel_diff_pct, None)
     }
 
-    #[allow(dead_code)]
-    pub fn latest_run(&self) -> Result<Option<RunSummary>, DevError> {
-        self.inner.latest_run()
-    }
-
     pub fn run_results(&self, run_id: &str) -> Result<Vec<ResultRow>, DevError> {
         self.inner.run_results(run_id)
     }
@@ -146,8 +141,12 @@ mod tests {
             "sluggrs-run"
         );
         assert_eq!(
-            snapshots.get_approval("snapshot").unwrap().unwrap().commit,
-            "commit"
+            snapshots
+                .get_approval("snapshot")
+                .unwrap()
+                .unwrap()
+                .subject_id,
+            "snapshot"
         );
         drop(snapshots);
 
@@ -161,8 +160,12 @@ mod tests {
             "litehtml-run"
         );
         assert_eq!(
-            mechanical.get_approval("fixture").unwrap().unwrap().commit,
-            "commit"
+            mechanical
+                .get_approval("fixture")
+                .unwrap()
+                .unwrap()
+                .subject_id,
+            "fixture"
         );
     }
 }

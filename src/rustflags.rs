@@ -35,7 +35,116 @@
 //! `[target.<host-triple>] rustflags` is common (linker choice, `target-cpu`),
 //! and it decides the winning layer for every project on that machine.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+
+/// Cargo's two environment rustflags sources and their precedence. Keep the
+/// raw values so presence, including a set-but-empty or non-Unicode value,
+/// cannot be confused with absence by a caller.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct RustflagsEnv {
+    encoded: Option<std::ffi::OsString>,
+    plain: Option<std::ffi::OsString>,
+}
+
+impl RustflagsEnv {
+    /// Resolve the values one cargo process will inherit. Explicit overrides
+    /// take precedence over brokkr's environment, just as they do for the
+    /// other cargo launch settings.
+    pub(crate) fn from(env: EffectiveEnv<'_>) -> Self {
+        Self {
+            encoded: env.get_os("CARGO_ENCODED_RUSTFLAGS"),
+            plain: env.get_os("RUSTFLAGS"),
+        }
+    }
+
+    pub(crate) fn process() -> Self {
+        Self::from(EffectiveEnv::new(&[]))
+    }
+
+    /// The source Cargo reads, applying its documented encoded-env priority.
+    fn active(&self) -> Option<(&'static str, &std::ffi::OsString)> {
+        self.encoded
+            .as_ref()
+            .map(|value| ("CARGO_ENCODED_RUSTFLAGS", value))
+            .or_else(|| self.plain.as_ref().map(|value| ("RUSTFLAGS", value)))
+    }
+
+    /// Append UTF-8 brokkr flags to the one source cargo reads. A non-Unicode
+    /// inherited value cannot be safely copied through the string-based env
+    /// interface used by cargo launchers, so refuse instead of falling back
+    /// to the lower-priority source or silently replacing project flags.
+    pub(crate) fn compose(
+        &self,
+        additions: &[String],
+    ) -> Result<Option<(String, String)>, crate::error::DevError> {
+        if additions.is_empty() {
+            return Ok(None);
+        }
+        let empty = std::ffi::OsString::new();
+        let (key, existing) = self.active().unwrap_or(("RUSTFLAGS", &empty));
+        let existing = existing.to_str().ok_or_else(|| {
+            crate::error::DevError::Config(format!(
+                "{key} is set to a non-UTF-8 value; brokkr cannot append rustflags without changing it"
+            ))
+        })?;
+        let value = if key == "CARGO_ENCODED_RUSTFLAGS" {
+            let mut parts: Vec<String> = if existing.is_empty() {
+                Vec::new()
+            } else {
+                existing.split('\u{1f}').map(str::to_owned).collect()
+            };
+            parts.extend(additions.iter().cloned());
+            parts.join("\u{1f}")
+        } else {
+            let mut value = existing.to_owned();
+            for flag in additions {
+                if !value.trim().is_empty() {
+                    value.push(' ');
+                }
+                value.push_str(flag);
+            }
+            value
+        };
+        Ok(Some((key.to_owned(), value)))
+    }
+
+    /// Describe the precedence decision used by `cargo`, including a lower
+    /// priority `RUSTFLAGS` value that is present but shadowed.
+    pub(crate) fn invocation_notes(&self) -> Vec<String> {
+        let mut notes = Vec::new();
+        if let Some((key, value)) = self.active() {
+            let description = match value.to_str() {
+                Some(v) if v.trim().is_empty() => "set but empty in the environment",
+                Some(_) => "inherited from the environment",
+                None => "inherited as a non-UTF-8 value",
+            };
+            notes.push(format!("{key} {description}"));
+        }
+        if self.encoded.is_some() && self.plain.is_some() {
+            notes.push("RUSTFLAGS is shadowed by CARGO_ENCODED_RUSTFLAGS".into());
+        }
+        notes
+    }
+
+    /// Include Cargo's config-shaped rustflags environment sources in the
+    /// invocation notice, identifying target variables through the same
+    /// target/config view as [`sink`].
+    pub(crate) fn invocation_notes_for(&self, build_root: &Path) -> Vec<String> {
+        let mut notes = self.invocation_notes();
+        let paths = config_paths(build_root);
+        for triple in target_triples_for_sink(build_root, &paths) {
+            let key = target_rustflags_env_var(&triple);
+            if std::env::var_os(&key).is_some() {
+                notes.push(format!("{key} is set for target {triple}"));
+            }
+        }
+        if std::env::var_os("CARGO_BUILD_RUSTFLAGS").is_some() {
+            notes.push("CARGO_BUILD_RUSTFLAGS is set for build.rustflags".into());
+        }
+        notes
+    }
+}
 
 /// The environment Cargo receives, with the caller's explicit pairs taking
 /// precedence over brokkr's inherited process environment. A present empty
@@ -250,9 +359,11 @@ pub enum Sink {
     /// Source 2 is live: append to `RUSTFLAGS` (space-separated).
     Env,
     /// Source 3 is live: `--config target."cfg(all())".rustflags=[..]`, which
-    /// joins the matching target entries and lands last.
+    /// joins the matching target entries and lands last. A matching
+    /// `CARGO_TARGET_<triple>_RUSTFLAGS` is the environment form of this source.
     TargetConfig,
-    /// Source 4 (or nothing at all): `--config build.rustflags=[..]`.
+    /// Source 4 (or nothing at all): `--config build.rustflags=[..]`. This
+    /// includes `CARGO_BUILD_RUSTFLAGS`, the environment form of this key.
     BuildConfig,
 }
 
@@ -297,25 +408,47 @@ impl Sink {
 /// `--config` sink cargo never reads, and every allow injected there would be
 /// silently inert.
 pub fn sink(build_root: &Path, sweep_sets_rustflags: bool) -> Sink {
-    if std::env::var_os("CARGO_ENCODED_RUSTFLAGS").is_some() {
-        return Sink::EncodedEnv;
+    let env = RustflagsEnv::process();
+    if let Some(sink) = env_sink(sweep_sets_rustflags, &env) {
+        return sink;
     }
-    if sweep_sets_rustflags || std::env::var_os("RUSTFLAGS").is_some() {
-        return Sink::Env;
+    let paths = config_paths(build_root);
+    let triples = target_triples_for_sink(build_root, &paths);
+    // Cargo treats the target-triple environment spelling as a matching
+    // `target.<triple>.rustflags` entry. Add brokkr's flags to the target
+    // source when it is live, so the higher-priority source-3 rule does not
+    // make an injected `build.rustflags` inert.
+    if triples
+        .iter()
+        .any(|triple| std::env::var_os(target_rustflags_env_var(triple)).is_some())
+    {
+        return Sink::TargetConfig;
     }
-    let triple = host_triple_for(build_root);
-    for path in config_paths(build_root) {
+    let host = host_triple_for(build_root);
+    for path in paths {
         let Ok(text) = std::fs::read_to_string(&path) else {
             continue;
         };
         let Ok(doc) = text.parse::<toml::Table>() else {
             continue;
         };
-        if has_matching_target_rustflags(&doc, triple.as_deref()) {
+        if has_matching_target_rustflags(&doc, host.as_deref()) {
             return Sink::TargetConfig;
         }
     }
     Sink::BuildConfig
+}
+
+/// Resolve the environment-backed sink independently from process and config
+/// discovery so precedence and empty-value behavior can be tested directly.
+fn env_sink(sweep_sets_rustflags: bool, env: &RustflagsEnv) -> Option<Sink> {
+    match env.active().map(|(key, _)| key) {
+        Some("CARGO_ENCODED_RUSTFLAGS") => Some(Sink::EncodedEnv),
+        Some("RUSTFLAGS") => Some(Sink::Env),
+        None if sweep_sets_rustflags => Some(Sink::Env),
+        None => None,
+        Some(_) => unreachable!("RustflagsEnv::active only returns known keys"),
+    }
 }
 
 /// Split `allow_flags` into the share that rides the environment and the share
@@ -375,9 +508,10 @@ fn toml_string(s: &str) -> String {
     out
 }
 
-/// Every `.cargo/config{.toml}` cargo would read for a build at `build_root`:
-/// the ancestor walk, then `$CARGO_HOME`. Order does not matter here - the
-/// question is only whether *any* of them contributes a matching target entry.
+/// Every Cargo config document cargo would read for a build at `build_root`:
+/// the ancestor walk, then `$CARGO_HOME`, with each document's includes in
+/// their Cargo precedence order. Callers can then inspect one flattened view
+/// without silently missing a target rustflags entry stored in an include.
 pub(crate) fn config_paths(build_root: &Path) -> Vec<PathBuf> {
     config_paths_under(build_root, EffectiveEnv::new(&[]))
 }
@@ -388,8 +522,9 @@ pub(crate) fn config_paths(build_root: &Path) -> Vec<PathBuf> {
 /// runner or target configured in the other home goes unseen.
 pub(crate) fn config_paths_under(build_root: &Path, env: EffectiveEnv<'_>) -> Vec<PathBuf> {
     let mut out = Vec::new();
+    let mut seen = HashSet::new();
     for dir in build_root.ancestors() {
-        push_config(&mut out, &dir.join(".cargo"));
+        push_config(&mut out, &dir.join(".cargo"), &mut seen);
     }
     // The value cargo sees: the sweep's (even an empty one) over brokkr's own.
     // Then cargo's rule - empty means unset, so `$HOME/.cargo`, and a relative
@@ -399,17 +534,126 @@ pub(crate) fn config_paths_under(build_root: &Path, env: EffectiveEnv<'_>) -> Ve
         None => crate::user_dirs::home().map(|h| h.join(".cargo")),
     };
     if let Some(home) = home {
-        push_config(&mut out, &home);
+        push_config(&mut out, &home, &mut seen);
     }
     out
 }
 
 /// Cargo accepts both spellings but reads only one per directory - the
 /// extensionless `config` when both exist (`user_dirs::cargo_config_file`).
-fn push_config(out: &mut Vec<PathBuf>, dir: &Path) {
+fn push_config(out: &mut Vec<PathBuf>, dir: &Path, seen: &mut HashSet<PathBuf>) {
     if let Some(path) = crate::user_dirs::cargo_config_file(dir) {
-        out.push(path);
+        push_config_with_includes(out, &path, seen);
     }
+}
+
+/// Append one Cargo config and its included documents from highest to lowest
+/// precedence. Cargo loads includes left to right, then overlays the including
+/// document, so the root comes first and the includes are traversed in reverse.
+fn push_config_with_includes(out: &mut Vec<PathBuf>, path: &Path, seen: &mut HashSet<PathBuf>) {
+    let identity = path.canonicalize().unwrap_or_else(|_| path.to_owned());
+    if !seen.insert(identity) {
+        return;
+    }
+
+    let doc = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|text| text.parse::<toml::Table>().ok());
+    out.push(path.to_owned());
+    if let Some(includes) = doc
+        .as_ref()
+        .and_then(|doc| doc.get("include"))
+        .and_then(toml::Value::as_array)
+    {
+        let anchor = path
+            .parent()
+            .and_then(Path::parent)
+            .unwrap_or_else(|| Path::new("."));
+        for include in includes.iter().rev() {
+            let (include_path, optional) = match include {
+                toml::Value::String(path) => (Some(path.as_str()), false),
+                toml::Value::Table(table) => (
+                    table.get("path").and_then(toml::Value::as_str),
+                    table
+                        .get("optional")
+                        .and_then(toml::Value::as_bool)
+                        .unwrap_or(false),
+                ),
+                _ => (None, false),
+            };
+            let Some(include_path) = include_path.filter(|path| path.ends_with(".toml")) else {
+                continue;
+            };
+            let included = anchor.join(include_path);
+            if optional && !included.exists() {
+                continue;
+            }
+            push_config_with_includes(out, &included, seen);
+        }
+    }
+}
+
+fn target_rustflags_env_var(triple: &str) -> String {
+    format!(
+        "CARGO_TARGET_{}_RUSTFLAGS",
+        triple.to_uppercase().replace('-', "_")
+    )
+}
+
+/// Cargo's configured target names drive `CARGO_TARGET_<triple>_RUSTFLAGS`.
+/// Respect `CARGO_BUILD_TARGET` or `build.target`; if neither is present,
+/// Cargo builds for the host.
+fn target_triples_for_sink(build_root: &Path, paths: &[PathBuf]) -> Vec<String> {
+    let host = host_triple_for(build_root);
+    let configured = std::env::var_os("CARGO_BUILD_TARGET")
+        .and_then(|value| value.into_string().ok())
+        .and_then(|value| parse_target_values(&value, host.as_deref()))
+        .or_else(|| {
+            paths.iter().find_map(|path| {
+                let text = std::fs::read_to_string(path).ok()?;
+                let doc = text.parse::<toml::Table>().ok()?;
+                let value = doc.get("build")?.as_table()?.get("target")?;
+                match value {
+                    toml::Value::String(value) => parse_target_values(value, host.as_deref()),
+                    toml::Value::Array(values) => {
+                        let targets: Vec<String> = values
+                            .iter()
+                            .filter_map(toml::Value::as_str)
+                            .filter_map(|value| target_key_triple(value, host.as_deref()))
+                            .collect();
+                        (!targets.is_empty()).then_some(targets)
+                    }
+                    _ => None,
+                }
+            })
+        });
+
+    configured.unwrap_or_else(|| host.into_iter().collect())
+}
+
+fn parse_target_values(value: &str, host: Option<&str>) -> Option<Vec<String>> {
+    let targets: Vec<String> = value
+        .split(',')
+        .filter_map(|value| target_key_triple(value, host))
+        .collect();
+    (!targets.is_empty()).then_some(targets)
+}
+
+fn target_key_triple(value: &str, host: Option<&str>) -> Option<String> {
+    let target = value.trim();
+    if target.is_empty() {
+        return None;
+    }
+    if target == "host-tuple" {
+        return host.map(str::to_owned);
+    }
+    let path = Path::new(target);
+    Some(
+        path.file_stem()
+            .and_then(std::ffi::OsStr::to_str)
+            .unwrap_or(target)
+            .to_owned(),
+    )
 }
 
 /// Does this config document contribute a `target.*.rustflags` that applies to
@@ -612,6 +856,76 @@ fn cfg_flag(name: &str) -> Option<bool> {
 mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
+
+    #[test]
+    fn encoded_rustflags_wins_by_presence_and_keeps_an_empty_value() {
+        let overrides = [
+            ("CARGO_ENCODED_RUSTFLAGS", ""),
+            ("RUSTFLAGS", "-D warnings"),
+        ];
+        let env = RustflagsEnv::from(EffectiveEnv::new(&overrides));
+        assert_eq!(
+            env.compose(&["-A unused".into()]).unwrap(),
+            Some(("CARGO_ENCODED_RUSTFLAGS".into(), "-A unused".into()))
+        );
+        assert!(
+            env.invocation_notes()
+                .iter()
+                .any(|line| line.contains("CARGO_ENCODED_RUSTFLAGS set but empty"))
+        );
+    }
+
+    #[test]
+    fn sink_selection_uses_injected_rustflags_presence() {
+        let encoded_empty = RustflagsEnv {
+            encoded: Some("".into()),
+            plain: Some("-D warnings".into()),
+        };
+        assert_eq!(env_sink(false, &encoded_empty), Some(Sink::EncodedEnv));
+
+        let plain_empty = RustflagsEnv {
+            encoded: None,
+            plain: Some("".into()),
+        };
+        assert_eq!(env_sink(false, &plain_empty), Some(Sink::Env));
+        assert_eq!(env_sink(true, &RustflagsEnv::default()), Some(Sink::Env));
+        assert_eq!(env_sink(false, &RustflagsEnv::default()), None);
+    }
+
+    #[test]
+    fn config_paths_include_cargo_documents_in_precedence_order() {
+        let root = crate::test_scratch::scratch("rustflags", "cargo_config_includes");
+        let cargo_dir = root.join(".cargo");
+        std::fs::create_dir_all(&cargo_dir).unwrap();
+        std::fs::write(
+            cargo_dir.join("config.toml"),
+            "include = [\"first.toml\", \"second.toml\"]\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("first.toml"), "[build]\nrustflags = []\n").unwrap();
+        std::fs::write(root.join("second.toml"), "[build]\nrustflags = []\n").unwrap();
+
+        let paths = config_paths(&root);
+        assert_eq!(paths.first(), Some(&cargo_dir.join("config.toml")));
+        assert_eq!(paths.get(1), Some(&root.join("second.toml")));
+        assert_eq!(paths.get(2), Some(&root.join("first.toml")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_unicode_encoded_rustflags_refuses_instead_of_falling_through() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let env = RustflagsEnv {
+            encoded: Some(std::ffi::OsString::from_vec(vec![0xff])),
+            plain: Some("-D warnings".into()),
+        };
+        assert!(matches!(
+            env.compose(&["-A unused".into()]),
+            Err(crate::error::DevError::Config(message))
+                if message.contains("CARGO_ENCODED_RUSTFLAGS")
+        ));
+    }
 
     #[test]
     fn cfg_all_of_nothing_is_true() {

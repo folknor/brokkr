@@ -59,7 +59,7 @@ pub(crate) fn resolve(
                 features: extra_features.to_vec(),
                 default_features: true,
                 all_features: false,
-                profile: "release",
+                profile: crate::build::CargoProfile::Release,
             },
         });
     };
@@ -89,7 +89,7 @@ pub(crate) fn resolve(
             features,
             default_features: true,
             all_features: false,
-            profile: "release",
+            profile: crate::build::CargoProfile::Release,
         },
     })
 }

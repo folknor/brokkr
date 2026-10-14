@@ -5,11 +5,13 @@ use std::path::Path;
 use crate::build;
 use crate::clean::layout::ElivagarLayout;
 use crate::config::ResolvedPaths;
+use crate::db::KvPair;
 use crate::error::DevError;
-use crate::harness::BenchHarness;
+use crate::harness::{BenchConfig, BenchHarness, BenchResult, WallSource};
 use crate::output;
 
-use super::{bench_node_store, bench_planetiler, bench_pmtiles, bench_self, bench_tilemaker};
+use super::commands::{BuiltCommand, ExampleCommand};
+use super::{bench_planetiler, bench_tilemaker};
 
 // ---------------------------------------------------------------------------
 // Public entry point
@@ -31,7 +33,7 @@ pub fn run(
     // 1. bench self -- full elivagar pipeline
     output::bench_msg("=== bench self ===");
     let binary = build::cargo_build(&super::build_config(features), project_root)?.path;
-    bench_self::run(
+    run_tilegen(
         harness,
         &binary,
         pbf_path,
@@ -39,7 +41,6 @@ pub fn run(
         runs,
         &layout,
         project_root,
-        None,
         tilegen,
         opts,
     )?;
@@ -63,21 +64,27 @@ pub fn run(
 
     // 3. bench node-store -- micro-benchmark
     output::bench_msg("=== bench node-store ===");
-    bench_node_store::run(
+    run_example(
         harness,
         project_root,
+        &layout,
         features,
-        super::constants::DEFAULT_NODE_STORE_MILLIONS,
+        ExampleCommand::NodeStore {
+            nodes: super::constants::DEFAULT_NODE_STORE_MILLIONS,
+        },
         runs,
     )?;
 
     // 4. bench pmtiles -- micro-benchmark
     output::bench_msg("=== bench pmtiles ===");
-    bench_pmtiles::run(
+    run_example(
         harness,
         project_root,
+        &layout,
         features,
-        super::constants::DEFAULT_PMTILES_BENCH_TILES,
+        ExampleCommand::PmtilesWriter {
+            tiles: super::constants::DEFAULT_PMTILES_BENCH_TILES,
+        },
         runs,
     )?;
 
@@ -99,4 +106,159 @@ pub fn run(
             failures.join(", ")
         )))
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_tilegen(
+    harness: &BenchHarness,
+    binary: &Path,
+    pbf_path: &Path,
+    file_mb: f64,
+    runs: usize,
+    layout: &ElivagarLayout<'_>,
+    project_root: &Path,
+    tilegen: &crate::config::project_config::elivagar::TilegenConfig,
+    opts: &super::PipelineOpts,
+) -> Result<(), DevError> {
+    let pbf_str = pbf_path
+        .to_str()
+        .ok_or_else(|| DevError::Config("PBF path is not valid UTF-8".into()))?;
+    let basename = pbf_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default()
+        .to_owned();
+    let command = BuiltCommand::MainBinary {
+        tilegen,
+        skip_to: None,
+    };
+    let args = command.build_args(pbf_str, layout, Some(opts))?;
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    output::bench_msg(&format!(
+        "elivagar pipeline: {basename} ({file_mb:.0} MB), {runs} run(s)"
+    ));
+
+    let config = BenchConfig {
+        command: command.id().into(),
+        input_file: Some(basename),
+        input_mb: Some(file_mb),
+        cargo_features: None,
+        external_build: None,
+        runs,
+        cli_args: Some(crate::harness::format_cli_args(
+            &binary.display().to_string(),
+            &refs,
+        )),
+        metadata: vec![],
+    };
+    // `bench all`'s self arm only measures output; clear any artifact left by
+    // an earlier interrupted run before starting this sample.
+    cleanup_outputs(&command, layout)?;
+    let measurement = harness.measure_external(
+        &config,
+        binary,
+        &refs,
+        project_root,
+        &[],
+        WallSource::External,
+        || Ok(()),
+    );
+    let result = match measurement {
+        Ok(mut measurement) => {
+            for iteration in &mut measurement.iterations {
+                if let Some(result) = &mut iteration.result {
+                    result.kv.push(KvPair::text(
+                        "meta.locations_on_ways_detected",
+                        super::detect_locations_on_ways_stderr(&iteration.stderr).to_string(),
+                    ));
+                }
+            }
+            harness.record(&config, &mut measurement, |_, _| Ok(()))
+        }
+        Err(error) => Err(error),
+    };
+
+    // Remove partial output after either success or failure. This arm never
+    // promotes an archive into the durable store.
+    let cleanup = cleanup_outputs(&command, layout);
+    match (result, cleanup) {
+        (Ok(_), Ok(())) => Ok(()),
+        (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
+        (Err(run_error), Err(cleanup_error)) => Err(DevError::Reported(format!(
+            "{run_error}; output cleanup failed: {cleanup_error}"
+        ))),
+    }
+}
+
+fn cleanup_outputs(
+    command: &BuiltCommand<'_>,
+    layout: &ElivagarLayout<'_>,
+) -> Result<(), DevError> {
+    for path in command.output_files(layout) {
+        match std::fs::remove_file(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
+}
+
+fn run_example(
+    harness: &BenchHarness,
+    project_root: &Path,
+    layout: &ElivagarLayout<'_>,
+    features: &[String],
+    example: ExampleCommand,
+    runs: usize,
+) -> Result<(), DevError> {
+    let command = BuiltCommand::Example(example);
+    let mut build = super::build_config(features);
+    build.example = Some(example.cargo_example().into());
+    let binary = build::cargo_build(&build, project_root)?.path;
+    let mut args = command.build_args("", layout, None)?;
+    let run_arg = args
+        .last_mut()
+        .ok_or_else(|| DevError::Internal("example command has no --runs argument".into()))?;
+    *run_arg = runs.to_string();
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let program = binary.display().to_string();
+    let config = BenchConfig {
+        command: example.id().into(),
+        input_file: None,
+        input_mb: None,
+        cargo_features: None,
+        external_build: None,
+        runs: 1,
+        cli_args: None,
+        metadata: vec![],
+    };
+
+    harness.run_internal(&config, |_| {
+        let captured = output::run_captured(&program, &refs, project_root)?;
+        if !captured.stdout.is_empty() {
+            output::plain(&String::from_utf8_lossy(&captured.stdout));
+        }
+        if !captured.stderr.is_empty() {
+            output::plain_stderr(&String::from_utf8_lossy(&captured.stderr));
+        }
+        captured.check_success(&program)?;
+
+        let (key, value) = match example {
+            ExampleCommand::PmtilesWriter { tiles } => ("tiles", tiles),
+            ExampleCommand::NodeStore { nodes } => ("nodes_millions", nodes),
+        };
+        Ok(BenchResult {
+            elapsed_ms: crate::harness::elapsed_to_ms(&captured.elapsed),
+            elapsed_us: None,
+            kv: vec![
+                KvPair::int(key, i64::try_from(value).unwrap_or(i64::MAX)),
+                KvPair::int("internal_runs", i64::try_from(runs).unwrap_or(i64::MAX)),
+            ],
+            iterations: Vec::new(),
+            distribution: None,
+            hotpath: None,
+        })
+    })?;
+    Ok(())
 }

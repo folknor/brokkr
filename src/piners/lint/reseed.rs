@@ -227,8 +227,7 @@ mod tests {
 
     #[test]
     fn discover_finds_pine_by_stem_and_errors_on_collision() {
-        let root = std::env::temp_dir().join(format!("brokkr_lint_reseed_{}", std::process::id()));
-        std::fs::remove_dir_all(&root).ok();
+        let root = crate::test_scratch::scratch("piners_lint_reseed", "discover_collision");
         std::fs::create_dir_all(root.join("a")).unwrap();
         std::fs::create_dir_all(root.join("b")).unwrap();
         std::fs::write(root.join("a/clean-01.pine"), b"//@version=6\n").unwrap();

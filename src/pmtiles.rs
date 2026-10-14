@@ -10,6 +10,7 @@ use std::path::Path;
 use crate::elivagar::constants::pmtiles as pmtiles_constants;
 use crate::elivagar::eliv::{PmtilesReader, RawDirEntry, tile_id_to_zxy};
 use crate::error::DevError;
+use crate::output;
 
 struct HeaderStats {
     data_length: u64,
@@ -66,26 +67,29 @@ pub fn run(path: &str) -> Result<(), DevError> {
     let mut zooms: Vec<u8> = zoom_stats.keys().copied().collect();
     zooms.sort_unstable();
 
-    println!("\n=== {path} ===");
-    println!(
+    output::plain(&format!("\n=== {path} ==="));
+    output::plain(&format!(
         "  Zoom: z{}-z{}, internal compression: {}",
         header.min_zoom,
         header.max_zoom,
         compression_name(header.internal_compression),
-    );
-    println!(
+    ));
+    output::plain(&format!(
         "  Addressed: {}, Entries: {}, Unique: {}",
         fmt_int(header.num_addressed),
         fmt_int(header.num_entries),
         fmt_int(header.num_unique),
-    );
-    println!(
+    ));
+    output::plain(&format!(
         "  Data size: {} bytes ({:.1} MB)",
         fmt_int(header.data_length),
         header.data_length as f64 / 1_048_576.0,
-    );
-    println!("  Directory entries: {}", fmt_int(entries.len() as u64));
-    println!("  Per-zoom tiles:");
+    ));
+    output::plain(&format!(
+        "  Directory entries: {}",
+        fmt_int(entries.len() as u64)
+    ));
+    output::plain("  Per-zoom tiles:");
 
     let mut total_tiles = 0u64;
     let mut global_min: Option<u32> = None;
@@ -105,22 +109,22 @@ pub fn run(path: &str) -> Result<(), DevError> {
             Some(value) => format!("{} avg bytes", fmt_int(value)),
             None => String::new(),
         };
-        println!(
+        output::plain(&format!(
             "    z{zoom:2}: {:>8} tiles, {:>8} unique, {:>16}",
             fmt_int(stats.tile_count),
             fmt_int(stats.unique_offsets.len() as u64),
             average,
-        );
+        ));
     }
 
-    println!("  Total: {} tiles", fmt_int(total_tiles));
+    output::plain(&format!("  Total: {} tiles", fmt_int(total_tiles)));
     if let Some(average) = global_total_length.checked_div(total_tiles) {
-        println!(
+        output::plain(&format!(
             "  Tile sizes: min {} bytes, max {} bytes, avg {} bytes",
             fmt_int(u64::from(global_min.unwrap_or(0))),
             fmt_int(u64::from(global_max)),
             fmt_int(average),
-        );
+        ));
     }
     Ok(())
 }

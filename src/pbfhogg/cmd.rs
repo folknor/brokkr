@@ -8,7 +8,7 @@ use crate::measure::MeasureRequest;
 use crate::output;
 use crate::preflight;
 use crate::project::{self, Project};
-use crate::resolve::{self, resolve_bbox, resolve_default_osc_path, resolve_pbf_with_size};
+use crate::resolve::{self, resolve_bbox, resolve_pbf_with_size};
 use crate::tools;
 
 /// Resolve a verify subcommand's input PBF: prefer `--input <PATH>`
@@ -175,7 +175,12 @@ pub(crate) fn bench_read(
     }
 
     let feat_refs = req.feat_refs();
-    let ctx = MeasurementSession::build_for_request(req, Some("pbfhogg-cli"), &feat_refs, true)?;
+    let ctx = MeasurementSession::build_for_request(
+        req,
+        Project::Pbfhogg.cli_package(),
+        &feat_refs,
+        true,
+    )?;
     let (pbf_path, file_mb) = resolve_read_pbf_with_size(req, snapshot, &ctx.paths)?;
     let modes = super::bench_read::parse_modes(modes_str)?;
     super::bench_read::run(
@@ -200,7 +205,12 @@ pub(crate) fn bench_write(req: &MeasureRequest, compression_str: &str) -> Result
     }
 
     let feat_refs = req.feat_refs();
-    let ctx = MeasurementSession::build_for_request(req, Some("pbfhogg-cli"), &feat_refs, true)?;
+    let ctx = MeasurementSession::build_for_request(
+        req,
+        Project::Pbfhogg.cli_package(),
+        &feat_refs,
+        true,
+    )?;
     let (pbf_path, file_mb) = resolve_pbf_with_size(
         req.dataset,
         req.variant,
@@ -232,12 +242,7 @@ pub(crate) fn bench_merge(
         let paths = dry_run_paths(req)?;
         let (pbf_path, _file_mb) =
             resolve_pbf_with_size(req.dataset, req.variant, &paths, req.project_root.as_path())?;
-        let osc_path = match osc_seq {
-            Some(seq) => {
-                resolve::resolve_osc_path(req.dataset, seq, &paths, req.project_root.as_path())?
-            }
-            None => resolve_default_osc_path(req.dataset, &paths, req.project_root.as_path())?,
-        };
+        let osc_path = resolve_bench_osc(req.dataset, osc_seq, &paths, req.project_root.as_path())?;
         let _ = super::parse_compressions(compression_str, false)?;
         output::dry_run_msg(&format!("pbf: {}", pbf_path.display()));
         output::dry_run_msg(&format!("osc: {}", osc_path.display()));
@@ -253,19 +258,19 @@ pub(crate) fn bench_merge(
     if uring {
         all_features.push("linux-io-uring");
     }
-    let ctx = MeasurementSession::build_for_request(req, Some("pbfhogg-cli"), &all_features, true)?;
+    let ctx = MeasurementSession::build_for_request(
+        req,
+        Project::Pbfhogg.cli_package(),
+        &all_features,
+        true,
+    )?;
     let (pbf_path, file_mb) = resolve_pbf_with_size(
         req.dataset,
         req.variant,
         &ctx.paths,
         req.project_root.as_path(),
     )?;
-    let osc_path = match osc_seq {
-        Some(seq) => {
-            resolve::resolve_osc_path(req.dataset, seq, &ctx.paths, req.project_root.as_path())?
-        }
-        None => resolve_default_osc_path(req.dataset, &ctx.paths, req.project_root.as_path())?,
-    };
+    let osc_path = resolve_bench_osc(req.dataset, osc_seq, &ctx.paths, req.project_root.as_path())?;
     let compressions = super::parse_compressions(compression_str, false)?;
     super::bench_merge::run(
         &ctx.harness,
@@ -307,6 +312,22 @@ pub(crate) fn bench_all(req: &MeasureRequest) -> Result<(), DevError> {
         req.runs(),
         req.dataset,
     )
+}
+
+fn resolve_bench_osc(
+    dataset: &str,
+    osc_seq: Option<&str>,
+    paths: &config::ResolvedPaths,
+    project_root: &Path,
+) -> Result<PathBuf, DevError> {
+    let (path, _seq) = resolve::resolve_single_osc(
+        dataset,
+        &resolve::SnapshotRef::Base,
+        osc_seq,
+        paths,
+        project_root,
+    )?;
+    Ok(path)
 }
 
 /// Resolve host paths without building the binary, for dry-run validation.
@@ -388,7 +409,6 @@ pub(crate) fn verify(
             osc_path.as_deref(),
             resolved_bbox.as_ref(),
             &paths.data_dir,
-            project_root,
             pbf.direct_io,
             &pbf.dataset,
             verbose,
@@ -537,7 +557,7 @@ pub(crate) fn verify(
                 project_root,
             )?;
             narrate_osc_scope(pbf.snapshot.as_deref(), scope);
-            let osmosis = match tools::ensure_osmosis(&paths.data_dir, project_root) {
+            let osmosis = match tools::ensure_osmosis(&paths.data_dir) {
                 Ok(tools) => Some(tools),
                 Err(e) => {
                     output::verify_msg(&format!("osmosis not available (non-fatal): {e}"));

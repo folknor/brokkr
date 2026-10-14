@@ -51,6 +51,7 @@ use crate::config::project_config::piners::PinersConfig;
 use crate::error::DevError;
 use crate::lockfile::LockGuard;
 use crate::output;
+use crate::piners::build;
 use crate::piners::contract::RunErrorRecord;
 use crate::piners::corpus_db::{CorpusDb, RunContext, RunRecord};
 use crate::piners::integrity::{self, HarnessEnd, Reconciliation, Trigger};
@@ -60,7 +61,6 @@ use crate::piners::registry::{self, Registry, VerifiedProbe};
 use crate::piners::report;
 use crate::piners::run_model::{Mode, ModeFlags, RunVerdict};
 use crate::piners::select::SelectArgs;
-use crate::ratatoskr::build;
 use crate::resolve::corpus_runs_db_path;
 
 const ARTEFACT_TEST_ID: &str = "corpus";
@@ -160,7 +160,7 @@ pub fn corpus(
     // bytes a reseed had just adopted. Held to the end, through ingest and
     // the bless write.
     let lock = crate::context::reenter_command_lock()?;
-    let _sigterm = crate::shutdown::SigtermGuard::install();
+    let sigterm = crate::shutdown::SigtermGuard::install();
 
     let sel_args = SelectArgs {
         keywords: args.keywords.clone(),
@@ -218,7 +218,7 @@ pub fn corpus(
         context.debug,
         Some(&|pid| lock.set_child_pid(pid)),
         Some(&|| lock.clear_child_pid()),
-        true,
+        crate::shutdown::ChildIsolation::ProcessGroup(&sigterm),
     )?;
     output::corpus_msg(&format!(
         "harness build ok (features={}, binary={})",
@@ -298,6 +298,9 @@ pub fn corpus(
 
     // The one deadline: the hang backstop, counted from this launch, bounds
     // the original attempt and every diagnostic attempt after it together.
+    // The shared captured-process runner returns the completed stream as one
+    // buffer; integrity reconciliation and isolation use the same original
+    // report after the harness exits.
     let launched = Instant::now();
     let capture = match output::run_captured_with_env_and_deadline(
         &binary_str,
@@ -306,7 +309,7 @@ pub fn corpus(
         &env_pairs,
         HARNESS_HANG_BACKSTOP,
         Some(&|pid| lock.set_child_pid(pid)),
-        true,
+        crate::shutdown::ChildIsolation::ProcessGroup(&sigterm),
     ) {
         Ok(c) => c,
         Err(DevError::Interrupted) => {
@@ -341,7 +344,7 @@ pub fn corpus(
                 &corpus_db_path,
                 &envelope,
                 artefacts,
-                &RunVerdict::fail("harness failed to spawn"),
+                &RunVerdict::error("harness failed to spawn"),
                 e,
                 Some(&msg),
             ));
@@ -706,6 +709,8 @@ impl AttemptEnv<'_> {
         let mut argv: Vec<&str> = vec!["--manifest", &manifest_str];
         argv.extend(self.harness_args.iter().map(String::as_str));
         let lock = self.lock;
+        // Guards nest; this one is the borrow the process-group isolation needs.
+        let signal_guard = crate::shutdown::SigtermGuard::install();
         let capture = output::run_captured_with_env_and_deadline(
             self.binary,
             &argv,
@@ -713,8 +718,9 @@ impl AttemptEnv<'_> {
             &env,
             remaining,
             Some(&|pid| lock.set_child_pid(pid)),
-            true,
+            crate::shutdown::ChildIsolation::ProcessGroup(&signal_guard),
         );
+        drop(signal_guard);
         lock.clear_child_pid();
         let capture = match capture {
             Ok(c) => c,
@@ -1378,7 +1384,7 @@ mod tests {
             &db_path,
             &envelope,
             artefacts,
-            &RunVerdict::fail("harness failed to spawn"),
+            &RunVerdict::error("harness failed to spawn"),
             DevError::Config("sentinel-error".into()),
             Some("boom"),
         );
@@ -1389,7 +1395,7 @@ mod tests {
 
         let db = CorpusDb::open_readonly(&db_path).unwrap();
         let row = db.run(6).unwrap().unwrap();
-        assert_eq!(row.result, "fail");
+        assert_eq!(row.result, "error");
         assert_eq!(row.fail_reason.as_deref(), Some("harness failed to spawn"));
         assert_eq!(row.commit_sha.as_deref(), Some("abc123"));
         assert!(dir.join("manifest.json").exists(), "dir must be preserved");

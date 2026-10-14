@@ -15,281 +15,130 @@ Hygiene findings from the hunt for the `check`/`test`/`clippy` pipeline, test ex
 
 Reported by: check-core.
 
-`rustflags::sink`, `check_cmd/output.rs::composed_rustflags_env` and `phase.rs::announce_invocation_shaping` each restate which of `CARGO_ENCODED_RUSTFLAGS`/`RUSTFLAGS` is live. Empty `CARGO_ENCODED_RUSTFLAGS`: live to `sink` (`var_os().is_some()`), not live to `announce` (`trim().is_empty()`). A non-UTF-8 encoded value is live to `sink` but falls through to `RUSTFLAGS` in `composed`. All three treat empty `RUSTFLAGS` as unset (see BUG-009). `composed`/`announce` read the environment per call. `sink` ignores env-configured `CARGO_TARGET_<TRIPLE>_RUSTFLAGS`/`CARGO_BUILD_RUSTFLAGS` and config `include`s, silently; it has no unit test because it reads env and `$HOME` directly.
-
-Enforcement proposed: one `RustflagsEnv::from(env)` in `rustflags.rs` plus a textlint rule forbidding `env::var(_os)?("(CARGO_ENCODED_)?RUSTFLAGS"` outside it.
+Residue: `check_cmd/sweep_env.rs` still reads the rustflags environment directly instead of through `RustflagsEnv`.
 
 ## VAL-003 - Failure sentinels and tool labels are strings matched by content
 
 Reported by: check-core, test-execution.
 
-- `"tests failed"` built in phase.rs and string-matched twice; `"coverage failed"` built in coverage.rs and matched in phase.rs; `"coverage enumeration failed"` spelled four times.
-- `"cargo clippy: no issues"` returned by cargo_filter and compared in output.rs.
-- `filter_clippy` output relabelled with `replacen("cargo clippy:", "cargo test:")` (output.rs, `filter_test_build_failure`) and `"cargo build:"` (test_cmd).
-
-Enforcement proposed: typed variants; text filters take a tool-label parameter and return `Option` (as `format_clippy_multi` does).
-
-Design hunt (check-report): "already reported" travels as message text - `already_reported` converts `DevError::Build(m) if m == TESTS_FAILED` into `Reported`, `record_phase_stop` matches `Build(m) if m == TESTS_FAILED`, `cmd_clippy` matches `Reported(m) if m == CLIPPY_FAILED`; every other phase invents its own `Reported("gremlins found")`, `"header check failed"`, `"textlint failed"`, `"manifest check failed"`, `"cargo_env failed"`, `"{phase} failed"`. The test phase returns `Build` (meaning "not yet printed") for a failure that was printed, then patches it. Proposed: phases return `Result<(), PhaseFailure>` with `Findings { phase }` (detail printed), `Error(DevError)` (not printed) or `Stopped`, converted to `DevError` once at `cmd_check`. The text path's summary line reads `cargo clippy: N errors, M warnings` when rendering a failed `cargo test` build (`output.rs` `filter_clippy_in_tree` on the test build's stderr, `test_cmd`) - operator text naming the wrong command; the earlier hygiene account says that output is relabelled with `replacen`, so the two readings disagree on whether the relabel reaches every path.
-
-## VAL-007 - Cargo/libtest argv classification is re-implemented per lane
-
-Reported by: check-core, test-execution.
-
-- `narrows_selection` (`-p`, `--package`, `--exclude`); `reject_forwarded_selectors` (same plus `--workspace`); `partition_target_selectors` and `reject_unsupported_forwarded` each re-split on `=`.
-- "Is this a target selector": `has_target_selector` (prefix match, output.rs) and `partition_target_selectors` (parallel.rs); agreement unchecked.
-- `--format` refusal: output.rs checks both spellings on the final argv; `direct_libtest_args` catches `--format` not `--format=`; nextest refuses all libtest args.
-
-Enforcement proposed: one `CargoArgv` classifier type with a shared selector table and test.
-
-Design hunt (check-exec): the runner has two preconditions - `--format json -Z unstable-options` on every lane, `--test-threads=1` on the serial runner - and enforces only the second, by scanning argv (`enforce_single_threaded`). Every caller builds the argv by hand: `check_cmd/output.rs` pushes json then calls `reject_format_override` (both spellings); `parallel::direct_libtest_args` pushes json and refuses only an exact `--format`, safe today only because user args precede brokkr's json and libtest takes the last occurrence; `test_cmd::direct_libtest_args` is a hard-coded array; `isolate.rs` and the discovery args in `focused.rs`. The package-selector set is written twice and differs (`narrows_selection`: `-p | --package | --exclude`; `reject_forwarded_selectors` adds `--workspace`), both also remembering the attached `-pfoo` form, and `output.rs`'s `serial_shim_fallback` has its own `--config`/`--target` scan. Proposed: a `LibtestInvocation { filters, exact, include_ignored, nocapture, threads: One | N(u32) | Default, passthrough }` that the runner renders itself, format flags always last, refusing passthrough tokens containing `--format` or `--test-threads` at construction - which also lets the serial/parallel runner choice be typed rather than re-derived from argv - and one `ForwardedCargoArgs::parse` yielding typed groups (`package_selectors`, `target_selectors`, `config`, `target`, `manifest_path`, `target_dir`, `no_run`, `rest`), living with selection rather than in `parallel.rs`.
+Residue: the test phase still signals failure through the `TESTS_FAILED` string sentinel, `test_cmd/plan.rs` relabels clippy output with `replacen`, and the legacy `filter_clippy` string wrapper remains.
 
 ## VAL-009 - Two owners of `-Zfeature-unification` support; package-mode builds in two target dirs
 
 Reported by: test-execution.
 
-`install_shape::is_toolchain_refusal` records that matching `contains("nightly")` was wrong and fixed it; `binaries::test_binaries_with_runtime` still uses `contains("feature-unification") || contains("nightly")`. The install-feature phase builds package-mode in the main target dir, while a `feature_unification = "package"` test lane is isolated to `unify-package` because sharing "would thrash against every ordinary sweep"; the two never share a cache and the install phase contradicts that rationale.
-
-## VAL-010 - Test time limits are restated by hand
-
-Reported by: test-execution, check-core.
-
-- 280 has no named owner: only clap `range(1..=280)`, help text and docs.
-- "20s" hand-written in the `test_cmd` error string ("run them all at the 20s ceiling"), CLI help, the `test_cmd` header, and 15+ times in `check.md`.
-- `IDLE_TIMEOUT`'s comment says it "matches check's clippy ceiling", untied to `watchdog::phase_ceiling`.
-- `SWEEP_WALL_TIMEOUT` and `PARALLEL_SWEEP_TIMEOUT` (both 1800s) enforced two ways (watchdog `wall` vs `try_wait` loop); inside `check` the 15-minute phase ceiling always fires first, so the parallel `timed_out` branch and its "(1800s)" messages are unreachable (VAL-028).
-
-Enforcement proposed: name `MAX_TEST_TIMEOUT` and use it in the parser; format messages from constants; a unit test asserting `check.md` (which is `include_str!`'d) states `TEST_TIMEOUT.as_secs()`.
-
-Design hunt (check-exec): the "(1800s)" timeout messages in `output.rs` and `parallel.rs` are user-facing verdicts that cannot occur under `check` or `test`. The whole ceiling hierarchy - per-test 20s, idle 300s, wall 1800s, phase 5/15/2 min, run 25 min, nextest's synthesized slow-timeout, the listing deadline (`TEST_TIMEOUT` in `binaries.rs` and `focused.rs`), the prebuild deadline (`IDLE_TIMEOUT` in `test_cmd`) - is spread over `test_runner.rs`, `watchdog.rs`, `nextest_lane.rs`, `binaries.rs`, `focused.rs` and `test_cmd.rs`, and nothing states or checks that the inner bounds sit below the outer ones. Proposed: one `ceilings.rs` table holding every bound with its role, plus a const assertion for the ordering.
+Residue: install-feature checks and missing-bin probes still do not run in the isolated package-unification target dir that package-mode test sweeps use.
 
 ## VAL-011 - Check/test tunables have no index and no injection point
 
 Reported by: check-core, test-execution, config-cli-bootstrap.
 
-- `CHECK_CEILING`, `phase_ceiling`, `WATCHDOG_EXIT_CODE` (watchdog.rs); `RUN_LOGS_KEPT`, `.brokkr/check-logs` (report.rs); exit 10 (phase.rs); `PROSE_PHASES`/`PROSE_EXTENSIONS`; four `test_runner.rs` constants plus `WATCHDOG_POLL`; `cpu_topology` fallback 4 (also in `tools.rs`). check.md partly inventories them.
-- `fire()` calls `process::exit`, so no test proves a ceiling fires and `phase_ceiling` can't be shortened for a test.
-- `cpu_topology::CPU_ROOT` is hard-coded, so `physical_cores` is untestable; the count ignores affinity and cgroup cpusets, so in a restricted container the default budget exceeds usable CPUs.
-- `ParallelBinaries::resolved_budget` claims `brokkr env` "reports the same figure" and that it is "resolved at config load"; `env` shows `cache_domain_cores()` without the `_or_default` fallback ("not detected" while the lane runs at `available_parallelism` or 4), and it is called from `profile.rs`. The same doc still describes the replaced claim rule ("A binary claims `min(its test count, budget)` slots").
-
-Design hunt (check-exec): `cpu_topology` reads only cpu0's L3 domain, so on a heterogeneous or asymmetric part the default budget is cpu0's island, not the smallest island.
-
-## VAL-012 - `NEXTEST_ENGINE_VERSION` is a hand copy of Cargo.toml
-
-Reported by: test-execution.
-
-`"0.124.0"` is copied by hand; the dependency is a caret requirement, so `cargo update` can move the lock to 0.124.x without the constant following. Matches today. Enforcement proposed: a test parsing `include_str!("../Cargo.lock")`, or an `=` pin.
-
-## VAL-014 - nextest engine setup is copied twice and has diverged
-
-Reported by: test-execution.
-
-`run_nextest_sweep` and `nextest_shape_cases` each hold ~120 identical lines (host detection, metadata, configs, build, builder, synth config, profile, ctx, `TestList`); only the audit path has the `build-finished` guard.
+Residue: `PHASE_CLOCK` poison handling, CPU-topology and run-log-retention parts remain.
 
 ## VAL-015 - The same condition is handled differently across test lanes
 
 Reported by: test-execution.
 
-- Doctests on an isolated lane warn every run; the parallel lane refuses at config load, and its own comment explains why a per-run warning is wrong.
-- Forwarded args: refused by isolated, partitioned by parallel, cargo-only for nextest.
-- Target runners: parallel refuses, nextest honours, and nextest drops an unparseable one silently (`TargetRunner::new(...).unwrap_or_else(|_| TargetRunner::empty())`).
-- `isolation = "process"` and `harness = "nextest"` are two implementations of process-per-test; the docs already call nextest the concurrent form of the same guarantee.
-- `enforce_single_threaded` and the serial lane's second `--test-threads=1` requirement are leftovers of the partial-marker machine; the JSON tracker handles concurrency, which `run_libtest_parallel` proves (checkable).
+Residue: `prepare.rs::direct_preflight` still refuses all forwarded args for isolated lanes, and complete-profile admission does not require a doctest carrier for process-isolated lanes.
 
 ## VAL-016 - Check run-state policy is per call site
 
 Reported by: check-core.
 
-- The "nothing ran" refusal and `-p` intersection are implemented in both `run_per_build_shape` and `run_test_phase` with different messages; `run_per_build_shape`'s doc claims the logic is shared "so they cannot drift".
-- Globals `REPORT` and `PHASE_CLOCK` rest on "one run per process", asserted not enforced (`report_begin` silently overwrites); poison policy differs between them (`REPORT` recovers via `into_inner`, `PHASE_CLOCK` silently skips the ceiling).
-- Run-log names and pruning order use wall-clock ms, so a backward clock step prunes the newest logs.
-- Captured script-check output is persisted verbatim in `.brokkr/check-logs` (see PLT-037).
-
-## VAL-017 - The legacy fallback label `"all-features"` is a cross-module contract held by a comment
-
-Reported by: check-core.
-
-Shared with `brokkr test`, held only by a test comment ("Don't change without updating `brokkr test`"). brokkr itself runs on this fallback (no `[[check]]` entries in its `brokkr.toml`).
+Residue: the silent `PHASE_CLOCK` poison path and wall-clock run-log pruning remain.
 
 ## VAL-018 - Test lanes read cargo config late and fail open
 
 Reported by: test-execution.
 
-`cargo_config_env` and `refuse_configured_runner` silently skip cargo config files that don't parse, so the runner refusal fails open on a malformed file despite its "fail closed" rationale. The hunter suspects `CargoConfigs::new` discovers config from the process cwd, not `project_root` (verify).
+Residue: `rustflags.rs::CargoLaunchConfig::discover` still skips read/parse failures, and no validated cargo-config snapshot is acquired before builds and carried into lane setup.
 
 ## VAL-019 - Fixed shared files rewritten non-atomically every run
 
 Reported by: test-execution, process-control.
 
-`nextest-synth.toml` and `~/.brokkr/nextest-env.toml` are rewritten non-atomically on every run, safe only because of the global lock; `nextest-env.toml` is also written capability-less outside a hold, which that rationale doesn't cover.
-
-## VAL-020 - Test-execution resources grow without bound
-
-Reported by: test-execution.
-
-`.brokkr/test-hung/<ts>-<pid>-<name>/` snapshots are never cleaned and `clean.md` doesn't mention them; the parallel lane spawns one OS thread per planned binary up front plus three per running binary.
+Residue: the user-wide nextest env file is now replaced atomically, but one fixed path is still shared by capability-less writers that are not serialized by the lock.
 
 ## VAL-021 - Check/test tests that cannot fail
 
 Reported by: check-core, test-execution.
 
-- `clippy_sort_key_orders_errors_before_warnings` passes only because `"E0308" < "clippy::aaaa"`; the key has no level component and production headers are always `error[…]`. The `clippy_sort_key` comment about "the end of their level" is stale.
-- `json_summary_tests` build `CheckSummary` by hand and assert what they set.
-- `a_pinned_unification_reaches_every_compiling_path` claims "every" but checks three of six builders (BUG-005).
-- `test_cmd::decide_sweeps_default_profile_filters_dropped` asserts only the label; its comment ("Sweep struct only carries label / feature_args / build_packages") is false.
-- `binary_timings::serial_cost_does_not_move_when_the_allocation_moves` does arithmetic on a local array and calls no module code.
-- `a_store_in_the_old_format_reads_as_empty_rather_than_failing` asserts `toml::from_str` fails, not that `timings_load` returns empty.
-- `test_scratch::a_directory_is_cleared_of_a_previous_run` re-implements the clearing instead of exercising `scratch`.
-- `cpu_topology::the_default_is_always_at_least_one` cannot fail because of `.max(1)`.
+Residue: the clippy-order and pinned-unification tests in `test_execution_tests.rs` and the other listed weak tests outside A's files remain.
 
 ## VAL-022 - Tests exercise compositions production doesn't use
 
 Reported by: check-core.
 
-- `parse_clippy_from_json`/`gated_diags` (`#[cfg(test)]`) apply only the sited filter; production applies `keep = !is_dependency_warning && !sited_allowed` inside `run_clippy_phase`. The `allow_exact` tests describe a pipeline that never runs.
-- `merge_clippy_dedups_and_combines_sweeps` feeds `merge_clippy` from the text parser; production feeds JSON.
-
-## VAL-023 - Environment-dependent check/test tests
-
-Reported by: check-core, test-execution.
-
-Watchdog tests need Linux `/proc` and a real process tree; `begin_phase_sets_both_bookkeepings` mutates the global `PHASE_CLOCK` and leaves it set; `everything_is_displayed_without_git` relies on `/nonexistent` not existing; three `test_runner` watchdog tests spawn `sh -c "sleep 60 & wait"`, and only one test there carries `#[cfg(target_os = "linux")]` (it needs no Linux API). See PLT-039 for the repo-wide pattern.
-
-## VAL-024 - Stale test names and merged doc blocks in test execution
-
-Reported by: test-execution.
-
-`count_listed_tests_counts_only_tests` returns names; scratch name `"watchdog_attribution_never_kills"` belongs to a test asserting the opposite; `an_unknown_flag_is_left_for_the_per_binary_command` refers to per-binary commands that no longer exist. Merged doc blocks on `a_lost_start_record_does_not_escape_the_per_test_cap` ("THE CONTRACT" belongs to another test), `Ceilings`/`WallShape`, `test_argv` (stale `--list`/`Ok(0)` paragraph), `resolve_sweeps`, `unify_workspace`.
+Residue: the merge test still feeds the legacy text parser instead of cargo JSON.
 
 ## VAL-025 - Stale claims in check/test code and `check.md`
 
 Reported by: check-core, test-execution.
 
-Check core:
-- `CheckEntry.harness`/`Harness::Nextest` docs say the engine runs "under the project's own `.config/nextest.toml`" and "owns build, list and run"; check.md says the file is never opened and brokkr owns compile shape (config-cli-bootstrap reported the same).
-- `Certifies` doc: "until coverage accounting exists".
-- `SkipSpec` doc and `ResolvedSweep.qualified_skips` ("only on process-isolated sweeps, enforced at resolve time") ignore nextest and the ad-hoc path.
-- `ResolvedSweep.parallel_budget` "enforced at resolve time" - actually `reject_conflicting_lanes` at run time.
-- `ResolvedSweep.build_packages` says "`cargo build --release`"; the pre-build uses the sweep profile.
-- cargo_filter module doc says the text path is the "rare build-error case"; it runs on every green test sweep (`filter_clippy_in_tree`), pre-builds and `brokkr test`; `ClippyParse` "errors-first" holds only for text.
-- `decide_active_sweeps` doc ("Err only when --profile doesn't resolve").
-- `profile.rs` documents `test_threads >= 2`/`0` "bypass the watchdog for a whole-sweep timeout", contradicting "every test gets 20s" (config-cli-bootstrap).
-
-Test execution:
-- `test_runner.rs` header: "watching libtest's partial `test name ... ` progress marker" (deleted); `LibtestRun.completed` doc describes the deferred-observe state machine and `--test-threads=1`.
-- `split_trailing_event`: events "no longer decide when anything is killed" (the watchdog kills on them); `Ceilings.per_test` "Advisory" but terminates; `run_libtest_parallel` "honours a cooperative `brokkr kill` / Ctrl-C" (BUG-016).
-- `check_cmd/output.rs`: "parallel ⇒ no watchdog, one whole-sweep timeout instead"; `build_test_env`: check "always tests in the dev profile".
-- `parallel.rs` header "Slices are proportional to test count" (duration-weighted now); "the per-binary runs below re-enter cargo"; the `partition_target_selectors` rationale describes the old re-entry design; "sequential parallel path"; `binaries.rs`' `-Zfeature-unification` hint says "per-binary runs".
-- `nextest.rs` "NOT YET WIRED" with `#[allow(dead_code)]` on items `nextest_lane` uses; measurements recorded against "cargo-nextest 0.9.143" while the engine is nextest-runner 0.124.
-- `isolate.rs`: "replicating [cargo's env] is nextest's whole job, not brokkr's" - `direct_runtime.rs` now does it.
-- `Ceilings::one_test` on the isolated lane (and check.md "process is the unit of exactly one test"): `cargo test <selection> -- --exact name` spawns every selected binary and the plan merges names across binaries; the 20s wall covers cargo startup plus N launches.
-- `test_scratch.rs` calls itself "the one scratch-directory allocator" and cites "Eleven modules" (see PLT-038, PLT-041); its uniqueness guard is process-local (no-op under process-per-test or across the two bin crates).
-- `--timeout` help: "Exact test name to run (substring filter…)".
-
-`check.md`:
-- "a tenth phase, `coverage`" (predates rustdoc and install_feature); the opening phase list omits rustdoc and install_feature.
-- Rustdoc section "capped … like clippy's" vs "nothing is capped".
-- "must not set `--format` … on a parallel lane" - applies to every lane; "Serial vs parallel" says the serial lane "attribut[es] a stall … from libtest's sequential output"; repeats the stale selector rationale.
-- Says whole-sweep ceilings (30 min) back up and stop the run; unreachable inside `check` (VAL-010).
-
-Design hunt (check-plan, check-exec): `phase.rs::reject_extra_args_complete` says "the plan takes each lane's selection from the sweep's own filters alone, without [forwarded args]", but `prepare::lane_filter_args` does fold forwarded libtest args into the listing (the refusal is still right, since cargo-side forwarded args are not folded, but the stated reason is partly stale). `binary_timings.rs` opens with "Per-binary wall times", while the file's whole argument is that it stores serial cost and not wall time.
+Residue: stale `CheckEntry.harness` and `Certifies` comments in `config_parts/schema.rs` and some test-phase comments remain.
 
 ## VAL-026 - Misattached doc comments and stale naming in check core
 
 Reported by: check-core.
 
-Rendered in rustdoc (`document_private_items = true`): `reject_scoped_complete`'s paragraph on `run_sequential_resolutions`; `decide_active_sweeps`' doc on `CLIPPY_ENV_CONFLICT_REMEDY`; `describe_sweep`'s doc on `cli_package_scope`; `announce_allows`' first paragraph on `announce_test_allows`; `isolated_target_dir` and `composed_rustflags_env` each fuse two docs; a leftover comment in `run_test_phase` mentions a removed `whole_workspace` binding. Several comments still say `[clippy] allow`/`[clippy] allow_exact` (`BuildPhaseArgs`, `clippy_args` doc, `sited_match`, `gated_diags`).
-
-Enforcement proposed: textlint (`region = "comment"`, pattern `\[clippy\] allow`).
+Residue: the `whole_workspace` residue and misattached comments in `test_execution.rs` and `sweep_env.rs` remain.
 
 ## VAL-027 - Check/test messages name the wrong thing or say nothing
 
 Reported by: check-core, test-execution.
 
-- `format_hung_test` always says "killed cargo process group", even when the leader is a directly executed test binary; the serial lane's "a test exceeded its {ceiling}s budget" prints 300s for an idle kill; the nextest zero-work error says "cargo test: zero tests ran".
-- `brokkr test` hand-rolls `println!("[test]    …")` ~15 times and writes stdout/stderr directly in `flush_sink` and forwarders (no `test_msg`; bypasses quiet and run log). The nextest engine prints straight to the terminal (`ReporterOutput::Terminal`) on green runs, breaking "one grouped line per phase on green". See PLT-004.
-- Pluralisation is ad hoc: `format_clippy_multi` spells `error`/`errors`, `dead filter{}` pluralises manually, `filter_clippy_in_tree` prints `1 errors` (pinned by a test).
-- "skipped" goes to stdout when caused by `-p`, to the log when caused by config - deliberate and documented, but each site re-implements it.
-- Silent where something significant happens: watchdog thread spawn failure (`.ok()`, no ceilings), run log open failure, `PHASE_CLOCK` poisoned (ceiling skipped), the `BuildConfig` sink chosen because of an unmodelled env rustflags source.
-- The verdict line lists every `[lints] allow` entry unbounded (the `allow_exact` list was collapsed for this reason); `invocation:` echoes all forwarded args.
-- `DevError::Verify` is used for test timeouts.
-- `timings_record` swallows every failure with nothing logged (intended).
+Residue: direct-binary timeout, idle-kill and nextest zero-work wording, watchdog spawn and `PHASE_CLOCK` poison reporting, run-log open failures and `test_cmd` output-path messages remain.
 
 ## VAL-028 - Dead or unreachable code in the check/test pipeline
 
 Reported by: check-core, test-execution.
 
-- `profile::resolve_unification` returns `Result` with no `Err` path left (its docs say the refusal was removed).
-- `ProfileDef.description` `#[allow(dead_code)]` for a "future `brokkr profiles`".
-- `ClippyDiagnostic.is_error` constant `true` on the JSON path; `is_foreign_manifest_warning`'s `is_error` guard matters only for text.
-- `ResolvedSweep::libtest_argv` test-only, doc ("Wall-clock-ordered") describes nothing.
-- `NextestPair` defined, never constructed; `Disposition::is_terminal` test-only; stale `#[allow(dead_code)]` on `Disposition`/`nextest_disposition` (used).
-- `run_parallel_sweep`'s `doctests` parameter (`let _ = doctests;`); `test_runner::effective_test_threads` alias of `effective_test_threads_from`; `is_bare_status_line` (marker-machine leftover used only by `test_cmd`'s display filter); `binary_selector` feeds only the reproduction line.
-- `PARALLEL_SWEEP_TIMEOUT` and the parallel `timed_out` paths are unreachable inside `check` (VAL-010).
-- Not dead: the "legacy fallback" branch (brokkr itself runs on it).
+Residue: `resolve_planned_sweep` still returns a `Result` with no error path, and other listed residues in S- and I-owned files remain.
 
 ## VAL-032 - `TEXTLINT_PRESET_FIELDS` mirrors `TextlintRule` by hand
 
 Reported by: convention-engines.
 
-A hand-written list of 16 names in `parser.rs` mirroring `TextlintRule` minus 3; no test compares them, so a new field left off is silently rejected in presets. Enforcement proposed: a parity test or a `Preset` struct derived from the same field set.
+Residue: `TEXTLINT_PRESET_FIELDS` is still hand-maintained with no parity check.
 
 ## VAL-034 - The displayed cargo argv is a second copy of the real one
 
 Reported by: convention-engines.
 
-`phase.rs` prints `cargo_line(... "cargo metadata --format-version 1 --no-deps (dependency rules)")` as a literal separate from the argv passed; they agree today. Enforcement proposed: render from the argv slice.
+Residue: `conventions.rs` still prints a literal cargo metadata command instead of the real invocation.
 
 ## VAL-035 - Convention-engine config is validated when the phase runs, not at load
 
 Reported by: convention-engines, config-cli-bootstrap, check-core.
 
-Textlint regexes, `region`, `join_wrapped_use` conflicts and zero-line windows are checked only in `textlint::compile`; dependency_rule `kinds` ("Validated when the phase runs"); `version_align.granularity` (inside `manifest::scan`); every header/manifest glob. A typo surfaces mid-run after earlier phases, never if the phase is skipped by `skip_phases` or the markdown-only shortcut, and under `--textlint NAME` only selected rules compile. `region`, `kinds`, `granularity` are `String`s while `MatchMode`/`Stream`/`Stage` are serde enums. `brokkr.toml.md` claims the `join_wrapped_use`+`except` error is "rejected at load time" (false).
-
-Enforcement proposed: serde enums and compiling every rule in the parser.
-
-Design hunt (check-report, deps-misc): `globs::build_set` is called at scan time by header, textlint and manifest, so an invalid glob in `brokkr.toml` is a phase failure mid-run rather than a config-load error; proposed to compile globs in the parser and store `GlobSet`s. `version_align.granularity` is validated in `manifest::scan` (`"" | "major" | "minor"`), defaulted again in `check_version_align` (`"" -> "minor"`) and re-compared in `version_key` (`== "major"`, else minor) - an `enum Granularity` at load. `lex::Region::parse` is a config parser living in the lexer; the config layer should deserialize `Region` directly.
-
-## VAL-036 - Convention-engine tunables have no config surface or injection point
-
-Reported by: convention-engines.
-
-`DISPLAY_CAP = 200` in textlint (truncates silently, no ellipsis), `TOOLCHAIN_CRATES`, `STALE_DAYS`, `ABANDONED_DAYS`, `SUPPORTED_SCHEMA`, gremlins' `SCANNED_EXTENSIONS`; `[deps]` has one knob; nothing lists the set. `ccu::now_julian_day` reads `SystemTime` and `try_run` spawns `ccu` directly, so dedup and `OutdatedComplete` are untested and a pre-epoch clock becomes day 1970 with negative ages. `focus::tildify` reads `HOME` directly. `ccu`'s `INSTALL_HINT` hard-codes `~/Programs/check-updates/ccu` and the module doc cites the same path.
+Residue: textlint compilation and manifest glob/granularity validation still happen at scan time.
 
 ## VAL-037 - Convention-engine output is inconsistent
 
 Reported by: convention-engines.
 
-- Focus JSON drops `prefix_note` ("not in host-filtered graph", "substring matches"); a consumer can't tell a fallback result from an exact one.
-- Textlint, dependency rules and script-check report counts "so ok is falsifiable"; header, manifest and gremlins print a bare `ok`, and textlint's count still aggregates across rules (the green lines live in `check_cmd/phase.rs`).
-- The gremlins failure hint "rerun with `--fix-gremlins` to rewrite all banned chars" (printed from `check_cmd/phase.rs`) is false for config-`ban`ned codepoints; `gremlins.rs` now documents why those may not be rewritable.
+Residue: the gremlins, header and manifest green lines are still bare.
 
 ## VAL-038 - Convention-engine and deps errors misclassified
 
 Reported by: convention-engines.
 
-`From<serde_json::Error>` gives `DevError::Build("json: ...")`, so a metadata schema mismatch reads "build: json: missing field … line 1 column N" with no phase or command; `cargo metadata` failures use `Build` not `Subprocess` (exit code lost); `brokkr deps nosuchcrate` prints "build: no package matching ...". See PLT-007.
+Residue: the shared JSON conversion and cargo metadata failures still map to `Build`.
 
 ## VAL-039 - Convention-engine tests that prove little
 
 Reported by: convention-engines.
 
-`header::current_year_is_sane` reads the wall clock and asserts `2024..2100`; `header::scan` has no test. No test covers the git-backed scan entry points (gremlins, header, textlint, manifest `scan`), so globs/`exclude`/walk wiring is untested. Nothing asserts every `GREMLINS` entry has a `replacement()` arm (they match today). No `TEXTLINT_PRESET_FIELDS` parity test (VAL-032). `gates_or_together_any_hit_suppresses` and check.md ("Multiple gates AND together") describe the same behaviour with opposite words.
-
-Design hunt (check-report): `header::current_utc_year` (libc `gmtime`) is called per run inside the phase; the year is exactly the kind of input a test would want injected.
+Residue: textlint preset-field parity is untested.
 
 ## VAL-040 - Convention-engine guards that fail open
 
 Reported by: convention-engines.
 
-Globs, adapter groups, `version_align` and the dead-scope checks for gremlins, textlint, header and manifest are now enforced when their scanners run. Residue:
-- Unmatched `[deps].workspace_dep_ignore` and `dependency_rule.except` entries are still silent.
-- The dead-scope checks are scan-time, so a skipped phase, the prose-only shortcut or an unselected `--textlint` rule still bypasses them; moving them to config load needs the tracked-file list at parse time.
+Residue: tree-dependent dead-scope checks can still be bypassed by skipped phases or the prose-only shortcut.
 
 ## VAL-042 - Convention-engine policy invented per site
 
 Reported by: convention-engines.
 
-- Four path-pattern dialects in one scope: globset (header, textlint, manifest), directory prefix (gremlins `exclude`), trailing-`*` prefix (`workspace_dep_ignore`), literal `"*"` (`dependency_rule.from`).
-- Textlint `skip_after` and `allow_marker` each have per-line and join-pass implementations (`skip_after_suppresses`, `use_marker_suppresses`), kept aligned by comments.
-- `except_above`/`require_above` (and the `_below` pair) behave identically; the docs say the names differ only to show intent; each is documented four times in `schema.rs`.
-- `script_check` holds child stdout/stderr fully in memory (unbounded).
+Residue: the schema docs for the convention selectors are not consolidated.

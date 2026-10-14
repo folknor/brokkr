@@ -1,8 +1,9 @@
 # `[piners]` config
 
-The piners block, read by `brokkr corpus` / `brokkr corpus-results`. Kept out of the
-`[[check]]` sweep, like `[ratatoskr]`. All paths resolve relative to
-`brokkr.toml`. See `docs/commands/corpus.md` for the runner and
+The piners block, read by `brokkr corpus` / `brokkr corpus-results`, with
+optional `[piners.lint]` settings for `brokkr lint-corpus` / `brokkr lint-results`.
+Kept out of the `[[check]]` sweep, like `[ratatoskr]`. All paths resolve
+relative to `brokkr.toml`. See `docs/commands/corpus.md` for the runner and
 `docs/projects/piners.md` for the data contracts + run store.
 
 ```toml
@@ -19,6 +20,17 @@ binary  = "corpus"         # bin (built as `cargo build -p piners-runner --bin c
 # debug = true             # parity-run default (debug if unset); --debug/--release
                            # override. Measured runs (--hotpath/--alloc) ignore it
                            # and default to release.
+
+# Optional differential-lint corpus. Snippets live under corpus_root.
+[piners.lint]
+package = "piners-runner"             # validator package built from this tree
+# binary = "piners"                   # defaults to package
+# subcommand = "validate"             # defaults to validate
+# features = ["..."]                  # optional cargo features
+# debug = true                         # defaults to the dev profile
+registry_dir = "corpus/lint-registry" # lints.toml + <keyword>.toml
+# snippets_dir = "corpus/lint-snippets" # defaults to registry_dir
+# pine_lint_bin = "pine-lint"          # defaults to pine-lint on PATH
 ```
 
 - `corpus_root` - root of the piners-owned corpus tree (default `corpus`):
@@ -35,6 +47,12 @@ binary  = "corpus"         # bin (built as `cargo build -p piners-runner --bin c
   piners-owned metadata describing it, still holds).
 - `harness` - the corpus harness build spec (shared `[*.harness]` shape).
   Required to run probes; `--verify-only` and `--reseed` work without it.
+- `lint` - optional differential-lint corpus settings for `brokkr lint-corpus`
+  and `brokkr lint-results`. `package`, optional `binary`/`subcommand`,
+  `features`, and `debug` configure the validator built from this tree;
+  `registry_dir` defaults to `corpus-lint-registry`, `snippets_dir` defaults
+  to that registry and must be under `corpus_root`, and `pine_lint_bin`
+  defaults to `pine-lint` on `PATH`. Paths resolve relative to `brokkr.toml`.
 
 There is no `[piners.feeds]` block. OHLCV feeds are hash-pinned registry
 content - `[feeds.<name>]` groups in `pins.toml`, referenced by directory

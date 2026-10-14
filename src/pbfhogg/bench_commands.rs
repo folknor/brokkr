@@ -64,7 +64,7 @@ fn preset_to_command(name: &str) -> Result<PbfhoggCommand, DevError> {
         },
         "inspect-tags-way" => PbfhoggCommand::Inspect {
             mode: InspectMode::Tags {
-                type_filter: Some("way".into()),
+                type_filter: Some(super::commands::InspectTypeFilter::Way),
             },
         },
         "check-refs" => PbfhoggCommand::CheckRefs,
@@ -173,11 +173,10 @@ pub fn run(
     pbf_path: &Path,
     osc_path: Option<&Path>,
     osc_seq: Option<&str>,
-    scratch_dir: Option<&Path>,
+    scratch_dir: &Path,
     runs: usize,
     commands: &[&str],
     project_root: &Path,
-    index_type: Option<&str>,
 ) -> Result<(), DevError> {
     // Resolve OSC path once if any preset needs it.
     let osc_pathbuf = if suite_needs_osc(commands)? {
@@ -206,15 +205,13 @@ pub fn run(
                 "diff/diff-osc require the OSC file's replication seq (dataset osc entry)".into(),
             )
         })?;
-        let scratch = scratch_dir
-            .ok_or_else(|| DevError::Config("diff/diff-osc require a scratch directory".into()))?;
         let (merged, state) = crate::pbfhogg::plan::ensure_merged_pbf(
             binary,
             pbf_path,
             osc,
             "base",
             seq,
-            scratch,
+            scratch_dir,
             project_root,
             true,
         )?;
@@ -224,20 +221,13 @@ pub fn run(
     };
 
     // Ensure scratch dir exists up front so per-preset contexts can reference it.
-    let scratch_dir = scratch_dir.ok_or_else(|| {
-        DevError::Config("bench_commands::run requires a scratch directory".into())
-    })?;
     std::fs::create_dir_all(scratch_dir)
         .map_err(|e| DevError::Config(format!("failed to create scratch dir: {e}")))?;
 
     crate::harness::run_variants("command", commands, |name| {
         let cmd = preset_to_command(name)?;
 
-        let mut params = CommandParams::default();
-        if let Some(it) = index_type {
-            params.index_type = Some(it.to_owned());
-        }
-
+        let params = CommandParams::default();
         let primary_pbf = pbf_path.to_path_buf();
         let inputs = match &cmd {
             PbfhoggCommand::MergeChanges { .. }
@@ -263,7 +253,6 @@ pub fn run(
             _ => ResolvedInputs::Pbf { pbf: primary_pbf },
         };
         let ctx = CommandContext {
-            binary: binary.to_path_buf(),
             inputs,
             scratch_dir: scratch_dir.to_path_buf(),
             dataset: String::new(),
@@ -323,11 +312,11 @@ mod tests {
     }
 
     #[test]
-    fn cat_variants_share_result_command() {
+    fn cat_variants_share_result_id() {
         // All four cat presets collapse to the consolidated "cat" command
         // label in the DB (axes live in cli_args).
         for name in ["cat", "cat-way", "cat-relation", "cat-dedupe"] {
-            assert_eq!(preset_to_command(name).unwrap().result_command(), "cat");
+            assert_eq!(preset_to_command(name).unwrap().id(), "cat");
         }
     }
 

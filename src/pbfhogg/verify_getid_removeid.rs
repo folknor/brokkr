@@ -2,15 +2,11 @@
 
 use std::path::Path;
 
+use super::commands::GETID_BENCH_IDS;
 use super::verify::{Findings, Verdict, VerifyHarness};
 use super::verify_multi_extract::inspect_counts;
 use crate::error::DevError;
 use crate::output::verify_msg;
-
-/// Element IDs known to exist in Denmark PBFs.
-const IDS: &[&str] = &[
-    "n115722", "n115723", "n115724", "w2080", "w2081", "w2082", "r174", "r213", "r339",
-];
 
 /// Run getid cross-validation: pbfhogg getid vs osmium getid,
 /// then pbfhogg getid --invert complement test.
@@ -27,15 +23,27 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, direct_io: bool) -> Result<Findi
     if direct_io {
         pbfhogg_args.push("--direct-io");
     }
-    pbfhogg_args.extend_from_slice(IDS);
+    pbfhogg_args.extend_from_slice(GETID_BENCH_IDS);
     let captured = harness.run_pbfhogg(&pbfhogg_args)?;
     harness.check_exit(&captured, "pbfhogg getid")?;
+
+    let selected = inspect_counts(harness, &pbfhogg_getid)?;
+    if selected.nodes == 0 && selected.ways == 0 && selected.relations == 0 {
+        return Err(DevError::Config(
+            "the fixed getid verification IDs do not occur in this PBF; the comparison would be vacuous"
+                .into(),
+        ));
+    }
+    verify_msg(&format!(
+        "  fixed IDs selected: {} nodes, {} ways, {} relations",
+        selected.nodes, selected.ways, selected.relations
+    ));
 
     // osmium getid <pbf> <ids...> -o <out> --overwrite
     let osmium_getid = outdir.join("osmium-getid.osm.pbf");
     let osmium_getid_str = osmium_getid.display().to_string();
     let mut osmium_args: Vec<&str> = vec!["getid", &pbf_str];
-    osmium_args.extend_from_slice(IDS);
+    osmium_args.extend_from_slice(GETID_BENCH_IDS);
     osmium_args.extend_from_slice(&["-o", &osmium_getid_str, "--overwrite"]);
     let captured = harness.run_tool("osmium", &osmium_args)?;
     harness.check_exit(&captured, "osmium getid")?;
@@ -70,7 +78,7 @@ pub fn run(harness: &VerifyHarness, pbf: &Path, direct_io: bool) -> Result<Findi
     if direct_io {
         invert_args.push("--direct-io");
     }
-    invert_args.extend_from_slice(IDS);
+    invert_args.extend_from_slice(GETID_BENCH_IDS);
     let captured = harness.run_pbfhogg(&invert_args)?;
     harness.check_exit(&captured, "pbfhogg getid --invert")?;
 

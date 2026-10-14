@@ -12,12 +12,12 @@
 //! starts within them. It does **not** parse element bodies (tags,
 //! refs, members, coordinates, metadata) - those aren't needed for
 //! the carve-out and pulling in a full XML stack just to discard them
-//! would be churn. OSC files we see are tool-emitted and regular
-//! enough that whitespace-tolerant tag-start scanning is sufficient;
-//! we never parse user-authored XML.
+//! would be churn. It scans incrementally and retains only the current tag,
+//! so large Planet or regional diffs do not need to fit in memory.
 
 use std::collections::BTreeSet;
-use std::io::Read;
+use std::fs::File;
+use std::io::{self, Cursor, Read};
 use std::path::Path;
 
 use flate2::read::MultiGzDecoder;
@@ -69,40 +69,50 @@ impl OscDiff {
 /// the create/modify/delete sections). Plain `GzDecoder` stops silently at the
 /// first member boundary and would yield a truncated-but-valid-looking OSC.
 pub fn parse_osc_file(path: &Path) -> Result<OscDiff, DevError> {
-    let bytes = std::fs::read(path)
+    let mut file = File::open(path)
         .map_err(|e| DevError::Verify(format!("cannot open OSC {}: {e}", path.display())))?;
-    parse_osc_text(&decode_osc_bytes(&bytes, path)?).map_err(|why| {
-        DevError::Verify(format!(
+    let mut magic = [0; 2];
+    let mut prefix_len = 0;
+    while prefix_len < magic.len() {
+        let read = file
+            .read(&mut magic[prefix_len..])
+            .map_err(|e| DevError::Verify(format!("cannot read OSC {}: {e}", path.display())))?;
+        if read == 0 {
+            break;
+        }
+        prefix_len += read;
+    }
+    let input = Cursor::new(magic[..prefix_len].to_vec()).chain(file);
+    let compressed = prefix_len == 2 && magic == [0x1f, 0x8b];
+    let result = if compressed {
+        parse_osc_reader(MultiGzDecoder::new(input))
+    } else {
+        parse_osc_reader(input)
+    };
+    result.map_err(|error| match error {
+        OscReadError::Read(error) if compressed => {
+            DevError::Verify(format!("cannot decompress OSC {}: {error}", path.display()))
+        }
+        OscReadError::Read(error) => {
+            DevError::Verify(format!("cannot read OSC {}: {error}", path.display()))
+        }
+        OscReadError::Utf8(error) => DevError::Verify(format!(
+            "OSC {} is not valid UTF-8: {error}",
+            path.display()
+        )),
+        OscReadError::Parse(why) => DevError::Verify(format!(
             "{} is not a complete OSC document: {why}",
             path.display()
-        ))
+        )),
     })
-}
-
-/// Decompress OSC bytes to XML text. Gzip is detected by magic bytes and
-/// decoded with `MultiGzDecoder` (handles pbfhogg's spliced multi-member
-/// stream); anything else is treated as plain UTF-8 XML.
-fn decode_osc_bytes(bytes: &[u8], path: &Path) -> Result<String, DevError> {
-    if bytes.starts_with(&[0x1f, 0x8b]) {
-        let mut s = String::new();
-        MultiGzDecoder::new(bytes)
-            .read_to_string(&mut s)
-            .map_err(|e| {
-                DevError::Verify(format!("cannot decompress OSC {}: {e}", path.display()))
-            })?;
-        Ok(s)
-    } else {
-        String::from_utf8(bytes.to_vec()).map_err(|e| {
-            DevError::Verify(format!("OSC {} is not valid UTF-8: {e}", path.display()))
-        })
-    }
 }
 
 /// Section the parser is currently inside. `None` means "between
 /// `<osmChange>` and the first action tag" or "after closing one
 /// action tag and before opening the next."
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 enum Section {
+    #[default]
     None,
     Create,
     Modify,
@@ -110,12 +120,66 @@ enum Section {
 }
 
 /// Where the parser stands relative to the `<osmChange>` root element.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum Root {
     /// No element seen yet (only the prolog: `<?xml?>`, comments, DOCTYPE).
+    #[default]
     Before,
     Open,
     Closed,
+}
+
+/// Read errors and document errors remain distinct so the file entry point
+/// can name decompression, UTF-8, and XML failures accurately.
+#[derive(Debug)]
+enum OscReadError {
+    Read(io::Error),
+    Utf8(std::str::Utf8Error),
+    Parse(String),
+}
+
+/// Validate UTF-8 in bounded chunks. The trailing bytes of a partial code
+/// point are carried into the next chunk; the OSC scanner itself only retains
+/// the current tag (or a small comment marker), never the element bodies.
+#[derive(Default)]
+struct Utf8Validator {
+    trailing: Vec<u8>,
+}
+
+impl Utf8Validator {
+    fn push(&mut self, bytes: &[u8]) -> Result<(), std::str::Utf8Error> {
+        let mut joined = std::mem::take(&mut self.trailing);
+        joined.extend_from_slice(bytes);
+        match std::str::from_utf8(&joined) {
+            Ok(_) => Ok(()),
+            Err(error) if error.error_len().is_none() => {
+                self.trailing
+                    .extend_from_slice(&joined[error.valid_up_to()..]);
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn finish(self) -> Result<(), std::str::Utf8Error> {
+        std::str::from_utf8(&self.trailing).map(|_| ())
+    }
+}
+
+fn parse_osc_reader<R: Read>(mut reader: R) -> Result<OscDiff, OscReadError> {
+    let mut parser = OscParser::default();
+    let mut validator = Utf8Validator::default();
+    let mut chunk = [0; 16 * 1024];
+    loop {
+        let read = reader.read(&mut chunk).map_err(OscReadError::Read)?;
+        if read == 0 {
+            validator.finish().map_err(OscReadError::Utf8)?;
+            break;
+        }
+        validator.push(&chunk[..read]).map_err(OscReadError::Utf8)?;
+        parser.feed(&chunk[..read]).map_err(OscReadError::Parse)?;
+    }
+    parser.finish().map_err(OscReadError::Parse)
 }
 
 /// Parse already-decompressed OSC XML text. Tolerant of whitespace,
@@ -127,102 +191,136 @@ enum Root {
 /// non-OSC input - an empty file, an `.osm` document, a diff truncated
 /// mid-write - parsed as an empty diff, which `verify_merge` reports as
 /// "element-identical PASS".
-///
-/// The error is the bare reason; [`parse_osc_file`] wraps it in a
-/// `DevError` that names the file.
-#[allow(clippy::cognitive_complexity)] // single state machine
+#[cfg(test)]
 pub fn parse_osc_text(text: &str) -> Result<OscDiff, String> {
-    let mut out = OscDiff::default();
-    let mut section = Section::None;
-    let mut root = Root::Before;
-    let bytes = text.as_bytes();
-    let mut i = 0;
+    let mut parser = OscParser::default();
+    parser.feed(text.as_bytes())?;
+    parser.finish()
+}
 
-    while i < bytes.len() {
-        // Skip until next `<`. Everything before is element bodies or
-        // whitespace we don't care about.
-        let Some(rel) = bytes[i..].iter().position(|&b| b == b'<') else {
-            break;
-        };
-        i += rel;
+#[derive(Default)]
+struct OscParser {
+    out: OscDiff,
+    section: Section,
+    root: Root,
+    scan: ScanState,
+}
 
-        // Skip XML comments `<!-- ... -->` and processing
-        // instructions `<? ... ?>` / DOCTYPE `<! ... >`. These never
-        // contain action-tag starts in well-formed OSC.
-        if bytes[i..].starts_with(b"<!--") {
-            if let Some(end) = find_subsequence(&bytes[i..], b"-->") {
-                i += end + 3;
-                continue;
-            }
-            break;
+#[derive(Default)]
+enum ScanState {
+    #[default]
+    Text,
+    Probe(Vec<u8>),
+    Tag(Vec<u8>),
+    Comment(u8),
+    Declaration,
+}
+
+impl OscParser {
+    fn feed(&mut self, bytes: &[u8]) -> Result<(), String> {
+        for &byte in bytes {
+            let state = std::mem::take(&mut self.scan);
+            self.scan = match state {
+                ScanState::Text if byte == b'<' => ScanState::Probe(Vec::new()),
+                ScanState::Text => ScanState::Text,
+                ScanState::Probe(mut prefix) => {
+                    prefix.push(byte);
+                    if prefix.as_slice() == b"!--" {
+                        ScanState::Comment(0)
+                    } else if b"!--".starts_with(prefix.as_slice()) || prefix.as_slice() == b"?" {
+                        ScanState::Probe(prefix)
+                    } else if prefix.starts_with(b"!") || prefix.starts_with(b"?") {
+                        ScanState::Declaration
+                    } else if byte == b'>' {
+                        self.process_tag(&prefix[..prefix.len() - 1])?;
+                        ScanState::Text
+                    } else {
+                        ScanState::Tag(prefix)
+                    }
+                }
+                ScanState::Tag(tag) if byte == b'>' => {
+                    self.process_tag(&tag)?;
+                    ScanState::Text
+                }
+                ScanState::Tag(mut tag) => {
+                    tag.push(byte);
+                    ScanState::Tag(tag)
+                }
+                ScanState::Comment(mut trailing_dashes) => {
+                    if byte == b'>' && trailing_dashes == 2 {
+                        ScanState::Text
+                    } else {
+                        trailing_dashes = if byte == b'-' {
+                            (trailing_dashes + 1).min(2)
+                        } else {
+                            0
+                        };
+                        ScanState::Comment(trailing_dashes)
+                    }
+                }
+                ScanState::Declaration if byte == b'>' => ScanState::Text,
+                ScanState::Declaration => ScanState::Declaration,
+            };
         }
-        if bytes[i..].starts_with(b"<?") || bytes[i..].starts_with(b"<!") {
-            if let Some(end) = bytes[i..].iter().position(|&b| b == b'>') {
-                i += end + 1;
-                continue;
-            }
-            break;
-        }
+        Ok(())
+    }
 
-        // We're at a `<...>` tag. Find its end.
-        let Some(close_rel) = bytes[i..].iter().position(|&b| b == b'>') else {
-            break;
-        };
-        let tag_end = i + close_rel; // exclusive of '>'
-        let tag = &text[i + 1..tag_end];
-        i = tag_end + 1;
-
-        // Distinguish closing tags (`</foo>`) from opening / self-closing.
+    fn process_tag(&mut self, tag: &[u8]) -> Result<(), String> {
+        let tag = std::str::from_utf8(tag).map_err(|error| error.to_string())?;
         if let Some(name) = tag.strip_prefix('/') {
             let name = name.trim();
             match name {
-                "create" | "modify" | "delete" => section = Section::None,
-                "osmChange" if root == Root::Open => root = Root::Closed,
+                "create" | "modify" | "delete" => self.section = Section::None,
+                "osmChange" if self.root == Root::Open => self.root = Root::Closed,
                 _ => {}
             }
-            continue;
+            return Ok(());
         }
 
-        // Strip self-closing trailing slash for matching.
         let self_closing = tag.ends_with('/');
         let stripped = tag.trim_end_matches('/').trim();
         let (name, attrs) = split_tag_name(stripped);
-
-        match root {
+        match self.root {
             Root::Before if name == "osmChange" => {
-                root = if self_closing {
+                self.root = if self_closing {
                     Root::Closed
                 } else {
                     Root::Open
                 };
-                continue;
+                return Ok(());
             }
-            Root::Before => {
-                return Err(format!("root element is <{name}>, not <osmChange>"));
-            }
-            Root::Closed => {
-                return Err(format!("element <{name}> after the closing </osmChange>"));
-            }
+            Root::Before => return Err(format!("root element is <{name}>, not <osmChange>")),
+            Root::Closed => return Err(format!("element <{name}> after the closing </osmChange>")),
             Root::Open => {}
         }
-
         match name {
-            "create" => section = Section::Create,
-            "modify" => section = Section::Modify,
-            "delete" => section = Section::Delete,
+            "create" => self.section = Section::Create,
+            "modify" => self.section = Section::Modify,
+            "delete" => self.section = Section::Delete,
             "node" | "way" | "relation" => {
                 if let Some(id) = extract_id(attrs) {
-                    record(&mut out, section, name, id);
+                    record(&mut self.out, self.section, name, id);
                 }
             }
             _ => {}
         }
+        Ok(())
     }
 
-    match root {
-        Root::Closed => Ok(out),
-        Root::Before => Err("no <osmChange> root element".to_owned()),
-        Root::Open => Err("missing closing </osmChange> (truncated?)".to_owned()),
+    fn finish(self) -> Result<OscDiff, String> {
+        match self.scan {
+            ScanState::Text => {}
+            ScanState::Comment(_) => return Err("unterminated XML comment".to_owned()),
+            ScanState::Declaration => return Err("unterminated XML declaration".to_owned()),
+            ScanState::Probe(_) | ScanState::Tag(_) => {
+                return Err("incomplete XML tag".to_owned());
+            }
+        }
+        match self.root {
+            Root::Closed => Ok(self.out),
+            Root::Before => Err("no <osmChange> root element".to_owned()),
+            Root::Open => Err("missing closing </osmChange> (truncated?)".to_owned()),
+        }
     }
 }
 
@@ -308,17 +406,6 @@ fn record(out: &mut OscDiff, section: Section, kind: &str, id: i64) {
     target.insert(id);
 }
 
-/// Naive `memmem` substitute. OSC files we parse top out at
-/// double-digit megabytes (the Denmark daily diff) so a linear scan
-/// is fine; pulling in the `memchr` crate just to find `-->` would
-/// be silly.
-fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    if needle.is_empty() {
-        return Some(0);
-    }
-    haystack.windows(needle.len()).position(|w| w == needle)
-}
-
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -394,18 +481,10 @@ mod tests {
         ));
         assert_eq!(&multi[..2], &[0x1f, 0x8b], "gzip magic");
 
-        // Detected as gzip by magic even with a bare `.osc` name (the bug).
-        let text = decode_osc_bytes(&multi, Path::new("pbfhogg-vs-osmium.osc")).unwrap();
-        assert!(
-            text.contains(r#"node id="1""#),
-            "first member missing: {text}"
-        );
-        assert!(
-            text.contains(r#"way id="2""#),
-            "second member missing - GzDecoder truncation? {text}"
-        );
-
-        let diff = parse_osc_text(&text).unwrap();
+        // Detected as gzip by magic even with a bare `.osc` name.
+        let path = crate::test_scratch::scratch_path("osc", "multi-member.osc");
+        std::fs::write(&path, multi).unwrap();
+        let diff = parse_osc_file(&path).unwrap();
         assert_eq!(
             diff.created_nodes.iter().copied().collect::<Vec<_>>(),
             vec![1]
@@ -418,8 +497,10 @@ mod tests {
 
     #[test]
     fn plain_text_osc_passes_through() {
-        let text = decode_osc_bytes(SAMPLE.as_bytes(), Path::new("x.osc")).unwrap();
-        assert_eq!(text, SAMPLE);
+        let diff = parse_osc_reader(Cursor::new(SAMPLE.as_bytes())).unwrap();
+        assert!(diff.created_nodes.contains(&100));
+        assert!(diff.modified_nodes.contains(&300));
+        assert!(diff.deleted_relations.contains(&600));
     }
 
     #[test]

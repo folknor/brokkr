@@ -17,6 +17,9 @@
 //! so one hung script fails as that entry - its captured output shown, the
 //! other entries still run - instead of taking the whole run down through the
 //! phase watchdog.
+//! Each output stream retains at most [`CAPTURE_LIMIT`] bytes. If a selected
+//! stream exceeds that cap, or its pipe remains open past the drain grace, the
+//! entry fails because capture cannot prove the complete stream matched.
 //!
 //! This module is the logic (`evaluate` + `run_one`); orchestration and
 //! failure formatting live in `check_cmd::phase::run_script_checks`, mirroring
@@ -27,7 +30,10 @@ use std::time::Duration;
 
 use crate::config::{MatchMode, ScriptCheck, Stream};
 use crate::error::DevError;
-use crate::output;
+
+/// Maximum retained bytes per stream for one script-check. The child keeps
+/// running after this point, but the supervisor drains and discards the rest.
+const CAPTURE_LIMIT: usize = 1024 * 1024;
 
 /// The captured result of running one script-check.
 pub struct Outcome {
@@ -36,10 +42,16 @@ pub struct Outcome {
     pub passed: bool,
     /// `Some(deadline)` when the command was killed for running past it.
     pub timed_out: Option<Duration>,
-    /// The command's captured stdout (shown verbatim on failure).
+    /// The retained stdout prefix (shown on failure).
     pub stdout: Vec<u8>,
-    /// The command's captured stderr (shown verbatim on failure).
+    /// The retained stderr prefix (shown on failure).
     pub stderr: Vec<u8>,
+    /// True when stdout exceeded the retained prefix.
+    pub stdout_truncated: bool,
+    /// True when stderr exceeded the retained prefix.
+    pub stderr_truncated: bool,
+    /// True when a writer kept a pipe open beyond the supervisor's drain grace.
+    pub capture_incomplete: bool,
 }
 
 /// Run one `[[script_check]]` and evaluate its output.
@@ -69,18 +81,35 @@ pub struct Outcome {
 /// brokkr's own children would let a script descendant keep compiling into
 /// later holds it was never authorized for.
 pub fn run_one(check: &ScriptCheck, cwd: &Path, deadline: Duration) -> Result<Outcome, DevError> {
-    let run = output::run_captured_with_env_and_deadline(
+    let signal_guard = crate::shutdown::SigtermGuard::install();
+    let run = crate::output::child::run_captured_bounded(
         "sh",
         &["-c", &check.command],
         cwd,
         &[],
         deadline,
         None,
-        true,
+        crate::shutdown::ChildIsolation::ProcessGroup(&signal_guard),
+        crate::output::child::CaptureCap {
+            stdout: CAPTURE_LIMIT + 1,
+            stderr: CAPTURE_LIMIT + 1,
+        },
     )?;
     let timed_out = run.killed_on_deadline().then_some(deadline);
-    let captured = run.captured;
+    let capture_incomplete = run.output_cut;
+    let mut captured = run.captured;
+    let stdout_truncated = captured.stdout.len() > CAPTURE_LIMIT;
+    let stderr_truncated = captured.stderr.len() > CAPTURE_LIMIT;
+    captured.stdout.truncate(CAPTURE_LIMIT);
+    captured.stderr.truncate(CAPTURE_LIMIT);
+    let relevant_output_truncated = match check.stream {
+        Stream::Stdout => stdout_truncated,
+        Stream::Stderr => stderr_truncated,
+        Stream::Both => stdout_truncated || stderr_truncated,
+    };
     let passed = timed_out.is_none()
+        && !capture_incomplete
+        && !relevant_output_truncated
         && evaluate(
             &check.expect,
             check.match_mode,
@@ -93,6 +122,9 @@ pub fn run_one(check: &ScriptCheck, cwd: &Path, deadline: Duration) -> Result<Ou
         timed_out,
         stdout: captured.stdout,
         stderr: captured.stderr,
+        stdout_truncated,
+        stderr_truncated,
+        capture_incomplete,
     })
 }
 

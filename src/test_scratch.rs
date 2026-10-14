@@ -1,7 +1,7 @@
 //! The one scratch-directory allocator for unit tests.
 //!
 //! Project rules forbid `/tmp`, so every test that needs a filesystem writes
-//! under the crate's gitignored `target/test-tmp/`. Eleven modules grew their
+//! under the crate's gitignored `target/test-tmp/`. Many modules grew their
 //! own copy of that helper, each correct on its own and each carrying the same
 //! unwritten precondition: **the name must be unique**, because the allocator
 //! deletes the directory before handing it back.
@@ -28,8 +28,8 @@
 //! that somebody has to reproduce under concurrency to explain.
 //!
 //! Why a shared module rather than a guard pasted into each copy: a
-//! precondition enforced in eleven places is enforced in ten places as soon as
-//! somebody adds a twelfth. The allocator is the only thing that knows about
+//! precondition enforced in every copy is missing from the next copy somebody
+//! adds. The allocator is the only thing that knows about
 //! the deletion, so it is the only thing that can enforce the rule that
 //! deletion implies.
 
@@ -102,15 +102,13 @@ pub(crate) fn scratch_path(module: &str, name: &str) -> PathBuf {
     path
 }
 
-/// The one lock serialising unit tests that mutate process-global state:
-/// the compilation capability slot (`hold`) and the armed toolchain-disable
-/// dir (`toolchain::DISABLE_DIR`).
+/// The one lock serialising unit tests that mutate process-global state, such
+/// as the compilation capability slot (`hold`).
 ///
 /// One lock for all of them, not one per module: the state is read across
-/// modules (a lock acquisition reads both), so per-module locks serialised
-/// each module against itself and nothing against the others - which is how a
-/// toolchain test arming a scratch dir could have a concurrent lockfile test
-/// rename files in it. Hold it for the whole test, and restore what you found.
+/// modules (a lock acquisition reads it), so per-module locks would serialise
+/// each module against itself and nothing against the others. Hold it for the
+/// whole test, and restore what you found.
 pub(crate) fn process_global_lock() -> std::sync::MutexGuard<'static, ()> {
     static SEQ: Mutex<()> = Mutex::new(());
     SEQ.lock()

@@ -120,10 +120,11 @@ pub fn record_prefix(git_root: &Path) -> String {
 /// worktree brokkr cut: the slot's [`TARGET_LINK`]. `None` for every other
 /// tree, which keeps whatever target dir its own config gives it.
 ///
-/// Used by [`crate::build::cargo_build_observed`] and `brokkr bench` to pin
-/// `CARGO_TARGET_DIR`, which overrides any inherited `build.target-dir` or
+/// Used by the shared Cargo build and discovery helpers and `brokkr bench` to
+/// pin `CARGO_TARGET_DIR`, which overrides any inherited `build.target-dir` or
 /// exported `CARGO_TARGET_DIR` that would otherwise put the worktree's build
-/// in the live tree's target.
+/// in the live tree's target. Hand-built Cargo invocations need the same
+/// override as well, since their callers still launch Cargo independently.
 pub fn isolated_target_dir(build_root: &Path) -> Option<PathBuf> {
     let container = container().ok()?;
     let slot = build_root.parent()?;
@@ -590,54 +591,16 @@ fn remove_checkout(git_root: &Path, path: &Path) -> Result<(), DevError> {
     Ok(())
 }
 
-/// True when the worktree has uncommitted or untracked content.
-///
-/// Deliberately does not exclude anything. `git::check_clean`'s exclusions
-/// exist so brokkr's own outputs can't block a *measurement*; here the question
-/// is whether deleting this directory would destroy work, and for that, an
-/// untracked file counts.
+/// True when deleting the worktree could destroy uncommitted or untracked work.
+/// A git failure is treated as dirty.
 pub fn is_dirty(path: &Path) -> bool {
-    porcelain(path).is_none_or(|lines| !lines.is_empty())
+    crate::git::TreeState::read(path).is_none_or(|state| state.for_deletion())
 }
 
-/// True when the checkout holds exactly its commit, for reuse.
-///
-/// Stricter than [`git::check_clean`](crate::git)'s measurement rule - an
-/// untracked source file counts, since cargo auto-discovers `src/bin/*.rs` and
-/// examples - but blind to the two states brokkr itself leaves: the toolchain
-/// pin moved aside by a run that was hard-killed (`toolchain::activate` adopts
-/// that sidecar on the next lock), and a `Cargo.lock` cargo generated for a
-/// commit that tracked none. A checkout git cannot read is not pristine.
+/// Whether a persistent worktree is safe to reuse for its named commit. The
+/// policy includes every source change and ignores only known generated states.
 pub fn is_pristine(path: &Path) -> bool {
-    let Some(lines) = porcelain(path) else {
-        return false;
-    };
-    lines.iter().all(|line| {
-        let (status, file) = line.split_at(line.len().min(3));
-        match status {
-            "?? " => file == "Cargo.lock" || file.ends_with(crate::toolchain::SUFFIX),
-            " D " => file == "rust-toolchain" || file == "rust-toolchain.toml",
-            _ => false,
-        }
-    })
-}
-
-/// `git status --porcelain` lines, or `None` when git cannot answer.
-fn porcelain(path: &Path) -> Option<Vec<String>> {
-    let out = Command::new("git")
-        .args(["status", "--porcelain"])
-        .current_dir(path)
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    Some(
-        String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .map(str::to_owned)
-            .collect(),
-    )
+    crate::git::TreeState::read(path).is_some_and(|state| !state.for_reuse())
 }
 
 /// Run a git command in the given directory and return trimmed stdout.

@@ -120,6 +120,42 @@ pub(crate) fn collect_clean_approval(
     Ok(git_info)
 }
 
+/// Refuse to pin an approval to the current commit unless its image came from
+/// a clean run of that same commit.
+pub(crate) fn validate_approval_origin(
+    subject: &str,
+    result_run_id: &str,
+    run: Option<&super::db::RunSummary>,
+    current_commit: &str,
+) -> Result<(), DevError> {
+    let run = run.ok_or_else(|| {
+        DevError::Verify(format!(
+            "latest {subject} result has no run metadata; rerun it before approval"
+        ))
+    })?;
+    if run.run_id != result_run_id {
+        return Err(DevError::Verify(format!(
+            "latest {subject} result points to run {result_run_id}, but its metadata \
+             names {}; rerun before approval",
+            run.run_id
+        )));
+    }
+    if run.dirty {
+        return Err(DevError::Verify(format!(
+            "latest {subject} result came from a dirty run; rerun it from a clean \
+             checkout before approval"
+        )));
+    }
+    if run.commit != current_commit {
+        return Err(DevError::Verify(format!(
+            "latest {subject} result was recorded at commit {}, but the current \
+             checkout is {current_commit}; rerun before approval",
+            run.commit
+        )));
+    }
+    Ok(())
+}
+
 /// Open a subject's visual store. The opener is handed the legacy
 /// `results.db` path: the store lives beside it under its own file name, and
 /// the legacy tables in it are the source of the one-time import.
@@ -170,4 +206,33 @@ pub(crate) fn print_run_summary(
         return Err(DevError::ExitCode(1));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::visual::db::RunSummary;
+
+    fn run_summary(commit: &str, dirty: bool) -> RunSummary {
+        RunSummary {
+            run_id: "run".into(),
+            commit: commit.into(),
+            dirty,
+            adapter_name: None,
+        }
+    }
+
+    #[test]
+    fn approval_origin_requires_a_clean_run_of_the_current_commit() {
+        let clean = run_summary("abc123", false);
+        assert!(validate_approval_origin("sluggrs", "run", Some(&clean), "abc123").is_ok());
+        assert!(validate_approval_origin("sluggrs", "other", Some(&clean), "abc123").is_err());
+
+        let dirty = run_summary("abc123", true);
+        assert!(validate_approval_origin("sluggrs", "run", Some(&dirty), "abc123").is_err());
+
+        let old = run_summary("old123", false);
+        assert!(validate_approval_origin("sluggrs", "run", Some(&old), "abc123").is_err());
+        assert!(validate_approval_origin("sluggrs", "run", None, "abc123").is_err());
+    }
 }

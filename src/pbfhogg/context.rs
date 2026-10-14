@@ -152,7 +152,6 @@ pub struct CommandObservations {
 /// Command execution context after all input paths have been resolved.
 #[derive(Debug, Clone)]
 pub struct CommandContext {
-    pub binary: PathBuf,
     pub inputs: ResolvedInputs,
     pub scratch_dir: PathBuf,
     pub dataset: String,
@@ -196,10 +195,6 @@ impl CommandContext {
             .second_pbf()
             .ok_or_else(|| DevError::Internal("pbfhogg command input has no second PBF".into()))?;
         crate::utf8_path::path_str(path)
-    }
-
-    pub fn binary_str(&self) -> Result<&str, DevError> {
-        crate::utf8_path::path_str(&self.binary)
     }
 
     pub fn pbf_basename(&self) -> Result<String, DevError> {

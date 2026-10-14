@@ -1,5 +1,9 @@
 use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 
+pub(crate) const DEFAULT_DATASET: &str = "denmark";
+pub(crate) const DEFAULT_RAW_VARIANT: &str = "raw";
+pub(crate) const DEFAULT_INDEXED_VARIANT: &str = "indexed";
+
 /// Index mode selection for `verify add-locations-to-ways`.
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub(crate) enum AltwMode {
@@ -67,7 +71,7 @@ Which diagnostics are shown (every diagnostic phase):
   3. Nothing is capped: every error is printed, every time.
 
 Examples:
-  brokkr check                                     # gremlins + clippy + all tests
+  brokkr check                                     # configured checks and test sweeps
   brokkr check --fix-gremlins                      # rewrite banned chars before checking
   brokkr check -- --test read_paths                # run one test file
   brokkr check -- -- --ignored                     # run ignored tests
@@ -351,8 +355,8 @@ In depth: `brokkr man clippy`."
     ///
     /// The `docs/**.md` files are compiled into the binary and rendered to the
     /// terminal. Topics are filtered by the detected project, except the
-    /// project-agnostic ones (check, clippy, deps, config, measure, run,
-    /// output-channels), which are listed everywhere. A long topic lists its
+    /// project-agnostic topics (such as check, clean, bench, config and
+    /// measure), which are listed everywhere. A long topic lists its
     /// sections instead of dumping the file: `brokkr man config script_check`
     /// reads one, `--full` reads the lot.
     #[command(display_order = 0)]
@@ -913,7 +917,7 @@ Examples:
         #[command(flatten)]
         mode: ModeArgs,
         /// Dataset name from brokkr.toml
-        #[arg(long, default_value = "denmark")]
+        #[arg(long, default_value = DEFAULT_DATASET)]
         dataset: String,
         /// "From" snapshot reference. Use `base` for the dataset's
         /// legacy/primary PBF, or a snapshot key registered under
@@ -925,7 +929,7 @@ Examples:
         to: String,
         /// PBF variant to use on both sides (raw, indexed, locations).
         /// Errors if the requested variant doesn't exist on either snapshot.
-        #[arg(long, default_value = "indexed")]
+        #[arg(long, default_value = DEFAULT_INDEXED_VARIANT)]
         variant: String,
         /// Output format: `default` (summary diff) or `osc` (OSC-format diff
         /// written to scratch).
@@ -1032,10 +1036,10 @@ Examples:
         #[command(flatten)]
         mode: ModeArgs,
         /// Dataset name from brokkr.toml
-        #[arg(long, default_value = "denmark")]
+        #[arg(long, default_value = DEFAULT_DATASET)]
         dataset: String,
         /// PBF variant to use
-        #[arg(long, default_value = "raw")]
+        #[arg(long, default_value = DEFAULT_RAW_VARIANT)]
         variant: String,
         /// Resume from checkpoint: ocean, sort or assemble
         #[arg(long)]
@@ -1065,10 +1069,10 @@ Examples:
         #[command(flatten)]
         mode: ModeArgs,
         /// Dataset name from brokkr.toml
-        #[arg(long, default_value = "denmark")]
+        #[arg(long, default_value = DEFAULT_DATASET)]
         dataset: String,
         /// PBF variant to use
-        #[arg(long, default_value = "raw")]
+        #[arg(long, default_value = DEFAULT_RAW_VARIANT)]
         variant: String,
     },
     /// Tilemaker comparison baseline
@@ -1077,10 +1081,10 @@ Examples:
         #[command(flatten)]
         mode: ModeArgs,
         /// Dataset name from brokkr.toml
-        #[arg(long, default_value = "denmark")]
+        #[arg(long, default_value = DEFAULT_DATASET)]
         dataset: String,
         /// PBF variant to use
-        #[arg(long, default_value = "raw")]
+        #[arg(long, default_value = DEFAULT_RAW_VARIANT)]
         variant: String,
     },
 
@@ -1091,7 +1095,7 @@ Examples:
         #[command(flatten)]
         mode: ModeArgs,
         /// Dataset name from brokkr.toml
-        #[arg(long, default_value = "denmark")]
+        #[arg(long, default_value = DEFAULT_DATASET)]
         dataset: String,
         /// Specific query name to benchmark
         #[arg(long)]
@@ -1103,10 +1107,10 @@ Examples:
         #[command(flatten)]
         mode: ModeArgs,
         /// Dataset name from brokkr.toml
-        #[arg(long, default_value = "denmark")]
+        #[arg(long, default_value = DEFAULT_DATASET)]
         dataset: String,
         /// PBF variant to use
-        #[arg(long, default_value = "raw")]
+        #[arg(long, default_value = DEFAULT_RAW_VARIANT)]
         variant: String,
     },
     /// Tile serving benchmark
@@ -1115,7 +1119,7 @@ Examples:
         #[command(flatten)]
         mode: ModeArgs,
         /// Dataset name from brokkr.toml
-        #[arg(long, default_value = "denmark")]
+        #[arg(long, default_value = DEFAULT_DATASET)]
         dataset: String,
         /// PMTiles variant from config
         #[arg(long)]
@@ -1132,10 +1136,10 @@ Examples:
         #[command(flatten)]
         mode: ModeArgs,
         /// Dataset name from brokkr.toml
-        #[arg(long, default_value = "denmark")]
+        #[arg(long, default_value = DEFAULT_DATASET)]
         dataset: String,
         /// PBF variant to use
-        #[arg(long, default_value = "indexed")]
+        #[arg(long, default_value = DEFAULT_INDEXED_VARIANT)]
         variant: String,
     },
 
@@ -1148,10 +1152,10 @@ Examples:
         /// Suite name: pbfhogg, elivagar, or nidhogg
         name: String,
         /// Dataset name from brokkr.toml
-        #[arg(long, default_value = "denmark")]
+        #[arg(long, default_value = DEFAULT_DATASET)]
         dataset: String,
         /// PBF variant to use
-        #[arg(long, default_value = "indexed")]
+        #[arg(long, default_value = DEFAULT_INDEXED_VARIANT)]
         variant: String,
     },
     /// Build and run with passthrough args (deprecated - use `run` subcommands instead)
@@ -1508,8 +1512,7 @@ wedged; follow up with `brokkr clean` manually."
     #[command(
         display_order = 7,
         long_about = "\
-Browse the global command history log ($XDG_DATA_HOME/brokkr/history.db,
-default ~/.local/share/brokkr/history.db).
+Browse the global command history log in brokkr's XDG data directory.
 
 Every brokkr invocation is recorded with timing and exit status. Each line
 starts with the entry's id, which `brokkr history <id>` takes. Timestamps
@@ -1711,10 +1714,10 @@ In depth: `brokkr man elivagar` (config: `brokkr man elivagar-config`)."
     #[command(name = "pmtiles-inspect", display_order = 33)]
     PmtilesInspect {
         /// Dataset name from brokkr.toml
-        #[arg(long, default_value = "denmark")]
+        #[arg(long, default_value = DEFAULT_DATASET)]
         dataset: String,
         /// PBF variant selecting which output to open (raw, indexed, locations)
-        #[arg(long, default_value = "raw")]
+        #[arg(long, default_value = DEFAULT_RAW_VARIANT)]
         variant: String,
         /// Commit short hash selecting which tilegen output to open (default: current HEAD)
         #[arg(long)]
@@ -1727,10 +1730,10 @@ In depth: `brokkr man elivagar` (config: `brokkr man elivagar-config`)."
     #[command(display_order = 34)]
     Diag {
         /// Dataset name from brokkr.toml
-        #[arg(long, default_value = "denmark")]
+        #[arg(long, default_value = DEFAULT_DATASET)]
         dataset: String,
         /// PBF variant selecting which output to open (raw, indexed, locations)
-        #[arg(long, default_value = "raw")]
+        #[arg(long, default_value = DEFAULT_RAW_VARIANT)]
         variant: String,
         /// Commit short hash selecting which tilegen output to open (default: current HEAD)
         #[arg(long)]
@@ -1749,10 +1752,10 @@ In depth: `brokkr man elivagar` (config: `brokkr man elivagar-config`)."
     #[command(display_order = 35)]
     Svg {
         /// Dataset name from brokkr.toml
-        #[arg(long, default_value = "denmark")]
+        #[arg(long, default_value = DEFAULT_DATASET)]
         dataset: String,
         /// PBF variant selecting which output to open (raw, indexed, locations)
-        #[arg(long, default_value = "raw")]
+        #[arg(long, default_value = DEFAULT_RAW_VARIANT)]
         variant: String,
         /// Commit short hash selecting which tilegen output to open (default: current HEAD)
         #[arg(long)]
@@ -1803,10 +1806,10 @@ In depth: `brokkr man elivagar`.",
     )]
     Regress {
         /// Dataset name from brokkr.toml
-        #[arg(long, default_value = "denmark")]
+        #[arg(long, default_value = DEFAULT_DATASET)]
         dataset: String,
         /// PBF variant of the CURRENT output (raw, indexed, locations)
-        #[arg(long, default_value = "raw")]
+        #[arg(long, default_value = DEFAULT_RAW_VARIANT)]
         variant: String,
         /// Commit short hash selecting the CURRENT output (default: current HEAD)
         #[arg(long)]
@@ -1816,7 +1819,7 @@ In depth: `brokkr man elivagar`.",
         file: Option<String>,
         /// PBF variant of the COMPARAND output (defaults to raw; set it
         /// independently of --variant - a cross-variant diff is a legitimate use)
-        #[arg(long, default_value = "raw")]
+        #[arg(long, default_value = DEFAULT_RAW_VARIANT)]
         against_variant: String,
         /// Commit short hash selecting the COMPARAND output from data/tilegen/
         #[arg(long)]
@@ -1830,8 +1833,8 @@ In depth: `brokkr man elivagar`.",
         /// tolerance_moved budget before exit 1 (default 0: any move fails)
         #[arg(long, default_value_t = 0)]
         max_moved: u64,
-        /// Per-class example cap (default 20)
-        #[arg(long, default_value_t = 20)]
+        /// Per-class example cap
+        #[arg(long, default_value_t = crate::elivagar::constants::DEFAULT_MAX_EXAMPLES)]
         max_examples: usize,
         /// Dump side-by-side overlay pairs for the worst structural diffs to DIR
         #[arg(long)]
@@ -1909,7 +1912,7 @@ In depth: `brokkr man nidhogg`."
         data_dir: Option<String>,
 
         /// Dataset name from brokkr.toml
-        #[arg(long, value_name = "NAME", default_value = "denmark")]
+        #[arg(long, value_name = "NAME", default_value = DEFAULT_DATASET)]
         dataset: String,
 
         /// PMTiles to serve: a variant name from config, a file path, or
@@ -1928,11 +1931,11 @@ In depth: `brokkr man nidhogg`."
     #[command(display_order = 43)]
     Ingest {
         /// PBF variant to use (raw, indexed, locations)
-        #[arg(long, default_value = "raw")]
+        #[arg(long, default_value = DEFAULT_RAW_VARIANT)]
         variant: String,
 
         /// Dataset name from brokkr.toml
-        #[arg(long, default_value = "denmark")]
+        #[arg(long, default_value = DEFAULT_DATASET)]
         dataset: String,
     },
     /// Run diff application
@@ -1945,7 +1948,8 @@ In depth: `brokkr man nidhogg`."
     /// Send a test query
     #[command(display_order = 45)]
     Query {
-        /// JSON query body (default: Copenhagen highways)
+        /// JSON query body, including a bbox inside the served dataset
+        #[arg(required = true)]
         json: Option<String>,
     },
     /// Test geocoding
@@ -1972,22 +1976,22 @@ In depth: `brokkr man nidhogg`."
     /// invocation after one build, so a failing or crashing harness never
     /// hides the ones after it; every failure is listed, tagged with its
     /// harness.
-    /// Always: --include-ignored, --nocapture, --test-threads=1.
+    /// Always: --include-ignored and --nocapture. Test thread count comes
+    /// from the selected profile when set, otherwise it defaults to one.
     /// Adds --release unless dev profile is selected. Profile precedence:
     /// `--debug` / `--release` on the CLI win; otherwise `[test] debug` in
     /// brokkr.toml decides (default release).
-    /// Feature selection matches `brokkr check` - defaults to --all-features,
-    /// and runs a second sweep with [check].consumer_features if configured.
+    /// Sweep selection follows the configured profile or [[check]] entries,
+    /// and defaults to one --all-features sweep when none are configured.
     /// Streams the test's own stdout/stderr live and prints a [test]
     /// PASS/FAIL footer with wall time per harness that ran it. Libtest's own framing
     /// (`running N tests`, `test foo ... ok`) is dropped - the test's
-    /// output is the signal. Gated off for litehtml/sluggrs (use
-    /// `brokkr visual`).
+    /// output is the signal.
     ///
     /// The package passed to `cargo test -p` is resolved in order:
     ///   1. `-p/--package` on the command line
     ///   2. `[test] default_package` in brokkr.toml
-    ///   3. The project's built-in default (pbfhogg-cli, nidhogg)
+    ///   3. The detected project's built-in package default, if it has one
     ///
     /// Projects without any of these (e.g. a workspace) must pass -p.
     ///
@@ -2031,19 +2035,21 @@ In depth: `brokkr man nidhogg`."
         /// from brokkr.toml. Mutually exclusive with --debug.
         #[arg(long)]
         release: bool,
-        /// Override the per-test watchdog ceiling, in seconds (1-280).
+        /// Override the per-test watchdog ceiling, in seconds.
         /// Only honored when `<name>` matches exactly one test per sweep;
         /// if it matches more than one, `brokkr test` errors before
-        /// running. Without this flag the ceiling is the standard 20s.
+        /// running. Without this flag the ceiling is the standard per-test
+        /// cap.
         ///
-        /// This is the ONLY exception to brokkr's 20s per-test cap, and 280s
-        /// is its hard limit. Exceeding the cap - raised or not - fails the
-        /// run and stops it. The flag also makes attribution exact: `<name>`
-        /// is resolved to its one full test name and run with libtest
+        /// This is the ONLY exception to brokkr's per-test cap, and the
+        /// parser enforces the runner's supported maximum. Exceeding the cap - raised
+        /// or not - fails the run and stops it. The flag also makes
+        /// attribution exact: `<name>` is resolved to its one full test name
+        /// and run with libtest
         /// `--exact`, so the process is the unit of one test. Note it bounds
         /// the whole cargo invocation - lock wait, residual compilation,
         /// startup, the test, teardown - not the test body alone.
-        #[arg(long, value_name = "SECS", value_parser = clap::value_parser!(u64).range(1..=280))]
+        #[arg(long, value_name = "SECS", value_parser = clap::value_parser!(u64).range(1..=crate::test_runner::ceilings::MAX_TEST_TIMEOUT.as_secs()))]
         timeout: Option<u64>,
         /// Run only the named sweep from the resolved `default_profile`
         /// (e.g. `--sweep all` or `--sweep consumer`), instead of every
@@ -2216,10 +2222,10 @@ In depth: `brokkr man nidhogg`."
     /// `service-test`/`service-suite`/`service-list` triple; the old
     /// names are gone, not aliased.
     ///
-    /// Running builds the configured `[[check]]` sweep via
-    /// `[ratatoskr.harness]` (same feature contract `brokkr check`
-    /// enforces), allocates a per-run artefact dir at
-    /// `.brokkr/ratatoskr/<test>/run-N/`, then spawns
+    /// Running builds the harness binary declared by `[ratatoskr.harness]`
+    /// (its own build, independent of the `[[check]]` sweeps), allocates a
+    /// per-run artefact dir at `.brokkr/ratatoskr/service/<test>/run-N/`,
+    /// then spawns
     /// `<binary> --test-harness <SCRIPT>` with
     /// `BROKKR_HARNESS_ARTEFACT_DIR` and `BROKKR_TEST_BIN_DIR` set in
     /// the env (plus the `RATATOSKR_TEST_*_ENDPOINT` family when the
@@ -2318,8 +2324,8 @@ In depth: `brokkr man nidhogg`."
     /// --test-harness <SCRIPT>` with `BROKKR_HARNESS_ARTEFACT_DIR` and
     /// `BROKKR_TEST_BIN_DIR` set plus one `RATATOSKR_TEST_<PROTO>_ENDPOINT`
     /// per protocol whose env-var spelling is configured under
-    /// `[ratatoskr]`. Tears sæhrimnir down with a 1.5s SIGTERM budget after
-    /// the harness exits. PASS/FAIL on the harness binary's exit code; on
+    /// `[ratatoskr]`. Tears sæhrimnir down with a bounded SIGTERM grace period
+    /// after the harness exits. PASS/FAIL on the harness binary's exit code; on
     /// FAIL the per-run dir at `.brokkr/ratatoskr/sync/<test>/run-N/` is
     /// preserved with `harness/`, `mock/`, and `run.toml` for triage.
     ///
@@ -2370,8 +2376,9 @@ In depth: `brokkr man nidhogg`."
         )]
         bench: Option<usize>,
 
-        /// Allow recording on a dirty git tree (the gate row lands tagged
-        /// `dirty`; `results.db` still skips it). Requires `--bench`.
+        /// Allow recording on a dirty git tree (a gated run that records a
+        /// row tags it `dirty`; `results.db` still skips it). Requires
+        /// `--bench`.
         #[arg(long, requires = "bench")]
         force: bool,
 
@@ -2423,13 +2430,13 @@ In depth: `brokkr man nidhogg`."
 
     /// Spawn sæhrimnir against a fixture, print endpoints, run until Ctrl-C
     ///
-    /// Manual-exploration tool for plan 3. Resolves
+    /// Manual-exploration tool for local fixture work. Resolves
     /// `[ratatoskr] mock_server_binary` and `[ratatoskr] fixtures_dir`
     /// from `brokkr.toml` (both required), spawns sæhrimnir with
     /// `--fixture <PATH> --readiness-file <PATH>`, waits for the
     /// readiness sentinel, prints the per-protocol listening
-    /// endpoints, and runs until SIGINT/SIGTERM. SIGTERMs sæhrimnir
-    /// with a 1.5s budget on shutdown before escalating to SIGKILL.
+    /// endpoints, and runs until SIGINT/SIGTERM. SIGTERMs sæhrimnir on
+    /// shutdown before escalating to SIGKILL after a bounded grace period.
     /// Auto-build of sæhrimnir is not yet wired - the binary must
     /// already exist at `mock_server_binary`.
     ///
@@ -2507,9 +2514,11 @@ In depth: `brokkr man nidhogg`."
         /// Pins every oracle present and `inputs.json`. `--reseed --all`
         /// regenerates the whole file from the tree (probes whose dirs
         /// vanished drop out); `--reseed --probe <id>` (repeatable)
-        /// upserts each. Re-stamps `[feeds]` hashes, carries each probe's
-        /// blessed `expected` forward, and never touches `[probe_config]`
-        /// (where feed, budget and start are declared). Prints added/changed/removed;
+        /// upserts each. Re-stamps the `[feeds]` hashes of the feed groups
+        /// the selection uses (every group under `--all`), carries each
+        /// probe's blessed `expected` forward, and never touches
+        /// `[probe_config]` (where feed, budget and start are declared).
+        /// Prints added/changed/removed probes and changed feed hashes;
         /// review the result with `git diff pins.toml`. Not usable with
         /// `--keyword` or `--verify-only`.
         #[arg(long, conflicts_with_all = ["verify_only", "keyword", "bench", "hotpath", "alloc"])]
@@ -2604,7 +2613,6 @@ Examples:
   brokkr corpus-results --diffs --where 'exit_price_delta > 0.05'  # filtered trade rows (latest run)
   brokkr corpus-results --dispositions --columns probe,boundary_anchor,anchor_consumed  # projected
   brokkr corpus-results --dispositions --where 'ts_entry_share_pct >= 50'   # filtered probes
-  brokkr corpus-results --runtimes --over 269                      # probes whose runtime nears the wall
   brokkr corpus-results --trend magnifier-tick-dist-endpoints-01   # tier/p90 over recent runs
   brokkr corpus-results --sql 'SELECT probe, p90_exit FROM disposition'  # read-only escape hatch
 
@@ -2659,8 +2667,8 @@ In depth: `brokkr man piners`."
         #[arg(long)]
         runtimes: bool,
 
-        /// With `--runtimes`, keep only probes above this many seconds (e.g.
-        /// `--over 269` for what nears the ceiling).
+        /// With `--runtimes`, keep only probes above this many seconds. Use a
+        /// threshold near the configured per-probe runtime limit to find slow probes.
         #[arg(long, value_name = "SECS")]
         over: Option<f64>,
 
@@ -2821,16 +2829,16 @@ In depth: `brokkr man lint-corpus`."
 #[derive(Args, Clone)]
 pub(crate) struct ModeArgs {
     /// Full benchmark: lockfile, N runs (default 3), DB storage
-    #[arg(long, num_args = 0..=1, default_missing_value = "3")]
-    pub(crate) bench: Option<usize>,
+    #[arg(long, conflicts_with_all = ["hotpath", "alloc"], num_args = 0..=1, default_missing_value = "3")]
+    pub(crate) bench: Option<std::num::NonZeroUsize>,
 
     /// Function-level timing via hotpath feature (optional run count, default 1)
-    #[arg(long, num_args = 0..=1, default_missing_value = "1")]
-    pub(crate) hotpath: Option<usize>,
+    #[arg(long, conflicts_with_all = ["bench", "alloc"], num_args = 0..=1, default_missing_value = "1")]
+    pub(crate) hotpath: Option<std::num::NonZeroUsize>,
 
     /// Per-function allocation tracking via hotpath-alloc feature (optional run count, default 1)
-    #[arg(long, num_args = 0..=1, default_missing_value = "1")]
-    pub(crate) alloc: Option<usize>,
+    #[arg(long, conflicts_with_all = ["bench", "hotpath"], num_args = 0..=1, default_missing_value = "1")]
+    pub(crate) alloc: Option<std::num::NonZeroUsize>,
 
     /// Print full build/bench/result output
     #[arg(short, long)]
@@ -2849,9 +2857,10 @@ pub(crate) struct ModeArgs {
     pub(crate) force: bool,
 
     /// Validate argv, config, and path resolution without building or running.
-    /// Short-circuits after path/arg-vector construction. Skips cargo build,
-    /// lock acquisition, and process execution. Useful for sanity-checking a
-    /// script of queued benches before leaving it overnight.
+    /// Short-circuits after path/arg-vector construction. Skips cargo build and
+    /// process execution; the command's configured lock policy still applies.
+    /// Useful for sanity-checking a script of queued benches before leaving it
+    /// overnight.
     #[arg(long)]
     pub(crate) dry_run: bool,
 
@@ -2861,15 +2870,6 @@ pub(crate) struct ModeArgs {
     pub(crate) stop: Option<String>,
 }
 
-impl ModeArgs {
-    /// Whether a measurement mode (`--bench`/`--hotpath`/`--alloc`) is set.
-    /// Used by commands like `corpus` that flatten `ModeArgs` and route bare
-    /// (no-measurement) invocations to a different, non-measured handler.
-    pub(crate) fn is_measured(&self) -> bool {
-        self.bench.is_some() || self.hotpath.is_some() || self.alloc.is_some()
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Shared args for pbfhogg measured commands
 // ---------------------------------------------------------------------------
@@ -2877,10 +2877,10 @@ impl ModeArgs {
 #[derive(Args, Clone)]
 pub(crate) struct PbfArgs {
     /// Dataset name from brokkr.toml
-    #[arg(long, default_value = "denmark")]
+    #[arg(long, default_value = DEFAULT_DATASET)]
     pub(crate) dataset: String,
     /// PBF variant to use (raw, indexed, locations)
-    #[arg(long, default_value = "indexed")]
+    #[arg(long, default_value = DEFAULT_INDEXED_VARIANT)]
     pub(crate) variant: String,
     /// Use O_DIRECT for file I/O (requires linux-direct-io feature in pbfhogg)
     #[arg(long)]
@@ -2907,10 +2907,10 @@ pub(crate) struct PbfArgs {
 #[derive(Args, Clone)]
 pub(crate) struct VerifyPbfArgs {
     /// Dataset name from brokkr.toml
-    #[arg(long, default_value = "denmark", conflicts_with = "input")]
+    #[arg(long, default_value = DEFAULT_DATASET, conflicts_with = "input")]
     pub(crate) dataset: String,
     /// PBF variant to use (raw, indexed, locations)
-    #[arg(long, default_value = "indexed", conflicts_with = "input")]
+    #[arg(long, default_value = DEFAULT_INDEXED_VARIANT, conflicts_with = "input")]
     pub(crate) variant: String,
     /// Path to a handcrafted input PBF (skips dataset resolution).
     /// Mutually exclusive with `--dataset` / `--variant`.
@@ -3018,9 +3018,9 @@ pub(crate) enum VerifyCommand {
     /// Cross-validate renumber against osmium renumber
     #[command(display_order = 9)]
     Renumber {
-        #[arg(long, default_value = "denmark", conflicts_with = "input")]
+        #[arg(long, default_value = DEFAULT_DATASET, conflicts_with = "input")]
         dataset: String,
-        #[arg(long, default_value = "indexed", conflicts_with = "input")]
+        #[arg(long, default_value = DEFAULT_INDEXED_VARIANT, conflicts_with = "input")]
         variant: String,
         /// Path to a handcrafted input PBF (skips dataset resolution).
         #[arg(long, value_name = "PATH")]
@@ -3040,9 +3040,9 @@ pub(crate) enum VerifyCommand {
     /// Cross-validate diff summary against osmium diff
     #[command(display_order = 10)]
     Diff {
-        #[arg(long, default_value = "denmark", conflicts_with = "input")]
+        #[arg(long, default_value = DEFAULT_DATASET, conflicts_with = "input")]
         dataset: String,
-        #[arg(long, default_value = "indexed", conflicts_with = "input")]
+        #[arg(long, default_value = DEFAULT_INDEXED_VARIANT, conflicts_with = "input")]
         variant: String,
         /// Path to a handcrafted input PBF (skips dataset resolution).
         #[arg(long, value_name = "PATH")]
@@ -3080,10 +3080,10 @@ pub(crate) enum VerifyCommand {
     #[command(name = "pmtiles", display_order = 15)]
     ElivVerify {
         /// Dataset name from brokkr.toml
-        #[arg(long, default_value = "denmark")]
+        #[arg(long, default_value = DEFAULT_DATASET)]
         dataset: String,
         /// PBF variant, selecting which archive to open (raw, indexed, locations)
-        #[arg(long, default_value = "raw")]
+        #[arg(long, default_value = DEFAULT_RAW_VARIANT)]
         variant: String,
         /// Commit short hash selecting which archive to open (default: current HEAD)
         #[arg(long)]
@@ -3105,21 +3105,21 @@ pub(crate) enum VerifyCommand {
     #[command(display_order = 20)]
     Batch {
         /// Dataset name from brokkr.toml
-        #[arg(long, default_value = "denmark")]
+        #[arg(long, default_value = DEFAULT_DATASET)]
         dataset: String,
     },
     /// Geocode verification
     #[command(display_order = 21)]
     NidGeocode {
-        /// Search terms to test
-        #[arg(trailing_var_arg = true)]
+        /// Search terms to test (at least one, known to the served dataset)
+        #[arg(trailing_var_arg = true, required = true)]
         queries: Vec<String>,
     },
     /// Read-only filesystem verification
     #[command(display_order = 22)]
     Readonly {
         /// Dataset name from brokkr.toml
-        #[arg(long, default_value = "denmark")]
+        #[arg(long, default_value = DEFAULT_DATASET)]
         dataset: String,
     },
 }
@@ -3152,7 +3152,7 @@ pub(crate) struct LitehtmlVisualArgs {
 #[derive(Args)]
 pub(crate) struct CorpusArchiveArgs {
     /// Dataset name from brokkr.toml
-    #[arg(long, default_value = "denmark")]
+    #[arg(long, default_value = DEFAULT_DATASET)]
     pub(crate) dataset: String,
     /// PBF variant, selecting which archive to open (raw, indexed, locations).
     /// Required unless --file is given: the corpus contract pins one variant

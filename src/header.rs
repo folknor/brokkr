@@ -12,11 +12,11 @@
 //! Enabled by a `[header]` section with `paths` and `pattern`; absent by
 //! default.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use crate::config::HeaderConfig;
 use crate::error::DevError;
-use crate::{globs, gremlins};
+use crate::globs;
 
 /// A file that does not contain the expected header text.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,10 +42,21 @@ pub fn current_utc_year() -> Result<i32, DevError> {
     // `gmtime_r` fills a caller-owned `tm`. Neither reads uninitialised memory.
     unsafe {
         let t = libc::time(std::ptr::null_mut());
+        utc_year_at(t)
+    }
+}
+
+/// Convert injected epoch seconds to a UTC year. Kept separate from the clock
+/// read so the calendar boundary can be tested without depending on today's
+/// date.
+fn utc_year_at(seconds: libc::time_t) -> Result<i32, DevError> {
+    // SAFETY: `gmtime_r` reads the initialized scalar and fills this caller-
+    // owned `tm`; a null return is handled instead of reading a failed result.
+    unsafe {
         let mut tm: libc::tm = std::mem::zeroed();
-        if libc::gmtime_r(&t, &mut tm).is_null() {
+        if libc::gmtime_r(&seconds, &mut tm).is_null() {
             return Err(DevError::Config(
-                "gmtime_r failed to convert the current time to UTC".into(),
+                "gmtime_r failed to convert epoch seconds to UTC".into(),
             ));
         }
         Ok(tm.tm_year + 1900)
@@ -57,11 +68,11 @@ pub fn expand(pattern: &str, year: i32) -> String {
     pattern.replace("{year}", &year.to_string())
 }
 
-/// Scan tracked files matching `cfg.paths` (minus `cfg.exempt`) for the
+/// Scan snapshot files matching `cfg.paths` (minus `cfg.exempt`) for the
 /// expanded header text anywhere in each file. `year` is injected so the check
 /// is deterministic and testable.
 pub fn scan(
-    project_root: &Path,
+    tree: &crate::scope::TreeSnapshot,
     cfg: &HeaderConfig,
     year: i32,
 ) -> Result<Vec<HeaderViolation>, DevError> {
@@ -74,9 +85,9 @@ pub fn scan(
     let exempt = globs::build_set(&cfg.exempt, "[header].exempt")?;
     let expected = expand(&cfg.pattern, year);
 
-    let files = gremlins::tracked_files(project_root)?;
+    let files = tree.files();
     // Dead scope is warned about, not refused - see `globs::warn_unmatched`.
-    globs::warn_unmatched(&cfg.paths, &files, "[header].paths")?;
+    globs::warn_unmatched(&cfg.paths, files,"[header].paths")?;
     let selected: Vec<PathBuf> = files
         .iter()
         .filter(|rel| globs::matches(&paths, rel))
@@ -92,16 +103,15 @@ pub fn scan(
         if globs::matches(&exempt, rel) {
             continue;
         }
-        let abs = project_root.join(rel);
         // Bytes, not a `String`: a file that is not valid UTF-8 used to fail
         // `read_to_string` and be skipped - i.e. pass. Matching the header's
         // bytes judges it on content like any other file. An unreadable file
-        // is an error (see `gremlins::read_in_scope`); only a path deleted
+        // is an error (see `TreeSnapshot::read_file`); only a path deleted
         // from the working tree is skipped.
-        let Some(bytes) = gremlins::read_in_scope(&abs, rel)? else {
+        let Some(bytes) = tree.read_file(rel)? else {
             continue;
         };
-        if !contains_bytes(&bytes, expected.as_bytes()) {
+        if !contains_bytes(bytes.as_ref(), expected.as_bytes()) {
             out.push(HeaderViolation { file: rel.clone() });
         }
     }
@@ -142,9 +152,31 @@ mod tests {
     }
 
     #[test]
-    fn current_year_is_sane() {
-        // The check ships in 2026; the year must be at least that and not wild.
-        let y = current_utc_year().unwrap();
-        assert!((2024..2100).contains(&y), "got {y}");
+    fn utc_year_uses_the_supplied_epoch() {
+        assert_eq!(utc_year_at(0).unwrap(), 1970);
+        assert_eq!(utc_year_at(946_684_800).unwrap(), 2000);
+    }
+
+    #[test]
+    fn scan_observes_globs_exemptions_and_file_contents() {
+        let root = crate::scope::test_git_tree("header", "scan_globs");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("tests")).unwrap();
+        std::fs::write(root.join("src/lib.rs"), "missing header\n").unwrap();
+        std::fs::write(root.join("tests/helper.rs"), "missing but exempt\n").unwrap();
+        let cfg = HeaderConfig {
+            paths: vec!["**/*.rs".into()],
+            pattern: "Copyright {year}".into(),
+            exempt: vec!["tests/**".into()],
+        };
+
+        let tree = crate::scope::TreeSnapshot::load(&root).unwrap();
+        let violations = scan(&tree, &cfg, 2025).unwrap();
+        assert_eq!(
+            violations,
+            vec![HeaderViolation {
+                file: PathBuf::from("src/lib.rs")
+            }]
+        );
     }
 }

@@ -51,13 +51,13 @@ fn format_epoch(epoch: i64) -> String {
 ///
 /// Writes to stderr so it never contaminates the raw JSONL stream on
 /// stdout (`--samples`, `--markers`, the default phase summary, etc.).
-pub(crate) fn print_run_info(store: &db::RunStore, id: &db::RunId) {
-    let Some(info) = store.query_sidecar_run_info(id).ok().flatten() else {
-        return;
+pub(crate) fn print_run_info(store: &db::RunStore, id: &db::RunId) -> Result<(), DevError> {
+    let Some(info) = store.query_sidecar_run_info(id)? else {
+        return Ok(());
     };
     // Only print if we have at least some provenance data.
     if info.run_start_epoch.is_none() && info.binary_path.is_none() {
-        return;
+        return Ok(());
     }
 
     // Line 1: timestamp, PID, command, mode, dataset.
@@ -79,18 +79,17 @@ pub(crate) fn print_run_info(store: &db::RunStore, id: &db::RunId) {
         crate::output::console::plain_stderr(&format!("[sidecar] {}", parts.join("  ")));
     }
 
-    // Line 2: git commit + wall time from sidecar summary.
-    let (best_idx, _) = store.query_sidecar_meta(id).unwrap_or((0, 1));
-    let samples = store.query_sidecar_samples(id, Some(best_idx)).ok();
-    let wall_time = samples.as_ref().and_then(|s| {
-        if s.len() < 2 {
-            return None;
-        }
-        let first = s.first()?.timestamp_us;
-        let last = s.last()?.timestamp_us;
+    // Line 2: git commit + wall time measured from the selected sample run.
+    let (best_idx, _) = store.query_sidecar_meta(id)?;
+    let samples = store.query_sidecar_samples(id, Some(best_idx))?;
+    let wall_time = if samples.len() < 2 {
+        None
+    } else {
+        let first = samples[0].timestamp_us;
+        let last = samples[samples.len() - 1].timestamp_us;
         let secs = (last - first) / 1_000_000;
-        if secs > 0 { Some(secs) } else { None }
-    });
+        (secs > 0).then_some(secs)
+    };
     match (&info.git_commit, wall_time) {
         (Some(commit), Some(secs)) => {
             let (m, s) = (secs / 60, secs % 60);
@@ -147,6 +146,7 @@ pub(crate) fn print_run_info(store: &db::RunStore, id: &db::RunId) {
             crate::output::console::plain_stderr(&format!("[sidecar] binary: {path}"));
         }
     }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -335,33 +335,13 @@ pub(crate) fn print_field_stat(samples: &[&sidecar::Sample], field: &str) -> Res
     let min = values[0];
     let max = values[n - 1];
 
-    // Linear interpolation percentiles (same as harness::percentile).
-    let pct = |p: usize| -> i64 {
-        if n == 1 {
-            return values[0];
-        }
-        #[allow(clippy::cast_precision_loss)]
-        let pos = (p as f64 / 100.0) * (n - 1) as f64;
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let lo = pos as usize;
-        let hi = (lo + 1).min(n - 1);
-        #[allow(clippy::cast_precision_loss)]
-        let frac = pos - lo as f64;
-        #[allow(clippy::cast_precision_loss)]
-        let result = values[lo] as f64 + frac * (values[hi] - values[lo]) as f64;
-        #[allow(clippy::cast_possible_truncation)]
-        {
-            result.round() as i64
-        }
-    };
-
     println!("field    {field}");
     println!("samples  {n}");
     println!("min      {min}");
     println!("max      {max}");
     println!("avg      {avg:.1}");
-    println!("p50      {}", pct(50));
-    println!("p95      {}", pct(95));
+    println!("p50      {}", sidecar::linear_percentile(&values, 50));
+    println!("p95      {}", sidecar::linear_percentile(&values, 95));
     Ok(())
 }
 

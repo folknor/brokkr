@@ -24,7 +24,8 @@ Callers invoke `measure::runner::run(req, &plan)`. Pbfhogg plans carry the
 command, OSC sequence and `CommandParams`, including I/O flags, snapshot
 selection, bbox and merged-cache policy. Elivagar plans carry the typed
 `ElivagarCommand`, including its tilegen contract or example parameters.
-There are no project dispatch modules.
+Project-specific command modules construct those plans; the shared runner
+owns measurement setup and execution after planning.
 
 The runner checks project and profiling capabilities, returns after dry-run
 planning, creates the session and executes the selected plan kind. Pbfhogg's

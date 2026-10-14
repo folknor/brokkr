@@ -240,9 +240,9 @@ fn run_as_snapshot(
     // Snapshot-specific filenames. The snapshot key is typically a date like
     // "20260411" but can be any [a-zA-Z0-9_-]+ string. Filenames bake the key
     // in directly so they don't collide with the dataset's primary files.
-    let pbf_filename = format!("{dataset_key}-{snap_key}.osm.pbf");
+    let pbf_filename = raw_pbf_filename(dataset_key, snap_key);
     let pbf_dest = data_dir.join(&pbf_filename);
-    let indexed_filename = format!("{dataset_key}-{snap_key}-with-indexdata.osm.pbf");
+    let indexed_filename = indexed_pbf_filename(dataset_key, snap_key);
     let indexed_dest = data_dir.join(&indexed_filename);
 
     // -- Download PBF --
@@ -265,7 +265,7 @@ fn run_as_snapshot(
         // a tighter range. Simplest: download just `target_seq` itself.
         // (Future enhancement: --osc-from N --osc-to M for snapshot-scoped ranges.)
         let url = source.osc_url(target_seq);
-        let dest = data_dir.join(format!("{dataset_key}-{snap_key}-seq{target_seq}.osc.gz"));
+        let dest = data_dir.join(osc_filename(dataset_key, snap_key, target_seq));
         if is_nonempty(&dest) {
             output::download_msg(&format!("  SKIP (exists): {}", dest.display()));
         } else {
@@ -357,7 +357,7 @@ fn run_as_snapshot(
 /// Convert a unix epoch second timestamp into a `YYYYMMDD` date string (UTC).
 /// Used to derive snapshot keys from file mtimes.
 fn unix_to_yyyymmdd(unix_secs: i64) -> String {
-    let days = unix_secs.div_euclid(86400);
+    let days = unix_secs.div_euclid(86_400);
     let (y, m, d) = days_to_civil(days);
     format!("{y:04}{m:02}{d:02}")
 }
@@ -370,55 +370,13 @@ fn unix_to_yyyymmdd(unix_secs: i64) -> String {
 /// its key when the key follows the common dated convention. Snapshots with
 /// non-date keys fall back to today's date.
 fn snapshot_key_to_iso_date(key: &str) -> Option<String> {
-    if key.len() != 8 || !key.bytes().all(|b| b.is_ascii_digit()) {
-        return None;
-    }
-    let y: i32 = key[..4].parse().ok()?;
-    let m: u32 = key[4..6].parse().ok()?;
-    let d: u32 = key[6..8].parse().ok()?;
-    if !is_valid_gregorian_date(y, m, d) {
-        return None;
-    }
-    Some(format!("{y:04}-{m:02}-{d:02}"))
-}
-
-/// Whether a date exists in the proleptic Gregorian calendar.
-fn is_valid_gregorian_date(year: i32, month: u32, day: u32) -> bool {
-    let days_in_month = match month {
-        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
-        4 | 6 | 9 | 11 => 30,
-        2 if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) => 29,
-        2 => 28,
-        _ => return false,
-    };
-    (1..=days_in_month).contains(&day)
+    CivilDate::parse_yyyymmdd(key).map(CivilDate::iso)
 }
 
 /// Convert a `YYYY-MM-DD` `download_date` string into `YYYYMMDD`. Returns
 /// `None` if the input doesn't match the expected format.
 fn iso_date_to_yyyymmdd(s: &str) -> Option<String> {
-    let bytes = s.as_bytes();
-    if bytes.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-' {
-        return None;
-    }
-    let y = s.get(..4)?;
-    let m = s.get(5..7)?;
-    let d = s.get(8..10)?;
-    if y.bytes().all(|b| b.is_ascii_digit())
-        && m.bytes().all(|b| b.is_ascii_digit())
-        && d.bytes().all(|b| b.is_ascii_digit())
-    {
-        let year = y.parse().ok()?;
-        let month = m.parse().ok()?;
-        let day = d.parse().ok()?;
-        if is_valid_gregorian_date(year, month, day) {
-            Some(format!("{year:04}{month:02}{day:02}"))
-        } else {
-            None
-        }
-    } else {
-        None
-    }
+    CivilDate::parse_iso(s).map(CivilDate::yyyymmdd)
 }
 
 /// Get the unix mtime of a file in seconds since epoch, or 0 on any error.
@@ -549,9 +507,9 @@ fn run_refresh(
     // -- Step 3: download new PBF to a fresh dated filename --
     std::fs::create_dir_all(data_dir)?;
     let date = today();
-    let new_pbf_filename = format!("{dataset_key}-{date}.osm.pbf");
+    let new_pbf_filename = raw_pbf_filename(dataset_key, &date);
     let new_pbf_dest = data_dir.join(&new_pbf_filename);
-    let new_indexed_filename = format!("{dataset_key}-{date}-with-indexdata.osm.pbf");
+    let new_indexed_filename = indexed_pbf_filename(dataset_key, &date);
     let new_indexed_dest = data_dir.join(&new_indexed_filename);
 
     // The new primary's dated names must not be files the dataset already
@@ -638,42 +596,14 @@ fn run_refresh(
 
 /// Format `YYYYMMDD` as `YYYY-MM-DD` for writing to brokkr.toml.
 fn iso_date_today(yyyymmdd: &str) -> String {
-    if yyyymmdd.len() == 8 {
-        format!("{}-{}-{}", &yyyymmdd[..4], &yyyymmdd[4..6], &yyyymmdd[6..8])
-    } else {
-        yyyymmdd.to_owned()
-    }
+    CivilDate::parse_yyyymmdd(yyyymmdd)
+        .map_or_else(|| yyyymmdd.to_owned(), CivilDate::iso)
 }
 
 /// Parse a `YYYY-MM-DD` string as a unix epoch second (UTC midnight).
 /// Returns `None` if the format doesn't match.
 fn iso_date_parse_unix(s: &str) -> Option<i64> {
-    let yyyymmdd = iso_date_to_yyyymmdd(s)?;
-    let y: i32 = yyyymmdd[..4].parse().ok()?;
-    let m: u32 = yyyymmdd[4..6].parse().ok()?;
-    let d: u32 = yyyymmdd[6..8].parse().ok()?;
-    let days = civil_to_days(y, m, d)?;
-    Some(days * 86400)
-}
-
-/// Convert (year, month, day) → days since 1970-01-01. Inverse of
-/// `days_to_civil` from earlier in this file.
-fn civil_to_days(y: i32, m: u32, d: u32) -> Option<i64> {
-    if !is_valid_gregorian_date(y, m, d) {
-        return None;
-    }
-    let y = y as i64;
-    let y = if m <= 2 { y - 1 } else { y };
-    let era = if y >= 0 { y } else { y - 399 } / 400;
-    #[allow(clippy::cast_sign_loss)] // yoe is non-negative by construction
-    let yoe = (y - era * 400) as u64;
-    let m = u64::from(m);
-    let d = u64::from(d);
-    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    #[allow(clippy::cast_possible_wrap)]
-    let days = doe as i64;
-    Some(era * 146097 + days - 719468)
+    CivilDate::parse_iso(s).map(CivilDate::unix_seconds)
 }
 
 #[cfg(test)]

@@ -634,6 +634,9 @@ pub(crate) fn list(
             "  {:<25} {:<30} {:<10} {}",
             fixture.id, tags, fixture.expected, approved,
         ));
+        if let Some(notes) = fixture.notes.as_deref().filter(|notes| !notes.is_empty()) {
+            output::litehtml_msg(&format!("    note: {notes}"));
+        }
     }
 
     Ok(())
@@ -755,6 +758,8 @@ pub(crate) fn approve(
     // Both scores or nothing. An error row is never an approval candidate,
     // and a missing element score would disable the element ratchet for good.
     let (pixel_pct, element_pct) = approval_scores(&fixture.id, &result)?;
+    let run = db.run_summary(&result.run_id)?;
+    engine::validate_approval_origin("litehtml", &result.run_id, run.as_ref(), git_info.commit.as_str())?;
 
     db.set_approval(
         &fixture.id,
@@ -967,7 +972,7 @@ fn ensure_prepare_script(project_root: &Path) -> Result<PathBuf, DevError> {
         &[],
         PNPM_INSTALL_DEADLINE,
         None,
-        false,
+        crate::shutdown::ChildIsolation::Inherit,
     )?;
     if run.killed_on_deadline() || !run.captured.success() {
         drop(std::fs::remove_dir_all(&node_modules));

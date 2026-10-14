@@ -47,6 +47,7 @@ pub fn run(
         .filter(|dep| dep.scope == ManifestDependencyScope::Workspace)
         .map(|dep| dep.key.to_owned())
         .collect();
+    validate_ignore(ignore, &declared)?;
     if declared.is_empty() {
         return Ok(Vec::new());
     }
@@ -73,11 +74,29 @@ pub fn run(
 /// and `starts_with("")` is always true, which would silently disable the whole
 /// phase.
 fn ignored(name: &str, ignore: &[String]) -> bool {
-    ignore.iter().any(|ig| match ig.strip_suffix('*') {
-        Some("") => ig == name,
+    ignore.iter().any(|ig| ignore_entry_matches(name, ig))
+}
+
+fn ignore_entry_matches(name: &str, entry: &str) -> bool {
+    match entry.strip_suffix('*') {
+        Some("") => entry == name,
         Some(prefix) => name.starts_with(prefix),
-        None => ig == name,
-    })
+        None => entry == name,
+    }
+}
+
+fn validate_ignore(ignore: &[String], declared: &BTreeSet<String>) -> Result<(), DevError> {
+    for entry in ignore {
+        if !declared
+            .iter()
+            .any(|name| ignore_entry_matches(name, entry))
+        {
+            return Err(DevError::Config(format!(
+                "[deps].workspace_dep_ignore entry {entry:?} matches no [workspace.dependencies] key"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Names of deps this manifest inherits from the workspace
@@ -161,6 +180,19 @@ libc = { workspace = true }\n";
         assert!(!ignored("serde", &ignore));
         assert!(!ignored("tokio", &ignore));
         assert!(ignored("*", &ignore));
+    }
+
+    #[test]
+    fn unmatched_ignore_entries_are_rejected() {
+        let declared = ["serde", "tokio"].into_iter().map(str::to_owned).collect();
+        assert!(validate_ignore(&["ser*".into()], &declared).is_ok());
+        let error = validate_ignore(&["missing".into()], &declared).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("matches no [workspace.dependencies] key")
+        );
+        assert!(validate_ignore(&["anything*".into()], &BTreeSet::new()).is_err());
     }
 
     fn metadata_for(root: &Path, member_manifest: &Path) -> CargoMetadata {

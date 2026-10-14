@@ -80,7 +80,11 @@ pub fn check_metadata(
     metadata_json: &str,
     rules: &[DependencyRule],
 ) -> Result<DependencyReport, DevError> {
-    let metadata: CargoMetadata = serde_json::from_str(metadata_json)?;
+    let metadata: CargoMetadata = serde_json::from_str(metadata_json).map_err(|error| {
+        DevError::Internal(format!(
+            "dependency_rules could not deserialize the cargo metadata snapshot: {error}"
+        ))
+    })?;
     let workspace_packages: Vec<&CargoPackage> = metadata
         .packages
         .iter()
@@ -104,20 +108,14 @@ pub fn check_metadata(
         let kinds = &rule.kinds;
 
         // Resolve the `from` set. `"*"` expands to every workspace package;
-        // otherwise each named package is looked up. `except` drops packages
-        // from either form.
-        let from_pkgs: Vec<&CargoPackage> = if rule.from.iter().any(|f| f == "*") {
-            workspace_packages
-                .iter()
-                .copied()
-                .filter(|pkg| !except.contains(pkg.name.as_str()))
-                .collect()
+        // otherwise each named package is looked up. Validate every exception
+        // against this set before applying it, so a typo cannot silently leave
+        // the intended package in scope.
+        let candidates: Vec<&CargoPackage> = if rule.from.iter().any(|f| f == "*") {
+            workspace_packages.clone()
         } else {
             let mut pkgs = Vec::new();
             for from in &rule.from {
-                if except.contains(from.as_str()) {
-                    continue;
-                }
                 let Some(pkg) = by_name.get(from.as_str()) else {
                     return Err(DevError::Config(format!(
                         "[[dependency_rule]] references package '{from}' in `from`, \
@@ -128,6 +126,18 @@ pub fn check_metadata(
             }
             pkgs
         };
+
+        for name in &rule.except {
+            if !candidates.iter().any(|pkg| pkg.name == *name) {
+                return Err(DevError::Config(format!(
+                    "[[dependency_rule]] except entry {name:?} matches no package selected by `from`"
+                )));
+            }
+        }
+        let from_pkgs: Vec<&CargoPackage> = candidates
+            .into_iter()
+            .filter(|pkg| !except.contains(pkg.name.as_str()))
+            .collect();
 
         for pkg in from_pkgs {
             for dep in &pkg.dependencies {
@@ -328,6 +338,21 @@ mod tests {
                 .violations
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn unmatched_except_is_a_config_error() {
+        let rules = vec![DependencyRule {
+            name: None,
+            from: vec!["*".into()],
+            forbid: Some(vec!["db".into()]),
+            allow: None,
+            except: vec!["missing".into()],
+            kinds: Vec::new(),
+            optional: None,
+        }];
+        let error = check_metadata(metadata(), &rules).unwrap_err().to_string();
+        assert!(error.contains("except entry \"missing\""), "got: {error}");
     }
 
     /// Build an `app` rule forbidding `to`, scoped by `kinds` / `optional`.

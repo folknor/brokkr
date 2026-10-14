@@ -15,10 +15,11 @@ where
     let dev_config = &detection.config;
     let project = detection.project;
     let project_root = detection.project_root.as_path();
-    let mm = if mode.is_measured() {
-        resolve_mode(mode)?
-    } else {
+    let requested_mode = resolve_mode(mode);
+    let mm = if requested_mode == measure::MeasureMode::Run {
         cli::invocation().spec().default_mode
+    } else {
+        requested_mode
     };
     let features = resolve_features(dev_config, &mode.features);
     output::set_quiet(!mode.verbose);
@@ -131,10 +132,10 @@ fn main() {
     if let Some(code) = test_runner::maybe_run_harness_shim() {
         std::process::exit(code);
     }
-    let raw_args: String = std::env::args().skip(1).collect::<Vec<_>>().join(" ");
+    let raw_args: Vec<String> = std::env::args().skip(1).collect();
     let start = Instant::now();
 
-    // Resolve the project once for help filtering, toolchain arming, command
+    // Resolve the project once for help filtering, the toolchain setting, command
     // dispatch and interrupt cleanup. Help still fails open on a bad config;
     // the command decides below whether that detection error is fatal.
     let (detection, detection_error) = match project::detect_optional() {
@@ -164,12 +165,7 @@ fn main() {
     });
     let elapsed_ms = duration_ms(start.elapsed());
 
-    let exit_code = match &result {
-        Ok(()) => 0,
-        Err(DevError::ExitCode(code)) => *code,
-        Err(DevError::Interrupted) => 130,
-        Err(_) => 1,
-    };
+    let exit_code = crate::error::result_exit_code(&result);
 
     if !is_history {
         history_cmd::record_history(&raw_args, elapsed_ms, exit_code);
@@ -204,9 +200,10 @@ fn main() {
     }
 }
 
-/// A few commands are useful even when the project config is malformed or
-/// unavailable. All other handlers historically propagated detection errors
-/// before dispatch; keep that policy while sharing the one startup result.
+/// Only commands that never read a project config run past a detection error.
+/// An optional-config command (`check`, `clippy`, `run`, ...) must not fall
+/// back to its no-config path when a `brokkr.toml` exists but is malformed:
+/// `check` would then run without the project's gates and report green.
 fn detection_error_is_ignored(command: &Command) -> bool {
     command.spec().config == cli::ConfigNeed::None
 }
@@ -230,7 +227,7 @@ fn require_detection(
 
 /// `cargo fmt` runs rustfmt from the pinned toolchain, so honour
 /// disable_toolchain. When it's set we must move the pin aside; do it by
-/// arming the build root and riding the global lock's activation - the same
+/// riding the global lock's activation of the configured build root - the same
 /// mechanism every build path uses - rather than a bare guard. A bare guard
 /// would race a concurrent locked build that had already moved the same file
 /// aside: fmt would adopt that build's sidecar and restore it mid-command.
@@ -239,7 +236,6 @@ fn require_detection(
 fn run_fmt(args: &[String], detection: Option<&project::Detection>) -> Result<(), DevError> {
     match detection {
         Some(d) if d.config.disable_toolchain => {
-            toolchain::arm(Some(d.build_root.as_path().to_path_buf()));
             let lock = context::reenter_command_lock()?;
             cmd_fmt(args, Some(&lock))
         }
@@ -248,16 +244,15 @@ fn run_fmt(args: &[String], detection: Option<&project::Detection>) -> Result<()
 }
 
 /// Reading the docs must work in a tree brokkr knows nothing about, so a
-/// missing or malformed config falls back to `Other("")` and gets the
-/// project-agnostic topics. No lock: this reads compiled-in strings and
-/// touches nothing on disk, and needs no toolchain arming.
+/// missing or malformed config gets the project-agnostic topics. No lock:
+/// this reads compiled-in strings and touches nothing on disk.
 fn run_man(
     topic: Option<&str>,
     sections: &[String],
     full: bool,
     detection: Option<&project::Detection>,
 ) -> Result<(), DevError> {
-    let project = detection.map_or(Project::Other(""), |d| d.project);
+    let project = detection.map(|d| d.project);
     man::run(topic, sections, full, project)
 }
 
@@ -387,7 +382,6 @@ fn run_sync(
     let project = detection.project;
     let dev_config = &detection.config;
     let project_root = detection.project_root.as_path();
-    project::require(project, Project::Ratatoskr, "sync")?;
     let ratatoskr_config = detection.project_config.ratatoskr()?;
     let cohort_gate = gate.as_deref() == Some(ratatoskr::sync::GATE_ALL);
 
@@ -484,7 +478,7 @@ fn run_sync(
 /// run_measured/MeasurementSession). A corpus parity run has nothing for it to
 /// override, and a flag accepted and ignored would read as if it did something.
 fn refuse_unmeasured_force(mode: &cli::ModeArgs) -> Result<(), DevError> {
-    if mode.force && !mode.is_measured() {
+    if mode.force && resolve_mode(mode) == measure::MeasureMode::Run {
         return Err(DevError::Usage(
             "corpus: `--force` applies to a measured run (`--hotpath`/`--alloc`) only; \
              a parity run has no runtime limit to bypass"
@@ -739,6 +733,9 @@ fn run(cli: Cli, detection: Option<&project::Detection>) -> Result<(), DevError>
                 build_root: detection.map(|d| &d.build_root)
                     .or_else(|| fallback_roots.as_ref().map(|roots| &roots.1))
                     .expect("locking commands resolve a build root"),
+                // Activated explicitly below, so it can be skipped for
+                // worktree commands and tracked on the hold.
+                disable_toolchain_dir: None,
             };
             Some(if spec.lock == cli::LockPolicy::NonBlocking {
                 lockfile::try_acquire_without_toolchain(&ctx)?
@@ -749,7 +746,7 @@ fn run(cli: Cli, detection: Option<&project::Detection>) -> Result<(), DevError>
     };
     let disable_dir = detection.filter(|d| d.config.disable_toolchain)
         .map(|d| d.build_root.as_path().to_path_buf());
-    toolchain::arm(disable_dir);
+    context::set_configured_toolchain_dir(disable_dir);
     let historical = cli.command.uses_worktree();
     let _toolchain = if !historical && spec.lock != cli::LockPolicy::None {
         detection.filter(|d| d.config.disable_toolchain)
@@ -871,7 +868,7 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
         command_input::RoutedCommand::Other(command) => *command,
     };
     match command {
-        command @ (Command::Lock | Command::Kill { .. } | Command::Strays { .. }
+        Command::Lock | Command::Kill { .. } | Command::Strays { .. }
         | Command::Guard { .. } | Command::History { .. } | Command::Check { .. }
         | Command::Clippy { .. } | Command::Fmt { .. } | Command::Bench { .. }
         | Command::Run { .. } | Command::Install { .. } | Command::Wc { .. }
@@ -882,7 +879,9 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
         | Command::MergeChanges { .. } | Command::ApplyChanges { .. }
         | Command::AddLocationsToWays { .. } | Command::Repack { .. }
         | Command::Degrade { .. } | Command::TimeFilter { .. } | Command::Diff { .. }
-        | Command::BuildGeocodeIndex { .. }) => run(Cli { command }, Some(detection)),
+        | Command::BuildGeocodeIndex { .. } => unreachable!(
+            "top-level command dispatch must not re-enter through run_project"
+        ),
         Command::Env => cmd_env(dev_config, project, &detection.project_root, &detection.build_root),
         Command::DiffSnapshots {
             mode,
@@ -1061,8 +1060,8 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
             run_measured(
                 &mode,
                 detection,
-                "denmark",
-                "raw",
+                cli::DEFAULT_DATASET,
+                cli::DEFAULT_RAW_VARIANT,
                 &invocation,
                 |req| measure::runner::run(req, &elivagar::plan::ElivagarPlan(&cmd)),
             )
@@ -1076,8 +1075,8 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
             run_measured(
                 &mode,
                 detection,
-                "denmark",
-                "raw",
+                cli::DEFAULT_DATASET,
+                cli::DEFAULT_RAW_VARIANT,
                 &invocation,
                 |req| measure::runner::run(req, &elivagar::plan::ElivagarPlan(&cmd)),
             )
@@ -1128,7 +1127,7 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
                 &mode,
                 detection,
                 &dataset,
-                "raw",
+                cli::DEFAULT_RAW_VARIANT,
                 &invocation,
                 |req| measure::runner::run(req, &nidhogg::plan::NidhoggPlan(&cmd)),
             )
@@ -1162,7 +1161,7 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
                 &mode,
                 detection,
                 &dataset,
-                "raw",
+                cli::DEFAULT_RAW_VARIANT,
                 &invocation,
                 |req| measure::runner::run(req, &nidhogg::plan::NidhoggPlan(&cmd)),
             )
@@ -1171,7 +1170,7 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
         // ----- dellingr commands -----
         // Dataset/variant are the `run_measured` scaffolding every measured
         // command shares; dellingr has neither, so both stay empty rather
-        // than inventing a "denmark" that would land in the DB.
+        // than inventing a dataset name that would land in the DB.
         Command::Dellingr { mode, lua } => run_measured(
             &mode,
             detection,
@@ -1363,7 +1362,6 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
             full,
             compare,
         } => {
-            project::require(project, Project::Piners, "corpus-results")?;
             let cq = CorpusQuery {
                 run_id,
                 run,
@@ -1780,11 +1778,7 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
                     sluggrs_config,
                     &args,
                 ),
-                _ => Err(DevError::WrongProject {
-                    command: "visual".to_owned(),
-                    expected: "litehtml/sluggrs".to_owned(),
-                    current: project.to_string(),
-                })
+                _ => unreachable!("command specification admits visual only for litehtml/sluggrs"),
             }
         }
         // ----- cargo single-test runner -----
@@ -1807,11 +1801,7 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
             match project_config {
                 ProjectConfig::Litehtml(cfg) => litehtml::cmd::list(project, project_root, cfg),
                 ProjectConfig::Sluggrs(cfg) => sluggrs::cmd::list(project, project_root, cfg),
-                _ => Err(DevError::WrongProject {
-                    command: "list".to_owned(),
-                    expected: "litehtml/sluggrs".to_owned(),
-                    current: project.to_string(),
-                })
+                _ => unreachable!("command specification admits list only for litehtml/sluggrs"),
             }
         }
         Command::Approve { fixture, all } => {
@@ -1821,32 +1811,20 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
             match project {
                 Project::Litehtml => litehtml::cmd::report(project, project_root, &run_id),
                 Project::Sluggrs => sluggrs::cmd::report(project, project_root, &run_id),
-                other => Err(DevError::WrongProject {
-                    command: "report".to_owned(),
-                    expected: "litehtml/sluggrs".to_owned(),
-                    current: other.to_string(),
-                })
+                _ => unreachable!("command specification admits report only for litehtml/sluggrs"),
             }
         }
         Command::VisualStatus => {
             match project_config {
                 ProjectConfig::Litehtml(cfg) => litehtml::cmd::status(project, project_root, cfg),
                 ProjectConfig::Sluggrs(cfg) => sluggrs::cmd::status(project, project_root, cfg),
-                _ => Err(DevError::WrongProject {
-                    command: "visual-status".to_owned(),
-                    expected: "litehtml/sluggrs".to_owned(),
-                    current: project.to_string(),
-                })
+                _ => unreachable!("command specification admits visual-status only for litehtml/sluggrs"),
             }
         }
         // ----- litehtml-only commands -----
         Command::Prepare { input, output } => {
             let ProjectConfig::Litehtml(cfg) = project_config else {
-                return Err(DevError::WrongProject {
-                    command: "prepare".to_owned(),
-                    expected: "litehtml".to_owned(),
-                    current: project.to_string(),
-                });
+                unreachable!("command specification admits prepare only for litehtml")
             };
             litehtml::cmd::prepare(project, project_root, cfg, &input, &output)
         }
@@ -1861,8 +1839,8 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
             run_measured(
                 &mode,
                 detection,
-                "n/a",
-                "n/a",
+                "",
+                "",
                 &invocation,
                 |req| sluggrs::hotpath::cmd(req, &target),
             )
@@ -1879,8 +1857,6 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
             repeat,
             keep_going,
         } => {
-            project::require(project, Project::Ratatoskr, "service")?;
-
             // Same bare-is-an-index shape as `sync`: bare lists, SCRIPT
             // runs one (a directory runs that cohort), --all runs the
             // discovered cohort.
@@ -1917,7 +1893,6 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
         }
         Command::Sync { script, all, filter, include_ignored, bench, force, keep_artefacts, debug, release, gate, as_baseline, commit } => run_sync(&script, &all, &filter, &include_ignored, &bench, &force, &keep_artefacts, &debug, &release, &gate, &as_baseline, &commit, detection, &invocation),
         Command::MockServe { fixture } => {
-            project::require(project, Project::Ratatoskr, "mock-serve")?;
             let cfg = project_config.ratatoskr()?;
             ratatoskr::saehrimnir::run_mock_serve(&ratatoskr::saehrimnir::MockServeRequest {
                 project_root,
@@ -1941,7 +1916,6 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
             harness_args,
             mode,
         } => {
-            project::require(project, Project::Piners, "corpus")?;
             refuse_unmeasured_force(&mode)?;
             let args = piners::cmd::CorpusArgs {
                 keywords: keyword,
@@ -1956,7 +1930,7 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
                 keep_artefacts,
                 harness_args,
             };
-            if mode.is_measured() {
+            if resolve_mode(&mode) != measure::MeasureMode::Run {
                 // --hotpath/--alloc: build the harness with the hotpath feature
                 // and record to results.db, skipping the gate and runs.db.
                 run_measured(
@@ -1986,7 +1960,6 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
             debug,
             release,
         } => {
-            project::require(project, Project::Piners, "lint-corpus")?;
             let args = piners::lint::cmd::LintArgs {
                 keywords: keyword,
                 probe,
@@ -2008,7 +1981,6 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
             limit,
             full,
         } => {
-            project::require(project, Project::Piners, "lint-results")?;
             let lq = piners::lint::query::LintQuery {
                 run_id,
                 run,

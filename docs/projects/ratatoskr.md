@@ -2,6 +2,36 @@
 
 `project = "ratatoskr"` in `brokkr.toml`. Multi-crate workspace.
 
+## Configuration
+
+Project-specific settings live under `[ratatoskr]` in the project
+`brokkr.toml`:
+
+- `[ratatoskr.harness]` names the cargo package (`package`), optional binary
+  target (`binary`, defaulting to the package name), optional cargo
+  `features`, and optional `debug` profile default. Orchestration builds use
+  this spec directly; they do not select a `[[check]]` sweep.
+- `mock_server_binary` points to the sæhrimnir executable and `fixtures_dir`
+  to its fixture files. Absolute paths stay absolute; relative paths resolve
+  from the project root. Both are required when a selected service or sync
+  script uses a fixture, and by `mock-serve`.
+- `test_endpoint_env_<protocol>` settings name the environment variable
+  brokkr sets for each protocol's endpoint. The registered protocols are
+  `jmap`, `imap`, `smtp`, `graph`, `gmail`, `caldav`, `carddav`, `people`,
+  and `gcal`. These variables are injected for fixture-backed service and
+  sync runs. HTTP protocols receive an `http://host:port` origin; IMAP and
+  SMTP receive `host:port`.
+- `sync_script_dir` optionally selects the sync script directory. Relative
+  paths resolve from the project root; the default is
+  `crates/app/tests/sync-harness`.
+- `[ratatoskr.gate.<name>]` configures a gate's script, baseline identity,
+  and metric rules. See
+  [the sync gate guide](../commands/ratatoskr-gate.md) for its full shape.
+
+The schema-universal fields are documented in `docs/brokkr.toml.md`; the
+ratatoskr-specific config sections are described here so service, sync, and
+gate users can find them in one place.
+
 ## Two test harnesses
 
 ratatoskr exercises two separate harness flows from brokkr:

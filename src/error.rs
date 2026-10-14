@@ -4,6 +4,21 @@ use std::io;
 use std::path::PathBuf;
 use std::time::Duration;
 
+pub(crate) const EXIT_SUCCESS: i32 = 0;
+pub(crate) const EXIT_FAILURE: i32 = 1;
+pub(crate) const EXIT_INTERRUPTED: i32 = 130;
+
+/// Resolve the top-level process code from one handler result. The command
+/// entry point should use this value for both history and the eventual exit.
+pub(crate) fn result_exit_code(result: &Result<(), DevError>) -> i32 {
+    match result {
+        Ok(()) => EXIT_SUCCESS,
+        Err(DevError::ExitCode(code)) => *code,
+        Err(DevError::Interrupted) => EXIT_INTERRUPTED,
+        Err(_) => EXIT_FAILURE,
+    }
+}
+
 /// How a diagnostic should be rendered by `DevError`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RenderingPolicy {

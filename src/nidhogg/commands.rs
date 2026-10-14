@@ -3,12 +3,12 @@
 //! Each nidhogg command that can be measured (wall-clock, hotpath, alloc) is
 //! defined here.  Unlike pbfhogg commands, nidhogg commands have fundamentally
 //! different execution patterns: Api does HTTP against a running server,
-//! Ingest runs an external binary with per-run scratch cleanup, and Tiles
-//! manages a full server lifecycle.  The enum captures identity, capabilities,
-//! and metadata - dispatch handles execution.
+//! Ingest runs the binary with per-run scratch cleanup, and Tiles manages a
+//! full server lifecycle. The enum owns command identity, build package and
+//! the ingest argv; the plan supplies the other lifecycle details.
 
-use crate::db::KvPair;
 use crate::error::DevError;
+use crate::project::Project;
 
 // ---------------------------------------------------------------------------
 // NidhoggCommand - the unified command enum
@@ -37,7 +37,6 @@ pub enum NidhoggCommand {
     },
 }
 
-#[allow(dead_code)] // methods prepared for future dispatch unification
 impl NidhoggCommand {
     /// The command ID string used in CLI and result DB.
     pub fn id(&self) -> &'static str {
@@ -48,57 +47,13 @@ impl NidhoggCommand {
         }
     }
 
-    /// Whether this command supports hotpath profiling.
-    ///
-    /// Only Ingest supports hotpath - the current hotpath implementation
-    /// always runs `nidhogg ingest` with hotpath features enabled.
-    /// Api talks to a running server (no binary instrumentation) and
-    /// Tiles manages a server lifecycle (hotpath not wired).
-    pub fn supports_hotpath(&self) -> bool {
-        match self {
-            Self::Ingest => true,
-            Self::Api { .. } | Self::Tiles { .. } => false,
-        }
-    }
-
     /// The cargo package name to build, if this command needs a build.
     ///
     /// Api doesn't build anything (it talks to an already-running server).
     pub fn package(&self) -> Option<&'static str> {
         match self {
             Self::Api { .. } => None,
-            Self::Ingest | Self::Tiles { .. } => Some("nidhogg"),
-        }
-    }
-
-    /// Build metadata key-value pairs for the result DB.
-    ///
-    /// Post-v13 this is reserved for runtime observations. Axis-like
-    /// fields (query name, uring flag) are already captured in the
-    /// `brokkr_args` column, so we don't mirror them here.
-    pub fn metadata(&self) -> Vec<KvPair> {
-        Vec::new()
-    }
-
-    /// Whether this command needs a binary build before execution.
-    ///
-    /// Api talks to an already-running server via HTTP - no build needed.
-    /// Ingest and Tiles both need the nidhogg binary.
-    pub fn needs_build(&self) -> bool {
-        match self {
-            Self::Api { .. } => false,
-            Self::Ingest | Self::Tiles { .. } => true,
-        }
-    }
-
-    /// Whether this command requires an already-running nidhogg server.
-    ///
-    /// Api requires an external server to be running.
-    /// Ingest runs standalone. Tiles manages its own server lifecycle.
-    pub fn needs_server(&self) -> bool {
-        match self {
-            Self::Api { .. } => true,
-            Self::Ingest | Self::Tiles { .. } => false,
+            Self::Ingest | Self::Tiles { .. } => Project::Nidhogg.cli_package(),
         }
     }
 
@@ -164,74 +119,19 @@ mod tests {
     }
 
     #[test]
-    fn only_ingest_supports_hotpath() {
-        assert!(!NidhoggCommand::Api { query: None }.supports_hotpath());
-        assert!(NidhoggCommand::Ingest.supports_hotpath());
-        assert!(
-            !NidhoggCommand::Tiles {
-                tiles_variant: None,
-                uring: false,
-            }
-            .supports_hotpath()
-        );
-    }
-
-    #[test]
-    fn package_none_for_api() {
+    fn package_matches_build_requirements() {
         assert_eq!(NidhoggCommand::Api { query: None }.package(), None);
-        assert_eq!(NidhoggCommand::Ingest.package(), Some("nidhogg"));
+        assert_eq!(
+            NidhoggCommand::Ingest.package(),
+            Project::Nidhogg.cli_package()
+        );
         assert_eq!(
             NidhoggCommand::Tiles {
                 tiles_variant: None,
                 uring: false,
             }
             .package(),
-            Some("nidhogg")
+            Project::Nidhogg.cli_package()
         );
-    }
-
-    #[test]
-    fn metadata_is_empty_post_v13() {
-        // Axis-like fields (query, uring) live in brokkr_args/cli_args after
-        // v13; nidhogg's metadata() now returns no runtime observations.
-        assert!(
-            NidhoggCommand::Api {
-                query: Some("bbox-small".into())
-            }
-            .metadata()
-            .is_empty()
-        );
-        assert!(NidhoggCommand::Ingest.metadata().is_empty());
-        assert!(
-            NidhoggCommand::Tiles {
-                tiles_variant: None,
-                uring: true,
-            }
-            .metadata()
-            .is_empty()
-        );
-    }
-
-    #[test]
-    fn api_needs_server_not_build() {
-        let cmd = NidhoggCommand::Api { query: None };
-        assert!(!cmd.needs_build());
-        assert!(cmd.needs_server());
-    }
-
-    #[test]
-    fn ingest_needs_build_not_server() {
-        assert!(NidhoggCommand::Ingest.needs_build());
-        assert!(!NidhoggCommand::Ingest.needs_server());
-    }
-
-    #[test]
-    fn tiles_needs_build_not_server() {
-        let cmd = NidhoggCommand::Tiles {
-            tiles_variant: None,
-            uring: false,
-        };
-        assert!(cmd.needs_build());
-        assert!(!cmd.needs_server());
     }
 }

@@ -17,6 +17,7 @@ use serde_json::json;
 use super::super::constants::DEFAULT_MAX_EXAMPLES;
 use super::super::eliv::tile_id_to_zxy;
 use super::compare::{OutcomeClass, OutcomeCounts};
+use crate::output;
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -182,7 +183,7 @@ impl RegressReport {
     }
 
     pub fn print_text(&self) {
-        println!(
+        output::plain(&format!(
             "identical_tiles={} diffs={} only_current={} only_baseline={} tolerance_moved={} structural_moved={} attr_changed={}",
             self.identical_tiles,
             self.diff_count,
@@ -191,8 +192,8 @@ impl RegressReport {
             self.totals.count(OutcomeClass::ToleranceMoved),
             self.totals.count(OutcomeClass::StructuralMoved),
             self.totals.count(OutcomeClass::AttrChanged)
-        );
-        println!(
+        ));
+        output::plain(&format!(
             "regress addressed_tiles={} directory_runs={} unique_blobs={} unique_blob_pairs={} raw_equal_pairs={} raw_equal_tiles={} canonical_equal_pairs={} canonical_equal_tiles={} detailed_pairs={} detailed_tiles={} raw_ms={} canonical_ms={} detail_ms={} peak_rss_kb={}",
             self.counters.addressed_tiles,
             self.counters.directory_runs,
@@ -208,29 +209,29 @@ impl RegressReport {
             self.counters.canonical_pass_ms,
             self.counters.detail_pass_ms,
             self.counters.peak_rss_kb,
-        );
+        ));
 
         for ((z, layer), c) in &self.per_zoom_layer {
             if counters_are_zero(c) {
                 continue;
             }
-            print!("z{z} {layer}");
-            for class in OutcomeClass::ALL {
-                print!(" {}={}", class.text_label(), c.count(class));
-            }
-            println!();
+            let counts = OutcomeClass::ALL
+                .iter()
+                .map(|class| format!(" {}={}", class.text_label(), c.count(*class)))
+                .collect::<String>();
+            output::plain(&format!("z{z} {layer}{counts}"));
         }
 
         for ((z, layer), values) in &self.displacement {
             if values.is_empty() {
                 continue;
             }
-            println!(
+            output::plain(&format!(
                 "z{z} {layer} displacement p50={} p95={} max={}",
                 values.percentile(50),
                 values.percentile(95),
                 values.max()
-            );
+            ));
         }
 
         for ex in &self.examples {
@@ -238,7 +239,12 @@ impl RegressReport {
             let id = ex
                 .id
                 .map_or_else(|| "anon".to_string(), |id| id.to_string());
-            println!("z{z}/{x}/{y} {} {} {}", ex.layer.as_ref(), id, ex.class);
+            output::plain(&format!(
+                "z{z}/{x}/{y} {} {} {}",
+                ex.layer.as_ref(),
+                id,
+                ex.class
+            ));
         }
     }
 

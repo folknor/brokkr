@@ -1,15 +1,19 @@
-//! Discovery for service-harness scripts.
+//! Discovery and frontmatter parsing for service and sync harness scripts.
 //!
-//! Default location: `<project_root>/crates/app/tests/service-harness/`.
-//! Discovery is recursive (`**/*.lua`), so cohorts can live under
-//! subdirectories such as `t1/`, `extract/`, etc.
+//! Service scripts default to
+//! `<project_root>/crates/app/tests/service-harness/`; sync scripts use the
+//! configured sync-script directory or its own convention. Discovery is
+//! recursive (`**/*.lua`), so cohorts can live under subdirectories such as
+//! `t1/`, `extract/`, etc.
 //!
 //! Frontmatter is parsed from a contiguous block of `--` line comments
 //! at the top of each script, before the first non-comment / non-blank
 //! line. Recognized keys:
 //!
 //! - `description` (free text shown by bare `brokkr service`)
-//! - `expected = pass | ignored`
+//! - `expected = pass | ignored` (ignored scripts are skipped by default)
+//! - `fixture` (optional for service scripts, required for sync scripts)
+//! - `protocol` (informational label)
 //! - `ceiling = 60s` / `5m` / `1h` / `90` - per-script wall-clock
 //!   backstop enforced by brokkr around the whole run. Bare numbers are
 //!   read as seconds. Omitted scripts use [`DEFAULT_CEILING`].

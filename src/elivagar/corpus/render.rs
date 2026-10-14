@@ -306,13 +306,20 @@ pub(crate) fn render_archive_tile_from_runs(
     layers: Option<&[String]>,
 ) -> io::Result<RenderedSvg> {
     let id = xy_to_tile_id(z, x, y);
-    let raw = if let Some(e) = find_entry(runs, id) {
+    let entry = find_entry(runs, id);
+    let raw = if let Some(e) = entry {
         gzip_decompress(archive.raw_blob_at(e.offset, e.length)?)?
     } else {
         Vec::new()
     };
     let tile = decode_render_tile(&raw).map_err(io::Error::other)?;
-    render_svg(&tile, z, x, y, style, layers).map_err(io::Error::other)
+    let mut rendered = render_svg(&tile, z, x, y, style, layers).map_err(io::Error::other)?;
+    if entry.is_none() {
+        rendered.warnings.push(format!(
+            "tile {z}/{x}/{y} is not addressed in the archive; rendering a blank SVG"
+        ));
+    }
+    Ok(rendered)
 }
 
 /// Emit the ring-grouping report - the input to the ring-grouping differential

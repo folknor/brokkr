@@ -31,8 +31,7 @@ impl<'a> ChildGuard<'a> {
         // Publish the tile server's PG-leader PID under the auxiliary
         // mock_pids slot. Same shape as ratatoskr's FixtureSession:
         // `brokkr kill --hard` SIGKILLs every entry, and the server is
-        // spawned in its own process group so the kill sweeps any
-        // helper threads / subprocesses too.
+        // in brokkr's process group, so hard kill targets this PID only.
         lock.add_mock_pid(pid);
         Self {
             child: Some(child),
@@ -65,7 +64,6 @@ impl<'a> Drop for ChildGuard<'a> {
     }
 }
 
-/// Number of iterations over the full tile set per run.
 /// Check whether a stderr line indicates the server is ready.
 ///
 /// Matches case-insensitively on "listening" - this is more resilient than
@@ -396,4 +394,16 @@ fn curl_get_tile(port: u16, z: u32, x: u32, y: u32) -> Result<(), DevError> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod readiness_tests {
+    use super::is_ready_line;
+
+    #[test]
+    fn readiness_line_matches_case_insensitively() {
+        assert!(is_ready_line("Listening on 127.0.0.1:3033"));
+        assert!(is_ready_line("server is LISTENING"));
+        assert!(!is_ready_line("startup complete"));
+    }
 }

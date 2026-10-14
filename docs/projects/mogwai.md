@@ -26,7 +26,7 @@ that could only hold argv is what forced everything else into a second "layer".
 
 ## What the registry holds
 
-Targets and their feature shapes, plus out-of-git inputs. Nothing else.
+Targets and their feature shapes only.
 
 ```toml
 [mogwai]
@@ -37,14 +37,7 @@ bin     = "mogwai"         # optional, defaults to the package name
 package  = "mogwai-lab"    # optional, defaults to [mogwai] package
 example  = "screen_projection_bench"
 features = ["hotpath"]
-
-[bygg.datasets.mnq-tbbo-july]
-path   = "research/market-data/databento/mnqv/2026-07.full.tbbo"
-xxh128 = "280ade40376bd49f50c579bb127f3fbd"
 ```
-
-The input pin is parsed as XXH128: exactly 32 hexadecimal characters.
-SHA-256 manifest digests are rejected when brokkr loads the config.
 
 - **CLI surfaces need no registration.** The bin is registered once; the argv is
   composed at the call site.
@@ -113,9 +106,11 @@ row rather than prevented, and reading rules turn that into a verdict.
 ## Rows and pairing
 
 Rows file under the target name, or the bin name for a CLI invocation. The
-invocation is captured verbatim in `cli_args` and `brokkr_args`, and
-`brokkr_args` stays in the pairing key - two different invocations must not
-average into one row.
+subprocess and brokkr invocations are recorded in `cli_args` and `brokkr_args`.
+New rows pair on `(command, mode, input_file, arm_key, env_fingerprint)`;
+`arm_key` keeps measurement-affecting options while excluding commit, verbosity,
+and iteration-count provenance. See `brokkr man results` for historical-row
+pairing behavior.
 
 Selecting an arm is therefore a query. `brokkr results --grep` and `--grep-v`
 run over the whole invocation, which is the only way to select an arm defined by
@@ -150,46 +145,6 @@ and cannot be waived per comparison.
 Counters from the winning run only: averaging across iterations would hide an
 iteration that differed rather than surface it. `meta.`, `env.` and `prev.`
 pairs are excluded as provenance.
-
-## Datasets
-
-`[<host>.datasets.<name>]` records an out-of-git input: which delivery, and
-whether the file under that path drifted since a row was recorded against it.
-Per host, because deliveries live wherever the machine holding them put them.
-
-This is **not** a substitute for the run's own content verification, which asks a
-different question - whether the data is what the ledger says. This asks whether
-the bytes moved under a recorded row.
-
-> [!IMPORTANT]
-> The digest is **XXH128**, brokkr's standard file hash - not the SHA-256 the
-> delivery manifests carry. There is nothing to transcribe. Register the path,
-> run `brokkr env`, and the entry lists with the digest computed from disk:
->
-> ```
-> datasets:    mnq-tbbo-july <tick> (no hash configured, actual: 280ade40...)
-> ```
->
-> Paste it back. A digest that cannot be computed reports why rather than a bare
-> `error`.
-
-`path` may name a **directory**. Deliveries frequently are one - a Databento
-delivery is two `.csv.zst` archives beside `manifest.json`, `metadata.json` and
-`condition.json`, and `measure --corpus` takes the directory. A directory
-digests as the fold, sorted by path relative to the root, of
-`<relative path>\0<file digest>` over every file beneath it:
-
-- Sorting makes it reproducible; readdir order is a filesystem detail that
-  differs between two copies of identical data.
-- The relative path is inside the fold, so a rename, or two files swapping
-  contents, changes the digest. A delivery is its layout as well as its bytes.
-- Per-file digests reuse the mtime cache, so an unchanged multi-gigabyte
-  delivery is a stat per file, not a re-read.
-- Symlinks are recorded by target text and never followed.
-- An empty directory is refused - a wrong path far more often than an input.
-
-Pinning one file *inside* a delivery is not a substitute: it reads as verified
-while covering a 4 KB descriptor and leaving the actual input unpinned.
 
 ## Deferred
 

@@ -155,15 +155,17 @@ That move is a rename to a `.brokkr-disabled` sidecar, which `git status` sees
 as a deletion plus an untracked file. The baseline name is therefore resolved
 *before* the lock is taken: the dirty-tree guard exists to catch changes that
 would make a commit hash a lie about what was measured, so it has to be asked at
-a moment when the only thing that could have dirtied the tree is the user. A `--commit` run re-arms the disable at the
-worktree before taking the lock, so the pin moved aside is the one in the tree
-being built rather than the live root's.
+a moment when the only thing that could have dirtied the tree is the user. A
+`--commit` run takes the lock without touching the live root's pin and moves
+aside the worktree's pin once the checkout exists, so the pin moved aside is the
+one in the tree being built.
 
 ## Worktree isolation
 
-A `--commit` run builds in a persistent worktree, and that build is pinned to a
-per-worktree `CARGO_TARGET_DIR` - the same rule every other brokkr build path
-applies. The dir sits under the project's own target
+A `--commit` run builds in a persistent worktree, and `brokkr bench` pins its
+Cargo invocation to a per-worktree `CARGO_TARGET_DIR`. The shared Cargo build
+and workspace metadata helpers use the same target-dir resolver. The dir sits
+under the project's own target
 (`<target>/brokkr-worktrees/<checkout key>/<short hash>`), reached through the
 worktree slot's `.brokkr-target` link.
 

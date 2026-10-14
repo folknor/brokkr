@@ -32,8 +32,8 @@
 //! onto each support package), exactly as `check -p` projects them: a token
 //! only another of the sweep's packages routes is dropped, and said so.
 //!
-//! Every test gets a 20s hard cap; exceeding it fails the run and stops it,
-//! between `-N` iterations included. `--timeout <SECS>` (1-280) is the only
+//! Every test gets the shared hard cap; exceeding it fails the run and stops it,
+//! between `-N` iterations included. `--timeout <SECS>` is the only
 //! exception anywhere in brokkr, and it also makes the *attribution* exact:
 //! discovery resolves `<NAME>` to one (harness, full test name), and that one
 //! binary is run with libtest `--exact`, making the process the unit of one
@@ -365,7 +365,8 @@ mod tests {
         );
     }
 
-    /// A directly run harness gets the filter first and the focused-run flags;
+    /// A directly run harness gets the filter first and the focused-run flags
+    /// (the JSON event format is added by the runner's invocation, not here);
     /// `--exact` only when the caller resolved a full name.
     #[test]
     fn direct_args_carry_the_filter_and_exact_only_on_request() {
@@ -377,10 +378,6 @@ mod tests {
                 "--include-ignored",
                 "--nocapture",
                 "--test-threads=1",
-                "-Z",
-                "unstable-options",
-                "--format",
-                "json"
             ]
         );
         let exact = direct_libtest_args("some::test", true);
@@ -1063,7 +1060,12 @@ include_ignored = false
                 ]),
             "{pre:?}"
         );
-        let support = pre_build_argv(&sweep, &attempt.support()[0], &[], crate::config::SweepProfile::Dev);
+        let support = pre_build_argv(
+            &sweep,
+            &attempt.support()[0],
+            &[],
+            crate::config::SweepProfile::Dev,
+        );
         assert!(
             support
                 .windows(2)

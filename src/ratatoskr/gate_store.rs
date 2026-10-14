@@ -1,7 +1,7 @@
 //! SQLite store for ratatoskr `sync --bench` regression gating.
 //!
-//! Per-project SQLite DB at `.brokkr/ratatoskr/gate.db` (committed,
-//! same convention as `.brokkr/results.db`). One row per gated
+//! Per-project SQLite DB at `.brokkr/ratatoskr/gate.db`, beside
+//! `.brokkr/results.db`. One row per gated
 //! `sync --bench` run. Baselines are pure pointers in `brokkr.toml`
 //! (`[ratatoskr.gate.<name>.baseline].<hostname>`); they don't change
 //! the write path.
@@ -56,17 +56,6 @@ pub fn canonical_features(features: &[String]) -> String {
     names.sort_unstable();
     names.dedup();
     names.join(",")
-}
-
-/// Generate a UUIDv4 as 32 hex chars (no dashes).
-fn generate_uuid() -> Result<String, DevError> {
-    use std::io::Read;
-
-    let mut bytes = [0u8; 16];
-    std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
-    bytes[6] = (bytes[6] & 0x0f) | 0x40;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
 const CREATE_INDEX: &str = "\
@@ -129,6 +118,10 @@ impl GateDb {
             std::fs::create_dir_all(parent)?;
         }
         let conn = crate::db::store::open_read_write(path, "ratatoskr gate", SCHEMA_VERSION)?;
+        Self::initialize(conn)
+    }
+
+    fn initialize(conn: Connection) -> Result<Self, DevError> {
         run_migrations(&conn)?;
         conn.execute_batch(CREATE_TABLE)?;
         conn.execute_batch(CREATE_INDEX)?;
@@ -137,7 +130,7 @@ impl GateDb {
 
     /// Insert a row, returning its newly generated UUID.
     pub fn insert(&self, row: &GateRow) -> Result<String, DevError> {
-        let uuid = generate_uuid()?;
+        let uuid = crate::db::generate_uuid()?;
         let created_at = unix_now();
         self.conn.execute(
             "INSERT INTO gate_runs (\
@@ -324,9 +317,9 @@ fn unix_now() -> i64 {
 
 fn run_migrations(conn: &Connection) -> Result<(), DevError> {
     crate::db::store::migrate(conn, "ratatoskr gate", SCHEMA_VERSION, |conn, current| {
-        if !has_table(conn, "gate_runs") {
+        if !crate::db::store::table_exists(conn, "gate_runs")? {
             conn.execute_batch(CREATE_TABLE)?;
-        } else if current < 2 && !has_column(conn, "gate_runs", "features")? {
+        } else if current < 2 && !crate::db::store::column_exists(conn, "gate_runs", "features")? {
             // v1 -> v2: nullable, no backfill. The features a v1 row was built
             // with are unknowable after the fact, and inventing a value (the
             // current config's, say) would make a legacy baseline claim an
@@ -339,24 +332,6 @@ fn run_migrations(conn: &Connection) -> Result<(), DevError> {
     })
 }
 
-fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool, DevError> {
-    let mut stmt = conn.prepare("SELECT name FROM pragma_table_info(?1)")?;
-    let names = stmt
-        .query_map([table], |r| r.get::<_, String>(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(names.iter().any(|n| n == column))
-}
-
-fn has_table(conn: &Connection, table: &str) -> bool {
-    conn.query_row(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
-        [table],
-        |row| row.get::<_, i64>(0),
-    )
-    .map(|count| count > 0)
-    .unwrap_or(false)
-}
-
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -364,11 +339,7 @@ mod tests {
 
     fn open_mem() -> GateDb {
         let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(CREATE_TABLE).unwrap();
-        conn.execute_batch(CREATE_INDEX).unwrap();
-        conn.pragma_update(None, "user_version", SCHEMA_VERSION)
-            .unwrap();
-        GateDb { conn }
+        GateDb::initialize(conn).unwrap()
     }
 
     fn sample_row() -> GateRow {
@@ -383,7 +354,7 @@ mod tests {
             elapsed_ms: 1234,
             exit_code: 0,
             success: true,
-            sidecar: "{}".into(),
+            sidecar: r#"{"rss_peak_kb":8192,"sample_count":12}"#.into(),
             meta: r#"{"correct":1}"#.into(),
             features: "fast-sync".into(),
         }
@@ -509,7 +480,9 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(entry.gate_name, "jmap_small");
+        assert_eq!(entry.sidecar, r#"{"rss_peak_kb":8192,"sample_count":12}"#);
         assert_eq!(entry.meta, r#"{"correct":1}"#);
+        assert_eq!(entry.features.as_deref(), Some("fast-sync"));
     }
 
     #[test]

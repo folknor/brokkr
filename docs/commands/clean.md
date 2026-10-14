@@ -99,7 +99,9 @@ Bare `brokkr clean`, in order:
   `.brokkr/dellingr/`, `.brokkr/mogwai/`, `.brokkr/test-hung/`, and, for
   litehtml, `.brokkr/prepare-cache/`. The per-user
   `~/.brokkr/sidecar-status` file is removed with the project scratch.
-  Other directories under `.brokkr/ratatoskr/` are preserved.
+  Other directories under `.brokkr/ratatoskr/` are preserved. Hung-test snapshots
+  also prune their oldest directories as new diagnostics arrive, keeping a
+  bounded recent history even between cleans.
 - **Litehtml also**: under `$XDG_CACHE_HOME/brokkr/litehtml-prepare/`, every
   version directory (a constructed 32-hex-digit name) other than the one this
   brokkr's bundled Node scripts hash to. The current one stays, so the next

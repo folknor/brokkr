@@ -1,4 +1,5 @@
-//! Verify: apply-changes - 4-tool comparison: pbfhogg, osmium, osmosis, osmconvert.
+//! Verify: apply-changes - strict pbfhogg/osmium comparison, with optional
+//! osmosis and osmconvert outputs shown for additional context.
 
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -16,7 +17,8 @@ use crate::tools::OsmosisTools;
 /// bury the verify summary. The full counts are still reported.
 const MAX_REPORTED_IDS: usize = 10;
 
-/// Cross-validate `pbfhogg apply-changes` against osmium, osmosis, and osmconvert.
+/// Cross-validate `pbfhogg apply-changes` against osmium; print optional
+/// osmosis and osmconvert output for additional context.
 pub fn run(
     harness: &VerifyHarness,
     pbf: &Path,

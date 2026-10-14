@@ -8,6 +8,9 @@ use std::process::{Command, Stdio};
 use crate::error::DevError;
 use crate::resolve::Bbox;
 
+const HIGHWAY_QUERY: &str =
+    r#"{"highway":["motorway","trunk","primary","secondary","tertiary","residential"]}"#;
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -23,9 +26,7 @@ pub fn bbox_to_api(bbox: &Bbox) -> String {
 /// Build a default spatial query JSON from a validated bbox.
 pub fn default_api_query(bbox: &Bbox) -> String {
     let api_bbox = bbox_to_api(bbox);
-    format!(
-        r#"{{"bbox":{api_bbox},"query":[{{"highway":["motorway","trunk","primary","secondary","tertiary","residential"]}}]}}"#
-    )
+    format!(r#"{{"bbox":{api_bbox},"query":[{HIGHWAY_QUERY}]}}"#)
 }
 
 /// Build the standard set of API benchmark queries from a dataset bbox.
@@ -41,15 +42,11 @@ pub fn build_api_queries(bbox: &Bbox) -> Result<Vec<(String, String)>, DevError>
     Ok(vec![
         (
             "highways".into(),
-            format!(
-                r#"{{"bbox":{medium},"query":[{{"highway":["motorway","trunk","primary","secondary","tertiary","residential"]}}]}}"#
-            ),
+            format!(r#"{{"bbox":{medium},"query":[{HIGHWAY_QUERY}]}}"#),
         ),
         (
             "highways_large".into(),
-            format!(
-                r#"{{"bbox":{full},"query":[{{"highway":["motorway","trunk","primary","secondary","tertiary","residential"]}}]}}"#
-            ),
+            format!(r#"{{"bbox":{full},"query":[{HIGHWAY_QUERY}]}}"#),
         ),
         (
             "small_nofilter".into(),
@@ -67,15 +64,13 @@ pub fn build_batch_queries(bbox: &Bbox) -> (String, Vec<(String, String)>) {
     let api_bbox = bbox_to_api(bbox);
 
     let batch_body = format!(
-        r#"{{"bbox":{api_bbox},"queries":{{"roads":[{{"highway":["motorway","trunk","primary","secondary","tertiary","residential"]}}],"infra":[{{"railway":true}}],"coastline":[{{"natural":["coastline"]}}],"landcover":[{{"landuse":true}}]}}}}"#
+        r#"{{"bbox":{api_bbox},"queries":{{"roads":[{HIGHWAY_QUERY}],"infra":[{{"railway":true}}],"coastline":[{{"natural":["coastline"]}}],"landcover":[{{"landuse":true}}]}}}}"#
     );
 
     let individual = vec![
         (
             "roads".into(),
-            format!(
-                r#"{{"bbox":{api_bbox},"query":[{{"highway":["motorway","trunk","primary","secondary","tertiary","residential"]}}]}}"#
-            ),
+            format!(r#"{{"bbox":{api_bbox},"query":[{HIGHWAY_QUERY}]}}"#),
         ),
         (
             "infra".into(),
@@ -388,7 +383,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_level_with_defaults_off_still_works() {
+    fn query_url_uses_the_api_endpoint() {
         // Verify URL helpers produce expected format.
         let url = query_url(3033);
         assert_eq!(url, "http://localhost:3033/api/query");

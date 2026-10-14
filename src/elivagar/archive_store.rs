@@ -241,18 +241,16 @@ impl ArchiveStore {
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(0),
             Err(error) => return Err(error),
         };
-        let listing: Vec<(String, SystemTime, PathBuf)> = entries
-            .flatten()
-            .filter_map(|entry| {
-                let path = entry.path();
-                let name = path.file_name()?.to_str()?.to_owned();
-                let modified = entry
-                    .metadata()
-                    .and_then(|metadata| metadata.modified())
-                    .unwrap_or(std::time::UNIX_EPOCH);
-                Some((name, modified, path))
-            })
-            .collect();
+        let mut listing: Vec<(String, SystemTime, PathBuf)> = Vec::new();
+        for entry in entries {
+            let entry = entry?;
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            let modified = entry.metadata()?.modified()?;
+            listing.push((name.to_owned(), modified, path));
+        }
 
         let mut removed = 0;
         let mut handled = HashSet::new();

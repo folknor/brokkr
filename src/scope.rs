@@ -5,9 +5,23 @@
 //! unstaged changes - the files being edited right now - come first, then the
 //! rest, which is the whole of what this module decides.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Arc, Mutex};
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::panic)]
+pub(crate) fn test_git_tree(module: &str, name: &str) -> PathBuf {
+    let root = crate::test_scratch::scratch(module, name);
+    let status = Command::new("git")
+        .args(["init", "--quiet"])
+        .current_dir(&root)
+        .status()
+        .expect("git is available");
+    assert!(status.success(), "git init failed in {}", root.display());
+    root
+}
 
 /// Files with unstaged changes: modified in the working tree relative to the
 /// index, plus untracked files git does not ignore (a new file is unstaged
@@ -21,36 +35,7 @@ use std::process::Command;
 /// `None` when git cannot be asked (not a repository); callers then treat
 /// every error as a candidate.
 pub fn unstaged_files(project_root: &Path) -> Option<HashSet<PathBuf>> {
-    let modified = git_paths(project_root, &["diff", "--name-only", "--relative", "-z"])?;
-    let untracked = git_paths(
-        project_root,
-        &["ls-files", "--others", "--exclude-standard", "-z"],
-    )?;
-    Some(modified.into_iter().chain(untracked).collect())
-}
-
-/// Run a git command that prints NUL-separated paths.
-fn git_paths(project_root: &Path, args: &[&str]) -> Option<Vec<PathBuf>> {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(project_root)
-        .output()
-        .ok()
-        .filter(|o| o.status.success())?;
-    let mut paths = Vec::new();
-    for raw in output
-        .stdout
-        .split(|b| *b == 0)
-        .filter(|raw| !raw.is_empty())
-    {
-        let Ok(path) = std::str::from_utf8(raw) else {
-            // No partial changed-path set is trustworthy. `None` makes
-            // callers prioritize every candidate as potentially unstaged.
-            return None;
-        };
-        paths.push(PathBuf::from(path));
-    }
-    Some(paths)
+    status_snapshot(project_root).and_then(|(_, unstaged)| unstaged)
 }
 
 /// What kind of work is uncommitted in the working tree.
@@ -87,48 +72,138 @@ pub enum Dirt {
 /// all count: what matters is whether anything not yet committed could change
 /// how the code builds, and an untracked `.rs` file certainly can.
 pub fn dirt(project_root: &Path) -> Dirt {
-    let Some(output) = Command::new("git")
+    status_snapshot(project_root)
+        .map(|(dirt, _)| dirt)
+        .unwrap_or(Dirt::Unknown)
+}
+
+fn status_snapshot(project_root: &Path) -> Option<(Dirt, Option<HashSet<PathBuf>>)> {
+    let output = Command::new("git")
         .args(["status", "--porcelain=v1", "-z", "--untracked-files=all"])
         .current_dir(project_root)
         .output()
         .ok()
-        .filter(|o| o.status.success())
-    else {
-        return Dirt::Unknown;
-    };
-    classify_status(&output.stdout)
+        .filter(|o| o.status.success())?;
+    Some(parse_status(&output.stdout))
+}
+
+/// One check invocation's view of the working tree. Git paths are enumerated
+/// once, status supplies both dirt and diagnostic priority, and file bytes are
+/// cached on first read so every convention scanner judges the same contents.
+pub(crate) struct TreeSnapshot {
+    root: PathBuf,
+    files: Vec<PathBuf>,
+    contents: Mutex<HashMap<PathBuf, Option<Arc<[u8]>>>>,
+    unstaged: Option<HashSet<PathBuf>>,
+}
+
+impl TreeSnapshot {
+    pub(crate) fn load(project_root: &Path) -> Result<Self, crate::error::DevError> {
+        let files = crate::gremlins::tracked_files(project_root)?;
+        let unstaged = status_snapshot(project_root).and_then(|(_, unstaged)| unstaged);
+        Ok(Self {
+            root: project_root.to_path_buf(),
+            files,
+            contents: Mutex::new(HashMap::new()),
+            unstaged,
+        })
+    }
+
+    pub(crate) fn files(&self) -> &[PathBuf] {
+        &self.files
+    }
+
+    pub(crate) fn unstaged_files(&self) -> Option<&HashSet<PathBuf>> {
+        self.unstaged.as_ref()
+    }
+
+    /// Read one path from this snapshot. `None` means git listed a file that
+    /// has since been deleted; every other read failure is returned. Both the
+    /// bytes and a missing-file result are cached so scanners share one read.
+    pub(crate) fn read_file(
+        &self,
+        rel: &Path,
+    ) -> Result<Option<Arc<[u8]>>, crate::error::DevError> {
+        let mut contents = self
+            .contents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(cached) = contents.get(rel) {
+            return Ok(cached.clone());
+        }
+        let bytes = match std::fs::read(self.root.join(rel)) {
+            Ok(bytes) => Some(Arc::from(bytes)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                return Err(crate::error::DevError::Io(std::io::Error::new(
+                    error.kind(),
+                    format!("cannot read {}: {error}", rel.display()),
+                )));
+            }
+        };
+        contents.insert(rel.to_path_buf(), bytes.clone());
+        Ok(bytes)
+    }
+
+    pub(crate) fn write_file(
+        &self,
+        rel: &Path,
+        bytes: Vec<u8>,
+    ) -> Result<(), crate::error::DevError> {
+        let mut contents = self
+            .contents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::fs::write(self.root.join(rel), &bytes).map_err(crate::error::DevError::Io)?;
+        contents.insert(rel.to_path_buf(), Some(Arc::from(bytes)));
+        Ok(())
+    }
 }
 
 /// Classify the bytes of `git status --porcelain=v1 -z`. Split out so the
 /// record format - including the second path a rename record carries - is
 /// testable without a repository.
+#[cfg(test)]
 fn classify_status(stdout: &[u8]) -> Dirt {
+    parse_status(stdout).0
+}
+
+fn parse_status(stdout: &[u8]) -> (Dirt, Option<HashSet<PathBuf>>) {
     let mut seen = false;
     let mut prose_only = true;
+    let mut unstaged = HashSet::new();
     // A rename/copy record is followed by its origin path as a bare field.
     // That path is part of the change too: `git mv notes.md src/lib.rs` is not
     // a documentation edit.
     let mut expect_origin = false;
+    let mut origin_unstaged = false;
     for field in stdout.split(|b| *b == 0) {
         if field.is_empty() {
             continue;
         }
         let Ok(text) = std::str::from_utf8(field) else {
             // A path we cannot read is a path we cannot vouch for.
-            return Dirt::Code;
+            return (Dirt::Code, None);
         };
-        let path = if expect_origin {
+        let (path, changed_in_worktree) = if expect_origin {
             expect_origin = false;
-            text
+            (text, origin_unstaged)
         } else {
             // `XY <path>`: two status columns, a space, then the path.
-            let Some(rest) = text.get(3..) else {
-                return Dirt::Code;
+            let Some(status) = text.get(..2) else {
+                return (Dirt::Code, None);
             };
-            expect_origin = text.starts_with('R') || text.starts_with('C');
-            rest
+            let Some(path) = text.get(3..) else {
+                return (Dirt::Code, None);
+            };
+            expect_origin = status.starts_with('R') || status.starts_with('C');
+            origin_unstaged = status.as_bytes()[1] != b' ' || status == "??";
+            (path, origin_unstaged)
         };
         seen = true;
+        if changed_in_worktree {
+            unstaged.insert(PathBuf::from(path));
+        }
         let is_prose = Path::new(path)
             .extension()
             .and_then(|e| e.to_str())
@@ -137,13 +212,17 @@ fn classify_status(stdout: &[u8]) -> Dirt {
             prose_only = false;
         }
     }
-    if !seen {
+    if expect_origin {
+        return (Dirt::Code, None);
+    }
+    let dirt = if !seen {
         Dirt::Clean
     } else if prose_only {
         Dirt::ProseOnly
     } else {
         Dirt::Code
-    }
+    };
+    (dirt, Some(unstaged))
 }
 
 /// Order a diagnostic list for display.
@@ -218,6 +297,36 @@ mod tests {
     fn markdown_only_changes_are_prose() {
         let status = b" M docs/guide.md\0?? notes/todo.MARKDOWN\0A  README.MD\0";
         assert_eq!(classify_status(status), Dirt::ProseOnly);
+    }
+
+    #[test]
+    fn status_snapshot_prioritizes_worktree_and_untracked_paths_only() {
+        let status = b" M src/edit.rs\0M  src/staged.rs\0?? notes/new.md\0";
+        let (dirt, unstaged) = parse_status(status);
+        assert_eq!(dirt, Dirt::Code);
+        assert_eq!(
+            unstaged.unwrap(),
+            [p("src/edit.rs"), p("notes/new.md")].into_iter().collect()
+        );
+    }
+
+    #[test]
+    fn snapshot_reuses_file_bytes_and_updates_them_after_a_write() {
+        let root = test_git_tree("scope", "tree_snapshot");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/lib.rs"), "before").unwrap();
+        let tree = TreeSnapshot::load(&root).unwrap();
+
+        let first = tree.read_file(Path::new("src/lib.rs")).unwrap().unwrap();
+        std::fs::write(root.join("src/lib.rs"), "external change").unwrap();
+        let repeated = tree.read_file(Path::new("src/lib.rs")).unwrap().unwrap();
+        assert!(Arc::ptr_eq(&first, &repeated));
+        assert_eq!(repeated.as_ref(), b"before");
+
+        tree.write_file(Path::new("src/lib.rs"), b"fixed".to_vec())
+            .unwrap();
+        let fixed = tree.read_file(Path::new("src/lib.rs")).unwrap().unwrap();
+        assert_eq!(fixed.as_ref(), b"fixed");
     }
 
     #[test]

@@ -441,25 +441,6 @@ pub(crate) fn resolve_pbf_path(
     Ok(resolve_pbf_entry(dataset, variant, paths, project_root)?.path)
 }
 
-/// Resolve the OSC path from --dataset + --osc-seq.
-pub(crate) fn resolve_osc_path(
-    dataset: &str,
-    seq: &str,
-    paths: &config::ResolvedPaths,
-    project_root: &Path,
-) -> Result<PathBuf, DevError> {
-    let ds = get_dataset(dataset, paths)?;
-    resolve_entry_path(
-        &ds.osc,
-        seq,
-        dataset,
-        "osc seq",
-        &paths.data_dir,
-        ds.origin.as_deref(),
-        project_root,
-    )
-}
-
 /// Resolve a single OSC path along with the seq key it came from.
 ///
 /// If `osc_seq` is `Some(seq)`, returns the path for that seq plus the seq
@@ -598,6 +579,7 @@ pub(crate) fn resolve_osc_range(
 ///
 /// If exactly one OSC is configured, returns it. If multiple exist, errors
 /// with a message listing available sequence numbers.
+#[cfg(test)]
 pub(crate) fn resolve_default_osc_path(
     dataset: &str,
     paths: &config::ResolvedPaths,
@@ -752,28 +734,6 @@ pub(crate) fn nidhogg_data_dir_path(
         DevError::Config(format!("dataset '{dataset}' has no data_dir configured"))
     })?;
     Ok(paths.data_dir.join(dir_name))
-}
-
-/// Get a PBF entry reference for direct field access (e.g. checking if a variant exists).
-pub(crate) fn get_pbf_entry<'a>(
-    dataset: &str,
-    variant: &str,
-    paths: &'a config::ResolvedPaths,
-) -> Option<&'a config::PbfEntry> {
-    paths.datasets.get(dataset)?.pbf.get(variant)
-}
-
-/// Get the first available OSC entry for optional lookups (e.g. bench-all).
-pub(crate) fn get_default_osc_entry<'a>(
-    dataset: &str,
-    paths: &'a config::ResolvedPaths,
-) -> Option<&'a config::OscEntry> {
-    let ds = paths.datasets.get(dataset)?;
-    if ds.osc.len() == 1 {
-        ds.osc.values().next()
-    } else {
-        None
-    }
 }
 
 /// Path to the results database for the current project.

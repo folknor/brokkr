@@ -14,7 +14,7 @@ use toml_edit::{DocumentMut, Item, Table};
 use crate::config::{AdapterGroup, ManifestConfig, VersionAlign};
 use crate::deps::DependencyKind;
 use crate::error::DevError;
-use crate::{globs, gremlins};
+use crate::globs;
 
 /// One structural convention violation in a manifest.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -193,9 +193,12 @@ fn starts_new_group(prefix: &str) -> bool {
     false
 }
 
-/// Scan every tracked manifest matching the config's globs and run the enabled
+/// Scan every snapshot manifest matching the config's globs and run the enabled
 /// checks, newest concern first in declaration order.
-pub fn scan(project_root: &Path, cfg: &ManifestConfig) -> Result<Vec<ManifestViolation>, DevError> {
+pub fn scan(
+    tree: &crate::scope::TreeSnapshot,
+    cfg: &ManifestConfig,
+) -> Result<Vec<ManifestViolation>, DevError> {
     let default_paths = [String::from("**/Cargo.toml")];
     let path_globs = if cfg.paths.is_empty() {
         &default_paths[..]
@@ -214,12 +217,12 @@ pub fn scan(project_root: &Path, cfg: &ManifestConfig) -> Result<Vec<ManifestVio
         }
     }
 
-    let files = gremlins::tracked_files(project_root)?;
+    let files = tree.files();
     // Dead globs are warned about, not refused - see `globs::warn_unmatched`.
     // The adapter group's own references below stay hard errors: they name
     // packages and a marker, not paths, and a dead one silently disables the
     // rule rather than guarding against a file that may come back.
-    globs::warn_unmatched(path_globs, &files, "[manifest] paths")?;
+    globs::warn_unmatched(path_globs, files, "[manifest] paths")?;
     let path_candidates: Vec<PathBuf> = files
         .iter()
         .filter(|rel| globs::matches(&paths, rel))
@@ -238,10 +241,9 @@ pub fn scan(project_root: &Path, cfg: &ManifestConfig) -> Result<Vec<ManifestVio
     let mut manifests: Vec<(PathBuf, DocumentMut)> = Vec::new();
     let mut out = Vec::new();
     for rel in included {
-        let abs = project_root.join(&rel);
-        // An unreadable file is an error (see `gremlins::read_in_scope`); only a
+        // An unreadable file is an error (see `TreeSnapshot::read_file`); only a
         // path deleted from the working tree is skipped.
-        let Some(bytes) = gremlins::read_in_scope(&abs, &rel)? else {
+        let Some(bytes) = tree.read_file(&rel)? else {
             continue;
         };
         // A manifest that is not UTF-8 or not TOML is reported, not skipped:
@@ -250,7 +252,7 @@ pub fn scan(project_root: &Path, cfg: &ManifestConfig) -> Result<Vec<ManifestVio
         // template/fixture manifest must not down the whole phase either, so
         // it is one violation for that file - exempt it with
         // `[manifest].exclude` if it is deliberately not a real manifest.
-        let parsed = parse_manifest_bytes(&bytes);
+        let parsed = parse_manifest_bytes(bytes.as_ref());
         match parsed {
             Ok(doc) => manifests.push((rel, doc)),
             Err(why) => out.push(unparseable(rel, &why)),
@@ -870,6 +872,28 @@ mod tests {
         )
         .unwrap();
         out.iter().map(|v| (v.rule, v.message.clone())).collect()
+    }
+
+    #[test]
+    fn scan_walks_git_manifests_and_runs_enabled_checks() {
+        let root = crate::scope::test_git_tree("manifest", "scan_tree");
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\
+             [dependencies]\ntokio = \"1\"\nanyhow = \"1\"\n",
+        )
+        .unwrap();
+        let cfg = ManifestConfig {
+            paths: vec!["Cargo.toml".into()],
+            sort_dependencies: true,
+            ..ManifestConfig::default()
+        };
+
+        let tree = crate::scope::TreeSnapshot::load(&root).unwrap();
+        let violations = scan(&tree, &cfg).unwrap();
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].file, PathBuf::from("Cargo.toml"));
+        assert_eq!(violations[0].rule, "sort-dependencies");
     }
 
     #[test]

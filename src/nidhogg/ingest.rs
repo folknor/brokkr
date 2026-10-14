@@ -32,7 +32,9 @@ pub fn run(
         data_dir.display(),
     ));
 
-    let captured = output::run_captured(binary_str, &["ingest", pbf_str, data_str], project_root)?;
+    let args = super::commands::NidhoggCommand::Ingest.build_args(pbf_str, data_str)?;
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let captured = output::run_captured(binary_str, &arg_refs, project_root)?;
 
     // Show stderr (progress output).
     let stderr = String::from_utf8_lossy(&captured.stderr);

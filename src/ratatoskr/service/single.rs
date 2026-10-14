@@ -12,7 +12,8 @@ use crate::output;
 use crate::ratatoskr::build::{self, HarnessBuild};
 use crate::ratatoskr::discover::{self, PreserveDataDir};
 use crate::ratatoskr::saehrimnir::MockPaths;
-use crate::ratatoskr::timing::format_duration;
+use crate::ratatoskr::timing::{format_duration, format_elapsed_ms};
+use crate::ratatoskr::{HARNESS_MODE_FLAG, harness_env};
 
 use super::suite::{FixtureSession, directory_filter, service_suite, write_artefacts};
 
@@ -34,11 +35,9 @@ use super::suite::{FixtureSession, directory_filter, service_suite, write_artefa
 /// failed.
 ///
 /// The harness binary itself - the Lua VM, `ServiceClient` userdata,
-/// wait combinator, frame-log tap, `/proc` snapshot writer - lives in
-/// ratatoskr's `app` crate behind the `test-helpers` feature and lands
-/// in Phase 8. Until it does, `app --test-harness` errors out with
-/// "unknown flag" and brokkr captures that into the artefact dir
-/// faithfully; the plumbing here is structurally complete.
+/// wait combinator, frame-log tap, and `/proc` snapshot writer - lives in
+/// ratatoskr's `app` crate behind the `test-helpers` feature. This module
+/// owns the subprocess lifecycle and captured artefacts around it.
 #[allow(clippy::too_many_lines)] // linear orchestration: parse, build, mock-up, run, mock-down
 pub(crate) fn service_test(req: &crate::request::ServiceTestRequest<'_>) -> Result<(), DevError> {
     let crate::request::ServiceTestRequest {
@@ -125,7 +124,7 @@ pub(crate) fn service_test(req: &crate::request::ServiceTestRequest<'_>) -> Resu
 
     let _lock = crate::context::reenter_command_lock()?;
     // Cooperative SIGTERM for `brokkr kill`. See run_sync_smoke for rationale.
-    let _sigterm = crate::shutdown::SigtermGuard::install();
+    let sigterm = crate::shutdown::SigtermGuard::install();
 
     let debug = profile_override.unwrap_or_else(|| harness_cfg.debug.unwrap_or(false));
     let built = build::build_for_harness(
@@ -134,7 +133,7 @@ pub(crate) fn service_test(req: &crate::request::ServiceTestRequest<'_>) -> Resu
         debug,
         Some(&|pid| _lock.set_child_pid(pid)),
         Some(&|| _lock.clear_child_pid()),
-        true, // isolate_pg: outer SigtermGuard active
+        crate::shutdown::ChildIsolation::ProcessGroup(&sigterm),
     )?;
 
     let state = ProjectState::new(project_root);
@@ -239,7 +238,7 @@ fn run_single(run: &ServiceRun<'_>) -> Result<(), DevError> {
         run.lock,
     )?;
     if result.succeeded {
-        output::ratatoskr_msg(&format!("PASS in {}ms", result.elapsed_ms));
+        output::ratatoskr_msg(&format!("PASS in {}", format_elapsed_ms(result.elapsed_ms)));
         Ok(())
     } else {
         let dir = result
@@ -248,8 +247,9 @@ fn run_single(run: &ServiceRun<'_>) -> Result<(), DevError> {
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "<missing>".to_owned());
         output::ratatoskr_msg(&format!(
-            "FAIL {} in {}ms (artefacts: {dir})",
-            result.exit_label, result.elapsed_ms
+            "FAIL {} in {} (artefacts: {dir})",
+            result.exit_label,
+            format_elapsed_ms(result.elapsed_ms)
         ));
         artefacts::emit_clean_hint(output::ratatoskr_msg);
         Err(DevError::Reported("service harness failed".into()))
@@ -319,23 +319,20 @@ pub(super) fn spawn_and_capture(
 ) -> Result<RunResult, DevError> {
     let binary_str = built.binary.display().to_string();
     let script_str = script_abs.display().to_string();
-    let artefact_path_str = artefacts.path().display().to_string();
-    let bin_dir_str = built.bin_dir.display().to_string();
-
-    let mut env_pairs: Vec<(&str, &str)> = vec![
-        ("BROKKR_HARNESS_ARTEFACT_DIR", &artefact_path_str),
-        ("BROKKR_TEST_BIN_DIR", &bin_dir_str),
-    ];
+    let common_env = harness_env(artefacts.path(), &built.bin_dir);
+    let mut env_pairs = common_env.as_pairs().to_vec();
     env_pairs.extend_from_slice(extra_env);
 
+    // Guards nest; this one is the borrow the process-group isolation needs.
+    let signal_guard = crate::shutdown::SigtermGuard::install();
     let deadline_capture = match output::run_captured_with_env_and_deadline(
         &binary_str,
-        &["--test-harness", &script_str],
+        &[HARNESS_MODE_FLAG, &script_str],
         project_root,
         &env_pairs,
         ceiling,
         Some(&|pid| lock.set_child_pid(pid)),
-        true, // isolate_pg: caller's SigtermGuard active
+        crate::shutdown::ChildIsolation::ProcessGroup(&signal_guard),
     ) {
         Ok(c) => c,
         // `Interrupted` means the child spawned and ran fine until
@@ -367,17 +364,8 @@ pub(super) fn spawn_and_capture(
     write_artefacts(artefacts.path(), script_abs, built, &captured, project_root)?;
 
     let elapsed_ms = captured.elapsed.as_millis();
-    let exit_label = if killed_on_deadline {
-        format!("ceiling={}", format_duration(ceiling))
-    } else {
-        match (captured.code(), captured.signal()) {
-            (Some(code), _) => format!("exit={code}"),
-            (None, Some(sig)) => format!("signal={sig}"),
-            (None, None) => "unknown exit".to_owned(),
-        }
-    };
+    let (succeeded, exit_label) = classify_capture(&captured, killed_on_deadline, ceiling);
 
-    let succeeded = !killed_on_deadline && captured.success();
     if succeeded {
         let path = artefacts.path().to_path_buf();
         artefacts.finalize_success()?;
@@ -402,10 +390,34 @@ pub(super) fn spawn_and_capture(
     }
 }
 
+/// Classify one captured harness result. Shared with tests so they exercise
+/// brokkr's exit and deadline policy without relying on host executables.
+pub(super) fn classify_capture(
+    captured: &crate::output::CapturedOutput,
+    killed_on_deadline: bool,
+    ceiling: Duration,
+) -> (bool, String) {
+    let exit_label = if killed_on_deadline {
+        format!("ceiling={}", format_duration(ceiling))
+    } else {
+        match (captured.code(), captured.signal()) {
+            (Some(code), _) => format!("exit={code}"),
+            (None, Some(sig)) => format!("signal={sig}"),
+            (None, None) => "unknown exit".to_owned(),
+        }
+    };
+
+    let succeeded = !killed_on_deadline && captured.success();
+    (succeeded, exit_label)
+}
+
 /// Format one soak iteration's status line. Pure for testability.
 pub(super) fn format_iter_line(iter: u32, total: u32, result: &RunResult) -> String {
     if result.succeeded {
-        format!("iter {iter}/{total}: PASS in {}ms", result.elapsed_ms)
+        format!(
+            "iter {iter}/{total}: PASS in {}",
+            format_elapsed_ms(result.elapsed_ms)
+        )
     } else {
         let dir = result
             .artefact_path
@@ -413,8 +425,9 @@ pub(super) fn format_iter_line(iter: u32, total: u32, result: &RunResult) -> Str
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "<missing>".to_owned());
         format!(
-            "iter {iter}/{total}: FAIL {} in {}ms (artefacts: {dir})",
-            result.exit_label, result.elapsed_ms
+            "iter {iter}/{total}: FAIL {} in {} (artefacts: {dir})",
+            result.exit_label,
+            format_elapsed_ms(result.elapsed_ms)
         )
     }
 }
@@ -446,7 +459,12 @@ pub(super) fn format_soak_summary(results: &[(u32, RunResult)], total: u32) -> S
         } else {
             pass_times.iter().sum::<u128>() / pass_times.len() as u128
         };
-        format!("soak: {pass_count}/{total} passed (min {min}ms, max {max}ms, avg {avg}ms)")
+        format!(
+            "soak: {pass_count}/{total} passed (min {}, max {}, avg {})",
+            format_elapsed_ms(min),
+            format_elapsed_ms(max),
+            format_elapsed_ms(avg)
+        )
     } else if stopped_early {
         // keep_going = false path: by construction there's exactly one
         // failed iter and the loop bailed immediately after it.

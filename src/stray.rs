@@ -33,6 +33,9 @@ use crate::error::DevError;
 use crate::output;
 pub(crate) use crate::process::ReaperExemptions;
 
+const ANCESTRY_DEPTH_LIMIT: usize = 256;
+const DESCENDANT_DEPTH_LIMIT: usize = 64;
+
 /// One cargo-family process selected for cleanup outside brokkr's protected
 /// invocation and ownership trees.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -245,7 +248,7 @@ fn classify(table: &HashMap<u32, ProcEntry>, ownership: Ownership) -> Vec<Stray>
         let mut cursor = entry.ppid;
         // Bounded walk: a `/proc` snapshot can contain a ppid cycle only if
         // the table is inconsistent, but a bound costs nothing.
-        for _ in 0..256 {
+        for _ in 0..ANCESTRY_DEPTH_LIMIT {
             let Some(parent) = table.get(&cursor) else {
                 break;
             };
@@ -301,7 +304,7 @@ fn collect_descendants(
     seen: &mut HashSet<u32>,
     out: &mut Vec<(usize, crate::process::ProcIdentity)>,
 ) {
-    if depth > 64 || ownership.owns(pid, exemptions) {
+    if depth > DESCENDANT_DEPTH_LIMIT || ownership.owns(pid, exemptions) {
         return;
     }
     for (&child, entry) in table {

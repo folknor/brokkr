@@ -541,11 +541,10 @@ pub struct RunInvocation {
 
 /// A row read back from the database.
 ///
-/// Nullable columns (`variant`, `input_file`, `cargo_features`, etc.) are
+/// Nullable columns (`mode`, `input_file`, `cargo_features`, etc.) are
 /// mapped to `String` via `unwrap_or_default()` - `NULL` becomes `""`.
 /// This is intentional: all consumers use `.is_empty()` checks, so the
 /// distinction between NULL and empty string is not needed.
-#[allow(dead_code)]
 pub struct StoredRow {
     pub id: i64,
     pub timestamp: String,
@@ -623,9 +622,9 @@ impl StoredRow {
     }
 }
 
-/// The run recorded immediately before this one, as captured at record time.
-///
-/// Cheap answer to "what state was the machine in when this row was recorded".
+/// The row recorded immediately before this one in the same project's
+/// results database. Dirty runs and runs from other projects are outside this
+/// store.
 /// A benchmark's wall time depends heavily on what ran just before it: a cell
 /// reading a 92 GB file four minutes after another cell read the same file
 /// finds the headers warm in the page cache and reports a wall that the code
@@ -852,10 +851,8 @@ mod tests {
         // var whose value contains ',' was indistinguishable from two
         // vars. `MALLOC_CONF` is literally the motivating example -
         // glibc accepts `dirty_decay_ms:0,narenas:1` syntax.
-        let row_one_comma_value =
-            stored_row_with_env(&[("MALLOC_CONF", "dirty_decay_ms:0,narenas:1")]);
-        let row_two_vars_collision =
-            stored_row_with_env(&[("MALLOC_CONF", "dirty_decay_ms:0"), ("narenas:1", "")]);
+        let row_one_comma_value = stored_row_with_env(&[("MALLOC_CONF", "a,b=1")]);
+        let row_two_vars_collision = stored_row_with_env(&[("MALLOC_CONF", "a"), ("b", "1")]);
         assert_ne!(
             row_one_comma_value.env_fingerprint(),
             row_two_vars_collision.env_fingerprint()

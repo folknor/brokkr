@@ -1,9 +1,7 @@
 //! Consolidated pbfhogg measurable command definitions.
 //!
-//! Every pbfhogg command that can be measured (wall-clock, hotpath, alloc, or
-//! profile) is defined here exactly once.  This replaces the scattered
-//! definitions across `bench_commands.rs`, `bench_build_geocode_index.rs`,
-//! and `hotpath.rs`.
+//! Every measurable pbfhogg command and its argv shape is defined here exactly
+//! once. `bench_commands.rs` maps suite preset names to these typed commands.
 
 use std::path::{Path, PathBuf};
 
@@ -20,9 +18,43 @@ use crate::resolve::Bbox;
 /// and keeps `extended` out of modes where pbfhogg ignores it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InspectMode {
-    Default { extended: bool },
+    Default {
+        extended: bool,
+    },
     Nodes,
-    Tags { type_filter: Option<String> },
+    Tags {
+        type_filter: Option<InspectTypeFilter>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InspectTypeFilter {
+    Node,
+    Way,
+    Relation,
+    Invalid(String),
+}
+
+impl InspectTypeFilter {
+    pub fn from_cli(value: &str) -> Self {
+        match value {
+            "node" => Self::Node,
+            "way" => Self::Way,
+            "relation" => Self::Relation,
+            _ => Self::Invalid(format!(
+                "unknown inspect tags --type '{value}' (expected: node, way, relation)"
+            )),
+        }
+    }
+
+    fn as_str(&self) -> Result<&'static str, DevError> {
+        match self {
+            Self::Node => Ok("node"),
+            Self::Way => Ok("way"),
+            Self::Relation => Ok("relation"),
+            Self::Invalid(message) => Err(DevError::Config(message.clone())),
+        }
+    }
 }
 
 /// Valid tags-filter input policies. OSC input cannot carry PBF-only switches.
@@ -34,6 +66,7 @@ pub enum TagsFilterInput {
         remove_tags: bool,
     },
     Osc,
+    Invalid(String),
 }
 
 /// What output a command produces.
@@ -71,9 +104,8 @@ pub struct CommandDescriptor {
     pub supports_io_uring: bool,
 }
 
-/// Which build-args flavor to produce: the default wallclock/suite args,
-/// or the hotpath-profile args (binary prepended, hotpath-prefixed scratch
-/// filenames, a few simplified argv forms).
+/// Which build-args flavor to produce. The command arguments are shared;
+/// the mode selects only a separate scratch filename namespace.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArgMode {
     Bench,
@@ -105,17 +137,26 @@ pub enum ExtractStrategy {
 }
 
 /// `cat --type` filter - restrict passthrough to a specific object type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CatTypeFilter {
     Way,
     Relation,
+    Invalid(String),
 }
 
 impl CatTypeFilter {
-    pub fn as_str(self) -> &'static str {
+    pub fn as_str(&self) -> Result<&'static str, DevError> {
         match self {
-            Self::Way => "way",
-            Self::Relation => "relation",
+            Self::Way => Ok("way"),
+            Self::Relation => Ok("relation"),
+            Self::Invalid(message) => Err(DevError::Config(message.clone())),
+        }
+    }
+
+    pub fn from_cli(value: &str) -> Self {
+        match Self::parse(value) {
+            Ok(filter) => filter,
+            Err(error) => Self::Invalid(error.to_string()),
         }
     }
 
@@ -191,7 +232,7 @@ impl ExtractStrategy {
 /// three IDs of each object type (n/w/r) so the bench shape is reproducible.
 /// Some entries may not exist in very small test datasets - the pbfhogg
 /// binary tolerates missing IDs without erroring.
-const GETID_BENCH_IDS: &[&str] = &[
+pub(crate) const GETID_BENCH_IDS: &[&str] = &[
     "n115722", "n115723", "n115724", "w2080", "w2081", "w2082", "r174", "r213", "r339",
 ];
 
@@ -203,7 +244,7 @@ const GETPARENTS_BENCH_IDS: &[&str] = &["n115722", "n115723", "w2080"];
 /// Min-count threshold used by the bench version of `inspect tags`. Set
 /// impossibly high so pbfhogg's default tag-frequency filter never trims
 /// anything - we want the full decode cost measured, not just popular tags.
-const INSPECT_ALL_TAGS_MIN_COUNT: &str = "999999999";
+pub(crate) const INSPECT_ALL_TAGS_MIN_COUNT: &str = "999999999";
 
 /// Default `verify multi-extract` region count, shared with the CLI schema.
 pub const DEFAULT_MULTI_EXTRACT_REGIONS: usize = 5;
@@ -431,11 +472,6 @@ impl PbfhoggCommand {
         self.descriptor().output
     }
 
-    /// Whether this command supports hotpath profiling.
-    pub fn supports_hotpath(&self) -> bool {
-        true
-    }
-
     /// Whether this command accepts `--io-uring`.
     ///
     /// Only commands whose pbfhogg binary clap definition includes `--io-uring`
@@ -490,15 +526,6 @@ impl PbfhoggCommand {
             Self::Diff { .. } | Self::DiffSnapshots { .. } => &[1],
             _ => &[],
         }
-    }
-
-    /// The result command label for the DB - just the subcommand id
-    /// (`"add-locations-to-ways"`, `"cat"`, `"diff-snapshots"`, ...). The
-    /// measurement mode (`bench`/`hotpath`/`alloc`) lives in the
-    /// `variant` column; axes (direct-io, compression, snapshot, …) live
-    /// in `cli_args` and `brokkr_args`.
-    pub fn result_command(&self) -> String {
-        self.id().to_owned()
     }
 
     /// Build metadata key-value pairs for the result DB.
@@ -559,32 +586,21 @@ impl PbfhoggCommand {
 
     /// Build the argument vector for this command given the resolved context.
     ///
-    /// `ArgMode::Bench` produces argv without the binary path (the caller
-    /// passes the binary separately when spawning). `ArgMode::Hotpath`
-    /// prepends the binary path (matching the format expected by
-    /// `run_hotpath_capture`) and picks hotpath-prefixed scratch filenames.
-    /// A few commands have small argv differences between modes - those are
-    /// called out inline.
+    /// Returns the command argv without the binary path; the caller passes
+    /// the binary separately when spawning. The mode only selects the scratch
+    /// filename namespace, so benchmark and profiling runs execute the same
+    /// command arguments.
     /// I/O and explicit compression options are appended here so every caller,
-    /// including dry-run, sees the same final command shape. The one legacy
-    /// apply-changes default is selected here and placed with its core args.
+    /// including dry-run, sees the same final command shape.
     #[allow(clippy::too_many_lines)]
     pub fn build_args(&self, ctx: &CommandContext, mode: ArgMode) -> Result<Vec<String>, DevError> {
-        let mut prefix: Vec<String> = Vec::new();
-        if mode == ArgMode::Hotpath {
-            prefix.push(ctx.binary_str()?.to_owned());
-        }
-        let default_hotpath_compression = mode == ArgMode::Hotpath
-            && matches!(self, Self::ApplyChanges)
-            && ctx.params.compression.is_none();
-        let body = self.build_body(ctx, mode, default_hotpath_compression)?;
-        prefix.extend(body);
-        prefix.extend(ctx.params.io.args());
+        let mut args = self.build_body(ctx, mode)?;
+        args.extend(ctx.params.io.args());
         if let Some(compression) = &ctx.params.compression {
-            prefix.push("--compression".into());
-            prefix.push(compression.clone());
+            args.push("--compression".into());
+            args.push(compression.clone());
         }
-        Ok(prefix)
+        Ok(args)
     }
 
     /// Build the core argv for an extract command with an explicit output
@@ -614,12 +630,7 @@ impl PbfhoggCommand {
 
     /// Build the body of the argument vector (no binary prefix).
     #[allow(clippy::too_many_lines, clippy::cognitive_complexity)]
-    fn build_body(
-        &self,
-        ctx: &CommandContext,
-        mode: ArgMode,
-        default_hotpath_compression: bool,
-    ) -> Result<Vec<String>, DevError> {
+    fn build_body(&self, ctx: &CommandContext, mode: ArgMode) -> Result<Vec<String>, DevError> {
         match self {
             // -----------------------------------------------------------------
             // Tool CLI commands (26 from bench_commands.rs)
@@ -630,17 +641,12 @@ impl PbfhoggCommand {
                     InspectMode::Tags { type_filter } => {
                         args.push("tags".into());
                         args.push(ctx.pbf_str()?.into());
-                        // Hotpath legacy: the pre-unification build_hotpath_args
-                        // dropped --type and --min-count for `inspect tags`.
-                        // Preserved here so hotpath result rows don't shift.
-                        if mode == ArgMode::Bench {
-                            if let Some(tf) = type_filter {
-                                args.push("--type".into());
-                                args.push(tf.clone());
-                            }
-                            args.push("--min-count".into());
-                            args.push(INSPECT_ALL_TAGS_MIN_COUNT.into());
+                        if let Some(tf) = type_filter {
+                            args.push("--type".into());
+                            args.push(tf.as_str()?.into());
                         }
+                        args.push("--min-count".into());
+                        args.push(INSPECT_ALL_TAGS_MIN_COUNT.into());
                     }
                     InspectMode::Nodes => {
                         args.push("--nodes".into());
@@ -707,7 +713,7 @@ impl PbfhoggCommand {
                 }
                 if let Some(tf) = type_filter {
                     args.push("--type".into());
-                    args.push(tf.as_str().into());
+                    args.push(tf.as_str()?.into());
                 }
                 args.push("-o".into());
                 args.push(crate::utf8_path::path_string(&output)?);
@@ -737,6 +743,9 @@ impl PbfhoggCommand {
                             args.push("-t".into());
                         }
                         ctx.pbf_str()?.to_owned()
+                    }
+                    TagsFilterInput::Invalid(message) => {
+                        return Err(DevError::Config(message.clone()));
                     }
                 };
                 args.push(input_path);
@@ -810,7 +819,6 @@ impl PbfhoggCommand {
                     osc,
                     &crate::utf8_path::path_string(&output)?,
                     &ctx.params,
-                    default_hotpath_compression,
                 ))
             }
             Self::AddLocationsToWays => {
@@ -977,7 +985,6 @@ impl PbfhoggCommand {
         osc: &str,
         output: &str,
         params: &CommandParams,
-        default_hotpath_compression: bool,
     ) -> Vec<String> {
         let mut args = vec!["apply-changes".into(), pbf.into(), osc.into()];
         if params.locations_on_ways {
@@ -986,10 +993,6 @@ impl PbfhoggCommand {
         if let Some(jobs) = params.jobs {
             args.push("-j".into());
             args.push(jobs.to_string());
-        }
-        if default_hotpath_compression {
-            args.push("--compression".into());
-            args.push("zlib".into());
         }
         args.push("-o".into());
         args.push(output.into());
@@ -1147,7 +1150,6 @@ mod tests {
 
     fn test_ctx() -> CommandContext {
         CommandContext {
-            binary: PathBuf::from("/usr/bin/pbfhogg"),
             inputs: ResolvedInputs::PbfAndBbox {
                 pbf: PathBuf::from("/data/denmark.osm.pbf"),
                 bbox: Bbox::parse("12.4,55.6,12.7,55.8").unwrap(),
@@ -1227,6 +1229,43 @@ mod tests {
                 "999999999",
             ]
         );
+    }
+
+    #[test]
+    fn inspect_tags_uses_the_same_filter_in_bench_and_hotpath() {
+        let ctx = test_ctx();
+        let cmd = PbfhoggCommand::Inspect {
+            mode: InspectMode::Tags {
+                type_filter: Some(InspectTypeFilter::Way),
+            },
+        };
+        let bench = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
+        let hotpath = cmd.build_args(&ctx, ArgMode::Hotpath).unwrap();
+        assert_eq!(bench, hotpath);
+        assert!(bench.windows(2).any(|pair| pair == ["--type", "way"]));
+        assert!(
+            bench
+                .windows(2)
+                .any(|pair| pair == ["--min-count", INSPECT_ALL_TAGS_MIN_COUNT])
+        );
+    }
+
+    #[test]
+    fn apply_changes_hotpath_does_not_override_the_compression_default() {
+        let mut ctx = test_ctx();
+        use_pbf_and_osc(&mut ctx);
+        let cmd = PbfhoggCommand::ApplyChanges;
+        let bench = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
+        let hotpath = cmd.build_args(&ctx, ArgMode::Hotpath).unwrap();
+        assert!(!bench.iter().any(|arg| arg == "--compression"));
+        assert!(!hotpath.iter().any(|arg| arg == "--compression"));
+
+        ctx.params.compression = Some("zstd:5".into());
+        for mode in [ArgMode::Bench, ArgMode::Hotpath] {
+            let args = cmd.build_args(&ctx, mode).unwrap();
+            let option = args.iter().position(|arg| arg == "--compression").unwrap();
+            assert_eq!(args[option + 1], "zstd:5");
+        }
     }
 
     #[test]
@@ -1456,19 +1495,6 @@ mod tests {
         assert_eq!(args[2], "--output-dir");
         assert!(args[3].contains("geocode-denmark"));
         assert_eq!(args[4], "--force");
-    }
-
-    #[test]
-    fn supports_hotpath_includes_tool_commands() {
-        assert!(
-            PbfhoggCommand::Inspect {
-                mode: InspectMode::Default { extended: false }
-            }
-            .supports_hotpath()
-        );
-        assert!(PbfhoggCommand::CheckRefs.supports_hotpath());
-        assert!(PbfhoggCommand::BuildGeocodeIndex.supports_hotpath());
-        assert!(PbfhoggCommand::AddLocationsToWays.supports_hotpath());
     }
 
     #[test]

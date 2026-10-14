@@ -422,6 +422,26 @@ impl Drop for SigtermGuard {
     }
 }
 
+/// Process-group isolation that can only be selected while a shutdown guard is
+/// in scope. A grouped child leaves the parent's terminal process group, so
+/// the guard is the proof that brokkr will bridge terminal and `brokkr kill`
+/// signals to it.
+#[derive(Clone, Copy)]
+pub enum ChildIsolation<'guard> {
+    /// Keep the child in brokkr's process group.
+    Inherit,
+    /// Put the child in its own process group while this guard remains alive.
+    // The reference is a lifetime proof and is never read.
+    #[allow(dead_code, reason = "held only to tie the child to a live shutdown guard")]
+    ProcessGroup(&'guard SigtermGuard),
+}
+
+impl ChildIsolation<'_> {
+    pub(crate) const fn is_process_group(self) -> bool {
+        matches!(self, Self::ProcessGroup(_))
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Test process groups die with brokkr.
 //

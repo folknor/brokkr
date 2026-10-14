@@ -53,7 +53,7 @@ pub(crate) enum Launch<'a> {
 
 /// Per-invocation process inputs shared by all libtest lanes.
 pub(crate) struct LibtestInvocation<'a> {
-    pub(crate) args: &'a [&'a str],
+    pub(crate) args: super::LibtestArgs,
     pub(crate) cwd: &'a Path,
     pub(crate) state_root: &'a Path,
     pub(crate) env: &'a [(&'a str, &'a str)],
@@ -100,6 +100,9 @@ where
         context,
         abort,
     } = invocation;
+    let rendered_args = args.render(launch);
+    let args: Vec<&str> = rendered_args.iter().map(String::as_str).collect();
+    let args = args.as_slice();
     let shim = !matches!(observe.shim, ShimMode::Off);
     if shim && launch != Launch::Cargo {
         return Err(DevError::Build(
@@ -465,34 +468,22 @@ pub(crate) fn run_listing(
 }
 
 pub(crate) fn effective_test_threads(args: &[String]) -> Result<Option<u32>, DevError> {
-    effective_test_threads_from(args)
-}
-
-fn effective_test_threads_from<T: AsRef<str>>(args: &[T]) -> Result<Option<u32>, DevError> {
     let mut current = None;
     let mut idx = 0usize;
     while idx < args.len() {
-        let arg = args[idx].as_ref();
+        let arg = args[idx].as_str();
         if let Some(value) = arg.strip_prefix("--test-threads=") {
-            current = Some(parse_thread_count(value)?);
+            current = Some(super::invocation::parse_thread_count(value)?);
         } else if arg == "--test-threads" {
             let Some(value) = args.get(idx + 1) else {
                 return Err(DevError::Config(
                     "--test-threads requires a numeric value".into(),
                 ));
             };
-            current = Some(parse_thread_count(value.as_ref())?);
+            current = Some(super::invocation::parse_thread_count(value.as_str())?);
             idx += 1;
         }
         idx += 1;
     }
     Ok(current)
-}
-
-fn parse_thread_count(value: &str) -> Result<u32, DevError> {
-    value.parse::<u32>().map_err(|_| {
-        DevError::Config(format!(
-            "--test-threads requires a numeric value, got {value:?}"
-        ))
-    })
 }

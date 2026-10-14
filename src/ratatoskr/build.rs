@@ -41,14 +41,14 @@ pub fn build_for_harness(
     debug: bool,
     on_spawn: Option<&dyn Fn(u32)>,
     on_done: Option<&dyn Fn()>,
-    isolate_pg: bool,
+    isolation: crate::shutdown::ChildIsolation<'_>,
 ) -> Result<HarnessBuild, DevError> {
     let features_label = feature_summary(&harness_cfg.features);
 
     // No announcement of its own: the `[build]` lines cargo_build prints
     // already name the package, features and profile.
     let cfg = BuildConfig::for_harness(harness_cfg, debug);
-    let result = build::cargo_build_observed(&cfg, project_root, on_spawn, isolate_pg);
+    let result = build::cargo_build_observed(&cfg, project_root, on_spawn, isolation);
     if let Some(cb) = on_done {
         cb();
     }
@@ -71,7 +71,7 @@ pub fn build_for_harness(
     })
 }
 
-/// Render a features list for the `[ratatoskr] building ...` log line.
+/// Render a features list for the `[harness] building ...` log line.
 fn feature_summary(features: &[String]) -> String {
     if features.is_empty() {
         "default".to_owned()

@@ -1,5 +1,6 @@
 //! External tool download and cache management.
 
+use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -29,12 +30,45 @@ pub struct TilemakerTools {
     pub process: PathBuf,
 }
 
+/// Resolve an executable using the process PATH, or validate a supplied path.
+/// All brokkr preflight checks use this lookup instead of spawning `which` or
+/// maintaining a second PATH walker.
+pub(crate) fn find_executable(name: &str) -> Option<PathBuf> {
+    let requested = Path::new(name);
+    if requested.is_absolute() || name.contains(std::path::MAIN_SEPARATOR) {
+        return is_executable(requested).then(|| requested.to_path_buf());
+    }
+
+    let path = std::env::var_os("PATH")?;
+    find_executable_in(name, &path)
+}
+
+fn find_executable_in(name: &str, path: &OsStr) -> Option<PathBuf> {
+    std::env::split_paths(path)
+        .map(|directory| directory.join(name))
+        .find(|candidate| is_executable(candidate))
+}
+
+fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::metadata(path)
+        .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+}
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
-const JDK_MAJOR: u32 = 25;
+// Update pins together with their digests after reviewing an upstream release.
+const JDK_RELEASE: &str = "jdk-25.0.4.1+1";
+const JDK_ARCHIVE_VERSION: &str = "25.0.4.1_1";
+const PLANETILER_RELEASE: &str = "v0.10.2";
+const PLANETILER_SHA256: &str = "f310bd0413e2e4512b27f4046d418664e8e1d3bf31603c2a70e23de06c167e4d";
 const OSMOSIS_VERSION: &str = "0.49.2";
+const OSMOSIS_SHA256: &str = "2a23a7bf7499a0727ae6987cf66fcafc03b37379dc02177c730f352bd67a0b97";
+const TILEMAKER_COMMIT: &str = "facdf933f4f5ac2944a9d65c27970270583d68fa";
+const SHORTBREAD_COMMIT: &str = "9ec009826b49b71bb1481a1c28c3681766c600e3";
 
 // ---------------------------------------------------------------------------
 // Top-level entry point
@@ -60,10 +94,7 @@ pub fn ensure_planetiler(
 }
 
 /// Ensure JDK + Osmosis are ready for merge verification.
-pub fn ensure_osmosis(
-    data_dir: &Path,
-    #[allow(unused_variables)] workspace_root: &Path,
-) -> Result<OsmosisTools, DevError> {
+pub fn ensure_osmosis(data_dir: &Path) -> Result<OsmosisTools, DevError> {
     check_curl()?;
 
     let java_home = data_dir.join("jdk");
@@ -82,49 +113,57 @@ fn ensure_osmosis_binary(data_dir: &Path) -> Result<PathBuf, DevError> {
     let osmosis_dir = data_dir.join("osmosis");
     let version_file = data_dir.join(".osmosis-version");
     let osmosis_bin = osmosis_dir.join("bin/osmosis");
+    let marker = format!("{OSMOSIS_VERSION}\n{OSMOSIS_SHA256}\n");
 
-    // Check cached version.
+    // A changed checksum pin invalidates the installed cache as well as a
+    // version bump.
     if osmosis_bin.exists()
         && let Ok(cached) = fs::read_to_string(&version_file)
-        && cached.trim() == OSMOSIS_VERSION
+        && cached == marker
     {
         return Ok(osmosis_bin);
     }
 
     let download_url = format!(
-        "https://github.com/openstreetmap/osmosis/releases/download/{OSMOSIS_VERSION}/osmosis-{OSMOSIS_VERSION}.tgz"
+        "https://github.com/openstreetmap/osmosis/releases/download/{OSMOSIS_VERSION}/osmosis-{OSMOSIS_VERSION}.tar"
     );
 
-    // Download. Not checksum-verified: this is a fixed release URL with no
-    // metadata request in front of it, so there is no published digest in hand
-    // to compare against. `OSMOSIS_VERSION` pins the release; verifying would
-    // mean adding a GitHub releases API call to read the asset's `digest`, as
-    // `ensure_planetiler_jar` does.
-    let tarball = data_dir.join("osmosis-download.tgz");
-    let tarball_str = tarball.display().to_string();
+    // The release asset has no published digest, so this pin carries the
+    // reviewed SHA-256 beside its version.
+    let tarball = data_dir.join("osmosis-download.tar");
     output::verify_msg(&format!("downloading Osmosis {OSMOSIS_VERSION}"));
-    run_curl(
-        &["-fsSL", "-o", &tarball_str, &download_url],
-        Path::new("."),
-    )?;
+    fetch_verified(&download_url, &tarball, Some(OSMOSIS_SHA256))?;
 
-    // Remove old dir and recreate.
-    if osmosis_dir.exists() {
-        fs::remove_dir_all(&osmosis_dir)?;
+    // Extract into a sibling staging directory. The release archive has a
+    // versioned top-level directory and is an uncompressed tar file.
+    let extract_dir = data_dir.join("osmosis-extract");
+    if extract_dir.exists() {
+        fs::remove_dir_all(&extract_dir)?;
     }
-    fs::create_dir_all(&osmosis_dir)?;
-
-    // Extract.
-    let osmosis_dir_str = osmosis_dir.display().to_string();
+    fs::create_dir_all(&extract_dir)?;
+    let tarball_str = tarball.display().to_string();
+    let extract_dir_str = extract_dir.display().to_string();
     let captured = output::run_captured(
         "tar",
-        &["xzf", &tarball_str, "-C", &osmosis_dir_str],
-        Path::new("."),
+        &["xf", &tarball_str, "-C", &extract_dir_str],
+        data_dir,
     )?;
     captured.check_success("tar")?;
 
+    let unpacked = extract_dir.join(format!("osmosis-{OSMOSIS_VERSION}"));
+    if !unpacked.join("bin/osmosis").is_file() {
+        return Err(DevError::Config(format!(
+            "Osmosis {OSMOSIS_VERSION} archive has no bin/osmosis"
+        )));
+    }
+
+    // Replace the old version only after the pinned archive was verified and
+    // extracted successfully.
+    replace_directory(&unpacked, &osmosis_dir, &data_dir.join("osmosis-old"))?;
+    fs::remove_dir_all(&extract_dir)?;
+
     // Write version file.
-    fs::write(&version_file, OSMOSIS_VERSION)?;
+    fs::write(&version_file, marker)?;
 
     // Clean up tarball.
     fs::remove_file(&tarball).ok();
@@ -138,17 +177,12 @@ fn ensure_osmosis_binary(data_dir: &Path) -> Result<PathBuf, DevError> {
 // ---------------------------------------------------------------------------
 
 pub(crate) fn check_curl() -> Result<(), DevError> {
-    let result = std::process::Command::new("which")
-        .arg("curl")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
-
-    match result {
-        Ok(status) if status.success() => Ok(()),
-        _ => Err(DevError::Preflight(vec![
+    if find_executable("curl").is_some() {
+        Ok(())
+    } else {
+        Err(DevError::Preflight(vec![
             "'curl' not found in PATH (required for tool downloads)".into(),
-        ])),
+        ]))
     }
 }
 
@@ -161,64 +195,40 @@ fn ensure_jdk(data_dir: &Path) -> Result<PathBuf, DevError> {
     let version_file = data_dir.join(".jdk-version");
     let java = jdk_dir.join("bin/java");
 
-    // Cache-first: if the java binary exists and the version marker records
-    // the major we want, the JDK is already installed. Skip the network call
-    // entirely. The major has to be checked, not just the marker's existence,
-    // or bumping `JDK_MAJOR` would never replace the installed JDK.
+    let arch = detect_arch()?;
+    let os = detect_os()?;
+    let checksum = jdk_checksum(arch, os)?;
+
+    // Cache only the exact release and archive digest this build records.
     if java.exists()
         && let Ok(marker) = fs::read_to_string(&version_file)
-        && jdk_marker_matches(&marker)
+        && jdk_marker_matches(&marker, checksum)
     {
         return Ok(java);
     }
 
-    let arch = detect_arch()?;
-    let os = detect_os()?;
-    let api_url = format!(
-        "https://api.adoptium.net/v3/assets/latest/{JDK_MAJOR}/hotspot\
-         ?architecture={arch}&image_type=jdk&os={os}&vendor=eclipse"
+    let release = JDK_RELEASE.replace('+', "%2B");
+    let archive = format!("OpenJDK25U-jdk_{arch}_{os}_hotspot_{JDK_ARCHIVE_VERSION}.tar.gz");
+    let download_url = format!(
+        "https://github.com/adoptium/temurin25-binaries/releases/download/{release}/{archive}"
     );
-
-    let api_body = run_curl(&["-sfL", &api_url], Path::new("."))?;
-    let api_json: serde_json::Value = serde_json::from_slice(&api_body)?;
-
-    let first = api_json
-        .as_array()
-        .and_then(|arr| arr.first())
-        .ok_or_else(|| DevError::Config("adoptium API returned empty response".into()))?;
-
-    let release_name = first
-        .get("release_name")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| DevError::Config("adoptium API missing release_name".into()))?;
-
-    let package = first.get("binary").and_then(|b| b.get("package"));
-    let download_url = package
-        .and_then(|p| p.get("link"))
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| DevError::Config("adoptium API missing binary.package.link".into()))?;
-    // The same response carries the package's sha256. Required rather than
-    // optional: it is part of the documented asset shape, so its absence is
-    // an API change to stop on, not a reason to install unverified.
-    let checksum = package
-        .and_then(|p| p.get("checksum"))
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| DevError::Config("adoptium API missing binary.package.checksum".into()))?;
 
     // Download.
     let tarball = data_dir.join("jdk-download.tar.gz");
     let tarball_str = tarball.display().to_string();
-    output::bench_msg(&format!("downloading JDK {release_name}"));
-    fetch_verified(download_url, &tarball, Some(checksum))?;
+    output::bench_msg(&format!("downloading JDK {JDK_RELEASE}"));
+    fetch_verified(&download_url, &tarball, Some(checksum))?;
 
-    // Remove old JDK dir and recreate.
-    if jdk_dir.exists() {
-        fs::remove_dir_all(&jdk_dir)?;
+    // Extract to staging and keep the existing JDK until the new archive has
+    // unpacked and passed its expected-file check.
+    let staged_jdk = data_dir.join("jdk-extract");
+    if staged_jdk.exists() {
+        fs::remove_dir_all(&staged_jdk)?;
     }
-    fs::create_dir_all(&jdk_dir)?;
+    fs::create_dir_all(&staged_jdk)?;
 
     // Extract.
-    let jdk_dir_str = jdk_dir.display().to_string();
+    let jdk_dir_str = staged_jdk.display().to_string();
     let captured = output::run_captured(
         "tar",
         &[
@@ -231,29 +241,74 @@ fn ensure_jdk(data_dir: &Path) -> Result<PathBuf, DevError> {
         Path::new("."),
     )?;
     captured.check_success("tar")?;
+    if !staged_jdk.join("bin/java").is_file() {
+        return Err(DevError::Config(format!(
+            "Temurin {JDK_RELEASE} archive has no bin/java"
+        )));
+    }
+    replace_directory(&staged_jdk, &jdk_dir, &data_dir.join("jdk-old"))?;
 
-    // Write version file: the major the cache check keys on, then the exact
-    // release for a human reading it.
-    fs::write(&version_file, jdk_marker(release_name))?;
+    // Record the exact release so a version change invalidates this cache.
+    fs::write(&version_file, jdk_marker(checksum))?;
 
     // Clean up tarball.
     fs::remove_file(&tarball).ok();
 
-    output::bench_msg(&format!("installed JDK {release_name}"));
+    output::bench_msg(&format!("installed JDK {JDK_RELEASE}"));
     Ok(java)
 }
 
-/// `.jdk-version` content: `JDK_MAJOR` on the first line, the release name on
-/// the second.
-fn jdk_marker(release_name: &str) -> String {
-    format!("{JDK_MAJOR}\n{release_name}\n")
+fn jdk_checksum(arch: &str, os: &str) -> Result<&'static str, DevError> {
+    match (arch, os) {
+        ("x64", "linux") => Ok("dbb698396d478e7fa2b1e50f4103324b2a99b90569ee27c33f2261f9215cf41e"),
+        ("aarch64", "linux") => {
+            Ok("69df11a02cfa3ef7d7ca645e03edce6778ec090e100f6ae2b42097865730ac52")
+        }
+        ("x64", "mac") => Ok("e6229d9504f7922053ab31821b9e6bee8761daf7b026a3476d1a027563009880"),
+        ("aarch64", "mac") => {
+            Ok("61979887f7506a24a57439ff99adb8b3a7fc89977d9cfe3b8984f58a981b7b9d")
+        }
+        _ => Err(DevError::Config(format!(
+            "no JDK {JDK_RELEASE} checksum for {arch}/{os}"
+        ))),
+    }
 }
 
-/// Whether a `.jdk-version` marker records the current `JDK_MAJOR`. A marker
-/// from before the major was recorded (the release name alone) does not
-/// match, which costs one re-download and then settles.
-fn jdk_marker_matches(marker: &str) -> bool {
-    marker.lines().next().map(str::trim) == Some(JDK_MAJOR.to_string().as_str())
+/// `.jdk-version` pins the exact Temurin release, not only its feature line.
+fn jdk_marker(checksum: &str) -> String {
+    format!("{JDK_RELEASE}\n{checksum}\n")
+}
+
+fn jdk_marker_matches(marker: &str, checksum: &str) -> bool {
+    let mut lines = marker.lines().map(str::trim);
+    lines.next() == Some(JDK_RELEASE) && lines.next() == Some(checksum)
+}
+
+/// Swap an extracted directory into place without discarding the prior cache
+/// if the final rename fails. A leftover backup is recovered on the next run.
+fn replace_directory(staged: &Path, destination: &Path, backup: &Path) -> Result<(), DevError> {
+    if backup.exists() {
+        if destination.exists() {
+            fs::remove_dir_all(backup)?;
+        } else {
+            fs::rename(backup, destination)?;
+        }
+    }
+
+    let had_destination = destination.exists();
+    if had_destination {
+        fs::rename(destination, backup)?;
+    }
+    if let Err(error) = fs::rename(staged, destination) {
+        if had_destination {
+            drop(fs::rename(backup, destination));
+        }
+        return Err(error.into());
+    }
+    if had_destination {
+        fs::remove_dir_all(backup)?;
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -263,62 +318,30 @@ fn jdk_marker_matches(marker: &str) -> bool {
 fn ensure_planetiler_jar(data_dir: &Path) -> Result<PathBuf, DevError> {
     let jar_path = data_dir.join("planetiler.jar");
     let version_file = data_dir.join(".planetiler-version");
+    let marker = format!("{PLANETILER_RELEASE}\n{PLANETILER_SHA256}\n");
 
-    // Cache-first: if both the jar and version marker exist, the jar is
-    // already installed. Skip the network call entirely.
-    if jar_path.exists() && version_file.exists() {
+    // Cache only the release this build records. A different marker gets
+    // replaced by the pinned asset below.
+    if jar_path.exists()
+        && let Ok(cached_marker) = fs::read_to_string(&version_file)
+        && cached_marker == marker
+    {
         return Ok(jar_path);
     }
 
-    let api_url = "https://api.github.com/repos/onthegomap/planetiler/releases/latest";
+    let download_url = format!(
+        "https://github.com/onthegomap/planetiler/releases/download/{PLANETILER_RELEASE}/planetiler.jar"
+    );
 
-    let api_body = run_curl(&["-sfL", api_url], Path::new("."))?;
-    let api_json: serde_json::Value = serde_json::from_slice(&api_body)?;
-
-    let tag_name = api_json
-        .get("tag_name")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| DevError::Config("github API missing tag_name".into()))?;
-
-    let assets = api_json
-        .get("assets")
-        .and_then(serde_json::Value::as_array)
-        .ok_or_else(|| DevError::Config("github API missing assets array".into()))?;
-
-    let asset = assets
-        .iter()
-        .find(|a| a.get("name").and_then(serde_json::Value::as_str) == Some("planetiler.jar"))
-        .ok_or_else(|| {
-            DevError::Config("github API: no planetiler.jar asset found in release".into())
-        })?;
-    let download_url = asset
-        .get("browser_download_url")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| {
-            DevError::Config("github API: planetiler.jar asset has no download url".into())
-        })?;
-    // GitHub reports a `digest` of `sha256:<hex>` per release asset, but only
-    // for assets uploaded since it started computing them - older releases
-    // carry `null`. Verify when it is there; without it there is nothing
-    // upstream publishes to check against, so the jar installs unverified.
-    let digest = asset
-        .get("digest")
-        .and_then(serde_json::Value::as_str)
-        .and_then(|d| d.strip_prefix("sha256:"));
-    if digest.is_none() {
-        output::bench_msg(&format!(
-            "Planetiler {tag_name}: release publishes no sha256 digest; installing unverified"
-        ));
-    }
-
-    // Download. Staged, so a partial jar never sits at `jar_path`.
-    output::bench_msg(&format!("downloading Planetiler {tag_name}"));
-    fetch_verified(download_url, &jar_path, digest)?;
+    // Download. Staged and digest-checked, so a partial or replaced asset
+    // never sits at `jar_path`.
+    output::bench_msg(&format!("downloading Planetiler {PLANETILER_RELEASE}"));
+    fetch_verified(&download_url, &jar_path, Some(PLANETILER_SHA256))?;
 
     // Write version file.
-    fs::write(&version_file, tag_name)?;
+    fs::write(&version_file, marker)?;
 
-    output::bench_msg(&format!("installed Planetiler {tag_name}"));
+    output::bench_msg(&format!("installed Planetiler {PLANETILER_RELEASE}"));
     Ok(jar_path)
 }
 
@@ -426,10 +449,22 @@ const CURL_STALL_ARGS: [&str; 6] = [
     "120",
 ];
 
+/// Retry transient connection and server errors without imposing a total cap
+/// on long-running downloads. `--retry-max-time` bounds the retry window, not
+/// the duration of a transfer that is making progress.
+const CURL_RETRY_ARGS: [&str; 6] = [
+    "--retry",
+    "3",
+    "--retry-delay",
+    "1",
+    "--retry-max-time",
+    "30",
+];
+
 /// Run curl with the given arguments, returning stdout bytes on success.
 /// Bounded by [`CURL_STALL_ARGS`].
 pub(crate) fn run_curl(args: &[&str], cwd: &Path) -> Result<Vec<u8>, DevError> {
-    let mut all: Vec<&str> = CURL_STALL_ARGS.to_vec();
+    let mut all: Vec<&str> = CURL_STALL_ARGS.into_iter().chain(CURL_RETRY_ARGS).collect();
     all.extend_from_slice(args);
     let captured = output::run_captured("curl", &all, cwd)?;
 
@@ -460,6 +495,7 @@ pub(crate) fn download_file(url: &str, dest: &Path) -> Result<(), DevError> {
     // this rather than a total-duration cap.
     let status = std::process::Command::new("curl")
         .args(CURL_STALL_ARGS)
+        .args(CURL_RETRY_ARGS)
         .args(["-fL", "--progress-bar", "-o", &tmp_str, url])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::inherit())
@@ -552,7 +588,9 @@ pub(crate) fn head_url(url: &str) -> Result<HeadResponse, DevError> {
     // A HEAD carries no body, so unlike the downloads it can take a hard cap:
     // a server that accepts the connection and never answers fails in 60s.
     let output = std::process::Command::new("curl")
-        .args(["--connect-timeout", "30", "--max-time", "60", "-fsIL", url])
+        .args(["--connect-timeout", "30", "--max-time", "60"])
+        .args(CURL_RETRY_ARGS)
+        .args(["-fsIL", url])
         .output()
         .map_err(|error| DevError::Spawn {
             program: "curl".into(),
@@ -652,17 +690,12 @@ fn parse_http_date(s: &str) -> Result<i64, String> {
 // ---------------------------------------------------------------------------
 
 fn check_build_tool(name: &str) -> Result<(), DevError> {
-    let result = std::process::Command::new("which")
-        .arg(name)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
-
-    match result {
-        Ok(status) if status.success() => Ok(()),
-        _ => Err(DevError::Preflight(vec![format!(
+    if find_executable(name).is_some() {
+        Ok(())
+    } else {
+        Err(DevError::Preflight(vec![format!(
             "'{name}' not found in PATH (required to build tilemaker)"
-        )])),
+        )]))
     }
 }
 
@@ -673,51 +706,25 @@ pub fn ensure_tilemaker(data_dir: &Path) -> Result<TilemakerTools, DevError> {
     check_build_tool("g++")?;
     check_build_tool("make")?;
 
-    let tilemaker_dir = data_dir.join("tilemaker");
-    let version_file = data_dir.join(".tilemaker-version");
-    let build_dir = tilemaker_dir.join("build");
-    let tilemaker_bin = build_dir.join("tilemaker");
-
-    // Clone or update tilemaker source.
-    if !tilemaker_dir.exists() {
-        let tilemaker_dir_str = tilemaker_dir.display().to_string();
-        output::bench_msg("cloning tilemaker");
-        let captured = output::run_captured(
-            "git",
-            &[
-                "clone",
-                "--depth",
-                "1",
-                "https://github.com/systemed/tilemaker.git",
-                &tilemaker_dir_str,
-            ],
-            data_dir,
-        )?;
-        captured.check_success("git")?;
-    } else {
-        let tilemaker_dir_str = tilemaker_dir.display().to_string();
-        // Tolerate failure - just use what's there.
-        drop(output::run_captured(
-            "git",
-            &["-C", &tilemaker_dir_str, "pull", "--ff-only"],
-            data_dir,
-        ));
-    }
-
-    // Get current commit hash.
-    let tilemaker_dir_str = tilemaker_dir.display().to_string();
-    let captured = output::run_captured(
-        "git",
-        &["-C", &tilemaker_dir_str, "rev-parse", "HEAD"],
+    let tilemaker_dir = ensure_pinned_git_source(
         data_dir,
+        "tilemaker",
+        "https://github.com/systemed/tilemaker.git",
+        TILEMAKER_COMMIT,
+        "tilemaker",
+        &[":(exclude,top)build/"],
     )?;
-    captured.check_success("git")?;
-    let commit = String::from_utf8_lossy(&captured.stdout).trim().to_string();
+    let version_file = data_dir.join(".tilemaker-version");
+    // Keep generated CMake files outside the pinned source checkout so the
+    // next source verification sees only upstream-controlled files.
+    let build_dir = data_dir.join("tilemaker-build");
+    let tilemaker_bin = build_dir.join("tilemaker");
+    let tilemaker_dir_str = tilemaker_dir.display().to_string();
 
     // Check if build can be skipped.
     if tilemaker_bin.exists()
         && let Ok(cached) = fs::read_to_string(&version_file)
-        && cached.trim() == commit
+        && cached.trim() == TILEMAKER_COMMIT
     {
         // Version matches and binary exists - skip build.
         let shortbread_dir = ensure_shortbread_config(data_dir)?;
@@ -754,9 +761,9 @@ pub fn ensure_tilemaker(data_dir: &Path) -> Result<TilemakerTools, DevError> {
     captured.check_success("cmake")?;
 
     // Write version file.
-    fs::write(&version_file, &commit)?;
+    fs::write(&version_file, TILEMAKER_COMMIT)?;
 
-    let commit_short = &commit[..commit.len().min(8)];
+    let commit_short = &TILEMAKER_COMMIT[..8];
     output::bench_msg(&format!("built tilemaker ({commit_short})"));
 
     // Ensure shortbread config.
@@ -770,34 +777,120 @@ pub fn ensure_tilemaker(data_dir: &Path) -> Result<TilemakerTools, DevError> {
 }
 
 fn ensure_shortbread_config(data_dir: &Path) -> Result<PathBuf, DevError> {
-    let shortbread_dir = data_dir.join("shortbread-tilemaker");
+    ensure_pinned_git_source(
+        data_dir,
+        "shortbread-tilemaker",
+        "https://github.com/shortbread-tiles/shortbread-tilemaker.git",
+        SHORTBREAD_COMMIT,
+        "shortbread-tilemaker config",
+        &[],
+    )
+}
 
-    if !shortbread_dir.exists() {
-        let shortbread_dir_str = shortbread_dir.display().to_string();
-        output::bench_msg("cloning shortbread-tilemaker config");
+fn ensure_pinned_git_source(
+    data_dir: &Path,
+    local_name: &str,
+    repository: &str,
+    commit: &str,
+    label: &str,
+    generated_paths: &[&str],
+) -> Result<PathBuf, DevError> {
+    let path = data_dir.join(local_name);
+    let path_text = path.display().to_string();
+    let created = !path.exists();
+    if created {
+        output::bench_msg(&format!("cloning pinned {label}"));
         let captured = output::run_captured(
             "git",
             &[
                 "clone",
                 "--depth",
                 "1",
-                "https://github.com/shortbread-tiles/shortbread-tilemaker.git",
-                &shortbread_dir_str,
+                "--no-checkout",
+                "--filter=blob:none",
+                repository,
+                &path_text,
             ],
             data_dir,
         )?;
-        captured.check_success("git")?;
-    } else {
-        let shortbread_dir_str = shortbread_dir.display().to_string();
-        // Tolerate failure - just use what's there.
-        drop(output::run_captured(
-            "git",
-            &["-C", &shortbread_dir_str, "pull", "--ff-only"],
-            data_dir,
-        ));
+        if let Err(error) = captured.check_success("git") {
+            drop(fs::remove_dir_all(&path));
+            return Err(error);
+        }
     }
 
-    Ok(shortbread_dir)
+    let result = (|| {
+        let status = git_source_status(data_dir, &path_text, generated_paths)?;
+        if !created && !status.is_empty() {
+            return Err(DevError::Refused(format!(
+                "pinned {label} source at {} has local changes; move or remove it before retrying",
+                path.display()
+            )));
+        }
+
+        let current = git_captured(data_dir, &["-C", &path_text, "rev-parse", "HEAD"])?;
+        let current = String::from_utf8_lossy(&current).trim().to_owned();
+        if current != commit {
+            git_captured(
+                data_dir,
+                &["-C", &path_text, "fetch", "--depth=1", "origin", commit],
+            )?;
+        }
+        if created || current != commit {
+            git_captured(
+                data_dir,
+                &["-C", &path_text, "checkout", "--detach", commit],
+            )?;
+        }
+
+        let checked_out = git_captured(data_dir, &["-C", &path_text, "rev-parse", "HEAD"])?;
+        let checked_out = String::from_utf8_lossy(&checked_out).trim().to_owned();
+        if checked_out != commit {
+            return Err(DevError::Build(format!(
+                "git checked out {checked_out} for pinned {label}, expected {commit}"
+            )));
+        }
+
+        let status = git_source_status(data_dir, &path_text, generated_paths)?;
+        if !status.is_empty() {
+            return Err(DevError::Refused(format!(
+                "pinned {label} source at {} is not clean after checkout",
+                path.display()
+            )));
+        }
+        Ok(())
+    })();
+
+    if created && result.is_err() {
+        drop(fs::remove_dir_all(&path));
+    }
+    result.map(|()| path)
+}
+
+fn git_captured(cwd: &Path, args: &[&str]) -> Result<Vec<u8>, DevError> {
+    let captured = output::run_captured("git", args, cwd)?;
+    captured.check_success("git")?;
+    Ok(captured.stdout)
+}
+
+fn git_source_status(
+    cwd: &Path,
+    source_path: &str,
+    generated_paths: &[&str],
+) -> Result<Vec<u8>, DevError> {
+    let mut args = vec![
+        "-C",
+        source_path,
+        "status",
+        "--porcelain=v1",
+        "--no-renames",
+        "--untracked-files=all",
+    ];
+    if !generated_paths.is_empty() {
+        args.extend(["--", "."]);
+        args.extend_from_slice(generated_paths);
+    }
+    git_captured(cwd, &args)
 }
 
 #[cfg(test)]
@@ -837,15 +930,12 @@ mod tests {
     }
 
     #[test]
-    fn jdk_marker_keys_on_the_major() {
-        assert!(jdk_marker_matches(&jdk_marker("jdk-25.0.1+8")));
-        // A marker naming another major - what a `JDK_MAJOR` bump leaves
-        // behind - must not satisfy the cache.
-        let other = format!("{}\njdk-x\n", JDK_MAJOR + 1);
-        assert!(!jdk_marker_matches(&other));
-        // The pre-major marker format (the release name alone).
-        assert!(!jdk_marker_matches("jdk-21.0.5+11"));
-        assert!(!jdk_marker_matches(""));
+    fn jdk_marker_pins_the_exact_release() {
+        assert!(jdk_marker_matches(&jdk_marker("digest-a"), "digest-a"));
+        assert!(!jdk_marker_matches(&jdk_marker("digest-a"), "digest-b"));
+        assert!(!jdk_marker_matches("jdk-25.0.1+8\ndigest-a\n", "digest-a"));
+        assert!(!jdk_marker_matches("jdk-25.0.4+7\ndigest-a\n", "digest-a"));
+        assert!(!jdk_marker_matches("", "digest-a"));
     }
 
     #[test]

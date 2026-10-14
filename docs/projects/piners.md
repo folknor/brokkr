@@ -1,8 +1,9 @@
 # piners project notes
 
-`project = "piners"` in `brokkr.toml`. The one command is `brokkr corpus`
-(the parity-corpus runner) plus `brokkr corpus-results` (its query sibling
-over the corpus run store, below). Driving the runner - config, selection, verification, the
+`project = "piners"` in `brokkr.toml`. The project commands include
+`brokkr corpus` (the parity-corpus runner) and `brokkr corpus-results` (its
+query sibling), plus `brokkr lint-corpus` and `brokkr lint-results` for the
+differential-lint corpus. Driving the parity runner - config, selection, verification, the
 expected-disposition gate, reseed/bless - is documented in
 `docs/commands/corpus.md`. This doc covers the **data contracts** the harness
 emits and the **run store** brokkr persists them to. Helpers: `src/piners/`.
@@ -212,7 +213,7 @@ first), per-db `PRAGMA user_version` migrations, WAL - mirroring `src/db`
   judged by its moved bytes against `HEAD`'s; each `NULL` when unknown,
   never a guessed clean), `selector` (JSON: resolved ids + raw flags, forwarded
   harness flags, and the build profile as `debug`), dedicated `debug` and
-  `harness_args` columns (v9: typed execution context for `--compare`; older
+  `harness_args` columns (typed execution context for `--compare`; older
   selectors backfill them only when their JSON types are valid, otherwise
   context remains unknown), `gated` (neither
   `--no-gate` nor `--bless`), `result` (`pass`/`fail`, or `interrupted`/
@@ -236,7 +237,11 @@ first), per-db `PRAGMA user_version` migrations, WAL - mirroring `src/db`
   `stage`, whichever of `feed`/`role`/`path`/`field` it carried, `error`,
   explicit nulls and any field brokkr does not model - in the run's own
   transaction; `fail_reason` is its
-  readable projection, and `corpus-results <id>` renders it). The exit/reason/stderr make a failed run self-contained.
+  readable projection, and `corpus-results <id>` renders it), and
+  `report_warnings` (JSON diagnostics for malformed stream lines and dropped
+  diagnostic subrecords; protocol violations are also counted separately,
+  queryable with `corpus-results --sql`). The exit/reason/stderr make a failed
+  run self-contained.
 - `disposition` (PK `run_id,probe`) - the harness line stored **whole** as
   `raw_json`, the authoritative record, with every harness field a generated
   column projected from it. The harness adds diagnostics faster than brokkr

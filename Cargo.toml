@@ -3,7 +3,7 @@ name = "brokkr"
 version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
-description = "Shared development tooling for pbfhogg, elivagar, and nidhogg"
+description = "Shared development tooling for multiple Rust and data projects"
 # Both bins are declared explicitly below; without this, target
 # auto-discovery would also pick up src/bin/rustc_guard.rs under its file
 # name and the guard would build twice under two names.
@@ -110,6 +110,9 @@ large_enum_variant = "deny"
 clone_on_ref_ptr = "deny"
 float_cmp = "deny"
 cognitive_complexity = "deny"
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
 cast_sign_loss = "deny"
 cast_possible_truncation = "deny"
 cast_possible_wrap = "deny"

@@ -202,13 +202,15 @@ pub(crate) fn test_binaries_with_runtime(
         // rejections that name the flag so an ordinary compile error is not
         // decorated with an irrelevant remedy.
         if selection.iter().any(|a| a == "-Zfeature-unification")
-            && (stderr.contains("feature-unification") || stderr.contains("nightly"))
+            && is_feature_unification_refusal(&stderr,
+                cargo_json::parse_cargo_diagnostics(&String::from_utf8_lossy(&captured.stdout))
+                    .iter().any(crate::diagnostic::Diagnostic::is_error))
         {
             output::error(
                 "this cargo does not support -Zfeature-unification, which the \
-                 parallel test lane needs to keep its per-binary runs on the \
-                 prebuild's feature graph. Update the nightly toolchain, or \
-                 drop `parallel` from the [[check]] entry.",
+                 selected build shape requires to keep execution on the \
+                 prebuild's feature graph. Update the nightly toolchain to one \
+                 supporting the selected feature-unification mode.",
             );
         }
         return Ok(None);
@@ -428,6 +430,33 @@ fn toolchain_libdir(
     Ok(String::from_utf8_lossy(&captured.stdout).trim().to_owned())
 }
 
+/// Did cargo reject the unification flags themselves, rather than fail to
+/// compile something? Shared by binary enumeration and the install-feature
+/// phase, where it aborts the whole phase.
+///
+/// It has to be a POSITIVE identification of cargo's own option rejection.
+/// Testing `stderr.contains("nightly")` matches any rustc diagnostic about an
+/// unstable API, and `error: failed to select a version for \`nightly-helper\``.
+/// Absence of rustc diagnostics is necessary (a real compile failure always
+/// has them) and nowhere near sufficient: cargo fails before rustc for
+/// manifest, resolution and config reasons unrelated to these flags.
+///
+/// Wrong in the safe direction by construction: an unrecognised rejection
+/// reads as an ordinary build failure.
+pub(crate) fn is_feature_unification_refusal(stderr: &str, has_rustc_errors: bool) -> bool {
+    if has_rustc_errors { return false; }
+    const REJECTIONS: [&str; 6] = [
+        "flag is only accepted on the nightly channel",
+        "unknown `-Z` flag",
+        "unexpected argument '-Zfeature-unification'",
+        "unexpected argument `-Zfeature-unification`",
+        "feature-unification is unstable",
+        "`feature-unification` is unstable",
+    ];
+    REJECTIONS.iter().any(|rejection| stderr.contains(rejection))
+        || (stderr.contains("feature-unification") && stderr.contains("requires -Z"))
+}
+
 /// Run one built test binary with `--list` plus the given libtest args.
 ///
 /// Listed under the SAME launch envelope its execution gets
@@ -640,6 +669,13 @@ mod binaries_tests {
     #![allow(clippy::unwrap_used)]
 
     use super::{filter_binaries, package_name_from_id, parse_test_binaries, TestBinary};
+
+    #[test]
+    fn only_cargo_option_rejections_identify_unsupported_unification() {
+        assert!(super::is_feature_unification_refusal("error: unknown `-Z` flag", false));
+        assert!(!super::is_feature_unification_refusal("failed to compile nightly-helper", false));
+        assert!(!super::is_feature_unification_refusal("feature-unification is unstable", true));
+    }
 
     #[test]
     fn package_id_formats_all_parse() {

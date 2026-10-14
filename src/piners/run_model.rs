@@ -135,10 +135,6 @@ impl RunVerdict {
         Self::Interrupted(reason.into())
     }
 
-    pub(crate) fn fail(reason: impl Into<String>) -> Self {
-        Self::Fail(reason.into())
-    }
-
     pub(crate) fn result(&self) -> &'static str {
         match self {
             Self::Pass => "pass",

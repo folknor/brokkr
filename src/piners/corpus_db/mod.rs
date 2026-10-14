@@ -9,9 +9,11 @@
 //! stays queryable across runs via `brokkr corpus-results` (piners only).
 //!
 //! Store opening and schema-version migrations use the shared policy in
-//! `db::store`; the corpus remains piners-specific and append-only, with
-//! single-transaction bulk inserts ([`ingest`]) and parameterized queries plus
-//! formatter-on-rows rendering ([`query`]/[`mod@format`]).
+//! `db::store`; the corpus remains piners-specific and append-only. No
+//! retention policy is configured, so run and trade history remains queryable
+//! instead of being silently deleted. Writes use single-transaction bulk
+//! inserts ([`ingest`]) and parameterized queries plus formatter-on-rows
+//! rendering ([`query`]/[`mod@format`]).
 
 pub mod compare;
 pub mod format;

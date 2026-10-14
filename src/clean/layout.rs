@@ -10,6 +10,11 @@ use std::path::{Path, PathBuf};
 
 use crate::config;
 
+pub(crate) const RUSTFLAGS_TARGET_PREFIX: &str = "rustflags-";
+
+/// The project-local state directory's name, relative to the project root.
+pub(crate) const PROJECT_STATE_DIR: &str = ".brokkr";
+
 /// The project-local `.brokkr` root and its named stores.
 #[derive(Debug, Clone)]
 pub(crate) struct ProjectState {
@@ -19,7 +24,7 @@ pub(crate) struct ProjectState {
 impl ProjectState {
     pub(crate) fn new(project_root: &Path) -> Self {
         Self {
-            root: project_root.join(".brokkr"),
+            root: project_root.join(PROJECT_STATE_DIR),
         }
     }
 
@@ -256,12 +261,6 @@ impl<'a> ElivagarLayout<'a> {
 
     pub(crate) fn tilegen_output(&self) -> PathBuf {
         self.scratch().join("bench-self-output.pmtiles")
-    }
-
-    pub(crate) fn tilegen_hotpath_output(&self, alloc: bool) -> PathBuf {
-        let suffix = if alloc { "alloc-" } else { "" };
-        self.scratch()
-            .join(format!("hotpath-{suffix}output.pmtiles"))
     }
 
     pub(crate) fn tilegen_tmp(&self) -> PathBuf {
@@ -583,7 +582,7 @@ impl<'a> RustflagsTargets<'a> {
                 let is_reserved = entry
                     .file_name()
                     .to_string_lossy()
-                    .starts_with("rustflags-");
+                    .starts_with(RUSTFLAGS_TARGET_PREFIX);
                 (is_reserved && entry.file_type().ok()?.is_dir()).then(|| entry.path())
             })
             .collect()

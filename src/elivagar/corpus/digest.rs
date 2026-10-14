@@ -7,7 +7,6 @@
 //! hash domains and text headers are byte-identical to elivagar's originals so
 //! brokkr reads and writes the baselines already committed in elivagar's repo.
 
-use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -129,99 +128,108 @@ fn bucket_root(buckets: &[BucketDigest]) -> u128 {
 ///
 /// `sort_scratch` is where the external sort spills once a zoom or bucket
 /// outgrows memory; it is created on demand and each spill is removed again.
-pub fn fold_leaves(leaves: &[LeafRun], mode: DigestMode, sort_scratch: &Path) -> io::Result<Digest> {
-    let mut uniques = BTreeSet::new();
+pub fn fold_leaves(
+    leaves: &[LeafRun],
+    mode: DigestMode,
+    sort_scratch: &Path,
+) -> io::Result<Digest> {
+    let mut unique_hashes = ExternalU128Sorter::new(sort_scratch);
+    let mut ordered: Vec<&LeafRun> = Vec::with_capacity(leaves.len());
+    for leaf in leaves {
+        unique_hashes.push(leaf.hash)?;
+        ordered.push(leaf);
+    }
+    ordered.sort_unstable_by_key(|leaf| leaf.tile_id);
+    let unique = unique_hashes.finish_unique_count()?;
+    drop(unique_hashes);
+
     let mut tiles = 0u64;
     // Every leaf counts toward `unique`, zero-length ones included, as the
     // in-memory fold always did. A run that crosses a zoom boundary is split
     // there: each tile id still lands in its own zoom, exactly as the
-    // per-tile walk assigned it. Only overlapping runs are refused - no valid
-    // archive has them, and the streaming bucket fold below relies on each
-    // zoom's ids arriving in increasing order.
-    let mut by_zoom: BTreeMap<u8, Vec<(u64, u64, u128)>> = BTreeMap::new();
-    for leaf in leaves {
-        uniques.insert(leaf.hash);
+    // per-tile walk assigned it. Sorting leaf references preserves the public
+    // function's acceptance of unsorted input without materializing a second
+    // per-zoom tuple vector.
+    let mut zooms = Vec::new();
+    let mut buckets = Vec::new();
+    let mut active_zoom: Option<ZoomFold> = None;
+    for leaf in ordered {
         let mut start = leaf.tile_id;
         let end = start
             .checked_add(u64::from(leaf.run_length))
             .ok_or_else(|| invalid("leaf run end overflows"))?;
         while start < end {
             let segment_end = end.min(next_zoom_boundary(start));
+            if segment_end <= start {
+                return Err(invalid("leaf run crosses an invalid zoom boundary"));
+            }
             let (zoom, _, _) = tile_id_to_zxy(start);
-            by_zoom
-                .entry(zoom)
-                .or_default()
-                .push((start, segment_end, leaf.hash));
-            start = segment_end;
-        }
-    }
-
-    let mut zooms = Vec::with_capacity(by_zoom.len());
-    let mut buckets = Vec::new();
-    for (z, mut runs) in by_zoom {
-        runs.sort_unstable_by_key(|&(start, _, _)| start);
-        let mut sorter = ExternalU128Sorter::new(sort_scratch);
-        let mut zoom_tiles = 0u64;
-        let mut previous_end = None;
-        let mut bucket_cell = None;
-        let mut bucket_tiles = 0u64;
-        let mut bucket_values = ExternalU128Sorter::new(sort_scratch);
-        for (start, end, leaf_hash) in runs {
-            if previous_end.is_some_and(|previous| start < previous) {
+            if active_zoom.as_ref().is_none_or(|fold| fold.zoom != zoom) {
+                if let Some(fold) = active_zoom.take() {
+                    let digest = fold.finish(mode, &mut buckets)?;
+                    tiles = tiles
+                        .checked_add(digest.tiles)
+                        .ok_or_else(|| invalid("leaf tile count overflows"))?;
+                    zooms.push(digest);
+                }
+                active_zoom = Some(ZoomFold::new(zoom, sort_scratch));
+            }
+            let fold = active_zoom
+                .as_mut()
+                .ok_or_else(|| invalid("zoom fold was not initialized"))?;
+            if fold.previous_end.is_some_and(|previous| start < previous) {
                 return Err(invalid("leaf runs overlap"));
             }
-            previous_end = Some(end);
-            for id in start..end {
+            fold.previous_end = Some(segment_end);
+            for id in start..segment_end {
                 let (_, x, y) = tile_id_to_zxy(id);
-                let value = pair(id, leaf_hash);
-                sorter.push(value)?;
-                zoom_tiles = zoom_tiles
+                let value = pair(id, leaf.hash);
+                fold.values.push(value)?;
+                fold.tiles = fold
+                    .tiles
                     .checked_add(1)
                     .ok_or_else(|| invalid("leaf tile count overflows"))?;
                 if mode == DigestMode::Buckets {
                     // PMTiles tile ids follow the Hilbert order. Descendants of
                     // one z7 cell are contiguous, so one external sorter can
                     // hash the cell without retaining an expanded tile vector.
-                    let cell = if z <= BUCKET_ZOOM {
+                    let cell = if zoom <= BUCKET_ZOOM {
                         id
                     } else {
-                        xy_to_tile_id(BUCKET_ZOOM, x >> (z - BUCKET_ZOOM), y >> (z - BUCKET_ZOOM))
+                        xy_to_tile_id(
+                            BUCKET_ZOOM,
+                            x >> (zoom - BUCKET_ZOOM),
+                            y >> (zoom - BUCKET_ZOOM),
+                        )
                     };
-                    if bucket_cell.is_some_and(|previous| previous != cell) {
+                    if fold.bucket_cell.is_some_and(|previous| previous != cell) {
                         finish_bucket(
-                            z,
-                            bucket_cell,
-                            bucket_tiles,
-                            &mut bucket_values,
+                            zoom,
+                            fold.bucket_cell,
+                            fold.bucket_tiles,
+                            &mut fold.bucket_values,
                             &mut buckets,
                         )?;
-                        bucket_values = ExternalU128Sorter::new(sort_scratch);
-                        bucket_tiles = 0;
+                        fold.bucket_values = ExternalU128Sorter::new(sort_scratch);
+                        fold.bucket_tiles = 0;
                     }
-                    bucket_cell = Some(cell);
-                    bucket_values.push(value)?;
-                    bucket_tiles = bucket_tiles
+                    fold.bucket_cell = Some(cell);
+                    fold.bucket_values.push(value)?;
+                    fold.bucket_tiles = fold
+                        .bucket_tiles
                         .checked_add(1)
                         .ok_or_else(|| invalid("leaf bucket tile count overflows"))?;
                 }
             }
+            start = segment_end;
         }
-        finish_bucket(
-            z,
-            bucket_cell,
-            bucket_tiles,
-            &mut bucket_values,
-            &mut buckets,
-        )?;
-        let hash = sorter.finish_hash(b"corpus-zoom", zoom_tiles)?;
+    }
+    if let Some(fold) = active_zoom {
+        let digest = fold.finish(mode, &mut buckets)?;
         tiles = tiles
-            .checked_add(zoom_tiles)
+            .checked_add(digest.tiles)
             .ok_or_else(|| invalid("leaf tile count overflows"))?;
-        zooms.push(ZoomDigest {
-            z,
-            tiles: zoom_tiles,
-            hash,
-        });
+        zooms.push(digest);
     }
     buckets.sort_unstable_by_key(|bucket| (bucket.z, bucket.cell));
     let broot = (mode == DigestMode::Buckets).then(|| bucket_root(&buckets));
@@ -231,10 +239,56 @@ pub fn fold_leaves(leaves: &[LeafRun], mode: DigestMode, sort_scratch: &Path) ->
         broot,
         tiles,
         entries: leaves.len() as u64,
-        unique: uniques.len() as u64,
+        unique,
         zooms,
         buckets,
     })
+}
+
+struct ZoomFold {
+    zoom: u8,
+    values: ExternalU128Sorter,
+    tiles: u64,
+    previous_end: Option<u64>,
+    bucket_cell: Option<u64>,
+    bucket_tiles: u64,
+    bucket_values: ExternalU128Sorter,
+}
+
+impl ZoomFold {
+    fn new(zoom: u8, sort_scratch: &Path) -> Self {
+        Self {
+            zoom,
+            values: ExternalU128Sorter::new(sort_scratch),
+            tiles: 0,
+            previous_end: None,
+            bucket_cell: None,
+            bucket_tiles: 0,
+            bucket_values: ExternalU128Sorter::new(sort_scratch),
+        }
+    }
+
+    fn finish(
+        mut self,
+        mode: DigestMode,
+        buckets: &mut Vec<BucketDigest>,
+    ) -> io::Result<ZoomDigest> {
+        if mode == DigestMode::Buckets {
+            finish_bucket(
+                self.zoom,
+                self.bucket_cell,
+                self.bucket_tiles,
+                &mut self.bucket_values,
+                buckets,
+            )?;
+        }
+        let hash = self.values.finish_hash(b"corpus-zoom", self.tiles)?;
+        Ok(ZoomDigest {
+            z: self.zoom,
+            tiles: self.tiles,
+            hash,
+        })
+    }
 }
 
 fn finish_bucket(
@@ -696,7 +750,11 @@ mod tests {
         let base = parse_baseline_text(&digest_text(&dg)).unwrap();
         assert_eq!(base.broot, dg.broot);
         // The z7-vs-z<=7 cell label must round-trip through parse.
-        assert!(baseline_inconsistency(&base, None, &scratch.path).unwrap().is_none());
+        assert!(
+            baseline_inconsistency(&base, None, &scratch.path)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

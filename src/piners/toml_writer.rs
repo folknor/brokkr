@@ -73,28 +73,7 @@ pub(crate) fn parse_value(text: &str, label: &str) -> Result<Value, DevError> {
     })
 }
 
-/// Quote a TOML basic string, escaping delimiters and control characters.
+/// Serialize a TOML string value through `toml_edit`'s basic-string writer.
 pub(crate) fn toml_string(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('"');
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\u{8}' => out.push_str("\\b"),
-            '\u{c}' => out.push_str("\\f"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if c.is_control() && (c as u32) <= 0xffff => {
-                out.push_str(&format!("\\u{:04X}", c as u32));
-            }
-            c if c.is_control() => {
-                out.push_str(&format!("\\U{:08X}", c as u32));
-            }
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
+    Value::from(s).to_string()
 }

@@ -197,9 +197,7 @@ struct ProtocolPaths {
 }
 
 impl ProtocolPaths {
-    fn from_home(home: Option<std::ffi::OsString>) -> Self {
-        let home = home.filter(|home| !home.is_empty()).map(PathBuf::from);
-        let home = home.as_deref();
+    fn from_home(home: Option<&Path>) -> Self {
         Self {
             lock_file: user_dirs::lock_file_at(home),
             compile_lock: user_dirs::compile_lock_at(home),
@@ -474,7 +472,7 @@ enum Decision {
     /// compile beside a measurement. The cost is that every idle compile (an
     /// IDE check) in flight at hold start now blocks the drain; the holder
     /// bounds that by reaping strays after a short first window
-    /// (`DRAIN_REAP_AFTER` in `src/lockfile.rs`), and those compilers were
+    /// (`DRAIN_REAP_AFTER` in `src/lock/hold_protocol.rs`), and those compilers were
     /// going to be reaped after the drain regardless. Leases only exist for
     /// compiles that started before the hold: once the flock is held, a new
     /// compile sees the hold and is refused or admitted by capability.
@@ -487,7 +485,8 @@ enum Decision {
 }
 
 fn decide() -> Decision {
-    let paths = ProtocolPaths::from_home(std::env::var_os(protocol::HOME_ENV));
+    let home = user_dirs::home();
+    let paths = ProtocolPaths::from_home(home.as_deref());
     decide_with(&paths, |key| std::env::var_os(key))
 }
 

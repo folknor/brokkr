@@ -317,7 +317,6 @@ fn sanitize_test_name_for_path_component() {
     );
 }
 
-#[cfg(target_os = "linux")]
 #[test]
 fn idle_wedge_fires_only_with_nothing_in_flight() {
     let long_ago = Instant::now()
@@ -347,6 +346,7 @@ fn idle_wedge_fires_only_with_nothing_in_flight() {
 /// age. That is the case the whole struct exists for - a run whose lifecycle
 /// events were lost or never emitted must still be bounded, and the bound
 /// must come from a clock no input can reach.
+#[cfg(target_os = "linux")]
 #[test]
 fn the_wall_deadline_fires_with_no_events_at_all() {
     use std::os::unix::process::CommandExt;
@@ -408,15 +408,6 @@ fn the_wall_deadline_fires_with_no_events_at_all() {
     );
 }
 
-/// THE CONTRACT: every test gets `per_test` of wall time and no more.
-/// Exceeding it kills the run, whatever the wall ceiling still has left.
-///
-/// The clock is fed by a stream test output shares, and the cap is enforced
-/// anyway. Either the named test really burned its budget, or its terminal
-/// event was lost and brokkr has seen no test complete for longer than the
-/// budget - in which case the run has exceeded what the contract allows
-/// either way. A lost event can corrupt the name, never the entitlement to
-/// kill.
 /// The hole a lost START record opened. With no start, `current` stays empty,
 /// so the per-test clock has nothing to age - and the only remaining bound was
 /// the five-minute idle ceiling, letting a test run for minutes under a
@@ -516,11 +507,12 @@ fn a_repeated_forged_completion_cannot_refresh_the_clock() {
     ));
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn an_expired_per_test_cap_kills_even_with_the_wall_far_away() {
     use std::os::unix::process::CommandExt;
 
-    let root = test_root("watchdog_attribution_never_kills");
+    let root = test_root("watchdog_expired_per_test_cap");
     let mut child = Command::new("sh")
         .arg("-c")
         .arg("sleep 60 & wait")
@@ -599,6 +591,7 @@ fn an_expired_per_test_cap_kills_even_with_the_wall_far_away() {
     );
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn watchdog_kills_process_group_and_writes_snapshot() {
     use std::os::unix::process::CommandExt;
@@ -673,6 +666,7 @@ fn watchdog_kills_process_group_and_writes_snapshot() {
 // A directly executed test binary is the hung harness itself; its children
 // are whatever the tests spawned. The snapshot must examine the leader,
 // where under cargo it examines cargo's first child.
+#[cfg(target_os = "linux")]
 #[test]
 fn a_direct_launch_snapshots_the_leader_not_its_child() {
     use std::os::unix::process::CommandExt;

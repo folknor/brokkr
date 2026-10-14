@@ -3,6 +3,7 @@
 //! See `docs/commands/corpus.md`.
 
 pub mod bless;
+pub(crate) mod build;
 pub mod cmd;
 pub mod contract;
 pub mod corpus_db;

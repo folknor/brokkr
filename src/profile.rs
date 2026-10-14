@@ -38,9 +38,9 @@ pub struct SweepDecl {
     /// `check_cmd`'s selection module and nowhere else. See
     /// [`FeatureConfig`].
     pub features: FeatureConfig,
-    /// Packages to rebuild before running tests, sourced from the
-    /// resolved `[[check]]` entry. `cargo build --release -p <pkg>`
-    /// with the same feature args.
+    /// Packages to rebuild before running tests, sourced from the resolved
+    /// `[[check]]` entry. The build uses this sweep's resolved profile and
+    /// feature args.
     pub build_packages: Vec<String>,
     /// Packages to scope the clippy / test invocation to, emitted as
     /// `-p <pkg>`. From the `[[check]]` entry's `packages`. Needed for
@@ -354,7 +354,9 @@ impl TargetLocation {
 impl IsolatedTargetKey {
     fn directory_name(&self) -> String {
         match self {
-            Self::Rustflags(hash) => format!("rustflags-{hash}"),
+            Self::Rustflags(hash) => {
+                format!("{}{hash}", crate::clean::layout::RUSTFLAGS_TARGET_PREFIX)
+            }
             Self::Unify {
                 mode,
                 rustflags_hash,
@@ -605,7 +607,7 @@ impl SweepDecl {
         &self.filters
     }
 
-    /// Wall-clock-ordered argv for the libtest (post-`--`) section.
+    /// Filter argv in order for the libtest (post-`--`) section.
     /// Helper for tests.
     #[cfg(test)]
     pub fn libtest_argv(&self) -> Vec<String> {
@@ -1309,14 +1311,14 @@ skip = [{ package = "a", pattern = "slow" }]
         // which is what every sweep did before this key existed...
         let auto = SweepDecl::default();
         assert_eq!(
-            resolve_unification(&auto, false).unwrap(),
+            resolve_unification(&auto, false),
             EffectiveUnification::Ambient
         );
         assert!(plan_decl(auto.clone()).unification_args().is_empty());
         // ...and `auto` on a promotion-eligible parallel sweep still pins
         // workspace, which is what the parallel lane did before it.
         assert_eq!(
-            resolve_unification(&auto, true).unwrap(),
+            resolve_unification(&auto, true),
             EffectiveUnification::Pinned(CargoUnification::Workspace)
         );
     }
@@ -1333,11 +1335,11 @@ skip = [{ package = "a", pattern = "slow" }]
         // prebuild. Direct execution runs the prebuilt binaries themselves,
         // so the request is deliverable everywhere and is simply pinned.
         assert_eq!(
-            resolve_unification(&sweep, true).unwrap(),
+            resolve_unification(&sweep, true),
             EffectiveUnification::Pinned(CargoUnification::Selected)
         );
         assert_eq!(
-            resolve_unification(&sweep, false).unwrap(),
+            resolve_unification(&sweep, false),
             EffectiveUnification::Pinned(CargoUnification::Selected)
         );
     }

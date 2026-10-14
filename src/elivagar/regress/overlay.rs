@@ -86,7 +86,9 @@ impl DiffSink for OverlayCollector {
         current: Option<&PreparedLayer>,
         baseline: Option<&PreparedLayer>,
     ) {
-        let layer = current.or(baseline).expect("layer event");
+        let Some(layer) = current.or(baseline) else {
+            return;
+        };
         for f in current.map_or(&[][..], |l| &l.features) {
             self.record(&layer.name, class, 0, Some(f), None);
         }

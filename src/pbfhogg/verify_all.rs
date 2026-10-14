@@ -47,7 +47,6 @@ pub fn run(
     osc: Option<&Path>,
     bbox: Option<&Bbox>,
     data_dir: &Path,
-    project_root: &Path,
     direct_io: bool,
     dataset: &str,
     verbose: bool,
@@ -142,7 +141,7 @@ pub fn run(
         // run_check so any setup output isn't captured as check detail, and
         // narrated on failure the way single `verify merge` does, rather than
         // dropped: a silently missing reference tool reads as a covered one.
-        let osmosis = match crate::tools::ensure_osmosis(data_dir, project_root) {
+        let osmosis = match crate::tools::ensure_osmosis(data_dir) {
             Ok(tools) => Some(tools),
             Err(e) => {
                 verify_summary(&format!("osmosis not available (non-fatal): {e}"));

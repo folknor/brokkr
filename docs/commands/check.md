@@ -5,8 +5,9 @@ test-phase driver in `src/check_cmd/test_phase.rs`, with serial test execution
 in `src/check_cmd/test_execution.rs` and its environment in
 `src/check_cmd/sweep_env.rs`. They differ in scope: `check` is the
 full validation pass (gremlins + header + textlint + manifest + script checks +
-dependency rules + publish cycle + clippy + tests); `test` runs the cargo tests
-matching one name against the same sweep set.
+dependency rules + publish cycle + clippy + optional rustdoc + prepare + tests,
+with coverage under a complete claim and install-feature when configured);
+`test` runs the cargo tests matching one name against the same sweep set.
 
 For the underlying config (`[[check]]`, `[[dependency_rule]]`, `[test]`
 section, profiles) see `docs/brokkr.toml.md`.
@@ -18,7 +19,8 @@ phase in the order they run, then the machinery layered on top (coverage,
 ## `brokkr check`
 
 Gremlins + header + textlint + manifest + script checks + dependency rules +
-publish cycle + clippy + tests. Trailing args after
+publish cycle + clippy + optional rustdoc + prepare + tests + coverage under a
+complete claim + install-feature when configured. Trailing args after
 `brokkr check --` are split on a literal `--`: tokens before it go to
 `cargo test` (e.g.
 `brokkr check -- --test cli_sort` scopes to one test crate), tokens after go
@@ -111,7 +113,7 @@ Output:
   [run]     clippy: ok (5 sweeps) in 1m12s
   [run]     rustdoc: ok (4 sweeps) in 58.0s
   [run]     script-check: ok (2 checks)
-  [warn]    cargo test: 0 errors, 1 warnings
+  [warn]    cargo test: 0 errors, 1 warning
   [warn]      warning broadarrow-ba v0.1.0 (...) ignoring invalid dependency `broadarrow-ba` which is missing a lib target
   [warn]      (sweeps: threaded/telemetry-features, doc-twin/doctests)
   [run]     test: 6546 passed (5 sweeps; slowest parallel binary broadarrow-daemon/broadarrow_daemon 32.8s in threaded/default) in 4m35s
@@ -131,14 +133,16 @@ Output:
   moved.
 - **What still prints on green**, because each changes what the verdict
   means: an `invocation:` line up front naming what this run changed about
-  the configured gate (`-p`, forwarded `-- ...` args, `RUSTFLAGS` /
+  the configured gate (`-p`, a bounded preview of forwarded `-- ...` args,
+  `RUSTFLAGS` /
   `CARGO_ENCODED_RUSTFLAGS` inherited from the environment - set-but-empty
   included, since cargo reads an empty one as a live source that shadows the
   config-file rustflags); the ad-hoc
   features, `skip_phases` and markdown-only announcements; `-p` drops and
   skips per sweep; warnings (below); zero-test units on the test line; and
-  the verdict line's context - the profile, the sweeps that ran, and every
-  `[lints]` suppression. The suppressions sit on the verdict rather than on a
+  the verdict line's context - the profile, the sweeps that ran, and a bounded
+  summary of `[lints]` suppressions (six names per group, with an omitted
+  count for longer lists). The suppressions sit on the verdict rather than on a
   phase line because they narrow clippy (`-A`), rustdoc (dropped at
   ingestion) and every compiling phase (test, coverage, install-feature,
   through rustflags) alike; `allow_exact` lists its lint names only, its
@@ -494,6 +498,12 @@ trailer carries it as `scope: "prose_only"`.
 
 ## Time ceilings
 
+The time bounds and their ordering live in `src/test_runner/ceilings.rs`.
+`test_runner` applies the per-test and idle bounds; the check watchdog applies
+the phase and whole-run bounds. Libtest lanes use brokkr's JSON event stream,
+and forwarded `--format` values cannot replace it. Raw passthrough also refuses
+`--format` and `--test-threads`; thread counts come from the lane policy.
+
 A whole `check` run may hold the lock for at most 25 minutes, measured from
 lock acquisition (a wait behind another brokkr command is not charged), and
 each phase has its own ceiling on top of that:
@@ -554,7 +564,8 @@ the stale metadata exactly as after a hard kill.
 
 The libtest runner carries a third clock, shared by `check`'s test phase and
 `brokkr test`: the 5-minute **idle ceiling** (`IDLE_TIMEOUT` in
-`src/test_runner.rs`). The 20s per-test watchdog ages a test only after
+`src/test_runner/ceilings.rs`, re-exported from `src/test_runner.rs`). The 20s
+per-test watchdog ages a test only after
 libtest announces it, so it is blind to everything around the tests - the
 compile and link inside `cargo test`, the binary's teardown after the last
 result. When no test has been in flight for five minutes the watchdog kills
@@ -750,8 +761,9 @@ is worse than one that refuses, since a green audit is taken as evidence.
 
 ### The clocks, per lane
 
-`Ceilings` in `src/test_runner/deadline.rs` carries the cap, an optional wall backstop, and
-a `WallShape` saying what a kill may be *called*. Every lane enforces the same 20s
+`Ceilings` in `src/test_runner/deadline.rs` carries the cap, an optional wall
+backstop, and a `WallShape` saying what a kill may be *called*. The numeric
+bounds live in `src/test_runner/ceilings.rs`. Every lane enforces the same 20s
 cap; they differ only in how exactly a kill can be attributed.
 
 | lane | cap | kill named by |
@@ -783,10 +795,10 @@ a warning says capture stopped, and the run goes on with what arrived. Nothing
 is signalled - the run's process group may already be gone and its id reused; a
 leaked process carrying the run token is reaped at the next hold (see Strays).
 
-The limits are constants in `src/check_cmd/watchdog.rs` (`CHECK_CEILING` and
-`phase_ceiling`), `src/test_runner/deadline.rs` (`IDLE_TIMEOUT`, `TEST_TIMEOUT`,
-`SWEEP_WALL_TIMEOUT`) and `src/test_runner/procgroup.rs`
-(`DRAIN_GRACE`); there is no config key or flag.
+The time limits are indexed in `src/test_runner/ceilings.rs`; phase ceilings
+are selected by `Phase::ceiling`, and the check watchdog applies the whole-run
+bound. Output drain grace remains in `src/test_runner/procgroup.rs`. There is
+no config key or flag for these limits.
 
 ## Strays
 
@@ -799,21 +811,15 @@ with nothing to time out. Both hangs above were this: a rust-analyzer `cargo
 check` (a nightly regression, September 2026) held the target lock for over an
 hour, and the next day four of its build scripts spun at 100% CPU under it.
 
-So every locked brokkr command, once it holds the lock, scans `/proc` for the
-cargo family - `cargo`, `cargo-*`, `rustc`, `rustdoc`, `clippy-driver`, build
-scripts (`build_script_bu` after the kernel's 15-byte truncation) and the
-wrapper itself (`brokkr-rustc-gu`, truncated from `brokkr-rustc-guard`) - that
-brokkr does not own, SIGKILLs them leaves first, and reports the whole reap on
-one `[strays]` line - comm counts plus deduplicated starters, no pids since
-everything named is already dead, e.g. `[strays] SIGKILL sent to 3 stray cargo
-processes (build_script_bu x2, cargo) started by rust-analyzer` (`src/stray.rs`;
-live per-process detail is `brokkr strays`' job). The line carries no pointer
-to this section; `brokkr strays` ends with one. The starter is
-the nearest ancestor outside the family. When it is rust-analyzer it is killed
-too, because it would only re-run the cargo within seconds and the editor
-restarts it on demand; a shell or editor starter (a hand-typed `cargo`) is
-never signalled. Failure to read `/proc` reads as nothing found: the reap is on
-the way to the real work, never a gate on it.
+A fresh locked hold reaps unowned cargo-family processes after acquisition.
+`src/stray.rs::is_cargo_family` owns the executable classification; the reaper
+then applies its process-identity and ownership checks, kills leaves first, and
+reports comm counts plus deduplicated starters on one `[strays]` line. The
+live per-process detail is `brokkr strays`' job. The starter is the nearest
+ancestor outside the family. When it is rust-analyzer it is killed too, because
+it would only restart the cargo; a shell or editor starter (a hand-typed
+`cargo`) is never signalled. Failure to read `/proc` reads as nothing found:
+the reap is on the way to the real work, never a gate on it.
 
 **Both reapers spare the same process-tree boundary: this brokkr, its visible
 ancestors, and its visible descendants.** `ReaperExemptions` in `src/stray.rs`
@@ -988,9 +994,9 @@ Acquisition, correspondingly, does this before the hold is usable:
    from a separate intent flag a crashed writer could leave behind.
 2. Take the **exclusive** `compile.lock`, draining earlier leases - those of
    compilers admitted under an earlier hold and of compilers started while no
-   hold existed (an IDE check, a hand-typed `cargo`). After a short first
-   window of a few seconds the stray reap runs once, then the wait resumes; the
-   whole drain is bounded at 120s. The window is short because every compiler
+   hold existed (an IDE check, a hand-typed `cargo`). After a short initial
+   window the stray reap runs once, then the wait resumes under the configured
+   drain budget. The window is short because every compiler
    still holding a lease at that point is a stray the post-hold reap would kill
    anyway; waiting longer only stalls the acquisition.
 3. Mint the nonce and publish its hash *while still holding the exclusive
@@ -1079,11 +1085,10 @@ and the second is the one that forced the rule:
   correctly-stamped child, then healed with no external change.
 
 Query admission stops *new* poison at the source. Against *historical* and
-*racing* poison, brokkr stamps `CARGO_CACHE_RUSTC_INFO=0` on every child it
-starts (`hold::RUSTC_INFO_CACHE_ENV`, applied at the same choke points as the
-capability, plus the nextest lane's config overrides), so brokkr's own cargos
-never read the persistent probe cache at all - they re-probe, a few tens of
-milliseconds per invocation. A poisoned entry encountered *outside* brokkr is
+*racing* poison, the shared spawn policy stamps
+`CARGO_CACHE_RUSTC_INFO=0` (`hold::RUSTC_INFO_CACHE_ENV`), and nextest's
+generated config carries it to engine-owned children. A poisoned entry
+encountered *outside* brokkr is
 cured by `CARGO_CACHE_RUSTC_INFO=0 BROKKR_CARGO=1 cargo <...>` - the first
 variable makes cargo actually probe, the second makes the guard admit the
 probe's compile siblings.
@@ -1171,13 +1176,13 @@ children: that would let a script descendant keep compiling into later holds it
 was never authorized for, which is the failure the per-acquisition nonce exists
 to prevent.
 
-The capability is stamped at the spawn choke points (`crate::hold::stamp`, called
-from `output.rs`'s three `Command` constructors, `test_runner`'s process-group
-spawn, and the raw `forward_cargo`) rather than at each of brokkr's ~25 cargo call
-sites, so a new call site is covered by construction. It is applied *last*, after
-every caller-supplied env var, so a caller cannot displace it. The boundary is
-every child brokkr starts under a hold, not just the ones named cargo: a prebuilt
-test binary, a script check or a benchmark can all reach cargo later.
+`process::spawn::ChildPolicy` owns the shared spawn sequence: caller environment,
+`cargo_env`, OOM protection, test/service parent-death and orphan policy, then
+the hold capability last. The output runners use that policy, and its rendered
+environment feeds nextest's generated config. Direct `Command` construction in
+other subsystems is outside this choke point until those call sites migrate;
+those paths must not be assumed to carry the hold capability or the rest of the
+policy.
 
 The nextest lane (`src/check_cmd/nextest_lane.rs`) launches test processes
 through the linked engine's `TestList::new` and `runner.try_execute`, which
@@ -1202,8 +1207,7 @@ install. `--remove` can unset another exact-name brokkr guard too, including
 one whose install is gone, but still refuses an unrelated wrapper. Works with
 no `brokkr.toml`.
 
-`scripts/guard-smoke.py` exercises the guard's decision paths against the real
-flock. `scripts/guard-decision-probe.py <guard-binary>` covers the capability
+`scripts/guard-decision-probe.py <guard-binary>` covers the capability
 paths against a scratch `$HOME` - idle, a stale record left by a crash, a
 draining hold, a mismatched capability, no capability, the `BROKKR_CARGO`
 hatch, and query admission against a refusing hold (with its
@@ -1212,6 +1216,22 @@ change to `decide()` or `classify()`: it is what caught
 the stale-record refusal described above. The admitted path is covered end to end
 by `brokkr check` compiling anything at all while brokkr holds its own lock; if
 it were broken, no build on the machine would work.
+
+## Platform tunables index
+
+The constants stay with the subsystem whose behavior they shape. This index
+points to those owners; their source definitions are authoritative, so the
+values are not copied here.
+
+| Area | Tunable owners |
+| --- | --- |
+| Child output and supervision | `STATUS_WIDTH` in `src/output/console.rs`; deadline polling, output-drain settling, capture limits, and forwarded-SIGTERM budget in `src/output/child.rs` |
+| Lock acquisition and status service | lock polling and compile-lease drain policy in `src/lock/hold_protocol.rs`; request size, service polling, and request/reply budgets in `src/lock/service.rs`; stable lock-record read retries in `src/lock/record.rs` |
+| Guard protocol | handshake probe budget in `src/guard.rs`; protocol fields shared with `src/bin/rustc_guard.rs` |
+| Process cleanup | ancestry and descendant depth limits in `src/stray.rs`; orphan grace and reap policy in `src/test_orphans.rs`; child OOM adjustment in `src/oom.rs` |
+| User-facing defaults | worktree retention in `src/worktree_record.rs`; short config-filter rejection in `src/config_parts/parser.rs`; `brokkr wc` default in `src/wc.rs`; man section-index threshold in `src/man.rs` |
+| External tool versions | release and checksum pins in `src/tools.rs` |
+| Tilegen archive retention | `TILEGEN_RETENTION` in `src/elivagar/archive_store.rs` (the older `OUTPUT_RETENTION` name is no longer present) |
 
 ## `gremlins` phase
 
@@ -1268,12 +1288,14 @@ behavior: the match is suppressed iff `pattern` is found within `lines` lines
 in that direction (excluding the match line, clamped at the file edges); the
 names differ only to document intent (`except_above` reads for a
 preceding `#[cfg(...)]` exemption, `require_below` for a required token like
-`biased;` that must follow a `tokio::select!`). Multiple gates AND together
-(the violation stands only when every window is clear). Windows read raw text -
-no region masking, no `use`-joining - so because the test is per-line, write
-context patterns fragment-tolerant (match `madsim`, not a full single-line
-attribute) so a rustfmt-wrapped `#[cfg(...)]` still suppresses. The generic
-engine behind most grep-style convention hooks; see `src/textlint.rs`.
+`biased;` that must follow a `tokio::select!`). Any matching window suppresses
+the violation; it remains only when every configured window is clear. Windows
+read raw text - no region masking, no `use`-joining - so because the test is
+per-line, write context patterns fragment-tolerant (match `madsim`, not a full
+single-line attribute) so a rustfmt-wrapped `#[cfg(...)]` still suppresses. The
+generic engine behind most grep-style convention hooks; see `src/textlint.rs`.
+Reported source excerpts are capped at 200 characters, with an ellipsis when
+the matched line is longer; matching still uses the full line.
 
 A clean run reports what it covered - `textlint (21 rules, 812 files)` on the
 conventions line - rather than a bare `ok`, matching the `dependency rules`
@@ -1312,10 +1334,14 @@ deadline - whatever is left of the `script_check` phase ceiling, less ten
 seconds for the report - in its own process group, so a hung script is killed
 pipeline and all and fails as that entry (`killed after ...`, with the output it
 produced so far) instead of the phase watchdog ending the whole run; a killed
-entry never passes, whatever it printed first. Every entry runs (no
-fail-fast within the phase) so one `brokkr check` surfaces all broken gates, and
-each failure prints its captured stdout/stderr - the diagnostic, rendered
-against the entry's declared `diagnostics` shape (below). A clean stage reports once -
+entry never passes, whatever it printed first. Each stream retains at most
+1 MiB; if a selected stream exceeds that bound, or a child leaves its output
+pipe open past the drain grace, the entry fails because capture cannot prove
+the complete stream matched. Every entry runs (no fail-fast within the phase),
+so one `brokkr check` surfaces all broken gates, and each failure prints its
+retained stdout/stderr - the
+diagnostic, rendered against the entry's declared `diagnostics` shape (below).
+A clean stage reports once -
 `script-check (21 checks)` on the conventions line for the `pre-clippy` stage,
 its own `script-check: ok (2 checks)` line for a later stage - rather than one
 per entry; the count keeps
@@ -1352,13 +1378,13 @@ internals, only what it printed - so the question is which part of it to show.
 
 | View | Prints |
 | --- | --- |
-| `diagnostics = "opaque"` | Both streams, verbatim |
+| `diagnostics = "opaque"` | Both retained streams, verbatim |
 | `diagnostics = "rustc"` | Every `error`-level block, then a line counting the warnings not shown |
 
-`opaque` prints the stream whole rather than capping it: an opaque check's
-verdict is typically its *last* line (that is what `last-line` matches), while
-a command's fatal error is typically near its first, so any cap hides whichever
-the reader came for.
+`opaque` prints the retained stream prefix. Capture is bounded to 1 MiB per
+stream; a selected stream that exceeds the bound, or a pipe that remains open
+past the drain grace, fails closed since capture cannot establish that the
+complete output matched.
 
 `rustc` exists because a `cargo doc --workspace` gate is not an opaque analyser -
 it emits standard rustc diagnostics, and treating them as a blob throws away
@@ -1793,10 +1819,14 @@ phase compiles rather than reads diagnostics:
   graph over the other's.
 - **The flags travel through cargo's rustflags,** since `cargo test` has no
   `-- <rustc flags>` passthrough. Cargo picks exactly one rustflags source, so
-  brokkr finds the layer already live for this build and adds to *that* one
-  with `--config` (the highest-precedence config source) rather than exporting
-  `RUSTFLAGS`, which would discard the project's own flags wholesale. The
-  notice line names the layer it used. See
+  brokkr finds the layer already live for this build and adds there rather
+  than exporting `RUSTFLAGS`, which would discard the project's own flags
+  wholesale. The lookup covers matching target entries (including
+  `CARGO_TARGET_<triple>_RUSTFLAGS`), `build.rustflags` (including
+  `CARGO_BUILD_RUSTFLAGS`), and recursively included Cargo config files. It
+  composes directly into the encoded or plain rustflags environment source,
+  or uses `--config` at the active target/build layer. The notice line names
+  inherited rustflags environment sources. See
   [`[lints]`](../brokkr.toml.md#lints-section) for the full rule, including why
   an injection can be deliberately inert.
 
@@ -2007,9 +2037,8 @@ example in `docs/brokkr.toml.md`.
 ### Serial vs parallel sweeps
 
 By default the test phase runs each sweep serial (`--test-threads=1`) under
-the per-test hang watchdog, attributing a stall to a named test
-from libtest's sequential output. The parallel lane keeps the same watchdog via
-libtest's JSON event stream. A profile can opt a sweep into
+the per-test hang watchdog, attributing a stall from libtest's JSON events.
+Parallel execution uses the same tracker and watchdog. A profile can opt a sweep into
 parallel execution with `test_threads`:
 
 - unset or `test_threads = 1` - serial, per-test watchdog (the default; nothing
@@ -2047,15 +2076,16 @@ dominated by a few wall-clock-heavy tests (live/network/multi-second lifecycle)
 that parallelism hides - now without surrendering per-test hang protection.
 Because the per-test clock is wall-clock, a test that is merely CPU-starved
 under heavy `test_threads` load (not hung) can trip it; keep genuinely
-multi-second tests off the parallel lane. A profile must not set `--format` in
-its `libtest_args` on a parallel lane (the sweep owns that flag). `brokkr test`
+multi-second tests off the parallel lane. Every lane reserves `--format` for
+the runner's JSON protocol. `brokkr test`
 is unaffected - it is always serial regardless of the profile's `test_threads`.
 
 A `certifies = "complete"` profile refuses this cargo-mediated parallelism
 during `prepare`: many tests and harnesses share one stream with no harness
 isolation, so its executions cannot be attributed. `parallel = { budget = N }`
 (below) runs the binaries concurrently with each one on its own stream, and is
-the lane to use there.
+the lane to use there. Its worker count is bounded by the in-flight budget;
+queued binaries do not each reserve an OS thread.
 
 ### Process isolation (`isolation = "process"`)
 
@@ -2388,8 +2418,8 @@ replacement.
 profile may reference them - the exclusion story is the existing ledger
 model unchanged, because the synthesized config has no default-filter and
 narrowing only ever comes from `brokkr.toml` skips and quarantines. How the
-pieces fit (measured against cargo-nextest 0.9.143, recorded at the code
-sites):
+pieces fit (measured against the linked `nextest-runner` version recorded in
+`Cargo.lock`):
 
 - **A nextest lane's selection comes from the engine's own listing** under the
   sweep's real filters - the very `TestList` the lane executes, so plan and

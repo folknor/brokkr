@@ -322,8 +322,9 @@ fn run_migrations(conn: &rusqlite::Connection) -> Result<(), DevError> {
         "piners lint runs",
         SCHEMA_VERSION,
         |conn, _current| {
-            // Version 1 is the initial schema. Future steps are gated on the
-            // supplied version; this DDL also initializes a fresh store.
+            // There are no post-v1 steps yet. Keep the version gate because
+            // it stamps fresh stores and gives future schema changes one
+            // place to migrate existing histories before applying the DDL.
             conn.execute_batch(SCHEMA)?;
             Ok(())
         },
@@ -360,10 +361,7 @@ mod tests {
 
     #[test]
     fn record_run_roundtrips_and_renders() {
-        // Pinned dir under the OS temp root, namespaced by pid - data stays out
-        // of any /tmp literal in source and is cleaned at the end.
-        let dir = std::env::temp_dir().join(format!("brokkr_lintdb_{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
+        let dir = crate::test_scratch::scratch("piners_lint_db", "record_run_roundtrips");
         let path = dir.join("runs.db");
 
         let mut db = LintDb::open(&path).unwrap();
@@ -379,15 +377,24 @@ mod tests {
             gated: true,
             verdict: &RunVerdict::Fail("1 gate deviation(s)".to_owned()),
             probe_count: probes.len(),
-            stderr: "",
+            stderr: "validator stderr captured",
         };
 
         let run_id = db.record_run(&meta, &probes).unwrap();
         assert_eq!(db.latest_run_id().unwrap(), Some(run_id));
 
         let runs = db.recent_runs(10).unwrap();
-        assert!(runs.contains("diverge_one") || runs.contains("bracket"));
-        assert!(!runs.is_empty());
+        assert!(runs.contains(&run_id.to_string()), "{runs}");
+        assert!(runs.contains("2026-06-22T00:00:00Z"), "{runs}");
+        assert!(runs.contains("fail"), "{runs}");
+        assert!(runs.contains("kw=bracket"), "{runs}");
+        let stored_stderr: String = db
+            .conn
+            .query_row("SELECT stderr FROM run WHERE id = ?1", [run_id], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(stored_stderr, "validator stderr captured");
 
         // Full view shows every probe.
         let full = db.run_dispositions(run_id, true).unwrap();

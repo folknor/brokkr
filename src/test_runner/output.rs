@@ -1213,7 +1213,7 @@ error: could not compile `pbfhogg` (test) due to 1 previous error
 ";
         let result = filter_test("", stderr);
         assert!(result.contains("cargo test:"), "got: {result}");
-        assert!(result.contains("1 errors"), "got: {result}");
+        assert!(result.contains("1 error,"), "got: {result}");
         assert!(
             result.contains(
                 "error[E0425] tests/foo.rs:3:13 cannot find value `missing_symbol` in this scope"

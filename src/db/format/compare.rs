@@ -184,10 +184,7 @@ struct RowData {
     input_display: String,
     captured_env: std::collections::BTreeMap<String, String>,
     host: HostEnv,
-    /// Names this row's workload declared identity-bearing, recorded WITH the
-    /// run rather than read from today's config - so a later re-declaration
-    /// cannot retroactively change what a historical comparison asserted.
-    /// Every non-provenance counter on the row, stringified for comparison.
+    /// Every non-provenance counter on this row, stringified for comparison.
     counters: std::collections::BTreeMap<String, String>,
 }
 

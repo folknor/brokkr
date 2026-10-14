@@ -208,6 +208,7 @@ fn direct_libtest_args(
     threads: u32,
     libtest_extra: &[String],
 ) -> Result<Vec<String>, DevError> {
+    test_runner::LibtestArgs::validate_passthrough(libtest_extra)?;
     let filters = sweep.lane_filters();
     let mut libtest_args = filters.libtest_args();
     libtest_args.extend(filters.name_filters());
@@ -233,15 +234,6 @@ fn direct_libtest_args(
     }
     libtest_args.push(format!("--test-threads={threads}"));
 
-    // The per-test hang watchdog reads libtest's JSON event stream: human
-    // output emits no per-test *start* signal under concurrency, so there is
-    // nothing to age. Same constraint, and same refusal, as the sequential
-    // parallel path.
-    libtest_args.push("-Z".into());
-    libtest_args.push("unstable-options".into());
-    libtest_args.push("--format".into());
-    libtest_args.push("json".into());
-    reject_format_override(&libtest_args)?;
     Ok(libtest_args)
 }
 
@@ -300,7 +292,7 @@ fn run_one_binary(
             program: &binary.executable,
         },
         test_runner::LibtestInvocation {
-            args: &arg_refs,
+            args: test_runner::LibtestArgs::from_argv(test_runner::Launch::Direct { program: &binary.executable }, &arg_refs)?,
             cwd: &cwd,
             state_root,
             env: &env_pairs,
@@ -353,8 +345,8 @@ fn run_one_binary(
 ///
 /// Doctests are not reachable from this lane (they live in the `--doc`
 /// pseudo-target, which has no binary to fan out over), but this is NOT where
-/// that is reported: `[test] doctests = true` alongside a `parallel` entry is
-/// refused at config load. A per-run warning would be printed on every green
+/// that is reported: admission checks require a serial/doc-only carrier when
+/// `[test] doctests = true`. A per-run warning would be printed on every green
 /// run forever for a decision that only needs making once.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn run_parallel_sweep(
@@ -463,11 +455,7 @@ fn run_parallel_sweep(
 
     let pool = Budget::new(budget);
     let mut runs: Vec<Result<BinaryRun, DevError>> = Vec::new();
-    // Set the moment any binary blows its budget. Every thread is created up
-    // front and waits for a slot, so without this a killed binary released its
-    // slots and the next queued binary started - the run carried on past a
-    // timeout, which the contract forbids. Threads already executing cannot be
-    // recalled (their own watchdogs bound them), but nothing new starts.
+    // A timeout cancels both running siblings and work not yet dequeued.
     let aborted = std::sync::atomic::AtomicBool::new(false);
     let extras = DirectExtras {
         attempt,
@@ -476,45 +464,44 @@ fn run_parallel_sweep(
         forwarded: ForwardedArgs::parse(&prepared.cargo_extra),
     };
 
+    let queue = std::sync::Mutex::new(planned.iter());
     std::thread::scope(|scope| {
         let mut handles = Vec::new();
-        for (run, slots) in &planned {
+        for _ in 0..planned.len().min(usize::try_from(budget).unwrap_or(usize::MAX)) {
             let pool = &pool;
             let env_refs = &env_refs;
             let aborted = &aborted;
             let extras = &extras;
+            let queue = &queue;
             handles.push(scope.spawn(move || {
-                pool.acquire(*slots)?;
-                if aborted.load(std::sync::atomic::Ordering::SeqCst) {
-                    pool.release(*slots);
-                    return Ok(BinaryRun::skipped_after_abort(&run.planned.binary));
+                let mut completed = Vec::new();
+                loop {
+                    let next = queue.lock().unwrap_or_else(std::sync::PoisonError::into_inner).next();
+                    let Some((run, slots)) = next else { break; };
+                    let out = match pool.acquire(*slots) {
+                        Err(error) => Err(error),
+                        Ok(()) => {
+                            let out = if aborted.load(std::sync::atomic::Ordering::SeqCst) {
+                                Ok(BinaryRun::skipped_after_abort(&run.planned.binary))
+                            } else {
+                                run_one_binary(state_root, sweep, run, extras, runtime,
+                                    env_refs, *slots, tap, aborted)
+                            };
+                            if out.as_ref().is_ok_and(|r| r.hung.is_some()) {
+                                aborted.store(true, std::sync::atomic::Ordering::SeqCst);
+                            }
+                            pool.release(*slots);
+                            out
+                        }
+                    };
+                    completed.push(out);
                 }
-                let out = run_one_binary(
-                    state_root,
-                    sweep,
-                    run,
-                    extras,
-                    runtime,
-                    env_refs,
-                    *slots,
-                    tap,
-                    aborted,
-                );
-                if out.as_ref().is_ok_and(|r| r.hung.is_some()) {
-                    aborted.store(true, std::sync::atomic::Ordering::SeqCst);
-                }
-                // Released whether the run succeeded or errored: a binary that
-                // failed to spawn must not strand its slice of the budget and
-                // wedge every binary still waiting.
-                pool.release(*slots);
-                out
+                completed
             }));
         }
         for h in handles {
-            runs.push(h.join().unwrap_or_else(|_| {
-                Err(DevError::Build(
-                    "a parallel test binary thread panicked".into(),
-                ))
+            runs.extend(h.join().unwrap_or_else(|_| {
+                vec![Err(DevError::Build("a parallel test binary thread panicked".into()))]
             }));
         }
     });
@@ -899,7 +886,7 @@ mod parallel_lane_tests {
     // silently change which binaries the sweep plans, which is the worse
     // direction to be wrong in.
     #[test]
-    fn an_unknown_flag_is_left_for_the_per_binary_command() {
+    fn an_unknown_flag_is_left_for_the_cargo_build() {
         let (sel, rest) = ForwardedArgs::parse(&v(&["--offline", "-j", "4"])).partition_targets();
         assert!(sel.is_empty());
         assert_eq!(rest, v(&["--offline", "-j", "4"]));
@@ -1009,11 +996,7 @@ mod parallel_lane_tests {
                 "--skip",
                 "slow_io",
                 "fast_",
-                "--test-threads=3",
-                "-Z",
-                "unstable-options",
-                "--format",
-                "json"
+                "--test-threads=3"
             ])
         );
     }

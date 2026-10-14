@@ -14,8 +14,8 @@
 //! The guard restores on `Drop`, which covers normal completion, an error
 //! return, the cooperative-interrupt path (runs unwind through
 //! `DevError::Interrupted`) and a `check`/`test`/`clippy` watchdog kill, which
-//! unwinds the same way - and whose exit backstop, for a main thread that
-//! cannot unwind, calls [`restore_armed`]. It does **not** cover a hard kill
+//! unwinds the same way - and whose exit backstop calls
+//! [`restore_active_hold`]. It does **not** cover a hard kill
 //! (`brokkr kill --hard`, SIGKILL) or a signal during an unguarded window (a
 //! bare `cargo build`), which terminates brokkr with no unwinding - that
 //! mirrors how the rest of brokkr
@@ -30,19 +30,16 @@
 //! lock across the whole `--commit` run, activates a [`DisabledToolchain`] on
 //! the worktree path itself for the build closure when `disable_toolchain` is
 //! set - otherwise the commit's own committed pin would be honoured there.
-//! (Re-arming would not reach it: every acquire inside that run re-enters the
-//! existing hold, and a re-entry activates nothing.)
+//! (The worktree path is attached to the active hold for its own lifetime.)
 //!
 //! ## Serialisation
 //!
 //! Activation is driven by the global command lock, not the top of `run`. The
-//! build root to disable is *armed* once ([`arm`], from `main`);
-//! [`crate::lockfile::acquire`] then activates it - moving the
-//! file aside - immediately after taking the flock, and the returned
-//! `LockGuard`'s drop restores it just before releasing the flock. The
-//! moved-aside window is thus exactly the locked window, so concurrent brokkr
-//! invocations (which the lock already serialises) can never observe or race
-//! the half-moved state.
+//! lock context carries the configured build-root path into acquisition. After
+//! taking the flock, checking the disk gate and draining compiler leases,
+//! acquisition moves the file aside before publishing the hold capability.
+//! The returned `LockGuard` restores it just before releasing the flock, so
+//! concurrent brokkr invocations cannot observe or race the half-moved state.
 //!
 //! Every command that runs cargo/rustup against a pinned tree therefore takes
 //! the lock so this activation fires - including the ones that aren't builds in
@@ -55,39 +52,17 @@
 //! `disable_toolchain` is set; with nothing to move it stays lock-free.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, PoisonError};
 
 use crate::error::DevError;
 use crate::output;
 
-/// The build root whose pinned toolchain should be disabled when the global
-/// lock is taken, or `None`. Armed once from `main` for the live build root.
-/// Worktree runs bypass this setting through the lockfile's explicit
-/// no-toolchain acquisition and register their own path on the live hold.
-/// Read by [`activate_for_lock`], which the lockfile calls under the flock.
-static DISABLE_DIR: Mutex<Option<PathBuf>> = Mutex::new(None);
-
-/// Set the build root to disable at lock time, returning the previous value.
-///
-/// Called once at startup with the live build root (or `None` when
-/// `disable_toolchain` is off / no project).
-pub fn arm(dir: Option<PathBuf>) -> Option<PathBuf> {
-    let mut slot = DISABLE_DIR.lock().unwrap_or_else(PoisonError::into_inner);
-    std::mem::replace(&mut *slot, dir)
-}
-
-/// Activate the armed toolchain-disable, if any. Called by
-/// [`crate::lockfile::acquire`] immediately after the flock is held, so the
-/// moved-aside window coincides with the locked window. The returned guard is
-/// stored in the `LockGuard` and restores the file just before the flock is
-/// released.
-pub fn activate_for_lock() -> Result<Option<DisabledToolchain>, DevError> {
-    let dir = DISABLE_DIR
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .clone();
+/// Activate the configured toolchain-disable path, if any. Lock acquisition
+/// calls this after the compiler drain and before publishing the capability.
+/// The returned guard is stored in the `LockGuard` and restores the file just
+/// before the flock is released.
+pub fn activate_for_lock(dir: Option<&Path>) -> Result<Option<DisabledToolchain>, DevError> {
     match dir {
-        Some(dir) => Ok(Some(DisabledToolchain::activate(&dir)?)),
+        Some(dir) => Ok(Some(DisabledToolchain::activate(dir)?)),
         None => Ok(None),
     }
 }
@@ -95,19 +70,12 @@ pub fn activate_for_lock() -> Result<Option<DisabledToolchain>, DevError> {
 /// Put back toolchain pins held aside by the live lock, for a process about to
 /// exit without unwinding - the `check` watchdog's backstop, whose main thread
 /// (and so the `LockGuard` whose drop normally restores) is stuck. The hold
-/// records its primary directory and any active worktree directories. Before a
-/// lock exists, fall back to the armed build root. Only a sidecar whose
-/// original is absent is renamed back, which is exactly what the guard's drop
-/// would have done; never called on a path where that drop will still run.
-pub fn restore_armed() {
-    let dirs = match crate::lockfile::current_hold_toolchain_dirs() {
-        Some(dirs) => dirs,
-        None => DISABLE_DIR
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
-            .into_iter()
-            .collect(),
+/// records its primary directory and any active worktree directories. Only a
+/// sidecar whose original is absent is renamed back, as the guard's drop would
+/// do; the path list is scoped to the active hold.
+pub fn restore_active_hold() {
+    let Some(dirs) = crate::lockfile::current_hold_toolchain_dirs() else {
+        return;
     };
     for dir in dirs {
         restore_dir(&dir);
@@ -118,15 +86,36 @@ fn restore_dir(dir: &Path) {
     for name in FILES {
         let orig = dir.join(name);
         let aside = dir.join(format!("{name}{SUFFIX}"));
-        if aside.exists()
-            && !orig.exists()
-            && let Err(e) = std::fs::rename(&aside, &orig)
-        {
+        let should_restore = match path_exists(&aside).and_then(|exists| {
+            if exists {
+                path_exists(&orig).map(|original_exists| !original_exists)
+            } else {
+                Ok(false)
+            }
+        }) {
+            Ok(should_restore) => should_restore,
+            Err(error) => {
+                output::error_forced(&format!("disable_toolchain: {error}"));
+                false
+            }
+        };
+        if should_restore && let Err(e) = std::fs::rename(&aside, &orig) {
             output::error_forced(&format!(
                 "disable_toolchain: failed to restore {}: {e}",
                 orig.display()
             ));
         }
+    }
+}
+
+fn path_exists(path: &Path) -> Result<bool, DevError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(DevError::Io(std::io::Error::new(
+            error.kind(),
+            format!("cannot inspect {}: {error}", path.display()),
+        ))),
     }
 }
 
@@ -161,15 +150,27 @@ impl DisabledToolchain {
         for name in FILES {
             let orig = dir.join(name);
             let aside = dir.join(format!("{name}{SUFFIX}"));
-            if orig.exists() {
+            if path_exists(&orig)? {
                 // Both-exist case: a stale sidecar from a prior hard-killed run
                 // sits next to a current original (rustup/the user recreated the
                 // real file since). The stale sidecar no longer matches anything;
-                // its original was superseded. Remove it (best-effort) before we
-                // move the current `orig` into its place, so the CURRENT file
-                // becomes the restore target rather than being silently clobbered.
-                if aside.exists() {
-                    std::fs::remove_file(&aside).ok();
+                // its original was superseded. Remove it before we move the
+                // current file into its place, so that file becomes the restore
+                // target rather than being silently clobbered.
+                if path_exists(&aside)? {
+                    match std::fs::remove_file(&aside) {
+                        Ok(()) => {}
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(error) => {
+                            return Err(DevError::Io(std::io::Error::new(
+                                error.kind(),
+                                format!(
+                                    "disable_toolchain: cannot remove stale {}: {error}",
+                                    aside.display()
+                                ),
+                            )));
+                        }
+                    }
                 }
                 // This same-directory rename hides the intact toolchain pin
                 // for the locked window and is reversed by Drop. Atomic file
@@ -189,7 +190,7 @@ impl DisabledToolchain {
                 // commands keep none, and a log-only line would vanish).
                 output::detail_or_console(&format!("toolchain disabled: {name} moved aside"));
                 moved.push((aside, orig));
-            } else if aside.exists() {
+            } else if path_exists(&aside)? {
                 // Leftover from a hard-killed prior run: adopt so drop restores
                 // it. The file stays disabled for this run (its point), then
                 // returns to normal afterwards. Worth saying: it means an
@@ -321,31 +322,20 @@ mod tests {
         assert!(!aside.exists());
     }
 
-    /// Mutates `DISABLE_DIR`, which every lock acquisition reads, so it holds
-    /// the crate's shared process-global test lock for its whole body.
     #[test]
-    fn arm_drives_activation_and_restores_previous() {
-        let _serial = crate::test_scratch::process_global_lock();
+    fn explicit_path_drives_lock_activation() {
         let dir = tmpdir("armed");
         let toml = dir.join("rust-toolchain.toml");
         fs::write(&toml, "pinned").unwrap();
 
-        // Armed: activate_for_lock (what the lockfile calls under the flock)
-        // moves the file aside; dropping the returned guard restores it.
-        let saved = super::arm(Some(dir.clone()));
         {
-            let guard = super::activate_for_lock().unwrap();
+            let guard = super::activate_for_lock(Some(&dir)).unwrap();
             assert!(guard.is_some());
             assert!(!toml.exists());
             assert!(dir.join(format!("rust-toolchain.toml{SUFFIX}")).exists());
         }
         assert!(toml.exists());
 
-        // Not armed: activate_for_lock is a no-op.
-        super::arm(None);
-        assert!(super::activate_for_lock().unwrap().is_none());
-
-        // Restore whatever the process global held before this test.
-        super::arm(saved);
+        assert!(super::activate_for_lock(None).unwrap().is_none());
     }
 }

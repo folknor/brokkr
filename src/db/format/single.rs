@@ -175,12 +175,12 @@ fn host_fields(row: &StoredRow) -> Vec<(String, String)> {
     }
     match (row.cargo_profile, row.cargo_features.as_str()) {
         (Some(prof), "") => {
-            fields.push(("cargo".into(), prof.as_str().to_owned()));
+            fields.push(("cargo".into(), prof.as_label().to_owned()));
         }
         (Some(prof), feats) => {
             fields.push((
                 "cargo".into(),
-                format!("{}, features: {feats}", prof.as_str()),
+                format!("{}, features: {feats}", prof.as_label()),
             ));
         }
         (None, "") => {}

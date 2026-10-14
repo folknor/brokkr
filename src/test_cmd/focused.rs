@@ -43,7 +43,7 @@ pub(super) struct Listed {
 }
 
 /// The libtest flags a discovery listing runs with.
-const DISCOVERY_ARGS: [&str; 5] = ["--list", "--format", "json", "-Z", "unstable-options"];
+const DISCOVERY_ARGS: [&str; 5] = ["--list", "-Z", "unstable-options", "--format", "json"];
 
 /// What one package manifest says about harness generation, per target.
 #[derive(Debug, Default)]

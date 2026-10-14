@@ -28,20 +28,6 @@ Reported by: config-cli, measurement, map-projects.
 
 Proposed splits: real modules for `main_parts` and `cli`. Measurement: `measure/wall.rs`, `measure/loop.rs`, `measure/record.rs` (row building, `prev.*`, result line), `measure/capture.rs` (hotpath child runner), `measure/kv.rs` (stderr counter protocol), `sidecar/backup.rs`, and `bench_variants.rs` (`run_variants` is a dispatch helper, not harness). Resolve: `datasets::resolve` (entry resolution, `SnapshotRef`, `select_one`, typed errors), `elivagar::archive_store`, DB paths next to their DBs, `nidhogg_data_dir_path` into `nidhogg`. Download: a real `pbfhogg::download` with submodules `source` (Geofabrik/planet, aliases, URLs), `layout` (`raw_pbf_path`, `osc_filename`), `snapshot` (promotion, collision preflight, toml writes) and `modes`.
 
-## STR-008 - A lane's execution kind is five loose fields and a priority ladder
-
-Reported by: check-plan.
-
-`harness: Harness`, `doc_only: bool`, `parallel_budget: Option<u32>`, `process_isolation: bool` and `test_threads: Option<u32>` together encode one fact: how the lane executes. `prepare::lane_kind` recovers it with a priority ladder (nextest > doc_only > parallel > isolated > serial). Illegal combinations are refused in four different places, or not at all. `lane_kind` silently picks `Parallel` when both `parallel_budget` and `process_isolation` are set, so correctness depends on `phase.rs::reject_conflicting_lanes` having run first. The two docs already disagree: `profile.rs`'s doc on `parallel_budget` says the exclusion is "enforced at resolve time", while `reject_conflicting_lanes` says it is "refused here rather than at resolve time". `LaneKind` is defined in `accounting.rs`, derived in `prepare.rs`, and consumed by `phase.rs`, `continuation.rs` and the doctest predicate, so the type's dependency points accounting <- prepare and the derivation's points prepare <- accounting.
-
-Proposed: `enum LaneExec { Serial { threads }, Parallel { budget }, Isolated, Nextest { threads }, DocOnly }`, built once at resolution, with the conflicts as construction errors and the value carried on the planned sweep. `LaneKind` becomes a projection of it.
-
-## STR-034 - Measurement session residue
-
-Reported by: measurement, map-projects.
-
-`MeasurementSession` replaces the two contexts and the dead `BenchConfig` fallbacks are gone. Residue: the db tests still build full `RunRow` literals by hand (a `RunRow` fixture builder would remove the copies).
-
 ## STR-037 - Remaining dependency edges pointing up
 
 Reported by: measurement, process-control, deps-misc.

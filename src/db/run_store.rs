@@ -147,7 +147,7 @@ impl RunStore {
         match run_ref {
             RunRef::Uuid(prefix) => {
                 super::like::require_prefix(prefix, "uuid")?;
-                let prefix = self.resolve_latest(prefix);
+                let prefix = self.resolve_latest(prefix)?;
                 super::like::require_prefix(&prefix, "uuid")?;
                 let candidates = self.uuids_matching_prefix(&prefix)?;
                 let resolution = match candidates.len() {
@@ -167,7 +167,7 @@ impl RunStore {
         let candidates = match selector {
             RunSelector::Uuid(prefix) => {
                 super::like::require_prefix(prefix, "uuid")?;
-                let prefix = self.resolve_latest(prefix);
+                let prefix = self.resolve_latest(prefix)?;
                 super::like::require_prefix(&prefix, "uuid")?;
                 self.uuids_matching_prefix(&prefix)?
             }
@@ -241,11 +241,11 @@ impl RunStore {
         })
     }
 
-    fn resolve_latest(&self, value: &str) -> String {
-        self.sidecar
-            .as_ref()
-            .map(|sidecar| sidecar.resolve_latest(value))
-            .unwrap_or_else(|| value.to_owned())
+    fn resolve_latest(&self, value: &str) -> Result<String, DevError> {
+        match &self.sidecar {
+            Some(sidecar) => sidecar.resolve_latest(value),
+            None => Ok(value.to_owned()),
+        }
     }
 
     fn sidecar_required(&self) -> Result<&sidecar::SidecarDb, DevError> {

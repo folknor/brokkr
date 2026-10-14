@@ -95,11 +95,9 @@ pub fn run(
     let passed = report.passed(&cfg);
 
     if json {
-        println!(
-            "{}",
-            serde_json::to_string(&report.to_json(passed))
-                .map_err(|e| failed(&format!("serialize regress report: {e}")))?
-        );
+        let json = serde_json::to_string(&report.to_json(passed))
+            .map_err(|e| failed(&format!("serialize regress report: {e}")))?;
+        output::plain(&json);
     } else {
         report.print_text();
     }

@@ -393,27 +393,39 @@ pub(crate) fn sparse_min_cost_pairs<T>(
             break;
         };
         // Alternate forward predecessor and matched edge back to a free
-        // current. Consistent pointers cannot revisit a vertex, so the walk
-        // is bounded; exceeding the bound means the invariant broke.
-        let mut hops = 0usize;
-        loop {
-            hops += 1;
-            assert!(
-                hops <= vertex_bound,
-                "augmenting path exceeds its vertex bound"
-            );
-            let ci = prev_baseline[bi].expect("augmenting path reaches a relaxed baseline node");
-            let previous_bi = cur_match[ci];
-            cur_match[ci] = Some(bi);
-            bl_match[bi] = Some(ci);
-            cur_cost[ci] = *edge_cost
-                .get(&(ci, bi))
-                .expect("augmenting path uses a candidate edge");
-            let Some(old_bi) = previous_bi else {
+        // current. Validate the whole chain before changing either matching
+        // table so an inconsistent predecessor leaves the current matching
+        // intact and the caller can still report unmatched items.
+        let mut augmented = false;
+        let mut path = Vec::new();
+        for _ in 0..vertex_bound {
+            let Some(ci) = prev_baseline[bi] else {
                 break;
             };
-            bl_match[old_bi] = None;
+            let Some(&cost) = edge_cost.get(&(ci, bi)) else {
+                break;
+            };
+            let previous_bi = cur_match[ci];
+            if previous_bi.is_some_and(|old_bi| bl_match[old_bi] != Some(ci)) {
+                break;
+            }
+            path.push((ci, bi, cost, previous_bi));
+            let Some(old_bi) = previous_bi else {
+                augmented = true;
+                break;
+            };
             bi = old_bi;
+        }
+        if !augmented {
+            break;
+        }
+        for (ci, bi, cost, previous_bi) in path {
+            cur_match[ci] = Some(bi);
+            bl_match[bi] = Some(ci);
+            cur_cost[ci] = cost;
+            if let Some(old_bi) = previous_bi {
+                bl_match[old_bi] = None;
+            }
         }
     }
 

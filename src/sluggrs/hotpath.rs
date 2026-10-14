@@ -114,7 +114,7 @@ pub(crate) fn cmd(req: &MeasureRequest, target: &str) -> Result<(), DevError> {
         features,
         default_features: true,
         all_features: false,
-        profile: "release",
+        profile: crate::build::CargoProfile::Release,
     };
 
     // `MeasurementSession` builds against `build_root` (the worktree under
@@ -123,13 +123,11 @@ pub(crate) fn cmd(req: &MeasureRequest, target: &str) -> Result<(), DevError> {
     // call so a worktree's own toolchain pin is already disarmed.
     let ctx = MeasurementSession::with_build_config_for_request(req, &build_config)?;
 
-    let scratch_dir = ctx.paths.scratch_dir.clone();
     run(
         &ctx,
         req,
         req.runs(),
         req.build_root.as_path(),
-        &scratch_dir,
         &command_label,
     )
 }
@@ -144,7 +142,6 @@ fn run(
     req: &MeasureRequest,
     runs: usize,
     build_root: &Path,
-    scratch_dir: &Path,
     command_label: &str,
 ) -> Result<(), DevError> {
     let binary_str = ctx
@@ -152,8 +149,6 @@ fn run(
         .to_str()
         .ok_or_else(|| DevError::Config("binary path is not valid UTF-8".into()))?
         .to_owned();
-
-    std::fs::create_dir_all(scratch_dir)?;
 
     let config = BenchConfig {
         command: command_label.to_owned(),

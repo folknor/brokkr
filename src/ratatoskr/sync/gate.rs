@@ -9,6 +9,7 @@ use crate::git;
 use crate::output;
 use crate::ratatoskr::gate as gate_eval;
 use crate::ratatoskr::gate_store::{GateDb, GateRow};
+use crate::ratatoskr::resolve_config_path;
 use crate::sidecar;
 
 use super::bench::{SyncBenchRequest, run_sync_bench};
@@ -18,6 +19,7 @@ use super::bench::{read_summary_json, summary_to_kv};
 use super::list::{DEFAULT_SYNC_SCRIPT_DIR, sync_script_dir};
 #[cfg(test)]
 use super::runner::render_run_toml;
+use super::runner::{resolve_path, validate_sync_config};
 
 /// The reserved `--gate` value that means "every configured gate".
 pub const GATE_ALL: &str = "all";
@@ -96,21 +98,21 @@ pub fn run_gate_cohort(req: &SyncBenchRequest<'_>) -> Result<(), DevError> {
         ));
     }
 
-    // Resolve every script up front. A typo'd path in gate 14 should
-    // surface now, not twenty minutes into a sweep.
+    // Validate shared mock/harness configuration and every gate script,
+    // including frontmatter and fixture resolution, before the first build.
+    let (_, _, _, fixtures_dir) = validate_sync_config(req.project_root.as_path(), cfg)?;
     let mut plan: Vec<(&str, String)> = Vec::new();
     for (name, gate) in &cfg.gate {
-        let script = if gate.script.is_absolute() {
-            gate.script.clone()
-        } else {
-            req.project_root.as_path().join(&gate.script)
-        };
+        let script = resolve_config_path(req.project_root.as_path(), &gate.script);
         if !script.is_file() {
             return Err(DevError::Config(format!(
                 "sync --gate all: gate `{name}` names a script that does not exist: {}",
                 script.display()
             )));
         }
+        resolve_path(&script, &fixtures_dir).map_err(|error| {
+            DevError::Config(format!("sync --gate all: gate `{name}`: {error}"))
+        })?;
         // Same reasoning for the rule set: a predicate-free rule in the
         // last gate is a config error, not something to find after every
         // other gate has benched. (Per-gate `run_sync_bench` re-checks.)
@@ -125,9 +127,9 @@ pub fn run_gate_cohort(req: &SyncBenchRequest<'_>) -> Result<(), DevError> {
     }
 
     output::ratatoskr_msg(&format!(
-        "gate cohort: {} gate(s), {} iteration(s) each",
-        plan.len(),
-        req.bench
+        "gate cohort: {}, {} each",
+        output::count(plan.len(), "gate"),
+        output::count(req.bench, "iteration")
     ));
 
     // Hold the global measurement lock for the entire sweep. Each
@@ -171,9 +173,10 @@ pub fn run_gate_cohort(req: &SyncBenchRequest<'_>) -> Result<(), DevError> {
             // nothing downstream ever saw it again.
             Err(DevError::Interrupted) => {
                 output::ratatoskr_msg(&format!(
-                    "gate cohort: interrupted during gate `{name}` ({ran}/{} started, {} failed before it)",
-                    plan.len(),
-                    failures.len()
+                    "gate cohort: interrupted during gate `{name}` ({}/{} started, {} failed before it)",
+                    output::count(ran, "gate"),
+                    output::count(plan.len(), "gate"),
+                    output::count(failures.len(), "gate")
                 ));
                 return Err(DevError::Interrupted);
             }
@@ -195,9 +198,9 @@ pub fn run_gate_cohort(req: &SyncBenchRequest<'_>) -> Result<(), DevError> {
         .collect::<Vec<_>>()
         .join("\n");
     Err(DevError::Reported(format!(
-        "sync --gate all: {} of {} gate(s) failed:\n{detail}",
-        failures.len(),
-        plan.len()
+        "sync --gate all: {} failed out of {}:\n{detail}",
+        output::count(failures.len(), "gate"),
+        output::count(plan.len(), "gate")
     )))
 }
 
@@ -233,11 +236,7 @@ pub(super) fn run_gate_hook(ctx: &GateHookCtx<'_>) -> Result<(), DevError> {
     // invocation. The gate is bound to a specific script; mixing them
     // up would silently compare against a different fixture's baseline.
     // Gate paths are config-relative, independent of the caller's cwd.
-    let configured_script = if gate.script.is_absolute() {
-        gate.script.clone()
-    } else {
-        ctx.project_root.join(&gate.script)
-    };
+    let configured_script = resolve_config_path(ctx.project_root, &gate.script);
     let configured_canon = configured_script.canonicalize().map_err(|error| {
         DevError::Config(format!(
             "gate `{}`: failed to resolve configured script {}: {error}",
@@ -260,7 +259,7 @@ pub(super) fn run_gate_hook(ctx: &GateHookCtx<'_>) -> Result<(), DevError> {
     // be. `gate.db` itself stays under the main `project_root` below - a
     // worktree is disposable, and the baselines are not.
     let git_info = git::collect(ctx.req.build_root.as_path())?;
-    let profile_name = CargoProfile::for_debug(ctx.debug).as_str();
+    let profile_name = CargoProfile::for_debug(ctx.debug).as_label();
 
     let sidecar_blob = sidecar_to_json(ctx.sidecar_data);
     let meta_blob = meta_to_json(ctx.summary);
@@ -279,8 +278,12 @@ pub(super) fn run_gate_hook(ctx: &GateHookCtx<'_>) -> Result<(), DevError> {
         // are therefore constants for rows produced by this path.
         exit_code: 0,
         success: true,
-        sidecar: serde_json::to_string(&sidecar_blob).unwrap_or_else(|_| "{}".into()),
-        meta: serde_json::to_string(&meta_blob).unwrap_or_else(|_| "{}".into()),
+        sidecar: serde_json::to_string(&sidecar_blob).map_err(|error| {
+            DevError::Internal(format!("gate: serialize sidecar metrics: {error}"))
+        })?,
+        meta: serde_json::to_string(&meta_blob).map_err(|error| {
+            DevError::Internal(format!("gate: serialize harness metrics: {error}"))
+        })?,
         features: ctx.features.to_owned(),
     };
 
@@ -292,16 +295,18 @@ pub(super) fn run_gate_hook(ctx: &GateHookCtx<'_>) -> Result<(), DevError> {
 
     // Say which database. The harness's earlier "dirty tree - results will
     // NOT be stored" warning is about results.db and does not govern
-    // gate.db, which records every gated run so a failure is inspectable.
+    // gate.db, which records a run here before baseline lookup and rule
+    // evaluation so those failures remain inspectable. Harness failures
+    // and other errors before insertion never reach this point.
     // Unqualified, the two lines read as a contradiction.
     output::ratatoskr_msg(&format!(
         "gate `{}` recorded run {short} in gate.db on host `{hostname}`",
         ctx.gate_name
     ));
     if row.dirty {
-        output::ratatoskr_msg(
-            "  [warn] this row is tagged dirty (--force); it is stored, but \
-             pinning it as a baseline pins numbers from an uncommitted tree",
+        output::warn(
+            "this row is tagged dirty (--force); pinning it as a baseline pins \
+             numbers from an uncommitted tree",
         );
     }
 
@@ -362,10 +367,9 @@ fn warn_if_rebasing(
     // Char-based, not a byte slice: the pin is hand-pasted TOML and may
     // hold a multi-byte character, which a byte slice would panic on.
     let short: String = pinned.chars().take(8).collect();
-    output::ratatoskr_msg(&format!(
-        "  [warn] gate `{gate_name}` already pins baseline {short} for host \
-         `{hostname}` - repinning rebases every baseline-relative rule onto \
-         this run's numbers"
+    output::warn(&format!(
+        "gate `{gate_name}` already pins baseline {short} for host `{hostname}` - \
+         repinning rebases every baseline-relative rule onto this run's numbers"
     ));
     if !strict.is_empty() {
         let subject = if strict.len() == 1 {
@@ -373,8 +377,8 @@ fn warn_if_rebasing(
         } else {
             format!("rules `{}` admit", strict.join("`, `"))
         };
-        output::ratatoskr_msg(&format!(
-            "  [warn] {subject} no drift at all; if this tree has regressed, \
+        output::warn(&format!(
+            "{subject} no drift at all; if this tree has regressed, \
              repinning blesses the regression and the gate goes blind to it. \
              Repin only from a tree you have independently confirmed good."
         ));
@@ -397,16 +401,14 @@ fn missing_baseline_error(
     hostname: &str,
     baseline_uuid: &str,
     current_uuid: &str,
-) -> DevError {
-    let hosts = db.hosts_with_uuid(baseline_uuid).unwrap_or_default();
+) -> Result<String, DevError> {
+    let hosts = db.hosts_with_uuid(baseline_uuid)?;
     let others: Vec<&str> = hosts
         .iter()
         .filter(|h| h.as_str() != hostname)
         .map(String::as_str)
         .collect();
-    let siblings = db
-        .count_for_gate(gate_name, hostname, current_uuid)
-        .unwrap_or(0);
+    let siblings = db.count_for_gate(gate_name, hostname, current_uuid)?;
 
     let cause = if others.is_empty() {
         if siblings == 0 {
@@ -417,25 +419,27 @@ fn missing_baseline_error(
             )
         } else {
             format!(
-                "gate.db does have {siblings} other row(s) for `{gate_name}` on this \
-                 host, so the pinned row specifically is gone (pruned, or written to \
-                 a different ratatoskr gate database)."
+                "gate.db does have {} for `{gate_name}` on this host, so the pinned \
+                 row specifically is gone (pruned, or written to a different \
+                 ratatoskr gate database).",
+                output::count(usize::try_from(siblings).unwrap_or(usize::MAX), "other row")
             )
         }
     } else {
         format!(
-            "that UUID *is* present in gate.db, but under host(s): {}. \
+            "that UUID *is* present in gate.db, but under {}: {}. \
              The pin is filed under the wrong hostname.",
+            output::count(others.len(), "host"),
             others.join(", ")
         )
     };
 
-    DevError::Verify(format!(
+    Ok(format!(
         "gate `{gate_name}`: baseline UUID `{baseline_uuid}` is pinned for host \
          `{hostname}` in brokkr.toml, but no such row exists in gate.db under that \
          host.\n  {cause}\n  Recovery: restore the gate.db that holds this row \
-         (it is the only copy of the reference numbers).\n  [warn] --as-baseline \
-         is NOT a safe fix here: someone pinned this UUID deliberately, and \
+         (it is the only copy of the reference numbers).\n  Safety: --as-baseline \
+         is not a safe fix here: someone pinned this UUID deliberately, and \
          re-recording silently rebases every rule onto the current tree's numbers. \
          If the current tree has regressed, the gate is blessed blind. Only \
          re-record from a tree you have independently confirmed is good."
@@ -464,15 +468,23 @@ fn evaluate_against_baseline(
     })?;
     // Exact-or-unambiguous-prefix, never the current row (already
     // inserted above): see `GateDb::lookup_baseline`.
-    let baseline_entry = db
+    let baseline_entry = match db
         .lookup_baseline(baseline_uuid, hostname, current_uuid)
         .map_err(|e| match e {
             DevError::Config(msg) => DevError::Config(format!("gate `{gate_name}`: {msg}")),
             other => other,
-        })?
-        .ok_or_else(|| {
-            missing_baseline_error(db, gate_name, hostname, baseline_uuid, current_uuid)
-        })?;
+        })? {
+        Some(entry) => entry,
+        None => {
+            return Err(DevError::Verify(missing_baseline_error(
+                db,
+                gate_name,
+                hostname,
+                baseline_uuid,
+                current_uuid,
+            )?));
+        }
+    };
     let baseline_identity = gate_eval::GateIdentity::new(
         baseline_entry.gate_name.clone(),
         baseline_entry.script.clone(),
@@ -497,13 +509,13 @@ fn evaluate_against_baseline(
     let verdict = match baseline_identity.mismatch(&current_identity) {
         Some(mismatch) => gate_eval::GateVerdict::incomparable(mismatch),
         None => {
-            let current_run = gate_eval::GateRun::from_parts(
+            let current_run = gate_eval::GateRun::from_json_parts(
                 current_row.elapsed_ms,
                 current_row.exit_code,
                 current_row.success,
-                serde_json::from_str(&current_row.sidecar).unwrap_or_default(),
-                serde_json::from_str(&current_row.meta).unwrap_or_default(),
-            );
+                &current_row.sidecar,
+                &current_row.meta,
+            )?;
             let baseline_run = gate_eval::GateRun::from_entry(&baseline_entry)?;
             gate_eval::GateVerdict::from_outcomes(rules.evaluate(&current_run, &baseline_run)?)
         }
@@ -523,14 +535,14 @@ fn evaluate_against_baseline(
         verdict.outcomes().len(),
     ));
     if baseline_entry.dirty {
-        output::ratatoskr_msg(
-            "  [warn] baseline was recorded on a dirty git tree (--force); \
-             consider re-recording on a clean checkout",
+        output::warn(
+            "baseline was recorded on a dirty git tree (--force); consider \
+             re-recording on a clean checkout",
         );
     }
     if features_unrecorded {
-        output::ratatoskr_msg(&format!(
-            "  [warn] baseline predates gate.db's features column, so the features \
+        output::warn(&format!(
+            "baseline predates gate.db's features column, so the features \
              it was built with are unknown; this run is {}. Compared on trust - \
              repin from a tree you have confirmed good to make the identity checkable.",
             features_label(&current_row.features)
@@ -649,8 +661,7 @@ mod tests {
     use std::time::Duration;
 
     /// The load-bearing refusal: one command must not be able to rebase
-    /// every gate at once. On ratatoskr's own config that would
-    /// re-anchor 14 zero-drift rules in a single sweep.
+    /// every gate's zero-drift rules at once.
     #[test]
     fn gate_all_refuses_as_baseline() {
         let err = validate_gate_selection(Some(GATE_ALL), false, true)
@@ -754,8 +765,8 @@ mod tests {
             fixtures_dir: None,
             test_endpoint_env_jmap: Some("RATATOSKR_TEST_JMAP_ENDPOINT".into()),
             test_endpoint_env_imap: Some("RATATOSKR_TEST_IMAP_ENDPOINT".into()),
-            test_endpoint_env_smtp: None,
-            test_endpoint_env_graph: None,
+            test_endpoint_env_smtp: Some("RATATOSKR_TEST_SMTP_ENDPOINT".into()),
+            test_endpoint_env_graph: Some("RATATOSKR_TEST_GRAPH_ENDPOINT".into()),
             test_endpoint_env_gmail: Some("RATATOSKR_TEST_GMAIL_ENDPOINT".into()),
             test_endpoint_env_caldav: Some("RATATOSKR_TEST_CALDAV_ENDPOINT".into()),
             test_endpoint_env_carddav: Some("RATATOSKR_TEST_CARDDAV_ENDPOINT".into()),
@@ -780,6 +791,8 @@ mod tests {
             vec![
                 "RATATOSKR_TEST_JMAP_ENDPOINT",
                 "RATATOSKR_TEST_IMAP_ENDPOINT",
+                "RATATOSKR_TEST_SMTP_ENDPOINT",
+                "RATATOSKR_TEST_GRAPH_ENDPOINT",
                 "RATATOSKR_TEST_GMAIL_ENDPOINT",
                 "RATATOSKR_TEST_CALDAV_ENDPOINT",
                 "RATATOSKR_TEST_CARDDAV_ENDPOINT",
@@ -790,30 +803,46 @@ mod tests {
     }
 
     #[test]
-    fn endpoint_envs_use_http_for_json_over_http() {
+    fn endpoint_envs_use_http_for_every_json_protocol() {
         let cfg = cfg_with_endpoints();
         let pairs = endpoint_env_pairs(&cfg, &endpoints());
-        let jmap = pairs
-            .iter()
-            .find(|(n, _)| n == "RATATOSKR_TEST_JMAP_ENDPOINT")
-            .unwrap();
-        assert_eq!(jmap.1, "http://127.0.0.1:1001");
-        let gmail = pairs
-            .iter()
-            .find(|(n, _)| n == "RATATOSKR_TEST_GMAIL_ENDPOINT")
-            .unwrap();
-        assert_eq!(gmail.1, "http://127.0.0.1:1005");
+        for (name, value) in [
+            ("RATATOSKR_TEST_JMAP_ENDPOINT", "http://127.0.0.1:1001"),
+            ("RATATOSKR_TEST_GRAPH_ENDPOINT", "http://127.0.0.1:1004"),
+            ("RATATOSKR_TEST_GMAIL_ENDPOINT", "http://127.0.0.1:1005"),
+            ("RATATOSKR_TEST_CALDAV_ENDPOINT", "http://127.0.0.1:1006"),
+            ("RATATOSKR_TEST_CARDDAV_ENDPOINT", "http://127.0.0.1:1009"),
+            ("RATATOSKR_TEST_PEOPLE_ENDPOINT", "http://127.0.0.1:1007"),
+            ("RATATOSKR_TEST_GCAL_ENDPOINT", "http://127.0.0.1:1008"),
+        ] {
+            assert_eq!(
+                pairs
+                    .iter()
+                    .find(|(n, _)| n == name)
+                    .map(|(_, v)| v.as_str()),
+                Some(value),
+                "{name}"
+            );
+        }
     }
 
     #[test]
-    fn endpoint_envs_use_host_port_for_stream_protocols() {
+    fn endpoint_envs_use_host_port_for_both_stream_protocols() {
         let cfg = cfg_with_endpoints();
         let pairs = endpoint_env_pairs(&cfg, &endpoints());
-        let imap = pairs
-            .iter()
-            .find(|(n, _)| n == "RATATOSKR_TEST_IMAP_ENDPOINT")
-            .unwrap();
-        assert_eq!(imap.1, "127.0.0.1:1002");
+        for (name, value) in [
+            ("RATATOSKR_TEST_IMAP_ENDPOINT", "127.0.0.1:1002"),
+            ("RATATOSKR_TEST_SMTP_ENDPOINT", "127.0.0.1:1003"),
+        ] {
+            assert_eq!(
+                pairs
+                    .iter()
+                    .find(|(n, _)| n == name)
+                    .map(|(_, v)| v.as_str()),
+                Some(value),
+                "{name}"
+            );
+        }
     }
 
     #[test]

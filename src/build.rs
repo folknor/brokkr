@@ -35,12 +35,30 @@ impl CargoProfile {
         if debug { Self::Dev } else { Self::Release }
     }
 
-    pub fn as_str(self) -> &'static str {
+    pub fn as_label(self) -> &'static str {
         match self {
             Self::Release => "release",
             Self::Dev => "dev",
             Self::Java => "java",
             Self::CMake => "cmake",
+        }
+    }
+
+    /// Cargo's profile directory for Rust-built artifacts. External build
+    /// kinds have no Cargo target directory.
+    pub fn target_dir(self) -> Option<&'static str> {
+        match self {
+            Self::Release => Some("release"),
+            Self::Dev => Some("debug"),
+            Self::Java | Self::CMake => None,
+        }
+    }
+
+    /// The concise Cargo switch for a standard profile, if one exists.
+    pub fn cargo_flag(self) -> Option<&'static str> {
+        match self {
+            Self::Release => Some("--release"),
+            Self::Dev | Self::Java | Self::CMake => None,
         }
     }
 
@@ -57,18 +75,8 @@ impl CargoProfile {
         }
     }
 
-    /// Resolve a Cargo build profile into the profile vocabulary recorded by
-    /// results rows. Brokkr's cargo build configurations currently use the
-    /// standard `dev` and `release` profiles only; refusing another profile
-    /// keeps a row from claiming it was built in release by default.
-    fn from_build_config(profile: &str) -> Result<Self, DevError> {
-        match profile {
-            "release" => Ok(Self::Release),
-            "dev" => Ok(Self::Dev),
-            other => Err(DevError::Build(format!(
-                "cargo build used unsupported results profile {other:?}"
-            ))),
-        }
+    fn is_rust_build(self) -> bool {
+        matches!(self, Self::Dev | Self::Release)
     }
 }
 
@@ -101,7 +109,7 @@ pub struct BuildConfig {
     /// `--all-features`. Only `brokkr run --commit` sets it, forwarding the
     /// flag a plain `run` hands to `cargo run`.
     pub all_features: bool,
-    pub profile: &'static str,
+    pub profile: CargoProfile,
 }
 
 impl BuildConfig {
@@ -113,7 +121,7 @@ impl BuildConfig {
             features: Vec::new(),
             default_features: true,
             all_features: false,
-            profile: "release",
+            profile: CargoProfile::Release,
         }
     }
 
@@ -125,7 +133,7 @@ impl BuildConfig {
             features: features.iter().map(|s| (*s).to_owned()).collect(),
             default_features: true,
             all_features: false,
-            profile: "release",
+            profile: CargoProfile::Release,
         }
     }
 
@@ -138,7 +146,7 @@ impl BuildConfig {
             features: features.to_vec(),
             default_features: true,
             all_features: false,
-            profile: "release",
+            profile: CargoProfile::Release,
         }
     }
 
@@ -150,7 +158,7 @@ impl BuildConfig {
             features: features.iter().map(|s| (*s).to_owned()).collect(),
             default_features: false,
             all_features: false,
-            profile: "release",
+            profile: CargoProfile::Release,
         }
     }
 
@@ -169,9 +177,19 @@ impl BuildConfig {
             features: harness_cfg.features.clone(),
             default_features: true,
             all_features: false,
-            profile: if debug { "dev" } else { "release" },
+            profile: CargoProfile::for_debug(debug),
         }
     }
+}
+
+/// Target directory override shared by Cargo build, metadata, binary lookup,
+/// and benchmark paths for a brokkr-created worktree.
+pub(crate) fn cargo_target_dir_override(build_root: &Path) -> Option<String> {
+    crate::worktree::isolated_target_dir(build_root).map(|path| path.display().to_string())
+}
+
+fn target_dir_env(target_dir: Option<&str>) -> Vec<(&'static str, &str)> {
+    target_dir.map_or_else(Vec::new, |dir| vec![("CARGO_TARGET_DIR", dir)])
 }
 
 // ---------------------------------------------------------------------------
@@ -218,7 +236,9 @@ pub fn project_info(cwd: Option<&Path>) -> Result<ProjectInfo, DevError> {
             .map_err(|e| DevError::Build(format!("cannot determine current directory: {e}")))?,
     };
 
-    let metadata = metadata::load(&project_root, Query::workspace(), &[], None)?;
+    let target_override = cargo_target_dir_override(&project_root);
+    let env = target_dir_env(target_override.as_deref());
+    let metadata = metadata::load(&project_root, Query::workspace(), &env, None)?;
 
     Ok(ProjectInfo {
         target_dir: PathBuf::from(&metadata.target_directory),
@@ -241,13 +261,18 @@ pub fn project_info(cwd: Option<&Path>) -> Result<ProjectInfo, DevError> {
 /// Refuses unless this process holds the brokkr lock - see
 /// [`cargo_build_observed`].
 pub fn cargo_build(config: &BuildConfig, project_root: &Path) -> Result<BuiltArtifact, DevError> {
-    cargo_build_observed(config, project_root, None, false)
+    cargo_build_observed(
+        config,
+        project_root,
+        None,
+        crate::shutdown::ChildIsolation::Inherit,
+    )
 }
 
 /// As [`cargo_build`], but takes an extra `on_spawn` observer that fires with
-/// the cargo PID, and an `isolate_pg` policy. The orchestrator passes
-/// `isolate_pg = true` only when a SigtermGuard is active for the build window
-/// so terminal signals can bridge to cargo's process group.
+/// the cargo PID, and an isolation policy. Process-group isolation borrows the
+/// caller's live `SigtermGuard`, the proof that terminal signals bridge to
+/// cargo's process group.
 ///
 /// **Every build runs under the lock, and publishes its cargo PID into it.**
 /// The hold is looked up here ([`crate::lockfile::current_hold`]) and a build
@@ -262,7 +287,7 @@ pub fn cargo_build_observed(
     config: &BuildConfig,
     project_root: &Path,
     on_spawn: Option<&dyn Fn(u32)>,
-    isolate_pg: bool,
+    isolation: crate::shutdown::ChildIsolation<'_>,
 ) -> Result<BuiltArtifact, DevError> {
     let hold = crate::lockfile::current_hold().ok_or_else(|| {
         DevError::Lock(
@@ -277,7 +302,7 @@ pub fn cargo_build_observed(
             cb(pid);
         }
     };
-    let built = cargo_build_locked(config, project_root, &publish, isolate_pg);
+    let built = cargo_build_locked(config, project_root, &publish, isolation);
     hold.clear_child_pid();
     built
 }
@@ -287,11 +312,17 @@ fn cargo_build_locked(
     config: &BuildConfig,
     project_root: &Path,
     on_spawn: &dyn Fn(u32),
-    isolate_pg: bool,
+    isolation: crate::shutdown::ChildIsolation<'_>,
 ) -> Result<BuiltArtifact, DevError> {
-    let profile = CargoProfile::from_build_config(config.profile)?;
+    if !config.profile.is_rust_build() {
+        return Err(DevError::Build(format!(
+            "{} is not a Cargo build profile",
+            config.profile.as_label()
+        )));
+    }
+    let profile = config.profile;
     let on_spawn = Some(on_spawn);
-    let args = build_args(config);
+    let args = build_args(config)?;
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
 
     output::build_msg(&format!("cargo {}", arg_refs.join(" ")));
@@ -308,15 +339,11 @@ fn cargo_build_locked(
     // trees apart; the env var overrides any inherited `build.target-dir`.
     // That dir sits under the live project's target, on its disk (`worktree`'s
     // module doc).
-    let target_override =
-        crate::worktree::isolated_target_dir(project_root).map(|dir| dir.display().to_string());
-    let env: Vec<(&str, &str)> = match target_override.as_deref() {
-        Some(dir) => {
-            output::detail_or_console(&format!("isolating worktree build target dir -> {dir}"));
-            vec![("CARGO_TARGET_DIR", dir)]
-        }
-        None => Vec::new(),
-    };
+    let target_override = cargo_target_dir_override(project_root);
+    let env = target_dir_env(target_override.as_deref());
+    if let Some(dir) = &target_override {
+        output::detail_or_console(&format!("isolating worktree build target dir -> {dir}"));
+    }
 
     let start = Instant::now();
     let captured = output::run_captured_observed(
@@ -325,7 +352,7 @@ fn cargo_build_locked(
         project_root,
         &env,
         on_spawn,
-        isolate_pg,
+        isolation,
         output::SpawnProfile::Cargo { phase: None },
     )?;
     let elapsed = start.elapsed();
@@ -365,22 +392,31 @@ fn cargo_build_locked(
     Ok(built)
 }
 
-/// Resolve the expected release binary path from cargo metadata without
+/// Resolve the selected profile's binary path from cargo metadata without
 /// building.
 pub fn resolve_existing_binary(
     config: &BuildConfig,
     project_root: &Path,
 ) -> Result<PathBuf, DevError> {
-    let metadata = metadata::load(project_root, Query::workspace(), &[], None)?;
+    if !config.profile.is_rust_build() {
+        return Err(DevError::Build(format!(
+            "{} is not a Cargo build profile",
+            config.profile.as_label()
+        )));
+    }
+    let target_override = cargo_target_dir_override(project_root);
+    let env = target_dir_env(target_override.as_deref());
+    let metadata = metadata::load(project_root, Query::workspace(), &env, None)?;
     let bin_name = resolve_bin_name(&metadata, config)?;
 
     let mut path = PathBuf::from(&metadata.target_directory);
-    path.push(config.profile);
+    path.push(config.profile.target_dir().ok_or_else(|| {
+        DevError::Build(format!(
+            "{} has no Cargo target directory",
+            config.profile.as_label()
+        ))
+    })?);
     path.push(bin_name);
-
-    if cfg!(windows) {
-        path.set_extension("exe");
-    }
 
     if !path.exists() {
         return Err(DevError::Build(format!(
@@ -393,7 +429,13 @@ pub fn resolve_existing_binary(
 }
 
 /// Assemble the argument list for `cargo build`.
-fn build_args(config: &BuildConfig) -> Vec<String> {
+fn build_args(config: &BuildConfig) -> Result<Vec<String>, DevError> {
+    if !config.profile.is_rust_build() {
+        return Err(DevError::Build(format!(
+            "{} is not a Cargo build profile",
+            config.profile.as_label()
+        )));
+    }
     let mut args = Vec::with_capacity(10);
     args.push("build".into());
 
@@ -412,11 +454,8 @@ fn build_args(config: &BuildConfig) -> Vec<String> {
         args.push(example.clone());
     }
 
-    if config.profile == "release" {
-        args.push("--release".into());
-    } else {
-        args.push("--profile".into());
-        args.push(config.profile.into());
+    if let Some(flag) = config.profile.cargo_flag() {
+        args.push(flag.into());
     }
 
     args.push("--message-format=json".into());
@@ -434,7 +473,7 @@ fn build_args(config: &BuildConfig) -> Vec<String> {
         args.push(config.features.join(","));
     }
 
-    args
+    Ok(args)
 }
 
 fn resolve_bin_name(metadata: &CargoMetadata, config: &BuildConfig) -> Result<String, DevError> {
@@ -482,10 +521,10 @@ fn resolve_bin_name(metadata: &CargoMetadata, config: &BuildConfig) -> Result<St
 
 /// Scan JSON lines from cargo output to find the compiled executable.
 ///
-/// When `expected_name` is `Some`, prefer the executable whose file stem
-/// matches the name exactly (e.g. `"nidhogg"` matches `target/release/nidhogg`
-/// but not `target/release/nidhogg-update`).  Falls back to the last
-/// executable if no exact match is found.
+/// Prefer the executable whose file stem matches `expected_name`. When there
+/// is no exact match, require cargo to have reported exactly one executable;
+/// cargo does not guarantee JSON ordering, so selecting the last is unsafe.
+/// The same single-executable rule applies when no name was supplied.
 pub fn find_executable(stdout: &[u8], expected_name: Option<&str>) -> Result<PathBuf, DevError> {
     find_executable_artifact(stdout, expected_name).map(|artifact| artifact.path)
 }

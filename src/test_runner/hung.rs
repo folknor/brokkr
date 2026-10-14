@@ -35,14 +35,18 @@ pub(super) fn capture_hung_test(
     // config-dir `project_root` (`state_root`), not the code tree cargo runs
     // in - the two differ when brokkr.toml is one level above a foreign
     // checkout, and the foreign repo must stay clean.
-    let snapshot_dir = crate::clean::layout::ProjectState::new(state_root)
-        .test_hung_dir()
-        .join(format!(
-            "{}-{}-{}",
-            unix_secs(),
-            cargo_pid,
-            sanitize_path_component(&component)
-        ));
+    static SNAPSHOTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _snapshots = SNAPSHOTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let snapshots = crate::clean::layout::ProjectState::new(state_root).test_hung_dir();
+    prune_snapshots(&snapshots);
+    let snapshot_dir = snapshots.join(format!(
+        "{}-{}-{}",
+        unix_secs(),
+        cargo_pid,
+        sanitize_path_component(&component)
+    ));
 
     let mut snapshot_error = None;
     if let Err(err) = fs::create_dir_all(&snapshot_dir) {
@@ -74,6 +78,29 @@ pub(super) fn capture_hung_test(
         wchan,
         stack,
         snapshot_error,
+    }
+}
+
+/// Diagnostics are a bounded recent history, rather than an archive. Keep
+/// room for the snapshot about to be written. Never follow directory symlinks.
+fn prune_snapshots(root: &Path) {
+    const RETAINED: usize = 16;
+    let Ok(entries) = fs::read_dir(root) else {
+        return;
+    };
+    let mut directories: Vec<_> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let metadata = entry.metadata().ok()?;
+            if !entry.file_type().ok()?.is_dir() {
+                return None;
+            }
+            Some((metadata.modified().unwrap_or(UNIX_EPOCH), entry.path()))
+        })
+        .collect();
+    directories.sort_by(|a, b| b.cmp(a));
+    for (_, path) in directories.into_iter().skip(RETAINED - 1) {
+        drop(fs::remove_dir_all(path));
     }
 }
 
@@ -247,4 +274,27 @@ pub(crate) fn format_hung_test(hung: &HungTest, cwd: &Path) -> String {
     }
     out.push_str(&format!("\n  {}", snapshot_line(hung, cwd)));
     out
+}
+
+#[cfg(test)]
+mod retention_tests {
+    #![allow(clippy::unwrap_used)]
+    #[test]
+    fn snapshot_retention_leaves_room_for_the_next_diagnostic() {
+        let root = crate::test_scratch::scratch("test_runner_hung", "retention");
+        for n in 0..30 {
+            std::fs::create_dir(root.join(format!("snapshot-{n}"))).unwrap();
+        }
+        let preserved = root.join("other-file");
+        std::fs::write(&preserved, "untouched").unwrap();
+        super::prune_snapshots(&root);
+        assert_eq!(
+            std::fs::read_dir(&root)
+                .unwrap()
+                .filter(|e| e.as_ref().unwrap().file_type().unwrap().is_dir())
+                .count(),
+            15
+        );
+        assert!(preserved.exists());
+    }
 }

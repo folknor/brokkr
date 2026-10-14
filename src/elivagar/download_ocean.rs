@@ -151,7 +151,11 @@ fn download_variant(data_dir: &Path, variant: &OceanVariant) -> Result<(), DevEr
     }
     std::fs::write(&marker, b"")?;
 
-    std::fs::remove_file(&zip_path).ok();
+    match std::fs::remove_file(&zip_path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
 
     output::download_msg(&format!("done: {}", shp_path.display()));
 
@@ -163,30 +167,18 @@ fn download_variant(data_dir: &Path, variant: &OceanVariant) -> Result<(), DevEr
 // ---------------------------------------------------------------------------
 
 fn check_ogr2ogr() -> Result<(), DevError> {
-    let result = std::process::Command::new("which")
-        .arg("ogr2ogr")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
-
-    match result {
-        Ok(status) if status.success() => Ok(()),
-        _ => Err(DevError::Preflight(vec![
+    match crate::tools::find_executable("ogr2ogr") {
+        Some(_) => Ok(()),
+        None => Err(DevError::Preflight(vec![
             "'ogr2ogr' not found in PATH (required for EPSG:4326 reprojection)".into(),
         ])),
     }
 }
 
 fn check_unzip() -> Result<(), DevError> {
-    let result = std::process::Command::new("which")
-        .arg("unzip")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
-
-    match result {
-        Ok(status) if status.success() => Ok(()),
-        _ => Err(DevError::Preflight(vec![
+    match crate::tools::find_executable("unzip") {
+        Some(_) => Ok(()),
+        None => Err(DevError::Preflight(vec![
             "'unzip' not found in PATH (required for ocean shapefile extraction)".into(),
         ])),
     }

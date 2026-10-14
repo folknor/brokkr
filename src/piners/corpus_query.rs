@@ -138,7 +138,7 @@ pub fn cmd(project_root: &Path, q: &CorpusQuery) -> Result<(), DevError> {
     }
 
     // Bare positional run id or --run N: that run's per-probe detail.
-    if let Some(run_id) = explicit_run_id(q)? {
+    if let Some(run_id) = explicit_run_id(q) {
         return render_run_detail(&db, run_id, q.full);
     }
 
@@ -150,10 +150,10 @@ pub fn cmd(project_root: &Path, q: &CorpusQuery) -> Result<(), DevError> {
 
 /// The run id named explicitly via `--run` or the bare positional argument.
 /// A non-numeric positional is a clear error (it's not a probe selector).
-fn explicit_run_id(q: &CorpusQuery) -> Result<Option<i64>, DevError> {
+fn explicit_run_id(q: &CorpusQuery) -> Option<i64> {
     // `--run` and the bare positional are equivalent; prefer the flag. clap
     // already rejects a non-numeric positional, so there is no parse path here.
-    Ok(q.run.or(q.run_id))
+    q.run.or(q.run_id)
 }
 
 /// Reject options that would otherwise be accepted and silently ignored by a
@@ -252,7 +252,7 @@ fn validate_query(q: &CorpusQuery) -> Result<(), DevError> {
 
 /// The explicit run id if given, else the latest recorded run.
 fn resolve_run(db: &CorpusDb, q: &CorpusQuery) -> Result<Option<i64>, DevError> {
-    if let Some(id) = explicit_run_id(q)? {
+    if let Some(id) = explicit_run_id(q) {
         return Ok(Some(id));
     }
     db.latest_run_id()

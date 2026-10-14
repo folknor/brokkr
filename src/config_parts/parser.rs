@@ -87,20 +87,8 @@ fn parse_project(table: &toml::Table) -> Result<Project, DevError> {
         .and_then(|v| v.as_str())
         .ok_or_else(|| DevError::Config("brokkr.toml missing required 'project' field".into()))?;
 
-    let project = match project_str {
-        "pbfhogg" => Project::Pbfhogg,
-        "elivagar" => Project::Elivagar,
-        "nidhogg" => Project::Nidhogg,
-        "brokkr" => Project::Brokkr,
-        "litehtml-rs" => Project::Litehtml,
-        "sluggrs" => Project::Sluggrs,
-        "ratatoskr" => Project::Ratatoskr,
-        "saehrimnir" => Project::Saehrimnir,
-        "piners" => Project::Piners,
-        "dellingr" => Project::Dellingr,
-        "mogwai" => Project::Mogwai,
-        other => Project::Other(Box::leak(other.to_owned().into_boxed_str())),
-    };
+    let project = Project::from_builtin_name(project_str)
+        .unwrap_or_else(|| Project::Other(Box::leak(project_str.to_owned().into_boxed_str())));
     Ok(project)
 }
 
@@ -583,7 +571,7 @@ fn parse_textlint(
             .map_or_else(|| "<unnamed>".to_owned(), |n| format!("{n:?}"));
         // Combine the named presets in declaration order into one table, then
         // layer that under the rule - so a later preset never reorders an
-        // earlier one's list entries ahead of it (S3-25).
+        // earlier one's list entries ahead of it.
         let mut combined = toml::value::Table::new();
         for name in take_textlint_presets(&mut body, &label)? {
             let preset = presets.get(&name).ok_or_else(|| {
@@ -745,10 +733,12 @@ fn parse_capture_env(
     Ok(out)
 }
 
-/// Top-level config sections that are not host tables. `include` is consumed
-/// by composition before this parser sees the merged table.
-const NON_HOST_TOP_LEVEL_KEYS: &[&str] = &[
+/// Top-level keys owned by brokkr rather than hostnames. Composition consumes
+/// `include` before this parser sees the merged table; it stays here so the
+/// parser and the config reference share one key universe.
+pub(crate) const SECTIONS: &[&str] = &[
     "project",
+    "include",
     "host",
     "litehtml",
     "sluggrs",
@@ -807,7 +797,7 @@ fn parse_hosts(
     }
 
     for (key, value) in table {
-        if NON_HOST_TOP_LEVEL_KEYS.contains(&key.as_str()) {
+        if SECTIONS.contains(&key.as_str()) {
             continue;
         }
         if !value.is_table() {
@@ -1157,8 +1147,18 @@ fn parse_check(
 /// isolation (`sweep_runtime_env` / `sweep_cargo_env`). Both a `[[check]]`
 /// entry's `env` and a profile's `env` feed `merged_env`, which lets the sweep
 /// env win over the composed isolation overlay - so a hand-set value here
-/// silently *replaces* it rather than layering onto it.
-const RESERVED_SWEEP_ENV: [&str; 3] = ["RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "CARGO_TARGET_DIR"];
+/// silently *replaces* it rather than layering onto it. The hold capability,
+/// compile-lease marker and rustc-info cache switch are brokkr's own child
+/// protocol (`crate::hold`): the spawn choke point stamps them last, so a
+/// configured value could never take effect and is refused as a mistake.
+const RESERVED_SWEEP_ENV: [&str; 6] = [
+    "RUSTFLAGS",
+    "CARGO_ENCODED_RUSTFLAGS",
+    "CARGO_TARGET_DIR",
+    crate::hold::CAPABILITY_ENV,
+    crate::hold::LEASE_MARKER_ENV,
+    crate::hold::RUSTC_INFO_CACHE_ENV,
+];
 
 /// Reject any [`RESERVED_SWEEP_ENV`] key set by hand in an env map that feeds a
 /// sweep, **unconditionally** - not gated on `rustflags` being present, because
@@ -1174,12 +1174,13 @@ fn reject_reserved_sweep_env(
     for banned in RESERVED_SWEEP_ENV {
         if env.contains_key(banned) {
             return Err(DevError::Config(format!(
-                "{at} sets `env.{banned}`, a key brokkr composes itself for the \
-                 sweep's target-dir / RUSTFLAGS isolation. A hand-set value \
-                 silently replaces the composed one (a wrong-binary \
-                 BROKKR_TEST_BIN_DIR, or a dropped `--cfg`). Remove it; pass \
-                 extra rustc flags through a `[[check]]` entry's `rustflags` \
-                 field, which auto-isolates the target dir."
+                "{at} sets `env.{banned}`, a key brokkr composes itself (the \
+                 sweep's target-dir / RUSTFLAGS isolation, or its own child \
+                 protocol). A hand-set value either silently replaces the \
+                 composed one (a wrong-binary BROKKR_TEST_BIN_DIR, or a dropped \
+                 `--cfg`) or never takes effect. Remove it; pass extra rustc \
+                 flags through a `[[check]]` entry's `rustflags` field, which \
+                 auto-isolates the target dir."
             )));
         }
     }
@@ -1379,9 +1380,8 @@ fn validate_check_entry_harness(entry: &CheckEntry) -> Result<(), DevError> {
 
 /// Parse the optional `[test]` section from the root table.
 ///
-/// Also detects the previous `[test.sweeps.*]` shape (folded into
-/// `[[check]]` with this redesign) and `[check].consumer_features`
-/// fragments smuggled inside `[test]`, redirecting to the new shape.
+/// Also detects the previous `[test.sweeps.*]` shape, now represented by
+/// `[[check]]` entries referenced from `[test.profiles.*].sweeps`.
 fn parse_test(
     table: &toml::map::Map<String, toml::Value>,
 ) -> Result<Option<TestConfig>, DevError> {
@@ -1655,6 +1655,7 @@ fn validate_check_against_test(
     }
     validate_doctest_ledger(t, check, quarantine)?;
     let resolved_profiles = crate::profile::resolve_profiles_for_validation(t, check)?;
+    validate_complete_doctest_carriers(t, &resolved_profiles)?;
     validate_complete_test_threads(t, &resolved_profiles)?;
     Ok(())
 }
@@ -1924,9 +1925,9 @@ fn referenced_check_entries(
 /// sweeps a lane happens to reference, an entry no lane names would be
 /// enumerated nowhere and the coverage audit would print `0 orphaned` over
 /// tests that never ran - the exact hole the audit exists to close. Every
-/// `[[check]]` entry is unconditional today (feature 6 `when` is unbuilt),
-/// so a complete profile must reference every one; an omission is a
-/// resolve-time error. `curated = true` entries are exempt: a curated
+/// `[[check]]` entry is unconditional, so a complete profile must reference
+/// every one. An omission is a resolve-time error. `curated = true` entries
+/// are exempt: a curated
 /// entry's non-run pairs are outside the universe by declaration, so an
 /// unreferenced one certifies nothing without running it - which is what
 /// lets a curated subset live in its own deliberately-run profile while a
@@ -1939,26 +1940,6 @@ fn validate_complete_universe(
     let mut referenced: BTreeSet<String> = BTreeSet::new();
     let mut visited: BTreeSet<String> = BTreeSet::new();
     referenced_check_entries(&t.profiles, name, &mut visited, &mut referenced);
-    // Doctests run only in a sweep without `parallel`. A profile whose every
-    // sweep is parallel therefore runs none - and a `complete` profile that
-    // certifies a run in which the project's declared doctests never executed
-    // is claiming coverage it does not have. Checked per complete profile
-    // rather than globally: a partial `fast` profile may legitimately be all
-    // parallel, because it certifies nothing.
-    if t.doctests && !referenced.is_empty() {
-        let serial = check
-            .iter()
-            .filter(|e| referenced.contains(&e.name))
-            .any(|e| e.parallel.is_none());
-        if !serial {
-            return Err(DevError::Config(format!(
-                "[test.profiles.{name}] certifies \"complete\" and \
-                 [test] doctests = true, but every sweep it runs sets \
-                 `parallel`, which cannot execute doctests. Add a [[check]] \
-                 entry without `parallel` to this profile's sweeps."
-            )));
-        }
-    }
     let unreferenced: Vec<&str> = check
         .iter()
         .filter(|e| !e.curated)
@@ -1981,6 +1962,39 @@ fn validate_complete_universe(
              universe), or delete the entry.",
             unreferenced.join(", "),
         )));
+    }
+    Ok(())
+}
+
+/// A complete profile must carry configured doctests through at least one
+/// selected lane. Use the same lane predicate as preparation and accounting,
+/// so nextest, isolation, parallel execution and target filters cannot drift
+/// into separate interpretations of what runs doctests.
+fn validate_complete_doctest_carriers(
+    config: &TestConfig,
+    profiles: &BTreeMap<String, Vec<crate::profile::SweepDecl>>,
+) -> Result<(), DevError> {
+    if !config.doctests {
+        return Ok(());
+    }
+    for (name, profile) in &config.profiles {
+        if !Claim::new(profile.certifies).requires_attribution() {
+            continue;
+        }
+        let carries_doctests = profiles.get(name).is_some_and(|sweeps| {
+            sweeps.iter().any(|declaration| {
+                crate::profile::PlannedSweep::resolve(declaration.clone(), false).is_ok_and(
+                    |sweep| crate::check_cmd::lane_runs_doctests(&sweep, config.doctests),
+                )
+            })
+        });
+        if !carries_doctests {
+            return Err(DevError::Config(format!(
+                "[test.profiles.{name}] certifies \"complete\" and \
+                 [test] doctests = true, but none of its selected lanes runs doctests. \
+                 Add a serial sweep without target filters or a `doc_only` entry."
+            )));
+        }
     }
     Ok(())
 }
@@ -2360,7 +2374,7 @@ mod universe_tests {
 
     #[test]
     fn complete_lanes_profile_must_reference_every_check_entry() {
-        // The S3-12 hole: a complete profile whose lanes name only
+        // A complete profile whose lanes name only
         // default+ffi leaves live+sim enumerated nowhere, so the audit would
         // print `0 orphaned` over tests that never ran.
         let cfg: TestConfig = toml::from_str(

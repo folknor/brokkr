@@ -811,7 +811,7 @@ mod tests {
 
     #[test]
     fn table_cell_markup_stays_inside_the_table() {
-        // S3-28/S3-30: emphasis, strong, and inline code inside a table cell
+        // Emphasis, strong, and inline code inside a table cell
         // used to leak their markers into the stream ABOVE the buffered table
         // (and code lost its backticks). They must render in place, in the cell.
         let out = render(
@@ -838,7 +838,7 @@ mod tests {
 
     #[test]
     fn table_header_cells_are_styled() {
-        // S3-30: header cells route through `push_table_text`, so the header
+        // Header cells route through `push_table_text`, so the header
         // theme only takes effect if that path styles them. A plain table (no
         // inline markup) therefore emits ANSI only once the header is styled.
         let colored = render("| Head | X |\n| --- | --- |\n| a | b |\n", false);

@@ -110,7 +110,7 @@ pub struct BenchHarness {
     /// What the session built, when it built the measured binary: the row's
     /// `cargo_profile` and canonical `cargo_features` come from it.
     build_identity: Option<BuildIdentity>,
-    /// Env var snapshot captured at `with_request` time. Merged into
+    /// Env var snapshot captured from the measurement request. Merged into
     /// every row's kv via `build_row` as `env.<NAME>` entries - lets
     /// env-gated code paths (A/B feature flags set from the shell) be
     /// distinguished across result rows.
@@ -377,7 +377,7 @@ impl BenchHarness {
             return Ok(None);
         }
         if self.git.is_clean {
-            let row = self.build_row(config, result, iterations_us, fired_stop_marker);
+            let row = self.build_row(config, result, iterations_us, fired_stop_marker)?;
             let (uuid, short) = match self.db.insert(&row) {
                 Ok(pair) => pair,
                 Err(e) => {
@@ -411,10 +411,10 @@ impl BenchHarness {
         config: &BenchConfig,
         program: &Path,
         start_epoch: i64,
+        binary_xxh128: Option<String>,
         pid: Option<u32>,
         ending: Option<child::Ending>,
     ) -> crate::db::sidecar::RunInfo {
-        let binary_xxh128 = crate::preflight::compute_file_digest(program).map(|d| d.to_string()).ok();
         crate::db::sidecar::RunInfo {
             run_start_epoch: Some(start_epoch),
             pid: pid.map(i64::from),
@@ -434,7 +434,7 @@ impl BenchHarness {
     /// elapsed_ms, so `brokkr sidecar <uuid>` defaults to the right run.
     ///
     /// `run_info` carries provenance metadata (timestamp, binary hash, git
-    /// commit, variant, dataset, exit code) so that `brokkr sidecar dirty`
+    /// commit, mode, dataset, ending) so that `brokkr sidecar dirty`
     /// can identify exactly which run produced the sidecar data.
     ///
     /// When `uuid` is `None` (dirty tree or failed run), generates a fresh
@@ -458,17 +458,7 @@ impl BenchHarness {
             Some(u) => (u.to_owned(), false),
             None => {
                 // Generate a unique UUID for this dirty/failed run.
-                let mut bytes = [0u8; 16];
-                std::fs::File::open("/dev/urandom")
-                    .and_then(|mut f| {
-                        use std::io::Read;
-                        f.read_exact(&mut bytes)
-                    })
-                    .map_err(DevError::Io)?;
-                bytes[6] = (bytes[6] & 0x0f) | 0x40;
-                bytes[8] = (bytes[8] & 0x3f) | 0x80;
-                let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
-                (hex, true)
+                (crate::db::generate_uuid()?, true)
             }
         };
 
@@ -515,7 +505,7 @@ impl BenchHarness {
         result: &BenchResult,
         iterations_us: &[i64],
         fired_stop_marker: Option<&str>,
-    ) -> RunRow {
+    ) -> Result<RunRow, DevError> {
         let mut kv = config.metadata.clone();
         // Sources are appended in increasing precedence - metadata, env
         // capture, prev.*, then the run's own counters - and the insert
@@ -523,7 +513,7 @@ impl BenchHarness {
         // runtime counters win the unlikely collision (env.foo vs a
         // runtime env.foo).
         kv.extend(self.env_kv.iter().cloned());
-        kv.extend(previous_run_kv(&self.db, self.measure_start_epoch.get()));
+        kv.extend(previous_run_kv(&self.db, self.measure_start_epoch.get())?);
         let mut peak_rss_mb: Option<f64> = None;
         for pair in &result.kv {
             if pair.key == "peak_rss_kb" {
@@ -543,7 +533,7 @@ impl BenchHarness {
         // brokkr invocation string - the harness attaches them.
         let mode = self.effective_mode();
 
-        RunRow {
+        Ok(RunRow {
             hostname: self.host.hostname.clone(),
             commit: self.git.commit.clone(),
             subject: self.git.subject.clone(),
@@ -594,7 +584,7 @@ impl BenchHarness {
             },
             distribution: result.distribution.clone(),
             hotpath: result.hotpath.clone(),
-        }
+        })
     }
 }
 
@@ -607,17 +597,20 @@ impl BenchHarness {
 /// to tell "this baseline was warm" from "this baseline was fast".
 ///
 /// Must be called before the current row is inserted, or it describes the
-/// current run. Provenance is best-effort: a lookup failure yields no pairs
-/// rather than failing a benchmark that otherwise succeeded.
+/// current run. Lookup errors are returned so the row cannot silently lose
+/// predecessor provenance.
 ///
 /// `measure_start_epoch` is when this run began; the gap is measured to that,
 /// not to now, because "now" is after every iteration has run and would count
 /// this run's own duration as idle time. Falls back to the current clock when
 /// it is 0 (a caller that recorded a result without going through a `run_*`
 /// loop), which is the same reading as before the loop for an instant record.
-fn previous_run_kv(db: &ResultsDb, measure_start_epoch: i64) -> Vec<KvPair> {
-    let Ok(Some(prev)) = db.previous_run() else {
-        return Vec::new();
+fn previous_run_kv(
+    db: &ResultsDb,
+    measure_start_epoch: i64,
+) -> Result<Vec<KvPair>, DevError> {
+    let Some(prev) = db.previous_run()? else {
+        return Ok(Vec::new());
     };
     let start = if measure_start_epoch > 0 {
         measure_start_epoch
@@ -649,5 +642,5 @@ fn previous_run_kv(db: &ResultsDb, measure_start_epoch: i64) -> Vec<KvPair> {
             input,
         ));
     }
-    kv
+    Ok(kv)
 }

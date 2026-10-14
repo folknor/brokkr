@@ -23,6 +23,7 @@
 //! moves for the same reasons.
 
 use std::collections::BTreeMap;
+use std::io;
 use std::path::Path;
 
 use super::constants::mvt;
@@ -79,10 +80,10 @@ struct SamplePair {
 
 type ZoomRuns = BTreeMap<u8, Vec<TileSpan>>;
 
-fn addressed_runs(archive: &ArchiveView) -> Result<(ZoomRuns, u64), DevError> {
+fn addressed_runs(archive: &ArchiveView, path: &str) -> Result<(ZoomRuns, u64), DevError> {
     let runs = archive
         .read_all_runs()
-        .map_err(|e| DevError::Verify(format!("read directory: {e}")))?;
+        .map_err(|error| archive_failure(path, &error))?;
     let mut by_zoom = ZoomRuns::new();
     let mut addressed = 0u64;
     for run in runs {
@@ -180,10 +181,24 @@ fn spread_sample(common: &[CommonSpan], count: u64, take: usize) -> Vec<SamplePa
 /// size. A tile that will not decode is skipped rather than fatal: this is a
 /// census over a sample, and one bad tile should not deny the other sampled
 /// tiles.
-fn tally_tile(archive: &ArchiveView, blob: BlobRef) -> Option<(Tallies, usize)> {
-    let raw = archive.raw_blob(blob).ok()?;
-    let bytes = gzip_decompress(raw).ok()?;
-    let tile = decode_detail_tile(&bytes, Strictness::Tolerant).ok()?;
+fn tally_tile(
+    archive: &ArchiveView,
+    blob: BlobRef,
+    path: &str,
+) -> Result<Option<(Tallies, usize)>, DevError> {
+    let raw = match archive.raw_blob(blob) {
+        Ok(raw) => raw,
+        Err(error) if malformed_tile_error(error.kind()) => return Ok(None),
+        Err(error) => return Err(archive_failure(path, &error)),
+    };
+    let bytes = match gzip_decompress(raw) {
+        Ok(bytes) => bytes,
+        Err(error) if malformed_tile_error(error.kind()) => return Ok(None),
+        Err(error) => return Err(archive_failure(path, &error)),
+    };
+    let Ok(tile) = decode_detail_tile(&bytes, Strictness::Tolerant) else {
+        return Ok(None);
+    };
     let mut into = Tallies::new();
     for layer in &tile.layers {
         let tally = into.entry(layer.name.to_string()).or_default();
@@ -203,7 +218,23 @@ fn tally_tile(archive: &ArchiveView, blob: BlobRef) -> Option<(Tallies, usize)> 
                 .sum::<usize>();
         }
     }
-    Some((into, bytes.len()))
+    Ok(Some((into, bytes.len())))
+}
+
+fn malformed_tile_error(kind: io::ErrorKind) -> bool {
+    matches!(
+        kind,
+        io::ErrorKind::InvalidData | io::ErrorKind::UnexpectedEof
+    )
+}
+
+fn archive_failure(path: &str, error: &io::Error) -> DevError {
+    let message = format!("{path}: {error}");
+    if malformed_tile_error(error.kind()) {
+        DevError::Verify(message)
+    } else {
+        DevError::Io(io::Error::new(error.kind(), message))
+    }
 }
 
 /// Fold one tile's tallies into a running total.
@@ -233,8 +264,7 @@ pub fn run(file_a: &str, file_b: &str, sample: Option<usize>) -> Result<(), DevE
         )));
     }
     let open = |path: &str| {
-        ArchiveView::open(Path::new(path))
-            .map_err(|e| DevError::Verify(format!("open {path}: {e}")))
+        ArchiveView::open(Path::new(path)).map_err(|error| archive_failure(path, &error))
     };
     let name = |path: &str| {
         Path::new(path)
@@ -247,8 +277,8 @@ pub fn run(file_a: &str, file_b: &str, sample: Option<usize>) -> Result<(), DevE
     let name_a = name(file_a);
     let name_b = name(file_b);
 
-    let (by_zoom_a, addressed_a) = addressed_runs(&archive_a)?;
-    let (by_zoom_b, addressed_b) = addressed_runs(&archive_b)?;
+    let (by_zoom_a, addressed_a) = addressed_runs(&archive_a, file_a)?;
+    let (by_zoom_b, addressed_b) = addressed_runs(&archive_b, file_b)?;
     output::bench_msg(&format!(
         "{name_a}: {} tiles, z{}-{}",
         addressed_a,
@@ -274,17 +304,19 @@ pub fn run(file_a: &str, file_b: &str, sample: Option<usize>) -> Result<(), DevE
             (&archive_a, by_zoom_a.get(&z).unwrap_or(&empty)),
             (&archive_b, by_zoom_b.get(&z).unwrap_or(&empty)),
             sample_per_zoom,
+            file_a,
+            file_b,
         )?;
         merge(&mut grand_a, &zoom_a);
         merge(&mut grand_b, &zoom_b);
     }
 
-    println!("\n=== Grand totals (all sampled tiles) ===\n");
-    println!(
+    output::plain("\n=== Grand totals (all sampled tiles) ===\n");
+    output::plain(&format!(
         "{:24} {name_a:>10} {name_b:>10} {:>8} {:>10} {:>10}",
         "layer", "diff", "verts_A", "verts_B"
-    );
-    println!("{}", "-".repeat(78));
+    ));
+    output::plain(&"-".repeat(78));
     let mut total_a = LayerTally::default();
     let mut total_b = LayerTally::default();
     for layer in layer_names(&grand_a, &grand_b) {
@@ -299,21 +331,21 @@ pub fn run(file_a: &str, file_b: &str, sample: Option<usize>) -> Result<(), DevE
         } else {
             "only A".to_string()
         };
-        println!(
+        output::plain(&format!(
             "{layer:24} {:10} {:10} {diff:>8} {:10} {:10}",
             a.features, b.features, a.vertices, b.vertices
-        );
+        ));
     }
-    println!("{}", "-".repeat(78));
+    output::plain(&"-".repeat(78));
     let total_diff = if total_a.features > 0 {
         percent(total_a.features, total_b.features)
     } else {
         "N/A".to_string()
     };
-    println!(
+    output::plain(&format!(
         "{:24} {:10} {:10} {total_diff:>8} {:10} {:10}",
         "TOTAL", total_a.features, total_b.features, total_a.vertices, total_b.vertices
-    );
+    ));
     Ok(())
 }
 
@@ -324,6 +356,8 @@ fn compare_zoom(
     a: (&ArchiveView, &[TileSpan]),
     b: (&ArchiveView, &[TileSpan]),
     sample_per_zoom: usize,
+    path_a: &str,
+    path_b: &str,
 ) -> Result<(Tallies, Tallies), DevError> {
     let (archive_a, za) = a;
     let (archive_b, zb) = b;
@@ -356,7 +390,10 @@ fn compare_zoom(
     let (mut bytes_a, mut bytes_b) = (0usize, 0usize);
     let (mut decoded, mut errors) = (0usize, 0usize);
     for pair in sampled {
-        match (tally_tile(archive_a, pair.a), tally_tile(archive_b, pair.b)) {
+        match (
+            tally_tile(archive_a, pair.a, path_a)?,
+            tally_tile(archive_b, pair.b, path_b)?,
+        ) {
             (Some((ta, la)), Some((tb, lb))) => {
                 merge(&mut zoom_a, &ta);
                 merge(&mut zoom_b, &tb);
@@ -413,7 +450,7 @@ fn print_layers(a: &Tallies, b: &Tallies, indent: &str) {
                 String::new()
             }
         };
-        println!(
+        output::plain(&format!(
             "{indent}{layer:24} A:{:6}{:16} B:{:6}{:16} verts A:{:8} B:{:8}  {}",
             ta.features,
             split(ta),
@@ -422,6 +459,6 @@ fn print_layers(a: &Tallies, b: &Tallies, indent: &str) {
             ta.vertices,
             tb.vertices,
             percent(ta.features, tb.features)
-        );
+        ));
     }
 }

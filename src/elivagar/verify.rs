@@ -36,6 +36,9 @@ pub fn run(
         for line in stdout.lines() {
             output::verify_msg(&format!("  {line}"));
         }
+        if !captured.stderr.is_empty() {
+            output::plain_stderr(&String::from_utf8_lossy(&captured.stderr));
+        }
         output::verify_msg("PASS");
         Ok(())
     } else {

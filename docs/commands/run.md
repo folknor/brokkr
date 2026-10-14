@@ -267,3 +267,26 @@ With no `brokkr.toml`, the working directory is the project root and there is
 no `[bin]` section - discovery, the bare index, and the sole-runnable and
 sole-package rules all still work. Configuration buys disambiguation, never
 capability.
+
+## Exit statuses
+
+Most commands return `0` on success and `1` on an ordinary failure. The
+following codes are shared or command-specific outcomes; a code does not have
+one global meaning across every command.
+
+| Code | Meaning |
+| --- | --- |
+| `0` | Success, including the bare `brokkr run` target index. |
+| `1` | Ordinary failure; also a failed `check`/`test` verdict and a refused rustc compile. |
+| `2` | Command-specific: clap usage failure, `brokkr-rustc-guard` called without a wrapped command, or a corpus-gate archive refusal. |
+| `3` | Command-specific: `brokkr regress` could not complete, or the corpus gate found baseline trouble. |
+| `4` | `brokkr pmtiles-corpus` could not complete. |
+| `10` | A `check`/`test` run ended with a partial verdict. |
+| `124` | A `check`/`test`/`clippy` watchdog ceiling fired. |
+| `127` | `brokkr-rustc-guard` could not exec the wrapped compiler. |
+| `130` | An accepted interrupt or graceful stop. |
+
+`brokkr run` is a passthrough boundary: the wrapped program's non-zero status
+is propagated as-is. Its status can therefore overlap with a brokkr outcome
+above; use the command output to distinguish them. See the command-specific
+details in `brokkr man check`, `brokkr man corpus`, and `brokkr man elivagar`.

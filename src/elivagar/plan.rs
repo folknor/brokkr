@@ -99,7 +99,11 @@ impl PlannedCommand for ElivagarPlan<'_, '_> {
         } else {
             match self.0 {
                 ElivagarCommand::Built(command) => command.build_args("", &layout, None)?,
-                _ => unreachable!(),
+                ElivagarCommand::External(_) => {
+                    return Err(DevError::Internal(
+                        "external elivagar command unexpectedly has no PBF input".into(),
+                    ));
+                }
             }
         };
         Ok(CommandPlan {
@@ -121,14 +125,12 @@ impl PlannedCommand for ElivagarPlan<'_, '_> {
         ctx: &MeasurementSession,
         _plan: &CommandPlan<Self::State>,
     ) -> Result<(), DevError> {
-        if let ElivagarCommand::Built(BuiltCommand::MainBinary { .. }) = self.0 {
+        if let ElivagarCommand::Built(command @ BuiltCommand::MainBinary { .. }) = self.0 {
             let layout = ElivagarLayout::new(&ctx.paths);
             std::fs::create_dir_all(layout.scratch())?;
             std::fs::create_dir_all(layout.tilegen_tmp())?;
-            if let ElivagarCommand::Built(command) = self.0 {
-                for file in command.output_files(&layout) {
-                    std::fs::remove_file(file).ok();
-                }
+            for file in command.output_files(&layout) {
+                remove_if_present(&file)?;
             }
         }
         Ok(())
@@ -149,8 +151,8 @@ impl PlannedCommand for ElivagarPlan<'_, '_> {
         _plan: &CommandPlan<Self::State>,
     ) -> Result<(), DevError> {
         // This is the success path: Run/Bench promote their archive, while
-        // Hotpath/Alloc remove scratch outputs. Failed execution does not reach
-        // this callback and needs cleanup at the shared runner boundary.
+        // Hotpath/Alloc remove scratch outputs. Failed executions preserve
+        // scratch output for diagnosis, as the shared runner documents.
         if let ElivagarCommand::Built(command @ BuiltCommand::MainBinary { .. }) = self.0 {
             let layout = ElivagarLayout::new(&ctx.paths);
             if matches!(req.mode, MeasureMode::Run | MeasureMode::Bench { .. }) {
@@ -163,12 +165,8 @@ impl PlannedCommand for ElivagarPlan<'_, '_> {
                 )?;
             } else {
                 for file in command.output_files(&layout) {
-                    std::fs::remove_file(file).ok();
+                    remove_if_present(&file)?;
                 }
-                std::fs::remove_file(layout.tilegen_hotpath_output(
-                    req.mode.profiled() == Some(crate::measure::ProfiledMode::Alloc),
-                ))
-                .ok();
             }
         }
         Ok(())
@@ -188,8 +186,18 @@ impl PlannedCommand for ElivagarPlan<'_, '_> {
             ElivagarCommand::Built(BuiltCommand::Example(example)) => {
                 run_example(req, ctx, example, plan)
             }
-            _ => unreachable!(),
+            ElivagarCommand::Built(BuiltCommand::MainBinary { .. }) => Err(DevError::Internal(
+                "tilegen execution must use the binary plan".into(),
+            )),
         }
+    }
+}
+
+fn remove_if_present(path: &Path) -> Result<(), DevError> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
     }
 }
 

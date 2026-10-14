@@ -26,8 +26,9 @@ fails at parse time rather than silently listing; `--filter` and
 
 For the `[ratatoskr.harness]` config block (direct package and binary build
 specification) see
-`docs/brokkr.toml.md`. For the harness model (lua VM, ServiceClient userdata,
-artefact writers, runtime-outcome) see `docs/projects/ratatoskr.md`.
+the [ratatoskr configuration guide](../projects/ratatoskr.md#configuration).
+For the harness model (lua VM, ServiceClient userdata, artefact writers,
+runtime-outcome) see the rest of that guide.
 
 ## `service` (no SCRIPT) - the index
 
@@ -85,8 +86,10 @@ When the ceiling fires brokkr SIGKILLs the child and labels the run
 `ceiling=<spelling>`; otherwise the label tracks the child's exit code/signal.
 `run.toml` is written with reproducibility metadata; on success the artefact
 dir is deleted unless `--keep-artefacts` is passed or the script's frontmatter
-sets `preserve_data_dir = on_success_too`; failures always preserve;
-history-DB records every run.
+sets `preserve_data_dir = on_success_too`; failures always preserve. Each
+run's `run.toml` captures its reproduction metadata. The command invocation
+is also recorded in brokkr's general command history; service results are
+not inserted into `results.db`.
 
 The Lua VM, `ServiceClient` userdata bindings, wait combinators, and
 runtime-owned artefact writers (`frames.jsonl`, `events.jsonl`, `steps.jsonl`,

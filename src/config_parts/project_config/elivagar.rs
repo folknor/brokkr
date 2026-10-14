@@ -7,11 +7,9 @@ use std::collections::BTreeMap;
 /// This is the whole of what a tilegen run is configured by. Nothing is
 /// inferred from the filesystem and there are no override flags - a run's
 /// behaviour is a function of the named block and its input, and of nothing
-/// else. brokkr used to auto-detect the ocean shapefiles from `data/`, which
-/// meant two runs of the same binary on the same PBF could produce different
-/// ocean geometry with nothing in the recorded invocation saying which; on
-/// 2026-07-14 a denmark archive was blessed as the regress baseline while
-/// `ocean-tiles.pmtiles` was absent, and every gate passed.
+/// else. Ocean inputs are explicit so the same binary and PBF cannot silently
+/// select different geometry based on which files happen to be present in
+/// `data/`.
 ///
 /// Ordering matters here: `BTreeMap` (not `HashMap`) keeps the expanded argv
 /// byte-identical across runs of the same block, which is what lets

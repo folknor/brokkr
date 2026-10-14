@@ -368,7 +368,7 @@ pub fn format_detail(entry: &HistoryEntry) -> String {
         fields.push(("project", p.clone()));
     }
     fields.push(("cwd", entry.cwd.clone()));
-    fields.push(("command", entry.command.clone()));
+    fields.push(("command", format_history_command(&entry.command)));
     if let Some(ms) = entry.elapsed_ms {
         fields.push(("elapsed", format!("{ms} ms")));
     }
@@ -440,11 +440,185 @@ pub fn format_history(entries: &[HistoryEntry]) -> String {
             "{id:>id_width$}  {ts}  {project:<10} {elapsed:>7}  {cmd}{commit_display}{fail_tag}",
             id = entry.id,
             ts = entry.timestamp,
-            cmd = entry.command,
+            cmd = format_history_command(&entry.command),
         ));
     }
 
     lines.join("\n")
+}
+
+/// Render the structured argv used by new history rows. Older rows retain
+/// their original joined text and pass through unchanged.
+fn format_history_command(command: &str) -> String {
+    serde_json::from_str::<Vec<String>>(command).map_or_else(
+        |_| command.to_owned(),
+        |argv| {
+            argv.iter()
+                .map(|arg| format!("{arg:?}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        },
+    )
+}
+
+/// Return argv safe for durable storage. The value following `--env` is
+/// always redacted because an environment name can be project-specific and
+/// may not use a recognizable secret suffix.
+pub(crate) fn redact_argv(argv: &[String]) -> Vec<String> {
+    #[derive(Clone, Copy)]
+    enum NextValue {
+        Secret,
+        Environment,
+        Header,
+    }
+
+    let mut redacted = Vec::with_capacity(argv.len());
+    let mut next = None;
+    for arg in argv {
+        if let Some(kind) = next.take() {
+            redacted.push(match kind {
+                NextValue::Secret => "<redacted>".to_owned(),
+                NextValue::Environment => redact_assignment(arg, true),
+                NextValue::Header => redact_header(arg),
+            });
+            continue;
+        }
+
+        if arg == "--env" {
+            redacted.push(arg.clone());
+            next = Some(NextValue::Environment);
+            continue;
+        }
+        if let Some(value) = arg.strip_prefix("--env=") {
+            redacted.push(format!("--env={}", redact_assignment(value, true)));
+            continue;
+        }
+        if matches!(arg.as_str(), "-H" | "--header") {
+            redacted.push(arg.clone());
+            next = Some(NextValue::Header);
+            continue;
+        }
+        if let Some(value) = arg.strip_prefix("--header=") {
+            redacted.push(format!("--header={}", redact_header(value)));
+            continue;
+        }
+        if let Some(value) = arg.strip_prefix("-H=") {
+            redacted.push(format!("-H={}", redact_header(value)));
+            continue;
+        }
+        if let Some((name, _)) = arg.strip_prefix("-H").and_then(|h| h.split_once(':'))
+            && sensitive_name(name)
+        {
+            redacted.push(format!("-H{name}: <redacted>"));
+            continue;
+        }
+
+        if let Some((name, _)) = arg.split_once('=')
+            && sensitive_name(name)
+        {
+            redacted.push(format!("{name}=<redacted>"));
+            continue;
+        }
+        if sensitive_name(arg) {
+            redacted.push(arg.clone());
+            next = Some(NextValue::Secret);
+            continue;
+        }
+
+        redacted.push(redact_url_credentials(arg));
+    }
+    redacted
+}
+
+fn redact_assignment(value: &str, redact_all: bool) -> String {
+    match value.split_once('=') {
+        Some((name, _)) if redact_all || sensitive_name(name) => {
+            format!("{name}=<redacted>")
+        }
+        Some((name, value)) => format!("{name}={}", redact_env_value(name, value)),
+        None if redact_all => "<redacted>".to_owned(),
+        None => redact_url_credentials(value),
+    }
+}
+
+fn redact_header(value: &str) -> String {
+    match value.split_once(':') {
+        Some((name, _)) if sensitive_name(name) => format!("{name}: <redacted>"),
+        _ => redact_url_credentials(value),
+    }
+}
+
+fn sensitive_name(name: &str) -> bool {
+    let normalized = name
+        .trim_start_matches('-')
+        .to_ascii_lowercase()
+        .replace('-', "_");
+    [
+        "password",
+        "passwd",
+        "secret",
+        "token",
+        "credential",
+        "authorization",
+        "cookie",
+        "session",
+        "private_key",
+        "api_key",
+        "access_key",
+        "database_url",
+        "dsn",
+        "auth",
+    ]
+    .iter()
+    .any(|part| normalized.contains(part))
+}
+
+/// Scrub one captured environment value before it reaches a durable run row.
+/// The variable name remains useful for interpreting the row; recognized
+/// credential names retain only that name and a redaction marker.
+pub(crate) fn redact_env_value(name: &str, value: &str) -> String {
+    if sensitive_name(name) {
+        "<redacted>".to_owned()
+    } else {
+        redact_url_credentials(value)
+    }
+}
+
+fn redact_url_credentials(value: &str) -> String {
+    let Some((scheme, rest)) = value.split_once("://") else {
+        return value.to_owned();
+    };
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+    let authority = authority.rfind('@').map_or_else(
+        || authority.to_owned(),
+        |at| format!("<redacted>@{}", &authority[at + 1..]),
+    );
+    let tail = redact_url_parameters(&rest[authority_end..]);
+    format!("{scheme}://{authority}{tail}")
+}
+
+fn redact_url_parameters(tail: &str) -> String {
+    let mut rendered = String::with_capacity(tail.len());
+    let mut remaining = tail;
+    while let Some(delimiter) = remaining.find(['?', '#']) {
+        rendered.push_str(&remaining[..=delimiter]);
+        remaining = &remaining[delimiter + 1..];
+        let end = remaining.find(['?', '#']).unwrap_or(remaining.len());
+        rendered.push_str(
+            &remaining[..end]
+                .split('&')
+                .map(|field| match field.split_once('=') {
+                    Some((name, _)) if sensitive_name(name) => format!("{name}=<redacted>"),
+                    _ => field.to_owned(),
+                })
+                .collect::<Vec<_>>()
+                .join("&"),
+        );
+        remaining = &remaining[end..];
+    }
+    rendered.push_str(remaining);
+    rendered
 }
 
 // ---------------------------------------------------------------------------
@@ -808,16 +982,13 @@ mod tests {
     }
 
     #[test]
-    fn db_path_uses_xdg_data_home() {
-        // Save and restore XDG_DATA_HOME.
-        let old = std::env::var("XDG_DATA_HOME").ok();
-        // SAFETY: test is single-threaded and restores the original value.
-        unsafe { std::env::set_var("XDG_DATA_HOME", "/tmp/test-xdg-data") };
-        let path = db_path().unwrap();
-        assert_eq!(path, PathBuf::from("/tmp/test-xdg-data/brokkr/history.db"));
-        match old {
-            Some(v) => unsafe { std::env::set_var("XDG_DATA_HOME", v) },
-            None => unsafe { std::env::remove_var("XDG_DATA_HOME") },
+    fn db_path_uses_the_resolved_data_home_without_mutating_process_env() {
+        match crate::user_dirs::xdg_data_home() {
+            Some(data_home) => assert_eq!(
+                db_path().unwrap(),
+                data_home.join("brokkr").join("history.db")
+            ),
+            None => assert!(db_path().is_err()),
         }
     }
 

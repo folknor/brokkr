@@ -6,6 +6,7 @@ use crate::config::project_config::ratatoskr::RatatoskrConfig;
 use crate::error::DevError;
 use crate::output;
 use crate::ratatoskr::discover;
+use crate::ratatoskr::resolve_config_path;
 
 /// Default location for sync-test scripts inside ratatoskr's tree.
 pub const DEFAULT_SYNC_SCRIPT_DIR: &str = "crates/app/tests/sync-harness";
@@ -51,8 +52,7 @@ pub fn run_sync_list(project_root: &Path, ratatoskr: &RatatoskrConfig) -> Result
 pub(super) fn sync_script_dir(project_root: &Path, cfg: Option<&RatatoskrConfig>) -> PathBuf {
     let configured = cfg.and_then(|c| c.sync_script_dir.as_ref());
     match configured {
-        Some(p) if p.is_absolute() => p.clone(),
-        Some(p) => project_root.join(p),
+        Some(p) => resolve_config_path(project_root, p),
         None => project_root.join(DEFAULT_SYNC_SCRIPT_DIR),
     }
 }

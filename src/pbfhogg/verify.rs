@@ -12,6 +12,8 @@ use crate::error::DevError;
 use crate::output;
 use crate::output::CapturedOutput;
 
+pub(crate) const SORT_TYPE_THEN_ID: &str = "Sort.Type_then_ID";
+
 /// Stable labels shared by individual verify dispatch and `verify all`.
 pub(super) mod labels {
     pub const SORT: &str = "sort";
@@ -63,9 +65,12 @@ impl VerifyHarness {
         let lock = crate::context::reenter_command_lock()?;
         let effective = build_root;
         let build_config = if features.is_empty() {
-            build::BuildConfig::release(Some("pbfhogg-cli"))
+            build::BuildConfig::release(crate::project::Project::Pbfhogg.cli_package())
         } else {
-            build::BuildConfig::release_with_owned_features(Some("pbfhogg-cli"), features)
+            build::BuildConfig::release_with_owned_features(
+                crate::project::Project::Pbfhogg.cli_package(),
+                features,
+            )
         };
         let binary = build::cargo_build(&build_config, effective)?.path;
         let output_dir = target_dir.join("verify");
@@ -173,7 +178,7 @@ impl VerifyHarness {
         self.check_exit(&captured, "pbfhogg inspect --extended")?;
 
         let stdout = String::from_utf8_lossy(&captured.stdout);
-        let has_flag = stdout.contains("Sort.Type_then_ID");
+        let has_flag = stdout.contains(SORT_TYPE_THEN_ID);
 
         match parse_ordered(&stdout) {
             Some(true) => {
@@ -182,9 +187,9 @@ impl VerifyHarness {
             }
             Some(false) => {
                 let hint = if has_flag {
-                    " - header declares Sort.Type_then_ID but element order disagrees"
+                    format!(" - header declares {SORT_TYPE_THEN_ID} but element order disagrees")
                 } else {
-                    ""
+                    String::new()
                 };
                 output::verify_msg(&format!(
                     "  {label}: NOT ordered (inspect Ordered: no){hint} FAIL"
@@ -196,7 +201,7 @@ impl VerifyHarness {
                 // fall back to the header feature so the check still runs.
                 if has_flag {
                     output::verify_msg(&format!(
-                        "  {label}: sorted (Sort.Type_then_ID header; order not computed) PASS"
+                        "  {label}: sorted ({SORT_TYPE_THEN_ID} header; order not computed) PASS"
                     ));
                 } else {
                     output::verify_msg(&format!("  {label}: NOT sorted FAIL"));
@@ -262,14 +267,14 @@ impl VerifyHarness {
 
     // -- Internal helpers --------------------------------------------------
 
-    /// Run `inspect` and return whether stdout contains "Sort.Type_then_ID".
+    /// Run `inspect` and return whether stdout contains [`SORT_TYPE_THEN_ID`].
     /// A failed `inspect` is an error - its empty stdout is not "unsorted".
     fn has_sort_flag(&self, pbf: &Path) -> Result<bool, DevError> {
         let pbf_str = pbf.display().to_string();
         let captured = self.run_pbfhogg(&["inspect", &pbf_str])?;
         self.check_exit(&captured, "pbfhogg inspect")?;
         let stdout = String::from_utf8_lossy(&captured.stdout);
-        Ok(stdout.contains("Sort.Type_then_ID"))
+        Ok(stdout.contains(SORT_TYPE_THEN_ID))
     }
 }
 
@@ -415,12 +420,7 @@ where
 
 /// Check whether an executable exists on `PATH`.
 pub fn which_exists(name: &str) -> bool {
-    std::process::Command::new("which")
-        .arg(name)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
+    crate::tools::find_executable(name).is_some()
 }
 
 /// Classify a `pbfhogg diff --suppress-common` run from its exit code and
@@ -487,8 +487,8 @@ fn parse_ordered(inspect_text: &str) -> Option<bool> {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::{
-        CheckOutcome, Findings, Verdict, diff_verdict, fresh_subdir, is_plain_component,
-        parse_ordered,
+        CheckOutcome, Findings, SORT_TYPE_THEN_ID, Verdict, diff_verdict, fresh_subdir,
+        is_plain_component, parse_ordered,
     };
 
     #[test]
@@ -576,23 +576,23 @@ mod tests {
 
     #[test]
     fn parse_ordered_yes() {
-        let text = "Features: Sort.Type_then_ID\nOrdered:  yes\nTimestamps: ..\n";
-        assert_eq!(parse_ordered(text), Some(true));
+        let text = format!("Features: {SORT_TYPE_THEN_ID}\nOrdered:  yes\nTimestamps: ..\n");
+        assert_eq!(parse_ordered(&text), Some(true));
     }
 
     #[test]
     fn parse_ordered_no() {
         // The degraded-unsorted case: header still claims the feature, but the
         // computed order says no. check_sorted must trust this line.
-        let text = "Features: Sort.Type_then_ID\nOrdered:  no\n";
-        assert_eq!(parse_ordered(text), Some(false));
+        let text = format!("Features: {SORT_TYPE_THEN_ID}\nOrdered:  no\n");
+        assert_eq!(parse_ordered(&text), Some(false));
     }
 
     #[test]
     fn parse_ordered_absent() {
         // Plain (non-extended) inspect has no Ordered: line.
-        let text = "Features: Sort.Type_then_ID\nElements: 100 total\n";
-        assert_eq!(parse_ordered(text), None);
+        let text = format!("Features: {SORT_TYPE_THEN_ID}\nElements: 100 total\n");
+        assert_eq!(parse_ordered(&text), None);
     }
 
     #[test]

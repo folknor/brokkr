@@ -7,7 +7,7 @@
 - `src/elivagar/commands.rs` - `ElivagarCommand` (`Built(BuiltCommand)` for
   the main binary and the cargo examples, `External(ExternalTool)` for
   Planetiler and Tilemaker) with `needs_pbf()`; `BuiltCommand` carries
-  `build_args()`, `metadata()`, `output_files()` and `id()` - the CLI id,
+  `build_args()`, `output_files()` and `id()` - the CLI id,
   which is also the `command` results are filed under.
 - `src/elivagar/plan.rs` - builds and executes measured command plans; tilegen
   completion delegates durable archive admission to `artifacts.rs`.
@@ -101,13 +101,10 @@ This replaced `detect_ocean()`/`push_ocean_args()`, which stat'd `data/` for
 the two shapefiles and passed whichever existed (and never passed the
 `.pmtiles` artifact at all - elivagar auto-detected that itself). A run's
 meaning therefore lived in the filesystem rather than the invocation: two runs
-of the same binary on the same PBF produced different ocean geometry with
-nothing in `cli_args` saying which, so no bench row could be classified after
-the fact as artifact-active or computed. On 2026-07-14 a denmark archive was
-built, verified and blessed as the regress baseline while
-`data/ocean-tiles.pmtiles` was missing; it took the computed path throughout
-and every gate passed. `bench all`'s self arm shared the same path and the
-same defect.
+of the same binary on the same PBF could produce different ocean geometry
+without recording which inputs were selected. Explicit inputs make artifact
+use and computed output identifiable in each bench row, including the self arm
+of `bench all`.
 
 Only the `default` tilegen block is currently selected; sibling blocks are not
 runnable because the CLI has no block selector. Add that selector before using

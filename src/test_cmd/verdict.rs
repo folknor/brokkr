@@ -300,7 +300,7 @@ pub(super) fn run_one(
     let run = test_runner::run_libtest(
         launch,
         test_runner::LibtestInvocation {
-            args,
+            args: test_runner::LibtestArgs::from_argv(launch, args)?,
             cwd,
             state_root,
             env,

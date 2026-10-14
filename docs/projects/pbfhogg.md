@@ -4,19 +4,21 @@
 
 ## Module layout
 
-- `src/pbfhogg/commands.rs` - `PbfhoggCommand` enum with `build_args()`,
-  `build_hotpath_args()`, `result_command()`, `result_variant()`,
-  `metadata()` - single source of truth for all pbfhogg command argument
-  construction.
+- `src/pbfhogg/commands.rs` - `PbfhoggCommand` enum with typed command
+  descriptors, `build_args()`, result identity and observations. Bench and
+  hotpath runs share the same argv; mode selects a scratch filename namespace.
 - `src/pbfhogg/plan.rs` - resolved command plans for the shared
   `src/measure/runner.rs`; execution uses one `MeasurementSession`.
 - `src/pbfhogg/...` - benchmarks (read, write, merge, commands, extract,
   allocator, blob-filter, planetiler, all), verify (one check per
   cross-validated command, plus `all`),
-  download (Geofabrik region/OSC fetcher with auto-registration in
+  download (Geofabrik or Planet PBF/OSC fetcher with auto-registration in
   `brokkr.toml`).
 
 ## Verify subcommands
+
+`brokkr verify` holds the brokkr command lock for the whole invocation,
+including `verify all` and its per-check runs.
 
 **Output model.** Every verify check runs "quiet on pass, loud on fail" via
 `verify::run_check`: by default a check's detail (`verify_msg` output - section
@@ -91,7 +93,9 @@ Minimal `.osc` / `.osc.gz` reader. Returns `OscDiff` with sorted ID sets per
 (`<create>` / `<modify>` / `<delete>`) section per element kind. Used by
 `verify_merge` for the delete-set carve-out.
 
-Hand-rolled tag-start scanner; tolerant of XML comments, processing
+Streaming hand-rolled tag scanner; gzip and plain XML are consumed in bounded
+chunks, and the scanner retains only its current tag rather than the entire
+decompressed file. It is tolerant of XML comments, processing
 instructions, self-closing elements, and single-quoted attributes. Element
 bodies (tags / refs / members / coords / metadata) are deliberately skipped -
 only IDs are needed. The document itself is checked: the first element must
@@ -201,9 +205,10 @@ top-level `locations` variant.)
 
 ## download command
 
-`download <region> [--osc-seq N]` - download PBF + OSC from Geofabrik.
-Accepts short aliases (`denmark`, `europe`) or full Geofabrik paths
-(`europe/france`, `asia/japan/kanto`). Dataset key is the last path component.
+`download <region> [--osc-seq N]` - download PBF + OSC from Geofabrik or the
+Planet replication service. Geofabrik accepts short aliases (`denmark`,
+`europe`) or full paths (`europe/france`, `asia/japan/kanto`). Dataset key is
+the last path component.
 Checks configured filenames in `brokkr.toml` before downloading. `--osc-seq N`
 downloads all missing diffs from `last_configured_seq + 1` through N. After
 downloading, computes xxh128 hashes and registers the new entries in

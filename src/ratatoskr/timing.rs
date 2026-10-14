@@ -69,9 +69,15 @@ pub(crate) fn format_duration(duration: Duration) -> String {
     format!("{secs}s")
 }
 
-/// Format elapsed time at the one-decimal precision used by sync summaries.
-pub(crate) fn format_secs(duration: Duration) -> String {
-    format!("{:.1}s", duration.as_secs_f64())
+/// Format elapsed time in the integer-millisecond unit used by ratatoskr
+/// run summaries. Stored durations may retain higher precision separately.
+pub(crate) fn format_elapsed(duration: Duration) -> String {
+    format_elapsed_ms(duration.as_millis())
+}
+
+/// Format an already-truncated elapsed millisecond count.
+pub(crate) fn format_elapsed_ms(milliseconds: impl std::fmt::Display) -> String {
+    format!("{milliseconds}ms")
 }
 
 #[cfg(test)]

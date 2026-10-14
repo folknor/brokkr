@@ -21,7 +21,6 @@ pub fn run(
 ) -> Result<(), DevError> {
     std::fs::create_dir_all(scratch_dir)?;
     let command_ctx = CommandContext {
-        binary: binary.to_path_buf(),
         inputs: ResolvedInputs::PbfAndBbox {
             pbf: pbf_path.to_path_buf(),
             bbox: bbox.clone(),
@@ -52,7 +51,7 @@ pub fn run(
         let args_refs: Vec<&str> = args.iter().map(String::as_str).collect();
 
         let config = BenchConfig {
-            command: command.result_command(),
+            command: command.id().to_owned(),
             // Strategy and bbox remain in cli_args, preserving the existing
             // result-row shape for dataset-configured extract measurements.
             input_file: Some(basename.clone()),

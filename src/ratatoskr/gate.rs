@@ -4,7 +4,7 @@
 //! configured rules into typed metric selectors and predicates, pulls scalar
 //! values out of two JSON-encoded `gate_runs` rows (current + baseline), and
 //! reports per-rule pass/fail. Storage and CLI plumbing live in
-//! `src/ratatoskr/gate_store.rs` and `src/ratatoskr/sync.rs`.
+//! `src/ratatoskr/gate_store.rs` and `src/ratatoskr/sync/gate.rs`.
 
 use std::fmt::{self, Write};
 
@@ -481,8 +481,8 @@ impl fmt::Display for GateIdentityMismatch {
                 "baseline was built `{}` but this run is `{}`. Re-run with the \
                  baseline's profile (--debug / --release), or pin a baseline \
                  recorded under this one.",
-                baseline.as_str(),
-                current.as_str()
+                baseline.as_label(),
+                current.as_label()
             ),
             Self::Features { baseline, current } => write!(
                 f,
@@ -573,32 +573,31 @@ pub struct GateRun {
 
 impl GateRun {
     pub fn from_entry(entry: &GateEntry) -> Result<Self, DevError> {
-        Ok(Self {
-            elapsed_ms: entry.elapsed_ms,
-            exit_code: entry.exit_code,
-            success: entry.success,
-            sidecar: parse_obj(&entry.sidecar, "sidecar")?,
-            meta: parse_obj(&entry.meta, "meta")?,
-        })
+        Self::from_json_parts(
+            entry.elapsed_ms,
+            entry.exit_code,
+            entry.success,
+            &entry.sidecar,
+            &entry.meta,
+        )
     }
 
-    /// Build a `GateRun` directly from in-memory data, skipping the
-    /// JSON serialize+parse round-trip. Used by the sync bench for the
-    /// just-completed run.
-    pub fn from_parts(
+    /// Build a run view from the row's stored metric blobs. Both blobs must
+    /// remain valid JSON objects; malformed data is an evaluation error.
+    pub fn from_json_parts(
         elapsed_ms: i64,
         exit_code: i32,
         success: bool,
-        sidecar: Map<String, Value>,
-        meta: Map<String, Value>,
-    ) -> Self {
-        Self {
+        sidecar: &str,
+        meta: &str,
+    ) -> Result<Self, DevError> {
+        Ok(Self {
             elapsed_ms,
             exit_code,
             success,
-            sidecar,
-            meta,
-        }
+            sidecar: parse_obj(sidecar, "sidecar")?,
+            meta: parse_obj(meta, "meta")?,
+        })
     }
 }
 

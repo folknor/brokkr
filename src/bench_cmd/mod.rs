@@ -136,9 +136,10 @@ pub fn run(args: &BenchArgs) -> Result<(), DevError> {
         (None, Some(_)) => Some(resolve_baseline_name(build_root.as_path(), args)?),
     };
 
-    // `with_worktree` re-arms the toolchain-disable at the worktree before the
-    // closure runs, so the lock taken *inside* moves that tree's pin aside
-    // rather than the live root's. Hence lock-inside-closure, not outside.
+    // Under `--commit`, `with_worktree` holds the lock and moves the
+    // worktree's pin aside itself, so the lock taken *inside* re-enters that
+    // hold; without it, the lock taken inside is the fresh hold that moves the
+    // live root's pin. Hence lock-inside-closure, not outside.
     // `with_worktree` cuts its worktree from the build root, so the tree
     // checked out is the code tree rather than the config directory above it.
     // Worktree, toolchain and target-dir narration is run-log only.
@@ -403,13 +404,17 @@ fn resolve_baseline_name(build_root: &Path, args: &BenchArgs) -> Result<String, 
     Ok(short)
 }
 
-/// True when the tree has uncommitted changes outside `.brokkr/`.
-///
-/// The shared git helper excludes `.brokkr/`, so saved benchmark baselines
-/// never make a later run look dirty, and judges a toolchain file the lock
-/// moved aside by its moved bytes.
+/// True when a source or build-input change keeps a commit from naming the
+/// measured binary. The shared tree snapshot also ignores prose, config
+/// outputs, approved baselines, and an unchanged toolchain pin moved aside by
+/// brokkr.
 fn is_dirty(build_root: &Path) -> Result<bool, DevError> {
-    crate::git::has_uncommitted(build_root).ok_or_else(|| {
+    crate::git::TreeState::read_for_measurement(
+        build_root,
+        &crate::git::included_config_files(build_root),
+    )
+    .map(|state| state.for_measurement())
+    .ok_or_else(|| {
         DevError::Preflight(vec![format!(
             "could not determine git status for {}",
             build_root.display()
@@ -481,8 +486,7 @@ fn cargo_bench(
     // artifact a later commit built, so cargo calls it fresh, skips the rebuild,
     // and the run measures the wrong commit's code under the right commit's
     // baseline name. It reports success, and the number looks entirely ordinary.
-    let target_dir =
-        crate::worktree::isolated_target_dir(build_root).map(|dir| dir.display().to_string());
+    let target_dir = crate::build::cargo_target_dir_override(build_root);
     if let Some(dir) = &target_dir {
         output::detail(&format!("isolating worktree build target dir -> {dir}"));
     }

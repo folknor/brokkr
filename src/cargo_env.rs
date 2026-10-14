@@ -390,7 +390,7 @@ fn evaluate(
     // valid shell identifiers.
     let script = format!("unset {}; exec sh -c \"$1\" </dev/null", names.join(" "));
     let args = ["-c", script.as_str(), "brokkr-cargo-env", command];
-    let _signal_guard = crate::shutdown::SigtermGuard::install();
+    let signal_guard = crate::shutdown::SigtermGuard::install();
     let pgid = std::cell::Cell::new(None::<u32>);
     let observe_spawn = |pid: u32| pgid.set(Some(pid));
     // Capture one byte past each limit: enough to tell "too long" from "at
@@ -402,7 +402,7 @@ fn evaluate(
         env,
         EVAL_DEADLINE,
         Some(&observe_spawn),
-        true,
+        crate::shutdown::ChildIsolation::ProcessGroup(&signal_guard),
         crate::output::child::CaptureCap {
             stdout: STDOUT_LIMIT + 1,
             stderr: STDERR_LIMIT + 1,

@@ -73,18 +73,11 @@ mod visibility_tests {
     /// an unrecognised one - that is the whole contract of `Visibility::Any`.
     #[test]
     fn shared_commands_visible_everywhere() {
-        for project in [
-            Project::Pbfhogg,
-            Project::Elivagar,
-            Project::Nidhogg,
-            Project::Brokkr,
-            Project::Litehtml,
-            Project::Sluggrs,
-            Project::Ratatoskr,
-            Project::Piners,
-            Project::Dellingr,
-            Project::Other("some-foreign-repo"),
-        ] {
+        for project in Project::ALL
+            .iter()
+            .map(|(_, project)| *project)
+            .chain([Project::Other("some-foreign-repo")])
+        {
             for name in ["check", "env", "history", "clean"] {
                 assert!(visible_in(name, project), "`{name}` hidden in {project}");
             }
@@ -100,16 +93,12 @@ mod visibility_tests {
     fn measured_queries_follow_the_rows() {
         for name in ["results", "sidecar", "invalidate"] {
             assert!(!visible_in(name, Project::Litehtml), "`{name}` in litehtml");
-            for project in [
-                Project::Pbfhogg,
-                Project::Elivagar,
-                Project::Nidhogg,
-                Project::Ratatoskr,
-                Project::Sluggrs,
-                Project::Piners,
-                Project::Dellingr,
-                Project::Other("some-foreign-repo"),
-            ] {
+            for project in Project::ALL
+                .iter()
+                .map(|(_, project)| *project)
+                .filter(|project| *project != Project::Litehtml)
+                .chain([Project::Other("some-foreign-repo")])
+            {
                 assert!(visible_in(name, project), "`{name}` hidden in {project}");
             }
         }

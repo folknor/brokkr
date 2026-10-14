@@ -58,12 +58,10 @@ pub(crate) fn run(
     let binary_str = ctx.binary()?.display().to_string();
 
     // Rows file under the target name (or the bin name for a CLI invocation)
-    // and carry the invocation VERBATIM. Nothing is kept out of the pairing
-    // key: `brokkr_args` is a `pair_key` component precisely so that two
-    // different invocations do not average into one row, and an invocation
-    // that is not comparable is visible in the row rather than prevented by a
-    // config constraint. Selecting an arm - including the arm defined by an
-    // absent flag - is what `--grep` and `--grep-v` are for.
+    // and carry the exact invocation. Comparison uses its parsed arm_key,
+    // which excludes commit provenance, verbosity, and iteration count while
+    // retaining measurement-affecting options. `--grep` and `--grep-v` still
+    // query the full invocation, including arms defined by an absent flag.
     let config = BenchConfig {
         command: resolved.name.clone(),
         input_file: None,

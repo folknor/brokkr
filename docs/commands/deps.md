@@ -130,7 +130,9 @@ Normal-kind chain from a workspace member down to it:
 `registry=<url>` (an alternate registry, git-index `registry+` and
 sparse-index `sparse+` alike), `workspace`, or `path`. `manifest` is the resolved
 Cargo.toml with `$HOME` collapsed to `~`. The JSON output carries the same
-`source` and `manifest` context on each `ChainTrace`.
+`source` and `manifest` context on each `ChainTrace`; an optional `prefix_note`
+preserves the explanation when a record came from an all-target or substring
+fallback.
 
 Resolution falls back in three steps:
 
@@ -253,10 +255,11 @@ as dependency declarations. Emits
 `UnusedWorkspaceDep` (an offline finding: counts toward the exit-1 tally). The
 `[deps].workspace_dep_ignore` list exempts names that are legitimately
 unreferenced (dev tools, top-level members); an entry ending in `*` is a prefix
-glob (`cargo-*`). A root or member manifest that cannot be read or parsed
-fails the run rather than being skipped: a skipped root would read as an
-all-clear, and a skipped member would lose its inherited deps and report
-them as unused. See `src/deps/workspace_dep.rs`.
+match (`cargo-*`). Every ignore entry must match a declared workspace
+dependency; stale entries are refused. A root or member manifest that cannot
+be read or parsed fails the run rather than being skipped: a skipped root
+would read as an all-clear, and a skipped member would lose its inherited deps
+and report them as unused. See `src/deps/workspace_dep.rs`.
 
 ### native_code [v1]
 
@@ -297,8 +300,9 @@ Limitation: a build script that shells out to a compiler directly
 
 ### outdated [v1]
 
-Shells out to `ccu --json` (the user's check-updates tool, pinned at
-`schema_version=1`). Emits one `Outdated` event per non-up-to-date
+Shells out to `ccu --json` (the check-updates tool, pinned at
+`schema_version=1`). If `ccu` is missing, install that tool and make it
+available on `PATH`. Emits one `Outdated` event per non-up-to-date
 direct dep, carrying name + installed + latest + severity
 (`patch`/`minor`/`major`) + source_file + line_number.
 
@@ -336,9 +340,10 @@ example `{"phase":"stale","status":"skipped","reason":"..."}`.
 ### stale [v1]
 
 Uses the same `ccu --json` response as `outdated`. A `Stale` event is emitted
-when a check's `latest_released_at` is at least 240 days old (about 8 months).
-Severity becomes `"abandoned"` at 730 days (about
-2 years). These closed severity values are serialized as strings.
+when a check's `latest_released_at` crosses the built-in stale age threshold.
+Severity becomes `"abandoned"` at the higher built-in threshold. These
+policy cutoffs are maintained in `src/deps/ccu.rs`, not exposed as project
+configuration; the closed severity values are serialized as strings.
 
 The point of looking at the latest version's age (not the installed
 version's) is to answer "is this project maintained?". A long gap on

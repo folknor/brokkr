@@ -3,6 +3,7 @@
 mod helpers;
 mod identity;
 mod reap;
+pub(crate) mod spawn;
 mod table;
 
 pub(crate) use self::helpers::signal_process_group_raw;

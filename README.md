@@ -1,6 +1,6 @@
 # brokkr
 
-Command orchestrator and development utility for [pbfhogg](https://github.com/folknor/pbfhogg), [elivagar](https://github.com/folknor/elivagar), [nidhogg](https://github.com/folknor/nidhogg), [litehtml-rs](https://github.com/folknor/litehtml-rs), and [sluggrs](https://github.com/folknor/sluggrs). Single Rust binary that provides benchmarking, verification, profiling, visual reference testing, and operational commands across all projects.
+Shared command orchestrator and development utility for a family of Rust and data projects. A single Rust binary provides benchmarking, verification, profiling, visual reference testing, and operational commands across those projects.
 
 Built with LLMs. See [LLM.md](LLM.md).
 
@@ -13,12 +13,12 @@ cargo install --path ~/Programs/brokkr
 
 ## How it works
 
-Run `brokkr` from any project root. It reads `./brokkr.toml` to detect which project you're in and resolves datasets, paths, and host-specific configuration. Commands are project-gated - running a pbfhogg command from elivagar's root produces a clear error. (`check` is the exception - it works in any Rust+git repo, with or without `brokkr.toml`.)
+Run `brokkr` from any project root. It reads `./brokkr.toml` to detect the project and resolve datasets, paths, and host-specific configuration. Project-specific commands are gated by that detected project, so a pbfhogg command from elivagar's root produces a clear error. Shared Rust tooling such as `check` also works in any Rust+git repo, with or without `brokkr.toml`.
 
 ```
 cd ~/Programs/pbfhogg
 brokkr inspect --tags --dataset denmark             # run once, print timing
-brokkr inspect --tags --dataset denmark --bench     # 3 runs, store in DB
+brokkr inspect --tags --dataset denmark --bench     # benchmark and store in DB
 brokkr inspect --tags --dataset denmark --hotpath   # function-level timing
 brokkr verify sort                                  # cross-validate against osmium
 
@@ -43,16 +43,16 @@ Every measurable command supports these flags:
 | Flag | Behavior |
 |------|----------|
 | *(none)* | Build, run once, print timing. No DB storage. |
-| `--bench` | Full benchmark: lockfile, 3 runs, best-of-N stored in DB (all N per-iteration walls stored too, in execution order) |
-| `--bench N` | Same but N runs |
-| `--hotpath` | Function-level timing via hotpath feature (1 run) |
-| `--hotpath N` | Same but N runs |
-| `--alloc` | Per-function allocation tracking (1 run) |
+| `--bench` | Full benchmark: lockfile, repeated samples, best result stored in DB (per-iteration walls are stored too, in execution order) |
+| `--bench N` | Same with N samples |
+| `--hotpath` | Function-level timing via the hotpath feature |
+| `--hotpath N` | Same, with N runs |
+| `--alloc` | Per-function allocation tracking |
 | `--stop <marker>` | Kill the child when this FIFO marker is emitted (bench any phase in isolation) |
 
 All measured modes automatically attach a sidecar that samples `/proc` metrics at 100ms (see [Sidecar profiler](#sidecar-profiler) below).
 
-All commands also accept `--dataset`, `--variant`, `--commit`, `--features`, `--force`, `--verbose`, `--wait`.
+Commands accept the options relevant to their workflow, including dataset selection, feature selection, worktree commits, force, and verbose output.
 
 pbfhogg commands additionally accept `--direct-io` and `--io-uring` to enable O_DIRECT and io_uring I/O paths. These add the required cargo features to the build, pass the flags to the binary, and show up in the `cli_args`/`brokkr_args` columns of the results DB (query via `brokkr results --grep direct-io`). `--direct-io` works with all commands. `--io-uring` is only supported by `apply-changes`, `sort`, `cat --dedupe`, `diff --format osc`, `repack`, and `degrade` - brokkr rejects it for other commands before building. io_uring preflight checks run automatically.
 
@@ -60,20 +60,19 @@ pbfhogg commands additionally accept `--direct-io` and `--io-uring` to enable O_
 
 | Command | Description |
 |---------|-------------|
-| `check` | Run gremlin scan + dependency rules + clippy + tests (extra args forwarded to `cargo test`) |
-| `test [-p <PKG>] <NAME>` | Run one cargo test in release mode via `cargo test -p <PKG> <NAME>` with `--include-ignored --nocapture --test-threads=1`; streams output, prints a `[test] PASS/FAIL` footer per run. Package resolution: explicit `-p` > `[test] default_package` in brokkr.toml > built-in default (pbfhogg-cli, nidhogg). `-N` repeats, `-j` passes through to cargo. Gated off for litehtml/sluggrs (use `brokkr visual`). |
+| `check` | Run configured conventions, rustdoc and clippy checks, and test sweeps (extra cargo arguments are forwarded) |
+| `test [-p <PKG>] <NAME>` | Run matching cargo tests with ignored tests included; profile comes from CLI flags, the selected sweep, and `[test] debug`. Package selection uses `-p`, `[test] default_package`, then the project's built-in default. `-N` repeats; `-j` sets cargo's compile parallelism. |
 | `env` | Show hostname, kernel, governor, memory, drives, tool versions, dataset status |
 | `results` | Query the results database (`.brokkr/results.db`) |
 | `invalidate` | Hard-delete results + sidecar rows by UUID or commit prefix (dry-run unless `-f`) |
 | `clean [--worktrees]` | Remove scratch/temp files; `--worktrees` also purges persistent benchmark worktrees |
 | `pmtiles-stats` | PMTiles v3 file statistics |
 | `history` | Browse global command history |
-| `preview` | Run full pipeline (enrich → tilegen → ingest → serve) and open map viewer |
 | `lock` | Show who holds the benchmark lock |
 
-`check` filters cargo output into one line per diagnostic. Compilation noise is stripped; each error or warning becomes `error[CODE] file:line:col message` or `warning[rule] file:line:col message`. Passing tests are aggregated (e.g. `cargo test: 137 passed (4 suites, 1.45s)`), failures become `FAILED name location message`. There is no unfiltered mode - the one-line form is the whole surface - though a parse failure still falls back to dumping the raw streams, since a stream brokkr could not read is the one case where the unprocessed text is all there is. `--json` appends a single machine-readable summary line.
+`check` filters cargo output into one line per diagnostic. Compilation noise is stripped; each error or warning becomes `error[CODE] file:line:col message` or `warning[rule] file:line:col message`. Passing tests are aggregated (for example, `cargo test: N passed (M suites, elapsed)`), failures become `FAILED name location message`. There is no unfiltered mode - the one-line form is the whole surface - though a parse failure still falls back to dumping the raw streams, since a stream brokkr could not read is the one case where the unprocessed text is all there is. `--json` appends a single machine-readable summary line.
 
-A gremlin scan runs before clippy and fails the check if any banned Unicode character is found in tracked `.rs`/`.toml`/`.md`/`.js`/`.sh` files. Covers invisible/zero-width characters, non-breaking spaces, soft hyphen, line/paragraph separators, bidi marks/overrides/isolates, em/en dashes, typographic single and double quotes, plus `U+0003`, `U+000B`, and `U+FFFC`. Text mode prints one line per hit (`file:line:col U+XXXX NAME`); JSON mode emits `gremlin` / `gremlin_summary` events. See `src/gremlins.rs` for the full banned set.
+A gremlin scan runs as part of the configured convention checks and fails the check if any banned Unicode character is found in tracked `.rs`/`.toml`/`.md`/`.js`/`.sh` files. Covers invisible/zero-width characters, non-breaking spaces, soft hyphen, line/paragraph separators, bidi marks/overrides/isolates, em/en dashes, typographic single and double quotes, plus `U+0003`, `U+000B`, and `U+FFFC`. Text mode prints one line per hit (`file:line:col U+XXXX NAME`); JSON mode includes the findings in the command summary. See `src/gremlins.rs` for the full banned set.
 
 If `brokkr.toml` contains `[[dependency_rule]]` entries, `check` then validates direct Cargo dependency boundaries from `cargo metadata --no-deps`. Example:
 
@@ -97,9 +96,9 @@ Every diagnostic is an error, except a warning from a dependency outside the wor
 
 Each `[[check]]` entry declares `name`, optional `features = [...]` (explicit list - the `features = "all"` sentinel is rejected), optional `no_default_features`, and optional `build_packages = [...]`. `build_packages` rebuilds those cargo packages with the entry's feature flags before the test phase, so `tests/cli_*.rs` integration tests don't silently invoke a stale binary built for a different feature set. Diagnostics from clippy and rustdoc are deduped across sweeps. A line is tagged with the sweeps that reported it (`[<sweep-name>]`, `[a+b]`) only when some sweep that selected its package did not - a diagnostic every covering sweep reports belongs to the code, not to a build shape. Cost is ~Nx cold (cargo keeps separate `target/` per feature set); incremental is small.
 
-`check` also works without a `brokkr.toml`, so you can drop it into any Rust+git repo and get the same clippy + tests + gremlins pipeline (single `--all-features` sweep, no profiles).
+`check` also works without a `brokkr.toml`, so you can drop it into any Rust+git repo and get the default convention, rustdoc, clippy, and test pipeline (single `--all-features` sweep, no profiles).
 
-`test [-p <PKG>] <NAME>` is the narrow counterpart to `check` for drilling into one specific test. It invokes `cargo test -p <PKG> <NAME>` (no `--test`), so both unit tests and integration tests inside the selected package are matched by the name substring. Package resolution runs in order: explicit `-p/--package` on the command line, then `[test] default_package` in `brokkr.toml`, then the project's built-in default (`pbfhogg-cli` for pbfhogg, `nidhogg` for nidhogg). Multi-crate workspaces (e.g. ratatoskr) have no built-in default, so they either pass `-p` on every invocation or set `default_package` in their `brokkr.toml`. It always builds release and always adds `--include-ignored --nocapture --test-threads=1`. Sweep selection mirrors `check`'s ladder: if `[test].default_profile` is set, the test runs against every `[[check]]` entry the profile references; else if `[[check]]` is non-empty, every entry runs in declaration order; else fall back to a single `--all-features` sweep. Profile-level libtest filters (`only` / `skip` / `tests`) are intentionally dropped here - the user's `<NAME>` is the filter, and combining the two would silently produce zero matches when the test lives in a `mod` the profile would otherwise skip. Each sweep's `build_packages` are rebuilt with matching feature flags before the test phase. The test's own `println!`/`eprintln!` streams live; cargo compile progress, warning and error blocks, and the test harness framing (`running N tests`, `test foo ... ok`, `test result:`) are stripped. Each run ends with a single `[test]` line - `PASS` / `FAIL` / `BUILD FAILED` / `SKIP` - that includes wall time and, on failure, the panic message and location. `SKIP` means the name didn't match any test in that sweep (usually because the test is `#[cfg(feature = "...")]`-gated and the feature isn't enabled here); as long as at least one sweep saw a real match, brokkr exits `0`. Only when every sweep skips does the whole run exit non-zero with a "check the package/name" hint. Because `cargo test <name>` is a substring filter, identically-named tests in different modules of the same package all run together - use a more qualified name (module path) to disambiguate. `-N <n>` repeats the test per sweep (for flaky-test hunting) and `-j <n>` sets `cargo -j N` for parallel compile. Litehtml and sluggrs projects are rejected here - use `brokkr visual` for fixture tests there.
+`test [-p <PKG>] <NAME>` is the narrow counterpart to `check` for drilling into one specific test. It invokes cargo with the selected package and name as a substring filter, so unit and integration tests in that package can match. Package resolution runs in order: explicit `-p/--package`, `[test] default_package` in `brokkr.toml`, then the project's built-in default. Multi-crate workspaces without a built-in default can set `default_package` or pass `-p`. The build profile follows CLI overrides, the selected sweep's profile, and `[test] debug` (release when none selects dev). The runner includes ignored tests and captures their output; each harness gets a `[test]` result with wall time and failure details. Sweep selection follows `[test].default_profile`, configured `[[check]]` entries, or a single `--all-features` sweep. Profile-level libtest filters are not applied because the user's `<NAME>` is the filter. `build_packages` are rebuilt with matching feature flags before the test phase. `SKIP` means a sweep found no matching test; the whole command succeeds when at least one sweep runs a match. `-N <n>` repeats the test per sweep, and `-j <n>` sets cargo's compile parallelism.
 
 ### pbfhogg
 
@@ -142,7 +141,7 @@ brokkr diff-snapshots --dataset planet --from 20260411 --to 20260418 --format os
 
 **Verification** (`brokkr verify <subcommand>`): cross-validates against osmium, osmosis, and osmconvert. Subcommands: `sort`, `cat`, `extract`, `multi-extract`, `tags-filter`, `getid-removeid`, `add-locations-to-ways`, `check-refs`, `merge` (apply-changes), `derive-changes` (diff → osc roundtrip), `renumber`, `diff`, and `all` (runs them all). Verify subcommands keep their own short names; they don't mirror the consolidated CLI umbrella shape.
 
-`verify renumber` is a special case. Most verify commands require pbfhogg's output to be byte-identical (or element-identical) with osmium's. `renumber` does not: pbfhogg's orphan-reference handling in relation members is a documented intentional deviation (see pbfhogg's `DEVIATIONS.md` and `notes/renumber-planet-scale.md` section 5b), so a small non-zero diff is expected and does not indicate a regression. The goal of the command is to separate "expected delta" from "actual regression" without a human having to triage every diff.
+`verify renumber` is a special case. Most verify commands require pbfhogg's output to be byte-identical (or element-identical) with osmium's. `renumber` does not: pbfhogg's orphan-reference handling in relation members is an intentional deviation documented in pbfhogg's `DEVIATIONS.md`, so a small non-zero diff is expected and does not indicate a regression. The goal of the command is to separate "expected delta" from "actual regression" without a human having to triage every diff.
 
 ```
 brokkr verify renumber                              # default: denmark
@@ -222,30 +221,6 @@ brokkr visual creatine_products
 
 `prepare` and `html-extract` shell out to a Node.js script (requires Node + pnpm; auto-installs dependencies on first use). Node is already required for Puppeteer-based Chrome capture.
 
-## Preview pipeline
-
-`brokkr preview` runs the full data pipeline and opens a map viewer for visual inspection:
-
-```
-brokkr preview                          # full pipeline, default dataset/variant
-brokkr preview --from tilegen           # skip enrich, start from tile generation
-brokkr preview --from serve --no-open   # just restart server, don't open browser
-brokkr preview --dataset japan --variant raw
-```
-
-Steps: **enrich** (pbfhogg add-locations-to-ways) → **tilegen** (elivagar run) → **ingest** (nidhogg ingest) → **serve** (nidhogg serve + browser). Use `--from` to skip upstream steps when iterating on a single project.
-
-Requires a `[hostname.preview]` section in `brokkr.toml` pointing to each project's source tree:
-
-```toml
-[plantasjen.preview]
-pbfhogg = "/home/folk/Programs/pbfhogg"
-elivagar = "/home/folk/Programs/elivagar"
-nidhogg = "/home/folk/Programs/nidhogg"
-```
-
-Artifacts are written to `.brokkr/preview/` (enriched PBF, PMTiles, ingest data dir). Works from any of the three project roots.
-
 ## Benchmark harness
 
 All benchmarks run through `BenchHarness`, which provides:
@@ -300,7 +275,7 @@ The FIFO protocol is convention-free - brokkr doesn't mandate any naming scheme 
 
 Both conventions are additive - projects can opt in incrementally. Existing emissions keep working with no change, and the only required mechanical migration is whichever blocking points you want to instrument. (Historical note: `--stalls` originally paired `WAIT_<CATEGORY>_START`/`_END` markers; it moved to `*_wait_ns` counters so the marker stream stays reserved for phase boundaries and the stall view unifies with pbfhogg's existing wait counters. Brokkr no longer treats any `WAIT_`-prefixed marker specially.)
 
-See [`notes/sidecar.md`](notes/sidecar.md) for the scoped plan these conventions were introduced with; [`LLM.md`](LLM.md) has broader history.
+The marker and counter conventions are described here as the durable contract; [`LLM.md`](LLM.md) has broader project history.
 
 ## Results database
 
@@ -371,7 +346,7 @@ brokkr inspect --tags --dataset denmark
 Add `--bench` to enable the full harness with DB storage:
 
 ```
-brokkr inspect --tags --dataset denmark --bench    # 3 runs, best-of-N stored
+brokkr inspect --tags --dataset denmark --bench    # benchmark and store per-iteration results
 brokkr inspect --tags --dataset denmark --bench 10 # 10 runs
 ```
 
@@ -428,19 +403,14 @@ xxhash = "..."
 file = "denmark-20260411-with-indexdata.osm.pbf"
 xxhash = "..."
 
-# Cross-project source trees for preview pipeline
-[plantasjen.preview]
-pbfhogg = "/home/folk/Programs/pbfhogg"
-elivagar = "/home/folk/Programs/elivagar"
-nidhogg = "/home/folk/Programs/nidhogg"
 ```
 
-- `project` - which project this is (`pbfhogg`, `elivagar`, `nidhogg`, or `litehtml-rs`)
+- `project` - which supported project this config belongs to
 - `[hostname.datasets.*]` - named datasets with PBF variants, OSC diffs, PMTiles entries, and bounding box
 - `[hostname.datasets.*.snapshot.<key>]` - additional historical snapshots of the dataset (different point-in-time PBFs of the same region). Each snapshot has its own `pbf` and optional `osc` tables. The legacy top-level data is implicitly snapshot `base` (a reserved name). Snapshot keys must match `[a-zA-Z0-9_-]+`. Snapshots are first-class for `diff-snapshots` and addressable via `--snapshot <key>` on every measurable pbfhogg command (`apply-changes`, `merge-changes`, `tags-filter`, `diff` including `--format osc`, `repack`, `degrade`, `sort`, `cat`, `inspect`, `add-locations-to-ways`, `getid`, `getparents`, `renumber`, `check-refs`, `check-ids`, `time-filter`, `extract`, `multi-extract`, `build-geocode-index`). Refresh-mode downloads (`brokkr download <region> --refresh`) populate snapshot blocks automatically by archiving the previous primary state. Generative commands `brokkr repack --as-snapshot KEY` and `brokkr degrade --as-snapshot KEY` register newly-produced artifacts under this same shape
 - `xxhash` - optional XXH128 hash for file integrity checks (`sha256` accepted as alias during migration). Run `brokkr env` to see computed hashes for updating config
 - `[hostname]` - per-host path overrides, port, drive configuration, and default cargo features; defaults to `data/`, `data/scratch/`, and cargo target dir
-- `features` - cargo features appended to every build (all measurable commands, `verify`, `serve`, `ingest`, `update`). Not applied to `check`. CLI `--features` are additive on top
+- `features` - host Cargo feature defaults, inherited according to the command's build path. See `docs/brokkr.toml.md` for the policy. CLI `--features` are additive where host features apply.
 - `[[check]]` - top-level array of tables (not host-scoped). Each entry is one (clippy + test) sweep with the entry's feature flags. Fields: `name` (required, unique label - referenced by name from `[test.profiles.*].sweeps`), `features = [...]` (explicit list; the `features = "all"` sentinel is rejected so adding a new feature to `Cargo.toml` doesn't silently broaden coverage), `no_default_features = true|false`, `build_packages = ["pbfhogg-cli", ...]` (rebuilt with the entry's features before the test phase, keeping `tests/cli_*.rs` `CliInvoker` calls honest). Multiple entries catch lints that feature-gated proc-macro rewrites mask under any single feature set. The legacy `[check]` table form (with `consumer_features`) is rejected at parse time
 - `[[dependency_rule]]` - top-level array of direct Cargo dependency boundary rules enforced by `brokkr check`. Fields: optional `name`, `from = "app"` or `from = ["app", "rtsk"]`, and either `forbid = "db"` / `forbid = ["db", "rusqlite"]` or an allow-list `allow = ["libc"]` (exactly one)
 - `[test]` - top-level (not host-scoped). `default_package = "..."` is the cargo package `brokkr test` uses when no `-p/--package` is given; required for multi-crate workspaces that lack a built-in default. Explicit CLI `-p` always wins. `default_profile = "..."` is the validation profile `brokkr check` uses when no `--profile` is passed - typically `tier1` for fast inner-loop runs. `[test.profiles.<name>]` declares a profile with `sweeps = [...]` (list of `[[check]]` entry names), optional `tests`/`only`/`skip`/`include_ignored`/`test_threads`/`env`, and optional `extends = "<other>"` (single-parent inheritance, child collections replace parent's). Profiles use Rust **module paths** as the annotation surface: tests inside `mod tier2 { ... }` / `mod platform { ... }` / `mod serial { ... }` are filtered by name substring (`only = ["tier2::"]`, `skip = ["platform::"]`). Dangling sweep references (profile names a `[[check]]` entry that doesn't exist) are caught at parse time. The legacy `[test.sweeps.*]` map form is rejected; sweeps live in `[[check]]` now

@@ -5,8 +5,7 @@
 ## Module layout
 
 - `src/nidhogg/commands.rs` - `NidhoggCommand` enum (Api/Ingest/Tiles) with
-  `id()`, `supports_hotpath()`, `needs_build()`, `needs_server()`,
-  `metadata()`.
+  command identity, build package selection, and the shared ingest argv.
 - `src/nidhogg/plan.rs` - binary, HTTP and server lifecycle plans for
   `src/measure/runner.rs`; execution uses one `MeasurementSession`.
 - `src/nidhogg/...` - server lifecycle (serve/stop/status), ingest, update,
@@ -14,6 +13,14 @@
   readonly), hotpath.
 - `src/nidhogg/client.rs` - query/bbox helpers that derive API queries from
   dataset bbox.
+
+`query` needs an explicit `--json` body because it has no dataset-independent
+default bbox. `verify geocode` likewise needs one or more explicit search
+terms, since the matching places depend on the configured index.
+
+All `brokkr verify` variants use the command lock, including `verify batch`
+and `verify geocode`. Those two query a running server without building, but
+they still wait for the lock so they do not overlap other locked work.
 
 ## Dataset specifics
 

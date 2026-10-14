@@ -66,6 +66,35 @@ impl ExternalU128Sorter {
         Ok(hash.digest128())
     }
 
+    /// Count distinct values with the same bounded-memory sort used for the
+    /// corpus folds. The input count is the number of leaf runs, not addressed
+    /// tiles, so a zero-length leaf still participates as before.
+    pub(crate) fn finish_unique_count(&mut self) -> io::Result<u64> {
+        let mut previous = None;
+        let mut unique = 0u64;
+        let mut count = |value| {
+            if previous != Some(value) {
+                unique = unique
+                    .checked_add(1)
+                    .ok_or_else(|| io::Error::other("unique hash count overflows"))?;
+                previous = Some(value);
+            }
+            Ok(())
+        };
+
+        if self.runs.is_empty() {
+            self.values.sort_unstable();
+            for value in self.values.drain(..) {
+                count(value)?;
+            }
+        } else {
+            self.flush_chunk()?;
+            self.compact_runs()?;
+            merge_runs(&self.runs, &mut count)?;
+        }
+        Ok(unique)
+    }
+
     fn flush_chunk(&mut self) -> io::Result<()> {
         if self.values.is_empty() {
             return Ok(());

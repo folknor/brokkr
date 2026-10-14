@@ -140,9 +140,12 @@ where
 /// drop a single site that fails rather than sinking the whole disposition.
 /// Dense-na sites are pure diagnostics (they feed the console breakdown and the
 /// corpus DB, never the gate), so one malformed site must not cost us the
-/// probe's gate-critical disposition. Paired with [`de_call_site`], which keeps
-/// the common numeric-`call_site` site parseable in the first place; this is
-/// the backstop for any *other* future field-type drift inside a site.
+/// probe's gate-critical disposition. The original disposition line remains in
+/// `ProbeLine::raw` and is persisted to the run store, so dropping an
+/// unparseable typed site does not discard its source data. Paired with
+/// [`de_call_site`], which keeps the common numeric-`call_site` site parseable
+/// in the first place; this is the backstop for any *other* future field-type
+/// drift inside a site.
 fn de_dense_na_sites<'de, D>(deserializer: D) -> Result<Vec<DenseNaSite>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -380,6 +383,19 @@ pub struct InvalidRecord {
     pub not_json: bool,
 }
 
+/// A diagnostic record brokkr had to drop while parsing the harness stream.
+/// Records that are protocol violations are also listed in `invalid`; other
+/// dropped diagnostic subrecords do not invalidate their probe. The reason and
+/// a short source excerpt are kept with the run for later inspection.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ParseWarning {
+    pub line: usize,
+    pub kind: String,
+    pub probe: Option<String>,
+    pub reason: String,
+    pub raw: String,
+}
+
 /// The harness's versioned contract lines (`docs/projects/piners.md`).
 /// Recognised by `kind` alone; the version and fields are validated by
 /// [`crate::piners::contract`], never here, so a known kind with a bad
@@ -415,6 +431,10 @@ pub struct HarnessReport {
     /// Lines that should have been disposition records and could not be
     /// read as one, in emission order. See [`InvalidRecord`].
     pub invalid: Vec<InvalidRecord>,
+    /// Structured diagnostics for records dropped during parsing. Protocol
+    /// violations also appear in `invalid`; malformed diagnostic subrecords
+    /// such as `trade_diff` rows can be non-fatal.
+    pub warnings: Vec<ParseWarning>,
     /// Contract lines in emission order.
     pub contract: Vec<ContractLine>,
     /// Position of the last non-blank line, `None` for an empty stream.
@@ -533,6 +553,53 @@ pub struct DenseNaGroup {
 /// Up to this many example ids are listed per breakdown group.
 const MAX_EXAMPLES: usize = 4;
 
+/// A stdout line that is not JSON: a warning, and an invalid record the
+/// integrity check fails the run on.
+fn record_not_json(
+    report: &mut HarnessReport,
+    position: usize,
+    trimmed: &str,
+    error: &serde_json::Error,
+) {
+    report.warnings.push(ParseWarning {
+        line: position,
+        kind: "not_json".to_owned(),
+        probe: None,
+        reason: error.to_string(),
+        raw: clip(trimmed),
+    });
+    report.invalid.push(InvalidRecord {
+        probe: None,
+        reason: format!("not JSON ({error}): {}", clip(trimmed)),
+        line: position,
+        not_json: true,
+    });
+}
+
+/// A disposition line that does not deserialize: a warning, and an invalid
+/// record naming the probe when the line carried one.
+fn record_unparsable_disposition(
+    report: &mut HarnessReport,
+    position: usize,
+    trimmed: &str,
+    probe: Option<String>,
+    error: &serde_json::Error,
+) {
+    report.warnings.push(ParseWarning {
+        line: position,
+        kind: "disposition_parse".to_owned(),
+        probe: probe.clone(),
+        reason: error.to_string(),
+        raw: clip(trimmed),
+    });
+    report.invalid.push(InvalidRecord {
+        probe,
+        reason: format!("unparsable disposition line: {error}"),
+        line: position,
+        not_json: false,
+    });
+}
+
 /// Parse NDJSON harness stdout. Blank lines are skipped; a legacy `summary`
 /// line is skipped (the harness no longer emits one); a `trade_diff` line is
 /// collected, and one that fails to parse is warned about and dropped (it is
@@ -565,12 +632,7 @@ pub fn parse(stdout: &[u8]) -> HarnessReport {
         let value = match serde_json::from_str::<serde_json::Value>(trimmed) {
             Ok(v) => v,
             Err(e) => {
-                report.invalid.push(InvalidRecord {
-                    probe: None,
-                    reason: format!("not JSON ({e}): {}", clip(trimmed)),
-                    line: position,
-                    not_json: true,
-                });
+                record_not_json(&mut report, position, trimmed, &e);
                 continue;
             }
         };
@@ -614,6 +676,14 @@ pub fn parse(stdout: &[u8]) -> HarnessReport {
             .get("probe")
             .and_then(serde_json::Value::as_str)
             .map(str::to_owned);
+        let dense_na_warnings = if matches!(
+            value.get("kind").and_then(serde_json::Value::as_str),
+            None | Some("disposition")
+        ) {
+            malformed_dense_na_sites(&value, probe_id.as_deref(), position)
+        } else {
+            Vec::new()
+        };
         let at = probe_id
             .as_deref()
             .map_or_else(String::new, |id| format!(" (probe {id})"));
@@ -642,19 +712,22 @@ pub fn parse(stdout: &[u8]) -> HarnessReport {
                         report.probes.push(p);
                     }
                     Err(e) => {
-                        report.invalid.push(InvalidRecord {
-                            probe: probe_id,
-                            reason: format!("unparsable disposition line: {e}"),
-                            line: position,
-                            not_json: false,
-                        });
+                        record_unparsable_disposition(&mut report, position, trimmed, probe_id, &e);
                     }
                 }
+                report.warnings.extend(dense_na_warnings);
             }
             Some("trade_diff") => match serde_json::from_value::<TradeDiffLine>(value) {
                 Ok(t) => report.trade_diffs.push(t),
                 Err(e) => {
                     output::warn(&format!("corpus: unparsable trade_diff line{at}: {e}"));
+                    report.warnings.push(ParseWarning {
+                        line: position,
+                        kind: "trade_diff_parse".to_owned(),
+                        probe: probe_id,
+                        reason: e.to_string(),
+                        raw: clip(trimmed),
+                    });
                 }
             },
             Some(_) => continue,
@@ -662,6 +735,45 @@ pub fn parse(stdout: &[u8]) -> HarnessReport {
     }
 
     report
+}
+
+/// Collect malformed dense-na subrecords before `de_dense_na_sites` drops
+/// them. The disposition's raw JSON remains intact; this makes each typed
+/// omission visible in the persisted run diagnostics too.
+fn malformed_dense_na_sites(
+    value: &serde_json::Value,
+    probe: Option<&str>,
+    line: usize,
+) -> Vec<ParseWarning> {
+    let Some(sites) = value
+        .get("dense_na_sites")
+        .and_then(serde_json::Value::as_array)
+    else {
+        return Vec::new();
+    };
+    sites
+        .iter()
+        .enumerate()
+        .filter_map(|(index, site)| {
+            serde_json::from_value::<DenseNaSite>(site.clone())
+                .err()
+                .map(|error| {
+                    let raw = site.to_string();
+                    output::warn(&format!(
+                        "corpus: dropped malformed dense_na_sites entry {} on line {line}{}",
+                        index + 1,
+                        probe.map_or_else(String::new, |id| format!(" (probe {id})"))
+                    ));
+                    ParseWarning {
+                        line,
+                        kind: "dense_na_site_parse".to_owned(),
+                        probe: probe.map(str::to_owned),
+                        reason: error.to_string(),
+                        raw: clip(&raw),
+                    }
+                })
+        })
+        .collect()
 }
 
 /// The legacy trailing summary record the harness once emitted: `summary:

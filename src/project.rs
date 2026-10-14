@@ -26,20 +26,36 @@ pub enum Project {
 }
 
 impl Project {
+    /// Built-in project names and their identities. Keep this list as the
+    /// single owner of the name-to-variant mapping used by config parsing,
+    /// display, help and project-wide checks.
+    pub const ALL: &[(&'static str, Self)] = &[
+        ("pbfhogg", Self::Pbfhogg),
+        ("elivagar", Self::Elivagar),
+        ("nidhogg", Self::Nidhogg),
+        ("brokkr", Self::Brokkr),
+        ("litehtml-rs", Self::Litehtml),
+        ("sluggrs", Self::Sluggrs),
+        ("ratatoskr", Self::Ratatoskr),
+        ("saehrimnir", Self::Saehrimnir),
+        ("piners", Self::Piners),
+        ("dellingr", Self::Dellingr),
+        ("mogwai", Self::Mogwai),
+    ];
+
+    pub fn from_builtin_name(name: &str) -> Option<Self> {
+        Self::ALL
+            .iter()
+            .find_map(|(known, project)| (*known == name).then_some(*project))
+    }
+
     pub fn name(self) -> &'static str {
         match self {
-            Self::Pbfhogg => "pbfhogg",
-            Self::Elivagar => "elivagar",
-            Self::Nidhogg => "nidhogg",
-            Self::Brokkr => "brokkr",
-            Self::Litehtml => "litehtml-rs",
-            Self::Sluggrs => "sluggrs",
-            Self::Ratatoskr => "ratatoskr",
-            Self::Saehrimnir => "saehrimnir",
-            Self::Piners => "piners",
-            Self::Dellingr => "dellingr",
-            Self::Mogwai => "mogwai",
-            Self::Other(s) => s,
+            Self::Other(name) => name,
+            _ => Self::ALL
+                .iter()
+                .find_map(|(name, project)| (*project == self).then_some(*name))
+                .unwrap_or("unknown"),
         }
     }
 

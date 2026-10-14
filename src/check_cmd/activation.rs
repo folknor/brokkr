@@ -17,8 +17,8 @@ const CHECK_ENV_CONFLICT_REMEDY: &str = "an ad-hoc `--features` run takes no \
 /// priority ladder documented at the top of the file. The caller plans them
 /// once the invocation's scope is known.
 ///
-/// Returns `Err` only when the user asked for a `--profile` that
-/// doesn't resolve. Every other branch always succeeds with at least
+/// Returns `Err` for an unresolved requested profile or an ad-hoc env
+/// conflict across `[[check]]` entries. Every successful branch has at least
 /// one sweep.
 pub(crate) fn decide_active_sweeps(
     check_entries: &[CheckEntry],

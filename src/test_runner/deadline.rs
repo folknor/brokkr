@@ -62,36 +62,10 @@ pub(crate) fn kill_of(reason: &TimeoutReason) -> KillCause {
     }
 }
 
-/// **The hard cap.** Every test brokkr runs gets this much wall time and no more;
-/// exceeding it fails the run and stops it. The single exception is
-/// `brokkr test --timeout`, which raises the cap for one resolved test and is
-/// itself limited to 280s by the CLI parser.
-///
-/// The clock is fed by libtest's announcements, which share a stream with test
-/// output, so a lost event can blur *which* test is named. It cannot excuse the
-/// overrun: if no test has been seen completing for longer than the budget, the
-/// budget is blown whoever spent it.
-pub(crate) const TEST_TIMEOUT: Duration = Duration::from_secs(20);
-pub(super) const WATCHDOG_POLL: Duration = Duration::from_millis(250);
+use super::ceilings::SWEEP_WALL_TIMEOUT;
+pub(super) use super::ceilings::WATCHDOG_POLL;
+pub(crate) use super::ceilings::{IDLE_TIMEOUT, TEST_TIMEOUT};
 
-/// How long a libtest run may go with no test in flight before the watchdog
-/// kills it as a wedge. The per-test ceiling ages a test only after libtest
-/// announces it, so it is blind to everything around the tests: the compile
-/// and link inside `cargo test`, and the binary's teardown after the last
-/// result. Five minutes covers cold builds while still bounding a wedge.
-pub(crate) const IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
-
-/// Wall-clock backstop for a whole run, enforced from the watchdog's own clock
-/// and unreachable by test output.
-pub(crate) const SWEEP_WALL_TIMEOUT: Duration = Duration::from_secs(1800);
-
-/// The ceilings one libtest run is subject to.
-///
-/// `per_test` is the hard cap and it terminates. `wall` is a backstop for a wedge
-/// the cap cannot charge to any test. `shape` says only what a kill may be
-/// *called*, which is the one thing a corrupted stream can take away: with a
-/// caller-resolved single test the name is exact, and on a shared harness it is
-/// the tracker's best-known suspect.
 /// What the caller knows about the run's shape, and therefore what a wall expiry
 /// means.
 ///
@@ -113,9 +87,16 @@ pub(crate) enum WallShape {
     OneTest { name: String },
 }
 
+/// The ceilings one libtest run is subject to.
+///
+/// `per_test` is the hard cap and it terminates. `wall` is a backstop for a wedge
+/// the cap cannot charge to any test. `shape` says only what a kill may be
+/// *called*, which is the one thing a corrupted stream can take away: with a
+/// caller-resolved single test the name is exact, and on a shared harness it is
+/// the tracker's best-known suspect.
 #[derive(Clone)]
 pub(crate) struct Ceilings {
-    /// Per-test ceiling for blame, aged from announced starts. Advisory.
+    /// Hard per-test ceiling, aged from announced starts or missing progress.
     pub(crate) per_test: Duration,
     /// Wall-clock ceiling for the whole run. Authoritative; unreachable by test
     /// output. `None` leaves the run bounded only by the phase watchdog above

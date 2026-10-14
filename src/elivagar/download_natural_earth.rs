@@ -133,7 +133,11 @@ pub fn run(data_dir: &Path) -> Result<(), DevError> {
 
         captured.check_success("unzip")?;
 
-        std::fs::remove_file(&zip_path).ok();
+        match std::fs::remove_file(&zip_path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
 
         if !shp_path.exists() {
             return Err(DevError::Verify(format!(
@@ -165,15 +169,9 @@ pub fn run(data_dir: &Path) -> Result<(), DevError> {
 // ---------------------------------------------------------------------------
 
 fn check_unzip() -> Result<(), DevError> {
-    let result = std::process::Command::new("which")
-        .arg("unzip")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
-
-    match result {
-        Ok(status) if status.success() => Ok(()),
-        _ => Err(DevError::Preflight(vec![
+    match crate::tools::find_executable("unzip") {
+        Some(_) => Ok(()),
+        None => Err(DevError::Preflight(vec![
             "'unzip' not found in PATH (required for Natural Earth shapefile extraction)".into(),
         ])),
     }

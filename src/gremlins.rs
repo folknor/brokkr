@@ -133,31 +133,30 @@ fn replacement(c: char, allow: &CodepointSet) -> Option<&'static str> {
 /// ASCII equivalents (or deleting zero-width / bidi noise). Returns one
 /// summary entry per file that was actually modified.
 pub fn fix(
-    project_root: &Path,
+    tree: &crate::scope::TreeSnapshot,
     config: Option<&GremlinsConfig>,
 ) -> Result<Vec<FixSummary>, DevError> {
     let allow = allow_set(config);
-    let files = tracked_files(project_root)?;
-    validate_excludes(&files, config)?;
+    let files = tree.files();
+    validate_excludes(files, config)?;
     let mut out = Vec::new();
-    for rel in &files {
+    for rel in files {
         if !is_scannable(rel) || is_excluded(rel, config) {
             continue;
         }
-        let abs = project_root.join(rel);
-        let Some(bytes) = read_in_scope(&abs, rel)? else {
+        let Some(bytes) = tree.read_file(rel)? else {
             continue;
         };
         // A non-UTF-8 file is left untouched: rewriting it means guessing
         // its encoding, and a wrong guess corrupts every other non-ASCII
         // byte in it. Not silent - `scan` reports each invalid byte, so the
         // gremlins phase still fails until the file is re-encoded by hand.
-        let Ok(content) = String::from_utf8(bytes) else {
+        let Ok(content) = String::from_utf8(bytes.as_ref().to_vec()) else {
             continue;
         };
         let (fixed, count) = fix_content(&content, &allow);
         if count > 0 {
-            std::fs::write(&abs, fixed).map_err(DevError::Io)?;
+            tree.write_file(rel, fixed.into_bytes())?;
             out.push(FixSummary {
                 path: rel.clone(),
                 count,
@@ -281,48 +280,27 @@ const GREMLINS: &[(char, &str)] = &[
     ('\u{FFFC}', "OBJECT REPLACEMENT CHARACTER"),
 ];
 
-/// Scan every tracked file with a scannable extension, skipping any path
+/// Scan every snapshot file with a scannable extension, skipping any path
 /// under a `[gremlins].exclude` directory.
 pub fn scan(
-    project_root: &Path,
+    tree: &crate::scope::TreeSnapshot,
     config: Option<&GremlinsConfig>,
 ) -> Result<Vec<Gremlin>, DevError> {
     let allow = allow_set(config);
     let ban = ban_set(config);
-    let files = tracked_files(project_root)?;
-    validate_excludes(&files, config)?;
+    let files = tree.files();
+    validate_excludes(files, config)?;
     let mut out = Vec::new();
-    for rel in &files {
+    for rel in files {
         if !is_scannable(rel) || is_excluded(rel, config) {
             continue;
         }
-        let abs = project_root.join(rel);
-        let Some(bytes) = read_in_scope(&abs, rel)? else {
+        let Some(bytes) = tree.read_file(rel)? else {
             continue;
         };
-        scan_bytes(rel, &bytes, &mut out, &allow, &ban);
+        scan_bytes(rel, bytes.as_ref(), &mut out, &allow, &ban);
     }
     Ok(out)
-}
-
-/// Read one in-scope file as raw bytes - not a `String`, because a file that
-/// is not valid UTF-8 is exactly where a gremlin hides (a Latin-1 `.md` with
-/// a raw 0xA0 NBSP), and `read_to_string` failing on it used to make the
-/// file invisible.
-///
-/// `Ok(None)` only for a path that no longer exists: `git ls-files --cached`
-/// still lists a file deleted from the working tree, and there is nothing
-/// left to scan. Any other read failure is an error naming the file, never a
-/// silent skip - an in-scope file the scan could not look at is not clean.
-pub(crate) fn read_in_scope(abs: &Path, rel: &Path) -> Result<Option<Vec<u8>>, DevError> {
-    match std::fs::read(abs) {
-        Ok(bytes) => Ok(Some(bytes)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(DevError::Io(std::io::Error::new(
-            e.kind(),
-            format!("cannot read {}: {e}", rel.display()),
-        ))),
-    }
 }
 
 /// Label for a byte that is not part of any valid UTF-8 sequence. Its
@@ -600,6 +578,31 @@ mod tests {
     }
 
     #[test]
+    fn every_builtin_gremlin_has_a_fix_replacement() {
+        let allow = CodepointSet::default();
+        for (character, name) in GREMLINS {
+            assert!(
+                replacement(*character, &allow).is_some(),
+                "{name} (U+{:04X}) has no replacement",
+                *character as u32
+            );
+        }
+    }
+
+    #[test]
+    fn scan_walks_git_files_and_reads_their_contents() {
+        let root = crate::scope::test_git_tree("gremlins", "scan_tree");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/lib.rs"), "// source \u{2014} note\n").unwrap();
+
+        let tree = crate::scope::TreeSnapshot::load(&root).unwrap();
+        let found = scan(&tree, None).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].path, PathBuf::from("src/lib.rs"));
+        assert_eq!(found[0].name, "EM DASH");
+    }
+
+    #[test]
     fn crlf_does_not_inflate_column() {
         // B9: a `\r` before LF used to count as a column character,
         // so a gremlin on a CRLF line was reported with column = N+1
@@ -667,17 +670,13 @@ mod tests {
 
     #[test]
     fn unreadable_in_scope_file_is_an_error_but_a_deleted_one_is_not() {
-        let dir = crate::test_scratch::scratch("gremlins", "unreadable");
+        let dir = crate::scope::test_git_tree("gremlins", "unreadable");
+        let tree = crate::scope::TreeSnapshot::load(&dir).unwrap();
         // A directory with a scannable name cannot be read as a file.
         let as_dir = dir.join("odd.md");
         std::fs::create_dir_all(&as_dir).unwrap();
-        assert!(read_in_scope(&as_dir, Path::new("odd.md")).is_err());
-        let gone = dir.join("gone.md");
-        assert!(
-            read_in_scope(&gone, Path::new("gone.md"))
-                .unwrap()
-                .is_none()
-        );
+        assert!(tree.read_file(Path::new("odd.md")).is_err());
+        assert!(tree.read_file(Path::new("gone.md")).unwrap().is_none());
     }
 
     #[test]

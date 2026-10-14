@@ -40,26 +40,14 @@ pub(crate) fn resolve_features(
     merged
 }
 
-pub(crate) fn resolve_mode(mode: &cli::ModeArgs) -> Result<measure::MeasureMode, DevError> {
-    let set_count =
-        mode.bench.is_some() as u8 + mode.hotpath.is_some() as u8 + mode.alloc.is_some() as u8;
-    if set_count > 1 {
-        return Err(DevError::Usage(
-            "--bench, --hotpath, and --alloc are mutually exclusive".into(),
-        ));
-    }
-    let count = |runs| {
-        std::num::NonZeroUsize::new(runs)
-            .ok_or_else(|| DevError::Usage("run count must be >= 1".into()))
-    };
-    let result = if let Some(runs) = mode.bench {
-        measure::MeasureMode::Bench { runs: count(runs)? }
+pub(crate) fn resolve_mode(mode: &cli::ModeArgs) -> measure::MeasureMode {
+    if let Some(runs) = mode.bench {
+        measure::MeasureMode::Bench { runs }
     } else if let Some(runs) = mode.hotpath {
-        measure::MeasureMode::Hotpath { runs: count(runs)? }
+        measure::MeasureMode::Hotpath { runs }
     } else if let Some(runs) = mode.alloc {
-        measure::MeasureMode::Alloc { runs: count(runs)? }
+        measure::MeasureMode::Alloc { runs }
     } else {
         measure::MeasureMode::Run
-    };
-    Ok(result)
+    }
 }

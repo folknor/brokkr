@@ -203,7 +203,7 @@ pub fn regress(
             state.raw_equal = raw_equal(cur, bl);
             Ok(())
         })?;
-    report.counters.raw_pass_ms = elapsed_ms(raw_start);
+    report.counters.raw_pass_ms = crate::passthrough_cmd::duration_ms(raw_start.elapsed());
 
     // Pass 2: the canonical semantic hash, memoized per blob rather than per
     // pair - the same blob typically appears in many surviving pairs.
@@ -227,7 +227,8 @@ pub fn regress(
             state.canonical_equal = current == baseline;
             Ok(())
         })?;
-    report.counters.canonical_pass_ms = elapsed_ms(canonical_start);
+    report.counters.canonical_pass_ms =
+        crate::passthrough_cmd::duration_ms(canonical_start.elapsed());
 
     // Pass 3: structural decode and classification.
     let detail_start = Instant::now();
@@ -242,7 +243,7 @@ pub fn regress(
             state.detail = Some(compare_detail_tiles::<DetailOutcome>(&cur, &bl, cfg));
             Ok(())
         })?;
-    report.counters.detail_pass_ms = elapsed_ms(detail_start);
+    report.counters.detail_pass_ms = crate::passthrough_cmd::duration_ms(detail_start.elapsed());
 
     let mut interner = LayerInterner::default();
     let mut examples = ExampleSelector::new(cfg.max_examples);
@@ -262,10 +263,9 @@ pub fn regress(
         } else {
             report.counters.detailed_pairs += 1;
             report.counters.detailed_tiles += tiles;
-            let detail = state
-                .detail
-                .as_ref()
-                .expect("detail pass sets differing work outcome");
+            let detail = state.detail.as_ref().ok_or_else(|| {
+                io::Error::other("detail pass did not produce a differing work outcome")
+            })?;
             for &span in &state.work.spans {
                 apply_detail_span(&mut report, &mut interner, &mut examples, span, detail);
             }
@@ -273,7 +273,7 @@ pub fn regress(
     }
     coalesce_differing_ranges(&mut report);
     report.examples = examples.finish();
-    report.counters.peak_rss_kb = peak_rss_kb().unwrap_or(0);
+    report.counters.peak_rss_kb = crate::sidecar::self_peak_rss_kb().unwrap_or(0);
     Ok(report)
 }
 
@@ -465,12 +465,4 @@ fn coalesce_differing_ranges(report: &mut RegressReport) {
 
 pub(crate) fn invalid_tile(error: String) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, error)
-}
-
-fn elapsed_ms(start: Instant) -> u64 {
-    crate::passthrough_cmd::duration_ms(start.elapsed())
-}
-
-fn peak_rss_kb() -> Option<u64> {
-    crate::sidecar::self_peak_rss_kb()
 }

@@ -25,10 +25,35 @@ use crate::output;
 /// target name can collide with it.
 pub const NO_NAME: &str = "\u{0}brokkr-bare-run";
 
-/// Flags of `brokkr run` that take a separate value argument. The
-/// pre-pass has to know them, or `run --features x -- ARGS` stops its scan
-/// on `x` and never sees the `--` it was looking for.
-const RUN_VALUE_FLAGS: [&str; 3] = ["--features", "-F", "--commit"];
+/// Flags of `brokkr run` that take a separate value argument. Derived from
+/// clap so adding an option cannot silently desynchronise the argv pre-pass.
+/// Build on a larger-stack helper thread: constructing brokkr's full clap
+/// tree overflows the small stacks used by libtest workers.
+fn run_value_flags() -> Option<&'static [String]> {
+    static FLAGS: std::sync::OnceLock<Option<Vec<String>>> = std::sync::OnceLock::new();
+    FLAGS
+        .get_or_init(|| {
+            let built = std::thread::Builder::new().stack_size(8 << 20).spawn(|| {
+                use clap::CommandFactory;
+
+                let mut cli = crate::cli::Cli::command();
+                let Some(run) = cli.find_subcommand_mut("run") else {
+                    return Vec::new();
+                };
+                run.get_arguments()
+                    .filter(|arg| arg.get_action().takes_values())
+                    .flat_map(|arg| {
+                        arg.get_long()
+                            .map(|name| format!("--{name}"))
+                            .into_iter()
+                            .chain(arg.get_short().map(|name| format!("-{name}")))
+                    })
+                    .collect()
+            });
+            built.ok().and_then(|thread| thread.join().ok())
+        })
+        .as_deref()
+}
 
 /// Rewrite `run [flags] -- ARGS...` so the `--` no longer lands in the
 /// name position. Returns the argv unchanged in every other shape,
@@ -45,10 +70,16 @@ pub fn bare_run_sentinel(args: Vec<String>) -> Vec<String> {
     if args.get(run_at).is_none_or(|a| a != "run") {
         return args;
     }
+    let Some(value_flags) = run_value_flags() else {
+        // If the helper thread cannot be created, leave argv untouched so
+        // clap reports the invocation instead of using a stale hand-maintained
+        // list of value-taking options.
+        return args;
+    };
     let mut i = run_at + 1;
     while args.get(i).is_some_and(|a| a.starts_with('-') && a != "--") {
         // `--features=a` carries its value inline; `--features a` does not.
-        let takes_value = RUN_VALUE_FLAGS.contains(&args[i].as_str());
+        let takes_value = value_flags.contains(&args[i]);
         i += if takes_value { 2 } else { 1 };
     }
     let mut args = args;
@@ -304,11 +335,7 @@ pub fn cmd_run_commit(
         features: feat.features.to_vec(),
         default_features: !feat.no_default,
         all_features: feat.all,
-        profile: if resolve_debug(cfg, debug, release) {
-            "dev"
-        } else {
-            "release"
-        },
+        profile: crate::build::CargoProfile::for_debug(resolve_debug(cfg, debug, release)),
     };
     let exe = crate::build::cargo_build(&build, worktree)?;
     let exe_str = exe.path.display().to_string();
@@ -338,20 +365,42 @@ pub fn install_bin_targets(
     install: &[String],
 ) -> Result<Vec<(String, Vec<String>)>, DevError> {
     let runnables = discover(project_root)?;
+    Ok(resolve_install_packages(&runnables, install)?
+        .into_iter()
+        .map(|package| (package.name, package.bin_names))
+        .collect())
+}
+
+struct InstallPackage {
+    name: String,
+    package_dir: PathBuf,
+    bin_names: Vec<String>,
+}
+
+/// Resolve configured install package names against one metadata snapshot.
+/// Shared by `cmd_install` and the install-feature check so both refuse
+/// unknown packages with the same rule and wording.
+fn resolve_install_packages(
+    runnables: &[Runnable],
+    install: &[String],
+) -> Result<Vec<InstallPackage>, DevError> {
     let mut out = Vec::new();
     for pkg in install {
-        let bins: Vec<String> = runnables
+        let selected: Vec<&Runnable> = runnables
             .iter()
             .filter(|r| !r.example && &r.package == pkg)
-            .map(|r| r.name.clone())
             .collect();
-        if bins.is_empty() {
+        let Some(first) = selected.first() else {
             return Err(DevError::Refused(format!(
                 "[bin] install names '{pkg}', which has no bin target \
                  in this workspace"
             )));
-        }
-        out.push((pkg.clone(), bins));
+        };
+        out.push(InstallPackage {
+            name: pkg.clone(),
+            package_dir: first.package_dir.clone(),
+            bin_names: selected.iter().map(|r| r.name.clone()).collect(),
+        });
     }
     Ok(out)
 }
@@ -383,22 +432,8 @@ pub fn cmd_install(
     let (runnables, workspace_root) = discover_workspace(project_root)?;
     let bins: Vec<&Runnable> = runnables.iter().filter(|r| !r.example).collect();
 
-    let selected: Vec<&Runnable> = match cfg.map(|c| c.install.as_slice()) {
-        Some(list) if !list.is_empty() => {
-            let mut out = Vec::new();
-            for pkg in list {
-                // First bin of the package carries the package_dir; `cargo
-                // install --path` installs every bin the package has.
-                let Some(r) = bins.iter().find(|r| &r.package == pkg) else {
-                    return Err(DevError::Refused(format!(
-                        "[bin] install names '{pkg}', which has no bin target \
-                         in this workspace"
-                    )));
-                };
-                out.push(*r);
-            }
-            out
-        }
+    let install = match cfg.map(|c| c.install.as_slice()) {
+        Some(list) if !list.is_empty() => list.to_vec(),
         _ => {
             // Auto: exactly one package with bin targets.
             let mut pkgs: Vec<&Runnable> = Vec::new();
@@ -413,7 +448,7 @@ pub fn cmd_install(
                         "no bin targets in this workspace - nothing to install".into(),
                     ));
                 }
-                [_] => pkgs,
+                [one] => vec![one.package.clone()],
                 many => {
                     let mut msg = format!("{} packages carry bin targets:\n", many.len());
                     for r in many {
@@ -425,6 +460,7 @@ pub fn cmd_install(
             }
         }
     };
+    let selected = resolve_install_packages(&runnables, &install)?;
 
     let dev = resolve_debug(cfg, debug, release);
     // A lock cargo cannot find is a lock `--locked` would only make it abort
@@ -433,13 +469,13 @@ pub fn cmd_install(
     // workspace's `Cargo.lock` at metadata's `workspace_root` - not the member
     // directory, and not wherever brokkr happened to be invoked from.
     let has_lock = workspace_root.join("Cargo.lock").is_file();
-    for r in selected {
+    for package in selected {
         let locked = !unlocked && has_lock;
         if !unlocked && !locked {
             output::run_msg(&format!(
                 "no Cargo.lock for {} - installing with cargo's own \
                  dependency resolution, not the one check validated",
-                r.package
+                package.name
             ));
         }
         let mut cargo_args: Vec<String> = vec!["install".into()];
@@ -450,14 +486,14 @@ pub fn cmd_install(
             cargo_args.push("--locked".into());
         }
         cargo_args.push("--path".into());
-        cargo_args.push(r.package_dir.display().to_string());
+        cargo_args.push(package.package_dir.display().to_string());
         output::run_msg(&format!("cargo {}", cargo_args.join(" ")));
         let code = run_cargo(&cargo_args, lock)?;
         if code != 0 {
             // Cargo printed its own error; this names which brokkr step died.
             return Err(DevError::Reported(format!(
                 "cargo install failed for {} (exit code {code})",
-                r.package
+                package.name
             )));
         }
     }

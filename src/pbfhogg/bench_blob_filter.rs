@@ -41,7 +41,7 @@ fn command_args(name: &str, pbf: &str, output: &str, force: bool) -> Result<Vec<
             "--type".into(),
             "way".into(),
             "--min-count".into(),
-            "999999999".into(),
+            super::commands::INSPECT_ALL_TAGS_MIN_COUNT.into(),
         ],
         "inspect-nodes" => vec!["inspect".into(), "--nodes".into(), pbf.into()],
         _ => {

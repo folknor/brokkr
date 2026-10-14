@@ -10,9 +10,9 @@ fn validate_snapshot_key_arg(s: &str) -> Result<String, String> {
 /// be empty (the empty-value case is legitimate for filtering rows where the
 /// stored value is the empty string).
 fn validate_meta_filter(s: &str) -> Result<String, String> {
-    if !s.contains('=') {
+    if s.matches('=').count() != 1 {
         return Err(format!(
-            "expected key=value, got '{s}' (use --meta KEY=VALUE)"
+            "expected exactly one '=' in key=value, got '{s}' (use --meta KEY=VALUE)"
         ));
     }
     Ok(s.to_owned())
@@ -23,6 +23,11 @@ fn validate_meta_filter(s: &str) -> Result<String, String> {
 /// validator deliberately allows an empty key for row filtering), and any VALUE
 /// including empty (`KEY=` legitimately sets an empty variable).
 fn validate_env_kv(s: &str) -> Result<String, String> {
+    if s.matches('=').count() != 1 {
+        return Err(format!(
+            "expected exactly one '=' in KEY=VALUE, got '{s}' (use --env KEY=VALUE)"
+        ));
+    }
     match s.split_once('=') {
         Some((k, _)) if !k.is_empty() => Ok(s.to_owned()),
         Some(_) => Err(format!("--env KEY must be non-empty, got '{s}'")),

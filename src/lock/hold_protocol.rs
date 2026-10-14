@@ -32,8 +32,9 @@ pub(super) struct HoldEffects {
     /// Wait out earlier compilation leases; the returned descriptor is the
     /// exclusive lease held while the capability is published.
     pub(super) drain: fn() -> Result<Option<OwnedFd>, DevError>,
-    /// Activate the armed toolchain-disable ([`crate::toolchain`]).
-    pub(super) toolchain: fn() -> Result<Option<crate::toolchain::DisabledToolchain>, DevError>,
+    /// Activate the context's toolchain-disable path, when configured.
+    pub(super) toolchain:
+        fn(&LockContext<'_>) -> Result<Option<crate::toolchain::DisabledToolchain>, DevError>,
     /// Attach this hold's minted nonce to the live guard for child stamping.
     pub(super) capability: fn(Nonce) -> Option<Nonce>,
     /// Runs once the fresh hold is registered: the stray reap and the stale
@@ -46,12 +47,20 @@ pub(super) const HOST_EFFECTS: HoldEffects = HoldEffects {
     service: host_service,
     disk_gate: crate::disk_gate::check,
     drain: host_drain,
-    toolchain: crate::toolchain::activate_for_lock,
+    toolchain: activate_toolchain,
     capability: Some,
     after_fresh_hold: host_after_fresh_hold,
 };
 
-fn no_toolchain() -> Result<Option<crate::toolchain::DisabledToolchain>, DevError> {
+fn activate_toolchain(
+    ctx: &LockContext<'_>,
+) -> Result<Option<crate::toolchain::DisabledToolchain>, DevError> {
+    crate::toolchain::activate_for_lock(ctx.disable_toolchain_dir)
+}
+
+fn no_toolchain(
+    _: &LockContext<'_>,
+) -> Result<Option<crate::toolchain::DisabledToolchain>, DevError> {
     Ok(None)
 }
 
@@ -198,7 +207,7 @@ pub(super) fn acquire_at_with(
     let flocked = flocked.start_service(ctx, effects.service)?;
     let gated = flocked.gate(ctx, effects.disk_gate)?;
     let drained = gated.drain(ctx, effects.drain)?;
-    let authorized = drained.authorize(effects.toolchain)?;
+    let authorized = drained.authorize(effects.toolchain, ctx)?;
     Ok(authorized.into_live(effects.capability, effects.after_fresh_hold))
 }
 
@@ -284,10 +293,14 @@ impl Drained {
     /// fallible work before the new `LockInner` owns the capability.
     fn authorize(
         mut self,
-        toolchain_effect: fn() -> Result<Option<crate::toolchain::DisabledToolchain>, DevError>,
+        toolchain_effect: fn(
+            &LockContext<'_>,
+        )
+            -> Result<Option<crate::toolchain::DisabledToolchain>, DevError>,
+        ctx: &LockContext<'_>,
     ) -> Result<Authorized, DevError> {
         refuse_if_stopping()?;
-        let toolchain = toolchain_effect()?;
+        let toolchain = toolchain_effect(ctx)?;
         refuse_if_stopping()?;
 
         let nonce = Nonce::mint().ok_or_else(|| {
@@ -368,10 +381,10 @@ pub(super) const LOCK_POLL: std::time::Duration = std::time::Duration::from_mill
 /// on the flock while its ancestor waits for it to exit: neither moves, and the
 /// machine-wide lock stays held until someone kills them (it sat 22 minutes
 /// once). The ancestor is recognisable without any process ancestry, which a
-/// PID namespace hides: every child of a hold inherits that hold's nonce, and
-/// the lock record publishes the nonce's hash (`crate::hold`). `inherited` is
-/// this process's inherited hash; a holder publishing the same one is the hold
-/// this process descends from.
+/// PID namespace hides: the shared child policy carries the hold's nonce, and
+/// the lock record publishes its hash (`crate::hold`). `inherited` is this
+/// process's inherited hash; a holder publishing the same one is the hold this
+/// process descends from.
 ///
 /// That match proves authorization, not deadlock: an ancestor could release
 /// and only then wait. Refusing that case loses an execution that would have

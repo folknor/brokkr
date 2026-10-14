@@ -28,6 +28,7 @@ use crate::output;
 
 const WRAPPER_KEY: &str = "rustc-wrapper";
 const GUARD_BIN: &str = "brokkr-rustc-guard";
+const GUARD_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 
 // The version and wire fields are shared with the standalone guard through
 // `lock_protocol.rs`. Bump the version there when admission behavior changes
@@ -202,7 +203,12 @@ fn do_remove(config_path: &std::path::Path) -> Result<(), DevError> {
                 "build.{WRAPPER_KEY} = \"{wrapper}\" is not a brokkr guard - refusing to remove a wrapper brokkr did not write"
             )));
         }
-        Wrapper::None => unreachable!("a configured wrapper was just read"),
+        Wrapper::None => {
+            return Err(DevError::Config(format!(
+                "{} no longer has a string build.{WRAPPER_KEY} value",
+                config_path.display()
+            )));
+        }
     }
     if let Some(build) = doc.get_mut("build").and_then(toml_edit::Item::as_table_mut) {
         build.remove(WRAPPER_KEY);
@@ -239,16 +245,19 @@ fn probe_guard(wrapper: &str) -> GuardProbe {
         &[GUARD_INFO_ARG],
         std::path::Path::new("/"),
         &[],
-        std::time::Duration::from_secs(3),
+        GUARD_PROBE_TIMEOUT,
         None,
-        false,
+        crate::shutdown::ChildIsolation::Inherit,
     );
     let capture = match capture {
         Ok(c) => c,
         Err(e) => return GuardProbe::Stale(format!("could not be executed: {e}")),
     };
     if capture.killed_on_deadline() {
-        return GuardProbe::Stale("did not answer the handshake within 3s".into());
+        return GuardProbe::Stale(format!(
+            "did not answer the handshake within {}s",
+            GUARD_PROBE_TIMEOUT.as_secs()
+        ));
     }
     let stdout = String::from_utf8_lossy(&capture.captured.stdout);
     let Some(first) = stdout.lines().next() else {

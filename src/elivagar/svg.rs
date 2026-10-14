@@ -60,11 +60,11 @@ pub fn run(
 
     let stdout = String::from_utf8_lossy(&captured.stdout);
     if !stdout.is_empty() {
-        print!("{stdout}");
+        output::plain(&stdout);
     }
     let stderr = String::from_utf8_lossy(&captured.stderr);
     if !stderr.is_empty() {
-        eprint!("{stderr}");
+        output::plain_stderr(&stderr);
     }
 
     captured.check_success(&binary_str)?;

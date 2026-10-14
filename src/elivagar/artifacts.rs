@@ -11,7 +11,7 @@ use crate::output;
 /// probe pair was already lost). The store owns the retention window for each
 /// dataset and variant.
 ///
-/// For non-Tilegen commands, cleans up output files as before.
+/// Example commands have no output files to promote.
 ///
 /// Every way of ending without a durable archive is an `Err`, not a logged
 /// line: a tilegen run whose output never reaches the store has not produced
@@ -28,14 +28,6 @@ pub(crate) fn rename_elivagar_output(
 ) -> Result<(), DevError> {
     let output_files = command.output_files(layout);
     if output_files.is_empty() {
-        return Ok(());
-    }
-
-    // Only Tilegen produces output to rename.
-    if !matches!(command, BuiltCommand::MainBinary { .. }) {
-        for path in &output_files {
-            std::fs::remove_file(path).ok();
-        }
         return Ok(());
     }
 

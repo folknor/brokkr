@@ -26,18 +26,27 @@ pub struct ContractDoc {
 /// Outcome of reading the provenance block. Everything but `Contract` is an
 /// archive-side refusal (exit 2) - the archive cannot be judged on its own terms.
 ///
-/// The non-`Contract` variants and their payloads are surfaced through `Debug`
-/// in the refusal message (`{state:?}`); `Unavailable` is constructed by the
-/// reader path (metadata unreadable) that lands with the linked crate.
+/// The non-`Contract` variants and their payloads are surfaced through
+/// `Display` in the refusal message.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub enum ContractState {
     Contract(ContractDoc),
     Absent,
-    Unavailable(String),
     Invalid,
     UnknownSchema(u64),
     Incomplete(&'static str),
+}
+
+impl std::fmt::Display for ContractState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Contract(_) => f.write_str("valid contract"),
+            Self::Absent => f.write_str("no provenance block"),
+            Self::Invalid => f.write_str("provenance block is not a valid object"),
+            Self::UnknownSchema(schema) => write!(f, "unknown schema version {schema}"),
+            Self::Incomplete(member) => write!(f, "provenance block lacks `{member}`"),
+        }
+    }
 }
 
 /// Decode the `elivagar` provenance member out of an archive's metadata JSON.
@@ -75,8 +84,8 @@ pub fn extract_contract(metadata_json: &str) -> ContractState {
     })
 }
 
-/// The gated paths which differ. `input.name` and the whole `build`/`effective`
-/// block are intentionally diagnostic: archives from different revisions are
+/// The gated paths which differ. `input.name` and the whole `build` block are
+/// intentionally diagnostic: archives from different revisions are
 /// exactly what the gate is meant to compare, so they must never gate.
 #[must_use]
 pub fn contract_diff(baseline: &ContractDoc, candidate: &ContractDoc) -> Vec<String> {

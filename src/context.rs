@@ -8,6 +8,23 @@ use crate::lockfile;
 use crate::output;
 use crate::project::{BuildRoot, Project, ProjectRoot};
 
+/// The build root whose pinned toolchain a fresh hold moves aside, recorded
+/// once at startup from the detected config (`disable_toolchain`). Like
+/// [`crate::cli::invocation`], it is a write-once fact about this invocation,
+/// read only to fill [`lockfile::LockContext::disable_toolchain_dir`]; the lock
+/// layer itself never reads it.
+static CONFIGURED_TOOLCHAIN_DIR: std::sync::OnceLock<Option<std::path::PathBuf>> =
+    std::sync::OnceLock::new();
+
+/// Record the invocation's toolchain-disable path. The first call wins.
+pub(crate) fn set_configured_toolchain_dir(dir: Option<std::path::PathBuf>) {
+    CONFIGURED_TOOLCHAIN_DIR.set(dir).ok();
+}
+
+fn configured_toolchain_dir() -> Option<&'static Path> {
+    CONFIGURED_TOOLCHAIN_DIR.get().and_then(Option::as_deref)
+}
+
 /// Re-enter the invocation's hold without inventing a second lock label.
 pub(crate) fn reenter_command_lock() -> Result<lockfile::LockGuard, DevError> {
     let (project_root, build_root) = crate::project::detect_roots()?;
@@ -49,6 +66,7 @@ pub(crate) fn acquire_cmd_lock_opt(
         command: crate::cli::invocation(),
         project_root,
         build_root,
+        disable_toolchain_dir: configured_toolchain_dir(),
     })
 }
 
@@ -150,7 +168,7 @@ impl MeasurementSession {
     ) -> Result<Self, DevError> {
         // Take the lock before resolving paths, for the same reason as
         // `MeasurementSession::with_build_config`: `resolve_bootstrap_paths` runs
-        // `cargo metadata`, and the lock activates the armed toolchain-disable.
+        // `cargo metadata`, and the lock activates the configured toolchain-disable.
         // Acquiring first keeps a worktree's committed pin from being live
         // during that metadata call. The harness is handed the held lock.
         let lock = lockfile::acquire(&lockfile::LockContext {
@@ -158,6 +176,7 @@ impl MeasurementSession {
             command: crate::cli::invocation(),
             project_root,
             build_root,
+            disable_toolchain_dir: configured_toolchain_dir(),
         })?;
         let paths = resolve_bootstrap_paths(dev_config, project_root, build_root)?;
         let harness = harness::BenchHarness::new_with_lock(
@@ -377,14 +396,15 @@ where
             // waiter's message show for the whole run (the closure's re-entrant
             // acquires never rewrite it), so it carries the caller's project
             // and the invoked command, not a bookkeeping name.
-            // The live build root's armed pin is unrelated to this run. Keep
-            // the configured arm untouched and explicitly activate the
-            // worktree's pin below, once its checkout exists.
+            // The live build root's pin is unrelated to this run. Leave it
+            // alone and explicitly activate the worktree's pin below, once its
+            // checkout exists.
             let lock = lockfile::acquire_without_toolchain(&lockfile::LockContext {
                 project: project.map_or("brokkr", Project::name),
                 command: crate::cli::invocation(),
                 project_root,
                 build_root,
+                disable_toolchain_dir: None,
             })?;
 
             // Retention runs from `create`'s cut hook: only when a worktree is

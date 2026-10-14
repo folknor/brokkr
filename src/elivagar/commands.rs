@@ -7,7 +7,6 @@ use std::path::PathBuf;
 
 use crate::clean::layout::ElivagarLayout;
 use crate::config;
-use crate::db::KvPair;
 use crate::error::DevError;
 
 use super::PipelineOpts;
@@ -34,6 +33,7 @@ pub enum BuiltCommand<'a> {
 }
 
 /// Cargo examples used by elivagar's synthetic micro-benchmarks.
+#[derive(Clone, Copy)]
 pub enum ExampleCommand {
     /// PMTiles writer micro-benchmark.
     PmtilesWriter { tiles: usize },
@@ -122,15 +122,6 @@ impl BuiltCommand<'_> {
                 "1".into(),
             ]),
         }
-    }
-
-    /// Build metadata KV pairs for result storage.
-    ///
-    /// Post-v13 this is reserved for runtime observations. Axis-like fields
-    /// are captured in `brokkr_args`/`cli_args`; `locations_on_ways_detected`
-    /// is observed after the run and added by the dispatch layer.
-    pub fn metadata(&self) -> Vec<KvPair> {
-        Vec::new()
     }
 
     /// The CLI command ID.

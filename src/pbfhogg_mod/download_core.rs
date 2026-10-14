@@ -21,6 +21,102 @@ use crate::output;
 use crate::preflight;
 use crate::tools;
 
+const PLANET_ORIGIN: &str = "planet.openstreetmap.org";
+const PLANET_BASE_URL: &str = "https://planet.openstreetmap.org";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CivilDate {
+    year: i32,
+    month: u32,
+    day: u32,
+}
+
+impl CivilDate {
+    fn from_unix_seconds(unix_secs: i64) -> Self {
+        Self::from_unix_days(unix_secs.div_euclid(86_400))
+    }
+
+    fn from_unix_days(days: i64) -> Self {
+        let z = days + 719_468;
+        let era = (if z >= 0 { z } else { z - 146_096 }) / 146_097;
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let doe = (z - era * 146_097) as u32;
+        let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+        let year = i64::from(yoe) + era * 400;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let day = doy - (153 * mp + 2) / 5 + 1;
+        let month = if mp < 10 { mp + 3 } else { mp - 9 };
+        let year = if month <= 2 { year + 1 } else { year };
+        #[allow(clippy::cast_possible_truncation)]
+        let year = year as i32;
+        Self { year, month, day }
+    }
+
+    fn parse_yyyymmdd(value: &str) -> Option<Self> {
+        if value.len() != 8 || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        let year = value[..4].parse().ok()?;
+        let month = value[4..6].parse().ok()?;
+        let day = value[6..8].parse().ok()?;
+        Self::new(year, month, day)
+    }
+
+    fn parse_iso(value: &str) -> Option<Self> {
+        let bytes = value.as_bytes();
+        if bytes.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-' {
+            return None;
+        }
+        let year = value.get(..4)?;
+        let month = value.get(5..7)?;
+        let day = value.get(8..10)?;
+        if !year.bytes().all(|byte| byte.is_ascii_digit())
+            || !month.bytes().all(|byte| byte.is_ascii_digit())
+            || !day.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            return None;
+        }
+        Self::new(year.parse().ok()?, month.parse().ok()?, day.parse().ok()?)
+    }
+
+    fn new(year: i32, month: u32, day: u32) -> Option<Self> {
+        let days_in_month = match month {
+            1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+            4 | 6 | 9 | 11 => 30,
+            2 if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) => 29,
+            2 => 28,
+            _ => return None,
+        };
+        if !(1..=days_in_month).contains(&day) {
+            return None;
+        }
+        Some(Self { year, month, day })
+    }
+
+    fn yyyymmdd(self) -> String {
+        format!("{:04}{:02}{:02}", self.year, self.month, self.day)
+    }
+
+    fn iso(self) -> String {
+        format!("{:04}-{:02}-{:02}", self.year, self.month, self.day)
+    }
+
+    fn unix_seconds(self) -> i64 {
+        let year = i64::from(self.year) - if self.month <= 2 { 1 } else { 0 };
+        let era = (if year >= 0 { year } else { year - 399 }) / 400;
+        #[allow(clippy::cast_sign_loss)]
+        let yoe = (year - era * 400) as u64;
+        let month = u64::from(self.month);
+        let day = u64::from(self.day);
+        let doy = (153 * (if month > 2 { month - 3 } else { month + 9 }) + 2) / 5 + day - 1;
+        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+        #[allow(clippy::cast_possible_wrap)]
+        let days = doe as i64;
+        (era * 146_097 + days - 719_468) * 86_400
+    }
+}
+
 /// Today's date as `YYYYMMDD`.
 fn today() -> String {
     let secs = SystemTime::now()
@@ -28,28 +124,31 @@ fn today() -> String {
         .unwrap_or_default()
         .as_secs();
     #[allow(clippy::cast_possible_wrap)]
-    let days = (secs / 86400) as i64; // safe: won't wrap until year 292 billion
-    let (y, m, d) = days_to_civil(days);
-    format!("{y:04}{m:02}{d:02}")
+    let secs = secs as i64;
+    CivilDate::from_unix_seconds(secs).yyyymmdd()
 }
 
 /// Convert days since 1970-01-01 to (year, month, day).
 /// Algorithm from Howard Hinnant's chrono-compatible date library.
 fn days_to_civil(days: i64) -> (i32, u32, u32) {
-    let z = days + 719468;
-    let era = (if z >= 0 { z } else { z - 146096 }) / 146097;
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let doe = (z - era * 146097) as u32; // always 0..146096 by construction
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe as i64 + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
-    #[allow(clippy::cast_possible_truncation)]
-    let y_i32 = y as i32; // safe for dates anywhere near the present
-    (y_i32, m, d)
+    let date = CivilDate::from_unix_days(days);
+    (date.year, date.month, date.day)
+}
+
+fn raw_pbf_filename(dataset_key: &str, date_or_snapshot: &str) -> String {
+    format!("{dataset_key}-{date_or_snapshot}.osm.pbf")
+}
+
+fn indexed_pbf_filename(dataset_key: &str, date_or_snapshot: &str) -> String {
+    format!("{dataset_key}-{date_or_snapshot}-with-indexdata.osm.pbf")
+}
+
+fn snapshot_pbf_filename(dataset_key: &str, snap_key: &str, variant: &str) -> String {
+    if variant == "indexed" {
+        indexed_pbf_filename(dataset_key, snap_key)
+    } else {
+        raw_pbf_filename(dataset_key, snap_key)
+    }
 }
 
 /// Format a 9-digit zero-padded sequence number as a 3-level path: `000/004/715`.
@@ -80,7 +179,7 @@ impl DownloadSource {
                 format!("https://download.geofabrik.de/{path}-latest.osm.pbf")
             }
             Self::Planet => {
-                "https://planet.openstreetmap.org/pbf/planet-latest.osm.pbf".into()
+                format!("{PLANET_BASE_URL}/pbf/planet-latest.osm.pbf")
             }
         }
     }
@@ -93,7 +192,7 @@ impl DownloadSource {
                 format!("https://download.geofabrik.de/{path}-updates/{sp}.osc.gz")
             }
             Self::Planet => {
-                format!("https://planet.openstreetmap.org/replication/day/{sp}.osc.gz")
+                format!("{PLANET_BASE_URL}/replication/day/{sp}.osc.gz")
             }
         }
     }
@@ -102,7 +201,7 @@ impl DownloadSource {
     fn origin(&self) -> &'static str {
         match self {
             Self::Geofabrik { .. } => "Geofabrik",
-            Self::Planet => "planet.openstreetmap.org",
+            Self::Planet => PLANET_ORIGIN,
         }
     }
 
@@ -110,7 +209,7 @@ impl DownloadSource {
     fn display_name(&self) -> String {
         match self {
             Self::Geofabrik { path } => format!("Geofabrik: {path}"),
-            Self::Planet => "planet.openstreetmap.org".into(),
+            Self::Planet => PLANET_ORIGIN.into(),
         }
     }
 }
@@ -150,7 +249,7 @@ struct ResolvedDownload {
 fn resolve(name: &str, dataset: Option<&Dataset>) -> Result<ResolvedDownload, DevError> {
     // If the dataset already exists, let its origin override.
     if let Some(ds) = dataset
-        && ds.origin.as_deref() == Some("planet.openstreetmap.org")
+        && ds.origin.as_deref() == Some(PLANET_ORIGIN)
     {
         return Ok(ResolvedDownload {
             source: DownloadSource::Planet,
@@ -255,7 +354,7 @@ fn raw_pbf_path(dataset: Option<&Dataset>, data_dir: &Path, dataset_key: &str, d
     {
         return data_dir.join(&entry.file);
     }
-    data_dir.join(format!("{dataset_key}-{date}.osm.pbf"))
+    data_dir.join(raw_pbf_filename(dataset_key, date))
 }
 
 /// Find the "indexed" PBF path - either the configured `indexed` variant, or
@@ -266,7 +365,7 @@ fn indexed_pbf_path(dataset: Option<&Dataset>, data_dir: &Path, dataset_key: &st
     {
         return data_dir.join(&entry.file);
     }
-    data_dir.join(format!("{dataset_key}-{date}-with-indexdata.osm.pbf"))
+    data_dir.join(indexed_pbf_filename(dataset_key, date))
 }
 
 /// Build the OSC destination filename using the project naming convention.
@@ -375,10 +474,7 @@ pub(crate) fn promote_snapshot(
 
     std::fs::create_dir_all(data_dir)?;
 
-    let target_filename = match target_variant {
-        "indexed" => format!("{dataset_key}-{snap_key}-with-indexdata.osm.pbf"),
-        _ => format!("{dataset_key}-{snap_key}.osm.pbf"),
-    };
+    let target_filename = snapshot_pbf_filename(dataset_key, snap_key, target_variant);
     let target_path = data_dir.join(&target_filename);
 
     output::download_msg(&format!(

@@ -20,6 +20,24 @@ mod tests {
     use super::*;
     use super::check::{rustflags_target_key, test_phase_allow_flags};
 
+    #[test]
+    fn config_reference_lists_the_parser_section_universe() {
+        let docs = include_str!("../../docs/brokkr.toml.md");
+        let list = docs
+            .split_once("Reserved top-level keys parsed as config sections, or consumed by composition:\n")
+            .expect("reserved-section list heading")
+            .1
+            .lines()
+            .take_while(|line| !line.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let documented: Vec<&str> = list.split('`').skip(1).step_by(2).collect();
+        let documented_set: std::collections::BTreeSet<_> = documented.iter().copied().collect();
+        let parser_set: std::collections::BTreeSet<_> = SECTIONS.iter().copied().collect();
+        assert_eq!(documented.len(), documented_set.len(), "duplicate documented key");
+        assert_eq!(documented_set, parser_set, "config reference key universe drifted");
+    }
+
     fn make_config(hosts: HashMap<String, HostConfig>) -> DevConfig {
         DevConfig {
             hosts,
@@ -341,7 +359,7 @@ preset = ["a", "b"]
         )
         .unwrap();
 
-        // S3-25: the earlier-listed preset wins for scalars *and* its list
+        // The earlier-listed preset wins for scalars *and its list
         // entries come first, so lists and scalars agree on `preset = ["a",
         // "b"]` meaning "a before b" (before the fix, lists came out reversed:
         // ["b/**", "a/**"]).
@@ -382,7 +400,7 @@ preset = ["a", "b"]
 
     #[test]
     fn textlint_unreferenced_preset_rejected() {
-        // S3-24: a preset no rule draws on is dead config - reject it, whether
+        // A preset no rule draws on is dead config - reject it, whether
         // or not any rules exist.
         assert!(textlint_of(
             "[textlint_preset.unused]\npaths = [\"**\"]\n\n[[textlint]]\n\
@@ -657,7 +675,7 @@ preset = ["a", "b"]
 
     #[test]
     fn parse_check_rejects_env_target_dir_without_rustflags() {
-        // S3-19: brokkr owns CARGO_TARGET_DIR for the sweep's isolation
+        // Brokkr owns CARGO_TARGET_DIR for the sweep's isolation
         // unconditionally - the old guard only fired when `rustflags` was also
         // set, so a plain entry hand-setting it slipped through.
         let table: toml::map::Map<String, toml::Value> = toml::from_str(
@@ -670,7 +688,7 @@ preset = ["a", "b"]
 
     #[test]
     fn parse_check_rejects_env_encoded_rustflags() {
-        // S3-19: CARGO_ENCODED_RUSTFLAGS wins over a plain RUSTFLAGS, so a
+        // CARGO_ENCODED_RUSTFLAGS wins over a plain RUSTFLAGS, so a
         // hand-set one would silently defeat the composed flags too.
         let table: toml::map::Map<String, toml::Value> = toml::from_str(
             "[[check]]\nname = \"x\"\nenv = { CARGO_ENCODED_RUSTFLAGS = \"x\" }\n",
@@ -692,7 +710,7 @@ preset = ["a", "b"]
 
     #[test]
     fn profile_env_rejects_reserved_target_dir() {
-        // S3-19: a profile's env reaches the sweep (build_resolved_sweep merges
+        // A profile's env reaches the sweep (build_resolved_sweep merges
         // it in) and would win over the composed isolation, so the reserved
         // keys are rejected on a profile too, not only on a `[[check]]` entry.
         let err = validate_fragment(
@@ -709,7 +727,7 @@ preset = ["a", "b"]
 
     #[test]
     fn skip_phases_coverage_rejected() {
-        // S3-23: coverage is a valid `failed_phase` but not skippable - it runs
+        // Coverage is a valid `failed_phase` but not skippable - it runs
         // only under a complete claim, so skipping it under the required partial
         // claim could never do anything.
         let err = validate_fragment(
@@ -735,7 +753,7 @@ preset = ["a", "b"]
 
     #[test]
     fn non_skippable_phases_are_real_phases() {
-        // S3-23: the non-skippable set must be a subset of the real phase set -
+        // The non-skippable set must be a subset of the real phase set -
         // `coverage` stays a valid `failed_phase` value even though it can't be
         // skipped.
         let all: Vec<&str> = phase_names().collect();

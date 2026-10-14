@@ -279,8 +279,7 @@ mod tests {
 
     #[test]
     fn load_parses_lints_and_keyword_files() {
-        let dir = std::env::temp_dir().join(format!("brokkr_lint_reg_{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_scratch::scratch("piners_lint_registry", "load_files");
         std::fs::write(
             dir.join("lints.toml"),
             r#"

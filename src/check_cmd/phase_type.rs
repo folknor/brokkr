@@ -2,6 +2,48 @@
 /// evaluation records its first failure.
 pub(super) use crate::cargo_env::Phase;
 
+/// A check phase's outcome before the command boundary decides how to render
+/// it. Findings have already printed their report; operational errors have
+/// not, while a stop has its own exit path.
+#[derive(Debug)]
+enum PhaseFailure {
+    Findings(Phase),
+    Printed(crate::error::DevError),
+    Error(crate::error::DevError),
+    Stopped(crate::error::DevError),
+}
+
+impl PhaseFailure {
+    fn for_phase(phase: Phase, error: crate::error::DevError) -> Self {
+        match error {
+            crate::error::DevError::Reported(_) => Self::Findings(phase),
+            other => other.into(),
+        }
+    }
+
+    fn into_dev_error(self) -> crate::error::DevError {
+        match self {
+            Self::Findings(phase) => {
+                crate::error::DevError::Reported(format!("{} failed", phase.as_str()))
+            }
+            Self::Printed(error) => error,
+            Self::Error(error) | Self::Stopped(error) => error,
+        }
+    }
+}
+
+impl From<crate::error::DevError> for PhaseFailure {
+    fn from(error: crate::error::DevError) -> Self {
+        match error {
+            error @ crate::error::DevError::Reported(_) => Self::Printed(error),
+            crate::error::DevError::Interrupted | crate::error::DevError::ExitCode(_) => {
+                Self::Stopped(error)
+            }
+            other => Self::Error(other),
+        }
+    }
+}
+
 impl Phase {
     pub(super) const ALL: [Self; 13] = [
         Self::Gremlins,
@@ -37,13 +79,7 @@ impl Phase {
     }
 
     pub(super) const fn ceiling(self) -> std::time::Duration {
-        let minutes = match self {
-            Self::Clippy | Self::Rustdoc => 5,
-            Self::Prepare | Self::Test => 15,
-            Self::Coverage | Self::InstallFeature | Self::ScriptCheck => 5,
-            _ => 2,
-        };
-        std::time::Duration::from_secs(minutes * 60)
+        crate::test_runner::ceilings::phase_ceiling(self)
     }
 
     pub(super) const fn cargo_verb(self) -> Option<&'static str> {

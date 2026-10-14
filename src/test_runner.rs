@@ -5,10 +5,12 @@
 //! `procgroup`, `run`, `hung`, and `output` (the display-only libtest text
 //! parser and compact failure rendering).
 
+pub(crate) mod ceilings;
 mod context;
 mod deadline;
 mod events;
 mod hung;
+mod invocation;
 mod libtest_json;
 mod outcome;
 mod output;
@@ -30,6 +32,7 @@ pub(crate) use events::{
     StreamEnd, StreamSource, StreamTap, TestResult, next_stream_id,
 };
 pub(crate) use hung::{format_hung_test, is_bare_status_line};
+pub(crate) use invocation::LibtestArgs;
 use libtest_json::JsonReconstructor;
 pub(crate) use outcome::{
     ExecutionOutcome, LaneVerdict, ProtocolIssue, StreamOutcome, lane_verdict,

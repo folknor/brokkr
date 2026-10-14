@@ -207,7 +207,9 @@ impl DiffSink for DetailOutcome {
         current: Option<&PreparedLayer>,
         baseline: Option<&PreparedLayer>,
     ) {
-        let layer = current.or(baseline).expect("layer event has a layer");
+        let Some(layer) = current.or(baseline) else {
+            return;
+        };
         self.record(&layer.name, class, 0, None, None);
     }
 }

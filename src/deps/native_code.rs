@@ -83,8 +83,9 @@ impl Serialize for NativeDependencyEvent {
     }
 }
 
-/// Build-dependency crate names that mean "this build script compiles
-/// non-Rust source". `cxx-build` depends on `cc`, but a crate using
+/// Fixed classifier policy: build-dependency crate names that mean "this build
+/// script compiles non-Rust source". This is not project configuration.
+/// `cxx-build` depends on `cc`, but a crate using
 /// cxx lists `cxx-build` as its own direct build-dep, so scanning
 /// direct build edges catches it without chasing transitives.
 const TOOLCHAIN_CRATES: &[&str] = &["cc", "cmake", "cxx-build", "nasm-rs"];

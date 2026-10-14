@@ -30,15 +30,12 @@ use crate::piners::integrity::{self, HarnessEnd};
 use crate::piners::manifest::Manifest;
 use crate::piners::prepare::{self, PreparedSelection};
 use crate::piners::select::SelectArgs;
-use crate::project::{self, Project};
 
 /// Run a measured corpus selection (`--hotpath`/`--alloc`). Routed here from
 /// the `Corpus` dispatch when a measurement flag is set; bare/parity runs go to
 /// [`crate::piners::cmd::corpus`] instead.
 #[allow(clippy::too_many_lines)] // linear orchestration: select, verify, build, measure
 pub(crate) fn run(req: &MeasureRequest, args: &CorpusArgs) -> Result<(), DevError> {
-    project::require(req.project, Project::Piners, "corpus")?;
-
     let profiling = match req.mode {
         MeasureMode::Hotpath { .. } | MeasureMode::Alloc { .. } => req
             .mode

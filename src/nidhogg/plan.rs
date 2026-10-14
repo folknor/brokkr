@@ -159,7 +159,7 @@ impl PlannedCommand for NidhoggPlan<'_> {
                 input_file: Some(crate::utf8_path::file_name(&pbf)),
                 input_mb: Some(file_mb),
                 cli_args: None,
-                metadata: self.0.metadata(),
+                metadata: vec![],
             },
         })
     }
@@ -178,13 +178,20 @@ fn api_plan(
         .filter(|(n, _)| query.is_none_or(|q| q == n))
         .map(|(n, _)| n)
         .collect();
-    let pbf = crate::resolve::resolve_pbf_path(
-        req.dataset,
-        req.variant,
-        paths,
-        req.project_root.as_path(),
-    )
-    .ok();
+    let has_configured_pbf = paths
+        .datasets
+        .get(req.dataset)
+        .is_some_and(|dataset| !dataset.pbf.is_empty());
+    let pbf = has_configured_pbf
+        .then(|| {
+            crate::resolve::resolve_pbf_path(
+                req.dataset,
+                req.variant,
+                paths,
+                req.project_root.as_path(),
+            )
+        })
+        .transpose()?;
     let input_file = pbf
         .as_ref()
         .and_then(|p| crate::utf8_path::file_name_str(p))

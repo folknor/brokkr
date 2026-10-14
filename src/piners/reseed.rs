@@ -33,8 +33,8 @@
 //! probes be declared together and pinned one at a time.
 //!
 //! Reseed touches the pinned *content* only: it re-hashes the probe files,
-//! the `[feeds]` group files and the `[harness_files]` (on every reseed,
-//! `--probe` included), preserves `[probe_config]` verbatim, and
+//! the selected probes' `[feeds]` groups (all groups for `--all`), and the
+//! `[harness_files]` (on every reseed), preserves `[probe_config]` verbatim, and
 //! carries each surviving probe's blessed `expected` forward. It decides
 //! nothing about how a probe runs - feed, budget, start and CSV timezone are
 //! resolved from `[probe_config]` at run time - so a probe entry lost and
@@ -49,7 +49,7 @@
 //! is edited in place via [`crate::piners::pins_write`], so hand-written
 //! TOML comments survive the re-stamp.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use crate::config::project_config::piners::PinersConfig;
@@ -132,13 +132,14 @@ pub fn run(project_root: &Path, cfg: &PinersConfig, args: &CorpusArgs) -> Result
         ));
     }
     output::corpus_msg(&format!(
-        "reseed: {}, {} -> {} (added={} changed={} removed={})",
+        "reseed: {}, {} -> {} (added={} changed={} removed={}; feed file hashes changed={})",
         output::count(plan.probes, "probe"),
         output::count(plan.feeds, "feed group"),
         pins_path.display(),
         plan.diff.added,
         plan.diff.changed,
         plan.diff.removed,
+        plan.feed_hashes_changed,
     ));
     if !plan.diff.oracle_switched.is_empty() {
         output::warn(&format!(
@@ -159,6 +160,7 @@ struct Plan {
     text: String,
     probes: usize,
     feeds: usize,
+    feed_hashes_changed: usize,
     diff: Diff,
     /// Near-miss dirs the walk passed over (`strategy.pine`, no oracle).
     skipped: usize,
@@ -246,7 +248,26 @@ fn plan(
     // for every probe that survives the re-stamp.
     carry_expected(&mut new_pins, &existing.probes);
 
-    let feeds = restamp_feeds(&existing.feeds, corpus_root)?;
+    let selected_feeds = if args.all {
+        None
+    } else {
+        let mut selected = BTreeSet::new();
+        for id in &args.probe {
+            let pin = new_pins.get(id).ok_or_else(|| {
+                DevError::Internal(format!("reseed selected probe '{id}' was not pinned"))
+            })?;
+            let config = registry::resolve(&existing.probe_config, pin.probe_dir());
+            let feed = config.feed.ok_or_else(|| {
+                DevError::Config(format!(
+                    "corpus --reseed: probe '{id}' has no resolved feed in [probe_config]"
+                ))
+            })?;
+            selected.insert(feed);
+        }
+        Some(selected)
+    };
+    let (feeds, feed_hashes_changed) =
+        restamp_feeds(&existing.feeds, selected_feeds.as_ref(), corpus_root)?;
     let files = restamp_harness_files(&existing.harness_files, corpus_root)?;
     let diff = Diff::compute(&existing.probes, &new_pins);
     let text = pins_write::render_pins(existing_text, &feeds, &files, &pending, &new_pins)?;
@@ -256,6 +277,7 @@ fn plan(
         text,
         probes: new_pins.len(),
         feeds: feeds.len(),
+        feed_hashes_changed,
         diff,
         skipped: discovered.skipped.len(),
     })
@@ -309,12 +331,58 @@ fn discover(corpus_root: &Path, registry_dir: &Path) -> Result<Discovered, DevEr
             corpus_root.display()
         )));
     }
+    let corpus_root = path_for_walk(corpus_root)?;
+    let registry_dir = path_for_walk(registry_dir)?;
     let mut found = Discovered {
         probes: BTreeMap::new(),
         skipped: Vec::new(),
     };
-    walk(corpus_root, corpus_root, registry_dir, &mut found)?;
+    walk(&corpus_root, &corpus_root, &registry_dir, &mut found)?;
     Ok(found)
+}
+
+/// Resolve existing ancestors and normalize the rest so registry exclusion
+/// does not depend on a configured path's `..` or symlink spelling. The
+/// registry may not exist during the first reseed, so canonicalizing the full
+/// path alone is insufficient.
+fn path_for_walk(path: &Path) -> Result<PathBuf, DevError> {
+    use std::path::Component;
+
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir => {
+                normalized.push(component.as_os_str());
+            }
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::Normal(name) => normalized.push(name),
+        }
+    }
+
+    let mut ancestor = normalized.clone();
+    let mut suffix = Vec::new();
+    while !ancestor.exists() {
+        let Some(name) = ancestor.file_name() else {
+            break;
+        };
+        suffix.push(name.to_os_string());
+        if !ancestor.pop() {
+            break;
+        }
+    }
+    let mut resolved = std::fs::canonicalize(&ancestor).unwrap_or(ancestor);
+    for component in suffix.into_iter().rev() {
+        resolved.push(component);
+    }
+    Ok(resolved)
 }
 
 fn walk(
@@ -448,16 +516,23 @@ fn carry_expected(new: &mut BTreeMap<String, Pin>, old: &BTreeMap<String, Pin>) 
     registry_io::carry_by_id(new, old, |pin, previous| pin.expected = previous.expected);
 }
 
-/// Re-stamp every `[feeds]` group's file hashes from the corpus filesystem
-/// (the feed sibling of the per-probe re-hash). Paths are preserved; a
-/// missing feed file is a hard error - the table claims it exists.
+/// Re-stamp the selected `[feeds]` groups' file hashes from the corpus
+/// filesystem. `None` selects every group; an empty set selects none. Return
+/// the number of file hashes that changed. Paths and unselected groups are
+/// preserved; a missing selected feed file is a hard error.
 fn restamp_feeds(
     feeds: &BTreeMap<String, FeedGroup>,
+    selected: Option<&BTreeSet<String>>,
     corpus_root: &Path,
-) -> Result<BTreeMap<String, FeedGroup>, DevError> {
+) -> Result<(BTreeMap<String, FeedGroup>, usize), DevError> {
     let mut out = BTreeMap::new();
+    let mut changed = 0;
     for (name, group) in feeds {
         let mut stamped = group.clone();
+        if selected.is_some_and(|selected| !selected.contains(name)) {
+            out.insert(name.clone(), stamped);
+            continue;
+        }
         for (role, pin) in stamped.roles_mut() {
             let abs = corpus_root.join(&pin.path);
             if !abs.exists() {
@@ -472,13 +547,17 @@ fn restamp_feeds(
             let origin = format!("feed group '{name}' ({role})");
             let at = |e| crate::piners::registry::with_origin(e, &origin, &abs);
             crate::piners::lfs::ensure_materialized(&abs).map_err(at)?;
-            pin.xxh128 = preflight::compute_file_digest(&abs)
+            let digest = preflight::compute_file_digest(&abs)
                 .map(|digest| digest.to_string())
                 .map_err(at)?;
+            if pin.xxh128 != digest {
+                changed += 1;
+                pin.xxh128 = digest;
+            }
         }
         out.insert(name.clone(), stamped);
     }
-    Ok(out)
+    Ok((out, changed))
 }
 
 /// Re-stamp every `[harness_files]` hash from the corpus filesystem, the
@@ -807,7 +886,8 @@ bar_budget = 20200
         // A dot-dir (plain .git checkout) that must be ignored.
         write_probe(&root.join(".git/fake-probe"));
 
-        let found = discover(&root, &registry).unwrap();
+        let spelled_with_parent = registry.join("..").join("registry");
+        let found = discover(&root, &spelled_with_parent).unwrap();
 
         let ids: Vec<&str> = found.probes.keys().map(String::as_str).collect();
         assert_eq!(ids, vec!["01-trend", "alpha-01", "ha-close-01", "sym-eth"]);
@@ -911,6 +991,14 @@ bar_budget = 20200
             "[probes.alpha]\n",
             "# alpha is the flagship\n[probes.alpha]\nexpected = \"accepted\"\n",
         );
+        // A reseed of a named probe re-stamps the feed group its config
+        // resolves, so the probe must declare one.
+        std::fs::create_dir_all(root.join("data")).unwrap();
+        std::fs::write(root.join("data/f.csv"), b"t,o,h,l,c,v\n").unwrap();
+        let blessed = format!(
+            "[feeds.f]\nbase = {{ path = \"data/f.csv\", xxh128 = \"00\" }}\n\n\
+             [probe_config.\"piners\"]\nfeed = \"f\"\n\n{blessed}"
+        );
 
         // The capture is redone with tvr: the CSV goes, a record arrives.
         std::fs::remove_file(dir.join("tv_trades.csv")).unwrap();
@@ -1007,6 +1095,7 @@ bar_budget = 20200
         let root = crate::test_scratch::scratch("piners_reseed", "restamp_roles");
         std::fs::create_dir_all(root.join("data")).unwrap();
         std::fs::write(root.join("data/15m.csv"), b"ohlcv\n").unwrap();
+        std::fs::write(root.join("data/other.csv"), b"other\n").unwrap();
 
         let mut feeds = BTreeMap::new();
         feeds.insert(
@@ -1020,16 +1109,30 @@ bar_budget = 20200
                 lower: None,
             },
         );
+        feeds.insert(
+            "other".to_owned(),
+            FeedGroup::Roles {
+                primary: FilePin {
+                    path: "data/other.csv".into(),
+                    xxh128: "unselected-stale".into(),
+                },
+                warmup: None,
+                lower: None,
+            },
+        );
 
-        let stamped = restamp_feeds(&feeds, &root).unwrap();
+        let selected = BTreeSet::from(["eth-15m".to_owned()]);
+        let (stamped, changed) = restamp_feeds(&feeds, Some(&selected), &root).unwrap();
+        assert_eq!(changed, 1);
         assert_ne!(stamped["eth-15m"].roles()[0].1.xxh128, "stale");
         assert_eq!(stamped["eth-15m"].roles()[0].1.xxh128.len(), 32);
+        assert_eq!(stamped["other"].roles()[0].1.xxh128, "unselected-stale");
 
         match feeds.get_mut("eth-15m").unwrap() {
             FeedGroup::Roles { primary, .. } => primary.path = "data/missing.csv".into(),
             _ => unreachable!(),
         }
-        let err = restamp_feeds(&feeds, &root).unwrap_err();
+        let err = restamp_feeds(&feeds, Some(&selected), &root).unwrap_err();
         assert!(format!("{err:?}").contains("missing.csv"));
     }
 
@@ -1076,7 +1179,8 @@ bar_budget = 20200
             },
         );
 
-        let stamped = restamp_feeds(&feeds, &root).unwrap();
+        let (stamped, changed) = restamp_feeds(&feeds, None, &root).unwrap();
+        assert_eq!(changed, 1);
         match &stamped["eth-15m-2025"] {
             FeedGroup::Base { base } => {
                 assert_ne!(base.xxh128, "stale");

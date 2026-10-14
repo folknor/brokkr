@@ -388,11 +388,6 @@ pub fn guard_msg(msg: &str) {
     emit_tag("[guard]", msg);
 }
 
-#[allow(dead_code)]
-pub fn history_msg(msg: &str) {
-    emit_tag("[history]", msg);
-}
-
 pub fn sidecar_msg(msg: &str) {
     if !is_quiet() {
         // Always stderr - every [sidecar] line is narration (run provenance,

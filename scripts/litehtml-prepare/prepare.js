@@ -18,6 +18,25 @@ const { PNG } = require("pngjs");
 // CLI argument parsing
 // ---------------------------------------------------------------------------
 
+function parseValueOptions(args, command, optionNames) {
+	const opts = {};
+	for (let i = 0; i < args.length; i += 2) {
+		const key = args[i];
+		if (!Object.prototype.hasOwnProperty.call(optionNames, key)) {
+			throw new Error(command + ": unknown option '" + key + "'");
+		}
+		if (i + 1 >= args.length || args[i + 1] === "") {
+			throw new Error(command + ": " + key + " requires a value");
+		}
+		const name = optionNames[key];
+		if (Object.prototype.hasOwnProperty.call(opts, name)) {
+			throw new Error(command + ": " + key + " was provided more than once");
+		}
+		opts[name] = args[i + 1];
+	}
+	return opts;
+}
+
 function parseArgs(argv) {
 	const args = argv.slice(2);
 	const command = args[0];
@@ -25,14 +44,13 @@ function parseArgs(argv) {
 	if (command === "prepare") {
 		const input = args[1];
 		const output = args[2];
-		const opts = {};
-		for (let i = 3; i < args.length; i += 2) {
-			const key = args[i];
-			const val = args[i + 1];
-			if (key === "--cache-dir") opts.cacheDir = val;
-			else if (key === "--ahem-font") opts.ahemFont = val;
-			else if (key === "--fallback-aspect-ratio")
-				opts.fallbackAspectRatio = parseFloat(val);
+		const opts = parseValueOptions(args.slice(3), "prepare", {
+			"--cache-dir": "cacheDir",
+			"--ahem-font": "ahemFont",
+			"--fallback-aspect-ratio": "fallbackAspectRatio",
+		});
+		if (opts.fallbackAspectRatio !== undefined) {
+			opts.fallbackAspectRatio = Number(opts.fallbackAspectRatio);
 		}
 		return { command, input, output, opts };
 	}
@@ -40,28 +58,39 @@ function parseArgs(argv) {
 	if (command === "extract") {
 		const input = args[1];
 		const output = args[2];
-		const opts = {};
-		for (let i = 3; i < args.length; i += 2) {
-			const key = args[i];
-			const val = args[i + 1];
-			if (key === "--selector") opts.selector = val;
-			else if (key === "--from") opts.from = val;
-			else if (key === "--to") opts.to = val;
-		}
+		const opts = parseValueOptions(args.slice(3), "extract", {
+			"--selector": "selector",
+			"--from": "from",
+			"--to": "to",
+		});
 		return { command, input, output, opts };
 	}
 
 	if (command === "outline") {
 		const input = args[1];
 		const opts = { full: false, selectors: false };
+		const seen = new Set();
 		for (let i = 2; i < args.length; i++) {
 			const key = args[i];
 			if (key === "--depth") {
-				opts.depth = parseInt(args[++i], 10);
+				if (seen.has(key)) throw new Error("outline: --depth was provided more than once");
+				if (i + 1 >= args.length || args[i + 1] === "") {
+					throw new Error("outline: --depth requires a value");
+				}
+				seen.add(key);
+				opts.depth = Number(args[++i]);
 			} else if (key === "--full") {
+				if (seen.has(key)) throw new Error("outline: --full was provided more than once");
+				seen.add(key);
 				opts.full = true;
 			} else if (key === "--selectors") {
+				if (seen.has(key)) {
+					throw new Error("outline: --selectors was provided more than once");
+				}
+				seen.add(key);
 				opts.selectors = true;
+			} else {
+				throw new Error("outline: unknown option '" + key + "'");
 			}
 		}
 		if (!opts.full && opts.depth === undefined) {
@@ -94,6 +123,11 @@ function warn(msg) {
 // HTTP fetching
 // ---------------------------------------------------------------------------
 
+const MAX_IMAGE_RESPONSE_BYTES = 20 * 1024 * 1024;
+const MAX_IMAGE_CACHE_BYTES = 128 * 1024 * 1024;
+const MAX_IMAGE_CACHE_ENTRIES = 512;
+const IMAGE_CACHE_KEY = /^[a-f0-9]{64}$/;
+
 function fetchUrl(url, redirectCount) {
 	if (redirectCount === undefined) redirectCount = 0;
 	if (redirectCount > 5)
@@ -115,6 +149,7 @@ function fetchUrl(url, redirectCount) {
 				res.statusCode < 400 &&
 				res.headers.location
 			) {
+				res.resume();
 				let location = res.headers.location;
 				if (location.startsWith("/")) {
 					const parsed = new URL(url);
@@ -128,9 +163,47 @@ function fetchUrl(url, redirectCount) {
 				reject(new Error(`HTTP ${res.statusCode} for ${url}`));
 				return;
 			}
+			const contentLength = Number(res.headers["content-length"]);
+			if (
+				Number.isFinite(contentLength) &&
+				contentLength > MAX_IMAGE_RESPONSE_BYTES
+			) {
+				res.resume();
+				reject(
+					new Error(
+						"image response exceeds " +
+							MAX_IMAGE_RESPONSE_BYTES +
+							" byte limit for " +
+							url,
+					),
+				);
+				return;
+			}
 			const chunks = [];
-			res.on("data", (chunk) => chunks.push(chunk));
-			res.on("end", () => resolve(Buffer.concat(chunks)));
+			let receivedBytes = 0;
+			let tooLarge = false;
+			res.on("data", (chunk) => {
+				if (tooLarge) return;
+				receivedBytes += chunk.length;
+				if (receivedBytes > MAX_IMAGE_RESPONSE_BYTES) {
+					tooLarge = true;
+					res.destroy();
+					reject(
+						new Error(
+							"image response exceeds " +
+								MAX_IMAGE_RESPONSE_BYTES +
+								" byte limit for " +
+								url,
+						),
+					);
+					return;
+				}
+				chunks.push(chunk);
+			});
+			res.on("end", () => {
+				if (!tooLarge) resolve(Buffer.concat(chunks));
+			});
+			res.on("aborted", () => reject(new Error("incomplete image response for " + url)));
 			res.on("error", reject);
 		});
 		req.on("error", reject);
@@ -149,30 +222,79 @@ function cacheKey(url) {
 	return crypto.createHash("sha256").update(url).digest("hex");
 }
 
+function pruneImageCache(
+	cacheDir,
+	requiredBytes = 0,
+	protectedPath = null,
+	requiredEntries = 0,
+) {
+	const entries = fs.readdirSync(cacheDir, { withFileTypes: true });
+	const files = [];
+	let totalBytes = 0;
+
+	for (const entry of entries) {
+		if (!entry.isFile()) continue;
+		const filePath = path.join(cacheDir, entry.name);
+		if (
+			entry.name.endsWith(".miss") &&
+			IMAGE_CACHE_KEY.test(entry.name.slice(0, -".miss".length))
+		) {
+			fs.rmSync(filePath, { force: true });
+			continue;
+		}
+		if (!IMAGE_CACHE_KEY.test(entry.name)) continue;
+		const stats = fs.statSync(filePath);
+		files.push({ filePath, size: stats.size, modified: stats.mtimeMs });
+		totalBytes += stats.size;
+	}
+
+	files.sort((a, b) => a.modified - b.modified);
+	let totalEntries = files.length;
+	for (const file of files) {
+		if (
+			totalBytes + requiredBytes <= MAX_IMAGE_CACHE_BYTES &&
+			totalEntries + requiredEntries <= MAX_IMAGE_CACHE_ENTRIES
+		) {
+			break;
+		}
+		if (file.filePath === protectedPath) continue;
+		fs.rmSync(file.filePath, { force: true });
+		totalBytes -= file.size;
+		totalEntries--;
+	}
+}
+
 function cachedFetch(url, cacheDir) {
 	const key = cacheKey(url);
 	const cachePath = path.join(cacheDir, key);
-	// Failed fetches are negative-cached: dead CDN URLs used to cost a
-	// 10s timeout on every re-prepare. Delete the .miss file to retry.
+	// Remove old negative markers so transient fetch failures are retried.
 	const missPath = cachePath + ".miss";
 
+	pruneImageCache(cacheDir, 0, cachePath);
 	if (fs.existsSync(cachePath)) {
-		return Promise.resolve(fs.readFileSync(cachePath));
+		if (fs.statSync(cachePath).size <= MAX_IMAGE_CACHE_BYTES) {
+			const cached = fs.readFileSync(cachePath);
+			const now = new Date();
+			fs.utimesSync(cachePath, now, now);
+			return Promise.resolve(cached);
+		}
+		// Old cache versions had no response bound; discard oversized entries.
+		fs.rmSync(cachePath, { force: true });
 	}
 	if (fs.existsSync(missPath)) {
-		const prior = fs.readFileSync(missPath, "utf-8").trim();
-		return Promise.reject(
-			new Error(`negative-cached failure (${prior}); delete ${missPath} to retry`),
-		);
+		fs.rmSync(missPath, { force: true });
 	}
 
 	return fetchUrl(url).then(
 		(buf) => {
-			fs.writeFileSync(cachePath, buf);
+			if (buf.length <= MAX_IMAGE_CACHE_BYTES) {
+				pruneImageCache(cacheDir, buf.length, cachePath, 1);
+				fs.writeFileSync(cachePath, buf);
+			}
 			return buf;
 		},
 		(err) => {
-			fs.writeFileSync(missPath, `${err.message || err}\n`);
+			fs.rmSync(missPath, { force: true });
 			throw err;
 		},
 	);

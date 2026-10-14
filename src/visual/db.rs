@@ -74,25 +74,19 @@ impl Layout {
     }
 }
 
-#[allow(dead_code)]
 pub(crate) struct Approval {
     pub(crate) subject_id: String,
-    pub(crate) approved_at: String,
-    pub(crate) commit: String,
     pub(crate) pixel_diff_pct: f64,
     pub(crate) element_match_pct: Option<f64>,
 }
 
-#[allow(dead_code)]
 pub(crate) struct RunSummary {
     pub(crate) run_id: String,
-    pub(crate) timestamp: String,
     pub(crate) commit: String,
     pub(crate) dirty: bool,
     pub(crate) adapter_name: Option<String>,
 }
 
-#[allow(dead_code)]
 pub(crate) struct ResultRow {
     pub(crate) run_id: String,
     pub(crate) subject_id: String,
@@ -232,7 +226,7 @@ impl VisualDb {
 
     pub(crate) fn get_approval(&self, subject_id: &str) -> Result<Option<Approval>, DevError> {
         let mut stmt = self.conn.prepare(&format!(
-            "SELECT {}, approved_at, [commit], pixel_diff_pct, {} \
+            "SELECT {}, pixel_diff_pct, {} \
              FROM {} WHERE {} = ?1",
             self.layout.id,
             self.layout.element_column(),
@@ -277,24 +271,9 @@ impl VisualDb {
         Ok(())
     }
 
-    pub(crate) fn latest_run(&self) -> Result<Option<RunSummary>, DevError> {
-        let mut stmt = self.conn.prepare(&format!(
-            "SELECT run_id, timestamp, [commit], dirty, {} \
-             FROM {} ORDER BY timestamp DESC, rowid DESC LIMIT 1",
-            self.layout.adapter_column(),
-            self.layout.runs,
-        ))?;
-        let mut rows = stmt.query_map([], map_run_summary)?;
-        match rows.next() {
-            Some(Ok(summary)) => Ok(Some(summary)),
-            Some(Err(error)) => Err(error.into()),
-            None => Ok(None),
-        }
-    }
-
     pub(crate) fn run_summary(&self, run_id: &str) -> Result<Option<RunSummary>, DevError> {
         let mut stmt = self.conn.prepare(&format!(
-            "SELECT run_id, timestamp, [commit], dirty, {} FROM {} WHERE run_id = ?1",
+            "SELECT run_id, [commit], dirty, {} FROM {} WHERE run_id = ?1",
             self.layout.adapter_column(),
             self.layout.runs,
         ))?;
@@ -320,7 +299,7 @@ impl VisualDb {
 
     pub(crate) fn all_approvals(&self) -> Result<Vec<Approval>, DevError> {
         let mut stmt = self.conn.prepare(&format!(
-            "SELECT {}, approved_at, [commit], pixel_diff_pct, {} \
+            "SELECT {}, pixel_diff_pct, {} \
              FROM {} ORDER BY {}",
             self.layout.id,
             self.layout.element_column(),
@@ -790,20 +769,17 @@ fn insert_legacy_approvals(
 fn map_approval(row: &Row<'_>) -> rusqlite::Result<Approval> {
     Ok(Approval {
         subject_id: row.get(0)?,
-        approved_at: row.get(1)?,
-        commit: row.get(2)?,
-        pixel_diff_pct: row.get(3)?,
-        element_match_pct: row.get(4)?,
+        pixel_diff_pct: row.get(1)?,
+        element_match_pct: row.get(2)?,
     })
 }
 
 fn map_run_summary(row: &Row<'_>) -> rusqlite::Result<RunSummary> {
     Ok(RunSummary {
         run_id: row.get(0)?,
-        timestamp: row.get(1)?,
-        commit: row.get(2)?,
-        dirty: row.get::<_, i32>(3)? != 0,
-        adapter_name: row.get(4)?,
+        commit: row.get(1)?,
+        dirty: row.get::<_, i32>(2)? != 0,
+        adapter_name: row.get(3)?,
     })
 }
 

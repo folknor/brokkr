@@ -75,6 +75,30 @@ pub(crate) const DEFAULT_MEASUREMENT_TUNABLES: MeasurementTunables = Measurement
     hotpath_report_filename: "hotpath-report.json",
 };
 
+/// Compute a percentile from a sorted sample using linear interpolation.
+/// Benchmark and sidecar summaries share this calculation so they cannot
+/// disagree for the same sample set.
+#[allow(clippy::cast_possible_truncation)]
+pub(crate) fn linear_percentile(sorted: &[i64], pct: usize) -> i64 {
+    if sorted.is_empty() {
+        return 0;
+    }
+    let len = sorted.len();
+    if len == 1 {
+        return sorted[0];
+    }
+    #[allow(clippy::cast_precision_loss)]
+    let pos = (pct as f64 / 100.0) * (len - 1) as f64;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let lo = pos as usize;
+    let hi = (lo + 1).min(len - 1);
+    #[allow(clippy::cast_precision_loss)]
+    let frac = pos - lo as f64;
+    #[allow(clippy::cast_precision_loss)]
+    let result = sorted[lo] as f64 + frac * (sorted[hi] - sorted[lo]) as f64;
+    result.round() as i64
+}
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -886,7 +910,7 @@ pub(crate) fn run_sidecar_with_deadline(
     // The shared child supervisor owns process polling and process-group
     // signals. This guard only makes the sidecar's own shutdown path observe
     // the process-wide termination request.
-    let _shutdown_guard = crate::shutdown::SigtermGuard::install();
+    let shutdown_guard = crate::shutdown::SigtermGuard::install();
     let pid = child_process.id();
 
     let mut samples = Vec::new();
@@ -912,7 +936,7 @@ pub(crate) fn run_sidecar_with_deadline(
         &label,
         start,
         limit,
-        true,
+        crate::shutdown::ChildIsolation::ProcessGroup(&shutdown_guard),
         tick_interval,
         || {
             let elapsed_us =
@@ -1086,17 +1110,24 @@ mod tests {
 
     #[test]
     fn read_proc_io_tolerates_extra_lines() {
-        // Simulate a /proc/io with an unexpected line - should not crash.
-        // We can't easily inject content into /proc, but we verify our own
-        // /proc/io parses correctly (which has the standard 7 lines).
-        let pid = std::process::id();
-        let io = read_proc_io(pid);
-        assert!(io.is_some());
-        let io = io.unwrap();
-        // All standard fields should be populated.
-        assert!(
-            io.syscr > 0 || io.rchar > 0,
-            "at least one I/O counter should be nonzero"
-        );
+        let io = parse_proc_io(concat!(
+            "rchar: 12\n",
+            "wchar: 34\n",
+            "unexpected line\n",
+            "read_bytes: 56\n",
+            "write_bytes: invalid\n",
+            "cancelled_write_bytes: 7\n",
+            "syscr: 8\n",
+            "syscw: 9\n",
+            "future_counter: 100\n",
+        ))
+        .expect("unexpected lines are ignored");
+        assert_eq!(io.rchar, 12);
+        assert_eq!(io.wchar, 34);
+        assert_eq!(io.read_bytes, 56);
+        assert_eq!(io.write_bytes, 0, "invalid values leave the default");
+        assert_eq!(io.cancelled_write_bytes, 7);
+        assert_eq!(io.syscr, 8);
+        assert_eq!(io.syscw, 9);
     }
 }

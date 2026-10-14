@@ -118,11 +118,12 @@ impl ResultsDb {
     /// The most recently recorded run in this database, or `None` when it is
     /// empty. Call *before* inserting the current run, or it returns itself.
     ///
-    /// Deliberately unfiltered: the question is "what last touched this
-    /// machine", not "what last ran with these flags", and the results DB is
-    /// already scoped to one project by its path. Ordered by `id` rather than
-    /// `timestamp` because `timestamp` has one-second resolution and two runs
-    /// can share it; `id` is the true insertion order.
+    /// Deliberately unfiltered within this project's results database: the
+    /// question is what this project recorded most recently, not what last ran
+    /// with these flags. Dirty runs and other projects are outside this store.
+    /// Ordered by `id` rather than `timestamp` because `timestamp` has
+    /// one-second resolution and two runs can share it; `id` is the true
+    /// insertion order.
     pub fn previous_run(&self) -> Result<Option<PreviousRun>, DevError> {
         let mut stmt = self.conn.prepare(
             "SELECT uuid, command, input_file, \

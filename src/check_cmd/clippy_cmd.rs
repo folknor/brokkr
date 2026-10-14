@@ -97,7 +97,7 @@ pub(crate) fn cmd_clippy(
         // in the message - swallowing them printed `clippy failed in 0.0s`
         // with no cause in a non-Rust directory. The verdict is a
         // `DevError::Reported`, the variant for "detail already printed".
-        Err(DevError::Reported(m)) if m == CLIPPY_FAILED => {
+        Err(PhaseFailure::Findings(Phase::Clippy)) => {
             output::error(&format!("clippy failed in {}", fmt_wall(started.elapsed())));
             Err(DevError::ExitCode(1))
         }
@@ -105,11 +105,6 @@ pub(crate) fn cmd_clippy(
         // spawn failure, cooperative interrupt) is NOT an already-rendered lint
         // result - propagate the real cause so main reports it, instead of
         // masking it behind "clippy failed".
-        Err(other) => Err(other),
+        Err(other) => Err(other.into_dev_error()),
     }
 }
-
-/// The label `report_diagnostic_phase` returns (as `DevError::Reported`) for a
-/// failed clippy phase - the one error from it whose detail is already on
-/// screen.
-const CLIPPY_FAILED: &str = "clippy failed";

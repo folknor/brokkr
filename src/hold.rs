@@ -85,6 +85,20 @@ pub fn capability() -> Option<Nonce> {
     crate::lockfile::current_capability()
 }
 
+/// Environment entries emitted by the hold policy. Keeping these as values
+/// also lets process engines without a `Command` handle render the same
+/// entries into their own configuration.
+pub(crate) fn child_env() -> Vec<(String, String)> {
+    let mut env = Vec::with_capacity(2);
+    if let Some(nonce) = capability() {
+        env.push((CAPABILITY_ENV.to_owned(), nonce.expose().to_owned()));
+    }
+    // Unconditional, hold or no hold: replay protection is about what a cargo
+    // READS, not about what this process is authorized to do.
+    env.push((RUSTC_INFO_CACHE_ENV.to_owned(), "0".to_owned()));
+    env
+}
+
 /// The published hash of the capability this process INHERITED - the nonce
 /// of whatever hold its ancestor owned when it was spawned - or `None` when it
 /// inherited none.
@@ -103,20 +117,13 @@ pub fn inherited_capability_hash() -> Option<AuthHash> {
 
 /// Stamp the current capability onto a child command.
 ///
-/// Called from the spawn choke points rather than at each of brokkr's ~25 cargo
-/// call sites, so a new call site is covered by construction. The boundary is
-/// deliberately *every* child brokkr starts under a hold, not just the ones
-/// named cargo: a prebuilt test binary, a script check or a benchmark can all
-/// reach cargo later, and predicting which is the same inference problem one
-/// layer down.
+/// Called at the end of shared child-policy construction, after caller env and
+/// the other policy steps. Direct `Command` constructors must use that policy
+/// too if their descendants need the hold capability.
 pub fn stamp(cmd: &mut std::process::Command) {
-    if let Some(nonce) = capability() {
-        cmd.env(CAPABILITY_ENV, nonce.expose());
+    for (name, value) in child_env() {
+        cmd.env(name, value);
     }
-    // Unconditional, hold or no hold: replay protection is about what a
-    // cargo READS, not about what this process is authorized to do. See
-    // [`RUSTC_INFO_CACHE_ENV`].
-    cmd.env(RUSTC_INFO_CACHE_ENV, "0");
 }
 
 /// The capability as a cargo config *file*, for the nextest lane.
@@ -144,8 +151,11 @@ pub fn stamp(cmd: &mut std::process::Command) {
 /// no `value` to satisfy the env entry type. A path in the same vec, however,
 /// is loaded as a full config file, where inline tables are legal. The file
 /// lives beside the lock (`~/.brokkr/`, never swept, and this crate's rules
-/// forbid `/tmp`); one fixed name is safe because holds are serialized by the
-/// global flock and `CargoConfigs::new` reads the file eagerly. Rewritten from
+/// forbid `/tmp`). One fixed name is shared: holds are serialized by the global
+/// flock and `CargoConfigs::new` reads the file eagerly, but a capability-less
+/// call outside any hold is not serialized against them, so the file is
+/// replaced atomically and a reader sees one writer's whole file, not
+/// necessarily its own. Rewritten from
 /// scratch on every call - including capability-less ones, so a previous
 /// hold's nonce cannot survive - and kept owner-only, since the published lock
 /// file carries only the nonce's hash and this file would otherwise leak the
@@ -157,7 +167,7 @@ pub fn stamp(cmd: &mut std::process::Command) {
 /// (`test_orphans::marker` registers on first use; a failed registration
 /// leaves the entry out). Returns the path to
 /// hand to `CargoConfigs::new`; any write failure propagates, because
-/// returning the path after a failed truncate would load stale contents.
+/// returning the path after a failed replacement would load stale contents.
 pub fn cargo_config_overrides() -> std::io::Result<Vec<String>> {
     use std::io::Write as _;
     use std::os::unix::fs::OpenOptionsExt as _;
@@ -170,39 +180,35 @@ pub fn cargo_config_overrides() -> std::io::Result<Vec<String>> {
         .ok_or_else(|| std::io::Error::other("cannot resolve the nextest env config directory"))?;
     std::fs::create_dir_all(dir)?;
 
+    let policy = crate::process::spawn::ChildPolicy::test_process();
     let mut contents = String::from("[env]\n");
-    contents.push_str(&format!(
-        "{RUSTC_INFO_CACHE_ENV} = {{ value = \"0\", force = true, relative = false }}\n"
-    ));
-    if let Some(nonce) = capability() {
+    for (name, value) in policy.render_env() {
         contents.push_str(&format!(
-            "{CAPABILITY_ENV} = {{ value = \"{}\", force = true, relative = false }}\n",
-            nonce.expose()
-        ));
-    }
-    // The engine builds its own test commands, so brokkr's parent-death signal
-    // (`shutdown::die_with_parent`) is not on them, and a SIGKILLed brokkr
-    // can orphan them as it orphans a test binary under cargo on the libtest
-    // lanes. They carry the same orphan-reap token those lanes stamp
-    // (`crate::test_orphans`).
-    if let Some(token) = crate::test_orphans::marker() {
-        contents.push_str(&format!(
-            "{} = {{ value = \"{token}\", force = true, relative = false }}\n",
-            crate::test_orphans::MARKER_ENV
+            "{name} = {{ value = {value:?}, force = true, relative = false }}\n"
         ));
     }
 
+    let owner_only = <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o600);
+    // The atomic commit carries the target's permissions onto the new file, so
+    // tighten a pre-existing target first: it may predate the owner-only rule.
+    match std::fs::set_permissions(&path, owner_only) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    // Replaced atomically: a reader (a concurrent nextest engine setup that
+    // did not come through this hold) sees the old file or the new one, never
+    // a truncated prefix.
+    let staged = crate::atomic_write::Staged::per_process(&path)?;
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
         .mode(0o600)
-        .open(&path)?;
-    // `mode` only applies at creation; tighten a pre-existing file too.
-    file.set_permissions(
-        <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o600),
-    )?;
+        .open(staged.tmp_path())?;
     file.write_all(contents.as_bytes())?;
+    drop(file);
+    staged.commit()?;
 
     Ok(vec![path.to_string_lossy().into_owned()])
 }
@@ -244,11 +250,26 @@ mod tests {
     }
 
     #[test]
-    fn stamp_is_a_no_op_without_a_capability() {
+    fn stamp_disables_the_probe_cache_without_a_capability() {
         let mut cmd = std::process::Command::new("/bin/true");
         stamp(&mut cmd);
-        if let Some(c) = capability() {
-            assert!(!c.expose().is_empty());
+        let env: std::collections::HashMap<_, _> = cmd
+            .get_envs()
+            .filter_map(|(key, value)| {
+                Some((
+                    key.to_string_lossy().into_owned(),
+                    value?.to_string_lossy().into_owned(),
+                ))
+            })
+            .collect();
+        assert_eq!(env.get(RUSTC_INFO_CACHE_ENV).map(String::as_str), Some("0"));
+        if let Some(capability) = capability() {
+            assert_eq!(
+                env.get(CAPABILITY_ENV).map(String::as_str),
+                Some(capability.expose())
+            );
+        } else {
+            assert!(!env.contains_key(CAPABILITY_ENV));
         }
     }
 }

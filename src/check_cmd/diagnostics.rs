@@ -207,7 +207,7 @@ fn run_clippy_phase(
     // shapes). Only silences the stale-allow report.
     narrowed: bool,
     serial_builds: bool,
-) -> Result<(), DevError> {
+) -> Result<(), PhaseFailure> {
     let (allow, allow_exact) = (lints.allow.as_slice(), lints.allow_exact.as_slice());
     // Inside `check` the verdict line names every suppression once, for all
     // the phases it narrows; `brokkr clippy` (and `--commands`, which asks
@@ -255,12 +255,7 @@ fn run_clippy_phase(
     // with nothing parseable still fails.
     // Cargo's manifest lints never saw clippy's `-A` flags, so `[lints] allow`
     // reaches them here.
-    let keep = |d: &Diagnostic| {
-        !d.is_dependency_warning()
-            && !sited_allowed(d, allow_exact)
-            && !(diagnostic_lint(d).is_some_and(crate::config::check::is_cargo_lint)
-                && code_allowed(d, allow))
-    };
+    let keep = |d: &Diagnostic| clippy_keeps(d, allow, allow_exact);
     let outcome = ran.verdict(|failed| {
             report_diagnostic_phase(
                 Phase::Clippy,
@@ -326,7 +321,7 @@ fn run_rustdoc_phase(
     reporter: Reporter,
     reach: &mut dyn FnMut(usize),
     serial_builds: bool,
-) -> Result<(), DevError> {
+) -> Result<(), PhaseFailure> {
     let Some(cfg) = cfg else {
         return Ok(());
     };
@@ -397,6 +392,20 @@ fn sited_allowed(d: &Diagnostic, allow_exact: &[SitedAllow]) -> bool {
     allow_exact.iter().any(|s| sited_match(s, d))
 }
 
+/// The clippy phase's single diagnostic gate: dependency warnings are
+/// exempt, then configured sited and cargo-manifest allows are applied. The
+/// production phase and its JSON-focused parser tests both use this predicate.
+fn clippy_keeps(
+    diagnostic: &Diagnostic,
+    allow: &[crate::config::check::LintName],
+    allow_exact: &[SitedAllow],
+) -> bool {
+    !diagnostic.is_dependency_warning()
+        && !sited_allowed(diagnostic, allow_exact)
+        && !(diagnostic_lint(diagnostic).is_some_and(crate::config::check::is_cargo_lint)
+            && code_allowed(diagnostic, allow))
+}
+
 /// `phase sweep-label`, or just `phase` when the sweep is labelled after it:
 /// `brokkr clippy`'s ad-hoc sweep is labelled "clippy", and `clippy clippy:`
 /// says the one fact twice.
@@ -423,7 +432,7 @@ fn report_diagnostic_phase(
     keep: &dyn Fn(&Diagnostic) -> bool,
     active_sweep_count: usize,
     already_failed: bool,
-) -> Result<(), DevError> {
+) -> Result<(), PhaseFailure> {
     let run_failed = |r: &SweepResult| !r.success || r.diagnostics.iter().any(keep);
     if !results.iter().any(run_failed) {
         // The phase's one green line. Only inside `check`: `brokkr clippy`
@@ -455,7 +464,7 @@ fn report_diagnostic_phase(
         active_sweep_count,
         keep,
     ));
-    Err(DevError::Reported(format!("{} failed", phase.as_str())))
+    Err(PhaseFailure::Findings(phase))
 }
 
 /// Run `run_one` once per cargo resolution of every lane the phase's selection
@@ -463,8 +472,8 @@ fn report_diagnostic_phase(
 /// package-mode unification - calling `reach(i)` for each sweep whose run
 /// returns an outcome. The dedupe, the CLI `-p` intersection and the
 /// nothing-reached refusal were all decided by the selection, which every
-/// per-shape diagnostic phase reads, so they cannot drift apart; the stored
-/// refusal is reported here, at the phase's start.
+/// phase reads. The phase runner reports its stored refusal before requesting
+/// project metadata or entering this per-shape iterator.
 #[allow(clippy::too_many_arguments)]
 fn run_per_build_shape(
     phase: Phase,
@@ -476,7 +485,6 @@ fn run_per_build_shape(
     serial_builds: bool,
     run_one: impl Fn(&PlannedSweep, &ResolutionRun, Option<&Path>) -> Result<SweepResult, DevError> + Sync,
 ) -> Result<PhaseRuns, DevError> {
-    selection.check_refusal()?;
     // cargo's resolved target dir, so a `rustflags` sweep clippy-checks in the
     // *same* isolated `<target>/rustflags-<hash>` its test phase builds into -
     // they must agree on the location, and a workspace can place it off the
@@ -596,10 +604,13 @@ impl PhaseRuns {
     /// the others found. `report` reports the runs that were made, and is
     /// told whether the phase already failed - a failed phase has no green
     /// line to print, even when every run it did make was clean.
-    fn verdict(self, report: impl FnOnce(bool) -> Result<(), DevError>) -> Result<(), DevError> {
+    fn verdict<E: From<DevError>>(
+        self,
+        report: impl FnOnce(bool) -> Result<(), E>,
+    ) -> Result<(), E> {
         let reported = report(self.error.is_some());
         match self.error {
-            Some(e) => Err(e),
+            Some(e) => Err(e.into()),
             None => reported,
         }
     }
@@ -763,7 +774,7 @@ fn report_stale_sited_allows(
     }
 }
 
-/// Does a `[clippy] allow_exact` entry suppress this diagnostic? Lint names
+/// Does a `[lints] allow_exact` entry suppress this diagnostic? Lint names
 /// match with or without the `clippy::` qualifier (mirroring what `allow`
 /// accepts); the file must equal the entry's path exactly - cargo emits
 /// build-root-relative paths, which is also what the entry is written from.
@@ -775,23 +786,16 @@ fn sited_match(s: &SitedAllow, d: &Diagnostic) -> bool {
     lint_matches && d.path() == Some(Path::new(s.path.as_str()))
 }
 
-/// Parse a sweep's stdout and drop every diagnostic a `[clippy] allow_exact`
-/// entry suppresses. This is the ingestion-side gate the sited allows act
-/// through: unlike `allow`'s `-A`, which a source site's own lint-level
-/// attribute can defeat (the `#[expect]`-sibling interaction in
-/// `docs/commands/check.md`), a diagnostic filtered here is gone from the
-/// pass/fail decision no matter how clippy leveled it. The phases apply the
-/// same gate through [`sited_allowed`] inside their `keep` predicate; this
-/// whole-stream form remains for the parser tests.
+/// Test helper for the JSON diagnostic gate. It applies the same predicate as
+/// the production clippy phase, with no owner index or blanket allows because
+/// these fixtures focus on exact path matching.
 #[cfg(test)]
 fn gated_diags(
     stdout: &str,
     allow_exact: &[SitedAllow],
 ) -> Vec<Diagnostic> {
     let mut events = cargo_json::parse_cargo_diagnostics(stdout);
-    if !allow_exact.is_empty() {
-        events.retain(|d| !allow_exact.iter().any(|s| sited_match(s, d)));
-    }
+    events.retain(|d| clippy_keeps(d, &[], allow_exact));
     events
 }
 
@@ -1016,11 +1020,11 @@ fn format_clippy_multi(
         m.diag.path().unwrap_or_else(|| Path::new(""))
     });
 
-    let errors = if total == 1 { "error" } else { "errors" };
+    let errors = output::count(total, "error");
     let header = if multi {
-        format!("{tool}: {total} {errors} ({active_sweep_count} sweeps)\n")
+        format!("{tool}: {errors} ({active_sweep_count} sweeps)\n")
     } else {
-        format!("{tool}: {total} {errors}\n")
+        format!("{tool}: {errors}\n")
     };
 
     let mut out = header;

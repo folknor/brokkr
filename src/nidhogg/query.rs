@@ -12,11 +12,13 @@ use crate::output;
 
 /// Send a spatial query to the nidhogg API and print a summary.
 pub fn run(port: u16, query_json: Option<&str>) -> Result<(), DevError> {
+    let body = query_json.ok_or_else(|| {
+        DevError::Config(
+            "nidhogg query requires --json; this command has no dataset-independent default bbox"
+                .into(),
+        )
+    })?;
     super::server::check_running(port)?;
-
-    // Fallback query for interactive use when no --json is provided.
-    const FALLBACK_QUERY: &str = r#"{"bbox":[55.66,12.55,55.70,12.60],"query":[{"highway":["motorway","trunk","primary","secondary","tertiary","residential"]}]}"#;
-    let body = query_json.unwrap_or(FALLBACK_QUERY);
     let url = super::client::query_url(port);
 
     output::run_msg(&format!("POST {url}"));

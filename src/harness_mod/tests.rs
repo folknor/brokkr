@@ -371,7 +371,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_kv_stderr_elapsed_ms_takes_precedence_over_total_ms() {
+    fn parse_kv_stderr_last_timing_value_wins() {
         // Both present: last one wins (due to overwrite semantics)
         let stderr = b"total_ms=100\nelapsed_ms=200\n";
         let result = parse_kv_stderr(stderr).unwrap();

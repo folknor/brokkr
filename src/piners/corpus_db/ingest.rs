@@ -141,12 +141,14 @@ fn record_inner(
         .map(|context| serde_json::to_string(&context.harness_args))
         .transpose()
         .map_err(|e| DevError::Database(format!("serializing run harness args: {e}")))?;
+    let report_warnings = serde_json::to_string(&report.warnings)
+        .map_err(|e| DevError::Database(format!("serializing harness parse warnings: {e}")))?;
     conn.execute(
         "INSERT INTO run \
          (run_id, started_at, selector, gated, result, fail_reason, harness_exit_code, \
           probe_count, harness_stderr, wall_ms, commit_sha, dirty, protocol_violations, run_error, \
-          debug, harness_args) \
-         VALUES (?9, COALESCE(?10, datetime('now')), ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?11, ?12, ?13, ?14, ?15, ?16)",
+          debug, harness_args, report_warnings) \
+         VALUES (?9, COALESCE(?10, datetime('now')), ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
         params![
             run.selector,
             i64::from(run.gated),
@@ -164,6 +166,7 @@ fn record_inner(
             run.run_error,
             debug,
             harness_args,
+            report_warnings,
         ],
     )?;
     let run_id = conn.last_insert_rowid();

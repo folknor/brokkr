@@ -294,15 +294,15 @@ mod selection {
         declaration: SweepDecl,
         promotion_eligible: bool,
     ) -> Result<PlannedSweep, DevError> {
-        let effective = resolve_unification(&declaration, promotion_eligible)?;
+        let effective = resolve_unification(&declaration, promotion_eligible);
         Ok(PlannedSweep::with_effective_unification(declaration, effective))
     }
 
     pub(crate) fn resolve_unification(
         sweep: &SweepDecl,
         promotion_eligible: bool,
-    ) -> Result<EffectiveUnification, DevError> {
-        Ok(match sweep.feature_unification {
+    ) -> EffectiveUnification {
+        match sweep.feature_unification {
             FeatureUnification::Package => EffectiveUnification::Pinned(CargoUnification::Package),
             FeatureUnification::Workspace => {
                 EffectiveUnification::Pinned(CargoUnification::Workspace)
@@ -312,7 +312,7 @@ mod selection {
                 EffectiveUnification::Pinned(CargoUnification::Workspace)
             }
             FeatureUnification::Auto => EffectiveUnification::Ambient,
-        })
+        }
     }
 
     /// Reject forwarded package selectors that would escape a per-package

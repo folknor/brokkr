@@ -433,10 +433,11 @@ pub(super) fn plan_focused(
             return Err(DevError::Config(format!(
                 "--timeout only applies to a single test, but `{name}` matches {} in sweep `{}`: \
                  {}. Narrow it to one fully-qualified test name, or drop --timeout to run them \
-                 all at the 20s ceiling.",
+                 all at the {}s ceiling.",
                 output::count(occurrences.len(), "test"),
                 shape.sweep.label,
-                occurrences.join(", ")
+                occurrences.join(", "),
+                test_runner::TEST_TIMEOUT.as_secs()
             )));
         }
         hits.first().and_then(|(_, m)| m.first().cloned())
@@ -510,10 +511,6 @@ pub(super) fn direct_libtest_args(filter: &str, exact: bool) -> Vec<String> {
         "--include-ignored",
         "--nocapture",
         "--test-threads=1",
-        "-Z",
-        "unstable-options",
-        "--format",
-        "json",
     ]
     .iter()
     .map(|s| (*s).to_owned())
@@ -616,13 +613,15 @@ pub(super) fn cargo_with_deadline(
     env: &[(&str, &str)],
     what: &str,
 ) -> Result<output::CapturedOutput, DevError> {
+    // Guards nest; this one is the borrow the process-group isolation needs.
+    let signal_guard = crate::shutdown::SigtermGuard::install();
     let run = output::run_captured_with_idle_deadline(
         "cargo",
         args,
         project_root,
         env,
         test_runner::IDLE_TIMEOUT,
-        true,
+        crate::shutdown::ChildIsolation::ProcessGroup(&signal_guard),
         output::SpawnProfile::Cargo {
             phase: crate::check_cmd::current_phase(),
         },
@@ -1018,15 +1017,6 @@ pub(super) fn resolve_package_spec(
     )))
 }
 
-/// Decide which sweeps `brokkr test` runs.
-///
-/// Reuses `check_cmd::decide_active_sweeps` (no CLI features, no
-/// `--profile` override - resolution falls through to
-/// `[test] default_profile` -> `[[check]]` entries -> legacy
-/// `--all-features`), then drops the libtest filters that would
-/// fight with the user's `<name>` argument. `env` is preserved (B3:
-/// silent profile-env drop fixed by this consolidation).
-///
 /// Resolve the profile's sweeps and apply a `--sweep` selection. Deduping lane
 /// duplicates is deliberately *not* done here: the run's selection does it
 /// (`PhaseSelection::for_brokkr_test`), after `--sweep` and with the package
@@ -1042,6 +1032,15 @@ pub(super) fn resolve_sweeps(
     select_sweep(sweeps, sweep_filter)
 }
 
+/// Decide which sweeps `brokkr test` runs.
+///
+/// Reuses `check_cmd::decide_active_sweeps` (no CLI features, no
+/// `--profile` override - resolution falls through to
+/// `[test] default_profile` -> `[[check]]` entries -> legacy
+/// `--all-features`), then drops the libtest filters that would
+/// fight with the user's `<name>` argument. `env` is preserved (B3:
+/// silent profile-env drop fixed by this consolidation).
+///
 pub(super) fn decide_sweeps(
     test_cfg: Option<&crate::config::TestConfig>,
     check_entries: &[crate::config::CheckEntry],

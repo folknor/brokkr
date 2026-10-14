@@ -16,7 +16,9 @@ trait Render {
 
 pub(super) fn render_json(events: &[DepsEvent]) -> Result<(), DevError> {
     for event in events {
-        let line = serde_json::to_string(event)?;
+        let line = serde_json::to_string(event).map_err(|error| {
+            DevError::Internal(format!("could not serialize `brokkr deps` event: {error}"))
+        })?;
         println!("{line}");
     }
     Ok(())

@@ -34,7 +34,7 @@
 /// How long a `brokkr check` run may hold the lock before the watchdog
 /// kills it. Measured from lock acquisition, so a wait behind another brokkr
 /// command does not count.
-pub(crate) const CHECK_CEILING: std::time::Duration = std::time::Duration::from_secs(25 * 60);
+pub(crate) use crate::test_runner::ceilings::CHECK_CEILING;
 
 /// Exit status of a run the watchdog killed. `timeout(1)`'s convention.
 pub(crate) const WATCHDOG_EXIT_CODE: i32 = 124;
@@ -44,7 +44,7 @@ pub(crate) const WATCHDOG_EXIT_CODE: i32 = 124;
 /// then (and anything it starts meanwhile is killed within a poll), so a
 /// healthy unwind takes well under a second; this only matters for a main
 /// thread blocked somewhere no kill releases.
-const UNWIND_GRACE: std::time::Duration = std::time::Duration::from_secs(20);
+use crate::test_runner::ceilings::UNWIND_GRACE;
 
 // The per-phase ceilings are `Phase::ceiling` (`phase_type.rs`), the one
 // source: the source-reading phases finish in seconds, so two minutes is
@@ -69,10 +69,15 @@ static WATCHDOG_FIRED: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(
 /// phase entry in `run_convention_phases` / `run_build_phases` goes through
 /// here, so the two bookkeepings cannot drift.
 pub(crate) fn begin_phase(failing_phase: &mut Option<Phase>, phase: Phase) {
-    *failing_phase = Some(phase);
-    enter_phase(phase);
+    begin_phase_with(failing_phase, phase, enter_phase);
     output::detail(&format!("phase {}: started", phase.as_str()));
     output::status(phase.as_str());
+}
+
+/// The two bookkeeping updates with an injected clock entry for unit tests.
+fn begin_phase_with(failing_phase: &mut Option<Phase>, phase: Phase, enter: impl FnOnce(Phase)) {
+    *failing_phase = Some(phase);
+    enter(phase);
 }
 
 /// Restart the phase clock for `phase` alone - for the commands that borrow
@@ -111,7 +116,7 @@ pub(crate) fn phase_time_left() -> Option<std::time::Duration> {
 fn phase_time_left_at(
     clock: Option<(Phase, std::time::Instant)>,
 ) -> Option<std::time::Duration> {
-    clock.map(|(phase, since)| phase.ceiling().saturating_sub(since.elapsed()))
+    clock.map(|(phase, since)| crate::test_runner::ceilings::phase_ceiling(phase).saturating_sub(since.elapsed()))
 }
 
 /// Why the watchdog fired, if it has. A command that armed one checks this
@@ -164,7 +169,7 @@ impl CheckWatchdog {
                     }
                     let overrun = PHASE_CLOCK.lock().ok().and_then(|clock| {
                         clock.and_then(|(phase, since)| {
-                            let ceiling = phase.ceiling();
+                            let ceiling = crate::test_runner::ceilings::phase_ceiling(phase);
                             (since.elapsed() >= ceiling).then_some((phase, ceiling))
                         })
                     });
@@ -287,8 +292,8 @@ fn backstop_exit() -> ! {
         UNWIND_GRACE.as_secs(),
     ));
     // The lock's drop is what normally puts a moved-aside pin back.
-    crate::toolchain::restore_armed();
-    let raw_args: String = std::env::args().skip(1).collect::<Vec<_>>().join(" ");
+    crate::toolchain::restore_active_hold();
+    let raw_args: Vec<String> = std::env::args().skip(1).collect();
     crate::history_cmd::record_history(&raw_args, process_age_ms(), WATCHDOG_EXIT_CODE);
     std::process::exit(WATCHDOG_EXIT_CODE)
 }
@@ -321,6 +326,13 @@ mod watchdog_tests {
     use super::*;
 
     #[test]
+    fn every_phase_uses_the_shared_ceilings_table() {
+        for phase in Phase::ALL {
+            assert_eq!(phase.ceiling(), crate::test_runner::ceilings::phase_ceiling(phase));
+        }
+    }
+
+    #[test]
     fn clippy_ceiling_is_five_minutes() {
         assert_eq!(Phase::Clippy.ceiling(), std::time::Duration::from_secs(300));
         assert!(Phase::Test.ceiling() > Phase::Clippy.ceiling());
@@ -331,10 +343,10 @@ mod watchdog_tests {
     #[test]
     fn begin_phase_sets_both_bookkeepings() {
         let mut failing = None;
-        begin_phase(&mut failing, Phase::Gremlins);
+        let mut entered = None;
+        begin_phase_with(&mut failing, Phase::Gremlins, |phase| entered = Some(phase));
         assert_eq!(failing, Some(Phase::Gremlins));
-        let clock = PHASE_CLOCK.lock().expect("clock");
-        assert!(matches!(*clock, Some((Phase::Gremlins, _))));
+        assert_eq!(entered, failing);
     }
 
     /// The real firing path journals the deadline itself, before anything is
@@ -400,6 +412,7 @@ mod watchdog_tests {
         assert_eq!((queued.outcome, queued.detail), (Outcome::Unobserved, Some(Detail::PhaseDeadline)));
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn process_age_is_plausible() {
         // This test binary has been running for less than a day; a wrong

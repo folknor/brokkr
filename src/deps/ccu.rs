@@ -10,8 +10,8 @@
 //!   old, or you're behind on an old crate. Either way, the project
 //!   may not be actively maintained.
 //!
-//! Schema version pinned at 1 - the JSON contract is in
-//! `~/Programs/check-updates/ccu`.
+//! Schema version pinned at 1 - the JSON contract is the `ccu --json`
+//! protocol.
 //!
 //! All failure modes (tool missing, subprocess error, deadline kill,
 //! non-zero exit, schema mismatch, parse error) collapse into a shared
@@ -41,13 +41,17 @@ const PHASES: [Phase; 2] = [Phase::Outdated, Phase::Stale];
 /// direct dep. Exceeding it degrades to the usual `ToolMissing` skip - the
 /// phases are informational, so a timeout must never fail the run.
 const CCU_DEADLINE: Duration = Duration::from_secs(120);
-const INSTALL_HINT: &str = "not installed; cargo install --path ~/Programs/check-updates/ccu";
+const INSTALL_HINT: &str = concat!(
+    "not installed; install the check-updates `ccu` tool ",
+    "and make it available on PATH"
+);
+/// Version of the external `ccu --json` protocol that this parser supports.
+/// This is an integration contract, not a per-project setting.
 const SUPPORTED_SCHEMA: u32 = 1;
 
-/// 240 days (about eight months). Below this, a crate's latest release
-/// is "fresh enough" and we say nothing.
+/// Fixed policy age: below this, a crate's latest release is "fresh enough".
 const STALE_DAYS: i64 = 240;
-/// 730 days (about two years). Crosses into the louder "abandoned" label.
+/// Fixed policy age at which a stale crate is labelled "abandoned".
 const ABANDONED_DAYS: i64 = 730;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
@@ -212,7 +216,7 @@ fn try_run(project_root: &Path) -> Result<(Vec<DepsEvent>, Vec<DepsEvent>), Stri
         &[],
         CCU_DEADLINE,
         None,
-        false,
+        crate::shutdown::ChildIsolation::Inherit,
     ) {
         Ok(r) => r,
         Err(DevError::Spawn { error, .. }) if error.kind() == ErrorKind::NotFound => {
@@ -250,7 +254,11 @@ fn try_run(project_root: &Path) -> Result<(Vec<DepsEvent>, Vec<DepsEvent>), Stri
         ));
     }
 
-    let now_jdn = now_julian_day();
+    let now_jdn = now_julian_day(SystemTime::now())?;
+    Ok(events_from_output(parsed, now_jdn))
+}
+
+fn events_from_output(parsed: CcuOutput, now_jdn: i64) -> (Vec<DepsEvent>, Vec<DepsEvent>) {
     let mut outdated_events = Vec::new();
     let mut stale_events = Vec::new();
     // In multi-workspace projects ccu reports the same crate once per
@@ -296,7 +304,7 @@ fn try_run(project_root: &Path) -> Result<(Vec<DepsEvent>, Vec<DepsEvent>), Stri
     // Retain the marker at the end for existing NDJSON consumers. The
     // summary now carries each successful phase's zero-result state too.
     stale_events.push(DepsEvent::OutdatedComplete);
-    Ok((outdated_events, stale_events))
+    (outdated_events, stale_events)
 }
 
 fn classify_age(age_days: i64) -> Option<StaleSeverity> {
@@ -339,19 +347,20 @@ fn julian_day(y: i32, mo: u32, d: u32) -> i64 {
     d as i64 + (153 * mm + 2) / 5 + 365 * yy + yy / 4 - yy / 100 + yy / 400 - 32045
 }
 
-fn now_julian_day() -> i64 {
-    let now_secs = SystemTime::now()
+fn now_julian_day(now: SystemTime) -> Result<i64, String> {
+    let now_secs = now
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+        .map_err(|_| "system clock is before the Unix epoch".to_string())?
+        .as_secs();
     // 2440588 is the JDN of 1970-01-01. as_secs() returns u64;
     // dividing by 86400 brings it well within i64 range for any
     // sane wall-clock value.
-    2440588 + i64::try_from(now_secs / 86400).unwrap_or(0)
+    Ok(2440588 + i64::try_from(now_secs / 86400).unwrap_or(0))
 }
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
     use super::*;
 
     #[test]
@@ -390,5 +399,39 @@ mod tests {
         assert_eq!(classify_age(729), Some(StaleSeverity::Stale));
         assert_eq!(classify_age(730), Some(StaleSeverity::Abandoned));
         assert_eq!(classify_age(3000), Some(StaleSeverity::Abandoned));
+    }
+
+    #[test]
+    fn julian_day_uses_injected_time_and_rejects_pre_epoch() {
+        let epoch = UNIX_EPOCH;
+        assert_eq!(now_julian_day(epoch).unwrap(), 2440588);
+        assert_eq!(
+            now_julian_day(epoch + Duration::from_secs(86400)).unwrap(),
+            2440589
+        );
+        assert!(now_julian_day(epoch - Duration::from_secs(1)).is_err());
+    }
+
+    #[test]
+    fn output_conversion_deduplicates_findings_and_keeps_the_completion_marker() {
+        let check = || CcuCheck {
+            dependency: CcuDependency {
+                name: "sample".into(),
+                source_file: "Cargo.toml".into(),
+                line_number: 7,
+            },
+            installed: Some("1.0.0".into()),
+            latest: "2.0.0".into(),
+            severity: Some(OutdatedSeverity::Major),
+            latest_released_at: Some("2020-01-01T00:00:00Z".into()),
+        };
+        let parsed = CcuOutput {
+            schema_version: SUPPORTED_SCHEMA,
+            checks: vec![check(), check()],
+        };
+        let (outdated, stale) = events_from_output(parsed, julian_day(2023, 1, 1));
+        assert_eq!(outdated.len(), 1);
+        assert_eq!(stale.len(), 2);
+        assert!(matches!(stale.last(), Some(DepsEvent::OutdatedComplete)));
     }
 }

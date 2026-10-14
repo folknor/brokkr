@@ -15,10 +15,12 @@
 //! `run_error` record stored whole as JSON; version 9 adds typed
 //! `run.debug` and `run.harness_args` columns for execution context, backfilled
 //! from selector fields only when each has the expected JSON type; incomplete
-//! context stays unknown. On a fresh database the schema DDL in `schema.rs`
-//! creates the current tables (columns included) inside the shared migration
-//! transaction. The `has_table` helper lives here so a future column add stays
-//! a localized change, exactly as in `ResultsDb`.
+//! context stays unknown; version 10 adds `run.report_warnings`, structured
+//! parse diagnostics for malformed records and dropped diagnostic subrecords
+//! (protocol violations remain counted separately). On a fresh database,
+//! the schema DDL in `schema.rs` creates the current tables (columns included)
+//! inside the shared migration transaction. The `has_table` helper lives here
+//! so a future column add stays a localized change, exactly as in `ResultsDb`.
 
 use rusqlite::params;
 use serde_json::{Map, Value};
@@ -27,7 +29,7 @@ use super::schema::disposition_ddl;
 use crate::error::DevError;
 
 /// Current schema version. Increment when adding a migration below.
-pub(super) const SCHEMA_VERSION: i64 = 9;
+pub(super) const SCHEMA_VERSION: i64 = 10;
 
 /// Run pending migrations through the shared store policy. The v5 rebuild
 /// preserves historical orphan dispositions, so foreign-key enforcement is
@@ -156,6 +158,16 @@ fn migrate_from(conn: &rusqlite::Connection, current: i64) -> Result<(), DevErro
             conn.execute("ALTER TABLE run ADD COLUMN harness_args TEXT", [])?;
         }
         backfill_run_context(conn)?;
+    }
+
+    // v9 -> v10: parse diagnostics for malformed records and dropped
+    // subrecords. Older runs have no such diagnostics, so they read as an
+    // empty JSON array.
+    if current < 10 && !has_column(conn, "run", "report_warnings") {
+        conn.execute(
+            "ALTER TABLE run ADD COLUMN report_warnings TEXT NOT NULL DEFAULT '[]'",
+            [],
+        )?;
     }
 
     Ok(())

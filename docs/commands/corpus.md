@@ -650,8 +650,9 @@ Either form completes the `[pending]` registrations it pins (`--all`: every
 one, refusing if one is not on disk at its registered path; `--probe`: the
 named ones), removing them in the same write.
 
-Prints `added/changed/removed`. Touches the pinned *content* only:
-re-hashes the probe files, the `[feeds]` group files and every
+Prints `added/changed/removed` and the number of feed file hashes that changed.
+Touches the pinned *content* only: re-hashes the probe files, the selected
+probes' `[feeds]` groups (`--all` refreshes every group), and every
 `[harness_files]` entry (`--probe` included - an edited facts file is
 re-stamped by any reseed), preserves
 `[probe_config]` verbatim, and carries each surviving probe's `expected`

@@ -342,9 +342,8 @@ pub(crate) fn corpus(
     match cmd {
         PmtilesCorpusCommand::Check { archive, corpus } => {
             let path = resolve(archive)?;
-            let (outcome, report) =
-                gate::check(&path, &corpus_dir(archive, corpus), &sort_scratch)
-                    .map_err(DevError::Io)?;
+            let (outcome, report) = gate::check(&path, &corpus_dir(archive, corpus), &sort_scratch)
+                .map_err(DevError::Io)?;
             emit_corpus(outcome, &report)
         }
         PmtilesCorpusCommand::Bless {
@@ -354,15 +353,14 @@ pub(crate) fn corpus(
             mode,
         } => {
             let path = resolve(archive)?;
-            let (outcome, report) =
-                gate::bless(
-                    &path,
-                    &corpus_dir(archive, corpus),
-                    *mode,
-                    *rotate,
-                    &sort_scratch,
-                )
-                .map_err(DevError::Io)?;
+            let (outcome, report) = gate::bless(
+                &path,
+                &corpus_dir(archive, corpus),
+                *mode,
+                *rotate,
+                &sort_scratch,
+            )
+            .map_err(DevError::Io)?;
             emit_corpus(outcome, &report)
         }
         PmtilesCorpusCommand::RenderManifest {
@@ -373,9 +371,8 @@ pub(crate) fn corpus(
             let path = resolve(archive)?;
             let dir = corpus_dir(archive, corpus);
             let style_path = style.clone().unwrap_or_else(|| style_default(&dir));
-            let (outcome, report) =
-                gate::render_manifest(&path, &dir, &style_path, &sort_scratch)
-                    .map_err(DevError::Io)?;
+            let (outcome, report) = gate::render_manifest(&path, &dir, &style_path, &sort_scratch)
+                .map_err(DevError::Io)?;
             emit_corpus(outcome, &report)
         }
         PmtilesCorpusCommand::Render {
@@ -423,7 +420,7 @@ pub(crate) fn corpus(
                 Some(o) => o.clone(),
                 None => {
                     let dir = ElivagarLayout::new(&paths).corpus_calibrands();
-                    std::fs::create_dir_all(&dir).ok();
+                    std::fs::create_dir_all(&dir)?;
                     // With `--file` and no `--variant`, name the calibrand
                     // after the input file instead.
                     let stem = match &archive.variant {
@@ -462,7 +459,16 @@ fn emit_corpus(
         }
     }
     if report.changed > 0 {
-        crate::output::run_msg(&format!("{} changed run(s)", report.changed));
+        let (noun, plural) = match report.changed_unit {
+            Some(super::corpus::ChangedUnit::Buckets) => ("bucket", "s"),
+            Some(super::corpus::ChangedUnit::LeafRuns) => ("leaf run", "s"),
+            None => ("change", "s"),
+        };
+        crate::output::run_msg(&format!(
+            "{} changed {noun}{}",
+            report.changed,
+            if report.changed == 1 { "" } else { plural }
+        ));
     }
     match outcome {
         Outcome::Pass => {

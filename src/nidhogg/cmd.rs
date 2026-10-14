@@ -52,12 +52,20 @@ pub(crate) fn serve(
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
     let (project_root, build_root) = (project_root.as_path(), build_root.as_path());
 
-    // Resolve data directory: CLI override → dataset config → None (tiles-only).
+    // Resolve a configured data directory strictly. A missing `data_dir`
+    // field permits tiles-only serving; a configured but missing directory or
+    // an unknown dataset remains an error.
     let data_dir_str = match data_dir {
         Some(d) => Some(d.to_owned()),
-        None => resolve_nidhogg_data_dir(dataset, &paths)
-            .ok()
-            .map(|p| p.display().to_string()),
+        None => match paths.datasets.get(dataset) {
+            Some(ds) if ds.data_dir.is_none() => None,
+            Some(_) => Some(
+                resolve_nidhogg_data_dir(dataset, &paths)?
+                    .display()
+                    .to_string(),
+            ),
+            None => return Err(DevError::Config(format!("unknown dataset: {dataset}"))),
+        },
     };
 
     // Resolve tiles: "none" explicitly disables, path with / or .pmtiles is
@@ -73,7 +81,7 @@ pub(crate) fn serve(
     }
 
     let port = resolve_port(dev_config)?;
-    let build_config = build_config_with_features(Some("nidhogg"), features);
+    let build_config = build_config_with_features(Project::Nidhogg.cli_package(), features);
     let binary = build::cargo_build(&build_config, build_root)?.path;
     super::server::serve(
         &binary,
@@ -163,7 +171,7 @@ pub(crate) fn ingest(
     // and ingest is what creates it (`ingest::run` does `create_dir_all`).
     let data_dir = resolve::nidhogg_data_dir_path(dataset, &paths)?;
 
-    let build_config = build_config_with_features(Some("nidhogg"), features);
+    let build_config = build_config_with_features(Project::Nidhogg.cli_package(), features);
     let binary = build::cargo_build(&build_config, build_root)?.path;
     super::ingest::run(&binary, &pbf_path, &data_dir, project_root)
 }
@@ -176,7 +184,7 @@ pub(crate) fn update(
     features: &[String],
 ) -> Result<(), DevError> {
     project::require(project, Project::Nidhogg, "update")?;
-    let mut config = build_config_with_features(Some("nidhogg"), features);
+    let mut config = build_config_with_features(Project::Nidhogg.cli_package(), features);
     config.bin = Some("nidhogg-update".into());
     let binary = build::cargo_build(&config, build_root)?.path;
     super::update::run(&binary, args, project_root)
@@ -225,11 +233,7 @@ pub(crate) fn verify_geocode(
     queries: &[String],
 ) -> Result<(), DevError> {
     let port = resolve_port(dev_config)?;
-    let query_refs: Vec<&str> = if queries.is_empty() {
-        super::client::GEOCODE_TEST_QUERIES.to_vec()
-    } else {
-        queries.iter().map(String::as_str).collect()
-    };
+    let query_refs: Vec<&str> = queries.iter().map(String::as_str).collect();
     super::verify_geocode::run(port, &query_refs)
 }
 
@@ -250,7 +254,7 @@ pub(crate) fn verify_readonly(
         .display()
         .to_string();
 
-    let build_config = build_config_with_features(Some("nidhogg"), features);
+    let build_config = build_config_with_features(Project::Nidhogg.cli_package(), features);
     let binary = build::cargo_build(&build_config, build_root)?.path;
     let bbox = resolve_bbox(None, dataset, &paths)?;
     super::verify_readonly::run(&binary, &data_dir_str, port, project_root, &bbox)

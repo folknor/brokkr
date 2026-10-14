@@ -199,7 +199,7 @@ const TOPICS: &[Topic] = &[
     },
     Topic {
         name: "piners-config",
-        summary: "the [piners] config block: corpus_root, registry_dir, feeds",
+        summary: "the [piners] config block and its corpus and registry paths",
         content: include_str!("../docs/brokkr.toml.piners.md"),
         commands: &[CommandId::Corpus],
     },
@@ -230,15 +230,25 @@ const TOPICS: &[Topic] = &[
 ];
 
 /// The topics available in `project`, in table order.
-fn visible(project: Project) -> Vec<&'static Topic> {
+fn visible(project: Option<Project>) -> Vec<&'static Topic> {
     TOPICS
         .iter()
         .filter(|t| {
             t.commands
                 .iter()
-                .any(|id| crate::cli::visible_to(&id.spec().applies, project))
+                .any(|id| visible_to_project(&id.spec().applies, project))
         })
         .collect()
+}
+
+fn visible_to_project(visibility: &crate::cli::Visibility, project: Option<Project>) -> bool {
+    match project {
+        Some(project) => crate::cli::visible_to(visibility, project),
+        None => match visibility {
+            crate::cli::Visibility::Any | crate::cli::Visibility::Except(_) => true,
+            crate::cli::Visibility::Only(_) => false,
+        },
+    }
 }
 
 /// Colour is on only when stdout is a real terminal and `NO_COLOR` is unset.
@@ -255,14 +265,13 @@ const INDEX_MIN_SECTIONS: usize = 8;
 /// available topics when `None`.
 ///
 /// An unknown topic is an error rather than a silent listing, and one that
-/// exists but belongs to another project says so - the same courtesy
-/// `project::require()` extends to a wrong-project command, rather than
-/// pretending the doc does not exist.
+/// exists but belongs to another project says so, using the same command
+/// specification that filters help and dispatch.
 pub fn run(
     topic: Option<&str>,
     queries: &[String],
     full: bool,
-    project: Project,
+    project: Option<Project>,
 ) -> Result<(), crate::error::DevError> {
     let Some(name) = topic else {
         write_stdout(&list_topics(project));
@@ -279,11 +288,12 @@ pub fn run(
     if !found
         .commands
         .iter()
-        .any(|id| crate::cli::visible_to(&id.spec().applies, project))
+        .any(|id| visible_to_project(&id.spec().applies, project))
     {
+        let current = project.map_or_else(|| "no detected project".to_owned(), |p| p.to_string());
         return Err(crate::error::DevError::Config(format!(
             "man topic '{name}' documents another project's surface (current: \
-             {project}). Run `brokkr man` to list this project's topics."
+             {current}). Run `brokkr man` to list this project's topics."
         )));
     }
 
@@ -349,16 +359,13 @@ fn write_stdout(text: &str) {
 
 /// The bare-`brokkr man` listing: each topic name padded to a common width
 /// followed by its one-line summary.
-fn list_topics(project: Project) -> String {
+fn list_topics(project: Option<Project>) -> String {
     let topics = visible(project);
     let width = topics.iter().map(|t| t.name.len()).max().unwrap_or(0);
-    // An undetectable project is `Other("")`, whose name is empty; naming it
-    // would leave a dangling space ("Bundled docs for . Run ..."). Drop the
-    // "for X" clause entirely in that case - only the generic topics show.
-    let mut out = if project.name().is_empty() {
-        "Bundled docs. Run `brokkr man <topic>` to read one.\n\n".to_string()
-    } else {
+    let mut out = if let Some(project) = project {
         format!("Bundled docs for {project}. Run `brokkr man <topic>` to read one.\n\n")
+    } else {
+        "Bundled docs. Run `brokkr man <topic>` to read one.\n\n".to_string()
     };
     for topic in topics {
         out.push_str(&format!(
@@ -392,13 +399,12 @@ mod tests {
     /// project, which is exactly where someone is most likely to need them.
     #[test]
     fn generic_topics_survive_every_project() {
-        for project in [
-            Project::Pbfhogg,
-            Project::Piners,
-            Project::Litehtml,
-            Project::Other("some-foreign-repo"),
-        ] {
-            let names: Vec<&str> = visible(project).iter().map(|t| t.name).collect();
+        for project in Project::ALL
+            .iter()
+            .map(|(_, project)| *project)
+            .chain([Project::Other("some-foreign-repo")])
+        {
+            let names: Vec<&str> = visible(Some(project)).iter().map(|t| t.name).collect();
             for expected in ["check", "clippy", "deps", "config", "measure", "run"] {
                 assert!(
                     names.contains(&expected),
@@ -411,11 +417,17 @@ mod tests {
     /// And the project-scoped ones must not leak across.
     #[test]
     fn scoped_topics_stay_in_their_project() {
-        let piners: Vec<&str> = visible(Project::Piners).iter().map(|t| t.name).collect();
+        let piners: Vec<&str> = visible(Some(Project::Piners))
+            .iter()
+            .map(|t| t.name)
+            .collect();
         assert!(piners.contains(&"corpus"));
         assert!(!piners.contains(&"pbfhogg"));
 
-        let pbfhogg: Vec<&str> = visible(Project::Pbfhogg).iter().map(|t| t.name).collect();
+        let pbfhogg: Vec<&str> = visible(Some(Project::Pbfhogg))
+            .iter()
+            .map(|t| t.name)
+            .collect();
         assert!(pbfhogg.contains(&"pbfhogg"));
         assert!(!pbfhogg.contains(&"corpus"));
     }
@@ -424,7 +436,7 @@ mod tests {
     /// one - the generic topics are the whole point of the `Any` arm.
     #[test]
     fn other_project_listing_is_not_empty() {
-        let out = list_topics(Project::Other("some-foreign-repo"));
+        let out = list_topics(Some(Project::Other("some-foreign-repo")));
         assert!(out.contains("check"), "{out}");
         assert!(!out.contains("corpus"), "{out}");
     }
@@ -450,11 +462,36 @@ mod tests {
         }
     }
 
-    /// The no-project fallback is `Other("")`, whose empty name must not leave
-    /// a dangling space in the header ("Bundled docs for . Run ...").
     #[test]
-    fn empty_project_header_has_no_dangling_space() {
-        let out = list_topics(Project::Other(""));
+    fn every_markdown_doc_is_bundled() {
+        fn visit(dir: &std::path::Path, files: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    visit(&path, files);
+                } else if path.extension().is_some_and(|extension| extension == "md") {
+                    files.push(path);
+                }
+            }
+        }
+
+        let docs = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs");
+        let mut files = Vec::new();
+        visit(&docs, &mut files);
+        for path in files {
+            let content = std::fs::read_to_string(&path).unwrap();
+            assert!(
+                TOPICS.iter().any(|topic| topic.content == content),
+                "{} is not included in the manual topic catalog",
+                path.display()
+            );
+        }
+    }
+
+    /// Without detection there is no project name to put in the listing.
+    #[test]
+    fn no_project_header_has_no_dangling_space() {
+        let out = list_topics(None);
         assert!(
             out.starts_with("Bundled docs. Run `brokkr man <topic>`"),
             "clean header without a stray space: {out:?}"

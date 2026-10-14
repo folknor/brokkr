@@ -250,7 +250,8 @@ CREATE TABLE IF NOT EXISTS run (
     diagnosis         TEXT,
     run_error         TEXT,
     debug             INTEGER,
-    harness_args      TEXT
+    harness_args      TEXT,
+    report_warnings   TEXT NOT NULL DEFAULT '[]'
 );
 CREATE INDEX IF NOT EXISTS idx_run_started ON run(started_at);
 

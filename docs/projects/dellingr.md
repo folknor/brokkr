@@ -108,7 +108,7 @@ verifies the digest (xxh128, mtime-cached via `preflight::verify_file_digest`)
 before building anything, and refuses on mismatch:
 
 ```
-[error]   preflight: hash mismatch for /home/f/dellingr/examples/fields/same_obj_read.lua
+[error]   preflight: hash mismatch for examples/fields/same_obj_read.lua
             expected: eaa3cf86979bad6b7d091923e9ddb132
             actual:   7b1d0c9f42ae86530fd1cc2b19e4a7f0
             origin: [dellingr.workloads.same_obj_read].hotpath_file in brokkr.toml
@@ -171,7 +171,7 @@ One row series per workload is what makes the query surface useful:
 
 - `brokkr results --command same_obj_read` - one workload across commits
 - `brokkr results --compare <a> <b>` - pairs per workload automatically (the
-  pair key is `(command, mode, input_file)`)
+  pair key is `(command, mode, input_file, arm_key, env_fingerprint)`)
 - `brokkr results --command same_obj_read --mode bench` - keeps instrumented
   runs out of a wall-clock series
 - `brokkr results <uuid>` - per-iteration walls and `prev.*` provenance
@@ -182,11 +182,11 @@ dellingr has none; the workload is the operation, already in `command`.
 
 ## Scratch and clean
 
-The harness's hotpath report and marker FIFO live in `.brokkr/dellingr/`,
-rather than the default `data/scratch` (which would create a `data/` tree in a
-project that has no data). A routine `brokkr clean` removes that directory.
-`results.db` and `sidecar.db` are one level up in `.brokkr/` and are out of
-scope for `clean`, as in every project.
+Dellingr has no project-specific scratch tree. Hotpath capture temporarily uses
+`.brokkr/hotpath-report.json`, and sidecar measurement temporarily uses
+`.brokkr/.sidecar-<pid>.fifo`; both are removed after capture. `brokkr clean`
+removes a legacy `.brokkr/dellingr/` directory if one remains. `results.db` and
+`sidecar.db` stay in `.brokkr/` and are out of scope for `clean`.
 
 ## Out of scope
 

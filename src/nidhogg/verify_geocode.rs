@@ -15,13 +15,13 @@ use crate::output;
 /// For each query: GET `/api/geocode?q=<term>`, check non-empty, report
 /// PASS/FAIL with result count and top result. Returns error if any failed.
 pub fn run(port: u16, queries: &[&str]) -> Result<(), DevError> {
+    if queries.is_empty() {
+        return Err(DevError::Config(
+            "nidhogg verify geocode requires at least one query; supply terms known to the dataset"
+                .into(),
+        ));
+    }
     super::server::check_running(port)?;
-
-    let queries = if queries.is_empty() {
-        super::client::GEOCODE_TEST_QUERIES
-    } else {
-        queries
-    };
 
     let mut passed = 0u32;
     let mut failed = 0u32;

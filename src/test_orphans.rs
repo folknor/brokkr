@@ -137,11 +137,16 @@ pub fn marker() -> Option<&'static str> {
         .map(|r| r.token.as_str())
 }
 
+/// The liveness marker to carry into a child, if this process registered.
+pub(crate) fn child_env() -> Option<(&'static str, &'static str)> {
+    marker().map(|token| (MARKER_ENV, token))
+}
+
 /// Stamp this process's token onto a test child. Called from the test runners'
 /// spawn choke point, after the caller's env so a sweep env cannot displace it.
 pub fn stamp(cmd: &mut std::process::Command) {
-    if let Some(token) = marker() {
-        cmd.env(MARKER_ENV, token);
+    if let Some((name, token)) = child_env() {
+        cmd.env(name, token);
     }
 }
 

@@ -18,7 +18,8 @@ use crate::ratatoskr::discover::{self, ScriptInfo, ScriptKind};
 use crate::ratatoskr::saehrimnir::{
     ManagedMock, MockArtifactScope, MockOutcome, MockPaths, resolve_fixture,
 };
-use crate::ratatoskr::timing::format_secs;
+use crate::ratatoskr::timing::format_elapsed;
+use crate::ratatoskr::{HARNESS_MODE_FLAG, harness_env};
 
 use super::gate::validate_reserved_gate;
 
@@ -99,22 +100,34 @@ pub(super) fn resolve_info(
     })
 }
 
-/// Resolve a script named on the command line: existence check, parse
-/// frontmatter, then the shared [`resolve_info`].
+/// Resolve a script named on the command line through the shared path logic.
 pub(super) fn resolve_single(
     script: &str,
     fixtures_dir: &Path,
 ) -> Result<ResolvedScript, DevError> {
-    let script_path = Path::new(script);
+    resolve_path(Path::new(script), fixtures_dir)
+}
+
+/// Resolve a script path supplied by config or the command line.
+pub(super) fn resolve_path(
+    script_path: &Path,
+    fixtures_dir: &Path,
+) -> Result<ResolvedScript, DevError> {
     if !script_path.is_file() {
         return Err(DevError::Config(format!(
-            "sync: script not found or not a file: {script}"
+            "sync: script not found or not a file: {}",
+            script_path.display()
         )));
     }
     let stem = script_path
         .file_stem()
         .and_then(|s| s.to_str())
-        .ok_or_else(|| DevError::Config(format!("sync: script has no stem: {script}")))?;
+        .ok_or_else(|| {
+            DevError::Config(format!(
+                "sync: script has no stem: {}",
+                script_path.display()
+            ))
+        })?;
     let parsed = discover::parse_sync_script(script_path, stem)
         .map_err(|e| DevError::Config(format!("sync: parse script: {e}")))?;
     resolve_info(&parsed, fixtures_dir)
@@ -180,7 +193,7 @@ impl SyncRunner<'_> {
 
 /// Per-phase wall-clock timings for an unmeasured `sync` run. Each field is `None`
 /// until the phase completes, so a spawn-side failure still produces a
-/// faithful summary (e.g. `FAIL in 0.4s (mock 0.4s)` if sæhrimnir died
+/// faithful summary (e.g. `FAIL in 400ms (mock 400ms)` if sæhrimnir died
 /// during readiness).
 #[derive(Default)]
 struct PhaseTimings {
@@ -197,21 +210,21 @@ impl PhaseTimings {
         let mut parts: Vec<String> = Vec::new();
         let mut total = Duration::ZERO;
         if let Some(d) = self.mock_ready {
-            parts.push(format!("mock {}", format_secs(d)));
+            parts.push(format!("mock {}", format_elapsed(d)));
             total += d;
         }
         if let Some(d) = self.harness {
-            parts.push(format!("harness {}", format_secs(d)));
+            parts.push(format!("harness {}", format_elapsed(d)));
             total += d;
         }
         if let Some(d) = self.mock_shutdown {
-            parts.push(format!("shutdown {}", format_secs(d)));
+            parts.push(format!("shutdown {}", format_elapsed(d)));
             total += d;
         }
         if parts.is_empty() {
             String::new()
         } else {
-            format!(" in {} ({})", format_secs(total), parts.join(", "))
+            format!(" in {} ({})", format_elapsed(total), parts.join(", "))
         }
     }
 }
@@ -249,14 +262,9 @@ impl SyncRunner<'_> {
         timings.mock_ready = Some(mock.ready_elapsed());
         let endpoint_envs = mock.env_pair_refs();
 
-        let bin_dir_str = self.built.bin_dir.display().to_string();
-        let harness_dir_str = harness_dir.display().to_string();
         let script_str = resolved.script_abs.display().to_string();
-
-        let mut env_pairs: Vec<(&str, &str)> = vec![
-            ("BROKKR_HARNESS_ARTEFACT_DIR", &harness_dir_str),
-            ("BROKKR_TEST_BIN_DIR", &bin_dir_str),
-        ];
+        let common_env = harness_env(harness_dir, &self.built.bin_dir);
+        let mut env_pairs = common_env.as_pairs().to_vec();
         for &(name, value) in &endpoint_envs {
             env_pairs.push((name, value));
         }
@@ -268,15 +276,18 @@ impl SyncRunner<'_> {
         let ceiling = resolved.ceiling;
 
         let binary_str = self.built.binary.display().to_string();
+        // Guards nest; this one is the borrow the process-group isolation needs.
+        let signal_guard = crate::shutdown::SigtermGuard::install();
         let deadline_capture = output::run_captured_with_env_and_deadline(
             &binary_str,
-            &["--test-harness", &script_str],
+            &[HARNESS_MODE_FLAG, &script_str],
             self.project_root,
             &env_pairs,
             ceiling,
             Some(&|pid| lock.set_child_pid(pid)),
-            true, // isolate_pg: the caller's SigtermGuard active
+            crate::shutdown::ChildIsolation::ProcessGroup(&signal_guard),
         );
+        drop(signal_guard);
 
         // Capture harness elapsed before tearing down sæhrimnir so a
         // ceiling-kill or non-zero exit still surfaces a harness duration in

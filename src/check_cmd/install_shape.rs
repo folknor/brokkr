@@ -72,36 +72,6 @@ fn package_unification_args() -> [String; 3] {
     crate::config::check::CargoUnification::Package.cargo_args()
 }
 
-/// Did cargo reject the unification flags themselves, rather than fail to
-/// compile something?
-///
-/// This one classification aborts the whole phase, so it has to be a
-/// POSITIVE identification of cargo's own option rejection. The first
-/// version tested `stderr.contains("nightly")`, which any rustc diagnostic
-/// about an unstable API satisfies, as does `error: failed to select a
-/// version for \`nightly-helper\`` - and the phase would then abort every
-/// remaining install package with a false remedy. Absence of rustc
-/// diagnostics is necessary (a real compile failure always has them) and
-/// nowhere near sufficient: cargo fails before rustc for manifest,
-/// resolution and config reasons that have nothing to do with these flags.
-///
-/// Wrong in the safe direction by construction: an unrecognised rejection
-/// reads as an ordinary failure, which reports the package and continues.
-fn is_toolchain_refusal(stderr: &str, has_rustc_errors: bool) -> bool {
-    if has_rustc_errors {
-        return false;
-    }
-    const REJECTIONS: [&str; 6] = [
-        "flag is only accepted on the nightly channel",
-        "unknown `-Z` flag",
-        "unexpected argument '-Zfeature-unification'",
-        "unexpected argument `-Zfeature-unification`",
-        "feature-unification is unstable",
-        "`feature-unification` is unstable",
-    ];
-    REJECTIONS.iter().any(|r| stderr.contains(r))
-        || (stderr.contains("feature-unification") && stderr.contains("requires -Z"))
-}
 
 /// Should the phase run under this mode and profile claim?
 fn install_feature_applies(
@@ -413,7 +383,7 @@ fn check_one_install_package(
     if !captured.success() {
         let events = cargo_json::parse_cargo_diagnostics(&stdout);
         let errors: Vec<_> = events.iter().filter(|d| d.is_error()).collect();
-        if is_toolchain_refusal(&stderr, !errors.is_empty()) {
+        if is_feature_unification_refusal(&stderr, !errors.is_empty()) {
             // No silent fallback: running un-pinned would recreate the
             // workspace-unified graph this phase exists to leave. A hard
             // stop rather than a per-package failure - it would repeat
@@ -545,7 +515,10 @@ fn run_install_feature_phase(
     // Lint allows reach this build the same way they reach the test phase -
     // env or `--config`, whichever layer is live (see `rustflags`).
     let (env_allows, allow_args) = rustflags::plumbing(project_root, false, allow_flags);
-    let env_pairs = composed_rustflags_env(&[], env_allows);
+    let env_pairs = rustflags::RustflagsEnv::process()
+        .compose(env_allows)?
+        .into_iter()
+        .collect::<Vec<_>>();
     let env_refs: Vec<(&str, &str)> = env_pairs
         .iter()
         .map(|(k, v)| (k.as_str(), v.as_str()))
@@ -664,27 +637,27 @@ mod install_shape_tests {
     // "nightly", which ordinary compile output satisfies constantly.
     #[test]
     fn only_cargos_own_option_rejection_reads_as_an_unsupported_toolchain() {
-        assert!(is_toolchain_refusal(
+        assert!(is_feature_unification_refusal(
             "error: the `-Z` flag is only accepted on the nightly channel of Cargo",
             false
         ));
-        assert!(is_toolchain_refusal("error: unknown `-Z` flag specified", false));
+        assert!(is_feature_unification_refusal("error: unknown `-Z` flag specified", false));
 
         // A dependency whose NAME contains the word, and no rustc errors:
         // the old classifier aborted every remaining package here.
-        assert!(!is_toolchain_refusal(
+        assert!(!is_feature_unification_refusal(
             "error: failed to select a version for `nightly-helper`",
             false
         ));
         // An unstable-API diagnostic mentioning nightly, with rustc errors
         // present - an ordinary compile failure, reported per package.
-        assert!(!is_toolchain_refusal(
+        assert!(!is_feature_unification_refusal(
             "error[E0658]: use of unstable library feature; add `#![feature(x)]` \
              to the crate attributes to enable (nightly only)",
             true
         ));
         // Even the right words do not qualify once rustc has spoken.
-        assert!(!is_toolchain_refusal(
+        assert!(!is_feature_unification_refusal(
             "error: unknown `-Z` flag specified",
             true
         ));

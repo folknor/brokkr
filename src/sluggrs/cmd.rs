@@ -125,7 +125,7 @@ fn build_snapshot_binary(build_root: &Path) -> Result<PathBuf, DevError> {
         features: Vec::new(),
         default_features: true,
         all_features: false,
-        profile: "release",
+        profile: crate::build::CargoProfile::Release,
     };
     build::cargo_build(&config, build_root).map(|artifact| artifact.path)
 }
@@ -151,8 +151,28 @@ fn parse_snapshot_metadata(stdout: &[u8]) -> Result<SnapshotMeta, DevError> {
 #[derive(serde::Deserialize)]
 struct SnapshotMeta {
     adapter: String,
-    #[allow(dead_code)]
-    backend: Option<String>,
+}
+
+fn print_render_diagnostics(snapshot_id: &str, stderr: &[u8], stdout: &[u8]) {
+    output::sluggrs_msg(&format!(
+        "  ERROR: rendering snapshot '{snapshot_id}' failed"
+    ));
+    let stderr = String::from_utf8_lossy(stderr);
+    if stderr.trim().is_empty() {
+        output::sluggrs_msg("    renderer produced no stderr output");
+    } else {
+        output::sluggrs_msg("    stderr:");
+        for line in stderr.lines() {
+            output::sluggrs_msg(&format!("      {line}"));
+        }
+    }
+    let stdout = String::from_utf8_lossy(stdout);
+    if !stdout.trim().is_empty() {
+        output::sluggrs_msg("    stdout:");
+        for line in stdout.lines() {
+            output::sluggrs_msg(&format!("      {line}"));
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -231,11 +251,7 @@ fn run_snapshot(
     let captured = output::run_captured(&binary_str, &args, project_root)?;
 
     if !captured.success() {
-        let stderr = String::from_utf8_lossy(&captured.stderr);
-        output::sluggrs_msg(&format!(
-            "  ERROR: {}",
-            stderr.lines().next().unwrap_or("unknown error")
-        ));
+        print_render_diagnostics(&snapshot.id, &captured.stderr, &captured.stdout);
         db.insert_result(run_id, &snapshot.id, None, status::Status::Error)?;
         return Ok((
             SnapshotOutcome {
@@ -266,6 +282,10 @@ fn run_snapshot(
     };
 
     if !output_png.exists() {
+        output::sluggrs_msg(&format!(
+            "  ERROR: renderer exited successfully for '{}' without writing output.png",
+            snapshot.id
+        ));
         db.insert_result(run_id, &snapshot.id, None, status::Status::Error)?;
         return Ok((
             SnapshotOutcome {
@@ -527,6 +547,14 @@ pub(crate) fn approve(
     // an ERROR row means output.png is missing or untrustworthy.
     let latest = db.latest_result_for_snapshot(&snapshot.id)?;
     validate_approval_ready(&snapshot.id, latest.as_ref(), output_png.exists())?;
+    let result = latest.as_ref().ok_or_else(|| {
+        DevError::Verify(format!(
+            "no scored result for snapshot '{}'; rerun it before approval",
+            snapshot.id
+        ))
+    })?;
+    let run = db.run_summary(&result.run_id)?;
+    engine::validate_approval_origin("sluggrs", &result.run_id, run.as_ref(), git_info.commit.as_str())?;
 
     // Approving makes this output the image every later run is compared
     // against, so the ratchet value that belongs with it is its diff against

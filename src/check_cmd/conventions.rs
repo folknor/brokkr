@@ -10,8 +10,34 @@ use crate::rustc_text::{self, Block, BlockKind, Level};
 use crate::{dependency_rules, gremlins, output, scope};
 use std::path::Path;
 
+/// One check invocation's working-tree snapshot, loaded the first time a
+/// convention scanner needs it. Lazy so a run whose file scanners are all
+/// skipped or unconfigured never walks git at all; once loaded, every scanner
+/// judges the same file list and the same bytes.
+pub(super) struct LazyTree<'a> {
+    root: &'a Path,
+    cell: std::cell::OnceCell<scope::TreeSnapshot>,
+}
+
+impl<'a> LazyTree<'a> {
+    pub(super) fn new(root: &'a Path) -> Self {
+        Self {
+            root,
+            cell: std::cell::OnceCell::new(),
+        }
+    }
+
+    pub(super) fn get(&self) -> Result<&scope::TreeSnapshot, DevError> {
+        if let Some(tree) = self.cell.get() {
+            return Ok(tree);
+        }
+        let loaded = scope::TreeSnapshot::load(self.root)?;
+        Ok(self.cell.get_or_init(|| loaded))
+    }
+}
+
 pub(super) fn run_gremlins(
-    project_root: &Path,
+    tree: &LazyTree<'_>,
     config: Option<&GremlinsConfig>,
     fix: bool,
 ) -> Result<(), DevError> {
@@ -22,8 +48,9 @@ pub(super) fn run_gremlins(
         return Ok(());
     }
 
+    let tree = tree.get()?;
     if fix {
-        let fixed = gremlins::fix(project_root, config)?;
+        let fixed = gremlins::fix(tree, config)?;
         let total: usize = fixed.iter().map(|f| f.count).sum();
         if total == 0 {
             output::run_msg("fix-gremlins: nothing to fix");
@@ -39,7 +66,7 @@ pub(super) fn run_gremlins(
         }
     }
 
-    let found = gremlins::scan(project_root, config)?;
+    let found = gremlins::scan(tree, config)?;
 
     if found.is_empty() {
         phase_ok(Phase::Gremlins.label(), None);
@@ -47,7 +74,7 @@ pub(super) fn run_gremlins(
     }
 
     let total = found.len();
-    let displayed = scope_order(found, project_root, |g| g.path.as_path());
+    let displayed = tree_order(found, tree, |g| g.path.as_path());
 
     let mut msg = format!("gremlins: {total} found\n");
     for g in &displayed {
@@ -56,7 +83,7 @@ pub(super) fn run_gremlins(
         msg.push('\n');
     }
     msg.push_str(
-        "  hint: rerun with `brokkr check --fix-gremlins` to rewrite all banned chars in place\n",
+        "  hint: rerun with `brokkr check --fix-gremlins`; only characters with a defined replacement are rewritten\n",
     );
     output::error(msg.trim_end());
     Err(DevError::Reported("gremlins found".into()))
@@ -78,10 +105,20 @@ pub(super) fn scope_order<T>(
     scope::prioritize(violations, get_path, unstaged.as_ref())
 }
 
+/// [`scope_order`] for a convention scan, reading the unstaged set the
+/// snapshot already took rather than asking git again.
+fn tree_order<T>(
+    violations: Vec<T>,
+    tree: &scope::TreeSnapshot,
+    get_path: impl Fn(&T) -> &Path,
+) -> Vec<T> {
+    scope::prioritize(violations, get_path, tree.unstaged_files())
+}
+
 /// The `[header]` phase: required text anywhere in a selected file, with a current-year check.
 /// Inert unless the project has a `[header]` section.
 pub(super) fn run_header(
-    project_root: &Path,
+    tree: &LazyTree<'_>,
     header_cfg: Option<&HeaderConfig>,
 ) -> Result<(), DevError> {
     let Some(cfg) = header_cfg else {
@@ -90,7 +127,8 @@ pub(super) fn run_header(
     let year = crate::header::current_utc_year()?;
     let expected = crate::header::expand(&cfg.pattern, year);
 
-    let violations = crate::header::scan(project_root, cfg, year)?;
+    let tree = tree.get()?;
+    let violations = crate::header::scan(tree, cfg, year)?;
 
     if violations.is_empty() {
         phase_ok(Phase::Header.label(), None);
@@ -100,19 +138,20 @@ pub(super) fn run_header(
     report_findings(
         "header",
         "header check failed",
-        &scope_order(violations, project_root, |v| v.file.as_path()),
+        &tree_order(violations, tree, |v| v.file.as_path()),
         |v| crate::header::format_one(v, &expected),
     )
 }
 
 /// The `[[textlint]]` phase: declarative forbid-a-pattern line rules. Inert
 /// unless the project defines `[[textlint]]` entries.
-pub(super) fn run_textlint(project_root: &Path, rules: &[TextlintRule]) -> Result<(), DevError> {
+pub(super) fn run_textlint(tree: &LazyTree<'_>, rules: &[TextlintRule]) -> Result<(), DevError> {
     if rules.is_empty() {
         return Ok(());
     }
 
-    let scan = crate::textlint::scan(project_root, rules)?;
+    let tree = tree.get()?;
+    let scan = crate::textlint::scan(tree, rules)?;
     let violations = scan.violations;
 
     if violations.is_empty() {
@@ -133,7 +172,7 @@ pub(super) fn run_textlint(project_root: &Path, rules: &[TextlintRule]) -> Resul
     report_findings(
         "textlint",
         "textlint failed",
-        &scope_order(violations, project_root, |v| v.file.as_path()),
+        &tree_order(violations, tree, |v| v.file.as_path()),
         crate::textlint::format_one,
     )
 }
@@ -141,14 +180,15 @@ pub(super) fn run_textlint(project_root: &Path, rules: &[TextlintRule]) -> Resul
 /// The `[manifest]` phase: native structural `Cargo.toml` conventions. Inert
 /// unless the project has a `[manifest]` section with at least one check on.
 pub(super) fn run_manifest(
-    project_root: &Path,
+    tree: &LazyTree<'_>,
     manifest_cfg: Option<&ManifestConfig>,
 ) -> Result<(), DevError> {
     let Some(cfg) = manifest_cfg else {
         return Ok(());
     };
 
-    let violations = crate::manifest::scan(project_root, cfg)?;
+    let tree = tree.get()?;
+    let violations = crate::manifest::scan(tree, cfg)?;
 
     if violations.is_empty() {
         phase_ok(Phase::Manifest.label(), None);
@@ -158,7 +198,7 @@ pub(super) fn run_manifest(
     report_findings(
         "manifest",
         "manifest check failed",
-        &scope_order(violations, project_root, |v| v.file.as_path()),
+        &tree_order(violations, tree, |v| v.file.as_path()),
         crate::manifest::format_one,
     )
 }
@@ -257,6 +297,13 @@ pub(super) fn report_script_stage(
                 ": killed after {} (its share of the script_check phase ceiling), output so far:\n",
                 fmt_wall(deadline)
             )),
+            None if outcome.capture_incomplete => msg.push_str(
+                ": output capture incomplete (a writer kept a pipe open past the drain grace), output so far:\n",
+            ),
+            None if relevant_truncated(check.stream, outcome) => msg.push_str(&format!(
+                ": {} exceeded the capture limit, so the match cannot be proven; retained prefix:\n",
+                stream_label(check.stream)
+            )),
             None => msg.push_str(&format!(
                 ": {} did not match {:?}\n",
                 stream_label(check.stream),
@@ -316,7 +363,25 @@ fn append_script_failure(
         }
     }
     append_captured_stream(msg, "stdout", &outcome.stdout);
+    if outcome.stdout_truncated {
+        msg.push_str("    (stdout truncated at the capture limit)\n");
+    }
     append_captured_stream(msg, "stderr", &outcome.stderr);
+    if outcome.stderr_truncated {
+        msg.push_str("    (stderr truncated at the capture limit)\n");
+    }
+}
+
+/// Whether the stream(s) a check matches against overran the capture limit.
+fn relevant_truncated(
+    stream: crate::config::Stream,
+    outcome: &crate::script_check::Outcome,
+) -> bool {
+    match stream {
+        crate::config::Stream::Stdout => outcome.stdout_truncated,
+        crate::config::Stream::Stderr => outcome.stderr_truncated,
+        crate::config::Stream::Both => outcome.stdout_truncated || outcome.stderr_truncated,
+    }
 }
 
 /// Append every error finding of a rustc-shaped failure, then one trailer
@@ -508,7 +573,20 @@ mod script_failure_render_tests {
             timed_out: None,
             stdout: stdout.as_bytes().to_vec(),
             stderr: stderr.as_bytes().to_vec(),
+            stdout_truncated: false,
+            stderr_truncated: false,
+            capture_incomplete: false,
         }
+    }
+
+    #[test]
+    fn a_truncated_stream_is_marked() {
+        let mut msg = String::new();
+        let mut truncated = outcome("partial\n", "");
+        truncated.stdout_truncated = true;
+        append_script_failure(&mut msg, &check(Diagnostics::Opaque), &truncated);
+        assert!(msg.contains("partial"));
+        assert!(msg.contains("stdout truncated at the capture limit"));
     }
 
     /// The shape of the reported case: a few errors buried in warnings.
@@ -610,7 +688,10 @@ mod scope_order_tests {
     #[test]
     fn everything_is_displayed_without_git() {
         let violations = vec![PathBuf::from("a.rs"), PathBuf::from("b.rs")];
-        let displayed = scope_order(violations, Path::new("/nonexistent"), PathBuf::as_path);
+        // A test-owned directory: whatever git can or cannot say about it,
+        // ordering never drops an error.
+        let root = crate::test_scratch::scratch("check_cmd_conventions", "not_a_repo");
+        let displayed = scope_order(violations, &root, PathBuf::as_path);
         assert_eq!(displayed.len(), 2);
     }
 }

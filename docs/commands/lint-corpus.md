@@ -102,7 +102,7 @@ Only `agree_clean`, `agree_flagged` and `divergent` can be pinned in
 `expected`. `piners_error` and `lint_error` describe validator failures, so
 the registry rejects them instead of allowing an expectation no run can meet.
 
-`path` is relative to the registry's snippet tree; `xxh128` is brokkr's
+`path` is relative to `[piners] corpus_root`; `xxh128` is brokkr's
 standard file hash (`preflight::compute_file_digest`), verified before any run.
 `<keyword>.toml` files are pure selection groupings (`probes = ["id", ..]`),
 ids only - the volatile fields live only in `lints.toml`.
@@ -187,9 +187,9 @@ selection and stamps each probe's TV diagnostic fingerprint + an absolute
 `toml_edit`, comment-preserving). It is
 the deliberate, network-touching registry writer - the analogue of `corpus`'s
 `--reseed`/`--bless`, run on a cadence, never in a normal run. On frequent runs
-the anchor is **informational**: when piners and pine-lint agree but both
-diverge from a fresh anchor, brokkr surfaces it (`agree but TV-divergent,
-anchored Nd ago`) - the shared-but-wrong consensus the corpus exists to catch.
+the anchor is **informational**: brokkr reports when piners' diagnostics differ
+from the stored TV fingerprint. The advisory does not require pine-lint to
+agree with piners and does not include the anchor's age.
 An anchor stamped under another scope than the run's is not compared; the run
 says how many were skipped. TV is rate-limited; brokkr kills a `pine-lint
 --tv` call still running after 30s. Re-anchor is sequential and tolerant of
@@ -219,10 +219,12 @@ unless every TV call failed.
 
 ## Artefacts and the run store
 
-Each run's per-probe results ingest into `.brokkr/piners/lint/runs.db` (mirrors
-the corpus run store): a `run` row plus child `disposition` rows (outcome,
-disposition, expected, gate_ok, the raw piners/pine-lint diagnostic counts, the
-signature, the TV-anchor age). Gitignore it. `brokkr clean` spares it.
+Each run's results ingest into `.brokkr/piners/lint/runs.db` (mirrors the
+corpus run store): a `run` row with `result`, captured validator stderr, and
+selector metadata, plus child `disposition` rows with `disposition`, expected,
+gate status, diagnostic counts, signature, TV-anchor comparison, and a per-probe
+error for validator failures. Gitignore the store; `brokkr clean` does not
+manage it.
 
 ## See also
 

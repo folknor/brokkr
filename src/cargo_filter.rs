@@ -90,9 +90,17 @@ pub fn filter_clippy(output: &str) -> String {
 
 /// Like [`filter_clippy`], resolving warning ownership from cargo metadata.
 pub fn filter_clippy_with_owners(output: &str, owners: Option<&OwnerIndex>) -> String {
+    format_clippy_for(output, "cargo clippy", owners)
+        .unwrap_or_else(|| "cargo clippy: no issues".into())
+}
+
+/// Format diagnostics for a cargo command. `None` means there was no finding;
+/// parse failures retain the raw stream so the caller never loses an
+/// unexplained build failure.
+fn format_clippy_for(output: &str, tool: &str, owners: Option<&OwnerIndex>) -> Option<String> {
     let mut parsed = parse_clippy(output);
     if parsed.parse_failed {
-        return output.to_string();
+        return Some(output.to_string());
     }
     if let Some(owners) = owners {
         for diagnostic in &mut parsed.diagnostics {
@@ -101,31 +109,33 @@ pub fn filter_clippy_with_owners(output: &str, owners: Option<&OwnerIndex>) -> S
         parsed.diagnostics.retain(|d| !d.is_dependency_warning());
     }
     if parsed.diagnostics.is_empty() {
-        return "cargo clippy: no issues".into();
+        return None;
     }
 
     let errors = parsed.diagnostics.iter().filter(|d| d.is_error()).count();
     let warnings = parsed.diagnostics.len() - errors;
 
-    let mut result = format!("cargo clippy: {errors} errors, {warnings} warnings\n");
+    let mut result = format!(
+        "{tool}: {}, {}\n",
+        crate::output::count(errors, "error"),
+        crate::output::count(warnings, "warning")
+    );
     for d in &parsed.diagnostics {
         result.push_str("  ");
         result.push_str(&d.format_one());
         result.push('\n');
     }
-    result.trim_end().to_string()
+    Some(result.trim_end().to_string())
 }
 
 /// Format a `cargo test` run that died in the build phase: the clippy-style
-/// one-line diagnostics relabeled under `cargo test:` - the command that
-/// actually ran - plus [`linker_failure_detail`] when applicable. Shared by
+/// one-line diagnostics labeled as `cargo test` - the command that actually
+/// ran - plus [`linker_failure_detail`] when applicable. Shared by
 /// [`crate::test_runner::filter_test`]'s compile-error branch and `brokkr test`'s BUILD FAILED
 /// reporter, so both paths label the failure identically.
 pub(crate) fn filter_test_build_failure(stderr: &str) -> String {
-    let mut filtered = filter_clippy(stderr);
-    if filtered.starts_with("cargo clippy:") {
-        filtered = filtered.replacen("cargo clippy:", "cargo test:", 1);
-    }
+    let mut filtered = format_clippy_for(stderr, "cargo test", None)
+        .unwrap_or_else(|| "cargo test: build failed without a parsed diagnostic".into());
     if let Some(extra) = linker_failure_detail(stderr) {
         filtered.push('\n');
         filtered.push_str(&extra);
@@ -457,6 +467,16 @@ error: could not compile `mycrate` (bin \"mycrate\") due to 1 previous error
     }
 
     #[test]
+    fn cargo_test_build_failure_keeps_its_tool_label() {
+        let stderr = "error[E0308]: mismatched types\n --> src/foo.rs:20:5\n  |\n20|     \"hello\"\n  |     ^^^^^^^ expected `i32`, found `&str`\n  |\nerror: aborting due to 1 previous error\n";
+        let result = filter_test_build_failure(stderr);
+        assert!(
+            result.starts_with("cargo test: 1 error, 0 warnings"),
+            "got: {result}"
+        );
+    }
+
+    #[test]
     fn clippy_one_line_per_diagnostic() {
         let output = "\
 warning: unused variable: `x` [unused_variables]
@@ -476,7 +496,7 @@ error: aborting due to 1 previous error
 ";
         let result = filter_clippy(output);
         assert!(
-            result.starts_with("cargo clippy: 1 errors, 1 warnings"),
+            result.starts_with("cargo clippy: 1 error, 1 warning"),
             "got: {result}"
         );
         // Error line: one-liner with code, location, message, and type detail.
@@ -563,7 +583,7 @@ warning: build failed, waiting for other jobs to finish...
 ";
         let result = filter_clippy(output);
         assert!(!result.contains("build failed"), "got: {result}");
-        assert!(result.contains("1 errors, 0 warnings"), "got: {result}");
+        assert!(result.contains("1 error, 0 warnings"), "got: {result}");
     }
 
     #[test]

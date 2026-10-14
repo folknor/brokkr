@@ -9,6 +9,10 @@ All litehtml and sluggrs commands are top-level (no `brokkr litehtml` or
 `approve`, `report`, `visual-status`) dispatch to litehtml or sluggrs based on
 the detected project.
 
+`visual`, `approve`, and `prepare` follow the brokkr command lock policy.
+They wait for the lock while building or changing visual baselines. `list`,
+`report`, and `visual-status` do not acquire the command lock.
+
 > Historical note: `visual` was formerly named `test`; that name is now owned
 > by the generic cargo single-test runner - see `docs/commands/check.md`.
 
@@ -54,7 +58,9 @@ its project-specific config block.
   `fullPage` at the measurement viewport - the viewport is never resized
   between the JSON dump and the PNG. A capture failing with puppeteer's
   "Could not find Chrome" gets a hint to run `npx puppeteer browsers
-  install chrome` - a puppeteer bump changes the pinned browser build.
+  install chrome`. Puppeteer selects its browser build from the installed
+  version, so changing the globally installed Puppeteer may require installing
+  that version's Chrome again.
 - `list` - show configured fixtures with tags, expected outcome, and approval
   state.
 - `approve <ID>... | --all` - record current divergence as accepted baseline.
@@ -79,6 +85,10 @@ its project-specific config block.
   approve operation's *output*, so it cannot invalidate the pin. Without the
   exemption `approve` was self-blocking: the first one succeeded and every
   later one failed until you committed.
+  The latest scored result must also point to a run recorded as clean at the
+  same commit as the current checkout. If the checkout moved or the image came
+  from a dirty run, rerun the visual command from the current clean tree before
+  approving.
 - `report <run_id>` - show results table for a past test run.
 - `visual-status` - dashboard: all fixtures with approved baseline vs last
   run, delta, improvements.
@@ -104,11 +114,13 @@ not positional). Scoring is designed to be honest rather than flattering:
 - **`br` is filtered from both sides.** Chrome emits `br` boxes; the
   pipeline folds line breaks into rich-text leaves and never will.
 - **Chrome-only inline elements leave the denominator.** The pipeline
-  folds plain CSS-inline tags (`span`/`a`/`b`/... - mirror of litehtml-rs
-  `is_inline_tag` in `src/style.rs`, keep in sync) into rich-text leaves,
+  folds plain CSS-inline tags (`span`/`a`/`b`/... - the local list mirrors the
+  sister project's `is_inline_tag` in `src/style.rs`) into rich-text leaves,
   so a chrome-only inline element is a representation choice, not a
-  defect. Deliberately chrome-only-side only, unlike `br`: the pipeline
-  *does* emit inline elements when they are display:inline-block (MJML
+  defect. A Rust unit test checks that the local prepare list covers the
+  scorer list; the sibling repository's separate copy still needs review when
+  either list changes. Deliberately chrome-only-side only, unlike `br`: the
+  pipeline *does* emit inline elements when they are display:inline-block (MJML
   nav links, buttons, social tables), and those path-matched comparisons
   catch real bugs, so they are always scored.
 - **Zero-height reference elements are skipped.** Empty `tbody`/`tr`
@@ -117,10 +129,10 @@ not positional). Scoring is designed to be honest rather than flattering:
 
 Matched-but-out-of-tolerance elements are **offenders**: the full list
 lands in `fixtures/<id>/offenders.txt` (worst first, deltas are
-pipeline-minus-reference), and the top 10 print under the fixture's row
-when its status is `FAIL_THRESHOLD` or `REGRESSION`. The file is removed
-only when a run finds that fixture completely clean - a PASS whose score
-cleared the threshold can still keep a file listing its out-of-tolerance
+pipeline-minus-reference), and the highest-ranked offenders print below the
+fixture's row when its status is `FAIL_THRESHOLD` or `REGRESSION`. The file is
+removed only when a run finds that fixture completely clean - a PASS whose
+score cleared the threshold can still keep a file listing its out-of-tolerance
 stragglers.
 
 The consumer repo is expected to gitignore `fixtures/*/offenders.txt`
@@ -136,8 +148,7 @@ describing the tree.
 `PASS`, `NO_BASELINE`, `FAIL_THRESHOLD`, `REGRESSION`, `EXPECTED_FAIL`,
 `ERROR` (`visual::status::Status`, `src/visual/status.rs`). Litehtml's
 element comparison remains in `src/litehtml/compare.rs`. Sluggrs reaches all
-but `EXPECTED_FAIL`, which needs a per-fixture `expected_fail` flag that
-`[[sluggrs.snapshot]]` does not have.
+but `EXPECTED_FAIL`. `[[sluggrs.snapshot]]` has no expected-outcome field.
 
 A litehtml `expected = "fail"` fixture that passes is reported as `PASS
 (unexpected pass: ...)` and counted separately in the summary. It does not
@@ -169,8 +180,10 @@ is recorded as one `ERROR` row; it does not abort the remaining snapshots.
   strips background-image/external CSS and remote-URL legacy `background`
   attributes, injects Ahem font, pretty-prints).
   Shells out to Node.js script. Image cache in `.brokkr/prepare-cache/`;
-  failed fetches are negative-cached as `<key>.miss` files (delete to
-  retry) and fetches send a browser-like User-Agent.
+  successful responses are cached by URL hash in a bounded cache, with older
+  entries pruned as needed. Failed fetches are not cached, so a later prepare
+  retries them; responses above the size limit are refused. Fetches send a
+  browser-like User-Agent.
 
   Fidelity rules (the prepared fixture should lay out like the raw email):
   author `width`/`height` attrs are never overwritten - the fetched
@@ -185,7 +198,8 @@ is recorded as one `ERROR` row; it does not abort the remaining snapshots.
   whitespace between inline elements. The manual
   `scripts/litehtml-prepare/smoke.js` helper exercises these offline
   (`node scripts/litehtml-prepare/smoke.js`) after that package's dependencies
-  are installed; it is not part of `brokkr test` or `brokkr check`.
+  are installed, including rejection of unknown options for all three
+  subcommands; it is not part of `brokkr test` or `brokkr check`.
 - `html-extract <input.html> [--selector S | --from S --to S] <output.html>` -
   extract sub-fixture from prepared HTML. `--selector` for single element,
   `--from`/`--to` for sibling range. Preserves ancestor context and table

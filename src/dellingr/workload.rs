@@ -73,10 +73,7 @@ pub(crate) fn resolve(
     // the wrong scale.
     let (file, xxh128, origin_key) = match (&entry.hotpath_file, &entry.hotpath_xxh128) {
         (Some(_), None) | (None, Some(_)) => {
-            return Err(DevError::Config(format!(
-                "[dellingr.workloads.{name}] registers only half of the hotpath \
-                 pair - `hotpath_file` and `hotpath_xxh128` must come together"
-            )));
+            unreachable!("the dellingr config parser rejects incomplete hotpath pairs")
         }
         (Some(file), Some(hash)) if instrumented => (file, hash, "hotpath_file"),
         (None, None) if instrumented => {

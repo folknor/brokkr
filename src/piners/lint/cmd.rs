@@ -22,6 +22,7 @@ use crate::config::HarnessConfig;
 use crate::config::project_config::piners::PinersConfig;
 use crate::error::DevError;
 use crate::output::{self, CapturedOutput};
+use crate::piners::build;
 use crate::piners::lint::db::{LintDb, RunMeta};
 use crate::piners::lint::diff::classify;
 use crate::piners::lint::registry::{self, LintPin, LintRegistry, TvDiag};
@@ -30,7 +31,6 @@ use crate::piners::lint::{self, DiagSet, ProbeResult, validators};
 use crate::piners::registry_io;
 use crate::piners::run_model::{Mode, ModeFlags, RunVerdict};
 use crate::piners::time::now_rfc3339;
-use crate::ratatoskr::build;
 use crate::resolve::lint_runs_db_path;
 
 /// A PID-tracked captured-subprocess runner (`program`, `argv`, deadline) ->
@@ -114,7 +114,7 @@ pub fn lint_corpus(
     // judge the pins and bytes the run will use, not ones a writer replaced
     // while this waited. Verify-only included.
     let _lock = crate::context::reenter_command_lock()?;
-    let _sigterm = crate::shutdown::SigtermGuard::install();
+    let sigterm = crate::shutdown::SigtermGuard::install();
 
     let registry_dir = project_root.join(lint_cfg.registry_dir());
     let mut registry = LintRegistry::load(&registry_dir, &_lock)?;
@@ -170,7 +170,7 @@ pub fn lint_corpus(
                 &[],
                 deadline,
                 Some(&|pid| _lock.set_child_pid(pid)),
-                false,
+                crate::shutdown::ChildIsolation::Inherit,
             );
             _lock.clear_child_pid();
             let r = r?;
@@ -192,6 +192,7 @@ pub fn lint_corpus(
     // registry, and return. No validator build, no run store. The anchor is
     // filtered to the run's scope, which is recorded beside it (`tv_scope`).
     if mode.is_reanchor() {
+        let anchored_at = now_rfc3339();
         return reanchor(
             &registry_dir,
             &mut registry,
@@ -199,6 +200,7 @@ pub fn lint_corpus(
             &abs_paths,
             lint_cfg.pine_lint_bin(),
             scope,
+            &anchored_at,
             &run,
         );
     }
@@ -222,7 +224,7 @@ pub fn lint_corpus(
         debug,
         Some(&|pid| _lock.set_child_pid(pid)),
         Some(&|| _lock.clear_child_pid()),
-        true,
+        crate::shutdown::ChildIsolation::ProcessGroup(&sigterm),
     )?;
     let validator = built.binary.display().to_string();
     let subcommand = lint_cfg.subcommand().to_owned();
@@ -235,6 +237,7 @@ pub fn lint_corpus(
 
     // Run both validators on each probe and classify.
     let mut results: Vec<ProbeResult> = Vec::with_capacity(ids.len());
+    let mut validator_stderr = String::new();
     for id in &ids {
         // A `brokkr kill` interrupts the in-flight call, which then reads as a
         // tool error; stop here rather than spawn (and kill) every later probe.
@@ -249,12 +252,42 @@ pub fn lint_corpus(
             &[&subcommand, "--format", "json", abs],
             OFFLINE_DEADLINE,
         ) {
-            Ok(cap) => validators::parse_piners(&cap.stdout, scope),
-            Err(e) => Err(format!("piners validate failed: {e}")),
+            Ok(cap) => {
+                append_stderr_block(
+                    &mut validator_stderr,
+                    &format!("piners ({id}) stderr"),
+                    &String::from_utf8_lossy(&cap.stderr),
+                );
+                validators::parse_piners(&cap.stdout, scope)
+            }
+            Err(e) => {
+                let message = format!("piners validate failed: {e}");
+                append_stderr_block(
+                    &mut validator_stderr,
+                    &format!("piners ({id}) error"),
+                    &message,
+                );
+                Err(message)
+            }
         };
         let lint_set = match run(&pine_lint, &[abs], OFFLINE_DEADLINE) {
-            Ok(cap) => validators::parse_pine_lint(&cap.stdout, scope),
-            Err(e) => Err(format!("pine-lint failed: {e}")),
+            Ok(cap) => {
+                append_stderr_block(
+                    &mut validator_stderr,
+                    &format!("pine-lint ({id}) stderr"),
+                    &String::from_utf8_lossy(&cap.stderr),
+                );
+                validators::parse_pine_lint(&cap.stdout, scope)
+            }
+            Err(e) => {
+                let message = format!("pine-lint failed: {e}");
+                append_stderr_block(
+                    &mut validator_stderr,
+                    &format!("pine-lint ({id}) error"),
+                    &message,
+                );
+                Err(message)
+            }
         };
 
         let outcome = classify(
@@ -296,7 +329,7 @@ pub fn lint_corpus(
         gated: mode.gated(),
         verdict: &verdict,
         probe_count: results.len(),
-        stderr: "",
+        stderr: &validator_stderr,
     };
     let db_path = lint_runs_db_path(project_root);
     let mut db = LintDb::open(&db_path)?;
@@ -354,6 +387,23 @@ pub fn lint_corpus(
     }
 }
 
+/// Append one labeled validator diagnostic to the run's persisted stderr.
+fn append_stderr_block(stderr: &mut String, label: &str, content: &str) {
+    if content.is_empty() {
+        return;
+    }
+    if !stderr.is_empty() && !stderr.ends_with('\n') {
+        stderr.push('\n');
+    }
+    stderr.push_str("--- ");
+    stderr.push_str(label);
+    stderr.push_str(" ---\n");
+    stderr.push_str(content);
+    if !content.ends_with('\n') {
+        stderr.push('\n');
+    }
+}
+
 /// Assemble a [`ProbeResult`] from a probe's classification, pin, and (when
 /// piners parsed) its diagnostic set for the TV-anchor comparison.
 ///
@@ -397,6 +447,7 @@ fn build_result(
 /// fingerprint + `tv_anchored_at` + `tv_scope` into `lints.toml`. Per-probe
 /// transport failures (including a call killed at [`TV_DEADLINE`]) are
 /// reported, not fatal; the run succeeds unless every probe failed.
+#[allow(clippy::too_many_arguments)]
 fn reanchor(
     registry_dir: &Path,
     registry: &mut LintRegistry,
@@ -404,9 +455,9 @@ fn reanchor(
     abs_paths: &BTreeMap<String, String>,
     pine_lint: &str,
     scope: validators::Scope,
+    anchored_at: &str,
     run: &RunFn,
 ) -> Result<(), DevError> {
-    let now = now_rfc3339();
     let recorded_scope = scope.recorded_label();
     let mut fresh: BTreeMap<String, Vec<TvDiag>> = BTreeMap::new();
     let mut failed = 0usize;
@@ -435,7 +486,7 @@ fn reanchor(
             for (id, tv) in &fresh {
                 if let Some(pin) = pins.get_mut(id) {
                     pin.tv = tv.clone();
-                    pin.tv_anchored_at = Some(now.clone());
+                    pin.tv_anchored_at = Some(anchored_at.to_owned());
                     pin.tv_scope = recorded_scope.clone();
                 }
             }

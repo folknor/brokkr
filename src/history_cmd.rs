@@ -48,8 +48,9 @@ pub(crate) fn cmd_history(q: HistoryQuery) -> Result<(), DevError> {
     Ok(())
 }
 
-/// Best-effort recording of command history. Warns once on a real failure.
-pub(crate) fn record_history(raw_args: &str, elapsed_ms: u64, exit_code: i32) {
+/// Best-effort recording of command history. Arguments are redacted before
+/// durable storage and kept as a JSON argv so boundaries survive spaces.
+pub(crate) fn record_history(argv: &[String], elapsed_ms: u64, exit_code: i32) {
     // Sandboxes (and other minimal envs) may have neither XDG_DATA_HOME nor
     // HOME set - there's nowhere to put history.db, and emitting a warning
     // on every invocation is just noise.
@@ -59,6 +60,11 @@ pub(crate) fn record_history(raw_args: &str, elapsed_ms: u64, exit_code: i32) {
 
     let inner = || -> Result<(), history::StoreError> {
         let db = history::HistoryDb::open_typed()?;
+        let command = serde_json::to_string(&history::redact_argv(argv)).map_err(|error| {
+            history::StoreError::Other(DevError::Internal(format!(
+                "cannot encode history argv: {error}"
+            )))
+        })?;
 
         // Best-effort metadata collection. Each item can fail independently.
         let hostname = config::hostname().unwrap_or_else(|_| "unknown".into());
@@ -91,7 +97,7 @@ pub(crate) fn record_history(raw_args: &str, elapsed_ms: u64, exit_code: i32) {
         db.insert(&history::HistoryRow {
             project: project_name,
             cwd,
-            command: raw_args.to_owned(),
+            command,
             elapsed_ms: elapsed,
             exit_status: exit_code,
             hostname,

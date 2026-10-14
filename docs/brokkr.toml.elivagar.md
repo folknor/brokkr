@@ -71,13 +71,11 @@ The ocean rules are:
 - A named input that cannot be honoured is an error at run time, not a
   fallback.
 
-That last rule is the point of the whole block. brokkr used to stat `data/` for
-the shapefiles and pass whichever it found, so a run's meaning lived in the
-filesystem rather than the invocation - two runs of the same binary on the same
-PBF produced different ocean geometry with nothing in `cli_args` saying which.
-On 2026-07-14 a denmark archive was built, verified and blessed as the regress
-baseline while `ocean-tiles.pmtiles` was missing; it took the computed path
-throughout and every gate passed.
+That last rule is the point of the whole block. Ocean inputs are explicit in
+the invocation, so a run cannot silently select different geometry based on
+which shapefiles or artifacts happen to be present in `data/`. The recorded
+arguments identify whether the configured artifact or the computed path was
+used.
 
 ### `dedup_cap`
 

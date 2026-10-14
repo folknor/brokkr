@@ -298,13 +298,12 @@ pub(crate) fn report_policy(
     }
     if !dead.is_empty() {
         output::error(&format!(
-            "{} dead `skip`/`only` filter{}: a filter that selects nothing is a \
+            "{}: a filter that selects nothing is a \
              name that drifted, not a no-op - a dead `skip` no longer excludes \
              what it names, and a dead `only` leaves its lane evaluating \
              nothing while still reading as a gate. Fix the substring or delete \
              the filter.",
-            dead.len(),
-            if dead.len() == 1 { "" } else { "s" }
+            output::count(dead.len(), "dead `skip`/`only` filter")
         ));
     }
 

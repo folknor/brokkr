@@ -47,7 +47,7 @@ pub(super) fn run_focus(project_root: &Path, spec: &str, json: bool) -> Result<(
     });
     let match_count = unfiltered.packages.iter().filter(|p| predicate(p)).count();
     if match_count == 0 {
-        return Err(DevError::Build(format!(
+        return Err(DevError::Refused(format!(
             "no package matching {spec:?} in this workspace's resolve graph"
         )));
     }
@@ -74,13 +74,18 @@ fn emit_traces(
             version: p.version.clone(),
             source: format_source(p, md.source_kind(&p.id)),
             manifest_path: tildify(&p.manifest_path),
+            prefix_note: prefix_note.map(str::to_owned),
             chains: chains_to_workspace(md, &p.id),
         })
         .collect();
 
     if json {
         for t in &traces {
-            let line = serde_json::to_string(t)?;
+            let line = serde_json::to_string(t).map_err(|error| {
+                DevError::Internal(format!(
+                    "could not serialize dependency focus result: {error}"
+                ))
+            })?;
             println!("{line}");
         }
         return Ok(());
@@ -124,6 +129,11 @@ pub struct ChainTrace {
     /// ability. The JSON value is the same shortened form so scripts
     /// match what the text renderer shows.
     pub manifest_path: String,
+    /// Why focus mode fell back from an exact host-graph match, when it did.
+    /// Included in JSON so consumers can distinguish an exact result from a
+    /// result selected by an all-target or substring fallback.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prefix_note: Option<String>,
     /// Chains ordered workspace-root first, target last.
     pub chains: Vec<Vec<String>>,
 }
@@ -179,8 +189,12 @@ fn format_source(p: &CargoPackage, source_kind: PackageSourceKind) -> String {
 }
 
 fn tildify(path: &str) -> String {
-    if let Some(home) = crate::user_dirs::home()
-        && let Ok(rest) = Path::new(path).strip_prefix(&home)
+    tildify_with_home(path, crate::user_dirs::home().as_deref())
+}
+
+fn tildify_with_home(path: &str, home: Option<&Path>) -> String {
+    if let Some(home) = home
+        && let Ok(rest) = Path::new(path).strip_prefix(home)
     {
         if rest.as_os_str().is_empty() {
             return "~".to_string();
@@ -205,6 +219,7 @@ fn chains_to_workspace(metadata: &CargoMetadata, target_id: &super::PackageId) -
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
     use super::*;
 
     fn pkg(source: Option<&str>) -> CargoPackage {
@@ -256,6 +271,56 @@ mod tests {
         assert_eq!(
             format_source(&pkg(None), PackageSourceKind::Member),
             "workspace"
+        );
+    }
+
+    #[test]
+    fn focus_json_keeps_the_fallback_note() {
+        let trace = ChainTrace {
+            krate: "x".into(),
+            version: "1.0.0".into(),
+            source: "crates.io".into(),
+            manifest_path: "~/Cargo.toml".into(),
+            prefix_note: Some("x: not in host-filtered graph; showing all-target chains".into()),
+            chains: Vec::new(),
+        };
+        let value = serde_json::to_value(trace).unwrap();
+        assert_eq!(
+            value["prefix_note"],
+            "x: not in host-filtered graph; showing all-target chains"
+        );
+    }
+
+    #[test]
+    fn exact_focus_json_omits_an_absent_note() {
+        let trace = ChainTrace {
+            krate: "x".into(),
+            version: "1.0.0".into(),
+            source: "crates.io".into(),
+            manifest_path: "~/Cargo.toml".into(),
+            prefix_note: None,
+            chains: Vec::new(),
+        };
+        let value = serde_json::to_value(trace).unwrap();
+        assert!(value.get("prefix_note").is_none());
+    }
+
+    #[test]
+    fn tildify_uses_the_supplied_home() {
+        assert_eq!(
+            tildify_with_home(
+                "/home/folk/.cargo/registry/src",
+                Some(Path::new("/home/folk"))
+            ),
+            "~/.cargo/registry/src"
+        );
+        assert_eq!(
+            tildify_with_home("/opt/cargo/registry/src", Some(Path::new("/home/folk"))),
+            "/opt/cargo/registry/src"
+        );
+        assert_eq!(
+            tildify_with_home("relative/Cargo.toml", None),
+            "relative/Cargo.toml"
         );
     }
 }

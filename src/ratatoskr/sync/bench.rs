@@ -19,7 +19,8 @@ use crate::ratatoskr::build::{self, HarnessBuild};
 use crate::ratatoskr::gate as gate_eval;
 use crate::ratatoskr::gate_store::canonical_features;
 use crate::ratatoskr::saehrimnir::{ManagedMock, MockArtifactScope};
-use crate::ratatoskr::timing::format_secs;
+use crate::ratatoskr::timing::{format_elapsed, format_elapsed_ms};
+use crate::ratatoskr::{HARNESS_MODE_FLAG, harness_env};
 
 use super::gate::{self, GateHookCtx};
 use super::runner::{resolve_single, validate_sync_config};
@@ -128,7 +129,7 @@ pub fn run_sync_bench(req: &SyncBenchRequest<'_>) -> Result<(), DevError> {
         debug,
         Some(&|pid| harness.lock().set_child_pid(pid)),
         Some(&|| harness.lock().clear_child_pid()),
-        true, // isolate_pg: phase guard forwards signals to the build process group
+        crate::shutdown::ChildIsolation::ProcessGroup(phase_guard.signal_guard()),
     )?;
     // What was actually built: ratatoskr's config sets `debug = true`, so the
     // row's profile follows the build, not a release default.
@@ -220,6 +221,11 @@ impl PhaseGuard {
         }
     }
 
+    /// The live guard, borrowed as proof for process-group isolation.
+    fn signal_guard(&self) -> &crate::shutdown::SigtermGuard {
+        &self._guard
+    }
+
     /// Whether a shutdown request is pending under this guard.
     fn requested(&self) -> bool {
         crate::shutdown::is_shutdown_requested()
@@ -276,7 +282,6 @@ fn bench_loop(ctx: BenchLoopCtx<'_>) -> Result<(), DevError> {
     // Allocate every fallible resource before the mock starts. Once a
     // managed mock exists, every error below still reaches the shared
     // graceful shutdown path.
-    let bin_dir_str = built.bin_dir.display().to_string();
     let script_str = script_abs.display().to_string();
 
     // PID published from inside spawn_observed - before readiness wait
@@ -293,7 +298,7 @@ fn bench_loop(ctx: BenchLoopCtx<'_>) -> Result<(), DevError> {
     )?;
     output::ratatoskr_msg(&format!(
         "mock ready in {}",
-        format_secs(mock.ready_elapsed())
+        format_elapsed(mock.ready_elapsed())
     ));
     let endpoint_envs = mock.env_pair_refs();
 
@@ -314,7 +319,7 @@ fn bench_loop(ctx: BenchLoopCtx<'_>) -> Result<(), DevError> {
         // (`with_build_identity` above).
         external_build: None,
         runs: req.bench,
-        cli_args: Some(format!("--test-harness {}", script_abs.display())),
+        cli_args: Some(format!("{HARNESS_MODE_FLAG} {}", script_abs.display())),
         metadata: Vec::new(),
     };
 
@@ -341,11 +346,8 @@ fn bench_loop(ctx: BenchLoopCtx<'_>) -> Result<(), DevError> {
             let iter_dir = run_root.join(format!("iter-{}", i + 1));
             let iter_harness_dir = iter_dir.join("harness");
             fs::create_dir_all(&iter_harness_dir).map_err(DevError::Io)?;
-            let iter_harness_str = iter_harness_dir.display().to_string();
-            let mut env_pairs: Vec<(&str, &str)> = vec![
-                ("BROKKR_HARNESS_ARTEFACT_DIR", iter_harness_str.as_str()),
-                ("BROKKR_TEST_BIN_DIR", bin_dir_str.as_str()),
-            ];
+            let common_env = harness_env(&iter_harness_dir, &built.bin_dir);
+            let mut env_pairs = common_env.as_pairs().to_vec();
             env_pairs.extend(endpoint_envs.iter().copied());
 
             // The sidecar's own guard nests inside the phase guard for the
@@ -354,7 +356,7 @@ fn bench_loop(ctx: BenchLoopCtx<'_>) -> Result<(), DevError> {
             phase_guard.release_for_sidecar()?;
             let captured = harness.capture(
                 &built.binary,
-                &["--test-harness", &script_str],
+                &[HARNESS_MODE_FLAG, &script_str],
                 req.project_root.as_path(),
                 &env_pairs,
                 &[],
@@ -398,7 +400,7 @@ fn bench_loop(ctx: BenchLoopCtx<'_>) -> Result<(), DevError> {
     if let Ok(mock_outcome) = &mock_shutdown {
         output::ratatoskr_msg(&format!(
             "mock shutdown in {}",
-            format_secs(mock_outcome.shutdown_elapsed)
+            format_elapsed(mock_outcome.shutdown_elapsed)
         ));
     }
     let killed_after_budget = mock_shutdown
@@ -441,9 +443,9 @@ fn bench_loop(ctx: BenchLoopCtx<'_>) -> Result<(), DevError> {
         .ok_or_else(|| DevError::Internal("sync bench winner has no sidecar data".into()))?;
 
     output::ratatoskr_msg(&format!(
-        "best-of-{}: {}ms (iter {})",
+        "best-of-{}: {} (iter {})",
         req.bench,
-        elapsed_ms,
+        format_elapsed_ms(elapsed_ms),
         best_idx + 1,
     ));
 
@@ -558,9 +560,9 @@ pub struct SyncBenchRequest<'a> {
     pub script: &'a str,
     /// Number of measured iterations. Best-of-N reported and stored.
     pub bench: usize,
-    /// Allow recording on a dirty git tree (results land under the `dirty`
-    /// alias instead of being skipped). Mirrors the existing bench-flag
-    /// semantics across pbfhogg/elivagar.
+    /// Allow a measurement on a dirty git tree. Results are not inserted into
+    /// results.db; collected sidecar data uses its `dirty` latest pointer, and
+    /// a completed gated run is recorded in gate.db with `dirty = true`.
     pub force: bool,
     pub keep_artefacts: bool,
     pub profile_override: Option<bool>,

@@ -76,11 +76,24 @@ use nextest_runner::{
     test_filter::{FilterBound, RunIgnored, TestFilter, TestFilterPatterns},
 };
 
-/// The linked nextest-runner version, printed on the lane header so a result
-/// names the engine that produced it. Must track Cargo.toml's pin - there is
-/// no runtime accessor on the crate, and a compile-time drift here would
-/// only mislabel output, never change behaviour.
-const NEXTEST_ENGINE_VERSION: &str = "0.126.0";
+/// The linked nextest-runner version from the embedded dependency resolution.
+/// The manifest requirement may admit updates, so only the lock identifies
+/// which engine actually produced this binary's results.
+fn nextest_engine_version() -> Result<String, DevError> {
+    // Cargo.lock identifies the linked engine, including caret updates that
+    // leave Cargo.toml unchanged. Never label a run from a hand-copied version.
+    let lock: toml::Value = toml::from_str(include_str!("../../Cargo.lock"))
+        .map_err(|e| DevError::Config(format!("embedded Cargo.lock: {e}")))?;
+    let versions: Vec<_> = lock.get("package").and_then(toml::Value::as_array)
+        .into_iter().flatten()
+        .filter(|p| p.get("name").and_then(toml::Value::as_str) == Some("nextest-runner"))
+        .filter_map(|p| p.get("version").and_then(toml::Value::as_str))
+        .collect();
+    match versions.as_slice() {
+        [version] => Ok((*version).to_owned()),
+        _ => Err(DevError::Config("Cargo.lock must identify exactly one nextest-runner".into())),
+    }
+}
 
 /// The engine config brokkr synthesizes for one run. Written under the
 /// brokkr-owned state dir (never into the code tree) and handed to the
@@ -104,7 +117,7 @@ fn write_synthesized_config(state_root: &Path, ceiling: std::time::Duration) -> 
          retries = 0\n\
          slow-timeout = {{ period = \"{ceiling}s\", terminate-after = 1, grace-period = \"0s\" }}\n"
     );
-    std::fs::write(&path, body)?;
+    atomic_engine_config(&path, body.as_bytes())?;
     Utf8PathBuf::from_path_buf(path)
         .map_err(|p| DevError::Config(format!("state dir is not UTF-8: {}", p.display())))
 }
@@ -131,11 +144,26 @@ fn write_synthesized_config(state_root: &Path, ceiling: std::time::Duration) -> 
 /// the orphan-reap token are left out of the sweep file so the capability file
 /// alone decides them - the libtest lanes stamp them last, after the sweep env,
 /// for the same reason.
-fn engine_cargo_configs(state_root: &Path, env: &[(&str, &str)]) -> Result<CargoConfigs, DevError> {
+fn engine_cargo_configs(project_root: &Path, state_root: &Path, env: &[(&str, &str)]) -> Result<CargoConfigs, DevError> {
     let mut overrides = crate::hold::cargo_config_overrides()
         .map_err(|e| DevError::Config(format!("nextest env config unwritable: {e}")))?;
     overrides.push(write_sweep_env_config(state_root, env)?);
-    CargoConfigs::new(overrides)
+    let effective = crate::rustflags::EffectiveEnv::new(env);
+    // Explicit file sources retain Cargo's relative-path semantics and follow
+    // the sweep's CARGO_HOME. The engine's ordinary constructor discovers from
+    // process cwd, which need not be the build root. Its isolated constructor
+    // avoids that ambient dependency without changing cwd process-wide.
+    for path in crate::rustflags::config_paths_under(project_root, effective) {
+        overrides.push(path.to_str().ok_or_else(||
+            DevError::Config(format!("cargo config path is not UTF-8: {}", path.display())))?.to_owned());
+    }
+    let root = Utf8PathBuf::from_path_buf(project_root.canonicalize()?)
+        .map_err(|p| DevError::Config(format!("build root is not UTF-8: {}", p.display())))?;
+    let target_paths = effective.get_os("RUST_TARGET_PATH").map(|value|
+        std::env::split_paths(&value).map(|path| Utf8PathBuf::from_path_buf(path)
+            .map_err(|p| DevError::Config(format!("target path is not UTF-8: {}", p.display()))))
+            .collect::<Result<Vec<_>, _>>()).transpose()?.unwrap_or_default();
+    CargoConfigs::new_with_isolation(overrides, &root, &root, target_paths)
         .map_err(|e| DevError::Config(format!("cargo config discovery failed: {e}")))
 }
 
@@ -166,22 +194,33 @@ fn sweep_env_config_body(env: &[(&str, &str)]) -> String {
 /// eagerly. Rewritten from scratch on every call so a previous sweep's env
 /// cannot leak into this one; owner-only, since sweep env can carry anything.
 fn write_sweep_env_config(state_root: &Path, env: &[(&str, &str)]) -> Result<String, DevError> {
-    use std::io::Write as _;
-    use std::os::unix::fs::OpenOptionsExt as _;
-
     let state = crate::clean::layout::ProjectState::new(state_root);
     std::fs::create_dir_all(state.root())?;
     let path = state.nextest_sweep_env_file();
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(&path)?;
-    file.write_all(sweep_env_config_body(env).as_bytes())?;
+    atomic_engine_config(&path, sweep_env_config_body(env).as_bytes())?;
     path.to_str()
         .map(str::to_owned)
         .ok_or_else(|| DevError::Config(format!("state dir is not UTF-8: {}", path.display())))
+}
+
+/// Replace a generated config only after its complete body is durable.
+/// Readers see one complete generation even outside the command lock.
+fn atomic_engine_config(path: &Path, body: &[u8]) -> Result<(), DevError> {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+    static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let sequence = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let temporary = path.with_extension(format!("tmp-{}-{sequence}", std::process::id()));
+    let result = (|| -> std::io::Result<()> {
+        let mut file = std::fs::OpenOptions::new().write(true).create_new(true)
+            .mode(0o600).open(&temporary)?;
+        file.write_all(body)?;
+        file.sync_all()?;
+        std::fs::rename(&temporary, path)?;
+        Ok(())
+    })();
+    if result.is_err() { drop(std::fs::remove_file(&temporary)); }
+    result.map_err(DevError::from)
 }
 
 /// The engine lane, prepared: the listing it will execute, and everything the
@@ -434,6 +473,8 @@ pub(crate) struct NextestBuild<'a> {
 /// [`prepare_nextest`] does after cargo has run. Split out so the part that
 /// reads the build into the engine and lists can be driven without cargo.
 #[allow(clippy::too_many_lines)]
+// Preparation and execution share this assembly and its retained TestList;
+// execution must never set up or enumerate a second engine selection.
 pub(crate) fn assemble_nextest_lane(
     inputs: &LaneInputs<'_>,
     sweep: &PlannedSweep,
@@ -451,7 +492,7 @@ pub(crate) fn assemble_nextest_lane(
             .map_err(|e| DevError::Build(format!("cargo metadata unparseable: {e}")))?,
     ));
     let workspace_root: Utf8PathBuf = graph.workspace().root().to_owned();
-    let cargo_configs = engine_cargo_configs(inputs.state_root, &env_refs)?;
+    let cargo_configs = engine_cargo_configs(inputs.project_root, inputs.state_root, &env_refs)?;
     let mut builder = BinaryListBuilder::new(graph, build_platforms.clone());
     for line in stdout.lines() {
         builder
@@ -499,12 +540,13 @@ pub(crate) fn assemble_nextest_lane(
     // the cost is a narrow unix signal race around spawn, not correctness of
     // results.
     let double_spawn = DoubleSpawnInfo::disabled();
+    // The engine launches through a resolved wrapper. DirectRuntime refuses
+    // wrappers because its direct lanes cannot reproduce that launch contract.
     let target_runner = TargetRunner::new(&cargo_configs, &build_platforms)
         .map_err(|e| DevError::Config(format!("nextest target runner resolution failed: {e}")))?;
     let version_env_vars = VersionEnvVars {
-        current_version: NEXTEST_ENGINE_VERSION
-            .parse()
-            .map_err(|e| DevError::Build(format!("engine version constant: {e}")))?,
+        current_version: nextest_engine_version()?.parse()
+            .map_err(|e| DevError::Config(format!("linked nextest version: {e}")))?,
         required_version: None,
         recommended_version: None,
     };
@@ -663,9 +705,10 @@ fn run_nextest_sweep(
     };
     announce_sweep(
         &format!(
-            "test {}: {}, nextest engine {NEXTEST_ENGINE_VERSION}, process-per-test, brokkr-owned config",
+            "test {}: {}, nextest engine {}, process-per-test, brokkr-owned config",
             sweep.label,
-            describe_sweep(sweep, true, attempt.selection(), attempt.described_features())
+            describe_sweep(sweep, true, attempt.selection(), attempt.described_features()),
+            nextest_engine_version()?
         ),
         None,
         commands,
@@ -1051,6 +1094,18 @@ fn qualified_skip_filterset(package: &str, pattern: &str) -> Result<String, DevE
 mod nextest_lane_tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
+
+    #[test]
+    fn generated_config_replacement_is_complete_and_owner_only() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = crate::test_scratch::scratch("nextest_lane", "atomic_config");
+        let path = root.join("config.toml");
+        atomic_engine_config(&path, b"old = true\n").unwrap();
+        atomic_engine_config(&path, b"new = true\n").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new = true\n");
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
+    }
 
     fn planned(declaration: crate::profile::SweepDecl) -> PlannedSweep {
         PlannedSweep::resolve(declaration, false).unwrap()

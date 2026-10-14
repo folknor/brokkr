@@ -1,9 +1,9 @@
 # brokkr.toml datasets
 
-Host dataset config is consumed by the map-data projects (pbfhogg, elivagar,
-nidhogg) and by Mogwai's out-of-git input pins. Mogwai uses `path` plus
-`xxh128`; map-data projects use the PBF, OSC and PMTiles entries described
-below. litehtml, sluggrs, ratatoskr, and piners do not use these datasets.
+Host dataset config is used by the map-data projects and by Mogwai's out-of-git
+input pins. Mogwai uses `path` plus `xxh128`; map-data projects use the PBF,
+OSC and PMTiles entries described below. Other project-specific inputs belong
+to their project config.
 Datasets are host-scoped - they live under `[<hostname>.datasets.<name>]`,
 never a global `[datasets]` table. See the host example in
 `docs/brokkr.toml.md`.
@@ -36,13 +36,6 @@ paths still resolve against each including project's root.
 - `pmtiles.<variant>` - PMTiles archive entries keyed by variant name (e.g.
   `elivagar`). Each has `file`, optional `xxhash` (XXH128).
   Used by nidhogg `serve` and `bench tiles`.
-- `blessed` - the singular regress reference archive (elivagar). Fields:
-  `file` (relative to the data dir, conventionally `blessed/<dataset>-<commit>.pmtiles`),
-  `commit` (source commit, for provenance), optional `xxhash` (XXH128).
-  Written by `brokkr bless`, read + hash-verified by `brokkr regress`. The
-  archive lives under gitignored `data/blessed/`; only this registration is
-  committed. Singular (not keyed by variant) - one pmtiles variant exists
-  today. Each host blesses its own.
 - Top-level dataset fields: `origin`, `download_date`, `bbox`, `data_dir`
   (nidhogg only).
 
@@ -62,10 +55,6 @@ seq = 4704
 file = "denmark-4705.osc.gz"
 xxhash = "fa581f7b..."
 
-[plantasjen.datasets.denmark.blessed]
-file = "blessed/denmark-661cd1c.pmtiles"
-commit = "661cd1c"
-xxhash = "9c2e0b4a..."
 ```
 
 ## Shared variant-selection flags

@@ -1,6 +1,8 @@
 //! Route the parsed command into a concrete execution input.
 use crate::cli::{Command, ModeArgs, PbfArgs};
-use crate::pbfhogg::commands::{InspectMode, PbfhoggCommand, TagsFilterInput};
+use crate::pbfhogg::commands::{
+    CatTypeFilter, InspectMode, InspectTypeFilter, PbfhoggCommand, TagsFilterInput,
+};
 use crate::pbfhogg::context::CommandParams;
 
 // A routed command is built once per process and consumed at once, so the
@@ -42,7 +44,9 @@ impl Command {
                     pbf,
                     command: PbfhoggCommand::Inspect {
                         mode: if tags {
-                            InspectMode::Tags { type_filter }
+                            InspectMode::Tags {
+                                type_filter: type_filter.as_deref().map(InspectTypeFilter::from_cli),
+                            }
                         } else if nodes {
                             InspectMode::Nodes
                         } else {
@@ -113,12 +117,7 @@ impl Command {
                 clean,
                 snapshot,
             } => {
-                // Parse errors become `None` - clap's value_parser catches
-                // most bad input upstream; dispatch will surface anything
-                // that slips through.
-                let tf = type_filter
-                    .as_deref()
-                    .and_then(|s| crate::pbfhogg::commands::CatTypeFilter::parse(s).ok());
+                let tf = type_filter.as_deref().map(CatTypeFilter::from_cli);
                 let params = CommandParams {
                     snapshot,
                     ..Default::default()
@@ -147,14 +146,16 @@ impl Command {
                 snapshot,
                 jobs,
             } => {
-                let input = if input_kind.as_deref() == Some("osc") {
-                    TagsFilterInput::Osc
-                } else {
-                    TagsFilterInput::Pbf {
+                let input = match input_kind.as_deref() {
+                    Some("osc") => TagsFilterInput::Osc,
+                    None | Some("pbf") => TagsFilterInput::Pbf {
                         omit_referenced,
                         invert: invert_match,
                         remove_tags,
-                    }
+                    },
+                    Some(other) => TagsFilterInput::Invalid(format!(
+                        "unknown tags-filter --input-kind '{other}' (expected: pbf, osc)"
+                    )),
                 };
                 let params = CommandParams {
                     snapshot,

@@ -1,10 +1,11 @@
 use std::path::Path;
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::ExitStatus;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 pub use crate::cargo_env::SpawnProfile;
 use crate::error::DevError;
+use crate::shutdown::ChildIsolation;
 
 /// Why a child stopped. The supervisor assigns this once at the event that
 /// ended the run, so callers do not reconstruct it from competing flags.
@@ -206,7 +207,7 @@ pub fn run_cargo(
         env,
         ChildLimit::Wall(Duration::MAX),
         None,
-        false,
+        ChildIsolation::Inherit,
         SpawnProfile::Cargo { phase },
         CaptureCap::UNBOUNDED,
     )?;
@@ -225,7 +226,7 @@ pub fn run_captured_observed(
     cwd: &Path,
     env: &[(&str, &str)],
     on_spawn: Option<&dyn Fn(u32)>,
-    isolate_pg: bool,
+    isolation: ChildIsolation<'_>,
     profile: SpawnProfile,
 ) -> Result<CapturedOutput, DevError> {
     let dc = run_captured_limited(
@@ -235,7 +236,7 @@ pub fn run_captured_observed(
         env,
         ChildLimit::Wall(Duration::MAX),
         on_spawn,
-        isolate_pg,
+        isolation,
         profile,
         CaptureCap::UNBOUNDED,
     )?;
@@ -256,8 +257,15 @@ pub fn run_captured_with_env(
     // poll covers every captured child too. `Duration::MAX`
     // disables the deadline branch in practice (kernel pid lifetime is
     // measured in hours, this in eons).
-    let dc =
-        run_captured_with_env_and_deadline(program, args, cwd, env, Duration::MAX, None, false)?;
+    let dc = run_captured_with_env_and_deadline(
+        program,
+        args,
+        cwd,
+        env,
+        Duration::MAX,
+        None,
+        ChildIsolation::Inherit,
+    )?;
     Ok(dc.captured)
 }
 
@@ -273,7 +281,7 @@ pub(crate) fn run_captured_bounded(
     env: &[(&str, &str)],
     deadline: Duration,
     on_spawn: Option<&dyn Fn(u32)>,
-    isolate_pg: bool,
+    isolation: ChildIsolation<'_>,
     cap: CaptureCap,
 ) -> Result<DeadlineCapture, DevError> {
     run_captured_limited(
@@ -283,7 +291,7 @@ pub(crate) fn run_captured_bounded(
         env,
         ChildLimit::Wall(deadline),
         on_spawn,
-        isolate_pg,
+        isolation,
         SpawnProfile::Plain,
         cap,
     )
@@ -340,7 +348,7 @@ pub fn run_captured_with_env_and_deadline(
     env: &[(&str, &str)],
     deadline: Duration,
     on_spawn: Option<&dyn Fn(u32)>,
-    isolate_pg: bool,
+    isolation: ChildIsolation<'_>,
 ) -> Result<DeadlineCapture, DevError> {
     run_captured_limited(
         program,
@@ -349,7 +357,7 @@ pub fn run_captured_with_env_and_deadline(
         env,
         ChildLimit::Wall(deadline),
         on_spawn,
-        isolate_pg,
+        isolation,
         SpawnProfile::Plain,
         CaptureCap::UNBOUNDED,
     )
@@ -363,7 +371,7 @@ pub fn run_captured_with_idle_deadline(
     cwd: &Path,
     env: &[(&str, &str)],
     idle: Duration,
-    isolate_pg: bool,
+    isolation: ChildIsolation<'_>,
     profile: SpawnProfile,
 ) -> Result<DeadlineCapture, DevError> {
     run_captured_limited(
@@ -373,7 +381,7 @@ pub fn run_captured_with_idle_deadline(
         env,
         ChildLimit::Idle(idle),
         None,
-        isolate_pg,
+        isolation,
         profile,
         CaptureCap::UNBOUNDED,
     )
@@ -470,7 +478,7 @@ pub(crate) fn supervise_child(
     label: &str,
     start: Instant,
     limit: ChildLimit,
-    isolate_pg: bool,
+    isolation: ChildIsolation<'_>,
     tick_interval: Duration,
     observe: impl FnMut() -> Option<String>,
 ) -> SupervisedChild {
@@ -479,7 +487,7 @@ pub(crate) fn supervise_child(
         label,
         start,
         limit,
-        isolate_pg,
+        isolation,
         tick_interval,
         CaptureCap::UNBOUNDED,
         observe,
@@ -506,7 +514,7 @@ fn supervise_child_capped(
     label: &str,
     start: Instant,
     limit: ChildLimit,
-    isolate_pg: bool,
+    isolation: ChildIsolation<'_>,
     tick_interval: Duration,
     cap: CaptureCap,
     mut observe: impl FnMut() -> Option<String>,
@@ -538,7 +546,7 @@ fn supervise_child_capped(
     let mut next_tick = Instant::now();
     let ending = loop {
         if let Some(marker) = observe() {
-            terminate_child(&mut child, isolate_pg, false);
+            terminate_child(&mut child, isolation, false);
             let ending = child.wait().map_or_else(
                 |error| Ending::WaitFailed(error.to_string()),
                 |_| Ending::StopMarker(marker),
@@ -548,7 +556,7 @@ fn supervise_child_capped(
         }
 
         if crate::shutdown::is_shutdown_requested() {
-            terminate_child(&mut child, isolate_pg, true);
+            terminate_child(&mut child, isolation, true);
             let ending = child.wait().map_or_else(
                 |error| Ending::WaitFailed(error.to_string()),
                 |_| Ending::Interrupted,
@@ -566,7 +574,7 @@ fn supervise_child_capped(
             }
             Ok(None) => {
                 if let Some(duration) = expired() {
-                    terminate_child(&mut child, isolate_pg, false);
+                    terminate_child(&mut child, isolation, false);
                     let ending = child.wait().map_or_else(
                         |error| Ending::WaitFailed(error.to_string()),
                         |_| Ending::Deadline(duration),
@@ -576,7 +584,7 @@ fn supervise_child_capped(
                 }
             }
             Err(error) => {
-                terminate_child(&mut child, isolate_pg, false);
+                terminate_child(&mut child, isolation, false);
                 child.wait().ok();
                 child_elapsed = Some(start.elapsed());
                 break Ending::WaitFailed(error.to_string());
@@ -608,40 +616,21 @@ fn run_captured_limited(
     env: &[(&str, &str)],
     limit: ChildLimit,
     on_spawn: Option<&dyn Fn(u32)>,
-    isolate_pg: bool,
+    isolation: ChildIsolation<'_>,
     profile: SpawnProfile,
     cap: CaptureCap,
 ) -> Result<DeadlineCapture, DevError> {
     let start = Instant::now();
-    let mut cmd = Command::new(program);
-    cmd.args(args)
-        .current_dir(cwd)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    for &(key, value) in env {
-        cmd.env(key, value);
-    }
-    crate::cargo_env::apply(&mut cmd, profile, args, Some(cwd), env)?;
-    crate::oom::protect_child(&mut cmd);
-    crate::hold::stamp(&mut cmd);
-    use std::os::unix::process::CommandExt;
-    if isolate_pg {
-        cmd.process_group(0);
-    }
-
-    let child = cmd.spawn().map_err(|error| DevError::Spawn {
-        program: program.to_owned(),
-        error,
-    })?;
-    if let Some(cb) = on_spawn {
-        cb(child.id());
-    }
+    let policy = crate::process::spawn::ChildPolicy::from_cargo_profile(profile);
+    let mut cmd = policy.command(program, args, Some(cwd), env, isolation)?;
+    crate::process::spawn::capture_stdio(&mut cmd);
+    let child = crate::process::spawn::spawn(cmd, on_spawn)?;
     let run = supervise_child_capped(
         child,
         program,
         start,
         limit,
-        isolate_pg,
+        isolation,
         DEADLINE_POLL_INTERVAL,
         cap,
         || None,
@@ -664,10 +653,14 @@ fn run_captured_limited(
 }
 
 /// End a child with SIGKILL, optionally forwarding SIGTERM first.
-fn terminate_child(child: &mut std::process::Child, isolate_pg: bool, forward_term: bool) {
+fn terminate_child(
+    child: &mut std::process::Child,
+    isolation: ChildIsolation<'_>,
+    forward_term: bool,
+) {
     let pid = child.id();
     if forward_term {
-        if isolate_pg {
+        if isolation.is_process_group() {
             crate::process::signal_process_group(pid, libc::SIGTERM).ok();
         } else {
             crate::process::signal_pid(pid, libc::SIGTERM).ok();
@@ -681,7 +674,7 @@ fn terminate_child(child: &mut std::process::Child, isolate_pg: bool, forward_te
             }
         }
     }
-    if isolate_pg {
+    if isolation.is_process_group() {
         crate::process::signal_process_group(pid, libc::SIGKILL).ok();
     }
     child.kill().ok();
@@ -703,38 +696,13 @@ pub fn spawn_captured(
     args: &[&str],
     cwd: &Path,
     env: &[(&str, &str)],
-    isolate_pg: bool,
+    isolation: ChildIsolation<'_>,
     profile: SpawnProfile,
 ) -> Result<std::process::Child, DevError> {
-    let mut cmd = Command::new(program);
-    cmd.args(args)
-        .current_dir(cwd)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-    for &(key, value) in env {
-        cmd.env(key, value);
-    }
-    crate::cargo_env::apply(&mut cmd, profile, args, Some(cwd), env)?;
-    crate::oom::protect_child(&mut cmd);
-    // Last, after every caller-supplied env var, so a caller cannot displace
-    // the capability that lets this child compile under the hold. See
-    // `crate::hold` for why the mark is inherited rather than inferred, and why
-    // it is stamped on every child rather than only the ones named cargo.
-    crate::hold::stamp(&mut cmd);
-    // PG isolation is opt-in for the same reason as the deadline
-    // runner: the caller asserts a SigtermGuard is active so terminal
-    // signals bridge to the PG. The sidecar's own SigtermGuard (around
-    // `run_sidecar_with_deadline`) is the typical pairing.
-    use std::os::unix::process::CommandExt;
-    if isolate_pg {
-        cmd.process_group(0);
-    }
-
-    cmd.spawn().map_err(|error| DevError::Spawn {
-        program: program.to_owned(),
-        error,
-    })
+    let policy = crate::process::spawn::ChildPolicy::from_cargo_profile(profile);
+    let mut cmd = policy.command(program, args, Some(cwd), env, isolation)?;
+    crate::process::spawn::capture_stdio(&mut cmd);
+    crate::process::spawn::spawn(cmd, None)
 }
 
 /// Run a subprocess with inherited stdio (passthrough mode), returning timing.
@@ -765,14 +733,10 @@ pub fn run_passthrough_in(
     lock: Option<&crate::lockfile::LockGuard>,
 ) -> Result<PassthroughOutput, DevError> {
     let start = Instant::now();
-    let mut cmd = Command::new(program);
-    cmd.args(args);
-    if let Some(dir) = dir {
-        cmd.current_dir(dir);
-    }
-    for (k, v) in env {
-        cmd.env(k, v);
-    }
+    // Install before the `[cargo_env]` evaluation, which polls the flag too.
+    let _guard = crate::shutdown::SigtermGuard::install();
+    let policy = crate::process::spawn::ChildPolicy::from_cargo_profile(profile);
+    let cmd = policy.command(program, args, dir, env, ChildIsolation::Inherit)?;
     // A passthrough child (elivagar `regress`, elivagar run-mode dispatch) is a
     // real, long-running workload with no sidecar window around it. Historically
     // this used a bare `cmd.status()`, which left brokkr with the default
@@ -782,19 +746,7 @@ pub fn run_passthrough_in(
     // ctrl-C) reaches the child. The child stays in brokkr's process group -
     // not isolated - so a terminal SIGINT still hits it directly, and the guard
     // covers the `brokkr kill` case where only brokkr's PID is signalled.
-    // Installed before the `[cargo_env]` evaluation, which polls the flag too.
-    let _guard = crate::shutdown::SigtermGuard::install();
-    crate::cargo_env::apply(&mut cmd, profile, args, dir, env)?;
-    crate::oom::protect_child(&mut cmd);
-    // Last, after every caller-supplied env var, so a caller cannot displace
-    // the capability that lets this child compile under the hold. See
-    // `crate::hold` for why the mark is inherited rather than inferred, and why
-    // it is stamped on every child rather than only the ones named cargo.
-    crate::hold::stamp(&mut cmd);
-    let child = cmd.spawn().map_err(|error| DevError::Spawn {
-        program: program.to_owned(),
-        error,
-    })?;
+    let child = crate::process::spawn::spawn(cmd, None)?;
     // Publish the child PID into the lockfile so `brokkr kill --hard` (which
     // reads child_pid from the lock file rather than holding the Child handle)
     // can SIGKILL it, and `brokkr lock` can show it. Cleared on every exit path
@@ -808,7 +760,7 @@ pub fn run_passthrough_in(
         program,
         start,
         ChildLimit::None,
-        false,
+        ChildIsolation::Inherit,
         DEADLINE_POLL_INTERVAL,
         || None,
     );
@@ -850,6 +802,7 @@ mod tests {
     #[test]
     fn idle_deadline_resets_on_output_and_fires_on_silence() {
         let idle = Duration::from_millis(600);
+        let signal_guard = crate::shutdown::SigtermGuard::install();
         let chatty = run_captured_with_idle_deadline(
             "sh",
             &[
@@ -859,7 +812,7 @@ mod tests {
             cwd(),
             &[],
             idle,
-            true,
+            ChildIsolation::ProcessGroup(&signal_guard),
             SpawnProfile::Plain,
         )
         .unwrap();
@@ -876,7 +829,7 @@ mod tests {
             cwd(),
             &[],
             idle,
-            true,
+            ChildIsolation::ProcessGroup(&signal_guard),
             SpawnProfile::Plain,
         )
         .unwrap();
@@ -897,7 +850,7 @@ mod tests {
             &[],
             Duration::from_secs(5),
             None,
-            false,
+            ChildIsolation::Inherit,
         )
         .unwrap();
         assert!(!result.captured.ending.is_deadline());
@@ -916,7 +869,7 @@ mod tests {
             &[],
             Duration::from_millis(250),
             None,
-            false,
+            ChildIsolation::Inherit,
         )
         .unwrap();
         let elapsed = start.elapsed();
@@ -942,7 +895,7 @@ mod tests {
             &[],
             Duration::from_secs(5),
             None,
-            false,
+            ChildIsolation::Inherit,
         )
         .unwrap();
         assert!(!result.captured.ending.is_deadline());

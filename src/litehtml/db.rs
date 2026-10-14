@@ -76,9 +76,8 @@ impl MechanicalDb {
             .set_approval(fixture_id, commit, pixel_diff_pct, element_match_pct)
     }
 
-    #[allow(dead_code)]
-    pub fn latest_run(&self) -> Result<Option<RunSummary>, DevError> {
-        self.inner.latest_run()
+    pub fn run_summary(&self, run_id: &str) -> Result<Option<RunSummary>, DevError> {
+        self.inner.run_summary(run_id)
     }
 
     pub fn run_results(&self, run_id: &str) -> Result<Vec<ResultRow>, DevError> {

@@ -5,6 +5,7 @@ use std::path::Path;
 use crate::build::{self, BuildConfig};
 use crate::error::DevError;
 use crate::harness::{BenchConfig, BenchHarness};
+use crate::project::Project;
 
 pub const ALL_ALLOCATORS: &[&str] = &["default", "jemalloc", "mimalloc"];
 
@@ -19,9 +20,13 @@ pub fn run(
 
     crate::harness::run_variants("allocator", ALL_ALLOCATORS, |name| {
         let build_config = match name {
-            "jemalloc" => BuildConfig::release_with_features(Some("pbfhogg-cli"), &["jemalloc"]),
-            "mimalloc" => BuildConfig::release_with_features(Some("pbfhogg-cli"), &["mimalloc"]),
-            _ => BuildConfig::release(Some("pbfhogg-cli")),
+            "jemalloc" => {
+                BuildConfig::release_with_features(Project::Pbfhogg.cli_package(), &["jemalloc"])
+            }
+            "mimalloc" => {
+                BuildConfig::release_with_features(Project::Pbfhogg.cli_package(), &["mimalloc"])
+            }
+            _ => BuildConfig::release(Project::Pbfhogg.cli_package()),
         };
 
         let binary = build::cargo_build(&build_config, project_root)?.path;

@@ -375,7 +375,6 @@ fn run_test_lane(
             a.attempt,
             p,
             tap,
-            a.doctests,
             a.commands,
             timings,
         ),

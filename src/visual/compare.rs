@@ -4,11 +4,8 @@ use std::path::Path;
 
 use crate::error::DevError;
 
-#[allow(dead_code)]
 pub(crate) struct PixelDiffResult {
     pub(crate) diff_pct: f64,
-    pub(crate) total_pixels: u64,
-    pub(crate) diff_pixels: u64,
 }
 
 /// IDs become one filesystem component under the project's artifact root.
@@ -199,11 +196,7 @@ pub(crate) fn compare_pixels(
             (diff_pixels as f64 / total_pixels as f64) * 100.0
         }
     };
-    Ok(PixelDiffResult {
-        diff_pct,
-        total_pixels,
-        diff_pixels,
-    })
+    Ok(PixelDiffResult { diff_pct })
 }
 
 #[cfg(test)]

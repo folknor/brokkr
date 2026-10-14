@@ -207,6 +207,21 @@ mod tests {
             reg.pins["untouched"].expected,
             Some(registry::CorpusDisposition::ByteExact)
         );
+
+        let written = std::fs::read_to_string(&pins_path).unwrap();
+        let on_disk = registry::parse_pins(&written, &pins_path).unwrap();
+        assert_eq!(
+            on_disk.probes["a"].expected,
+            Some(registry::CorpusDisposition::CountDivergent)
+        );
+        assert_eq!(
+            on_disk.probes["b"].expected,
+            Some(registry::CorpusDisposition::CompileFail)
+        );
+        assert_eq!(
+            on_disk.probes["untouched"].expected,
+            Some(registry::CorpusDisposition::ByteExact)
+        );
     }
 
     #[test]

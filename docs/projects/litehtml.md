@@ -19,12 +19,12 @@ visual-test surface, different pipeline binary).
 - `src/visual/` - shared pixel comparison, typed visual statuses, run engine,
   database operations, and common command formatting. Run IDs use the shared
   UUID helpers in `src/db/types.rs`.
-- `scripts/litehtml-prepare/` - Node.js fixture preprocessing (cheerio +
-  pngjs). `prepare.js` handles `prepare`, `extract`, and `outline`
+- `scripts/litehtml-prepare/` - Node.js fixture preprocessing (cheerio,
+  image-size, and pngjs). `prepare.js` handles `prepare`, `extract`, and `outline`
   subcommands. Dependencies managed via pnpm (`package.json`,
-  `pnpm-lock.yaml`). Its `INLINE_ELEMENTS` must stay a superset of
-  `compare.rs`'s `is_inline_tag`, or the pretty-printer treats an inline tag
-  (`<font>`, say) as a block and invents whitespace around it.
+  `pnpm-lock.yaml`). A Rust unit test parses its `INLINE_ELEMENTS` and checks
+  that it covers every tag in `compare.rs`'s `is_inline_tag`. The sibling
+  litehtml-rs repository's pipeline keeps a separate copy of that list.
 
 ## Commands
 
@@ -60,9 +60,9 @@ notes = "narrow mobile layout"       # optional metadata
 and must be greater than zero; both thresholds are percentages in percentage
 points. `mode` is `ahem` (pass
 `--fixture` to the pipeline) or `default` (run the pipeline without that flag).
-The optional `fallback_aspect_ratio` is used only by `prepare`, must be finite
-and greater than zero, and defaults to `2.0` when omitted. Fixture viewport
-overrides must also be greater than zero.
+The optional `fallback_aspect_ratio` is used only by `prepare` and must be
+finite and greater than zero. When omitted, brokkr supplies its default value.
+Fixture viewport overrides must also be greater than zero.
 
 Each `[[litehtml.fixture]]` requires a unique, path-safe `id`, an HTML `path`,
 and `expected = "pass" | "fail"`. `tags` is an optional list used by
@@ -72,10 +72,10 @@ failure as `EXPECTED_FAIL`; a passing render is still a `PASS` and is called
 out as a stale expectation. `waive_element_threshold = true` disables
 the absolute element-match threshold for that fixture; its score is still
 recorded and an approved element score still acts as a regression ratchet.
-`notes` is accepted as metadata but currently does not change command output or
-comparison behavior. Unknown mode/expected values, duplicate IDs, and IDs that
-could escape the `fixtures/<id>` artifact directory are rejected before a
-visual command runs.
+`notes` is optional metadata displayed below each fixture by `list`; it does
+not change comparison behavior. Unknown mode/expected values, duplicate IDs,
+and IDs that could escape the `fixtures/<id>` artifact directory are rejected
+before a visual command runs.
 
 The Node entry points and package files are compiled into brokkr and installed
 under `$XDG_CACHE_HOME/brokkr/litehtml-prepare/<key>`, the key a hash of the

@@ -9,6 +9,32 @@ use crate::error::DevError;
 
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Check whether a SQLite table exists, preserving inspection errors for the
+/// caller instead of interpreting them as absence.
+pub(crate) fn table_exists(conn: &Connection, table: &str) -> Result<bool, DevError> {
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+        [table],
+        |row| row.get(0),
+    )?;
+    Ok(count > 0)
+}
+
+/// Check whether a SQLite table has a column, preserving inspection errors
+/// for the caller instead of interpreting them as absence.
+pub(crate) fn column_exists(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+) -> Result<bool, DevError> {
+    let quoted_table = format!("\"{}\"", table.replace('"', "\"\""));
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({quoted_table})"))?;
+    let columns = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(columns.iter().any(|name| name == column))
+}
+
 /// Open a database for a store that may create or migrate data.
 pub(crate) fn open_read_write(
     path: &Path,

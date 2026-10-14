@@ -3,6 +3,9 @@ use std::os::unix::io::RawFd;
 use super::{AcqId, AuthHash, LockRecord, LockState};
 use crate::process::{BootId, HostScope, NsInode, Pid, ProcIdentity, StartTicks};
 
+const READ_STABILITY_ATTEMPTS: usize = 3;
+const READ_STABILITY_RETRY: std::time::Duration = std::time::Duration::from_millis(10);
+
 /// Info read back from the lock file. `starttime` and `boot_id` are the
 /// holder's identity tokens; every PID here is meaningful only after
 /// [`crate::process::verify_identity`] passes for it - the numbers were written in the
@@ -226,9 +229,9 @@ pub(super) fn rewrite_from_state(fd: RawFd, state: &LockState) -> std::io::Resul
 /// prefix per holder, every key is always emitted, and parsing is
 /// first-occurrence-wins so a stale tail can never override a fresh prefix.
 pub(super) fn read_lock_contents(fd: RawFd) -> Option<LockInfo> {
-    for attempt in 0..3 {
+    for attempt in 0..READ_STABILITY_ATTEMPTS {
         if attempt > 0 {
-            std::thread::sleep(std::time::Duration::from_millis(10));
+            std::thread::sleep(READ_STABILITY_RETRY);
         }
         let first = read_file_bytes(fd)?;
         let second = read_file_bytes(fd)?;

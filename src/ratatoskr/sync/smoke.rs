@@ -56,7 +56,7 @@ pub fn run_sync_smoke(req: &SyncSmokeRequest<'_>) -> Result<(), DevError> {
     // the harness binary - sees the flag-poll path in
     // `output::run_captured_with_env_and_deadline`. Drops at function
     // end, before `_lock`.
-    let _sigterm = crate::shutdown::SigtermGuard::install();
+    let sigterm = crate::shutdown::SigtermGuard::install();
 
     let debug = req
         .profile_override
@@ -67,7 +67,7 @@ pub fn run_sync_smoke(req: &SyncSmokeRequest<'_>) -> Result<(), DevError> {
         debug,
         Some(&|pid| _lock.set_child_pid(pid)),
         Some(&|| _lock.clear_child_pid()),
-        true, // isolate_pg: SigtermGuard above bridges terminal signals
+        crate::shutdown::ChildIsolation::ProcessGroup(&sigterm),
     )?;
 
     let runner = SyncRunner {

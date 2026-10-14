@@ -15,10 +15,11 @@ use crate::output::{self, CapturedOutput};
 use crate::ratatoskr::build::{self, HarnessBuild};
 use crate::ratatoskr::discover::{self, PreserveDataDir, SCRIPT_DIR, ScriptInfo, Selection};
 use crate::ratatoskr::saehrimnir::{ManagedMock, MockArtifactScope, MockPaths, Protocol};
+use crate::ratatoskr::timing::format_elapsed_ms;
 
 use super::single::{RunResult, spawn_and_capture};
 #[cfg(test)]
-use super::single::{format_iter_line, format_soak_summary};
+use super::single::{classify_capture, format_iter_line, format_soak_summary};
 
 /// `brokkr service --all` - run every discovered script (optionally
 /// filtered) against a single shared harness build.
@@ -94,7 +95,7 @@ pub(crate) fn service_suite(req: &crate::request::ServiceSuiteRequest<'_>) -> Re
 
     let _lock = crate::context::reenter_command_lock()?;
     // Cooperative SIGTERM for `brokkr kill`. See run_sync_smoke for rationale.
-    let _sigterm = crate::shutdown::SigtermGuard::install();
+    let sigterm = crate::shutdown::SigtermGuard::install();
 
     let debug = profile_override.unwrap_or_else(|| harness_cfg.debug.unwrap_or(false));
     let built = build::build_for_harness(
@@ -103,7 +104,7 @@ pub(crate) fn service_suite(req: &crate::request::ServiceSuiteRequest<'_>) -> Re
         debug,
         Some(&|pid| _lock.set_child_pid(pid)),
         Some(&|| _lock.clear_child_pid()),
-        true, // isolate_pg: outer SigtermGuard active
+        crate::shutdown::ChildIsolation::ProcessGroup(&sigterm),
     )?;
     output::ratatoskr_msg(&format_suite_header(
         runnable.len(),
@@ -428,7 +429,10 @@ fn format_suite_iter_line(
         format!("[{pos}/{total}]")
     };
     if result.succeeded {
-        format!("{prefix} PASS {name} in {}ms", result.elapsed_ms)
+        format!(
+            "{prefix} PASS {name} in {}",
+            format_elapsed_ms(result.elapsed_ms)
+        )
     } else {
         let dir = result
             .artefact_path
@@ -436,8 +440,9 @@ fn format_suite_iter_line(
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "<missing>".to_owned());
         format!(
-            "{prefix} FAIL {name} {} in {}ms (artefacts: {dir})",
-            result.exit_label, result.elapsed_ms
+            "{prefix} FAIL {name} {} in {} (artefacts: {dir})",
+            result.exit_label,
+            format_elapsed_ms(result.elapsed_ms)
         )
     }
 }
@@ -469,7 +474,10 @@ fn format_suite_summary(results: &[CycleRun], total: usize, cycles: u32, bailed:
         };
         format!(
             "soak: {pass_count}/{cohort_total} cohort runs passed across {cycles} cycles \
-             (min {min}ms, max {max}ms, avg {avg}ms)"
+             (min {}, max {}, avg {})",
+            format_elapsed_ms(min),
+            format_elapsed_ms(max),
+            format_elapsed_ms(avg)
         )
     } else if bailed {
         // First failure stops the cohort; report the cycle and script.
@@ -538,7 +546,12 @@ fn format_single_cycle_summary(results: &[CycleRun], total: usize, bailed: bool)
         } else {
             pass_times.iter().sum::<u128>() / pass_times.len() as u128
         };
-        format!("suite: {pass_count}/{total} passed (min {min}ms, max {max}ms, avg {avg}ms)")
+        format!(
+            "suite: {pass_count}/{total} passed (min {}, max {}, avg {})",
+            format_elapsed_ms(min),
+            format_elapsed_ms(max),
+            format_elapsed_ms(avg)
+        )
     } else if bailed {
         let first_fail = fail_names[0];
         format!("suite: stopped at {first_fail} ({pass_count} passed, {fail_count} failed)")
@@ -580,6 +593,17 @@ pub(super) fn write_artefacts(
     captured: &CapturedOutput,
     project_root: &Path,
 ) -> Result<(), DevError> {
+    let git = crate::git::collect(project_root).ok();
+    write_artefacts_with_git(artefact_dir, script_abs, built, captured, git.as_ref())
+}
+
+fn write_artefacts_with_git(
+    artefact_dir: &Path,
+    script_abs: &Path,
+    built: &HarnessBuild,
+    captured: &CapturedOutput,
+    git: Option<&crate::git::GitInfo>,
+) -> Result<(), DevError> {
     fs::write(artefact_dir.join("binary-stdout.log"), &captured.stdout)?;
     fs::write(artefact_dir.join("binary-stderr.log"), &captured.stderr)?;
 
@@ -589,7 +613,6 @@ pub(super) fn write_artefacts(
         .unwrap_or_else(|| PathBuf::from("script.lua"));
     fs::copy(script_abs, artefact_dir.join(&script_filename))?;
 
-    let git = crate::git::collect(project_root).ok();
     let meta = RunMetadata {
         brokkr_version: env!("CARGO_PKG_VERSION").to_owned(),
         script: script_abs.display().to_string(),
@@ -598,9 +621,9 @@ pub(super) fn write_artefacts(
         elapsed_ms: u64::try_from(captured.elapsed.as_millis()).unwrap_or(u64::MAX),
         exit_code: captured.code(),
         signal: captured.signal(),
-        git_commit: git.as_ref().map(|g| g.commit.as_str().to_owned()),
-        git_subject: git.as_ref().map(|g| g.subject.clone()),
-        git_clean: git.as_ref().map(|g| g.is_clean),
+        git_commit: git.map(|g| g.commit.as_str().to_owned()),
+        git_subject: git.map(|g| g.subject.clone()),
+        git_clean: git.map(|g| g.is_clean),
     };
     let serialized = toml::to_string(&meta)
         .map_err(|e| DevError::Config(format!("service: failed to serialize run.toml: {e}")))?;
@@ -672,7 +695,6 @@ impl<'a> FixtureSession<'a> {
 mod tests {
     #![allow(clippy::unwrap_used)]
 
-    use std::process::Command;
     use std::time::Duration;
 
     use crate::ratatoskr::discover::ScriptKind;
@@ -776,16 +798,8 @@ mod tests {
     }
 
     #[test]
-    fn write_artefacts_omits_git_keys_when_collection_fails() {
-        // Pass a non-git dir as project_root - git::collect returns Err
-        // and the optional git_* fields elide. The tmpdir lives under
-        // brokkr's `target/test-tmp/`, which is itself inside brokkr's
-        // git repo - `git rev-parse` would walk upward and succeed.
-        // Drop a malformed `.git` *file* (gitlink shape) in the dir so
-        // git stops the walk there and returns non-zero.
+    fn write_artefacts_omits_git_fields_without_git_metadata() {
         let parent = tmpdir("write_no_git");
-        let project = tmpdir("write_no_git_project");
-        fs::write(project.join(".git"), "gitdir: /nonexistent-by-design\n").unwrap();
         let script = parent.join("gamma.lua");
         fs::write(&script, "").unwrap();
         let bin_dir = parent.join("bin");
@@ -794,29 +808,35 @@ mod tests {
         let built = fake_built(&bin_dir);
         let cap = captured(b"", b"", Some(0), None);
 
-        write_artefacts(&artefact_dir, &script, &built, &cap, &project).unwrap();
+        write_artefacts_with_git(&artefact_dir, &script, &built, &cap, None).unwrap();
         let toml_body = fs::read_to_string(artefact_dir.join("run.toml")).unwrap();
         assert!(!toml_body.contains("git_commit"), "got: {toml_body}");
         assert!(!toml_body.contains("git_clean"), "got: {toml_body}");
     }
 
-    /// End-to-end shape: stand-in "harness binary" via `/bin/true` and
-    /// `/bin/false` exercises the success vs failure routing through
-    /// the artefact dir. We can't invoke `service_test` itself without
-    /// a real `[ratatoskr.harness]` config + cargo build, so we drive
-    /// the spawn-and-capture step directly.
     #[test]
-    fn capturing_true_succeeds() {
-        let cap = Command::new("/bin/true").output().unwrap();
-        assert!(cap.status.success());
-        assert_eq!(cap.status.code(), Some(0));
+    fn capture_classifier_accepts_only_clean_success() {
+        let ceiling = Duration::from_secs(1);
+        let (succeeded, label) =
+            classify_capture(&captured(b"", b"", Some(0), None), false, ceiling);
+        assert!(succeeded);
+        assert_eq!(label, "exit=0");
+
+        let (succeeded, label) =
+            classify_capture(&captured(b"", b"", Some(1), None), false, ceiling);
+        assert!(!succeeded);
+        assert_eq!(label, "exit=1");
     }
 
     #[test]
-    fn capturing_false_reports_nonzero_code() {
-        let cap = Command::new("/bin/false").output().unwrap();
-        assert!(!cap.status.success());
-        assert_eq!(cap.status.code(), Some(1));
+    fn capture_classifier_marks_deadline_as_failure_even_with_zero_exit() {
+        let (succeeded, label) = classify_capture(
+            &captured(b"", b"", Some(0), None),
+            true,
+            Duration::from_secs(1),
+        );
+        assert!(!succeeded);
+        assert_eq!(label, "ceiling=1s");
     }
 
     // ---- soak format helpers ------------------------------------------

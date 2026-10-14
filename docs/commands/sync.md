@@ -28,12 +28,14 @@ Flags that only make sense while measuring (`--bench`, `--force`,
 so `brokkr sync --gate x` fails at parse time rather than silently
 listing.
 
-For the `[ratatoskr]` config block (mock_server_binary, fixtures_dir, endpoint
-env-var spellings, sync_script_dir) see `docs/brokkr.toml.md`. For the harness
-model and sæhrimnir contract see `docs/projects/ratatoskr.md`.
+For the ratatoskr project config (`[ratatoskr]`, `[ratatoskr.harness]`, and
+`[ratatoskr.gate.*]`) see the
+[ratatoskr configuration guide](../projects/ratatoskr.md#configuration).
+For the harness model and sæhrimnir contract see the rest of that guide.
 
-Helpers live in `src/ratatoskr/sync.rs` (orchestration) and
-`src/ratatoskr/saehrimnir.rs` (spawn/sentinel/teardown).
+The command entry points are in `src/ratatoskr/sync.rs`; the run, bench,
+gate, and discovery implementations are in `src/ratatoskr/sync/`. Sæhrimnir
+spawn, sentinel parsing, and teardown live in `src/ratatoskr/saehrimnir.rs`.
 
 ## `mock-serve --fixture <NAME>`
 
@@ -86,7 +88,7 @@ script, never the binary - and each script then reports exactly one
 line:
 
 ```
-[ratatoskr] account-verify-imap-success: PASS in 0.4s (mock 0.1s, harness 0.4s, shutdown 0.0s)
+[ratatoskr] account-verify-imap-success: PASS in 400ms (mock 100ms, harness 400ms, shutdown 0ms)
 [ratatoskr] bifrost-consumer-lag-recovery: FAIL - config: sync: script ... has no `-- fixture: <NAME>` frontmatter line. ...
 ```
 
@@ -169,7 +171,7 @@ string-formatted, so a quote or backslash in a path cannot corrupt it, and
 its field names match `service`'s `run.toml`.
 
 The PASS/FAIL line carries a phase summary so a slow run is decomposable at
-a glance: `PASS in 3.7s (mock 0.4s, harness 3.2s, shutdown 0.1s)`. Phases
+a glance: `PASS in 3700ms (mock 400ms, harness 3200ms, shutdown 100ms)`. Phases
 that didn't run (e.g. a spawn-side failure before the harness started) are
 omitted, and the leading `in <total>` is dropped entirely if no phase
 recorded.
@@ -188,25 +190,24 @@ Best-of-N selection ranks every iteration on its `SYNC_START` -> `SYNC_END`
 span, kept in microseconds; an iteration missing either marker fails the
 measurement rather than being ranked on a whole-process wall. The best
 iteration's `summary.json` (if the script writes one into
-`BROKKR_HARNESS_ARTEFACT_DIR`) gets ingested as `meta.<key>` KvPair rows:
-numeric values become Int/Real, strings become Text, nested objects/bools/null
-are skipped. The run goes through the shared measurement loop and
-`BenchHarness::record` every other measured command uses - one sæhrimnir
-across iterations is the only sync-specific part - so `brokkr results
---compare` and the sidecar DB work the same as for pbfhogg/elivagar benches,
-and the row carries the same provenance: every iteration's ranking value in
-execution order, `cargo_profile` from the profile actually built (`dev` under
-`[ratatoskr.harness] debug = true` or `--debug`), the configured features, the
-`capture_env` snapshot, sidecar RunInfo naming the winning iteration's process,
-and a measurement-start stamp so `prev.gap_seconds` excludes the run's own
-duration. A failed, hung or interrupted run keeps its collected sidecar data
-under the `dirty` alias - including an iteration whose child succeeded but
-whose post-processing (the per-iteration log write, or reading
-`summary.json`) then failed - and the dirty record carries the child's real
-exit status. `--force` allows recording on a dirty git tree (rows land under
-the `dirty` alias). A gated run also records the harness build's features
-in `gate.db`, where the gate requires them to match the baseline's (see
-`docs/commands/ratatoskr-gate.md`).
+`BROKKR_HARNESS_ARTEFACT_DIR`) gets ingested as `meta.<key>` values. For
+`results.db`, top-level numbers become Int/Real and strings become Text;
+booleans, nulls, arrays, and nested objects are omitted. The gate row keeps
+booleans so gate selectors can treat them as `1`/`0`. The run uses the shared
+measurement loop, so a completed clean-tree measurement is
+recorded in `results.db` with the usual provenance: every iteration's ranking
+value in execution order, `cargo_profile` from the profile actually built
+(`dev` under `[ratatoskr.harness] debug = true` or `--debug`), configured
+features, the `capture_env` snapshot, sidecar RunInfo for the winning
+iteration's process, and a measurement-start stamp so `prev.gap_seconds`
+excludes the run's own duration. A failed, hung, or interrupted run has no
+`results.db` row; collected sidecar data can still be reached with
+`brokkr sidecar dirty`. `--force` permits measuring a dirty git tree, but
+does not insert that run into `results.db`; its sidecar data is available
+through the same alias. A completed gated bench separately writes a row
+to `gate.db` (including a `dirty` flag when applicable), even if a metric
+rule then fails. A harness failure before the gate hook writes no gate row;
+see `docs/commands/ratatoskr-gate.md`.
 
 Each iteration is bounded by the script's frontmatter `ceiling:` (or
 discover's default), the same watchdog the unmeasured run uses: an iteration

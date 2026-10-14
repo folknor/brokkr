@@ -1,8 +1,8 @@
 //! Sidecar profile database - separate from the results DB.
 //!
-//! Sidecar data (samples, markers, summaries) is stored in `.brokkr/sidecar.db`
-//! which is gitignored. The results DB (`.brokkr/results.db`) is tracked in git
-//! and stays small. The two are linked by result UUID.
+//! Sidecar data (samples, markers) is stored in `.brokkr/sidecar.db`; the
+//! results DB (`.brokkr/results.db`) is stored beside it. Both are gitignored
+//! and linked by result UUID.
 
 use std::path::Path;
 
@@ -29,10 +29,6 @@ CREATE TABLE IF NOT EXISTS sidecar_markers (
 CREATE TABLE IF NOT EXISTS sidecar_summary (
     result_uuid  TEXT NOT NULL,
     run_idx      INTEGER NOT NULL DEFAULT 0,
-    vm_hwm_kb    INTEGER,
-    sample_count INTEGER,
-    marker_count INTEGER,
-    wall_time_ms INTEGER,
     PRIMARY KEY (result_uuid, run_idx)
 );
 
@@ -89,7 +85,7 @@ fn sidecar_schema() -> String {
 // ---------------------------------------------------------------------------
 
 /// Current sidecar schema version.
-const SIDECAR_VERSION: i64 = 6;
+const SIDECAR_VERSION: i64 = 7;
 
 /// Apply migrations newer than `current`; version checks and stamping are
 /// centralized in `db::store`.
@@ -100,23 +96,22 @@ fn run_sidecar_migrations(conn: &rusqlite::Connection, current: i64) -> Result<(
     //           Existing UUIDs without meta rows get defaults on query (best_run_idx=0).
     // v3 -> v4: add run provenance columns to sidecar_meta.
     if current < 4 {
-        // ALTER TABLE is idempotent-safe: if the column already exists (e.g.
-        // fresh DB created with the v4 DDL), the error is harmless.
-        for col in &[
-            "run_start_epoch INTEGER",
-            "pid INTEGER",
-            "command TEXT",
-            "binary_path TEXT",
-            "binary_xxh128 TEXT",
-            "git_commit TEXT",
-            "mode TEXT",
-            "dataset TEXT",
-            "exit_code INTEGER",
+        for (name, declaration) in [
+            ("run_start_epoch", "run_start_epoch INTEGER"),
+            ("pid", "pid INTEGER"),
+            ("command", "command TEXT"),
+            ("binary_path", "binary_path TEXT"),
+            ("binary_xxh128", "binary_xxh128 TEXT"),
+            ("git_commit", "git_commit TEXT"),
+            ("mode", "mode TEXT"),
+            ("dataset", "dataset TEXT"),
+            ("exit_code", "exit_code INTEGER"),
         ] {
-            let sql = format!("ALTER TABLE sidecar_meta ADD COLUMN {col}");
-            // Ignore "duplicate column name" errors from fresh databases.
-            #[allow(clippy::let_underscore_must_use)]
-            let _ = conn.execute_batch(&sql);
+            if !super::store::column_exists(conn, "sidecar_meta", name)? {
+                conn.execute_batch(&format!(
+                    "ALTER TABLE sidecar_meta ADD COLUMN {declaration}"
+                ))?;
+            }
         }
     }
     // v4 -> v5: rename `variant` column to `mode` to match the results
@@ -124,18 +119,8 @@ fn run_sidecar_migrations(conn: &rusqlite::Connection, current: i64) -> Result<(
     //           still exists (fresh DBs created with the v5 DDL already
     //           have `mode`).
     if current < 5 {
-        let columns = conn
-            .prepare("PRAGMA table_info(sidecar_meta)")
-            .and_then(|mut stmt| {
-                let names: Vec<String> = stmt
-                    .query_map([], |row| row.get::<_, String>(1))?
-                    .filter_map(Result::ok)
-                    .collect();
-                Ok(names)
-            })
-            .unwrap_or_default();
-        let has_variant = columns.iter().any(|name| name == "variant");
-        let has_mode = columns.iter().any(|name| name == "mode");
+        let has_variant = super::store::column_exists(conn, "sidecar_meta", "variant")?;
+        let has_mode = super::store::column_exists(conn, "sidecar_meta", "mode")?;
         if has_variant && !has_mode {
             conn.execute_batch("ALTER TABLE sidecar_meta RENAME COLUMN variant TO mode")?;
         }
@@ -144,22 +129,25 @@ fn run_sidecar_migrations(conn: &rusqlite::Connection, current: i64) -> Result<(
     //           ended (`exit_code` alone could not say "deadline" or "stop
     //           marker", and folded a signal into 128+N). Rows written before
     //           it keep their `exit_code` and read back through it.
-    if current < 6 {
-        let columns = conn
-            .prepare("PRAGMA table_info(sidecar_meta)")
-            .and_then(|mut stmt| {
-                let names: Vec<String> = stmt
-                    .query_map([], |row| row.get::<_, String>(1))?
-                    .filter_map(Result::ok)
-                    .collect();
-                Ok(names)
-            })
-            .unwrap_or_default();
-        if !columns.is_empty() && !columns.iter().any(|name| name == "ending") {
-            conn.execute_batch("ALTER TABLE sidecar_meta ADD COLUMN ending TEXT")?;
-        }
+    if current < 6 && !super::store::column_exists(conn, "sidecar_meta", "ending")? {
+        conn.execute_batch("ALTER TABLE sidecar_meta ADD COLUMN ending TEXT")?;
+    }
+    // v6 -> v7: sidecar_summary is an identity index only. Its metric
+    // columns were written but never queried; samples and markers are the
+    // authoritative values.
+    if current < 7 {
+        drop_summary_payload(conn)?;
     }
 
+    Ok(())
+}
+
+fn drop_summary_payload(conn: &rusqlite::Connection) -> Result<(), DevError> {
+    for column in ["vm_hwm_kb", "sample_count", "marker_count", "wall_time_ms"] {
+        if super::store::column_exists(conn, "sidecar_summary", column)? {
+            conn.execute_batch(&format!("ALTER TABLE sidecar_summary DROP COLUMN {column}"))?;
+        }
+    }
     Ok(())
 }
 
@@ -256,8 +244,8 @@ impl SidecarDb {
     pub fn open(path: &Path) -> Result<Self, DevError> {
         let conn = super::store::open_read_write(path, "sidecar.db", SIDECAR_VERSION)?;
         super::store::migrate(&conn, "sidecar.db", SIDECAR_VERSION, |conn, version| {
-            run_sidecar_migrations(conn, version)?;
             conn.execute_batch(&sidecar_schema())?;
+            run_sidecar_migrations(conn, version)?;
             Ok(())
         })?;
         Ok(Self { conn })
@@ -347,17 +335,8 @@ impl SidecarDb {
         }
 
         tx.execute(
-            "INSERT INTO sidecar_summary (
-                result_uuid, run_idx, vm_hwm_kb, sample_count, marker_count, wall_time_ms
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            rusqlite::params![
-                result_uuid,
-                run_idx as i64,
-                data.summary.vm_hwm_kb,
-                data.summary.sample_count,
-                data.summary.marker_count,
-                data.summary.wall_time_ms,
-            ],
+            "INSERT INTO sidecar_summary (result_uuid, run_idx) VALUES (?1, ?2)",
+            rusqlite::params![result_uuid, run_idx as i64],
         )?;
 
         tx.commit()?;
@@ -476,14 +455,16 @@ impl SidecarDb {
     /// If `uuid_prefix` matches a key in `sidecar_latest`, returns the
     /// stored UUID. Otherwise returns the input as-is (for normal UUID
     /// prefix lookups).
-    pub(crate) fn resolve_latest(&self, uuid_prefix: &str) -> String {
-        self.conn
+    pub(crate) fn resolve_latest(&self, uuid_prefix: &str) -> Result<String, DevError> {
+        let latest = self
+            .conn
             .query_row(
                 "SELECT uuid FROM sidecar_latest WHERE key = ?1",
                 rusqlite::params![uuid_prefix],
                 |row| row.get::<_, String>(0),
             )
-            .unwrap_or_else(|_| uuid_prefix.to_owned())
+            .optional()?;
+        Ok(latest.unwrap_or_else(|| uuid_prefix.to_owned()))
     }
 
     // -------------------------------------------------------------------
@@ -774,8 +755,7 @@ mod tests {
     fn insert_session(db: &SidecarDb, uuid: &str, marker: &str) {
         db.conn
             .execute(
-                "INSERT INTO sidecar_summary (result_uuid, run_idx, vm_hwm_kb, sample_count, \
-                 marker_count, wall_time_ms) VALUES (?1, 0, 0, 0, 1, 0)",
+                "INSERT INTO sidecar_summary (result_uuid, run_idx) VALUES (?1, 0)",
                 rusqlite::params![uuid],
             )
             .unwrap();
@@ -797,9 +777,15 @@ mod tests {
         insert_session(&db, "old111", "M");
         drop(db);
         let raw = rusqlite::Connection::open(&path).unwrap();
-        raw.execute_batch("ALTER TABLE sidecar_meta DROP COLUMN ending")
-            .unwrap();
-        raw.pragma_update(None, "user_version", SIDECAR_VERSION - 1)
+        raw.execute_batch(
+            "ALTER TABLE sidecar_meta DROP COLUMN ending;
+             ALTER TABLE sidecar_summary ADD COLUMN vm_hwm_kb INTEGER;
+             ALTER TABLE sidecar_summary ADD COLUMN sample_count INTEGER;
+             ALTER TABLE sidecar_summary ADD COLUMN marker_count INTEGER;
+             ALTER TABLE sidecar_summary ADD COLUMN wall_time_ms INTEGER;",
+        )
+        .unwrap();
+        raw.pragma_update(None, "user_version", SIDECAR_VERSION - 2)
             .unwrap();
         drop(raw);
 
@@ -811,6 +797,12 @@ mod tests {
         assert_eq!(version, SIDECAR_VERSION);
         let has_ending = ro.conn().prepare("SELECT ending FROM sidecar_meta").is_ok();
         assert!(has_ending, "the migrated schema has the current column");
+        for column in ["vm_hwm_kb", "sample_count", "marker_count", "wall_time_ms"] {
+            assert!(
+                !super::super::store::column_exists(ro.conn(), "sidecar_summary", column).unwrap(),
+                "legacy summary column {column} is removed"
+            );
+        }
         let markers: i64 = ro
             .conn()
             .query_row("SELECT COUNT(*) FROM sidecar_markers", [], |row| row.get(0))

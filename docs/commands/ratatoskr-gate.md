@@ -6,14 +6,17 @@ against a per-hostname pinned baseline. The gate compares scalar metrics
 from the current run to a baseline row recorded in
 `.brokkr/ratatoskr/gate.db` and exits non-zero on any threshold breach.
 
-For the `[ratatoskr]` config block see `docs/brokkr.toml.md`. For the
-underlying bench mechanics (sæhrimnir spawn, FIFO markers, best-of-N
+For `[ratatoskr.gate.*]` configuration see the
+[ratatoskr configuration guide](../projects/ratatoskr.md#configuration).
+For the underlying bench mechanics (sæhrimnir spawn, FIFO markers, best-of-N
 selection, summary.json ingestion) see `docs/commands/sync.md`.
 
 ## Storage: `.brokkr/ratatoskr/gate.db`
 
-Committed SQLite DB (same convention as `.brokkr/results.db`). One row per
-gated `sync --bench` run. Schema:
+Local SQLite DB (same convention as `.brokkr/results.db`). The gate hook
+inserts a row before baseline lookup and rule evaluation, so a successful
+insert remains available when comparison fails. Harness failures and other
+errors before insertion produce no row. Schema:
 
 ```
 CREATE TABLE gate_runs (
@@ -56,11 +59,12 @@ Normalized metric tables can wait until there is a real query need.
 
 ## Write policy
 
-A gated run that completes all harness iterations writes a row, regardless
-of whether `--as-baseline` was passed. A harness failure returns before the
-gate hook, so it writes no gate row. Baselines are pure pointers in TOML;
-they don't change the successful-run write path. This gives local history
-for free and makes baseline promotion cheap (just paste a UUID).
+After all harness iterations succeed, the gate hook validates the run and
+inserts its row before looking up a baseline or evaluating rules. A metric
+breach or missing baseline therefore leaves the inserted row available for
+inspection. A harness failure or an earlier hook error writes no row.
+`--as-baseline` uses the same insert path and skips only evaluation.
+Baselines are pure pointers in TOML; they don't change the write path.
 
 If gate.db growth ever matters, prune by age or count - not in v1.
 
@@ -182,17 +186,19 @@ actually describes the code that produced the numbers. It does not count
 Nor does it count `*.md` or `brokkr.toml` - the latter mattering here
 because pinning a baseline means editing `brokkr.toml`. Without those
 exclusions `--as-baseline` was self-blocking, since each gated run
-can write a `gate.db` row and gate.db is tracked: the first recording
-worked and every later one refused until you committed. That is the
+can write a `gate.db` row, which dirties the tree wherever a project
+tracks that file: the first recording worked and every later one refused
+until you committed. That is the
 same trap `brokkr approve` hit with `approved.png`.
 
-A gated run under `--force` is recorded in `gate.db` with `dirty = 1`,
-and the run prints a warning saying so. This does not contradict the
-harness's earlier `dirty tree - results will NOT be stored in database`
-warning, which governs `results.db` only: a successful gated run still
-writes its gate row, so an evaluated gate failure stays inspectable.
-Harness failures before the gate hook produce no row. Pinning a dirty row as a baseline
-is allowed, and every later comparison against it re-warns.
+A dirty-tree run under `--force` can still reach the gate hook. If the hook
+inserts its row, that row carries `dirty = 1` and the run prints a warning.
+The harness's earlier `dirty tree - results will NOT be stored in database`
+warning concerns `results.db`: dirty runs do not get a results row, while a
+successful gate-hook insert is stored independently. A metric-rule failure
+therefore remains inspectable. Harness failures and other errors before
+insertion produce no gate row. Pinning a dirty row as a baseline is allowed,
+and every later comparison against it re-warns.
 
 ## Rule kinds
 
@@ -228,15 +234,17 @@ Three namespaces:
   schema migration. Since the gate hook runs only after successful
   iterations, `exit_code` is always `0` and `success` is always `1` for
   rows it evaluates; predicates on them cannot detect benchmark failures.
-- `sidecar.<key>` - flat lookup into the sidecar JSON blob. Numeric
-  scalars only.
+- `sidecar.<key>` - flat lookup into the sidecar JSON blob.
 - `meta.<key>` - flat lookup into the `summary.json` ingestion blob.
-  Numeric scalars only; string equality via `equal = "..."` is allowed.
+  Numeric and boolean scalars work with numeric predicates (booleans become
+  `1`/`0`); string scalars work with `equal = "..."`.
 
 Quoted dotted keys in TOML (`"sidecar.rss_peak_kb"`) keep the namespace
-prefix readable. Selector syntax is checked before build; missing keys or
-non-scalar run data are hard errors at gate time - never silently treated
-as zero.
+prefix readable. Selector syntax is checked before build; missing keys and
+null, array, or object values are errors at gate time. The sidecar projection
+does emit zero for `num_threads_max`, `read_bytes`, `write_bytes`, `vol_cs`,
+`nonvol_cs`, `minflt`, and `majflt` when the sidecar has no samples; other
+missing selectors are not filled with a default.
 
 ## CLI
 
@@ -245,8 +253,8 @@ as zero.
 `--gate` requires `--bench` - every rule compares measured numbers, so
 there is nothing to evaluate on an unmeasured run.
 
-Runs the bench as documented in `docs/commands/sync.md`; after a successful
-harness run, it writes a row to gate.db and evaluates every rule under
+Runs the bench as documented in `docs/commands/sync.md`; after a completed
+successful bench, it writes a row to gate.db and evaluates every rule under
 `[ratatoskr.gate.<name>.metrics.*]`. Reports each rule with `OK` /
 `FAIL` and a numeric line; exits non-zero if any rule fails.
 
@@ -257,12 +265,12 @@ every configured gate in name order, each supplying its own script from
 config - so the sweep takes no SCRIPT argument, and passing one is an
 error rather than a silently ignored contradiction.
 
-Every gate's script is resolved and existence-checked **before anything
-is built**, so a typo in the last gate surfaces immediately rather than
-twenty minutes into the sweep.
+Shared mock and harness config, every gate script, its frontmatter and
+fixture, and each rule set are validated **before anything is built**, so
+a typo in a later gate surfaces immediately rather than after earlier
+benches have run.
 
-Every gate's rule set is validated up front too (non-empty, every rule
-carrying a predicate).
+Each rule set must be non-empty and every rule must carry a predicate.
 
 A breach does not stop the sweep. After a refactor the useful answer is
 the whole blast radius, not the first provider that tripped, so every
@@ -293,19 +301,18 @@ sharing a script is legible rather than surprising.
 
 ### `--as-baseline` is refused with `--gate all`
 
-Hard error during command validation, before a worktree or build starts:
+Hard error during command validation, before a worktree or build starts
+(this is not a clap parse-time refusal):
 
 > `--as-baseline` cannot be combined with `--gate all`.
 
 Repinning is a per-gate decision by design. A cohort rebase re-anchors
 every baseline-relative rule at once onto whatever the tree measures at
 that moment, with no per-gate pause to notice a regression being
-blessed. The checked-out Ratatoskr config has 17 gates; 15 use
-`max_delta` and/or `equal_to_baseline`, while `contacts_cadence` and
-`bifrost-consumer-hot-path` use literal equality rules. All 17 also pin
-`success = 1` and `exit_code = 0`. Those constants confirm the stored row's
-expected successful-run shape; they cannot detect failed harness runs,
-because the gate hook runs only after a successful bench.
+blessed. Bare `success` and `exit_code` selectors are constants for rows
+that reach the hook (`success = 1`, `exit_code = 0`), so they confirm the
+recorded successful-run shape but cannot detect a harness failure. The hook
+does not run after a failed bench.
 
 Record baselines one at a time, from a tree independently confirmed
 good. The single-gate `--as-baseline` path warns when it is repinning
@@ -332,16 +339,11 @@ new baseline after a deliberate change is the command's purpose, and the
 paste-line still has to be moved into `brokkr.toml` by hand, so the
 warning arrives before anything is actually rebased.
 
-`--force` lets a dirty git tree record (rows land with the real
-`git_commit` SHA plus `dirty = 1`, so the SHA stays useful for
-forensics). Dirty rows are valid baselines but flagged in the gate
-report.
-
-The harness's `dirty tree - results will NOT be stored in results.db`
-warning governs `results.db` only. A successful gated run still writes to
-`gate.db` - that is the write policy above, not a contradiction - and the
-`recorded run <id> in gate.db` line names its database for exactly that
-reason. A dirty row additionally prints a `tagged dirty` warning.
+`--force` permits a gate bench on a dirty git tree. A completed gated run
+lands in `gate.db` with the real `git_commit` SHA and `dirty = 1`, so the SHA
+stays useful for forensics. It does not create a `results.db` row; sidecar
+data remains reachable with `brokkr sidecar dirty`. Dirty gate rows are
+valid baselines but flagged in the gate report.
 
 ## Out of scope for v1
 

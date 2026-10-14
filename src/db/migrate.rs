@@ -1,14 +1,16 @@
+use super::KvClass;
 use super::schema::HOTPATH_TYPED_DDL;
+use super::store::{column_exists, table_exists};
 use crate::error::DevError;
 
 /// Current schema version. Increment when adding new migrations.
-pub(super) const SCHEMA_VERSION: i64 = 23;
+pub(super) const SCHEMA_VERSION: i64 = 24;
 
 /// Apply all migrations newer than `current`. Version checks and stamping are
 /// centralized in `db::store`.
 pub(super) fn run_migrations(conn: &rusqlite::Connection, current: i64) -> Result<(), DevError> {
     // Fresh database - no tables yet, nothing to migrate.
-    if !has_table(conn, "runs") {
+    if !table_exists(conn, "runs")? {
         return Ok(());
     }
 
@@ -18,7 +20,7 @@ pub(super) fn run_migrations(conn: &rusqlite::Connection, current: i64) -> Resul
     // still carry that stamp on a pre-uuid `runs` table. Skipping the step
     // would make `SCHEMA`'s `idx_runs_uuid` fail on the missing column.
     // `migrate_uuid` is idempotent, so running it on a genuine v1 file is safe.
-    if current < 1 || !has_column(conn, "runs", "uuid") {
+    if current < 1 || !column_exists(conn, "runs", "uuid")? {
         migrate_uuid(conn)?;
     }
     if current < 2 {
@@ -38,9 +40,6 @@ pub(super) fn run_migrations(conn: &rusqlite::Connection, current: i64) -> Resul
     }
     if current < 7 {
         migrate_v6_to_v7(conn)?;
-    }
-    if current < 8 {
-        migrate_v7_to_v8(conn)?;
     }
     if current < 9 {
         migrate_v8_to_v9(conn)?;
@@ -88,6 +87,9 @@ pub(super) fn run_migrations(conn: &rusqlite::Connection, current: i64) -> Resul
     if current < 23 {
         migrate_v22_to_v23(conn)?;
     }
+    if current < 24 {
+        migrate_v23_to_v24(conn)?;
+    }
 
     Ok(())
 }
@@ -96,8 +98,19 @@ pub(super) fn run_migrations(conn: &rusqlite::Connection, current: i64) -> Resul
 /// remain untouched because argv boundaries lost by the old format cannot be
 /// reconstructed reliably.
 fn migrate_v22_to_v23(conn: &rusqlite::Connection) -> Result<(), DevError> {
-    if !has_column(conn, "runs", "arm_key") {
+    if !column_exists(conn, "runs", "arm_key")? {
         conn.execute_batch("ALTER TABLE runs ADD COLUMN arm_key TEXT")?;
+    }
+    Ok(())
+}
+
+/// Remove legacy JSON columns after v2→v3 migrated their contents into the
+/// normalized child tables. Current writers and readers use those tables.
+fn migrate_v23_to_v24(conn: &rusqlite::Connection) -> Result<(), DevError> {
+    for column in ["extra", "metadata"] {
+        if column_exists(conn, "runs", column)? {
+            conn.execute_batch(&format!("ALTER TABLE runs DROP COLUMN {column}"))?;
+        }
     }
     Ok(())
 }
@@ -109,33 +122,9 @@ fn migrate_v21_to_v22(conn: &rusqlite::Connection) -> Result<(), DevError> {
     Ok(())
 }
 
-/// Check whether a table exists in the database.
-fn has_table(conn: &rusqlite::Connection, table: &str) -> bool {
-    conn.query_row(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
-        [table],
-        |row| row.get::<_, i64>(0),
-    )
-    .map(|count| count > 0)
-    .unwrap_or(false)
-}
-
-/// Check whether a column exists on a table.
-fn has_column(conn: &rusqlite::Connection, table: &str, column: &str) -> bool {
-    conn.prepare(&format!("PRAGMA table_info({table})"))
-        .and_then(|mut stmt| {
-            let names: Vec<String> = stmt
-                .query_map([], |row| row.get::<_, String>(1))?
-                .filter_map(Result::ok)
-                .collect();
-            Ok(names.contains(&column.to_owned()))
-        })
-        .unwrap_or(false)
-}
-
 /// Migration v0 -> v1: add uuid column and backfill.
 fn migrate_uuid(conn: &rusqlite::Connection) -> Result<(), DevError> {
-    if !has_column(conn, "runs", "uuid") {
+    if !column_exists(conn, "runs", "uuid")? {
         conn.execute_batch("ALTER TABLE runs ADD COLUMN uuid TEXT")?;
     }
 
@@ -158,10 +147,10 @@ fn migrate_uuid(conn: &rusqlite::Connection) -> Result<(), DevError> {
 
 /// Migration v1 -> v2: add cli_args and metadata columns.
 fn migrate_cli_args_metadata(conn: &rusqlite::Connection) -> Result<(), DevError> {
-    if !has_column(conn, "runs", "cli_args") {
+    if !column_exists(conn, "runs", "cli_args")? {
         conn.execute_batch("ALTER TABLE runs ADD COLUMN cli_args TEXT")?;
     }
-    if !has_column(conn, "runs", "metadata") {
+    if !column_exists(conn, "runs", "metadata")? {
         conn.execute_batch("ALTER TABLE runs ADD COLUMN metadata TEXT")?;
     }
     Ok(())
@@ -171,10 +160,10 @@ fn migrate_cli_args_metadata(conn: &rusqlite::Connection) -> Result<(), DevError
 /// migrate extra/metadata JSON into child tables.
 fn migrate_v2_to_v3(conn: &rusqlite::Connection) -> Result<(), DevError> {
     // Phase 1: DDL additions.
-    if !has_column(conn, "runs", "peak_rss_mb") {
+    if !column_exists(conn, "runs", "peak_rss_mb")? {
         conn.execute_batch("ALTER TABLE runs ADD COLUMN peak_rss_mb REAL")?;
     }
-    if !has_column(conn, "runs", "project") {
+    if !column_exists(conn, "runs", "project")? {
         // Existing rows in the original results database belong to pbfhogg.
         conn.execute_batch("ALTER TABLE runs ADD COLUMN project TEXT NOT NULL DEFAULT 'pbfhogg'")?;
     }
@@ -258,7 +247,7 @@ fn migrate_v3_to_v4(conn: &rusqlite::Connection) -> Result<(), DevError> {
 /// Migration v4 -> v5: rename `meta.locations_on_ways` to `meta.locations_on_ways_cli`
 /// in run_kv. Existing rows recorded only CLI intent, not runtime detection.
 fn migrate_v4_to_v5(conn: &rusqlite::Connection) -> Result<(), DevError> {
-    if has_table(conn, "run_kv") {
+    if table_exists(conn, "run_kv")? {
         conn.execute(
             "UPDATE run_kv SET key = 'meta.locations_on_ways_cli' WHERE key = 'meta.locations_on_ways'",
             [],
@@ -270,7 +259,7 @@ fn migrate_v4_to_v5(conn: &rusqlite::Connection) -> Result<(), DevError> {
 /// Migration v5 -> v6: rename `meta.tiles_sha256` to `meta.tiles_hash`
 /// in run_kv after switching from SHA256 to XXH128.
 fn migrate_v5_to_v6(conn: &rusqlite::Connection) -> Result<(), DevError> {
-    if has_table(conn, "run_kv") {
+    if table_exists(conn, "run_kv")? {
         conn.execute(
             "UPDATE run_kv SET key = 'meta.tiles_hash' WHERE key = 'meta.tiles_sha256'",
             [],
@@ -282,7 +271,7 @@ fn migrate_v5_to_v6(conn: &rusqlite::Connection) -> Result<(), DevError> {
 /// Migration v6 -> v7: replace `cpu_user`, `cpu_sys`, `cpu_total` columns in
 /// `hotpath_threads` with `cpu_percent_avg` (hotpath 0.14 schema change).
 fn migrate_v6_to_v7(conn: &rusqlite::Connection) -> Result<(), DevError> {
-    if !has_table(conn, "hotpath_threads") {
+    if !table_exists(conn, "hotpath_threads")? {
         return Ok(());
     }
     // SQLite doesn't support DROP COLUMN before 3.35.0, and even then it's
@@ -312,69 +301,12 @@ fn migrate_v6_to_v7(conn: &rusqlite::Connection) -> Result<(), DevError> {
     Ok(())
 }
 
-/// Migration v7 -> v8: add sidecar profiler tables.
-///
-/// Fresh databases already have these tables from the SCHEMA DDL, so this
-/// migration only runs on databases created before the sidecar feature.
-fn migrate_v7_to_v8(conn: &rusqlite::Connection) -> Result<(), DevError> {
-    if !has_table(conn, "sidecar_samples") {
-        conn.execute_batch(
-            "CREATE TABLE sidecar_samples (
-                result_uuid TEXT NOT NULL,
-                run_idx     INTEGER NOT NULL DEFAULT 0,
-                sample_idx  INTEGER NOT NULL,
-                timestamp_us INTEGER NOT NULL,
-                rss_kb      INTEGER,
-                anon_kb     INTEGER,
-                file_kb     INTEGER,
-                shmem_kb    INTEGER,
-                swap_kb     INTEGER,
-                vsize_kb    INTEGER,
-                vm_hwm_kb   INTEGER,
-                utime       INTEGER,
-                stime       INTEGER,
-                num_threads INTEGER,
-                minflt      INTEGER,
-                majflt      INTEGER,
-                rchar       INTEGER,
-                wchar       INTEGER,
-                read_bytes  INTEGER,
-                write_bytes INTEGER,
-                cancelled_write_bytes INTEGER,
-                syscr       INTEGER,
-                syscw       INTEGER,
-                vol_cs      INTEGER,
-                nonvol_cs   INTEGER,
-                PRIMARY KEY (result_uuid, run_idx, sample_idx)
-            );
-            CREATE TABLE sidecar_markers (
-                result_uuid  TEXT NOT NULL,
-                run_idx      INTEGER NOT NULL DEFAULT 0,
-                marker_idx   INTEGER NOT NULL,
-                timestamp_us INTEGER NOT NULL,
-                name         TEXT NOT NULL,
-                PRIMARY KEY (result_uuid, run_idx, marker_idx)
-            );
-            CREATE TABLE sidecar_summary (
-                result_uuid  TEXT NOT NULL,
-                run_idx      INTEGER NOT NULL DEFAULT 0,
-                vm_hwm_kb    INTEGER,
-                sample_count INTEGER,
-                marker_count INTEGER,
-                wall_time_ms INTEGER,
-                PRIMARY KEY (result_uuid, run_idx)
-            );",
-        )?;
-    }
-    Ok(())
-}
-
 /// Migration v8 -> v9: drop sidecar tables from results.db.
 ///
-/// Sidecar data now lives in a separate `.brokkr/sidecar.db` (gitignored)
-/// to keep the tracked results.db small.
+/// Sidecar data now lives in a separate `.brokkr/sidecar.db` to keep the
+/// results.db small.
 fn migrate_v8_to_v9(conn: &rusqlite::Connection) -> Result<(), DevError> {
-    if has_table(conn, "sidecar_samples") {
+    if table_exists(conn, "sidecar_samples")? {
         conn.execute_batch(
             "DROP TABLE IF EXISTS sidecar_samples;
              DROP TABLE IF EXISTS sidecar_markers;
@@ -386,7 +318,7 @@ fn migrate_v8_to_v9(conn: &rusqlite::Connection) -> Result<(), DevError> {
 
 /// v9 → v10: add stop_marker column.
 fn migrate_v9_to_v10(conn: &rusqlite::Connection) -> Result<(), DevError> {
-    if !has_column(conn, "runs", "stop_marker") {
+    if !column_exists(conn, "runs", "stop_marker")? {
         conn.execute_batch("ALTER TABLE runs ADD COLUMN stop_marker TEXT")?;
     }
     Ok(())
@@ -429,7 +361,7 @@ fn migrate_v11_to_v12(conn: &rusqlite::Connection) -> Result<(), DevError> {
     // superset of these steps and didn't bump `user_version` past 11
     // (observed on databases copied between projects). Treat it as
     // already-applied rather than erroring.
-    if !has_column(conn, "runs", "variant") {
+    if !column_exists(conn, "runs", "variant")? {
         return Ok(());
     }
 
@@ -543,14 +475,14 @@ fn migrate_v11_to_v12(conn: &rusqlite::Connection) -> Result<(), DevError> {
 fn migrate_v12_to_v13(conn: &rusqlite::Connection) -> Result<(), DevError> {
     // 1. Add brokkr_args column (if not already present - guards against a
     //    fresh SCHEMA that already has it).
-    if !has_column(conn, "runs", "brokkr_args") {
+    if !column_exists(conn, "runs", "brokkr_args")? {
         conn.execute_batch("ALTER TABLE runs ADD COLUMN brokkr_args TEXT")?;
     }
 
     // Idempotency guard for the rest: every subsequent step reads/writes
     // `variant`. If it's already been renamed to `mode` (post-v14) by a
     // different brokkr branch that didn't bump user_version, skip.
-    if !has_column(conn, "runs", "variant") {
+    if !column_exists(conn, "runs", "variant")? {
         return Ok(());
     }
 
@@ -635,7 +567,7 @@ fn migrate_v12_to_v13(conn: &rusqlite::Connection) -> Result<(), DevError> {
     //    v0→v3) start from a schema that only contains the `runs` table
     //    and rely on `ResultsDb::open` to call `SCHEMA` *after* this
     //    migration to create the missing child tables.
-    if has_table(conn, "run_kv") {
+    if table_exists(conn, "run_kv")? {
         conn.execute(
             "DELETE FROM run_kv WHERE key IN ( \
                 'meta.compression', 'meta.writer_mode', 'meta.io_mode', 'meta.mode', \
@@ -671,7 +603,7 @@ fn migrate_v13_to_v14(conn: &rusqlite::Connection) -> Result<(), DevError> {
     // Guard: only rename if the old column still exists. On fresh
     // databases `SCHEMA` already created the table with `mode`, so the
     // rename would fail.
-    if has_column(conn, "runs", "variant") && !has_column(conn, "runs", "mode") {
+    if column_exists(conn, "runs", "variant")? && !column_exists(conn, "runs", "mode")? {
         conn.execute_batch("ALTER TABLE runs RENAME COLUMN variant TO mode")?;
     }
     Ok(())
@@ -742,7 +674,7 @@ fn migrate_v15_to_v16(conn: &rusqlite::Connection) -> Result<(), DevError> {
 /// and cannot be reconstructed, so backfilling `elapsed_ms * 1000` would
 /// manufacture a precision the row never had.
 fn migrate_v16_to_v17(conn: &rusqlite::Connection) -> Result<(), DevError> {
-    if !has_column(conn, "runs", "elapsed_us") {
+    if !column_exists(conn, "runs", "elapsed_us")? {
         conn.execute_batch("ALTER TABLE runs ADD COLUMN elapsed_us INTEGER")?;
     }
     Ok(())
@@ -801,16 +733,18 @@ fn migrate_v17_to_v18(conn: &rusqlite::Connection) -> Result<(), DevError> {
 /// with only `runs`, and `ResultsDb::open` creates the child tables
 /// afterwards from the current DDL, which already has the columns.
 fn migrate_v18_to_v19(conn: &rusqlite::Connection) -> Result<(), DevError> {
-    if has_table(conn, "run_distribution") {
+    if table_exists(conn, "run_distribution")? {
         for column in ["min_us", "p50_us", "p95_us", "max_us"] {
-            if !has_column(conn, "run_distribution", column) {
+            if !column_exists(conn, "run_distribution", column)? {
                 conn.execute_batch(&format!(
                     "ALTER TABLE run_distribution ADD COLUMN {column} INTEGER"
                 ))?;
             }
         }
     }
-    if has_table(conn, "run_iterations") && !has_column(conn, "run_iterations", "elapsed_us") {
+    if table_exists(conn, "run_iterations")?
+        && !column_exists(conn, "run_iterations", "elapsed_us")?
+    {
         conn.execute_batch("ALTER TABLE run_iterations ADD COLUMN elapsed_us INTEGER")?;
     }
     Ok(())
@@ -825,7 +759,7 @@ fn migrate_v18_to_v19(conn: &rusqlite::Connection) -> Result<(), DevError> {
 fn migrate_v19_to_v20(conn: &rusqlite::Connection) -> Result<(), DevError> {
     // A database that skipped the v9 -> v10 step has no event column to split.
     migrate_v9_to_v10(conn)?;
-    if !has_column(conn, "runs", "stop_marker_requested") {
+    if !column_exists(conn, "runs", "stop_marker_requested")? {
         conn.execute_batch("ALTER TABLE runs ADD COLUMN stop_marker_requested TEXT")?;
     }
     conn.execute_batch(
@@ -875,7 +809,7 @@ fn migrate_json_to_children(conn: &rusqlite::Connection) -> Result<(), DevError>
             && let Some(obj) = val.as_object()
         {
             for (key, value) in obj {
-                let prefixed = format!("meta.{key}");
+                let prefixed = KvClass::Metadata.qualify(key);
                 insert_kv_from_json(conn, *run_id, &prefixed, value)?;
             }
         }
@@ -1192,10 +1126,11 @@ mod tests {
             .unwrap();
 
         // New columns exist.
-        assert!(has_column(&db.conn, "runs", "peak_rss_mb"));
-        assert!(has_column(&db.conn, "runs", "project"));
-        assert!(has_column(&db.conn, "runs", "cli_args"));
-        assert!(has_column(&db.conn, "runs", "metadata"));
+        assert!(column_exists(&db.conn, "runs", "peak_rss_mb").unwrap());
+        assert!(column_exists(&db.conn, "runs", "project").unwrap());
+        assert!(column_exists(&db.conn, "runs", "cli_args").unwrap());
+        assert!(!column_exists(&db.conn, "runs", "extra").unwrap());
+        assert!(!column_exists(&db.conn, "runs", "metadata").unwrap());
 
         drop(db);
         cleanup(&dir, &db_path);
@@ -1218,7 +1153,7 @@ mod tests {
         }
 
         let db = ResultsDb::open(&db_path).expect("open should repair the stamped file");
-        assert!(has_column(&db.conn, "runs", "uuid"));
+        assert!(column_exists(&db.conn, "runs", "uuid").unwrap());
         let nulls: i64 = db
             .conn
             .query_row("SELECT COUNT(*) FROM runs WHERE uuid IS NULL", [], |r| {
@@ -1293,7 +1228,7 @@ mod tests {
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
         assert_eq!(version, SCHEMA_VERSION);
-        assert!(has_column(&db.conn, "runs", "arm_key"));
+        assert!(column_exists(&db.conn, "runs", "arm_key").unwrap());
 
         drop(db);
         cleanup(&dir, &db_path);
@@ -1825,7 +1760,7 @@ mod tests {
         assert_eq!(version, SCHEMA_VERSION);
 
         // brokkr_args column now exists (NULL for historical rows).
-        assert!(has_column(&db.conn, "runs", "brokkr_args"));
+        assert!(column_exists(&db.conn, "runs", "brokkr_args").unwrap());
 
         let row_of = |id: i64| -> (String, Option<String>) {
             db.conn
@@ -1918,8 +1853,8 @@ mod tests {
         assert_eq!(version, SCHEMA_VERSION);
 
         // `variant` gone, `mode` present and carrying the same values.
-        assert!(!has_column(&db.conn, "runs", "variant"));
-        assert!(has_column(&db.conn, "runs", "mode"));
+        assert!(!column_exists(&db.conn, "runs", "variant").unwrap());
+        assert!(column_exists(&db.conn, "runs", "mode").unwrap());
 
         let mode_of = |id: i64| -> Option<String> {
             db.conn
@@ -2200,9 +2135,12 @@ mod tests {
             .unwrap();
         assert_eq!(version, SCHEMA_VERSION);
         for column in ["min_us", "p50_us", "p95_us", "max_us"] {
-            assert!(has_column(&db.conn, "run_distribution", column), "{column}");
+            assert!(
+                column_exists(&db.conn, "run_distribution", column).unwrap(),
+                "{column}"
+            );
         }
-        assert!(has_column(&db.conn, "run_iterations", "elapsed_us"));
+        assert!(column_exists(&db.conn, "run_iterations", "elapsed_us").unwrap());
 
         let (rows, _) = db
             .query_by_run_ids(
@@ -2273,7 +2211,7 @@ mod tests {
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
         assert_eq!(version, SCHEMA_VERSION);
-        assert!(has_column(&db.conn, "runs", "stop_marker_requested"));
+        assert!(column_exists(&db.conn, "runs", "stop_marker_requested").unwrap());
         let mut stmt = db
             .conn
             .prepare("SELECT uuid, stop_marker, stop_marker_requested FROM runs ORDER BY uuid")
@@ -2307,7 +2245,7 @@ mod tests {
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
         assert_eq!(version, SCHEMA_VERSION);
-        assert!(has_column(&db.conn, "runs", "arm_key"));
+        assert!(column_exists(&db.conn, "runs", "arm_key").unwrap());
 
         drop(db);
         cleanup(&dir, &db_path);

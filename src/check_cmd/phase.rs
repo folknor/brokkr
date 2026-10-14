@@ -68,7 +68,7 @@ pub(crate) fn cmd_check(
     extra_args: &[String],
 ) -> Result<(), DevError> {
     let started = std::time::Instant::now();
-    let _scope = RunScope::begin();
+    let _scope = RunScope::begin()?;
     // A graceful `brokkr kill` / Ctrl-C ends the run as `Interrupted` (exit 130,
     // main's scratch cleanup) rather than killing brokkr on the default action
     // mid-phase. Every runner the phases use either polls the flag or is
@@ -93,7 +93,7 @@ pub(crate) fn cmd_check(
     reject_extra_args_complete(claim, extra_args)?;
 
     announce_profile_header(&active_sweeps, &profile_label);
-    announce_invocation_shaping(packages, extra_args);
+    announce_invocation_shaping(project_root, packages, extra_args);
     announce_adhoc_shaping(
         features,
         no_default_features,
@@ -166,7 +166,7 @@ pub(crate) fn cmd_check(
     // per-phase datum the `--json` summary carries.
     let mut failing_phase: Option<Phase> = None;
     let background = BackgroundScripts::start(project_root, script_checks, skip(Phase::ScriptCheck));
-    let mut run_phases = || -> Result<(), DevError> {
+    let mut run_phases = || -> Result<(), PhaseFailure> {
         run_convention_phases(
             &ConventionPhaseArgs {
                 project_root,
@@ -181,7 +181,10 @@ pub(crate) fn cmd_check(
             },
             &skip,
             &mut failing_phase,
-        )?;
+        )
+        .map_err(|error| {
+            PhaseFailure::for_phase(failing_phase.unwrap_or(Phase::Gremlins), error)
+        })?;
 
         run_build_phases(
             &BuildPhaseArgs {
@@ -221,14 +224,17 @@ pub(crate) fn cmd_check(
     // happened in. It was printed when it happened.
     if let Some((_, phase)) = crate::cargo_env::failure() {
         if outcome.is_ok() {
-            outcome = Err(DevError::Reported("cargo_env failed".into()));
+            outcome = Err(phase.map_or_else(
+                || PhaseFailure::Printed(DevError::Reported("cargo_env failed".into())),
+                PhaseFailure::Findings,
+            ));
         }
         if !background.failed() {
             failing_phase = phase.or(failing_phase);
         }
     }
     match joined {
-        Err(e) if outcome.is_ok() => outcome = Err(e),
+        Err(e) if outcome.is_ok() => outcome = Err(e.into()),
         // The run's own error is the one the summary prints; this one would
         // otherwise go unsaid.
         Err(e) if e.rendering_policy() != crate::error::RenderingPolicy::AlreadyPrinted && !matches!(e, DevError::Interrupted) => output::error(&e.to_string()),
@@ -238,6 +244,8 @@ pub(crate) fn cmd_check(
     if timings {
         emit_timings(&collected_timings, active_sweeps.len() > 1);
     }
+
+    let outcome = outcome.map_err(PhaseFailure::into_dev_error);
 
     let ran_labels = ledger.reached_labels(&active_sweeps);
 
@@ -286,7 +294,7 @@ pub(crate) fn cmd_check_selected(
     let _interrupts = crate::shutdown::SigtermGuard::install();
 
     let started = std::time::Instant::now();
-    let textlint = run_textlint(project_root, &rules);
+    let textlint = run_textlint(&LazyTree::new(project_root), &rules);
     // Every stage in one pass: the selection names entries, and an entry's stage
     // only orders it around phases this run does not execute.
     let scripts = if checks.is_empty() {
@@ -370,28 +378,42 @@ fn announce_profile_header(active_sweeps: &[PlannedSweep], profile_label: &Optio
 ///
 /// Ad-hoc `--features`, profile `skip_phases` and the markdown-only shortcut
 /// announce themselves on their own lines.
-fn announce_invocation_shaping(packages: &[String], extra_args: &[String]) {
+fn announce_invocation_shaping(
+    project_root: &Path,
+    packages: &[String],
+    extra_args: &[String],
+) {
     let mut parts: Vec<String> = Vec::new();
     if !packages.is_empty() {
         let scope: Vec<String> = packages.iter().map(|p| format!("-p {p}")).collect();
         parts.push(scope.join(" "));
     }
     if !extra_args.is_empty() {
-        parts.push(format!("forwarded `-- {}`", extra_args.join(" ")));
+        const MAX_ARGS: usize = 8;
+        const MAX_ARG_CHARS: usize = 80;
+        let shown: Vec<String> = extra_args
+            .iter()
+            .take(MAX_ARGS)
+            .map(|arg| {
+                let mut chars = arg.chars();
+                let mut prefix: String = chars.by_ref().take(MAX_ARG_CHARS).collect();
+                if chars.next().is_some() {
+                    prefix.push_str("...");
+                }
+                format!("{prefix:?}")
+            })
+            .collect();
+        let omitted = extra_args.len().saturating_sub(shown.len());
+        let suffix = if omitted == 0 {
+            String::new()
+        } else {
+            format!("; {} omitted", output::count(omitted, "arg"))
+        };
+        parts.push(format!("forwarded `-- {}`{suffix}", shown.join(" ")));
     }
-    // Presence, not content: cargo reads a set-but-empty variable as a live
-    // (empty) flag source that shadows every config-file rustflags table, so
-    // the project's own `-Dwarnings`/linker flags silently drop out. That is
-    // exactly the kind of shaping this line exists to name.
-    for var in ["CARGO_ENCODED_RUSTFLAGS", "RUSTFLAGS"] {
-        match std::env::var_os(var) {
-            Some(v) if v.to_string_lossy().trim().is_empty() => parts.push(format!(
-                "{var} set but empty in the environment (cargo ignores config rustflags)"
-            )),
-            Some(_) => parts.push(format!("{var} inherited from the environment")),
-            None => {}
-        }
-    }
+    // The same resolver used by sink selection reports cargo's active source,
+    // including a set-but-empty encoded value and any shadowed plain value.
+    parts.extend(rustflags::RustflagsEnv::process().invocation_notes_for(project_root));
     if !parts.is_empty() {
         output::run_msg(&format!("invocation: {}", parts.join("; ")));
     }
@@ -630,24 +652,27 @@ fn run_convention_phases_inner(
     skip: &dyn Fn(Phase) -> bool,
     failing_phase: &mut Option<Phase>,
 ) -> Result<(), DevError> {
+    // One working-tree snapshot for every file scanner below.
+    let tree = LazyTree::new(a.project_root);
+
     if !skip(Phase::Gremlins) {
         start_phase(failing_phase, Phase::Gremlins);
-        run_gremlins(a.project_root, a.gremlins_cfg, a.fix_gremlins)?;
+        run_gremlins(&tree, a.gremlins_cfg, a.fix_gremlins)?;
     }
 
     if !skip(Phase::Header) {
         start_phase(failing_phase, Phase::Header);
-        run_header(a.project_root, a.header_cfg)?;
+        run_header(&tree, a.header_cfg)?;
     }
 
     if !skip(Phase::Textlint) {
         start_phase(failing_phase, Phase::Textlint);
-        run_textlint(a.project_root, a.textlint_rules)?;
+        run_textlint(&tree, a.textlint_rules)?;
     }
 
     if !skip(Phase::Manifest) {
         start_phase(failing_phase, Phase::Manifest);
-        run_manifest(a.project_root, a.manifest_cfg)?;
+        run_manifest(&tree, a.manifest_cfg)?;
     }
 
     if !skip(Phase::ScriptCheck) {
@@ -712,6 +737,10 @@ struct RunReport {
     continuation: Option<ContinuationReport>,
 }
 
+// Compatibility name used by `test_phase.rs`, which is owned by another
+// fixer in this wave. Its result is adapted to `PhaseFailure` at the caller.
+const TESTS_FAILED: &str = "tests failed";
+
 /// The prepared profile and where its record lives on disk.
 struct Prepared {
     prep: ProfilePrep,
@@ -737,7 +766,7 @@ fn run_build_phases(
     ledger: &mut ReachLedger,
     collected_timings: Option<&mut Vec<TestTiming>>,
     run_report: &mut RunReport,
-) -> Result<(), DevError> {
+) -> Result<(), PhaseFailure> {
     // A refusal here prints through `finish_check`, like every error that is
     // not `DevError::Reported`.
     verify_doc_only_rules(a)?;
@@ -749,7 +778,7 @@ fn run_build_phases(
     }
 
     let certifying = a.claim.requires_attribution();
-    let mut test_failure: Option<DevError> = None;
+    let mut test_failure: Option<PhaseFailure> = None;
     let mut prepared: Option<Prepared> = None;
     if !skip(Phase::Test) {
         // A `-p` that rules every lane out of the test phase is refused
@@ -775,7 +804,7 @@ fn run_build_phases(
             // Nothing runs on an incomplete plan under a claim: a test phase
             // that ran anyway would produce a record nothing could certify.
             // The audit below still reports what the plan knows.
-            test_failure = Some(DevError::Reported("preparation failed".into()));
+            test_failure = Some(PhaseFailure::Findings(Phase::Prepare));
         }
         prepared = Some(p);
         if test_failure.is_none() {
@@ -802,7 +831,17 @@ fn run_build_phases(
                 ledger,
                 &mut run_report.termination,
             )
-            .err();
+            .err()
+            .map(|error| match error {
+                // `test_phase.rs` is owned by the test-execution fixer in this
+                // wave. Adapt its legacy result at this boundary; the producer
+                // can return `PhaseFailure` when that interface is in its
+                // owned files.
+                DevError::Build(message) if message == TESTS_FAILED => {
+                    PhaseFailure::Printed(DevError::Reported(message))
+                }
+                other => other.into(),
+            });
         }
         // The test phase is over, however it ended: the journal says so. A
         // journal without this line was cut short.
@@ -899,7 +938,7 @@ fn run_diagnostic_phases(
     skip: &dyn Fn(Phase) -> bool,
     failing_phase: &mut Option<Phase>,
     ledger: &mut ReachLedger,
-) -> Result<(), DevError> {
+) -> Result<(), PhaseFailure> {
     if !skip(Phase::Clippy) {
         start_phase(failing_phase, Phase::Clippy);
         run_clippy_phase(
@@ -938,8 +977,8 @@ fn finish_build_phases(
     failing_phase: &mut Option<Phase>,
     prepared: Option<Prepared>,
     run_report: &mut RunReport,
-    test_failure: Option<DevError>,
-) -> Result<(), DevError> {
+    test_failure: Option<PhaseFailure>,
+) -> Result<(), PhaseFailure> {
     // The audit runs only under a complete claim - it is what the claim buys -
     // and it runs on every outcome of the test phase, a watchdog kill
     // included: it is pure reconciliation of the plan and the journal, so it
@@ -969,7 +1008,7 @@ fn finish_build_phases(
     }
 
     if let Some(e) = test_failure {
-        return Err(already_reported(e, TESTS_FAILED));
+        return Err(e);
     }
 
     // Only past a green test phase: the test phase fails fast, so a post-test
@@ -1125,7 +1164,7 @@ struct AuditOutcome {
     termination: Option<TerminationSummary>,
     /// What the run left unresolved, when anything.
     continuation: Option<ContinuationReport>,
-    result: Result<(), DevError>,
+    result: Result<(), PhaseFailure>,
 }
 
 /// Read a prepared run's journal back and reconcile the plan against it.
@@ -1192,10 +1231,8 @@ fn audit_coverage(
     let termination = recon.first_termination.as_ref().map(|t| TerminationSummary::of(t, label));
     let result = if !tests_green {
         Ok(())
-    } else if policy_failed {
-        Err(DevError::Reported("coverage failed".into()))
-    } else if !recon.green() {
-        Err(DevError::Reported("execution accounting violated the green invariant".into()))
+    } else if policy_failed || !recon.green() {
+        Err(PhaseFailure::Findings(Phase::Coverage))
     } else {
         Ok(())
     };
@@ -1430,12 +1467,10 @@ fn reject_scoped_complete(
     Ok(())
 }
 
-/// Trailing `brokkr check -- …` args narrow the real test run - a libtest
-/// `--skip` drops tests, a cargo `--lib` drops integration binaries - but
-/// the plan takes each lane's selection from the sweep's own filters alone,
-/// without them. Those narrowed-away pairs would be selected and expected
-/// while nothing ran them, so the run could never be accounted - and before
-/// the plan existed, the audit certified `complete` over exactly those tests.
+/// Trailing `brokkr check -- …` args can change the test invocation without
+/// becoming part of the declared selection. Libtest filters are reflected in
+/// the lane listing, but cargo-side selectors are not, so a complete claim
+/// rejects all forwarded args before its plan can disagree with execution.
 /// Reject trailing args under a complete claim, exactly like
 /// `-p`: this closes the hole for both `--gate` and a `complete`
 /// `default_profile`, and for the ordinary-lane profiles that
@@ -1458,21 +1493,6 @@ fn reject_extra_args_complete(
     Ok(())
 }
 
-/// The test phase's "failures already listed" sentinel. A `Build` rather than
-/// a `Reported` until the build phases finish, because the phase loop tells a
-/// failing lane (fail-fast for the lanes after it) from every other way out
-/// by it; [`already_reported`] converts it after.
-const TESTS_FAILED: &str = "tests failed";
-
-/// Mark a phase's printed-detail sentinel as [`DevError::Reported`], leaving
-/// every other error (whose message is its only diagnostic) untouched.
-fn already_reported(e: DevError, sentinel: &str) -> DevError {
-    match e {
-        DevError::Build(m) if m == sentinel => DevError::Reported(m),
-        other => other,
-    }
-}
-
 /// Assemble the `cargo clippy` argv for one sweep. Always
 /// `--message-format=json` so the lint code is populated on every diagnostic
 /// (cargo's pretty stderr only annotates the first occurrence per crate),
@@ -1480,7 +1500,7 @@ fn already_reported(e: DevError, sentinel: &str) -> DevError {
 /// `--cap-lints=warn` so a deny-level lint still yields `.rmeta` and every
 /// downstream crate is checked - brokkr recovers the intent by treating any
 /// surfaced diagnostic as a hard failure at the call site. `allow` is the
-/// `[clippy] allow` list, emitted as `-A <lint>` so the suppressed lints
+/// `[lints] allow` list, emitted as `-A <lint>` so the suppressed lints
 /// never reach the diagnostic stream (no carve-outs in the fail decision).
 #[cfg(test)]
 mod select_named_tests {

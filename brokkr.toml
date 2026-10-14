@@ -20,7 +20,7 @@ document_private_items = true
 [[textlint]]
 name = "docs-cite-no-line-numbers"
 pattern = '\b[\w/.-]+\.rs:\d+'
-paths = ["docs/**/*.md"]
+paths = ["README.md", "CLAUDE.md", "docs/**/*.md"]
 message = "source line numbers drift; cite the file and the symbol instead"
 
 # The one-way dependency direction from CLAUDE.md: `notes/` carries no truth
@@ -29,8 +29,39 @@ message = "source line numbers drift; cite the file and the symbol instead"
 [[textlint]]
 name = "docs-never-cite-notes"
 pattern = '\bnotes/'
-paths = ["docs/**/*.md"]
+paths = ["README.md", "CLAUDE.md", "docs/**/*.md", "scripts/**/*.js", "scripts/**/*.py", "scripts/**/*.sh"]
 message = "notes/ is transient; durable docs must carry their own context"
+
+[[textlint]]
+name = "durable-docs-avoid-machine-local-paths"
+pattern = '/home/'
+paths = ["README.md", "CLAUDE.md", "docs/**/*.md"]
+message = "durable docs must use portable paths"
+
+# Old tracker labels and machine-local paths are not durable context. Scoped
+# to the config/CLI/dispatch layer: other modules still carry such labels, and
+# a path joins this list once it is clean.
+[[textlint]]
+name = "owned-source-comments-have-durable-context"
+pattern = '\bS\d+-\d+\b|\b(?:TODO|request|plan|Phase|feature)\s+#?\d+\b|\bQ\d+:|\bC\d+\b|[\w/.-]+\.rs:\d+|/home/'
+paths = ["src/config_parts/**/*.rs", "src/project.rs", "src/cli.rs", "src/cli/**/*.rs", "src/command_args.rs", "src/man.rs", "src/man/**/*.rs", "src/main_parts/**/*.rs"]
+region = "comment"
+message = "comments must explain durable behavior without tracker labels or local paths"
+
+[[textlint]]
+name = "owned-source-strings-have-durable-context"
+pattern = '\bS\d+-\d+\b|\b(?:TODO|request|plan|Phase|feature)\s+#?\d+\b|\bQ\d+:|\bC\d+\b|[\w/.-]+\.rs:\d+|\bnotes/|/home/'
+paths = ["src/config_parts/**/*.rs", "src/project.rs", "src/cli.rs", "src/cli/**/*.rs", "src/command_args.rs", "src/man.rs", "src/man/**/*.rs", "src/main_parts/**/*.rs"]
+exclude = ["src/config_parts/tests.rs"]
+region = "string"
+message = "user-facing strings must not expose tracker labels or machine-local paths"
+
+[[textlint]]
+name = "dataset-defaults-have-one-owner"
+pattern = 'default_value\s*=\s*"(?:denmark|raw|indexed)"'
+paths = ["src/cli/schema.rs"]
+region = "code"
+message = "use the shared dataset and variant defaults from src/cli/schema.rs"
 
 # The same rule for code comments. `region = "comment"` because string literals
 # legitimately name `notes/` paths, as test data for the dirt classifier does.

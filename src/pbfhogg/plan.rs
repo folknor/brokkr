@@ -53,10 +53,10 @@ impl PlannedCommand for PbfhoggPlan<'_> {
         self.command.id()
     }
     fn package(&self) -> Option<&'static str> {
-        Some("pbfhogg-cli")
+        Project::Pbfhogg.cli_package()
     }
     fn supports_profiling(&self) -> bool {
-        self.command.supports_hotpath()
+        true
     }
     fn ok_codes(&self) -> &[i32] {
         self.command.ok_exit_codes()
@@ -94,10 +94,7 @@ impl PlannedCommand for PbfhoggPlan<'_> {
         let state =
             build_pbfhogg_context(req, self.command, self.osc_seq, binary, paths, self.params)?;
         let mode = arg_mode(req);
-        let mut args = self.command.build_args(&state, mode)?;
-        if mode == ArgMode::Hotpath {
-            args.remove(0);
-        }
+        let args = self.command.build_args(&state, mode)?;
         let (basename, mb) = result_input_metadata(&state)?;
         Ok(CommandPlan {
             args,
@@ -119,13 +116,11 @@ impl PlannedCommand for PbfhoggPlan<'_> {
     ) -> Result<Vec<String>, DevError> {
         // The selected argv was built by `plan`; check the alternate shape as
         // well so a dry run catches missing inputs in either supported mode.
-        if self.command.supports_hotpath() {
-            let other_mode = match arg_mode(req) {
-                ArgMode::Bench => ArgMode::Hotpath,
-                ArgMode::Hotpath => ArgMode::Bench,
-            };
-            let _ = self.command.build_args(&plan.state, other_mode)?;
-        }
+        let other_mode = match arg_mode(req) {
+            ArgMode::Bench => ArgMode::Hotpath,
+            ArgMode::Hotpath => ArgMode::Bench,
+        };
+        let _ = self.command.build_args(&plan.state, other_mode)?;
 
         let mut lines = vec![format!(
             "{} args: {}",
@@ -339,7 +334,7 @@ fn build_pbfhogg_context(
     extra_params: &CommandParams,
 ) -> Result<CommandContext, DevError> {
     if matches!(command, PbfhoggCommand::DiffSnapshots { .. }) {
-        return build_diff_snapshots_context(req, binary, paths, extra_params);
+        return build_diff_snapshots_context(req, paths, extra_params);
     }
 
     // Parse the optional `--snapshot` flag from extra_params into a SnapshotRef.
@@ -447,7 +442,6 @@ fn build_pbfhogg_context(
     };
 
     Ok(CommandContext {
-        binary: binary.to_path_buf(),
         inputs,
         scratch_dir: paths.scratch_dir.clone(),
         dataset: req.dataset.to_owned(),
@@ -514,7 +508,6 @@ fn resolve_merged_pbf(
 /// Resolve both snapshot paths and retain typed metadata for the `--to` side.
 fn build_diff_snapshots_context(
     req: &MeasureRequest,
-    binary: &Path,
     paths: &config::ResolvedPaths,
     extra_params: &CommandParams,
 ) -> Result<CommandContext, DevError> {
@@ -545,11 +538,10 @@ fn build_diff_snapshots_context(
     )?;
     let snapshot_to = SnapshotSide {
         file_name: crate::utf8_path::file_name_str(&to_path).map(str::to_owned),
-        size_mb: resolve::file_size_mb(&to_path).ok(),
+        size_mb: Some(resolve::file_size_mb(&to_path)?),
     };
 
     Ok(CommandContext {
-        binary: binary.to_path_buf(),
         inputs: ResolvedInputs::TwoPbfs {
             a: from_path,
             b: to_path,
@@ -734,7 +726,6 @@ pub(crate) fn ensure_merged_pbf(
         osc_str,
         &partial_str,
         &CommandParams::default(),
-        false,
     );
     let apply_arg_refs: Vec<&str> = apply_args.iter().map(String::as_str).collect();
     let captured = output::run_captured(&binary_str, &apply_arg_refs, project_root)?;

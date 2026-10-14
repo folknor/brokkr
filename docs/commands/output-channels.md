@@ -1,14 +1,14 @@
 # Output channels: how brokkr captures a run's output
 
 When brokkr runs a project binary under a measurement mode, the binary's
-output can travel to the operator's terminal, to the tracked results DB, to
+output can travel to the operator's terminal, to the gitignored results DB, to
 the gitignored sidecar DB, or nowhere at all. Which of these happens depends
 entirely on **which harness path** the command's dispatch chose - the project
 binary itself never knows what mode it runs under. This file is the map.
 
 ## The two databases
 
-- `.brokkr/results.db` - **tracked in git**, kept small. One row per bench
+- `.brokkr/results.db` - **gitignored**, kept small. One row per bench
   run: `command`, `elapsed_ms`, `commit`, `input`, and a `kv` column of
   arbitrary `key=value` metrics. Queried with `brokkr results`. Two things
   brokkr records itself rather than receiving over a transport channel: the
@@ -118,13 +118,12 @@ may inspect either stream before recording; storage uses the winner's metrics.
 Missing or invalid hotpath JSON fails the iteration and preserves its sidecar
 under `dirty`, rather than recording a profile mode without a profile.
 
-Both scrape stderr for `key=value` counters, because stderr is captured either
-way and the scrape is free. A wall on its own cannot distinguish "the code got
-faster" from "the code did less"; the counters are what answer that, and they
-drive `--compare`'s `counters:` line. On the external path a stderr `elapsed_ms`
-is kept as an ordinary counter rather than replacing the measured wall - that
-substitution is the whole difference between the two paths, and it should not
-happen by accident.
+Both scrape non-timing stderr `key=value` pairs for counters, because stderr is
+captured either way and the scrape is free. A wall on its own cannot
+distinguish "the code got faster" from "the code did less"; the counters are
+what answer that, and they drive `--compare`'s `counters:` line. The reserved
+`elapsed_ms` and `total_ms` keys are omitted from the external path's counters;
+on the self-reported path they supply the recorded wall.
 
 There was briefly a third path combining an external wall with counter scraping.
 It differed from `run_external_ok` by a bool that the shared body already took,
@@ -197,19 +196,32 @@ varies per command.
 
 `tilegen` now behaves exactly like a pbfhogg command: brokkr's own best-of-N
 external wall-clock `elapsed_ms`, its metrics to sidecar.db as FIFO counters,
-and any stderr `key=value` lines scraped into results.db `kv` as counters (no
-`elapsed_ms=` contract - a stderr `elapsed_ms` is kept as a counter, never
-substituted for the wall). Its runtime metrics moved from stderr `key=value`
+and non-timing stderr `key=value` lines scraped into results.db `kv` as
+counters. An stderr `elapsed_ms` or `total_ms` does not replace the wall or
+appear as a counter. Its runtime metrics moved from stderr `key=value`
 to FIFO counters on the elivagar side (54f9b07). The example micro-benches record only
-brokkr's wall-clock `elapsed_ms`; their stderr and any counters are discarded.
+brokkr's wall-clock `elapsed_ms`; they don't scrape stderr into result KV, but
+replay their captured stdout and stderr to the terminal.
 The external baselines build no Rust binary at all.
+
+### nidhogg
+
+The `tiles` lifecycle benchmark measures the server's start-to-shutdown wall
+with brokkr. After the readiness message, it parses the remaining stderr
+`key=value` lines into result KV pairs; `elapsed_ms`/`total_ms` are reserved
+timing names and are not stored as counters. This path uses no sidecar FIFO.
+
+| Command | Bench path | sidecar | stderr kv |
+|---|---|---|---|
+| tiles | `run_internal` + server lifecycle | no | shutdown counters |
 
 ## Quick decision guide
 
-- Want a metric in `brokkr results`? Print a `key=value` line to stderr. On
+- Want a metric in `brokkr results`? Print a non-timing `key=value` line to stderr. On
   the external wall-clock path (`run_external_ok`: every pbfhogg command,
   elivagar `tilegen`, `brokkr mogwai`) it is scraped into `kv` as a counter
-  and feeds `--compare`'s `counters:` line; the wall stays brokkr's own. On the
+  and feeds `--compare`'s `counters:` line; `elapsed_ms` and `total_ms` are
+  reserved and ignored there, and the wall stays brokkr's own. On the
   read/write/merge/`self` micro-benches (`measure_external`) a
   mandatory `elapsed_ms=`/`total_ms=` line additionally supplies the recorded
   timing.

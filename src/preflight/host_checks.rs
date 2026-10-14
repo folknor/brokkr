@@ -83,27 +83,11 @@ fn run_single(check: &Check) -> Option<String> {
 }
 
 fn check_binary(name: &str, help: &str) -> Option<String> {
-    let requested = Path::new(name);
-    let found = if requested.is_absolute() || name.contains(std::path::MAIN_SEPARATOR) {
-        is_executable(requested)
-    } else {
-        std::env::var_os("PATH").is_some_and(|path| {
-            std::env::split_paths(&path).any(|dir| is_executable(&dir.join(name)))
-        })
-    };
-
-    if found {
+    if crate::tools::find_executable(name).is_some() {
         None
     } else {
         Some(format!("'{name}' not found in PATH ({help})"))
     }
-}
-
-fn is_executable(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-
-    std::fs::metadata(path)
-        .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
 }
 
 fn check_file(path: &Path, description: &str) -> Option<String> {

@@ -12,13 +12,14 @@ pub(crate) use crate::visual::status::{
     status_columns,
 };
 
-#[allow(dead_code)]
 pub(crate) struct ElementMatchResult {
     pub(crate) match_pct: f64,
     /// Scored elements: reference elements surviving the head/`br`/
     /// zero-height filters, whether or not the pipeline produced them.
+    #[cfg(test)]
     pub(crate) total_elements: usize,
     /// Scored elements whose geometry was within tolerance.
+    #[cfg(test)]
     pub(crate) passing_elements: usize,
     /// Path-matched elements whose geometry fell outside tolerance,
     /// sorted worst-first by largest absolute delta.
@@ -119,43 +120,14 @@ fn is_br(el: &LayoutElement) -> bool {
 /// display:inline-block (MJML nav links, buttons, social tables), and
 /// those matched comparisons catch real bugs, so a path-matched inline
 /// element is always scored.
+const INLINE_TAGS: &[&str] = &[
+    "span", "a", "strong", "em", "b", "i", "u", "small", "big", "sub", "sup", "code", "kbd",
+    "samp", "var", "cite", "abbr", "mark", "del", "ins", "s", "q", "dfn", "ruby", "rt", "rp",
+    "bdi", "bdo", "wbr", "time", "data", "output", "font",
+];
+
 fn is_inline_tag(tag: &str) -> bool {
-    matches!(
-        tag,
-        "span"
-            | "a"
-            | "strong"
-            | "em"
-            | "b"
-            | "i"
-            | "u"
-            | "small"
-            | "big"
-            | "sub"
-            | "sup"
-            | "code"
-            | "kbd"
-            | "samp"
-            | "var"
-            | "cite"
-            | "abbr"
-            | "mark"
-            | "del"
-            | "ins"
-            | "s"
-            | "q"
-            | "dfn"
-            | "ruby"
-            | "rt"
-            | "rp"
-            | "bdi"
-            | "bdo"
-            | "wbr"
-            | "time"
-            | "data"
-            | "output"
-            | "font"
-    )
+    INLINE_TAGS.contains(&tag)
 }
 
 pub(crate) fn compare_elements(
@@ -257,7 +229,9 @@ fn compare_element_sets_with_policy(
 
     ElementMatchResult {
         match_pct,
+        #[cfg(test)]
         total_elements: scored,
+        #[cfg(test)]
         passing_elements: passing,
         offenders,
     }
@@ -354,7 +328,39 @@ mod tests {
         clippy::let_underscore_must_use,
         clippy::useless_vec
     )]
+    use std::collections::HashSet;
+
     use super::*;
+
+    const PREPARE_JS: &str = include_str!("../../scripts/litehtml-prepare/prepare.js");
+
+    #[test]
+    fn prepare_inline_tags_cover_every_scored_inline_tag() {
+        let (_, declaration) = PREPARE_JS
+            .split_once("const INLINE_ELEMENTS = new Set([")
+            .expect("prepare.js declares its inline element set");
+        let (list, _) = declaration
+            .split_once("]);")
+            .expect("prepare.js closes its inline element set");
+        let prepare_tags: HashSet<_> = list
+            .lines()
+            .filter_map(|line| {
+                line.trim()
+                    .trim_end_matches(',')
+                    .strip_prefix('"')
+                    .and_then(|tag| tag.strip_suffix('"'))
+            })
+            .collect();
+
+        for tag in INLINE_TAGS {
+            assert!(
+                prepare_tags.contains(tag),
+                "prepare.js inline set is missing scorer tag {tag}"
+            );
+        }
+        assert!(prepare_tags.contains("br"));
+        assert!(prepare_tags.contains("img"));
+    }
 
     fn el(path: &str, x: f64, y: f64, w: f64, h: f64) -> LayoutElement {
         LayoutElement {

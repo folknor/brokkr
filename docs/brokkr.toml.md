@@ -263,20 +263,18 @@ global lock, which is then held through the build and measurement, so a
 concurrent brokkr can neither evict a worktree mid-build nor lose a
 bookkeeping update.
 
-**This is a growth damper, not a bound.** The count is per project, so the
-disk-wide total is this number times however many projects you have worktrees
-for. Only a global byte budget could promise "never fills the disk", and a count
-is in any case a proxy for the real constraint, which is bytes. brokkr caches
-each worktree's measured size in its bookkeeping so a size-based rule can be
-added later without walking the tree at eviction time.
+**This is a growth damper, not a bound.** Retention is per project, so the
+disk-wide total grows with the number of projects that use worktrees. Only a
+global byte budget could promise "never fills the disk", and a count is a proxy
+for the real constraint, which is bytes. The bookkeeping records last-use time
+but does not currently record worktree size; a future size-based rule would
+need to add that measurement.
 
-The default of 6 is chosen for the **heaviest** dependency graph, not the
-lightest. A cold worktree build is ~36s on a mid-sized workspace but minutes on
-elivagar, and a silent multi-minute stall is a worse failure than some gigabytes
-that were not strictly needed. Six also clears the shape of a real comparison -
-a baseline, the commit under test, the head, a rework, and room to iterate the
-rework twice without evicting the baseline you are still comparing against.
-Projects with cheap builds can lower it.
+The default comes from `worktree_record::DEFAULT_KEEP` and is chosen for the
+**heaviest** dependency graph, not the lightest. A cold worktree build on that
+graph is costly, and a silent multi-minute stall is a worse failure than
+keeping some extra worktrees. The host's `worktree_keep` value can lower or
+raise the default.
 
 Two rules the eviction obeys:
 
@@ -630,6 +628,9 @@ for gates brokkr's native phases can't express (semantic analysers, external
 formatter conventions). Each entry runs `command` via `sh -c` and passes iff the
 captured output matches `expect`; on failure the captured output is shown.
 Matching the sentinel (not the exit code) catches a check stubbed to `exit 0`.
+At most 1 MiB per output stream is retained; if a stream selected by the rule
+exceeds that bound or its pipe remains open past the drain grace, the check
+fails because capture cannot prove that the full output matched.
 
 ```toml
 [[script_check]]
@@ -867,7 +868,9 @@ workspace_dep_ignore = ["lychee", "cargo-*", "backtest"]
 - `workspace_dep_ignore` - workspace-dependency names the unused-workspace-dep
   phase must not flag even when no member inherits them (dev tools, top-level
   members whose use cargo metadata can't attribute). An entry ending in `*` is
-  a prefix glob. See `docs/commands/deps.md`.
+  a prefix match. Every entry must match a declared `[workspace.dependencies]`
+  key when `brokkr deps` runs; stale entries are refused. See
+  `docs/commands/deps.md`.
 
 ## `[bin]` section
 
@@ -1415,35 +1418,24 @@ guessing.
 
 ### Doctests
 
-Doctests live in cargo's `--doc` pseudo-target, which has no binary for the
-lane to fan out over, so a `parallel` sweep cannot run them. They therefore
-need at least one entry **without** `parallel` to run under, and two load
-errors enforce that:
+Doctests live in cargo's `--doc` pseudo-target, which has no binary for a
+`parallel` sweep to fan out over, and nextest does not execute them. When
+`[test] doctests = true`, load rejects a config whose `[[check]]` entries are
+all parallel or nextest lanes, because none can run doctests. A complete
+profile must also select at least one lane that actually runs them; this is
+checked per profile, since partial profiles do not claim complete coverage.
 
-- **Every `[[check]]` entry sets `parallel`** - there is nowhere for doctests
-  to run at all.
-- **A `certifies = "complete"` profile runs only parallel sweeps** - the
-  profile would certify a run in which the project's declared doctests never
-  executed. Checked per complete profile rather than globally, because a
-  partial profile may legitimately be all-parallel: it certifies nothing.
+A plain libtest lane can carry doctests when its package and target selection
+includes them. A `doc_only = true` entry is the explicit alternative: it runs
+`cargo test --doc` with its own selection and can provide the workspace-wide
+doctest carrier for a parallel profile. Both obligations are load errors, so
+the configured complete claim cannot pass without its declared doctests.
 
-Both are load errors rather than run-time warnings: the conflict is a property
-of the config, so it needs deciding once, and a gate whose every green run
-carries a warning has taught its readers to skip warnings.
-
-A mixed config is the intended shape and loads cleanly - `fanout` with
-`parallel`, `rest` without, both in the complete profile's `sweeps`. Note that
-an earlier version refused *any* `parallel` entry while its message told you to
-add a serial sibling, so the remedy it named did not clear it; the only escape
-was `doctests = false` plus a quarantine, which the complete gate then
-correctly called an unaudited gap.
-
-When the parallel sweep IS the workspace-wide one and the serial remainder is
-package-scoped, the serial siblings only run their own packages' doctests -
-the rest of the workspace's doctests would silently stop. That shape wants a
-`doc_only = true` twin of the parallel entry (same selection, `--doc`, ~a few
-seconds serial); see the `doc_only` key above, including the
-workspace-shaped-carrier rule a complete profile enforces.
+When a parallel sweep is workspace-wide but the serial remainder is
+package-scoped, those serial siblings only run their packages' doctests. Add a
+workspace-shaped `doc_only = true` twin of the parallel entry to carry doctests
+for the rest of the workspace; see the `doc_only` key above for the selection
+rule a complete profile enforces.
 
 ### What it does not do
 
@@ -1527,7 +1519,8 @@ forbid = "rusqlite"
   in-scope dependencies at all"; an entry nothing depends on is not an error
   (the list states what is permitted, not what is required).
 - `except` (optional) - workspace packages to drop from the `from` set. Pairs
-  with `from = "*"` to express "no crate may depend on X, except these".
+  with `from = "*"` to express "no crate may depend on X, except these". Every
+  entry must match a package selected by `from`; unmatched entries are refused.
 - `kinds` (optional) - dependency kinds the rule applies to: `normal`, `dev`,
   `build` (string or array). Empty = every kind (the default; never flips to
   silently ignore a kind you used to catch). `kinds = ["normal"]` means a
