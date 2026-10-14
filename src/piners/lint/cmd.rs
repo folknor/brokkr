@@ -18,7 +18,8 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::Duration;
 
-use crate::config::{DevConfig, HarnessConfig};
+use crate::config::HarnessConfig;
+use crate::config::project_config::piners::PinersConfig;
 use crate::error::DevError;
 use crate::lockfile::{self, LockContext};
 use crate::output::{self, CapturedOutput};
@@ -82,10 +83,10 @@ pub struct LintArgs {
 #[allow(clippy::too_many_lines)] // linear orchestration: load, select, verify, build, run, report
 pub fn lint_corpus(
     project_root: &Path,
-    dev_config: &DevConfig,
+    piners: &PinersConfig,
     args: &LintArgs,
 ) -> Result<(), DevError> {
-    let piners_cfg = dev_config.piners.clone().unwrap_or_default();
+    let piners_cfg = piners.clone();
     let lint_cfg = piners_cfg.lint.as_ref().ok_or_else(|| {
         DevError::Config(
             "lint-corpus: no [piners.lint] section in brokkr.toml. Declare \

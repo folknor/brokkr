@@ -1,10 +1,12 @@
-//! The linked-elivagar-crate surface the corpus gate consumes.
+//! The linked-elivagar-crate surface used by brokkr's archive consumers.
 //!
 //! Per `elivagar.md` / `brokkr.md`, brokkr owns the gate but does not decode
 //! PMTiles itself: it links the elivagar crate and reads archives in-process
 //! through elivagar's reader/decoder/writer. This module is the seam - the one
-//! place that names the elivagar API the gate depends on, so the rest of
-//! `corpus/` imports from here rather than reaching into `elivagar::` directly.
+//! place that names the elivagar API brokkr depends on, so `corpus/`,
+//! `regress/` and the PMTiles adapters import from here rather than reaching
+//! into `elivagar::` directly. brokkr's durable archive paths and lifecycle
+//! are not part of this seam; they live in `elivagar/archive_store.rs`.
 //!
 //! The canonical tile hash is NOT here: it is brokkr's (`corpus/canonical.rs`),
 //! built over the `decode_detail_attr` + `protohoggr` primitives this seam
@@ -13,7 +15,7 @@
 
 // Reader surface.
 pub use elivagar::pmtiles_reader::{
-    ArchiveView, BlobRef, RawDirEntry, find_entry, gzip_decompress, read_i32_le,
+    ArchiveView, BlobRef, PmtilesReader, RawDirEntry, find_entry, gzip_decompress, read_i32_le,
 };
 // Writer surface (mutate) + PMTiles addressing math.
 pub use elivagar::pmtiles_writer::{PmtilesConfig, PmtilesWriter, tile_id_to_zxy, xy_to_tile_id};

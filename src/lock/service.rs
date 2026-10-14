@@ -264,9 +264,12 @@ fn stop_reply(shared: &Shared) -> String {
         return "gone\n".into();
     }
     crate::shutdown::commit_stop();
-    // SAFETY: kill(2) on our own pid; no pointers.
-    let rc = unsafe { libc::kill(libc::getpid(), libc::SIGTERM) };
-    let signal_error = (rc != 0).then(io::Error::last_os_error);
+    let signal_error =
+        match crate::process::signal_pid(std::process::id(),libc::SIGTERM) {
+            Ok(true) => None,
+            Ok(false) => Some(io::Error::from_raw_os_error(libc::ESRCH)),
+            Err(error) => Some(error),
+        };
     drop(live);
     match signal_error {
         None => "accepted\n".into(),

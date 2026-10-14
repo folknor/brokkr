@@ -1957,21 +1957,10 @@ In depth: `brokkr man nidhogg`."
     /// In depth: `brokkr man visual`.
     #[command(display_order = 50)]
     Visual {
-        /// Fixture or snapshot ID (or unique prefix)
-        #[arg(value_name = "ID")]
-        fixture: Option<String>,
-
-        /// Run all fixtures tagged with this suite name (litehtml only)
-        #[arg(long, conflicts_with = "all")]
-        suite: Option<String>,
-
-        /// Run all fixtures/snapshots
-        #[arg(long)]
-        all: bool,
-
-        /// Force-regenerate Chrome reference artifacts before comparing (litehtml only)
-        #[arg(long)]
-        recapture: bool,
+        #[command(flatten)]
+        args: VisualArgs,
+        #[command(flatten)]
+        litehtml: LitehtmlVisualArgs,
     },
     /// Run the cargo tests matching a name (release by default; --debug for dev)
     ///
@@ -3131,6 +3120,28 @@ pub(crate) enum VerifyCommand {
     },
 }
 
+/// Arguments shared by the litehtml and sluggrs visual runners.
+#[derive(Args)]
+pub(crate) struct VisualArgs {
+    /// Fixture or snapshot ID (or unique prefix)
+    #[arg(value_name = "ID")]
+    pub(crate) fixture: Option<String>,
+    /// Run all fixtures/snapshots
+    #[arg(long)]
+    pub(crate) all: bool,
+}
+
+/// Flags accepted only by the litehtml visual runner.
+#[derive(Args)]
+pub(crate) struct LitehtmlVisualArgs {
+    /// Run all fixtures tagged with this suite name
+    #[arg(long, conflicts_with = "all")]
+    pub(crate) suite: Option<String>,
+    /// Force-regenerate Chrome reference artifacts before comparing
+    #[arg(long)]
+    pub(crate) recapture: bool,
+}
+
 /// The archive selector shared by every `pmtiles-corpus` subcommand: the same
 /// `[--dataset D] [--commit H | --file P]` resolver `pmtiles-inspect`/`diag`/
 /// `svg` use. One resolver, zero divergence in default-commit semantics.
@@ -3182,9 +3193,9 @@ pub(crate) enum PmtilesCorpusCommand {
         /// Replace an existing baseline (elivagar refuses to overwrite otherwise)
         #[arg(long)]
         rotate: bool,
-        /// Digest mode passed through to elivagar (e.g. leaves, buckets)
-        #[arg(long)]
-        mode: Option<String>,
+        /// Digest mode passed through to elivagar
+        #[arg(long, value_enum, default_value = "leaves")]
+        mode: crate::elivagar::corpus::DigestMode,
     },
     /// Render the SVG corpus manifest for an archive
     #[command(name = "render-manifest")]
@@ -3235,9 +3246,8 @@ pub(crate) enum PmtilesCorpusCommand {
         #[arg(short = 'o', long)]
         output: Option<std::path::PathBuf>,
         /// Mutation op passed through to elivagar
-        /// (drop-tile|nudge-geometry|layer-version|regzip)
-        #[arg(long)]
-        op: String,
+        #[arg(long, value_enum)]
+        op: crate::elivagar::corpus::MutationOp,
         /// Target tile z/x/y for ops that need one
         #[arg(long)]
         tile: Option<String>,

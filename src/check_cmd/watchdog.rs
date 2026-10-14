@@ -307,8 +307,8 @@ fn backstop_exit() -> ! {
 // process age is nowhere near u64's range, so neither cast can bite.
 #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 fn process_age_ms() -> u64 {
-    let ticks = crate::lockfile::proc_starttime(std::process::id())
-        .and_then(|s| s.parse::<f64>().ok());
+    let ticks = crate::process::proc_starttime(std::process::id())
+        .map(|ticks| ticks.get() as f64);
     let uptime = std::fs::read_to_string("/proc/uptime")
         .ok()
         .and_then(|s| s.split_whitespace().next().and_then(|u| u.parse::<f64>().ok()));
@@ -354,16 +354,21 @@ mod watchdog_tests {
         let _journal = JOURNAL_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let root = crate::test_scratch::scratch("watchdog", "firing_journal");
         let unit = BinaryUnit::of(&test_binary_for_tests("core", "lib", "core"));
-        let pair = PairId { shape: "s".into(), resolution: None, unit, test: "queued".into() };
+        let pair = PairId { shape: "s".into(), resolution: Resolution::Combined, unit, test: "queued".into() };
         let plan = AccountingPlan {
             run_id: new_run_id(),
             complete: true,
             // A lane index no other test's tap uses: the journal is process-wide,
             // and a concurrently running test's records may land in it too.
             lanes: vec![LaneRecord {
-                prepared: true,
-                executions: vec![pair],
-                ..LaneRecord::empty(7_777, "lane".into(), LaneKind::Parallel, "s".into())
+                inventory: Inventory::Prepared {
+                    executions: vec![pair],
+                    ignored_selected: Vec::new(),
+                    outside_claim: Vec::new(),
+                    artifacts: Vec::new(),
+                    unlisted: Vec::new(),
+                },
+                ..LaneRecord::empty(LaneIdx::new(7_777), "lane".into(), LaneKind::Parallel, "s".into())
             }],
             ..AccountingPlan::default()
         };

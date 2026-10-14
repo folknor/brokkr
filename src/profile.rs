@@ -1,7 +1,7 @@
 //! Profile resolution for `[test.profiles.*]`.
 //!
 //! Translates a named profile (with optional `extends` chain) into a
-//! list of `ResolvedSweep`s ready for `brokkr check` (and
+//! list of `SweepDecl`s ready for invocation planning in `brokkr check` (and
 //! `brokkr test`) to execute. Each resolved sweep carries:
 //!
 //! - the `[[check]]` entry that supplies feature flags + build_packages
@@ -18,16 +18,17 @@ use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 
 use crate::config::ParallelBinaries;
-use crate::config::rustflags_target_key;
+use crate::config::check::{CargoUnification, EffectiveUnification, rustflags_target_key};
 use crate::config::{
-    CargoUnification, CheckEntry, EffectiveUnification, FeatureUnification, Harness, Isolation,
-    ProfileDef, SkipSpec, SweepProfile, TestConfig,
+    CheckEntry, FeatureUnification, Harness, Isolation, ProfileDef, SkipSpec, SweepProfile,
+    TestConfig,
 };
 use crate::error::DevError;
 
-/// One sweep to execute, after profile resolution + check-entry lookup.
+/// One sweep declaration after profile resolution + check-entry lookup.
+/// Invocation-specific decisions are added by [`PlannedSweep`].
 #[derive(Debug, Clone, Default)]
-pub struct ResolvedSweep {
+pub struct SweepDecl {
     /// Display label - the `[[check]]` entry's `name`.
     pub label: String,
     /// The sweep's feature configuration, structured. Deliberately NOT an
@@ -72,15 +73,8 @@ pub struct ResolvedSweep {
     pub profile: Option<SweepProfile>,
     /// The `[[check]]` entry's `feature_unification`, as configured. Policy,
     /// not yet an answer: `auto` resolves differently depending on CLI scope
-    /// and parallel eligibility, which are runtime facts.
+    /// and parallel eligibility, which are invocation facts.
     pub feature_unification: FeatureUnification,
-    /// The resolved answer for THIS invocation, filled in by
-    /// [`resolve_unification`] once the CLI scope is known. Part of the build
-    /// shape, and it must be the effective value rather than the configured
-    /// one: an `auto` sweep promoted to `workspace` compiles a different graph
-    /// from an `auto` sweep that was not, and keying on the configured `auto`
-    /// would let those two dedupe into one.
-    pub effective_unification: EffectiveUnification,
     /// The bare `[[check]]` entry name, NEVER lane-qualified - `label` becomes
     /// `tier1/default` under a lanes profile, this stays `default`. The key
     /// for state that belongs to the entry rather than the run, today the
@@ -104,6 +98,61 @@ pub struct ResolvedSweep {
     /// ever see gate sweeps, and the one sweep that can carry this
     /// runs alone under `cmd_clippy` with nothing to dedupe against.
     pub lib_only: bool,
+}
+
+/// A sweep ready for execution in one invocation. Construction resolves the
+/// configured unification policy exactly once, after the invocation's scope
+/// and parallel eligibility are known. There is deliberately no `Default`:
+/// every planned sweep has crossed that resolution boundary.
+#[derive(Debug, Clone)]
+pub struct PlannedSweep {
+    declaration: SweepDecl,
+    effective_unification: EffectiveUnification,
+}
+
+impl std::ops::Deref for PlannedSweep {
+    type Target = SweepDecl;
+
+    fn deref(&self) -> &Self::Target {
+        &self.declaration
+    }
+}
+
+impl PlannedSweep {
+    pub fn resolve(declaration: SweepDecl, promotion_eligible: bool) -> Result<Self, DevError> {
+        let effective_unification = resolve_unification(&declaration, promotion_eligible)?;
+        Ok(Self {
+            declaration,
+            effective_unification,
+        })
+    }
+
+    pub fn effective_unification(&self) -> EffectiveUnification {
+        self.effective_unification
+    }
+
+    /// The declaration this sweep was planned from, for fixtures that revise
+    /// one field of an existing sweep.
+    #[cfg(test)]
+    pub fn declaration(&self) -> &SweepDecl {
+        &self.declaration
+    }
+
+    /// Consume the sweep, returning the declaration it was planned from.
+    #[cfg(test)]
+    pub fn into_declaration(self) -> SweepDecl {
+        self.declaration
+    }
+}
+
+/// Test fixtures: a declaration planned as a non-promotable lane. Production
+/// code goes through [`PlannedSweep::resolve`], which is told whether the
+/// invocation makes the lane promotion-eligible.
+#[cfg(test)]
+impl From<SweepDecl> for PlannedSweep {
+    fn from(declaration: SweepDecl) -> Self {
+        Self::resolve(declaration, false).expect("unification resolution does not fail")
+    }
 }
 
 /// libtest thread policy for a cargo-mediated harness.
@@ -532,7 +581,7 @@ impl LaneFilters {
     }
 }
 
-impl ResolvedSweep {
+impl SweepDecl {
     /// The resolved execution policy.
     pub fn lane_exec(&self) -> LaneExec {
         self.lane_exec
@@ -553,42 +602,12 @@ impl ResolvedSweep {
         }
         out
     }
+}
 
+impl PlannedSweep {
     /// The sweep's *build shape*: everything that decides what cargo
-    /// compiles, and nothing that only decides which tests run. Two lanes
-    /// referencing the same `[[check]]` entry produce equal keys, so clippy
-    /// and rustdoc dedupe on this while the test phase keeps both entries.
-    /// (`brokkr test` dedupes on what a lane executes instead -
-    /// `check_cmd`'s `ExecProjection`, which also tells a doctest twin
-    /// apart.) `env` is in the key:
-    /// `HIGH_PRECISION=1` on one sweep and not another makes two
-    /// otherwise-identical sweeps cache-incompatible. `test_exclude_packages`
-    /// is deliberately out - it narrows the test invocation only.
-    ///
-    /// `profile` is in, because `cfg(debug_assertions)` decides which code
-    /// exists: a dev and a release sweep of the same features compile
-    /// different source and present different lint surfaces, so deduping
-    /// either into the other would lint one build and run the other.
-    /// `effective_unification` is in, and it is the EFFECTIVE value rather
-    /// than the configured one: package and workspace resolution compile
-    /// different code for the same source, so two sweeps differing only there
-    /// are two lint surfaces and two test universes. Keying on the configured
-    /// value instead would fold a promoted `auto` sweep into an unpromoted one.
-    ///
-    /// KNOWN GAP, pre-existing and left alone: `build_packages` is in the key
-    /// although clippy never reads it, so two sweeps differing only in their
-    /// pre-built binaries get linted twice for provably identical output. That
-    /// is a phase-contract conflation (one key serving clippy dedupe and
-    /// coverage grouping, which want different things), and
-    /// splitting it is orthogonal to feature unification - it would change
-    /// dedupe behaviour for configs that have nothing to do with this feature.
-    ///
-    /// This is the CONFIGURED shape: packages and features as declared. It
-    /// identifies the declared sweep (coverage grouping, the accounting's
-    /// shape id). What a run actually compiles depends on the invocation's
-    /// selection - a `-p` narrowing or a package-mode resolution projects
-    /// the features per run - so clippy/rustdoc dedupe and `brokkr test`'s
-    /// execution dedupe compare the selection module's effective key instead.
+    /// compiles, and nothing that only decides which tests run. The effective
+    /// unification answer belongs here because it depends on invocation scope.
     #[cfg(test)]
     pub fn build_shape_key(&self) -> BuildShapeKey {
         (
@@ -642,7 +661,7 @@ impl ResolvedSweep {
     }
 }
 
-/// The tuple `ResolvedSweep::build_shape_key` compares.
+/// The tuple `PlannedSweep::build_shape_key` compares.
 #[cfg(test)]
 type BuildShapeKey = (
     Vec<String>,
@@ -673,7 +692,7 @@ type BuildShapeKey = (
 /// left to mismatch. (It was refused while the fan-out re-entered cargo per
 /// binary, where selected mode let a runner resolve a different graph.)
 pub fn resolve_unification(
-    sweep: &ResolvedSweep,
+    sweep: &SweepDecl,
     promotion_eligible: bool,
 ) -> Result<EffectiveUnification, DevError> {
     Ok(match sweep.feature_unification {
@@ -694,10 +713,10 @@ pub fn resolve_unification(
     })
 }
 
-/// Synthesize a `ResolvedSweep` from a `CheckEntry` alone, with no
+/// Synthesize a `SweepDecl` from a `CheckEntry` alone, with no
 /// profile filters. Used by the bare `brokkr check` path when
 /// `[[check]]` is configured but no profile is selected.
-pub fn sweep_from_check_entry(entry: &CheckEntry) -> ResolvedSweep {
+pub fn sweep_from_check_entry(entry: &CheckEntry) -> SweepDecl {
     // No profile in play, so the entry's own filters are all there is.
     let filters = LaneFilters {
         filters: entry_filters(entry),
@@ -714,7 +733,7 @@ pub fn sweep_from_check_entry(entry: &CheckEntry) -> ResolvedSweep {
     )
     .expect("parsed check entries have a valid execution mode");
 
-    ResolvedSweep {
+    SweepDecl {
         label: entry.name.clone(),
         features: FeatureConfig::from_entry(entry),
         build_packages: entry.build_packages.clone(),
@@ -724,9 +743,6 @@ pub fn sweep_from_check_entry(entry: &CheckEntry) -> ResolvedSweep {
         env: entry.env.clone(),
         rustflags: entry.rustflags.clone(),
         feature_unification: entry.feature_unification,
-        // Unresolved until the CLI scope is known; `resolve_unification`
-        // fills it in before any cargo command is built.
-        effective_unification: EffectiveUnification::Ambient,
         lane_exec,
         curated: entry.curated,
         profile: entry.profile,
@@ -777,7 +793,7 @@ struct ResolvedProfile {
     env: BTreeMap<String, String>,
 }
 
-/// Resolve `name` into a list of `ResolvedSweep`s ready to execute.
+/// Resolve `name` into a list of `SweepDecl`s ready to execute.
 ///
 /// Errors:
 /// - `name` is not in `cfg.profiles`
@@ -789,7 +805,7 @@ pub fn resolve(
     cfg: &TestConfig,
     checks: &[CheckEntry],
     name: &str,
-) -> Result<Vec<ResolvedSweep>, DevError> {
+) -> Result<Vec<SweepDecl>, DevError> {
     // A `lanes` profile is a list of runs: each lane resolves on its own
     // (load-time validation guarantees lanes carry no run-shaping fields,
     // don't nest, and exist), concatenated in declaration order. Labels are
@@ -818,7 +834,7 @@ pub fn resolve(
 pub(crate) fn resolve_profiles_for_validation(
     cfg: &TestConfig,
     checks: &[CheckEntry],
-) -> Result<BTreeMap<String, Vec<ResolvedSweep>>, DevError> {
+) -> Result<BTreeMap<String, Vec<SweepDecl>>, DevError> {
     let mut resolved = BTreeMap::new();
     for name in cfg.profiles.keys() {
         let sweeps = if cfg
@@ -845,7 +861,7 @@ fn resolve_single(
     cfg: &TestConfig,
     checks: &[CheckEntry],
     name: &str,
-) -> Result<Vec<ResolvedSweep>, DevError> {
+) -> Result<Vec<SweepDecl>, DevError> {
     let merged = resolve_profile_chain(&cfg.profiles, name)?;
 
     if merged.sweeps.is_empty() {
@@ -866,7 +882,7 @@ fn resolve_single(
                      but no `[[check]]` entry with that name exists."
                 ))
             })?;
-        out.push(build_resolved_sweep(entry, &merged, name)?);
+        out.push(build_sweep_decl(entry, &merged, name)?);
     }
 
     // Package-qualified skips are filtered out of the enumerated set, and
@@ -961,7 +977,7 @@ fn collect_extends_chain<'a>(
 /// The *run-shaping* half of a profile: which tests run and how they are
 /// executed, with nothing that decides what cargo compiles.
 ///
-/// Split out of [`build_resolved_sweep`] so the ad-hoc CLI-features path can
+/// Split out of [`build_sweep_decl`] so the ad-hoc CLI-features path can
 /// inherit it. A `--features` run overrides *sweep selection* - which
 /// `[[check]]` entry's feature shape to compile - and that is orthogonal to
 /// the profile's filters: a test that cannot pass in-process cannot pass
@@ -994,7 +1010,7 @@ impl RunShaping {
 
     /// Overlay onto an ad-hoc sweep. Assignment, not merge: an ad-hoc sweep
     /// carries no `[[check]]` entry, so there is nothing to AND with.
-    pub fn apply(self, sweep: &mut ResolvedSweep) {
+    pub fn apply(self, sweep: &mut SweepDecl) {
         sweep.filters = self.filters;
         sweep.env = self.env;
         sweep.lane_exec = self.lane_exec;
@@ -1103,11 +1119,11 @@ fn shaping_from(profile: &ResolvedProfile, profile_name: &str) -> RunShaping {
     }
 }
 
-fn build_resolved_sweep(
+fn build_sweep_decl(
     entry: &CheckEntry,
     profile: &ResolvedProfile,
     profile_name: &str,
-) -> Result<ResolvedSweep, DevError> {
+) -> Result<SweepDecl, DevError> {
     let shaping = shaping_from(profile, profile_name);
     let mut filters = shaping.filters;
     filters.filters.extend(entry_filters(entry));
@@ -1133,7 +1149,7 @@ fn build_resolved_sweep(
     )
     .map_err(|error| DevError::Config(format!("[test.profiles.{profile_name}]: {error}")))?;
 
-    Ok(ResolvedSweep {
+    Ok(SweepDecl {
         label: entry.name.clone(),
         features: FeatureConfig::from_entry(entry),
         build_packages: entry.build_packages.clone(),
@@ -1143,7 +1159,6 @@ fn build_resolved_sweep(
         env,
         rustflags: entry.rustflags.clone(),
         feature_unification: entry.feature_unification,
-        effective_unification: EffectiveUnification::Ambient,
         lane_exec,
         curated: entry.curated,
         profile: entry.profile,
@@ -1163,6 +1178,10 @@ mod tests {
         clippy::too_many_lines
     )]
     use super::*;
+
+    fn plan_decl(declaration: SweepDecl) -> PlannedSweep {
+        PlannedSweep::resolve(declaration, false).unwrap()
+    }
 
     /// Parse the body of a fake `brokkr.toml`-shaped fragment into
     /// `(checks, test_cfg)`. Keeps the test cases readable and avoids
@@ -1224,7 +1243,10 @@ lanes = ["tier1", "serial"]
         );
         // ...while the build shape is identical, which is exactly what
         // clippy (and `brokkr test`) dedupe on.
-        assert_eq!(sweeps[0].build_shape_key(), sweeps[1].build_shape_key());
+        assert_eq!(
+            plan_decl(sweeps[0].clone()).build_shape_key(),
+            plan_decl(sweeps[1].clone()).build_shape_key()
+        );
     }
 
     #[test]
@@ -1246,7 +1268,10 @@ isolation = "process"
         // Execution policy, not build shape: an isolated and a plain sweep
         // of the same entry still dedupe to one clippy run.
         let plain = sweep_from_check_entry(&checks[0]);
-        assert_eq!(plain.build_shape_key(), sweeps[0].build_shape_key());
+        assert_eq!(
+            plan_decl(plain).build_shape_key(),
+            plan_decl(sweeps[0].clone()).build_shape_key()
+        );
     }
 
     #[test]
@@ -1289,24 +1314,24 @@ skip = [{ package = "a", pattern = "slow" }]
         // source and present different lint surfaces - deduping either into
         // the other would lint one build and run the other, which is the
         // whole argument the coverage phase is built on.
-        let base = ResolvedSweep::default();
-        let pkg = ResolvedSweep {
-            effective_unification: EffectiveUnification::Pinned(CargoUnification::Package),
-            ..base.clone()
-        };
-        let ws = ResolvedSweep {
-            effective_unification: EffectiveUnification::Pinned(CargoUnification::Workspace),
-            ..base.clone()
-        };
+        let base = plan_decl(SweepDecl::default());
+        let pkg = plan_decl(SweepDecl {
+            feature_unification: FeatureUnification::Package,
+            ..base.declaration().clone()
+        });
+        let ws = plan_decl(SweepDecl {
+            feature_unification: FeatureUnification::Workspace,
+            ..base.declaration().clone()
+        });
         assert_ne!(pkg.build_shape_key(), ws.build_shape_key());
         assert_ne!(pkg.build_shape_key(), base.build_shape_key());
         // And an unpinned lane is not the same shape as one pinned to
         // cargo's default: `Ambient` defers to the config chain, which is a
         // different promise even where it lands on the same answer.
-        let sel = ResolvedSweep {
-            effective_unification: EffectiveUnification::Pinned(CargoUnification::Selected),
-            ..base.clone()
-        };
+        let sel = plan_decl(SweepDecl {
+            feature_unification: FeatureUnification::Selected,
+            ..base.declaration().clone()
+        });
         assert_ne!(sel.build_shape_key(), base.build_shape_key());
     }
 
@@ -1314,12 +1339,12 @@ skip = [{ package = "a", pattern = "slow" }]
     fn auto_preserves_the_pre_existing_behaviour_in_both_directions() {
         // The compatibility contract: `auto` un-promoted pins nothing at all,
         // which is what every sweep did before this key existed...
-        let auto = ResolvedSweep::default();
+        let auto = SweepDecl::default();
         assert_eq!(
             resolve_unification(&auto, false).unwrap(),
             EffectiveUnification::Ambient
         );
-        assert!(auto.unification_args().is_empty());
+        assert!(plan_decl(auto.clone()).unification_args().is_empty());
         // ...and `auto` on a promotion-eligible parallel sweep still pins
         // workspace, which is what the parallel lane did before it.
         assert_eq!(
@@ -1330,10 +1355,10 @@ skip = [{ package = "a", pattern = "slow" }]
 
     #[test]
     fn explicit_selected_is_honoured_even_on_a_promotion_eligible_sweep() {
-        let sweep = ResolvedSweep {
+        let sweep = SweepDecl {
             label: "lane".into(),
             feature_unification: FeatureUnification::Selected,
-            ..ResolvedSweep::default()
+            ..SweepDecl::default()
         };
         // This was a refusal when the fan-out re-entered cargo per binary -
         // selected mode let a runner resolve a different graph from its
@@ -1354,17 +1379,21 @@ skip = [{ package = "a", pattern = "slow" }]
         // The default must keep cargo's own dir, or every existing tree pays
         // a cold rebuild for a feature it does not use.
         assert_eq!(
-            ResolvedSweep::default().target_location(),
+            plan_decl(SweepDecl::default()).target_location(),
             TargetLocation::Shared
         );
         // A pinned selected/workspace sweep resolves what ambient already
         // resolves in any given repo, so splitting the cache buys nothing.
         for mode in [CargoUnification::Selected, CargoUnification::Workspace] {
             assert_eq!(
-                ResolvedSweep {
-                    effective_unification: EffectiveUnification::Pinned(mode),
-                    ..ResolvedSweep::default()
-                }
+                plan_decl(SweepDecl {
+                    feature_unification: match mode {
+                        CargoUnification::Selected => FeatureUnification::Selected,
+                        CargoUnification::Workspace => FeatureUnification::Workspace,
+                        CargoUnification::Package => FeatureUnification::Package,
+                    },
+                    ..SweepDecl::default()
+                })
                 .target_location(),
                 TargetLocation::Shared,
             );
@@ -1372,10 +1401,10 @@ skip = [{ package = "a", pattern = "slow" }]
         // Package mode isolates even with no rustflags: it resolves a
         // different graph and would otherwise thrash against every ordinary
         // sweep, in both directions, on every run.
-        let pkg = ResolvedSweep {
-            effective_unification: EffectiveUnification::Pinned(CargoUnification::Package),
-            ..ResolvedSweep::default()
-        };
+        let pkg = plan_decl(SweepDecl {
+            feature_unification: FeatureUnification::Package,
+            ..SweepDecl::default()
+        });
         assert_eq!(
             pkg.target_location(),
             TargetLocation::Isolated(IsolatedTargetKey::Unify {
@@ -1391,11 +1420,11 @@ skip = [{ package = "a", pattern = "slow" }]
         // The rustflags-only name is unchanged, so no existing isolated dir
         // is re-derived by this feature.
         let flags = vec!["--cfg".to_owned(), "madsim".to_owned()];
-        let plain = ResolvedSweep {
+        let plain = plan_decl(SweepDecl {
             rustflags: flags.clone(),
-            ..ResolvedSweep::default()
-        };
-        let hash = crate::config::rustflags_target_key(&flags).unwrap();
+            ..SweepDecl::default()
+        });
+        let hash = crate::config::check::rustflags_target_key(&flags).unwrap();
         assert_eq!(
             plain.target_location(),
             TargetLocation::Isolated(IsolatedTargetKey::Rustflags(hash.clone()))
@@ -1406,10 +1435,10 @@ skip = [{ package = "a", pattern = "slow" }]
         );
         // ...and the two inputs compose rather than colliding: a package-mode
         // sweep carrying the same flags gets its own dir, not the plain one.
-        let pkg_with_flags = ResolvedSweep {
+        let pkg_with_flags = plan_decl(SweepDecl {
             rustflags: flags,
-            ..pkg
-        };
+            ..pkg.declaration().clone()
+        });
         assert_eq!(
             pkg_with_flags.target_location(),
             TargetLocation::Isolated(IsolatedTargetKey::Unify {
@@ -1427,11 +1456,12 @@ skip = [{ package = "a", pattern = "slow" }]
 
     #[test]
     fn build_shape_key_tracks_env_not_filters() {
-        let plain = sweep_from_check_entry(&CheckEntry {
+        let plain_decl = sweep_from_check_entry(&CheckEntry {
             name: "default".into(),
             ..Default::default()
         });
-        let mut filtered = plain.clone();
+        let plain = plan_decl(plain_decl.clone());
+        let mut filtered = plain_decl;
         filtered.filters = LaneFilters {
             filters: vec![Filter {
                 kind: FilterKind::Skip,
@@ -1445,12 +1475,16 @@ skip = [{ package = "a", pattern = "slow" }]
             threads: Threads::CargoDefault,
         };
         // Filters and thread policy don't change what cargo builds.
-        assert_eq!(plain.build_shape_key(), filtered.build_shape_key());
+        assert_eq!(
+            plain.build_shape_key(),
+            plan_decl(filtered).build_shape_key()
+        );
 
         // Env does: HIGH_PRECISION=1 on one sweep and not another makes two
         // otherwise-identical sweeps cache-incompatible.
-        let mut env_sweep = plain.clone();
-        env_sweep.env.insert("HIGH_PRECISION".into(), "1".into());
+        let mut declaration = plain.declaration().clone();
+        declaration.env.insert("HIGH_PRECISION".into(), "1".into());
+        let env_sweep = plan_decl(declaration);
         assert_ne!(plain.build_shape_key(), env_sweep.build_shape_key());
     }
 
@@ -1482,15 +1516,18 @@ sweeps = ["timing"]
         let mut dev_entry = checks[0].clone();
         dev_entry.profile = Some(SweepProfile::Dev);
         let dev = sweep_from_check_entry(&dev_entry);
-        assert_ne!(dev.build_shape_key(), resolved[0].build_shape_key());
+        assert_ne!(
+            plan_decl(dev.clone()).build_shape_key(),
+            plan_decl(resolved[0].clone()).build_shape_key()
+        );
 
         // And an unset profile is its own shape too: it means "the command's
         // default", which is not the same declaration as either.
         let mut unset_entry = checks[0].clone();
         unset_entry.profile = None;
         assert_ne!(
-            sweep_from_check_entry(&unset_entry).build_shape_key(),
-            dev.build_shape_key()
+            plan_decl(sweep_from_check_entry(&unset_entry)).build_shape_key(),
+            plan_decl(dev).build_shape_key()
         );
     }
 
@@ -1579,7 +1616,10 @@ sweeps = ["sim-live"]
         let mut plain_entry = checks[0].clone();
         plain_entry.curated = false;
         let plain = sweep_from_check_entry(&plain_entry);
-        assert_eq!(plain.build_shape_key(), resolved[0].build_shape_key());
+        assert_eq!(
+            plan_decl(plain).build_shape_key(),
+            plan_decl(resolved[0].clone()).build_shape_key()
+        );
     }
 
     #[test]
@@ -1979,7 +2019,7 @@ tests = ["cli_x"]
 
     #[test]
     fn libtest_argv_concats_args_and_name_filters() {
-        let s = ResolvedSweep {
+        let s = SweepDecl {
             label: "x".into(),
             filters: LaneFilters {
                 include_ignored: true,

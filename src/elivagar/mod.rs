@@ -3,6 +3,8 @@ use std::path::Path;
 use crate::config;
 use crate::error::DevError;
 
+pub mod archive_store;
+pub(crate) mod artifacts;
 pub mod bench_all;
 pub mod bench_node_store;
 pub mod bench_planetiler;
@@ -14,12 +16,12 @@ pub mod commands;
 pub mod compare_tiles;
 pub mod corpus;
 pub mod diag;
-pub mod dispatch;
 pub mod download_natural_earth;
 pub mod download_ocean;
 pub mod eliv;
 pub mod inspect;
 pub mod ocean_build;
+pub(crate) mod plan;
 pub mod regress;
 pub mod svg;
 pub mod verify;
@@ -53,7 +55,7 @@ impl PipelineOpts {
     /// invocation claims otherwise.
     pub fn push_args(
         &self,
-        tg: &config::TilegenConfig,
+        tg: &config::project_config::elivagar::TilegenConfig,
         args: &mut Vec<String>,
         data_dir: &Path,
     ) -> Result<(), DevError> {
@@ -179,7 +181,7 @@ pub const DEFAULT_TILEGEN: &str = "default";
 pub fn resolve_tilegen<'a>(
     dev_config: &'a config::DevConfig,
     name: &str,
-) -> Result<&'a config::TilegenConfig, DevError> {
+) -> Result<&'a config::project_config::elivagar::TilegenConfig, DevError> {
     let host = config::hostname()?;
     let blocks = dev_config
         .hosts

@@ -10,8 +10,8 @@ use super::harness_shim;
 use super::{
     Ceilings, HungTest, KillCause, ObsEvent, ObservationSink, StreamSource, StreamTap, StrictPlan,
     TestTracker, WATCHDOG_POLL, WallShape, clone_buffer, clone_hung, drain_libtest_json,
-    drain_stderr, drain_to_buffer, join_drains, kill_process_group, spawn_cargo_process_group,
-    spawn_process_group, watchdog_loop,
+    drain_stderr, drain_to_buffer, join_drains, spawn_cargo_process_group, spawn_process_group,
+    watchdog_loop,
 };
 use crate::error::DevError;
 use crate::output::CapturedOutput;
@@ -606,7 +606,7 @@ fn wait_parallel(
                 // covers a request raised without a signal (the watchdog).
                 let interrupted = crate::shutdown::is_shutdown_requested();
                 if cancelled || interrupted {
-                    kill_process_group(cargo_pid).ok();
+                    crate::process::signal_process_group(cargo_pid, libc::SIGKILL).ok();
                     let status = child.wait().map_err(spawn_err)?;
                     if interrupted {
                         return Ok(ParallelWait::Interrupted);
@@ -655,7 +655,7 @@ pub(crate) fn run_listing(
     let pgid = child.id();
     let reaper = crate::shutdown::GroupReaper::register(pgid);
     let (Some(stdout_pipe), Some(stderr_pipe)) = (child.stdout.take(), child.stderr.take()) else {
-        kill_process_group(pgid).ok();
+        crate::process::signal_process_group(pgid, libc::SIGKILL).ok();
         child.wait().ok();
         return Err(DevError::Build(format!("{program} output was not piped")));
     };
@@ -673,7 +673,7 @@ pub(crate) fn run_listing(
             Ok(Some(status)) => break status,
             Ok(None) => {
                 if crate::shutdown::is_shutdown_requested() {
-                    kill_process_group(pgid).ok();
+                    crate::process::signal_process_group(pgid, libc::SIGKILL).ok();
                     child.wait().ok();
                     drop(reaper);
                     cancel.store(true, Ordering::Release);
@@ -682,7 +682,7 @@ pub(crate) fn run_listing(
                     return Err(DevError::Interrupted);
                 }
                 if start.elapsed() >= wall {
-                    kill_process_group(pgid).ok();
+                    crate::process::signal_process_group(pgid, libc::SIGKILL).ok();
                     timed_out = true;
                     break child.wait().map_err(spawn_err)?;
                 }

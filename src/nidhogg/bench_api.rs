@@ -53,14 +53,12 @@ pub fn run(
             // (curl-style HTTP). Different query rows are distinguished
             // by the command column: `api-<query>`.
             command: format!("api-{name}"),
-            mode: None,
             input_file: input_file.map(str::to_owned),
             input_mb,
             cargo_features: None,
             cargo_profile: crate::build::CargoProfile::Release,
             runs,
             cli_args: None,
-            brokkr_args: None,
             metadata: vec![KvPair::int("meta.port", port as i64)],
         };
 

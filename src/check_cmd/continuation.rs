@@ -66,21 +66,21 @@ pub(crate) struct CandidateOut {
     pub(crate) package: String,
     pub(crate) binary: String,
     pub(crate) test: String,
-    pub(crate) outcome: &'static str,
-    pub(crate) detail: Option<&'static str>,
+    pub(crate) outcome: Outcome,
+    pub(crate) detail: Option<Detail>,
     /// The execution's full identity.
     pub(crate) execution: ExecutionId,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub(crate) struct LaneInventoryOut {
-    pub(crate) lane: usize,
+    pub(crate) lane: LaneIdx,
     pub(crate) label: String,
     pub(crate) kind: LaneKind,
     /// `complete`, `partial` (some of its binaries answer no libtest
     /// listing), `unavailable`, `skipped`, or `doctests` (a doctest-only lane
     /// has no enumerable inventory, by nature).
-    pub(crate) availability: &'static str,
+    pub(crate) availability: LaneAvailability,
     pub(crate) reason: Option<String>,
     pub(crate) expected_executions: usize,
 }
@@ -99,7 +99,49 @@ pub(crate) struct ReachedGroup {
 pub(crate) struct SuspectOut {
     pub(crate) lane: String,
     pub(crate) test: String,
-    pub(crate) cause: &'static str,
+    pub(crate) cause: TerminationCause,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum LaneAvailability {
+    Complete,
+    Partial,
+    Unavailable,
+    Skipped,
+    Doctests,
+}
+
+impl std::fmt::Display for LaneAvailability {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let value = match self {
+            Self::Complete => "complete",
+            Self::Partial => "partial",
+            Self::Unavailable => "unavailable",
+            Self::Skipped => "skipped",
+            Self::Doctests => "doctests",
+        };
+        f.write_str(value)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum InventoryAvailability {
+    Complete,
+    Partial,
+    Unavailable,
+}
+
+impl std::fmt::Display for InventoryAvailability {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let value = match self {
+            Self::Complete => "complete",
+            Self::Partial => "partial",
+            Self::Unavailable => "unavailable",
+        };
+        f.write_str(value)
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -108,7 +150,7 @@ pub(crate) struct InventoryOut {
     pub(crate) scope: &'static str,
     /// `complete` (every enumerable lane has an inventory and the plan is
     /// whole), `partial`, or `unavailable` (no lane has one).
-    pub(crate) availability: &'static str,
+    pub(crate) availability: InventoryAvailability,
     pub(crate) plan_complete: bool,
     pub(crate) journal_closed: bool,
     pub(crate) expected_executions: usize,
@@ -138,27 +180,28 @@ fn lane_inventory(plan: &AccountingPlan, recon: &Reconciliation) -> Vec<LaneInve
     plan.lanes
         .iter()
         .map(|l| {
-            let expected = recon.accounted.iter().filter(|a| a.id.lane.get() == l.lane).count();
-            let (availability, reason) = if let Some(why) = recon.superseded.get(&l.lane) {
-                ("unavailable", Some(format!("the plan stopped describing this lane: {why}")))
-            } else if let Some(why) = &l.skipped {
-                ("skipped", Some(why.clone()))
-            } else if let Some(why) = &l.unavailable {
-                ("unavailable", Some(why.clone()))
-            } else if l.kind == LaneKind::DocOnly {
-                ("doctests", Some("doctests cannot be enumerated".to_owned()))
-            } else if !l.unlisted.is_empty() {
-                (
-                    "partial",
-                    Some(format!(
-                        "{} cannot be enumerated, so the tests in {} are outside the inventory: {}",
-                        output::count(l.unlisted.len(), "binary"),
-                        if l.unlisted.len() == 1 { "it" } else { "them" },
-                        l.unlisted.iter().map(|(id, why)| format!("{id} ({why})")).collect::<Vec<_>>().join("; ")
-                    )),
-                )
+            let expected = recon.accounted.iter().filter(|a| a.id.lane == l.lane).count();
+            let (availability, reason) = if let Some(why) = recon.superseded.get(&l.lane.get()) {
+                (LaneAvailability::Unavailable, Some(format!("the plan stopped describing this lane: {why}")))
             } else {
-                ("complete", None)
+                match &l.inventory {
+                    Inventory::Skipped(why) => (LaneAvailability::Skipped, Some(why.clone())),
+                    Inventory::Unavailable(why) => (LaneAvailability::Unavailable, Some(why.to_string())),
+                    Inventory::DocTests => (
+                        LaneAvailability::Doctests,
+                        Some("doctests cannot be enumerated".to_owned()),
+                    ),
+                    Inventory::Prepared { unlisted, .. } if !unlisted.is_empty() => (
+                        LaneAvailability::Partial,
+                        Some(format!(
+                            "{} cannot be enumerated, so the tests in {} are outside the inventory: {}",
+                            output::count(unlisted.len(), "binary"),
+                            if unlisted.len() == 1 { "it" } else { "them" },
+                            unlisted.iter().map(|(id, why)| format!("{id} ({why})")).collect::<Vec<_>>().join("; ")
+                        )),
+                    ),
+                    Inventory::Prepared { .. } => (LaneAvailability::Complete, None),
+                }
             };
             LaneInventoryOut {
                 lane: l.lane,
@@ -181,21 +224,24 @@ fn suspects(plan: &AccountingPlan, recon: &Reconciliation, records: &[JournalRec
     let blind: BTreeSet<usize> = plan
         .lanes
         .iter()
-        .filter(|l| l.unavailable.is_some())
-        .map(|l| l.lane)
+        .filter(|l| l.inventory.is_unavailable())
+        .map(|l| l.lane.get())
         .chain(recon.superseded.keys().copied())
         .collect();
     let mut out: Vec<SuspectOut> = Vec::new();
     for r in records {
         let JournalRecord::Terminated(t) = r else { continue };
         let (Some(lane), Some(test)) = (t.lane, &t.test) else { continue };
+        let lane_idx = LaneIdx::new(lane);
         let partial_unattributed = t.charged.is_none()
-            && plan.lane(lane).is_some_and(|l| !l.unlisted.is_empty());
+            && plan.lane(lane_idx).is_some_and(|l| !l.inventory.unlisted().is_empty());
         if !blind.contains(&lane) && !partial_unattributed {
             continue;
         }
-        let label = plan.lane(lane).map_or_else(|| format!("lane {lane}"), |l| l.label.clone());
-        let s = SuspectOut { lane: label, test: test.clone(), cause: t.cause.as_str() };
+        let label = plan
+            .lane(lane_idx)
+            .map_or_else(|| format!("lane {lane}"), |l| l.label.clone());
+        let s = SuspectOut { lane: label, test: test.clone(), cause: t.cause };
         if !out.iter().any(|o| o.lane == s.lane && o.test == s.test) {
             out.push(s);
         }
@@ -218,31 +264,38 @@ pub(crate) fn build_continuation(
     let lanes = lane_inventory(plan, recon);
     let enumerable: Vec<&LaneInventoryOut> = lanes
         .iter()
-        .filter(|l| matches!(l.availability, "complete" | "partial" | "unavailable"))
+        .filter(|l| {
+            matches!(
+                l.availability,
+                LaneAvailability::Complete | LaneAvailability::Partial | LaneAvailability::Unavailable
+            )
+        })
         .collect();
-    let available = enumerable.iter().filter(|l| l.availability != "unavailable").count();
+    let available = enumerable.iter().filter(|l| l.availability != LaneAvailability::Unavailable).count();
     let availability = if enumerable.is_empty() || available == 0 {
-        "unavailable"
-    } else if enumerable.iter().all(|l| l.availability == "complete")
+        InventoryAvailability::Unavailable
+    } else if enumerable.iter().all(|l| l.availability == LaneAvailability::Complete)
         && plan.complete
         && recon.superseded.is_empty()
     {
-        "complete"
+        InventoryAvailability::Complete
     } else {
-        "partial"
+        InventoryAvailability::Partial
     };
 
-    let label_of = |lane: usize| plan.lane(lane).map_or_else(|| format!("lane {lane}"), |l| l.label.clone());
+    let label_of = |lane: usize| {
+        plan.lane(LaneIdx::new(lane)).map_or_else(|| format!("lane {lane}"), |l| l.label.clone())
+    };
     let candidates: Vec<CandidateOut> = cands
         .iter()
         .map(|c| CandidateOut {
             lane: label_of(c.id.lane.get()),
-            resolution: c.id.pair.resolution.clone(),
+            resolution: c.id.pair.resolution.as_option().map(str::to_owned),
             package: c.id.pair.unit.package.clone(),
             binary: format!("{}:{}", c.id.pair.unit.kind, c.id.pair.unit.target),
-            test: c.id.pair.test.clone(),
-            outcome: c.outcome.as_str(),
-            detail: c.detail.map(Detail::as_str),
+            test: c.id.pair.test.as_str().to_owned(),
+            outcome: c.outcome,
+            detail: c.detail,
             execution: c.id.clone(),
         })
         .collect();
@@ -269,7 +322,7 @@ pub(crate) fn build_continuation(
             .filter(|a| a.outcome != Outcome::Unobserved)
             .map(|a| ReachedGroup {
                 lane: a.id.lane,
-                resolution: Resolution::from_option(a.id.pair.resolution.as_deref()),
+                resolution: a.id.pair.resolution.clone(),
                 unit: a.id.pair.unit.clone(),
             })
             .collect(),
@@ -305,7 +358,7 @@ pub(crate) fn render_continuation(report: &ContinuationReport) -> Vec<String> {
         let seen = members.iter().any(|c| {
             report.reached.iter().any(|group| {
                 group.lane == c.execution.lane
-                    && group.resolution.as_option() == c.execution.pair.resolution.as_deref()
+                    && group.resolution == c.execution.pair.resolution
                     && group.unit == c.execution.pair.unit
             })
         });
@@ -325,15 +378,19 @@ pub(crate) fn render_continuation(report: &ContinuationReport) -> Vec<String> {
         }
         out.push(if seen { key.clone() } else { format!("{key} (not reached)") });
         for c in named {
-            let detail = c.detail.map_or_else(String::new, |d| format!("  {}", d.replace('_', " ")));
-            out.push(format!("  {:<11}  {}{detail}", c.outcome, c.test));
+            let detail = c
+                .detail
+                .map_or_else(String::new, |d| format!("  {}", d.as_str().replace('_', " ")));
+            out.push(format!("  {:<11}  {}{detail}", c.outcome.as_str(), c.test));
         }
         if !casualties.is_empty() {
             out.push(format!("  not reached: {}", output::count(casualties.len(), "test")));
         }
     }
 
-    for lane in report.inventory.lanes.iter().filter(|l| matches!(l.availability, "unavailable" | "partial")) {
+    for lane in report.inventory.lanes.iter().filter(|l| {
+        matches!(l.availability, LaneAvailability::Unavailable | LaneAvailability::Partial)
+    }) {
         out.push(String::new());
         out.push(format!(
             "inventory {} for {}: {}",
@@ -345,7 +402,7 @@ pub(crate) fn render_continuation(report: &ContinuationReport) -> Vec<String> {
             out.push(format!(
                 "  suspect      {}  {} (named by a shared stream; its binary is unknown)",
                 s.test,
-                s.cause.replace('_', " ")
+                s.cause.as_str().replace('_', " ")
             ));
         }
     }
@@ -363,7 +420,7 @@ pub(crate) fn render_continuation(report: &ContinuationReport) -> Vec<String> {
 /// An execution that never started only because an earlier failure stopped
 /// the run (fail fast), as opposed to one a kill, hang or interrupt left.
 fn is_fail_fast_casualty(c: &CandidateOut) -> bool {
-    c.outcome == Outcome::Unobserved.as_str() && c.detail == Some(Detail::FailFast.as_str())
+    c.outcome == Outcome::Unobserved && c.detail == Some(Detail::FailFast)
 }
 
 #[cfg(test)]
@@ -382,7 +439,12 @@ mod continuation_tests {
     }
 
     fn pair(u: &BinaryUnit, test: &str) -> PairId {
-        PairId { shape: "s".into(), resolution: None, unit: u.clone(), test: test.into() }
+        PairId {
+            shape: "s".into(),
+            resolution: Resolution::Combined,
+            unit: u.clone(),
+            test: test.into(),
+        }
     }
 
     fn obs(lane: usize, stream: u64, u: &BinaryUnit, event: ObsEvent) -> JournalRecord {
@@ -395,10 +457,20 @@ mod continuation_tests {
     }
 
     fn lane(idx: usize, label: &str, kind: LaneKind, tests: &[(&BinaryUnit, &str)]) -> LaneRecord {
+        let inventory = if kind == LaneKind::DocOnly {
+            Inventory::DocTests
+        } else {
+            Inventory::Prepared {
+                executions: tests.iter().map(|(u, t)| pair(u, t)).collect(),
+                ignored_selected: Vec::new(),
+                outside_claim: Vec::new(),
+                artifacts: Vec::new(),
+                unlisted: Vec::new(),
+            }
+        };
         LaneRecord {
-            prepared: true,
-            executions: tests.iter().map(|(u, t)| pair(u, t)).collect(),
-            ..LaneRecord::empty(idx, label.into(), kind, "s".into())
+            inventory,
+            ..LaneRecord::empty(LaneIdx::new(idx), label.into(), kind, "s".into())
         }
     }
 
@@ -441,11 +513,11 @@ mod continuation_tests {
         let recon = reconcile(&p, &records, false, Vec::new());
         let report = build_continuation(&p, &recon, &records).unwrap();
         assert_eq!(report.candidates.len(), 3);
-        assert_eq!(report.candidates[0].outcome, "interrupted");
-        assert_eq!(report.candidates[0].detail, Some("phase_deadline"));
-        assert_eq!(report.candidates[1].outcome, "unobserved");
+        assert_eq!(report.candidates[0].outcome, Outcome::Interrupted);
+        assert_eq!(report.candidates[0].detail, Some(Detail::PhaseDeadline));
+        assert_eq!(report.candidates[1].outcome, Outcome::Unobserved);
         assert!(!report.certifies);
-        assert_eq!(report.inventory.availability, "complete");
+        assert_eq!(report.inventory.availability, InventoryAvailability::Complete);
 
         let text = render_continuation(&report).join("\n");
         assert!(text.contains("diagnostic continuation: 3 unresolved executions"), "{text}");
@@ -460,8 +532,8 @@ mod continuation_tests {
     /// shared stream blamed is mentioned.
     #[test]
     fn a_lane_with_no_attribution_reports_unavailable_instead_of_inventing_names() {
-        let mut l = LaneRecord::empty(0, "threaded".into(), LaneKind::Serial, "s".into());
-        l.unavailable = Some("cargo-mediated parallelism shares one stream".into());
+        let mut l = LaneRecord::empty(LaneIdx::new(0), "threaded".into(), LaneKind::Serial, "s".into());
+        l.inventory = Inventory::Unavailable(UnavailableReason::CargoThreaded);
         let p = plan_of(vec![l]);
         let records = vec![JournalRecord::Terminated(Termination {
             scope: TerminationScope::Lane,
@@ -474,7 +546,7 @@ mod continuation_tests {
         let recon = reconcile(&p, &records, false, Vec::new());
         let report = build_continuation(&p, &recon, &records).unwrap();
         assert!(report.candidates.is_empty());
-        assert_eq!(report.inventory.availability, "unavailable");
+        assert_eq!(report.inventory.availability, InventoryAvailability::Unavailable);
         assert_eq!(report.inventory.suspects.len(), 1);
         assert_eq!(report.inventory.suspects[0].test, "suite::hung");
         let text = render_continuation(&report).join("\n");
@@ -488,8 +560,14 @@ mod continuation_tests {
     /// stream names a suspect, but cannot identify a binary or an execution.
     #[test]
     fn a_partial_lane_reports_unattributed_termination_suspects() {
-        let mut l = LaneRecord::empty(0, "default".into(), LaneKind::Serial, "s".into());
-        l.unlisted = vec![("crate-a::custom".into(), "no libtest listing".into())];
+        let mut l = LaneRecord::empty(LaneIdx::new(0), "default".into(), LaneKind::Serial, "s".into());
+        l.inventory = Inventory::Prepared {
+            executions: Vec::new(),
+            ignored_selected: Vec::new(),
+            outside_claim: Vec::new(),
+            artifacts: Vec::new(),
+            unlisted: vec![("crate-a::custom".into(), "no libtest listing".into())],
+        };
         let p = plan_of(vec![l]);
         let records = vec![JournalRecord::Terminated(Termination {
             scope: TerminationScope::Stream,
@@ -502,7 +580,7 @@ mod continuation_tests {
         let recon = reconcile(&p, &records, false, Vec::new());
         let report = build_continuation(&p, &recon, &records).unwrap();
         assert!(report.candidates.is_empty());
-        assert_eq!(report.inventory.lanes[0].availability, "partial");
+        assert_eq!(report.inventory.lanes[0].availability, LaneAvailability::Partial);
         assert_eq!(report.inventory.suspects.len(), 1);
         assert_eq!(report.inventory.suspects[0].test, "suite::hung");
         let text = render_continuation(&report).join("\n");
@@ -515,7 +593,9 @@ mod continuation_tests {
     fn a_partial_lane_does_not_repeat_a_charged_termination_as_a_suspect() {
         let u = unit("integration");
         let mut l = lane(0, "default", LaneKind::Serial, &[(&u, "suite::hung")]);
-        l.unlisted = vec![("crate-a::custom".into(), "no libtest listing".into())];
+        if let Inventory::Prepared { unlisted, .. } = &mut l.inventory {
+            *unlisted = vec![("crate-a::custom".into(), "no libtest listing".into())];
+        }
         let p = plan_of(vec![l]);
         let records = vec![JournalRecord::Terminated(Termination {
             scope: TerminationScope::Stream,
@@ -605,9 +685,9 @@ mod continuation_tests {
         assert_eq!(recon.accounted.len(), 1, "the superseded lane expects nothing");
         let report = build_continuation(&p, &recon, &records).unwrap();
         let second = report.inventory.lanes.iter().find(|l| l.label == "second").unwrap();
-        assert_eq!(second.availability, "unavailable");
+        assert_eq!(second.availability, LaneAvailability::Unavailable);
         assert!(second.reason.as_deref().unwrap().contains("artifacts changed"));
-        assert_eq!(report.inventory.availability, "partial");
+        assert_eq!(report.inventory.availability, InventoryAvailability::Partial);
     }
 
     /// The `--json` shape: the source run id, an explicit statement that it
@@ -647,12 +727,14 @@ mod continuation_tests {
     fn an_unenumerable_binary_makes_its_lane_partial_and_says_so() {
         let u = unit("integration");
         let mut l = lane(0, "default", LaneKind::Serial, &[(&u, "a")]);
-        l.unlisted = vec![("crate-a::custom".into(), "no libtest listing".into())];
+        if let Inventory::Prepared { unlisted, .. } = &mut l.inventory {
+            *unlisted = vec![("crate-a::custom".into(), "no libtest listing".into())];
+        }
         let p = plan_of(vec![l]);
         let records = vec![deadline()];
         let recon = reconcile(&p, &records, false, Vec::new());
         let report = build_continuation(&p, &recon, &records).unwrap();
-        assert_eq!(report.inventory.availability, "partial");
+        assert_eq!(report.inventory.availability, InventoryAvailability::Partial);
         let text = render_continuation(&report).join("\n");
         assert!(text.contains("inventory partial for default"), "{text}");
         assert!(text.contains("crate-a::custom (no libtest listing)"), "{text}");

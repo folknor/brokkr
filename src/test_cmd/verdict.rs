@@ -325,7 +325,7 @@ pub(super) fn run_one(
     let stderr_lines: Vec<&str> = stderr_text.lines().collect();
     // stderr matters: panics print there, and under --nocapture it's the
     // only place the FAIL footer can recover the message/location from.
-    let parsed = cargo_filter::parse_test_output_with_stderr(&stdout_lines, &stderr_lines);
+    let parsed = test_runner::parse_test_output_with_stderr(&stdout_lines, &stderr_lines);
 
     let has_test_result = stdout_lines.iter().any(|l| l.starts_with("test result:"));
     // Only cargo compiles; a directly run harness printing `error: ...` is a
@@ -451,7 +451,7 @@ pub(super) fn run_one(
     //
     // Fail closed. The counts are whatever was observed, so they still go in the
     // message - a partial report is useful, it just is not a pass.
-    if let cargo_filter::Completeness::Incomplete { reason } = &parsed.completeness {
+    if let test_runner::Completeness::Incomplete { reason } = &parsed.completeness {
         flush_sink(sink, false);
         return Ok(report_incomplete(tag, target, &wall, reason, &parsed));
     }
@@ -469,7 +469,7 @@ pub(super) fn run_one(
 /// the name must also be one it listed. With no listing (a doc-only run) the
 /// verdict alone decides.
 pub(super) fn failure_kind(
-    f: &cargo_filter::ParsedTestFailure,
+    f: &test_runner::ParsedTestFailure,
     listed: Option<&[String]>,
 ) -> FailureKind {
     let selectable = listed.is_none_or(|l| l.contains(&f.name));
@@ -550,9 +550,9 @@ pub(super) fn disagrees_with_discovery(
     target: &str,
     wall: &str,
     want: usize,
-    parsed: &cargo_filter::ParsedTestResults,
+    parsed: &test_runner::ParsedTestResults,
 ) -> Option<RunReport> {
-    if let cargo_filter::Completeness::Incomplete { reason } = &parsed.completeness {
+    if let test_runner::Completeness::Incomplete { reason } = &parsed.completeness {
         return Some(report_incomplete(tag, target, wall, reason, parsed));
     }
     let got = parsed.accounted();
@@ -652,7 +652,7 @@ pub(super) fn report_incomplete(
     target: &str,
     wall: &str,
     reason: &str,
-    parsed: &cargo_filter::ParsedTestResults,
+    parsed: &test_runner::ParsedTestResults,
 ) -> RunReport {
     println!(
         "[test]    FAIL {tag} ({wall}) - the test stream did not finish reporting: {reason}. \

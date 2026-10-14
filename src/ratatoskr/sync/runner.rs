@@ -7,7 +7,8 @@ use std::time::Duration;
 use serde::Serialize;
 
 use crate::artefacts::ArtefactDir;
-use crate::config::{DevConfig, HarnessConfig, RatatoskrConfig};
+use crate::config::HarnessConfig;
+use crate::config::project_config::ratatoskr::RatatoskrConfig;
 use crate::error::DevError;
 use crate::git;
 use crate::lockfile;
@@ -31,15 +32,8 @@ pub(super) const SYNC_ARTEFACT_PARENT: &str = ".brokkr/ratatoskr/sync";
 /// cohort fails up front instead of once per script.
 pub(super) fn validate_sync_config<'a>(
     project_root: &Path,
-    dev_config: &'a DevConfig,
+    cfg: &'a RatatoskrConfig,
 ) -> Result<(&'a RatatoskrConfig, &'a HarnessConfig, PathBuf, PathBuf), DevError> {
-    let cfg = dev_config.ratatoskr.as_ref().ok_or_else(|| {
-        DevError::Config(
-            "sync: no [ratatoskr] section in brokkr.toml. \
-             Required to locate sæhrimnir and the harness binary."
-                .into(),
-        )
-    })?;
     let harness_cfg = cfg.harness.as_ref().ok_or_else(|| {
         DevError::Config(
             "sync: no [ratatoskr.harness] section in brokkr.toml. \

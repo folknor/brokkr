@@ -1,18 +1,20 @@
 //! The `[mogwai.targets.*]` registry: a name -> a cargo example plus features.
 
 use crate::build::BuildConfig;
-use crate::config::{DevConfig, MogwaiConfig};
+use crate::config::project_config::ProjectConfig;
+use crate::config::project_config::mogwai::MogwaiConfig;
 use crate::error::DevError;
 
-/// The `[mogwai]` section, or a message saying how to add it.
-pub(crate) fn config(dev_config: &DevConfig) -> Result<&MogwaiConfig, DevError> {
-    dev_config.mogwai.as_ref().ok_or_else(|| {
-        DevError::Config(
-            "no [mogwai] section in brokkr.toml\n  add:\n\n  [mogwai]\n  \
-             package = \"mogwai-cli\"\n  bin = \"mogwai\""
-                .to_owned(),
-        )
-    })
+/// The `[mogwai]` section. Load requires it in a mogwai project (its
+/// missing-section error says what to write), so the only refusal left here
+/// is a project that is not mogwai.
+pub(crate) fn config(project_config: &ProjectConfig) -> Result<&MogwaiConfig, DevError> {
+    match project_config {
+        ProjectConfig::Mogwai(cfg) => Ok(cfg),
+        _ => Err(DevError::Config(
+            "`brokkr mogwai` needs a mogwai project (`project = \"mogwai\"`)".to_owned(),
+        )),
+    }
 }
 
 /// What to build for this invocation.
@@ -143,7 +145,7 @@ mod tests {
         crate::test_scratch::scratch("mogwai-targets", test_name)
     }
 
-    /// Build a `DevConfig` from `toml_src`, with `brokkr.toml` written into
+    /// Load the project config from `toml_src`, with `brokkr.toml` written into
     /// the caller's OWN scratch dir.
     ///
     /// Takes the dir rather than allocating one: a helper that allocated its
@@ -151,9 +153,9 @@ mod tests {
     /// caller. Writing into the caller's root also matches how the config is
     /// really found - `project_root` and the directory holding `brokkr.toml`
     /// are the same place in every non-test path.
-    fn config_with(dir: &Path, toml_src: &str) -> DevConfig {
+    fn config_with(dir: &Path, toml_src: &str) -> ProjectConfig {
         fs::write(dir.join("brokkr.toml"), toml_src).unwrap();
-        crate::config::load(dir).unwrap().1
+        crate::config::load(dir).unwrap().2
     }
 
     #[test]

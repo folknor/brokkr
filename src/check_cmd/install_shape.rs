@@ -69,7 +69,7 @@
 /// phase and a package-mode test lane must mean the same thing by "the install
 /// shape", or the lane's green would be evidence about a different build.
 fn package_unification_args() -> [String; 3] {
-    crate::config::CargoUnification::Package.cargo_args()
+    crate::config::check::CargoUnification::Package.cargo_args()
 }
 
 /// Did cargo reject the unification flags themselves, rather than fail to
@@ -371,7 +371,7 @@ fn probe_missing_bin(
 }
 
 /// Render one invocation's rustc errors, one line each.
-fn report_errors(package: &str, errors: &[&cargo_json::DiagnosticEvent]) {
+fn report_errors(package: &str, errors: &[&Diagnostic]) {
     let mut msg = format!(
         "install-feature {package}: {}\n",
         output::count(errors.len(), "error")

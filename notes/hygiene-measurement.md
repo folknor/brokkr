@@ -45,6 +45,18 @@ Reported by: measurement-storage, small-benches.
 
 `db` exports `generate_uuid`, `short_uuid` and `RunId::short()`, and results, sidecar, litehtml and sluggrs use them. Residue: `harness_mod/types_run.rs` still generates dirty-run uuids inline from `/dev/urandom`, and `ratatoskr/gate_store.rs` has its own UUIDv4 generator. A textlint ban on `/dev/urandom` must exempt the lock-token code, which needs randomness that is not a uuid.
 
+## MEA-023 - Hotpath v22 regressions: legacy columns and unknown units
+
+Reported by: the wave-8 reviewer.
+
+The typed hotpath tables (results schema v22) changed two things beyond the design. New writes no longer fill the legacy text columns, so an older brokkr reading a v22 database shows blank hotpath metrics. And `Quantity::parse` accepts only `ns/us/µs/ms/s`, `B/KB/MB/GB` and `%`: any other unit the hotpath crate emits (`KiB`, a compound duration) is silently dropped on write and on legacy read, where the old code kept the display string. Check the accepted units against the hotpath crate's formatter, and keep an unparsed value as its display text rather than dropping it.
+
+## MEA-024 - The runner lost pbfhogg's dry-run detail and bench announce line
+
+Reported by: the wave-8 reviewer.
+
+The shared command-plan runner prints only `<id> args: ...` and `ok` for a dry run; the old pbfhogg dispatcher printed the resolved `pbf:`, `osc:`, OSC range, `pbf_b:` and `bbox:` lines and validated both the bench and hotpath argv builders. pbfhogg bench's single-command path also lost its `<cmd> (N MB), R run(s)` announce line (only the suite's `run_wallclock_core` still prints it). A `describe` hook on `PlannedCommand` would restore both for every project. Separately, the db tests still build full `RunRow` literals by hand; a `RunRow` test fixture builder was proposed alongside the session unification and not done.
+
 ## MEA-005 - Small store helpers still copied
 
 Reported by: measurement-storage, piners, ratatoskr.

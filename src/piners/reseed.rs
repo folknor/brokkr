@@ -52,7 +52,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use crate::config::PinersConfig;
+use crate::config::project_config::piners::PinersConfig;
 use crate::error::DevError;
 use crate::output;
 use crate::piners::cmd::CorpusArgs;
@@ -435,7 +435,9 @@ fn stamp_file(
     crate::piners::lfs::ensure_materialized(&abs).map_err(at)?;
     Ok(Some(FilePin {
         path: rel,
-        xxh128: preflight::compute_xxh128(&abs).map_err(at)?,
+        xxh128: preflight::compute_file_digest(&abs)
+            .map(|digest| digest.to_string())
+            .map_err(at)?,
     }))
 }
 
@@ -470,7 +472,9 @@ fn restamp_feeds(
             let origin = format!("feed group '{name}' ({role})");
             let at = |e| crate::piners::registry::with_origin(e, &origin, &abs);
             crate::piners::lfs::ensure_materialized(&abs).map_err(at)?;
-            pin.xxh128 = preflight::compute_xxh128(&abs).map_err(at)?;
+            pin.xxh128 = preflight::compute_file_digest(&abs)
+                .map(|digest| digest.to_string())
+                .map_err(at)?;
         }
         out.insert(name.clone(), stamped);
     }
@@ -500,7 +504,11 @@ fn restamp_harness_files(
             name.clone(),
             HarnessFile {
                 path: file.path.clone(),
-                xxh128: Some(preflight::compute_xxh128(&abs).map_err(at)?),
+                xxh128: Some(
+                    preflight::compute_file_digest(&abs)
+                        .map(|digest| digest.to_string())
+                        .map_err(at)?,
+                ),
             },
         );
     }

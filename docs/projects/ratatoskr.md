@@ -24,9 +24,11 @@ intentionally outside the everyday `brokkr check` sweep matrix, so adding
 an orchestration command never widens the per-crate feature graph that
 `brokkr check` and `brokkr check -p <crate>` walk.
 
-See `RatatoskrConfig` / `HarnessConfig` rustdoc in `src/config.rs` for
-the fields. The orchestration commands accept `--debug` / `--release`
-(mutually exclusive) to override the toml on a per-invocation basis.
+See `RatatoskrConfig` rustdoc in
+`src/config_parts/project_config/ratatoskr.rs` and `HarnessConfig` in
+`src/config.rs` for the fields. The orchestration commands accept `--debug` /
+`--release` (mutually exclusive) to override the toml on a per-invocation
+basis.
 
 A stale `[ratatoskr.harness].sweep` field from the pre-decoupling shape
 is rejected at parse time with a migration message: drop the matching

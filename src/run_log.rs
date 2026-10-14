@@ -90,7 +90,7 @@ impl Drop for RunLog {
 /// [`RUN_LOGS_KEPT`] remain. Best-effort: a log that cannot be opened costs the
 /// record, never the run.
 fn open_run_log(state_root: &Path, kind: &str) {
-    let dir = state_root.join(".brokkr").join("check-logs");
+    let dir = crate::clean::layout::ProjectState::new(state_root).check_logs_dir();
     if std::fs::create_dir_all(&dir).is_err() {
         return;
     }

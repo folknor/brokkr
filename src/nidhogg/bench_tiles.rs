@@ -132,14 +132,12 @@ pub fn run(
 
     let config = BenchConfig {
         command: "tiles".into(),
-        mode: None,
         input_file: Some(tiles_file.to_owned()),
         input_mb: Some(tiles_mb),
         cargo_features: None,
         cargo_profile: crate::build::CargoProfile::Release,
         runs,
         cli_args: None,
-        brokkr_args: None,
         metadata,
     };
 
@@ -286,7 +284,7 @@ fn run_lifecycle(
     output::bench_msg("sending SIGTERM");
     let pid = child.id();
     // Single-PID SIGTERM (server shares brokkr's PG, no isolation).
-    crate::ratatoskr::process::send_signal(pid, libc::SIGTERM).ok();
+    crate::process::signal_pid(pid, libc::SIGTERM).ok();
 
     // 6. Wait for process exit, then join reader to get remaining stderr.
     let status = child.wait().map_err(|error| DevError::Spawn {

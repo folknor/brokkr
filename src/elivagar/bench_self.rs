@@ -32,7 +32,7 @@ pub fn run(
     scratch_dir: &Path,
     project_root: &Path,
     skip_to: Option<&str>,
-    tilegen: &crate::config::TilegenConfig,
+    tilegen: &crate::config::project_config::elivagar::TilegenConfig,
     opts: &super::PipelineOpts,
 ) -> Result<(), DevError> {
     let pbf_str = pbf_path
@@ -58,7 +58,6 @@ pub fn run(
     // cli_args verbatim, and `brokkr results --grep` selects on it.
     let config = BenchConfig {
         command: command.id().into(),
-        mode: None,
         input_file: Some(basename),
         input_mb: Some(file_mb),
         cargo_features: None,
@@ -68,7 +67,6 @@ pub fn run(
             &binary.display().to_string(),
             &arg_refs,
         )),
-        brokkr_args: None,
         metadata: command.metadata(),
     };
 

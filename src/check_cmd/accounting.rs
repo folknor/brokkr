@@ -57,9 +57,9 @@ mod accounting_tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
-    use crate::profile::ResolvedSweep;
+    use crate::profile::{PlannedSweep, SweepDecl};
     use crate::test_runner::{hash_file, ObsEvent, StreamEnd, TestResult};
-    use super::super::test_binary_for_tests;
+    use super::super::{test_binary_for_tests, Resolution};
 
     fn unit(package: &str, kind: &str, target: &str) -> BinaryUnit {
         BinaryUnit {
@@ -71,15 +71,29 @@ mod accounting_tests {
     }
 
     fn pair(u: &BinaryUnit, test: &str) -> PairId {
-        PairId { shape: "s".into(), resolution: None, unit: u.clone(), test: test.into() }
+        PairId {
+            shape: "s".into(),
+            resolution: Resolution::Combined,
+            unit: u.clone(),
+            test: test.into(),
+        }
     }
 
     fn lane(idx: usize, executions: Vec<PairId>) -> LaneRecord {
-        LaneRecord {
-            prepared: true,
+        let mut lane = LaneRecord::empty(
+            LaneIdx::new(idx),
+            format!("lane{idx}"),
+            LaneKind::Parallel,
+            "s".into(),
+        );
+        lane.inventory = Inventory::Prepared {
             executions,
-            ..LaneRecord::empty(idx, format!("lane{idx}"), LaneKind::Parallel, "s".into())
-        }
+            ignored_selected: Vec::new(),
+            outside_claim: Vec::new(),
+            artifacts: Vec::new(),
+            unlisted: Vec::new(),
+        };
+        lane
     }
 
     fn plan(lanes: Vec<LaneRecord>) -> AccountingPlan {
@@ -107,7 +121,7 @@ mod accounting_tests {
         let a = r
             .accounted
             .iter()
-            .find(|a| a.id.lane.get() == lane && a.id.pair.test == test)
+            .find(|a| a.id.lane.get() == lane && a.id.pair.test.as_str() == test)
             .unwrap();
         (a.outcome, a.detail)
     }
@@ -282,7 +296,9 @@ mod accounting_tests {
     fn an_ignored_selected_test_reporting_ignored_is_expected() {
         let u = unit("core", "lib", "core");
         let mut l = lane(0, vec![pair(&u, "a")]);
-        l.ignored_selected = vec![pair(&u, "slow_manual")];
+        if let Inventory::Prepared { ignored_selected, .. } = &mut l.inventory {
+            *ignored_selected = vec![pair(&u, "slow_manual")];
+        }
         let p = plan(vec![l]);
         let mut records = vec![obs(0, 1, &u, ObsEvent::SuiteStarted { test_count: 2 })];
         records.push(obs(0, 1, &u, started("a")));
@@ -302,7 +318,9 @@ mod accounting_tests {
     fn a_benchmark_in_test_mode_is_outside_the_claim() {
         let u = unit("core", "lib", "core");
         let mut l = lane(0, vec![pair(&u, "a")]);
-        l.outside_claim = vec![pair(&u, "bench_parse")];
+        if let Inventory::Prepared { outside_claim, .. } = &mut l.inventory {
+            *outside_claim = vec![pair(&u, "bench_parse")];
+        }
         let p = plan(vec![l]);
         let mut records = clean_run(0, 1, &u, &["a", "bench_parse"]);
         // The suite's own tally counts the bench as passed, as libtest does.
@@ -564,19 +582,14 @@ mod accounting_tests {
     #[test]
     fn a_planned_artifact_rebuilt_in_place_is_drift() {
         let u = unit("core", "lib", "core");
-        let planned = vec![PlannedArtifact {
-            resolution: None,
-            unit: u,
-            executable: "/t/debug/deps/core-1".into(),
-            hash: "aaaa".into(),
-        }];
-        let same = vec![(None, "/t/debug/deps/core-1".to_owned(), "aaaa".to_owned())];
+        let planned = vec![PlannedArtifact::new(None, u, "/t/debug/deps/core-1".into(), "aaaa".into())];
+        let same = vec![ArtifactFingerprint::new(None, "/t/debug/deps/core-1".into(), "aaaa".into())];
         assert!(artifact_drift(&planned, &same).is_empty());
-        let replaced = vec![(None, "/t/debug/deps/core-1".to_owned(), "bbbb".to_owned())];
+        let replaced = vec![ArtifactFingerprint::new(None, "/t/debug/deps/core-1".into(), "bbbb".into())];
         let drift = artifact_drift(&planned, &replaced);
         assert_eq!(drift.len(), 1);
         assert!(drift[0].contains("different content"), "{drift:?}");
-        let moved = vec![(None, "/t/debug/deps/core-2".to_owned(), "aaaa".to_owned())];
+        let moved = vec![ArtifactFingerprint::new(None, "/t/debug/deps/core-2".into(), "aaaa".into())];
         assert_eq!(artifact_drift(&planned, &moved).len(), 2);
     }
 
@@ -653,6 +666,7 @@ mod accounting_tests {
     fn carrier_lane(idx: usize, required: bool) -> LaneRecord {
         let mut l = lane(idx, Vec::new());
         l.kind = LaneKind::DocOnly;
+        l.inventory = Inventory::DocTests;
         l.doc_carrier = true;
         l.doc_streams_required = required;
         l
@@ -730,29 +744,30 @@ mod accounting_tests {
     /// switches cargo's doctest pass off; a direct lane never does.
     #[test]
     fn only_lanes_that_run_doctests_are_carriers() {
-        let serial = ResolvedSweep { label: "serial".into(), ..ResolvedSweep::default() };
+        let planned = |declaration| PlannedSweep::resolve(declaration, false).unwrap();
+        let serial = planned(SweepDecl { label: "serial".into(), ..SweepDecl::default() });
         assert!(lane_runs_doctests(&serial, true));
         assert!(!lane_runs_doctests(&serial, false));
-        let narrowed = ResolvedSweep {
+        let narrowed = planned(SweepDecl {
             label: "narrowed".into(),
             filters: crate::profile::LaneFilters {
                 targets: vec![crate::profile::TargetName::new("cli")],
                 ..Default::default()
             },
-            ..ResolvedSweep::default()
-        };
+            ..SweepDecl::default()
+        });
         assert!(!lane_runs_doctests(&narrowed, true), "a target selector turns doctests off");
-        let doc = ResolvedSweep {
+        let doc = planned(SweepDecl {
             label: "doc".into(),
             lane_exec: crate::profile::LaneExec::doc_only(),
-            ..ResolvedSweep::default()
-        };
+            ..SweepDecl::default()
+        });
         assert!(lane_runs_doctests(&doc, false));
-        let parallel = ResolvedSweep {
+        let parallel = planned(SweepDecl {
             label: "p".into(),
             lane_exec: crate::profile::LaneExec::Parallel { budget: 4 },
-            ..ResolvedSweep::default()
-        };
+            ..SweepDecl::default()
+        });
         assert!(!lane_runs_doctests(&parallel, true));
     }
 
@@ -789,18 +804,18 @@ mod accounting_tests {
         let a = unit("core", "lib", "core");
         let b = unit("core", "test", "suite");
         let mut l = lane(0, vec![pair(&a, "x"), pair(&a, "y"), pair(&b, "x")]);
-        l.ignored_selected = vec![pair(&b, "slow")];
-        l.unavailable = Some("why".into());
-        l.unlisted = vec![("core::custom".into(), "no listing".into())];
+        if let Inventory::Prepared { ignored_selected, unlisted, .. } = &mut l.inventory {
+            *ignored_selected = vec![pair(&b, "slow")];
+            *unlisted = vec![("core::custom".into(), "no listing".into())];
+        }
         let p = AccountingPlan { certifying: true, ..plan(vec![l]) };
         let json = serde_json::to_string(&p).unwrap();
         // The unit's package id is written once per binary, not once per test.
         assert_eq!(json.matches("path+file:///x/core#core@0.1.0").count(), 2 + 1, "{json}");
         let back: AccountingPlan = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.lanes[0].executions, p.lanes[0].executions);
-        assert_eq!(back.lanes[0].ignored_selected, p.lanes[0].ignored_selected);
-        assert_eq!(back.lanes[0].unavailable.as_deref(), Some("why"));
-        assert_eq!(back.lanes[0].unlisted, p.lanes[0].unlisted);
+        assert_eq!(back.lanes[0].inventory.executions(), p.lanes[0].inventory.executions());
+        assert_eq!(back.lanes[0].inventory.ignored_selected(), p.lanes[0].inventory.ignored_selected());
+        assert_eq!(back.lanes[0].inventory, p.lanes[0].inventory);
         assert!(back.certifying);
     }
 

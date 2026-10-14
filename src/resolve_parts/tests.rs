@@ -22,6 +22,7 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use crate::config::{Dataset, OscEntry, PbfEntry, PmtilesEntry, ResolvedPaths};
+    use crate::elivagar::archive_store::{ArchiveKey, ArchiveStore};
 
     use super::*;
 
@@ -668,16 +669,18 @@ mod tests {
 
     #[test]
     fn archive_matcher_accepts_only_constructed_names() {
-        let name = pmtiles_archive_name(Path::new("/out"), "north-america", "raw", "abc1234");
+        let store = ArchiveStore::new(Path::new("/out"));
+        let key = ArchiveKey::new("north-america", "raw", "abc1234").unwrap();
+        let name = store.path_for(&key);
         let file = name.file_name().unwrap().to_str().unwrap();
-        assert!(pmtiles_archive_matches(file, "north-america", "raw"));
+        assert!(ArchiveStore::matches_name(file, "north-america", "raw"));
         // A hyphenated dataset name is never parsed back, only constructed, so
         // a split that constructs the same name is the same group by
         // definition - and prunes it identically. Not a bleed.
-        assert!(pmtiles_archive_matches(file, "north", "america-raw"));
+        assert!(ArchiveStore::matches_name(file, "north", "america-raw"));
         // Not an archive at all, and the pre-rename `<dataset>-<commit>` form.
-        assert!(!pmtiles_archive_matches("ocean-tiles.pmtiles", "ocean", "raw"));
-        assert!(!pmtiles_archive_matches(
+        assert!(!ArchiveStore::matches_name("ocean-tiles.pmtiles", "ocean", "raw"));
+        assert!(!ArchiveStore::matches_name(
             "denmark-abc1234.pmtiles",
             "denmark",
             "raw"
@@ -688,12 +691,12 @@ mod tests {
     fn archive_matcher_does_not_let_a_variant_claim_its_dash_extension() {
         // The bug this closes: `denmark-raw-` prefixes every `denmark-raw-fast-*`
         // file, so `raw`'s keep-N window would evict `raw-fast`'s archives.
-        assert!(pmtiles_archive_matches(
+        assert!(ArchiveStore::matches_name(
             "denmark-raw-fast-abc1234.pmtiles",
             "denmark",
             "raw-fast"
         ));
-        assert!(!pmtiles_archive_matches(
+        assert!(!ArchiveStore::matches_name(
             "denmark-raw-fast-abc1234.pmtiles",
             "denmark",
             "raw"

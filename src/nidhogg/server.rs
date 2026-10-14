@@ -5,8 +5,8 @@
 //!
 //! `stop` signals only the process `serve` recorded, and only after proving
 //! it is still that process: the pid file carries the PID's `/proc`
-//! starttime and the boot id, the same identity token `lockfile`/`brokkr
-//! kill` verify, and the signal goes through a pidfd opened between two
+//! starttime and the boot id, the same identity token `crate::process` and
+//! `brokkr kill` verify, and the signal goes through a pidfd opened between two
 //! verifications, so PID recycling cannot redirect it. There is no
 //! name-based fallback (the old `pkill -f "nidhogg serve"` reached every
 //! matching process on the host, other checkouts' servers included).
@@ -17,8 +17,8 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use crate::error::DevError;
-use crate::lockfile;
 use crate::output;
+use crate::process::{self, BootId, Pid, ProcIdentity, StartTicks, VerifiedProcess};
 
 /// Default port for the nidhogg server.
 pub const DEFAULT_PORT: u16 = 3033;
@@ -67,11 +67,11 @@ pub fn serve(
     // Ensure logs/ and .brokkr/ directories exist.
     let logs_dir = project_root.join("logs");
     std::fs::create_dir_all(&logs_dir)?;
-    let dev_dir = project_root.join(".brokkr");
-    std::fs::create_dir_all(&dev_dir)?;
+    let state = crate::clean::layout::ProjectState::new(project_root);
+    std::fs::create_dir_all(state.root())?;
 
     let log_path = logs_dir.join("serve.log");
-    let pid_path = dev_dir.join("nidhogg.pid");
+    let pid_path = state.nidhogg_pid_file();
 
     // Open log file for stdout and stderr.
     let log_file = std::fs::File::create(&log_path)?;
@@ -110,11 +110,11 @@ pub fn serve(
     // Capture the identity while the child is ours and unreaped, so the
     // starttime is guaranteed to be this process's. A record we cannot
     // write is a server `stop` could never verify - don't leave it running.
-    let record = match (lockfile::proc_starttime(pid), lockfile::local_boot_id()) {
+    let record = match (process::proc_starttime(pid), process::local_boot_id()) {
         (Some(starttime), Some(boot_id)) => ServerRecord {
             pid,
-            starttime,
-            boot_id,
+            starttime: starttime.get().to_string(),
+            boot_id: boot_id.as_str().to_owned(),
         },
         _ => {
             child.kill().ok();
@@ -151,7 +151,7 @@ pub fn serve(
 /// that carries no identity (the pre-starttime format) or whose identity no
 /// longer matches is dropped without signalling anything.
 pub fn stop(project_root: &Path) -> Result<(), DevError> {
-    let pid_path = project_root.join(".brokkr").join("nidhogg.pid");
+    let pid_path = crate::clean::layout::ProjectState::new(project_root).nidhogg_pid_file();
 
     let content = match std::fs::read_to_string(&pid_path) {
         Ok(c) => c,
@@ -235,6 +235,8 @@ fn poll_for_ready(port: u16, child: &mut Child) -> Result<bool, DevError> {
 }
 
 /// The identity of the server `serve` spawned, as stored in the pid file.
+/// The fields stay text on the wire; [`ServerRecord::identity`] parses them
+/// back into the typed identity `crate::process` verifies.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ServerRecord {
     pid: u32,
@@ -243,6 +245,15 @@ struct ServerRecord {
 }
 
 impl ServerRecord {
+    /// The typed identity and boot this record names; `None` when a field
+    /// does not parse, which `stop` treats as unverifiable.
+    fn identity(&self) -> Option<(ProcIdentity, BootId)> {
+        let pid = Pid::new(self.pid)?;
+        let start = StartTicks::parse(&self.starttime)?;
+        let boot = BootId::new(&self.boot_id)?;
+        Some((ProcIdentity::new(pid, start), boot))
+    }
+
     fn render(&self) -> String {
         format!(
             "pid={}\nstarttime={}\nboot_id={}\n",
@@ -304,10 +315,13 @@ enum StopOutcome {
 /// readable when the process terminates (a zombie counts, so a server that
 /// is our own unreaped child - `verify readonly` - is seen as exited too).
 fn stop_verified(record: &ServerRecord) -> Result<StopOutcome, DevError> {
-    let Ok(pidfd) = lockfile::open_verified_pidfd(record.pid, &record.starttime, &record.boot_id)
-    else {
+    let Some((identity, boot)) = record.identity() else {
         return Ok(StopOutcome::Unverified);
     };
+    let Ok(verified) = VerifiedProcess::open(identity, Some(&boot)) else {
+        return Ok(StopOutcome::Unverified);
+    };
+    let pidfd = verified.into_pidfd();
 
     if !pidfd_send_signal(&pidfd, libc::SIGTERM)? {
         return Ok(StopOutcome::NotRunning);
@@ -336,7 +350,7 @@ fn stop_verified(record: &ServerRecord) -> Result<StopOutcome, DevError> {
 /// `pidfd_send_signal(2)`: `Ok(false)` when the process has already exited
 /// (ESRCH); any other failure is an error, not a guess.
 fn pidfd_send_signal(pidfd: &OwnedFd, signal: libc::c_int) -> Result<bool, DevError> {
-    lockfile::pidfd_send_signal(pidfd, signal).map_err(DevError::Io)
+    process::pidfd_send_signal(pidfd, signal).map_err(DevError::Io)
 }
 
 /// Wait until the pidfd reports process exit, up to `timeout`.
@@ -419,7 +433,7 @@ mod tests {
         let rec = ServerRecord {
             pid,
             starttime: "1".into(),
-            boot_id: lockfile::local_boot_id().unwrap(),
+            boot_id: process::local_boot_id().unwrap().as_str().to_owned(),
         };
         assert_eq!(stop_verified(&rec).unwrap(), StopOutcome::Unverified);
         // Still alive: nothing was sent.
@@ -434,8 +448,8 @@ mod tests {
         let pid = child.id();
         let rec = ServerRecord {
             pid,
-            starttime: lockfile::proc_starttime(pid).unwrap(),
-            boot_id: lockfile::local_boot_id().unwrap(),
+            starttime: process::proc_starttime(pid).unwrap().get().to_string(),
+            boot_id: process::local_boot_id().unwrap().as_str().to_owned(),
         };
         assert_eq!(stop_verified(&rec).unwrap(), StopOutcome::Stopped);
         let status = child.wait().unwrap();

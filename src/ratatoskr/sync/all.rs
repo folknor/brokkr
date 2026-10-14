@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use crate::artefacts;
-use crate::config::DevConfig;
+use crate::config::project_config::ratatoskr::RatatoskrConfig;
 use crate::error::DevError;
 use crate::lockfile::{self, LockContext};
 use crate::output;
@@ -69,12 +69,12 @@ fn select_cohort<'a>(
 /// script; a 160-script sweep is read by scanning verdicts, so nothing
 /// invariant belongs in the loop.
 pub fn run_sync_all(req: &SyncAllRequest<'_>) -> Result<(), DevError> {
-    let dir = sync_script_dir(req.project_root, req.dev_config.ratatoskr.as_ref());
+    let dir = sync_script_dir(req.project_root, Some(req.ratatoskr));
     let scripts = discover::discover_at(&dir)?;
     let selected = select_cohort(&scripts, req, &dir)?;
 
     let (cfg, harness_cfg, mock_binary, fixtures_dir) =
-        validate_sync_config(req.project_root, req.dev_config)?;
+        validate_sync_config(req.project_root, req.ratatoskr)?;
 
     output::ratatoskr_msg(&format!("sync cohort: {} script(s)", selected.len()));
 
@@ -191,7 +191,7 @@ pub fn run_sync_all(req: &SyncAllRequest<'_>) -> Result<(), DevError> {
 /// CLI inputs for `brokkr sync --all`.
 pub struct SyncAllRequest<'a> {
     pub project_root: &'a Path,
-    pub dev_config: &'a DevConfig,
+    pub ratatoskr: &'a RatatoskrConfig,
     /// Substring match against the script's discovered name.
     pub filter: Option<&'a str>,
     /// Include scripts whose frontmatter says `expected: ignored`.

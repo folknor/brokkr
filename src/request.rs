@@ -1,103 +1,21 @@
+use std::path::Path;
+
+use crate::config::project_config::ratatoskr::RatatoskrConfig;
 use crate::db::QueryFilter;
 use crate::error::DevError;
-
-/// Query parameters for the `results` command.
-pub(crate) struct ResultsQuery {
-    pub(crate) query: Option<String>,
-    pub(crate) commit: Option<String>,
-    pub(crate) compare: Option<Vec<String>>,
-    pub(crate) command: Option<String>,
-    pub(crate) mode: Option<String>,
-    pub(crate) dataset: Option<String>,
-    /// Metadata filters as `key=value` strings, parsed into `(key, value)`
-    /// pairs by `cmd_results`. Multiple filters AND together.
-    pub(crate) meta: Vec<String>,
-    /// Captured-env filters as `KEY=VALUE` strings, parsed by
-    /// `cmd_results`. Multiple filters AND. Rows without the key are
-    /// excluded (no missing-as-0 coercion).
-    pub(crate) env: Vec<String>,
-    /// Substring match against the `cli_args` OR `brokkr_args` columns
-    /// (unified `--grep`, à la `git log --grep`). Multiple terms AND
-    /// together - each must match the row.
-    pub(crate) grep: Vec<String>,
-    /// Negative `--grep-v`: a row is excluded when any term matches either
-    /// invocation column. ORs together (any hit excludes), which is the
-    /// natural dual of `grep`'s AND.
-    pub(crate) grep_v: Vec<String>,
-    pub(crate) limit: usize,
-    pub(crate) top: usize,
-}
-
-/// The mutually exclusive result views after the CLI request has been
-/// validated and its row filters have been assembled once.
+/// One selected result view after the CLI's mutually-exclusive selectors and
+/// fixed-width compare operands have been resolved.
 pub(crate) enum ResultsView {
-    Table {
-        filter: QueryFilter,
-    },
-    Uuid {
-        prefix: String,
-        filter: QueryFilter,
-        top: usize,
-    },
-    Compare {
-        commits: (String, String),
-        filter: QueryFilter,
-        top: usize,
-    },
+    Table,
+    Uuid { prefix: String },
+    Compare { commits: (String, String) },
 }
 
-impl ResultsQuery {
-    pub(crate) fn view(&self) -> Result<ResultsView, DevError> {
-        let filter = QueryFilter {
-            commit: self.commit.clone(),
-            command: self.command.clone(),
-            mode: self.mode.clone(),
-            dataset: self.dataset.clone(),
-            meta: self
-                .meta
-                .iter()
-                .filter_map(|s| {
-                    s.split_once('=')
-                        .map(|(key, value)| (key.to_owned(), value.to_owned()))
-                })
-                .collect(),
-            env: self
-                .env
-                .iter()
-                .filter_map(|s| {
-                    s.split_once('=')
-                        .map(|(key, value)| (key.to_owned(), value.to_owned()))
-                })
-                .collect(),
-            grep: self.grep.clone(),
-            grep_v: self.grep_v.clone(),
-            limit: self.limit,
-        };
-
-        match (self.query.as_deref(), self.compare.as_deref()) {
-            (Some(prefix), None) if filter.commit.is_none() => Ok(ResultsView::Uuid {
-                prefix: prefix.to_owned(),
-                filter,
-                top: self.top,
-            }),
-            (None, Some(commits)) if filter.commit.is_none() => {
-                let [a, b] = commits else {
-                    return Err(DevError::Config(
-                        "--compare requires exactly two commits".into(),
-                    ));
-                };
-                Ok(ResultsView::Compare {
-                    commits: (a.clone(), b.clone()),
-                    filter,
-                    top: self.top,
-                })
-            }
-            (None, None) => Ok(ResultsView::Table { filter }),
-            _ => Err(DevError::Config(
-                "results accepts one of a UUID, --compare, or --commit".into(),
-            )),
-        }
-    }
+/// The complete request for the `results` command.
+pub(crate) struct ResultsQuery {
+    pub(crate) view: ResultsView,
+    pub(crate) filter: QueryFilter,
+    pub(crate) top: usize,
 }
 
 /// Query parameters for the `corpus-results` command (piners only) - the
@@ -135,20 +53,24 @@ pub(crate) struct CorpusQuery {
     pub(crate) compare: Option<(i64, i64)>,
 }
 
+/// One selected sidecar view. Selectors are resolved before the command
+/// handler receives the request, and compare operands are always a pair.
+pub(crate) enum SidecarView {
+    Summary { uuid: String },
+    Samples { uuid: String },
+    Markers { uuid: String },
+    Durations { uuid: String },
+    Counters { uuid: String },
+    Stalls { uuid: String },
+    Stat { uuid: String },
+    Compare { uuids: (String, String) },
+}
+
 /// Query parameters for the `sidecar` command.
-///
-/// Each `SidecarQuery` picks exactly one view (the default is the
-/// per-phase summary when no selector is set). `compare` takes two
-/// UUIDs instead of the single `query` UUID; clap enforces that.
 pub(crate) struct SidecarQuery {
-    pub(crate) query: Option<String>,
-    pub(crate) samples: bool,
-    pub(crate) markers: bool,
-    pub(crate) durations: bool,
-    pub(crate) counters: bool,
-    pub(crate) stalls: bool,
+    pub(crate) view: SidecarView,
+    /// The stat field is also kept here for timeline-filter validation.
     pub(crate) stat: Option<String>,
-    pub(crate) compare: Option<Vec<String>>,
     pub(crate) human: bool,
     pub(crate) run: Option<String>,
     pub(crate) phase: Option<String>,
@@ -162,50 +84,33 @@ pub(crate) struct SidecarQuery {
     pub(crate) tail: Option<usize>,
 }
 
-/// One selected sidecar output. The query UUID and any stat field travel with
-/// their view, so dispatch cannot accidentally choose a result while dropping
-/// its selector.
-pub(crate) enum SidecarView<'a> {
-    Summary { uuid: &'a str },
-    Samples { uuid: &'a str },
-    Markers { uuid: &'a str },
-    Durations { uuid: &'a str },
-    Counters { uuid: &'a str },
-    Stalls { uuid: &'a str },
-    Stat { uuid: &'a str, field: &'a str },
-    Compare { uuids: (&'a str, &'a str) },
+/// Fixed-width comparison operands while argv is still at the CLI boundary.
+pub(crate) fn compare_pair<T>(values: Vec<T>, option: &str) -> Result<(T, T), DevError> {
+    let [first, second]: [T; 2] = values
+        .try_into()
+        .map_err(|_| DevError::Config(format!("{option} requires exactly two values")))?;
+    Ok((first, second))
 }
 
-impl SidecarQuery {
-    pub(crate) fn view(&self) -> Result<SidecarView<'_>, DevError> {
-        if let Some(uuids) = self.compare.as_deref() {
-            let [a, b] = uuids else {
-                return Err(DevError::Config(
-                    "--compare requires exactly two UUIDs".into(),
-                ));
-            };
-            return Ok(SidecarView::Compare {
-                uuids: (a.as_str(), b.as_str()),
-            });
-        }
+/// Service entry-point inputs. Keeping invocation state together lets the
+/// ratatoskr service entry points accept one explicit request value.
+pub(crate) struct ServiceSuiteRequest<'a> {
+    pub(crate) project_root: &'a Path,
+    pub(crate) ratatoskr: &'a RatatoskrConfig,
+    pub(crate) filter: Option<&'a str>,
+    pub(crate) keep_artefacts: bool,
+    pub(crate) profile_override: Option<bool>,
+    pub(crate) keep_going: bool,
+    pub(crate) include_ignored: bool,
+    pub(crate) repeat: u32,
+}
 
-        let uuid = self.query.as_deref().ok_or_else(|| {
-            DevError::Config("sidecar requires a UUID unless --compare is used".into())
-        })?;
-        Ok(if self.samples {
-            SidecarView::Samples { uuid }
-        } else if self.markers {
-            SidecarView::Markers { uuid }
-        } else if self.durations {
-            SidecarView::Durations { uuid }
-        } else if self.counters {
-            SidecarView::Counters { uuid }
-        } else if self.stalls {
-            SidecarView::Stalls { uuid }
-        } else if let Some(field) = self.stat.as_deref() {
-            SidecarView::Stat { uuid, field }
-        } else {
-            SidecarView::Summary { uuid }
-        })
-    }
+pub(crate) struct ServiceTestRequest<'a> {
+    pub(crate) project_root: &'a Path,
+    pub(crate) ratatoskr: &'a RatatoskrConfig,
+    pub(crate) script: &'a str,
+    pub(crate) keep_artefacts: bool,
+    pub(crate) profile_override: Option<bool>,
+    pub(crate) repeat: u32,
+    pub(crate) keep_going: bool,
 }

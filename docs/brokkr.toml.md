@@ -184,6 +184,13 @@ features = ["linux-direct-io", "linux-io-uring"]
 `include` is consumed while config layers are composed. Other reserved
 top-level keys are parsed as their named sections; an unrecognized table is a
 legacy hostname section, and an unrecognized non-table value is rejected.
+`[litehtml]`, `[sluggrs]`, `[ratatoskr]`, `[piners]`, `[dellingr]`, and
+`[mogwai]` belong only to projects with the matching `project` value; a
+section for a different project is a load error. The matching section is
+required for `litehtml-rs`, `sluggrs`, `ratatoskr`, `dellingr`, and `mogwai`.
+Piners keeps its default corpus and registry paths when `[piners]` is absent.
+Project-specific config details are in the linked project docs at the top of
+this document.
 `[host.<name>]` is also accepted and lets a hostname use a reserved section
 name. Host tables must set at least one supported option, and unknown fields
 inside one are rejected. When host sections exist but none names this machine,
@@ -194,20 +201,21 @@ valid host shape is necessarily interpreted as a host even if its name
 resembles a misspelled section. Datasets are host-scoped (no global
 `[datasets]` section). Path resolution: host config -> defaults (`data/`,
 `data/scratch/`, `data/tilegen/`, cargo target dir). `output` is the durable
-tilegen output store (map-data projects): `tilegen` renames each run's archive
-to `<output>/<dataset>-<variant>-<commit>.pmtiles`, and
+tilegen output store (map-data projects): `ArchiveStore` admits each successful
+tilegen archive as `<output>/<dataset>-<variant>-<commit>.pmtiles`, and
 `pmtiles-inspect`/`diag`/`svg`/`regress`/`pmtiles-corpus` resolve it by
 `--variant` + `--commit`. It is kept SEPARATE from `scratch`
 on purpose - elivagar wipes its `--tmp-dir` (`<data>/tilegen_tmp`) every run,
 and on some hosts `scratch` points at that same dir, so archives written into
 scratch were destroyed by the next run. `brokkr` refuses to write outputs into
-a dir that coincides with scratch/tmp; retention keeps the last 5 archives per
+a dir that coincides with scratch/tmp; the store keeps the last 5 archives per
 `(dataset, variant)` pair - scoped so that building one variant can never evict
 another's archives at the same commit. Group membership is decided by
-*constructing* the name shape and requiring a hyphen-free commit token after it
-(`resolve::pmtiles_archive_matches`), never by parsing a filename back: dataset
-names carry hyphens, and a prefix test alone would let a variant claim a
-dash-extending sibling's files (`raw` swallowing `raw-fast`) and evict them.
+constructing the name shape and requiring a hyphen-free commit token after it,
+never by parsing a filename back: dataset names carry hyphens, and a prefix test
+alone would let a variant claim a dash-extending sibling's files (`raw`
+swallowing `raw-fast`) and evict them. `brokkr clean --archives` uses the same
+store pruning operation with its configured keep count and dry-run policy.
 Host `features` are added to measured-request builds through the shared build
 context, and to the `passthrough`, `verify`, `serve`, `ingest`, and `update`
 paths. Standalone `run`, `install`, `check`, `clippy`, `test`, and Criterion
@@ -1355,9 +1363,11 @@ unbounded lane is precisely the mistake the key exists to make unspellable.
 ### The default budget
 
 `parallel = {}` leaves the budget unset, which resolves to **the physical cores
-sharing one last-level cache** - a full CCX/CCD on AMD, the die on Intel.
-`brokkr env` prints the machine's own number on its `l3 domain:` line, so a
-machine-dependent default is auditable rather than mysterious.
+available in one last-level cache domain** - a full CCX/CCD on AMD, the die on
+Intel when the process can use that whole domain. The detected cache CPUs are
+intersected with the calling thread's affinity (`Cpus_allowed_list` in procfs),
+so a cpuset or affinity restriction does not count CPUs the process cannot
+run on. `brokkr env` prints the resulting number on its `l3 domain:` line.
 
 Deliberately not logical CPUs. Two tests on the SMT siblings of one core
 contend for that core's execution resources, and on a chiplet part two tests on
@@ -1387,16 +1397,16 @@ in the run log for the first warm runs and raise the budget past
 `total_serial / pole_serial` (both figures are in `--timings`) before judging
 the lane.
 
-The metric is well defined on every vendor; what it *names* differs. On AMD Zen
-the L3 domain is a CCX, which on current parts is a whole CCD - 6 or 8 cores,
-and a real boundary, since cross-CCD traffic leaves the die. On Intel there is
-no CCD: L3 is shared across the whole ring or mesh, so the same computation
-returns every physical core in the socket, which is the correct analogue - the
-die *is* the domain, and on a multi-socket box the socket is. On Intel hybrid
-parts (Alder Lake and later) P-cores and E-cores share the L3 and both are
-counted, which is honest for a cache-sharing question and slightly optimistic
-for a throughput one; sysfs exposes no portable core-class field, so the
-alternative would be guessing.
+The metric is well defined on every vendor; what it *names* differs. On AMD
+Zen, an L3 domain is a CCX, commonly a whole CCD - 6 or 8 cores - and a real
+boundary, since cross-CCD traffic leaves the die. On Intel there is no CCD:
+L3 is shared across the ring or mesh, often across the socket. The count uses
+the CPUs in the selected L3 domain that the calling thread may run on, so
+affinity can make it a subset on either vendor. On Intel hybrid parts (Alder
+Lake and later) P-cores and E-cores share the L3 and both are counted, which is
+honest for a cache-sharing question and slightly optimistic for a throughput
+one; sysfs exposes no portable core-class field, so the alternative would be
+guessing.
 
 ### Doctests
 

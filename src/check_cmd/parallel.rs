@@ -19,8 +19,9 @@
 // the total, so the total is what the key takes: each binary claims a slice of
 // the budget and runs under a matching `--test-threads`.
 //
-// Slices are proportional to test count (see `claim_slots`), handed out
-// largest-binary-first. Proportional rather than `min(test count, budget)`
+// Slices are proportional to serial duration (see `binary_timings::allocate`),
+// handed out largest-binary-first. Proportional rather than
+// `min(test count, budget)`
 // because that obvious rule silently defeats the whole lane: a binary holding
 // at least `budget` tests claims the entire pool and runs alone, so a
 // workspace whose binaries each hold more tests than the budget never fans
@@ -237,70 +238,6 @@ fn partition_target_selectors(args: &[String]) -> (Vec<String>, Vec<String>) {
     (selectors, rest)
 }
 
-/// How many budget slots one binary claims: its share of the sweep's total
-/// cost.
-///
-/// # Why proportional
-///
-/// Model a binary of cost `c` running on `k` threads as taking `c/k`. All
-/// binaries run at once under `sum(k) <= budget`, so the sweep's wall time is
-/// `max(c_i / k_i)`. That maximum is minimised by making `c_i / k_i` equal for
-/// every binary - which is exactly `k_i` proportional to `c_i`. Threads in
-/// proportion to cost is not a heuristic; it is the allocation that finishes
-/// every binary at the same moment, and any other split leaves one binary a
-/// longer pole than it had to be.
-///
-/// # Why not `min(count, budget)`
-///
-/// The obvious rule - take as many slots as you have tests, capped at the
-/// budget - makes the lane a no-op on the workspaces that need it most. **Any
-/// binary holding at least `budget` tests claims the entire pool and runs
-/// alone.** A workspace whose binaries each hold more tests than the budget
-/// can never fan out at any sane setting: overlapping two of them would need a
-/// budget above their test counts, which is hundreds in flight - the exact
-/// mistake the budget exists to make unspellable. It failed green, too:
-/// measured on a 35-binary tree, eight fat binaries serialized at the full
-/// budget each and the sweep reported success.
-///
-/// # Why the weight is duration, not test count
-///
-/// See `timing_weight_for`. Count-as-cost assumes every test costs the same, and
-/// starves whichever binary is slow-but-small - which on a latency-bound suite
-/// is precisely the critical path.
-///
-/// Two floors keep it honest at the edges:
-///
-/// - **At least one slot**, so a binary is never unschedulable. This can push
-///   the sum of claims past the budget when there are more binaries than
-///   slots; that is the semaphore's problem, not the plan's, and it resolves
-///   as admission in waves rather than as oversubscription.
-/// - **Never more than its own test count**, which only binds when the budget
-///   exceeds the whole suite - a binary asking for more threads than it has
-///   tests would idle slots another binary could use.
-pub(crate) fn claim_slots(weight_ms: u64, total_ms: u64, budget: u32, count: u32) -> u32 {
-    if total_ms == 0 {
-        return 1;
-    }
-    // Integer milliseconds rather than seconds-as-f64: the arithmetic is a
-    // ratio of durations, and doing it in floats would need a float-to-int
-    // cast at the end that is unsound for NaN, negative and out-of-range
-    // values - none of which a weight should ever be, but all of which a
-    // cast would silently accept.
-    let share = u64::from(budget).saturating_mul(weight_ms) / total_ms;
-    let share = u32::try_from(share).unwrap_or(budget);
-    share.clamp(1, budget).min(count.max(1))
-}
-
-/// A weight in seconds as integer milliseconds, for the ratio above.
-///
-/// Total by construction: NaN, negative and absurd values all collapse to
-/// zero, which reads downstream as "no information" and floors the binary at
-/// one slot rather than corrupting every other binary's share.
-fn weight_ms(seconds: f64) -> u64 {
-    Duration::try_from_secs_f64(seconds)
-        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
-}
-
 // The pin itself now lives on the sweep as `effective_unification`, resolved
 // once per invocation by `profile::resolve_unification` and read here through
 // `sweep.unification_args()`. The prebuild and every per-binary invocation take
@@ -339,7 +276,7 @@ fn narrows_selection(cargo_extra: &[String]) -> bool {
 /// delivered. Package mode can never reach here: it requires a non-empty
 /// `packages`, which fails the second condition.
 pub(crate) fn unify_workspace(
-    sweep: &ResolvedSweep,
+    sweep: &crate::profile::SweepDecl,
     cli_scope: &[&str],
     whole_workspace: bool,
     cargo_extra: &[String],
@@ -361,10 +298,10 @@ pub(crate) fn unify_workspace(
 /// `--workspace` and `--exclude` have no package-mode meaning at all, since
 /// the mode requires an explicit positive set.
 pub(crate) fn reject_forwarded_selectors(
-    sweep: &ResolvedSweep,
+    sweep: &PlannedSweep,
     cargo_extra: &[String],
 ) -> Result<(), DevError> {
-    if !sweep.effective_unification.is_per_package() {
+    if !sweep.effective_unification().is_per_package() {
         return Ok(());
     }
     let offending: Vec<&String> = cargo_extra
@@ -430,7 +367,7 @@ pub(crate) fn target_selector(kind: &str, target: &str) -> Vec<String> {
 /// directly - no cargo half, since the fan-out runs the prebuilt executable
 /// itself.
 fn direct_libtest_args(
-    sweep: &ResolvedSweep,
+    sweep: &PlannedSweep,
     threads: u32,
     libtest_extra: &[String],
 ) -> Result<Vec<String>, DevError> {
@@ -492,7 +429,7 @@ fn direct_libtest_args(
 /// With no planned request (never expected), it falls back to the binary's
 /// own `-p` selector.
 fn repro_cargo_line(
-    sweep: &ResolvedSweep,
+    sweep: &PlannedSweep,
     binary: &TestBinary,
     request: Option<&[String]>,
     allow_args: &[String],
@@ -537,7 +474,7 @@ fn repro_cargo_line(
 ///   envelope reconstruction does not read.
 /// - `--manifest-path` / `--target-dir` move the workspace or artifacts out
 ///   from under the enumeration-derived paths.
-fn reject_unsupported_forwarded(sweep: &ResolvedSweep, cargo_extra: &[String]) -> Result<(), DevError> {
+fn reject_unsupported_forwarded(sweep: &PlannedSweep, cargo_extra: &[String]) -> Result<(), DevError> {
     const UNSUPPORTED: [&str; 5] =
         ["--no-run", "--target", "--config", "--manifest-path", "--target-dir"];
     let offending: Vec<&str> = cargo_extra
@@ -584,7 +521,7 @@ struct DirectExtras<'a> {
 fn run_one_binary(
     project_root: &Path,
     state_root: &Path,
-    sweep: &ResolvedSweep,
+    sweep: &PlannedSweep,
     run: &PlannedRun<'_>,
     extras: &DirectExtras<'_>,
     runtime: &DirectRuntime,
@@ -667,7 +604,7 @@ fn run_one_binary(
 fn run_parallel_sweep(
     project_root: &Path,
     state_root: &Path,
-    sweep: &ResolvedSweep,
+    sweep: &PlannedSweep,
     attempt: &Attempt,
     budget: u32,
     prepared: &PreparedLane,
@@ -702,10 +639,10 @@ fn run_parallel_sweep(
         )));
     }
 
-    // Test counts drive the slot claims: a claim of one for every binary
-    // would serialize the fan-out down to one test at a time per binary and
-    // give up most of the win. A binary whose filters select nothing never
-    // enters the plan.
+    // Recorded serial costs (or test counts when there is no history) drive
+    // the slot claims: a claim of one for every binary would serialize the
+    // fan-out down to one test at a time per binary and give up most of the
+    // win. A binary whose filters select nothing never enters the plan.
     let mut counted: Vec<(PlannedRun<'_>, u32)> = Vec::new();
     for b in binaries {
         let count = u32::try_from(b.planned.selected.len()).unwrap_or(u32::MAX);
@@ -714,42 +651,30 @@ fn run_parallel_sweep(
         }
         counted.push((b, count));
     }
-    // Claims need the whole sweep's cost, so they are allocated after every
-    // binary has been listed rather than as each one is. Cost is the previous
-    // run's measured wall time where there is one, and an estimate from the
-    // known binaries' cost per test otherwise - see `timing_weight_for`.
-    // Keyed by the ENTRY name, not the lane-qualified label: `default` and
-    // `tier1/default` are the same binaries, and keying on the label made
-    // every profile that runs an entry re-pay its warm-up separately
-    // (measured: the gate's first parallel run serialized its pole binary
-    // minutes after plain check had converged on the identical entry).
+    // The pure allocator sees the complete listing and prior serial costs for
+    // this entry. The cache key is the entry name, not the lane-qualified
+    // label, so `default` and `tier1/default` share the same measurements.
     let history = timings_load(state_root);
     let recorded = history.get(&sweep.entry_name);
-    let cost_of = |b: &TestBinary| recorded.and_then(|m| m.get(&binary_timing_key(b))).copied();
-    let known: Vec<(f64, u32)> = counted
+    let allocation_inputs: Vec<(String, u32)> = counted
         .iter()
-        .filter_map(|(b, c)| {
-            cost_of(&b.planned.binary).filter(|k| k.serial > 0.0).map(|k| (k.serial, *c))
-        })
+        .map(|(run, count)| (binary_timing_key(&run.planned.binary), *count))
         .collect();
-    let mean_cost = mean_cost_per_test(&known);
-    let weights: Vec<f64> = counted
-        .iter()
-        .map(|(b, c)| timing_weight_for(cost_of(&b.planned.binary).map(|k| k.serial), *c, mean_cost))
-        .collect();
-    let weights: Vec<u64> = weights.iter().copied().map(weight_ms).collect();
-    let total_weight: u64 = weights.iter().sum();
-    let mut planned: Vec<(PlannedRun<'_>, u32)> = counted
+    let mut by_key: BTreeMap<String, PlannedRun<'_>> = counted
         .into_iter()
-        .zip(&weights)
-        .map(|((b, count), w)| {
-            // Capped at what the binary can still use: past `serial/slowest`
-            // another thread cannot make it finish sooner, and the slot is
-            // worth more to a binary that is not yet at its own floor.
-            let cap = useful_slot_cap(cost_of(&b.planned.binary)).unwrap_or(u32::MAX);
-            let claim = claim_slots(*w, total_weight, budget, count).min(cap.max(1));
-            (b, claim)
+        .map(|(run, _)| {
+            (
+                binary_timing_key(&run.planned.binary),
+                PlannedRun {
+                    resolution: run.resolution,
+                    planned: run.planned,
+                },
+            )
         })
+        .collect();
+    let planned: Vec<(PlannedRun<'_>, u32)> = allocate(&allocation_inputs, recorded, budget)
+        .into_iter()
+        .filter_map(|(key, slots)| by_key.remove(&key).map(|run| (run, slots)))
         .collect();
     if planned.is_empty() {
         return Err(DevError::Config(format!(
@@ -758,13 +683,6 @@ fn run_parallel_sweep(
             sweep.label, prepared.enumerated
         )));
     }
-
-    // Largest first. A big binary admitted late would find the budget carved
-    // into slices too small to use it, so the long pole goes in while the pool
-    // is whole - the ordering that puts the critical path first.
-    planned.sort_by(|a, b| {
-        b.1.cmp(&a.1).then_with(|| a.0.planned.binary.target.cmp(&b.0.planned.binary.target))
-    });
 
     // Split here on purpose. Everything above is cargo building and listing;
     // everything below is tests actually running. Reporting one number for
@@ -873,12 +791,18 @@ fn run_parallel_sweep(
         .map(|r| {
             // Serial cost, not `r.elapsed`: the sum of a binary's own tests
             // does not move when its allocation moves, and wall time does.
-            let serial: f64 = r.completed.iter().map(|(_, d)| d.as_secs_f64()).sum();
+            let serial = r
+                .completed
+                .iter()
+                .map(|(_, duration)| *duration)
+                .fold(Duration::ZERO, |serial, duration| {
+                    serial.saturating_add(duration)
+                });
             let slowest = r
                 .completed
                 .iter()
-                .map(|(_, d)| d.as_secs_f64())
-                .fold(0.0_f64, f64::max);
+                .map(|(_, duration)| *duration)
+                .fold(Duration::ZERO, Duration::max);
             (r.timing_key.clone(), BinaryCost { serial, slowest })
         })
         .collect();
@@ -897,7 +821,7 @@ fn run_parallel_sweep(
 /// Worded as what the claims prove and no more: smaller binaries may still
 /// overlap around the full-budget ones, so this does not say the lane ran
 /// serially.
-fn warn_serialized_claims(sweep: &ResolvedSweep, budget: u32, planned: &[(&TestBinary, u32)]) {
+fn warn_serialized_claims(sweep: &PlannedSweep, budget: u32, planned: &[(&TestBinary, u32)]) {
     if budget <= 1 {
         return;
     }
@@ -939,7 +863,7 @@ fn error_detail(e: &DevError) -> String {
 #[allow(clippy::too_many_lines)]
 fn report_runs(
     project_root: &Path,
-    sweep: &ResolvedSweep,
+    sweep: &PlannedSweep,
     runs: Vec<Result<BinaryRun, DevError>>,
     started: Instant,
     build_elapsed: Duration,
@@ -1002,7 +926,7 @@ fn report_runs(
                 sweep.label, run.label
             ));
             output::error(&run.command);
-            output::error(&cargo_filter::filter_test(&stdout, &stderr));
+            output::error(&test_runner::filter_test(&stdout, &stderr));
             ok = false;
             continue;
         }
@@ -1011,8 +935,8 @@ fn report_runs(
         // exits 0 while emitting missing or malformed lifecycle records
         // contributed zero to `passed` and still left the sweep green - an
         // absence read as a fact. The stream has to say it finished.
-        let parsed = cargo_filter::parse_test_output(&stdout.lines().collect::<Vec<_>>());
-        if let cargo_filter::Completeness::Incomplete { reason } = &parsed.completeness {
+        let parsed = test_runner::parse_test_output(&stdout.lines().collect::<Vec<_>>());
+        if let test_runner::Completeness::Incomplete { reason } = &parsed.completeness {
             output::error(&format!(
                 "sweep '{}' binary {} exited successfully but its test stream did not finish \
                  reporting: {reason}. Observed {} completed test(s). A binary that stops talking \
@@ -1173,48 +1097,6 @@ mod parallel_lane_tests {
         assert_eq!(*pool.free.lock().unwrap(), 0);
     }
 
-    // The deadlock this guards: a binary claiming more than the whole budget
-    // could never be admitted, so no claim may exceed it.
-    #[test]
-    fn claims_are_always_satisfiable() {
-        let budget: u32 = 4;
-        for count in [1_u32, 3, 4, 9, 100, u32::MAX] {
-            let w = u64::from(count);
-            let claim = claim_slots(w, w, budget, count);
-            assert!((1..=budget).contains(&claim), "count {count}");
-        }
-    }
-
-    // Degenerate weights must not produce an unschedulable or oversized claim.
-    #[test]
-    fn non_finite_and_empty_weights_fall_back_to_one_slot() {
-        assert_eq!(claim_slots(1, 0, 8, 5), 1);
-        assert_eq!(weight_ms(f64::NAN), 0);
-        assert_eq!(weight_ms(-1.0), 0);
-        assert_eq!(weight_ms(f64::INFINITY), 0);
-        assert_eq!(weight_ms(22.3), 22_300);
-    }
-
-    // THE SECOND ALLOCATION REGRESSION. Weighting by test count starved the
-    // binary that was the critical path: ten latency-bound tests out of 2224
-    // computed to one slot, so its tests ran end to end for 22.3s of a 24.5s
-    // sweep. Weighted by measured duration it draws the slots it needs.
-    #[test]
-    fn a_slow_small_binary_outranks_a_fast_big_one() {
-        let budget = 24;
-        // The measured shape: one 22.3s binary of 10 tests, and the rest of
-        // the suite costing 38s across 2214 fast tests.
-        let total = weight_ms(22.3) + weight_ms(38.0);
-        let pole = claim_slots(weight_ms(22.3), total, budget, 10);
-        let bulk = claim_slots(weight_ms(38.0), total, budget, 2214);
-        assert!(pole >= 8, "the critical path must get real threads, got {pole}");
-        assert!(bulk >= 1 && bulk <= budget);
-
-        // Under the old count weighting it got exactly one slot - the bug.
-        let by_count = claim_slots(10, 2224, budget, 10);
-        assert_eq!(by_count, 1);
-    }
-
     fn v(args: &[&str]) -> Vec<String> {
         args.iter().map(|s| (*s).to_owned()).collect()
     }
@@ -1271,62 +1153,15 @@ mod parallel_lane_tests {
         assert!(rest.is_empty());
     }
 
-    // THE REGRESSION THIS FILE EXISTS TO PREVENT. Under the old
-    // `min(count, budget)` rule every one of these binaries claimed the whole
-    // pool and ran alone, so a 35-binary sweep serialized and reported success.
-    // Fat binaries must leave room for each other.
-    #[test]
-    fn a_binary_holding_more_tests_than_the_budget_does_not_eat_the_pool() {
-        // Eight binaries of 300 tests each, budget 24: the shape measured on
-        // the tree where the old rule was caught.
-        let budget = 24;
-        let total = 8 * 300;
-        let claim = claim_slots(300, total, budget, 300);
-        assert_eq!(claim, 3);
-        // The whole point: several of them fit at once.
-        assert!(claim * 8 <= budget, "eight fat binaries must co-exist");
-    }
-
-    // Proportional means the slice tracks the share of tests, so the binary
-    // with most tests gets most threads and they finish together.
-    #[test]
-    fn slices_follow_each_binarys_share_of_the_suite() {
-        let budget = 12;
-        let total = 100;
-        assert_eq!(claim_slots(50, total, budget, 50), 6);
-        assert_eq!(claim_slots(25, total, budget, 25), 3);
-        // A tiny binary still gets a slot rather than being unschedulable.
-        assert_eq!(claim_slots(1, total, budget, 1), 1);
-    }
-
-    // A lone binary is the degenerate case of proportional: its share is all
-    // of it, so it runs at the full budget exactly as before.
-    #[test]
-    fn a_lone_binary_takes_the_whole_budget() {
-        assert_eq!(claim_slots(1429, 1429, 6, 1429), 6);
-    }
-
-    // The count cap only binds when the budget outruns the whole suite: a
-    // binary asking for more threads than it has tests would idle slots.
-    #[test]
-    fn a_small_suite_on_a_big_machine_claims_no_more_than_it_has() {
-        assert_eq!(claim_slots(3, 6, 64, 3), 3);
-        assert_eq!(claim_slots(1, 1, 64, 1), 1);
-    }
-
-    // Degenerate inputs must not divide by zero or return an unschedulable
-    // claim - the plan filters empty binaries, but the rule is total anyway.
-    #[test]
-    fn an_empty_suite_still_yields_a_schedulable_claim() {
-        assert_eq!(claim_slots(0, 0, 8, 0), 1);
-        assert!(claim_slots(0, 10, 8, 0) >= 1);
-    }
-
-    fn bare_sweep() -> ResolvedSweep {
+    fn bare_decl() -> crate::profile::SweepDecl {
         crate::profile::sweep_from_check_entry(&crate::config::CheckEntry {
             name: "default".into(),
             ..Default::default()
         })
+    }
+
+    fn bare_sweep() -> PlannedSweep {
+        crate::profile::PlannedSweep::from(bare_decl())
     }
 
     // Workspace unification applies exactly when the selection is the whole
@@ -1335,16 +1170,16 @@ mod parallel_lane_tests {
     // the graph past what the prebuild selected.
     #[test]
     fn unification_applies_only_to_a_whole_workspace_selection() {
-        let sweep = bare_sweep();
+        let sweep = bare_decl();
         assert!(unify_workspace(&sweep, &[], true, &[]));
         assert!(!unify_workspace(&sweep, &[], false, &[]));
         assert!(!unify_workspace(&sweep, &["one-pkg"], true, &[]));
 
-        let mut scoped = bare_sweep();
+        let mut scoped = bare_decl();
         scoped.packages = vec!["a".into()];
         assert!(!unify_workspace(&scoped, &[], true, &[]));
 
-        let mut excluding = bare_sweep();
+        let mut excluding = bare_decl();
         excluding.test_exclude_packages = vec!["bad".into()];
         assert!(!unify_workspace(&excluding, &[], true, &[]));
     }
@@ -1356,7 +1191,7 @@ mod parallel_lane_tests {
     // features.
     #[test]
     fn a_forwarded_package_selector_also_rules_unification_out() {
-        let sweep = bare_sweep();
+        let sweep = bare_decl();
         for extra in [
             vec!["-p".to_owned(), "one".to_owned()],
             vec!["-p=one".to_owned()],
@@ -1392,7 +1227,7 @@ mod parallel_lane_tests {
     // count, and the JSON format the watchdog reads - never a cargo flag.
     #[test]
     fn direct_argv_is_libtest_only_with_threads_and_json() {
-        let mut sweep = bare_sweep();
+        let mut sweep = bare_decl();
         sweep.lane_exec = crate::profile::LaneExec::Parallel { budget: 4 };
         sweep.filters = crate::profile::LaneFilters {
             filters: vec![
@@ -1411,7 +1246,7 @@ mod parallel_lane_tests {
             ],
             ..Default::default()
         };
-        let args = direct_libtest_args(&sweep, 3, &[]).unwrap();
+        let args = direct_libtest_args(&crate::profile::PlannedSweep::from(sweep), 3, &[]).unwrap();
         assert_eq!(
             args,
             v(&[
@@ -1433,8 +1268,9 @@ mod parallel_lane_tests {
     fn a_foreign_test_threads_override_is_still_refused() {
         // A sweep that is not on the parallel lane never reaches this runner.
         assert!(direct_libtest_args(&bare_sweep(), 3, &[]).is_err());
-        let mut parallel = bare_sweep();
+        let mut parallel = bare_decl();
         parallel.lane_exec = crate::profile::LaneExec::Parallel { budget: 4 };
+        let parallel = crate::profile::PlannedSweep::from(parallel);
         assert!(direct_libtest_args(&parallel, 3, &v(&["--test-threads", "2"])).is_err());
     }
 
@@ -1443,12 +1279,11 @@ mod parallel_lane_tests {
     // prebuild did.
     #[test]
     fn the_repro_line_is_cargo_shaped_and_carries_the_pin() {
-        use crate::config::{CargoUnification, EffectiveUnification};
         let b = binary("pkg", "test", "t");
-        let promoted = ResolvedSweep {
-            effective_unification: EffectiveUnification::Pinned(CargoUnification::Workspace),
-            ..bare_sweep()
-        };
+        let promoted = crate::profile::PlannedSweep::from(crate::profile::SweepDecl {
+            feature_unification: crate::config::FeatureUnification::Workspace,
+            ..bare_sweep().declaration().clone()
+        });
         let line = repro_cargo_line(&promoted, &b, None, &[], &[]);
         assert!(line.starts_with("failing command: cargo test"), "{line}");
         assert!(line.contains("-Zfeature-unification"), "{line}");
@@ -1497,11 +1332,10 @@ mod parallel_lane_tests {
 
     #[test]
     fn package_mode_refuses_forwarded_package_selectors() {
-        use crate::config::{CargoUnification, EffectiveUnification};
-        let pkg = ResolvedSweep {
-            effective_unification: EffectiveUnification::Pinned(CargoUnification::Package),
-            ..bare_sweep()
-        };
+        let pkg = crate::profile::PlannedSweep::from(crate::profile::SweepDecl {
+            feature_unification: crate::config::FeatureUnification::Package,
+            ..bare_sweep().declaration().clone()
+        });
         // Every spelling cargo accepts, including the attached short form:
         // one that slipped through would union a second package into a
         // resolution promised to hold exactly one.

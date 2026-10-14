@@ -10,36 +10,38 @@
 //! on every shared cache line. Both look like parallelism and neither delivers
 //! it linearly.
 //!
-//! So the unit here is **distinct physical cores within cpu0's L3 domain**,
-//! read from sysfs:
+//! So the unit here is **distinct physical cores within the current thread's
+//! affinity and one of its L3 domains**, read from procfs and sysfs:
 //!
-//! - `cache/index3/shared_cpu_list` gives the logical CPUs sharing that L3.
+//! - `Cpus_allowed_list` in `/proc/thread-self/status` gives the CPUs this
+//!   thread may run on, including cpuset and affinity restrictions.
+//! - The first allowed CPU with an `index3/shared_cpu_list` identifies an L3
+//!   domain; its logical CPU list is intersected with the allowed set.
 //! - `topology/core_id` collapses SMT siblings onto their physical core.
 //!
 //! # What it means per vendor
 //!
 //! The metric is well defined everywhere; what it *names* differs.
 //!
-//! - **AMD Zen**: the L3 domain is a CCX, which on current parts is a whole
-//!   CCD - 6 or 8 cores. This is the number people mean by "a full CCD", and
-//!   it is a real boundary: cross-CCD traffic leaves the die.
-//! - **Intel**: there is no CCD. L3 is shared across the whole ring/mesh, so
-//!   this returns every physical core in the socket - the die *is* the domain.
-//!   The analogous boundary on a multi-socket Intel box is the socket, and
-//!   this reports it correctly for the same reason.
+//! - **AMD Zen**: an L3 domain is a CCX, commonly a whole CCD - 6 or 8 cores -
+//!   and a real boundary, since cross-CCD traffic leaves the die.
+//! - **Intel**: there is no CCD. L3 is shared across a ring/mesh, often across
+//!   the socket. The returned count is the physical cores in the selected L3
+//!   domain that the calling thread may use, so affinity can reduce it on
+//!   either vendor.
 //! - **Intel hybrid (Alder Lake and later)**: P-cores and E-cores share the
-//!   L3, so both are counted. That is the honest answer for a cache-sharing
-//!   question and a slightly optimistic one for a throughput question, since
-//!   an E-core is not a P-core. Noted rather than corrected: sysfs exposes no
-//!   portable core-class field, and guessing from core counts would be
-//!   wrong on the parts that matter.
+//!   L3, so both are counted when allowed. That is the honest answer for a
+//!   cache-sharing question and a slightly optimistic one for a throughput
+//!   question, since an E-core is not a P-core. Noted rather than corrected:
+//!   sysfs exposes no portable core-class field, and guessing from core counts
+//!   would be wrong on the parts that matter.
 //!
 //! # Fallbacks
 //!
 //! Every step degrades rather than fails, because this feeds a default and a
 //! report, never a correctness decision: no `index3` (no L3, or a container
-//! with a trimmed sysfs) falls back to physical cores across the machine, and
-//! no topology at all falls back to `available_parallelism()`.
+//! with a trimmed sysfs) falls back to physical cores in the allowed set, and
+//! no usable topology or affinity list falls back to `available_parallelism()`.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -107,28 +109,63 @@ fn online_cpus() -> BTreeSet<u32> {
         .unwrap_or_default()
 }
 
-/// Physical cores sharing cpu0's last-level cache.
+/// Parse the calling thread's allowed logical CPUs from procfs.
+fn parse_allowed_cpus(status: &str) -> Option<BTreeSet<u32>> {
+    status.lines().find_map(|line| {
+        let list = line.strip_prefix("Cpus_allowed_list:")?;
+        let cpus = parse_cpu_list(list);
+        (!cpus.is_empty()).then_some(cpus)
+    })
+}
+
+/// The calling thread's affinity, restricted to CPUs sysfs reports online.
+/// If the online list is unavailable, keep the kernel-provided affinity list.
+fn allowed_cpus() -> Option<BTreeSet<u32>> {
+    let status = read_trimmed(Path::new("/proc/thread-self/status"))?;
+    let allowed = parse_allowed_cpus(&status)?;
+    let online = online_cpus();
+    if online.is_empty() {
+        return Some(allowed);
+    }
+    let online_allowed: BTreeSet<u32> = allowed.intersection(&online).copied().collect();
+    Some(if online_allowed.is_empty() {
+        allowed
+    } else {
+        online_allowed
+    })
+}
+
+/// Restrict one cache's logical CPU set to the CPUs this thread may use.
+fn allowed_domain(allowed: &BTreeSet<u32>, cache: &BTreeSet<u32>) -> BTreeSet<u32> {
+    allowed.intersection(cache).copied().collect()
+}
+
+/// Physical cores in one last-level cache domain available to this thread.
 ///
 /// Returns `None` when sysfs says nothing usable, so callers can distinguish
 /// "not detected" from a plausible-looking number they would otherwise have
 /// to trust.
 pub(crate) fn cache_domain_cores() -> Option<usize> {
-    let l3 = Path::new(CPU_ROOT).join("cpu0/cache/index3/shared_cpu_list");
-    if let Some(list) = read_trimmed(&l3) {
-        let n = physical_cores(&parse_cpu_list(&list));
-        if n > 0 {
-            return Some(n);
+    let allowed = allowed_cpus()?;
+    for cpu in &allowed {
+        let l3 = Path::new(CPU_ROOT).join(format!("cpu{cpu}/cache/index3/shared_cpu_list"));
+        if let Some(list) = read_trimmed(&l3) {
+            let domain = allowed_domain(&allowed, &parse_cpu_list(&list));
+            let n = physical_cores(&domain);
+            if n > 0 {
+                return Some(n);
+            }
         }
     }
-    // No L3 (or no sysfs cache tree): fall back to physical cores machine-wide,
-    // which is the same question with the cache boundary erased.
-    let n = physical_cores(&online_cpus());
+    // No L3 (or no sysfs cache tree): erase the cache boundary while retaining
+    // the calling thread's affinity restriction.
+    let n = physical_cores(&allowed);
     (n > 0).then_some(n)
 }
 
 /// The cache domain's core count, or a usable number regardless.
 ///
-/// The last resort is `available_parallelism()`, which overcounts on an SMT
+/// The last resort is `available_parallelism()`, which can overcount on an SMT
 /// part - accepted because a default that is too high is a slow test run,
 /// while a default of zero is no test run at all.
 pub(crate) fn cache_domain_cores_or_default() -> u32 {
@@ -179,6 +216,26 @@ mod cpu_topology_tests {
         assert_eq!(
             parse_cpu_list("0-1,junk,4"),
             [0, 1, 4].into_iter().collect()
+        );
+    }
+
+    #[test]
+    fn proc_status_affinity_list_is_parsed() {
+        let status = "Name:\tbrokkr\nCpus_allowed:\t000000ff\nCpus_allowed_list:\t4-7,12,15\n";
+        assert_eq!(
+            parse_allowed_cpus(status),
+            Some([4, 5, 6, 7, 12, 15].into_iter().collect())
+        );
+        assert_eq!(parse_allowed_cpus("Name:\tbrokkr\n"), None);
+    }
+
+    #[test]
+    fn a_cache_domain_is_limited_to_affinity_allowed_cpus() {
+        let allowed: BTreeSet<u32> = [4, 5, 12, 13].into_iter().collect();
+        let cache: BTreeSet<u32> = [0, 1, 2, 3, 4, 5, 6, 7].into_iter().collect();
+        assert_eq!(
+            allowed_domain(&allowed, &cache),
+            [4, 5].into_iter().collect()
         );
     }
 

@@ -148,7 +148,7 @@ Probes are pinned in the registry (`registry_dir`), two file kinds:
   whose path is not plain relative components below `corpus_root`.
 
   All `path`s (probe, feed and harness file) are relative to `corpus_root`. `xxh128` is
-  brokkr's standard file hash (`preflight::compute_xxh128`, 32 lowercase hex,
+  brokkr's standard file hash (`preflight::compute_file_digest`, 32 lowercase hex,
   case-insensitive). `expected` is one disposition label (see the gate,
   below); absent until the probe is blessed. A probe entry holds nothing
   else: it is machine-stamped (reseed writes its hashes, bless its

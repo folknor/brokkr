@@ -1,17 +1,15 @@
-//! Unified dispatch layer for pbfhogg commands.
-//!
-//! Single entry point per measurement mode (wall-clock, hotpath, alloc).
-
+//! Pbfhogg input resolution and command plans.
 use std::path::Path;
 
 use crate::config;
-use crate::context::BenchContext;
+use crate::context::MeasurementSession;
 use crate::error::DevError;
 use crate::harness::{self, BenchConfig};
+use crate::measure::runner::{CommandPlan, PlannedCommand, RowSubject};
 use crate::measure::{CommandContext, CommandParams, MeasureMode, MeasureRequest};
 use crate::output;
 use crate::pbfhogg::commands::{ArgMode, InputKind, OutputKind, PbfhoggCommand};
-use crate::project::{self, Project};
+use crate::project::Project;
 use crate::resolve::{self, resolve_bbox};
 
 /// Resolve cargo features for the selected I/O mode and run its preflight
@@ -45,35 +43,114 @@ fn resolve_io_features(
     Ok(features)
 }
 
-/// Run a single pbfhogg command with the specified measurement mode.
-///
-/// Handles run, bench, hotpath, and alloc for any pbfhogg command.
-/// `extra_params` carries command-specific parameters (e.g. `index_type`
-/// for `add-locations-to-ways`, `bbox` for extract).
-pub(crate) fn run_command_with_params(
-    req: &MeasureRequest,
-    command: &PbfhoggCommand,
-    osc_seq: Option<&str>,
-    extra_params: &CommandParams,
-) -> Result<(), DevError> {
-    project::require(req.project, Project::Pbfhogg, command.id())?;
+pub(crate) struct PbfhoggPlan<'a> {
+    pub command: &'a PbfhoggCommand,
+    pub osc_seq: Option<&'a str>,
+    pub params: &'a CommandParams,
+}
 
-    // If `--as-snapshot KEY` is set, validate the key against existing
-    // brokkr.toml state before triggering the cargo build. Without this
-    // pre-flight, a 30s+ run can complete and then error at registration
-    // because the operator forgot `--replace-snapshot`.
-    preflight_as_snapshot(command, req, extra_params)?;
-
-    if req.dry_run {
-        return run_pbfhogg_dry_run(req, command, osc_seq, extra_params);
+impl PlannedCommand for PbfhoggPlan<'_> {
+    type State = CommandContext;
+    fn project(&self) -> Project {
+        Project::Pbfhogg
     }
-
-    match req.mode {
-        MeasureMode::Run => run_pbfhogg_run(req, command, osc_seq, extra_params),
-        MeasureMode::Bench { .. } => run_pbfhogg_wallclock(req, command, osc_seq, extra_params),
-        MeasureMode::Hotpath { .. } | MeasureMode::Alloc { .. } => {
-            run_pbfhogg_hotpath(req, command, osc_seq, extra_params)
+    fn id(&self) -> &'static str {
+        self.command.id()
+    }
+    fn package(&self) -> Option<&'static str> {
+        Some("pbfhogg-cli")
+    }
+    fn supports_profiling(&self) -> bool {
+        self.command.supports_hotpath()
+    }
+    fn ok_codes(&self) -> &[i32] {
+        self.command.ok_exit_codes()
+    }
+    fn build_config(
+        &self,
+        req: &MeasureRequest<'_>,
+    ) -> Result<Option<crate::build::BuildConfig>, DevError> {
+        preflight_as_snapshot(self.command, req, self.params)?;
+        let io = resolve_io_features(self.command, self.params)?;
+        let mut features = if matches!(
+            req.mode,
+            MeasureMode::Hotpath { .. } | MeasureMode::Alloc { .. }
+        ) {
+            req.hotpath_features()
+        } else {
+            req.feat_refs()
+        };
+        features.extend(io);
+        Ok(Some(crate::build::BuildConfig::release_with_features(
+            self.package(),
+            &features,
+        )))
+    }
+    fn plan(
+        &self,
+        req: &MeasureRequest<'_>,
+        paths: &config::ResolvedPaths,
+        binary: &Path,
+    ) -> Result<CommandPlan<CommandContext>, DevError> {
+        if req.dry_run {
+            preflight_as_snapshot(self.command, req, self.params)?;
+            resolve_io_features(self.command, self.params)?;
         }
+        let state =
+            build_pbfhogg_context(req, self.command, self.osc_seq, binary, paths, self.params)?;
+        let mode = arg_mode(req);
+        let mut args = self.command.build_args(&state, mode)?;
+        if mode == ArgMode::Hotpath {
+            args.remove(0);
+        }
+        let (basename, mb) = result_input_metadata(self.command, &state)?;
+        Ok(CommandPlan {
+            args,
+            scratch_dirs: vec![],
+            subject: RowSubject {
+                command: self.command.id().into(),
+                input_file: Some(basename),
+                input_mb: Some(mb),
+                cli_args: None,
+                metadata: self.command.metadata(&state),
+            },
+            state,
+        })
+    }
+    fn prepare(
+        &self,
+        req: &MeasureRequest<'_>,
+        _ctx: &MeasurementSession,
+        plan: &CommandPlan<CommandContext>,
+    ) -> Result<(), DevError> {
+        cleanup_output(self.command, &plan.state, arg_mode(req))?;
+        self.command.prepare_scratch(&plan.state)
+    }
+    fn finish(
+        &self,
+        req: &MeasureRequest<'_>,
+        ctx: &MeasurementSession,
+        plan: &CommandPlan<CommandContext>,
+    ) -> Result<(), DevError> {
+        promote_artifact(
+            self.command,
+            &plan.state,
+            arg_mode(req),
+            &ctx.paths,
+            req.project_root,
+        )?;
+        cleanup_output(self.command, &plan.state, arg_mode(req))
+    }
+}
+
+fn arg_mode(req: &MeasureRequest<'_>) -> ArgMode {
+    if matches!(
+        req.mode,
+        MeasureMode::Hotpath { .. } | MeasureMode::Alloc { .. }
+    ) {
+        ArgMode::Hotpath
+    } else {
+        ArgMode::Bench
     }
 }
 
@@ -115,204 +192,11 @@ fn require_snapshot_output(command: &PbfhoggCommand) -> Result<(), DevError> {
     Ok(())
 }
 
-/// Dry-run mode: validate argv, config, and path resolution without building
-/// or running. Short-circuits after `command.build_args` succeeds.
-///
-/// Does: io-flag validation, project bootstrap, path resolution
-/// (pbf/osc/bbox/snapshot/merged-cache-key), arg-vector construction, and
-/// hotpath-arg-vector construction for commands that support it.
-/// Does NOT: cargo build, lock acquisition, ensure_merged_pbf apply-changes,
-/// or process execution. Hash verification of the input PBF/OSC IS performed
-/// (cached in `.brokkr/hash_cache`), because it's part of "would this start
-/// up cleanly" and cache hits are fast.
-fn run_pbfhogg_dry_run(
-    req: &MeasureRequest,
-    command: &PbfhoggCommand,
-    osc_seq: Option<&str>,
-    extra_params: &CommandParams,
-) -> Result<(), DevError> {
-    // Validate I/O flag compatibility (e.g. --io-uring on a command that
-    // doesn't support it) and run io_uring preflight if requested.
-    let _io_features = resolve_io_features(command, extra_params)?;
-
-    // Resolve paths without building. bootstrap() reads cargo metadata for
-    // target_dir - cheap, doesn't trigger a compile.
-    let pi = crate::context::bootstrap(req.build_root)?;
-    let paths = crate::context::bootstrap_config(req.dev_config, req.project_root, &pi.target_dir)?;
-
-    // Fake binary path for the CommandContext. `build_args(_, Bench)`
-    // doesn't touch it; `build_args(_, Hotpath)` uses it only as a leading
-    // argv[0] string. Use the brokkr binary's own path so any accidental
-    // stat still succeeds.
-    let fake_binary =
-        std::env::current_exe().unwrap_or_else(|_| req.project_root.join("brokkr.toml"));
-
-    let cmd_ctx = build_pbfhogg_context(req, command, osc_seq, &fake_binary, &paths, extra_params)?;
-
-    let arg_mode = if matches!(
-        req.mode,
-        MeasureMode::Hotpath { .. } | MeasureMode::Alloc { .. }
-    ) {
-        ArgMode::Hotpath
-    } else {
-        ArgMode::Bench
-    };
-    let args = command.build_args(&cmd_ctx, arg_mode)?;
-
-    // Validate the other builder form too. The requested mode remains the one
-    // printed above, while both paths are checked for missing inputs.
-    if command.supports_hotpath() {
-        let other_mode = if arg_mode == ArgMode::Bench {
-            ArgMode::Hotpath
-        } else {
-            ArgMode::Bench
-        };
-        let _ = command.build_args(&cmd_ctx, other_mode)?;
-    }
-
-    let display_slice = if arg_mode == ArgMode::Hotpath {
-        &args[1..]
-    } else {
-        &args[..]
-    };
-    let displayed_args: Vec<&str> = display_slice.iter().map(String::as_str).collect();
-    output::dry_run_msg(&format!(
-        "{} args: {}",
-        command.id(),
-        displayed_args.join(" ")
-    ));
-    if let Some(pbf_path) = &cmd_ctx.pbf_path {
-        output::dry_run_msg(&format!("pbf: {}", pbf_path.display()));
-    }
-    if let Some(ref p) = cmd_ctx.osc_path {
-        output::dry_run_msg(&format!("osc: {}", p.display()));
-    }
-    if cmd_ctx.osc_paths.len() > 1 {
-        output::dry_run_msg(&format!(
-            "osc range: {} files ({} .. {})",
-            cmd_ctx.osc_paths.len(),
-            cmd_ctx
-                .osc_paths
-                .first()
-                .map_or(String::new(), |p| p.display().to_string()),
-            cmd_ctx
-                .osc_paths
-                .last()
-                .map_or(String::new(), |p| p.display().to_string()),
-        ));
-    }
-    if let Some(ref p) = cmd_ctx.pbf_b_path {
-        output::dry_run_msg(&format!("pbf_b: {}", p.display()));
-    }
-    if let Some(ref b) = cmd_ctx.bbox {
-        output::dry_run_msg(&format!("bbox: {b}"));
-    }
-    output::dry_run_msg("ok");
-    Ok(())
-}
-
-/// Default run mode: build, run once, print timing. Acquires lockfile, no DB storage.
-fn run_pbfhogg_run(
-    req: &MeasureRequest,
-    command: &PbfhoggCommand,
-    osc_seq: Option<&str>,
-    extra_params: &CommandParams,
-) -> Result<(), DevError> {
-    let io_features = resolve_io_features(command, extra_params)?;
-
-    let mut feat_refs: Vec<&str> = req.features.iter().map(String::as_str).collect();
-    feat_refs.extend_from_slice(&io_features);
-
-    let ctx = BenchContext::new_for_request(
-        req,
-        Some("pbfhogg-cli"),
-        &feat_refs,
-        true,
-        &format!("run {}", command.id()),
-    )?;
-
-    let cmd_ctx =
-        build_pbfhogg_context(req, command, osc_seq, &ctx.binary, &ctx.paths, extra_params)?;
-    let args = command.build_args(&cmd_ctx, ArgMode::Bench)?;
-    command.prepare_scratch(&cmd_ctx)?;
-    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-
-    let binary_str = ctx.binary.display().to_string();
-    output::run_msg(&format!("{binary_str} {}", arg_refs.join(" ")));
-
-    let out = output::run_passthrough_timed(&binary_str, &arg_refs, Some(ctx.harness.lock()))?;
-
-    if out.code != 0 && !command.ok_exit_codes().contains(&out.code) {
-        cleanup_output(command, &cmd_ctx, ArgMode::Bench)?;
-        return Err(DevError::ExitCode(out.code));
-    }
-
-    promote_artifact(
-        command,
-        &cmd_ctx,
-        ArgMode::Bench,
-        &ctx.paths,
-        req.project_root,
-    )?;
-    cleanup_output(command, &cmd_ctx, ArgMode::Bench)?;
-
-    let ms = crate::duration_ms(out.elapsed);
-    output::run_msg(&format!("elapsed={ms}ms"));
-
-    Ok(())
-}
-
-/// Wall-clock benchmark: build release binary, run externally, record timing.
-fn run_pbfhogg_wallclock(
-    req: &MeasureRequest,
-    command: &PbfhoggCommand,
-    osc_seq: Option<&str>,
-    extra_params: &CommandParams,
-) -> Result<(), DevError> {
-    let io_features = resolve_io_features(command, extra_params)?;
-
-    let mut feat_refs: Vec<&str> = req.features.iter().map(String::as_str).collect();
-    feat_refs.extend_from_slice(&io_features);
-
-    let ctx = BenchContext::new_for_request(
-        req,
-        Some("pbfhogg-cli"),
-        &feat_refs,
-        true,
-        &format!("run {}", command.id()),
-    )?;
-
-    let cmd_ctx =
-        build_pbfhogg_context(req, command, osc_seq, &ctx.binary, &ctx.paths, extra_params)?;
-
-    run_wallclock_core(
-        &ctx.harness,
-        &ctx.binary,
-        command,
-        &cmd_ctx,
-        req.runs(),
-        req.project_root,
-        true,
-    )?;
-
-    promote_artifact(
-        command,
-        &cmd_ctx,
-        ArgMode::Bench,
-        &ctx.paths,
-        req.project_root,
-    )?;
-    cleanup_output(command, &cmd_ctx, ArgMode::Bench)?;
-    Ok(())
-}
-
 /// Run a single pbfhogg command via the wall-clock harness.
 ///
-/// Shared by `run_pbfhogg_wallclock` (individual `brokkr <cmd>` invocations)
-/// and the suite runner in `pbfhogg::bench_commands`. Both paths produce
-/// identical DB rows; argv construction and BenchConfig fields are centralised
-/// here. Cleanup is the caller's responsibility - top-level invocations may
-/// promote the artifact (`--as-snapshot`) before cleaning up the scratch file.
+/// The suite reuses its already-built session. It produces the same row
+/// identity and argv as individual command plans; the suite owns promotion
+/// after the final sample.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_wallclock_core(
     harness: &harness::BenchHarness,
@@ -324,14 +208,12 @@ pub(crate) fn run_wallclock_core(
     announce: bool,
 ) -> Result<(), DevError> {
     let args = command.build_args(cmd_ctx, ArgMode::Bench)?;
-    command.prepare_scratch(cmd_ctx)?;
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
 
     let (basename, file_mb) = result_input_metadata(command, cmd_ctx)?;
 
     let config = BenchConfig {
         command: command.id().into(),
-        mode: None,
         input_file: Some(basename),
         input_mb: Some(file_mb),
         cargo_features: None,
@@ -341,7 +223,6 @@ pub(crate) fn run_wallclock_core(
             &binary.display().to_string(),
             &arg_refs,
         )),
-        brokkr_args: None,
         metadata: command.metadata(cmd_ctx),
     };
 
@@ -352,12 +233,16 @@ pub(crate) fn run_wallclock_core(
         ));
     }
 
-    harness.run_external_ok(
+    harness.run_external_prepared(
         &config,
         binary,
         &arg_refs,
         project_root,
         command.ok_exit_codes(),
+        || {
+            cleanup_output(command, cmd_ctx, ArgMode::Bench)?;
+            command.prepare_scratch(cmd_ctx)
+        },
     )?;
     Ok(())
 }
@@ -401,107 +286,6 @@ fn result_input_metadata(
             .ok_or_else(|| DevError::Config("PBF path is required but not set".into()))?;
         Ok((cmd_ctx.pbf_basename()?, resolve::file_size_mb(pbf_path)?))
     }
-}
-
-/// Hotpath/alloc mode: build with hotpath feature, run via run_hotpath_capture.
-fn run_pbfhogg_hotpath(
-    req: &MeasureRequest,
-    command: &PbfhoggCommand,
-    osc_seq: Option<&str>,
-    extra_params: &CommandParams,
-) -> Result<(), DevError> {
-    if !command.supports_hotpath() {
-        return Err(DevError::Config(format!(
-            "command '{}' does not support hotpath/alloc profiling",
-            command.id(),
-        )));
-    }
-
-    let alloc = matches!(req.mode, MeasureMode::Alloc { .. });
-    let feature = harness::hotpath_feature(alloc);
-    let io_features = resolve_io_features(command, extra_params)?;
-
-    // Build features: hotpath + user features + I/O features.
-    let mut all_features: Vec<&str> = vec![feature];
-    all_features.extend(req.features.iter().map(String::as_str));
-    all_features.extend_from_slice(&io_features);
-
-    let ctx = BenchContext::new_for_request(
-        req,
-        Some("pbfhogg-cli"),
-        &all_features,
-        true,
-        &format!(
-            "run {} --{}",
-            command.id(),
-            if alloc { "alloc" } else { "hotpath" }
-        ),
-    )?;
-
-    let cmd_ctx =
-        build_pbfhogg_context(req, command, osc_seq, &ctx.binary, &ctx.paths, extra_params)?;
-
-    let (basename, file_mb) = result_input_metadata(command, &cmd_ctx)?;
-
-    let hotpath_args = command.build_args(&cmd_ctx, ArgMode::Hotpath)?;
-    command.prepare_scratch(&cmd_ctx)?;
-
-    output::detail(&format!("{} {feature}", command.id()));
-    harness::hotpath_alloc_note(alloc);
-
-    let subprocess_args: Vec<&str> = hotpath_args[1..].iter().map(String::as_str).collect();
-
-    // Metadata is reserved for runtime observations post-v13 (cache state,
-    // detected features, resolved file paths). The alloc mode and the
-    // command id that used to be dumped here are now recorded in the
-    // variant and command columns respectively.
-    let metadata = command.metadata(&cmd_ctx);
-
-    let config = BenchConfig {
-        command: command.id().into(),
-        mode: None,
-        input_file: Some(basename),
-        input_mb: Some(file_mb),
-        cargo_features: None,
-        cargo_profile: crate::build::CargoProfile::Release,
-        runs: req.runs(),
-        cli_args: Some(harness::format_cli_args(
-            &ctx.binary.display().to_string(),
-            &subprocess_args,
-        )),
-        brokkr_args: None,
-        metadata,
-    };
-
-    let binary_str = ctx.binary.display().to_string();
-    let scratch_dir = ctx.paths.scratch_dir.clone();
-    let project_root = req.project_root.to_path_buf();
-
-    let ok_codes = command.ok_exit_codes();
-    ctx.harness.run_hotpath(&config, &ctx.binary, |_i| {
-        let (result, _stderr, sidecar) = harness::run_hotpath_capture(
-            &binary_str,
-            &subprocess_args,
-            &scratch_dir,
-            &project_root,
-            &[],
-            ok_codes,
-            req.stop_marker,
-            Some(ctx.harness.lock()),
-        )?;
-        Ok((result, sidecar))
-    })?;
-
-    promote_artifact(
-        command,
-        &cmd_ctx,
-        ArgMode::Hotpath,
-        &ctx.paths,
-        req.project_root,
-    )?;
-    cleanup_output(command, &cmd_ctx, ArgMode::Hotpath)?;
-
-    Ok(())
 }
 
 /// Build the `CommandContext` for a pbfhogg command, resolving all input paths.

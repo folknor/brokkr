@@ -58,9 +58,32 @@ pub(crate) fn harness_dir() -> Option<PathBuf> {
     brokkr_state_dir().map(|dir| dir.join("harness"))
 }
 
+/// The last marker reported by the current sidecar, beside the global lock.
+/// Unit tests never resolve it (`sidecar::status_path` is `None` there, since
+/// the file is host-global).
+#[cfg_attr(test, allow(dead_code))]
+pub(crate) fn sidecar_status() -> Option<PathBuf> {
+    brokkr_state_dir().map(|dir| dir.join("sidecar-status"))
+}
+
 /// Persistent cargo worktrees shared by every project for this user.
 pub(crate) fn worktrees() -> Option<PathBuf> {
     brokkr_state_dir().map(|dir| dir.join("worktrees"))
+}
+
+/// The global command-history database.
+pub(crate) fn history_db() -> Option<PathBuf> {
+    xdg_data_home().map(|dir| dir.join("brokkr").join("history.db"))
+}
+
+/// Durable backups of sidecar samples, stored outside every project tree.
+pub(crate) fn sidecar_backups_dir() -> Option<PathBuf> {
+    xdg_data_home().map(|dir| dir.join("brokkr").join("sidecar-backups"))
+}
+
+/// Versioned cache of the bundled litehtml Node scripts.
+pub(crate) fn litehtml_scripts_dir() -> Option<PathBuf> {
+    xdg_cache_home().map(|dir| dir.join("brokkr").join("litehtml-prepare"))
 }
 
 /// An XDG base directory: `$<var>` when it is set to an absolute path,

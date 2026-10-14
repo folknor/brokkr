@@ -7,9 +7,8 @@
 - `src/nidhogg/commands.rs` - `NidhoggCommand` enum (Api/Ingest/Tiles) with
   `id()`, `supports_hotpath()`, `needs_build()`, `needs_server()`,
   `metadata()`.
-- `src/nidhogg/dispatch.rs` - exposes `run_command()`. Ingest produces a
-  standalone command plan for `src/measure/runner.rs`; API and tiles delegate
-  to their specialized server lifecycles.
+- `src/nidhogg/plan.rs` - binary, HTTP and server lifecycle plans for
+  `src/measure/runner.rs`; execution uses one `MeasurementSession`.
 - `src/nidhogg/...` - server lifecycle (serve/stop/status), ingest, update,
   query, geocode, benchmarks (api, ingest, tiles), verify (batch, geocode,
   readonly), hotpath.
@@ -78,7 +77,10 @@ names (`run-ingest-output`, `bench-ingest-output`, `hotpath-ingest-output`).
 
 `--dry-run` is supported for ingest: resolve the input and construct argv,
 without building, executing, or creating scratch directories. API and tiles
-still reject dry-run and hotpath/alloc because they need server lifecycle plans.
+also support dry-run through HTTP/server lifecycle plans: resolution does not
+contact or start a server. They still reject hotpath/alloc. Run executes one
+sample per selected query or lifecycle without recording. Stored command names
+remain `api-<query>` and `tiles`, with absent `cli_args`.
 
 Scratch is reset before every sample in every mode, run and hotpath/alloc
 included, so no sample can find data an earlier one ingested. A successful

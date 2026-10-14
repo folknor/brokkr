@@ -70,7 +70,7 @@ mod tests {
     use crate::check_cmd::{self, LaneEntry};
     use crate::config::{CheckEntry, SweepProfile, TestConfig};
     use crate::error::DevError;
-    use crate::profile::ResolvedSweep;
+    use crate::profile::PlannedSweep;
     use crate::project::Project;
     use crate::test_runner;
     use std::path::{Path, PathBuf};
@@ -78,13 +78,18 @@ mod tests {
 
     /// `sweep`'s one request under `brokkr test -p pkg`: the package flags
     /// as the run's override spells them, with the sweep's features.
-    fn one_package(sweep: &ResolvedSweep, pkg: &str) -> check_cmd::ResolutionRun {
+    fn one_package(sweep: &PlannedSweep, pkg: &str) -> check_cmd::ResolutionRun {
         let sel = selection_for(std::slice::from_ref(sweep), pkg);
-        single_run(sweep, sel.attempt(0).unwrap()).unwrap().clone()
+        single_run(
+            sweep,
+            sel.attempt(crate::check_cmd::LaneIdx::new(0)).unwrap(),
+        )
+        .unwrap()
+        .clone()
     }
 
     /// `brokkr test`'s selection for `pkg`, every sweep resolving to release.
-    fn selection_for(sweeps: &[ResolvedSweep], pkg: &str) -> check_cmd::PhaseSelection {
+    fn selection_for(sweeps: &[PlannedSweep], pkg: &str) -> check_cmd::PhaseSelection {
         check_cmd::PhaseSelection::for_brokkr_test(
             sweeps,
             pkg,
@@ -99,11 +104,11 @@ mod tests {
     }
 
     /// The sweeps a `brokkr test -p pkg` run would build, in order.
-    fn attempted<'a>(sweeps: &'a [ResolvedSweep], pkg: &str) -> Vec<&'a str> {
+    fn attempted<'a>(sweeps: &'a [PlannedSweep], pkg: &str) -> Vec<&'a str> {
         let sel = selection_for(sweeps, pkg);
         sweeps
             .iter()
-            .zip(sel.entries())
+            .zip(sel.entries().iter())
             .filter(|(_, e)| e.attempt().is_some())
             .map(|(s, _)| s.label.as_str())
             .collect()
@@ -333,7 +338,7 @@ mod tests {
     /// every example.
     #[test]
     fn the_prebuild_selects_the_test_targets() {
-        let sweep = ResolvedSweep::default();
+        let sweep = crate::profile::PlannedSweep::from(crate::profile::SweepDecl::default());
         let run = one_package(&sweep, "pkg");
         let shape = BuildShape {
             sweep: &sweep,
@@ -381,10 +386,10 @@ mod tests {
     /// The doc-only run is `cargo test --doc NAME` with the same libtest half.
     #[test]
     fn the_doc_only_run_shares_the_libtest_half() {
-        let sweep = ResolvedSweep {
+        let sweep = crate::profile::PlannedSweep::from(crate::profile::SweepDecl {
             lane_exec: crate::profile::LaneExec::doc_only(),
-            ..ResolvedSweep::default()
-        };
+            ..crate::profile::SweepDecl::default()
+        });
         let one = one_package(&sweep, "pkg");
         let shape = BuildShape {
             sweep: &sweep,
@@ -759,7 +764,9 @@ lanes = ["tier1", "serial"]
         let sweeps = decide_sweeps(Some(&test_cfg), &entries).unwrap();
         assert_eq!(attempted(&sweeps, "pkg"), vec!["tier1/all"]);
         let sel = selection_for(&sweeps, "pkg");
-        assert!(matches!(sel.entry(1), Some(LaneEntry::Deduped(d)) if d.onto() == 0));
+        assert!(
+            matches!(sel.entry(crate::check_cmd::LaneIdx::new(1)), Some(LaneEntry::Deduped(d)) if d.onto() == crate::check_cmd::LaneIdx::new(0))
+        );
         assert_eq!(
             sweep_plan_line(&sweeps, &sel, "pkg"),
             "[test]    1 sweep for pkg: tier1/all (deduped: serial/all (as tier1/all))"
@@ -784,7 +791,7 @@ lanes = ["tier1", "serial"]
         // skips the `-p` target, the other runs it. The selection keeps the
         // permitting one, so declaration order can't decide whether
         // `-p PKG NAME` finds its test.
-        let excludes = ResolvedSweep {
+        let excludes = crate::profile::PlannedSweep::from(crate::profile::SweepDecl {
             label: "tier1/all".into(),
             features: crate::profile::FeatureConfig {
                 tokens: vec!["a".into()],
@@ -792,8 +799,8 @@ lanes = ["tier1", "serial"]
             },
             test_exclude_packages: vec!["pkg-x".into()],
             ..Default::default()
-        };
-        let permits = ResolvedSweep {
+        });
+        let permits = crate::profile::PlannedSweep::from(crate::profile::SweepDecl {
             label: "serial/all".into(),
             features: crate::profile::FeatureConfig {
                 tokens: vec!["a".into()],
@@ -801,11 +808,14 @@ lanes = ["tier1", "serial"]
             },
             test_exclude_packages: Vec::new(),
             ..Default::default()
-        };
+        });
         let sweeps = vec![excludes, permits];
         assert_eq!(attempted(&sweeps, "pkg-x"), vec!["serial/all"]);
         let sel = selection_for(&sweeps, "pkg-x");
-        assert!(matches!(sel.entry(0), Some(LaneEntry::Excluded(_))));
+        assert!(matches!(
+            sel.entry(crate::check_cmd::LaneIdx::new(0)),
+            Some(LaneEntry::Excluded(_))
+        ));
     }
 
     /// Regression: a sweep and its doctest twin are two runs. The old dedupe
@@ -814,15 +824,15 @@ lanes = ["tier1", "serial"]
     /// doctests.
     #[test]
     fn a_doctest_twin_is_not_collapsed_onto_its_sibling() {
-        let lib = ResolvedSweep {
+        let lib = crate::profile::PlannedSweep::from(crate::profile::SweepDecl {
             label: "default".into(),
-            ..Default::default()
-        };
-        let twin = ResolvedSweep {
+            ..crate::profile::SweepDecl::default()
+        });
+        let twin = crate::profile::PlannedSweep::from(crate::profile::SweepDecl {
             label: "doctests".into(),
             lane_exec: crate::profile::LaneExec::doc_only(),
-            ..Default::default()
-        };
+            ..crate::profile::SweepDecl::default()
+        });
         let sweeps = vec![lib, twin];
         assert_eq!(attempted(&sweeps, "pkg"), vec!["default", "doctests"]);
     }
@@ -940,12 +950,11 @@ include_ignored = false
     /// fails the pre-build before `cargo test` is reached.
     #[test]
     fn pre_build_carries_the_unification_pin_and_the_allow_config() {
-        use crate::config::{CargoUnification, EffectiveUnification};
-        let sweep = ResolvedSweep {
+        let sweep = crate::profile::PlannedSweep::from(crate::profile::SweepDecl {
             packages: vec!["daemon".to_owned()],
-            effective_unification: EffectiveUnification::Pinned(CargoUnification::Package),
-            ..ResolvedSweep::default()
-        };
+            feature_unification: crate::config::FeatureUnification::Package,
+            ..crate::profile::SweepDecl::default()
+        });
         let allow = vec![
             "--config".to_owned(),
             "build.rustflags=[\"-A\",\"x\"]".to_owned(),
@@ -968,7 +977,7 @@ include_ignored = false
         assert!(args.iter().any(|a| a == "--release"), "{args:?}");
 
         // An unpinned sweep with no allows stays byte-identical to before.
-        let plain_sweep = ResolvedSweep::default();
+        let plain_sweep = crate::profile::PlannedSweep::from(crate::profile::SweepDecl::default());
         let plain = pre_build_argv(
             &plain_sweep,
             &support_for(&plain_sweep, "core", "bin"),
@@ -988,13 +997,16 @@ include_ignored = false
 
     /// The support request the run's selection plans for `support` when
     /// `brokkr test -p pkg` runs `sweep` with `support` as a build package.
-    fn support_for(sweep: &ResolvedSweep, pkg: &str, support: &str) -> check_cmd::SupportRequest {
-        let with = ResolvedSweep {
+    fn support_for(sweep: &PlannedSweep, pkg: &str, support: &str) -> check_cmd::SupportRequest {
+        let with = crate::profile::PlannedSweep::from(crate::profile::SweepDecl {
             build_packages: vec![support.to_owned()],
-            ..sweep.clone()
-        };
+            ..sweep.declaration().clone()
+        });
         let sel = selection_for(std::slice::from_ref(&with), pkg);
-        sel.attempt(0).unwrap().support()[0].clone()
+        sel.attempt(crate::check_cmd::LaneIdx::new(0))
+            .unwrap()
+            .support()[0]
+            .clone()
     }
 
     /// `brokkr test -p strategy` projects a sweep's features onto the one
@@ -1003,7 +1015,7 @@ include_ignored = false
     #[test]
     fn the_run_and_its_support_build_carry_projected_features() {
         let ws = check_cmd::feature_fixture::piners();
-        let sweep = ResolvedSweep {
+        let sweep = crate::profile::PlannedSweep::from(crate::profile::SweepDecl {
             label: "piners".into(),
             packages: vec![
                 "piners-vm".into(),
@@ -1019,8 +1031,8 @@ include_ignored = false
                 ],
                 ..Default::default()
             },
-            ..ResolvedSweep::default()
-        };
+            ..crate::profile::SweepDecl::default()
+        });
         let sel = check_cmd::PhaseSelection::for_brokkr_test(
             std::slice::from_ref(&sweep),
             "piners-strategy",
@@ -1029,7 +1041,7 @@ include_ignored = false
             &check_cmd::FeatureOracle::fixed(ws),
         )
         .unwrap();
-        let attempt = sel.attempt(0).unwrap();
+        let attempt = sel.attempt(crate::check_cmd::LaneIdx::new(0)).unwrap();
         let run = single_run(&sweep, attempt).unwrap();
         let shape = BuildShape {
             sweep: &sweep,
@@ -1061,13 +1073,13 @@ include_ignored = false
     }
 
     fn ready_sweep<'s>(
-        sweep: &'s ResolvedSweep,
+        sweep: &'s PlannedSweep,
         harness: &check_cmd::TestBinary,
         support: &[check_cmd::SupportArtifact],
     ) -> ReadySweep<'s> {
         let hash = test_runner::hash_file(Path::new(&harness.executable)).unwrap();
         let attempt = selection_for(std::slice::from_ref(sweep), "core")
-            .attempt(0)
+            .attempt(crate::check_cmd::LaneIdx::new(0))
             .unwrap()
             .clone();
         ReadySweep {
@@ -1080,12 +1092,12 @@ include_ignored = false
                 runs: Vec::new(),
                 searched: 1,
                 exact: None,
-                artifacts: vec![check_cmd::PlannedArtifact {
-                    resolution: None,
-                    unit: check_cmd::BinaryUnit::of(harness),
-                    executable: harness.executable.clone(),
+                artifacts: vec![check_cmd::PlannedArtifact::new(
+                    None,
+                    check_cmd::BinaryUnit::of(harness),
+                    harness.executable.clone(),
                     hash,
-                }],
+                )],
             }),
             exact: None,
             support_fingerprint: check_cmd::support_fingerprint(support).unwrap(),
@@ -1116,7 +1128,7 @@ include_ignored = false
             target: "server".into(),
             executable: server.to_string_lossy().into_owned(),
         }];
-        let sweep = ResolvedSweep::default();
+        let sweep = crate::profile::PlannedSweep::from(crate::profile::SweepDecl::default());
         let prepared = ready_sweep(&sweep, &harness, &support);
         let rebuild = |_: usize| {
             Ok(Some((
@@ -1206,11 +1218,11 @@ include_ignored = false
             target: "server".into(),
             executable: server.to_string_lossy().into_owned(),
         }];
-        let sweep = ResolvedSweep {
+        let sweep = crate::profile::PlannedSweep::from(crate::profile::SweepDecl {
             label: "docs".into(),
             lane_exec: crate::profile::LaneExec::doc_only(),
-            ..ResolvedSweep::default()
-        };
+            ..crate::profile::SweepDecl::default()
+        });
         let mut harness = check_cmd::test_binary_for_tests("core", "test", "suite");
         harness.executable = server.to_string_lossy().into_owned();
         let mut prepared = ready_sweep(&sweep, &harness, &support);
@@ -1504,8 +1516,10 @@ include_ignored = false
 
     /// The one exclusion note of `sweep` for `pkg`, or `None` when the
     /// selection attempts it.
-    fn exclusion_of(sweep: &ResolvedSweep, pkg: &str) -> Option<check_cmd::AdmissionRule> {
-        match selection_for(std::slice::from_ref(sweep), pkg).entry(0) {
+    fn exclusion_of(sweep: &PlannedSweep, pkg: &str) -> Option<check_cmd::AdmissionRule> {
+        match selection_for(std::slice::from_ref(sweep), pkg)
+            .entry(crate::check_cmd::LaneIdx::new(0))
+        {
             Some(LaneEntry::Excluded(e)) => exclusion_rule(e.notes()),
             _ => None,
         }
@@ -1514,12 +1528,16 @@ include_ignored = false
     #[test]
     fn a_sweep_with_no_packages_list_admits_any_target() {
         // A sweep with no `packages` list covers every target.
-        let sweep = ResolvedSweep::default();
+        let sweep = crate::profile::PlannedSweep::from(crate::profile::SweepDecl::default());
         assert!(exclusion_of(&sweep, "nautilus-hyperliquid").is_none());
         // And the target replaces the sweep's own selection.
         let sel = selection_for(std::slice::from_ref(&sweep), "nautilus-hyperliquid");
         assert_eq!(
-            check_cmd::package_args(sel.attempt(0).unwrap().selection()),
+            check_cmd::package_args(
+                sel.attempt(crate::check_cmd::LaneIdx::new(0))
+                    .unwrap()
+                    .selection()
+            ),
             ["-p", "nautilus-hyperliquid"]
         );
     }
@@ -1529,10 +1547,10 @@ include_ignored = false
         // The reported case: an ffi/live sweep lists only its member packages;
         // `-p nautilus-hyperliquid` isn't one, so it must SKIP rather than
         // force a build of a feature the package doesn't declare.
-        let sweep = ResolvedSweep {
+        let sweep = crate::profile::PlannedSweep::from(crate::profile::SweepDecl {
             packages: vec!["nautilus-core".into(), "nautilus-common".into()],
-            ..Default::default()
-        };
+            ..crate::profile::SweepDecl::default()
+        });
         assert_eq!(
             exclusion_of(&sweep, "nautilus-hyperliquid"),
             Some(check_cmd::AdmissionRule::NotListed)
@@ -1541,10 +1559,10 @@ include_ignored = false
 
     #[test]
     fn a_target_inside_the_packages_list_is_attempted() {
-        let sweep = ResolvedSweep {
+        let sweep = crate::profile::PlannedSweep::from(crate::profile::SweepDecl {
             packages: vec!["nautilus-core".into(), "nautilus-hyperliquid".into()],
-            ..Default::default()
-        };
+            ..crate::profile::SweepDecl::default()
+        });
         assert_eq!(
             attempted(std::slice::from_ref(&sweep), "nautilus-hyperliquid").len(),
             1
@@ -1554,20 +1572,20 @@ include_ignored = false
     #[test]
     fn the_plan_line_keeps_the_two_scope_reasons_apart() {
         let sweeps = vec![
-            ResolvedSweep {
+            crate::profile::PlannedSweep::from(crate::profile::SweepDecl {
                 label: "default".into(),
-                ..Default::default()
-            },
-            ResolvedSweep {
+                ..crate::profile::SweepDecl::default()
+            }),
+            crate::profile::PlannedSweep::from(crate::profile::SweepDecl {
                 label: "vm".into(),
                 packages: vec!["other".into()],
-                ..Default::default()
-            },
-            ResolvedSweep {
+                ..crate::profile::SweepDecl::default()
+            }),
+            crate::profile::PlannedSweep::from(crate::profile::SweepDecl {
                 label: "ffi".into(),
                 test_exclude_packages: vec!["pkg".into()],
-                ..Default::default()
-            },
+                ..crate::profile::SweepDecl::default()
+            }),
         ];
         assert_eq!(
             sweep_plan_line(&sweeps, &selection_for(&sweeps, "pkg"), "pkg"),
@@ -1579,10 +1597,10 @@ include_ignored = false
     #[test]
     fn an_excluded_target_is_excluded_by_test_exclude_packages() {
         // An otherwise-workspace-wide sweep carving the target out.
-        let sweep = ResolvedSweep {
+        let sweep = crate::profile::PlannedSweep::from(crate::profile::SweepDecl {
             test_exclude_packages: vec!["nautilus-pyo3".into()],
-            ..Default::default()
-        };
+            ..crate::profile::SweepDecl::default()
+        });
         assert_eq!(
             exclusion_of(&sweep, "nautilus-pyo3"),
             Some(check_cmd::AdmissionRule::TestExcluded)

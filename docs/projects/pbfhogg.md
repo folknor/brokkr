@@ -8,9 +8,8 @@
   `build_hotpath_args()`, `result_command()`, `result_variant()`,
   `metadata()` - single source of truth for all pbfhogg command argument
   construction.
-- `src/pbfhogg/dispatch.rs` - dispatch via `run_command_with_params()`. Routes
-  through run/bench/hotpath/alloc based on command enum + mode. Uses
-  `BenchContext` for build+harness.
+- `src/pbfhogg/plan.rs` - resolved command plans for the shared
+  `src/measure/runner.rs`; execution uses one `MeasurementSession`.
 - `src/pbfhogg/...` - benchmarks (read, write, merge, commands, extract,
   allocator, blob-filter, planetiler, all), verify (one check per
   cross-validated command, plus `all`),
@@ -112,7 +111,7 @@ schema-universal flags (`--variant`, `--osc-seq`, `--tiles`) see
   top-level data. Any other key reads from
   `[..datasets.<dataset>.snapshot.<key>]`. Accepted by every measurable
   pbfhogg command - the resolver in `build_pbfhogg_context`
-  (`src/pbfhogg/dispatch.rs`) calls `resolve_snapshot_pbf_path` regardless of
+  (`src/pbfhogg/plan.rs`) calls `resolve_snapshot_pbf_path` regardless of
   which command is dispatching, so wiring a new pbfhogg command into the
   snapshot graph is just a matter of adding the field to its CLI variant in
   `src/cli.rs` and propagating it to `CommandParams.snapshot` in

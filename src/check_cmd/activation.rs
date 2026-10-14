@@ -2,7 +2,7 @@
 
 use crate::config::{CheckEntry, TestConfig};
 use crate::error::DevError;
-use crate::profile::{self, ResolvedSweep};
+use crate::profile::{self, SweepDecl};
 
 /// Escape sentences for a cross-entry `env` disagreement. `clippy` can pick a
 /// value (`--env`) or replay one entry (`--sweep`); `check` has neither flag,
@@ -13,8 +13,9 @@ const CHECK_ENV_CONFLICT_REMEDY: &str = "an ad-hoc `--features` run takes no \
      `[[check]]` entry and can't pick one; run a profile (or `-p` with no \
      `--features`) instead, or reconcile the entries' `env`.";
 
-/// Build the list of sweeps both phases iterate, applying the
-/// priority ladder documented at the top of the file.
+/// Build the list of sweep declarations both phases iterate, applying the
+/// priority ladder documented at the top of the file. The caller plans them
+/// once the invocation's scope is known.
 ///
 /// Returns `Err` only when the user asked for a `--profile` that
 /// doesn't resolve. Every other branch always succeeds with at least
@@ -25,7 +26,7 @@ pub(crate) fn decide_active_sweeps(
     profile_name: Option<&str>,
     features: &[String],
     no_default_features: bool,
-) -> Result<Vec<ResolvedSweep>, DevError> {
+) -> Result<Vec<SweepDecl>, DevError> {
     // 1. CLI override: ad-hoc one-off sweep. Overrides *sweep selection* -
     //    it takes no `[[check]]` entry, and ships no `build_packages` (the
     //    user is spot-checking; if they need a CLI rebuild they pass
@@ -41,7 +42,7 @@ pub(crate) fn decide_active_sweeps(
     //    always excluded, reporting a red indistinguishable from a code
     //    failure. `announce_adhoc_shaping` says which profile was applied.
     if !features.is_empty() || no_default_features {
-        let mut sweep = ResolvedSweep {
+        let mut sweep = SweepDecl {
             label: "default".into(),
             // The invocation named these features: never projected.
             features: profile::FeatureConfig::explicit(features, no_default_features, false),
@@ -69,7 +70,7 @@ pub(crate) fn decide_active_sweeps(
         // that follows feature resolution, which follows the CLI scope, and no
         // env union restores it.
         //
-        // Entry env overlays profile env, matching `build_resolved_sweep`.
+        // Entry env overlays profile env, matching `profile::build_sweep_decl`.
         //
         // `test_exclude_packages` is deliberately NOT unioned: it is a
         // per-entry selection workaround, not an invariant, so unioning it
@@ -107,7 +108,7 @@ pub(crate) fn decide_active_sweeps(
     //    invocation, matching pre-redesign behaviour. Label tracks
     //    the cargo flag so callers (e.g. `brokkr test`) don't have
     //    to special-case-detect this branch by feature-arg shape.
-    Ok(vec![ResolvedSweep {
+    Ok(vec![SweepDecl {
         label: "all-features".into(),
         features: profile::FeatureConfig {
             all_features: true,
@@ -138,7 +139,8 @@ pub(super) fn effective_profile_name(
     }
 }
 
-/// Construct the single `ResolvedSweep` a `brokkr clippy` invocation runs.
+/// Construct the single `SweepDecl` a `brokkr clippy` invocation runs; the
+/// caller plans it through the same unification resolution `check` uses.
 ///
 /// `--sweep NAME` borrows the named `[[check]]` entry wholesale (packages,
 /// features, env). Otherwise it is ad-hoc: packages from `-p`, features from the
@@ -154,7 +156,7 @@ pub(super) fn build_clippy_sweep(
     no_default_features: bool,
     sweep_name: Option<&str>,
     env_overrides: &[(String, String)],
-) -> Result<ResolvedSweep, DevError> {
+) -> Result<SweepDecl, DevError> {
     let overridden: std::collections::BTreeSet<&str> =
         env_overrides.iter().map(|(k, _)| k.as_str()).collect();
 
@@ -177,7 +179,7 @@ pub(super) fn build_clippy_sweep(
         } else {
             profile::FeatureConfig::explicit(features, no_default_features, false)
         };
-        ResolvedSweep {
+        SweepDecl {
             label: "clippy".into(),
             features,
             packages: packages.to_vec(),

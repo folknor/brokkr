@@ -59,7 +59,6 @@ pub fn run(
             command: "merge".into(),
             // io_mode / compression discriminators are in cli_args.
             // Measurement mode and brokkr_args come from the harness.
-            mode: None,
             input_file: Some(basename.clone()),
             input_mb: Some(file_mb),
             cargo_features: None,
@@ -69,7 +68,6 @@ pub fn run(
                 &binary.display().to_string(),
                 &bench_args,
             )),
-            brokkr_args: None,
             metadata: vec![],
         };
 

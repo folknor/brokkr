@@ -401,7 +401,7 @@ pub(crate) fn promote_snapshot(
         move_file_into_place(scratch_pbf, &target_path)?;
 
         output::download_msg(&format!("  hashing {target_filename}..."));
-        let hash = preflight::cached_xxh128(&target_path, project_root)?;
+        let hash = preflight::cached_path_digest(&target_path, project_root)?.to_string();
 
         let date = today();
         let snapshot_download_date = snapshot_key_to_iso_date(snap_key)

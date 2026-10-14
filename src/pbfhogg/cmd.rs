@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use crate::cli::VerifyCommand;
 use crate::config;
-use crate::context::{BenchContext, HarnessContext, bootstrap, bootstrap_config};
+use crate::context::{MeasurementSession, bootstrap, bootstrap_config};
 use crate::error::DevError;
 use crate::measure::MeasureRequest;
 use crate::output;
@@ -175,13 +175,18 @@ pub(crate) fn bench_read(
     }
 
     let feat_refs = req.feat_refs();
-    let ctx =
-        BenchContext::new_for_request(req, Some("pbfhogg-cli"), &feat_refs, true, "bench read")?;
+    let ctx = MeasurementSession::build_for_request(
+        req,
+        Some("pbfhogg-cli"),
+        &feat_refs,
+        true,
+        "bench read",
+    )?;
     let (pbf_path, file_mb) = resolve_read_pbf_with_size(req, snapshot, &ctx.paths)?;
     let modes = super::bench_read::parse_modes(modes_str)?;
     super::bench_read::run(
         &ctx.harness,
-        &ctx.binary,
+        ctx.binary()?,
         &pbf_path,
         file_mb,
         req.runs(),
@@ -200,14 +205,19 @@ pub(crate) fn bench_write(req: &MeasureRequest, compression_str: &str) -> Result
     }
 
     let feat_refs = req.feat_refs();
-    let ctx =
-        BenchContext::new_for_request(req, Some("pbfhogg-cli"), &feat_refs, true, "bench write")?;
+    let ctx = MeasurementSession::build_for_request(
+        req,
+        Some("pbfhogg-cli"),
+        &feat_refs,
+        true,
+        "bench write",
+    )?;
     let (pbf_path, file_mb) =
         resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
     let compressions = super::parse_compressions(compression_str, true)?;
     super::bench_write::run(
         &ctx.harness,
-        &ctx.binary,
+        ctx.binary()?,
         &pbf_path,
         file_mb,
         req.runs(),
@@ -248,7 +258,7 @@ pub(crate) fn bench_merge(
     if uring {
         all_features.push("linux-io-uring");
     }
-    let ctx = BenchContext::new_for_request(
+    let ctx = MeasurementSession::build_for_request(
         req,
         Some("pbfhogg-cli"),
         &all_features,
@@ -264,7 +274,7 @@ pub(crate) fn bench_merge(
     let compressions = super::parse_compressions(compression_str, false)?;
     super::bench_merge::run(
         &ctx.harness,
-        &ctx.binary,
+        ctx.binary()?,
         &pbf_path,
         &osc_path,
         file_mb,
@@ -284,7 +294,7 @@ pub(crate) fn bench_all(req: &MeasureRequest) -> Result<(), DevError> {
         return Ok(());
     }
 
-    let ctx = HarnessContext::new_for_request(req, "bench all")?;
+    let ctx = MeasurementSession::new_for_request(req, "bench all")?;
     let (pbf_path, file_mb) =
         resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
     let effective = req.build_root.unwrap_or(req.project_root);

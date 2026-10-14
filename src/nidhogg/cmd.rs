@@ -2,15 +2,11 @@ use std::path::Path;
 
 use crate::build;
 use crate::config;
-use crate::context::{BenchContext, HarnessContext, bootstrap, bootstrap_config};
+use crate::context::{bootstrap, bootstrap_config};
 use crate::error::DevError;
-use crate::measure::MeasureRequest;
 use crate::output;
-use crate::preflight;
 use crate::project::{self, Project};
-use crate::resolve::{
-    self, file_size_mb, resolve_bbox, resolve_nidhogg_data_dir, resolve_pbf_path,
-};
+use crate::resolve::{self, resolve_bbox, resolve_nidhogg_data_dir, resolve_pbf_path};
 
 /// The nidhogg server port: `[<host>] port` in brokkr.toml, else
 /// `DEFAULT_PORT`.
@@ -23,7 +19,7 @@ use crate::resolve::{
 /// benches at another port. A hostname lookup failure is an error rather
 /// than a silent fall-through to the default, which would likewise point
 /// every command at a port the config never named.
-fn resolve_port(dev_config: &config::DevConfig) -> Result<u16, DevError> {
+pub(crate) fn resolve_port(dev_config: &config::DevConfig) -> Result<u16, DevError> {
     let hostname = config::hostname()?;
     Ok(dev_config
         .hosts
@@ -204,89 +200,6 @@ pub(crate) fn geocode(
     project::require(project, Project::Nidhogg, "geocode")?;
     let port = resolve_port(dev_config)?;
     super::geocode::run(port, term)
-}
-
-pub(crate) fn bench_api(req: &MeasureRequest, query: Option<&str>) -> Result<(), DevError> {
-    let ctx = HarnessContext::new_for_request(req, "bench api")?;
-    let port = resolve_port(req.dev_config)?;
-
-    // Resolve dataset PBF for metadata recording.
-    let pbf_path = resolve_pbf_path(req.dataset, req.variant, &ctx.paths, req.project_root).ok();
-    let input_file = pbf_path
-        .as_ref()
-        .and_then(|p| p.file_name())
-        .and_then(|n| n.to_str());
-    let input_mb = pbf_path.as_ref().map(|p| file_size_mb(p)).transpose()?;
-
-    let bbox = resolve_bbox(None, req.dataset, &ctx.paths)?;
-    super::bench_api::run(
-        &ctx.harness,
-        port,
-        req.runs(),
-        query,
-        input_file,
-        input_mb,
-        &bbox,
-    )
-}
-
-pub(crate) fn bench_tiles(
-    req: &MeasureRequest,
-    tiles_variant: Option<&str>,
-    uring: bool,
-) -> Result<(), DevError> {
-    if uring {
-        preflight::run_preflight(&preflight::uring_checks())?;
-    }
-    let mut all_features = req.feat_refs();
-    if uring {
-        all_features.push("linux-io-uring");
-    }
-    let ctx =
-        BenchContext::new_for_request(req, Some("nidhogg"), &all_features, true, "bench tiles")?;
-    let data_dir = resolve_nidhogg_data_dir(req.dataset, &ctx.paths)?;
-    let port = resolve_port(req.dev_config)?;
-
-    let (tiles_path, tiles_mb) = match tiles_variant {
-        Some(v) => {
-            resolve::resolve_pmtiles_with_size(req.dataset, v, &ctx.paths, req.project_root)?
-        }
-        None => {
-            resolve::resolve_default_pmtiles_with_size(req.dataset, &ctx.paths, req.project_root)?
-        }
-    };
-    let tiles_hash = {
-        let ds = ctx.paths.datasets.get(req.dataset);
-        ds.and_then(|d| {
-            if let Some(v) = tiles_variant {
-                d.pmtiles.get(v)
-            } else if d.pmtiles.len() == 1 {
-                d.pmtiles.values().next()
-            } else {
-                None
-            }
-        })
-        .and_then(|e| e.xxhash.clone())
-    };
-
-    let tiles_file = tiles_path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or_default();
-    let tiles_str = tiles_path.display().to_string();
-
-    super::bench_tiles::run(
-        &ctx.harness,
-        &ctx.binary,
-        &data_dir.display().to_string(),
-        &tiles_str,
-        port,
-        tiles_file,
-        tiles_hash.as_deref(),
-        tiles_mb,
-        req.runs(),
-        req.project_root,
-    )
 }
 
 pub(crate) fn verify_batch(

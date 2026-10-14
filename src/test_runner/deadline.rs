@@ -7,10 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use super::{
-    KillCause, Leader, ObsEvent, StreamTap, capture_hung_test, kill_process_group,
-    stop_process_group,
-};
+use super::{KillCause, Leader, ObsEvent, StreamTap, capture_hung_test};
 
 /// Why the shared deadline machinery declared a run over budget. This carries
 /// the clock that fired; test naming and confidence live in `Attribution`.
@@ -276,7 +273,7 @@ pub(super) fn enforce_deadline(
     tap: Option<&StreamTap>,
 ) {
     // Freeze before diagnosis: collection must not extend the execution budget.
-    stop_process_group(pid).ok();
+    crate::process::signal_process_group(pid, libc::SIGSTOP).ok();
     if matches!(
         &verdict.attribution,
         Attribution::Suspect { stale: true, .. }
@@ -305,7 +302,7 @@ pub(super) fn enforce_deadline(
     if let Ok(mut slot) = hung.lock() {
         *slot = Some(report);
     }
-    kill_process_group(pid).ok();
+    crate::process::signal_process_group(pid, libc::SIGKILL).ok();
 }
 
 /// Whole-sweep wall-clock backstop for a parallel test sweep, enforced from the

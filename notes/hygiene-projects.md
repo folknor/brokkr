@@ -153,12 +153,6 @@ Reported by: elivagar.
 
 Design hunt (map-projects): `run_elivagar_hotpath` removes `hotpath-{alloc-}output.pmtiles` while `ElivagarCommand::build_args` always writes `bench-self-output.pmtiles`, and the hotpath path also deletes the tilegen output where run and bench archive it via `rename_elivagar_output` - deleting may be intended, but nothing names the policy. `<data>/tilegen_tmp` is built independently in `elivagar/commands.rs::build_args`, `elivagar/dispatch.rs::rename_elivagar_output` (the "output dir coincides with tmp" guard) and `main_parts/commands.rs` (clean), and documented in `config_parts/schema.rs`; `bench-self-output.pmtiles` is spelled twice inside `commands.rs` (`output_files`, `build_args`). Proposed: one `elivagar::paths::tilegen_tmp(data_dir)`, ideally on elivagar's `ResolvedPaths`.
 
-## PRJ-021 - elivagar corpus mode and op are strings at the CLI
-
-Reported by: elivagar.
-
-Corpus file names, SVG names, digest mode spellings and headers now live in `elivagar/corpus/layout.rs` and shared definitions. Residue: clap still takes `mode: Option<String>` and `op: String` with the mutation list hand-written in help, and `elivagar/cmd.rs` keeps a manual `parse_mode` adapter; a `ValueEnum` on the mode and op types needs `cli/schema.rs` and `elivagar/cmd.rs`.
-
 ## PRJ-023 - elivagar magic numbers, copied values and scattered defaults
 
 Reported by: elivagar.
@@ -192,13 +186,11 @@ Reported by: elivagar.
 
 Reported by: elivagar.
 
-- `eliv.rs` says "brokkr does not decode PMTiles itself" and that it re-exports the protohoggr primitives; `canonical.rs`/`render.rs` import `protohoggr` directly, the canonical tests import `elivagar::tile_detail` directly, `pmtiles.rs` is a complete second PMTiles reader, and `compare_tiles.rs` claims "one decoder in the system rather than three" while there are at least four MVT/protobuf walkers. Enforcement proposed: textlint `\b(elivagar|protohoggr)::` over `src/**/*.rs` (`region = "code"`) excluding `eliv.rs`; replace `pmtiles.rs` with elivagar's reader.
+`src/pmtiles.rs` now delegates directory reading and tile addressing to the linked elivagar reader through `eliv.rs`; its own header, varint, directory and Hilbert decoders are gone. Residue:
+- `canonical.rs`/`render.rs` import `protohoggr` directly and the canonical tests import `elivagar::tile_detail`, so `eliv.rs` is not the only seam its header claims; `corpus/mutate.rs` keeps a third `read_varint`. Enforcement proposed: textlint `\b(elivagar|protohoggr)::` over `src/**/*.rs` (`region = "code"`) excluding `eliv.rs`.
 - The rationale for locking inspect/diag/svg/verify ("can't read a mid-write archive") doesn't match: tilegen writes to scratch and renames; the lock actually serialises `cargo build`. `compare-tiles` and `pmtiles-stats` take no lock.
-- Build feature sets differ for the same binary: `verify` host features, inspect/diag/svg/ocean-build none, `bench_all` `paths.features`, dispatch `req.features`; alternating commands forces rebuilds.
-- `bootstrap(None)` vs `bootstrap(Some(build_root))` chosen per command; `project::require` runs after the lock is taken.
-- `svg`/`diag` (shelling out to elivagar) overlap the native `pmtiles-corpus render`/`rings`; the hunter leaves keeping both to the user.
-
-Design hunt (map-projects, deps-misc): `src/pmtiles.rs` (868 lines) hand-parses headers, varints, directories and Hilbert tile ids (`tile_id_to_zxy`) while `elivagar/eliv.rs` re-exports the linked elivagar crate's `pmtiles_reader` and `tile_id_to_zxy`, and `corpus/mutate.rs` has a third `read_varint`; decoding the spec in two places is a drift hazard (compression-code naming, run-length handling, leaf directories). If elivagar is always linked, `pmtiles-stats` and nidhogg's `sample_tile_coords` should read through `eliv` and `pmtiles.rs` can mostly go; if the link is meant to be optional, that boundary should be stated and `eliv` should be the crate's only consumer. Either way `pmtiles.rs` is project code at top level and belongs under a shared map-data module or behind `eliv.rs`.
+- Build feature sets differ for the same binary across commands (`verify` host features, inspect/diag/svg/ocean-build none, bench all, dispatch), so alternating commands forces rebuilds.
+- `svg`/`diag` (shelling out to elivagar) overlap the native `pmtiles-corpus render`/`rings`; keeping both is the user's call.
 
 ## PRJ-029 - Stale claims in elivagar docs and help
 
@@ -299,12 +291,6 @@ Reported by: ratatoskr.
 
 Artefact placement: sync gets a per-run `mock/`, service shares `.brokkr/ratatoskr/mock/<fixture>`. Mock-pid bookkeeping: `remove` then `clear_mock_pids` in service, `clear` only in sync. Process-group decision: `true` in smoke/service, `false` in bench, each with a paragraph-long justification. Interrupt policy and validate-before-build: PLT-012, PRJ-034. `unix_now()`, `Instant::now` everywhere, the hostname in `run_gate_hook`, and a cwd-relative `canonicalize` of the script are ambient dependencies.
 
-## PRJ-042 - ratatoskr entry-point waivers
-
-Reported by: ratatoskr.
-
-The service and sync `include!` shims are real modules and internal argument-count waivers became context structs. Residue: the service entry points still carry `too_many_arguments`/`too_many_lines` waivers because their callers in `main_parts/bootstrap.rs` pass loose arguments (request structs would remove them), and `harness_mod/foreign_loop.rs` has a comment naming the old module path.
-
 ## PRJ-044 - piners registry residue
 
 Reported by: piners.
@@ -352,12 +338,6 @@ Harness stdout is buffered whole in memory; `runs.db` is append-only with full s
 Reported by: piners.
 
 `RunMeta.stderr` and the lint `run.stderr` column always `""` (one call site); lint `run_migrations` scaffolding has no migrations; the duplicated `project::require` in `measured.rs`. Compatibility paths whose continued need can't be checked from this repo: `report.rs` skipping a legacy `summary` line ("the harness no longer emits one") and `fmt_selector` accepting the legacy string `probe` shape - depends on the piners harness and existing `runs.db` rows.
-
-## PRJ-053 - Visual flags are refused by hand
-
-Reported by: small-benches.
-
-`src/visual/` now owns the status model, the engine, the shared database operations and pixel comparison; sluggrs no longer imports litehtml. Residue: sluggrs still refuses the litehtml-only `--suite` and `--recapture` by hand; moving those flags into a litehtml-only argument type needs `cli/schema.rs` and `main_parts/commands.rs`.
 
 ## PRJ-054 - Three inline-tag lists disagree
 

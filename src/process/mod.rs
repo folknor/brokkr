@@ -1,13 +1,15 @@
 //! Shared process identity, `/proc` snapshots and verified signalling.
 
+mod helpers;
 mod identity;
 mod reap;
 mod table;
 
+pub(crate) use self::helpers::signal_process_group_raw;
+pub use self::helpers::{signal_pid, signal_process_group, snapshot_proc};
 pub use self::identity::{BootId, HostScope, NsInode, Pid, ProcIdentity, StartTicks};
 pub use self::reap::{
-    Delivery, PidfdRefusal, ReaperExemptions, VerifiedProcess, kill_verified, open_legacy_pidfd,
-    pidfd_send_signal,
+    Delivery, PidfdRefusal, ReaperExemptions, VerifiedProcess, kill_verified, pidfd_send_signal,
 };
 pub use self::table::{ProcStat, ProcTable};
 

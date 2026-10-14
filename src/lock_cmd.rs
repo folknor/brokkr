@@ -481,15 +481,7 @@ fn signal_target(target: &KillTarget, signal: libc::c_int) -> std::io::Result<bo
         if !crate::process::identity_matches(target.process.identity()) {
             return Ok(false);
         }
-        let ret = unsafe { libc::kill(-target.pid.cast_signed(), signal) };
-        if ret == 0 {
-            return Ok(true);
-        }
-        let err = std::io::Error::last_os_error();
-        if err.raw_os_error() == Some(libc::ESRCH) {
-            return Ok(false);
-        }
-        return Err(err);
+        return crate::process::signal_process_group(target.pid, signal);
     }
     target.process.send_signal(signal)
 }

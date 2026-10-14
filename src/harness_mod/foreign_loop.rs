@@ -6,7 +6,7 @@
 /// The pieces of the harness's own loops that a loop living elsewhere needs
 /// to record the same provenance.
 ///
-/// ratatoskr's sync bench (`ratatoskr_sync/bench_gate.rs`) drives its own
+/// ratatoskr's sync bench (`src/ratatoskr/sync/bench.rs`) drives its own
 /// best-of-N loop - it keeps one sæhrimnir alive across iterations and ranks
 /// by a marker span, neither of which `run_external_*` models. Without these
 /// it could not stamp the measurement start (so `prev.gap_seconds` counted the

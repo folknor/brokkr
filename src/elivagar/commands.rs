@@ -22,7 +22,7 @@ pub enum ElivagarCommand<'a> {
 pub enum BuiltCommand<'a> {
     /// Full elivagar pipeline: PBF -> PMTiles, using the main binary.
     MainBinary {
-        tilegen: &'a config::TilegenConfig,
+        tilegen: &'a config::project_config::elivagar::TilegenConfig,
         /// Resume from a checkpoint. Per-invocation, not part of the contract:
         /// `execution.resumed_from` sits in provenance's diagnostic group, and
         /// elivagar validates the checkpoint's input identity and producer
@@ -67,12 +67,6 @@ impl ElivagarCommand<'_> {
 }
 
 impl BuiltCommand<'_> {
-    /// Cargo package to build for this command. Current elivagar commands use
-    /// the default package.
-    pub fn package(&self) -> Option<&'static str> {
-        None
-    }
-
     /// Build argv for Rust commands. Main-binary tilegen requires assertions
     /// from the same PBF entry that supplied its resolved path.
     pub fn build_args(
@@ -87,13 +81,11 @@ impl BuiltCommand<'_> {
                 let opts = opts.ok_or_else(|| {
                     DevError::Config("tilegen arguments require resolved PBF assertions".into())
                 })?;
-                std::fs::create_dir_all(scratch_dir)?;
 
                 let output_path = scratch_dir.join("bench-self-output.pmtiles");
                 let output_str = output_path.display().to_string();
 
                 let tmp_dir = data_dir.join("tilegen_tmp");
-                std::fs::create_dir_all(&tmp_dir)?;
                 let tmp_dir_str = tmp_dir.display().to_string();
 
                 let mut args: Vec<String> = vec![

@@ -1,7 +1,7 @@
 //! `brokkr dellingr` - build the Lua bench harness and run one workload.
 
 use crate::build;
-use crate::context::BenchContext;
+use crate::context::MeasurementSession;
 use crate::error::DevError;
 use crate::harness::{self, BenchConfig};
 use crate::measure::{MeasureMode, MeasureRequest};
@@ -26,8 +26,8 @@ pub(crate) fn run(req: &MeasureRequest, lua: &str) -> Result<(), DevError> {
     // cost nothing. The path deliberately comes from the current tree even
     // under `--commit` - see `workload::resolve`. Instrumented modes resolve
     // the workload's `hotpath_file` variant, not `file`.
-    let resolved = workload::resolve(req.dev_config, req.project_root, lua, uses_hotpath(req))?;
-    let example = workload::config(req.dev_config)?.example.clone();
+    let resolved = workload::resolve(req.project_config, req.project_root, lua, uses_hotpath(req))?;
+    let example = workload::config(req.project_config)?.example.clone();
     let lua_path = resolved.path_str()?.to_owned();
 
     if req.dry_run {
@@ -68,12 +68,12 @@ pub(crate) fn run(req: &MeasureRequest, lua: &str) -> Result<(), DevError> {
         profile: "release",
     };
 
-    let ctx = BenchContext::with_build_config_for_request(req, &build_config, "dellingr")?;
+    let ctx = MeasurementSession::with_build_config_for_request(req, &build_config, "dellingr")?;
 
     let scratch_dir = req.project_root.join(SCRATCH_REL);
     std::fs::create_dir_all(&scratch_dir)?;
 
-    let binary_str = ctx.binary.display().to_string();
+    let binary_str = ctx.binary()?.display().to_string();
     let args = [lua_path.as_str()];
 
     // Filed under the workload name, not `dellingr`: one row series per
@@ -83,14 +83,12 @@ pub(crate) fn run(req: &MeasureRequest, lua: &str) -> Result<(), DevError> {
     // duplicating the name into that column would only widen the table.
     let config = BenchConfig {
         command: resolved.name.clone(),
-        mode: None,
         input_file: None,
         input_mb: None,
         cargo_features: None,
         cargo_profile: build::CargoProfile::Release,
         runs: req.runs(),
         cli_args: Some(harness::format_cli_args(&binary_str, &args)),
-        brokkr_args: None,
         metadata: vec![],
     };
 
@@ -99,7 +97,7 @@ pub(crate) fn run(req: &MeasureRequest, lua: &str) -> Result<(), DevError> {
         output::detail(&format!("dellingr {label}: {}", resolved.name));
         harness::hotpath_alloc_note(req.is_alloc());
 
-        ctx.harness.run_hotpath(&config, &ctx.binary, |_i| {
+        ctx.harness.run_hotpath(&config, ctx.binary()?, |_i| {
             let (result, _stderr, sidecar) = harness::run_hotpath_capture(
                 &binary_str,
                 &args,
@@ -119,7 +117,7 @@ pub(crate) fn run(req: &MeasureRequest, lua: &str) -> Result<(), DevError> {
             req.runs()
         ));
         ctx.harness
-            .run_external(&config, &ctx.binary, &args, req.project_root)?;
+            .run_external(&config, ctx.binary()?, &args, req.project_root)?;
     }
 
     Ok(())

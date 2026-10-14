@@ -160,18 +160,15 @@ mod tests {
 
     #[test]
     fn result_line_prints_the_resolved_mode() {
-        // Every writer leaves `BenchConfig.mode` at `None`; the line must
-        // print the harness-resolved mode it is handed, not that field.
+        // The line prints the session-resolved mode it is handed.
         let config = BenchConfig {
             command: "cat".into(),
-            mode: None,
             input_file: None,
             input_mb: None,
             cargo_features: None,
             cargo_profile: CargoProfile::Release,
             runs: 1,
             cli_args: None,
-            brokkr_args: None,
             metadata: Vec::new(),
         };
         let result = BenchResult {
@@ -238,14 +235,12 @@ mod tests {
     fn result_line_prints_fractional_distribution() {
         let config = BenchConfig {
             command: "api-bbox-small".into(),
-            mode: None,
             input_file: None,
             input_mb: None,
             cargo_features: None,
             cargo_profile: CargoProfile::Release,
             runs: 3,
             cli_args: None,
-            brokkr_args: None,
             metadata: Vec::new(),
         };
         let (dist, min_us) = summarize_distribution(&[312, 298, 450]).unwrap();

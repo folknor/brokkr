@@ -5,7 +5,7 @@ use std::fmt::{self, Display, Formatter};
 
 use crate::test_runner::{ObsEvent, StreamEnd, TestResult};
 use super::journal::{JournalRecord, StreamOrigin, Termination, TerminationCause, TerminationScope};
-use super::plan::{AccountingPlan, BinaryUnit, ExecutionId, LaneIdx, PairId};
+use super::plan::{AccountingPlan, BinaryUnit, ExecutionId, Inventory, LaneIdx, PairId};
 use super::super::Resolution;
 
 // ----- outcomes -----
@@ -471,18 +471,38 @@ pub(crate) fn reconcile(
             _ => None,
         })
         .collect();
-    for lane in plan.lanes.iter().filter(|l| !superseded.contains_key(&l.lane)) {
-        for pair in &lane.executions {
+    for lane in plan.lanes.iter().filter(|l| !superseded.contains_key(&l.lane.get())) {
+        let Inventory::Prepared { executions, ignored_selected: ignored, outside_claim: outside, .. } =
+            &lane.inventory
+        else {
+            continue;
+        };
+        for pair in executions {
             expected.insert(
-                ExecKey::new(lane.lane, pair.resolution.as_deref(), &pair.unit, &pair.test),
+                ExecKey::new(
+                    lane.lane.get(),
+                    pair.resolution.as_option(),
+                    &pair.unit,
+                    pair.test.as_str(),
+                ),
                 pair.clone(),
             );
         }
-        for pair in &lane.ignored_selected {
-            ignored_selected.insert(ExecKey::new(lane.lane, pair.resolution.as_deref(), &pair.unit, &pair.test));
+        for pair in ignored {
+            ignored_selected.insert(ExecKey::new(
+                lane.lane.get(),
+                pair.resolution.as_option(),
+                &pair.unit,
+                pair.test.as_str(),
+            ));
         }
-        for pair in &lane.outside_claim {
-            outside_claim.insert(ExecKey::new(lane.lane, pair.resolution.as_deref(), &pair.unit, &pair.test));
+        for pair in outside {
+            outside_claim.insert(ExecKey::new(
+                lane.lane.get(),
+                pair.resolution.as_option(),
+                &pair.unit,
+                pair.test.as_str(),
+            ));
         }
     }
 
@@ -807,7 +827,9 @@ pub(crate) fn reconcile(
             Some(StreamOrigin::Doctest) => Some("rustdoc".to_owned()),
             Some(StreamOrigin::Engine { .. } | StreamOrigin::Unattributed { .. }) | None => None,
         };
-        let label = plan.lane(st.lane).map_or_else(|| format!("lane {}", st.lane), |l| l.label.clone());
+        let label = plan
+            .lane(LaneIdx::new(st.lane))
+            .map_or_else(|| format!("lane {}", st.lane), |l| l.label.clone());
         match (st.end, &name) {
             (Some(StreamEnd::Cancelled), _) => truncated_streams.push(format!(
                 "{label}: stream {id}{} was cut short - brokkr stopped reading with the pipe open",
@@ -827,12 +849,12 @@ pub(crate) fn reconcile(
     for lane in plan.lanes.iter().filter(|l| l.doc_carrier) {
         let doc_streams: Vec<&StreamState> = streams
             .values()
-            .filter(|s| s.lane == lane.lane && matches!(s.origin, Some(StreamOrigin::Doctest)))
+            .filter(|s| s.lane == lane.lane.get() && matches!(s.origin, Some(StreamOrigin::Doctest)))
             .collect();
         // `all` over no streams is vacuously true, which is exactly the
         // carrier that never ran: where the plan says the lane holds a
         // library, its doctests must have presented at least one stream.
-        let completed = lane_finished_clean.get(&lane.lane).copied().unwrap_or(false)
+        let completed = lane_finished_clean.get(&lane.lane.get()).copied().unwrap_or(false)
             && (!lane.doc_streams_required || !doc_streams.is_empty())
             && doc_streams.iter().all(|s| !s.doctest_suites_unclosed && s.end == Some(StreamEnd::Eof));
         doctests.carriers.push(CarrierState { lane: lane.label.clone(), completed, streams: doc_streams.len() });

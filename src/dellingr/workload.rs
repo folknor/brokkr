@@ -2,7 +2,8 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::config::{DellingrConfig, DevConfig};
+use crate::config::project_config::ProjectConfig;
+use crate::config::project_config::dellingr::DellingrConfig;
 use crate::error::DevError;
 use crate::preflight;
 
@@ -28,17 +29,16 @@ impl Resolved {
     }
 }
 
-/// Fetch the `[dellingr]` block, with an actionable error when it's absent.
-pub(crate) fn config(dev_config: &DevConfig) -> Result<&DellingrConfig, DevError> {
-    dev_config.dellingr.as_ref().ok_or_else(|| {
-        DevError::Config(
-            "no [dellingr] section in brokkr.toml - `brokkr dellingr` needs the \
-             harness target and at least one workload:\n\n  [dellingr]\n  \
-             example = \"hotpath\"\n\n  [dellingr.workloads.same_obj_read]\n  \
-             file = \"examples/fields/same_obj_read.lua\"\n  xxh128 = \"...\""
-                .into(),
-        )
-    })
+/// The `[dellingr]` block. Load requires it in a dellingr project (its
+/// missing-section error says what to write), so the only refusal left here
+/// is a project that is not dellingr.
+pub(crate) fn config(project_config: &ProjectConfig) -> Result<&DellingrConfig, DevError> {
+    match project_config {
+        ProjectConfig::Dellingr(cfg) => Ok(cfg),
+        _ => Err(DevError::Config(
+            "`brokkr dellingr` needs a dellingr project (`project = \"dellingr\"`)".into(),
+        )),
+    }
 }
 
 /// Resolve `--lua <name>` against the registry and verify its digest.
@@ -57,18 +57,18 @@ pub(crate) fn config(dev_config: &DevConfig) -> Result<&DellingrConfig, DevError
 /// `instrumented` selects which registered file the run gets: `--hotpath` /
 /// `--alloc` resolve the `hotpath_file` / `hotpath_xxh128` pair, everything
 /// else resolves `file` / `xxh128`. The pair is *required* for instrumented
-/// runs - see [`crate::config::DellingrWorkload`] for why a seconds-scale
+/// runs - see [`crate::config::project_config::dellingr::DellingrWorkload`] for why a seconds-scale
 /// workload under hotpath instrumentation is a memory cliff, not a slow run.
 pub(crate) fn resolve(
-    dev_config: &DevConfig,
+    project_config: &ProjectConfig,
     project_root: &Path,
     name: &str,
     instrumented: bool,
 ) -> Result<Resolved, DevError> {
-    let cfg = config(dev_config)?;
+    let cfg = config(project_config)?;
     let entry = cfg.workload(name)?;
 
-    // A half-registered pair is rejected by `parse_dellingr`, so it cannot
+    // A half-registered pair is rejected by the `[dellingr]` parser, so it cannot
     // reach here; the arm stays as defence rather than a silent fallback to
     // the wrong scale.
     let (file, xxh128, origin_key) = match (&entry.hotpath_file, &entry.hotpath_xxh128) {
@@ -129,7 +129,7 @@ mod tests {
         crate::test_scratch::scratch("dellingr", test_name)
     }
 
-    /// Build a `DevConfig` carrying just the `[dellingr]` block under test,
+    /// Load the project config carrying just the `[dellingr]` block under test,
     /// with `brokkr.toml` written into the caller's OWN scratch dir.
     ///
     /// Takes the dir rather than allocating one: a helper that allocated its
@@ -137,19 +137,19 @@ mod tests {
     /// (see `tmpdir`). Writing into the caller's root also matches how the
     /// config is really found - `project_root` and the directory holding
     /// `brokkr.toml` are the same place in every non-test path.
-    fn config_with(dir: &Path, toml_src: &str) -> DevConfig {
+    fn config_with(dir: &Path, toml_src: &str) -> ProjectConfig {
         fs::write(dir.join("brokkr.toml"), toml_src).unwrap();
-        crate::config::load(dir).unwrap().1
+        crate::config::load(dir).unwrap().2
     }
 
     const SRC: &str = "-- workload\n";
 
-    /// xxh128 of `SRC`, computed the same way `verify_file_hash` does, so the
+    /// xxh128 of `SRC`, computed the same way `verify_file_digest` does, so the
     /// test pins behaviour rather than a hard-coded digest of its own.
     fn src_digest(root: &Path) -> String {
         let f = root.join("digest_probe.lua");
         fs::write(&f, SRC).unwrap();
-        preflight::compute_xxh128(&f).unwrap()
+        preflight::compute_file_digest(&f).unwrap().to_string()
     }
 
     fn write_workload(root: &Path, rel: &str, contents: &str) {
@@ -227,7 +227,7 @@ mod tests {
         assert!(msg.contains("unbounded"), "{msg}");
     }
 
-    /// A half-registered pair never reaches `resolve` - `parse_dellingr`
+    /// A half-registered pair never reaches `resolve` - the `[dellingr]` parser
     /// rejects it, so a workload nobody runs today is still reported. The
     /// parse-time behaviour is pinned in `config_parts/tests.rs`.
     #[test]
@@ -341,8 +341,8 @@ mod tests {
     #[test]
     fn absent_dellingr_block_explains_what_to_write() {
         let root = tmpdir("no_block");
-        let cfg = config_with(&root, "project = \"dellingr\"\n");
-        let err = config(&cfg).unwrap_err();
+        fs::write(root.join("brokkr.toml"), "project = \"dellingr\"\n").unwrap();
+        let err = crate::config::load(&root).unwrap_err();
         let DevError::Config(msg) = err else {
             panic!("expected DevError::Config, got {err:?}");
         };

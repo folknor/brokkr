@@ -103,7 +103,7 @@ Only `agree_clean`, `agree_flagged` and `divergent` can be pinned in
 the registry rejects them instead of allowing an expectation no run can meet.
 
 `path` is relative to the registry's snippet tree; `xxh128` is brokkr's
-standard file hash (`preflight::compute_xxh128`), verified before any run.
+standard file hash (`preflight::compute_file_digest`), verified before any run.
 `<keyword>.toml` files are pure selection groupings (`probes = ["id", ..]`),
 ids only - the volatile fields live only in `lints.toml`.
 

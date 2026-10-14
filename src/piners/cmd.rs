@@ -47,7 +47,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use crate::artefacts::ArtefactDir;
-use crate::config::DevConfig;
+use crate::config::project_config::piners::PinersConfig;
 use crate::error::DevError;
 use crate::lockfile::{self, LockContext, LockGuard};
 use crate::output;
@@ -122,10 +122,10 @@ pub(crate) fn missing_harness_config_error() -> DevError {
 #[allow(clippy::too_many_lines, clippy::cognitive_complexity)] // linear orchestration: load, select, verify, build, run, report, diagnose
 pub fn corpus(
     project_root: &Path,
-    dev_config: &DevConfig,
+    piners: &PinersConfig,
     args: &CorpusArgs,
 ) -> Result<(), DevError> {
-    let cfg = dev_config.piners.clone().unwrap_or_default();
+    let cfg = piners.clone();
     crate::piners::layout::ensure_distinct_registry_dirs(project_root, &cfg)?;
     let mode = Mode::resolve(ModeFlags {
         verify_only: args.verify_only,

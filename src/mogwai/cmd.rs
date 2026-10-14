@@ -1,6 +1,6 @@
 //! `brokkr mogwai` - build a mogwai surface and measure one invocation.
 
-use crate::context::BenchContext;
+use crate::context::MeasurementSession;
 use crate::error::DevError;
 use crate::harness::{self, BenchConfig};
 use crate::measure::{MeasureMode, MeasureRequest};
@@ -23,7 +23,7 @@ pub(crate) fn run(
 ) -> Result<(), DevError> {
     project::require(req.project, Project::Mogwai, "mogwai")?;
 
-    let cfg = targets::config(req.dev_config)?;
+    let cfg = targets::config(req.project_config)?;
 
     // Bare-is-an-index, but only when there is genuinely nothing to run. An
     // argv with no target is the CLI surface, which is the common case and
@@ -62,9 +62,9 @@ pub(crate) fn run(
         return Ok(());
     }
 
-    let ctx = BenchContext::with_build_config_for_request(req, &resolved.build, "mogwai")?;
+    let ctx = MeasurementSession::with_build_config_for_request(req, &resolved.build, "mogwai")?;
 
-    let binary_str = ctx.binary.display().to_string();
+    let binary_str = ctx.binary()?.display().to_string();
 
     // Rows file under the target name (or the bin name for a CLI invocation)
     // and carry the invocation VERBATIM. Nothing is kept out of the pairing
@@ -75,14 +75,12 @@ pub(crate) fn run(
     // absent flag - is what `--grep` and `--grep-v` are for.
     let config = BenchConfig {
         command: resolved.name.clone(),
-        mode: None,
         input_file: None,
         input_mb: None,
         cargo_features: None,
         cargo_profile: crate::build::CargoProfile::Release,
         runs: req.runs(),
         cli_args: Some(harness::format_cli_args(&binary_str, &argv)),
-        brokkr_args: None,
         metadata: vec![],
     };
 
@@ -99,7 +97,7 @@ pub(crate) fn run(
         output::detail(&format!("mogwai {label}: {}", resolved.name));
         harness::hotpath_alloc_note(req.is_alloc());
 
-        ctx.harness.run_hotpath(&config, &ctx.binary, |_i| {
+        ctx.harness.run_hotpath(&config, ctx.binary()?, |_i| {
             let (result, _stderr, sidecar) = harness::run_hotpath_capture(
                 &binary_str,
                 &argv,
@@ -122,7 +120,7 @@ pub(crate) fn run(
     // what `elapsed` means: markers keep the excluded setup visible as its own
     // phase instead of deleting it from the record.
     ctx.harness
-        .run_external(&config, &ctx.binary, &argv, req.project_root)?;
+        .run_external(&config, ctx.binary()?, &argv, req.project_root)?;
 
     Ok(())
 }

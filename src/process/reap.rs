@@ -78,24 +78,6 @@ pub fn kill_verified(identity: ProcIdentity, signal: libc::c_int) -> std::io::Re
     })
 }
 
-/// Open a pidfd for a legacy lock-record identity, preserving the old API at
-/// `lockfile::open_verified_pidfd` while sharing the verification sequence.
-pub fn open_legacy_pidfd(
-    pid: u32,
-    starttime: &str,
-    boot_id: &str,
-) -> Result<OwnedFd, PidfdRefusal> {
-    let (Some(pid), Some(start), Some(boot)) = (
-        Pid::new(pid),
-        super::StartTicks::parse(starttime),
-        BootId::new(boot_id),
-    ) else {
-        return Err(PidfdRefusal::Unverified);
-    };
-    VerifiedProcess::open(ProcIdentity::new(pid, start), Some(&boot))
-        .map(VerifiedProcess::into_pidfd)
-}
-
 /// Send a signal through an already owned pidfd. `Ok(false)` means ESRCH.
 pub fn pidfd_send_signal(pidfd: &OwnedFd, signal: libc::c_int) -> std::io::Result<bool> {
     // SAFETY: the pidfd is owned and live; a null siginfo is permitted.

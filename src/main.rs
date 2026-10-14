@@ -90,6 +90,7 @@ use clap::Parser;
 
 pub(crate) use clean::{CORPUS_CALIBRAND_DIR, CleanOpts};
 use cli::{Cli, Command, VerifyCommand};
+use config::project_config::ProjectConfig;
 use context::{acquire_cmd_lock, acquire_cmd_lock_opt, bootstrap, bootstrap_config, with_worktree};
 use error::DevError;
 use project::Project;

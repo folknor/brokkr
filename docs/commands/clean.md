@@ -27,10 +27,10 @@ one place it would be tempting to skip: the durable archive store, where names
 look like `<dataset>-<variant>-<commit>.pmtiles`. Dataset names contain
 hyphens, so a filename cannot be split back into its parts unambiguously - and
 a prefix test alone would let the variant `raw` claim `raw-fast`'s archives and
-delete them. So `--archives` builds each known `(dataset, variant)` prefix from
-config and matches forward (`resolve::pmtiles_archive_matches`). Anything the
-constructed matcher does not claim is preserved unconditionally, because a file
-brokkr cannot name by construction is self-evidently not brokkr's to delete.
+delete them. `ArchiveStore::prune()` builds each configured `(dataset,
+variant)` name shape and matches forward. Anything the constructed matcher does
+not claim is preserved unconditionally, because a file brokkr cannot name by
+construction is outside the store's ownership.
 
 The same rule is why an explicit `-o` output path is never touched while the
 *default* `-o` directory is: one is a location brokkr designated, the other is
@@ -46,8 +46,10 @@ The measurement stores are never removed, by any flag combination:
 | `.brokkr/sidecar.db` | the profiler record `brokkr sidecar` reads |
 | `$XDG_DATA_HOME/brokkr/history.db` | global command history |
 | `.brokkr/piners/corpus/runs.db` | the corpus run store, source of truth |
+| `.brokkr/piners/lint/runs.db` | the differential-lint run store |
 | `.brokkr/ratatoskr/gate.db` | the gate baselines |
 | `.brokkr/bench/` | criterion baselines + their environment stamps |
+| `$XDG_DATA_HOME/brokkr/sidecar-backups/` | durable profiler backups |
 
 `.brokkr/bench/` is why `brokkr bench` points `CRITERION_HOME` there instead of
 leaving criterion in its default `target/criterion`. A baseline costs minutes to
@@ -61,8 +63,9 @@ existing rule spares it, no special case required, and a user's own
 `brokkr.toml`; deleting the row that UUID points at breaks the gate with no way
 back short of re-recording, which silently rebases the reference onto current
 numbers - a gate that passes because it forgot what it was measuring against.
-So on ratatoskr projects `clean` removes the *directories* under
-`.brokkr/ratatoskr/` and spares every file at that level.
+Its path is a named permanent store in the ratatoskr layout. Cleanup preserves
+that path and any directory containing it, even if the store moves below the
+current `.brokkr/ratatoskr/` level.
 
 ## Routine clean
 
@@ -77,26 +80,29 @@ Bare `brokkr clean`, in order:
 - **Scratch**, whose shape differs per project: elivagar's scratch dir (the
   host `scratch`, where tilegen writes before the rename into the durable
   store) is wiped and recreated, and `<data>/tilegen_tmp` (the `--tmp-dir`
-  brokkr hands elivagar) is removed; nidhogg's `.ingest_tmp` and `.tilegen_tmp`
-  go, whether or not a scratch dir exists; every other project sweeps loose
-  `.pbf` files, `geocode-<dataset>/` output dirs, and orphaned
-  `.pbfhogg-external-join-<pid>` dirs. Those last survive OOM kills (SIGKILL
-  runs no destructor), so each is removed **only once its owner is known to be
-  gone**: no process holds the PID (`ESRCH` - an `EPERM` means a live process
-  under another uid), or the process holding it started after the dir was
-  created, which makes it a recycled PID. When either fact cannot be read the
-  dir is kept - a leak until the next clean, rather than a live sibling run's
-  scratch deleted.
+  brokkr hands elivagar) is removed. Nidhogg's constructed
+  `bench-ingest-output/` directory is removed. Pbfhogg removes its known
+  bench/hotpath PBF and OSC outputs, `multi-extract/`, the `geocode-<dataset>/`
+  dirs for configured datasets, and merged-PBF cache names constructed from
+  configured PBF/OSC entries. Other pbfhogg scratch files survive. Sidecar
+  marker FIFOs in the configured scratch root are removed only when both their
+  reserved `.sidecar-*.fifo` name shape and FIFO type match; clean does not
+  parse a PID from the name.
 - **Elivagar also**: `corpus-calibrands/` (the default `-o` for
-  `pmtiles-corpus mutate`) and `ocean-build_tmp`.
-- **Run-artefact trees**: `.brokkr/ratatoskr/` directories (run-N dirs left by
-  failed runs, plus `mock/` dirs from `mock-serve`), `.brokkr/dellingr/`
-  wholesale (the harness's hotpath report and marker FIFO), and
-  `.brokkr/piners/corpus/run-*/`.
+  `pmtiles-corpus mutate`). The `ocean-build_tmp`, `.ingest_tmp`, and
+  `.tilegen_tmp` names are not brokkr-designated paths and are left alone.
+- **Run-artefact trees**: the named `.brokkr/ratatoskr/{service,service-mock,sync,mock}/`
+  trees and child directories under `.brokkr/piners/corpus/` (the `gate.db`
+  and `runs.db` paths are protected),
+  `.brokkr/dellingr/`, `.brokkr/mogwai/`, `.brokkr/test-hung/`, and, for
+  litehtml, `.brokkr/prepare-cache/`. The per-user
+  `~/.brokkr/sidecar-status` file is removed with the project scratch.
+  Other directories under `.brokkr/ratatoskr/` are preserved.
 - **Litehtml also**: under `$XDG_CACHE_HOME/brokkr/litehtml-prepare/`, every
   version directory (a constructed 32-hex-digit name) other than the one this
   brokkr's bundled Node scripts hash to. The current one stays, so the next
-  `prepare` or `visual` does not reinstall its dependencies.
+  `prepare` or `visual` does not reinstall its dependencies. The capture
+  script is stored in this same versioned cache, not as `.brokkr/capture.js`.
 
 A routine clean **spares the durable tilegen output archives**
 (`<output>/<dataset>-<variant>-<commit>.pmtiles`). They are reproducible but

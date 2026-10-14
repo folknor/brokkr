@@ -194,7 +194,8 @@ pub fn verify_probe(
         )]));
     }
     let origin = format!("probe '{id}' ({})", pin.pine.path.display());
-    preflight::verify_file_hash(&abs, &pin.pine.xxh128, project_root, Some(&origin))?;
+    let expected = crate::piners::registry::parse_file_digest(&pin.pine.xxh128)?;
+    preflight::verify_file_digest(&abs, &expected, project_root, Some(&origin))?;
     Ok(abs)
 }
 

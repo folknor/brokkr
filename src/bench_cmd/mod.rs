@@ -53,9 +53,8 @@ pub struct BenchArgs {
     pub target: Option<String>,
     /// Measure this commit in a persistent worktree instead of the live tree.
     pub commit: Option<String>,
-    /// Compare two already-stored baselines, sampling nothing. clap's
-    /// `num_args = 2` guarantees the pair when present.
-    pub compare: Option<Vec<String>>,
+    /// Compare two already-stored baselines, sampling nothing.
+    pub compare: Option<(String, String)>,
     /// List the baselines brokkr has recorded.
     pub baselines: bool,
     /// Explicit baseline name, required when saving from a dirty tree.
@@ -76,7 +75,7 @@ pub struct BenchArgs {
 /// config lives one level above a foreign checkout, the baselines stay in the
 /// parent instead of appearing as untracked files in a repo that isn't ours.
 fn bench_home(project_root: &Path) -> PathBuf {
-    project_root.join(".brokkr").join("bench")
+    crate::clean::layout::ProjectState::new(project_root).bench_dir()
 }
 
 /// Entry point.
@@ -124,10 +123,7 @@ pub fn run(args: &BenchArgs) -> Result<(), DevError> {
         return list_baselines(&home);
     }
 
-    let compare = match args.compare.as_deref() {
-        Some([a, b]) => Some((a.clone(), b.clone())),
-        _ => None,
-    };
+    let compare = args.compare.clone();
 
     // Resolve the baseline name HERE, before the lock and therefore before
     // brokkr has touched the tree. Taking the lock activates the

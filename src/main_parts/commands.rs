@@ -91,7 +91,7 @@ fn resolve_mode(mode: &cli::ModeArgs) -> Result<measure::MeasureMode, DevError> 
 /// approved in turn, and the first failure stops the batch - a bad ID should
 /// not be silently skipped.
 fn cmd_approve(
-    dev_config: &config::DevConfig,
+    project_config: &ProjectConfig,
     project: Project,
     project_root: &Path,
     build_root: &Path,
@@ -109,12 +109,8 @@ fn cmd_approve(
         ));
     }
 
-    match project {
-        Project::Litehtml => {
-            let cfg = dev_config
-                .litehtml
-                .as_ref()
-                .ok_or_else(|| DevError::Config("no [litehtml] section in brokkr.toml".into()))?;
+    match project_config {
+        ProjectConfig::Litehtml(cfg) => {
             let ids = if all {
                 cfg.fixtures.iter().map(|f| f.id.clone()).collect()
             } else {
@@ -125,11 +121,7 @@ fn cmd_approve(
             }
             Ok(())
         }
-        Project::Sluggrs => {
-            let cfg = dev_config
-                .sluggrs
-                .as_ref()
-                .ok_or_else(|| DevError::Config("no [sluggrs] section in brokkr.toml".into()))?;
+        ProjectConfig::Sluggrs(cfg) => {
             let ids = if all {
                 cfg.snapshots.iter().map(|s| s.id.clone()).collect()
             } else {
@@ -140,8 +132,8 @@ fn cmd_approve(
             }
             Ok(())
         }
-        other => Err(DevError::Config(format!(
-            "'approve' is only available for litehtml/sluggrs projects (current: {other})"
+        _ => Err(DevError::Config(format!(
+            "'approve' is only available for litehtml/sluggrs projects (current: {project})"
         ))),
     }
 }
@@ -488,7 +480,7 @@ fn cmd_verify(
 /// standard env-var mechanism.
 fn cmd_hotpath_generic(req: &measure::MeasureRequest) -> Result<(), DevError> {
     let hotpath_features = req.hotpath_features();
-    let ctx = context::BenchContext::new_for_request(
+    let ctx = context::MeasurementSession::build_for_request(
         req,
         req.project.cli_package(),
         &hotpath_features,
@@ -501,22 +493,20 @@ fn cmd_hotpath_generic(req: &measure::MeasureRequest) -> Result<(), DevError> {
     output::detail(&format!("{} {label}", req.project));
     harness::hotpath_alloc_note(alloc);
 
-    let binary_str = ctx.binary.display().to_string();
+    let binary_str = ctx.binary()?.display().to_string();
 
     let config = harness::BenchConfig {
         command: "default".into(),
-        mode: None,
         input_file: None,
         input_mb: None,
         cargo_features: None,
         cargo_profile: crate::build::CargoProfile::Release,
         runs: req.runs(),
         cli_args: Some(harness::format_cli_args(&binary_str, &[])),
-        brokkr_args: None,
         metadata: vec![],
     };
 
-    ctx.harness.run_hotpath(&config, &ctx.binary, |_i| {
+    ctx.harness.run_hotpath(&config, ctx.binary()?, |_i| {
         let (result, _stderr, sidecar) = harness::run_hotpath_capture(
             &binary_str,
             &[],

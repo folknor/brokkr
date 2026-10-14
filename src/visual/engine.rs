@@ -104,9 +104,7 @@ pub(crate) fn format_status_row(
     status: &str,
     annotation: &str,
 ) -> String {
-    format!(
-        "  {id:<25} {approved:<11} {pixel:<11} {delta:<9} {status}{annotation}",
-    )
+    format!("  {id:<25} {approved:<11} {pixel:<11} {delta:<9} {status}{annotation}",)
 }
 
 pub(crate) fn collect_clean_approval(

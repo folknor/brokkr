@@ -8,7 +8,7 @@ use crate::check_cmd::{self, LaneEntry};
 use crate::config::DevConfig;
 use crate::error::DevError;
 use crate::output;
-use crate::profile::ResolvedSweep;
+use crate::profile::PlannedSweep;
 use crate::project::Project;
 use crate::test_runner;
 
@@ -100,7 +100,7 @@ pub(super) fn run_sweeps(
     // does are deduped. After `--sweep`, so a lane-qualified label reaches a
     // sweep the dedupe would otherwise fold away.
     let test_cfg = dev_config.test.as_ref();
-    let debug_of = |s: &ResolvedSweep| resolve_debug(profile_override, test_cfg, s.profile);
+    let debug_of = |s: &PlannedSweep| resolve_debug(profile_override, test_cfg, s.profile);
     // Each sweep's features are projected onto the one package: a token only
     // another of the sweep's packages routes is dropped, and said so.
     let oracle = check_cmd::FeatureOracle::at(project_root);
@@ -154,7 +154,7 @@ pub(super) fn run_sweeps(
     // named. (A sweep's discovery used to wait for the sweeps before it to
     // finish running.)
     let mut ready: Vec<ReadySweep<'_>> = Vec::new();
-    for (sweep, entry) in sweeps.iter().zip(selection.entries()) {
+    for (sweep, entry) in sweeps.iter().zip(selection.entries().iter()) {
         let attempt = match entry {
             LaneEntry::Attempt(a) => a,
             // A sweep whose rules leave the package out doesn't carry this
@@ -572,29 +572,35 @@ pub(super) fn test_lane_record(
     lane: usize,
     label: String,
 ) -> check_cmd::LaneRecord {
-    use check_cmd::{LaneKind, LaneRecord, PairId};
+    use check_cmd::{Inventory, LaneIdx, LaneKind, LaneRecord, PairId, Resolution};
+    let lane = LaneIdx::new(lane);
     let shape = check_cmd::shape_id(r.sweep);
     let Some(focused) = &r.focused else {
         // Doctests are not enumerable: the lane exists, expecting nothing.
-        return LaneRecord {
-            prepared: true,
-            ..LaneRecord::empty(lane, label, LaneKind::DocOnly, shape)
-        };
+        // `LaneRecord::empty` gives a doc-only lane the doctest inventory.
+        return LaneRecord::empty(lane, label, LaneKind::DocOnly, shape);
     };
     let mut rec = LaneRecord::empty(lane, label, LaneKind::Serial, shape.clone());
-    rec.prepared = true;
     rec.include_ignored = true;
-    rec.artifacts = focused.artifacts.clone();
-    for run in &focused.runs {
-        for name in &run.names {
-            rec.executions.push(PairId {
+    let executions = focused
+        .runs
+        .iter()
+        .flat_map(|run| {
+            run.names.iter().map(|name| PairId {
                 shape: shape.clone(),
-                resolution: None,
+                resolution: Resolution::Combined,
                 unit: run.unit.clone(),
-                test: name.clone(),
-            });
-        }
-    }
+                test: name.clone().into(),
+            })
+        })
+        .collect();
+    rec.inventory = Inventory::Prepared {
+        executions,
+        ignored_selected: Vec::new(),
+        outside_claim: Vec::new(),
+        artifacts: focused.artifacts.clone(),
+        unlisted: Vec::new(),
+    };
     rec
 }
 

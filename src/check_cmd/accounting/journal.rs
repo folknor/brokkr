@@ -314,7 +314,7 @@ pub(crate) fn new_run_id() -> String {
 
 /// Where the runs live.
 pub(crate) fn accounting_base(state_root: &Path) -> PathBuf {
-    state_root.join(".brokkr").join("accounting")
+    crate::clean::layout::ProjectState::new(state_root).accounting_dir()
 }
 
 /// A run id is `<ms>-<pid>`; anything else is not a run directory (and, as a

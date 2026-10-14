@@ -75,15 +75,12 @@ pub(crate) fn bootstrap_config(
     Ok(paths)
 }
 
-// ---------------------------------------------------------------------------
-// HarnessContext - shared bootstrap for no-build command handlers
-// ---------------------------------------------------------------------------
-
-/// Lighter context for commands that need a harness but don't build a binary
-/// (allocator, planetiler, bench-all, profile, hotpath variants, etc.).
-pub(crate) struct HarnessContext {
+/// One lock, path resolution and measurement provenance for a command.
+/// A build is optional; external tools and HTTP lifecycles use the same session.
+pub(crate) struct MeasurementSession {
     pub(crate) paths: config::ResolvedPaths,
     pub(crate) harness: harness::BenchHarness,
+    binary: Option<PathBuf>,
 }
 
 /// Whether a measurement request may run against a dirty tree.
@@ -112,7 +109,7 @@ impl DirtyPolicy {
     }
 }
 
-/// Shared bootstrap step for both context constructors: resolve host paths
+/// Shared bootstrap for the measurement session: resolve host paths
 /// and compute the effective build root + db root pair.
 fn resolve_bootstrap_paths<'a>(
     dev_config: &config::DevConfig,
@@ -141,8 +138,8 @@ pub(crate) fn worktree_keep(dev_config: &config::DevConfig) -> Result<usize, Dev
     Ok(dev_config.worktree_keep(&hostname))
 }
 
-impl HarnessContext {
-    /// Create a harness context using the dirty-tree policy for this request.
+impl MeasurementSession {
+    /// Create a measurement session using the dirty-tree policy for this request.
     /// The policy must be applied before `BenchHarness` is constructed, since
     /// its constructor performs the dirty-tree check.
     pub(crate) fn new_for_request(
@@ -172,7 +169,7 @@ impl HarnessContext {
         stop_marker: Option<String>,
     ) -> Result<Self, DevError> {
         // Take the lock before resolving paths, for the same reason as
-        // `BenchContext::with_build_config`: `resolve_bootstrap_paths` runs
+        // `MeasurementSession::with_build_config`: `resolve_bootstrap_paths` runs
         // `cargo metadata`, and the lock activates the armed toolchain-disable.
         // Acquiring first keeps a worktree's committed pin from being live
         // during that metadata call. (`BenchHarness::new` would otherwise take
@@ -193,7 +190,11 @@ impl HarnessContext {
             force,
             stop_marker,
         )?;
-        Ok(Self { paths, harness })
+        Ok(Self {
+            paths,
+            harness,
+            binary: None,
+        })
     }
 
     /// Attach the brokkr invocation string and measurement mode from the
@@ -208,28 +209,16 @@ impl HarnessContext {
             .with_env_kv(config::captured_env_pairs(req.dev_config));
         self
     }
-}
 
-// ---------------------------------------------------------------------------
-// BenchContext - shared bootstrap for benchmark command handlers
-// ---------------------------------------------------------------------------
-
-pub(crate) struct BenchContext {
-    pub(crate) paths: config::ResolvedPaths,
-    pub(crate) harness: harness::BenchHarness,
-    pub(crate) binary: PathBuf,
-}
-
-impl BenchContext {
-    /// Create a bench context using the dirty-tree policy for this request.
-    pub(crate) fn new_for_request(
+    /// Create a session with a built executable using the dirty-tree policy for this request.
+    pub(crate) fn build_for_request(
         req: &crate::measure::MeasureRequest<'_>,
         package: Option<&str>,
         features: &[&str],
         default_features: bool,
         lock_command: &str,
     ) -> Result<Self, DevError> {
-        Self::new(
+        Self::build(
             req.dev_config,
             req.project,
             req.project_root,
@@ -244,13 +233,13 @@ impl BenchContext {
         .map(|ctx| ctx.with_request(req))
     }
 
-    /// Create a new bench context.
+    /// Create a new session with a built executable.
     ///
     /// When `build_root` is `Some`, builds happen there (worktree) while data
     /// paths and the results DB use `project_root` (main tree). Git info is
     /// collected from the build root so the commit hash matches the built code.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn new(
+    pub(crate) fn build(
         dev_config: &config::DevConfig,
         project: Project,
         project_root: &Path,
@@ -281,7 +270,7 @@ impl BenchContext {
         )
     }
 
-    /// As [`BenchContext::new`], but the caller supplies the `BuildConfig`
+    /// As [`MeasurementSession::build`], but the caller supplies the `BuildConfig`
     /// directly instead of having it derived as a release build of the
     /// project's own crate. Same lock -> `cargo_build` -> `BenchHarness`
     /// lifecycle; the only difference is *what* gets built. This is the seam
@@ -299,21 +288,17 @@ impl BenchContext {
         force: bool,
         stop_marker: Option<String>,
     ) -> Result<Self, DevError> {
-        // Acquire the lock BEFORE resolving paths - not just before building.
-        // `resolve_bootstrap_paths` shells out to `cargo metadata`, and the lock
-        // is what activates the armed toolchain-disable. Acquiring it first means
-        // the pin is already moved aside for that first rustup-mediated call; a
-        // `--commit` worktree carrying its own uninstalled pin would otherwise
-        // have it live during metadata. It also keeps concurrent brokkr
-        // invocations blocking here instead of competing for CPU during build.
-        let lock = lockfile::acquire(&lockfile::LockContext {
-            project: project.name(),
-            command: lock_command,
-            project_root: &project_root.display().to_string(),
-        })?;
-        let (paths, effective_build_root, db_root) =
-            resolve_bootstrap_paths(dev_config, project_root, build_root)?;
-        // A BenchContext build always carries this host's configured defaults,
+        let mut session = Self::new(
+            dev_config,
+            project,
+            project_root,
+            build_root,
+            lock_command,
+            force,
+            stop_marker,
+        )?;
+        let effective_build_root = build_root.unwrap_or(project_root);
+        // A session build always carries this host's configured defaults,
         // even when its caller built the BuildConfig through a different path.
         // Request callers may already have merged them into the request; the
         // shared resolver dedupes that overlap before cargo and DB labeling.
@@ -334,21 +319,9 @@ impl BenchContext {
             Some(effective_config.features.join(","))
         };
         let binary = build::cargo_build(&effective_config, effective_build_root)?;
-        let harness = harness::BenchHarness::new_with_lock(
-            lock,
-            &paths,
-            effective_build_root,
-            db_root,
-            project,
-            force,
-            stop_marker,
-        )?
-        .with_cargo_features(cargo_features);
-        Ok(Self {
-            paths,
-            harness,
-            binary,
-        })
+        session.harness = session.harness.with_cargo_features(cargo_features);
+        session.binary = Some(binary);
+        Ok(session)
     }
 
     /// As [`with_build_config`](Self::with_build_config), with dirty-tree
@@ -371,17 +344,10 @@ impl BenchContext {
         .map(|ctx| ctx.with_request(req))
     }
 
-    /// Attach the brokkr invocation string and measurement mode from the
-    /// given `MeasureRequest` to the harness. Every row built by this
-    /// harness will carry them in the `brokkr_args` and `variant`
-    /// columns, so individual bench writers don't have to plumb them.
-    pub(crate) fn with_request(mut self, req: &crate::measure::MeasureRequest) -> Self {
-        self.harness = self
-            .harness
-            .with_brokkr_args(req.brokkr_args.to_owned())
-            .with_measure_mode(req.mode_label())
-            .with_env_kv(config::captured_env_pairs(req.dev_config));
-        self
+    pub(crate) fn binary(&self) -> Result<&Path, DevError> {
+        self.binary
+            .as_deref()
+            .ok_or_else(|| DevError::Config("session has no built executable".into()))
     }
 }
 

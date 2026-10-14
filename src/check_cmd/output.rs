@@ -51,7 +51,7 @@ pub(crate) fn build_test_env(
 /// lane with no single directory holding the binaries its tests spawn.
 ///
 pub(crate) fn isolated_target_dir(
-    sweep: &ResolvedSweep,
+    sweep: &PlannedSweep,
     meta_target_dir: &Path,
 ) -> Option<std::path::PathBuf> {
     let location = sweep.target_location();
@@ -108,7 +108,7 @@ fn composed_rustflags_env(rustflags: &[String], extra: &[String]) -> Option<(Str
 /// the suppressions, which is a hard error wherever the project's `-Dwarnings`
 /// turns one of those lints into one.
 pub(crate) fn sweep_cargo_env(
-    sweep: &ResolvedSweep,
+    sweep: &PlannedSweep,
     meta_target_dir: &Path,
     allow_flags: &[String],
 ) -> Vec<(String, String)> {
@@ -130,7 +130,7 @@ pub(crate) fn sweep_cargo_env(
 /// `--config` instead. The caller decides, because the same sink answer also
 /// selects the cargo args it must pass alongside these.
 pub(crate) fn sweep_runtime_env(
-    sweep: &ResolvedSweep,
+    sweep: &PlannedSweep,
     project: Option<Project>,
     meta_target_dir: &Path,
     profile_dir: &str,
@@ -194,7 +194,7 @@ fn describe_features(args: &[String]) -> Option<String> {
 /// request's projection, or for a lane-level line the tokens some run of the
 /// lane carries ([`Attempt::described_features`]).
 pub(crate) fn describe_sweep(
-    sweep: &ResolvedSweep,
+    sweep: &PlannedSweep,
     for_test: bool,
     selection: &Selection,
     features: &[String],
@@ -234,8 +234,8 @@ pub(crate) fn describe_sweep(
     // and the mode is the single most load-bearing fact about such a lane.
     // `auto` prints nothing: it is the status quo, and naming it on every
     // line of every ordinary run would be noise.
-    if let Some(mode) = sweep.effective_unification.describe() {
-        let isolated = if sweep.effective_unification.is_per_package() {
+    if let Some(mode) = sweep.effective_unification().describe() {
+        let isolated = if sweep.effective_unification().is_per_package() {
             " (isolated target)"
         } else {
             ""
@@ -311,12 +311,10 @@ pub(crate) fn describe_sweep(
 /// must come from the same feature graph as the tests themselves, or a
 /// package-mode lane runs its tests against a binary built under ambient
 /// resolution.
-fn pre_build_args(sweep: &ResolvedSweep, req: &SupportRequest, allow_args: &[String]) -> Vec<String> {
-    // `json-render-diagnostics`: the artifact stream on stdout (the support
-    // executables the pre-build produced, which a complete plan hashes),
-    // compiler diagnostics still rendered as text on stderr for the failure
-    // path. The message format does not enter cargo's fingerprint.
-    let mut args: Vec<String> = vec!["build".into(), "--message-format=json-render-diagnostics".into()];
+fn pre_build_args(sweep: &PlannedSweep, req: &SupportRequest, allow_args: &[String]) -> Vec<String> {
+    // One JSON stream carries both the support executables and typed compiler
+    // diagnostics. The message format does not enter cargo's fingerprint.
+    let mut args: Vec<String> = vec!["build".into(), "--message-format=json".into()];
     args.extend(allow_args.iter().cloned());
     // The pre-build must land where the tests will look for it: a sweep
     // pinned to a profile builds its binaries into that profile's
@@ -395,15 +393,100 @@ pub(crate) fn support_fingerprint(artifacts: &[SupportArtifact]) -> Result<Vec<S
     Ok(out)
 }
 
+/// Cargo JSON diagnostics plus cargo's stderr-only manifest lints, classified
+/// through the same owner index. Duplicate messages from the two channels are
+/// collapsed by their typed identity.
+fn owned_build_diagnostics(
+    stdout: &str,
+    stderr: &str,
+    owners: &crate::diagnostic::OwnerIndex,
+) -> Vec<crate::diagnostic::Diagnostic> {
+    let mut diagnostics = cargo_json::parse_cargo_diagnostics(stdout);
+    diagnostics.extend(
+        cargo_json::manifest_lints_by_block(&rustc_text::rustc_blocks(stderr))
+            .into_iter()
+            .map(|(_, diagnostic)| diagnostic),
+    );
+    for diagnostic in &mut diagnostics {
+        diagnostic.classify_owner(owners);
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    diagnostics.retain(|diagnostic| seen.insert(diagnostic.key_as(diagnostic.level)));
+    diagnostics
+}
+
+/// The manifest-lint blocks already represented by `owned_build_diagnostics`.
+/// Keep the rest of stderr verbatim for cargo errors and build-script output.
+fn stderr_without_manifest_lints(stderr: &str) -> String {
+    let blocks = rustc_text::rustc_blocks(stderr);
+    let listed: std::collections::HashSet<usize> =
+        cargo_json::manifest_lints_by_block(&blocks).into_iter().map(|(index, _)| index).collect();
+    blocks
+        .into_iter()
+        .enumerate()
+        .filter(|(index, _)| !listed.contains(index))
+        .map(|(_, block)| block.text)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Render cargo diagnostics with the shared one-line formatter and typed sort
+/// order. Dependency warnings are the only findings omitted.
+fn render_build_diagnostics(
+    tool: &str,
+    diagnostics: &[crate::diagnostic::Diagnostic],
+    warnings_only: bool,
+) -> Option<String> {
+    let mut visible: Vec<&crate::diagnostic::Diagnostic> = diagnostics
+        .iter()
+        .filter(|diagnostic| {
+            !diagnostic.is_dependency_warning()
+                && (!warnings_only || diagnostic.is_warning())
+        })
+        .collect();
+    if visible.is_empty() {
+        return None;
+    }
+    visible.sort_by_key(|diagnostic| {
+        let (path, line, column) = diagnostic.site.as_ref().map_or_else(
+            || (std::path::PathBuf::new(), 0, 0),
+            |site| (site.file.clone(), site.line.unwrap_or(0), site.column.unwrap_or(0)),
+        );
+        let level = match diagnostic.level {
+            Level::Error => 0,
+            Level::Warning => 1,
+            Level::Other => 2,
+        };
+        (
+            diagnostic.code.clone().unwrap_or_else(|| "\u{10FFFF}".into()),
+            path,
+            line,
+            column,
+            level,
+            diagnostic.message.clone(),
+        )
+    });
+    let errors = visible.iter().filter(|d| d.is_error()).count();
+    let warnings = visible.iter().filter(|d| d.is_warning()).count();
+    let mut rendered = format!("{tool}: {errors} errors, {warnings} warnings");
+    for diagnostic in visible {
+        rendered.push_str("\n  ");
+        rendered.push_str(&diagnostic.format_one());
+    }
+    Some(rendered)
+}
+
 /// Build one binary package with the sweep's feature flags, returning the
-/// executables it produced. Errors surface compile failures the same way the
-/// test phase does: the stderr filtered through `cargo_filter::filter_clippy`.
+/// executables it produced. Compiler messages and manifest lints use the same
+/// structured diagnostic path as clippy and rustdoc.
 fn run_sweep_pre_build(
     project_root: &Path,
-    sweep: &ResolvedSweep,
+    sweep: &PlannedSweep,
     req: &SupportRequest,
     project_env: &[(String, String)],
     allow_args: &[String],
+    owners: &crate::diagnostic::OwnerIndex,
     commands: bool,
 ) -> Result<Vec<SupportArtifact>, DevError> {
     let package = req.package();
@@ -427,11 +510,16 @@ fn run_sweep_pre_build(
         .collect();
     let captured = output::run_captured_with_env("cargo", &arg_refs, project_root, &env_refs)?;
 
+    let stdout = String::from_utf8_lossy(&captured.stdout);
+    let stderr = String::from_utf8_lossy(&captured.stderr);
+    let diagnostics = owned_build_diagnostics(&stdout, &stderr, owners);
     if captured.status.success() {
-        return Ok(support_artifacts(&String::from_utf8_lossy(&captured.stdout), package));
+        if let Some(warnings) = render_build_diagnostics("cargo build", &diagnostics, true) {
+            note_warning(&warnings, &sweep.label);
+        }
+        return Ok(support_artifacts(&stdout, package));
     }
 
-    let stderr = String::from_utf8_lossy(&captured.stderr);
     // Printed even under `--commands`: the streamed line is neither adjacent
     // to this failure nor attributable among several runs.
     // The identity leads and the error is `Reported`: nothing downstream
@@ -440,7 +528,13 @@ fn run_sweep_pre_build(
     let failed = format!("build failed for package '{package}' in sweep '{}'", sweep.label);
     output::error(&failed);
     output::error(&format!("failing command: cargo {}", args.join(" ")));
-    output::error(&cargo_filter::filter_clippy(&stderr));
+    if let Some(rendered) = render_build_diagnostics("cargo build", &diagnostics, false) {
+        output::error(&rendered);
+    }
+    let remaining_stderr = stderr_without_manifest_lints(&stderr);
+    if !remaining_stderr.trim().is_empty() {
+        output::error(remaining_stderr.trim());
+    }
     Err(DevError::Reported(failed))
 }
 
@@ -568,7 +662,7 @@ mod serial_shim_tests {
 /// the coverage enumeration - because a profile mismatch between any two of
 /// them is a silent full rebuild at best and lint results for a build that
 /// never ran at worst.
-fn sweep_profile_args(sweep: &ResolvedSweep) -> Vec<String> {
+fn sweep_profile_args(sweep: &PlannedSweep) -> Vec<String> {
     sweep
         .profile
         .map(|p| p.cargo_args().iter().map(|a| (*a).to_owned()).collect())
@@ -581,7 +675,7 @@ fn sweep_profile_args(sweep: &ResolvedSweep) -> Vec<String> {
 /// ([`selection::package_args`]): a CLI `-p` set already *replaced* the sweep's own
 /// selection there - cargo unions selection flags, so emitting `--workspace
 /// --exclude ... -p X` would silently run the whole workspace.
-fn sweep_selection_args(sweep: &ResolvedSweep, run: &ResolutionRun) -> Vec<String> {
+fn sweep_selection_args(sweep: &PlannedSweep, run: &ResolutionRun) -> Vec<String> {
     let mut args: Vec<String> = sweep_profile_args(sweep);
     // The sweep's pinned resolution. This is the ordinary (non-parallel) test
     // path, and it was the one place the pin was never emitted: the lane was
@@ -710,10 +804,11 @@ fn first_isolation_notice(label: &str) -> bool {
 fn run_one_test_sweep(
     project_root: &Path,
     state_root: &Path,
-    sweep: &ResolvedSweep,
+    sweep: &PlannedSweep,
     run: &ResolutionRun,
     extra_args: &[String],
     project_env: &[(String, String)],
+    owners: &crate::diagnostic::OwnerIndex,
     allow_args: &[String],
     doctests: bool,
     multi: bool,
@@ -751,7 +846,7 @@ fn run_one_test_sweep(
         },
     };
 
-    let mut args: Vec<String> = vec!["test".into()];
+    let mut args: Vec<String> = vec!["test".into(), "--message-format=json".into()];
     // Before the selection and the `--` split: `--config` is a cargo option,
     // and everything past `--` belongs to libtest.
     args.extend(allow_args.iter().cloned());
@@ -986,9 +1081,22 @@ fn run_one_test_sweep(
         )));
     }
 
+    let diagnostics = owned_build_diagnostics(&stdout, &stderr, owners);
     if !captured.status.success() {
         output::error(&full_command);
-        output::error(&cargo_filter::filter_test(&stdout, &stderr));
+        let has_test_summary = stdout.lines().any(|line| line.starts_with("test result:"));
+        let has_compile_error = diagnostics.iter().any(crate::diagnostic::Diagnostic::is_error);
+        if !has_test_summary && has_compile_error {
+            if let Some(rendered) = render_build_diagnostics("cargo test", &diagnostics, false) {
+                output::error(&rendered);
+            }
+            let remaining_stderr = stderr_without_manifest_lints(&stderr);
+            if !remaining_stderr.trim().is_empty() {
+                output::error(remaining_stderr.trim());
+            }
+        } else {
+            output::error(&crate::test_runner::filter_test(&stdout, &stderr));
+        }
         return Ok(false);
     }
     observe.missing_streams();
@@ -999,26 +1107,8 @@ fn run_one_test_sweep(
     // passing run still needs to say.
     // Held until the phase ends and merged with the identical block every other
     // sweep produced: one cargo warning seen by four sweeps is one warning.
-    // The text path and the JSON diagnostic path use the same ownership
-    // classifier. Cargo metadata is only needed when stderr contains a
-    // diagnostic site or manifest path; if unavailable, unknown ownership
-    // keeps the warning.
-    let owners = if stderr.contains("--> ") || stderr.contains("Cargo.toml") {
-        build::project_info(Some(project_root)).ok().map(|info| {
-            crate::diagnostic::OwnerIndex::from_metadata_at(
-                &info.workspace_root,
-                project_root,
-                &info.workspace_members,
-                &info.member_manifests,
-            )
-        })
-    } else {
-        None
-    };
-    let filtered = cargo_filter::filter_clippy_with_owners(&stderr, owners.as_ref());
-    if filtered != "cargo clippy: no issues" {
-        let relabeled = filtered.replacen("cargo clippy:", "cargo test:", 1);
-        note_warning(&relabeled, &sweep.label);
+    if let Some(warnings) = render_build_diagnostics("cargo test", &diagnostics, true) {
+        note_warning(&warnings, &sweep.label);
     }
 
     // Successful exit, but a profile/filter combo could still have
@@ -1028,7 +1118,7 @@ fn run_one_test_sweep(
     // out, since that's the silent-wrong-run shape. Suites = 0 (parse
     // failure) is also fatal: we can't tell what cargo did.
     let stdout_lines: Vec<&str> = stdout.lines().collect();
-    let parsed = cargo_filter::parse_test_output(&stdout_lines);
+    let parsed = crate::test_runner::parse_test_output(&stdout_lines);
     if zero_test_run(&parsed) {
         let label = if multi {
             format!(" (sweep: {})", sweep.label)
@@ -1050,7 +1140,7 @@ fn run_one_test_sweep(
     // a crash would be wrong - which left the incomplete case with no check of its
     // own, so a run like `running 1 test` / `running 1 test` / one summary, exit 0,
     // printed "1 passed" and returned green while a whole suite went unreported.
-    if let cargo_filter::Completeness::Incomplete { reason } = &parsed.completeness {
+    if let crate::test_runner::Completeness::Incomplete { reason } = &parsed.completeness {
         let label = if multi {
             format!(" (sweep: {})", sweep.label)
         } else {
@@ -1159,7 +1249,7 @@ fn reject_format_override(libtest_args: &[String]) -> Result<(), DevError> {
 /// A suite that legitimately defines zero tests (`#[cfg(test)] mod`
 /// with no `#[test]`s) prints `running 0 tests` + `0 filtered out` and
 /// is *not* flagged - that's a real, if empty, run.
-fn zero_test_run(p: &cargo_filter::ParsedTestResults) -> bool {
+fn zero_test_run(p: &crate::test_runner::ParsedTestResults) -> bool {
     if p.suites == 0 {
         return true;
     }
@@ -1623,13 +1713,31 @@ skip = ["edit_only::"]
             stderr: String::new(),
             success: true,
             selected: selected.map(|s| s.iter().map(|p| (*p).to_owned()).collect()),
-            manifest: Vec::new(),
+            diagnostics: Vec::new(),
+            suppressed_manifest_blocks: Vec::new(),
+            listed_manifest_errors: Vec::new(),
         }
     }
 
     /// `r` with its manifest lints attributed, as the clippy phase does.
     fn attributed(mut r: SweepResult, info: &crate::build::ProjectInfo) -> SweepResult {
-        r.manifest = attribute_manifest_lints(&r, info);
+        let owners = crate::diagnostic::OwnerIndex::from_metadata_at(
+            &info.workspace_root,
+            &info.workspace_root,
+            &info.workspace_members,
+            &info.member_manifests,
+        );
+        r.suppressed_manifest_blocks =
+            cargo_json::manifest_lints_by_block(&rustc_text::rustc_blocks(&r.stderr))
+                .into_iter()
+                .filter_map(|(block, diagnostic)| diagnostic.is_warning().then_some(block))
+                .collect();
+        for (block, diagnostic) in attribute_manifest_lints(&r, info, &owners) {
+            if diagnostic.is_error() {
+                r.listed_manifest_errors.push((block, diagnostic.clone()));
+            }
+            r.diagnostics.push(diagnostic);
+        }
         r
     }
 
@@ -1716,6 +1824,7 @@ warning: desktop: Exported component 'B' doesn't inherit Window
         let mut r = run("default", None);
         r.success = false;
         r.stdout = error.to_owned();
+        r.diagnostics = cargo_json::parse_cargo_diagnostics(&r.stdout);
         r.stderr = "\
 error: failed to run custom build command for `x-sys v1.0.0`
 
@@ -1732,6 +1841,7 @@ error: could not compile `core` (lib) due to 1 previous error
         let mut r = run("default", None);
         r.success = false;
         r.stdout = error.to_owned();
+        r.diagnostics = cargo_json::parse_cargo_diagnostics(&r.stdout);
         r.stderr = "error: could not compile `core` (lib) due to 1 previous error\n".to_owned();
         let out = format_clippy_multi("cargo clippy", &[r], None, &root, 1, &|_| true);
         assert!(!out.contains("could not compile"), "{out}");
@@ -1762,7 +1872,7 @@ error: could not compile `core` (lib) due to 1 previous error
     }
 
     /// An error an allow filtered from the list is still why cargo failed: the
-    /// report carries its rendered text, not an empty stream.
+    /// report renders its typed fields rather than cargo's rendered duplicate.
     #[test]
     fn a_filtered_error_still_explains_the_failure() {
         let mut r = run("default", None);
@@ -1772,9 +1882,10 @@ error: could not compile `core` (lib) due to 1 previous error
             r#"{"reason":"compiler-artifact","package_id":"q","filenames":["a"]}"#,
         ]
         .join("\n");
+        r.diagnostics = cargo_json::parse_cargo_diagnostics(&r.stdout);
         let root = crate::test_scratch::scratch("check-output", "a_filtered_error");
         let out = format_clippy_multi("cargo clippy", &[r], None, &root, 1, &|_| false);
-        assert!(out.contains("error[E0425]: cannot find value `x` in this scope"), "{out}");
+        assert!(out.contains("error[E0425] cannot find value `x`"), "{out}");
         assert!(!out.contains("compiler-artifact"), "{out}");
     }
 
@@ -1842,7 +1953,13 @@ warning: `b` (manifest) generated 1 warning
         let owners = |selected: Option<&[&str]>| -> Vec<(String, crate::diagnostic::Owner)> {
             let mut r = run("r", selected);
             r.stderr.clone_from(&stderr);
-            attribute_manifest_lints(&r, &info)
+            let owner_index = crate::diagnostic::OwnerIndex::from_metadata_at(
+                &info.workspace_root,
+                &info.workspace_root,
+                &info.workspace_members,
+                &info.member_manifests,
+            );
+            attribute_manifest_lints(&r, &info, &owner_index)
                 .into_iter()
                 .map(|(_, e)| {
                     (
@@ -1886,12 +2003,20 @@ warning: `b` (manifest) generated 1 warning
                 },
                 &info,
             );
-            r.manifest[0].1.is_dependency_warning()
+            r.diagnostics[0].is_dependency_warning()
         };
         assert!(!dependency("core/Cargo.toml"));
         assert!(!dependency("Cargo.toml"));
         assert!(dependency("../sibling/Cargo.toml"));
         assert!(dependency("vendor/x/Cargo.toml"));
+        let external = attributed(
+            SweepResult {
+                stderr: lint("../sibling/Cargo.toml"),
+                ..run("r", None)
+            },
+            &info,
+        );
+        assert!(external.diagnostics[0].package_id.is_none());
     }
 
     /// Two members, both default: `core` and `daemon`.
@@ -2460,11 +2585,11 @@ warning: z [too_many_lines]
         );
     }
 
-    fn rustflags_sweep() -> ResolvedSweep {
-        ResolvedSweep {
+    fn rustflags_sweep() -> PlannedSweep {
+        crate::profile::PlannedSweep::from(crate::profile::SweepDecl {
             rustflags: vec!["--cfg".into(), "madsim".into()],
-            ..Default::default()
-        }
+            ..crate::profile::SweepDecl::default()
+        })
     }
 
     fn get<'a>(env: &'a [(String, String)], key: &str) -> Option<&'a str> {
@@ -2478,7 +2603,7 @@ warning: z [too_many_lines]
     #[test]
     fn sweep_runtime_env_isolates_target_dir_for_rustflags() {
         let sweep = rustflags_sweep();
-        let key = crate::config::rustflags_target_key(&sweep.rustflags).unwrap();
+        let key = crate::config::check::rustflags_target_key(&sweep.rustflags).unwrap();
         let env = sweep_runtime_env(
             &sweep,
             Some(Project::Pbfhogg),
@@ -2503,7 +2628,7 @@ warning: z [too_many_lines]
         // dir on another drive. The isolated dir must land there, not on the
         // project root's drive (where `brokkr clean` never reclaims it).
         let sweep = rustflags_sweep();
-        let key = crate::config::rustflags_target_key(&sweep.rustflags).unwrap();
+        let key = crate::config::check::rustflags_target_key(&sweep.rustflags).unwrap();
         let env = sweep_runtime_env(
             &sweep,
             Some(Project::Pbfhogg),
@@ -2520,7 +2645,7 @@ warning: z [too_many_lines]
     #[test]
     fn sweep_runtime_env_plain_sweep_uses_metadata_target() {
         let env = sweep_runtime_env(
-            &ResolvedSweep::default(),
+            &crate::profile::PlannedSweep::from(crate::profile::SweepDecl::default()),
             Some(Project::Pbfhogg),
             Path::new("/meta/target"),
             "debug",
@@ -2533,7 +2658,7 @@ warning: z [too_many_lines]
 
     #[test]
     fn sweep_cargo_env_omits_bin_dir() {
-        let key = crate::config::rustflags_target_key(&rustflags_sweep().rustflags).unwrap();
+        let key = crate::config::check::rustflags_target_key(&rustflags_sweep().rustflags).unwrap();
         let env = sweep_cargo_env(&rustflags_sweep(), Path::new("/meta/target"), &[]);
         // Clippy shares the same isolated dir the test phase builds into.
         assert_eq!(
@@ -2545,11 +2670,11 @@ warning: z [too_many_lines]
         assert!(get(&env, "BROKKR_TEST_BIN_DIR").is_none());
         // A plain sweep contributes nothing.
         assert!(
-            sweep_cargo_env(&ResolvedSweep::default(), Path::new("/meta/target"), &[]).is_empty()
+            sweep_cargo_env(&crate::profile::PlannedSweep::from(crate::profile::SweepDecl::default()), Path::new("/meta/target"), &[]).is_empty()
         );
         // A plain sweep with env-sink lint allows carries them and nothing else.
         let allows = vec!["-Aclippy::assert_is_empty".to_owned()];
-        let env = sweep_cargo_env(&ResolvedSweep::default(), Path::new("/meta/target"), &allows);
+        let env = sweep_cargo_env(&crate::profile::PlannedSweep::from(crate::profile::SweepDecl::default()), Path::new("/meta/target"), &allows);
         assert!(get(&env, "CARGO_TARGET_DIR").is_none());
         assert!(rustflags_value(&env)
             .expect("allow flags reach the env")
@@ -2557,15 +2682,15 @@ warning: z [too_many_lines]
     }
 
     /// The one request a sweep's own selection runs as in `phase`.
-    fn only_run(sweep: &ResolvedSweep, phase: SelectionPhase) -> ResolutionRun {
+    fn only_run(sweep: &PlannedSweep, phase: SelectionPhase) -> ResolutionRun {
         let sel = PhaseSelection::for_check(phase, std::slice::from_ref(sweep), &[], &FeatureOracle::unavailable())
             .unwrap();
-        sel.attempt(0).unwrap().runs()[0].clone()
+        sel.attempt(LaneIdx::new(0)).unwrap().runs()[0].clone()
     }
 
     /// The support request for `package`, built as the selection builds it.
-    fn support_req(sweep: &ResolvedSweep, package: &str) -> SupportRequest {
-        let with = ResolvedSweep { build_packages: vec![package.to_owned()], ..sweep.clone() };
+    fn support_req(sweep: &PlannedSweep, package: &str) -> SupportRequest {
+        let with = crate::profile::PlannedSweep::from(crate::profile::SweepDecl { build_packages: vec![package.to_owned()], ..sweep.declaration().clone() });
         let sel = PhaseSelection::for_check(
             SelectionPhase::Test,
             std::slice::from_ref(&with),
@@ -2573,15 +2698,15 @@ warning: z [too_many_lines]
             &FeatureOracle::unavailable(),
         )
         .unwrap();
-        sel.attempt(0).unwrap().support()[0].clone()
+        sel.attempt(LaneIdx::new(0)).unwrap().support()[0].clone()
     }
 
-    fn release_sweep() -> ResolvedSweep {
-        ResolvedSweep {
+    fn release_sweep() -> PlannedSweep {
+        crate::profile::PlannedSweep::from(crate::profile::SweepDecl {
             label: "timing".into(),
             profile: Some(crate::config::SweepProfile::Release),
-            ..Default::default()
-        }
+            ..crate::profile::SweepDecl::default()
+        })
     }
 
     #[test]
@@ -2616,12 +2741,11 @@ warning: z [too_many_lines]
         // and then compiled under workspace resolution. It ran 839 green tests
         // against a defect it was created to catch. Assert the flags on every
         // compiling path, not the label.
-        use crate::config::{CargoUnification, EffectiveUnification};
-        let pkg = ResolvedSweep {
+        let pkg = crate::profile::PlannedSweep::from(crate::profile::SweepDecl {
             packages: vec!["daemon".to_owned()],
-            effective_unification: EffectiveUnification::Pinned(CargoUnification::Package),
-            ..ResolvedSweep::default()
-        };
+            feature_unification: crate::config::FeatureUnification::Package,
+            ..crate::profile::SweepDecl::default()
+        });
         let pin = "resolver.feature-unification=\"package\"";
 
         let daemon = only_run(&pkg, SelectionPhase::Test);
@@ -2641,7 +2765,7 @@ warning: z [too_many_lines]
         let pre_build = pre_build_args(&pkg, &support_req(&pkg, "daemon"), &[]);
         assert!(pre_build.iter().any(|a| a == pin), "pre-build: {pre_build:?}");
         // And it reports what it built, so a complete plan can hash it.
-        assert!(pre_build.iter().any(|a| a == "--message-format=json-render-diagnostics"), "{pre_build:?}");
+        assert!(pre_build.iter().any(|a| a == "--message-format=json"), "{pre_build:?}");
 
         let doc = doc_args(&pkg, &daemon, &crate::config::RustdocConfig::default());
         assert!(doc.iter().any(|a| a == pin), "rustdoc: {doc:?}");
@@ -2684,7 +2808,7 @@ warning: z [too_many_lines]
     fn an_unpinned_sweep_is_untouched() {
         // Every repo that never sets the key must produce byte-identical argv
         // to what it produced before the key existed.
-        let plain = ResolvedSweep::default();
+        let plain = crate::profile::PlannedSweep::from(crate::profile::SweepDecl::default());
         let run = only_run(&plain, SelectionPhase::Test);
         assert!(sweep_profile_args(&plain).is_empty());
         assert!(!sweep_selection_args(&plain, &run).iter().any(|a| a == "--release"));
@@ -2706,7 +2830,7 @@ warning: z [too_many_lines]
     #[test]
     fn clippy_args_leave_cargo_lints_out_of_the_allow_flags() {
         let allow = ["clippy::unused_async".to_owned(), "cargo::unused_dependencies".to_owned()];
-        let plain = ResolvedSweep::default();
+        let plain = crate::profile::PlannedSweep::from(crate::profile::SweepDecl::default());
         let args = clippy_args(&plain, &only_run(&plain, SelectionPhase::Clippy), &allow);
         assert!(args.iter().any(|a| a == "clippy::unused_async"), "{args:?}");
         assert!(!args.iter().any(|a| a.starts_with("cargo::")), "{args:?}");
@@ -2739,11 +2863,11 @@ warning: z [too_many_lines]
         let line = describe(&release_sweep(), true, &Selection::Bare);
         assert!(line.contains("profile release"), "got: {line}");
         // An unpinned sweep says nothing - it is the command's default.
-        assert!(!describe(&ResolvedSweep::default(), true, &Selection::Bare).contains("profile"));
+        assert!(!describe(&crate::profile::PlannedSweep::from(crate::profile::SweepDecl::default()), true, &Selection::Bare).contains("profile"));
     }
 
-    fn parsed(passed: usize, failed: usize, ignored: usize, filtered_out: usize, suites: usize) -> cargo_filter::ParsedTestResults {
-        cargo_filter::ParsedTestResults {
+    fn parsed(passed: usize, failed: usize, ignored: usize, filtered_out: usize, suites: usize) -> crate::test_runner::ParsedTestResults {
+        crate::test_runner::ParsedTestResults {
             failures: Vec::new(),
             passed,
             failed,
@@ -2751,7 +2875,7 @@ warning: z [too_many_lines]
             filtered_out,
             suites,
             duration: None,
-            completeness: cargo_filter::Completeness::Complete,
+            completeness: crate::test_runner::Completeness::Complete,
         }
     }
 
@@ -2797,16 +2921,16 @@ warning: z [too_many_lines]
         assert!(libtest.is_empty());
     }
 
-    fn sweep(label: &str) -> ResolvedSweep {
-        ResolvedSweep {
+    fn sweep(label: &str) -> PlannedSweep {
+        crate::profile::PlannedSweep::from(crate::profile::SweepDecl {
             label: label.into(),
-            ..Default::default()
-        }
+            ..crate::profile::SweepDecl::default()
+        })
     }
 
     /// [`describe_sweep`] with the sweep's configured features - what a run
     /// over the sweep's own selection carries.
-    fn describe(sweep: &ResolvedSweep, for_test: bool, selection: &Selection) -> String {
+    fn describe(sweep: &PlannedSweep, for_test: bool, selection: &Selection) -> String {
         describe_sweep(sweep, for_test, selection, &sweep.features.configured_key())
     }
 
@@ -2817,20 +2941,20 @@ warning: z [too_many_lines]
         assert_eq!(describe(&sweep("default"), false, &Selection::Bare), "default selection");
 
         // The sweep's own `packages` list; one package is named.
-        let scoped = ResolvedSweep {
+        let scoped = crate::profile::PlannedSweep::from(crate::profile::SweepDecl {
             packages: s(&["nautilus-core", "nautilus-model"]),
-            ..sweep("ffi")
-        };
+            ..sweep("ffi").declaration().clone()
+        });
         let own = Selection::configured(&scoped, SelectionPhase::Clippy);
         assert_eq!(describe(&scoped, false, &own), "2 pkgs");
         assert_eq!(describe(&scoped, false, &Selection::Explicit(s(&["nautilus-core"]))), "-p nautilus-core");
 
         // `--workspace --exclude` is a test-phase-only shape; the clippy line
         // describes the clippy selection, matching what actually runs.
-        let excluded = ResolvedSweep {
+        let excluded = crate::profile::PlannedSweep::from(crate::profile::SweepDecl {
             test_exclude_packages: s(&["nautilus-pyo3", "nautilus-cli"]),
-            ..sweep("default")
-        };
+            ..sweep("default").declaration().clone()
+        });
         let clippy = Selection::configured(&excluded, SelectionPhase::Clippy);
         assert_eq!(describe(&excluded, false, &clippy), "default selection");
         let test = Selection::configured(&excluded, SelectionPhase::Test);
@@ -2842,20 +2966,20 @@ warning: z [too_many_lines]
 
     #[test]
     fn describe_sweep_reads_features_back_out_of_argv() {
-        let all = ResolvedSweep {
+        let all = crate::profile::PlannedSweep::from(crate::profile::SweepDecl {
             features: crate::profile::FeatureConfig { all_features: true, ..Default::default() },
-            ..sweep("all")
-        };
+            ..sweep("all").declaration().clone()
+        });
         assert_eq!(describe(&all, false, &Selection::Bare), "default selection, all-features");
 
-        let consumer = ResolvedSweep {
+        let consumer = crate::profile::PlannedSweep::from(crate::profile::SweepDecl {
             features: crate::profile::FeatureConfig {
                 tokens: s(&["commands"]),
                 no_default_features: true,
                 ..Default::default()
             },
-            ..sweep("consumer")
-        };
+            ..sweep("consumer").declaration().clone()
+        });
         assert_eq!(
             describe(&consumer, false, &Selection::Bare),
             "default selection, no-default +commands"
@@ -2869,10 +2993,10 @@ warning: z [too_many_lines]
     /// a `-p` run that dropped a token does not claim to have built it.
     #[test]
     fn describe_sweep_renders_the_projected_features() {
-        let s0 = ResolvedSweep {
+        let s0 = crate::profile::PlannedSweep::from(crate::profile::SweepDecl {
             features: crate::profile::FeatureConfig { tokens: s(&["a/x", "b/y"]), ..Default::default() },
-            ..sweep("two")
-        };
+            ..sweep("two").declaration().clone()
+        });
         assert_eq!(
             describe_sweep(&s0, false, &override_of(&["a"]), &s(&["--features", "a/x"])),
             "-p a, +a/x"
@@ -2883,10 +3007,10 @@ warning: z [too_many_lines]
     fn describe_sweep_does_not_restate_the_label() {
         // The legacy no-`[[check]]` path names its synthesized sweep after the
         // feature shape, which would otherwise print twice on one line.
-        let legacy = ResolvedSweep {
+        let legacy = crate::profile::PlannedSweep::from(crate::profile::SweepDecl {
             features: crate::profile::FeatureConfig { all_features: true, ..Default::default() },
-            ..sweep("all-features")
-        };
+            ..sweep("all-features").declaration().clone()
+        });
         assert_eq!(describe(&legacy, false, &Selection::Bare), "default selection");
     }
 
@@ -2894,10 +3018,10 @@ warning: z [too_many_lines]
     fn describe_sweep_surfaces_rustflags_and_isolation() {
         // rustflags silently redirect the sweep to its own target dir; the
         // collapsed form must not hide the cause of a full recompile.
-        let sim = ResolvedSweep {
+        let sim = crate::profile::PlannedSweep::from(crate::profile::SweepDecl {
             rustflags: s(&["--cfg", "madsim"]),
-            ..sweep("sim")
-        };
+            ..sweep("sim").declaration().clone()
+        });
         assert!(describe(&sim, false, &Selection::Bare).contains("rustflags --cfg madsim"));
         assert!(describe(&sim, false, &Selection::Bare).contains("isolated target"));
     }
@@ -2915,7 +3039,7 @@ warning: z [too_many_lines]
                 origin: crate::profile::FilterOrigin::Profile("tier1".into()),
             })
             .collect();
-        let tier = ResolvedSweep {
+        let tier = crate::profile::PlannedSweep::from(crate::profile::SweepDecl {
             filters: crate::profile::LaneFilters {
                 filters: skips,
                 targets: Vec::new(),
@@ -2924,8 +3048,8 @@ warning: z [too_many_lines]
             lane_exec: crate::profile::LaneExec::Serial {
                 threads: crate::profile::Threads::CargoDefault,
             },
-            ..sweep("tier1")
-        };
+            ..sweep("tier1").declaration().clone()
+        });
         assert_eq!(
             describe(&tier, true, &Selection::Bare),
             "default selection, 3 skips, include-ignored, parallel"
@@ -2943,20 +3067,20 @@ warning: z [too_many_lines]
             targets: names.iter().map(|n| crate::profile::TargetName::new(*n)).collect(),
             ..Default::default()
         };
-        let one = ResolvedSweep {
+        let one = crate::profile::PlannedSweep::from(crate::profile::SweepDecl {
             filters: targets(&["cli_sort"]),
-            ..sweep("sort")
-        };
+            ..sweep("sort").declaration().clone()
+        });
         assert_eq!(
             describe(&one, true, &Selection::Bare),
             "default selection, --test cli_sort, serial"
         );
 
         // Two filters stay two distinct items, each self-contained.
-        let two = ResolvedSweep {
+        let two = crate::profile::PlannedSweep::from(crate::profile::SweepDecl {
             filters: targets(&["cli_sort", "cli_env"]),
-            ..sweep("sort")
-        };
+            ..sweep("sort").declaration().clone()
+        });
         assert_eq!(
             describe(&two, true, &Selection::Bare),
             "default selection, --test cli_sort, --test cli_env, serial"
@@ -2970,29 +3094,29 @@ warning: z [too_many_lines]
     fn describe_sweep_thread_policy_tracks_watchdog_lane() {
         // The watchdogged serial lane (`test_threads` unset or 1) says serial;
         // libtest-mediated threads (`test_threads` 0 or above 1) say parallel.
-        let serial = ResolvedSweep {
+        let serial = crate::profile::PlannedSweep::from(crate::profile::SweepDecl {
             lane_exec: crate::profile::LaneExec::Serial {
                 threads: crate::profile::Threads::Watchdogged,
             },
-            ..sweep("serial")
-        };
+            ..sweep("serial").declaration().clone()
+        });
         assert_eq!(describe(&serial, true, &Selection::Bare), "default selection, serial");
         let four = std::num::NonZeroU32::new(4).unwrap();
         for threads in [crate::profile::Threads::CargoDefault, crate::profile::Threads::Cargo(four)] {
-            let parallel = ResolvedSweep {
+            let parallel = crate::profile::PlannedSweep::from(crate::profile::SweepDecl {
                 lane_exec: crate::profile::LaneExec::Serial { threads },
-                ..sweep("par")
-            };
+                ..sweep("par").declaration().clone()
+            });
             assert_eq!(describe(&parallel, true, &Selection::Bare), "default selection, parallel");
         }
     }
 
     /// One sweep's entry in one `check` phase under a CLI `-p` set.
-    fn entry(sweep: &ResolvedSweep, phase: SelectionPhase, cli: &[&str]) -> LaneEntry {
+    fn entry(sweep: &PlannedSweep, phase: SelectionPhase, cli: &[&str]) -> LaneEntry {
         let sel =
             PhaseSelection::for_check(phase, std::slice::from_ref(sweep), &s(cli), &FeatureOracle::unavailable())
                 .unwrap();
-        sel.entry(0).unwrap().clone()
+        sel.entry(LaneIdx::new(0)).unwrap().clone()
     }
 
     fn override_of(packages: &[&str]) -> Selection {
@@ -3008,10 +3132,10 @@ warning: z [too_many_lines]
 
         // The exclusion list rules the package out - but only for the test
         // phase; clippy ignores test_exclude_packages by design.
-        let excluded = ResolvedSweep {
+        let excluded = crate::profile::PlannedSweep::from(crate::profile::SweepDecl {
             test_exclude_packages: s(&["x"]),
-            ..sweep("default")
-        };
+            ..sweep("default").declaration().clone()
+        });
         assert!(matches!(entry(&excluded, SelectionPhase::Test, &["x"]), LaneEntry::Excluded(_)));
         assert_eq!(
             entry(&excluded, SelectionPhase::Clippy, &["x"]).attempt().unwrap().selection(),
@@ -3019,10 +3143,10 @@ warning: z [too_many_lines]
         );
 
         // A `packages` list admits members and skips everything else.
-        let scoped = ResolvedSweep {
+        let scoped = crate::profile::PlannedSweep::from(crate::profile::SweepDecl {
             packages: s(&["a", "b"]),
-            ..sweep("ffi")
-        };
+            ..sweep("ffi").declaration().clone()
+        });
         assert_eq!(entry(&scoped, SelectionPhase::Test, &["a"]).attempt().unwrap().selection(), &override_of(&["a"]));
         assert!(matches!(entry(&scoped, SelectionPhase::Clippy, &["x"]), LaneEntry::Excluded(_)));
     }
@@ -3031,10 +3155,10 @@ warning: z [too_many_lines]
     fn cli_package_set_intersects_per_sweep() {
         // A multi `-p` set runs the in-scope subset with a note per dropped
         // package; the sweep is excluded only when nothing survives.
-        let scoped = ResolvedSweep {
+        let scoped = crate::profile::PlannedSweep::from(crate::profile::SweepDecl {
             packages: s(&["a", "b"]),
-            ..sweep("ffi")
-        };
+            ..sweep("ffi").declaration().clone()
+        });
         let mixed = entry(&scoped, SelectionPhase::Test, &["a", "x"]);
         assert_eq!(mixed.attempt().unwrap().selection(), &override_of(&["a"]));
         assert_eq!(mixed.notes().len(), 1);
@@ -3042,10 +3166,10 @@ warning: z [too_many_lines]
         assert!(matches!(entry(&scoped, SelectionPhase::Test, &["x", "y"]), LaneEntry::Excluded(_)));
 
         // Test-phase exclusion drops per package too.
-        let excluded = ResolvedSweep {
+        let excluded = crate::profile::PlannedSweep::from(crate::profile::SweepDecl {
             test_exclude_packages: s(&["x"]),
-            ..sweep("default")
-        };
+            ..sweep("default").declaration().clone()
+        });
         let mixed = entry(&excluded, SelectionPhase::Test, &["a", "x"]);
         assert_eq!(mixed.attempt().unwrap().selection(), &override_of(&["a"]));
         assert_eq!(mixed.notes().len(), 1);
@@ -3057,11 +3181,11 @@ warning: z [too_many_lines]
         // bin-only crate's doctest failure with `test_exclude_packages` on a
         // `doc_only` sweep, and `check -p <that crate>` must then skip the
         // doctest lane rather than run `cargo test --doc -p <crate>`.
-        let doctests = ResolvedSweep {
+        let doctests = crate::profile::PlannedSweep::from(crate::profile::SweepDecl {
             lane_exec: crate::profile::LaneExec::doc_only(),
             test_exclude_packages: s(&["bin-only"]),
-            ..sweep("doctests")
-        };
+            ..sweep("doctests").declaration().clone()
+        });
         assert!(matches!(entry(&doctests, SelectionPhase::Test, &["bin-only"]), LaneEntry::Excluded(_)));
         let mixed = entry(&doctests, SelectionPhase::Test, &["bin-only", "lib"]);
         assert_eq!(mixed.attempt().unwrap().selection(), &override_of(&["lib"]));
@@ -3073,10 +3197,10 @@ warning: z [too_many_lines]
         // The nautilus bug shape: an exclude-carrying sweep under CLI `-p`
         // must say `-p x`, not `workspace -2 pkgs` - the shape describes
         // what runs, and the CLI scope replaced the sweep's selection.
-        let excluded = ResolvedSweep {
+        let excluded = crate::profile::PlannedSweep::from(crate::profile::SweepDecl {
             test_exclude_packages: s(&["a", "b"]),
-            ..sweep("default")
-        };
+            ..sweep("default").declaration().clone()
+        });
         assert_eq!(describe(&excluded, true, &override_of(&["x"])), "-p x, serial");
         assert_eq!(describe(&excluded, false, &override_of(&["x"])), "-p x");
         assert_eq!(describe(&excluded, false, &override_of(&["x", "y"])), "-p x -p y");

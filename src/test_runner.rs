@@ -1,12 +1,14 @@
 //! Shared streaming runner for cargo libtest invocations.
 //!
 //! Public paths stay here as a facade; implementation lives by concern in
-//! `events`, `plan`, `deadline`, `libtest_json`, `procgroup`, `run`, and `hung`.
+//! `events`, `plan`, `deadline`, `libtest_json`, `procgroup`, `run`, `hung`,
+//! and `output` (the libtest text parser and compact failure rendering).
 
 mod deadline;
 mod events;
 mod hung;
 mod libtest_json;
+mod output;
 mod plan;
 mod procgroup;
 mod run;
@@ -24,6 +26,10 @@ pub(crate) use events::{
 };
 pub(crate) use hung::{format_hung_test, is_bare_status_line};
 use libtest_json::JsonReconstructor;
+pub(crate) use output::{
+    Completeness, ParsedTestFailure, ParsedTestResults, filter_test, parse_test_output,
+    parse_test_output_with_stderr,
+};
 pub(crate) use plan::{StrictPlan, hash_file};
 pub(crate) use procgroup::{Chunk, read_chunk, read_unless_cancelled};
 pub(crate) use run::{
@@ -43,7 +49,7 @@ use libtest_json::drain_libtest_json;
 use procgroup::DRAIN_GRACE;
 use procgroup::{
     clone_buffer, clone_hung, direct_child_pids, drain_stderr, drain_to_buffer, join_drains,
-    kill_process_group, spawn_cargo_process_group, spawn_process_group, stop_process_group,
+    spawn_cargo_process_group, spawn_process_group,
 };
 
 /// Run as the harness shim when this process was launched as one; `None`

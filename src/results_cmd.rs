@@ -83,39 +83,33 @@ pub(crate) fn cmd_results(
         return Ok(());
     }
 
-    match q.view()? {
-        ResultsView::Uuid {
-            prefix,
-            filter,
-            top,
-        } => {
-            show_uuid(&store, &prefix, &filter, top, &matcher)?;
+    match &q.view {
+        ResultsView::Uuid { prefix } => {
+            show_uuid(&store, prefix, &q.filter, q.top, &matcher)?;
         }
         ResultsView::Compare {
             commits: (commit_a, commit_b),
-            filter,
-            top,
         } => {
             let results_db = store
                 .results_db()
                 .ok_or_else(|| DevError::Config("results database is not available".into()))?;
-            let (rows_a, rows_b) = results_db.query_compare(&commit_a, &commit_b, &filter)?;
+            let (rows_a, rows_b) = results_db.query_compare(commit_a, commit_b, &q.filter)?;
             let table = db::format_compare_with_limit(
-                &commit_a,
+                commit_a,
                 &rows_a,
-                &commit_b,
+                commit_b,
                 &rows_b,
-                top,
-                filter.limit,
+                q.top,
+                q.filter.limit,
                 &matcher,
             );
             println!("{table}");
         }
-        ResultsView::Table { filter } => {
+        ResultsView::Table => {
             let results_db = store
                 .results_db()
                 .ok_or_else(|| DevError::Config("results database is not available".into()))?;
-            let rows = results_db.query(&filter)?;
+            let rows = results_db.query(&q.filter)?;
             if rows.is_empty() {
                 output::result_msg("no matching results");
             } else {

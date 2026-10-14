@@ -20,7 +20,7 @@
 //!   pair - an instrumentation-scale variant of the same kernel - because the
 //!   hotpath crate's per-call event queue is unbounded and a seconds-scale
 //!   `file` backlogs tens of GB of RAM under instrumentation. See
-//!   [`crate::config::DellingrWorkload`].
+//!   [`crate::config::project_config::dellingr::DellingrWorkload`].
 //! - **A `--commit` baseline mixes trees on purpose.** The harness is built
 //!   from the old worktree; the workload still comes from the registration in
 //!   the current tree. See [`workload::resolve`].

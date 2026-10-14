@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::config::{DevConfig, RatatoskrConfig};
+use crate::config::project_config::ratatoskr::RatatoskrConfig;
 use crate::error::DevError;
 use crate::output;
 use crate::ratatoskr::discover::{self, ScriptInfo};
@@ -14,8 +14,8 @@ pub const DEFAULT_SYNC_SCRIPT_DIR: &str = "crates/app/tests/sync-harness";
 /// directory and print a sorted table. Empty-state message names the
 /// expected directory so a fresh checkout (no harness scripts yet) gets
 /// a useful response.
-pub fn run_sync_list(project_root: &Path, dev_config: &DevConfig) -> Result<(), DevError> {
-    let dir = sync_script_dir(project_root, dev_config.ratatoskr.as_ref());
+pub fn run_sync_list(project_root: &Path, ratatoskr: &RatatoskrConfig) -> Result<(), DevError> {
+    let dir = sync_script_dir(project_root, Some(ratatoskr));
     let scripts = discover::discover_at(&dir)?;
     let display_dir = dir.display();
 

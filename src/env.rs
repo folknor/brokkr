@@ -62,7 +62,10 @@ pub struct StorageInfo {
     pub total_bytes: u64,
 }
 
-/// Whether a dataset PBF file exists on disk and passes hash verification.
+/// Whether a dataset path exists on disk and passes hash verification.
+///
+/// Computed values retain their file-or-tree shape as `PathDigest`; configured
+/// pins are parsed digests too, so status comparison never goes through hex text.
 pub enum DatasetStatus {
     /// File exists and hash matches.
     Verified,
@@ -923,7 +926,11 @@ fn check_file_entries<E: crate::resolve::FileEntry>(
         let status = if !path.exists() {
             DatasetStatus::Missing
         } else {
-            check_hash_status(&path, entry.xxhash().map(crate::preflight::FileDigest::value), project_root)
+            check_hash_status(
+                &path,
+                entry.xxhash().map(crate::preflight::FileDigest::value),
+                project_root,
+            )
         };
         out.push((label, status));
     }

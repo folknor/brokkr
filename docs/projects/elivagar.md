@@ -9,16 +9,20 @@
   Planetiler and Tilemaker) with `needs_pbf()`; `BuiltCommand` carries
   `build_args()`, `metadata()`, `output_files()` and `id()` - the CLI id,
   which is also the `command` results are filed under.
-- `src/elivagar/dispatch.rs` - exposes `run_command()`. Routes through
-  run/bench/hotpath/alloc based on command enum + mode. Uses `BenchContext`
-  for build+harness.
+- `src/elivagar/plan.rs` - builds and executes measured command plans; tilegen
+  completion delegates durable archive admission to `artifacts.rs`.
+- `src/elivagar/artifacts.rs` - admits successful tilegen output into the
+  durable store and removes non-tilegen outputs.
+- `src/elivagar/archive_store.rs` - owns archive keys, path construction,
+  revision resolution, admission and per-group pruning. It is exposed through
+  the linked-crate seam in `eliv.rs`.
 - `src/elivagar/...` - benchmarks (self, node-store, pmtiles, planetiler,
   tilemaker, all), verify, download-ocean, hotpath, ocean_build
   (`ocean-build`).
 - `src/elivagar/eliv.rs` - the linked-crate seam. The one place that names the
   elivagar API the adjudication code depends on (reader, `tile_detail` decoder,
-  writer, PMTiles addressing), so `corpus/` and `regress/` import from here
-  rather than reaching into `elivagar::` directly.
+  writer, PMTiles addressing), so `corpus/`, `regress/` and the stats/sampling
+  adapters import from here rather than reaching into `elivagar::` directly.
 - `src/elivagar/corpus/` - the native corpus gate (`pmtiles-corpus`). Owns the
   frozen canonical tile hash, the digest fold, the contract gating policy, the
   SVG render core, and every verdict.
@@ -120,13 +124,15 @@ inspector - the two share one flat clap `Command` enum so names must be
 unique.
 
 All four take `--dataset`/`--variant`/`--commit`/`--file`, resolved by
-`resolve_pmtiles_by_commit()` in `src/resolve_parts/schema.rs`: `--file`
-skips resolution; otherwise the path is
-`<output_dir>/<dataset>-<variant>-<commit>.pmtiles` (the durable output store,
-default `data/tilegen`, NOT scratch), constructed by the single
-`resolve::pmtiles_archive_name()` helper that `rename_elivagar_output()`
-(`src/elivagar/dispatch.rs`) also uses after `tilegen`, so the resolver and the
-writer can never drift on spelling. The archive content is a function of
+`ArchiveStore::resolve()` in `src/elivagar/archive_store.rs`, exposed through
+`src/elivagar/eliv.rs`. An explicit `--file` is returned with
+`ArchiveOrigin::ExplicitFile`; a store result carries its `ArchiveKey`. The
+durable path is
+`<output_dir>/<dataset>-<variant>-<commit>.pmtiles` (default
+`data/tilegen`, NOT scratch), constructed by `ArchiveStore::path_for()` and
+admitted after tilegen by `ArchiveStore::admit()` in
+`src/elivagar/artifacts.rs`. Admission also applies the per-group retention
+window. The archive content is a function of
 `(dataset, variant, commit)`, and the name carries all three - the variant is
 load-bearing, because without it `--against-commit H` (or a plain re-open)
 resolves to whichever variant happened to be built last at `H`, the
@@ -141,8 +147,7 @@ that cannot place its archive there - the commit cannot be read, the output
 dir cannot be created or coincides with scratch/tmp, the rename fails, or
 elivagar exited 0 without writing output - fails, leaving any output in
 scratch, rather than reporting success with nothing the resolver can find (it
-used to log the failure and exit 0, and a git failure named the file
-`...-unknown.pmtiles`, which no resolver constructs). The durable
+used to log the failure and exit 0). The durable
 store survives a routine `brokkr clean`; only the deep clean (`brokkr clean
 --worktrees`) reclaims it. These subcommands only read the file - the current
 release binary can inspect output built by any commit, so `--commit` picks
@@ -189,7 +194,7 @@ anymore. **Both sides are
 explicit** and there is no default baseline, ever: the CURRENT archive comes
 from `--variant`/`--commit`/`--file`, the COMPARAND from
 `--against-variant`/`--against-commit`/`--against`, each resolved through the
-same `resolve_pmtiles_by_commit()` used by `pmtiles-inspect`/`diag`/`svg`
+same `ArchiveStore::resolve()` used by `pmtiles-inspect`/`diag`/`svg`
 (durable output dir `data/tilegen`). The comparand's variant is addressed
 **independently** (`--against-variant`, defaulting to `raw` like `--variant`):
 a cross-variant diff is a legitimate regress use - it is the attribution
@@ -342,7 +347,7 @@ scratch dir a routine `brokkr clean` clears wholesale. An explicit `-o`
 elsewhere is the user's file and clean never touches it.
 
 Every subcommand resolves the archive through the SAME
-`resolve_pmtiles_by_commit()` as `pmtiles-inspect`/`diag`/`svg`
+`ArchiveStore::resolve()` as `pmtiles-inspect`/`diag`/`svg`
 (`[--dataset D] --variant V [--commit H | --file P]`), so default-commit
 semantics never diverge. Unlike those commands, `--variant` has **no default**
 here: it is required unless `--file` is given. The corpus contract pins one

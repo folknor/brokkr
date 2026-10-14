@@ -18,16 +18,11 @@ mod tests {
         clippy::useless_vec
     )]
     use super::*;
+    use super::check::{rustflags_target_key, test_phase_allow_flags};
 
     fn make_config(hosts: HashMap<String, HostConfig>) -> DevConfig {
         DevConfig {
             hosts,
-            litehtml: None,
-            sluggrs: None,
-            ratatoskr: None,
-            piners: None,
-            dellingr: None,
-            mogwai: None,
             dependency_rules: Vec::new(),
             check: Vec::new(),
             test: None,
@@ -1005,11 +1000,8 @@ capture_env = ["  PBFHOGG*  ", "MALLOC_CONF"]
         let resolved = resolve_paths(&config, "myhost", Path::new("/proj"), Path::new("/target"));
         let dk = resolved.datasets.get("dk").unwrap();
         assert_eq!(dk.pbf.len(), 3);
-        assert_eq!(dk.pbf.get("raw").unwrap().xxhash.as_deref(), Some(hex32('a').as_str()));
-        assert_eq!(
-            dk.pbf.get("indexed").unwrap().xxhash.as_deref(),
-            Some(hex32('b').as_str())
-        );
+        assert_eq!(dk.pbf.get("raw").unwrap().xxhash, Some(pin('a')));
+        assert_eq!(dk.pbf.get("indexed").unwrap().xxhash, Some(pin('b')));
     }
 
     #[test]
@@ -1098,10 +1090,7 @@ xxhash = "cccccccccccccccccccccccccccccccc"
         assert_eq!(dk.pbf.get("raw").unwrap().file, "dk-raw.osm.pbf");
         assert_eq!(dk.pbf.get("raw").unwrap().seq, Some(4704));
         // Upper-case hex is accepted and normalised to lower case.
-        assert_eq!(
-            dk.pbf.get("indexed").unwrap().xxhash.as_deref(),
-            Some(hex32('b').as_str())
-        );
+        assert_eq!(dk.pbf.get("indexed").unwrap().xxhash, Some(pin('b')));
         assert_eq!(dk.osc.get("4705").unwrap().file, "dk-4705.osc.gz");
     }
 
@@ -1138,7 +1127,10 @@ xxhash = "000000000000000000000000feedface"
         assert_eq!(snap.download_date.as_deref(), Some("2026-04-11"));
         assert_eq!(snap.seq, Some(4969));
         assert_eq!(snap.pbf.get("raw").unwrap().file, "planet-20260411.osm.pbf");
-        assert_eq!(snap.pbf.get("raw").unwrap().xxhash.as_deref(), Some("000000000000000000000000deadbeef"));
+        assert_eq!(
+            snap.pbf.get("raw").unwrap().xxhash,
+            Some("000000000000000000000000deadbeef".parse().unwrap())
+        );
         assert_eq!(
             snap.pbf.get("indexed").unwrap().file,
             "planet-20260411-with-indexdata.osm.pbf"
@@ -1287,10 +1279,7 @@ xxhash = "dddddddddddddddddddddddddddddddd"
             dk.pmtiles.get("elivagar").unwrap().file,
             "denmark-elivagar.pmtiles"
         );
-        assert_eq!(
-            dk.pmtiles.get("elivagar").unwrap().xxhash.as_deref(),
-            Some(hex32('d').as_str())
-        );
+        assert_eq!(dk.pmtiles.get("elivagar").unwrap().xxhash, Some(pin('d')));
     }
 
     // -------------------------------------------------------------------
@@ -2136,7 +2125,7 @@ binary = "app"
 "#;
         let root: toml::Value = toml::from_str(raw).unwrap();
         let table = root.as_table().unwrap();
-        let err = parse_ratatoskr(table).unwrap_err().to_string();
+        let err = project_config::ratatoskr::parse(table).unwrap_err().to_string();
         assert!(err.contains("sweep"), "got: {err}");
         assert!(err.contains("no longer supported"), "got: {err}");
     }
@@ -2151,7 +2140,7 @@ debug = true
 "#;
         let root: toml::Value = toml::from_str(raw).unwrap();
         let table = root.as_table().unwrap();
-        let cfg = parse_ratatoskr(table).unwrap().unwrap();
+        let cfg = project_config::ratatoskr::parse(table).unwrap();
         let h = cfg.harness.unwrap();
         assert_eq!(h.package, "app");
         assert_eq!(h.binary_name(), "app");
@@ -2216,7 +2205,7 @@ debug = true
         let mut tilegen = HashMap::new();
         tilegen.insert(
             "default".into(),
-            TilegenConfig {
+            project_config::elivagar::TilegenConfig {
                 ocean: ocean.iter().map(|s| (*s).to_owned()).collect(),
                 ..Default::default()
             },
@@ -2338,23 +2327,24 @@ debug = true
 
     #[test]
     fn dellingr_accepts_a_workload_with_both_pins() {
-        let cfg = parse_dellingr(&dellingr_table(
+        let cfg = project_config::dellingr::parse(&dellingr_table(
             "file = \"bench/w.lua\"\nxxh128 = \"00000000000000000000000000000000\"\n\
              hotpath_file = \"examples/w.lua\"\nhotpath_xxh128 = \"11111111111111111111111111111111\"\n",
         ))
-        .unwrap()
         .unwrap();
         let w = &cfg.workloads["w"];
         assert_eq!(w.hotpath_file.as_deref(), Some(Path::new("examples/w.lua")));
-        assert_eq!(w.hotpath_xxh128.as_deref(), Some("11111111111111111111111111111111"));
+        assert_eq!(
+            w.hotpath_xxh128,
+            Some("11111111111111111111111111111111".parse().unwrap())
+        );
     }
 
     #[test]
     fn dellingr_accepts_a_workload_with_no_hotpath_pin() {
-        let cfg = parse_dellingr(&dellingr_table(
+        let cfg = project_config::dellingr::parse(&dellingr_table(
             "file = \"bench/w.lua\"\nxxh128 = \"00000000000000000000000000000000\"\n",
         ))
-        .unwrap()
         .unwrap();
         assert!(cfg.workloads["w"].hotpath_file.is_none());
     }
@@ -2364,7 +2354,7 @@ debug = true
     /// same guard - `Path::join` would silently discard the root.
     #[test]
     fn dellingr_rejects_an_absolute_hotpath_file() {
-        let err = parse_dellingr(&dellingr_table(
+        let err = project_config::dellingr::parse(&dellingr_table(
             "file = \"bench/w.lua\"\nxxh128 = \"00000000000000000000000000000000\"\n\
              hotpath_file = \"/elsewhere/w.lua\"\nhotpath_xxh128 = \"11111111111111111111111111111111\"\n",
         ))
@@ -2376,7 +2366,7 @@ debug = true
 
     #[test]
     fn dellingr_rejects_an_absolute_file() {
-        let err = parse_dellingr(&dellingr_table(
+        let err = project_config::dellingr::parse(&dellingr_table(
             "file = \"/elsewhere/w.lua\"\nxxh128 = \"00000000000000000000000000000000\"\n",
         ))
         .unwrap_err();
@@ -2390,13 +2380,13 @@ debug = true
     /// Both pins are typed, so the refusal comes from deserialization.
     #[test]
     fn dellingr_rejects_an_empty_digest_on_either_pin() {
-        let err = parse_dellingr(&dellingr_table(
+        let err = project_config::dellingr::parse(&dellingr_table(
             "file = \"bench/w.lua\"\nxxh128 = \"  \"\n",
         ))
         .unwrap_err();
         assert!(format!("{err}").contains("XXH128"), "{err}");
 
-        let err = parse_dellingr(&dellingr_table(
+        let err = project_config::dellingr::parse(&dellingr_table(
             "file = \"bench/w.lua\"\nxxh128 = \"00000000000000000000000000000000\"\n\
              hotpath_file = \"examples/w.lua\"\nhotpath_xxh128 = \"\"\n",
         ))
@@ -2408,7 +2398,7 @@ debug = true
     /// when nobody runs *that* workload today.
     #[test]
     fn dellingr_rejects_a_half_registered_hotpath_pair() {
-        let err = parse_dellingr(&dellingr_table(
+        let err = project_config::dellingr::parse(&dellingr_table(
             "file = \"bench/w.lua\"\nxxh128 = \"00000000000000000000000000000000\"\n\
              hotpath_file = \"examples/w.lua\"\n",
         ))
@@ -2416,7 +2406,7 @@ debug = true
         let msg = format!("{err}");
         assert!(msg.contains("hotpath_file without hotpath_xxh128"), "{msg}");
 
-        let err = parse_dellingr(&dellingr_table(
+        let err = project_config::dellingr::parse(&dellingr_table(
             "file = \"bench/w.lua\"\nxxh128 = \"00000000000000000000000000000000\"\nhotpath_xxh128 = \"11111111111111111111111111111111\"\n",
         ))
         .unwrap_err();

@@ -1,7 +1,7 @@
-// Per-binary wall times carried between runs, so a parallel sweep can hand
-// out threads in proportion to how long a binary actually takes.
+// Per-binary costs carried between runs, so one pure allocator can hand out
+// threads in proportion to how long a binary actually takes.
 //
-// WHY COUNT IS THE WRONG WEIGHT. `claim_slots`' derivation - minimise
+// WHY COUNT IS THE WRONG WEIGHT. The allocation's derivation - minimise
 // `max(c_i / k_i)` by holding `c_i / k_i` equal - is right, but `c` has to be
 // the binary's COST. Using its test count silently assumes every test costs
 // the same, and a suite where that is false pays for the assumption in the
@@ -70,10 +70,34 @@ pub(crate) struct BinaryCost {
     /// Sum of the binary's own tests' durations - its cost if run on one
     /// thread. **Independent of the slots it was granted**, which is the whole
     /// point: see the module header.
-    pub(crate) serial: f64,
+    #[serde(with = "duration_millis")]
+    pub(crate) serial: Duration,
     /// Its single longest test. No number of threads takes the binary below
     /// this, so it is where extra slots stop buying anything.
-    pub(crate) slowest: f64,
+    #[serde(with = "duration_millis")]
+    pub(crate) slowest: Duration,
+}
+
+/// Keep the on-disk cache compact and independent of serde's representation
+/// for `Duration`: both fields are integer milliseconds.
+mod duration_millis {
+    use std::time::Duration;
+
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub(super) fn serialize<S>(value: &Duration, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_u64(u64::try_from(value.as_millis()).unwrap_or(u64::MAX))
+    }
+
+    pub(super) fn deserialize<'de, D>(deserializer: D) -> Result<Duration, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        u64::deserialize(deserializer).map(Duration::from_millis)
+    }
 }
 
 /// `[[check]] entry name -> package/kind:target identity -> cost`. The entry
@@ -82,7 +106,7 @@ pub(crate) struct BinaryCost {
 type Store = BTreeMap<String, BTreeMap<String, BinaryCost>>;
 
 fn store_path(state_root: &Path) -> std::path::PathBuf {
-    state_root.join(".brokkr").join("parallel-timings.toml")
+    crate::clean::layout::ProjectState::new(state_root).parallel_timings_file()
 }
 
 /// Read the recorded times, or an empty store.
@@ -95,6 +119,68 @@ pub(crate) fn timings_load(state_root: &Path) -> Store {
         .ok()
         .and_then(|text| toml::from_str(&text).ok())
         .unwrap_or_default()
+}
+
+/// Allocate each binary a proportional share of the test budget and order
+/// the result largest-first. Test counts estimate missing history; recorded
+/// serial durations replace those estimates. The function is pure so a whole
+/// allocation shape can be checked without launching a test process.
+pub(crate) fn allocate(
+    binaries: &[(String, u32)],
+    history: Option<&BTreeMap<String, BinaryCost>>,
+    budget: u32,
+) -> Vec<(String, u32)> {
+    let budget = budget.max(1);
+    let (known_nanos, known_tests) = binaries
+        .iter()
+        .filter_map(|(key, count)| {
+            let serial = history?.get(key)?.serial;
+            (serial > Duration::ZERO && *count > 0)
+                .then_some((serial.as_nanos(), u128::from(*count)))
+        })
+        .fold((0_u128, 0_u128), |(nanos, tests), (cost, count)| {
+            (nanos.saturating_add(cost), tests.saturating_add(count))
+        });
+
+    let allocated = binaries
+        .iter()
+        .map(|(key, count)| {
+            let cost = history.and_then(|store| store.get(key)).copied();
+            let weight = cost
+                .filter(|cost| cost.serial > Duration::ZERO)
+                .map(|cost| cost.serial.as_nanos())
+                .unwrap_or_else(|| {
+                    known_nanos
+                        .saturating_mul(u128::from(*count))
+                        .checked_div(known_tests)
+                        .map_or_else(|| u128::from(*count), |average| average.max(1))
+                });
+            (key.clone(), *count, weight, cost)
+        })
+        .collect::<Vec<_>>();
+    let total_weight = allocated
+        .iter()
+        .map(|(_, _, weight, _)| *weight)
+        .fold(0_u128, u128::saturating_add);
+
+    let mut result = allocated
+        .into_iter()
+        .map(|(key, count, weight, cost)| {
+            let share = u128::from(budget)
+                .saturating_mul(weight)
+                .checked_div(total_weight)
+                .unwrap_or(1);
+            let slots = u32::try_from(share).unwrap_or(budget).clamp(1, budget);
+            let slots = slots
+                .min(count.max(1))
+                .min(useful_slot_cap(cost).unwrap_or(u32::MAX).max(1));
+            (key, slots)
+        })
+        .collect::<Vec<_>>();
+    result.sort_by(|(key_a, slots_a), (key_b, slots_b)| {
+        slots_b.cmp(slots_a).then_with(|| key_a.cmp(key_b))
+    });
+    result
 }
 
 /// Merge this sweep's measured times into the store and write it back.
@@ -143,40 +229,6 @@ fn is_legacy_timing_key(key: &str) -> bool {
         .is_some_and(|(_, target)| !target.contains(':'))
 }
 
-/// The weight to allocate one binary's slots by: its measured seconds, or an
-/// estimate when it has never run.
-///
-/// `mean_cost` is the known binaries' mean seconds per test. When nothing is
-/// known it is `None` and the weight falls back to the test count, which
-/// reproduces the count-proportional behaviour exactly - so a first run in a
-/// fresh tree behaves as it did before this store existed.
-pub(crate) fn timing_weight_for(
-    recorded: Option<f64>,
-    count: u32,
-    mean_cost: Option<f64>,
-) -> f64 {
-    match (recorded, mean_cost) {
-        // A measurement of zero is real (a binary whose tests are instant) but
-        // useless as a weight, since a zero share would floor to one slot
-        // anyway - so it is left to the estimate rather than pinning the
-        // binary at nothing.
-        (Some(s), _) if s > 0.0 => s,
-        (_, Some(mean)) => f64::from(count) * mean,
-        _ => f64::from(count),
-    }
-}
-
-/// Mean seconds per test across the binaries that have a recorded time.
-///
-/// `None` when nothing is known, which is what puts the whole plan back on
-/// count-proportional weights rather than mixing units.
-pub(crate) fn mean_cost_per_test(known: &[(f64, u32)]) -> Option<f64> {
-    let (secs, tests): (f64, u64) = known
-        .iter()
-        .fold((0.0, 0), |(s, t), (sec, c)| (s + sec, t + u64::from(*c)));
-    (tests > 0 && secs > 0.0).then(|| secs / tests as f64)
-}
-
 /// The most slots a binary can still use, from `wall = max(serial/k, slowest)`.
 ///
 /// Once `serial / k` has fallen to the binary's longest single test, another
@@ -190,18 +242,18 @@ pub(crate) fn mean_cost_per_test(known: &[(f64, u32)]) -> Option<f64> {
 /// zero, where the caller's own count cap is the only bound that applies.
 pub(crate) fn useful_slot_cap(cost: Option<BinaryCost>) -> Option<u32> {
     let c = cost?;
-    if !(c.serial.is_finite() && c.slowest.is_finite()) || c.slowest <= 0.0 || c.serial <= 0.0 {
+    if c.slowest.is_zero() || c.serial.is_zero() {
         return None;
     }
-    // Rounded up: a binary needing 2.4 "slowest-test lengths" of work uses a
-    // third thread for the remainder, and rounding down would leave it short.
-    let ratio = (c.serial / c.slowest).ceil();
-    Some(u32::try_from(weight_ms_ceil(ratio)).unwrap_or(u32::MAX).max(1))
-}
-
-/// A small positive f64 as an integer, without a lossy cast.
-fn weight_ms_ceil(v: f64) -> u64 {
-    Duration::try_from_secs_f64(v).map_or(1, |d| d.as_secs().max(1))
+    let serial = c.serial.as_nanos();
+    let slowest = c.slowest.as_nanos();
+    let quotient = serial / slowest;
+    let ratio = if serial % slowest == 0 {
+        quotient
+    } else {
+        quotient + 1
+    };
+    Some(u32::try_from(ratio).unwrap_or(u32::MAX).max(1))
 }
 
 #[cfg(test)]
@@ -213,28 +265,17 @@ mod binary_timings_tests {
     // allocates exactly as it did before the store existed.
     #[test]
     fn no_history_falls_back_to_counts() {
-        assert!(mean_cost_per_test(&[]).is_none());
-        assert!((timing_weight_for(None, 10, None) - 10.0).abs() < f64::EPSILON);
+        assert_eq!(
+            allocate(&[("one".into(), 10)], None, 8),
+            vec![("one".into(), 8)]
+        );
     }
 
-    fn cost(serial: f64, slowest: f64) -> Option<BinaryCost> {
-        Some(BinaryCost { serial, slowest })
-    }
-
-    // THE OSCILLATION REGRESSION. The stored weight must be independent of
-    // the slots granted, or the allocator feeds its own decision back as its
-    // input and two-cycles. Serial cost is that invariant: the same binary
-    // run on 1 slot or 8 sums to the same total.
-    #[test]
-    fn serial_cost_does_not_move_when_the_allocation_moves() {
-        // Same four tests, whatever the concurrency: wall time differs, the
-        // sum does not.
-        let tests = [4.0_f64, 3.0, 2.0, 1.0];
-        let serial: f64 = tests.iter().sum();
-        assert!((serial - 10.0).abs() < f64::EPSILON);
-        // Wall on 1 slot is 10s and on 4 slots is 4s, and neither is what
-        // gets stored.
-        assert!((tests.iter().fold(0.0_f64, |a, b| a.max(*b)) - 4.0).abs() < f64::EPSILON);
+    fn cost(serial_ms: u64, slowest_ms: u64) -> Option<BinaryCost> {
+        Some(BinaryCost {
+            serial: Duration::from_millis(serial_ms),
+            slowest: Duration::from_millis(slowest_ms),
+        })
     }
 
     // No number of threads takes a binary below its longest single test, so
@@ -244,11 +285,11 @@ mod binary_timings_tests {
     fn the_useful_cap_is_where_extra_threads_stop_helping() {
         // 22.3s of work whose longest test is 10.1s: three threads reach the
         // floor, a fourth cannot beat it.
-        assert_eq!(useful_slot_cap(cost(22.3, 10.1)), Some(3));
+        assert_eq!(useful_slot_cap(cost(22_300, 10_100)), Some(3));
         // Evenly divisible work still needs the rounded-up thread count.
-        assert_eq!(useful_slot_cap(cost(10.0, 5.0)), Some(2));
+        assert_eq!(useful_slot_cap(cost(10_000, 5_000)), Some(2));
         // A binary that is one long test cannot use a second thread at all.
-        assert_eq!(useful_slot_cap(cost(10.1, 10.1)), Some(1));
+        assert_eq!(useful_slot_cap(cost(10_100, 10_100)), Some(1));
     }
 
     // No measurement, or a degenerate one, means no known limit - the
@@ -256,36 +297,110 @@ mod binary_timings_tests {
     #[test]
     fn an_unknown_or_degenerate_cost_imposes_no_cap() {
         assert_eq!(useful_slot_cap(None), None);
-        assert_eq!(useful_slot_cap(cost(10.0, 0.0)), None);
-        assert_eq!(useful_slot_cap(cost(0.0, 1.0)), None);
-        assert_eq!(useful_slot_cap(cost(f64::NAN, 1.0)), None);
-        assert_eq!(useful_slot_cap(cost(1.0, f64::INFINITY)), None);
+        assert_eq!(useful_slot_cap(cost(10_000, 0)), None);
+        assert_eq!(useful_slot_cap(cost(0, 1_000)), None);
     }
 
-    // The regression this exists for: a slow binary with few tests must
-    // outweigh a fast binary with many.
+    // THE WHOLE ALLOCATION REGRESSION. The earlier helpers passed in
+    // isolation, while their composition starved the small critical-path
+    // binary. Its useful cap is three threads, but count weighting would give
+    // it only one.
     #[test]
-    fn a_slow_binary_outweighs_a_bigger_fast_one() {
-        let slow = timing_weight_for(Some(22.3), 10, Some(0.01));
-        let fast = timing_weight_for(Some(2.0), 900, Some(0.01));
-        assert!(slow > fast, "slow {slow} should outweigh fast {fast}");
+    fn allocation_weights_the_slow_small_binary_and_caps_its_claim() {
+        let history = BTreeMap::from([
+            (
+                "slow".into(),
+                BinaryCost {
+                    serial: Duration::from_millis(22_300),
+                    slowest: Duration::from_millis(10_100),
+                },
+            ),
+            (
+                "fast".into(),
+                BinaryCost {
+                    serial: Duration::from_millis(38_000),
+                    slowest: Duration::from_millis(20),
+                },
+            ),
+        ]);
+        let binaries = [("slow".into(), 10), ("fast".into(), 2214)];
+        let allocated = allocate(&binaries, Some(&history), 24);
+        assert_eq!(allocated, vec![("fast".into(), 15), ("slow".into(), 3)]);
+
+        // Under count weighting, ten tests out of 2224 get exactly one slot.
+        let by_count = allocate(&binaries, None, 24);
+        assert_eq!(
+            by_count
+                .iter()
+                .find(|(key, _)| key == "slow")
+                .unwrap()
+                .1,
+            1
+        );
     }
 
-    // A binary nobody has measured is estimated from what its siblings cost
-    // per test - a better prior than treating every test as equal, and one
-    // that keeps a single unit across the plan.
+    // A binary nobody has measured is estimated from its siblings' mean cost
+    // per test, in the same duration unit as recorded costs.
     #[test]
-    fn an_unmeasured_binary_is_estimated_from_its_siblings() {
-        let mean = mean_cost_per_test(&[(10.0, 100), (5.0, 100)]).unwrap();
-        assert!((mean - 0.075).abs() < 1e-9);
-        assert!((timing_weight_for(None, 40, Some(mean)) - 3.0).abs() < 1e-9);
+    fn allocation_estimates_missing_history_from_known_binaries() {
+        let history = BTreeMap::from([
+            (
+                "a".into(),
+                BinaryCost {
+                    serial: Duration::from_secs(10),
+                    slowest: Duration::from_secs(1),
+                },
+            ),
+            (
+                "b".into(),
+                BinaryCost {
+                    serial: Duration::from_secs(5),
+                    slowest: Duration::from_secs(1),
+                },
+            ),
+        ]);
+        let allocated = allocate(
+            &[("a".into(), 100), ("b".into(), 100), ("new".into(), 40)],
+            Some(&history),
+            18,
+        );
+        assert_eq!(
+            allocated,
+            vec![("a".into(), 10), ("b".into(), 5), ("new".into(), 3)]
+        );
     }
 
-    // A recorded zero must not pin a binary to no weight at all.
+    // Every claim remains satisfiable, even if the budget is smaller than the
+    // binary count or a caller passes zero.
     #[test]
-    fn a_zero_measurement_defers_to_the_estimate() {
-        let w = timing_weight_for(Some(0.0), 8, Some(0.5));
-        assert!((w - 4.0).abs() < f64::EPSILON);
+    fn allocation_claims_are_clamped_to_a_usable_budget() {
+        let binaries: Vec<(String, u32)> = [1_u32, 3, 4, 9, 100, u32::MAX]
+            .into_iter()
+            .enumerate()
+            .map(|(index, count)| (index.to_string(), count))
+            .collect();
+        for (key, slots) in allocate(&binaries, None, 4) {
+            let count = binaries
+                .iter()
+                .find(|(candidate, _)| candidate == &key)
+                .unwrap()
+                .1;
+            assert!((1..=4).contains(&slots), "count {count}");
+        }
+        assert_eq!(
+            allocate(&[("empty".into(), 0)], None, 0),
+            vec![("empty".into(), 1)]
+        );
+    }
+
+    // Fat binaries keep room for each other; no one binary claims the pool
+    // merely because it contains at least as many tests as the budget.
+    #[test]
+    fn allocation_leaves_room_for_multiple_large_binaries() {
+        let binaries: Vec<(String, u32)> = (0..8).map(|i| (i.to_string(), 300)).collect();
+        let allocated = allocate(&binaries, None, 24);
+        assert!(allocated.iter().all(|(_, slots)| *slots == 3));
+        assert_eq!(allocated.iter().map(|(_, slots)| *slots).sum::<u32>(), 24);
     }
 
     #[test]
@@ -294,23 +409,25 @@ mod binary_timings_tests {
         store.entry("default".into()).or_default().insert(
             "pkg/some_target".into(),
             BinaryCost {
-                serial: 22.3,
-                slowest: 10.1,
+                serial: Duration::from_millis(22_300),
+                slowest: Duration::from_millis(10_100),
             },
         );
         let text = toml::to_string(&store).unwrap();
         let back: Store = toml::from_str(&text).unwrap();
         let got = back["default"]["pkg/some_target"];
-        assert!((got.serial - 22.3).abs() < f64::EPSILON);
-        assert!((got.slowest - 10.1).abs() < f64::EPSILON);
+        assert_eq!(got.serial, Duration::from_millis(22_300));
+        assert_eq!(got.slowest, Duration::from_millis(10_100));
+        assert!(text.contains("serial = 22300"));
+        assert!(text.contains("slowest = 10100"));
     }
 
-    // A store written by the previous (wall-time) format no longer parses.
+    // A store written with float seconds no longer parses.
     // That must degrade to "no history" and cost one warm-up run, never fail
     // the check - the file is advisory in every direction.
     #[test]
-    fn a_store_in_the_old_format_reads_as_empty_rather_than_failing() {
-        let old = "[default]\n\"pkg/some_target\" = 22.3\n";
+    fn a_store_written_with_float_seconds_no_longer_parses() {
+        let old = "[default.\"pkg/some_target\"]\nserial = 22.3\nslowest = 10.1\n";
         assert!(toml::from_str::<Store>(old).is_err());
     }
 }

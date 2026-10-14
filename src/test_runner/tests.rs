@@ -127,10 +127,9 @@ fn a_leaked_pipe_holder_does_not_hang_the_drain_join() {
     if let Some(pid) = text
         .lines()
         .next()
-        .and_then(|l| l.trim().parse::<i32>().ok())
+        .and_then(|l| l.trim().parse::<u32>().ok())
     {
-        // SAFETY: the sleep this test started; ESRCH is fine.
-        unsafe { libc::kill(pid, libc::SIGKILL) };
+        crate::process::signal_pid(pid, libc::SIGKILL).ok();
     }
 }
 
@@ -177,10 +176,9 @@ fn a_cancelled_drain_is_told_apart_from_an_eof() {
     if let Some(pid) = text
         .lines()
         .next()
-        .and_then(|l| l.trim().parse::<i32>().ok())
+        .and_then(|l| l.trim().parse::<u32>().ok())
     {
-        // SAFETY: the sleep this test started; ESRCH is fine.
-        unsafe { libc::kill(pid, libc::SIGKILL) };
+        crate::process::signal_pid(pid, libc::SIGKILL).ok();
     }
     let (end, _) = drained_end("echo done");
     assert_eq!(end, Some(StreamEnd::Eof));
@@ -710,7 +708,7 @@ fn a_direct_launch_snapshots_the_leader_not_its_child() {
         tick,
         tick,
     );
-    kill_process_group(leader).ok();
+    crate::process::signal_process_group(leader, libc::SIGKILL).ok();
     child.wait().ok();
 
     assert_eq!(direct.snapshot_pid, Some(leader));
@@ -756,7 +754,7 @@ fn an_event_glued_after_unterminated_output_is_still_consumed() {
         "the test's own output must survive verbatim: {lines:?}"
     );
     let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
-    let parsed = crate::cargo_filter::parse_test_output(&refs);
+    let parsed = crate::test_runner::parse_test_output(&refs);
     assert_eq!(parsed.passed, 1, "the event must be counted: {lines:?}");
 }
 
@@ -816,7 +814,7 @@ fn recon_passing_suite_round_trips_to_parseable_text() {
     ]);
     assert!(in_flight.is_empty(), "all tests should have finished");
     let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
-    let parsed = crate::cargo_filter::parse_test_output(&refs);
+    let parsed = crate::test_runner::parse_test_output(&refs);
     assert_eq!(parsed.passed, 2);
     assert_eq!(parsed.failed, 0);
     assert_eq!(parsed.filtered_out, 3);
@@ -832,7 +830,7 @@ fn recon_failure_renders_failures_block_with_panic() {
         r#"{"type":"suite","event":"failed","passed":0,"failed":1,"ignored":0,"measured":0,"filtered_out":0,"exec_time":0.02}"#,
     ]);
     let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
-    let parsed = crate::cargo_filter::parse_test_output(&refs);
+    let parsed = crate::test_runner::parse_test_output(&refs);
     assert_eq!(parsed.failed, 1);
     assert_eq!(parsed.failures.len(), 1, "panic detail recovered: {refs:?}");
     assert_eq!(parsed.failures[0].name, "a::boom");
@@ -929,12 +927,5 @@ fn wait_for_process_group_exit(pgid: u32) -> bool {
 }
 
 fn process_group_exists(pgid: u32) -> bool {
-    let Ok(pgid) = i32::try_from(pgid) else {
-        return false;
-    };
-    let ret = unsafe { libc::kill(-pgid, 0) };
-    if ret == 0 {
-        return true;
-    }
-    std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+    crate::process::signal_process_group(pgid, 0).unwrap_or(true)
 }

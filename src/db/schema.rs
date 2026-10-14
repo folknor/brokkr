@@ -146,6 +146,53 @@ CREATE TABLE IF NOT EXISTS hotpath_threads (
 CREATE INDEX IF NOT EXISTS idx_hotpath_threads_run_id ON hotpath_threads(run_id);
 ";
 
+/// Typed hotpath metrics are separate from the legacy display columns above.
+/// The parent rows keep names and ordering; these tables carry normalized
+/// values and arbitrary percentile keys.
+pub(super) const HOTPATH_TYPED_DDL: &str = "\
+CREATE TABLE IF NOT EXISTS hotpath_function_metrics (
+    function_id   INTEGER NOT NULL REFERENCES hotpath_functions(id) ON DELETE CASCADE,
+    metric        TEXT NOT NULL CHECK (metric IN ('avg', 'total', 'percent_total')),
+    quantity_kind TEXT NOT NULL CHECK (quantity_kind IN ('duration_ns', 'bytes', 'percent')),
+    value_int     INTEGER,
+    value_real    REAL,
+    PRIMARY KEY (function_id, metric),
+    CHECK (
+        (quantity_kind = 'percent' AND value_int IS NULL AND value_real IS NOT NULL) OR
+        (quantity_kind IN ('duration_ns', 'bytes') AND value_int IS NOT NULL AND value_real IS NULL)
+    )
+);
+
+CREATE TABLE IF NOT EXISTS hotpath_function_percentiles (
+    function_id   INTEGER NOT NULL REFERENCES hotpath_functions(id) ON DELETE CASCADE,
+    percentile    REAL NOT NULL CHECK (percentile >= 0 AND percentile <= 100),
+    quantity_kind TEXT NOT NULL CHECK (quantity_kind IN ('duration_ns', 'bytes', 'percent')),
+    value_int     INTEGER,
+    value_real    REAL,
+    PRIMARY KEY (function_id, percentile),
+    CHECK (
+        (quantity_kind = 'percent' AND value_int IS NULL AND value_real IS NOT NULL) OR
+        (quantity_kind IN ('duration_ns', 'bytes') AND value_int IS NOT NULL AND value_real IS NULL)
+    )
+);
+
+CREATE TABLE IF NOT EXISTS hotpath_thread_metrics (
+    thread_id     INTEGER NOT NULL REFERENCES hotpath_threads(id) ON DELETE CASCADE,
+    metric        TEXT NOT NULL CHECK (metric IN (
+        'cpu_percent', 'cpu_percent_max', 'cpu_percent_avg',
+        'alloc_bytes', 'dealloc_bytes', 'mem_diff'
+    )),
+    quantity_kind TEXT NOT NULL CHECK (quantity_kind IN ('duration_ns', 'bytes', 'percent')),
+    value_int     INTEGER,
+    value_real    REAL,
+    PRIMARY KEY (thread_id, metric),
+    CHECK (
+        (quantity_kind = 'percent' AND value_int IS NULL AND value_real IS NOT NULL) OR
+        (quantity_kind IN ('duration_ns', 'bytes') AND value_int IS NOT NULL AND value_real IS NULL)
+    )
+);
+";
+
 // ---------------------------------------------------------------------------
 // SQL fragments shared across query modules
 // ---------------------------------------------------------------------------
@@ -190,6 +237,7 @@ impl ResultsDb {
         // by the time CREATE INDEX runs.
         migrate::run_migrations(&conn)?;
         conn.execute_batch(SCHEMA)?;
+        conn.execute_batch(HOTPATH_TYPED_DDL)?;
         conn.execute_batch(RUN_ITERATIONS_DDL)?;
         // For fresh databases run_migrations was a no-op, so ensure
         // user_version reflects the schema we just created.

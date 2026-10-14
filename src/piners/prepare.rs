@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::config::PinersConfig;
+use crate::config::project_config::piners::PinersConfig;
 use crate::error::DevError;
 use crate::lockfile::LockGuard;
 use crate::output;

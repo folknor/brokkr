@@ -87,9 +87,9 @@ const NEXTEST_ENGINE_VERSION: &str = "0.126.0";
 /// engine as its ONLY config file, which is what replaces - not merely
 /// shadows - any `.config/nextest.toml` the checkout carries.
 fn write_synthesized_config(state_root: &Path, ceiling: std::time::Duration) -> Result<Utf8PathBuf, DevError> {
-    let dir = state_root.join(".brokkr");
-    std::fs::create_dir_all(&dir)?;
-    let path = dir.join("nextest-synth.toml");
+    let state = crate::clean::layout::ProjectState::new(state_root);
+    std::fs::create_dir_all(state.root())?;
+    let path = state.nextest_synth_file();
     let ceiling = ceiling.as_secs().max(1);
     // `terminate-after = 1`: the first time a test crosses the ceiling it is
     // terminated, the exact semantics of the libtest lanes' watchdog.
@@ -169,9 +169,9 @@ fn write_sweep_env_config(state_root: &Path, env: &[(&str, &str)]) -> Result<Str
     use std::io::Write as _;
     use std::os::unix::fs::OpenOptionsExt as _;
 
-    let dir = state_root.join(".brokkr");
-    std::fs::create_dir_all(&dir)?;
-    let path = dir.join("nextest-sweep-env.toml");
+    let state = crate::clean::layout::ProjectState::new(state_root);
+    std::fs::create_dir_all(state.root())?;
+    let path = state.nextest_sweep_env_file();
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
@@ -241,7 +241,7 @@ fn nextest_lane_artifacts(stdout: &str) -> Result<NextestArtifacts, DevError> {
 /// stream into the engine, list under the sweep's filters, and keep the list.
 fn prepare_nextest(
     inputs: &LaneInputs<'_>,
-    sweep: &ResolvedSweep,
+    sweep: &PlannedSweep,
     attempt: &Attempt,
     extra_args: &[String],
     env: &LaneEnv,
@@ -255,7 +255,7 @@ fn prepare_nextest(
 /// its usual failure shape. Non-certifying runs defer this to the lane's report
 /// in that phase. A stop is not a failure of this lane and gets no failure
 /// shape.
-fn report_certifying_failure(inputs: &LaneInputs<'_>, sweep: &ResolvedSweep, attempt: &Attempt, e: &DevError) {
+fn report_certifying_failure(inputs: &LaneInputs<'_>, sweep: &PlannedSweep, attempt: &Attempt, e: &DevError) {
     if inputs.certifying && !matches!(e, DevError::Interrupted) {
         output::error(&format!(
             "test {}: {}",
@@ -269,7 +269,7 @@ fn report_certifying_failure(inputs: &LaneInputs<'_>, sweep: &ResolvedSweep, att
 /// `cargo test --no-run` artifact stream. No binary runs here.
 pub(crate) fn build_nextest(
     inputs: &LaneInputs<'_>,
-    sweep: &ResolvedSweep,
+    sweep: &PlannedSweep,
     attempt: &Attempt,
     extra_args: &[String],
     env: &LaneEnv,
@@ -333,7 +333,7 @@ impl NextestBuilt {
 /// lane is compiled.
 fn build_nextest_shape(
     inputs: &LaneInputs<'_>,
-    sweep: &ResolvedSweep,
+    sweep: &PlannedSweep,
     selection: Vec<String>,
     env: &LaneEnv,
 ) -> Result<NextestBuilt, DevError> {
@@ -429,7 +429,7 @@ pub(crate) struct NextestBuild<'a> {
 #[allow(clippy::too_many_lines)]
 pub(crate) fn assemble_nextest_lane(
     inputs: &LaneInputs<'_>,
-    sweep: &ResolvedSweep,
+    sweep: &PlannedSweep,
     selection: Vec<String>,
     env: &LaneEnv,
     build: &NextestBuild<'_>,
@@ -645,7 +645,7 @@ fn cancel_cause(reason: Option<CancelReason>) -> TerminationCause {
 /// ordinary failed test run. A per-test timeout is an `Err` so the phase
 /// records and reports the run-wide stop rather than an ordinary red sweep.
 fn run_nextest_sweep(
-    sweep: &ResolvedSweep,
+    sweep: &PlannedSweep,
     attempt: &Attempt,
     prepared: &PreparedLane,
     tap: &LaneTap,
@@ -889,7 +889,7 @@ fn require_build_finished(stdout: &[u8], args: &[String]) -> Result<(), DevError
 /// place a sweep's selection is translated for the engine, so preparation and
 /// execution (which runs the prepared list) cannot disagree.
 fn sweep_engine_filter(
-    sweep: &ResolvedSweep,
+    sweep: &PlannedSweep,
     pcx: &ParseContext<'_>,
     known_groups: &nextest_filtering::KnownGroups,
 ) -> Result<TestFilter, DevError> {
@@ -961,6 +961,10 @@ mod nextest_lane_tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
 
+    fn planned(declaration: crate::profile::SweepDecl) -> PlannedSweep {
+        PlannedSweep::resolve(declaration, false).unwrap()
+    }
+
     #[test]
     fn artifact_stream_requires_build_finished() {
         let args = vec!["test".to_owned(), "--no-run".to_owned()];
@@ -1021,7 +1025,7 @@ mod nextest_lane_tests {
                 benchmarks: Vec::new(),
             }],
         });
-        let sweep = ResolvedSweep { label: "engine".into(), ..ResolvedSweep::default() };
+        let sweep = planned(crate::profile::SweepDecl { label: "engine".into(), ..Default::default() });
         let rebuild = |_: &PreparedResolution| {
             let (bins, index, _) = parse_test_binaries(&stdout);
             Ok(Some((bins, index)))
@@ -1147,16 +1151,23 @@ mod nextest_lane_tests {
     fn a_real_engine_run_reports_its_timeout() {
         let root = crate::test_scratch::scratch("nextest_lane", "real_engine");
         let (metadata, stream) = engine_fixture(&root);
+        let owners = crate::diagnostic::OwnerIndex::from_metadata_at(
+            &root,
+            &root,
+            &std::collections::HashMap::new(),
+            &std::collections::HashMap::new(),
+        );
         let inputs = LaneInputs {
             project: None,
             project_root: &root,
             state_root: &root,
             target_dir: &root,
             allow_flags: &[],
+            owners: &owners,
             commands: false,
             certifying: false,
         };
-        let assemble = |sweep: &ResolvedSweep| {
+        let assemble = |sweep: &PlannedSweep| {
             assemble_nextest_lane(
                 &inputs,
                 sweep,
@@ -1174,11 +1185,11 @@ mod nextest_lane_tests {
         };
 
         // Both tests listed; the slow one runs into the cap.
-        let sweep = ResolvedSweep {
+        let sweep = planned(crate::profile::SweepDecl {
             label: "engine".into(),
             lane_exec: crate::profile::LaneExec::Nextest { threads: Some(1) },
-            ..ResolvedSweep::default()
-        };
+            ..Default::default()
+        });
         let prepared = assemble(&sweep);
         assert_eq!(prepared.resolutions[0].binaries[0].selected, ["fast", "slow"]);
         let np = prepared.nextest.as_ref().expect("an engine lane");
@@ -1192,7 +1203,7 @@ mod nextest_lane_tests {
         );
 
         // A selection that never reaches the slow test finishes clean.
-        let fast = ResolvedSweep {
+        let fast = planned(crate::profile::SweepDecl {
             filters: crate::profile::LaneFilters {
                 filters: vec![crate::profile::Filter {
                     kind: crate::profile::FilterKind::Only,
@@ -1202,8 +1213,8 @@ mod nextest_lane_tests {
                 }],
                 ..Default::default()
             },
-            ..sweep.clone()
-        };
+            ..sweep.declaration().clone()
+        });
         let quick = assemble(&fast);
         let passed = run_nextest_engine("engine", Some(1), quick.nextest.as_ref().unwrap(), &LaneTap::new(0)).unwrap();
         assert!(passed);

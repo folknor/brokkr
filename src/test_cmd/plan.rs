@@ -7,7 +7,7 @@ use crate::check_cmd::{self, LaneEntry};
 use crate::config::{self, DevConfig};
 use crate::error::DevError;
 use crate::output;
-use crate::profile::ResolvedSweep;
+use crate::profile::PlannedSweep;
 use crate::project::Project;
 use crate::rustflags;
 use crate::test_runner;
@@ -25,7 +25,7 @@ use super::verdict::{Outcome, RunReport};
 /// `test_exclude_packages`, and one that would run exactly what an earlier
 /// sweep runs.
 pub(super) fn sweep_plan_line(
-    sweeps: &[ResolvedSweep],
+    sweeps: &[PlannedSweep],
     selection: &check_cmd::PhaseSelection,
     pkg: &str,
 ) -> String {
@@ -33,7 +33,7 @@ pub(super) fn sweep_plan_line(
     let mut not_listed: Vec<&str> = Vec::new();
     let mut excluded: Vec<&str> = Vec::new();
     let mut deduped: Vec<String> = Vec::new();
-    for (s, entry) in sweeps.iter().zip(selection.entries()) {
+    for (s, entry) in sweeps.iter().zip(selection.entries().iter()) {
         match entry {
             LaneEntry::Attempt(_) => eligible.push(&s.label),
             LaneEntry::Excluded(e) => match exclusion_rule(e.notes()) {
@@ -41,7 +41,7 @@ pub(super) fn sweep_plan_line(
                 _ => not_listed.push(&s.label),
             },
             LaneEntry::Deduped(d) => {
-                let onto = sweeps.get(d.onto()).map_or("?", |o| o.label.as_str());
+                let onto = sweeps.get(d.onto().get()).map_or("?", |o| o.label.as_str());
                 deduped.push(format!("{} (as {onto})", s.label));
             }
             LaneEntry::Disabled(_) | LaneEntry::NotApplicable(_) => {}
@@ -100,7 +100,7 @@ pub(super) enum SweepOutcome<'s> {
 /// One sweep, built and discovered: everything its runs share, owned, so
 /// every sweep can be prepared before the first one runs.
 pub(super) struct ReadySweep<'s> {
-    pub(super) sweep: &'s ResolvedSweep,
+    pub(super) sweep: &'s PlannedSweep,
     /// The sweep's attempt in the run's selection: its package selection.
     pub(super) attempt: check_cmd::Attempt,
     pub(super) debug: bool,
@@ -119,7 +119,7 @@ pub(super) struct ReadySweep<'s> {
 /// discover the harnesses holding a match. Only an attempt reaches here: a
 /// sweep the selection excludes or dedupes builds nothing.
 pub(super) fn prepare_sweep<'s>(
-    sweep: &'s ResolvedSweep,
+    sweep: &'s PlannedSweep,
     attempt: &check_cmd::Attempt,
     cx: &SweepContext<'_>,
 ) -> Result<SweepOutcome<'s>, DevError> {
@@ -477,12 +477,12 @@ pub(super) fn plan_focused(
     for b in binaries {
         let hash = test_runner::hash_file(Path::new(&b.executable))
             .map_err(|e| DevError::Build(format!("could not hash {}: {e}", b.executable)))?;
-        artifacts.push(check_cmd::PlannedArtifact {
-            resolution: None,
-            unit: check_cmd::BinaryUnit::of(b),
-            executable: b.executable.clone(),
+        artifacts.push(check_cmd::PlannedArtifact::new(
+            None,
+            check_cmd::BinaryUnit::of(b),
+            b.executable.clone(),
             hash,
-        });
+        ));
     }
     Ok(FocusedPlan {
         runs,
@@ -541,7 +541,7 @@ pub(super) fn direct_libtest_args(filter: &str, exact: bool) -> Vec<String> {
 /// than through cargo's `--` split). Until that plumbing exists, refuse - but
 /// say which it is, so the next reader does not inherit a wrong reason for a
 /// right refusal.
-pub(super) fn doc_only_timeout_refusal(sweep: &ResolvedSweep) -> DevError {
+pub(super) fn doc_only_timeout_refusal(sweep: &PlannedSweep) -> DevError {
     DevError::Config(format!(
         "--timeout cannot apply within doc-only sweep '{}': brokkr does not enumerate doctests \
          yet, so the single-test precondition cannot be checked. Drop --timeout, or use --sweep \
@@ -556,7 +556,7 @@ pub(super) fn doc_only_timeout_refusal(sweep: &ResolvedSweep) -> DevError {
 /// (already reported), `Err` on spawn failure.
 pub(super) fn run_pre_build(
     project_root: &Path,
-    sweep: &ResolvedSweep,
+    sweep: &PlannedSweep,
     req: &check_cmd::SupportRequest,
     env: &[(&str, &str)],
     allow_args: &[String],
@@ -661,7 +661,7 @@ pub(super) fn cargo_with_deadline(
 /// under an unsuppressed lint the project denies fails before the test run is
 /// ever reached. `allow_args` goes before the selection, as in [`test_argv`].
 pub(super) fn pre_build_argv(
-    sweep: &ResolvedSweep,
+    sweep: &PlannedSweep,
     req: &check_cmd::SupportRequest,
     allow_args: &[String],
     debug: bool,
@@ -691,7 +691,7 @@ pub(super) fn pre_build_argv(
 /// overrides the sweep's selection, so there is exactly one resolution under
 /// every unification mode (package mode over one package is one run).
 pub(super) fn single_run<'a>(
-    sweep: &ResolvedSweep,
+    sweep: &PlannedSweep,
     attempt: &'a check_cmd::Attempt,
 ) -> Result<&'a check_cmd::ResolutionRun, DevError> {
     match attempt.runs() {
@@ -708,7 +708,7 @@ pub(super) fn single_run<'a>(
 /// Everything that shapes a sweep's build, shared by its prebuild and every
 /// run that follows it, so the two cannot name different graphs.
 pub(super) struct BuildShape<'a> {
-    pub(super) sweep: &'a ResolvedSweep,
+    pub(super) sweep: &'a PlannedSweep,
     pub(super) allow_args: &'a [String],
     /// The sweep's request in this run: always the resolved package, as an
     /// override of the sweep's own selection, with the sweep's features
@@ -901,7 +901,7 @@ pub(super) fn matches_whole_suite(listed: &[String], name: &str) -> bool {
 /// (request 3 / B3: brokkr test was dropping this and a `default_profile` env
 /// didn't apply).
 pub(super) fn sweep_env(
-    sweep: &ResolvedSweep,
+    sweep: &PlannedSweep,
     project: Project,
     project_root: &Path,
     target_dir: &Path,
@@ -926,7 +926,7 @@ pub(super) fn sweep_env(
 /// other is the asymmetry the section exists to close.
 pub(super) fn lint_allow_flags(dev_config: &DevConfig) -> Vec<String> {
     dev_config.lints.as_ref().map_or_else(Vec::new, |l| {
-        config::test_phase_allow_flags(&l.allow, &l.allow_exact)
+        config::check::test_phase_allow_flags(&l.allow, &l.allow_exact)
     })
 }
 
@@ -1032,7 +1032,7 @@ pub(super) fn resolve_sweeps(
     test_cfg: Option<&crate::config::TestConfig>,
     check_entries: &[crate::config::CheckEntry],
     sweep_filter: Option<&str>,
-) -> Result<Vec<ResolvedSweep>, DevError> {
+) -> Result<Vec<PlannedSweep>, DevError> {
     let sweeps = decide_sweeps(test_cfg, check_entries)?;
     select_sweep(sweeps, sweep_filter)
 }
@@ -1040,33 +1040,35 @@ pub(super) fn resolve_sweeps(
 pub(super) fn decide_sweeps(
     test_cfg: Option<&crate::config::TestConfig>,
     check_entries: &[crate::config::CheckEntry],
-) -> Result<Vec<ResolvedSweep>, DevError> {
-    let mut sweeps = check_cmd::decide_active_sweeps(check_entries, test_cfg, None, &[], false)?;
-    for s in &mut sweeps {
-        // The user's `<name>` is the libtest filter. Profile-level
-        // `only` / `skip` / `tests` would either narrow it further (rare,
-        // surprising) or cause silent zero-match failures; drop them. With
-        // nothing declared applying, nothing can be audited as dead here
-        // either - and `brokkr test` runs no coverage phase anyway.
-        s.filters = crate::profile::LaneFilters::default();
-        // `brokkr test` has no parallel fan-out to promote for, so the only
-        // question is what the entry pinned. Resolving it here rather than
-        // leaving the field at its default is what stops the key being
-        // silently ignored by this command while `check` honours it - the two
-        // must agree on what a lane means, or a green `brokkr test` would be
-        // evidence about a build `check` never runs.
-        s.effective_unification = crate::profile::resolve_unification(s, false)?;
-    }
-    Ok(sweeps)
+) -> Result<Vec<PlannedSweep>, DevError> {
+    let sweeps = check_cmd::decide_active_sweeps(check_entries, test_cfg, None, &[], false)?;
+    sweeps
+        .into_iter()
+        .map(|mut s| {
+            // The user's `<name>` is the libtest filter. Profile-level
+            // `only` / `skip` / `tests` would either narrow it further (rare,
+            // surprising) or cause silent zero-match failures; drop them. With
+            // nothing declared applying, nothing can be audited as dead here
+            // either - and `brokkr test` runs no coverage phase anyway.
+            s.filters = crate::profile::LaneFilters::default();
+            // `brokkr test` has no parallel fan-out to promote for, so the
+            // only question is what the entry pinned. Planning the sweep here
+            // is what stops the key being silently ignored by this command
+            // while `check` honours it - the two must agree on what a lane
+            // means, or a green `brokkr test` would be evidence about a build
+            // `check` never runs.
+            PlannedSweep::resolve(s, false)
+        })
+        .collect()
 }
 
 /// Narrow the resolved sweep set to a single `--sweep <label>`. Passing
 /// `None` keeps every sweep. An unknown label is a hard error that lists
 /// the labels actually available, so a typo can't silently run nothing.
 pub(super) fn select_sweep(
-    sweeps: Vec<ResolvedSweep>,
+    sweeps: Vec<PlannedSweep>,
     filter: Option<&str>,
-) -> Result<Vec<ResolvedSweep>, DevError> {
+) -> Result<Vec<PlannedSweep>, DevError> {
     let Some(label) = filter else {
         return Ok(sweeps);
     };

@@ -33,10 +33,34 @@ nidhogg's query/ingest. Piners' `corpus` is also measurable, but **only
 `--hotpath`/`--alloc`** (see `docs/commands/corpus.md`): a bare `corpus` is the
 parity run (gate + `runs.db`), while `corpus --hotpath`/`--alloc` builds the
 `[piners.harness]` crate with the hotpath feature and records to `results.db`
-via the same `BenchContext` path as everyone else. `corpus --bench` is refused
+via the same `MeasurementSession` path as everyone else. `corpus --bench` is refused
 - the parity harness emits NDJSON dispositions, not the `key=value` stderr
 timing contract `--bench` needs. The build-config seam both paths share is
-`BenchContext::with_build_config` + `BuildConfig::for_harness`.
+`MeasurementSession::with_build_config` + `BuildConfig::for_harness`.
+
+## Command plans
+
+Pbfhogg, elivagar and nidhogg use `src/measure/runner.rs`. Binary plans run a
+built executable; external plans materialize tools outside the measured samples;
+HTTP/server lifecycle plans provide their own protocol operations. All use one
+`MeasurementSession` for the lock, paths, optional build and request provenance.
+
+Dry-run validates inputs and argv without acquiring a measurement session,
+building, downloading tools, starting servers, or creating run artifacts.
+Input hash verification may refresh `.brokkr/hash_cache`; this validation cache
+is the sole permitted planning write. Elivagar's argv construction creates no
+directories. API dry-run derives queries without contacting the running server.
+
+Run executes once without persisting result or sidecar records. Stored modes
+use the request's measurement mode and brokkr invocation; per-row fallback
+fields do not exist. Row command names and subprocess `cli_args` retain their
+previous spelling (examples and HTTP/server lifecycles retain absent `cli_args`).
+
+Declared sample scratch is reset before each sample and removed after success.
+A failed process, capture, or artifact promotion retains its current output.
+Shared input caches, downloaded tools and durable output archives are distinct
+from sample scratch. Tilegen's checkpoint directory remains available for
+`--skip-to`; elivagar owns its checkpoint reset contract.
 
 ## Benchmark harness
 
@@ -363,7 +387,7 @@ switches to fixed-width tables. Rendering lives in `src/sidecar_fmt.rs`.
   overhead per tick doesn't accumulate drift. Each tick reads
   `/proc/<pid>/{stat,io,status}`.
 - **`--stop <marker>`** SIGKILLs the whole child **process group**
-  (`send_signal_pgrp`, so descendants are reaped too) the moment the marker
+  (`process::signal_process_group`, so descendants are reaped too) the moment the marker
   lands. That SIGKILL is *not* treated as a failure - `stopped_by_marker`
   flags it and the run records normally, so you can bench one phase in
   isolation. The results row keeps the two facts apart: `stop_marker` is the
@@ -453,9 +477,13 @@ intact. Backup failure is logged but **non-fatal** to the run.
 
 Brokkr does not depend on the `hotpath` crate directly - it parses the JSON
 report that hotpath-instrumented binaries write to `HOTPATH_OUTPUT_PATH`.
-See the module header on `src/db/hotpath.rs` for the percentile-column
-constraint (p50/p95/p99 hardcoded; custom percentiles like p99.9 are silently
-dropped).
+Function percentiles are read from every `p<number>` field, sorted
+numerically, and may be fractional (`p99.9`). Timing values are stored in
+nanoseconds, byte values in bytes, and percentages as percentages. Function
+diffs show a relative change only when both totals have the same quantity
+kind; a duration is never compared with an allocation size or percentage. The
+results database keeps the old display-text columns and parses them when a
+typed metric is missing. Existing rows are not rewritten.
 
 Env vars brokkr sets on hotpath child processes:
 `HOTPATH_METRICS_SERVER_OFF=true`, `HOTPATH_OUTPUT_FORMAT=json`,

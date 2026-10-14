@@ -145,10 +145,11 @@ Output:
   never passes them to a build. A script that builds its own `-A` list
   from `[lints]` has to skip them too, or rustc fails every crate with E0602.
   The verdict prints on a red run too, so the context does.
-- **Warnings print once.** A cargo warning from a passing test sweep is held
-  until the phase ends and merged with the identical block from every other
-  sweep - keyed by the whole block, never split - then printed once with the
-  sweeps that produced it (`every sweep` when it is all of them). A
+- **Warnings print once.** Compiler and manifest warnings from a passing test
+  sweep or support pre-build are parsed, owner-filtered, deduplicated by typed
+  fields, and sorted before rendering. Identical rendered warning blocks are
+  held until the phase ends and printed once with the sweeps that produced them
+  (`every sweep` when it is all of them). A
   parallel plan in which two or more binaries each claimed the whole
   in-flight budget (budget above 1) warns, since those binaries could not
   overlap and the run otherwise reports success. A `[lints]` injection whose
@@ -266,8 +267,10 @@ It is invocation selection only: it never predicts binaries, tests, inventory
 or outcomes. The prepared inventory and the runtime record (journal,
 accounting) keep their own models.
 
-Per phase, one entry per active sweep, in sweep order - the sweep index stays
-the lane's identity everywhere (the plan, the journal, termination labels):
+Per phase, one entry per active sweep, in sweep order. The selection and
+prepared-lane collections are `Lanes<T>` values built from the active sweep
+list and addressed with `LaneIdx`; persisted lane records carry that same typed
+index into the journal and termination labels:
 
 - **Selection**, the effective package selection: the sweep's own `packages`
   list; `--workspace --exclude` from `test_exclude_packages` (test phase only -
@@ -770,14 +773,13 @@ Two further clocks bound what the per-test cap cannot charge to any test:
   the bound only for a caller that arms no phase watchdog.
 
 One more bound sits after the clocks stop: **output drain grace** (2 s,
-`DRAIN_GRACE`). Once cargo (or a directly run test binary) has exited, its
-stdout and stderr drains get that long to reach EOF. A process the tests left
-running that inherited either pipe keeps them open indefinitely, and the
-unbounded join that used to follow hung brokkr with the lock held. Past the
-grace the drains are cancelled and joined, a warning says capture stopped,
-and the run goes on with what arrived. Nothing is signalled - the run's
-process group may already be gone and its id reused; a leaked process carrying
-the run token is reaped at the next hold (see Strays).
+`DRAIN_GRACE`). The cargo streams and each isolated harness stream use the same
+join policy: after cargo (or a directly run test binary) exits, drains get that
+long to reach EOF. A process the tests left running that inherited a pipe can
+keep it open indefinitely. Past the grace the drains are cancelled and joined,
+a warning says capture stopped, and the run goes on with what arrived. Nothing
+is signalled - the run's process group may already be gone and its id reused; a
+leaked process carrying the run token is reaped at the next hold (see Strays).
 
 The limits are constants in `src/check_cmd/watchdog.rs` (`CHECK_CEILING` and
 `phase_ceiling`), `src/test_runner/deadline.rs` (`IDLE_TIMEOUT`, `TEST_TIMEOUT`,
@@ -1459,14 +1461,12 @@ Skippable as `publish_cycle` in a partial profile's `skip_phases`.
 
 ## `clippy` phase
 
-The clippy phase always invokes cargo with `--message-format=json` and ingests
-via `cargo_json::parse_cargo_diagnostics` - the text
-formatter converts each `DiagnosticEvent` into a `ClippyDiagnostic` so every
-warning keeps its lint code in the header, even for repeats of the same rule
-(cargo's pretty-printed text only annotates the first occurrence per crate,
-which is why the JSON ingestion path was needed; see `src/cargo_filter.rs`
-module header). Cargo's own manifest lints are the one exception - they reach
-stderr only, as text, and are read from there (below).
+The clippy phase always invokes cargo with `--message-format=json` and carries
+the resulting `Diagnostic` values through ownership, filtering, sorting,
+deduplication and rendering. Cargo's pretty-printed text only annotates the
+first occurrence of a lint per crate, which is why the JSON path is used.
+Cargo's own manifest lints are the one exception - they reach stderr only, as
+text, and are parsed into the same `Diagnostic` model (below).
 
 The invocation is `cargo clippy --keep-going --all-targets
 --message-format=json <sweep features> -- --cap-lints=warn`. The last two
@@ -1524,8 +1524,10 @@ names emptied), and only when that shape names exactly one lint there. An arrow
 with no `line:col` - cargo's fallback when it has no span - still locates the
 lint, by manifest alone.
 
-Only clippy reads them: clippy and rustdoc runs both emit them, and the
-rustdoc phase reading them too would report each one twice.
+Clippy reads these as findings under its any-diagnostic-fails rule. Test and
+support builds also read their stderr manifest lints through the same owner
+index so warnings from manifests outside the workspace can be omitted. Rustdoc
+does not read them, since clippy already reports the same cargo warning.
 
 Stderr text names no package, so each lint is attributed by the `Cargo.toml`
 it names (`attribute_manifest_lints`). Cargo prints that path relative to the
@@ -1757,7 +1759,11 @@ markdown-only tree, and 5-minute ceilinged like clippy.
 Runs after clippy, one lane per selected sweep. The subsections below cover
 the failure list, build-error reporting, lint suppression, per-sweep
 `rustflags`, the serial and parallel lanes, process isolation, and doctest
-policy.
+policy. Serial `cargo test` runs and `build_packages` support pre-builds use
+`--message-format=json`: compiler messages and artifact records share cargo's
+JSON stream, while cargo's manifest lints remain on stderr. Compiler messages
+use the shared `Diagnostic` ownership and renderer; libtest's reconstructed
+output is parsed alongside the test execution path.
 
 ### Lint suppression in the test phase
 
@@ -1774,9 +1780,10 @@ phase compiles rather than reads diagnostics:
   compilation, before any diagnostic reaches brokkr to be filtered, and `-A`
   has no path-scoped form - so each entry contributes its lint name build-wide.
   The run says so on its notice line.
-- **Only rustc's own lints reach the build.** A `cargo::` entry contributes
-  nothing: rustc knows no `cargo` lint tool, and cargo's manifest lints are
-  read by the clippy phase alone. Nor does a `clippy::` or `rustdoc::` entry:
+- **Only rustc's own lints reach the build.** A `cargo::` entry is not passed
+  as a rustc flag: rustc knows no `cargo` lint tool. Cargo's manifest lints
+  still arrive on stderr and are reported as warnings by the shared owner
+  path. Nor does a `clippy::` or `rustdoc::` entry:
   rustc raises neither, and rustflags are part of every unit's fingerprint, so
   an inert flag would only make the test build differ from a plain cargo's
   (or rust-analyzer's) in the same target dir - each then rebuilding the whole
@@ -1955,22 +1962,13 @@ real error, and brokkr can't tell the two apart.
 
 ### Foreign manifest warnings
 
-A *passing* test sweep still renders whatever cargo wrote to stderr, condensed
-through `filter_clippy`, relabelled `cargo test:`, and printed once per
-distinct block at the end of the phase (see "Output"). Cargo emits its own
-manifest complaints there - deprecated `lints.*` keys, unused manifest keys -
-once per dependency manifest it loads, path dependencies included. A project
-that builds against a vendored fork therefore collected dozens of lines about a
-`Cargo.toml` it does not own and cannot edit, on every run.
-
-The test phase calls `filter_clippy_in_tree` with the project root instead, and
-warnings whose message heads with an absolute `Cargo.toml` path outside that
-root are dropped, not merely deprioritised - they are not diagnostics about
-this repo. The shape is specific (no span, absolute path, filename
-`Cargo.toml`), so ordinary lints are untouched, and warnings about the
-project's own manifests still print. The clippy phase never needed this: it
-ingests `--message-format=json` compiler messages, which exclude cargo's own
-stderr.
+A passing test sweep and its support pre-builds parse compiler messages from
+cargo JSON and manifest lints from stderr into `Diagnostic` values. `OwnerIndex`
+classifies both package ids and manifest paths, so a warning from a path
+dependency outside the workspace is dropped by the same rule used by clippy;
+workspace member and root-manifest warnings still print. The remaining
+warnings are rendered and held once per distinct diagnostic until the phase
+ends (see "Output").
 
 ### Per-sweep rustflags
 
@@ -2219,10 +2217,12 @@ tests' durations - floored at one slot, capped at its own test count, and
 capped again where extra threads stop helping (`serial / slowest_test`). Costs
 live in `.brokkr/parallel-timings.toml`; a tree with no history weights by test
 count instead, so budget changes want two runs to measure rather than one.
-Serial cost rather than wall time because wall time depends on the slots
-granted, and feeding that back oscillates.
-An unset budget (`parallel = {}`) resolves to the physical cores sharing one
-last-level cache - `brokkr env`'s `l3 domain:` line prints the number.
+The pure allocator combines these rules and orders binaries largest-first.
+Serial cost is stored as integer milliseconds, not wall time, because wall time
+depends on the slots granted, and feeding that back oscillates.
+An unset budget (`parallel = {}`) resolves to the physical cores in one
+last-level cache domain that the calling thread is allowed to use -
+`brokkr env`'s `l3 domain:` line prints the number.
 
 The lane writes two lines to the run log regardless of how many binaries run:
 
@@ -2464,15 +2464,16 @@ selection"): its declared support
 builds (`build_packages`) run first, so a listing whose static constructor or
 custom harness reads a support binary sees the one the lane runs with; then
 its shape is built with the same `cargo test --no-run` the lane itself uses,
-and every binary listed - under
-the launch envelope execution will use (`DirectRuntime::envelope`: cwd,
+and every binary listed under the launch envelope execution will use
+(`DirectRuntime::envelope`: cwd,
 loader path, `[env]`, `CARGO_PKG_*`, build-script env), since a listing is
-the binary's own code and a custom harness may read its environment - and
-each shape resolution's universe enumerated. The plan records, per shape
-resolution, its universe and `#[ignore]`d subset; per lane, its selected
-pairs and the executions they imply (ignored names excluded unless the lane
-lifts `#[ignore]`; filtered-out names and `#[bench]` functions are outside the
-claim); the dead-filter findings (below); a content hash (xxh3) of every test
+the binary's own code and a custom harness may read its environment. Under a
+complete claim, each shape resolution's universe is enumerated. The plan
+records, per shape resolution under that claim, its universe and
+`#[ignore]`d subset; per prepared lane, its selected pairs and the executions
+they imply (ignored names excluded unless the lane lifts `#[ignore]`;
+filtered-out names and `#[bench]` functions are outside the claim); the
+dead-filter findings (below); a content hash (xxh3) of every test
 executable; the fingerprint of the runtime index the launch envelope is
 built from (build-script env, out dirs and link-search dirs, and every
 support bin behind `CARGO_BIN_EXE_<name>` by path and content hash) - on
@@ -2485,9 +2486,10 @@ anything that could not be prepared. A lane's
 ignored-only listing is its filter argv with `--ignored` in place of any
 `--include-ignored` (libtest refuses the two together).
 
-Preparation runs in two steps (`build_profile` and `prepare_profile` in
-`src/check_cmd/prepare.rs`), because a listing is binary execution under the
-same 20s wall limit as a test and must never share the machine with a compile:
+Preparation has a build stage (`build_profile`) followed by lane inventory
+and policy passes in `prepare_profile` (`src/check_cmd/prepare.rs`), because
+a listing is binary execution under the same 20s wall limit as a test and
+must never share the machine with a compile:
 
 1. **Build.** Every attempted lane's builds - under a complete claim its
    universe builds first, then its `build_packages` support builds, then its
@@ -2500,7 +2502,7 @@ same 20s wall limit as a test and must never share the machine with a compile:
    not in it, as no artifact stream names one (the same limit the rebuild
    comparison below has). Nothing is listed or executed in this step. The `background`
    script checks are joined at its end.
-2. **List.** Lane by lane in configured order, nothing compiling. A lane whose
+2. **Inventory.** Lane by lane in configured order, nothing compiling. A lane whose
    snapshot still holds is listed from its step-1 build; one that a later build
    in its directory replaced in place - or that has no step-1 build - is built
    again, alone, with its support builds, and listed from that build under a
@@ -2508,8 +2510,17 @@ same 20s wall limit as a test and must never share the machine with a compile:
    comes from the one build it is listed from. The snapshot is checked again
    after the listings, whichever build it came from: a file that changed
    while the lane's own binaries were being listed fails the lane, since its
-   inventory would describe other binaries than the ones it runs. Universes are
-   listed the same way.
+   inventory would describe other binaries than the ones it runs. Each lane
+   ends this pass with one inventory disposition: `prepared` (including any
+   unlistable binaries), `skipped`, `unavailable`, or `doc_tests` for a
+   doctest-only lane. A skipped lane has no selected executions, and an
+   unavailable lane has no binary inventory.
+3. **Policy (complete claims only).** After every lane's inventory disposition
+   is fixed, enumerate each shape resolution's universe and `#[ignore]`d
+   subset, validate that the prepared binaries belong to that universe, then
+   judge filter liveness across the lanes. A skipped or unavailable inventory
+   makes the relevant filters unknown, not dead. This pass writes the shape
+   and dead-filter records; it does not alter the selected pairs.
 
 Listings must not modify the files they are listed from. Hashing either side of
 a listing catches a net change, not a file replaced and put back while it ran.
@@ -2522,14 +2533,16 @@ anything short of the machine going down, the watchdog's backstop exit
 included. The journal's closing line is written when the test phase ends; a
 journal without it was cut short, and the audit says so.
 
-A lane that cannot be prepared - a build failure, a refusal - is a marker,
-and preparation goes on with the rest, so every refusal is reported in one
-run. A stop (an interrupt, the phase ceiling) ends preparation at once. Either
-way an incomplete plan comes back (`plan_complete = false`) and **the test
-phase does not run**: a record taken against an incomplete plan could certify
-nothing. `failed_phase` is then `"prepare"`. (Under a profile that does not
-certify, a lane that cannot be prepared is a lane with no inventory and still
-runs - see "Diagnostic continuation".)
+A lane that cannot be prepared - a build failure or a refusal - is recorded as
+unavailable, and preparation goes on with the rest, so every refusal is
+reported in one run. A stop (an interrupt or the phase ceiling) ends
+preparation at once. Under a complete claim, either condition leaves an
+incomplete plan (`plan_complete = false`) and the test phase does not run: a
+record taken against an incomplete plan could certify nothing, and
+`failed_phase` is then `"prepare"`. Under a profile that does not certify, a
+lane that cannot be prepared is recorded as unavailable and still runs through
+its normal lane path; the run can report its outcome without claiming a whole
+inventory (see "Diagnostic continuation").
 
 Before a lane that executes its binaries directly (parallel, isolated, the
 nextest engine) runs, its snapshot is hashed again, with no cargo invocation.

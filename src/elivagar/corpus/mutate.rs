@@ -10,6 +10,7 @@
 use std::io::{self, Read, Write};
 use std::path::Path;
 
+use clap::ValueEnum;
 use flate2::Compression;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
@@ -21,7 +22,8 @@ use super::super::eliv::{
 /// A deliberately small set of direct archive mutations used to calibrate the
 /// corpus gate. `drop-tile`/`nudge-geometry`/`layer-version` must FIRE with the
 /// target named; `regzip` (byte-different, semantically equal) must CLEAR.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+#[value(rename_all = "kebab-case")]
 pub enum MutationOp {
     DropTile,
     NudgeGeometry,
@@ -30,17 +32,15 @@ pub enum MutationOp {
 }
 
 impl MutationOp {
-    /// Parse the CLI `--op` value. The clap command currently stores it as a
-    /// `String`, so validation remains at the dispatch adapter.
+    /// Canonical command-line spelling, used in generated calibrand names.
     #[must_use]
-    pub fn parse(s: &str) -> Option<Self> {
-        Some(match s {
-            "drop-tile" => Self::DropTile,
-            "nudge-geometry" => Self::NudgeGeometry,
-            "layer-version" => Self::LayerVersion,
-            "regzip" => Self::Regzip,
-            _ => return None,
-        })
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::DropTile => "drop-tile",
+            Self::NudgeGeometry => "nudge-geometry",
+            Self::LayerVersion => "layer-version",
+            Self::Regzip => "regzip",
+        }
     }
 }
 

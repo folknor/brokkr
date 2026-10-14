@@ -3,7 +3,7 @@
 use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf};
 
-use crate::config::PinersConfig;
+use crate::config::project_config::piners::PinersConfig;
 use crate::error::DevError;
 
 /// Keep the independently shaped registries from occupying one directory.

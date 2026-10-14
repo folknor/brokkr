@@ -1,46 +1,16 @@
 use std::path::{Path, PathBuf};
 
+use super::archive_store::ArchiveStore;
 use crate::cli::{CorpusArchiveArgs, PmtilesCorpusCommand};
 use crate::config;
-use crate::context::{HarnessContext, bootstrap, bootstrap_config};
+use crate::context::{MeasurementSession, bootstrap, bootstrap_config};
 use crate::error::DevError;
 use crate::lockfile::LockGuard;
 use crate::measure::MeasureRequest;
 use crate::project::{self, Project};
-use crate::resolve::{resolve_pbf_with_size, resolve_pmtiles_by_commit};
-
-pub(crate) fn bench_planetiler(req: &MeasureRequest) -> Result<(), DevError> {
-    let ctx = HarnessContext::new_for_request(req, "bench planetiler")?;
-    let (pbf_path, file_mb) =
-        resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
-    super::bench_planetiler::run(
-        &ctx.harness,
-        &pbf_path,
-        file_mb,
-        req.runs(),
-        &ctx.paths.data_dir,
-        &ctx.paths.scratch_dir,
-        req.project_root,
-    )
-}
-
-pub(crate) fn bench_tilemaker(req: &MeasureRequest) -> Result<(), DevError> {
-    let ctx = HarnessContext::new_for_request(req, "bench tilemaker")?;
-    let (pbf_path, file_mb) =
-        resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
-    super::bench_tilemaker::run(
-        &ctx.harness,
-        &pbf_path,
-        file_mb,
-        req.runs(),
-        &ctx.paths.data_dir,
-        &ctx.paths.scratch_dir,
-        req.project_root,
-    )
-}
 
 pub(crate) fn bench_all(req: &MeasureRequest) -> Result<(), DevError> {
-    let ctx = HarnessContext::new_for_request(req, "bench all")?;
+    let ctx = MeasurementSession::new_for_request(req, "bench all")?;
     // The input assertions come from the same resolved entry that supplied
     // the path, not from a second lookup through the raw host config.
     let pbf =
@@ -117,8 +87,9 @@ pub(crate) fn verify(
     project::require(project, Project::Elivagar, "verify")?;
     let pi = bootstrap(Some(build_root))?;
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
-    let pmtiles_path =
-        resolve_pmtiles_by_commit(dataset, variant, commit, file, &paths, build_root)?;
+    let pmtiles_path = ArchiveStore::new(paths.output_dir.as_path())
+        .resolve(dataset, variant, commit, file, build_root)?
+        .path;
     super::verify::run(
         &pmtiles_path,
         build_root,
@@ -142,8 +113,9 @@ pub(crate) fn inspect(
     project::require(project, Project::Elivagar, "pmtiles-inspect")?;
     let pi = bootstrap(None)?;
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
-    let pmtiles_path =
-        resolve_pmtiles_by_commit(dataset, variant, commit, file, &paths, build_root)?;
+    let pmtiles_path = ArchiveStore::new(paths.output_dir.as_path())
+        .resolve(dataset, variant, commit, file, build_root)?
+        .path;
     super::inspect::run(&pmtiles_path, build_root)
 }
 
@@ -164,8 +136,9 @@ pub(crate) fn diag(
     project::require(project, Project::Elivagar, "diag")?;
     let pi = bootstrap(None)?;
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
-    let pmtiles_path =
-        resolve_pmtiles_by_commit(dataset, variant, commit, file, &paths, build_root)?;
+    let pmtiles_path = ArchiveStore::new(paths.output_dir.as_path())
+        .resolve(dataset, variant, commit, file, build_root)?
+        .path;
     super::diag::run(&pmtiles_path, build_root, z, x, y)
 }
 
@@ -190,8 +163,9 @@ pub(crate) fn svg(
     project::require(project, Project::Elivagar, "svg")?;
     let pi = bootstrap(None)?;
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
-    let pmtiles_path =
-        resolve_pmtiles_by_commit(dataset, variant, commit, file, &paths, build_root)?;
+    let pmtiles_path = ArchiveStore::new(paths.output_dir.as_path())
+        .resolve(dataset, variant, commit, file, build_root)?
+        .path;
     super::svg::run(
         &pmtiles_path,
         build_root,
@@ -237,7 +211,9 @@ pub(crate) fn regress(
     project::require(project, Project::Elivagar, "regress")?;
     let pi = bootstrap(None)?;
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
-    let current = resolve_pmtiles_by_commit(dataset, variant, commit, file, &paths, build_root)?;
+    let current = ArchiveStore::new(paths.output_dir.as_path())
+        .resolve(dataset, variant, commit, file, build_root)?
+        .path;
     // The comparand is one of the two --against* flags (clap's required
     // ArgGroup guarantees exactly one is present). An explicit path is checked
     // for existence; a commit resolves through the same durable-output resolver
@@ -255,14 +231,11 @@ pub(crate) fn regress(
             }
             path
         }
-        None => resolve_pmtiles_by_commit(
-            dataset,
-            against_variant,
-            against_commit,
-            None,
-            &paths,
-            build_root,
-        )?,
+        None => {
+            ArchiveStore::new(paths.output_dir.as_path())
+                .resolve(dataset, against_variant, against_commit, None, build_root)?
+                .path
+        }
     };
     super::regress::run(
         &current,
@@ -319,7 +292,7 @@ pub(crate) fn corpus(
     cmd: &PmtilesCorpusCommand,
     _lock: Option<&LockGuard>,
 ) -> Result<(), DevError> {
-    use super::corpus::{self as gate, MutationOp};
+    use super::corpus as gate;
 
     project::require(project, Project::Elivagar, "pmtiles-corpus")?;
     let pi = bootstrap(None)?;
@@ -329,14 +302,15 @@ pub(crate) fn corpus(
     // pmtiles-inspect/diag/svg. `variant` is `None` only alongside `--file`
     // (clap's `required_unless_present`), where the resolver ignores it.
     let resolve = |a: &CorpusArchiveArgs| -> Result<PathBuf, DevError> {
-        resolve_pmtiles_by_commit(
-            &a.dataset,
-            a.variant.as_deref().unwrap_or_default(),
-            a.commit.as_deref(),
-            a.file.as_deref(),
-            &paths,
-            build_root,
-        )
+        Ok(ArchiveStore::new(paths.output_dir.as_path())
+            .resolve(
+                &a.dataset,
+                a.variant.as_deref().unwrap_or_default(),
+                a.commit.as_deref(),
+                a.file.as_deref(),
+                build_root,
+            )?
+            .path)
     };
     // Corpus dir default: corpus/<dataset> under the repo root (build_root),
     // where the git-committed corpus lives - NOT project_root (config/data dir).
@@ -364,9 +338,9 @@ pub(crate) fn corpus(
             mode,
         } => {
             let path = resolve(archive)?;
-            let mode = parse_mode(mode.as_deref())?;
-            let (outcome, report) = gate::bless(&path, &corpus_dir(archive, corpus), mode, *rotate)
-                .map_err(DevError::Io)?;
+            let (outcome, report) =
+                gate::bless(&path, &corpus_dir(archive, corpus), *mode, *rotate)
+                    .map_err(DevError::Io)?;
             emit_corpus(outcome, &report)
         }
         PmtilesCorpusCommand::RenderManifest {
@@ -420,8 +394,6 @@ pub(crate) fn corpus(
             tile,
         } => {
             let path = resolve(archive)?;
-            let mop = MutationOp::parse(op)
-                .ok_or_else(|| DevError::Config(format!("unknown mutate op: {op}")))?;
             // Default `-o` to a calibrand under data/corpus-calibrands/ (cleared
             // by a routine `brokkr clean`); an explicit `-o` is the user's file.
             let out_path = match output {
@@ -438,11 +410,11 @@ pub(crate) fn corpus(
                             |s| s.to_string_lossy().into_owned(),
                         ),
                     };
-                    dir.join(format!("{stem}-{op}.pmtiles"))
+                    dir.join(format!("{stem}-{}.pmtiles", op.as_str()))
                 }
             };
             let target = tile.as_deref().map(parse_tile).transpose()?;
-            gate::mutate::mutate(&path, &out_path, target, mop).map_err(DevError::Io)?;
+            gate::mutate::mutate(&path, &out_path, target, *op).map_err(DevError::Io)?;
             crate::output::result_msg(&format!("mutated -> {}", out_path.display()));
             Ok(())
         }
@@ -475,15 +447,6 @@ fn emit_corpus(
             Ok(())
         }
         other => Err(DevError::ExitCode(other.exit_code())),
-    }
-}
-
-fn parse_mode(mode: Option<&str>) -> Result<super::corpus::DigestMode, DevError> {
-    use super::corpus::DigestMode;
-    match mode {
-        None | Some("leaves") => Ok(DigestMode::Leaves),
-        Some("buckets") => Ok(DigestMode::Buckets),
-        Some(other) => Err(DevError::Config(format!("unknown digest mode: {other}"))),
     }
 }
 

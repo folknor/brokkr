@@ -1,7 +1,8 @@
+use super::schema::HOTPATH_TYPED_DDL;
 use crate::error::DevError;
 
 /// Current schema version. Increment when adding new migrations.
-pub(super) const SCHEMA_VERSION: i64 = 21;
+pub(super) const SCHEMA_VERSION: i64 = 22;
 
 /// Run all pending migrations based on `PRAGMA user_version`.
 pub(super) fn run_migrations(conn: &rusqlite::Connection) -> Result<(), DevError> {
@@ -86,8 +87,18 @@ pub(super) fn run_migrations(conn: &rusqlite::Connection) -> Result<(), DevError
     if current < 21 {
         migrate_v20_to_v21(conn)?;
     }
+    if current < 22 {
+        migrate_v21_to_v22(conn)?;
+    }
 
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    Ok(())
+}
+
+/// Add the normalized hotpath metric stores. Historical display strings stay
+/// in their existing columns and are interpreted lazily by the query path.
+fn migrate_v21_to_v22(conn: &rusqlite::Connection) -> Result<(), DevError> {
+    conn.execute_batch(HOTPATH_TYPED_DDL)?;
     Ok(())
 }
 

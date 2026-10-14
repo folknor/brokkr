@@ -7,9 +7,6 @@
 use crate::diagnostic::Diagnostic;
 use crate::rustc_text::Level;
 
-/// The cargo reader's historical name for the shared diagnostic model.
-pub type DiagnosticEvent = Diagnostic;
-
 // --- Parsing ---
 
 /// Parse cargo `--message-format=json` stdout into diagnostics.
@@ -164,11 +161,11 @@ pub fn parse_cargo_diagnostics(stdout: &str) -> Vec<Diagnostic> {
 /// when that shape names exactly one lint there; an unnamed block with no such
 /// sibling, or an ambiguous one, stays in the stream.
 ///
-/// Every event has `package_id: None` - stderr text names no package. The
-/// `check` clippy phase attributes each one by its manifest path
-/// (`attribute_manifest_lints`), since cargo's parsing lints also cover
-/// path-sourced packages that are not members. The path is as cargo printed
-/// it: relative to the workspace root, whatever directory cargo ran in.
+/// Every event has `package_id: None` - stderr text names no package. Check's
+/// clippy, test, and support-build paths classify each one by its manifest
+/// path through `OwnerIndex`; clippy also narrows member findings to the
+/// selected packages. The path is as cargo printed it: relative to the
+/// workspace root, whatever directory cargo ran in.
 pub fn manifest_lints_by_block(blocks: &[crate::rustc_text::Block]) -> Vec<(usize, Diagnostic)> {
     struct Candidate<'a> {
         index: usize,
@@ -317,7 +314,7 @@ mod tests {
     use super::*;
 
     /// [`manifest_lints_by_block`] over a whole stderr, block indices dropped.
-    fn parse_manifest_lints(stderr: &str) -> Vec<DiagnosticEvent> {
+    fn parse_manifest_lints(stderr: &str) -> Vec<Diagnostic> {
         let blocks = crate::rustc_text::rustc_blocks(stderr);
         manifest_lints_by_block(&blocks)
             .into_iter()

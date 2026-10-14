@@ -24,7 +24,7 @@ pub fn run(
     runs: usize,
     _data_dir: &Path,
     _scratch_dir: &Path,
-    tilegen: &crate::config::TilegenConfig,
+    tilegen: &crate::config::project_config::elivagar::TilegenConfig,
     opts: &super::PipelineOpts,
 ) -> Result<(), DevError> {
     // 1. bench self -- full elivagar pipeline

@@ -104,7 +104,7 @@ call counts and percentages are scale-invariant for a fixed kernel.
 A workload is editable code. Retuning one without re-registering it would
 leave every stored row filed under that name describing a workload that no
 longer exists - the history silently stops meaning what it says. brokkr
-verifies the digest (xxh128, mtime-cached via `preflight::verify_file_hash`)
+verifies the digest (xxh128, mtime-cached via `preflight::verify_file_digest`)
 before building anything, and refuses on mismatch:
 
 ```

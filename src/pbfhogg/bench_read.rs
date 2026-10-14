@@ -78,7 +78,6 @@ pub fn run(
             // Variant (measurement mode) and brokkr_args are attached by
             // the harness via `with_request`. The mode discriminator
             // (sequential/parallel/…) is already in cli_args via `--mode`.
-            mode: None,
             input_file: Some(basename.clone()),
             input_mb: Some(file_mb),
             cargo_features: None,
@@ -88,7 +87,6 @@ pub fn run(
                 &binary.display().to_string(),
                 &bench_args,
             )),
-            brokkr_args: None,
             metadata: vec![],
         };
 

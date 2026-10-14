@@ -2,7 +2,6 @@
 
 use std::fmt;
 use std::io::Read;
-use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
@@ -135,18 +134,14 @@ fn write_hex(bytes: &[u8], f: &mut fmt::Formatter<'_>) -> fmt::Result {
 
 /// A digest of one file. The wrapper prevents a tree fold from being used as
 /// the pin for a file entry by accident.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FileDigest {
     value: Xxh128,
-    normalized: String,
 }
 
 impl FileDigest {
     fn new(value: Xxh128) -> Self {
-        Self {
-            value,
-            normalized: value.to_string(),
-        }
+        Self { value }
     }
 
     pub fn value(&self) -> Xxh128 {
@@ -159,14 +154,6 @@ impl FromStr for FileDigest {
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         value.parse().map(Self::new)
-    }
-}
-
-impl Deref for FileDigest {
-    type Target = str;
-
-    fn deref(&self) -> &Self::Target {
-        &self.normalized
     }
 }
 
@@ -235,23 +222,6 @@ impl fmt::Display for PathDigest {
 // XXH128 file verification with mtime cache
 // ---------------------------------------------------------------------------
 
-/// Verify that a file matches the expected XXH128 hash.
-///
-/// Results are cached in `{project_root}/.brokkr/hash_cache` keyed on the
-/// canonical path and a nanosecond mtime/ctime + inode + size stamp (see the
-/// hash cache section below). Re-hashing only happens when the file changes.
-pub fn verify_file_hash(
-    path: &Path,
-    expected_hex: &str,
-    project_root: &Path,
-    origin: Option<&str>,
-) -> Result<(), DevError> {
-    let expected: Xxh128 = expected_hex
-        .parse()
-        .map_err(|error| DevError::Config(format!("invalid XXH128 digest: {error}")))?;
-    verify_path_digest(path, &expected, project_root, origin)
-}
-
 /// Verify a parsed file pin against a regular file.
 pub fn verify_file_digest(
     path: &Path,
@@ -270,26 +240,6 @@ pub fn verify_file_digest(
     }
 }
 
-/// Verify a parsed XXH128 pin against a file or directory path.
-pub fn verify_path_digest(
-    path: &Path,
-    expected: &Xxh128,
-    project_root: &Path,
-    origin: Option<&str>,
-) -> Result<(), DevError> {
-    let actual = cached_path_digest(path, project_root)?;
-    if actual.value() == *expected {
-        Ok(())
-    } else {
-        Err(hash_mismatch(
-            path,
-            &expected.to_string(),
-            &actual.to_string(),
-            origin,
-        ))
-    }
-}
-
 fn hash_mismatch(path: &Path, expected: &str, actual: &str, origin: Option<&str>) -> DevError {
     let mut msg = format!(
         "hash mismatch for {}\n  expected: {expected}\n  actual:   {actual}",
@@ -301,8 +251,8 @@ fn hash_mismatch(path: &Path, expected: &str, actual: &str, origin: Option<&str>
     DevError::Preflight(vec![msg])
 }
 
-/// Return the XXH128 hex digest of a file or directory, using the mtime cache
-/// when possible.
+/// Compute a typed digest for a file or directory, preserving which shape was
+/// hashed in the return type, using the mtime cache for files.
 ///
 /// A DIRECTORY digests as the fold of its contents - see
 /// [`compute_tree_digest`]. Some inputs are delivered as a directory rather
@@ -310,12 +260,6 @@ fn hash_mismatch(path: &Path, expected: &str, actual: &str, origin: Option<&str>
 /// JSON descriptors, and the consuming CLI takes the directory), and a pin that
 /// could only name one file inside it would either leave the real input
 /// unpinned or read as verified while covering a 4 KB descriptor.
-pub fn cached_xxh128(path: &Path, project_root: &Path) -> Result<String, DevError> {
-    cached_path_digest(path, project_root).map(|digest| digest.to_string())
-}
-
-/// Compute a typed digest for a file or directory, preserving which shape was
-/// hashed in the return type.
 pub fn cached_path_digest(path: &Path, project_root: &Path) -> Result<PathDigest, DevError> {
     let meta = std::fs::metadata(path)?;
     if meta.is_dir() {
@@ -356,11 +300,6 @@ fn hash_file_cached(
 /// Compute XXH128 of a file, reading in 64 KB chunks.
 pub fn compute_file_digest(path: &Path) -> Result<FileDigest, DevError> {
     hash_file(path).map(FileDigest::new)
-}
-
-/// Compatibility spelling used by older callers that store digest text.
-pub fn compute_xxh128(path: &Path) -> Result<String, DevError> {
-    compute_file_digest(path).map(|digest| digest.to_string())
 }
 
 fn hash_file(path: &Path) -> Result<Xxh128, DevError> {
@@ -595,8 +534,9 @@ struct HashCache {
 
 impl HashCache {
     fn load(project_root: &Path) -> Self {
-        let dir = project_root.join(".brokkr");
-        let entries = read_cache_file(&dir.join("hash_cache"));
+        let state = crate::clean::layout::ProjectState::new(project_root);
+        let dir = state.root().to_path_buf();
+        let entries = read_cache_file(&state.hash_cache_file());
         Self {
             dir,
             entries,
@@ -692,8 +632,11 @@ mod hash_cache_tests {
         backdate(&file);
         // mtime is an hour old but ctime is now: a same-tick rewrite could
         // still leave the stamp unchanged, so nothing may be recorded yet.
-        let hex = cached_xxh128(&file, &root).unwrap();
-        assert_eq!(hex, compute_xxh128(&file).unwrap());
+        let cached = cached_path_digest(&file, &root).unwrap();
+        let PathDigest::File(cached) = cached else {
+            panic!("a regular file produced a tree digest");
+        };
+        assert_eq!(cached, compute_file_digest(&file).unwrap());
         assert!(
             !cache_text(&root).contains("f.bin"),
             "{}",
@@ -796,11 +739,6 @@ mod tree_hash_tests {
         crate::test_scratch::scratch("preflight-tree", name)
     }
 
-    /// A tree digest as text, the shape `cached_xxh128` returns.
-    fn compute_xxh128_tree(root: &Path, project_root: &Path) -> Result<String, DevError> {
-        compute_tree_digest(root, project_root).map(|digest| digest.to_string())
-    }
-
     /// Build a delivery-shaped tree: two archives beside their descriptors.
     fn delivery(root: &Path) {
         std::fs::create_dir_all(root).unwrap();
@@ -821,8 +759,8 @@ mod tree_hash_tests {
         // different paths and being read in whatever order readdir gives -
         // which is a filesystem detail, and is why the fold sorts.
         assert_eq!(
-            compute_xxh128_tree(&a, &base).unwrap(),
-            compute_xxh128_tree(&b, &base).unwrap()
+            compute_tree_digest(&a, &base).unwrap(),
+            compute_tree_digest(&b, &base).unwrap()
         );
     }
 
@@ -831,9 +769,9 @@ mod tree_hash_tests {
         let base = tmpdir("changed");
         let root = base.join("d");
         delivery(&root);
-        let before = compute_xxh128_tree(&root, &base).unwrap();
+        let before = compute_tree_digest(&root, &base).unwrap();
         std::fs::write(root.join("mnq-0.csv.zst"), b"different archive").unwrap();
-        assert_ne!(before, compute_xxh128_tree(&root, &base).unwrap());
+        assert_ne!(before, compute_tree_digest(&root, &base).unwrap());
     }
 
     #[test]
@@ -841,11 +779,11 @@ mod tree_hash_tests {
         let base = tmpdir("renamed");
         let root = base.join("d");
         delivery(&root);
-        let before = compute_xxh128_tree(&root, &base).unwrap();
+        let before = compute_tree_digest(&root, &base).unwrap();
         std::fs::rename(root.join("mnq-0.csv.zst"), root.join("mnq-2.csv.zst")).unwrap();
         // Same bytes, different layout. A delivery is its layout too - the
         // consuming CLI resolves files inside it by name.
-        assert_ne!(before, compute_xxh128_tree(&root, &base).unwrap());
+        assert_ne!(before, compute_tree_digest(&root, &base).unwrap());
     }
 
     #[test]
@@ -853,10 +791,10 @@ mod tree_hash_tests {
         let base = tmpdir("nested");
         let root = base.join("d");
         delivery(&root);
-        let before = compute_xxh128_tree(&root, &base).unwrap();
+        let before = compute_tree_digest(&root, &base).unwrap();
         std::fs::create_dir_all(root.join("sub")).unwrap();
         std::fs::write(root.join("sub/extra.json"), b"{}").unwrap();
-        assert_ne!(before, compute_xxh128_tree(&root, &base).unwrap());
+        assert_ne!(before, compute_tree_digest(&root, &base).unwrap());
     }
 
     #[test]
@@ -864,7 +802,7 @@ mod tree_hash_tests {
         let base = tmpdir("empty");
         let root = base.join("d");
         std::fs::create_dir_all(&root).unwrap();
-        let err = compute_xxh128_tree(&root, &base).unwrap_err();
+        let err = compute_tree_digest(&root, &base).unwrap_err();
         let DevError::Preflight(msgs) = err else {
             panic!("expected a preflight refusal, got {err:?}");
         };
@@ -872,17 +810,20 @@ mod tree_hash_tests {
     }
 
     #[test]
-    fn cached_xxh128_dispatches_on_file_versus_directory() {
+    fn cached_path_digest_dispatches_on_file_versus_directory() {
         let base = tmpdir("dispatch");
         let root = base.join("d");
         delivery(&root);
         // The entry point the corpus registry and `brokkr env` both go through.
-        let tree = cached_xxh128(&root, &base).unwrap();
-        assert_eq!(tree, compute_xxh128_tree(&root, &base).unwrap());
+        let tree = cached_path_digest(&root, &base).unwrap();
+        assert_eq!(
+            tree,
+            PathDigest::Tree(compute_tree_digest(&root, &base).unwrap())
+        );
         // A directory's digest is not any one file's digest - which is exactly
         // the failure mode of pinning `manifest.json` and calling the delivery
         // pinned.
-        let manifest = cached_xxh128(&root.join("manifest.json"), &base).unwrap();
-        assert_ne!(tree, manifest);
+        let manifest = cached_path_digest(&root.join("manifest.json"), &base).unwrap();
+        assert_ne!(tree.value(), manifest.value());
     }
 }

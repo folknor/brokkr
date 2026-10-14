@@ -3,7 +3,9 @@
 use super::ResultsDb;
 use super::run_store::RunId;
 use super::schema::INSERT_SQL;
-use super::types::{HotpathData, KvClass, KvPair, KvValue, RunRow, canonical_cargo_features};
+use super::types::{
+    HotpathData, KvClass, KvPair, KvValue, Quantity, RunRow, canonical_cargo_features,
+};
 use super::{generate_uuid, short_uuid};
 use crate::error::DevError;
 
@@ -169,33 +171,77 @@ fn insert_hotpath(
     for func in &hp.functions {
         conn.execute(
             "INSERT INTO hotpath_functions \
-             (run_id, section, description, ordinal, name, calls, avg, total, percent_total, p50, p95, p99) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+             (run_id, section, description, ordinal, name, calls) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             rusqlite::params![
-                run_id, func.section, func.description, func.ordinal, func.name,
-                func.calls, func.avg, func.total, func.percent_total,
-                func.p50, func.p95, func.p99,
+                run_id,
+                func.section,
+                func.description,
+                func.ordinal,
+                func.name,
+                func.calls,
             ],
         )?;
+        let function_id = conn.last_insert_rowid();
+        for (metric, value) in [
+            ("avg", func.avg),
+            ("total", func.total),
+            ("percent_total", func.percent_total),
+        ] {
+            if let Some(value) = value {
+                insert_typed_hotpath_metric(
+                    conn,
+                    "hotpath_function_metrics",
+                    "function_id",
+                    function_id,
+                    metric,
+                    value,
+                )?;
+            }
+        }
+        for (percentile, value) in &func.percentiles {
+            let (quantity_kind, value_int, value_real) = value.storage_parts();
+            conn.execute(
+                "INSERT INTO hotpath_function_percentiles \
+                 (function_id, percentile, quantity_kind, value_int, value_real) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![
+                    function_id,
+                    percentile.value(),
+                    quantity_kind,
+                    value_int,
+                    value_real,
+                ],
+            )?;
+        }
     }
     for thread in &hp.threads {
         conn.execute(
             "INSERT INTO hotpath_threads \
-             (run_id, name, status, cpu_percent, cpu_percent_max, cpu_percent_avg, \
-              alloc_bytes, dealloc_bytes, mem_diff) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            rusqlite::params![
-                run_id,
-                thread.name,
-                thread.status,
-                thread.cpu_percent,
-                thread.cpu_percent_max,
-                thread.cpu_percent_avg,
-                thread.alloc_bytes,
-                thread.dealloc_bytes,
-                thread.mem_diff,
-            ],
+             (run_id, name, status) \
+             VALUES (?1, ?2, ?3)",
+            rusqlite::params![run_id, thread.name, thread.status,],
         )?;
+        let thread_id = conn.last_insert_rowid();
+        for (metric, value) in [
+            ("cpu_percent", thread.cpu_percent),
+            ("cpu_percent_max", thread.cpu_percent_max),
+            ("cpu_percent_avg", thread.cpu_percent_avg),
+            ("alloc_bytes", thread.alloc_bytes),
+            ("dealloc_bytes", thread.dealloc_bytes),
+            ("mem_diff", thread.mem_diff),
+        ] {
+            if let Some(value) = value {
+                insert_typed_hotpath_metric(
+                    conn,
+                    "hotpath_thread_metrics",
+                    "thread_id",
+                    thread_id,
+                    metric,
+                    value,
+                )?;
+            }
+        }
     }
     // Thread summary stats into run_kv. These yield to anything already
     // in `row.kv` under the same key: the run's own report is primary.
@@ -207,6 +253,25 @@ fn insert_hotpath(
         };
         insert_kv_row(conn, run_id, &pair, OnConflict::Ignore)?;
     }
+    Ok(())
+}
+
+fn insert_typed_hotpath_metric(
+    conn: &rusqlite::Connection,
+    table: &str,
+    owner_column: &str,
+    owner_id: i64,
+    metric: &str,
+    quantity: Quantity,
+) -> Result<(), DevError> {
+    let (quantity_kind, value_int, value_real) = quantity.storage_parts();
+    conn.execute(
+        &format!(
+            "INSERT INTO {table} ({owner_column}, metric, quantity_kind, value_int, value_real) \
+             VALUES (?1, ?2, ?3, ?4, ?5)"
+        ),
+        rusqlite::params![owner_id, metric, quantity_kind, value_int, value_real],
+    )?;
     Ok(())
 }
 

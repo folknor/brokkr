@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use crate::artefacts;
-use crate::config::DevConfig;
+use crate::config::project_config::ratatoskr::RatatoskrConfig;
 use crate::error::DevError;
 use crate::lockfile::{self, LockContext};
 use crate::output;
@@ -19,7 +19,7 @@ use super::runner::{SyncRunner, resolve_single, validate_sync_config};
 /// body can be smoke-tested with synthetic paths if needed.
 pub struct SyncSmokeRequest<'a> {
     pub project_root: &'a Path,
-    pub dev_config: &'a DevConfig,
+    pub ratatoskr: &'a RatatoskrConfig,
     pub script: &'a str,
     pub keep_artefacts: bool,
     pub profile_override: Option<bool>,
@@ -44,7 +44,7 @@ pub struct SyncSmokeRequest<'a> {
 ///    early in scenarios).
 pub fn run_sync_smoke(req: &SyncSmokeRequest<'_>) -> Result<(), DevError> {
     let (cfg, harness_cfg, mock_binary, fixtures_dir) =
-        validate_sync_config(req.project_root, req.dev_config)?;
+        validate_sync_config(req.project_root, req.ratatoskr)?;
     let resolved = resolve_single(req.script, &fixtures_dir)?;
 
     let project_root_str = req.project_root.display().to_string();

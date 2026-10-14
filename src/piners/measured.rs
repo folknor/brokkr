@@ -9,7 +9,7 @@
 //! exactly its selection (every probe validly, no protocol violation) fails
 //! the measurement, unless its stop marker actually fired. Selection + hard
 //! verification + manifest construction are shared with the parity path; the
-//! build goes through [`crate::context::BenchContext::with_build_config`] with
+//! build goes through [`crate::context::MeasurementSession::with_build_config`] with
 //! the hotpath feature appended, so the run rides the same sidecar + results.db
 //! lifecycle as pbfhogg.
 //!
@@ -19,7 +19,7 @@
 //! a meaningless number.
 
 use crate::build::{BuildConfig, CargoProfile};
-use crate::context::BenchContext;
+use crate::context::MeasurementSession;
 use crate::db::KvPair;
 use crate::error::DevError;
 use crate::harness::{self, BenchConfig};
@@ -54,7 +54,7 @@ pub(crate) fn run(req: &MeasureRequest, args: &CorpusArgs) -> Result<(), DevErro
         MeasureMode::Run => unreachable!("Run mode routes to the parity path in dispatch"),
     };
 
-    let cfg = req.dev_config.piners.clone().unwrap_or_default();
+    let cfg = req.project_config.piners()?.clone();
     crate::piners::layout::ensure_distinct_registry_dirs(req.project_root, &cfg)?;
     let harness_cfg = cfg
         .harness
@@ -68,7 +68,7 @@ pub(crate) fn run(req: &MeasureRequest, args: &CorpusArgs) -> Result<(), DevErro
     };
     // Locked before the registry is read, as the parity path is (see
     // `cmd.rs`): verification must judge the pins and bytes the run uses.
-    // `BenchContext` acquires again below; acquisition is re-entrant within
+    // `MeasurementSession` acquires again below; acquisition is re-entrant within
     // the process, so the hold is one and spans both.
     let project_root_str = req.project_root.display().to_string();
     let lock = crate::lockfile::acquire(&crate::lockfile::LockContext {
@@ -109,7 +109,7 @@ pub(crate) fn run(req: &MeasureRequest, args: &CorpusArgs) -> Result<(), DevErro
         .features
         .push(harness::hotpath_feature(alloc).to_owned());
 
-    let ctx = BenchContext::with_build_config_for_request(req, &build_cfg, lock_command)?;
+    let ctx = MeasurementSession::with_build_config_for_request(req, &build_cfg, lock_command)?;
 
     // Manifest into the bench scratch dir. The harness writes its (ignored)
     // NDJSON there via BROKKR_HARNESS_ARTEFACT_DIR, and run_hotpath_capture
@@ -117,14 +117,15 @@ pub(crate) fn run(req: &MeasureRequest, args: &CorpusArgs) -> Result<(), DevErro
     let manifest_path = ctx.paths.scratch_dir.join("manifest.json");
     Manifest::build(&corpus_root, &verified, &reg).write(&manifest_path)?;
 
-    let bin_dir = ctx.binary.parent().ok_or_else(|| {
+    let binary = ctx.binary()?;
+    let bin_dir = binary.parent().ok_or_else(|| {
         DevError::Build(format!(
             "binary path {} has no parent directory",
-            ctx.binary.display()
+            binary.display()
         ))
     })?;
 
-    let binary_str = ctx.binary.display().to_string();
+    let binary_str = binary.display().to_string();
     let manifest_str = manifest_path.display().to_string();
     let scratch_str = ctx.paths.scratch_dir.display().to_string();
     let bin_dir_str = bin_dir.display().to_string();
@@ -155,14 +156,12 @@ pub(crate) fn run(req: &MeasureRequest, args: &CorpusArgs) -> Result<(), DevErro
     subprocess_args.extend(args.harness_args.iter().map(String::as_str));
     let config = BenchConfig {
         command: "corpus".to_owned(),
-        mode: None,
         input_file: Some(selector),
         input_mb: None,
         cargo_features: None,
         cargo_profile: CargoProfile::for_debug(debug),
         runs: req.runs(),
         cli_args: Some(harness::format_cli_args(&binary_str, &subprocess_args)),
-        brokkr_args: None,
         metadata,
     };
 
@@ -177,7 +176,7 @@ pub(crate) fn run(req: &MeasureRequest, args: &CorpusArgs) -> Result<(), DevErro
     // Applied through the sidecar's ambient scope because the child is
     // spawned inside `run_hotpath_capture`, which takes no deadline.
     let _deadline = crate::sidecar::DeadlineScope::enter(crate::piners::cmd::HARNESS_HANG_BACKSTOP);
-    ctx.harness.run_hotpath(&config, &ctx.binary, |i| {
+    ctx.harness.run_hotpath(&config, binary, |i| {
         // The capture does not reject on the exit status: the stream is read
         // first, on every status, so a run_error or a partial report is what
         // the failure names.

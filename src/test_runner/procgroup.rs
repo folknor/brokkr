@@ -254,34 +254,6 @@ fn is_cargo_finished_line(line: &str) -> bool {
     line.trim_start().starts_with("Finished ")
 }
 
-/// SIGSTOP a process group: stop it executing without destroying it.
-///
-/// Used to freeze a run the instant its budget expires, so the diagnostic
-/// snapshot that follows costs the offending test no further wall time and still
-/// has a live `/proc` to read. SIGKILL follows.
-pub(super) fn stop_process_group(pgid: u32) -> Result<(), DevError> {
-    signal_process_group(pgid, libc::SIGSTOP)
-}
-
-pub(super) fn kill_process_group(pgid: u32) -> Result<(), DevError> {
-    signal_process_group(pgid, libc::SIGKILL)
-}
-
-fn signal_process_group(pgid: u32, signal: libc::c_int) -> Result<(), DevError> {
-    let pgid = i32::try_from(pgid)
-        .map_err(|_| DevError::Build(format!("process group id {pgid} does not fit pid_t")))?;
-    let target: libc::pid_t = -pgid;
-    let ret = unsafe { libc::kill(target, signal) };
-    if ret == 0 {
-        return Ok(());
-    }
-    let err = std::io::Error::last_os_error();
-    if err.raw_os_error() == Some(libc::ESRCH) {
-        return Ok(());
-    }
-    Err(DevError::Io(err))
-}
-
 pub(super) fn direct_child_pids(parent: u32) -> Vec<u32> {
     let task_children = Path::new("/proc")
         .join(parent.to_string())

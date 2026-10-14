@@ -4,7 +4,8 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::build;
-use crate::config::{SluggrsConfig, SluggrsSnapshot};
+use crate::cli::VisualArgs;
+use crate::config::project_config::sluggrs::{SluggrsConfig, SluggrsSnapshot};
 use crate::error::DevError;
 use crate::git;
 use crate::output;
@@ -398,32 +399,20 @@ impl Subject for SnapshotRunner<'_> {
 
 /// `project_root` is the config dir (snapshots, results.db); `build_root` is
 /// the code tree cargo and git run in - they differ only under the
-/// one-level-up layout. `suite`/`recapture` are litehtml's flags on the
-/// shared `visual` command; sluggrs has neither concept, so they are refused
-/// rather than silently dropped.
-#[allow(clippy::too_many_arguments)]
+/// one-level-up layout.
 pub(crate) fn test(
     project: Project,
     project_root: &Path,
     build_root: &Path,
     sluggrs_config: &SluggrsConfig,
-    snapshot_id: Option<&str>,
-    suite: Option<&str>,
-    all: bool,
-    recapture: bool,
+    args: &VisualArgs,
 ) -> Result<(), DevError> {
     project::require(project, Project::Sluggrs, "visual")?;
     validate_config(sluggrs_config)?;
-    if suite.is_some() || recapture {
-        return Err(DevError::Config(
-            "--suite and --recapture are litehtml-only; sluggrs snapshots take an ID or --all"
-                .into(),
-        ));
-    }
 
     let db = open_db(project_root)?;
     let git_info = git::collect(build_root)?;
-    let snapshots = resolve_snapshots(sluggrs_config, snapshot_id, all)?;
+    let snapshots = resolve_snapshots(sluggrs_config, args.fixture.as_deref(), args.all)?;
 
     let binary = build_snapshot_binary(build_root)?;
 

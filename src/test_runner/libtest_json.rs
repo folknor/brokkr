@@ -72,8 +72,8 @@ pub(super) fn drain_libtest_json<R, F>(
 }
 
 /// Turns libtest's JSON event stream back into the human libtest text the
-/// downstream cargo parsers ([`crate::cargo_filter::parse_test_output`],
-/// [`crate::cargo_filter::filter_test`]) expect, while driving the
+/// downstream parsers ([`crate::test_runner::parse_test_output`],
+/// [`crate::test_runner::filter_test`]) expect, while driving the
 /// [`TestTracker`] the watchdog ages.
 ///
 /// libtest (nightly, `--format json`) emits one JSON object per line:

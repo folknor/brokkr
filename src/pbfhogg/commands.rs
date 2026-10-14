@@ -321,7 +321,7 @@ pub enum PbfhoggCommand {
 
 impl PbfhoggCommand {
     /// The command ID string used in CLI and result DB.
-    pub fn id(&self) -> &str {
+    pub fn id(&self) -> &'static str {
         match self {
             Self::Inspect { .. } => "inspect",
             Self::CheckRefs => "check-refs",

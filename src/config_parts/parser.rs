@@ -44,12 +44,16 @@ impl Claim {
 }
 
 /// Load `brokkr.toml` from the project root directory, with the user-wide
-/// config composed beneath its include layers.
-pub fn load(project_root: &Path) -> Result<(Project, DevConfig), DevError> {
+/// config composed beneath its include layers. The tuple carries project
+/// identity, shared settings, and the project-owned section in that order.
+pub fn load(
+    project_root: &Path,
+) -> Result<(Project, DevConfig, project_config::ProjectConfig), DevError> {
     let (root, _sources) = compose(&project_root.join("brokkr.toml"))?;
     let project = parse_project(&root)?;
+    let project_config = project_config::ProjectConfig::parse(project, &root)?;
     let config = parse_dev_config(&root)?;
-    Ok((project, config))
+    Ok((project, config, project_config))
 }
 
 /// Describe host sections that all belong to other machines, or `None` when
@@ -101,12 +105,6 @@ fn parse_project(table: &toml::Table) -> Result<Project, DevError> {
 }
 
 fn parse_dev_config(table: &toml::Table) -> Result<DevConfig, DevError> {
-    let litehtml = parse_litehtml(table)?;
-    let sluggrs = parse_sluggrs(table)?;
-    let ratatoskr = parse_ratatoskr(table)?;
-    let piners = parse_piners(table)?;
-    let dellingr = parse_dellingr(table)?;
-    let mogwai = parse_mogwai(table)?;
     let dependency_rules = parse_dependency_rules(table)?;
     let check = parse_check(table)?;
     let test = parse_test(table)?;
@@ -131,12 +129,6 @@ fn parse_dev_config(table: &toml::Table) -> Result<DevConfig, DevError> {
 
     Ok(DevConfig {
         hosts,
-        litehtml,
-        sluggrs,
-        ratatoskr,
-        piners,
-        dellingr,
-        mogwai,
         dependency_rules,
         check,
         test,
@@ -848,185 +840,6 @@ fn parse_host_config(section: &str, value: &toml::Value) -> Result<HostConfig, D
         )));
     }
     Ok(hc)
-}
-
-/// Parse the optional `[litehtml]` section from the root table.
-fn parse_litehtml(
-    table: &toml::map::Map<String, toml::Value>,
-) -> Result<Option<LitehtmlConfig>, DevError> {
-    let Some(value) = table.get("litehtml") else {
-        return Ok(None);
-    };
-    let config: LitehtmlConfig = value
-        .clone()
-        .try_into()
-        .map_err(|e: toml::de::Error| DevError::Config(format!("litehtml: {e}")))?;
-    Ok(Some(config))
-}
-
-/// Parse the optional `[sluggrs]` section from the root table.
-fn parse_sluggrs(
-    table: &toml::map::Map<String, toml::Value>,
-) -> Result<Option<SluggrsConfig>, DevError> {
-    let Some(value) = table.get("sluggrs") else {
-        return Ok(None);
-    };
-    let config: SluggrsConfig = value
-        .clone()
-        .try_into()
-        .map_err(|e: toml::de::Error| DevError::Config(format!("sluggrs: {e}")))?;
-    Ok(Some(config))
-}
-
-/// Parse the optional `[ratatoskr]` section from the root table.
-///
-/// Rejects the pre-decoupling `[ratatoskr.harness].sweep` field with a
-/// migration message - that field is gone; orchestration builds are now
-/// fully described by `package`/`binary`/`features` directly under
-/// `[ratatoskr.harness]` and never reference `[[check]]`. See
-/// `docs/projects/ratatoskr.md`.
-fn parse_ratatoskr(
-    table: &toml::map::Map<String, toml::Value>,
-) -> Result<Option<RatatoskrConfig>, DevError> {
-    let Some(value) = table.get("ratatoskr") else {
-        return Ok(None);
-    };
-    if let Some(harness) = value.as_table().and_then(|t| t.get("harness"))
-        && let Some(ht) = harness.as_table()
-        && ht.contains_key("sweep")
-    {
-        return Err(DevError::Config(
-            "[ratatoskr.harness].sweep is no longer supported. The harness \
-             build spec is now self-contained: drop the `[[check]]` entry \
-             that the sweep referenced, then under `[ratatoskr.harness]` \
-             declare `package = \"<crate>\"` (required), optional \
-             `binary = \"<bin>\"` (defaults to `package`), optional \
-             `features = [...]`, and optional `debug = true`. See \
-             docs/projects/ratatoskr.md."
-                .into(),
-        ));
-    }
-    let config: RatatoskrConfig = value
-        .clone()
-        .try_into()
-        .map_err(|e: toml::de::Error| DevError::Config(format!("ratatoskr: {e}")))?;
-    Ok(Some(config))
-}
-
-/// Parse the optional `[piners]` section from the root table.
-fn parse_piners(
-    table: &toml::map::Map<String, toml::Value>,
-) -> Result<Option<PinersConfig>, DevError> {
-    let Some(value) = table.get("piners") else {
-        return Ok(None);
-    };
-    let config: PinersConfig = value
-        .clone()
-        .try_into()
-        .map_err(|e: toml::de::Error| DevError::Config(format!("piners: {e}")))?;
-    Ok(Some(config))
-}
-
-/// Parse the optional `[dellingr]` section. Absent -> `None`.
-///
-/// Each workload's file/digest pairs are validated here rather than at
-/// resolution time: an absolute path would escape the project root and read a
-/// workload nobody registered, and it is a config mistake worth naming at
-/// parse time rather than as a confusing hash mismatch later. The optional
-/// `hotpath_file` / `hotpath_xxh128` pair gets the identical treatment - it is
-/// resolved by `--hotpath`/`--alloc` exactly the way `file` is by `--bench`,
-/// so a guard that covered only one of them would be half a guard.
-///
-/// The pair must also be whole. Validating that here and not in
-/// [`crate::dellingr::workload::resolve`] means a half-registered workload is
-/// named even when nobody runs *that* workload today.
-fn parse_dellingr(
-    table: &toml::map::Map<String, toml::Value>,
-) -> Result<Option<DellingrConfig>, DevError> {
-    let Some(value) = table.get("dellingr") else {
-        return Ok(None);
-    };
-    let config: DellingrConfig = value
-        .clone()
-        .try_into()
-        .map_err(|e: toml::de::Error| DevError::Config(format!("dellingr: {e}")))?;
-
-    if config.example.trim().is_empty() {
-        return Err(DevError::Config(
-            "[dellingr].example is empty - name the cargo --example target \
-             implementing the bench harness."
-                .into(),
-        ));
-    }
-    for (name, workload) in &config.workloads {
-        check_workload_pin(name, "file", &workload.file)?;
-
-        match (&workload.hotpath_file, &workload.hotpath_xxh128) {
-            (Some(file), Some(_)) => {
-                check_workload_pin(name, "hotpath_file", file)?;
-            }
-            (None, None) => {}
-            (present, _) => {
-                let (have, missing) = if present.is_some() {
-                    ("hotpath_file", "hotpath_xxh128")
-                } else {
-                    ("hotpath_xxh128", "hotpath_file")
-                };
-                return Err(DevError::Config(format!(
-                    "[dellingr.workloads.{name}] sets {have} without {missing} - \
-                     the instrumentation-scale variant needs both a path and a \
-                     pinned digest."
-                )));
-            }
-        }
-    }
-    Ok(Some(config))
-}
-
-/// Validate one workload pin's path. The digest half needs no check here: it
-/// deserialized as a `FileDigest`, so an empty or malformed value was already
-/// refused, naming the key.
-///
-/// `path_key` is the key being checked, so the error points at the offending
-/// line: a workload carries two independent pins (`file` + `xxh128` and
-/// `hotpath_file` + `hotpath_xxh128`) and the fix differs between them.
-fn check_workload_pin(name: &str, path_key: &str, file: &Path) -> Result<(), DevError> {
-    if file.is_absolute() {
-        return Err(DevError::Config(format!(
-            "[dellingr.workloads.{name}].{path_key} {file:?} is absolute; \
-             workload paths are relative to the directory holding brokkr.toml."
-        )));
-    }
-    Ok(())
-}
-
-/// Parse the optional `[mogwai]` section. Absent -> `None`.
-///
-/// Almost nothing to validate, which is the point. The registry holds cargo
-/// coordinates, and cargo rejects a target that does not exist far better than
-/// a pre-check here could. The predecessor's validation - measurement flags
-/// frozen into an argv, lineage pointers, corpus tokens agreeing in both
-/// directions - existed to defend a promise the registry no longer makes.
-fn parse_mogwai(
-    table: &toml::map::Map<String, toml::Value>,
-) -> Result<Option<MogwaiConfig>, DevError> {
-    let Some(value) = table.get("mogwai") else {
-        return Ok(None);
-    };
-    let config: MogwaiConfig = value
-        .clone()
-        .try_into()
-        .map_err(|e: toml::de::Error| DevError::Config(format!("mogwai: {e}")))?;
-
-    for (name, target) in &config.targets {
-        if target.example.trim().is_empty() {
-            return Err(DevError::Config(format!(
-                "[mogwai.targets.{name}].example is empty - name the \
-                 [[example]] target as registered in that crate's Cargo.toml."
-            )));
-        }
-    }
-    Ok(Some(config))
 }
 
 /// The `[gremlins]` section exactly as it appears in TOML, before `allow`/`ban`
@@ -1848,7 +1661,7 @@ fn validate_check_against_test(
 /// and doc-only entries carry their own concurrency and are not affected.
 fn validate_complete_test_threads(
     t: &TestConfig,
-    resolved_profiles: &BTreeMap<String, Vec<crate::profile::ResolvedSweep>>,
+    resolved_profiles: &BTreeMap<String, Vec<crate::profile::SweepDecl>>,
 ) -> Result<(), DevError> {
     for (claim, def) in &t.profiles {
         if !Claim::new(def.certifies).requires_attribution() {

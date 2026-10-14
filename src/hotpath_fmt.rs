@@ -5,7 +5,9 @@
 
 use std::fmt::Write;
 
-use crate::db::{HotpathData, HotpathFunction, HotpathThread, KvPair};
+use std::collections::BTreeSet;
+
+use crate::db::{HotpathData, HotpathFunction, HotpathThread, KvPair, Percentile, Quantity};
 
 /// Format a hotpath report for display.
 ///
@@ -81,20 +83,23 @@ fn format_functions_table(
     let mut w_name = "Function".len();
     let mut w_calls = "Calls".len();
     let mut w_avg = "Avg".len();
-    let mut w_pcts: Vec<usize> = percentile_keys.iter().map(String::len).collect();
+    let mut w_pcts: Vec<usize> = percentile_keys
+        .iter()
+        .map(|key| key.to_string().len())
+        .collect();
     let mut w_total = "Total".len();
     let mut w_pct_total = "% Total".len();
 
     for f in data {
         w_name = w_name.max(f.name.len());
         w_calls = w_calls.max(f.calls.map(|c| c.to_string()).unwrap_or_default().len());
-        w_avg = w_avg.max(f.avg.as_deref().unwrap_or("").len());
+        w_avg = w_avg.max(metric_text(f.avg.as_ref()).len());
         for (i, key) in percentile_keys.iter().enumerate() {
-            let val = percentile_value(f, key);
+            let val = percentile_value(f, *key);
             w_pcts[i] = w_pcts[i].max(val.len());
         }
-        w_total = w_total.max(f.total.as_deref().unwrap_or("").len());
-        w_pct_total = w_pct_total.max(f.percent_total.as_deref().unwrap_or("").len());
+        w_total = w_total.max(metric_text(f.total.as_ref()).len());
+        w_pct_total = w_pct_total.max(metric_text(f.percent_total.as_ref()).len());
     }
 
     // Header line.
@@ -108,8 +113,13 @@ fn format_functions_table(
     )
     .expect("write to String");
     for (i, key) in percentile_keys.iter().enumerate() {
-        write!(out, "  {:>width$}", key.to_uppercase(), width = w_pcts[i])
-            .expect("write to String");
+        write!(
+            out,
+            "  {:>width$}",
+            key.to_string().to_uppercase(),
+            width = w_pcts[i]
+        )
+        .expect("write to String");
     }
     writeln!(out, "  {:>w_total$}  {:>w_pct_total$}", "Total", "% Total",)
         .expect("write to String");
@@ -121,14 +131,14 @@ fn format_functions_table(
             "{:<w_name$}  {:>w_calls$}  {:>w_avg$}",
             f.name,
             f.calls.map(|c| c.to_string()).unwrap_or_default(),
-            f.avg.as_deref().unwrap_or(""),
+            metric_text(f.avg.as_ref()),
         )
         .expect("write to String");
         for (i, key) in percentile_keys.iter().enumerate() {
             write!(
                 out,
                 "  {:>width$}",
-                percentile_value(f, key),
+                percentile_value(f, *key),
                 width = w_pcts[i]
             )
             .expect("write to String");
@@ -136,8 +146,8 @@ fn format_functions_table(
         writeln!(
             out,
             "  {:>w_total$}  {:>w_pct_total$}",
-            f.total.as_deref().unwrap_or(""),
-            f.percent_total.as_deref().unwrap_or(""),
+            metric_text(f.total.as_ref()),
+            metric_text(f.percent_total.as_ref()),
         )
         .expect("write to String");
     }
@@ -145,36 +155,24 @@ fn format_functions_table(
 
 /// Detect which percentile columns are present across the function entries.
 ///
-/// Checks for `p50`, `p95`, `p99` fields being `Some` on any entry, and
-/// returns the keys in numeric order.
-fn detect_percentile_keys(functions: &[&HotpathFunction]) -> Vec<String> {
-    let mut keys = Vec::new();
-
-    let has_p50 = functions.iter().any(|f| f.p50.is_some());
-    let has_p95 = functions.iter().any(|f| f.p95.is_some());
-    let has_p99 = functions.iter().any(|f| f.p99.is_some());
-
-    if has_p50 {
-        keys.push("p50".to_string());
-    }
-    if has_p95 {
-        keys.push("p95".to_string());
-    }
-    if has_p99 {
-        keys.push("p99".to_string());
-    }
-
-    keys
+/// Collect all percentile keys present in the section, in numeric order.
+fn detect_percentile_keys(functions: &[&HotpathFunction]) -> Vec<Percentile> {
+    functions
+        .iter()
+        .flat_map(|function| function.percentiles.keys().copied())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
-/// Get the percentile value from a function entry by key name.
-fn percentile_value<'a>(f: &'a HotpathFunction, key: &str) -> &'a str {
-    match key {
-        "p50" => f.p50.as_deref().unwrap_or(""),
-        "p95" => f.p95.as_deref().unwrap_or(""),
-        "p99" => f.p99.as_deref().unwrap_or(""),
-        _ => "",
-    }
+/// Get a display spelling for a function metric.
+fn metric_text(metric: Option<&Quantity>) -> String {
+    metric.map(ToString::to_string).unwrap_or_default()
+}
+
+/// Get the display spelling of a percentile from a function entry.
+fn percentile_value(f: &HotpathFunction, key: Percentile) -> String {
+    metric_text(f.percentiles.get(&key))
 }
 
 // ---------------------------------------------------------------------------
@@ -223,13 +221,13 @@ fn format_threads_table(out: &mut String, threads: &[HotpathThread], summary: &[
     for t in threads {
         w_name = w_name.max(t.name.len());
         w_status = w_status.max(t.status.as_deref().unwrap_or("").len());
-        w_cpu_pct = w_cpu_pct.max(opt_or_dash(t.cpu_percent.as_deref()).len());
-        w_cpu_max = w_cpu_max.max(opt_or_dash(t.cpu_percent_max.as_deref()).len());
-        w_cpu_avg = w_cpu_avg.max(opt_or_dash(t.cpu_percent_avg.as_deref()).len());
+        w_cpu_pct = w_cpu_pct.max(quantity_or_dash(t.cpu_percent.as_ref()).len());
+        w_cpu_max = w_cpu_max.max(quantity_or_dash(t.cpu_percent_max.as_ref()).len());
+        w_cpu_avg = w_cpu_avg.max(quantity_or_dash(t.cpu_percent_avg.as_ref()).len());
         if has_alloc {
-            w_alloc = w_alloc.max(opt_or_dash(t.alloc_bytes.as_deref()).len());
-            w_dealloc = w_dealloc.max(opt_or_dash(t.dealloc_bytes.as_deref()).len());
-            w_diff = w_diff.max(opt_or_dash(t.mem_diff.as_deref()).len());
+            w_alloc = w_alloc.max(quantity_or_dash(t.alloc_bytes.as_ref()).len());
+            w_dealloc = w_dealloc.max(quantity_or_dash(t.dealloc_bytes.as_ref()).len());
+            w_diff = w_diff.max(quantity_or_dash(t.mem_diff.as_ref()).len());
         }
     }
 
@@ -265,18 +263,18 @@ fn format_threads_table(out: &mut String, threads: &[HotpathThread], summary: &[
             "{:<w_name$}  {:<w_status$}  {:>w_cpu_pct$}  {:>w_cpu_max$}  {:>w_cpu_avg$}",
             t.name,
             t.status.as_deref().unwrap_or(""),
-            opt_or_dash(t.cpu_percent.as_deref()),
-            opt_or_dash(t.cpu_percent_max.as_deref()),
-            opt_or_dash(t.cpu_percent_avg.as_deref()),
+            quantity_or_dash(t.cpu_percent.as_ref()),
+            quantity_or_dash(t.cpu_percent_max.as_ref()),
+            quantity_or_dash(t.cpu_percent_avg.as_ref()),
         )
         .expect("write to String");
         if has_alloc {
             write!(
                 out,
                 "  {:>w_alloc$}  {:>w_dealloc$}  {:>w_diff$}",
-                opt_or_dash(t.alloc_bytes.as_deref()),
-                opt_or_dash(t.dealloc_bytes.as_deref()),
-                opt_or_dash(t.mem_diff.as_deref()),
+                quantity_or_dash(t.alloc_bytes.as_ref()),
+                quantity_or_dash(t.dealloc_bytes.as_ref()),
+                quantity_or_dash(t.mem_diff.as_ref()),
             )
             .expect("write to String");
         }
@@ -289,9 +287,9 @@ fn kv_value_str(kv: &KvPair) -> String {
     kv.value.to_string()
 }
 
-/// Return the value if `Some`, otherwise "-".
-fn opt_or_dash(val: Option<&str>) -> &str {
-    val.unwrap_or("-")
+/// Return a typed metric's display value, or "-" when absent.
+fn quantity_or_dash(value: Option<&Quantity>) -> String {
+    value.map_or_else(|| "-".to_owned(), ToString::to_string)
 }
 
 // ---------------------------------------------------------------------------
@@ -398,15 +396,21 @@ fn format_section_diff(
 
     // Precompute display values for each row.
     let placeholder = "--";
-    let mut row_total_a: Vec<&str> = Vec::new();
-    let mut row_total_b: Vec<&str> = Vec::new();
+    let mut row_total_a: Vec<String> = Vec::new();
+    let mut row_total_b: Vec<String> = Vec::new();
     let mut row_change: Vec<String> = Vec::new();
 
     for &name in &names {
-        let ta = map_a.get(name).and_then(|f| f.total.as_deref());
-        let tb = map_b.get(name).and_then(|f| f.total.as_deref());
-        row_total_a.push(ta.unwrap_or(placeholder));
-        row_total_b.push(tb.unwrap_or(placeholder));
+        let ta = map_a.get(name).and_then(|f| f.total.as_ref());
+        let tb = map_b.get(name).and_then(|f| f.total.as_ref());
+        row_total_a.push(
+            ta.map(ToString::to_string)
+                .unwrap_or_else(|| placeholder.to_owned()),
+        );
+        row_total_b.push(
+            tb.map(ToString::to_string)
+                .unwrap_or_else(|| placeholder.to_owned()),
+        );
         row_change.push(format_change_str(ta, tb));
     }
 
@@ -452,62 +456,15 @@ fn format_section_diff(
     out
 }
 
-/// Parse a formatted metric string to a raw `f64` value.
-///
-/// Handles duration units (ns/us/ms/s -> result in ms), byte units
-/// (B/KB/MB/GB -> result in bytes), and bare percentages.
-fn parse_metric(s: &str) -> Option<f64> {
-    let s = s.trim();
-    if s.is_empty() {
-        return None;
-    }
-
-    // Bare percentage: "42.5%"
-    if let Some(num_str) = s.strip_suffix('%') {
-        return num_str.trim().parse::<f64>().ok();
-    }
-
-    // Split on last space to get (number, unit).
-    let split_pos = s.rfind(' ')?;
-    let num_str = s[..split_pos].trim();
-    let unit = s[split_pos + 1..].trim();
-
-    let number: f64 = num_str.parse().ok()?;
-
-    let multiplier = match unit {
-        // Duration -> ms
-        "ns" => 1e-6,
-        "\u{b5}s" => 1e-3,
-        "ms" => 1.0,
-        "s" => 1e3,
-        // Bytes -> bytes
-        "B" => 1.0,
-        "KB" => 1024.0,
-        "MB" => 1_048_576.0,
-        "GB" => 1_073_741_824.0,
-        _ => return None,
-    };
-
-    Some(number * multiplier)
-}
-
 /// Format a change string comparing two metric values.
 ///
-/// Returns a percentage like "+1.0%" or "-3.2%", or a status string
-/// for missing/unparseable values.
-fn format_change_str(a: Option<&str>, b: Option<&str>) -> String {
+/// Returns a percentage like "+1.0%" or "-3.2%". Incompatible dimensions,
+/// a zero baseline, or absent values have no meaningful relative change.
+fn format_change_str(a: Option<&Quantity>, b: Option<&Quantity>) -> String {
     match (a, b) {
-        (Some(sa), Some(sb)) => {
-            let va = parse_metric(sa);
-            let vb = parse_metric(sb);
-            match (va, vb) {
-                (Some(fa), Some(fb)) if fa.abs() > f64::EPSILON => {
-                    let pct = (fb - fa) / fa * 100.0;
-                    format!("{pct:+.1}%")
-                }
-                _ => "--".to_string(),
-            }
-        }
+        (Some(old), Some(new)) => new
+            .relative_change_from(*old)
+            .map_or_else(|| "--".to_owned(), |percent| format!("{percent:+.1}%")),
         (Some(_), None) => "(gone)".to_string(),
         (None, Some(_)) => "(new)".to_string(),
         (None, None) => "--".to_string(),
@@ -536,162 +493,28 @@ mod tests {
     use super::*;
     use crate::db::{HotpathData, HotpathFunction};
 
-    // -----------------------------------------------------------------------
-    // parse_metric
-    // -----------------------------------------------------------------------
+    fn q(value: &str) -> Quantity {
+        Quantity::parse(value).expect("valid metric")
+    }
+
+    fn p(value: &str) -> Percentile {
+        Percentile::parse_key(value).expect("valid percentile")
+    }
 
     #[test]
-    fn parse_metric_duration_ns() {
-        let v = parse_metric("500 ns").unwrap();
-        assert!(
-            (v - 0.0005).abs() < 1e-10,
-            "500 ns should be 0.0005 ms, got {v}"
+    fn typed_metric_display_and_relative_change() {
+        assert_eq!(q("500 ns"), Quantity::DurationNs(500));
+        assert_eq!(q("2 KB"), Quantity::Bytes(2048));
+        assert_eq!(q("99.2%"), Quantity::Percent(99.2));
+        assert_eq!(
+            format_change_str(Some(&q("500 ms")), Some(&q("1 s"))),
+            "+100.0%"
         );
-    }
-
-    #[test]
-    fn parse_metric_duration_us() {
-        let v = parse_metric("1.5 \u{b5}s").unwrap();
-        assert!(
-            (v - 0.0015).abs() < 1e-10,
-            "1.5 \u{b5}s should be 0.0015 ms, got {v}"
+        assert_eq!(
+            format_change_str(Some(&q("1 KB")), Some(&q("2 KB"))),
+            "+100.0%"
         );
-    }
-
-    #[test]
-    fn parse_metric_duration_ms() {
-        let v = parse_metric("42.3 ms").unwrap();
-        assert!(
-            (v - 42.3).abs() < 1e-10,
-            "42.3 ms should be 42.3 ms, got {v}"
-        );
-    }
-
-    #[test]
-    fn parse_metric_duration_s() {
-        let v = parse_metric("2.5 s").unwrap();
-        assert!(
-            (v - 2500.0).abs() < 1e-10,
-            "2.5 s should be 2500 ms, got {v}"
-        );
-    }
-
-    #[test]
-    fn parse_metric_bytes_b() {
-        let v = parse_metric("100 B").unwrap();
-        assert!(
-            (v - 100.0).abs() < 1e-10,
-            "100 B should be 100 bytes, got {v}"
-        );
-    }
-
-    #[test]
-    fn parse_metric_bytes_kb() {
-        let v = parse_metric("2 KB").unwrap();
-        assert!(
-            (v - 2048.0).abs() < 1e-10,
-            "2 KB should be 2048 bytes, got {v}"
-        );
-    }
-
-    #[test]
-    fn parse_metric_bytes_mb() {
-        let v = parse_metric("1 MB").unwrap();
-        assert!(
-            (v - 1_048_576.0).abs() < 1e-10,
-            "1 MB should be 1048576 bytes, got {v}"
-        );
-    }
-
-    #[test]
-    fn parse_metric_bytes_gb() {
-        let v = parse_metric("1.5 GB").unwrap();
-        let expected = 1.5 * 1_073_741_824.0;
-        assert!(
-            (v - expected).abs() < 1.0,
-            "1.5 GB should be {expected} bytes, got {v}"
-        );
-    }
-
-    #[test]
-    fn parse_metric_percentage() {
-        let v = parse_metric("99.2%").unwrap();
-        assert!((v - 99.2).abs() < 1e-10, "99.2% should be 99.2, got {v}");
-    }
-
-    #[test]
-    fn parse_metric_percentage_with_space_before_pct() {
-        // "42.5 %" has a space before %, so strip_suffix('%') gives "42.5 "
-        // which trims to "42.5" and parses fine.
-        let v = parse_metric("42.5 %").unwrap();
-        assert!(
-            (v - 42.5).abs() < 1e-10,
-            "42.5 % should parse as 42.5, got {v}"
-        );
-    }
-
-    #[test]
-    fn parse_metric_empty_string() {
-        assert!(
-            parse_metric("").is_none(),
-            "empty string should return None"
-        );
-    }
-
-    #[test]
-    fn parse_metric_whitespace_only() {
-        assert!(
-            parse_metric("   ").is_none(),
-            "whitespace-only should return None"
-        );
-    }
-
-    #[test]
-    fn parse_metric_no_space_between_number_and_unit() {
-        // "42ms" has no space, rfind(' ') returns None, and it doesn't end with '%'
-        assert!(
-            parse_metric("42ms").is_none(),
-            "no-space metric should return None"
-        );
-    }
-
-    #[test]
-    fn parse_metric_unknown_unit() {
-        assert!(
-            parse_metric("10 furlongs").is_none(),
-            "unknown unit should return None"
-        );
-    }
-
-    #[test]
-    fn parse_metric_leading_trailing_whitespace() {
-        let v = parse_metric("  42.3 ms  ").unwrap();
-        assert!(
-            (v - 42.3).abs() < 1e-10,
-            "trimmed '42.3 ms' should parse, got {v}"
-        );
-    }
-
-    #[test]
-    fn parse_metric_negative_number() {
-        // Negative durations are unusual but the parser should handle them.
-        let v = parse_metric("-5 ms").unwrap();
-        assert!((v - (-5.0)).abs() < 1e-10, "-5 ms should be -5.0, got {v}");
-    }
-
-    #[test]
-    fn parse_metric_zero() {
-        let v = parse_metric("0 ms").unwrap();
-        assert!((v - 0.0).abs() < 1e-10, "0 ms should be 0.0, got {v}");
-    }
-
-    #[test]
-    fn parse_metric_bare_number_no_unit_no_pct() {
-        // "42" -- no space, no %, so rfind(' ') returns None -> None.
-        assert!(
-            parse_metric("42").is_none(),
-            "bare number without unit should return None"
-        );
+        assert_eq!(format_change_str(Some(&q("1 KB")), Some(&q("2 ms"))), "--");
     }
 
     // -----------------------------------------------------------------------
@@ -700,38 +523,38 @@ mod tests {
 
     #[test]
     fn format_change_str_normal_increase() {
-        let result = format_change_str(Some("100 ms"), Some("110 ms"));
+        let result = format_change_str(Some(&q("100 ms")), Some(&q("110 ms")));
         assert_eq!(result, "+10.0%", "110ms vs 100ms should be +10.0%");
     }
 
     #[test]
     fn format_change_str_normal_decrease() {
-        let result = format_change_str(Some("200 ms"), Some("180 ms"));
+        let result = format_change_str(Some(&q("200 ms")), Some(&q("180 ms")));
         assert_eq!(result, "-10.0%", "180ms vs 200ms should be -10.0%");
     }
 
     #[test]
     fn format_change_str_no_change() {
-        let result = format_change_str(Some("50 ms"), Some("50 ms"));
+        let result = format_change_str(Some(&q("50 ms")), Some(&q("50 ms")));
         assert_eq!(result, "+0.0%", "same value should be +0.0%");
     }
 
     #[test]
     fn format_change_str_cross_unit() {
         // 1 s = 1000 ms. Going from 500 ms to 1 s is a +100% change.
-        let result = format_change_str(Some("500 ms"), Some("1 s"));
+        let result = format_change_str(Some(&q("500 ms")), Some(&q("1 s")));
         assert_eq!(result, "+100.0%", "500ms -> 1s should be +100.0%");
     }
 
     #[test]
     fn format_change_str_gone() {
-        let result = format_change_str(Some("100 ms"), None);
+        let result = format_change_str(Some(&q("100 ms")), None);
         assert_eq!(result, "(gone)", "present -> absent should be (gone)");
     }
 
     #[test]
     fn format_change_str_new() {
-        let result = format_change_str(None, Some("100 ms"));
+        let result = format_change_str(None, Some(&q("100 ms")));
         assert_eq!(result, "(new)", "absent -> present should be (new)");
     }
 
@@ -742,28 +565,28 @@ mod tests {
     }
 
     #[test]
-    fn format_change_str_unparseable_a() {
-        let result = format_change_str(Some("garbage"), Some("100 ms"));
-        assert_eq!(result, "--", "unparseable A should yield --");
+    fn format_change_str_rejects_mismatched_quantity_kinds_a() {
+        let result = format_change_str(Some(&q("100 B")), Some(&q("100 ms")));
+        assert_eq!(result, "--", "different dimensions should yield --");
     }
 
     #[test]
-    fn format_change_str_unparseable_b() {
-        let result = format_change_str(Some("100 ms"), Some("garbage"));
-        assert_eq!(result, "--", "unparseable B should yield --");
+    fn format_change_str_rejects_mismatched_quantity_kinds_b() {
+        let result = format_change_str(Some(&q("100 ms")), Some(&q("100 B")));
+        assert_eq!(result, "--", "different dimensions should yield --");
     }
 
     #[test]
-    fn format_change_str_both_unparseable() {
-        let result = format_change_str(Some("foo"), Some("bar"));
-        assert_eq!(result, "--", "both unparseable should yield --");
+    fn format_change_str_rejects_mismatched_quantity_kinds() {
+        let result = format_change_str(Some(&q("1 B")), Some(&q("1 ms")));
+        assert_eq!(result, "--", "different dimensions should yield --");
     }
 
     #[test]
     fn format_change_str_near_zero_baseline() {
         // Baseline is essentially zero (below f64::EPSILON).
         // The guard `fa.abs() > f64::EPSILON` should prevent division by near-zero.
-        let result = format_change_str(Some("0 ms"), Some("100 ms"));
+        let result = format_change_str(Some(&q("0 ms")), Some(&q("100 ms")));
         assert_eq!(
             result, "--",
             "zero baseline should yield -- to avoid division by zero"
@@ -773,7 +596,7 @@ mod tests {
     #[test]
     fn format_change_str_byte_units() {
         // 1 KB = 1024 B, 2 KB = 2048 B -> +100%
-        let result = format_change_str(Some("1 KB"), Some("2 KB"));
+        let result = format_change_str(Some(&q("1 KB")), Some(&q("2 KB")));
         assert_eq!(result, "+100.0%", "1KB -> 2KB should be +100.0%");
     }
 
@@ -793,12 +616,13 @@ mod tests {
             ordinal: 0,
             name: name.to_string(),
             calls: Some(1),
-            avg: Some("1 ms".to_string()),
-            total: Some("1 ms".to_string()),
-            percent_total: Some("100%".to_string()),
-            p50: p50.map(String::from),
-            p95: p95.map(String::from),
-            p99: p99.map(String::from),
+            avg: Some(q("1 ms")),
+            total: Some(q("1 ms")),
+            percent_total: Some(q("100%")),
+            percentiles: [("p50", p50), ("p95", p95), ("p99", p99)]
+                .into_iter()
+                .filter_map(|(key, value)| Some((Percentile::parse_key(key)?, q(value?))))
+                .collect(),
         }
     }
 
@@ -814,7 +638,7 @@ mod tests {
         let keys = detect_percentile_keys(&refs);
         assert_eq!(
             keys,
-            vec!["p50", "p95", "p99"],
+            vec![p("p50"), p("p95"), p("p99")],
             "should find p50, p95, p99 in numeric order"
         );
     }
@@ -824,7 +648,7 @@ mod tests {
         let funcs = vec![make_fn("bar", Some("0.5 ms"), None, None)];
         let refs: Vec<&HotpathFunction> = funcs.iter().collect();
         let keys = detect_percentile_keys(&refs);
-        assert_eq!(keys, vec!["p50"], "should find only p50");
+        assert_eq!(keys, vec![p("p50")], "should find only p50");
     }
 
     #[test]
@@ -856,7 +680,7 @@ mod tests {
         let keys = detect_percentile_keys(&refs);
         assert_eq!(
             keys,
-            vec!["p50", "p99"],
+            vec![p("p50"), p("p99")],
             "should detect p50 from first and p99 from second"
         );
     }
@@ -868,7 +692,7 @@ mod tests {
         let keys = detect_percentile_keys(&refs);
         assert_eq!(
             keys,
-            vec!["p95", "p99"],
+            vec![p("p95"), p("p99")],
             "should find p95 and p99 without p50"
         );
     }
@@ -885,12 +709,10 @@ mod tests {
                 ordinal: i as i64,
                 name: format!("fn_{i}"),
                 calls: Some((i + 1) as i64),
-                avg: Some(format!("{} ms", i + 1)),
-                total: Some(format!("{} ms", (i + 1) * 10)),
-                percent_total: Some(format!("{}%", 100 / n)),
-                p50: None,
-                p95: None,
-                p99: None,
+                avg: Some(q(&format!("{} ms", i + 1))),
+                total: Some(q(&format!("{} ms", (i + 1) * 10))),
+                percent_total: Some(q(&format!("{}%", 100 / n))),
+                percentiles: std::collections::BTreeMap::new(),
             })
             .collect();
         HotpathData {
@@ -969,11 +791,9 @@ mod tests {
             name: name.to_string(),
             calls: None,
             avg: None,
-            total: Some(total.to_string()),
+            total: Some(q(total)),
             percent_total: None,
-            p50: None,
-            p95: None,
-            p99: None,
+            percentiles: std::collections::BTreeMap::new(),
         }
     }
 

@@ -360,14 +360,10 @@ fn drain(pipe: impl Read + Send + 'static, limit: usize) -> std::sync::mpsc::Rec
     rx
 }
 
+/// Best-effort: a group that is already gone is the wanted outcome, and the
+/// group is this module's own child, so there is no identity to verify.
 fn kill_group(pgid: u32) {
-    if let Ok(pgid) = i32::try_from(pgid) {
-        // SAFETY: kill(2) with a negative pid signals a process group; a group
-        // that is already gone returns ESRCH, which is the wanted outcome.
-        unsafe {
-            libc::kill(-pgid, libc::SIGKILL);
-        }
-    }
+    crate::process::signal_process_group(pgid, libc::SIGKILL).ok();
 }
 
 /// Run one entry's command and return its value.

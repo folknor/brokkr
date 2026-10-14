@@ -152,7 +152,7 @@ pub fn run(
             .unwrap_or_default()
             .to_string_lossy();
         output::download_msg(&format!("  hashing {filename}..."));
-        let hash = preflight::cached_xxh128(&pbf_dest, project_root)?;
+        let hash = preflight::cached_path_digest(&pbf_dest, project_root)?.to_string();
         toml.set_pbf("raw", &filename, &hash)?;
     }
 
@@ -162,7 +162,7 @@ pub fn run(
             .unwrap_or_default()
             .to_string_lossy();
         output::download_msg(&format!("  hashing {filename}..."));
-        let hash = preflight::cached_xxh128(&indexed_dest, project_root)?;
+        let hash = preflight::cached_path_digest(&indexed_dest, project_root)?.to_string();
         toml.set_pbf("indexed", &filename, &hash)?;
     }
 
@@ -172,7 +172,7 @@ pub fn run(
             .unwrap_or_default()
             .to_string_lossy();
         output::download_msg(&format!("  hashing {filename}..."));
-        let hash = preflight::cached_xxh128(osc_path, project_root)?;
+        let hash = preflight::cached_path_digest(osc_path, project_root)?.to_string();
         toml.set_osc(*seq, &filename, &hash)?;
     }
     toml.commit()?;
@@ -304,7 +304,7 @@ fn run_as_snapshot(
     if downloaded_pbf || pbf_dest.exists() {
         let filename = pbf_dest.file_name().unwrap_or_default().to_string_lossy();
         output::download_msg(&format!("  hashing {filename}..."));
-        let hash = preflight::cached_xxh128(&pbf_dest, project_root)?;
+        let hash = preflight::cached_path_digest(&pbf_dest, project_root)?.to_string();
         toml.set_snapshot_pbf(snap_key, "raw", &filename, &hash)?;
     }
 
@@ -314,7 +314,7 @@ fn run_as_snapshot(
             .unwrap_or_default()
             .to_string_lossy();
         output::download_msg(&format!("  hashing {filename}..."));
-        let hash = preflight::cached_xxh128(&indexed_dest, project_root)?;
+        let hash = preflight::cached_path_digest(&indexed_dest, project_root)?.to_string();
         toml.set_snapshot_pbf(snap_key, "indexed", &filename, &hash)?;
     }
 
@@ -324,7 +324,7 @@ fn run_as_snapshot(
             .unwrap_or_default()
             .to_string_lossy();
         output::download_msg(&format!("  hashing {filename}..."));
-        let hash = preflight::cached_xxh128(osc_path, project_root)?;
+        let hash = preflight::cached_path_digest(osc_path, project_root)?.to_string();
         toml.set_snapshot_osc(snap_key, *seq, &filename, &hash)?;
     }
     toml.commit()?;
@@ -594,9 +594,9 @@ fn run_refresh(
 
     // -- Step 5: hash the new primary --
     output::download_msg(&format!("  hashing {new_pbf_filename}..."));
-    let new_raw_hash = preflight::cached_xxh128(&new_pbf_dest, project_root)?;
+    let new_raw_hash = preflight::cached_path_digest(&new_pbf_dest, project_root)?.to_string();
     output::download_msg(&format!("  hashing {new_indexed_filename}..."));
-    let indexed_hash = preflight::cached_xxh128(&new_indexed_dest, project_root)?;
+    let indexed_hash = preflight::cached_path_digest(&new_indexed_dest, project_root)?.to_string();
 
     // -- Step 6: one atomic brokkr.toml commit --
     // Archive the current primary pbf/osc tables under the snapshot (with the

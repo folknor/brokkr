@@ -21,7 +21,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use crate::config::{LintConfig, PinersConfig};
+use crate::config::project_config::piners::{LintConfig, PinersConfig};
 use crate::error::DevError;
 use crate::output;
 use crate::piners::lint::cmd::LintArgs;
@@ -194,7 +194,7 @@ fn stamp_one(id: &str, abs: &Path, corpus_root: &Path) -> Result<LintPin, DevErr
         tv: Vec::new(),
         pine: FilePin {
             path: rel,
-            xxh128: preflight::compute_xxh128(abs)?,
+            xxh128: preflight::compute_file_digest(abs)?.to_string(),
         },
     })
 }

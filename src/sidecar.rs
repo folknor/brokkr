@@ -53,6 +53,7 @@ use std::time::{Duration, Instant};
 
 use crate::error::DevError;
 use crate::output;
+use crate::process::{Pid, ProcStat};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -339,16 +340,6 @@ pub struct SidecarRunResult {
 // /proc parsing
 // ---------------------------------------------------------------------------
 
-/// Fields extracted from `/proc/{pid}/stat`.
-struct ProcStat {
-    utime: i64,
-    stime: i64,
-    num_threads: i64,
-    vsize: i64, // bytes
-    minflt: i64,
-    majflt: i64,
-}
-
 /// Fields extracted from `/proc/{pid}/io`.
 struct ProcIo {
     rchar: i64,
@@ -372,50 +363,9 @@ struct ProcStatus {
     nonvol_cs: i64,
 }
 
-/// Read and parse `/proc/{pid}/stat`.
-///
-/// The comm field (field 2) can contain spaces and parentheses, so we find
-/// the *last* `)` to locate the end of field 2, then parse by index from there.
+/// Read `/proc/{pid}/stat` through the shared process parser.
 fn read_proc_stat(pid: u32) -> Option<ProcStat> {
-    let path = format!("/proc/{pid}/stat");
-    let contents = fs::read_to_string(&path).ok()?;
-
-    // Find end of comm field: last ')' in the line.
-    let comm_end = contents.rfind(')')?;
-    let rest = contents.get(comm_end + 2..)?; // skip ") "
-
-    // Fields after comm (0-indexed from after comm):
-    //  0: state
-    //  1: ppid
-    //  2: pgrp
-    //  3: session
-    //  4: tty_nr
-    //  5: tpgid
-    //  6: flags
-    //  7: minflt
-    //  8: cminflt
-    //  9: majflt
-    // 10: cmajflt
-    // 11: utime
-    // 12: stime
-    // ...
-    // 17: num_threads (field index 19 in the full line, 17 after comm)
-    // ...
-    // 20: vsize (field index 22 in the full line, 20 after comm)
-    let fields: Vec<&str> = rest.split_whitespace().collect();
-
-    if fields.len() < 21 {
-        return None;
-    }
-
-    Some(ProcStat {
-        minflt: fields[7].parse().ok()?,
-        majflt: fields[9].parse().ok()?,
-        utime: fields[11].parse().ok()?,
-        stime: fields[12].parse().ok()?,
-        num_threads: fields[17].parse().ok()?,
-        vsize: fields[20].parse().ok()?,
-    })
+    ProcStat::read(Pid::new(pid)?).ok()
 }
 
 /// Read and parse `/proc/{pid}/io`.
@@ -530,14 +480,14 @@ fn read_proc_metrics(pid: u32, sample_idx: i32, timestamp_us: i64) -> Option<Sam
         shmem_kb: status.rss_shmem_kb,
         swap_kb: status.vm_swap_kb,
         vm_hwm_kb: status.vm_hwm_kb,
-        vsize_kb: stat.vsize / 1024,
+        vsize_kb: i64::try_from(stat.virtual_bytes()).ok()? / 1024,
 
-        utime: stat.utime,
-        stime: stat.stime,
-        num_threads: stat.num_threads,
+        utime: i64::try_from(stat.user_ticks()).ok()?,
+        stime: i64::try_from(stat.system_ticks()).ok()?,
+        num_threads: i64::try_from(stat.num_threads()).ok()?,
 
-        minflt: stat.minflt,
-        majflt: stat.majflt,
+        minflt: i64::try_from(stat.minor_faults()).ok()?,
+        majflt: i64::try_from(stat.major_faults()).ok()?,
 
         rchar: io.rchar,
         wchar: io.wchar,
@@ -572,9 +522,7 @@ fn read_proc_metrics(pid: u32, sample_idx: i32, timestamp_us: i64) -> Option<Sam
 /// ([`format_status`]/[`parse_status`]) carry the tested logic.
 #[cfg(not(test))]
 pub(crate) fn status_path() -> Option<PathBuf> {
-    crate::lockfile::compile_lock_path()
-        .ok()
-        .map(|p| p.with_file_name("sidecar-status"))
+    crate::user_dirs::sidecar_status()
 }
 
 #[cfg(test)]
@@ -1084,7 +1032,7 @@ pub(crate) fn run_sidecar_with_deadline(
                 // SIGKILL the whole process group (the captured runner
                 // / harness child is its own PG leader) so descendants
                 // get reaped along with the leader.
-                crate::ratatoskr::process::send_signal_pgrp(child.id(), libc::SIGKILL).ok();
+                crate::process::signal_process_group(child.id(), libc::SIGKILL).ok();
                 child.kill().ok();
                 // Wait for process to actually exit so we can collect status.
                 let status = child.wait().ok();
@@ -1098,7 +1046,7 @@ pub(crate) fn run_sidecar_with_deadline(
         // Graceful shutdown via `brokkr kill` (SIGTERM handler set this flag).
         if crate::shutdown::is_shutdown_requested() {
             output::sidecar_msg("shutdown requested, killing child");
-            crate::ratatoskr::process::send_signal_pgrp(child.id(), libc::SIGKILL).ok();
+            crate::process::signal_process_group(child.id(), libc::SIGKILL).ok();
             child.kill().ok();
             let status = child.wait().ok();
             child_elapsed = Some(start.elapsed());
@@ -1124,7 +1072,7 @@ pub(crate) fn run_sidecar_with_deadline(
                         "child exceeded its {:.1}s deadline, killing it",
                         limit.as_secs_f64()
                     ));
-                    crate::ratatoskr::process::send_signal_pgrp(child.id(), libc::SIGKILL).ok();
+                    crate::process::signal_process_group(child.id(), libc::SIGKILL).ok();
                     child.kill().ok();
                     let status = child.wait().ok();
                     child_elapsed = Some(start.elapsed());
@@ -1234,8 +1182,8 @@ mod tests {
         let stat = read_proc_stat(pid);
         assert!(stat.is_some(), "should be able to read own /proc/stat");
         let stat = stat.unwrap();
-        assert!(stat.num_threads >= 1);
-        assert!(stat.vsize > 0);
+        assert!(stat.num_threads() >= 1);
+        assert!(stat.virtual_bytes() > 0);
     }
 
     #[test]

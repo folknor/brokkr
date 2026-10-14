@@ -27,7 +27,7 @@ static SERIAL_BUILDS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicB
 /// or in a sweep's own `env` - or `build.build-dir` anywhere in the config
 /// chain) holds intermediate artifacts that target dirs do not separate, so it
 /// forces one group.
-fn set_serial_builds(project_root: &Path, configured: bool, sweeps: &[ResolvedSweep]) {
+fn set_serial_builds(project_root: &Path, configured: bool, sweeps: &[PlannedSweep]) {
     let sweep_build_dir = sweeps.iter().any(|sweep| {
         let env: Vec<(&str, &str)> = sweep
             .env
@@ -61,7 +61,7 @@ fn build_dir_configured(
 /// The directory a sweep's cargo invocations write: its isolated target dir,
 /// else the shared one. Canonicalized where it exists, so two spellings of
 /// one directory are one group.
-fn target_dir_key(sweep: &ResolvedSweep, meta_target_dir: &Path) -> PathBuf {
+fn target_dir_key(sweep: &PlannedSweep, meta_target_dir: &Path) -> PathBuf {
     let dir = isolated_target_dir(sweep, meta_target_dir).unwrap_or_else(|| meta_target_dir.to_path_buf());
     std::fs::canonicalize(&dir).unwrap_or(dir)
 }

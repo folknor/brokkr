@@ -1012,7 +1012,7 @@ pub struct VerifiedProbe {
 ///
 /// A missing file or a hash mismatch is a hard error: either the registry
 /// is lying or the corpus drifted under us. Reuses
-/// [`preflight::verify_file_hash`] (xxh128, mtime-cached) so the digest
+/// [`preflight::verify_file_digest`] (xxh128, mtime-cached) so the digest
 /// matches the rest of brokkr.
 ///
 /// Two more refusals, both about what the harness will actually do:
@@ -1140,9 +1140,18 @@ fn verify_one(
     // hash into the pin. Cheap sniff, no-op for plaintext files.
     let origin = format!("{subject} ({label})");
     crate::piners::lfs::ensure_materialized(&abs).map_err(|e| with_origin(e, &origin, &abs))?;
-    preflight::verify_file_hash(&abs, &file.xxh128, project_root, Some(&origin))
+    let expected = parse_file_digest(&file.xxh128)?;
+    preflight::verify_file_digest(&abs, &expected, project_root, Some(&origin))
         .map_err(|e| with_origin(e, &origin, &abs))?;
     Ok(())
+}
+
+/// Parse a digest at the registry's string boundary before using the typed
+/// file verification API.
+pub(crate) fn parse_file_digest(value: &str) -> Result<preflight::FileDigest, DevError> {
+    value
+        .parse()
+        .map_err(|error| DevError::Config(format!("invalid XXH128 digest: {error}")))
 }
 
 /// Name the probe, feed group or harness file (and the role or file label)
@@ -1716,7 +1725,7 @@ pine = { path = "p/bare/strategy.pine", xxh128 = "aa" }
         std::fs::write(&abs, bytes).unwrap();
         FilePin {
             path: rel,
-            xxh128: preflight::compute_xxh128(&abs).unwrap(),
+            xxh128: preflight::compute_file_digest(&abs).unwrap().to_string(),
         }
     }
 

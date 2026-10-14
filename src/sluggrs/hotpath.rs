@@ -28,7 +28,7 @@
 use std::path::Path;
 
 use crate::build;
-use crate::context::BenchContext;
+use crate::context::MeasurementSession;
 use crate::error::DevError;
 use crate::harness::{self, BenchConfig};
 use crate::measure::{MeasureMode, MeasureRequest};
@@ -132,11 +132,11 @@ pub(crate) fn cmd(req: &MeasureRequest, target: &str) -> Result<(), DevError> {
         profile: "release",
     };
 
-    // `BenchContext` builds against `build_root` (the worktree under
+    // `MeasurementSession` builds against `build_root` (the worktree under
     // `--commit`) while resolving data paths and the results DB against
     // `project_root`, and takes the global lock before the `cargo metadata`
     // call so a worktree's own toolchain pin is already disarmed.
-    let ctx = BenchContext::with_build_config_for_request(req, &build_config, "hotpath")?;
+    let ctx = MeasurementSession::with_build_config_for_request(req, &build_config, "hotpath")?;
 
     let scratch_dir = ctx.paths.scratch_dir.clone();
     run(
@@ -155,7 +155,7 @@ pub(crate) fn cmd(req: &MeasureRequest, target: &str) -> Result<(), DevError> {
 
 /// Run the built example through the bench harness under `req`'s mode.
 fn run(
-    ctx: &BenchContext,
+    ctx: &MeasurementSession,
     req: &MeasureRequest,
     runs: usize,
     build_root: &Path,
@@ -163,7 +163,7 @@ fn run(
     command_label: &str,
 ) -> Result<(), DevError> {
     let binary_str = ctx
-        .binary
+        .binary()?
         .to_str()
         .ok_or_else(|| DevError::Config("binary path is not valid UTF-8".into()))?
         .to_owned();
@@ -174,14 +174,12 @@ fn run(
         command: command_label.to_owned(),
         // Harness carries the measurement mode (bench/hotpath/alloc) and
         // the brokkr invocation - no need to set them here.
-        mode: None,
         input_file: None,
         input_mb: None,
         cargo_features: None,
         cargo_profile: build::CargoProfile::Release,
         runs,
         cli_args: Some(harness::format_cli_args(&binary_str, &[])),
-        brokkr_args: None,
         metadata: vec![],
     };
 
@@ -192,7 +190,7 @@ fn run(
         output::detail(&format!("sluggrs {label}: {command_label}"));
         harness::hotpath_alloc_note(req.is_alloc());
 
-        ctx.harness.run_hotpath(&config, &ctx.binary, |_i| {
+        ctx.harness.run_hotpath(&config, ctx.binary()?, |_i| {
             let (result, _stderr, sidecar) = harness::run_hotpath_capture(
                 &binary_str,
                 &[],
@@ -218,7 +216,7 @@ fn run(
         // The trade is that `elapsed_ms=` becomes mandatory on stderr: a run
         // that omits it fails rather than being silently mistimed.
         ctx.harness
-            .run_external_with_kv(&config, &ctx.binary, &[], build_root)?;
+            .run_external_with_kv(&config, ctx.binary()?, &[], build_root)?;
     }
 
     Ok(())

@@ -51,6 +51,7 @@ use super::{
     StreamTap, StrictPlan, TestTracker, WATCHDOG_POLL, hash_file,
 };
 use crate::error::DevError;
+use crate::process::{Pid, ProcStat, VerifiedProcess};
 
 pub(super) struct Harness {
     pidfd: OwnedFd,
@@ -127,23 +128,29 @@ const ACCEPT: u8 = 1;
 const PASSTHROUGH: u8 = 0;
 const REFUSE: u8 = 2;
 
-pub(super) struct Session {
-    dir: PathBuf,
-    listener: UnixListener,
-    cargo_pid: Arc<AtomicU32>,
-    harnesses: Arc<Mutex<Vec<Harness>>>,
+/// State shared by the session owner, acceptor, watchdog, and drains.
+struct SessionState {
+    cargo_pid: AtomicU32,
+    harnesses: Mutex<Vec<Harness>>,
     /// (pid, starttime) of every accepted peer: once per process identity,
     /// never refusing a recycled pid.
-    seen: Arc<Mutex<HashSet<(u32, String)>>>,
-    drains: Arc<Mutex<Vec<thread::JoinHandle<()>>>>,
-    done: Arc<AtomicBool>,
-    watchdog_done: Arc<AtomicBool>,
+    seen: Mutex<HashSet<(u32, String)>>,
+    drains: Mutex<Vec<thread::JoinHandle<()>>>,
+    accepting: AtomicBool,
+    drain_cancel: AtomicBool,
+    watchdog_done: AtomicBool,
     stdout: Arc<Mutex<Vec<u8>>>,
     sink: Option<ObservationSink>,
     /// `Some` on a strict session: the harness executables (and content) this
     /// run may attribute, and whether a rustdoc may connect. Anything else,
     /// and any cargo child that fails the handshake, is refused.
-    strict: Option<Arc<StrictPlan>>,
+    strict: Option<StrictPlan>,
+}
+
+pub(super) struct Session {
+    dir: PathBuf,
+    listener: UnixListener,
+    state: Arc<SessionState>,
 }
 
 impl Session {
@@ -174,15 +181,18 @@ impl Session {
         Ok(Self {
             dir,
             listener,
-            cargo_pid: Arc::new(AtomicU32::new(0)),
-            harnesses: Arc::new(Mutex::new(Vec::new())),
-            seen: Arc::new(Mutex::new(HashSet::new())),
-            drains: Arc::new(Mutex::new(Vec::new())),
-            done: Arc::new(AtomicBool::new(false)),
-            watchdog_done: Arc::new(AtomicBool::new(false)),
-            stdout,
-            sink,
-            strict: strict.map(Arc::new),
+            state: Arc::new(SessionState {
+                cargo_pid: AtomicU32::new(0),
+                harnesses: Mutex::new(Vec::new()),
+                seen: Mutex::new(HashSet::new()),
+                drains: Mutex::new(Vec::new()),
+                accepting: AtomicBool::new(true),
+                drain_cancel: AtomicBool::new(false),
+                watchdog_done: AtomicBool::new(false),
+                stdout,
+                sink,
+                strict,
+            }),
         })
     }
 
@@ -193,34 +203,31 @@ impl Session {
         self.dir.join(RUSTDOC_LINK).to_string_lossy().into_owned()
     }
     pub(super) fn set_cargo_pid(&self, pid: u32) {
-        self.cargo_pid.store(pid, Ordering::Release);
+        self.state.cargo_pid.store(pid, Ordering::Release);
     }
 
-    /// Stop accepting and draining, and wait for every drain to hand its
-    /// block to the stdout buffer. A drain whose pipe a leaked descendant
-    /// still holds notices `done` within one poll and flushes what it has, so
-    /// the join is bounded.
+    /// Stop accepting and give every output drain the shared grace interval
+    /// to reach EOF. The common join helper cancels and joins any drain whose
+    /// pipe a leaked descendant still holds open.
     pub(super) fn finish(&self) {
-        self.done.store(true, Ordering::Release);
+        self.state.accepting.store(false, Ordering::Release);
         self.stop_watchdog();
-        let drains = self
-            .drains
-            .lock()
-            .map(|mut d| std::mem::take(&mut *d))
-            .unwrap_or_default();
-        for d in drains {
-            d.join().ok();
-        }
+        let drains = match self.state.drains.lock() {
+            Ok(mut drains) => std::mem::take(&mut *drains),
+            Err(poisoned) => std::mem::take(&mut *poisoned.into_inner()),
+        };
+        super::procgroup::join_drains(drains, &self.state.drain_cancel);
     }
 
     pub(super) fn stop_watchdog(&self) {
-        self.watchdog_done.store(true, Ordering::Release);
+        self.state.watchdog_done.store(true, Ordering::Release);
     }
 
     pub(super) fn settle(&self) {
         let until = Instant::now() + Duration::from_millis(250);
         while Instant::now() < until {
             if self
+                .state
                 .harnesses
                 .lock()
                 .is_ok_and(|all| all.iter().all(|h| h.eof.load(Ordering::Acquire)))
@@ -233,30 +240,13 @@ impl Session {
 
     pub(super) fn run_acceptor(&self) -> Result<thread::JoinHandle<()>, DevError> {
         let listener = self.listener.try_clone().map_err(DevError::Io)?;
-        let cargo_pid = Arc::clone(&self.cargo_pid);
-        let harnesses = Arc::clone(&self.harnesses);
-        let seen = Arc::clone(&self.seen);
-        let drains = Arc::clone(&self.drains);
-        let done = Arc::clone(&self.done);
-        let stdout = Arc::clone(&self.stdout);
-        let sink = self.sink.clone();
-        let strict = self.strict.clone();
+        let state = Arc::clone(&self.state);
         Ok(thread::spawn(move || {
-            while !done.load(Ordering::Acquire) {
+            while state.accepting.load(Ordering::Acquire) {
                 match listener.accept() {
                     Ok((stream, _)) => {
-                        let shared = Shared {
-                            cargo_pid: &cargo_pid,
-                            seen: &seen,
-                            harnesses: &harnesses,
-                            drains: &drains,
-                            stdout: &stdout,
-                            done: &done,
-                            sink: sink.as_ref(),
-                            strict: strict.as_deref(),
-                        };
-                        if let Err(refusal) = accept_one(&stream, &shared) {
-                            refuse(&stream, refusal, &shared);
+                        if let Err(refusal) = accept_one(&stream, &state) {
+                            refuse(&stream, &refusal, &state);
                         }
                     }
                     Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
@@ -271,7 +261,7 @@ impl Session {
     pub(super) fn totals(&self) -> (Vec<(String, Duration)>, Vec<String>) {
         let mut completed = Vec::new();
         let mut in_flight = Vec::new();
-        if let Ok(harnesses) = self.harnesses.lock() {
+        if let Ok(harnesses) = self.state.harnesses.lock() {
             for h in harnesses.iter() {
                 if let Ok(mut t) = h.tracker.lock() {
                     completed.append(&mut t.completed);
@@ -294,21 +284,20 @@ impl Session {
         started: Instant,
         primary: Option<StreamTap>,
     ) -> thread::JoinHandle<()> {
-        let harnesses = Arc::clone(&self.harnesses);
-        let done = Arc::clone(&self.watchdog_done);
+        let state = Arc::clone(&self.state);
         let ceilings = ceilings.clone();
         let timeout = ceilings.per_test;
         thread::spawn(move || {
             let mut idle_since = started;
             loop {
-                if done.load(Ordering::Acquire) {
+                if state.watchdog_done.load(Ordering::Acquire) {
                     return;
                 }
                 let mut wait = WATCHDOG_POLL;
                 let mut readings = Vec::new();
                 let mut taps = Vec::new();
                 let mut executing = false;
-                if let Ok(harnesses) = harnesses.lock() {
+                if let Ok(harnesses) = state.harnesses.lock() {
                     for h in harnesses.iter() {
                         if !live_harness(h) {
                             continue;
@@ -340,7 +329,7 @@ impl Session {
                 }
                 let idle = (!executing).then(|| idle_since.elapsed());
                 if let Some(verdict) = ceilings.verdict(&readings, idle, started.elapsed()) {
-                    if done.load(Ordering::Acquire) {
+                    if state.watchdog_done.load(Ordering::Acquire) {
                         return;
                     }
                     let charged = verdict
@@ -377,35 +366,70 @@ impl Drop for Session {
     }
 }
 
-/// The session state an accepted connection is registered into.
-struct Shared<'a> {
-    cargo_pid: &'a AtomicU32,
-    seen: &'a Mutex<HashSet<(u32, String)>>,
-    harnesses: &'a Mutex<Vec<Harness>>,
-    drains: &'a Mutex<Vec<thread::JoinHandle<()>>>,
-    stdout: &'a Arc<Mutex<Vec<u8>>>,
-    done: &'a Arc<AtomicBool>,
-    sink: Option<&'a ObservationSink>,
-    strict: Option<&'a StrictPlan>,
-}
-
 /// Why a connection does not get a pipe.
 enum Refusal {
     /// Not cargo's direct child: the doctest runtool under rustdoc, or a nested
     /// run. Expected, and silent - and sanctioned to run unisolated even on a
     /// strict session, since its output is captured by its own parent.
     NotCargoChild,
-    /// Cargo's child, but the handshake failed. Worth saying.
-    Unexpected(io::Error),
-    /// A strict session's connection the plan does not hold: an executable
-    /// it never enumerated, one rebuilt since, or a rustdoc on a run with no
-    /// doctest carrier. Carries the whole detail.
-    Unplanned(String),
+    HandshakeIo(io::Error),
+    AuthenticationIo(io::Error),
+    SessionIo(io::Error),
+    UnplannedExecutable {
+        executable: String,
+    },
+    RebuiltExecutable {
+        executable: String,
+    },
+    RustdocWithoutCarrier,
+    UnknownRole {
+        role: u8,
+    },
+    ExecutableHashFailed {
+        executable: String,
+        detail: String,
+    },
+    RunnerMismatch,
+    RunnerExitedDuringHandshake,
+    ProcessIdentityUnavailable,
+    DuplicateConnection,
+    SessionClosing,
+    StatePoisoned(&'static str),
 }
 
-impl From<io::Error> for Refusal {
-    fn from(e: io::Error) -> Self {
-        Self::Unexpected(e)
+impl Refusal {
+    fn detail(&self) -> String {
+        match self {
+            Self::NotCargoChild => String::new(),
+            Self::HandshakeIo(error) => {
+                format!("a cargo child failed the harness handshake: {error}")
+            }
+            Self::AuthenticationIo(error) => {
+                format!("a cargo child failed harness authentication: {error}")
+            }
+            Self::SessionIo(error) => {
+                format!("the harness session could not create or deliver its output pipe: {error}")
+            }
+            Self::UnplannedExecutable { executable } => {
+                format!("a harness ran an executable this run did not plan: {executable}")
+            }
+            Self::RebuiltExecutable { executable } => format!(
+                "{executable} is not the content the plan enumerated - it was rebuilt since the plan"
+            ),
+            Self::RustdocWithoutCarrier => {
+                "a rustdoc connected on a run the plan holds no doctest carrier for".into()
+            }
+            Self::UnknownRole { role } => format!("unknown harness handshake role {role}"),
+            Self::ExecutableHashFailed { executable, detail } => {
+                format!("{executable} could not be hashed: {detail}")
+            }
+            Self::RunnerMismatch => "the runner is not this brokkr binary".into(),
+            Self::RunnerExitedDuringHandshake => "runner exited before handshake".into(),
+            Self::ProcessIdentityUnavailable => "runner has no process starttime".into(),
+            Self::DuplicateConnection => "second connection from one runner".into(),
+            Self::SessionClosing => "the harness session is closing".into(),
+            Self::StatePoisoned(name) => format!("harness session {name} mutex poisoned"),
+        }
     }
 }
 
@@ -413,15 +437,12 @@ impl From<io::Error> for Refusal {
 /// the shared stream, as it always has; a strict one refuses it (the shim then
 /// exits) and records why, because a harness that cannot be attributed cannot
 /// be accounted for.
-fn refuse(stream: &UnixStream, refusal: Refusal, s: &Shared<'_>) {
-    let detail = match refusal {
-        Refusal::NotCargoChild => {
-            send_verdict(stream, PASSTHROUGH, None).ok();
-            return;
-        }
-        Refusal::Unexpected(e) => format!("a cargo child failed the harness handshake: {e}"),
-        Refusal::Unplanned(detail) => detail,
-    };
+fn refuse(stream: &UnixStream, refusal: &Refusal, s: &SessionState) {
+    if matches!(refusal, Refusal::NotCargoChild) {
+        send_verdict(stream, PASSTHROUGH, None).ok();
+        return;
+    }
+    let detail = refusal.detail();
     if s.strict.is_some() {
         send_verdict(stream, REFUSE, None).ok();
     } else {
@@ -430,29 +451,27 @@ fn refuse(stream: &UnixStream, refusal: Refusal, s: &Shared<'_>) {
             "a test harness could not be isolated and runs on the shared stream: {detail}"
         ));
     }
-    if let Some(sink) = s.sink {
+    if let Some(sink) = s.sink.as_ref() {
         StreamTap::new(sink, StreamSource::Process).emit(ObsEvent::AttributionError { detail });
     }
 }
 
-fn accept_one(stream: &UnixStream, s: &Shared<'_>) -> Result<(), Refusal> {
+fn accept_one(stream: &UnixStream, s: &Arc<SessionState>) -> Result<(), Refusal> {
     // SO_PEERCRED supplies the kernel's PID at connect time. Check the direct
     // cargo parent and executable before giving this peer a pipe.
-    let pid = peer_pid(stream)?;
+    let pid = peer_pid(stream).map_err(Refusal::AuthenticationIo)?;
     // The shim writes its handshake before reading anything, so reading it
     // first costs nothing and leaves no peer waiting on an unread message.
-    let (role, executable) = recv_hello(stream)?;
+    let (role, executable) = recv_hello(stream).map_err(Refusal::HandshakeIo)?;
     let root = s.cargo_pid.load(Ordering::Acquire);
-    if root == 0 || proc_parent(pid)? != root {
+    if root == 0 || proc_parent(pid).map_err(Refusal::AuthenticationIo)? != root {
         return Err(Refusal::NotCargoChild);
     }
     let source = match role {
         ROLE_HARNESS => {
-            if let Some(plan) = s.strict {
+            if let Some(plan) = &s.strict {
                 let Some(planned) = plan.known.get(&executable) else {
-                    return Err(Refusal::Unplanned(format!(
-                        "a harness ran an executable this run did not plan: {executable}"
-                    )));
+                    return Err(Refusal::UnplannedExecutable { executable });
                 };
                 // The last check before this harness runs: the file cargo is
                 // about to exec is the one the plan enumerated, byte for
@@ -461,82 +480,80 @@ fn accept_one(stream: &UnixStream, s: &Shared<'_>) -> Result<(), Refusal> {
                 match hash_file(Path::new(&executable)) {
                     Ok(now) if &now == planned => {}
                     Ok(_) => {
-                        return Err(Refusal::Unplanned(format!(
-                            "{executable} is not the content the plan enumerated - it was rebuilt \
-                             since the plan"
-                        )));
+                        return Err(Refusal::RebuiltExecutable { executable });
                     }
                     Err(e) => {
-                        return Err(Refusal::Unexpected(io::Error::other(format!(
-                            "{executable} could not be hashed: {e}"
-                        ))));
+                        return Err(Refusal::ExecutableHashFailed {
+                            executable,
+                            detail: e.to_string(),
+                        });
                     }
                 }
             }
             StreamSource::Harness { executable }
         }
         ROLE_RUSTDOC => {
-            if s.strict.is_some_and(|plan| !plan.rustdoc) {
-                return Err(Refusal::Unplanned(
-                    "a rustdoc connected on a run the plan holds no doctest carrier for".into(),
-                ));
+            if s.strict.as_ref().is_some_and(|plan| !plan.rustdoc) {
+                return Err(Refusal::RustdocWithoutCarrier);
             }
             StreamSource::Rustdoc
         }
-        other => {
-            return Err(Refusal::Unexpected(io::Error::other(format!(
-                "unknown handshake role {other}"
-            ))));
-        }
+        role => return Err(Refusal::UnknownRole { role }),
     };
-    if !same_exe(pid)? {
-        return Err(Refusal::Unexpected(io::Error::other(
-            "the runner is not this brokkr binary",
-        )));
+    if !same_exe(pid).map_err(Refusal::AuthenticationIo)? {
+        return Err(Refusal::RunnerMismatch);
     }
-    let pidfd = open_pidfd(pid)?;
-    // A pidfd names this exact process, so PID reuse cannot retire or revive
-    // its tracker. The second parent check closes the connect/open race.
-    if pidfd_exited(&pidfd) || proc_parent(pid)? != root {
-        return Err(Refusal::Unexpected(io::Error::other(
-            "runner exited before handshake",
-        )));
+    // Bind the peer's current process generation to a pidfd: the identity is
+    // re-read around `pidfd_open`, and from then on the pidfd names this exact
+    // process, so PID reuse cannot retire or revive its tracker. The second
+    // parent check closes the connect/open race.
+    let stat = Pid::new(pid)
+        .and_then(|p| ProcStat::read(p).ok())
+        .ok_or(Refusal::ProcessIdentityUnavailable)?;
+    let pidfd = VerifiedProcess::open(stat.identity(), None)
+        .map_err(|_| Refusal::RunnerExitedDuringHandshake)?
+        .into_pidfd();
+    if pidfd_exited(&pidfd) || proc_parent(pid).map_err(Refusal::AuthenticationIo)? != root {
+        return Err(Refusal::RunnerExitedDuringHandshake);
     }
-    let identity = (
-        pid,
-        crate::lockfile::proc_starttime(pid).ok_or_else(|| io::Error::other("no starttime"))?,
-    );
+    let identity = (pid, stat.start().get().to_string());
     let fresh = s
         .seen
         .lock()
-        .map_err(|_| io::Error::other("seen mutex poisoned"))?
+        .map_err(|_| Refusal::StatePoisoned("peer identity"))?
         .insert(identity);
     if !fresh {
-        return Err(Refusal::Unexpected(io::Error::other(
-            "second connection from one runner",
-        )));
+        return Err(Refusal::DuplicateConnection);
     }
-    let (reader, writer) = pipe()?;
-    send_verdict(stream, ACCEPT, Some(writer.as_raw_fd()))?;
+    // The drain list is the admission barrier with `finish`: if this
+    // connection began before shutdown, finish will collect its thread; after
+    // shutdown begins, no untracked harness can receive a pipe.
+    let mut drains = s
+        .drains
+        .lock()
+        .map_err(|_| Refusal::StatePoisoned("drain list"))?;
+    let mut harnesses = s
+        .harnesses
+        .lock()
+        .map_err(|_| Refusal::StatePoisoned("harness list"))?;
+    if !s.accepting.load(Ordering::Acquire) {
+        return Err(Refusal::SessionClosing);
+    }
+    let (reader, writer) = pipe().map_err(Refusal::SessionIo)?;
+    send_verdict(stream, ACCEPT, Some(writer.as_raw_fd())).map_err(Refusal::SessionIo)?;
     drop(writer);
     let tracker = Arc::new(Mutex::new(TestTracker::default()));
     let eof = Arc::new(AtomicBool::new(false));
-    let tap = s.sink.map(|sink| StreamTap::new(sink, source));
-    s.harnesses
-        .lock()
-        .map_err(|_| io::Error::other("harness mutex poisoned"))?
-        .push(Harness {
-            pidfd,
-            tracker: Arc::clone(&tracker),
-            eof: Arc::clone(&eof),
-            tap: tap.clone(),
-        });
-    let stdout = Arc::clone(s.stdout);
-    let done = Arc::clone(s.done);
-    let handle = thread::spawn(move || drain_harness(reader, &stdout, &tracker, &eof, &done, tap));
-    if let Ok(mut d) = s.drains.lock() {
-        d.push(handle);
-    }
+    let tap = s.sink.as_ref().map(|sink| StreamTap::new(sink, source));
+    harnesses.push(Harness {
+        pidfd,
+        tracker: Arc::clone(&tracker),
+        eof: Arc::clone(&eof),
+        tap: tap.clone(),
+    });
+    let state = Arc::clone(s);
+    let handle = thread::spawn(move || drain_harness(reader, &state, &tracker, &eof, tap));
+    drains.push(handle);
     Ok(())
 }
 
@@ -549,10 +566,9 @@ fn accept_one(stream: &UnixStream, s: &Shared<'_>) -> Result<(), Refusal> {
 /// shape that used to drop failures from the roster.
 fn drain_harness(
     reader: OwnedFd,
-    stdout: &Mutex<Vec<u8>>,
+    state: &SessionState,
     tracker: &Mutex<TestTracker>,
     eof: &AtomicBool,
-    done: &AtomicBool,
     tap: Option<StreamTap>,
 ) {
     let mut reader = fs::File::from(reader);
@@ -564,7 +580,7 @@ fn drain_harness(
     let mut block: Vec<String> = Vec::new();
     let mut bytes = [0_u8; 4096];
     let end = loop {
-        match super::read_chunk(&mut reader, &mut bytes, done) {
+        match super::read_chunk(&mut reader, &mut bytes, &state.drain_cancel) {
             super::Chunk::Data(n) => {
                 for &byte in &bytes[..n] {
                     if byte == b'\n' {
@@ -576,7 +592,7 @@ fn drain_harness(
             }
             super::Chunk::Eof => break StreamEnd::Eof,
             super::Chunk::Error => break StreamEnd::ReadError,
-            // `done` while the pipe is still open: something the harness left
+            // Drain cancellation while the pipe is still open: something left
             // behind holds it, and whatever it has not written yet is lost.
             super::Chunk::Cancelled => break StreamEnd::Cancelled,
         }
@@ -589,7 +605,7 @@ fn drain_harness(
     // records it parsed, and this one is detached from the tap.
     let tap = recon.tap.take();
     block.extend(close_unfinished_suite(&mut recon, tracker));
-    if let Ok(mut buf) = stdout.lock() {
+    if let Ok(mut buf) = state.stdout.lock() {
         for line in block {
             buf.extend_from_slice(line.as_bytes());
             buf.push(b'\n');
@@ -681,18 +697,15 @@ fn peer_pid(stream: &UnixStream) -> io::Result<u32> {
 }
 
 fn proc_parent(pid: u32) -> io::Result<u32> {
-    let stat = fs::read_to_string(format!("/proc/{pid}/stat"))?;
-    let rest = stat
-        .rsplit_once(") ")
-        .ok_or_else(|| io::Error::other("invalid proc stat"))?
-        .1;
-    rest.split_whitespace()
-        .nth(1)
-        .ok_or_else(|| io::Error::other("missing parent pid"))?
-        .parse()
-        .map_err(|_| io::Error::other("invalid parent pid"))
+    let pid = Pid::new(pid).ok_or_else(|| io::Error::other("invalid pid"))?;
+    ProcStat::read(pid)?
+        .parent()
+        .map(Pid::get)
+        .ok_or_else(|| io::Error::other("missing parent pid"))
 }
 
+/// An unverified pidfd for a process the test itself owns.
+#[cfg(test)]
 fn open_pidfd(pid: u32) -> io::Result<OwnedFd> {
     // SAFETY: a plain syscall with no pointer arguments.
     let ret = unsafe { libc::syscall(libc::SYS_pidfd_open, pid.cast_signed(), 0_u32) };
@@ -989,38 +1002,33 @@ mod tests {
         assert_eq!(path, "/t/debug/deps/suite-abc");
     }
 
-    /// A session-shaped `Shared` whose "cargo" is this test process's parent,
+    /// A session state whose "cargo" is this test process's parent,
     /// so a socket pair inside this process authenticates as cargo's child
     /// running this very binary - the shape a real runner presents.
-    #[allow(clippy::type_complexity)]
-    fn strict_parts(
+    fn strict_state(
         known: &[(&str, &str)],
         rustdoc: bool,
-    ) -> (
-        AtomicU32,
-        Mutex<HashSet<(u32, String)>>,
-        Mutex<Vec<Harness>>,
-        Mutex<Vec<thread::JoinHandle<()>>>,
-        Arc<Mutex<Vec<u8>>>,
-        Arc<AtomicBool>,
-        StrictPlan,
-    ) {
+        sink: Option<ObservationSink>,
+    ) -> Arc<SessionState> {
         let parent = proc_parent(std::process::id()).expect("own parent");
-        (
-            AtomicU32::new(parent),
-            Mutex::new(HashSet::new()),
-            Mutex::new(Vec::new()),
-            Mutex::new(Vec::new()),
-            Arc::new(Mutex::new(Vec::new())),
-            Arc::new(AtomicBool::new(false)),
-            StrictPlan {
+        Arc::new(SessionState {
+            cargo_pid: AtomicU32::new(parent),
+            harnesses: Mutex::new(Vec::new()),
+            seen: Mutex::new(HashSet::new()),
+            drains: Mutex::new(Vec::new()),
+            accepting: AtomicBool::new(true),
+            drain_cancel: AtomicBool::new(false),
+            watchdog_done: AtomicBool::new(false),
+            stdout: Arc::new(Mutex::new(Vec::new())),
+            sink,
+            strict: Some(StrictPlan {
                 known: known
                     .iter()
                     .map(|(p, h)| ((*p).to_owned(), (*h).to_owned()))
                     .collect(),
                 rustdoc,
-            },
-        )
+            }),
+        })
     }
 
     fn collecting_sink() -> (ObservationSink, Arc<Mutex<Vec<super::super::Observation>>>) {
@@ -1039,11 +1047,10 @@ mod tests {
         (path.to_string_lossy().into_owned(), hash)
     }
 
-    fn release(done: &AtomicBool, drains: &Mutex<Vec<thread::JoinHandle<()>>>) {
-        done.store(true, Ordering::Release);
-        for d in drains.lock().expect("drains").drain(..) {
-            d.join().ok();
-        }
+    fn release(state: &SessionState) {
+        state.accepting.store(false, Ordering::Release);
+        let drains = std::mem::take(&mut *state.drains.lock().expect("drains"));
+        super::super::procgroup::join_drains(drains, &state.drain_cancel);
     }
 
     /// Under a strict session a cargo child that fails the handshake is an
@@ -1051,26 +1058,16 @@ mod tests {
     /// than left to run on the shared stream.
     #[test]
     fn a_failed_handshake_on_a_strict_session_is_refused_and_recorded() {
-        let (pid, seen, harnesses, drains, stdout, done, plan) =
-            strict_parts(&[("/planned", "0")], false);
         let (sink, observed) = collecting_sink();
-        let shared = Shared {
-            cargo_pid: &pid,
-            seen: &seen,
-            harnesses: &harnesses,
-            drains: &drains,
-            stdout: &stdout,
-            done: &done,
-            sink: Some(&sink),
-            strict: Some(&plan),
-        };
+        let state = strict_state(&[("/planned", "0")], false, Some(sink));
         // A peer that says nothing it should: an unknown role byte.
         let (parent, shim) = UnixStream::pair().expect("socket pair");
         send_hello(&shim, b'?', b"/planned").expect("send");
-        let Err(refusal) = accept_one(&parent, &shared) else {
+        let Err(refusal) = accept_one(&parent, &state) else {
             panic!("a bad handshake is refused");
         };
-        refuse(&parent, refusal, &shared);
+        assert!(matches!(&refusal, Refusal::UnknownRole { role: b'?' }));
+        refuse(&parent, &refusal, &state);
         assert!(matches!(
             recv_verdict(&shim).expect("verdict"),
             Verdict::Refuse
@@ -1084,30 +1081,42 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_missing_handshake_is_a_typed_io_refusal() {
+        let (sink, observed) = collecting_sink();
+        let state = strict_state(&[], false, Some(sink));
+        let (peer, shim) = UnixStream::pair().expect("socket pair");
+        drop(shim);
+        let Err(refusal) = accept_one(&peer, &state) else {
+            panic!("a missing handshake is refused");
+        };
+        assert!(matches!(&refusal, Refusal::HandshakeIo(_)));
+        refuse(&peer, &refusal, &state);
+        assert!(
+            observed
+                .lock()
+                .expect("observed")
+                .iter()
+                .any(|observation| {
+                    matches!(observation.event, ObsEvent::AttributionError { .. })
+                })
+        );
+    }
+
     /// A strict session's harness must resolve to a planned executable: an
     /// unknown one is refused, a planned one gets its pipe.
     #[test]
     fn a_strict_session_admits_only_planned_executables() {
         let (path, hash) = planned_file("admits_planned", b"harness");
-        let (pid, seen, harnesses, drains, stdout, done, plan) =
-            strict_parts(&[(path.as_str(), hash.as_str())], false);
         let (sink, observed) = collecting_sink();
-        let shared = Shared {
-            cargo_pid: &pid,
-            seen: &seen,
-            harnesses: &harnesses,
-            drains: &drains,
-            stdout: &stdout,
-            done: &done,
-            sink: Some(&sink),
-            strict: Some(&plan),
-        };
+        let state = strict_state(&[(path.as_str(), hash.as_str())], false, Some(sink));
         let (parent, shim) = UnixStream::pair().expect("socket pair");
         send_hello(&shim, ROLE_HARNESS, b"/elsewhere").expect("send");
-        let Err(refusal) = accept_one(&parent, &shared) else {
+        let Err(refusal) = accept_one(&parent, &state) else {
             panic!("an unplanned executable is refused");
         };
-        refuse(&parent, refusal, &shared);
+        assert!(matches!(&refusal, Refusal::UnplannedExecutable { .. }));
+        refuse(&parent, &refusal, &state);
         assert!(matches!(
             recv_verdict(&shim).expect("verdict"),
             Verdict::Refuse
@@ -1120,14 +1129,14 @@ mod tests {
         let (parent, shim) = UnixStream::pair().expect("socket pair");
         send_hello(&shim, ROLE_HARNESS, path.as_bytes()).expect("send");
         assert!(
-            accept_one(&parent, &shared).is_ok(),
+            accept_one(&parent, &state).is_ok(),
             "a planned harness is accepted"
         );
         assert!(matches!(
             recv_verdict(&shim).expect("verdict"),
             Verdict::Accept(_)
         ));
-        release(&done, &drains);
+        release(&state);
     }
 
     /// The planned path is not enough: a harness whose file was rebuilt
@@ -1137,25 +1146,15 @@ mod tests {
     fn a_strict_session_refuses_a_planned_path_with_other_content() {
         let (path, hash) = planned_file("rebuilt_in_place", b"the planned build");
         fs::write(&path, b"another shape's build").expect("rebuild");
-        let (pid, seen, harnesses, drains, stdout, done, plan) =
-            strict_parts(&[(path.as_str(), hash.as_str())], false);
         let (sink, observed) = collecting_sink();
-        let shared = Shared {
-            cargo_pid: &pid,
-            seen: &seen,
-            harnesses: &harnesses,
-            drains: &drains,
-            stdout: &stdout,
-            done: &done,
-            sink: Some(&sink),
-            strict: Some(&plan),
-        };
+        let state = strict_state(&[(path.as_str(), hash.as_str())], false, Some(sink));
         let (parent, shim) = UnixStream::pair().expect("socket pair");
         send_hello(&shim, ROLE_HARNESS, path.as_bytes()).expect("send");
-        let Err(refusal) = accept_one(&parent, &shared) else {
+        let Err(refusal) = accept_one(&parent, &state) else {
             panic!("a rebuilt harness is refused");
         };
-        refuse(&parent, refusal, &shared);
+        assert!(matches!(&refusal, Refusal::RebuiltExecutable { .. }));
+        refuse(&parent, &refusal, &state);
         assert!(matches!(
             recv_verdict(&shim).expect("verdict"),
             Verdict::Refuse
@@ -1171,21 +1170,11 @@ mod tests {
     #[test]
     fn a_strict_session_admits_rustdoc_only_on_a_planned_carrier() {
         for carrier in [false, true] {
-            let (pid, seen, harnesses, drains, stdout, done, plan) = strict_parts(&[], carrier);
             let (sink, observed) = collecting_sink();
-            let shared = Shared {
-                cargo_pid: &pid,
-                seen: &seen,
-                harnesses: &harnesses,
-                drains: &drains,
-                stdout: &stdout,
-                done: &done,
-                sink: Some(&sink),
-                strict: Some(&plan),
-            };
+            let state = strict_state(&[], carrier, Some(sink));
             let (parent, shim) = UnixStream::pair().expect("socket pair");
             send_hello(&shim, ROLE_RUSTDOC, b"rustdoc").expect("send");
-            let accepted = accept_one(&parent, &shared);
+            let accepted = accept_one(&parent, &state);
             if carrier {
                 assert!(
                     accepted.is_ok(),
@@ -1195,12 +1184,13 @@ mod tests {
                     recv_verdict(&shim).expect("verdict"),
                     Verdict::Accept(_)
                 ));
-                release(&done, &drains);
+                release(&state);
             } else {
                 let Err(refusal) = accepted else {
                     panic!("a rustdoc with no planned carrier is refused");
                 };
-                refuse(&parent, refusal, &shared);
+                assert!(matches!(&refusal, Refusal::RustdocWithoutCarrier));
+                refuse(&parent, &refusal, &state);
                 assert!(matches!(
                     recv_verdict(&shim).expect("verdict"),
                     Verdict::Refuse

@@ -85,7 +85,7 @@ pub struct Store {
 }
 
 fn store_path(project_root: &Path) -> PathBuf {
-    project_root.join(".brokkr").join("worktrees.toml")
+    crate::clean::layout::ProjectState::new(project_root).worktrees_file()
 }
 
 fn now_secs() -> u64 {

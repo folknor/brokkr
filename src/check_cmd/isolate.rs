@@ -24,7 +24,7 @@ use std::collections::BTreeMap;
 fn run_isolated_sweep(
     project_root: &Path,
     state_root: &Path,
-    sweep: &ResolvedSweep,
+    sweep: &PlannedSweep,
     attempt: &Attempt,
     prepared: &PreparedLane,
     tap: &LaneTap,
@@ -360,7 +360,7 @@ fn run_one_isolated_test(
         output::error(&format!("FAIL {name}"));
         output::error(&format!("failing command: {command}"));
         let stderr = String::from_utf8_lossy(&run.captured.stderr);
-        output::error(&cargo_filter::filter_test(&stdout, &stderr));
+        output::error(&test_runner::filter_test(&stdout, &stderr));
         return Ok(IsolatedOutcome::Failed);
     }
 
@@ -369,7 +369,7 @@ fn run_one_isolated_test(
     // between enumeration and execution - an anomaly, not a skip.
     let stdout_lines: Vec<&str> = stdout.lines().collect();
 
-    let parsed = cargo_filter::parse_test_output(&stdout_lines);
+    let parsed = test_runner::parse_test_output(&stdout_lines);
     if zero_test_run(&parsed) {
         output::error(&format!(
             "FAIL {name}: invocation ran zero tests (name no longer matches?)"
@@ -383,7 +383,7 @@ fn run_one_isolated_test(
     // shown that the test passed, whatever the exit status says. `zero_test_run`
     // returns false for an incomplete stream by design, which left this path
     // reaching `Passed` on evidence that never arrived.
-    if let cargo_filter::Completeness::Incomplete { reason } = &parsed.completeness {
+    if let test_runner::Completeness::Incomplete { reason } = &parsed.completeness {
         output::error(&format!(
             "FAIL {name}: the test stream did not finish reporting: {reason}. The process exited \
              successfully, but nothing reported this test's result, so there is no pass to record."
@@ -533,24 +533,30 @@ mod isolate_tests {
     #[test]
     fn an_isolated_timeout_is_charged_to_its_binary_not_to_a_same_named_test() {
         use super::{
-            AccountingPlan, Detail, JournalRecord, LaneKind, LaneRecord, ObsEvent, Outcome, PairId,
-            StreamOrigin, isolated_timeout_records, reconcile,
+            AccountingPlan, Detail, Inventory, JournalRecord, LaneIdx, LaneKind, LaneRecord,
+            ObsEvent, Outcome, PairId, Resolution, StreamOrigin, isolated_timeout_records,
+            reconcile,
         };
         let a = case("a", "/a/suite", false);
         let b = case("b", "/b/suite", false);
         let pair = |c: &IsolatedCase| PairId {
             shape: "s".into(),
-            resolution: None,
+            resolution: Resolution::Combined,
             unit: c.unit.clone(),
-            test: c.name.clone(),
+            test: c.name.clone().into(),
         };
         let plan = AccountingPlan {
             run_id: "t".into(),
             complete: true,
             lanes: vec![LaneRecord {
-                prepared: true,
-                executions: vec![pair(&a), pair(&b)],
-                ..LaneRecord::empty(0, "isolated".into(), LaneKind::Isolated, "s".into())
+                inventory: Inventory::Prepared {
+                    executions: vec![pair(&a), pair(&b)],
+                    ignored_selected: Vec::new(),
+                    outside_claim: Vec::new(),
+                    artifacts: Vec::new(),
+                    unlisted: Vec::new(),
+                },
+                ..LaneRecord::empty(LaneIdx::new(0), "isolated".into(), LaneKind::Isolated, "s".into())
             }],
             ..AccountingPlan::default()
         };

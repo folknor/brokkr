@@ -915,7 +915,7 @@ fn run_captured_limited(
                     // the right hammer - sending to -pid would also
                     // signal brokkr itself.
                     if isolate_pg {
-                        crate::ratatoskr::process::send_signal_pgrp(child.id(), libc::SIGKILL).ok();
+                        crate::process::signal_process_group(child.id(), libc::SIGKILL).ok();
                     }
                     drop(child.kill());
                     killed_on_deadline = true;
@@ -972,11 +972,9 @@ fn forward_sigterm_then_kill(child: &mut std::process::Child, isolate_pg: bool) 
     // ctrl-C from the terminal, the child already received SIGINT via
     // the foreground PG anyway.
     if isolate_pg {
-        crate::ratatoskr::process::send_signal_pgrp(pid, libc::SIGTERM).ok();
+        crate::process::signal_process_group(pid, libc::SIGTERM).ok();
     } else {
-        // SAFETY: sending SIGTERM to our own child by PID; ESRCH is
-        // benign (handled by the wait loop below).
-        unsafe { libc::kill(pid.cast_signed(), libc::SIGTERM) };
+        crate::process::signal_pid(pid, libc::SIGTERM).ok();
     }
     let term_sent = Instant::now();
     while term_sent.elapsed() < SIGTERM_FORWARD_BUDGET {
@@ -988,7 +986,7 @@ fn forward_sigterm_then_kill(child: &mut std::process::Child, isolate_pg: bool) 
     }
     // SIGKILL escalation: PG for isolated, single-PID for non-isolated.
     if isolate_pg {
-        crate::ratatoskr::process::send_signal_pgrp(pid, libc::SIGKILL).ok();
+        crate::process::signal_process_group(pid, libc::SIGKILL).ok();
     }
     drop(child.kill());
 }

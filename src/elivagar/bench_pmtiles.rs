@@ -46,14 +46,12 @@ pub fn run(
         command: "pmtiles-writer".into(),
         // Tiles count is in cli_args (`--tiles N`) and brokkr_args.
         // Measurement mode comes from the harness.
-        mode: None,
         input_file: None,
         input_mb: None,
         cargo_features: None,
         cargo_profile: crate::build::CargoProfile::Release,
         runs: 1, // example handles its own iterations
         cli_args: None,
-        brokkr_args: None,
         metadata: vec![],
     };
 

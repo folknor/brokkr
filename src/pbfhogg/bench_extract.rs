@@ -55,7 +55,6 @@ pub fn run(
             command: command.result_command(),
             // Strategy and bbox remain in cli_args, preserving the existing
             // result-row shape for dataset-configured extract measurements.
-            mode: None,
             input_file: Some(basename.clone()),
             input_mb: Some(file_mb),
             cargo_features: None,
@@ -65,7 +64,6 @@ pub fn run(
                 &binary.display().to_string(),
                 &args_refs,
             )),
-            brokkr_args: None,
             metadata: vec![],
         };
 

@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use crate::artefacts::{self, ArtefactDir};
-use crate::config::DevConfig;
+use crate::config::project_config::ratatoskr::RatatoskrConfig;
 use crate::error::DevError;
 use crate::lockfile::{self, LockContext};
 use crate::output::{self, CapturedOutput};
@@ -30,18 +30,18 @@ use super::single::{format_iter_line, format_soak_summary};
 /// the single-script shape uses, so artefact-dir lifecycle and ceiling
 /// semantics are identical. The summary at the end lists failed scripts by name -
 /// not iter index, since each script ran exactly once.
-#[allow(clippy::too_many_arguments)] // entry point gathers CLI flags
 #[allow(clippy::too_many_lines)] // linear orchestration: discover, validate, build, run with fixture grouping, summarize
-pub fn service_suite(
-    project_root: &Path,
-    dev_config: &DevConfig,
-    filter: Option<&str>,
-    keep_artefacts: bool,
-    profile_override: Option<bool>,
-    keep_going: bool,
-    include_ignored: bool,
-    repeat: u32,
-) -> Result<(), DevError> {
+pub(crate) fn service_suite(req: &crate::request::ServiceSuiteRequest<'_>) -> Result<(), DevError> {
+    let crate::request::ServiceSuiteRequest {
+        project_root,
+        ratatoskr,
+        filter,
+        keep_artefacts,
+        profile_override,
+        keep_going,
+        include_ignored,
+        repeat,
+    } = *req;
     let cycles = repeat.max(1);
     let all = discover::discover(project_root)?;
     let total_discovered = all.len();
@@ -61,24 +61,20 @@ pub fn service_suite(
         return Ok(());
     }
 
-    let harness_cfg = dev_config
-        .ratatoskr
-        .as_ref()
-        .and_then(|r| r.harness.as_ref())
-        .ok_or_else(|| {
-            DevError::Config(
-                "service: no [ratatoskr.harness] section in brokkr.toml. \
+    let harness_cfg = ratatoskr.harness.as_ref().ok_or_else(|| {
+        DevError::Config(
+            "service: no [ratatoskr.harness] section in brokkr.toml. \
                  Declare `[ratatoskr.harness]` with `package = \"<crate>\"` \
                  (and optional `binary`, `features`, `debug`)."
-                    .into(),
-            )
-        })?;
+                .into(),
+        )
+    })?;
 
     // Fail fast if any selected script needs a fixture but the
     // [ratatoskr] mock-server config isn't populated. Spawn-time would
     // catch this too but reporting it before the build wastes nothing.
     if let Some(needy) = runnable.iter().find(|s| s.fixture.is_some()) {
-        let cfg = dev_config.ratatoskr.as_ref().expect("checked above");
+        let cfg = ratatoskr;
         require_path(&cfg.mock_server_binary, project_root, "mock_server_binary").map_err(|e| {
             DevError::Config(format!(
                 "service: script {} needs a mock fixture but {e}",
@@ -153,7 +149,7 @@ pub fn service_suite(
                 {
                     let session = FixtureSession::start(
                         project_root,
-                        dev_config,
+                        ratatoskr,
                         &script.name,
                         fixture_name,
                         &_lock,
@@ -611,25 +607,23 @@ pub(super) struct FixtureSession {
 }
 
 impl FixtureSession {
-    /// Validate `[ratatoskr]` config, resolve the fixture, spawn
-    /// sæhrimnir, parse endpoints, and emit a one-line "mock-server up"
-    /// status. Errors out with the same shape `mock-serve` uses when
-    /// config is missing or the binary isn't built.
+    /// Validate the mock-server paths in `[ratatoskr]`, resolve the fixture,
+    /// spawn sæhrimnir, parse endpoints, and emit a one-line "mock-server up"
+    /// status. Errors out with the same shape `mock-serve` uses when a path
+    /// is unset or the binary isn't built.
     pub(super) fn start(
         project_root: &Path,
-        dev_config: &crate::config::DevConfig,
+        cfg: &RatatoskrConfig,
         owner_label: &str,
         fixture_name: &str,
         lock: &lockfile::LockGuard,
     ) -> Result<Self, DevError> {
-        let cfg = dev_config.ratatoskr.as_ref().ok_or_else(|| {
-            DevError::Config(format!(
-                "service: script {owner_label} declares `-- fixture: {fixture_name}` \
-                 but no [ratatoskr] section exists in brokkr.toml. \
-                 Set mock_server_binary and fixtures_dir to point at sæhrimnir's checkout."
-            ))
-        })?;
-        let binary = require_path(&cfg.mock_server_binary, project_root, "mock_server_binary")?;
+        let binary = require_path(&cfg.mock_server_binary, project_root, "mock_server_binary")
+            .map_err(|e| {
+                DevError::Config(format!(
+                    "service: script {owner_label} declares `-- fixture: {fixture_name}` but {e}"
+                ))
+            })?;
         let fixtures_dir = require_path(&cfg.fixtures_dir, project_root, "fixtures_dir")?;
         if !binary.exists() {
             return Err(DevError::Config(format!(

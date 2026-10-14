@@ -12,6 +12,10 @@ pub struct ProcStat {
     parent: Option<Pid>,
     user_ticks: u64,
     system_ticks: u64,
+    minor_faults: u64,
+    major_faults: u64,
+    num_threads: u64,
+    virtual_bytes: u64,
 }
 
 impl ProcStat {
@@ -55,7 +59,11 @@ impl ProcStat {
         let parent = fields.get(1)?.parse::<u32>().ok().and_then(Pid::new);
         let user_ticks = fields.get(11)?.parse().ok()?;
         let system_ticks = fields.get(12)?.parse().ok()?;
+        let minor_faults = fields.get(7)?.parse().ok()?;
+        let major_faults = fields.get(9)?.parse().ok()?;
+        let num_threads = fields.get(17)?.parse().ok()?;
         let start = StartTicks::new(fields.get(19)?.parse().ok()?);
+        let virtual_bytes = fields.get(20)?.parse().ok()?;
         Some(Self {
             identity: ProcIdentity::new(pid, start),
             comm,
@@ -63,6 +71,10 @@ impl ProcStat {
             parent,
             user_ticks,
             system_ticks,
+            minor_faults,
+            major_faults,
+            num_threads,
+            virtual_bytes,
         })
     }
 
@@ -92,6 +104,22 @@ impl ProcStat {
 
     pub const fn system_ticks(&self) -> u64 {
         self.system_ticks
+    }
+
+    pub const fn minor_faults(&self) -> u64 {
+        self.minor_faults
+    }
+
+    pub const fn major_faults(&self) -> u64 {
+        self.major_faults
+    }
+
+    pub const fn num_threads(&self) -> u64 {
+        self.num_threads
+    }
+
+    pub const fn virtual_bytes(&self) -> u64 {
+        self.virtual_bytes
     }
 }
 

@@ -47,8 +47,6 @@ pub(crate) fn cmd_sidecar(project_root: &Path, q: &SidecarQuery) -> Result<(), D
     // used to fail open (a bad condition printed every sample, an unknown
     // field silently vanished), which reads as a real answer.
     validate_timeline_args(q)?;
-    let view = q.view()?;
-
     let store = db::RunStore::open(
         &results_db_path(project_root),
         &sidecar_db_path(project_root),
@@ -57,7 +55,7 @@ pub(crate) fn cmd_sidecar(project_root: &Path, q: &SidecarQuery) -> Result<(), D
         output::result_msg("no sidecar.db found");
         return Ok(());
     }
-    match view {
+    match &q.view {
         SidecarView::Compare { uuids: (a, b) } => run_compare(&store, a, b, q.human),
         SidecarView::Summary { uuid } => {
             with_resolved(&store, uuid, |id| run_phase_summary(&store, id, q))
@@ -75,7 +73,11 @@ pub(crate) fn cmd_sidecar(project_root: &Path, q: &SidecarQuery) -> Result<(), D
             with_resolved(&store, uuid, |id| run_counters(&store, id, q))
         }
         SidecarView::Stalls { uuid } => with_resolved(&store, uuid, |id| run_stalls(&store, id, q)),
-        SidecarView::Stat { uuid, field } => {
+        SidecarView::Stat { uuid } => {
+            let field = q
+                .stat
+                .as_deref()
+                .ok_or_else(|| DevError::Config("sidecar stat view requires a field".into()))?;
             with_resolved(&store, uuid, |id| run_stat(&store, id, field, q))
         }
     }

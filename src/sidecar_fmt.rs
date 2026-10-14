@@ -106,7 +106,9 @@ pub(crate) fn print_run_info(store: &db::RunStore, id: &db::RunId) {
             eprintln!("[sidecar] binary: {path} (xxh128: {short}...)");
 
             // Check if current binary on disk still matches.
-            match crate::preflight::compute_xxh128(std::path::Path::new(path)) {
+            match crate::preflight::compute_file_digest(std::path::Path::new(path))
+                .map(|d| d.to_string())
+            {
                 Ok(current_hash) => {
                     if current_hash == *hash {
                         eprintln!("[sidecar] current binary xxh128: match");

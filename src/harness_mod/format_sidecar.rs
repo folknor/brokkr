@@ -5,10 +5,7 @@
 
 /// Build a result summary string with key=value pairs.
 ///
-/// `mode` is the harness-resolved measurement mode
-/// ([`BenchHarness::effective_mode`]), not `config.mode` - the per-config
-/// field is an override no writer sets, so reading it alone meant `mode=`
-/// never printed.
+/// `mode` is the session's measurement mode, shared by rows and sidecar records.
 fn format_result_line(
     config: &BenchConfig,
     mode: Option<&str>,
@@ -769,10 +766,9 @@ const SIDECAR_BACKUP_COPIES: usize = 3;
 /// `XDG_DATA_HOME` counts as unset (`user_dirs`), so the backups can never
 /// land in - and dirty - the tree brokkr is running in.
 fn sidecar_backup_dir() -> Result<PathBuf, DevError> {
-    let data_dir = crate::user_dirs::xdg_data_home().ok_or_else(|| {
+    crate::user_dirs::sidecar_backups_dir().ok_or_else(|| {
         DevError::Config("cannot determine data directory for sidecar backup".into())
-    })?;
-    Ok(data_dir.join("brokkr").join("sidecar-backups"))
+    })
 }
 
 /// Back up the sidecar DB with rotation and fsync.

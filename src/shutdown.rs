@@ -219,8 +219,8 @@ static GUARD_DEPTH: Mutex<usize> = Mutex::new(0);
 /// into the process group of whatever launched it.
 ///
 /// brokkr is full of group-kills: the deadline / cooperative-SIGTERM paths in
-/// `output.rs`, the test-runner watchdog, `ratatoskr/process.rs`, and the
-/// `--hard` branch in `main_parts/commands.rs`. Every one assumes "my process
+/// `output.rs`, the test-runner watchdog, the shared process-group helper, and
+/// the `--hard` branch in `main_parts/commands.rs`. Every one assumes "my process
 /// group holds only me and my descendants". An interactive shell guarantees
 /// that (each job gets its own group); so does a launcher that calls `setsid`
 /// (Claude Code runs each command in a fresh session). But a launcher that
@@ -491,12 +491,9 @@ fn kill_registered_groups() {
     for slot in &REAP_PGIDS {
         let pgid = slot.load(Ordering::SeqCst);
         if pgid > 1 {
-            // SAFETY: kill(2) is async-signal-safe and takes no pointers.
             // `pgid > 1` keeps this from ever becoming kill(0) (our own group)
             // or kill(-1) (every process we may signal).
-            unsafe {
-                libc::kill(-pgid, libc::SIGKILL);
-            }
+            let _ = crate::process::signal_process_group_raw(pgid, libc::SIGKILL);
         }
     }
 }

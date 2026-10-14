@@ -26,22 +26,61 @@ pub fn run(
     scratch_dir: &Path,
     project_root: &Path,
 ) -> Result<(), DevError> {
-    let tm = tools::ensure_tilemaker(data_dir)?;
-    super::download_ocean::ensure_ocean_4326(data_dir)?;
-
-    // Symlink ocean directories into shortbread-tilemaker/data/ so Tilemaker
-    // can find them at the relative paths its config expects.
-    let sb_data = data_dir.join("shortbread-tilemaker/data");
-    std::fs::create_dir_all(&sb_data)?;
-
-    ensure_symlink(
-        &data_dir.join("water-polygons-split-4326"),
-        &sb_data.join("water-polygons-split-4326"),
+    let invocation = prepare(
+        pbf_path,
+        file_mb,
+        runs,
+        data_dir,
+        scratch_dir,
+        false,
     )?;
-    ensure_symlink(
-        &data_dir.join("simplified-water-polygons-split-4326"),
-        &sb_data.join("simplified-water-polygons-split-4326"),
+    let args: Vec<&str> = invocation.args.iter().map(String::as_str).collect();
+    harness.run_external_prepared(
+        &invocation.config,
+        &invocation.program,
+        &args,
+        project_root,
+        &[],
+        || invocation.prepare_sample(),
     )?;
+    invocation.cleanup();
+    Ok(())
+}
+
+pub(crate) fn prepare(
+    pbf_path: &Path,
+    file_mb: f64,
+    runs: usize,
+    data_dir: &Path,
+    scratch_dir: &Path,
+    dry_run: bool,
+) -> Result<crate::measure::runner::ExternalInvocation, DevError> {
+    let tm = if dry_run {
+        tools::TilemakerTools {
+            tilemaker: data_dir.join("tilemaker/build/tilemaker"),
+            config: data_dir.join("shortbread-tilemaker/config.json"),
+            process: data_dir.join("shortbread-tilemaker/process.lua"),
+        }
+    } else {
+        tools::ensure_tilemaker(data_dir)?
+    };
+    if !dry_run {
+        super::download_ocean::ensure_ocean_4326(data_dir)?;
+
+        // Symlink ocean directories into shortbread-tilemaker/data/ so Tilemaker
+        // can find them at the relative paths its config expects.
+        let sb_data = data_dir.join("shortbread-tilemaker/data");
+        std::fs::create_dir_all(&sb_data)?;
+
+        ensure_symlink(
+            &data_dir.join("water-polygons-split-4326"),
+            &sb_data.join("water-polygons-split-4326"),
+        )?;
+        ensure_symlink(
+            &data_dir.join("simplified-water-polygons-split-4326"),
+            &sb_data.join("simplified-water-polygons-split-4326"),
+        )?;
+    }
 
     let basename = pbf_path
         .file_name()
@@ -53,13 +92,17 @@ pub fn run(
         .to_str()
         .ok_or_else(|| DevError::Config("PBF path is not valid UTF-8".into()))?;
 
-    std::fs::create_dir_all(scratch_dir)?;
+    if !dry_run {
+        std::fs::create_dir_all(scratch_dir)?;
+    }
     let output_path = scratch_dir.join("tilemaker-bench.pmtiles");
     let output_str = output_path.display().to_string();
 
-    output::bench_msg(&format!(
-        "Tilemaker Shortbread: {basename} ({file_mb:.0} MB), {runs} run(s)"
-    ));
+    if !dry_run {
+        output::bench_msg(&format!(
+            "Tilemaker Shortbread: {basename} ({file_mb:.0} MB), {runs} run(s)"
+        ));
+    }
 
     let config_str = tm.config.display().to_string();
     let process_str = tm.process.display().to_string();
@@ -79,7 +122,6 @@ pub fn run(
 
     let config = BenchConfig {
         command: "tilemaker".into(),
-        mode: None,
         input_file: Some(basename),
         input_mb: Some(file_mb),
         cargo_features: None,
@@ -89,16 +131,16 @@ pub fn run(
             &tm.tilemaker.display().to_string(),
             &args_refs,
         )),
-        brokkr_args: None,
         metadata: vec![],
     };
 
-    harness.run_external(&config, &tm.tilemaker, &args_refs, project_root)?;
-
-    // Clean up output file.
-    std::fs::remove_file(&output_path).ok();
-
-    Ok(())
+    Ok(crate::measure::runner::ExternalInvocation {
+        program: tm.tilemaker,
+        args: args_owned,
+        config,
+        output_files: vec![output_path],
+        scratch_dirs: vec![],
+    })
 }
 
 /// Make `link` a symlink to `target`, repairing one that points elsewhere or

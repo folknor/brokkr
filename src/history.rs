@@ -433,12 +433,11 @@ pub fn format_history(entries: &[HistoryEntry]) -> String {
 /// `$HOME/.local/share/brokkr/history.db` (an empty or relative
 /// `XDG_DATA_HOME` counts as unset - see `user_dirs`).
 fn db_path() -> Result<PathBuf, DevError> {
-    let data_dir = crate::user_dirs::xdg_data_home().ok_or_else(|| {
+    crate::user_dirs::history_db().ok_or_else(|| {
         DevError::Config(
             "cannot determine data directory: neither XDG_DATA_HOME nor HOME is set".into(),
         )
-    })?;
-    Ok(data_dir.join("brokkr").join("history.db"))
+    })
 }
 
 // ---------------------------------------------------------------------------

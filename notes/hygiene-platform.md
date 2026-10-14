@@ -11,15 +11,11 @@ Hygiene findings from the hunt for process control (lock, hold, guard, strays, s
    page - before the entry is removed, so the finding is not hunted again.
 4. Once all findings are resolved, the file gets deleted.
 
-## PLT-001 - The `.brokkr` state root is spelled at ~90 sites
+## PLT-001 - Remaining hand-built `.brokkr` paths
 
 Reported by: config-cli-bootstrap, test-execution, measurement-storage, ratatoskr, piners, small-benches, pbfhogg-nidhogg.
 
-`resolve::results_db_path` and similar exist, but paths are hand-built at ~90 sites in ~40 files (test-execution counted ~25 `join(".brokkr")`; measurement ~20). Examples: `commands.rs` builds `.brokkr/ratatoskr`, `.brokkr/dellingr`, `.brokkr/piners/corpus`, `.brokkr/.sidecar-status`; `preflight` builds `.brokkr/hash_cache`; test-hung, parallel-timings, nextest-synth; `BenchHarness::new_with_lock` and `store_sidecar` rebuild the results/sidecar DB paths (`output-channels.md` claims both are "resolved identically … by `BenchHarness::new_with_lock`"); ratatoskr `ARTEFACT_PARENT`, `MOCK_DIR`, `SYNC_ARTEFACT_PARENT`, the gate.db path; piners `ARTEFACT_PARENT`+`"corpus"`, `resolve_parts/runtime.rs::corpus_runs_db_path`, a literal in `clean_artefact_trees`; `dellingr/cmd.rs::SCRATCH_REL` and `.brokkr/mogwai`; nidhogg `.brokkr/nidhogg.pid` (twice). Project-level layouts: PRJ-033 (ratatoskr), PRJ-043 (piners), PRJ-055 (dellingr/mogwai).
-
-Enforcement proposed: a `StateDir` type with named accessors (and per-project layout types), held by a textlint rule forbidding `".brokkr` / `join(".brokkr")` outside it.
-
-Design hunt (process-control, measurement, other-projects): `$HOME/.brokkr` is also built independently in `lockfile::lock_path`, `lock_service::socket_dir`, `hold::cargo_config_overrides`, `test_orphans::runs_dir`, `worktree.rs`, `test_runner/harness_shim.rs` and twice in the guard; the empty-`$HOME` consequence is filed in `bugs.md`. The harness derives `db_dir.join("results.db")`/`.join("sidecar.db")` from its own `db_root.unwrap_or(project_root)` while readers use `resolve::results_db_path`/`sidecar_db_path`, and `bench_cmd::bench_home` is a third private derivation of `.brokkr/<x>`; they agree because `db_root` is always the project root. `brokkr clean` re-encodes each project's layout separately (sweep directories under `.brokkr/ratatoskr` but keep files, because `gate.db` lives there; sweep `.brokkr/piners/corpus` run dirs but not `runs.db`). Proposed owners: `user_dirs::brokkr_state_dir()` with typed accessors for the per-user state, store paths as methods on a `ProjectRoot` type, and a `Layout` exported by each project module (artefact roots, plus measurement stores marked permanent) that `clean` iterates.
+`ProjectState` and the per-project layouts (`clean/layout.rs`) now own the project state paths, and the stores, run log, accounting base, parallel timings, worktree record, nextest files, hash cache, hung-test snapshots and nidhogg pid file go through them; per-user state goes through `user_dirs`. Residue, each with a matching accessor already in the layout but not yet used outside `clean`: ratatoskr `ARTEFACT_PARENT` and `SERVICE_MOCK_PARENT` (`service/single.rs`), `SYNC_ARTEFACT_PARENT` (`sync/runner.rs`), `MOCK_DIR` (`saehrimnir.rs`) and the `gate.db` path (`sync/gate.rs`); dellingr and mogwai `SCRATCH_REL`; litehtml `prepare-cache` (`litehtml/cmd.rs`); pbfhogg scratch writers (`commands.rs` scratch output and multi-extract config paths, `plan.rs` merged PBF path, fixed-output writers in `bench_merge.rs`, `bench_blob_filter.rs`, `bench_all.rs`); nidhogg `commands.rs`/`plan.rs` scratch; elivagar's scratch, tmp and calibrand paths (and `main.rs` re-exporting `CORPUS_CALIBRAND_DIR`); and `bin/rustc_guard.rs`'s own state-root helper. Once they move, a textlint rule forbidding `".brokkr"` outside the layout owners holds it.
 
 ## PLT-002 - brokkr enforces very little of its own convention on itself
 
@@ -104,12 +100,6 @@ Reported by: elivagar, pbfhogg-nidhogg, piners, measurement-storage, ratatoskr.
 
 Internal `expect`/`unreachable!` in production: elivagar `engine.rs`, `compare.rs`, `overlay.rs`, `pairing.rs`, `mutate.rs`, `dispatch.rs`; pbfhogg (BUG-115); piners `measured.rs` `MeasureMode::Run => unreachable!` for a dispatch contract (refuses `--bench` at runtime instead of clap conflicts); `sidecar_cmd` `.expect` on a clap guarantee and `run_compare` indexing `uuids[0]`/`[1]`; ratatoskr `run_gate_hook`'s `.expect("gate existence already validated upstream")` depending on call order. Allowed only because `expect_used`/`indexing_slicing` aren't denied (PLT-002). PMTiles decoding panics: BUG-062.
 
-## PLT-010 - Process helpers still have callers outside the shared process module
-
-Reported by: test-execution, process-control, ratatoskr, measurement-storage, config-cli-bootstrap, pbfhogg-nidhogg.
-
-`src/process/` now owns typed identities, one `/proc/<pid>/stat` parser and snapshot, pidfd-backed verified signalling and the reaper exemptions; the lock, stray and orphan reapers, the shutdown walker and `lock_cmd` use it. Residue: `check_cmd/watchdog.rs`, `clean.rs`, `nidhogg/server.rs` and `test_runner/harness_shim.rs` still call the legacy `lockfile::*` process helpers; `harness_shim.rs` and `sidecar.rs` keep their own stat parsing (and the shim opens pidfds directly); `output.rs`, `sidecar.rs`, `test_runner/hung.rs` and `nidhogg/bench_tiles.rs` still import from `crate::ratatoskr::process`, and process-group signalling is a separate raw-signal path.
-
 ## PLT-011 - Lock-protocol literals are copied across the bin boundary
 
 Reported by: process-control.
@@ -188,22 +178,6 @@ Reported by: process-control, ratatoskr, test-execution, piners.
 Enforcement proposed: one enum with `dir()`, `cargo_flag()`, `as_label()`.
 
 Design hunt (config-cli, other-projects, measurement): `profile_override(debug, release) -> Option<bool>` (`Some(true)` = dev) is used by `test`, `service`, `sync`, `corpus`, `lint-corpus`; `run`/`install` take `debug: bool, release: bool` raw and resolve them a third way in `runnables`; `HarnessConfig::debug: Option<bool>`; `bench_gate.rs` stores `"debug" | "release"` in `gate.db`; dellingr and mogwai set `BuildConfig::profile: "release"` and separately `BenchConfig::cargo_profile: CargoProfile::Release` - two fields for one fact - while `piners/measured.rs` already uses `CargoProfile::for_debug(debug)`. "Which cargo profile does this harness build use?" has nine sites and three defaults: `piners/cmd.rs` (override, else `[piners.harness] debug`, else debug), `piners/lint/cmd.rs` (override, else `[piners.lint] debug`, else debug), `piners/measured.rs` (override, else release, deliberately ignoring config), `corpus_db/compare.rs::context_of` (missing reads as debug), `ratatoskr/service_test.rs`, `service_suite.rs`, `list_smoke.rs` twice and `bench_gate.rs` (override, else `[ratatoskr.harness] debug`, else release), dellingr/mogwai/sluggrs hotpath (always release). `crate::ratatoskr::build::build_for_harness` is piners' build entry point too; its doc and log text are written for `[ratatoskr.harness]` and state a release default piners does not use, and `config::HarnessConfig` is shared, with `lint/cmd.rs` synthesizing one from `LintConfig` fields. The recorded profile (`BenchConfig.cargo_profile`) is set by about 30 writer sites, almost all as a literal `CargoProfile::Release`, independent of what `BuildConfig` actually built. Proposed: `CargoProfile` everywhere, a flattened clap `ProfileArgs { --debug | --release }` resolved once into `ProfileChoice { Explicit(CargoProfile), Default }`, one `fn resolve_profile(surface: HarnessSurface, cli, cfg) -> CargoProfile` where `HarnessSurface` (Parity/Lint/Measured/Service/Sync) states its default and whether config is consulted, `build_for_harness`/`HarnessBuild` in `crate::build`, and `cargo_build` returning `BuiltArtifact { path, profile, features, target }` so the harness stamps rows from the artifact and writers stop naming profiles.
-
-## PLT-020 - `clean` breaks its constructed-name rule and misses brokkr's own leftovers
-
-Reported by: config-cli-bootstrap, elivagar, pbfhogg-nidhogg, ratatoskr, piners, small-benches, measurement-storage, test-execution.
-
-`docs/commands/clean.md` says clean removes only brokkr-designated or constructed names and never parses names back. Against that:
-- It deletes other tools' tmp names: `ocean-build_tmp` (elivagar's default, never passed by brokkr), `.ingest_tmp`/`.tilegen_tmp` in the nidhogg arm (never created by the nidhogg module), `.pbfhogg-external-join-<pid>` (parsed, then checked with a bare `kill(pid,0)`, BUG-040).
-- It prefix-matches `geocode-*`, sweeps every `*.pbf`, finds piners run dirs by `starts_with("run-")`, and elivagar's deep clean deletes every `*.pmtiles` (BUG-064).
-- ratatoskr's `gate.db` is spared only because clean keeps every file directly under `.brokkr/ratatoskr` and deletes every directory; moving `gate.db` into a subdirectory would delete baselines silently.
-- Misses: the nidhogg `*-ingest-output` dirs; pbfhogg `*.osc.gz` scratch and `multi-extract/`; `.brokkr/mogwai` scratch; `.brokkr/test-hung/`; `.sidecar-<pid>.fifo`/`.sidecar-status` after SIGKILL (a stale status can show a dead run's marker); `.brokkr/capture.js`, `.brokkr/prepare-cache`; the piners lint directory (`lint-corpus.md` claims "`brokkr clean` spares it"); `$XDG_DATA_HOME/brokkr/sidecar-backups/` is missing from clean.md's store table.
-- Wrong dir: BUG-035.
-- Tilegen retention has two pruners with identical read_dir → mtime-sort → skip logic: `elivagar/dispatch.rs::prune_output_dir` (`OUTPUT_RETENTION = 5`, not configurable) and `commands.rs::clean_archives` (`--keep` default 2).
-
-Enforcement proposed: layout types that clean asks for removable names (with a test that clean spares `layout.gate_db()`), one `Project::scratch_rel()` read by writers and clean.
-
-Design hunt (map-projects, config-cli): `elivagar/dispatch.rs::prune_output_dir` (`OUTPUT_RETENTION = 5` per dataset and variant, after each tilegen) and `main_parts/commands.rs::clean_archives` (`--keep`, default 2) share only `pmtiles_archive_matches`, so the newest-first ordering, the mtime fallback and the window are decided twice; `OUTPUT_RETENTION`'s doc still says `<dataset>-<commit>.pmtiles` (variant missing). The archive store as a whole is filed in `structural.md`. `clean` branching on every project inside `main_parts/commands.rs` is the hunter's reason for per-project `fn clean_targets(&ResolvedPaths) -> Vec<CleanTarget>` contributed by each project module.
 
 ## PLT-021 - `brokkr.toml` is parsed more than once per invocation
 

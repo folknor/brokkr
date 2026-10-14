@@ -26,7 +26,76 @@ pub fn run(
     scratch_dir: &Path,
     project_root: &Path,
 ) -> Result<(), DevError> {
-    let pt = tools::ensure_planetiler(data_dir, project_root)?;
+    let invocation = prepare(
+        pbf_path,
+        file_mb,
+        runs,
+        data_dir,
+        scratch_dir,
+        project_root,
+        false,
+    )?;
+    let args: Vec<&str> = invocation.args.iter().map(String::as_str).collect();
+    harness.run_external_prepared(
+        &invocation.config,
+        &invocation.program,
+        &args,
+        project_root,
+        &[],
+        || invocation.prepare_sample(),
+    )?;
+    invocation.cleanup();
+    Ok(())
+}
+
+/// Run planetiler once with `--download` and mark the sources primed.
+fn prime_sources(
+    java: &str,
+    prime_args: &[&str],
+    project_root: &Path,
+    sources_dir: &Path,
+    primed_marker: &Path,
+) -> Result<(), DevError> {
+    let captured = output::run_captured(java, prime_args, project_root)?;
+    captured.check_success(java)?;
+    // A successful `--download` run that left `sources_dir` empty put its
+    // sources somewhere else: planetiler did not honour `--download_dir`.
+    // Marking it primed would send every timed run to the network, or
+    // measure against sources it cannot find.
+    let populated = std::fs::read_dir(sources_dir)
+        .map(|mut entries| entries.next().is_some())
+        .unwrap_or(false);
+    if !populated {
+        return Err(DevError::Config(format!(
+            "planetiler primed successfully but wrote nothing to {} - \
+             it did not honour `--download_dir`; check the flag name \
+             against the planetiler release in use",
+            sources_dir.display()
+        )));
+    }
+    std::fs::write(primed_marker, b"")?;
+    output::bench_msg("Planetiler data primed");
+    Ok(())
+}
+
+pub(crate) fn prepare(
+    pbf_path: &Path,
+    file_mb: f64,
+    runs: usize,
+    data_dir: &Path,
+    scratch_dir: &Path,
+    project_root: &Path,
+    dry_run: bool,
+) -> Result<crate::measure::runner::ExternalInvocation, DevError> {
+    let pt = if dry_run {
+        tools::PlanetilerTools {
+            java: data_dir.join("jdk/bin/java"),
+            planetiler_jar: data_dir.join("planetiler.jar"),
+            bench_class_dir: data_dir.join("planetiler-bench-classes"),
+        }
+    } else {
+        tools::ensure_planetiler(data_dir, project_root)?
+    };
 
     let basename = pbf_path
         .file_name()
@@ -49,7 +118,9 @@ pub fn run(
     let heap_mb = std::cmp::max((file_mb as i64) * 2, 2048);
     let heap_arg = format!("-Xmx{heap_mb}m");
 
-    std::fs::create_dir_all(scratch_dir)?;
+    if !dry_run {
+        std::fs::create_dir_all(scratch_dir)?;
+    }
     let output_path = scratch_dir.join("planetiler-bench.pmtiles");
     let output_str = output_path.display().to_string();
 
@@ -77,7 +148,7 @@ pub fn run(
 
     // Prime Planetiler source data on first run - the only invocation that
     // passes `--download`, so network time never lands inside a timed run.
-    if !primed_marker.exists() {
+    if !dry_run && !primed_marker.exists() {
         output::bench_msg("priming Planetiler data (first-time download of ocean + natural earth)");
 
         let osm_arg = format!("--osm-path={pbf_str}");
@@ -98,31 +169,14 @@ pub fn run(
             "--nodemap-type=sparsearray",
             &tmp_arg,
         ];
-
-        let captured = output::run_captured(java_str, &prime_args, project_root)?;
-        captured.check_success(java_str)?;
-        // A successful `--download` run that left `sources_dir` empty put its
-        // sources somewhere else: planetiler did not honour `--download_dir`
-        // (see above). Marking it primed would send every timed run to the
-        // network, or measure against sources it cannot find.
-        let populated = std::fs::read_dir(&sources_dir)
-            .map(|mut entries| entries.next().is_some())
-            .unwrap_or(false);
-        if !populated {
-            return Err(DevError::Config(format!(
-                "planetiler primed successfully but wrote nothing to {} - \
-                 it did not honour `--download_dir`; check the flag name \
-                 against the planetiler release in use",
-                sources_dir.display()
-            )));
-        }
-        std::fs::write(&primed_marker, b"")?;
-        output::bench_msg("Planetiler data primed");
+        prime_sources(java_str, &prime_args, project_root, &sources_dir, &primed_marker)?;
     }
 
-    output::bench_msg(&format!(
-        "Planetiler Shortbread: {basename} ({file_mb:.0} MB), {runs} run(s), heap {heap_mb}m"
-    ));
+    if !dry_run {
+        output::bench_msg(&format!(
+            "Planetiler Shortbread: {basename} ({file_mb:.0} MB), {runs} run(s), heap {heap_mb}m"
+        ));
+    }
 
     // Build the args that get passed to harness.run_external().
     let osm_arg = format!("--osm-path={pbf_str}");
@@ -153,7 +207,6 @@ pub fn run(
         // size is a runtime observation (derived from input size, not
         // a user-provided flag) so it stays in metadata.
         command: "planetiler".into(),
-        mode: None,
         input_file: Some(basename),
         input_mb: Some(file_mb),
         cargo_features: None,
@@ -163,14 +216,14 @@ pub fn run(
             &pt.java.display().to_string(),
             &args_refs,
         )),
-        brokkr_args: None,
         metadata: vec![KvPair::int("meta.heap_mb", heap_mb)],
     };
 
-    harness.run_external(&config, &pt.java, &args_refs, project_root)?;
-
-    // Clean up output file.
-    std::fs::remove_file(&output_path).ok();
-
-    Ok(())
+    Ok(crate::measure::runner::ExternalInvocation {
+        program: pt.java,
+        args: args_owned,
+        config,
+        output_files: vec![output_path],
+        scratch_dirs: vec![tmpdir],
+    })
 }

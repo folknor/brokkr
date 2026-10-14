@@ -6,7 +6,7 @@ use super::schema::SELECT_COLS;
 use super::types::{KvClass, canonical_cargo_features};
 use super::{
     Distribution, DistributionUs, HotpathData, HotpathFunction, HotpathThread, KvPair, KvValue,
-    PreviousRun, QueryFilter, RunId, StoredRow,
+    Percentile, PreviousRun, Quantity, QueryFilter, RunId, StoredRow,
 };
 use crate::error::DevError;
 
@@ -625,58 +625,320 @@ fn load_hotpath_functions(
     conn: &rusqlite::Connection,
     run_id: i64,
 ) -> Result<Vec<HotpathFunction>, DevError> {
+    let (mut functions, legacy, ids) = load_hotpath_function_rows(conn, run_id)?;
+    load_typed_function_metrics(conn, run_id, &ids, &mut functions)?;
+    load_typed_function_percentiles(conn, run_id, &ids, &mut functions)?;
+    apply_legacy_function_metrics(&mut functions, legacy);
+    Ok(functions)
+}
+
+struct LegacyFunctionMetrics {
+    avg: Option<String>,
+    total: Option<String>,
+    percent_total: Option<String>,
+    p50: Option<String>,
+    p95: Option<String>,
+    p99: Option<String>,
+}
+
+/// A run's function rows, their legacy text metrics, and each row's index by
+/// database id.
+type FunctionRows = (
+    Vec<HotpathFunction>,
+    Vec<LegacyFunctionMetrics>,
+    std::collections::HashMap<i64, usize>,
+);
+
+fn load_hotpath_function_rows(
+    conn: &rusqlite::Connection,
+    run_id: i64,
+) -> Result<FunctionRows, DevError> {
+    let mut functions = Vec::new();
+    let mut legacy = Vec::new();
     let mut stmt = conn.prepare(
-        "SELECT section, description, ordinal, name, calls, avg, total, percent_total, p50, p95, p99 \
-         FROM hotpath_functions WHERE run_id = ?1 ORDER BY section, ordinal"
+        "SELECT id, section, description, ordinal, name, calls, avg, total, percent_total, p50, p95, p99 \
+         FROM hotpath_functions WHERE run_id = ?1 ORDER BY section, ordinal",
     )?;
     let rows = stmt.query_map(rusqlite::params![run_id], |row| {
-        Ok(HotpathFunction {
-            section: row.get(0)?,
-            description: row.get(1)?,
-            ordinal: row.get(2)?,
-            name: row.get(3)?,
-            calls: row.get(4)?,
-            avg: row.get(5)?,
-            total: row.get(6)?,
-            percent_total: row.get(7)?,
-            p50: row.get(8)?,
-            p95: row.get(9)?,
-            p99: row.get(10)?,
-        })
+        Ok((
+            row.get::<_, i64>(0)?,
+            HotpathFunction {
+                section: row.get(1)?,
+                description: row.get(2)?,
+                ordinal: row.get(3)?,
+                name: row.get(4)?,
+                calls: row.get(5)?,
+                avg: None,
+                total: None,
+                percent_total: None,
+                percentiles: std::collections::BTreeMap::new(),
+            },
+            LegacyFunctionMetrics {
+                avg: row.get(6)?,
+                total: row.get(7)?,
+                percent_total: row.get(8)?,
+                p50: row.get(9)?,
+                p95: row.get(10)?,
+                p99: row.get(11)?,
+            },
+        ))
     })?;
-    let mut result = Vec::new();
+    let mut ids = std::collections::HashMap::new();
     for row in rows {
-        result.push(row?);
+        let (id, function, old_metrics) = row?;
+        ids.insert(id, functions.len());
+        functions.push(function);
+        legacy.push(old_metrics);
     }
-    Ok(result)
+    drop(stmt);
+    Ok((functions, legacy, ids))
+}
+
+fn load_typed_function_metrics(
+    conn: &rusqlite::Connection,
+    run_id: i64,
+    ids: &std::collections::HashMap<i64, usize>,
+    functions: &mut [HotpathFunction],
+) -> Result<(), DevError> {
+    let mut stmt = conn.prepare(
+        "SELECT m.function_id, m.metric, m.quantity_kind, m.value_int, m.value_real \
+         FROM hotpath_function_metrics AS m \
+         JOIN hotpath_functions AS f ON f.id = m.function_id \
+         WHERE f.run_id = ?1",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![run_id], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, Option<i64>>(3)?,
+            row.get::<_, Option<f64>>(4)?,
+        ))
+    })?;
+    for row in rows {
+        let (id, metric, kind, integer, real) = row?;
+        let Some(index) = ids.get(&id).copied() else {
+            continue;
+        };
+        let Some(value) = Quantity::from_storage(&kind, integer, real) else {
+            continue;
+        };
+        let function = &mut functions[index];
+        match metric.as_str() {
+            "avg" => function.avg = Some(value),
+            "total" => function.total = Some(value),
+            "percent_total" => function.percent_total = Some(value),
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn load_typed_function_percentiles(
+    conn: &rusqlite::Connection,
+    run_id: i64,
+    ids: &std::collections::HashMap<i64, usize>,
+    functions: &mut [HotpathFunction],
+) -> Result<(), DevError> {
+    let mut stmt = conn.prepare(
+        "SELECT p.function_id, p.percentile, p.quantity_kind, p.value_int, p.value_real \
+         FROM hotpath_function_percentiles AS p \
+         JOIN hotpath_functions AS f ON f.id = p.function_id \
+         WHERE f.run_id = ?1",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![run_id], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, f64>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, Option<i64>>(3)?,
+            row.get::<_, Option<f64>>(4)?,
+        ))
+    })?;
+    for row in rows {
+        let (id, percentile, kind, integer, real) = row?;
+        let Some(index) = ids.get(&id).copied() else {
+            continue;
+        };
+        let (Some(percentile), Some(value)) = (
+            Percentile::new(percentile),
+            Quantity::from_storage(&kind, integer, real),
+        ) else {
+            continue;
+        };
+        functions[index].percentiles.insert(percentile, value);
+    }
+    Ok(())
+}
+
+fn apply_legacy_function_metrics(
+    functions: &mut [HotpathFunction],
+    legacy: Vec<LegacyFunctionMetrics>,
+) {
+    // Typed rows take precedence, while each missing field can still be read
+    // from the display strings written by earlier schema versions.
+    for (function, old) in functions.iter_mut().zip(legacy) {
+        function.avg = function
+            .avg
+            .or_else(|| old.avg.as_deref().and_then(Quantity::parse));
+        function.total = function
+            .total
+            .or_else(|| old.total.as_deref().and_then(Quantity::parse));
+        function.percent_total = function
+            .percent_total
+            .or_else(|| old.percent_total.as_deref().and_then(Quantity::parse));
+        for (key, text) in [("p50", old.p50), ("p95", old.p95), ("p99", old.p99)] {
+            if let (Some(percentile), Some(value)) = (
+                Percentile::parse_key(key),
+                text.as_deref().and_then(Quantity::parse),
+            ) {
+                function.percentiles.entry(percentile).or_insert(value);
+            }
+        }
+    }
 }
 
 fn load_hotpath_threads(
     conn: &rusqlite::Connection,
     run_id: i64,
 ) -> Result<Vec<HotpathThread>, DevError> {
+    let (mut threads, legacy, ids) = load_hotpath_thread_rows(conn, run_id)?;
+    load_typed_thread_metrics(conn, run_id, &ids, &mut threads)?;
+    apply_legacy_thread_metrics(&mut threads, legacy);
+    Ok(threads)
+}
+
+type LegacyThreadMetrics = [Option<String>; 6];
+
+/// A run's thread rows, their legacy text metrics, and each row's index by
+/// database id.
+type ThreadRows = (
+    Vec<HotpathThread>,
+    Vec<LegacyThreadMetrics>,
+    std::collections::HashMap<i64, usize>,
+);
+
+fn load_hotpath_thread_rows(
+    conn: &rusqlite::Connection,
+    run_id: i64,
+) -> Result<ThreadRows, DevError> {
+    let mut threads = Vec::new();
+    let mut legacy = Vec::new();
     let mut stmt = conn.prepare(
-        "SELECT name, status, cpu_percent, cpu_percent_max, cpu_percent_avg, \
+        "SELECT id, name, status, cpu_percent, cpu_percent_max, cpu_percent_avg, \
          alloc_bytes, dealloc_bytes, mem_diff \
          FROM hotpath_threads WHERE run_id = ?1",
     )?;
     let rows = stmt.query_map(rusqlite::params![run_id], |row| {
-        Ok(HotpathThread {
-            name: row.get(0)?,
-            status: row.get(1)?,
-            cpu_percent: row.get(2)?,
-            cpu_percent_max: row.get(3)?,
-            cpu_percent_avg: row.get(4)?,
-            alloc_bytes: row.get(5)?,
-            dealloc_bytes: row.get(6)?,
-            mem_diff: row.get(7)?,
-        })
+        Ok((
+            row.get::<_, i64>(0)?,
+            HotpathThread {
+                name: row.get(1)?,
+                status: row.get(2)?,
+                cpu_percent: None,
+                cpu_percent_max: None,
+                cpu_percent_avg: None,
+                alloc_bytes: None,
+                dealloc_bytes: None,
+                mem_diff: None,
+            },
+            [
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+                row.get(6)?,
+                row.get(7)?,
+                row.get(8)?,
+            ],
+        ))
     })?;
-    let mut result = Vec::new();
+    let mut ids = std::collections::HashMap::new();
     for row in rows {
-        result.push(row?);
+        let (id, thread, old_metrics) = row?;
+        ids.insert(id, threads.len());
+        threads.push(thread);
+        legacy.push(old_metrics);
     }
-    Ok(result)
+    Ok((threads, legacy, ids))
+}
+
+fn load_typed_thread_metrics(
+    conn: &rusqlite::Connection,
+    run_id: i64,
+    ids: &std::collections::HashMap<i64, usize>,
+    threads: &mut [HotpathThread],
+) -> Result<(), DevError> {
+    let mut stmt = conn.prepare(
+        "SELECT m.thread_id, m.metric, m.quantity_kind, m.value_int, m.value_real \
+         FROM hotpath_thread_metrics AS m \
+         JOIN hotpath_threads AS t ON t.id = m.thread_id \
+         WHERE t.run_id = ?1",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![run_id], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, Option<i64>>(3)?,
+            row.get::<_, Option<f64>>(4)?,
+        ))
+    })?;
+    for row in rows {
+        let (id, metric, kind, integer, real) = row?;
+        let Some(index) = ids.get(&id).copied() else {
+            continue;
+        };
+        let Some(value) = Quantity::from_storage(&kind, integer, real) else {
+            continue;
+        };
+        set_thread_metric(&mut threads[index], &metric, value);
+    }
+    Ok(())
+}
+
+fn apply_legacy_thread_metrics(threads: &mut [HotpathThread], legacy: Vec<LegacyThreadMetrics>) {
+    for (thread, old) in threads.iter_mut().zip(legacy) {
+        let legacy_values = [
+            ("cpu_percent", old[0].as_deref()),
+            ("cpu_percent_max", old[1].as_deref()),
+            ("cpu_percent_avg", old[2].as_deref()),
+            ("alloc_bytes", old[3].as_deref()),
+            ("dealloc_bytes", old[4].as_deref()),
+            ("mem_diff", old[5].as_deref()),
+        ];
+        for (metric, text) in legacy_values {
+            if let Some(value) = text.and_then(Quantity::parse) {
+                set_thread_metric_if_missing(thread, metric, value);
+            }
+        }
+    }
+}
+
+fn set_thread_metric(thread: &mut HotpathThread, metric: &str, value: Quantity) {
+    match metric {
+        "cpu_percent" => thread.cpu_percent = Some(value),
+        "cpu_percent_max" => thread.cpu_percent_max = Some(value),
+        "cpu_percent_avg" => thread.cpu_percent_avg = Some(value),
+        "alloc_bytes" => thread.alloc_bytes = Some(value),
+        "dealloc_bytes" => thread.dealloc_bytes = Some(value),
+        "mem_diff" => thread.mem_diff = Some(value),
+        _ => {}
+    }
+}
+
+fn set_thread_metric_if_missing(thread: &mut HotpathThread, metric: &str, value: Quantity) {
+    let slot = match metric {
+        "cpu_percent" => &mut thread.cpu_percent,
+        "cpu_percent_max" => &mut thread.cpu_percent_max,
+        "cpu_percent_avg" => &mut thread.cpu_percent_avg,
+        "alloc_bytes" => &mut thread.alloc_bytes,
+        "dealloc_bytes" => &mut thread.dealloc_bytes,
+        "mem_diff" => &mut thread.mem_diff,
+        _ => return,
+    };
+    if slot.is_none() {
+        *slot = Some(value);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1337,17 +1599,15 @@ mod tests {
                     ordinal: 0,
                     name: String::from("process"),
                     calls: Some(10),
-                    avg: Some(String::from("50ms")),
-                    total: Some(String::from("500ms")),
-                    percent_total: Some(String::from("100%")),
-                    p50: None,
-                    p95: None,
-                    p99: None,
+                    avg: Quantity::parse("50 ms"),
+                    total: Quantity::parse("500 ms"),
+                    percent_total: Quantity::parse("100%"),
+                    percentiles: std::collections::BTreeMap::new(),
                 }],
                 threads: vec![HotpathThread {
                     name: String::from("main"),
                     status: Some(String::from("running")),
-                    cpu_percent: Some(String::from("95%")),
+                    cpu_percent: Quantity::parse("95%"),
                     cpu_percent_max: None,
                     cpu_percent_avg: None,
                     alloc_bytes: None,

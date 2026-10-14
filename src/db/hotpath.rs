@@ -7,20 +7,9 @@
 //! `HOTPATH_OUTPUT_PATH=<scratch>/hotpath-report.json` - see
 //! `harness::run_hotpath_capture`.
 //!
-//! # Hardcoded percentile columns
-//!
-//! This parser, the `hotpath_functions` DB schema (`p50`/`p95`/`p99`
-//! columns in `src/db/schema.rs`), and the formatter in
-//! `src/hotpath_fmt.rs` all hardcode three percentile names: `p50`,
-//! `p95`, `p99`. Projects using hotpath must keep their percentile
-//! config at `[50.0, 95.0, 99.0]` (the crate's default). Custom float
-//! percentiles like `p99.9` (added in hotpath 0.15) are silently
-//! dropped by this parser.
-//!
-//! Generalising to dynamic percentile columns means a DB migration plus
-//! parser/schema/formatter changes - it's a real project, not a tweak.
+use std::collections::BTreeMap;
 
-use super::{HotpathData, HotpathFunction, HotpathThread, KvClass, KvPair};
+use super::{HotpathData, HotpathFunction, HotpathThread, KvClass, KvPair, Percentile, Quantity};
 
 /// Convert a hotpath JSON report (from the hotpath crate) into a `HotpathData` struct.
 ///
@@ -64,15 +53,16 @@ pub fn hotpath_data_from_json(extra: &serde_json::Value) -> Option<HotpathData> 
         if let Some(data) = threads_obj.get("data").and_then(|v| v.as_array()) {
             for entry in data {
                 let s = |k: &str| entry.get(k).and_then(|v| v.as_str()).map(String::from);
+                let quantity = |k: &str| s(k).and_then(|value| Quantity::parse(&value));
                 threads.push(HotpathThread {
                     name: s("name").unwrap_or_default(),
                     status: s("status"),
-                    cpu_percent: s("cpu_percent"),
-                    cpu_percent_max: s("cpu_percent_max"),
-                    cpu_percent_avg: s("cpu_percent_avg"),
-                    alloc_bytes: s("alloc_bytes"),
-                    dealloc_bytes: s("dealloc_bytes"),
-                    mem_diff: s("mem_diff"),
+                    cpu_percent: quantity("cpu_percent"),
+                    cpu_percent_max: quantity("cpu_percent_max"),
+                    cpu_percent_avg: quantity("cpu_percent_avg"),
+                    alloc_bytes: quantity("alloc_bytes"),
+                    dealloc_bytes: quantity("dealloc_bytes"),
+                    mem_diff: quantity("mem_diff"),
                 });
             }
         }
@@ -105,6 +95,17 @@ fn parse_functions_section(
 
     for (ordinal, entry) in data.iter().enumerate() {
         let s = |k: &str| entry.get(k).and_then(|v| v.as_str()).map(String::from);
+        let quantity = |k: &str| s(k).and_then(|value| Quantity::parse(&value));
+        let percentiles = entry
+            .as_object()
+            .into_iter()
+            .flat_map(|fields| fields.iter())
+            .filter_map(|(key, value)| {
+                let percentile = Percentile::parse_key(key)?;
+                let metric = Quantity::parse(value.as_str()?)?;
+                Some((percentile, metric))
+            })
+            .collect::<BTreeMap<_, _>>();
         #[allow(clippy::cast_possible_wrap)]
         let ord = ordinal as i64;
         out.push(HotpathFunction {
@@ -113,12 +114,10 @@ fn parse_functions_section(
             ordinal: ord,
             name: s("name").unwrap_or_default(),
             calls: entry.get("calls").and_then(serde_json::Value::as_i64),
-            avg: s("avg"),
-            total: s("total"),
-            percent_total: s("percent_total"),
-            p50: s("p50"),
-            p95: s("p95"),
-            p99: s("p99"),
+            avg: quantity("avg"),
+            total: quantity("total"),
+            percent_total: quantity("percent_total"),
+            percentiles,
         });
     }
 }

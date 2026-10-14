@@ -166,6 +166,214 @@ pub struct DistributionUs {
     pub max: i64,
 }
 
+/// The dimension carried by a hotpath quantity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QuantityKind {
+    Duration,
+    Bytes,
+    Percent,
+}
+
+impl QuantityKind {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Duration => "duration_ns",
+            Self::Bytes => "bytes",
+            Self::Percent => "percent",
+        }
+    }
+}
+
+/// A hotpath metric in a canonical unit.
+///
+/// Signed integer storage is intentional: `mem_diff` can be negative.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Quantity {
+    DurationNs(i64),
+    Bytes(i64),
+    Percent(f64),
+}
+
+impl Quantity {
+    /// Parse the display spelling written by the hotpath JSON reporter.
+    pub fn parse(value: &str) -> Option<Self> {
+        let value = value.trim();
+        if value.is_empty() {
+            return None;
+        }
+        if let Some(number) = value.strip_suffix('%') {
+            let number = number.trim().parse::<f64>().ok()?;
+            return number.is_finite().then_some(Self::Percent(number));
+        }
+
+        let split = value.rfind(char::is_whitespace)?;
+        let number = value[..split].trim().parse::<f64>().ok()?;
+        if !number.is_finite() {
+            return None;
+        }
+        let unit = value[split..].trim();
+        let (kind, scale) = match unit {
+            "ns" => (QuantityKind::Duration, 1.0),
+            "µs" | "μs" | "us" => (QuantityKind::Duration, 1_000.0),
+            "ms" => (QuantityKind::Duration, 1_000_000.0),
+            "s" => (QuantityKind::Duration, 1_000_000_000.0),
+            "B" => (QuantityKind::Bytes, 1.0),
+            "KB" => (QuantityKind::Bytes, 1_024.0),
+            "MB" => (QuantityKind::Bytes, 1_048_576.0),
+            "GB" => (QuantityKind::Bytes, 1_073_741_824.0),
+            _ => return None,
+        };
+        let value = checked_rounded_i64(number * scale)?;
+        match kind {
+            QuantityKind::Duration => Some(Self::DurationNs(value)),
+            QuantityKind::Bytes => Some(Self::Bytes(value)),
+            QuantityKind::Percent => None,
+        }
+    }
+
+    pub(crate) fn kind(self) -> QuantityKind {
+        match self {
+            Self::DurationNs(_) => QuantityKind::Duration,
+            Self::Bytes(_) => QuantityKind::Bytes,
+            Self::Percent(_) => QuantityKind::Percent,
+        }
+    }
+
+    pub(crate) fn storage_parts(self) -> (&'static str, Option<i64>, Option<f64>) {
+        match self {
+            Self::DurationNs(value) => (QuantityKind::Duration.as_str(), Some(value), None),
+            Self::Bytes(value) => (QuantityKind::Bytes.as_str(), Some(value), None),
+            Self::Percent(value) => (QuantityKind::Percent.as_str(), None, Some(value)),
+        }
+    }
+
+    pub(crate) fn from_storage(
+        kind: &str,
+        integer: Option<i64>,
+        real: Option<f64>,
+    ) -> Option<Self> {
+        match kind {
+            "duration_ns" => integer.map(Self::DurationNs),
+            "bytes" => integer.map(Self::Bytes),
+            "percent" => real.filter(|value| value.is_finite()).map(Self::Percent),
+            _ => None,
+        }
+    }
+
+    #[allow(clippy::cast_precision_loss)]
+    fn numeric_value(self) -> f64 {
+        match self {
+            Self::DurationNs(value) | Self::Bytes(value) => value as f64,
+            Self::Percent(value) => value,
+        }
+    }
+
+    pub(crate) fn relative_change_from(self, baseline: Self) -> Option<f64> {
+        if self.kind() != baseline.kind() {
+            return None;
+        }
+        let old = baseline.numeric_value();
+        if old.abs() <= f64::EPSILON {
+            return None;
+        }
+        Some((self.numeric_value() - old) / old * 100.0)
+    }
+}
+
+fn checked_rounded_i64(value: f64) -> Option<i64> {
+    let rounded = value.round();
+    // The upper bound is exclusive: i64::MAX rounds to 2^63 as an f64.
+    if !rounded.is_finite() || rounded < i64::MIN as f64 || rounded >= -(i64::MIN as f64) {
+        return None;
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    Some(rounded as i64)
+}
+
+impl std::fmt::Display for Quantity {
+    #[allow(clippy::cast_precision_loss)]
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match *self {
+            Self::DurationNs(value) => {
+                let magnitude = value.unsigned_abs();
+                let (scaled, unit) = if magnitude < 1_000 {
+                    (value as f64, "ns")
+                } else if magnitude < 1_000_000 {
+                    (value as f64 / 1_000.0, "µs")
+                } else if magnitude < 1_000_000_000 {
+                    (value as f64 / 1_000_000.0, "ms")
+                } else {
+                    (value as f64 / 1_000_000_000.0, "s")
+                };
+                write!(f, "{scaled} {unit}")
+            }
+            Self::Bytes(value) => {
+                let magnitude = value.unsigned_abs();
+                let (scaled, unit) = if magnitude < 1_024 {
+                    (value as f64, "B")
+                } else if magnitude < 1_048_576 {
+                    (value as f64 / 1_024.0, "KB")
+                } else if magnitude < 1_073_741_824 {
+                    (value as f64 / 1_048_576.0, "MB")
+                } else {
+                    (value as f64 / 1_073_741_824.0, "GB")
+                };
+                write!(f, "{scaled} {unit}")
+            }
+            Self::Percent(value) => write!(f, "{value}%"),
+        }
+    }
+}
+
+/// A percentile in the inclusive range 0 to 100. `total_cmp` keeps fractional
+/// percentiles such as 99.9 in numeric order as map keys.
+#[derive(Clone, Copy, Debug)]
+pub struct Percentile(f64);
+
+impl Percentile {
+    pub fn new(value: f64) -> Option<Self> {
+        (value.is_finite() && (0.0..=100.0).contains(&value)).then_some(Self(if value == 0.0 {
+            0.0
+        } else {
+            value
+        }))
+    }
+
+    pub(crate) fn parse_key(key: &str) -> Option<Self> {
+        Self::new(key.strip_prefix('p')?.parse().ok()?)
+    }
+
+    pub(crate) fn value(self) -> f64 {
+        self.0
+    }
+}
+
+impl PartialEq for Percentile {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.total_cmp(&other.0).is_eq()
+    }
+}
+
+impl Eq for Percentile {}
+
+impl PartialOrd for Percentile {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Percentile {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.0.total_cmp(&other.0)
+    }
+}
+
+impl std::fmt::Display for Percentile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "p{}", self.0)
+    }
+}
+
 /// A single function row from hotpath profiling.
 #[derive(Clone)]
 pub struct HotpathFunction {
@@ -174,12 +382,10 @@ pub struct HotpathFunction {
     pub ordinal: i64,
     pub name: String,
     pub calls: Option<i64>,
-    pub avg: Option<String>,
-    pub total: Option<String>,
-    pub percent_total: Option<String>,
-    pub p50: Option<String>,
-    pub p95: Option<String>,
-    pub p99: Option<String>,
+    pub avg: Option<Quantity>,
+    pub total: Option<Quantity>,
+    pub percent_total: Option<Quantity>,
+    pub percentiles: BTreeMap<Percentile, Quantity>,
 }
 
 /// A single thread row from hotpath profiling.
@@ -187,12 +393,12 @@ pub struct HotpathFunction {
 pub struct HotpathThread {
     pub name: String,
     pub status: Option<String>,
-    pub cpu_percent: Option<String>,
-    pub cpu_percent_max: Option<String>,
-    pub cpu_percent_avg: Option<String>,
-    pub alloc_bytes: Option<String>,
-    pub dealloc_bytes: Option<String>,
-    pub mem_diff: Option<String>,
+    pub cpu_percent: Option<Quantity>,
+    pub cpu_percent_max: Option<Quantity>,
+    pub cpu_percent_avg: Option<Quantity>,
+    pub alloc_bytes: Option<Quantity>,
+    pub dealloc_bytes: Option<Quantity>,
+    pub mem_diff: Option<Quantity>,
 }
 
 /// Structured hotpath profiling data (functions + threads).

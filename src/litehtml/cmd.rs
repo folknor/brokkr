@@ -4,7 +4,8 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::build;
-use crate::config::{LitehtmlConfig, LitehtmlFixture};
+use crate::cli::{LitehtmlVisualArgs, VisualArgs};
+use crate::config::project_config::litehtml::{LitehtmlConfig, LitehtmlFixture};
 use crate::error::DevError;
 use crate::git;
 use crate::output;
@@ -519,30 +520,32 @@ fn build_pipeline(build_root: &Path) -> Result<PathBuf, DevError> {
 /// `build_root` is the code tree cargo and git run in. They differ only under
 /// the one-level-up layout, where using `project_root` for the build and the
 /// commit stamp built and described the wrong tree.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn test(
     project: Project,
     project_root: &Path,
     build_root: &Path,
     litehtml_config: &LitehtmlConfig,
-    fixture_id: Option<&str>,
-    suite: Option<&str>,
-    all: bool,
-    recapture: bool,
+    args: &VisualArgs,
+    litehtml: &LitehtmlVisualArgs,
 ) -> Result<(), DevError> {
     project::require(project, Project::Litehtml, "visual")?;
     validate_config(litehtml_config)?;
 
     let db = open_db(project_root)?;
     let git_info = git::collect(build_root)?;
-    let fixtures = resolve_fixtures(litehtml_config, fixture_id, suite, all)?;
+    let fixtures = resolve_fixtures(
+        litehtml_config,
+        args.fixture.as_deref(),
+        litehtml.suite.as_deref(),
+        args.all,
+    )?;
 
     // Build the pipeline binary once.
     let binary = build_pipeline(build_root)?;
 
     // Materialize the capture script once if --recapture was requested; it
     // stays in the versioned per-user cache for later runs.
-    let recapture_script = if recapture {
+    let recapture_script = if litehtml.recapture {
         Some(CaptureScript::write()?)
     } else {
         None
@@ -865,10 +868,9 @@ const PNPM_INSTALL_DEADLINE: std::time::Duration = std::time::Duration::from_sec
 /// `$XDG_CACHE_HOME/brokkr/litehtml-prepare`: one subdirectory per bundled
 /// script version. Regenerable - a swept cache costs one reinstall.
 fn script_cache_root() -> Result<PathBuf, DevError> {
-    let cache_home = user_dirs::xdg_cache_home().ok_or_else(|| {
+    user_dirs::litehtml_scripts_dir().ok_or_else(|| {
         DevError::Config("cannot resolve an XDG cache directory for litehtml scripts".into())
-    })?;
-    Ok(cache_home.join("brokkr").join("litehtml-prepare"))
+    })
 }
 
 /// The cache key of the scripts this binary carries.

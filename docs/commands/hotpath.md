@@ -153,4 +153,4 @@ building, acquiring the lock, or running anything.
 - `src/main_parts/bootstrap.rs` - the dispatch arm; forces `--hotpath 1` when no
   mode flag is set, then hands off to `run_measured`
 - `src/sluggrs/hotpath.rs` - `cmd()` (target naming, feature selection,
-  `BenchContext::with_build_config`) and `run()` (the harness driver)
+  `MeasurementSession::with_build_config`) and `run()` (the harness driver)

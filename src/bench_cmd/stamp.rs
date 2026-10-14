@@ -161,7 +161,9 @@ fn cpu_model() -> Option<String> {
 fn cargo_config_digest() -> Option<String> {
     let home = crate::user_dirs::cargo_home()?;
     let path = crate::user_dirs::cargo_config_file(&home)?;
-    preflight::compute_xxh128(&path).ok()
+    preflight::compute_file_digest(&path)
+        .map(|d| d.to_string())
+        .ok()
 }
 
 /// Digests of every `.cargo/config{.toml}` from `build_root` upwards, paired
@@ -177,7 +179,7 @@ fn repo_config_digests(build_root: &Path) -> Vec<(usize, String)> {
     let mut out = Vec::new();
     for (depth, dir) in build_root.ancestors().enumerate() {
         if let Some(path) = crate::user_dirs::cargo_config_file(&dir.join(".cargo"))
-            && let Ok(d) = preflight::compute_xxh128(&path)
+            && let Ok(d) = preflight::compute_file_digest(&path).map(|d| d.to_string())
         {
             out.push((depth, d));
         }

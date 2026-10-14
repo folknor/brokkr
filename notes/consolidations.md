@@ -38,12 +38,6 @@ Reported by: check-report, config-cli.
 
 A borrowed `LintName`/`LintTool` in `config_parts/schema.rs` now owns namespace classification, test-build eligibility and blanket/sited matching. Residue: `allow`/`allow_exact` in config and `code` on diagnostics are still strings parsed at each use rather than at load and ingestion (needs an owned representation built in `parse_lints`), and `cmd_check`/`cmd_clippy` still receive `allow` and `allow_exact` as two loose slices rather than `&LintsConfig`. Also, `SitedAllow::parse` claims to validate relative paths but accepts absolute ones.
 
-## CON-015 - "Is this diagnostic about something the workspace does not own?"
-
-Reported by: check-report.
-
-A metadata-backed `OwnerIndex` in `src/diagnostic.rs` tells members, the root manifest and non-members apart, and the test-build text renderer uses it. Residue: the JSON clippy/rustdoc phase in `check_cmd/phase.rs` still classifies with `is_dependency_warning` and mints the synthetic `"manifest+<path>"` package id for manifest lints; it should classify through `OwnerIndex`.
-
 ## CON-023 - "Does `[<host>] features` apply to this build?"
 
 Reported by: config-cli.
@@ -55,15 +49,3 @@ Every `BenchContext` build now merges host features itself, and `docs/brokkr.tom
 Reported by: the wave-6 and wave-7 reviewers, laterally.
 
 The sweep argv projections and the duplicate `harness` field are gone; every reader uses `LaneExec`/`LaneFilters`. Residue: `sidecar.db` has its own `command` column, which results.db migration v21 did not rename, so historical sidecar sessions keep `self`, `pmtiles` and `ingest` while new ones use the CLI ids.
-
-## CON-034 - Two dependency-warning rules for one question
-
-Reported by: the wave-7 reviewer, laterally.
-
-`check_cmd/phase.rs::is_dependency_warning` (a `members` map plus `package_id`) and `Diagnostic::is_dependency_warning` (the metadata-backed `OwnerIndex`, which also classifies by manifest path and site) can disagree on the same warning, so the clippy/rustdoc phases and the text filter (`filter_clippy_with_owners`, test phase) may differ; `attribute_manifest_lints` duplicates `OwnerIndex::classify_path`'s manifest rule. Fold the phases onto `OwnerIndex`. (This is the remaining half of the ownership consolidation filed above.)
-
-## CON-035 - Transitional string facades with no end date
-
-Reported by: the wave-7 reviewer, laterally.
-
-Compatibility paths kept while call sites migrate: `lockfile.rs` re-exports for the old process helpers; `profile::DeclaredFilter`; `cargo_json::DiagnosticEvent` (an alias of `Diagnostic`); and `preflight::digest`'s `compute_xxh128`, `compute_xxh128_tree`, `cached_xxh128` and `verify_file_hash` string spellings, still used by piners, pbfhogg download, the bench stamp and the harness. `FileDigest` also carries a redundant `normalized: String` only to `Deref<Target = str>`, a stringly escape hatch around the typed digest. Migrate the callers and delete the facades.

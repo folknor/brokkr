@@ -5,5 +5,5 @@ mod single;
 mod suite;
 
 pub use list::service_list;
-pub use single::service_test;
-pub use suite::service_suite;
+pub(crate) use single::service_test;
+pub(crate) use suite::service_suite;

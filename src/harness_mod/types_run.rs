@@ -19,14 +19,6 @@ use crate::output;
 /// Configuration for a benchmark run.
 pub struct BenchConfig {
     pub command: String,
-    /// Measurement mode fallback (`"bench"`/`"hotpath"`/`"alloc"`), used
-    /// only when the harness has none. Every writer leaves this `None`:
-    /// the single source is the harness's `measure_mode`, set via
-    /// `with_measure_mode` from the request, and every reader - the stored
-    /// row, the `[result]` line and the sidecar provenance - goes through
-    /// [`BenchHarness::effective_mode`]. Reading this field directly is how
-    /// `mode=` once never printed and `sidecar_meta.mode` was always NULL.
-    pub mode: Option<String>,
     pub input_file: Option<String>,
     pub input_mb: Option<f64>,
     /// Optional per-row feature label. When present, it takes precedence over
@@ -38,12 +30,6 @@ pub struct BenchConfig {
     /// Literal subprocess invocation (pbfhogg/elivagar/...). Populated by
     /// dispatch from the argv it hands to the tool binary.
     pub cli_args: Option<String>,
-    /// Literal `brokkr <...>` invocation fallback, used only when the
-    /// harness has none. Every writer leaves this `None`; the harness's
-    /// `brokkr_args` (set via `with_brokkr_args` from the request) is the
-    /// source. Stored parallel to `cli_args` so queries can grep either
-    /// what the user asked brokkr to do or what brokkr asked the tool to do.
-    pub brokkr_args: Option<String>,
     pub metadata: Vec<KvPair>,
 }
 
@@ -113,7 +99,9 @@ pub struct PendingSidecar {
 pub struct BenchHarness {
     lock: LockGuard,
     db: ResultsDb,
-    db_dir: std::path::PathBuf,
+    /// The `.brokkr` stores the rows land in: the main tree's, also under
+    /// `--commit` (`db_root`).
+    state: crate::clean::layout::ProjectState,
     env: EnvInfo,
     git: GitInfo,
     storage_notes: Option<String>,
@@ -192,10 +180,9 @@ impl BenchHarness {
         std::fs::create_dir_all(&paths.scratch_dir)?;
         let env = crate::env::collect(paths, project, project_root);
         let git = crate::git::collect(project_root)?;
-        let db_base = db_root.unwrap_or(project_root);
-        let db_dir = db_base.join(".brokkr");
-        std::fs::create_dir_all(&db_dir)?;
-        let db = ResultsDb::open(&db_dir.join("results.db"))?;
+        let state = crate::clean::layout::ProjectState::new(db_root.unwrap_or(project_root));
+        std::fs::create_dir_all(state.root())?;
+        let db = ResultsDb::open(&state.results_db())?;
         let storage_notes = format_storage_notes(&paths.drives);
 
         if !git.is_clean {
@@ -216,7 +203,7 @@ impl BenchHarness {
         Ok(Self {
             lock,
             db,
-            db_dir,
+            state,
             env,
             git,
             storage_notes,
@@ -243,16 +230,14 @@ impl BenchHarness {
     }
 
     /// Set the literal `brokkr <...>` invocation string for this harness.
-    /// This value takes precedence over `BenchConfig.brokkr_args`; the config
-    /// value is a fallback for harnesses that do not carry an invocation.
+    /// Every row takes its invocation from this session value.
     pub fn with_brokkr_args(mut self, args: String) -> Self {
         self.brokkr_args = Some(args);
         self
     }
 
     /// Set the measurement mode string (`"bench"`, `"hotpath"`, `"alloc"`).
-    /// This takes precedence over `BenchConfig.mode`, so individual
-    /// writers don't have to supply it. `None` denotes run mode: report
+    /// Individual writers do not supply the measurement mode. `None` denotes run mode: report
     /// measurements without persisting result or sidecar records.
     pub fn with_measure_mode(mut self, mode: Option<&str>) -> Self {
         self.store_results = mode.is_some();
@@ -442,22 +427,25 @@ impl BenchHarness {
         cwd: &Path,
         ok_codes: &[i32],
     ) -> Result<BenchResult, DevError> {
-        self.run_external_inner(config, program, args, cwd, ok_codes)
+        self.run_external_prepared(config, program, args, cwd, ok_codes, || Ok(()))
     }
 
     /// Shared body of the external-timing paths.
     ///
     /// The winner is chosen by external wall; the counters never influence
     /// which iteration is "best", they only describe it.
-    fn run_external_inner(
+    pub(crate) fn run_external_prepared<F>(
         &self,
         config: &BenchConfig,
         program: &Path,
         args: &[&str],
         cwd: &Path,
         ok_codes: &[i32],
-    ) -> Result<BenchResult, DevError> {
-        let scratch_dir = &self.db_dir;
+        prepare: F,
+    ) -> Result<BenchResult, DevError>
+    where F: Fn() -> Result<(), DevError>,
+    {
+        let scratch_dir = self.state.root();
         use crate::sidecar;
 
         let start_epoch = wall_clock_epoch();
@@ -479,6 +467,7 @@ impl BenchHarness {
         let total = clamp_u32(config.runs);
 
         for i in 0..config.runs {
+            prepare()?;
             announce_run(i, config.runs);
             self.lock.set_progress(clamp_u32(i + 1), total);
 
@@ -682,7 +671,7 @@ impl BenchHarness {
         args: &[&str],
         cwd: &Path,
     ) -> Result<(BenchResult, Vec<u8>, PendingSidecar), DevError> {
-        let scratch_dir = &self.db_dir;
+        let scratch_dir = self.state.root();
         use crate::sidecar;
 
         let start_epoch = wall_clock_epoch();
@@ -822,7 +811,7 @@ impl BenchHarness {
         iterations_us: &[i64],
         fired_stop_marker: Option<&str>,
     ) -> Result<Option<String>, DevError> {
-        let mode = self.effective_mode(config);
+        let mode = self.effective_mode();
         if !self.store_results {
             force_emit_result_lines(config, mode.as_deref(), result, &self.git);
             return Ok(None);
@@ -851,11 +840,9 @@ impl BenchHarness {
     }
 
     /// The measurement mode a row, `[result]` line and sidecar record
-    /// carry: the harness's `measure_mode` (from the request), falling
-    /// back to the per-config override. The one resolution every reader
-    /// uses - see `BenchConfig::mode`.
-    pub fn effective_mode(&self, config: &BenchConfig) -> Option<String> {
-        self.measure_mode.clone().or_else(|| config.mode.clone())
+    /// carry: the session's `measure_mode`, set from the request.
+    pub fn effective_mode(&self) -> Option<String> {
+        self.measure_mode.clone()
     }
 
     /// Record that measurement is starting now. For the loops that don't
@@ -873,7 +860,7 @@ impl BenchHarness {
         pid: u32,
         exit_code: Option<i32>,
     ) -> crate::db::sidecar::RunInfo {
-        let binary_xxh128 = crate::preflight::compute_xxh128(program).ok();
+        let binary_xxh128 = crate::preflight::compute_file_digest(program).map(|d| d.to_string()).ok();
         crate::db::sidecar::RunInfo {
             run_start_epoch: Some(start_epoch),
             pid: Some(i64::from(pid)),
@@ -881,7 +868,7 @@ impl BenchHarness {
             binary_path: Some(program.display().to_string()),
             binary_xxh128,
             git_commit: Some(self.git.commit.clone()),
-            mode: self.effective_mode(config),
+            mode: self.effective_mode(),
             dataset: config.input_file.clone(),
             exit_code,
         }
@@ -944,7 +931,7 @@ impl BenchHarness {
             return Ok(());
         }
 
-        let sidecar_db_path = self.db_dir.join("sidecar.db");
+        let sidecar_db_path = self.state.sidecar_db();
         let sidecar_db = crate::db::sidecar::SidecarDb::open(&sidecar_db_path)?;
 
         let (store_uuid, is_dirty) = match uuid {
@@ -1034,11 +1021,8 @@ impl BenchHarness {
         // Harness-level values take precedence. The individual writers
         // don't have to know or care about the measurement mode or the
         // brokkr invocation string - the harness attaches them.
-        let mode = self.effective_mode(config);
-        let brokkr_args = self
-            .brokkr_args
-            .clone()
-            .or_else(|| config.brokkr_args.clone());
+        let mode = self.effective_mode();
+        let brokkr_args = self.brokkr_args.clone();
 
         RunRow {
             hostname: self.env.hostname.clone(),

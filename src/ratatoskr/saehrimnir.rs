@@ -20,11 +20,10 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use crate::config::RatatoskrConfig;
+use crate::config::project_config::ratatoskr::RatatoskrConfig;
 use crate::error::DevError;
 use crate::lockfile::{self, LockContext};
 use crate::output;
-use crate::ratatoskr::process as proc_helpers;
 use crate::ratatoskr::timing::{POLL_INTERVAL, SHUTDOWN_POLL_INTERVAL};
 pub use crate::ratatoskr::timing::{READINESS_BUDGET, SHUTDOWN_BUDGET};
 
@@ -811,9 +810,9 @@ fn print_endpoints(ep: &Endpoints) {
 /// consistent with the spawn site.
 fn kill_for_shutdown(pid: u32, signum: i32, isolate_pg: bool) {
     if isolate_pg {
-        proc_helpers::send_signal_pgrp(pid, signum).ok();
+        crate::process::signal_process_group(pid, signum).ok();
     } else {
-        proc_helpers::send_signal(pid, signum).ok();
+        crate::process::signal_pid(pid, signum).ok();
     }
 }
 

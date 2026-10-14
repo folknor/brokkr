@@ -178,7 +178,7 @@ fn suite_needs_osc(commands: &[&str]) -> Result<bool, DevError> {
 /// `osc_seq` is the replication seq `osc_path` was registered under; together
 /// with the snapshot key it names the merged-PBF cache. The suite always runs
 /// against the dataset's primary snapshot, so that key is `base`. The merged
-/// PBF comes from the same `dispatch::ensure_merged_pbf` the single-command
+/// PBF comes from the same `plan::ensure_merged_pbf` the single-command
 /// path uses, and is always rebuilt: the suite is a measured mode, and the
 /// cache key cannot see a primary PBF refreshed in place under the same stem.
 #[allow(clippy::too_many_arguments)]
@@ -223,7 +223,7 @@ pub fn run(
         })?;
         let scratch = scratch_dir
             .ok_or_else(|| DevError::Config("diff/diff-osc require a scratch directory".into()))?;
-        let (merged, _state) = crate::pbfhogg::dispatch::ensure_merged_pbf(
+        let (merged, _state) = crate::pbfhogg::plan::ensure_merged_pbf(
             binary,
             pbf_path,
             osc,
@@ -270,7 +270,7 @@ pub fn run(
             params,
         };
 
-        crate::pbfhogg::dispatch::run_wallclock_core(
+        crate::pbfhogg::plan::run_wallclock_core(
             harness,
             binary,
             &cmd,
@@ -279,11 +279,7 @@ pub fn run(
             project_root,
             false,
         )?;
-        crate::pbfhogg::dispatch::cleanup_output(
-            &cmd,
-            &ctx,
-            crate::pbfhogg::commands::ArgMode::Bench,
-        )?;
+        crate::pbfhogg::plan::cleanup_output(&cmd, &ctx, crate::pbfhogg::commands::ArgMode::Bench)?;
         Ok(())
     })
 }

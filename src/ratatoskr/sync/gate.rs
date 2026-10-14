@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use crate::build::CargoProfile;
-use crate::config::{GateConfig, RatatoskrConfig};
+use crate::config::project_config::ratatoskr::{GateConfig, RatatoskrConfig};
 use crate::error::DevError;
 use crate::git;
 use crate::lockfile::{self, LockContext};
@@ -78,13 +78,7 @@ pub fn validate_gate_selection(
 /// of its gates carrying zero-drift rules across the provider surface, with
 /// no per-gate moment to notice a regression being blessed.
 pub fn run_gate_cohort(req: &SyncBenchRequest<'_>) -> Result<(), DevError> {
-    let cfg = req.dev_config.ratatoskr.as_ref().ok_or_else(|| {
-        DevError::Config(
-            "sync: no [ratatoskr] section in brokkr.toml. \
-             Required to locate sæhrimnir and the harness binary."
-                .into(),
-        )
-    })?;
+    let cfg = req.ratatoskr;
 
     if cfg.gate.is_empty() {
         return Err(DevError::Config(
@@ -153,6 +147,7 @@ pub fn run_gate_cohort(req: &SyncBenchRequest<'_>) -> Result<(), DevError> {
             project_root: req.project_root,
             build_root: req.build_root,
             dev_config: req.dev_config,
+            ratatoskr: req.ratatoskr,
             script,
             bench: req.bench,
             force: req.force,

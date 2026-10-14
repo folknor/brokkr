@@ -1,15 +1,13 @@
-//! Process-tree primitives for the service harness.
+//! Shared best-effort signalling and process snapshots.
 //!
-//! Generic Linux helpers for signaling and inspecting child processes. The
-//! module keeps two process-presence helpers available only to unit tests.
+//! These helpers are for brokkr-owned children and diagnostics. Callers that
+//! target recorded identities use the verified pidfd APIs in `reap`.
 //!
-//! - [`send_signal`] - send `SIGTERM` / `SIGKILL` (or any signum) to a
-//!   known PID. Used by every test that drives the Service via signals
-//!   (parent-death, deadlock-drop, crashloop, respawn).
+//! - [`signal_pid`] - send a signal to a known PID.
+//! - [`signal_process_group`] - send a signal to a known PGID.
 //! - [`snapshot_proc`] - copy `/proc/<pid>/{status,wchan,syscall,stack}`
 //!   into the artefact dir. Distinguishes "blocked on futex" from
-//!   "blocked on closed pipe" without re-running, which is the single
-//!   most useful debugging artefact for a hung Service.
+//!   "blocked on closed pipe" without re-running.
 
 use std::fs;
 use std::path::Path;
@@ -18,54 +16,60 @@ use std::time::{Duration, Instant};
 
 use crate::error::DevError;
 
-/// Send `signum` to `pid`.
+/// Signal a PID that the caller already owns or has independently verified.
 ///
-/// `signum` is a libc signal constant: `libc::SIGTERM` (15) for the
-/// shutdown-drain path, `libc::SIGKILL` (9) for crash simulation,
-/// `0` for an existence check (the unit tests use this to check a PID).
-///
-/// Returns `Err` if `pid` does not exist (`ESRCH`) or the caller lacks
-/// permission (`EPERM`). Returning the typed error so the caller can
-/// distinguish "the process I was about to kill was already gone"
-/// (often fine) from "permission denied" (real configuration bug).
-pub fn send_signal(pid: u32, signum: i32) -> Result<(), DevError> {
-    // SAFETY: libc::kill is async-signal-safe and takes plain integers;
-    // there is no pointer / lifetime concern. `cast_signed` is a no-op
-    // for PIDs in the valid kernel range (kernel.pid_max < 2^22).
-    let ret = unsafe { libc::kill(pid.cast_signed(), signum) };
-    if ret == 0 {
-        return Ok(());
-    }
-    let err = std::io::Error::last_os_error();
-    Err(DevError::Io(err))
+/// Returns `Ok(false)` when the process has already exited. Callers targeting
+/// a stored or otherwise untrusted identity must use
+/// [`crate::process::VerifiedProcess`]
+/// instead, so PID recycling cannot redirect the signal.
+pub fn signal_pid(pid: u32, signal: libc::c_int) -> std::io::Result<bool> {
+    let pid = checked_pid(pid)?;
+    // SAFETY: libc::kill takes scalar arguments and no pointers.
+    let ret = unsafe { libc::kill(pid, signal) };
+    signal_result(ret)
 }
 
-/// Send `signum` to the entire process group whose PGID equals `pid`.
+/// Signal a process group by PGID. `Ok(false)` means the group has exited.
 ///
-/// Used by the kill paths that target children spawned with
-/// `process_group(0)` (the PG leader's PID == its PGID, so the caller
-/// passes the leader PID and we negate inside). Sends to descendants
-/// too, so cargo's rustc / sæhrimnir's helper subprocesses go down with
-/// the leader and don't get orphaned.
-///
-/// `ESRCH` is normalized to `Ok(())` because "the group is already
-/// gone" is the desired post-condition for every caller (deadline kill,
-/// cooperative SIGTERM, `--hard`, `MockServer::shutdown`).
-pub fn send_signal_pgrp(pid: u32, signum: i32) -> Result<(), DevError> {
-    let signed =
-        i32::try_from(pid).map_err(|_| DevError::Build(format!("pid {pid} does not fit pid_t")))?;
-    // SAFETY: `kill(-pgid, sig)` is async-signal-safe and takes plain
-    // integers. PIDs in the valid kernel range fit in i32 (kernel.pid_max
-    // < 2^22), and we just type-checked.
-    let ret = unsafe { libc::kill(-signed, signum) };
+/// This is for groups whose membership and lifetime the caller controls. A
+/// process group has no pidfd-equivalent handle, so callers that target a
+/// recorded group leader must verify its identity immediately before calling.
+pub fn signal_process_group(pgid: u32, signal: libc::c_int) -> std::io::Result<bool> {
+    let pgid = checked_pid(pgid)?;
+    let ret = signal_process_group_raw(pgid, signal);
+    signal_result(ret)
+}
+
+/// The syscall-only process-group path used by the shutdown signal handler.
+/// It performs no allocation or error formatting, so it is safe to call from
+/// that handler. `pgid` must be positive and fit in `pid_t`.
+pub(crate) fn signal_process_group_raw(pgid: libc::pid_t, signal: libc::c_int) -> libc::c_int {
+    // SAFETY: caller supplies a positive PGID; libc::kill is async-signal-safe.
+    unsafe { libc::kill(-pgid, signal) }
+}
+
+fn checked_pid(pid: u32) -> std::io::Result<libc::pid_t> {
+    let pid = libc::pid_t::try_from(pid).map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "PID does not fit pid_t")
+    })?;
+    if pid <= 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "PID must be positive",
+        ));
+    }
+    Ok(pid)
+}
+
+fn signal_result(ret: libc::c_int) -> std::io::Result<bool> {
     if ret == 0 {
-        return Ok(());
+        return Ok(true);
     }
     let err = std::io::Error::last_os_error();
     if err.raw_os_error() == Some(libc::ESRCH) {
-        return Ok(());
+        return Ok(false);
     }
-    Err(DevError::Io(err))
+    Err(err)
 }
 
 /// Whether `pid` refers to a live process.
@@ -80,12 +84,7 @@ pub fn send_signal_pgrp(pid: u32, signum: i32) -> Result<(), DevError> {
 /// "still occupying a PID slot, has not been waited on yet."
 #[cfg(test)]
 fn pid_is_alive(pid: u32) -> bool {
-    let ret = unsafe { libc::kill(pid.cast_signed(), 0) };
-    if ret == 0 {
-        return true;
-    }
-    let err = std::io::Error::last_os_error();
-    err.raw_os_error() != Some(libc::ESRCH)
+    signal_pid(pid, 0).unwrap_or(true)
 }
 
 /// Outcome of [`wait_for_sentinel`].
@@ -123,7 +122,7 @@ fn wait_for_sentinel(path: &Path, backstop: Duration) -> Result<SentinelOutcome,
             return Ok(SentinelOutcome::BackstopExpired);
         }
         let remaining = deadline - now;
-        std::thread::sleep(crate::ratatoskr::timing::POLL_INTERVAL.min(remaining));
+        std::thread::sleep(Duration::from_millis(50).min(remaining));
     }
 }
 
@@ -215,7 +214,7 @@ mod tests {
     fn send_signal_kills_process() {
         let mut child = spawn_sleep(60);
         let pid = child.id();
-        send_signal(pid, libc::SIGKILL).unwrap();
+        assert!(signal_pid(pid, libc::SIGKILL).unwrap());
         // Wait briefly for the kernel to reap.
         child.wait().ok();
         // After wait(), the PID is reaped; pid_is_alive should be false
@@ -224,9 +223,9 @@ mod tests {
     }
 
     #[test]
-    fn send_signal_returns_error_for_dead_pid() {
-        let result = send_signal(2_147_483_646, libc::SIGTERM);
-        assert!(matches!(result, Err(DevError::Io(_))));
+    fn signal_pid_reports_dead_pid() {
+        let result = signal_pid(2_147_483_646, libc::SIGTERM).unwrap();
+        assert!(!result);
     }
 
     #[test]

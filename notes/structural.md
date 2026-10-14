@@ -38,22 +38,6 @@ Every property a command has is decided inline in a roughly 1750-line `run()` ma
 
 Proposed: a declarative `CommandSpec` reached through an exhaustive `fn spec(&self) -> &'static CommandSpec`, so a new variant is a compile error rather than a fail-open table miss. It holds `applies: Visibility`, `config: Required | Optional | None`, the lock policy `None | Blocking | NonBlocking` with a label derived from the name, whether the disk gate applies, the default mode and the tools to probe. Dispatch resolves what the spec needs (detection, lock, run log) into a `Ctx` and calls one `handle(self, ctx)` per command family module (`pbfhogg::cli`, `elivagar::cli`, `ratatoskr::cli`, ...), where each project defines its own commands next to its dispatch. The "internal error" arms and the `as_pbfhogg() -> None` safety arm disappear. Help filtering, the `[project]` help prefix and `man` topic visibility all read the spec. The gating half of this question is recorded in the hygiene platform document's project-applicability entry.
 
-## STR-003 - Project and project config section are independent axes
-
-Reported by: config-cli.
-
-`DevConfig` holds `litehtml`, `sluggrs`, `ratatoskr`, `piners`, `dellingr` and `mogwai` as six `Option`s, parsed for every project. A handler therefore checks both "is the project litehtml" and "is `[litehtml]` present". It does the second inline with a repeated `.ok_or_else(|| DevError::Config("no [litehtml] section in brokkr.toml"))`: seven copies across `Visual`, `List`, `VisualStatus`, `Prepare`, `cmd_approve`, and `MockServe` with a different wording. Meanwhile a pbfhogg tree can carry a `[litehtml]` section that is parsed, validated and ignored. The per-project section types (`LitehtmlConfig`, `RatatoskrConfig`, `PinersConfig`, `DellingrConfig`, `MogwaiConfig`, `TilegenConfig`) are defined in the shared schema rather than in their project modules. Proposed: a `ProjectConfig` enum (`Litehtml(LitehtmlConfig)`, `Sluggrs(..)`, `Ratatoskr(..)`, ..., `Generic`) built by `load` from the `project` key, with each project module owning its section type and parser. A section for a different project is a load error, and a missing required section is reported once at load rather than once per command. The visual-command arms collapse to `match detection.project_config { Litehtml(cfg) => .., Sluggrs(cfg) => .. }`.
-
-## STR-004 - The config module holds check's behaviour, and `profile.rs` sits outside `check_cmd`
-
-Reported by: config-cli, check-plan.
-
-`config_parts/schema.rs` defines config types and also `test_phase_allow_flags`, `reaches_test_build`, `is_cargo_lint`, `rustflags_target_key`, `shape_target_key`, `EffectiveUnification::cargo_args/describe/is_per_package`, `SweepProfile::target_subdir/cargo_args` and `ParallelBinaries::resolved_budget`. These are `check_cmd`'s decisions (what flags a build gets, which target dir a shape uses), so `config` depends on knowledge of cargo invocation shape, and `check_cmd` must reach into `config` for its own rules. `parser.rs` holds `captured_env_pairs`/`matches_capture` (a measurement-DB concern), `resolve_paths`/`host_features`/`all_dataset_keys` (path resolution, which `src/resolve.rs` exists for) and `hostname()` (an OS query). It also holds about 600 lines of cross-section validation of `[[check]]`, `[test]` and `[[quarantine]]` (profiles, complete-universe rules, the doctest ledger), which is `check`'s certification policy.
-
-`src/profile.rs` is top-level but its only clients are `check_cmd` and `test_cmd`. It does four jobs: the `extends`-chain merge, the `ResolvedSweep` struct and its build identity, `FeatureConfig` argv rendering, and `resolve_unification`. The *validation* of those same profiles lives in `parser.rs`, which reimplements the merge.
-
-Proposed: keep `schema.rs` as data plus validation, and move build-shape derivation into `check_cmd` (for example `check_cmd/shape.rs`). Give planning a home, `src/check_cmd/plan/`, with `profile.rs` (the merge only, used by both the parser's validation and the runtime), `sweep.rs`, `lane.rs` (lane kind and filters) and selection/features under it. Validation that needs merged profiles (threads, qualified skips, the doc carrier) runs on resolved sweeps at load time instead of on raw definitions, and the config module stops being the thing that must change whenever check's certification rules change.
-
 ## STR-005 - `include!`-spliced fragments stand in for modules
 
 Reported by: config-cli, measurement, map-projects.
@@ -68,14 +52,6 @@ Reported by: config-cli, process-control.
 
 `clean` moved to `src/clean.rs`, `lock`/`kill` to `src/lock_cmd.rs` and `env` into `src/env.rs`. Residue: passthrough run and timing stats, `pmtiles-stats`, `verify` routing and the generic hotpath still live in `main_parts/commands.rs`, and `clean.rs` still branches on every project rather than asking each project module for its clean targets.
 
-## STR-007 - `ResolvedSweep` is two types glued together by a mutable field
-
-Reported by: check-plan.
-
-`profile.rs` builds `ResolvedSweep` with `effective_unification: EffectiveUnification::Ambient` as a placeholder (`build_resolved_sweep`, `sweep_from_check_entry`), and `phase.rs::resolve_sweep_unification` later overwrites it in place. Everything keyed on it (`build_shape_key`, `needs_isolated_target_dir`, `Resolutions::for_selection`, `shape_id`) is silently wrong if read before that write, and nothing in the type says which state a sweep is in. The struct derives `Default`, so tests (and potentially production) mint sweeps holding the placeholder. Many tests build `ResolvedSweep { .., ..Default::default() }` and then mutate `effective_unification` (the `selection.rs` test helper `package_mode`), constructing states production never reaches. Overall the sweep is a 25-field bag of primitives and argv fragments that every downstream module re-interprets; the hunter traces most of check-plan's duplicated decisions to that.
-
-Proposed: `SweepDecl`, the pure result of profile resolution (what the user wrote, with provenance), and `PlannedSweep`, resolved per invocation (effective unification, isolated target dir, lane kind, the selection `Attempt`s). Only `PlannedSweep` has `build_shape_key`/`shape_id`. The resolution function (`resolve_unification` plus the promotion eligibility now in `phase.rs`) is the only constructor of `PlannedSweep`, and tests go through it.
-
 ## STR-008 - A lane's execution kind is five loose fields and a priority ladder
 
 Reported by: check-plan.
@@ -83,32 +59,6 @@ Reported by: check-plan.
 `harness: Harness`, `doc_only: bool`, `parallel_budget: Option<u32>`, `process_isolation: bool` and `test_threads: Option<u32>` together encode one fact: how the lane executes. `prepare::lane_kind` recovers it with a priority ladder (nextest > doc_only > parallel > isolated > serial). Illegal combinations are refused in four different places, or not at all. `lane_kind` silently picks `Parallel` when both `parallel_budget` and `process_isolation` are set, so correctness depends on `phase.rs::reject_conflicting_lanes` having run first. The two docs already disagree: `profile.rs`'s doc on `parallel_budget` says the exclusion is "enforced at resolve time", while `reject_conflicting_lanes` says it is "refused here rather than at resolve time". `LaneKind` is defined in `accounting.rs`, derived in `prepare.rs`, and consumed by `phase.rs`, `continuation.rs` and the doctest predicate, so the type's dependency points accounting <- prepare and the derivation's points prepare <- accounting.
 
 Proposed: `enum LaneExec { Serial { threads }, Parallel { budget }, Isolated, Nextest { threads }, DocOnly }`, built once at resolution, with the conflicts as construction errors and the value carried on the planned sweep. `LaneKind` becomes a projection of it.
-
-## STR-009 - Plan wire records are still primitives
-
-Reported by: check-plan.
-
-`ShapeId`, `LaneIdx`, `Resolution`, `ContentHash`, `TargetKind`, typed refusals and typed anomaly details now exist, serialised transparently. Residue: `prepare.rs` still builds `PairId`, `PlannedArtifact`, `ShapeRecord` and `LaneRecord` from strings and `usize` (nine fields), `AccountingPlan.incomplete` is `Vec<String>`, `DeadFilterRecord` keeps three string fields, the universe maps are keyed `(String, Option<String>)`, and `artifact_drift` keeps a tuple-taking adapter around its typed core.
-
-## STR-010 - A lane's inventory state is three overlapping fields, and continuation is stringly typed
-
-Reported by: check-plan.
-
-`LaneRecord` carries `prepared: bool`, `unavailable: Option<String>` and `skipped: Option<String>`, plus whether `unlisted` is non-empty. Their meanings collide. A skipped lane is recorded with `prepared = true` (the "not attempted" branch in prepare.rs), so `prepared` really means "its expectation is known". `continuation::lane_inventory` reconstructs a disposition from these fields with an ordered if-ladder (superseded > skipped > unavailable > doc-only > unlisted > complete) and emits it as a `&'static str`. `prepare_profile` reads `prepared || kind == DocOnly` for `plan.complete`; DocOnly lanes already get `prepared = lane_ok = true`, so either the special case is dead or the invariant is not what it appears. `phase.rs` reads `unavailable.is_none()` separately. `LaneInventoryOut.availability` and `InventoryOut.availability` are `&'static str` compared with `matches!(l.availability, "complete" | "partial" | ...)`. `is_fail_fast_casualty` compares `c.outcome == Outcome::Unobserved.as_str()` after the enum has already been flattened to a string in `CandidateOut`, and `SuspectOut.cause` is flattened the same way. A test asserts on `.contains("one stream")`.
-
-Proposed: `enum Inventory { Prepared { executions, .., unlisted }, Skipped(reason), Unavailable(UnavailableReason), DocTests }`, with a typed `UnavailableReason` (`CargoThreaded`, `NoShim(reason)`, `PrepareFailed(msg)`, `Stopped`). Enums stay in the model and serialize with `rename_all`; the JSON DTOs stop flattening early.
-
-## STR-012 - `prepare.rs` interleaves building, listing and policy in one loop
-
-Reported by: check-plan.
-
-`prepare_profile` is a loop of about 300 lines. It interleaves lane preparation, stop handling, universe enumeration (policy), filter liveness (policy, coverage's function called from prepare), pair minting and shape-record assembly. The module header says inventory and policy universe "are kept apart in code because they are different claims", but they share this one loop and its mutable `plan`/`ledger`/`universes`. Proposed: two passes over the prepared lanes, `inventory` (per lane, always) and `policy` (per shape, certifying only), with filter liveness and the ledger moving wholly into `coverage.rs`. Today coverage owns `FilterLedger` but prepare drives it.
-
-## STR-013 - Lanes are identified by position in several parallel vectors
-
-Reported by: check-plan.
-
-"The sweep index is the lane identity everywhere." `PhaseSelection.entries`, `LaneRecord.lane` and `ReachLedger`'s `Vec<bool>`s are all aligned to the `sweeps` slice by position, and `nothing_reached`, `reached_labels` and `feature_drop_lines` zip with `sweeps` again. A misaligned zip silently truncates. Proposed: a `LaneIdx` newtype and an index-aligned `Lanes<T>` container that can be constructed only from the sweeps slice, so a misalignment becomes a type error.
 
 ## STR-014 - Selection decisions live outside the selection module
 
@@ -122,23 +72,11 @@ Reported by: check-exec.
 
 `crate::shutdown::is_shutdown_requested()` is polled from inside `wait_parallel`, `run_listing`, `spawn_process_group` and the end of `streaming_run_libtest`. `crate::output::warn` is called from inside the watchdog thread and `join_drains`. `concurrency::SERIAL_BUILDS` is a process static set once per run and read by `run_grouped`. In each case the state sits apart from the behaviour that acts on it. Proposed: a `RunContext { stop: StopSignal, warn: &dyn Fn }` passed in, which makes the runner testable without the process-global flag, and `SERIAL_BUILDS` as a parameter of `run_grouped`.
 
-## STR-018 - Parallel budget allocation is buried in the run function, in mixed time units
+## STR-020 - The harness-shim observation still carries prose
 
 Reported by: check-exec.
 
-`run_parallel_sweep` mixes timing load, cost estimation, slot claims, ordering, announcement, fan-out, abort, timing record and reporting. `claim_slots`, `useful_slot_cap`, `timing_weight_for` and `mean_cost_per_test` are pure but composed inline, so they are tested piecewise, while the oscillation and collapse bugs described in `binary_timings.rs`'s header lived in their composition. `BinaryCost { serial: f64, slowest: f64 }` holds seconds as floats, `claim_slots` works in `u64` ms, `weight_ms` and `weight_ms_ceil` convert between them, and everything else uses `Duration`. The "is this weight finite and non-negative" guarding exists only because the store uses `f64`. Proposed: one pure `fn allocate(binaries: &[(Key, count)], history, budget) -> Vec<(Key, slots)>` next to `binary_timings.rs`, tested whole, and `Duration` in the store (serialized as ms), which removes `weight_ms`, `weight_ms_ceil` and the NaN reasoning.
-
-## STR-020 - The harness-shim session
-
-Reported by: check-exec.
-
-`Session` holds about ten `Arc` fields, cloned field by field into `Shared<'a>` for each accept; one `Arc<SessionState>` would do. `finish()` joins drains with no grace bound and relies on each drain noticing `done` within a poll, while the unisolated path uses `join_drains` with `DRAIN_GRACE` and a warning: two drain-shutdown policies for one concern. `Refusal::Unplanned(String)` carries its cause as prose, and accounting receives `ObsEvent::AttributionError { detail: String }`. The cases (unplanned executable, rebuilt since the plan, rustdoc with no carrier, unknown role, handshake I/O) are a closed set and should be a typed enum on the observation.
-
-## STR-021 - The check pipeline does not yet consume the shared Diagnostic
-
-Reported by: check-report.
-
-`src/diagnostic.rs` holds one `Diagnostic` (typed severity, site, `LintName` view, field-derived dedupe key, one renderer), produced by both the cargo JSON and the text readers. Residue: `check_cmd/phase.rs` still converts through `event_to_clippy`, dedupes on the string `DiagKey`, and recovers code and location with `extract_lint_code`/`parse_location`; it should carry `Diagnostic` in `SweepResult`, sort and dedupe from `code` and `site`, and render through the shared renderer, rustdoc included. The test-build warning path still reads text rather than `--message-format=json`, and `cargo_filter` still holds the libtest output parser.
+The shim session is one `Arc<SessionState>` with typed refusals and one bounded drain policy. Residue: the observation it emits is still `ObsEvent::AttributionError { detail: String }`. `ObsEvent` is serialised into the accounting journal, so typing the reason needs a stable serde shape per refusal, a decision about the io::Error detail text, and the `check_cmd/output.rs` fallback emitter updated with it.
 
 ## STR-022 - `check_cmd/phase.rs` is still most of the command
 
@@ -151,12 +89,6 @@ Reported by: check-report.
 Reported by: check-report.
 
 It holds test env construction (`build_test_env`, `sweep_cargo_env`, `sweep_runtime_env`, rustflags composition), isolated target-dir naming, support-artifact pre-builds and fingerprinting, the serial shim fallback, and `run_one_test_sweep`, the serial lane (about 400 lines). That is 3079 lines, about 1800 of them tests, and nothing in it is about printing. Its name also collides with `crate::output`, the real console module, and both are imported side by side. Proposed: `check_cmd/sweep_env.rs` (env and target dir, the owner of the isolated-target-dir decision), with the serial lane joining the execution files. The name `output` goes away entirely.
-
-## STR-033 - Query requests still use bool flags and `Vec`s at the CLI boundary
-
-Reported by: measurement.
-
-Results and sidecar dispatch use exhaustive view enums and compare operands are pairs after validation, but `SidecarQuery` still carries bool view selectors, compare arguments still arrive as `Vec<String>`, and `BenchArgs.compare` is still a `Vec`. Converting them at parse time needs `main_parts/bootstrap.rs`, `request.rs` and `bench_cmd/mod.rs`.
 
 ## STR-024 - "Who is the audience for this line?" is a global plus ad-hoc bools
 
@@ -192,17 +124,11 @@ Reported by: measurement.
 
 Proposed: `enum Ending { Exited(i32), Signalled(i32), StopMarker(String /* resolved */), Deadline(Duration), Interrupted }`, produced once by the sidecar and captured runners, plus one `fn verdict(&Ending, ok_codes) -> IterationVerdict { Counted, Failed(DevError), Interrupted }`. `exit_code_from_status`, `check_success_or` and the per-loop branching collapse into that function. `RunInfo` takes `Option<Ending>`, and `Subprocess` carries `ended: Code(i32) | Signal(i32)`.
 
-## STR-032 - Hotpath metrics are stored as display strings and parsed back
-
-Reported by: measurement.
-
-Still current: `HotpathFunction`/`HotpathThread` carry six optional metric strings each, stored as `TEXT`, and `hotpath_fmt::parse_metric` re-derives units to diff them; only p50/p95/p99 survive. A worked design exists: parse at ingest into a `Quantity { DurationNs(i64) | Bytes(i64) | Percent(f64) }` (signed, since `mem_diff` can be negative) and a `Percentile` key that orders fractional values such as 99.9; a schema migration adds child tables `hotpath_function_metrics`, `hotpath_function_percentiles` and `hotpath_thread_metrics` with a `quantity_kind` check, keyed by the parent row with `ON DELETE CASCADE`; new writes go to the typed tables and reads fall back to parsing the old text columns, so no backfill is needed; diffs require matching quantity kinds. The fixer needs `src/db/**` (types, schema, write, query, migrate) and `src/hotpath_fmt.rs` together, and `docs/commands/measure.md`'s hotpath contract.
-
-## STR-034 - The measurement session is two contexts and a config with dead fallbacks
+## STR-034 - Measurement session residue
 
 Reported by: measurement, map-projects.
 
-`DirtyPolicy` and `RowSubject` now exist (`src/measure/runner.rs`, `context.rs`). Residue: `BenchContext` and `HarnessContext` are still two contexts with duplicated lock, path and `with_request` setup; `BenchConfig` still mixes row identity, loop control, build provenance and the dead `mode`/`brokkr_args` fallbacks; the db tests still build full `RunRow` literals by hand rather than through a fixture builder.
+`MeasurementSession` replaces the two contexts and the dead `BenchConfig` fallbacks are gone. Residue: the db tests still build full `RunRow` literals by hand (a `RunRow` fixture builder would remove the copies).
 
 ## STR-035 - The shared core owns pbfhogg's types, and pbfhogg's command inputs are checked at argv time
 
@@ -231,24 +157,6 @@ Lines 1-500 of `output.rs` are a console renderer: prefixed output, the status l
 Reported by: measurement, process-control, deps-misc.
 
 `RunLog` moved to `src/run_log.rs`, the cancellable pipe reader to `src/fs_probe.rs`, and the gate store under ratatoskr (`ratatoskr/gate_store.rs`). Residue: `cargo_env.rs` still calls `check_cmd::current_phase()` (implemented in `check_cmd/watchdog.rs`); `sidecar.rs` still uses the test runner's pipe reader; the `"pbfhogg"` default project is still hidden by name in `db/format/details.rs` and `db/format/single.rs`; `disk_gate`/`env` storage probing should sit below both.
-
-## STR-038 - pbfhogg and elivagar still have their own dispatchers
-
-Reported by: map-projects.
-
-A shared command-plan runner exists in `src/measure/runner.rs`, and nidhogg ingest uses it in all four modes (dry-run now supported, fresh scratch per sample, scratch kept on failure). Residue: pbfhogg's dispatcher, elivagar's dispatcher, elivagar's external tools and nidhogg's api/tiles server lifecycle still run their own skeletons, each deciding dry-run purity, run-mode recording and cleanup-on-failure itself; elivagar's argv construction still creates directories during dry-run. Migrating them onto the runner (external tools and server lifecycles as plan kinds) is the remaining work.
-
-## STR-039 - Digest typing residue
-
-Reported by: map-projects, config-cli, deps-misc.
-
-`Xxh128`/`Sha256` and `FileDigest`/`TreeDigest`/`PathDigest` exist in `preflight/digest.rs`, config fields deserialize into them (a sha256 in an xxh128 field fails at load), and `preflight` is split into `digest` and `host_checks`. Residue: `env.rs` dataset status still compares and holds digest strings; config tests still construct digests from strings.
-
-## STR-040 - The PMTiles archive store has no owner
-
-Reported by: map-projects.
-
-`resolve.rs` owns `pmtiles_archive_name`, `pmtiles_archive_prefix`, `pmtiles_archive_matches`, `legacy_archive_token` and `resolve_pmtiles_by_commit`. The rename into the store lives in `elivagar/dispatch.rs`, retention in two places, and `clean --archives` in `main_parts`. `pmtiles_archive_name`'s comment says it is "the single place this name is constructed". That holds for the name, but retention, enumeration (prefix match plus a hyphen-free remainder plus legacy hex tokens) and the "wiped dir" guard are spread across three modules. `resolve.rs`, the generic dataset-entry resolver, is the wrong home. `pmtiles_archive_name(output_dir, dataset, variant, commit)` takes four same-typed strings. `resolve_pmtiles_by_commit` falls back to the typed string as the hash token for an unresolvable revision (`Err(_) => c.to_owned()`), so a typo gives "no build for <typo>" and tells the operator to run tilegen for a commit that does not exist (deliberate according to its comment). With `--file` it skips hash verification and dataset scoping entirely, without recording that the input was unpinned. Proposed: `elivagar::archive_store::ArchiveStore { dir }` with `path_for(ArchiveKey { dataset, variant, commit })`, `resolve(dataset, variant, rev)`, `admit(scratch_file, key)`, `prune(group, keep)` and `groups()`.
 
 ## STR-042 - Commit identity is a string everywhere
 

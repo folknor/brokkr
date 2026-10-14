@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::config::{self, DevConfig};
+use crate::config::{self, DevConfig, project_config::ProjectConfig};
 use crate::error::DevError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,8 +81,8 @@ impl std::fmt::Display for Project {
     }
 }
 
-/// A resolved project: the project type, its parsed config, and the two
-/// roots that resolution distinguishes.
+/// A resolved project: its identity, shared and project-specific config, and
+/// the two roots that resolution distinguishes.
 ///
 /// - `project_root` is the directory that holds `brokkr.toml`. It anchors
 ///   everything brokkr *owns*: the `data/`/`scratch/`/`output/` trees and
@@ -100,7 +100,10 @@ impl std::fmt::Display for Project {
 // probe derives cwd independently, so config discovery cannot redirect it.
 pub struct Detection {
     pub project: Project,
+    /// Shared host, check, and command settings.
     pub config: DevConfig,
+    /// The section parsed for `project`; other projects' sections cannot load.
+    pub project_config: ProjectConfig,
     pub project_root: PathBuf,
     pub build_root: PathBuf,
 }
@@ -140,11 +143,12 @@ pub fn detect() -> Result<Detection, DevError> {
             cwd.display()
         ))
     })?;
-    let (project, config) = config::load(&config_dir)?;
+    let (project, config, project_config) = config::load(&config_dir)?;
     crate::cargo_env::install(&config.cargo_env);
     Ok(Detection {
         project,
         config,
+        project_config,
         project_root: config_dir,
         build_root: cwd,
     })
@@ -162,11 +166,12 @@ pub fn detect_optional() -> Result<Option<Detection>, DevError> {
     let Some(config_dir) = find_config_dir(&cwd) else {
         return Ok(None);
     };
-    let (project, config) = config::load(&config_dir)?;
+    let (project, config, project_config) = config::load(&config_dir)?;
     crate::cargo_env::install(&config.cargo_env);
     Ok(Some(Detection {
         project,
         config,
+        project_config,
         project_root: config_dir,
         build_root: cwd,
     }))

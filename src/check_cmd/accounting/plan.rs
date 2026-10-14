@@ -3,8 +3,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{self, Display, Formatter};
 
-use crate::profile::ResolvedSweep;
-use super::super::{lane_kind, selector_kind_of, DeclaredShape, Resolution, TestBinary};
+use crate::profile::PlannedSweep;
+use super::super::{lane_kind, selector_kind_of, DeclaredShape, Resolution, ShapeId, TestBinary};
 
 /// Index of one lane in the invocation's ordered plan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
@@ -27,15 +27,138 @@ impl From<LaneIdx> for usize {
     }
 }
 
+/// Values whose identity is their position in the invocation's sweep list.
+/// Construction always walks that source list, and callers address entries
+/// with `LaneIdx` rather than a raw integer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Lanes<T> {
+    entries: Vec<T>,
+}
+
+impl<T> Lanes<T> {
+    pub(crate) fn from_sweeps<S>(sweeps: &[S], mut make: impl FnMut(LaneIdx, &S) -> T) -> Self {
+        Self {
+            entries: sweeps
+                .iter()
+                .enumerate()
+                .map(|(index, sweep)| make(LaneIdx::new(index), sweep))
+                .collect(),
+        }
+    }
+
+    pub(crate) fn try_from_sweeps<S, E>(
+        sweeps: &[S],
+        mut make: impl FnMut(LaneIdx, &S) -> Result<T, E>,
+    ) -> Result<Self, E> {
+        let mut entries = Vec::with_capacity(sweeps.len());
+        for (index, sweep) in sweeps.iter().enumerate() {
+            entries.push(make(LaneIdx::new(index), sweep)?);
+        }
+        Ok(Self { entries })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub(crate) fn get(&self, lane: LaneIdx) -> Option<&T> {
+        self.entries.get(lane.get())
+    }
+
+    pub(crate) fn get_mut(&mut self, lane: LaneIdx) -> Option<&mut T> {
+        self.entries.get_mut(lane.get())
+    }
+
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &T> {
+        self.entries.iter()
+    }
+
+    pub(crate) fn iter_with<'a, 'b: 'a, S>(
+        &'a self,
+        sweeps: &'b [S],
+    ) -> impl Iterator<Item = (LaneIdx, &'b S, &'a T)> + 'a {
+        assert_eq!(self.entries.len(), sweeps.len(), "lane data must match its sweep list");
+        sweeps
+            .iter()
+            .zip(&self.entries)
+            .enumerate()
+            .map(|(i, (sweep, entry))| (LaneIdx::new(i), sweep, entry))
+    }
+}
+
 /// xxh3-64 content fingerprint. Its serde form remains the same hexadecimal
 /// string used by the existing plan record.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(transparent)]
 pub(crate) struct ContentHash(String);
 
+impl ContentHash {
+    #[cfg(test)]
+    pub(crate) fn as_str(&self) -> &str { &self.0 }
+}
+
 /// Executable path, kept separate from its content fingerprint.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
 pub(crate) struct ExecutablePath(String);
+
+impl Display for ExecutablePath {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result { f.write_str(&self.0) }
+}
+
+/// A libtest name carried in a plan pair.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+pub(crate) struct TestName(String);
+
+impl From<String> for TestName {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+
+impl From<&str> for TestName {
+    fn from(value: &str) -> Self { Self(value.to_owned()) }
+}
+
+impl TestName {
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl PartialEq<&str> for TestName {
+    fn eq(&self, other: &&str) -> bool {
+        self.0.as_str() == *other
+    }
+}
+
+impl Display for TestName {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result { f.write_str(&self.0) }
+}
+
+/// A binary's stable display id in inventory diagnostics.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+pub(crate) struct BinaryId(String);
+
+impl From<String> for BinaryId {
+    fn from(value: String) -> Self { Self(value) }
+}
+
+impl From<&str> for BinaryId {
+    fn from(value: &str) -> Self { Self(value.to_owned()) }
+}
+
+impl BinaryId {
+    #[cfg(test)]
+    pub(crate) fn as_str(&self) -> &str { &self.0 }
+}
+
+impl Display for BinaryId {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result { f.write_str(&self.0) }
+}
 
 /// Cargo target kind after brokkr's selector normalization (`lib`, `bin`,
 /// `test`, and the other cargo target kinds).
@@ -67,8 +190,7 @@ impl Display for TargetKind {
     }
 }
 
-/// Typed artifact fingerprint used by drift comparison. The plan and prepare
-/// boundary still speak their existing wire primitives.
+/// Typed artifact fingerprint used by drift comparison.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct ArtifactFingerprint {
     pub(crate) resolution: Resolution,
@@ -80,6 +202,22 @@ impl ArtifactFingerprint {
     pub(crate) fn new(resolution: Option<&str>, executable: String, hash: String) -> Self {
         Self {
             resolution: Resolution::from_option(resolution),
+            executable: ExecutablePath(executable),
+            hash: ContentHash(hash),
+        }
+    }
+}
+
+impl PlannedArtifact {
+    pub(crate) fn new(
+        resolution: Option<&str>,
+        unit: BinaryUnit,
+        executable: String,
+        hash: String,
+    ) -> Self {
+        Self {
+            resolution: Resolution::from_option(resolution),
+            unit,
             executable: ExecutablePath(executable),
             hash: ContentHash(hash),
         }
@@ -130,8 +268,8 @@ impl BinaryUnit {
 /// The identity is minted from the named, explicitly encoded `DeclaredShape`;
 /// two lanes with one declared shape share it even when their support
 /// pre-builds differ.
-pub(crate) fn shape_id(sweep: &ResolvedSweep) -> String {
-    DeclaredShape::of(sweep).id().to_string()
+pub(crate) fn shape_id(sweep: &PlannedSweep) -> ShapeId {
+    DeclaredShape::of(sweep).id()
 }
 
 /// The unit policy works on: one test, in one binary, of one cargo resolution
@@ -140,10 +278,10 @@ pub(crate) fn shape_id(sweep: &ResolvedSweep) -> String {
 /// granularities, and the coarse one merged two binaries' same-named tests.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
 pub(crate) struct PairId {
-    pub(crate) shape: String,
-    pub(crate) resolution: Option<String>,
+    pub(crate) shape: ShapeId,
+    pub(crate) resolution: Resolution,
     pub(crate) unit: BinaryUnit,
-    pub(crate) test: String,
+    pub(crate) test: TestName,
 }
 
 /// The unit accounting works on: one expected execution of a pair, by one
@@ -184,26 +322,26 @@ pub(crate) enum LaneKind {
 /// prove before it runs that it is about to run what was enumerated.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct PlannedArtifact {
-    pub(crate) resolution: Option<String>,
+    pub(crate) resolution: Resolution,
     pub(crate) unit: BinaryUnit,
-    pub(crate) executable: String,
+    pub(crate) executable: ExecutablePath,
     /// xxh3-64 of the file, hex.
-    pub(crate) hash: String,
+    pub(crate) hash: ContentHash,
 }
 
 /// One shape resolution's universe.
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct ShapeRecord {
-    pub(crate) shape: String,
-    pub(crate) resolution: Option<String>,
+    pub(crate) shape: ShapeId,
+    pub(crate) resolution: Resolution,
     pub(crate) label: String,
     /// Every lane of this shape is `curated = true`.
     pub(crate) curated: bool,
     /// The universe was enumerated and every lane of the shape prepared, so
     /// its classification is a finding rather than a guess.
     pub(crate) complete: bool,
-    pub(crate) universe: Vec<(BinaryUnit, String)>,
-    pub(crate) ignored: Vec<(BinaryUnit, String)>,
+    pub(crate) universe: Vec<(BinaryUnit, TestName)>,
+    pub(crate) ignored: Vec<(BinaryUnit, TestName)>,
 }
 
 /// One lane's selection and the executions it implies.
@@ -217,28 +355,13 @@ pub(crate) struct ShapeRecord {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(from = "LaneRecordWire", into = "LaneRecordWire")]
 pub(crate) struct LaneRecord {
-    pub(crate) lane: usize,
+    pub(crate) lane: LaneIdx,
     pub(crate) label: String,
     pub(crate) kind: LaneKind,
-    pub(crate) shape: String,
-    /// The lane's inventory was prepared: its executions are known. False
-    /// for a lane that could not be prepared and for one whose streams
-    /// cannot be attributed to binaries ([`Self::unavailable`] says which).
-    pub(crate) prepared: bool,
-    /// Why this lane has no inventory, when it has none. Set for a lane a
-    /// certifying claim would have refused (cargo-mediated parallelism, a
-    /// serial lane with no harness shim) and for one whose preparation
-    /// failed under a claim that does not require it: the lane still runs,
-    /// and what it observed is reported as such, never as a made-up
-    /// selection.
-    pub(crate) unavailable: Option<String>,
-    /// The lane did not run in this invocation by choice (a CLI `-p` its
-    /// config rules out), so it expects nothing.
-    pub(crate) skipped: Option<String>,
-    /// Binaries of the lane that answer no libtest listing, so the tests
-    /// they hold are outside the inventory: `(binary id, why)`. Never present
-    /// on a certifying lane, which refuses them.
-    pub(crate) unlisted: Vec<(String, String)>,
+    pub(crate) shape: ShapeId,
+    /// One disposition owns all inventory state, so prepared, skipped,
+    /// unavailable and partial listing cannot overlap.
+    pub(crate) inventory: Inventory,
     pub(crate) include_ignored: bool,
     /// Will run doctests: a `doc_only` lane, or a serial lane under `[test]
     /// doctests = true` whose selection carries no target selector (one
@@ -253,38 +376,104 @@ pub(crate) struct LaneRecord {
     /// independently). The count beyond one is not knowable - doctests have no
     /// inventory - so one is the floor that tells "ran" from "never ran".
     pub(crate) doc_streams_required: bool,
-    /// Every pair this lane is expected to execute.
-    pub(crate) executions: Vec<PairId>,
-    /// Pairs the lane's filters select that run as `ignored` (the lane does not
-    /// lift `#[ignore]`): libtest still reports them, and that report is not an
-    /// unplanned test.
-    pub(crate) ignored_selected: Vec<PairId>,
-    /// `#[bench]` functions the lane's filters admit: outside the claim, but a
-    /// `cargo test` run executes each once in test mode and reports it like a
-    /// test, so its records are neither accounted nor unplanned.
-    pub(crate) outside_claim: Vec<PairId>,
-    pub(crate) artifacts: Vec<PlannedArtifact>,
 }
 
 impl LaneRecord {
     /// A lane with nothing planned yet.
-    pub(crate) fn empty(lane: usize, label: String, kind: LaneKind, shape: String) -> Self {
+    pub(crate) fn empty(lane: LaneIdx, label: String, kind: LaneKind, shape: ShapeId) -> Self {
         Self {
             lane,
             label,
             kind,
             shape,
-            prepared: false,
-            unavailable: None,
-            skipped: None,
-            unlisted: Vec::new(),
+            inventory: if kind == LaneKind::DocOnly {
+                Inventory::DocTests
+            } else {
+                Inventory::Unavailable(UnavailableReason::Stopped)
+            },
             include_ignored: false,
             doc_carrier: false,
             doc_streams_required: false,
-            executions: Vec::new(),
-            ignored_selected: Vec::new(),
-            outside_claim: Vec::new(),
-            artifacts: Vec::new(),
+        }
+    }
+}
+
+/// What preparation established about one lane's expected tests.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum Inventory {
+    Prepared {
+        executions: Vec<PairId>,
+        ignored_selected: Vec<PairId>,
+        outside_claim: Vec<PairId>,
+        artifacts: Vec<PlannedArtifact>,
+        unlisted: Vec<(BinaryId, String)>,
+    },
+    Skipped(String),
+    Unavailable(UnavailableReason),
+    DocTests,
+}
+
+impl Inventory {
+    pub(crate) fn is_known(&self) -> bool {
+        matches!(self, Self::Prepared { .. } | Self::Skipped(_) | Self::DocTests)
+    }
+
+    pub(crate) fn is_unavailable(&self) -> bool {
+        matches!(self, Self::Unavailable(_))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn unavailable_reason(&self) -> Option<&UnavailableReason> {
+        match self { Self::Unavailable(reason) => Some(reason), _ => None }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn skipped_reason(&self) -> Option<&str> {
+        match self { Self::Skipped(reason) => Some(reason), _ => None }
+    }
+
+    pub(crate) fn unlisted(&self) -> &[(BinaryId, String)] {
+        match self { Self::Prepared { unlisted, .. } => unlisted, _ => &[] }
+    }
+
+    pub(crate) fn executions(&self) -> &[PairId] {
+        match self { Self::Prepared { executions, .. } => executions, _ => &[] }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn ignored_selected(&self) -> &[PairId] {
+        match self { Self::Prepared { ignored_selected, .. } => ignored_selected, _ => &[] }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn artifacts(&self) -> &[PlannedArtifact] {
+        match self { Self::Prepared { artifacts, .. } => artifacts, _ => &[] }
+    }
+}
+
+/// Why a lane has no enumerable binary inventory.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum UnavailableReason {
+    CargoThreaded,
+    NoShim(String),
+    PrepareFailed(String),
+    Stopped,
+}
+
+impl Display for UnavailableReason {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::CargoThreaded => f.write_str(
+                "cargo-mediated parallelism (`test_threads` other than 1) shares one output stream across tests and harnesses, so no test can be attributed to a binary",
+            ),
+            Self::NoShim(reason) => write!(
+                f,
+                "harness isolation is unavailable ({reason}), so every harness shares cargo's one output stream and no test can be attributed to a binary",
+            ),
+            Self::PrepareFailed(message) => write!(f, "preparation failed: {message}"),
+            Self::Stopped => f.write_str("preparation was stopped before this lane"),
         }
     }
 }
@@ -292,9 +481,9 @@ impl LaneRecord {
 /// One binary's tests of a lane, as persisted.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct PairGroup {
-    resolution: Option<String>,
+    resolution: Resolution,
     unit: BinaryUnit,
-    tests: Vec<String>,
+    tests: Vec<TestName>,
 }
 
 /// Group pairs by (resolution, binary) in first-seen order.
@@ -313,13 +502,13 @@ fn group_pairs(pairs: &[PairId]) -> Vec<PairGroup> {
     out
 }
 
-fn ungroup_pairs(shape: &str, groups: Vec<PairGroup>) -> Vec<PairId> {
+fn ungroup_pairs(shape: &ShapeId, groups: Vec<PairGroup>) -> Vec<PairId> {
     groups
         .into_iter()
         .flat_map(|g| {
             let PairGroup { resolution, unit, tests } = g;
             tests.into_iter().map(move |test| PairId {
-                shape: shape.to_owned(),
+                shape: shape.clone(),
                 resolution: resolution.clone(),
                 unit: unit.clone(),
                 test,
@@ -328,72 +517,100 @@ fn ungroup_pairs(shape: &str, groups: Vec<PairGroup>) -> Vec<PairId> {
         .collect()
 }
 
-/// [`LaneRecord`] as it sits on disk. The defaulted fields are the ones a
-/// reader of an older record may not find.
+/// Compact persisted form of an inventory. Every pair in the containing lane
+/// shares its shape, so grouping drops that repeated field from the wire.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum InventoryWire {
+    Prepared {
+        executions: Vec<PairGroup>,
+        ignored_selected: Vec<PairGroup>,
+        outside_claim: Vec<PairGroup>,
+        artifacts: Vec<PlannedArtifact>,
+        unlisted: Vec<(BinaryId, String)>,
+    },
+    Skipped(String),
+    Unavailable(UnavailableReason),
+    DocTests,
+}
+
+impl From<Inventory> for InventoryWire {
+    fn from(inventory: Inventory) -> Self {
+        match inventory {
+            Inventory::Prepared { executions, ignored_selected, outside_claim, artifacts, unlisted } => Self::Prepared {
+                executions: group_pairs(&executions),
+                ignored_selected: group_pairs(&ignored_selected),
+                outside_claim: group_pairs(&outside_claim),
+                artifacts,
+                unlisted,
+            },
+            Inventory::Skipped(reason) => Self::Skipped(reason),
+            Inventory::Unavailable(reason) => Self::Unavailable(reason),
+            Inventory::DocTests => Self::DocTests,
+        }
+    }
+}
+
+impl InventoryWire {
+    fn into_inventory(self, shape: &ShapeId) -> Inventory {
+        match self {
+            Self::Prepared { executions, ignored_selected, outside_claim, artifacts, unlisted } => Inventory::Prepared {
+                executions: ungroup_pairs(shape, executions),
+                ignored_selected: ungroup_pairs(shape, ignored_selected),
+                outside_claim: ungroup_pairs(shape, outside_claim),
+                artifacts,
+                unlisted,
+            },
+            Self::Skipped(reason) => Inventory::Skipped(reason),
+            Self::Unavailable(reason) => Inventory::Unavailable(reason),
+            Self::DocTests => Inventory::DocTests,
+        }
+    }
+}
+
+/// [`LaneRecord`] as it sits on disk. Pair groups omit the shared shape, and
+/// a lane's inventory disposition contains its selected execution data.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct LaneRecordWire {
-    lane: usize,
+    lane: LaneIdx,
     label: String,
     kind: LaneKind,
-    shape: String,
-    prepared: bool,
-    #[serde(default)]
-    unavailable: Option<String>,
-    #[serde(default)]
-    skipped: Option<String>,
-    #[serde(default)]
-    unlisted: Vec<(String, String)>,
+    shape: ShapeId,
+    inventory: InventoryWire,
     include_ignored: bool,
     doc_carrier: bool,
     #[serde(default)]
     doc_streams_required: bool,
-    executions: Vec<PairGroup>,
-    ignored_selected: Vec<PairGroup>,
-    #[serde(default)]
-    outside_claim: Vec<PairGroup>,
-    artifacts: Vec<PlannedArtifact>,
 }
 
 impl From<LaneRecord> for LaneRecordWire {
     fn from(l: LaneRecord) -> Self {
         Self {
-            executions: group_pairs(&l.executions),
-            ignored_selected: group_pairs(&l.ignored_selected),
-            outside_claim: group_pairs(&l.outside_claim),
             lane: l.lane,
             label: l.label,
             kind: l.kind,
             shape: l.shape,
-            prepared: l.prepared,
-            unavailable: l.unavailable,
-            skipped: l.skipped,
-            unlisted: l.unlisted,
+            inventory: l.inventory.into(),
             include_ignored: l.include_ignored,
             doc_carrier: l.doc_carrier,
             doc_streams_required: l.doc_streams_required,
-            artifacts: l.artifacts,
         }
     }
 }
 
 impl From<LaneRecordWire> for LaneRecord {
     fn from(w: LaneRecordWire) -> Self {
+        let shape = w.shape;
+        let inventory = w.inventory.into_inventory(&shape);
         Self {
-            executions: ungroup_pairs(&w.shape, w.executions),
-            ignored_selected: ungroup_pairs(&w.shape, w.ignored_selected),
-            outside_claim: ungroup_pairs(&w.shape, w.outside_claim),
             lane: w.lane,
             label: w.label,
             kind: w.kind,
-            shape: w.shape,
-            prepared: w.prepared,
-            unavailable: w.unavailable,
-            skipped: w.skipped,
-            unlisted: w.unlisted,
+            shape,
+            inventory,
             include_ignored: w.include_ignored,
             doc_carrier: w.doc_carrier,
             doc_streams_required: w.doc_streams_required,
-            artifacts: w.artifacts,
         }
     }
 }
@@ -401,9 +618,48 @@ impl From<LaneRecordWire> for LaneRecord {
 /// A dead `skip`/`only` filter found during preparation.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct DeadFilterRecord {
-    pub(crate) sweeps: String,
-    pub(crate) origin: String,
-    pub(crate) label: String,
+    pub(crate) sweeps: SweepNames,
+    pub(crate) origin: FilterOriginName,
+    pub(crate) label: FilterLabel,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+pub(crate) struct SweepNames(String);
+
+impl From<String> for SweepNames { fn from(value: String) -> Self { Self(value) } }
+impl Display for SweepNames { fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result { f.write_str(&self.0) } }
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+pub(crate) struct FilterOriginName(String);
+
+impl From<String> for FilterOriginName { fn from(value: String) -> Self { Self(value) } }
+impl Display for FilterOriginName { fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result { f.write_str(&self.0) } }
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+pub(crate) struct FilterLabel(String);
+
+impl From<String> for FilterLabel { fn from(value: String) -> Self { Self(value) } }
+impl Display for FilterLabel { fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result { f.write_str(&self.0) } }
+
+/// A diagnostic plan incompleteness reason. It retains its existing text on
+/// disk and in reports while staying distinct from arbitrary strings.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+pub(crate) struct PlanIssue(String);
+
+impl From<String> for PlanIssue { fn from(value: String) -> Self { Self(value) } }
+impl From<&str> for PlanIssue { fn from(value: &str) -> Self { Self(value.to_owned()) } }
+
+impl PlanIssue {
+    #[cfg(test)]
+    pub(crate) fn as_str(&self) -> &str { &self.0 }
+}
+
+impl Display for PlanIssue {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result { f.write_str(&self.0) }
 }
 
 /// The whole invocation, prepared: written to disk before the first test runs.
@@ -426,15 +682,14 @@ pub(crate) struct AccountingPlan {
     pub(crate) certifying: bool,
     /// False when anything could not be prepared; `incomplete` says what.
     pub(crate) complete: bool,
-    pub(crate) incomplete: Vec<String>,
+    pub(crate) incomplete: Vec<PlanIssue>,
     pub(crate) shapes: Vec<ShapeRecord>,
     pub(crate) lanes: Vec<LaneRecord>,
     pub(crate) dead_filters: Vec<DeadFilterRecord>,
 }
 
 impl AccountingPlan {
-    pub(crate) fn lane(&self, lane: impl Into<usize>) -> Option<&LaneRecord> {
-        let lane = lane.into();
+    pub(crate) fn lane(&self, lane: LaneIdx) -> Option<&LaneRecord> {
         self.lanes.iter().find(|l| l.lane == lane)
     }
 }
@@ -444,7 +699,7 @@ impl AccountingPlan {
 /// a serial libtest lane does under `[test] doctests = true` unless its
 /// selection names a target (`run_one_test_sweep` then leaves cargo's doctest
 /// pass off, and `--tests` is not appended either); no other lane runs any.
-pub(crate) fn lane_runs_doctests(sweep: &ResolvedSweep, doctests: bool) -> bool {
+pub(crate) fn lane_runs_doctests(sweep: &PlannedSweep, doctests: bool) -> bool {
     match lane_kind(sweep) {
         LaneKind::DocOnly => true,
         // The package selection, profile and feature flags never name a
@@ -463,19 +718,6 @@ pub(crate) fn lane_runs_doctests(sweep: &ResolvedSweep, doctests: bool) -> bool 
 /// that path is then another shape's, which no path comparison can see.
 pub(crate) fn artifact_drift(
     planned: &[PlannedArtifact],
-    current: &[(Option<String>, String, String)],
-) -> Vec<String> {
-    let current: Vec<ArtifactFingerprint> = current
-        .iter()
-        .map(|(resolution, executable, hash)| {
-            ArtifactFingerprint::new(resolution.as_deref(), executable.clone(), hash.clone())
-        })
-        .collect();
-    artifact_drift_typed(planned, &current)
-}
-
-pub(crate) fn artifact_drift_typed(
-    planned: &[PlannedArtifact],
     current: &[ArtifactFingerprint],
 ) -> Vec<String> {
     let mut out = Vec::new();
@@ -484,11 +726,9 @@ pub(crate) fn artifact_drift_typed(
         .map(|artifact| ((&artifact.resolution, &artifact.executable), &artifact.hash))
         .collect();
     for p in planned {
-        let resolution = Resolution::from_option(p.resolution.as_deref());
-        let executable = ExecutablePath(p.executable.clone());
-        match now.get(&(&resolution, &executable)) {
+        match now.get(&(&p.resolution, &p.executable)) {
             None => out.push(format!("{} ({}) is gone", p.unit.id(), p.executable)),
-            Some(hash) if hash.0.as_str() != p.hash.as_str() => out.push(format!(
+            Some(hash) if hash.0.as_str() != p.hash.0.as_str() => out.push(format!(
                 "{} ({}) was rebuilt with different content",
                 p.unit.id(),
                 p.executable
@@ -498,7 +738,7 @@ pub(crate) fn artifact_drift_typed(
     }
     let known: BTreeSet<(Resolution, ExecutablePath)> = planned
         .iter()
-        .map(|p| (Resolution::from_option(p.resolution.as_deref()), ExecutablePath(p.executable.clone())))
+        .map(|p| (p.resolution.clone(), p.executable.clone()))
         .collect();
     for artifact in current {
         if !known.contains(&(artifact.resolution.clone(), artifact.executable.clone())) {

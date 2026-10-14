@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::{Attribution, HungTest, Leader, TimeoutReason, direct_child_pids};
-use crate::ratatoskr::process::snapshot_proc;
+use crate::process::snapshot_proc;
 
 pub(super) fn capture_hung_test(
     state_root: &Path,
@@ -35,12 +35,14 @@ pub(super) fn capture_hung_test(
     // config-dir `project_root` (`state_root`), not the code tree cargo runs
     // in - the two differ when brokkr.toml is one level above a foreign
     // checkout, and the foreign repo must stay clean.
-    let snapshot_dir = state_root.join(".brokkr").join("test-hung").join(format!(
-        "{}-{}-{}",
-        unix_secs(),
-        cargo_pid,
-        sanitize_path_component(&component)
-    ));
+    let snapshot_dir = crate::clean::layout::ProjectState::new(state_root)
+        .test_hung_dir()
+        .join(format!(
+            "{}-{}-{}",
+            unix_secs(),
+            cargo_pid,
+            sanitize_path_component(&component)
+        ));
 
     let mut snapshot_error = None;
     if let Err(err) = fs::create_dir_all(&snapshot_dir) {

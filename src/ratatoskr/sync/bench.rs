@@ -6,7 +6,8 @@ use std::time::{Duration, Instant};
 
 use crate::artefacts::{self, ArtefactDir};
 use crate::build::CargoProfile;
-use crate::config::{DevConfig, RatatoskrConfig};
+use crate::config::DevConfig;
+use crate::config::project_config::ratatoskr::RatatoskrConfig;
 use crate::context;
 use crate::db::{KvPair, KvValue};
 use crate::error::DevError;
@@ -51,13 +52,7 @@ use super::runner::SYNC_ARTEFACT_PARENT;
 /// 8. Tear down sæhrimnir with the standard 1.5s budget.
 #[allow(clippy::too_many_lines)] // entry point: validate + bootstrap + build + spawn + dispatch
 pub fn run_sync_bench(req: &SyncBenchRequest<'_>) -> Result<(), DevError> {
-    let cfg = req.dev_config.ratatoskr.as_ref().ok_or_else(|| {
-        DevError::Config(
-            "sync: no [ratatoskr] section in brokkr.toml. \
-             Required to locate sæhrimnir and the harness binary."
-                .into(),
-        )
-    })?;
+    let cfg = req.ratatoskr;
     let harness_cfg = cfg.harness.as_ref().ok_or_else(|| {
         DevError::Config(
             "sync: no [ratatoskr.harness] section in brokkr.toml. \
@@ -143,7 +138,7 @@ pub fn run_sync_bench(req: &SyncBenchRequest<'_>) -> Result<(), DevError> {
     // `code_root` is where the harness is built and where git state is read
     // from - the `--commit` worktree when one was requested. Handing it to
     // `BenchHarness` as the project root (with the real root demoted to
-    // `db_root`) is the same convention `BenchContext` uses: the recorded
+    // `db_root`) is the same convention `MeasurementSession` uses: the recorded
     // commit then describes the code that was actually built, while
     // results.db stays in the main tree. It also means a `--commit` run
     // reads as clean, which it is - a detached worktree has nothing
@@ -163,8 +158,8 @@ pub fn run_sync_bench(req: &SyncBenchRequest<'_>) -> Result<(), DevError> {
     )?
     .with_brokkr_args(req.brokkr_args.clone())
     .with_measure_mode(Some("bench"))
-    // The same row provenance `BenchContext` attaches for every other
-    // measured command: the configured features (joined as `BenchContext`
+    // The same row provenance `MeasurementSession` attaches for every other
+    // measured command: the configured features (joined as `MeasurementSession`
     // joins them; `None` for a default-features build) and the
     // `capture_env` snapshot. This path builds its harness by hand, and
     // used to record neither.
@@ -386,7 +381,6 @@ fn bench_loop(ctx: BenchLoopCtx<'_>) -> Result<(), DevError> {
         // historical `sync-bench` rows so old and new runs still pair
         // under `brokkr results --compare`.
         command: "sync".into(),
-        mode: None,
         input_file: Some(fixture_name.to_owned()),
         input_mb: None,
         // The harness default (`with_cargo_features` in `run_sync_bench`).
@@ -396,7 +390,6 @@ fn bench_loop(ctx: BenchLoopCtx<'_>) -> Result<(), DevError> {
         cargo_profile: CargoProfile::for_debug(debug),
         runs: req.bench,
         cli_args: Some(format!("--test-harness {}", script_abs.display())),
-        brokkr_args: None,
         metadata: Vec::new(),
     };
 
@@ -749,6 +742,8 @@ pub struct SyncBenchRequest<'a> {
     /// compares the baseline row's script path against the current run's.
     pub build_root: Option<&'a Path>,
     pub dev_config: &'a DevConfig,
+    /// The `[ratatoskr]` section (required at load in a ratatoskr project).
+    pub ratatoskr: &'a RatatoskrConfig,
     pub script: &'a str,
     /// Number of measured iterations. Best-of-N reported and stored.
     pub bench: usize,

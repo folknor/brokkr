@@ -6,7 +6,6 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::artefacts::{self, ArtefactDir};
-use crate::config::DevConfig;
 use crate::error::DevError;
 use crate::lockfile::{self, LockContext};
 use crate::output;
@@ -55,17 +54,17 @@ pub(super) const SERVICE_MOCK_PARENT: &str = ".brokkr/ratatoskr/service-mock";
 /// in Phase 8. Until it does, `app --test-harness` errors out with
 /// "unknown flag" and brokkr captures that into the artefact dir
 /// faithfully; the plumbing here is structurally complete.
-#[allow(clippy::too_many_arguments)] // entry point gathers CLI flags
 #[allow(clippy::too_many_lines)] // linear orchestration: parse, build, mock-up, run, mock-down
-pub fn service_test(
-    project_root: &Path,
-    dev_config: &DevConfig,
-    script: &str,
-    keep_artefacts: bool,
-    profile_override: Option<bool>,
-    repeat: u32,
-    keep_going: bool,
-) -> Result<(), DevError> {
+pub(crate) fn service_test(req: &crate::request::ServiceTestRequest<'_>) -> Result<(), DevError> {
+    let crate::request::ServiceTestRequest {
+        project_root,
+        ratatoskr,
+        script,
+        keep_artefacts,
+        profile_override,
+        repeat,
+        keep_going,
+    } = *req;
     let script_path = Path::new(script);
     if !script_path.exists() {
         return Err(DevError::Config(format!(
@@ -81,16 +80,16 @@ pub fn service_test(
         // who wants to soak ignored scripts goes through `service --all
         // --include-ignored` directly.
         let filter = directory_filter(project_root, script_path)?;
-        return service_suite(
+        return service_suite(&crate::request::ServiceSuiteRequest {
             project_root,
-            dev_config,
-            Some(&filter),
+            ratatoskr,
+            filter: Some(&filter),
             keep_artefacts,
             profile_override,
             keep_going,
-            false,
+            include_ignored: false,
             repeat,
-        );
+        });
     }
     if !script_path.is_file() {
         return Err(DevError::Config(format!(
@@ -120,18 +119,14 @@ pub fn service_test(
     let keep_on_success =
         keep_artefacts || parsed.preserve_data_dir == PreserveDataDir::OnSuccessToo;
 
-    let harness_cfg = dev_config
-        .ratatoskr
-        .as_ref()
-        .and_then(|r| r.harness.as_ref())
-        .ok_or_else(|| {
-            DevError::Config(
-                "service: no [ratatoskr.harness] section in brokkr.toml. \
+    let harness_cfg = ratatoskr.harness.as_ref().ok_or_else(|| {
+        DevError::Config(
+            "service: no [ratatoskr.harness] section in brokkr.toml. \
                  Declare `[ratatoskr.harness]` with `package = \"<crate>\"` \
                  (and optional `binary`, `features`, `debug`)."
-                    .into(),
-            )
-        })?;
+                .into(),
+        )
+    })?;
 
     let project_root_str = project_root.display().to_string();
     let _lock = lockfile::acquire(&LockContext {
@@ -162,7 +157,7 @@ pub fn service_test(
     let mock_session = if let Some(fixture_name) = parsed.fixture.as_deref() {
         Some(FixtureSession::start(
             project_root,
-            dev_config,
+            ratatoskr,
             &test_id,
             fixture_name,
             &_lock,

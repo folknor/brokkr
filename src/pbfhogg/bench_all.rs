@@ -349,14 +349,12 @@ fn run_osmpbf_baseline(
             // row, distinguished by command. No natural cli/brokkr args
             // discriminator since baselines run different tools entirely.
             command: format!("baseline-{variant}"),
-            mode: None,
             input_file: Some(basename.clone()),
             input_mb: Some(file_mb),
             cargo_features: None,
             cargo_profile: crate::build::CargoProfile::Release,
             runs: 1,
             cli_args: None,
-            brokkr_args: None,
             metadata: vec![],
         };
 
@@ -409,14 +407,12 @@ fn run_osmium_baseline(
 
     let config = BenchConfig {
         command: "baseline-osmium-cat-opl".into(),
-        mode: None,
         input_file: Some(basename.clone()),
         input_mb: Some(file_mb),
         cargo_features: None,
         cargo_profile: crate::build::CargoProfile::Release,
         runs,
         cli_args: Some(crate::harness::format_cli_args("osmium", &osmium_args)),
-        brokkr_args: None,
         metadata: vec![],
     };
 
@@ -441,14 +437,12 @@ fn run_osmium_baseline(
 
     let altw_config = BenchConfig {
         command: "baseline-osmium-add-locations-to-ways".into(),
-        mode: None,
         input_file: Some(basename.clone()),
         input_mb: Some(file_mb),
         cargo_features: None,
         cargo_profile: crate::build::CargoProfile::Release,
         runs,
         cli_args: Some(crate::harness::format_cli_args("osmium", &altw_args)),
-        brokkr_args: None,
         metadata: vec![],
     };
 

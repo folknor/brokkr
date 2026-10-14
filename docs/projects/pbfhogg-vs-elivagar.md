@@ -1,149 +1,115 @@
-# pbfhogg vs elivagar: how the two dispatch layers differ
+# pbfhogg vs elivagar: command plans and measurement contracts
 
-Both projects are map-data benchmark drivers sharing the same harness,
-DBs, lock, and worktree machinery. But their dispatch layers
-(`src/pbfhogg/dispatch.rs`, `src/elivagar/dispatch.rs`) diverge in several
-ways that decide how a run is timed, what it stores, and where its output
-goes. This file catalogs those divergences. For the output-channel mechanics
-themselves, see `docs/commands/output-channels.md`.
+Both projects supply plans to `src/measure/runner.rs`. One
+`MeasurementSession` owns the lock, host paths, optional build and invocation
+provenance. Their differences describe the commands being measured, rather
+than separate dispatch loops. See `docs/commands/output-channels.md` for the
+output channels.
 
 ## At a glance
 
 | Aspect | pbfhogg | elivagar |
 |---|---|---|
-| Dispatch entry | `run_command_with_params` | `run_command` |
-| Per-command params | `CommandParams` (io flags, snapshot) | none |
-| Build kinds | one: `pbfhogg-cli` main binary | three: MainBinary / Example / NoBuild |
-| Bench harness path | uniform: `run_external_ok` | MainBinary `run_external_ok`; Example `run_internal`; NoBuild external |
-| Bench timing source | brokkr external wall-clock | brokkr external wall-clock (tilegen + examples) |
-| stderr `key=value` -> results.db | never | never |
-| I/O mode flags | `--direct-io` / `--io-uring` / `--compression` | none |
-| Output artifact lifecycle | `promote_artifact` + snapshots | `rename_elivagar_output` + durable output store (regress/bless) |
-| Run-specific metadata | - | - |
-| External-tool baselines | none | planetiler (Java), tilemaker (C++) |
+| Command plan | `PbfhoggPlan` | `ElivagarPlan` |
+| Per-command params | `CommandParams` (I/O, snapshot, bbox) | typed built command or external tool |
+| Build kinds | `pbfhogg-cli` main binary | main binary, cargo example, external tool |
+| Bench timing | best-of-N external wall | external wall; examples self-iterate |
+| I/O flags | `--direct-io`, `--io-uring`, `--compression` | none |
+| Output promotion | snapshot graph | durable PMTiles archive store |
+| External baselines | Java benchmarks in suites | Planetiler and Tilemaker |
 
 ## 1. Dispatch entry point and parameters
 
-pbfhogg exposes `run_command_with_params(req, command, osc_seq, extra_params)`
-- the extra `CommandParams` carries pbfhogg-only knobs: `direct_io`,
-`io_uring`, `compression`, `as_snapshot`/`replace_snapshot`, `index_type`,
-`bbox`, `keep_cache`. It runs `resolve_io_flags` (feature+arg injection,
-io_uring preflight) and an `--as-snapshot` collision preflight before
-building.
+Callers invoke `measure::runner::run(req, &plan)`. Pbfhogg plans carry the
+command, OSC sequence and `CommandParams`, including I/O flags, snapshot
+selection, bbox and merged-cache policy. Elivagar plans carry the typed
+`ElivagarCommand`, including its tilegen contract or example parameters.
+There are no project dispatch modules.
 
-elivagar exposes the leaner `run_command(req, command)` - no equivalent
-parameter bundle, no I/O-mode flags, no preflight. Its variance comes from
-the command's `BuildKind`, not from caller-supplied params.
+The runner checks project and profiling capabilities, returns after dry-run
+planning, creates the session and executes the selected plan kind. Pbfhogg's
+snapshot collision and I/O preflights still precede its build.
 
 ## 2. Build model
 
-pbfhogg is always one release build of the `pbfhogg-cli` main binary. Every
-command is a subcommand of that one binary.
+Pbfhogg uses the `pbfhogg-cli` release binary. Profiling adds its instrumentation
+feature; the I/O selection adds its required cargo features.
 
-elivagar's `ElivagarCommand` encodes the build kind in its shape
-(`src/elivagar/commands.rs`):
+Elivagar's enum selects its build shape:
 
-- **`Built(BuiltCommand::MainBinary)`** (`tilegen`) - release build of the
-  elivagar binary.
-- **`Built(BuiltCommand::Example)`** (`pmtiles-writer` -> `bench_pmtiles`,
-  `node-store` -> `bench_node_store`) - cargo `--example` builds; the example
-  runs its own N internal iterations.
-- **`External`** (`planetiler`, `tilemaker`) - external Java/C++ tools,
-  auto-downloaded, no Rust build at all.
+- `Built(MainBinary)` builds tilegen.
+- `Built(Example)` builds `bench_pmtiles` or `bench_node_store`.
+- `External` materializes Java/Planetiler or C++/Tilemaker without a Rust build.
+
+All builds pass through the same session. Tool setup and Planetiler's initial
+source priming run outside timed samples.
 
 ## 3. Bench harness path and timing
 
-pbfhogg routes **every** bench command through `run_pbfhogg_wallclock` ->
-`run_external_ok`. Timing is brokkr's own best-of-N external wall-clock
-(`elapsed_to_ms(&captured.elapsed)` in `types_run.rs`). stdout/stderr are
-captured and dropped; no stderr kv parsing.
+Pbfhogg and tilegen use `run_external_prepared`: best-of-N external wall-clock
+with microsecond resolution. The preparation callback resets sample output
+before every execution. Stderr counters describe the winning sample but do
+not replace its measured wall time.
 
-elivagar forks by build kind (`run_elivagar_bench`):
-
-- MainBinary -> `run_elivagar_wallclock` -> `run_external_ok`. **Same path
-  pbfhogg uses:** timing is brokkr's own best-of-N external wall-clock
-  (`elapsed_to_ms`), and stderr is captured and discarded. tilegen emits all
-  its metrics as FIFO sidecar counters (elivagar-side 54f9b07), so brokkr no
-  longer reads stderr - there is no `elapsed_ms=` contract. Runs are
-  distinguished purely by their recorded `cli_args` (the `--locations-on-ways`
-  flag lands in the subprocess argv when passed), exactly as pbfhogg does.
-- Example -> `run_elivagar_internal` -> `run_internal` + `run_captured`.
-  The example self-iterates; brokkr times one external invocation via
-  external wall-clock (`elapsed_to_ms`) and stores only `elapsed_ms`
-  (`kv: vec![]`).
-- NoBuild -> external-tool handling, outside this path.
-
-The tilegen timing source used to be the crux divergence - it depended on the
-binary self-reporting `elapsed_ms` on stderr and erroring if it was absent.
-That's now gone: tilegen routes through the same `run_external_ok` wall-clock
-path as pbfhogg, so both are uniform, best-of-N, and mode-agnostic.
+Elivagar examples self-iterate with `--runs N`; brokkr executes one aggregate
+sample through `run_internal`. Their existing `tiles`/`nodes_millions` and
+`internal_runs` observations remain. Examples retain absent `cli_args`.
+Planetiler and Tilemaker use the external wall-clock path with their existing
+argv and Java/CMake profile labels.
 
 ## 4. Output channels into the DBs
 
-Consequence of #3, spelled out per command in
-`docs/commands/output-channels.md`:
+External wall-clock and profiling runs capture the sidecar's `/proc` trajectory
+and FIFO markers/counters into `sidecar.db`. External timing also accepts stderr
+counters into the winning result's KV pairs. A self-reported `elapsed_ms` never
+replaces external timing.
 
-- **sidecar.db** (`emit_counter`/markers via FIFO): every pbfhogg command and
-  elivagar `tilegen`. **Not** elivagar examples (their `run_captured` path
-  sets no `BROKKR_MARKER_FIFO`) nor the NoBuild tools.
-- **results.db `kv`** (stderr `key=value`): none. Neither pbfhogg nor elivagar
-  reads stderr kv into results.db anymore - all runtime metrics go out as FIFO
-  counters into sidecar.db instead. (tilegen used to be the sole exception via
-  `run_external_with_kv_raw`; it moved to `run_external_ok` + FIFO counters.)
+Elivagar examples' ordinary captured execution has no FIFO sidecar. Profiling
+uses the shared hotpath capture path. Run mode persists neither result nor
+sidecar records.
 
 ## 5. I/O mode flags
 
-pbfhogg supports `--direct-io` (adds the `linux-direct-io` feature +
-`--direct-io` arg) and `--io-uring` (`linux-io-uring` feature + preflight),
-gated per-command by `supports_io_uring()`, plus `--compression`. These
-appear in the recorded `cli_args`, so a variant is distinguishable in
-results.db by its argv rather than a separate column.
+Pbfhogg supports `--direct-io`, `--io-uring` and `--compression`. I/O support is
+checked per command, and io_uring has its preflight. The flags retain their
+literal spelling in recorded subprocess `cli_args`.
 
-elivagar has no I/O-mode flag surface.
+Elivagar has no corresponding I/O selection flags.
 
 ## 6. Output artifact lifecycle
 
-pbfhogg promotes outputs via `promote_artifact` and integrates with the
-snapshot graph (`--as-snapshot`, `--replace-snapshot`, dataset variant
-selection).
+The runner calls completion hooks only after all samples succeed. A process,
+capture or promotion failure retains the current output for diagnosis.
 
-elivagar renames scratch output into place with `rename_elivagar_output`
-and maintains the **durable tilegen output store**
-(`<output>/<dataset>-<commit>.pmtiles`), the source of truth for `regress`
-/`bless` output-regression diffing. A routine `brokkr clean` spares that
-store; only `clean --worktrees` reclaims it. See
-`docs/projects/elivagar.md`.
+Pbfhogg completion can promote a PBF into the snapshot graph before scratch
+cleanup. Tilegen completion delegates to `elivagar/artifacts.rs`, which admits
+the PMTiles output into `elivagar/archive_store.rs`. The store owns names, protected
+directory checks and per-dataset/variant retention. Profiling tilegen cleans
+its output after success without admitting an archive.
+
+Shared inputs, merged caches, downloaded sources and tilegen checkpoints are
+not sample scratch. `--skip-to` continues to use elivagar's checkpoint contract.
 
 ## 7. Run-specific metadata
 
-Neither bench path derives metadata from stderr. tilegen's old
-`detect_locations_on_ways_stderr` -> `meta.locations_on_ways_detected` stamp
-was dropped when tilegen moved to `run_external_ok` (it no longer reads
-stderr); locations-on-ways is now distinguished by the `--locations-on-ways`
-flag in `cli_args`, matching how pbfhogg records its equivalent knobs.
-(elivagar's hotpath/alloc path still parses stderr for the stamp, since
-`run_hotpath_capture` returns stderr regardless - that's the one place the
-detection survives.)
+Command names and subprocess `cli_args` retain their previous row identity.
+Pbfhogg carries resolved input and cache observations. Tilegen profiling
+continues to observe `meta.locations_on_ways_detected` from captured stderr.
+The measurement mode and brokkr invocation come from the session; `BenchConfig`
+has no fallback fields for either.
 
 ## What they share
 
-Same `BenchContext`/`HarnessContext` bootstrap, same `results.db` +
-`sidecar.db` at `<db_root>/.brokkr/`, same per-user lock, same worktree
-lifecycle for retroactive benchmarking, same run mode (`run_passthrough_timed`,
-inherited stdio, no DB, no sidecar) and same `--hotpath`/`--alloc` path
-(`run_hotpath` wrapping `run_hotpath_capture`: the function-level JSON report
-into results.db, plus the `/proc` trajectory + FIFO counters into sidecar.db,
-so `brokkr sidecar <uuid>` works for hotpath/alloc runs too). The divergences
-above are all in the bench-mode dispatch, not the shared plumbing.
+The runner owns dry-run, mode selection, no-recording run mode, sample scratch
+reset and the success boundary. Both projects use the same session, results and
+sidecar stores, lock and worktree lifecycle.
+
+Dry-run constructs argv without building, installing tools, starting a child
+or creating run artifacts. Input verification may refresh the digest cache.
+Elivagar's argv construction creates no directories.
 
 ## Reconciliation history
 
-- **Done:** tilegen now uses the pbfhogg-style external-wall-clock bench path
-  (`run_external_ok`), so it no longer self-reports `elapsed_ms` on stderr. The
-  elivagar binary emits its metrics as FIFO sidecar counters instead
-  (elivagar-side 54f9b07). This converged the timing source, the stderr->kv
-  channel, and the run-specific metadata rows (#3, #4, #7 above).
-- **Not done (and no longer needed for tilegen):** letting pbfhogg commands
-  opt into stderr-kv metrics. With tilegen off the stderr-kv path, no command
-  routes runtime metrics into results.db `kv` - they all use FIFO counters ->
-  sidecar.db.
+Tilegen moved from self-reported stderr timing to external wall-clock timing.
+The remaining dispatch loops then moved to the shared command-plan runner,
+including external tools, cargo examples and nidhogg's HTTP/server lifecycles.

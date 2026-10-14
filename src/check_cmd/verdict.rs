@@ -253,7 +253,7 @@ pub(super) fn verdict_context(
         let mut widened: Vec<&str> = Vec::new();
         let mut sited: Vec<&str> = Vec::new();
         for s in allow_exact {
-            let group = if crate::config::reaches_test_build(&s.lint) {
+            let group = if crate::config::check::reaches_test_build(&s.lint) {
                 &mut widened
             } else {
                 &mut sited

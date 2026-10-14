@@ -12,6 +12,7 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
+use clap::ValueEnum;
 use xxhash_rust::xxh3::Xxh3;
 
 use super::super::eliv::{next_zoom_boundary, tile_id_to_zxy, xy_to_tile_id};
@@ -19,7 +20,7 @@ use super::super::eliv::{next_zoom_boundary, tile_id_to_zxy, xy_to_tile_id};
 const DIGEST_HEADER: &str = "elivagar-corpus-digest v1";
 const LEAVES_HEADER: &str = "elivagar-corpus-leaves v1";
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub enum DigestMode {
     Leaves,
     Buckets,
@@ -35,8 +36,7 @@ impl DigestMode {
         }
     }
 
-    /// Parse a mode spelling. `cmd::parse_mode` remains the adapter for the
-    /// clap command's current `Option<String>` field.
+    /// Parse a mode spelling from a stored corpus baseline.
     #[must_use]
     pub fn parse(value: &str) -> Option<Self> {
         match value {

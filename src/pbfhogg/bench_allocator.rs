@@ -38,7 +38,6 @@ pub fn run(
             // Allocator discriminator (jemalloc/mimalloc/default) is in
             // the `cargo_features` column. Measurement mode and
             // brokkr_args come from the harness.
-            mode: None,
             input_file: Some(basename.clone()),
             input_mb: Some(file_mb),
             cargo_features: features_label,
@@ -48,7 +47,6 @@ pub fn run(
                 &binary.display().to_string(),
                 &args,
             )),
-            brokkr_args: None,
             metadata: vec![],
         };
 

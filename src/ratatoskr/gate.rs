@@ -10,7 +10,7 @@ use std::fmt::{self, Write};
 
 use serde_json::{Map, Value};
 
-use crate::config::{GateConfig, MetricRule};
+use crate::config::project_config::ratatoskr::{GateConfig, MetricRule};
 use crate::error::DevError;
 use crate::ratatoskr::gate_store::GateEntry;
 

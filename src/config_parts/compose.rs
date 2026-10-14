@@ -568,7 +568,7 @@ mod compose_tests {
             ("brokkr.toml", "project = \"pbfhogg\"\ninclude = [\"hosts.toml\"]\n"),
             ("hosts.toml", "[h]\nport = 4000\n"),
         ]);
-        let (_, cfg) = load(&dir).unwrap();
+        let (_, cfg, _) = load(&dir).unwrap();
         assert_eq!(cfg.hosts["h"].port, Some(4000));
     }
 }

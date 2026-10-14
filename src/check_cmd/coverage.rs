@@ -128,7 +128,7 @@ fn quarantine_rollup(quarantine: &[QuarantineEntry], per_entry: &[usize]) -> Str
 /// itself - the green summary or, on a failing audit, a line of their own
 /// ahead of the findings - so `0 orphaned` can never be read apart from what
 /// the universe left out.
-fn declared_narrowing(sweeps: &[ResolvedSweep], curated_pairs: usize) -> Vec<String> {
+fn declared_narrowing(sweeps: &[PlannedSweep], curated_pairs: usize) -> Vec<String> {
     let mut out = Vec::new();
     let excluding: Vec<String> = sweeps
         .iter()
@@ -157,7 +157,7 @@ fn declared_narrowing(sweeps: &[ResolvedSweep], curated_pairs: usize) -> Vec<Str
 /// Doc-only sweeps sit outside the pair audit, and the narrowing is
 /// reported like `test_exclude_packages`: visible on every run rather than
 /// silently absent.
-fn doc_only_exclusion(sweeps: &[ResolvedSweep]) -> Option<String> {
+fn doc_only_exclusion(sweeps: &[PlannedSweep]) -> Option<String> {
     let doc_only = sweeps
         .iter()
         .filter(|s| matches!(s.lane_exec(), crate::profile::LaneExec::DocOnly { .. }))
@@ -184,15 +184,23 @@ fn shapes_from_plan(plan: &AccountingPlan) -> Vec<ShapeCoverage> {
                 .lanes
                 .iter()
                 .filter(|l| l.shape == s.shape)
-                .flat_map(|l| l.executions.iter())
+                .flat_map(|l| l.inventory.executions().iter())
                 .filter(|p| p.resolution == s.resolution)
-                .map(|p| (p.unit.clone(), p.test.clone()))
+                .map(|p| (p.unit.clone(), p.test.as_str().to_owned()))
                 .collect();
             ShapeCoverage {
                 label: s.label.clone(),
                 curated: s.curated,
-                universe: s.universe.iter().cloned().collect(),
-                ignored: s.ignored.iter().cloned().collect(),
+                universe: s
+                    .universe
+                    .iter()
+                    .map(|(unit, name)| (unit.clone(), name.as_str().to_owned()))
+                    .collect(),
+                ignored: s
+                    .ignored
+                    .iter()
+                    .map(|(unit, name)| (unit.clone(), name.as_str().to_owned()))
+                    .collect(),
                 selected,
             }
         })
@@ -211,7 +219,7 @@ fn shapes_from_plan(plan: &AccountingPlan) -> Vec<ShapeCoverage> {
 #[allow(clippy::too_many_lines)]
 pub(crate) fn report_policy(
     plan: &AccountingPlan,
-    sweeps: &[ResolvedSweep],
+    sweeps: &[PlannedSweep],
     quarantine: &[QuarantineEntry],
 ) -> (PolicyCoverage, bool) {
     let shapes = shapes_from_plan(plan);
@@ -257,7 +265,7 @@ pub(crate) fn report_policy(
         output::error(&format!(
             "coverage: the plan is incomplete - {}. Policy is reported for what was prepared, and \
              cannot pass.",
-            plan.incomplete.join("; ")
+            plan.incomplete.iter().map(ToString::to_string).collect::<Vec<_>>().join("; ")
         ));
     }
 
@@ -369,7 +377,7 @@ pub(crate) fn report_policy(
 /// `--exact` is part of the typed profile filters), so the local computation
 /// is exact, and a listing per binary per filter is not.
 fn filter_liveness(
-    sweep: &ResolvedSweep,
+    sweep: &PlannedSweep,
     candidates: &[(String, String)],
     ignored: &BTreeSet<(String, String)>,
 ) -> Vec<(DeclaredFilter, bool)> {
@@ -478,6 +486,13 @@ impl FilterLedger {
         self.tally(filter, sweep).unknown = true;
     }
 
+    /// Every filter of a sweep whose lane could not be listed.
+    fn record_all_unknown(&mut self, sweep: &PlannedSweep) {
+        for filter in &sweep.lane_filters().filters {
+            self.record_unknown(filter, &sweep.label);
+        }
+    }
+
     fn dead(self) -> Vec<DeadFilter> {
         self.tallies
             .into_iter()
@@ -491,6 +506,186 @@ impl FilterLedger {
     }
 }
 
+/// `(package, test name)` pairs.
+type TestPairs = Vec<(String, String)>;
+
+/// The test names a lane's binaries expose in their shapes' universes, and
+/// which of them are `#[ignore]`d at the source.
+fn lane_candidates(
+    prepared: &PreparedLane,
+    shape: &ShapeId,
+    universes: &BTreeMap<(ShapeId, Resolution), Option<Universe>>,
+) -> (TestPairs, BTreeSet<(String, String)>) {
+    let mut candidates: Vec<(String, String)> = Vec::new();
+    let mut ignored: BTreeSet<(String, String)> = BTreeSet::new();
+    for resolution in &prepared.resolutions {
+        let resolution_id = Resolution::from_option(resolution.resolution.as_deref());
+        let Some(Some(universe)) = universes.get(&(shape.clone(), resolution_id)) else {
+            continue;
+        };
+        for binary in &resolution.binaries {
+            for (unit, all, ignored_names) in &universe.binaries {
+                if *unit == binary.unit {
+                    candidates.extend(all.iter().map(|name| (unit.package.clone(), name.clone())));
+                    ignored.extend(ignored_names.iter().map(|name| (unit.package.clone(), name.clone())));
+                }
+            }
+        }
+    }
+    (candidates, ignored)
+}
+
+/// One `ShapeRecord` per enumerated shape resolution, in first-seen order.
+fn push_shape_records(
+    sweeps: &[PlannedSweep],
+    plan: &mut AccountingPlan,
+    shape_order: Vec<(ShapeId, Resolution, LaneIdx)>,
+    universes: &BTreeMap<(ShapeId, Resolution), Option<Universe>>,
+) {
+    for (shape, resolution, first) in shape_order {
+        let members: Vec<&LaneRecord> = plan
+            .lanes
+            .iter()
+            .filter(|lane| lane.shape == shape && lane.kind != LaneKind::DocOnly)
+            .collect();
+        let universe = universes.get(&(shape.clone(), resolution.clone())).and_then(Option::as_ref);
+        let sweep = &sweeps[first.get()];
+        let record = ShapeRecord {
+            shape: shape.clone(),
+            label: match resolution.as_option() {
+                Some(package) => format!("{}/{package}", sweep.label),
+                None => sweep.label.clone(),
+            },
+            resolution,
+            curated: members.iter().all(|lane| {
+                sweeps.get(lane.lane.get()).is_some_and(|sweep| sweep.curated)
+            }),
+            complete: universe.is_some() && members.iter().all(|lane| lane.inventory.is_known()),
+            universe: universe
+                .map(|universe| {
+                    universe
+                        .binaries
+                        .iter()
+                        .flat_map(|(unit, all, _)| {
+                            all.iter().map(move |name| (unit.clone(), name.clone().into()))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+            ignored: universe
+                .map(|universe| {
+                    universe
+                        .binaries
+                        .iter()
+                        .flat_map(|(unit, _, ignored)| {
+                            ignored.iter().map(move |name| (unit.clone(), name.clone().into()))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+        };
+        plan.shapes.push(record);
+    }
+}
+
+/// Second prepare pass: enumerate policy universes by shape, then judge
+/// filter liveness from the per-lane inventories. The first pass has already
+/// fixed every lane's executable selection and artifact record.
+fn prepare_policy_universes(
+    sweeps: &[PlannedSweep],
+    selection: &PhaseSelection,
+    plan: &mut AccountingPlan,
+    lanes: &Lanes<Option<PreparedLane>>,
+    preparer: &mut dyn Preparer,
+    error: &mut Option<DevError>,
+) {
+    let mut universes: BTreeMap<(ShapeId, Resolution), Option<Universe>> = BTreeMap::new();
+    let mut shape_order: Vec<(ShapeId, Resolution, LaneIdx)> = Vec::new();
+    let mut ledger = FilterLedger::default();
+    let mut stopped = false;
+
+    for (lane_idx, sweep) in sweeps.iter().enumerate().map(|(i, sweep)| (LaneIdx::new(i), sweep)) {
+        let kind = lane_kind(sweep);
+        if kind == LaneKind::DocOnly {
+            continue;
+        }
+        let prepared = lanes.get(lane_idx).and_then(Option::as_ref).filter(|p| p.unavailable.is_none());
+        let attempt = selection.attempt(lane_idx);
+        let (Some(prepared), Some(attempt)) = (prepared, attempt) else {
+            ledger.record_all_unknown(sweep);
+            continue;
+        };
+        if stopped || crate::shutdown::is_shutdown_requested() {
+            ledger.record_all_unknown(sweep);
+            continue;
+        }
+
+        let shape = shape_id(sweep);
+        let mut lane_ok = true;
+        for resolution in &prepared.resolutions {
+            let resolution_id = Resolution::from_option(resolution.resolution.as_deref());
+            let key = (shape.clone(), resolution_id.clone());
+            if !universes.contains_key(&key) {
+                shape_order.push((shape.clone(), resolution_id.clone(), lane_idx));
+                let planned = attempt.run_for(resolution.resolution.as_deref()).ok_or_else(|| {
+                    DevError::Build(format!(
+                        "sweep '{}': no planned request for resolution {:?}",
+                        sweep.label, resolution.resolution
+                    ))
+                });
+                let universe = match planned.and_then(|run| preparer.universe(sweep, run, &prepared.env)) {
+                    Ok(universe) => Some(universe),
+                    Err(e) => {
+                        plan.incomplete.push(format!("sweep '{}': universe: {e}", sweep.label).into());
+                        if matches!(e, DevError::Interrupted) || crate::shutdown::is_shutdown_requested() {
+                            stopped = true;
+                        }
+                        if error.is_none() {
+                            *error = Some(e);
+                        }
+                        None
+                    }
+                };
+                universes.insert(key.clone(), universe);
+            }
+            let Some(Some(universe)) = universes.get(&key) else {
+                lane_ok = false;
+                continue;
+            };
+            for binary in &resolution.binaries {
+                if !universe.binaries.iter().any(|(unit, _, _)| *unit == binary.unit) {
+                    lane_ok = false;
+                    plan.incomplete.push(
+                        format!("sweep '{}': {} is not in its shape's universe", sweep.label, binary.unit.id())
+                            .into(),
+                    );
+                }
+            }
+        }
+
+        if lane_ok {
+            let (candidates, ignored) = lane_candidates(prepared, &shape, &universes);
+            for (filter, live) in filter_liveness(sweep, &candidates, &ignored) {
+                ledger.record(&filter, live, &sweep.label);
+            }
+        } else {
+            ledger.record_all_unknown(sweep);
+        }
+    }
+
+    push_shape_records(sweeps, plan, shape_order, &universes);
+
+    plan.dead_filters = ledger
+        .dead()
+        .into_iter()
+        .map(|dead| DeadFilterRecord {
+            sweeps: dead.sweeps.into(),
+            origin: dead.origin.into(),
+            label: dead.label.into(),
+        })
+        .collect();
+}
+
 /// One shape resolution's bare cargo selection: the planned request's
 /// packages and projected features, no target filters (those are lane
 /// narrowing, audited via the selections).
@@ -502,7 +697,7 @@ impl FilterLedger {
 /// package mode it is one package, which REPLACES the shape's `-p` list
 /// rather than adding to it (cargo unions selection flags) and carries only
 /// the tokens that package routes.
-fn shape_selection_args(sweep: &ResolvedSweep, run: &ResolutionRun) -> Vec<String> {
+fn shape_selection_args(sweep: &PlannedSweep, run: &ResolutionRun) -> Vec<String> {
     // The shape's profile comes first: enumeration compiles
     // (`cargo test --no-run`), and enumerating a release shape in dev would
     // both rebuild the world and list the dev build's tests - a universe for
@@ -532,7 +727,7 @@ fn shape_selection_args(sweep: &ResolvedSweep, run: &ResolutionRun) -> Vec<Strin
 /// command per package and the universe must be enumerated the same way - a
 /// batched `-p a -p b` listing would catalogue binaries from a graph no run
 /// produced.
-fn shape_enumeration_args(sweep: &ResolvedSweep, run: &ResolutionRun, allow_args: Vec<String>) -> Vec<String> {
+fn shape_enumeration_args(sweep: &PlannedSweep, run: &ResolutionRun, allow_args: Vec<String>) -> Vec<String> {
     let mut args = allow_args;
     args.extend(shape_selection_args(sweep, run));
     args
@@ -623,22 +818,27 @@ mod coverage_tests {
 
     use super::{
         classify, filter_liveness, shape_enumeration_args, BinaryUnit, CoverageStats, DeclaredFilter,
-        FeatureOracle, FilterKind, FilterLedger, PhaseSelection, QuarantineEntry,
-        ResolutionRun, ResolvedSweep,
+        FeatureOracle, FilterKind, FilterLedger, LaneIdx, PhaseSelection, QuarantineEntry,
+        ResolutionRun, PlannedSweep,
         SelectionPhase, ShapeCoverage,
     };
-    use crate::profile::{FilterOrigin, LaneFilters};
+    use crate::config::FeatureUnification;
+    use crate::profile::{FilterOrigin, LaneFilters, SweepDecl};
     use std::collections::BTreeSet;
+
+    fn planned(declaration: SweepDecl) -> PlannedSweep {
+        PlannedSweep::resolve(declaration, false).unwrap()
+    }
 
     #[test]
     fn enumeration_selection_carries_the_lint_allows() {
         // The universe's `cargo test --no-run` compiles, so it is in the test
         // phase's class: a lint the project's `-Dwarnings` turns into an error
         // kills the build before any diagnostic exists to filter.
-        let sweep = ResolvedSweep {
+        let sweep = planned(SweepDecl {
             packages: vec!["pkg".into()],
-            ..ResolvedSweep::default()
-        };
+            ..SweepDecl::default()
+        });
         let allows = vec![
             "--config".to_owned(),
             "target.\"cfg(all())\".rustflags=[\"-A\",\"deprecated\"]".to_owned(),
@@ -658,7 +858,7 @@ mod coverage_tests {
 
     /// The lane's planned request for `resolution`, as the test selection
     /// builds it with no invocation override (a complete claim refuses `-p`).
-    fn planned_run(sweep: &ResolvedSweep, resolution: Option<&str>) -> ResolutionRun {
+    fn planned_run(sweep: &PlannedSweep, resolution: Option<&str>) -> ResolutionRun {
         let sel = PhaseSelection::for_check(
             SelectionPhase::Test,
             std::slice::from_ref(sweep),
@@ -666,7 +866,7 @@ mod coverage_tests {
             &FeatureOracle::fixed(super::features::fixture::piners()),
         )
         .unwrap();
-        sel.attempt(0).unwrap().run_for(resolution).unwrap().clone()
+        sel.attempt(LaneIdx::new(0)).unwrap().run_for(resolution).unwrap().clone()
     }
 
     /// Package mode enumerates one universe per package, each from the
@@ -674,16 +874,15 @@ mod coverage_tests {
     /// the same features its prebuild compiled.
     #[test]
     fn a_package_mode_universe_is_enumerated_from_the_planned_request() {
-        use crate::config::{CargoUnification, EffectiveUnification};
-        let sweep = ResolvedSweep {
+        let sweep = planned(SweepDecl {
             packages: vec!["piners-vm".into(), "piners-strategy".into()],
             features: crate::profile::FeatureConfig {
                 tokens: vec!["piners-vm/opcode-counts".into(), "piners-strategy/hotpath".into()],
                 ..Default::default()
             },
-            effective_unification: EffectiveUnification::Pinned(CargoUnification::Package),
-            ..ResolvedSweep::default()
-        };
+            feature_unification: FeatureUnification::Package,
+            ..SweepDecl::default()
+        });
         let vm = shape_enumeration_args(&sweep, &planned_run(&sweep, Some("piners-vm")), Vec::new());
         assert!(vm.ends_with(&[
             "-p".to_owned(),
@@ -708,16 +907,16 @@ mod coverage_tests {
         label: &str,
         filters: Vec<DeclaredFilter>,
         include_ignored: bool,
-    ) -> ResolvedSweep {
-        ResolvedSweep {
+    ) -> PlannedSweep {
+        planned(SweepDecl {
             label: label.into(),
             filters: LaneFilters {
                 filters,
                 include_ignored,
                 ..Default::default()
             },
-            ..ResolvedSweep::default()
-        }
+            ..SweepDecl::default()
+        })
     }
 
     fn candidates(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
@@ -730,7 +929,7 @@ mod coverage_tests {
     /// The verdict over a whole profile: every sweep's liveness recorded, then
     /// the ledger asked. Mirrors `prepare_profile`, which cannot decide inside
     /// its per-lane loop.
-    fn dead_over(lanes: &[(&ResolvedSweep, &[(String, String)])]) -> Vec<String> {
+    fn dead_over(lanes: &[(&PlannedSweep, &[(String, String)])]) -> Vec<String> {
         let ignored = BTreeSet::new();
         let mut ledger = FilterLedger::default();
         for (sweep, cands) in lanes {
@@ -742,7 +941,7 @@ mod coverage_tests {
     }
 
     fn dead_labels(
-        sweep: &ResolvedSweep,
+        sweep: &PlannedSweep,
         cands: &[(String, String)],
         ignored: &BTreeSet<(String, String)>,
     ) -> Vec<String> {
@@ -921,7 +1120,7 @@ mod coverage_tests {
         );
 
         // ...and alive again once the lane lifts the ignore.
-        let lifted = sweep_with_filters("default", sweep.filters.filters, true);
+        let lifted = sweep_with_filters("default", sweep.filters.filters.clone(), true);
         assert!(dead_labels(&lifted, &cands, &ignored).is_empty());
     }
 
