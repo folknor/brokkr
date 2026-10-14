@@ -186,7 +186,7 @@ fn run_curl_body(request_args: &[&str]) -> Result<String, DevError> {
         }
         return Err(DevError::Subprocess {
             program: "curl".into(),
-            code: output.status.code(),
+            ending: crate::error::ProcessEnding::from_status(&output.status),
             stderr,
         });
     }
@@ -239,16 +239,16 @@ pub fn health_check(port: u16) -> Result<bool, DevError> {
 /// "connection refused" read differently.
 pub fn describe_curl_error(err: &DevError) -> String {
     match err {
-        DevError::Subprocess { code, stderr, .. } => {
+        DevError::Subprocess { ending, stderr, .. } => {
             let detail = stderr
                 .lines()
                 .map(str::trim)
                 .filter(|l| !l.is_empty())
                 .collect::<Vec<_>>()
                 .join("; ");
-            let head = match code {
-                Some(c) => format!("curl exit {c}"),
-                None => "curl ended without an exit code".to_owned(),
+            let head = match ending {
+                crate::error::ProcessEnding::Code(c) => format!("curl exit {c}"),
+                crate::error::ProcessEnding::Signal(s) => format!("curl killed by signal {s}"),
             };
             if detail.is_empty() {
                 head
@@ -418,7 +418,7 @@ mod tests {
     fn curl_error_description_keeps_status_and_body() {
         let e = DevError::Subprocess {
             program: "curl".into(),
-            code: Some(22),
+            ending: crate::error::ProcessEnding::Code(22),
             stderr: "curl: (22) The requested URL returned error: 500\nresponse body: boom".into(),
         };
         assert_eq!(

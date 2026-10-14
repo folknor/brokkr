@@ -101,7 +101,9 @@ a `rustflags` or package-mode sweep - the same sweep-env-wins rule every
 
 ## Output
 
-Identical to `brokkr check`'s clippy phase. Cargo always runs with
+Identical to `brokkr check`'s clippy phase, implemented by the shared pipeline
+in `src/check_cmd/diagnostics.rs` and its `brokkr clippy` entry point in
+`src/check_cmd/clippy_cmd.rs`. Cargo always runs with
 `--message-format=json` so every diagnostic - including repeats of the same rule
 - carries its lint code in the header:
 

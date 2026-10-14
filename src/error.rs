@@ -1,9 +1,274 @@
 use std::error::Error as StdError;
 use std::fmt;
 use std::io;
+use std::path::PathBuf;
+use std::time::Duration;
+
+/// How a diagnostic should be rendered by `DevError`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenderingPolicy {
+    /// The failure site printed the full diagnostic already; keep the stored
+    /// label for callers that still need a concise summary.
+    AlreadyPrinted,
+    /// Render the message without a category prefix.
+    Bare,
+    /// Prefix the message with this category.
+    Prefixed(&'static str),
+}
+
+/// A lock error outside acquisition, or a typed reason a fresh acquisition
+/// refused to create a hold.
+#[derive(Debug)]
+pub enum LockError {
+    Acquisition(AcquireRefusal),
+    Other(String),
+}
+
+impl LockError {
+    pub fn acquisition(refusal: AcquireRefusal) -> Self {
+        Self::Acquisition(refusal)
+    }
+}
+
+impl From<String> for LockError {
+    fn from(message: String) -> Self {
+        Self::Other(message)
+    }
+}
+
+impl From<&str> for LockError {
+    fn from(message: &str) -> Self {
+        Self::Other(message.to_owned())
+    }
+}
+
+/// Machine-readable reasons why a fresh global hold could not be established.
+#[derive(Debug)]
+pub enum AcquireRefusal {
+    NestedDescendant {
+        command: String,
+    },
+    /// A non-blocking acquisition found the lock held. `holder` is the
+    /// holder's recorded command, when its record could be read.
+    Busy {
+        holder: Option<String>,
+    },
+    InsideCompilation {
+        marker: &'static str,
+    },
+    DiskGate(Vec<String>),
+    DrainTimeout {
+        waited: Duration,
+    },
+    LockFileOpen {
+        path: PathBuf,
+        source: io::Error,
+    },
+    LockFlock {
+        source: io::Error,
+    },
+    CompileLeaseOpen {
+        path: PathBuf,
+        source: io::Error,
+    },
+    CompileLeaseFlock {
+        path: PathBuf,
+        source: io::Error,
+    },
+    MetadataPublish {
+        stage: MetadataStage,
+        source: io::Error,
+    },
+    Entropy {
+        purpose: EntropyPurpose,
+    },
+    SocketBind {
+        path: PathBuf,
+        source: io::Error,
+    },
+    SocketDirectory {
+        reason: String,
+    },
+    ServiceThread {
+        source: io::Error,
+    },
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum MetadataStage {
+    Draining,
+    Capability,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum EntropyPurpose {
+    AcquisitionId,
+    Capability,
+}
+
+impl fmt::Display for AcquireRefusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NestedDescendant { command } => write!(
+                f,
+                "cannot take the brokkr lock independently while the hold you were started under is \
+                 active - it is held by your own ancestor (`brokkr {command}`), which waiting here would never \
+                 let go of. Run the inner command outside the outer one: run the built binary directly \
+                 (for brokkr itself, build it and invoke `target/debug/brokkr ...`, or `brokkr install` \
+                 and invoke the installed one), or run it before or after the outer command, not \
+                 beneath it."
+            ),
+            Self::Busy { holder: Some(command) } => write!(
+                f,
+                "the brokkr lock is held (by `brokkr {command}`) and this command does not wait for it"
+            ),
+            Self::Busy { holder: None } => {
+                f.write_str("the brokkr lock is held and this command does not wait for it")
+            }
+            Self::InsideCompilation { marker } => write!(
+                f,
+                "refusing to take the brokkr lock from inside a compilation brokkr admitted \
+                 ({marker} is set). Taking it here would deadlock: this compiler holds a share of the \
+                 compile lease that a new hold must drain. Run the brokkr command outside the \
+                 build - a build script or proc macro cannot drive brokkr."
+            ),
+            Self::DiskGate(failures) => {
+                f.write_str("preflight failed:")?;
+                for failure in failures {
+                    write!(f, "\n  - {failure}")?;
+                }
+                Ok(())
+            }
+            Self::DrainTimeout { waited } => write!(
+                f,
+                "compilation leases did not drain within {}s. A compiler started before this \
+                 hold is still holding its lease, or a process that inherited its \
+                 descriptor is. This is not a transient busy signal - an unchanged blocker \
+                 will fail every retry. `brokkr strays` shows what is running; \
+                 `brokkr lock` shows the holder.",
+                waited.as_secs()
+            ),
+            Self::LockFileOpen { path, source } => {
+                write!(f, "failed to open lock file {}: {source}", path.display())
+            }
+            Self::LockFlock { source } => write!(f, "flock failed: {source}"),
+            Self::CompileLeaseOpen { path, source } => write!(
+                f,
+                "failed to open the compile lease lock {}: {source}",
+                path.display()
+            ),
+            Self::CompileLeaseFlock { path, source } => write!(
+                f,
+                "could not take the compile lease lock at {}: {source}",
+                path.display()
+            ),
+            Self::MetadataPublish {
+                stage: MetadataStage::Draining,
+                source,
+            } => write!(f, "failed to publish lock metadata: {source}"),
+            Self::MetadataPublish {
+                stage: MetadataStage::Capability,
+                source,
+            } => write!(f, "failed to publish the compilation capability: {source}"),
+            Self::Entropy { purpose } => match purpose {
+                EntropyPurpose::AcquisitionId => {
+                    f.write_str("could not read /dev/urandom to mint a lock acquisition id")
+                }
+                EntropyPurpose::Capability => f.write_str(
+                    "could not read /dev/urandom to mint a compilation capability; a hold that cannot \
+                     mint one would have every one of its own compiles refused",
+                ),
+            },
+            Self::SocketBind { path, source } => {
+                write!(f, "cannot bind lock socket {}: {source}", path.display())
+            }
+            Self::SocketDirectory { reason } => f.write_str(reason),
+            Self::ServiceThread { source } => {
+                write!(f, "cannot start the lock service thread: {source}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for AcquireRefusal {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::LockFlock { source }
+            | Self::LockFileOpen { source, .. }
+            | Self::CompileLeaseOpen { source, .. }
+            | Self::CompileLeaseFlock { source, .. }
+            | Self::MetadataPublish { source, .. }
+            | Self::SocketBind { source, .. }
+            | Self::ServiceThread { source } => Some(source),
+            Self::NestedDescendant { .. }
+            | Self::Busy { .. }
+            | Self::InsideCompilation { .. }
+            | Self::DiskGate(_)
+            | Self::DrainTimeout { .. }
+            | Self::Entropy { .. }
+            | Self::SocketDirectory { .. } => None,
+        }
+    }
+}
+
+impl fmt::Display for LockError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Acquisition(refusal) => refusal.fmt(f),
+            Self::Other(message) => f.write_str(message),
+        }
+    }
+}
+
+impl StdError for LockError {
+    fn source(&self) -> Option<&(dyn StdError + 'static)> {
+        match self {
+            Self::Acquisition(refusal) => Some(refusal),
+            Self::Other(_) => None,
+        }
+    }
+}
 
 /// Error type for the dev tool.
 ///
+/// How a subprocess that ran ended: its exit code, or the signal that killed
+/// it. On Unix every reaped child has exactly one of the two.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessEnding {
+    Code(i32),
+    Signal(i32),
+}
+
+impl ProcessEnding {
+    /// From a reaped child's status. A status with neither (not produced by a
+    /// plain `wait`) is recorded by its raw wait value as a code, rather than
+    /// invented as a signal.
+    pub fn from_status(status: &std::process::ExitStatus) -> Self {
+        use std::os::unix::process::ExitStatusExt;
+        match (status.code(), status.signal()) {
+            (Some(code), _) => Self::Code(code),
+            (None, Some(signal)) => Self::Signal(signal),
+            (None, None) => Self::Code(status.into_raw()),
+        }
+    }
+}
+
+impl fmt::Display for ProcessEnding {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Code(code) => write!(f, "exited with code {code}"),
+            Self::Signal(libc::SIGKILL) => {
+                write!(
+                    f,
+                    "killed by signal {} (SIGKILL - possible OOM kill)",
+                    libc::SIGKILL
+                )
+            }
+            Self::Signal(signal) => write!(f, "killed by signal {signal}"),
+        }
+    }
+}
+
 /// No `Box` wrapping - this is a binary, not a library. Keeping it simple.
 #[derive(Debug)]
 pub enum DevError {
@@ -11,16 +276,26 @@ pub enum DevError {
     Io(io::Error),
     /// Configuration file parse or validation error.
     Config(String),
+    /// Invalid command usage that is not rejected by clap itself.
+    Usage(String),
+    /// A valid command was run for the wrong detected project.
+    WrongProject {
+        command: String,
+        expected: String,
+        current: String,
+    },
+    /// An invariant or dispatch contract inside brokkr failed.
+    Internal(String),
     /// Build failure (cargo returned non-zero, or compilation error).
     Build(String),
     /// One or more preflight checks failed.
     Preflight(Vec<String>),
-    /// A subprocess ran and ended unsuccessfully. `code` is `None` when it
-    /// ended without an exit code - on Unix, a signal death; constructors that
-    /// know the signal say so in `stderr`, since this variant does not carry it.
+    /// A subprocess ran and ended unsuccessfully, with how it ended carried
+    /// explicitly - an exit code or the signal that killed it - so rendering
+    /// never has to guess from the captured stderr.
     Subprocess {
         program: String,
-        code: Option<i32>,
+        ending: ProcessEnding,
         stderr: String,
     },
     /// A subprocess could not be started (or waited on) at all - `program` is
@@ -45,7 +320,7 @@ pub enum DevError {
     /// Renders bare; unlike [`DevError::Reported`], this is its first print.
     Refused(String),
     /// Lock file conflict (another dev instance is running).
-    Lock(String),
+    Lock(LockError),
     /// Database error (SQLite operations).
     Database(String),
     /// A verification check found a mismatch or unexpected result.
@@ -68,12 +343,26 @@ pub enum DevError {
 
 impl fmt::Display for DevError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let policy = self.rendering_policy();
         match self {
-            DevError::Io(err) => write!(f, "io: {err}"),
-            DevError::Config(msg) => write!(f, "config: {msg}"),
-            DevError::Build(msg) => write!(f, "build: {msg}"),
+            DevError::Io(err) => write_message(f, policy, &err.to_string()),
+            DevError::Config(msg) => write_message(f, policy, msg),
+            DevError::Usage(msg) => write_message(f, policy, msg),
+            DevError::WrongProject {
+                command,
+                expected,
+                current,
+            } => write_message(
+                f,
+                policy,
+                &format!(
+                    "'brokkr {command}' is only available in {expected} projects (current: {current})"
+                ),
+            ),
+            DevError::Internal(msg) => write_message(f, policy, msg),
+            DevError::Build(msg) => write_message(f, policy, msg),
             DevError::Preflight(failures) => {
-                write!(f, "preflight failed:")?;
+                write!(f, "{}:", prefix(policy, "preflight failed"))?;
                 for failure in failures {
                     write!(f, "\n  - {failure}")?;
                 }
@@ -81,23 +370,10 @@ impl fmt::Display for DevError {
             }
             DevError::Subprocess {
                 program,
-                code,
+                ending,
                 stderr,
             } => {
-                write!(f, "{program}")?;
-                // No exit code is a signal death on Unix, but the variant does
-                // not carry the signal: constructors that know it put it in
-                // `stderr` ("killed by signal 9"), and saying "killed by
-                // signal" here as well doubled it.
-                match code {
-                    Some(c) => write!(f, " exited with code {c}")?,
-                    // The constructor named the signal: its sentence is the
-                    // whole account ("X killed by signal 9 (SIGKILL - ...)").
-                    None if stderr.starts_with("killed by signal") => {
-                        return write!(f, " {stderr}");
-                    }
-                    None => write!(f, " ended without an exit code")?,
-                }
+                write!(f, "{program} {ending}")?;
                 if !stderr.is_empty() {
                     write!(f, ": {stderr}")?;
                 }
@@ -105,9 +381,9 @@ impl fmt::Display for DevError {
             }
             DevError::Spawn { program, error } => write!(f, "could not run {program}: {error}"),
             DevError::Reported(label) | DevError::Refused(label) => write!(f, "{label}"),
-            DevError::Lock(msg) => write!(f, "lock: {msg}"),
-            DevError::Database(msg) => write!(f, "database: {msg}"),
-            DevError::Verify(msg) => write!(f, "verify: {msg}"),
+            DevError::Lock(msg) => write_message(f, policy, &msg.to_string()),
+            DevError::Database(msg) => write_message(f, policy, msg),
+            DevError::Verify(msg) => write_message(f, policy, msg),
             DevError::CargoEnv(label) => write!(f, "{label}"),
             DevError::ExitCode(_) => Ok(()),
             DevError::Interrupted => write!(f, "interrupted by shutdown request"),
@@ -116,10 +392,45 @@ impl fmt::Display for DevError {
 }
 
 impl DevError {
-    /// Whether the site that raised this already printed its full detail, so
-    /// a summary prints nothing more for it.
-    pub fn already_printed(&self) -> bool {
-        matches!(self, DevError::Reported(_) | DevError::CargoEnv(_))
+    /// The single source of truth for category prefixes and whether the full
+    /// diagnostic was already emitted.
+    pub fn rendering_policy(&self) -> RenderingPolicy {
+        match self {
+            Self::Reported(_) | Self::CargoEnv(_) => RenderingPolicy::AlreadyPrinted,
+            Self::Refused(_)
+            | Self::Subprocess { .. }
+            | Self::Spawn { .. }
+            | Self::ExitCode(_)
+            | Self::Interrupted => RenderingPolicy::Bare,
+            Self::Io(_) => RenderingPolicy::Prefixed("io"),
+            Self::Config(_) => RenderingPolicy::Prefixed("config"),
+            Self::Usage(_) => RenderingPolicy::Prefixed("usage"),
+            Self::WrongProject { .. } => RenderingPolicy::Prefixed("wrong project"),
+            Self::Internal(_) => RenderingPolicy::Prefixed("internal"),
+            Self::Build(_) => RenderingPolicy::Prefixed("build"),
+            Self::Preflight(_) => RenderingPolicy::Prefixed("preflight failed"),
+            Self::Lock(_) => RenderingPolicy::Prefixed("lock"),
+            Self::Database(_) => RenderingPolicy::Prefixed("database"),
+            Self::Verify(_) => RenderingPolicy::Prefixed("verify"),
+        }
+    }
+}
+
+fn prefix(policy: RenderingPolicy, fallback: &'static str) -> &'static str {
+    match policy {
+        RenderingPolicy::Prefixed(category) => category,
+        RenderingPolicy::AlreadyPrinted | RenderingPolicy::Bare => fallback,
+    }
+}
+
+fn write_message(
+    f: &mut fmt::Formatter<'_>,
+    policy: RenderingPolicy,
+    message: &str,
+) -> fmt::Result {
+    match policy {
+        RenderingPolicy::Prefixed(category) => write!(f, "{category}: {message}"),
+        RenderingPolicy::AlreadyPrinted | RenderingPolicy::Bare => f.write_str(message),
     }
 }
 
@@ -127,11 +438,14 @@ impl StdError for DevError {
     fn source(&self) -> Option<&(dyn StdError + 'static)> {
         match self {
             DevError::Io(err) | DevError::Spawn { error: err, .. } => Some(err),
+            DevError::Lock(err) => Some(err),
             DevError::Config(_)
+            | DevError::Usage(_)
+            | DevError::WrongProject { .. }
+            | DevError::Internal(_)
             | DevError::Build(_)
             | DevError::Preflight(_)
             | DevError::Subprocess { .. }
-            | DevError::Lock(_)
             | DevError::Database(_)
             | DevError::Verify(_)
             | DevError::CargoEnv(_)
@@ -169,7 +483,7 @@ impl From<rusqlite::Error> for DevError {
 
 #[cfg(test)]
 mod tests {
-    use super::DevError;
+    use super::{DevError, ProcessEnding};
     use std::io;
 
     #[test]
@@ -184,38 +498,38 @@ mod tests {
     }
 
     #[test]
-    fn a_signal_named_by_the_constructor_is_said_once() {
+    fn a_signal_death_is_said_once_from_the_ending() {
         let e = DevError::Subprocess {
             program: "cargo fmt".into(),
-            code: None,
-            stderr: "killed by signal 9".into(),
+            ending: ProcessEnding::Signal(15),
+            stderr: String::new(),
         };
         let msg = e.to_string();
         assert_eq!(msg.matches("signal").count(), 1, "{msg}");
-        assert_eq!(msg, "cargo fmt killed by signal 9");
+        assert_eq!(msg, "cargo fmt killed by signal 15");
     }
 
     #[test]
     fn a_signal_death_with_output_keeps_the_output_after_the_sentence() {
         let e = DevError::Subprocess {
             program: "x".into(),
-            code: None,
-            stderr: "killed by signal 9 (SIGKILL - possible OOM kill)".into(),
+            ending: ProcessEnding::Signal(9),
+            stderr: "boom".into(),
         };
         assert_eq!(
             e.to_string(),
-            "x killed by signal 9 (SIGKILL - possible OOM kill)"
+            "x killed by signal 9 (SIGKILL - possible OOM kill): boom"
         );
     }
 
     #[test]
-    fn no_exit_code_and_no_signal_sentence_still_says_so() {
+    fn stderr_that_looks_like_a_signal_does_not_change_the_rendering() {
         let e = DevError::Subprocess {
             program: "x".into(),
-            code: None,
-            stderr: String::new(),
+            ending: ProcessEnding::Code(2),
+            stderr: "killed by signal 9".into(),
         };
-        assert_eq!(e.to_string(), "x ended without an exit code");
+        assert_eq!(e.to_string(), "x exited with code 2: killed by signal 9");
     }
 
     #[test]

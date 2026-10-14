@@ -9,6 +9,7 @@ use rusqlite::Connection;
 
 use crate::db::like;
 use crate::error::DevError;
+use crate::git::ShortCommit;
 
 // ---------------------------------------------------------------------------
 // Schema
@@ -139,6 +140,7 @@ impl HistoryDb {
     /// Insert a history row.
     #[allow(clippy::too_many_arguments)]
     pub fn insert(&self, row: &HistoryRow) -> Result<(), StoreError> {
+        let commit_hash = row.commit_hash.as_ref().map(ShortCommit::as_str);
         self.conn.execute(
             "INSERT INTO history (project, cwd, command, elapsed_ms, exit_status, \
                 hostname, commit_hash, dirty, kernel, avail_memory_mb) \
@@ -150,7 +152,7 @@ impl HistoryDb {
                 row.elapsed_ms,
                 row.exit_status,
                 row.hostname,
-                row.commit_hash,
+                commit_hash,
                 row.dirty,
                 row.kernel,
                 row.avail_memory_mb,
@@ -291,7 +293,7 @@ pub struct HistoryRow {
     pub elapsed_ms: i64,
     pub exit_status: i32,
     pub hostname: String,
-    pub commit_hash: Option<String>,
+    pub commit_hash: Option<ShortCommit>,
     pub dirty: Option<bool>,
     pub kernel: Option<String>,
     pub avail_memory_mb: Option<i64>,
@@ -562,7 +564,7 @@ mod tests {
             elapsed_ms: 1234,
             exit_status,
             hostname: "testhost".into(),
-            commit_hash: Some("abc123".into()),
+            commit_hash: Some("abc123".parse().unwrap()),
             dirty: Some(false),
             kernel: Some("6.18.0".into()),
             avail_memory_mb: Some(16000),

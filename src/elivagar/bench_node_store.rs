@@ -32,7 +32,8 @@ pub fn run(
             profile: "release",
         },
         project_root,
-    )?;
+    )?
+    .path;
 
     let binary_str = binary.display().to_string();
     let nodes_str = nodes_millions.to_string();
@@ -50,7 +51,7 @@ pub fn run(
         input_file: None,
         input_mb: None,
         cargo_features: None,
-        cargo_profile: crate::build::CargoProfile::Release,
+        external_build: None,
         runs: 1, // example handles its own iterations
         cli_args: None,
         metadata: vec![],

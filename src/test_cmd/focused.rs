@@ -169,6 +169,7 @@ pub(super) fn discover(
         &cwd,
         &env_pairs,
         test_runner::TEST_TIMEOUT,
+        &test_runner::RunContext::process(),
     )
     .inspect_err(|_| crate::output::run_msg(&command))?;
     let fail = |why: String| {

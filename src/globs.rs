@@ -8,6 +8,71 @@ use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 
 use crate::error::DevError;
 
+/// Extensions understood by the gremlin scanner and the prose-only check
+/// shortcut. Keeping the policy here means a prose extension cannot bypass
+/// gremlin scanning just because one caller has a narrower list.
+#[derive(Clone, Copy)]
+struct ScannedExtension {
+    name: &'static str,
+    prose: bool,
+}
+
+const SCANNED_EXTENSIONS: &[ScannedExtension] = &[
+    ScannedExtension {
+        name: "rs",
+        prose: false,
+    },
+    ScannedExtension {
+        name: "toml",
+        prose: false,
+    },
+    ScannedExtension {
+        name: "md",
+        prose: true,
+    },
+    ScannedExtension {
+        name: "markdown",
+        prose: true,
+    },
+    ScannedExtension {
+        name: "js",
+        prose: false,
+    },
+    ScannedExtension {
+        name: "sh",
+        prose: false,
+    },
+    ScannedExtension {
+        name: "py",
+        prose: false,
+    },
+    ScannedExtension {
+        name: "yml",
+        prose: false,
+    },
+    ScannedExtension {
+        name: "yaml",
+        prose: false,
+    },
+];
+
+/// Whether an extension (without its leading dot) is scanned by gremlins.
+/// Extension spelling is case-insensitive, matching common filesystem and
+/// documentation conventions such as `README.MD`.
+pub(crate) fn is_scanned_extension(extension: &str) -> bool {
+    SCANNED_EXTENSIONS
+        .iter()
+        .any(|entry| entry.name.eq_ignore_ascii_case(extension))
+}
+
+/// Whether an extension is documentation eligible for `scope::dirt`'s prose
+/// shortcut. This is a subset of the scanned set by construction.
+pub(crate) fn is_prose_extension(extension: &str) -> bool {
+    SCANNED_EXTENSIONS
+        .iter()
+        .any(|entry| entry.prose && entry.name.eq_ignore_ascii_case(extension))
+}
+
 /// Compile a list of glob patterns into a matcher. An empty list yields a set
 /// that matches nothing (the natural identity for an `exempt`/`paths` list).
 pub fn build_set(patterns: &[String], field: &str) -> Result<GlobSet, DevError> {
@@ -51,4 +116,21 @@ pub fn warn_unmatched(patterns: &[String], paths: &[PathBuf], field: &str) -> Re
 /// Whether `rel` (a project-root-relative path) matches any glob in the set.
 pub fn matches(set: &GlobSet, rel: &Path) -> bool {
     set.is_match(rel)
+}
+
+#[cfg(test)]
+mod extension_tests {
+    use super::*;
+
+    #[test]
+    fn every_prose_extension_is_scanned_case_insensitively() {
+        for entry in SCANNED_EXTENSIONS.iter().filter(|entry| entry.prose) {
+            assert!(is_scanned_extension(entry.name));
+            assert!(is_scanned_extension(&entry.name.to_ascii_uppercase()));
+            assert!(is_prose_extension(entry.name));
+        }
+        assert!(is_scanned_extension("py"));
+        assert!(is_scanned_extension("YML"));
+        assert!(is_scanned_extension("yaml"));
+    }
 }

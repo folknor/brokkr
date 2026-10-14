@@ -2,21 +2,21 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
 use crate::artefacts::{self, ArtefactDir};
+use crate::clean::layout::ProjectState;
 use crate::config::project_config::ratatoskr::RatatoskrConfig;
 use crate::error::DevError;
-use crate::lockfile::{self, LockContext};
+use crate::lockfile;
 use crate::output::{self, CapturedOutput};
 use crate::ratatoskr::build::{self, HarnessBuild};
 use crate::ratatoskr::discover::{self, Expected, PreserveDataDir, SCRIPT_DIR, ScriptInfo};
 use crate::ratatoskr::saehrimnir::{MockServer, endpoint_env_pairs, require_path, resolve_fixture};
 
-use super::single::{ARTEFACT_PARENT, RunResult, SERVICE_MOCK_PARENT, spawn_and_capture};
+use super::single::{RunResult, spawn_and_capture};
 #[cfg(test)]
 use super::single::{format_iter_line, format_soak_summary};
 
@@ -89,12 +89,7 @@ pub(crate) fn service_suite(req: &crate::request::ServiceSuiteRequest<'_>) -> Re
         })?;
     }
 
-    let project_root_str = project_root.display().to_string();
-    let _lock = lockfile::acquire(&LockContext {
-        project: "ratatoskr",
-        command: "service",
-        project_root: &project_root_str,
-    })?;
+    let _lock = crate::context::reenter_command_lock()?;
     // Cooperative SIGTERM for `brokkr kill`. See run_sync_smoke for rationale.
     let _sigterm = crate::shutdown::SigtermGuard::install();
 
@@ -115,7 +110,9 @@ pub(crate) fn service_suite(req: &crate::request::ServiceSuiteRequest<'_>) -> Re
         cycles,
     ));
 
-    let artefact_parent = project_root.join(ARTEFACT_PARENT);
+    let state = ProjectState::new(project_root);
+    let ratatoskr_layout = state.ratatoskr();
+    let artefact_parent = ratatoskr_layout.service_artifacts();
     let total = runnable.len();
     let total_runs = u32::try_from(total)
         .unwrap_or(u32::MAX)
@@ -579,9 +576,9 @@ pub(super) fn write_artefacts(
         binary: built.binary.display().to_string(),
         features: built.features_label.clone(),
         elapsed_ms: u64::try_from(captured.elapsed.as_millis()).unwrap_or(u64::MAX),
-        exit_code: captured.status.code(),
-        signal: captured.status.signal(),
-        git_commit: git.as_ref().map(|g| g.commit.clone()),
+        exit_code: captured.code(),
+        signal: captured.signal(),
+        git_commit: git.as_ref().map(|g| g.commit.as_str().to_owned()),
         git_subject: git.as_ref().map(|g| g.subject.clone()),
         git_clean: git.as_ref().map(|g| g.is_clean),
     };
@@ -634,8 +631,10 @@ impl FixtureSession {
         }
         let fixture_path = resolve_fixture(&fixtures_dir, fixture_name)?;
 
-        let mock_dir = project_root
-            .join(SERVICE_MOCK_PARENT)
+        let state = ProjectState::new(project_root);
+        let mock_dir = state
+            .ratatoskr()
+            .service_mock_artifacts()
             .join(safe_dir_name(fixture_name));
         std::fs::create_dir_all(&mock_dir).map_err(DevError::Io)?;
 
@@ -711,8 +710,7 @@ fn safe_dir_name(s: &str) -> String {
 mod tests {
     #![allow(clippy::unwrap_used)]
 
-    use std::os::unix::process::ExitStatusExt;
-    use std::process::{Command, ExitStatus};
+    use std::process::Command;
     use std::time::Duration;
 
     use super::*;
@@ -732,22 +730,21 @@ mod tests {
     }
 
     /// Build a `CapturedOutput` for unit testing without spawning a
-    /// subprocess. Uses [`ExitStatus::from_raw`] which encodes the wait
-    /// status the same way the kernel does (low byte = signal, next
-    /// byte = exit code when no signal).
+    /// subprocess. A signal wins over an exit code, as it does for a real
+    /// child.
     fn captured(
         stdout: &[u8],
         stderr: &[u8],
         exit_code: Option<i32>,
         signal: Option<i32>,
     ) -> CapturedOutput {
-        let raw = match (exit_code, signal) {
-            (_, Some(sig)) => sig,
-            (Some(code), None) => code << 8,
-            (None, None) => 0,
+        let ending = match (exit_code, signal) {
+            (_, Some(sig)) => crate::output::Ending::Signalled(sig),
+            (Some(code), None) => crate::output::Ending::Exited(code),
+            (None, None) => crate::output::Ending::Exited(0),
         };
         CapturedOutput {
-            status: ExitStatus::from_raw(raw),
+            ending,
             stdout: stdout.to_vec(),
             stderr: stderr.to_vec(),
             elapsed: Duration::from_millis(42),

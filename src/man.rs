@@ -27,7 +27,7 @@ mod sections;
 
 use std::io::{IsTerminal, Write};
 
-use crate::cli::Visibility;
+use crate::cli::CommandId;
 use crate::project::Project;
 
 /// One bundled doc: the name typed on the command line, a one-line summary for
@@ -36,7 +36,7 @@ struct Topic {
     name: &'static str,
     summary: &'static str,
     content: &'static str,
-    visibility: Visibility,
+    commands: &'static [CommandId],
 }
 
 /// Every bundled doc, in listing order: the project-agnostic ones first, then
@@ -49,43 +49,43 @@ const TOPICS: &[Topic] = &[
         name: "config",
         summary: "brokkr.toml: host sections, [[check]] sweeps, [test] profiles",
         content: include_str!("../docs/brokkr.toml.md"),
-        visibility: Visibility::Any,
+        commands: &[CommandId::Env],
     },
     Topic {
         name: "check",
         summary: "the check/test validation pipeline, sweeps, profiles, the gate",
         content: include_str!("../docs/commands/check.md"),
-        visibility: Visibility::Any,
+        commands: &[CommandId::Env],
     },
     Topic {
         name: "clippy",
         summary: "the investigative single-phase clippy runner",
         content: include_str!("../docs/commands/clippy.md"),
-        visibility: Visibility::Any,
+        commands: &[CommandId::Env],
     },
     Topic {
         name: "deps",
         summary: "the dependency audit: duplicate versions, git/path deps, staleness",
         content: include_str!("../docs/commands/deps.md"),
-        visibility: Visibility::Any,
+        commands: &[CommandId::Env],
     },
     Topic {
         name: "bench",
         summary: "the criterion runner: baselines, the environment gate, --compare",
         content: include_str!("../docs/commands/bench.md"),
-        visibility: Visibility::Any,
+        commands: &[CommandId::Env],
     },
     Topic {
         name: "run",
         summary: "run + install: target discovery, the bare index, [bin]",
         content: include_str!("../docs/commands/run.md"),
-        visibility: Visibility::Any,
+        commands: &[CommandId::Env],
     },
     Topic {
         name: "clean",
         summary: "what clean removes, what is permanently out of scope",
         content: include_str!("../docs/commands/clean.md"),
-        visibility: Visibility::Any,
+        commands: &[CommandId::Env],
     },
     Topic {
         name: "results",
@@ -93,139 +93,139 @@ const TOPICS: &[Topic] = &[
         content: include_str!("../docs/commands/results.md"),
         // Mirrors the `results` subcommand's own visibility - litehtml has no
         // results.db worth querying, so the topic follows the command.
-        visibility: Visibility::Except(crate::cli::MEASURED_DB_ABSENT),
+        commands: &[CommandId::Results],
     },
     Topic {
         name: "measure",
         summary: "--bench/--hotpath/--alloc, the sidecar profiler, marker FIFOs",
         content: include_str!("../docs/commands/measure.md"),
-        visibility: Visibility::Any,
+        commands: &[CommandId::Env],
     },
     Topic {
         name: "output-channels",
         summary: "where a run's output goes: stdout, stderr key=value, FIFO markers",
         content: include_str!("../docs/commands/output-channels.md"),
-        visibility: Visibility::Any,
+        commands: &[CommandId::Env],
     },
     Topic {
         name: "datasets",
         summary: "[<host>.datasets.*] pbf/osc/pmtiles entries and variant selection",
         content: include_str!("../docs/brokkr.toml.datasets.md"),
-        visibility: Visibility::Only(&[Project::Pbfhogg, Project::Elivagar, Project::Nidhogg]),
+        commands: &[CommandId::Verify],
     },
     Topic {
         name: "elivagar-config",
         summary: "[<host>.tilegen.*] blocks: the elivagar tilegen contract",
         content: include_str!("../docs/brokkr.toml.elivagar.md"),
-        visibility: Visibility::Only(&[Project::Elivagar]),
+        commands: &[CommandId::Tilegen],
     },
     Topic {
         name: "pbfhogg",
         summary: "pbfhogg commands, verify subcommands, snapshot graph, OSC parser",
         content: include_str!("../docs/projects/pbfhogg.md"),
-        visibility: Visibility::Only(&[Project::Pbfhogg]),
+        commands: &[CommandId::Read],
     },
     Topic {
         name: "elivagar",
         summary: "elivagar commands, regress, the pmtiles corpus, the durable tilegen output store",
         content: include_str!("../docs/projects/elivagar.md"),
-        visibility: Visibility::Only(&[Project::Elivagar]),
+        commands: &[CommandId::Tilegen],
     },
     Topic {
         name: "dispatch-differences",
         summary: "how pbfhogg and elivagar's dispatch layers differ",
         content: include_str!("../docs/projects/pbfhogg-vs-elivagar.md"),
-        visibility: Visibility::Only(&[Project::Pbfhogg, Project::Elivagar]),
+        commands: &[CommandId::Read, CommandId::Tilegen],
     },
     Topic {
         name: "nidhogg",
         summary: "nidhogg commands, server lifecycle, the API client",
         content: include_str!("../docs/projects/nidhogg.md"),
-        visibility: Visibility::Only(&[Project::Nidhogg]),
+        commands: &[CommandId::Serve],
     },
     Topic {
         name: "visual",
         summary: "visual reference testing: visual, list, approve, report, prepare",
         content: include_str!("../docs/commands/visual.md"),
-        visibility: Visibility::Only(&[Project::Litehtml, Project::Sluggrs]),
+        commands: &[CommandId::Visual],
     },
     Topic {
         name: "hotpath",
         summary: "sluggrs rendering bench: modes, --target naming, --commit",
         content: include_str!("../docs/commands/hotpath.md"),
-        visibility: Visibility::Only(&[Project::Sluggrs]),
+        commands: &[CommandId::Hotpath],
     },
     Topic {
         name: "litehtml",
         summary: "litehtml internals: modules, fixtures, Node.js scripts",
         content: include_str!("../docs/projects/litehtml.md"),
-        visibility: Visibility::Only(&[Project::Litehtml, Project::Sluggrs]),
+        commands: &[CommandId::Visual],
     },
     Topic {
         name: "sluggrs",
         summary: "sluggrs config, snapshot layout and module map",
         content: include_str!("../docs/projects/sluggrs.md"),
-        visibility: Visibility::Only(&[Project::Sluggrs]),
+        commands: &[CommandId::Hotpath],
     },
     Topic {
         name: "ratatoskr",
         summary: "the harness model, saehrimnir contract, lua runtime, artefacts",
         content: include_str!("../docs/projects/ratatoskr.md"),
-        visibility: Visibility::Only(&[Project::Ratatoskr]),
+        commands: &[CommandId::Sync],
     },
     Topic {
         name: "sync",
         summary: "sync (list/run/bench) and mock-serve",
         content: include_str!("../docs/commands/sync.md"),
-        visibility: Visibility::Only(&[Project::Ratatoskr]),
+        commands: &[CommandId::Sync],
     },
     Topic {
         name: "gate",
         summary: "--gate/--as-baseline, baseline pinning, bench thresholds",
         content: include_str!("../docs/commands/ratatoskr-gate.md"),
-        visibility: Visibility::Only(&[Project::Ratatoskr]),
+        commands: &[CommandId::Sync],
     },
     Topic {
         name: "service",
         summary: "the service command: lua VM, frontmatter, cohort runs",
         content: include_str!("../docs/commands/service.md"),
-        visibility: Visibility::Only(&[Project::Ratatoskr]),
+        commands: &[CommandId::Sync],
     },
     Topic {
         name: "piners",
         summary: "harness NDJSON/manifest contracts, runs.db, corpus-results",
         content: include_str!("../docs/projects/piners.md"),
-        visibility: Visibility::Only(&[Project::Piners]),
+        commands: &[CommandId::Corpus],
     },
     Topic {
         name: "piners-config",
         summary: "the [piners] config block: corpus_root, registry_dir, feeds",
         content: include_str!("../docs/brokkr.toml.piners.md"),
-        visibility: Visibility::Only(&[Project::Piners]),
+        commands: &[CommandId::Corpus],
     },
     Topic {
         name: "corpus",
         summary: "the parity-corpus runner: pins.toml, probes, dispositions",
         content: include_str!("../docs/commands/corpus.md"),
-        visibility: Visibility::Only(&[Project::Piners]),
+        commands: &[CommandId::Corpus],
     },
     Topic {
         name: "lint-corpus",
         summary: "the differential-lint corpus: lints.toml, diffs, --reanchor",
         content: include_str!("../docs/commands/lint-corpus.md"),
-        visibility: Visibility::Only(&[Project::Piners]),
+        commands: &[CommandId::Corpus],
     },
     Topic {
         name: "dellingr",
         summary: "the lua-workload bench: [dellingr] config, hash pins, --commit",
         content: include_str!("../docs/projects/dellingr.md"),
-        visibility: Visibility::Only(&[Project::Dellingr]),
+        commands: &[CommandId::Dellingr],
     },
     Topic {
         name: "mogwai",
         summary: "benching mogwai surfaces: the [mogwai.targets.*] registry, counters, datasets",
         content: include_str!("../docs/projects/mogwai.md"),
-        visibility: Visibility::Only(&[Project::Mogwai]),
+        commands: &[CommandId::Mogwai],
     },
 ];
 
@@ -233,7 +233,11 @@ const TOPICS: &[Topic] = &[
 fn visible(project: Project) -> Vec<&'static Topic> {
     TOPICS
         .iter()
-        .filter(|t| crate::cli::visible_to(&t.visibility, project))
+        .filter(|t| {
+            t.commands
+                .iter()
+                .any(|id| crate::cli::visible_to(&id.spec().applies, project))
+        })
         .collect()
 }
 
@@ -272,7 +276,11 @@ pub fn run(
         )));
     };
 
-    if !crate::cli::visible_to(&found.visibility, project) {
+    if !found
+        .commands
+        .iter()
+        .any(|id| crate::cli::visible_to(&id.spec().applies, project))
+    {
         return Err(crate::error::DevError::Config(format!(
             "man topic '{name}' documents another project's surface (current: \
              {project}). Run `brokkr man` to list this project's topics."

@@ -88,7 +88,7 @@ pub(crate) struct SidecarQuery {
 pub(crate) fn compare_pair<T>(values: Vec<T>, option: &str) -> Result<(T, T), DevError> {
     let [first, second]: [T; 2] = values
         .try_into()
-        .map_err(|_| DevError::Config(format!("{option} requires exactly two values")))?;
+        .map_err(|_| DevError::Usage(format!("{option} requires exactly two values")))?;
     Ok((first, second))
 }
 

@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 /// - `example` names the cargo `--example` target brokkr builds. The features
 ///   are *not* configured: `--bench` builds it bare, `--hotpath` adds
 ///   `hotpath`, `--alloc` adds `hotpath-alloc`. Those names are brokkr's
-///   standing convention across every project ([`crate::harness::hotpath_feature`]),
+///   standing convention across every project ([`crate::measure::ProfiledMode::feature`]),
 ///   so restating them per project would only create a way for them to disagree.
 /// - `[dellingr.workloads.<name>]` is the registry: `--lua <name>` resolves to
 ///   `file`, and `xxh128` pins its content.

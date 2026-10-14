@@ -38,7 +38,7 @@ what it has always meant. Every other measured command would resolve that to
 `Run` (execute once, store nothing); this one does not.
 
 `--alloc` prints a `NOTE: alloc profiling - wall-clock times are not
-meaningful` banner (the one shared `harness::hotpath_alloc_note`, the same
+meaningful` banner (the one shared `measure::ProfiledMode::print_note`, the same
 line every project prints), even without `--verbose`, because the allocator
 shim dominates the wall.
 
@@ -125,8 +125,9 @@ brokkr results --command render --compare <old-uuid> <new-uuid>
 Use `--bench`, not `--hotpath`, for that comparison - see the modes table above.
 
 `--compare` pairs the two rows into a single delta row. Pairing keys on
-`(command, mode, input_file, brokkr_args, env_fingerprint)`, with `--commit`
-and `--verbose` stripped from `brokkr_args` first - otherwise the retro row
+`(command, mode, input_file, arm_key, env_fingerprint)`, where the arm key is
+the recorded argv with `--commit`, `--verbose` and iteration counts removed
+(rows from before the key existed pair by their stored argv) - otherwise the retro row
 could never pair with the current-tree row, since `--commit` is precisely what
 distinguishes them. Any *other* flag difference between the two invocations
 does split them into separate rows, on purpose: that is how arm-defining flags
@@ -136,7 +137,7 @@ avoid being averaged together. So keep the two invocations identical apart from
 ## Output and storage
 
 `--verbose` prints the full build/run output; without it brokkr runs quiet, the
-same as every other measured command (`output::set_quiet(!verbose)` in
+same as every other measured command (`output::console::set_quiet(!verbose)` in
 `run_measured`). This is a behaviour the command inherited when it moved onto
 `ModeArgs`; it is not a sluggrs-specific choice.
 

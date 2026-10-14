@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 use crate::artefacts::{self, ArtefactDir};
 use crate::build::CargoProfile;
+use crate::clean::layout::ProjectState;
 use crate::config::DevConfig;
 use crate::config::project_config::ratatoskr::RatatoskrConfig;
 use crate::context;
@@ -13,7 +14,7 @@ use crate::db::{KvPair, KvValue};
 use crate::error::DevError;
 use crate::harness::{BenchConfig, BenchHarness, BenchResult};
 use crate::output;
-use crate::project::Project;
+use crate::project::{BuildRoot, Project, ProjectRoot};
 use crate::ratatoskr::build::{self, HarnessBuild};
 use crate::ratatoskr::discover;
 use crate::ratatoskr::gate as gate_eval;
@@ -23,14 +24,14 @@ use crate::ratatoskr::timing::{STDERR_TAIL_LINES, format_secs};
 use crate::sidecar;
 
 use super::gate::{self, GATE_ALL, GateHookCtx};
-use super::runner::SYNC_ARTEFACT_PARENT;
 
 /// Drive the measured `brokkr sync <SCRIPT> --bench N` end-to-end:
 ///
 /// 1. Validate config (same as the unmeasured run shape).
 /// 2. Resolve script + fixture from frontmatter.
-/// 3. Bootstrap [`crate::config::ResolvedPaths`] + acquire the bench
-///    lockfile via [`BenchHarness::new`]; build the harness binary.
+/// 3. Bootstrap [`crate::config::ResolvedPaths`] + take the lock and the
+///    bench harness via [`context::MeasurementSession::new`]; build the
+///    harness binary.
 /// 4. Allocate one top-level run dir
 ///    `.brokkr/ratatoskr/sync/<test>/run-N/` with `mock/` plus per-iter
 ///    `iter-K/harness/` subdirs. The whole bench shares one sæhrimnir
@@ -63,10 +64,14 @@ pub fn run_sync_bench(req: &SyncBenchRequest<'_>) -> Result<(), DevError> {
     })?;
     let mock_binary = require_path(
         &cfg.mock_server_binary,
-        req.project_root,
+        req.project_root.as_path(),
         "mock_server_binary",
     )?;
-    let fixtures_dir = require_path(&cfg.fixtures_dir, req.project_root, "fixtures_dir")?;
+    let fixtures_dir = require_path(
+        &cfg.fixtures_dir,
+        req.project_root.as_path(),
+        "fixtures_dir",
+    )?;
     if !mock_binary.exists() {
         return Err(DevError::Config(format!(
             "sync: sæhrimnir binary not found at {}. Build it first.",
@@ -74,7 +79,7 @@ pub fn run_sync_bench(req: &SyncBenchRequest<'_>) -> Result<(), DevError> {
         )));
     }
     if req.bench == 0 {
-        return Err(DevError::Config("sync: --bench must be >= 1".into()));
+        return Err(DevError::Usage("sync: --bench must be >= 1".into()));
     }
 
     // `all` is the reserved sweep value, so a gate of that name could
@@ -131,40 +136,33 @@ pub fn run_sync_bench(req: &SyncBenchRequest<'_>) -> Result<(), DevError> {
     })?;
     let fixture_path = resolve_fixture(&fixtures_dir, fixture_name)?;
 
-    // Bootstrap paths and stand up the bench harness. The harness
-    // acquires the lockfile internally, so concurrent brokkr
-    // invocations block here.
-    //
-    // `code_root` is where the harness is built and where git state is read
-    // from - the `--commit` worktree when one was requested. Handing it to
-    // `BenchHarness` as the project root (with the real root demoted to
-    // `db_root`) is the same convention `MeasurementSession` uses: the recorded
-    // commit then describes the code that was actually built, while
-    // results.db stays in the main tree. It also means a `--commit` run
-    // reads as clean, which it is - a detached worktree has nothing
-    // uncommitted in it.
-    let code_root = req.build_root.unwrap_or(req.project_root);
-    let db_root = req.build_root.map(|_| req.project_root);
-    let pi = context::bootstrap(req.build_root)?;
-    let paths = context::bootstrap_config(req.dev_config, req.project_root, &pi.target_dir)?;
-    let harness = BenchHarness::new(
-        &paths,
-        code_root,
-        db_root,
+    // Lock, host paths and the bench harness, through the same session
+    // constructor every other measured command uses: the lock is taken (or
+    // re-entered) before `cargo metadata`, git state is read from the build
+    // root - the `--commit` worktree when one was requested, so the recorded
+    // commit describes the code that was actually built - and results.db
+    // stays under the main tree's project root.
+    let context::MeasurementSession { paths, harness, .. } = context::MeasurementSession::new(
+        req.dev_config,
         Project::Ratatoskr,
-        "sync",
+        req.project_root,
+        req.build_root,
         req.force,
         None,
-    )?
-    .with_brokkr_args(req.brokkr_args.clone())
-    .with_measure_mode(Some("bench"))
-    // The same row provenance `MeasurementSession` attaches for every other
-    // measured command: the configured features (joined as `MeasurementSession`
-    // joins them; `None` for a default-features build) and the
-    // `capture_env` snapshot. This path builds its harness by hand, and
-    // used to record neither.
-    .with_cargo_features((!harness_cfg.features.is_empty()).then(|| harness_cfg.features.join(",")))
-    .with_env_kv(crate::config::captured_env_pairs(req.dev_config));
+    )?;
+    let code_root = req.build_root.as_path();
+    let harness = harness
+        .with_invocation(req.invocation.clone())
+        .with_measure_mode(Some(crate::measure::RecordedMode::Bench))
+        // The same row provenance `MeasurementSession` attaches for every other
+        // measured command: the configured features (joined as `MeasurementSession`
+        // joins them; `None` for a default-features build) and the
+        // `capture_env` snapshot. This path builds its harness by hand, and
+        // used to record neither.
+        .with_cargo_features(
+            (!harness_cfg.features.is_empty()).then(|| harness_cfg.features.join(",")),
+        )
+        .with_env_kv(crate::config::captured_env_pairs(req.dev_config));
 
     // Cooperative SIGTERM for everything outside the sidecar's own window
     // (build, sæhrimnir spawn and readiness, the gaps between iterations,
@@ -187,13 +185,21 @@ pub fn run_sync_bench(req: &SyncBenchRequest<'_>) -> Result<(), DevError> {
         // brokkr's process tree, so rustc workers go down with it.
         false,
     )?;
+    // What was actually built: ratatoskr's config sets `debug = true`, so the
+    // row's profile follows the build, not a release default.
+    let harness = harness.with_build_identity(crate::harness::BuildIdentity {
+        profile: CargoProfile::for_debug(debug),
+        features: (!harness_cfg.features.is_empty())
+            .then(|| canonical_features(&harness_cfg.features)),
+    });
     output::ratatoskr_msg(&format!(
         "harness build ok (features={}, binary={})",
         built.features_label,
         built.binary.display(),
     ));
 
-    let artefact_parent = req.project_root.join(SYNC_ARTEFACT_PARENT);
+    let state = ProjectState::new(req.project_root.as_path());
+    let artefact_parent = state.ratatoskr().sync_artifacts();
     let artefacts = ArtefactDir::allocate(&artefact_parent, &test_id, req.keep_artefacts)?;
     let mock_dir = artefacts.path().join("mock");
     fs::create_dir_all(&mock_dir).map_err(DevError::Io)?;
@@ -385,9 +391,9 @@ fn bench_loop(ctx: BenchLoopCtx<'_>) -> Result<(), DevError> {
         input_mb: None,
         // The harness default (`with_cargo_features` in `run_sync_bench`).
         cargo_features: None,
-        // What was actually built: ratatoskr's config sets `debug = true`,
-        // and every row used to say `release` regardless.
-        cargo_profile: CargoProfile::for_debug(debug),
+        // Cargo-built: the profile comes from the session's build identity
+        // (`with_build_identity` above).
+        external_build: None,
         runs: req.bench,
         cli_args: Some(format!("--test-harness {}", script_abs.display())),
         metadata: Vec::new(),
@@ -403,7 +409,7 @@ fn bench_loop(ctx: BenchLoopCtx<'_>) -> Result<(), DevError> {
     // set as soon as the child is reaped, cleared once the iteration
     // completes. A failure after a successful child (log write,
     // `summary.json`) therefore records that success, not a fabricated code.
-    let mut failed_status: Option<std::process::ExitStatus> = None;
+    let mut failed_ending: Option<crate::output::Ending> = None;
     // Stamped before the first iteration so `prev.gap_seconds` measures to
     // the start of this run, not to its recording.
     let start_epoch = harness.begin_measurement();
@@ -444,12 +450,13 @@ fn bench_loop(ctx: BenchLoopCtx<'_>) -> Result<(), DevError> {
             let spawned = output::spawn_captured(
                 &binary_str,
                 &["--test-harness", &script_str],
-                req.project_root,
+                req.project_root.as_path(),
                 &env_pairs,
                 // isolate_pg=true: sidecar installs its own
                 // SigtermGuard around `run_sidecar` below, covering
                 // the lifetime of this child.
                 true,
+                output::SpawnProfile::Plain,
             );
             let child = match spawned {
                 Ok(c) => c,
@@ -479,7 +486,8 @@ fn bench_loop(ctx: BenchLoopCtx<'_>) -> Result<(), DevError> {
             // child actually had, which may well be success. The index
             // stays `i`, so `best.run_idx` still addresses this entry.
             let marker_span_ms = sync_span_from_markers(&result.data.markers);
-            failed_status = Some(result.exit_status);
+            let ending = result.data.ending.clone();
+            failed_ending = Some(ending.clone());
             sidecar_runs.push(result.data);
 
             // Persist each iter's stdout/stderr so a later FAIL can
@@ -488,17 +496,18 @@ fn bench_loop(ctx: BenchLoopCtx<'_>) -> Result<(), DevError> {
             fs::write(iter_dir.join("binary-stdout.log"), &result.stdout).map_err(DevError::Io)?;
             fs::write(iter_dir.join("binary-stderr.log"), &result.stderr).map_err(DevError::Io)?;
 
-            if result.stopped_by_signal {
-                return Err(DevError::Interrupted);
+            match &ending {
+                crate::output::Ending::Interrupted => return Err(DevError::Interrupted),
+                crate::output::Ending::Deadline(_) => {
+                    return Err(DevError::Config(format!(
+                        "harness binary exceeded ceiling {ceiling:?} on iter {}/{}",
+                        i + 1,
+                        req.bench
+                    )));
+                }
+                _ => {}
             }
-            if result.stopped_by_deadline {
-                return Err(DevError::Config(format!(
-                    "harness binary exceeded ceiling {ceiling:?} on iter {}/{}",
-                    i + 1,
-                    req.bench
-                )));
-            }
-            if !result.exit_status.success() {
+            if !matches!(ending, crate::output::Ending::Exited(0)) {
                 let stderr_tail = String::from_utf8_lossy(&result.stderr)
                     .lines()
                     .rev()
@@ -509,8 +518,8 @@ fn bench_loop(ctx: BenchLoopCtx<'_>) -> Result<(), DevError> {
                     .collect::<Vec<_>>()
                     .join("\n");
                 return Err(DevError::Config(format!(
-                    "harness binary exited with {:?} on iter {}/{}\n--- last 5 stderr lines ---\n{stderr_tail}",
-                    result.exit_status,
+                    "harness binary ended with {:?} on iter {}/{}\n--- last 5 stderr lines ---\n{stderr_tail}",
+                    ending,
                     i + 1,
                     req.bench
                 )));
@@ -544,7 +553,7 @@ fn bench_loop(ctx: BenchLoopCtx<'_>) -> Result<(), DevError> {
                 best = Some(outcome);
             }
             // The iteration completed: no failure to attribute to it.
-            failed_status = None;
+            failed_ending = None;
         }
         Ok(())
     })();
@@ -568,8 +577,8 @@ fn bench_loop(ctx: BenchLoopCtx<'_>) -> Result<(), DevError> {
                 &bench_config,
                 program,
                 start_epoch,
-                last_pid,
-                failed_status.as_ref(),
+                Some(last_pid),
+                failed_ending.clone(),
             );
             harness
                 .store_sidecar(None, &sidecar_runs, sidecar_runs.len() - 1, Some(&info))
@@ -601,7 +610,15 @@ fn bench_loop(ctx: BenchLoopCtx<'_>) -> Result<(), DevError> {
         hotpath: None,
     };
 
-    let info = harness.run_info_for(&bench_config, program, start_epoch, last_pid, None);
+    let info = harness.run_info_for(
+        &bench_config,
+        program,
+        start_epoch,
+        Some(last_pid),
+        sidecar_runs
+            .get(best.run_idx)
+            .map(|data| data.ending.clone()),
+    );
     let uuid = match harness.record_result(&bench_config, &bench_result) {
         Ok(uuid) => uuid,
         Err(e) => {
@@ -629,7 +646,7 @@ fn bench_loop(ctx: BenchLoopCtx<'_>) -> Result<(), DevError> {
             cfg,
             gate_name,
             rules,
-            project_root: req.project_root,
+            project_root: req.project_root.as_path(),
             script_abs,
             fixture_name,
             debug,
@@ -729,10 +746,10 @@ pub(super) fn sync_span_from_markers(markers: &[sidecar::Marker]) -> Option<i64>
 
 /// CLI inputs for `brokkr sync <SCRIPT> --bench N`.
 pub struct SyncBenchRequest<'a> {
-    pub project_root: &'a Path,
-    /// The code tree to build and read git state from, when it differs from
-    /// `project_root`: the `--commit` worktree, or cwd when `brokkr.toml`
-    /// lives one level up. `None` in the common case.
+    pub project_root: &'a ProjectRoot,
+    /// The code tree to build and read git state from: the live checkout
+    /// (cwd, which differs from `project_root` when `brokkr.toml` lives one
+    /// level up), or the `--commit` worktree cut from it.
     ///
     /// Only the *harness build* moves. The script, the fixture, sæhrimnir,
     /// the artefact dir and both databases stay anchored to `project_root`:
@@ -740,7 +757,7 @@ pub struct SyncBenchRequest<'a> {
     /// for the same reason, that a baseline should vary the code under test
     /// and nothing else. The gate additionally depends on it, since it
     /// compares the baseline row's script path against the current run's.
-    pub build_root: Option<&'a Path>,
+    pub build_root: &'a BuildRoot,
     pub dev_config: &'a DevConfig,
     /// The `[ratatoskr]` section (required at load in a ratatoskr project).
     pub ratatoskr: &'a RatatoskrConfig,
@@ -753,9 +770,9 @@ pub struct SyncBenchRequest<'a> {
     pub force: bool,
     pub keep_artefacts: bool,
     pub profile_override: Option<bool>,
-    /// Literal `brokkr <...>` invocation, threaded through for the
-    /// `brokkr_args` column in results.db.
-    pub brokkr_args: String,
+    /// The brokkr invocation (exact argv and arm key) the results row
+    /// records.
+    pub invocation: crate::db::RunInvocation,
     /// Run the named gate after the bench completes. See
     /// `docs/commands/ratatoskr-gate.md`.
     pub gate: Option<&'a str>,

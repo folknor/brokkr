@@ -187,20 +187,32 @@ impl QuantityKind {
 /// A hotpath metric in a canonical unit.
 ///
 /// Signed integer storage is intentional: `mem_diff` can be negative.
-#[derive(Clone, Copy, Debug, PartialEq)]
+///
+/// A spelling the parser does not recognise is kept verbatim as
+/// [`Quantity::DisplayText`] rather than dropped: the report printed it, so
+/// the row shows it. It takes part in no numeric comparison and never reaches
+/// the typed metric tables.
+#[derive(Clone, Debug, PartialEq)]
 pub enum Quantity {
     DurationNs(i64),
     Bytes(i64),
     Percent(f64),
+    DisplayText(String),
 }
 
 impl Quantity {
-    /// Parse the display spelling written by the hotpath JSON reporter.
+    /// Parse the display spelling written by the hotpath JSON reporter. An
+    /// empty spelling is no quantity; any other spelling that is not a
+    /// recognised number-and-unit is kept as display text.
     pub fn parse(value: &str) -> Option<Self> {
         let value = value.trim();
         if value.is_empty() {
             return None;
         }
+        Some(Self::parse_numeric(value).unwrap_or_else(|| Self::DisplayText(value.to_owned())))
+    }
+
+    fn parse_numeric(value: &str) -> Option<Self> {
         if let Some(number) = value.strip_suffix('%') {
             let number = number.trim().parse::<f64>().ok()?;
             return number.is_finite().then_some(Self::Percent(number));
@@ -221,6 +233,7 @@ impl Quantity {
             "KB" => (QuantityKind::Bytes, 1_024.0),
             "MB" => (QuantityKind::Bytes, 1_048_576.0),
             "GB" => (QuantityKind::Bytes, 1_073_741_824.0),
+            "TB" => (QuantityKind::Bytes, 1_099_511_627_776.0),
             _ => return None,
         };
         let value = checked_rounded_i64(number * scale)?;
@@ -231,19 +244,24 @@ impl Quantity {
         }
     }
 
-    pub(crate) fn kind(self) -> QuantityKind {
+    /// The dimension, `None` for display text.
+    pub(crate) fn kind(&self) -> Option<QuantityKind> {
         match self {
-            Self::DurationNs(_) => QuantityKind::Duration,
-            Self::Bytes(_) => QuantityKind::Bytes,
-            Self::Percent(_) => QuantityKind::Percent,
+            Self::DurationNs(_) => Some(QuantityKind::Duration),
+            Self::Bytes(_) => Some(QuantityKind::Bytes),
+            Self::Percent(_) => Some(QuantityKind::Percent),
+            Self::DisplayText(_) => None,
         }
     }
 
-    pub(crate) fn storage_parts(self) -> (&'static str, Option<i64>, Option<f64>) {
+    /// The typed metric tables' columns, `None` for display text: those
+    /// tables hold numeric quantities only.
+    pub(crate) fn storage_parts(&self) -> Option<(&'static str, Option<i64>, Option<f64>)> {
         match self {
-            Self::DurationNs(value) => (QuantityKind::Duration.as_str(), Some(value), None),
-            Self::Bytes(value) => (QuantityKind::Bytes.as_str(), Some(value), None),
-            Self::Percent(value) => (QuantityKind::Percent.as_str(), None, Some(value)),
+            Self::DurationNs(value) => Some((QuantityKind::Duration.as_str(), Some(*value), None)),
+            Self::Bytes(value) => Some((QuantityKind::Bytes.as_str(), Some(*value), None)),
+            Self::Percent(value) => Some((QuantityKind::Percent.as_str(), None, Some(*value))),
+            Self::DisplayText(_) => None,
         }
     }
 
@@ -261,22 +279,26 @@ impl Quantity {
     }
 
     #[allow(clippy::cast_precision_loss)]
-    fn numeric_value(self) -> f64 {
+    fn numeric_value(&self) -> Option<f64> {
         match self {
-            Self::DurationNs(value) | Self::Bytes(value) => value as f64,
-            Self::Percent(value) => value,
+            Self::DurationNs(value) | Self::Bytes(value) => Some(*value as f64),
+            Self::Percent(value) => Some(*value),
+            Self::DisplayText(_) => None,
         }
     }
 
-    pub(crate) fn relative_change_from(self, baseline: Self) -> Option<f64> {
-        if self.kind() != baseline.kind() {
+    /// Percent change from `baseline`, for two numeric quantities of one
+    /// dimension; display text compares to nothing.
+    pub(crate) fn relative_change_from(&self, baseline: &Self) -> Option<f64> {
+        let kind = self.kind()?;
+        if Some(kind) != baseline.kind() {
             return None;
         }
-        let old = baseline.numeric_value();
+        let old = baseline.numeric_value()?;
         if old.abs() <= f64::EPSILON {
             return None;
         }
-        Some((self.numeric_value() - old) / old * 100.0)
+        Some((self.numeric_value()? - old) / old * 100.0)
     }
 }
 
@@ -294,6 +316,7 @@ impl std::fmt::Display for Quantity {
     #[allow(clippy::cast_precision_loss)]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match *self {
+            Self::DisplayText(ref text) => f.write_str(text),
             Self::DurationNs(value) => {
                 let magnitude = value.unsigned_abs();
                 let (scaled, unit) = if magnitude < 1_000 {
@@ -439,7 +462,9 @@ pub struct RunRow {
     pub avail_memory_mb: Option<i64>,
     pub storage_notes: Option<String>,
     pub cli_args: Option<String>,
-    pub brokkr_args: Option<String>,
+    /// Exact brokkr argv and the pairing identity computed from the parsed
+    /// CLI. `arm_key` deliberately remains opaque to the storage layer.
+    pub invocation: RunInvocation,
     pub project: String,
     /// Stop request and observed event as `(requested, fired)`, kept together
     /// so the configured spelling cannot be mistaken for proof that it fired.
@@ -461,6 +486,13 @@ pub struct RunRow {
     pub iterations_us: Vec<i64>,
     pub distribution: Option<Distribution>,
     pub hotpath: Option<HotpathData>,
+}
+
+/// Structured brokkr invocation captured at the CLI boundary.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RunInvocation {
+    pub argv: Vec<String>,
+    pub arm_key: String,
 }
 
 /// A row read back from the database.
@@ -500,7 +532,11 @@ pub struct StoredRow {
     pub storage_notes: String,
     pub uuid: String,
     pub cli_args: String,
+    /// Compact JSON argv for new rows; pre-v23 rows retain their historical
+    /// joined string because quoting cannot be reconstructed losslessly.
     pub brokkr_args: String,
+    /// Pairing key derived from the parsed CLI. Historical rows have none.
+    pub arm_key: Option<String>,
     pub project: String,
     /// The configured `--stop` marker, which may not have fired.
     pub stop_marker_requested: String,
@@ -702,6 +738,7 @@ mod tests {
             uuid: String::new(),
             cli_args: String::new(),
             brokkr_args: String::new(),
+            arm_key: None,
             project: String::new(),
             stop_marker_requested: String::new(),
             stop_marker: String::new(),

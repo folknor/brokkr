@@ -29,33 +29,17 @@ Reported by: measurement-storage.
 
 Enforcement proposed: textlint on `"BROKKR_MARKER_FIFO"` outside its owner.
 
-## MEA-003 - Mode and run count have several owners
-
-Reported by: measurement-storage, config-cli-bootstrap.
-
-Mode strings `"bench"`/`"hotpath"`/`"alloc"` live in `MeasureRequest::mode_label`, bench_gate `Some("bench")`, and pbfhogg's `if alloc {"alloc"} else {"hotpath"}`, reaching the harness as `Option<String>`. `BenchConfig.runs` duplicates `MeasureRequest::runs()` and every writer copies it by hand. "At least one run": see PLT-026.
-
-Enforcement proposed: the harness takes `MeasureMode`; `NonZeroUsize` in `MeasureMode` and `BenchConfig.runs`.
-
-Design hunt (measurement, other-projects): after the request the mode becomes `Option<String>` (`with_measure_mode(req.mode_label())`), stored on `BenchHarness.measure_mode`, cloned into `RunRow.mode` and `RunInfo.mode`; `BenchConfig.mode` is a dead fallback (`effective_mode` = harness or config; every writer sets `None`; its doc admits it caused two bugs); the DB tests insert `"mmap"`, `"zlib"`, `"release"` into the column; a `HarnessContext` built without `with_request` silently writes `mode = NULL`. `hotpath_feature(alloc: bool)`, `hotpath_alloc_note(alloc: bool)`, `MeasureRequest::is_alloc()` and `hotpath_features()` are called by pbfhogg, elivagar, nidhogg, dellingr, mogwai, sluggrs, piners and main_parts, each computing `alloc` itself, and several use `hotpath_feature(alloc)` as a label, conflating feature name and recorded mode. Proposed: `enum RecordedMode { Bench, Hotpath, Alloc }` via `MeasureMode::recorded()`, a non-optional harness field, `NonZeroUsize` runs, and a `ProfiledMode { Hotpath, Alloc }` with `.feature()`, `.label()`, `.note()` owned by `measure.rs`; delete `BenchConfig.mode` and `BenchConfig.brokkr_args`.
-
 ## MEA-004 - UUID generation still has inline copies
 
 Reported by: measurement-storage, small-benches.
 
 `db` exports `generate_uuid`, `short_uuid` and `RunId::short()`, and results, sidecar, litehtml and sluggrs use them. Residue: `harness_mod/types_run.rs` still generates dirty-run uuids inline from `/dev/urandom`, and `ratatoskr/gate_store.rs` has its own UUIDv4 generator. A textlint ban on `/dev/urandom` must exempt the lock-token code, which needs randomness that is not a uuid.
 
-## MEA-023 - Hotpath v22 regressions: legacy columns and unknown units
+## MEA-024 - DB tests build `RunRow` literals by hand
 
 Reported by: the wave-8 reviewer.
 
-The typed hotpath tables (results schema v22) changed two things beyond the design. New writes no longer fill the legacy text columns, so an older brokkr reading a v22 database shows blank hotpath metrics. And `Quantity::parse` accepts only `ns/us/µs/ms/s`, `B/KB/MB/GB` and `%`: any other unit the hotpath crate emits (`KiB`, a compound duration) is silently dropped on write and on legacy read, where the old code kept the display string. Check the accepted units against the hotpath crate's formatter, and keep an unparsed value as its display text rather than dropping it.
-
-## MEA-024 - The runner lost pbfhogg's dry-run detail and bench announce line
-
-Reported by: the wave-8 reviewer.
-
-The shared command-plan runner prints only `<id> args: ...` and `ok` for a dry run; the old pbfhogg dispatcher printed the resolved `pbf:`, `osc:`, OSC range, `pbf_b:` and `bbox:` lines and validated both the bench and hotpath argv builders. pbfhogg bench's single-command path also lost its `<cmd> (N MB), R run(s)` announce line (only the suite's `run_wallclock_core` still prints it). A `describe` hook on `PlannedCommand` would restore both for every project. Separately, the db tests still build full `RunRow` literals by hand; a `RunRow` test fixture builder was proposed alongside the session unification and not done.
+The runner's dry-run detail and bench announce line are restored. Residue: the db tests still build full `RunRow` literals by hand (about ten across `db/query.rs` and `db/write.rs`); a `RunRow` test fixture builder would remove the copies.
 
 ## MEA-005 - Small store helpers still copied
 
@@ -77,16 +61,6 @@ Reported by: measurement-storage.
 
 `db::types::KvClass` now classifies kv keys once for the results DB (load, compare, both detail views, writes). Residue: `meta.`/`env.` prefixes are still formatted or stripped by hand in the ratatoskr gate paths (`ratatoskr/gate.rs`, `ratatoskr_sync/bench_gate.rs` or their successors), `config_parts/parser.rs` and the legacy migrations; `RunRow` still takes kv pairs as prefixed strings rather than the split `meta`/`env`/`predecessor`/`thread_summary`/`counters` the proposal named.
 
-## MEA-008 - Invocation argv is stored as a string and re-parsed with different rules
-
-Reported by: measurement-storage, config-cli-bootstrap.
-
-`normalize_brokkr_args` and `format_brokkr_args_summary` re-parse tokens with different rules from a string `format_cli_args` cannot round-trip (it quotes only spaces). History stores argv joined unquoted; `capture_brokkr_args` shell-quotes. Pairing failures: BUG-049.
-
-Enforcement proposed: store argv as a JSON array.
-
-Design hunt (measurement): `db/format/compare.rs::normalize_brokkr_args` is a second CLI grammar, with hand-kept knowledge of `--commit`, `--verbose`/`-v`, `--bench/--hotpath/--alloc [N]` and `=N`, which must agree with clap and nothing checks; a value that happens to be `--commit` eats the next token. Proposed root fix: record the arm structurally at write time - the harness knows the measure mode, the commit and the runs count - as an `arm_key` (normalized argv minus provenance flags) computed from the parsed `Cli`, not from the joined string, and pair on it.
-
 ## MEA-009 - The sidecar-view hint is hand-written three times
 
 Reported by: measurement-storage.
@@ -99,13 +73,11 @@ Reported by: measurement-storage.
 
 `SAMPLE_INTERVAL_US` (sidecar.rs), `SIDECAR_BACKUP_COPIES` (format_sidecar.rs), the invalidate limit `100_000` (claims "don't silently truncate" and then does), the 500-char preview in `parse_kv_stderr`, `hotpath-report.json`; nothing lists the set. `run_sidecar` reaches the clock, `/proc` and signals directly; the `/proc` parsers are fused to `fs::read`, so tests can read only the test process's own `/proc`. An unknown `cargo_profile` is reported at every read (`map_stored_row`) rather than at write; the binary hash is taken at record time.
 
-## MEA-011 - Every store open migrates and writes
+## MEA-011 - Stores outside results and sidecar have their own open logic
 
 Reported by: measurement-storage, piners, ratatoskr.
 
-Each `ResultsDb::open`/`SidecarDb::open` runs migrations, `CREATE`, and an unconditional `user_version = N`, so read-only commands (`results`, `sidecar`, `invalidate`) migrate and write without the lock, and a DB from a newer brokkr is silently downgraded. Same for `gate.db`. piners' stores open `READ_ONLY` for queries (a better policy already in the tree, though with its own problem: BUG-093). No store sets `busy_timeout`, relying on rusqlite's implicit default unstated. `results.db` version writers: BUG-101.
-
-Design hunt (measurement): each store does its own open - `ResultsDb::open`, `SidecarDb::open`, `GateDb::open`, `HistoryDb::open_typed`, `litehtml/db.rs`, `sluggrs/db.rs`, `piners/lint/db.rs`, `piners/corpus_db` - each with its own WAL pragma, migration runner and `user_version` stamp; only history sets a `busy_timeout`. `results.db` has three schema owners (`ResultsDb`, litehtml `MechanicalDb`, sluggrs) sharing one `user_version`, and the migrate tests carry regression cases for litehtml having stamped it. Proposed: a `Store` trait or helper owning open, pragmas, busy timeout and versioned migrations, one `user_version` owner per file, and litehtml and sluggrs in their own files rather than guests in `results.db`.
+`db/store.rs` owns connection setup, the busy timeout, read-only opens, version checks and transactional migrations for `results.db` and `sidecar.db`, and a newer schema is refused rather than downgraded. Residue: `GateDb` still stamps its version after migrating (so a newer one can be downgraded), `HistoryDb` read commands open read-write, the piners corpus query path upgrades through a temporary read-write open, the piners lint query path does not validate the schema version, and the litehtml/sluggrs visual tables still live inside `results.db` rather than in their own versioned files.
 
 ## MEA-012 - Harness output channels
 
@@ -120,12 +92,6 @@ Reported by: measurement-storage, ratatoskr.
 `store_sidecar(...).ok()` on interrupt and failure paths; `query_meta` falls back to `(0,1)`, `query_run_info`/`has_data`/`resolve_latest` to defaults; `open_sidecar_db(...).ok()` in `results_cmd` and `sidecar_cmd`, so a corrupt or locked DB reports "no sidecar.db found"; the v3→v4 sidecar migration ignores all `ALTER` errors, not just duplicate-column; `previous_run_kv` drops lookup errors by design and reports nothing. ratatoskr's gate: `serde_json::to_string(..).unwrap_or_else(|_| "{}")` then parsed back with `unwrap_or_default()` in `evaluate_against_baseline`; `missing_baseline_error` queries use `unwrap_or_default()`/`unwrap_or(0)`.
 
 Design hunt (other-projects): `bench_gate.rs`'s round trip means a serialization failure becomes an empty map and the run then fails with "missing `sidecar.x`", blaming the data rather than the encoder, though `GateRun::from_parts` exists to skip the round trip. Proposed: keep the `Map`s in the in-memory row and serialize only at the DB edge.
-
-## MEA-014 - The recorded cargo profile is spelled by each writer
-
-Reported by: measurement-storage.
-
-`cargo_features` labels are canonicalised (sorted, deduplicated) on write and read, and `with_brokkr_args` precedence is documented. Residue: about 30 `cargo_profile` assignments across two dozen writer files (almost all a literal `CargoProfile::Release`) say which profile was built, independently of `BuildConfig.profile: &'static str`, which is what actually built. Proposed: `cargo_build` returns `BuiltArtifact { path, profile, features, target }` and the harness stamps the row from it.
 
 ## MEA-015 - Store mechanics invented per site
 

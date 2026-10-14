@@ -44,9 +44,12 @@ code; `phases_run` and `phase_outcomes` come from the outcomes.
 The full audit loads unfiltered metadata and a host-filtered snapshot, using
 the host triple from `rustc -vV`. Focus mode starts with the host-filtered
 graph and loads unfiltered metadata only when it needs a fallback. Brokkr
-deserializes a minimal subset (packages, workspace members, resolve graph). No
-extra crate dependencies. Network phases shell out to existing tools
-(`ccu` today, `cargo audit` planned) - no native network code in brokkr.
+deserializes a minimal subset (packages, workspace membership, declared deps,
+and resolve edges) into one indexed `Graph` per metadata load. The graph owns
+`PackageId` lookups, source classification, membership, and reverse
+Normal-kind adjacency. No extra crate dependencies. Network phases shell out
+to existing tools (`ccu` today, `cargo audit` planned) - no native network
+code in brokkr.
 
 `--locked` is what makes "audits `Cargo.lock`" true: without it cargo
 re-resolves whenever the lockfile is missing or behind a manifest,
@@ -69,9 +72,11 @@ and what's in your Cargo.toml that you can change to fix it.
 Each `VersionPin` carries blame and workspace-route context:
 
 - `picked_by` - direct parents of the pin (one reverse step through
-  the resolve graph). Workspace members appear as `"<name> (direct)"`;
-  other parents as `"name version"`. This answers "who landed on this
-  version?".
+  the resolve graph). In JSON each picker has `name`, `direct`, and an
+  optional `version`; workspace members have `direct: true` and no version.
+  The text renderer keeps the compact `"<name> (direct)"` and
+  `"name version"` labels. This answers "who landed on this version?"
+  without requiring JSON consumers to parse those labels.
 - `via_workspace` - workspace-direct dep names that lead to the pin
   via chains whose immediate picker is transitive. Empty when every
   picker is already a workspace member or a workspace-direct dep -
@@ -237,9 +242,14 @@ cycle; `check` is what stops one from landing. See `docs/commands/check.md`.
 Every `[workspace.dependencies]` entry in the root manifest should be inherited
 (`dep = { workspace = true }`) by some member; one nobody uses is dead weight.
 Workspace inheritance is a manifest concept `cargo metadata` does not surface,
-so this phase reads the TOML directly - the root for the declarations, each
-member (via its metadata `manifest_path`) for its `workspace = true` uses -
-while metadata still supplies the workspace root and member list. Emits
+so this phase reads the manifests directly - the root for the declarations,
+each member (via its metadata `manifest_path`) for its `workspace = true` uses -
+while metadata still supplies the workspace root and member membership. It uses
+the same `toml_edit` parser and `ManifestDeps` walker as the structural
+`[manifest]` checks, preserving Cargo dependency-table paths, package/target
+kinds, target cfgs, aliases, and inherited package names. The walker ignores
+similarly named dependency tables under metadata, which Cargo does not interpret
+as dependency declarations. Emits
 `UnusedWorkspaceDep` (an offline finding: counts toward the exit-1 tally). The
 `[deps].workspace_dep_ignore` list exempts names that are legitimately
 unreferenced (dev tools, top-level members); an entry ending in `*` is a prefix
@@ -378,6 +388,7 @@ and don't drive the exit code. `--no-fail` always exits 0.
 ```
 src/deps/
   mod.rs                 # DepsEvent enum, run(), text + JSON renderers
+  model.rs               # shared Cargo metadata, PackageId, and indexed Graph
   duplicate_version.rs   # blame-aware duplicate detection
   focus.rs               # `brokkr deps <pkg>` chain trace
   git_dependency.rs      # git+ source scanning with ref parsing
@@ -388,9 +399,8 @@ src/deps/
   ccu.rs                 # ccu --json shell-out (outdated + stale)
 ```
 
-Future phases land as siblings (`advisory.rs`, etc.). The
-cargo-metadata deserializer lives in `mod.rs` until it grows enough to
-warrant its own file.
+Future phases land as siblings (`advisory.rs`, etc.). Shared Cargo metadata and
+its indexed graph live in `model.rs`.
 
 `src/cli/schema.rs` carries the `Command::Deps { ... }` variant. Dispatch
 lands in `src/main_parts/bootstrap.rs` next to the other shared commands

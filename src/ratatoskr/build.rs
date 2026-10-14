@@ -52,7 +52,7 @@ pub fn build_for_harness(
     if let Some(cb) = on_done {
         cb();
     }
-    let binary = result?;
+    let binary = result?.path;
 
     let bin_dir = binary
         .parent()

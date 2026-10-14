@@ -1,6 +1,7 @@
 //! Build, tool and example plans for elivagar.
 
 use super::commands::{BuiltCommand, ElivagarCommand, ExampleCommand, ExternalTool};
+use crate::clean::layout::ElivagarLayout;
 use crate::context::MeasurementSession;
 use crate::error::DevError;
 use crate::measure::runner::{self, CommandPlan, PlanKind, PlannedCommand, RowSubject};
@@ -42,7 +43,7 @@ impl PlannedCommand for ElivagarPlan<'_, '_> {
             req.mode,
             MeasureMode::Hotpath { .. } | MeasureMode::Alloc { .. }
         ) {
-            req.hotpath_features()
+            req.build_features()
         } else {
             req.feat_refs()
         };
@@ -58,6 +59,7 @@ impl PlannedCommand for ElivagarPlan<'_, '_> {
         paths: &crate::config::ResolvedPaths,
         _binary: &Path,
     ) -> Result<CommandPlan<Self::State>, DevError> {
+        let layout = ElivagarLayout::new(paths);
         let mut state = (std::path::PathBuf::new(), 0.0);
         let mut input_file = None;
         let mut input_mb = None;
@@ -66,7 +68,7 @@ impl PlannedCommand for ElivagarPlan<'_, '_> {
                 req.dataset,
                 req.variant,
                 paths,
-                req.project_root,
+                req.project_root.as_path(),
             )?;
             state = (pbf.path.clone(), crate::resolve::file_size_mb(&pbf.path)?);
             input_file = pbf
@@ -77,17 +79,14 @@ impl PlannedCommand for ElivagarPlan<'_, '_> {
             match self.0 {
                 ElivagarCommand::Built(command) => command.build_args(
                     &pbf.path.display().to_string(),
-                    &paths.scratch_dir,
-                    &paths.data_dir,
+                    &layout,
                     Some(&super::PipelineOpts::from_pbf_entry(pbf.entry)),
                 )?,
-                ElivagarCommand::External(tool) => external(tool, req, paths, &state, true)?.args,
+                ElivagarCommand::External(tool) => external(tool, req, &layout, &state, true)?.args,
             }
         } else {
             match self.0 {
-                ElivagarCommand::Built(command) => {
-                    command.build_args("", &paths.scratch_dir, &paths.data_dir, None)?
-                }
+                ElivagarCommand::Built(command) => command.build_args("", &layout, None)?,
                 _ => unreachable!(),
             }
         };
@@ -111,10 +110,11 @@ impl PlannedCommand for ElivagarPlan<'_, '_> {
         _plan: &CommandPlan<Self::State>,
     ) -> Result<(), DevError> {
         if let ElivagarCommand::Built(BuiltCommand::MainBinary { .. }) = self.0 {
-            std::fs::create_dir_all(&ctx.paths.scratch_dir)?;
-            std::fs::create_dir_all(ctx.paths.data_dir.join("tilegen_tmp"))?;
+            let layout = ElivagarLayout::new(&ctx.paths);
+            std::fs::create_dir_all(layout.scratch())?;
+            std::fs::create_dir_all(layout.tilegen_tmp())?;
             if let ElivagarCommand::Built(command) = self.0 {
-                for file in command.output_files(&ctx.paths.scratch_dir) {
+                for file in command.output_files(&layout) {
                     std::fs::remove_file(file).ok();
                 }
             }
@@ -137,26 +137,22 @@ impl PlannedCommand for ElivagarPlan<'_, '_> {
         _plan: &CommandPlan<Self::State>,
     ) -> Result<(), DevError> {
         if let ElivagarCommand::Built(command @ BuiltCommand::MainBinary { .. }) = self.0 {
+            let layout = ElivagarLayout::new(&ctx.paths);
             if matches!(req.mode, MeasureMode::Run | MeasureMode::Bench { .. }) {
                 super::artifacts::rename_elivagar_output(
                     command,
-                    &ctx.paths.scratch_dir,
-                    &ctx.paths.output_dir,
-                    &ctx.paths.data_dir,
+                    &layout,
                     req.dataset,
                     req.variant,
-                    req.effective_build_root(),
+                    req.build_root.as_path(),
                 )?;
             } else {
-                for file in command.output_files(&ctx.paths.scratch_dir) {
+                for file in command.output_files(&layout) {
                     std::fs::remove_file(file).ok();
                 }
-                let suffix = if req.is_alloc() { "alloc-" } else { "" };
-                std::fs::remove_file(
-                    ctx.paths
-                        .scratch_dir
-                        .join(format!("hotpath-{suffix}output.pmtiles")),
-                )
+                std::fs::remove_file(layout.tilegen_hotpath_output(
+                    req.mode.profiled() == Some(crate::measure::ProfiledMode::Alloc),
+                ))
                 .ok();
             }
         }
@@ -170,7 +166,8 @@ impl PlannedCommand for ElivagarPlan<'_, '_> {
     ) -> Result<(), DevError> {
         match self.0 {
             ElivagarCommand::External(tool) => {
-                let invocation = external(tool, req, &ctx.paths, &plan.state, false)?;
+                let layout = ElivagarLayout::new(&ctx.paths);
+                let invocation = external(tool, req, &layout, &plan.state, false)?;
                 runner::execute_external(req, ctx, &invocation)
             }
             ElivagarCommand::Built(BuiltCommand::Example(example)) => {
@@ -184,7 +181,7 @@ impl PlannedCommand for ElivagarPlan<'_, '_> {
 fn external(
     tool: &ExternalTool,
     req: &MeasureRequest<'_>,
-    paths: &crate::config::ResolvedPaths,
+    layout: &ElivagarLayout<'_>,
     state: &(std::path::PathBuf, f64),
     dry_run: bool,
 ) -> Result<runner::ExternalInvocation, DevError> {
@@ -193,19 +190,13 @@ fn external(
             &state.0,
             state.1,
             req.runs(),
-            &paths.data_dir,
-            &paths.scratch_dir,
-            req.project_root,
+            layout,
+            req.project_root.as_path(),
             dry_run,
         ),
-        ExternalTool::Tilemaker => super::bench_tilemaker::prepare(
-            &state.0,
-            state.1,
-            req.runs(),
-            &paths.data_dir,
-            &paths.scratch_dir,
-            dry_run,
-        ),
+        ExternalTool::Tilemaker => {
+            super::bench_tilemaker::prepare(&state.0, state.1, req.runs(), layout, dry_run)
+        }
     }
 }
 
@@ -231,7 +222,7 @@ fn run_example(
         input_file: None,
         input_mb: None,
         cargo_features: None,
-        cargo_profile: crate::build::CargoProfile::Release,
+        external_build: None,
         runs: 1,
         cli_args: None,
         metadata: vec![],

@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::build;
+use crate::clean::layout::PbfhoggLayout;
 use crate::config::ResolvedPaths;
 use crate::db::KvPair;
 use crate::error::DevError;
@@ -37,7 +38,8 @@ pub fn run(
     let binary = build::cargo_build(
         &build::BuildConfig::release_with_owned_features(Some("pbfhogg-cli"), &paths.features),
         project_root,
-    )?;
+    )?
+    .path;
     // The seq the OSC is registered under travels with it: it keys the
     // merged-PBF cache (same rule as `get_default_osc_entry` - exactly one
     // osc entry, or none).
@@ -284,8 +286,7 @@ fn run_osmpbf_baseline(
     let manifest_str = manifest.display().to_string();
 
     // Build the baseline binary.
-    let captured = output::run_captured(
-        "cargo",
+    let captured = output::run_cargo(
         &[
             "build",
             "--release",
@@ -294,9 +295,11 @@ fn run_osmpbf_baseline(
             "--message-format=json",
         ],
         project_root,
+        &[],
+        None,
     )?;
 
-    if !captured.status.success() {
+    if !captured.success() {
         let stderr = String::from_utf8_lossy(&captured.stderr);
         return Err(DevError::Build(format!(
             "osmpbf-baseline build failed: {stderr}"
@@ -352,7 +355,7 @@ fn run_osmpbf_baseline(
             input_file: Some(basename.clone()),
             input_mb: Some(file_mb),
             cargo_features: None,
-            cargo_profile: crate::build::CargoProfile::Release,
+            external_build: None,
             runs: 1,
             cli_args: None,
             metadata: vec![],
@@ -410,7 +413,7 @@ fn run_osmium_baseline(
         input_file: Some(basename.clone()),
         input_mb: Some(file_mb),
         cargo_features: None,
-        cargo_profile: crate::build::CargoProfile::Release,
+        external_build: None,
         runs,
         cli_args: Some(crate::harness::format_cli_args("osmium", &osmium_args)),
         metadata: vec![],
@@ -422,7 +425,8 @@ fn run_osmium_baseline(
     std::fs::create_dir_all(scratch_dir)
         .map_err(|e| DevError::Config(format!("failed to create scratch dir: {e}")))?;
 
-    let altw_output = scratch_dir.join("bench-osmium-altw-output.osm.pbf");
+    let altw_output =
+        PbfhoggLayout::fixed_scratch_file(scratch_dir, "bench-osmium-altw-output.osm.pbf");
     let altw_output_str = altw_output
         .to_str()
         .ok_or_else(|| DevError::Config("scratch path is not valid UTF-8".into()))?;
@@ -440,7 +444,7 @@ fn run_osmium_baseline(
         input_file: Some(basename.clone()),
         input_mb: Some(file_mb),
         cargo_features: None,
-        cargo_profile: crate::build::CargoProfile::Release,
+        external_build: None,
         runs,
         cli_args: Some(crate::harness::format_cli_args("osmium", &altw_args)),
         metadata: vec![],

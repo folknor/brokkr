@@ -43,7 +43,7 @@
 //
 // There is deliberately NO per-entry serial-group key for that, because the
 // sweep list already composes: `[[check]]` entries run strictly one after
-// another (see `run_test_phase`'s loop), so a second entry with no `parallel`
+// another (see `run_test_phase`'s loop, `test_phase.rs`), so a second entry with no `parallel`
 // key IS the serial lane. Enumerate the parallel side with `tests` and leave
 // the complement unfiltered, never the reverse - a binary added later then
 // shows up serial and slow rather than parallel and flaky, and a STALE name in
@@ -92,7 +92,7 @@ use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::output::CapturedOutput;
-use crate::test_runner::{effective_test_threads, HungTest};
+use crate::test_runner::{effective_test_threads, HungTest, LaneVerdict};
 
 /// One binary's finished run, buffered so concurrent binaries cannot
 /// interleave their output into an unreadable braid.
@@ -107,6 +107,9 @@ struct BinaryRun {
     command: String,
     captured: CapturedOutput,
     hung: Option<HungTest>,
+    verdict: LaneVerdict,
+    /// What the run's observed events reduce to; the counts come from here.
+    outcome: test_runner::ExecutionOutcome,
     completed: Vec<(String, Duration)>,
     /// Wall time for this binary. Used for the summary's critical-path line -
     /// and NOT for the next run's allocation, because wall time is a function
@@ -126,12 +129,16 @@ impl BinaryRun {
             timing_key: binary_timing_key(binary),
             command: String::new(),
             captured: CapturedOutput {
-                status: std::process::ExitStatus::default(),
+                // Never spawned: an exit of 0 would read as a pass; the
+                // `skipped` flag and the incomplete verdict carry the truth.
+                ending: crate::output::Ending::Interrupted,
                 stdout: Vec::new(),
                 stderr: Vec::new(),
                 elapsed: Duration::ZERO,
             },
             hung: None,
+            verdict: LaneVerdict::Incomplete,
+            outcome: test_runner::ExecutionOutcome::default(),
             completed: Vec::new(),
             elapsed: Duration::ZERO,
             skipped: true,
@@ -180,187 +187,17 @@ impl Budget {
     }
 }
 
-/// Split cargo-level extra args into target selectors and everything else.
-///
-/// `brokkr check -- --test read_paths` is a documented workflow, and on this
-/// lane it needs different handling from every other cargo arg. A selector
-/// must shape WHICH BINARIES the sweep plans; every other arg (`--release`,
-/// `--no-fail-fast`, a feature flag) belongs on each per-binary invocation.
-///
-/// Getting this wrong is not a cosmetic bug. Each per-binary command already
-/// carries its own selector, and **cargo unions selection flags** - so
-/// appending `--test cli` to all of them turns every invocation into
-/// `cargo test -p pkg --lib --test cli`, running `cli` once per planned
-/// binary, pulling in binaries the user meant to exclude, and putting more
-/// tests in flight than the budget allows. Meanwhile the plan itself ignored
-/// the selector, because enumeration never saw it.
-///
-/// Value-taking selectors consume their following token; the `--test=NAME`
-/// form carries it inline. An unknown flag is left in `rest`, which is the
-/// safe direction: a non-selector wrongly treated as a selector would silently
-/// change the planned binary set, while a selector wrongly left in `rest` is
-/// the behaviour this function exists to fix and would be caught by the same
-/// symptom.
-fn partition_target_selectors(args: &[String]) -> (Vec<String>, Vec<String>) {
-    const VALUED: [&str; 4] = ["--test", "--bin", "--example", "--bench"];
-    const BARE: [&str; 8] = [
-        "--lib",
-        "--doc",
-        "--tests",
-        "--bins",
-        "--examples",
-        "--benches",
-        "--all-targets",
-        "--doctests",
-    ];
-
-    let mut selectors = Vec::new();
-    let mut rest = Vec::new();
-    let mut i = 0;
-    while i < args.len() {
-        let a = &args[i];
-        let head = a.split_once('=').map_or(a.as_str(), |(h, _)| h);
-        if a.contains('=') && VALUED.contains(&head) {
-            selectors.push(a.clone());
-        } else if VALUED.contains(&a.as_str()) {
-            selectors.push(a.clone());
-            if let Some(v) = args.get(i + 1) {
-                selectors.push(v.clone());
-                i += 1;
-            }
-        } else if BARE.contains(&a.as_str()) {
-            selectors.push(a.clone());
-        } else {
-            rest.push(a.clone());
-        }
-        i += 1;
-    }
-    (selectors, rest)
-}
-
 // The pin itself now lives on the sweep as `effective_unification`, resolved
 // once per invocation by `profile::resolve_unification` and read here through
 // `sweep.unification_args()`. The prebuild and every per-binary invocation take
 // it from that one field, which is what keeps them naming one graph - the
 // property this lane's local helper used to enforce by being the only caller.
 
-/// Whether forwarded cargo args narrow the package selection.
-///
-/// `brokkr check -- -p one-pkg` reaches cargo through a different channel
-/// than brokkr's own `-p`, and the unification gate has to see BOTH or it
-/// widens a selection the caller narrowed. Every spelling cargo accepts
-/// counts, including the attached short form `-pfoo` - a scan that knows
-/// only `-p foo` and `-p=foo` still hands workspace unification to a
-/// one-package run.
-///
-/// Selection-shaped is enough; the value is never inspected. A bare
-/// trailing `-p` that cargo will reject still reads as narrowing, because
-/// the alternative is deciding what an incomplete flag meant.
-fn narrows_selection(cargo_extra: &[String]) -> bool {
-    const SELECTORS: [&str; 3] = ["-p", "--package", "--exclude"];
-    cargo_extra.iter().any(|a| {
-        let head = a.split_once('=').map_or(a.as_str(), |(h, _)| h);
-        SELECTORS.contains(&head) || (a.starts_with("-p") && a.len() > 2)
-    })
-}
-
-/// Whether this sweep's fan-out gets workspace feature unification: only
-/// when its selection is exactly every workspace member, because that is the
-/// one selection where cargo's `"workspace"` mode describes the prebuild
-/// rather than widening it. See the module header for why each condition is
-/// load-bearing.
-/// This is now the *eligibility* half only: it says the fan-out would need the
-/// workspace pin, and [`crate::profile::resolve_unification`] decides what the
-/// sweep's configured policy does with that - promote under `auto`, honour an
-/// explicit `workspace`, or refuse an explicit `selected` that cannot be
-/// delivered. Package mode can never reach here: it requires a non-empty
-/// `packages`, which fails the second condition.
-pub(crate) fn unify_workspace(
-    sweep: &crate::profile::SweepDecl,
-    cli_scope: &[&str],
-    whole_workspace: bool,
-    cargo_extra: &[String],
-) -> bool {
-    cli_scope.is_empty()
-        && sweep.packages.is_empty()
-        && sweep.test_exclude_packages.is_empty()
-        && whole_workspace
-        && !narrows_selection(cargo_extra)
-}
-
-/// Reject forwarded cargo package selectors under package mode.
-///
-/// Package mode promises one cargo resolution per selected package. A
-/// trailing `-- -p other` reaches cargo through a channel brokkr does not
-/// plan, and cargo UNIONS selection flags, so it would smuggle a second
-/// package into a resolution that is supposed to hold exactly one - silently
-/// turning the lane back into the batched shape it exists to avoid.
-/// `--workspace` and `--exclude` have no package-mode meaning at all, since
-/// the mode requires an explicit positive set.
-pub(crate) fn reject_forwarded_selectors(
-    sweep: &PlannedSweep,
-    cargo_extra: &[String],
-) -> Result<(), DevError> {
-    if !sweep.effective_unification().is_per_package() {
-        return Ok(());
-    }
-    let offending: Vec<&String> = cargo_extra
-        .iter()
-        .filter(|a| {
-            let head = a.split_once('=').map_or(a.as_str(), |(h, _)| h);
-            ["-p", "--package", "--exclude", "--workspace"].contains(&head)
-                || (a.starts_with("-p") && a.len() > 2)
-        })
-        .collect();
-
-    if offending.is_empty() {
-        return Ok(());
-    }
-    Err(DevError::Config(format!(
-        "[[check]] '{}' runs under `feature_unification = \"package\"`, which resolves one cargo \
-         invocation per package, but the forwarded args carry package selectors ({}). cargo unions \
-         selection flags, so these would widen a resolution that must hold exactly one package. \
-         Use brokkr's own `-p`, or the entry's `packages`.",
-        sweep.label,
-        offending
-            .iter()
-            .map(|s| s.as_str())
-            .collect::<Vec<_>>()
-            .join(" ")
-    )))
-}
-
-/// The cargo target selector for one test binary.
-///
-/// Mirrors cargo's own target kinds rather than assuming `--test`: a package's
-/// unit tests live in the `lib`/`bin` harnesses, which `--test <name>` does not
-/// select at all. Paired with `-p <package>` because `--lib` alone is ambiguous
-/// across a workspace.
-fn binary_selector(binary: &TestBinary) -> Vec<String> {
-    let mut args = vec!["-p".to_owned(), binary.package.clone()];
-    args.extend(target_selector(&binary.kind, &binary.target));
-    args
-}
-
 /// Stable timing-cache identity for one planning unit. Keep it separate from
 /// the shorter failure label: a package can have a bin target and an
 /// integration-test target with the same name.
 fn binary_timing_key(binary: &TestBinary) -> String {
     format!("{}/{}", binary.package, binary.label())
-}
-
-/// The cargo target selector for one test harness of a known package.
-///
-/// The four named kinds select themselves (an example or bench only reaches
-/// the artifact stream as a test executable when its manifest sets
-/// `test = true`); everything else - `lib`, and the library crate types
-/// (`rlib`, `proc-macro`, ...) cargo reports in its place - is the lib
-/// harness, the only remaining place a unit test can live.
-pub(crate) fn target_selector(kind: &str, target: &str) -> Vec<String> {
-    match kind {
-        "test" | "bin" | "example" | "bench" => vec![format!("--{kind}"), target.to_owned()],
-        _ => vec!["--lib".to_owned()],
-    }
 }
 
 /// The libtest argv one binary of a parallel sweep is executed with,
@@ -414,89 +251,6 @@ fn direct_libtest_args(
     Ok(libtest_args)
 }
 
-/// The cargo-shaped reproduction line a failing binary reprints.
-///
-/// The lane executes the binary directly, but the command a debugging reader
-/// wants to paste is the cargo one - it rebuilds if needed and supplies the
-/// env without ceremony. `request` is the cargo fragment of the planned
-/// request that built the binary - its whole package selection and the
-/// features projected onto it - kept intact, so the repro resolves exactly
-/// the prebuild's graph and carries only tokens that selection routes.
-/// (Narrowing to `-p <binary's package>` would both re-unify features and
-/// hand cargo tokens only a co-selected package routes.) The target selector
-/// then narrows which targets run; a `--lib` under a multi-package selection
-/// runs every selected package's lib harness, the price of an exact graph.
-/// With no planned request (never expected), it falls back to the binary's
-/// own `-p` selector.
-fn repro_cargo_line(
-    sweep: &PlannedSweep,
-    binary: &TestBinary,
-    request: Option<&[String]>,
-    allow_args: &[String],
-    cargo_extra: &[String],
-) -> String {
-    let mut args: Vec<String> = vec!["test".into()];
-    args.extend(sweep.unification_args());
-    args.extend(allow_args.iter().cloned());
-    match request {
-        Some(req) => {
-            args.extend(req.iter().cloned());
-            args.extend(target_selector(&binary.kind, &binary.target));
-        }
-        None => args.extend(binary_selector(binary)),
-    }
-    if let Some(p) = sweep.profile {
-        args.extend(p.cargo_args().iter().map(|s| (*s).to_owned()));
-    }
-    args.extend(cargo_extra.iter().cloned());
-    let filters = sweep.lane_filters();
-    let mut libtest = filters.libtest_args();
-    libtest.extend(filters.name_filters());
-    if !libtest.is_empty() {
-        args.push("--".into());
-        args.extend(libtest);
-    }
-    format!("failing command: cargo {}", args.join(" "))
-}
-
-/// Refuse forwarded cargo args the direct-execution fan-out cannot honour.
-///
-/// After the rewrite, forwarded cargo-level args reach only the PREBUILD -
-/// the runners execute binaries directly. Most args are fine there
-/// (`--release` changes which binaries get built and therefore run; `-j`,
-/// `--offline`, `--locked` are prebuild-only by nature). Four are not:
-///
-/// - `--no-run` requests compilation without execution, and a lane that runs
-///   the tests anyway contradicts the forwarded request.
-/// - `--target` selects another platform's executables and potentially a
-///   target runner the direct exec would bypass.
-/// - `--config` can inject `[env]` or a runner at a precedence level the
-///   envelope reconstruction does not read.
-/// - `--manifest-path` / `--target-dir` move the workspace or artifacts out
-///   from under the enumeration-derived paths.
-fn reject_unsupported_forwarded(sweep: &PlannedSweep, cargo_extra: &[String]) -> Result<(), DevError> {
-    const UNSUPPORTED: [&str; 5] =
-        ["--no-run", "--target", "--config", "--manifest-path", "--target-dir"];
-    let offending: Vec<&str> = cargo_extra
-        .iter()
-        .map(String::as_str)
-        .filter(|a| {
-            let head = a.split_once('=').map_or(*a, |(h, _)| h);
-            UNSUPPORTED.contains(&head)
-        })
-        .collect();
-    if offending.is_empty() {
-        return Ok(());
-    }
-    Err(DevError::Config(format!(
-        "sweep '{}' runs its test binaries directly (parallel fan-out), and the forwarded cargo \
-         args carry {} - which only cargo-mediated execution can honour. Drop the flag, or drop \
-         `parallel` from the [[check]] entry.",
-        sweep.label,
-        offending.join(" ")
-    )))
-}
-
 /// One planned binary of a parallel lane, with the resolution it belongs to.
 struct PlannedRun<'a> {
     resolution: &'a Option<String>,
@@ -509,7 +263,9 @@ struct DirectExtras<'a> {
     attempt: &'a Attempt,
     libtest_extra: &'a [String],
     allow_args: &'a [String],
-    cargo_extra: &'a [String],
+    /// The forwarded cargo args the prebuild carried (target selectors
+    /// already applied to the plan), for each binary's reproduction line.
+    forwarded: ForwardedArgs,
 }
 
 /// Run one binary to completion, having already claimed `slots` of the
@@ -544,19 +300,26 @@ fn run_one_binary(
     let sink_origin = origin.clone();
     let sink = tap.sink(move |_| sink_origin.clone(), false);
     let started = Instant::now();
-    let run_result = test_runner::run_libtest_parallel(
-        &binary.executable,
-        test_runner::Leader::TestBinary,
-        &arg_refs,
-        &cwd,
-        state_root,
-        &env_pairs,
-        test_runner::PARALLEL_SWEEP_TIMEOUT,
-        test_runner::TEST_TIMEOUT,
-        // Shared with every concurrent binary: the first to blow its budget
-        // cancels the rest mid-flight rather than letting them finish.
-        Some(abort),
-        Some(&sink),
+    let observe = test_runner::Observe {
+        sink: Some(sink),
+        shim: test_runner::ShimMode::Off,
+    };
+    let run_result = test_runner::run_libtest(
+        test_runner::Launch::Direct {
+            program: &binary.executable,
+        },
+        test_runner::LibtestInvocation {
+            args: &arg_refs,
+            cwd: &cwd,
+            state_root,
+            env: &env_pairs,
+            context: test_runner::RunContext::process(),
+            // Shared with every concurrent binary: the first to blow its
+            // budget cancels the rest mid-flight.
+            abort: Some(abort),
+        },
+        test_runner::Ceilings::shared_harness_with(test_runner::TEST_TIMEOUT),
+        &observe,
         |_| {},
         |_| {},
         |_| {},
@@ -565,22 +328,24 @@ fn run_one_binary(
         tap.record(JournalRecord::SpawnFailed { lane: tap.lane(), origin, detail: error.to_string() });
     }
     let finished = run_result?;
-    let hung = match finished.outcome {
-        LibtestOutcome::HungTest(h) => Some(h),
-        LibtestOutcome::Completed => None,
-    };
+    let hung = finished.hung;
+    let verdict = test_runner::lane_verdict(&finished.outcome);
     Ok(BinaryRun {
         label: format!("{}/{}", binary.package, binary.target),
         timing_key: binary_timing_key(binary),
-        command: repro_cargo_line(
+        command: ReproLine::parallel_binary(
             sweep,
             binary,
-            extras.attempt.run_for(run.resolution.as_deref()).map(ResolutionRun::cargo_args).as_deref(),
+            extras.attempt.run_for(run.resolution.as_deref()),
             extras.allow_args,
-            extras.cargo_extra,
-        ),
+            &extras.forwarded,
+        )
+        .as_str()
+        .to_owned(),
         captured: finished.captured,
         hung,
+        verdict,
+        outcome: finished.outcome,
         completed: finished.completed,
         elapsed: started.elapsed(),
         skipped: false,
@@ -717,7 +482,7 @@ fn run_parallel_sweep(
         attempt,
         libtest_extra: &prepared.libtest_extra,
         allow_args: &prepared.env.allow_args,
-        cargo_extra: &prepared.cargo_extra,
+        forwarded: ForwardedArgs::parse(&prepared.cargo_extra),
     };
 
     std::thread::scope(|scope| {
@@ -871,6 +636,7 @@ fn report_runs(
 ) -> Result<bool, DevError> {
     let binaries = runs.len();
     let mut passed = 0usize;
+    let mut ignored = 0usize;
     let mut slowest = (String::new(), Duration::ZERO);
     let mut ok = true;
     // Set when any binary blew its budget: the lane stops rather than reporting
@@ -897,14 +663,18 @@ fn report_runs(
             skipped += 1;
             continue;
         }
-        let completed_count = run.completed.len();
-        passed += completed_count;
+        let (observed_passed, _, observed_ignored) = run.outcome.counts();
+        let completed_count = run.outcome.terminal_count();
+        passed += usize::try_from(observed_passed)
+            .map_err(|_| DevError::Build("observed pass count exceeds usize".into()))?;
+        ignored += usize::try_from(observed_ignored)
+            .map_err(|_| DevError::Build("observed ignored count exceeds usize".into()))?;
         if let Some(out) = timings.as_deref_mut() {
-            for (name, elapsed) in run.completed {
+            for (name, elapsed) in &run.completed {
                 out.push(TestTiming {
                     sweep: sweep.label.clone(),
-                    name,
-                    elapsed,
+                    name: name.clone(),
+                    elapsed: *elapsed,
                 });
             }
         }
@@ -912,40 +682,42 @@ fn report_runs(
         let stdout = String::from_utf8_lossy(&run.captured.stdout);
         let stderr = String::from_utf8_lossy(&run.captured.stderr);
 
-        if let Some(hung) = run.hung {
-            output::error(&format!("sweep '{}' binary {}:", sweep.label, run.label));
-            output::error(&test_runner::format_hung_test(&hung, project_root));
-            output::error(&run.command);
-            ok = false;
-            budget_blown = Some(run.label.clone());
-            continue;
-        }
-        if !run.captured.status.success() {
-            output::error(&format!(
-                "sweep '{}' binary {} failed:",
-                sweep.label, run.label
-            ));
-            output::error(&run.command);
-            output::error(&test_runner::filter_test(&stdout, &stderr));
-            ok = false;
-            continue;
-        }
-        // A clean exit is not evidence that the tests reported. This lane derives
-        // its pass count from observed JSON completion events, so a binary that
-        // exits 0 while emitting missing or malformed lifecycle records
-        // contributed zero to `passed` and still left the sweep green - an
-        // absence read as a fact. The stream has to say it finished.
-        let parsed = test_runner::parse_test_output(&stdout.lines().collect::<Vec<_>>());
-        if let test_runner::Completeness::Incomplete { reason } = &parsed.completeness {
-            output::error(&format!(
-                "sweep '{}' binary {} exited successfully but its test stream did not finish \
-                 reporting: {reason}. Observed {} completed test(s). A binary that stops talking \
-                 has not shown its tests passed - treat as a wrong-run.",
-                sweep.label, run.label, completed_count
-            ));
-            output::error(&run.command);
-            ok = false;
-            continue;
+        match run.verdict {
+            LaneVerdict::Pass => {}
+            LaneVerdict::BudgetBlown => {
+                output::error(&format!("sweep '{}' binary {}:", sweep.label, run.label));
+                if let Some(hung) = &run.hung {
+                    output::error(&test_runner::format_hung_test(hung, project_root));
+                } else {
+                    output::error("the test runner observed a timed-out execution");
+                }
+                output::error(&run.command);
+                ok = false;
+                budget_blown = Some(run.label.clone());
+                continue;
+            }
+            LaneVerdict::Stopped => return Err(DevError::Interrupted),
+            LaneVerdict::Fail => {
+                output::error(&format!(
+                    "sweep '{}' binary {} failed:",
+                    sweep.label, run.label
+                ));
+                output::error(&run.command);
+                output::error(&test_runner::filter_test(&stdout, &stderr));
+                ok = false;
+                continue;
+            }
+            LaneVerdict::Incomplete => {
+                output::error(&format!(
+                    "sweep '{}' binary {} exited without a complete test observation stream; \
+                     observed {completed_count} completed test(s). A binary that stops talking \
+                     has not shown its tests passed - treat as a wrong-run.",
+                    sweep.label, run.label
+                ));
+                output::error(&run.command);
+                ok = false;
+                continue;
+            }
         }
         // A passing binary prints NOTHING. Thirty-five green lines say only
         // what one summary line says, and a reader who has learned to scroll
@@ -1014,7 +786,7 @@ fn report_runs(
             build_elapsed.as_secs_f64(),
             critical,
         ));
-        note_tests(passed, 0, 0);
+        note_tests(passed, ignored, 0);
         if binaries > 1 {
             note_parallel_slowest(&sweep.label, &slowest.0, slowest.1);
         }
@@ -1059,27 +831,26 @@ mod parallel_lane_tests {
     // silently run nothing for every unit-test binary in the fan-out.
     #[test]
     fn each_target_kind_gets_the_selector_that_actually_selects_it() {
-        assert_eq!(
-            binary_selector(&binary("pkg", "test", "integration")),
-            vec!["-p", "pkg", "--test", "integration"]
-        );
-        assert_eq!(
-            binary_selector(&binary("pkg", "bin", "cli")),
-            vec!["-p", "pkg", "--bin", "cli"]
-        );
-        assert_eq!(
-            binary_selector(&binary("pkg", "lib", "pkg")),
-            vec!["-p", "pkg", "--lib"]
-        );
+        use selection::cargo_target_selector;
+        assert_eq!(cargo_target_selector("test", "integration"), vec!["--test", "integration"]);
+        assert_eq!(cargo_target_selector("bin", "cli"), vec!["--bin", "cli"]);
+        assert_eq!(cargo_target_selector("lib", "pkg"), vec!["--lib"]);
+        assert_eq!(cargo_target_selector("something-cargo-added-later", "t"), vec!["--lib"]);
     }
 
-    // `--lib` alone is ambiguous across a workspace, so every selector carries
-    // the owning package regardless of kind.
+    // `--lib` alone is ambiguous across a workspace, so a reproduction line
+    // with no planned request names the owning package regardless of kind.
     #[test]
-    fn every_selector_names_its_package() {
+    fn every_unplanned_repro_names_its_package() {
         for kind in ["test", "bin", "lib", "something-cargo-added-later"] {
-            let args = binary_selector(&binary("owner", kind, "t"));
-            assert_eq!(&args[..2], &["-p".to_owned(), "owner".to_owned()], "{kind}");
+            let line = ReproLine::parallel_binary(
+                &bare_sweep(),
+                &binary("owner", kind, "t"),
+                None,
+                &[],
+                &ForwardedArgs::parse(&[]),
+            );
+            assert!(line.as_str().contains("-p owner"), "{kind}: {}", line.as_str());
         }
     }
 
@@ -1107,7 +878,7 @@ mod parallel_lane_tests {
     // binaries the caller meant to exclude. Selectors shape the plan instead.
     #[test]
     fn target_selectors_are_split_out_of_the_per_binary_args() {
-        let (sel, rest) = partition_target_selectors(&v(&["--test", "read_paths"]));
+        let (sel, rest) = ForwardedArgs::parse(&v(&["--test", "read_paths"])).partition_targets();
         assert_eq!(sel, v(&["--test", "read_paths"]));
         assert!(rest.is_empty());
     }
@@ -1117,11 +888,11 @@ mod parallel_lane_tests {
     // command inherit a stray positional.
     #[test]
     fn a_selectors_value_travels_with_it_in_both_spellings() {
-        let (sel, rest) = partition_target_selectors(&v(&["--bin", "cli", "--release"]));
+        let (sel, rest) = ForwardedArgs::parse(&v(&["--bin", "cli", "--release"])).partition_targets();
         assert_eq!(sel, v(&["--bin", "cli"]));
         assert_eq!(rest, v(&["--release"]));
 
-        let (sel, rest) = partition_target_selectors(&v(&["--test=cli", "--release"]));
+        let (sel, rest) = ForwardedArgs::parse(&v(&["--test=cli", "--release"])).partition_targets();
         assert_eq!(sel, v(&["--test=cli"]));
         assert_eq!(rest, v(&["--release"]));
     }
@@ -1129,7 +900,7 @@ mod parallel_lane_tests {
     #[test]
     fn bare_selectors_need_no_value_and_non_selectors_are_untouched() {
         let (sel, rest) =
-            partition_target_selectors(&v(&["--lib", "--no-fail-fast", "--tests"]));
+            ForwardedArgs::parse(&v(&["--lib", "--no-fail-fast", "--tests"])).partition_targets();
         assert_eq!(sel, v(&["--lib", "--tests"]));
         assert_eq!(rest, v(&["--no-fail-fast"]));
     }
@@ -1139,7 +910,7 @@ mod parallel_lane_tests {
     // direction to be wrong in.
     #[test]
     fn an_unknown_flag_is_left_for_the_per_binary_command() {
-        let (sel, rest) = partition_target_selectors(&v(&["--offline", "-j", "4"]));
+        let (sel, rest) = ForwardedArgs::parse(&v(&["--offline", "-j", "4"])).partition_targets();
         assert!(sel.is_empty());
         assert_eq!(rest, v(&["--offline", "-j", "4"]));
     }
@@ -1148,7 +919,7 @@ mod parallel_lane_tests {
     // past the end.
     #[test]
     fn a_dangling_selector_does_not_panic() {
-        let (sel, rest) = partition_target_selectors(&v(&["--test"]));
+        let (sel, rest) = ForwardedArgs::parse(&v(&["--test"])).partition_targets();
         assert_eq!(sel, v(&["--test"]));
         assert!(rest.is_empty());
     }
@@ -1164,34 +935,16 @@ mod parallel_lane_tests {
         crate::profile::PlannedSweep::from(bare_decl())
     }
 
-    // Workspace unification applies exactly when the selection is the whole
-    // workspace: any narrowing - sweep packages, excludes, CLI `-p`, or a
-    // `default-members` subset - and cargo's `"workspace"` mode would widen
-    // the graph past what the prebuild selected.
+    // A selector forwarded after `--` narrows the selection the same way
+    // brokkr's own `-p` does, so it rules workspace promotion out
+    // (`resolve_invocation_sweeps`). Every spelling cargo accepts has to
+    // count: the attached short form is the one a hand-written scan misses,
+    // and missing it means a one-package run resolving against the whole
+    // workspace's features. (The sweep-side conditions - its own `packages`
+    // and `test_exclude_packages`, a CLI `-p`, a default-members subset - are
+    // the same resolver's, read before it asks cargo.)
     #[test]
-    fn unification_applies_only_to_a_whole_workspace_selection() {
-        let sweep = bare_decl();
-        assert!(unify_workspace(&sweep, &[], true, &[]));
-        assert!(!unify_workspace(&sweep, &[], false, &[]));
-        assert!(!unify_workspace(&sweep, &["one-pkg"], true, &[]));
-
-        let mut scoped = bare_decl();
-        scoped.packages = vec!["a".into()];
-        assert!(!unify_workspace(&scoped, &[], true, &[]));
-
-        let mut excluding = bare_decl();
-        excluding.test_exclude_packages = vec!["bad".into()];
-        assert!(!unify_workspace(&excluding, &[], true, &[]));
-    }
-
-    // A selector forwarded after `--` narrows the same way brokkr's own
-    // `-p` does. Every spelling cargo accepts has to count: the attached
-    // short form is the one a hand-written scan misses, and missing it
-    // means a one-package run resolving against the whole workspace's
-    // features.
-    #[test]
-    fn a_forwarded_package_selector_also_rules_unification_out() {
-        let sweep = bare_decl();
+    fn a_forwarded_package_selector_rules_promotion_out() {
         for extra in [
             vec!["-p".to_owned(), "one".to_owned()],
             vec!["-p=one".to_owned()],
@@ -1205,8 +958,8 @@ mod parallel_lane_tests {
             vec!["-p".to_owned()],
         ] {
             assert!(
-                !unify_workspace(&sweep, &[], true, &extra),
-                "{extra:?} must rule unification out"
+                ForwardedArgs::parse(&extra).narrows_package_selection(),
+                "{extra:?} must rule promotion out"
             );
         }
 
@@ -1215,12 +968,25 @@ mod parallel_lane_tests {
             vec!["--no-fail-fast".to_owned()],
             vec!["--release".to_owned()],
             vec!["--profile=release".to_owned()],
+            vec!["--workspace".to_owned()],
         ] {
             assert!(
-                unify_workspace(&sweep, &[], true, &extra),
-                "{extra:?} must not rule unification out"
+                !ForwardedArgs::parse(&extra).narrows_package_selection(),
+                "{extra:?} must not rule promotion out"
             );
         }
+    }
+
+    // Promotion turns an `auto` parallel sweep's unification into the
+    // workspace pin; without eligibility it stays ambient.
+    #[test]
+    fn promotion_pins_auto_to_the_workspace() {
+        let mut parallel = bare_decl();
+        parallel.lane_exec = crate::profile::LaneExec::Parallel { budget: 4 };
+        let promoted = resolve_planned_sweep(parallel.clone(), true).unwrap();
+        assert!(promoted.unification_args().iter().any(|a| a.contains("feature-unification")));
+        let ambient = resolve_planned_sweep(parallel, false).unwrap();
+        assert!(ambient.unification_args().is_empty());
     }
 
     // The direct-exec argv is libtest-only: filters, the budget's thread
@@ -1284,28 +1050,42 @@ mod parallel_lane_tests {
             feature_unification: crate::config::FeatureUnification::Workspace,
             ..bare_sweep().declaration().clone()
         });
-        let line = repro_cargo_line(&promoted, &b, None, &[], &[]);
+        let none = ForwardedArgs::parse(&[]);
+        let line = ReproLine::parallel_binary(&promoted, &b, None, &[], &none);
+        let line = line.as_str();
         assert!(line.starts_with("failing command: cargo test"), "{line}");
         assert!(line.contains("-Zfeature-unification"), "{line}");
         assert!(line.contains("-p pkg --test t"), "{line}");
         // Unpinned `auto` reproduces without a pin - the pre-existing shape.
-        let plain = repro_cargo_line(&bare_sweep(), &b, None, &[], &[]);
-        assert!(!plain.contains("-Zfeature-unification"), "{plain}");
+        let plain = ReproLine::parallel_binary(&bare_sweep(), &b, None, &[], &none);
+        assert!(!plain.as_str().contains("-Zfeature-unification"), "{}", plain.as_str());
     }
 
     // The repro keeps the building request whole: a combined resolution
-    // over independent `a` and `b` carrying `a/fa,b/fb` reproduces as that
-    // selection with those features, the binary narrowing only the target -
-    // `-p a --features a/fa,b/fb` would be rejected by cargo, and `-p a`
-    // alone would re-unify the graph.
+    // over `a` and `b` reproduces as that selection with its features, the
+    // binary narrowing only the target - `-p a` alone would re-unify the
+    // graph.
     #[test]
     fn the_repro_line_keeps_the_planned_requests_selection() {
-        let b = binary("a", "test", "t");
-        let req = v(&["-p", "a", "-p", "b", "--features", "a/fa,b/fb"]);
-        let line = repro_cargo_line(&bare_sweep(), &b, Some(&req), &[], &[]);
-        assert!(line.contains("-p a -p b --features a/fa,b/fb --test t"), "{line}");
-        let lib = repro_cargo_line(&bare_sweep(), &binary("a", "lib", "a"), Some(&req), &[], &[]);
-        assert!(lib.contains("--features a/fa,b/fb --lib"), "{lib}");
+        let sweep = crate::profile::PlannedSweep::from(crate::profile::SweepDecl {
+            packages: vec!["a".into(), "b".into()],
+            ..bare_sweep().declaration().clone()
+        });
+        let selection = PhaseSelection::for_check(
+            SelectionPhase::Test,
+            std::slice::from_ref(&sweep),
+            &[],
+            &FeatureOracle::unavailable(),
+        )
+        .unwrap();
+        let request = selection.attempt(LaneIdx::new(0)).unwrap().runs()[0].clone();
+        let none = ForwardedArgs::parse(&[]);
+        let line = ReproLine::parallel_binary(&sweep, &binary("a", "test", "t"), Some(&request), &[], &none);
+        assert!(line.as_str().contains("-p a -p b"), "{}", line.as_str());
+        assert!(line.as_str().contains("--test t"), "{}", line.as_str());
+        let lib = ReproLine::parallel_binary(&sweep, &binary("a", "lib", "a"), Some(&request), &[], &none);
+        assert!(lib.as_str().contains("-p a -p b"), "{}", lib.as_str());
+        assert!(lib.as_str().ends_with("--lib"), "{}", lib.as_str());
     }
 
     // Forwarded cargo args only cargo-mediated execution can honour are
@@ -1323,10 +1103,10 @@ mod parallel_lane_tests {
             v(&["--manifest-path", "../other/Cargo.toml"]),
             v(&["--target-dir=/elsewhere"]),
         ] {
-            assert!(reject_unsupported_forwarded(&sweep, &extra).is_err(), "{extra:?}");
+            assert!(reject_direct_execution_args(&sweep, &ForwardedArgs::parse(&extra)).is_err(), "{extra:?}");
         }
         for extra in [v(&["--release"]), v(&["--offline"]), v(&["-j", "4"])] {
-            assert!(reject_unsupported_forwarded(&sweep, &extra).is_ok(), "{extra:?}");
+            assert!(reject_direct_execution_args(&sweep, &ForwardedArgs::parse(&extra)).is_ok(), "{extra:?}");
         }
     }
 
@@ -1347,15 +1127,19 @@ mod parallel_lane_tests {
             vec!["--exclude=x".to_owned()],
         ] {
             assert!(
-                reject_forwarded_selectors(&pkg, &extra).is_err(),
+                reject_forwarded_package_selectors(&pkg, &ForwardedArgs::parse(&extra)).is_err(),
                 "{extra:?} must be refused"
             );
         }
         // Non-selection args are none of this rule's business.
-        assert!(reject_forwarded_selectors(&pkg, &["--release".to_owned()]).is_ok());
+        assert!(reject_forwarded_package_selectors(&pkg, &ForwardedArgs::parse(&["--release".to_owned()])).is_ok());
         // And the rule applies to package mode alone.
         assert!(
-            reject_forwarded_selectors(&bare_sweep(), &["-p".to_owned(), "o".to_owned()]).is_ok()
+            reject_forwarded_package_selectors(
+                &bare_sweep(),
+                &ForwardedArgs::parse(&["-p".to_owned(), "o".to_owned()]),
+            )
+            .is_ok()
         );
     }
 }

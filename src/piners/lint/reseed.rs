@@ -58,7 +58,7 @@ pub fn run(
 
     // Held across the read-modify-write, so a concurrent `--bless`/
     // `--reanchor` (which hold the same lock) cannot interleave with it.
-    let _lock = registry_io::lock(project_root, "lint-reseed")?;
+    let _lock = registry_io::lock()?;
 
     let existing_text = if lints_path.exists() {
         Some(std::fs::read_to_string(&lints_path).map_err(DevError::Io)?)

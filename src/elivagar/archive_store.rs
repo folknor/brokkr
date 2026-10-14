@@ -146,7 +146,7 @@ impl ArchiveStore {
             Some(revision) => self.resolve_revision(dataset, variant, revision, build_root)?,
             None => {
                 let commit = crate::git::collect(build_root)?.commit;
-                ArchiveKey::new(dataset, variant, commit)?
+                ArchiveKey::new(dataset, variant, commit.as_str())?
             }
         };
         let path = self.path_for(&key);
@@ -175,9 +175,7 @@ impl ArchiveStore {
         protected_dirs: &[&Path],
     ) -> Result<PathBuf, DevError> {
         let scratch_dir = scratch_file.parent().unwrap_or_else(|| Path::new(""));
-        if self.dir.as_path() == scratch_dir
-            || protected_dirs.contains(&self.dir.as_path())
-        {
+        if self.dir.as_path() == scratch_dir || protected_dirs.contains(&self.dir.as_path()) {
             return Err(DevError::Config(format!(
                 "output dir {} coincides with elivagar's scratch/tmp dir; set a distinct [<host>].output in brokkr.toml. Output left in {}",
                 self.dir.display(),
@@ -217,9 +215,11 @@ impl ArchiveStore {
         // Retention is best-effort after admission, as a pruning failure must
         // not turn a successfully stored archive into a failed tilegen run.
         let group = key.group();
-        drop(self.prune_groups(std::slice::from_ref(&group), TILEGEN_RETENTION, |path| {
-            std::fs::remove_file(path).is_ok()
-        }));
+        drop(
+            self.prune_groups(std::slice::from_ref(&group), TILEGEN_RETENTION, |path| {
+                std::fs::remove_file(path).is_ok()
+            }),
+        );
         Ok(destination)
     }
 
@@ -297,13 +297,13 @@ impl ArchiveStore {
     ) -> Result<ArchiveKey, DevError> {
         match crate::git::resolve_commit(build_root, revision) {
             Ok(id) => {
-                let fixed = ArchiveKey::new(dataset, variant, id.short.clone())?;
+                let fixed = ArchiveKey::new(dataset, variant, id.short().as_str().to_owned())?;
                 if self.path_for(&fixed).exists() {
                     return Ok(fixed);
                 }
                 let commit = self
-                    .legacy_archive_token(dataset, variant, &id.full)
-                    .unwrap_or(id.short);
+                    .legacy_archive_token(dataset, variant, id.as_str())
+                    .unwrap_or_else(|| id.short().as_str().to_owned());
                 ArchiveKey::new(dataset, variant, commit)
             }
             Err(error) => {

@@ -28,7 +28,7 @@ single `[sidecar]` summary, the `[run] results.db <id>` line naming the stored
 row, the `[run] commit` line for `--commit`) is specified in
 `docs/commands/measure.md` ("What a measured run prints").
 
-The prefixed printers in `src/output.rs` (`[build]`, `[run]`, `[lock]`, `[strays]`,
+The prefixed printers in `src/output/console.rs` (`[build]`, `[run]`, `[lock]`, `[strays]`,
 `[guard]`, `[bench]`, `[verify]`, `[sidecar]`, `[dry-run]`, ...) all go through
 one renderer, which tees each line into the run log when the command keeps one
 (`check`, `test`, measured runs, `bench`; `.brokkr/check-logs/<kind>-<ms>.log`)
@@ -39,6 +39,10 @@ narration (stderr, so `brokkr sidecar ... | jq` stays clean) and the deliberatel
 renderer-free `[warn]` bookkeeping paths. `[lock]` is for lock events,
 `[strays]` for the stray-process reaps and `brokkr strays`, and `[guard]` for
 `brokkr guard`; `[dry-run]` marks a planned action under `--dry-run`.
+
+Captured and passthrough subprocesses run through `src/output/child.rs`, which
+owns child polling, typed endings, deadlines, signal forwarding, and bounded
+stdout/stderr drains.
 
 ## The three transport channels
 

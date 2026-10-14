@@ -161,7 +161,7 @@ struct PairKey {
     command: String,
     mode: String,
     input_file: String,
-    brokkr_args: String,
+    arm_key: String,
     env_fingerprint: String,
 }
 
@@ -243,7 +243,7 @@ fn build_comparison_pairs(
             &row.command,
             &row.mode,
             &row.input_file,
-            &normalize_brokkr_args(&row.brokkr_args),
+            row.arm_key.as_deref().unwrap_or(row.brokkr_args.as_str()),
             &row.env_fingerprint(),
         )
     };
@@ -486,105 +486,17 @@ fn display_or_unknown(s: &str) -> &str {
     if s.is_empty() { "(unknown)" } else { s }
 }
 
-/// Build the dedup/pair key for the compare view.
-///
-/// Post-v13 the axis (direct-io, compression, snapshot, index-type, …) lives
-/// in `cli_args` / `brokkr_args` rather than in the `variant` column, so
-/// `(command, mode, input_file)` alone would collapse axis-distinct runs
-/// into one pair (silently hiding the rest). We include `brokkr_args` so
-/// two runs of the same command with different flags show as separate
-/// rows, and `env_fingerprint` so env-gated A/B rows on the same commit
-/// don't collide either.
-fn pair_key(
-    command: &str,
-    mode: &str,
-    input_file: &str,
-    brokkr_args: &str,
-    env_fp: &str,
-) -> PairKey {
+/// Build the comparison identity from the parsed-CLI arm key. Historical rows
+/// without one use their exact stored invocation string; no argv grammar is
+/// inferred here.
+fn pair_key(command: &str, mode: &str, input_file: &str, arm_key: &str, env_fp: &str) -> PairKey {
     PairKey {
         command: command.to_owned(),
         mode: mode.to_owned(),
         input_file: input_file.to_owned(),
-        brokkr_args: brokkr_args.to_owned(),
+        arm_key: arm_key.to_owned(),
         env_fingerprint: env_fp.to_owned(),
     }
-}
-
-/// Drop the `brokkr_args` tokens that name *provenance or presentation*
-/// rather than the benchmark arm, so they cannot enter the pair key.
-///
-/// `brokkr_args` is in the key on purpose: `--direct-io` and its kin define
-/// genuinely different arms, and collapsing them into one row would silently
-/// average two different benchmarks (see
-/// `pair_key_distinguishes_by_brokkr_args`). Two flags invert that logic:
-///
-/// - `--commit REF` is the whole point of the comparison, not part of the
-///   subject's identity. `--compare A B` asks for the same benchmark at two
-///   commits, and `--commit` is *how* one side got its commit - so keying on
-///   it makes the comparison axis part of the identity, and a `--commit` row
-///   can never pair with the current-tree row it exists to be compared
-///   against. That defeats the flag entirely.
-/// - `--verbose`/`-v` only changes what is printed. It cannot move a wall.
-/// - The iteration count of `--bench N` / `--hotpath N` / `--alloc N` (and
-///   the `=N` forms) is how many samples best-of-N drew, not what was
-///   measured. The flag itself stays - the mode is part of the key anyway.
-/// - `argv[0]` is reduced to its basename: `brokkr` and `~/.cargo/bin/brokkr`
-///   (or `target/release/brokkr`) are the same program to the user.
-///
-/// Everything else stays. This is a display-level pairing heuristic, not a
-/// correctness gate: a value that happens to be the literal string
-/// `--commit` would consume the token after it, and a numeric positional
-/// directly after a bare `--bench` would be read as its count - which is
-/// how clap reads it too (`num_args = 0..=1`).
-fn normalize_brokkr_args(args: &str) -> String {
-    let mut out: Vec<&str> = Vec::new();
-    let mut skip_value = false;
-    let mut after_count_flag = false;
-
-    for (i, token) in args.split_whitespace().enumerate() {
-        if skip_value {
-            skip_value = false;
-            continue;
-        }
-        if std::mem::take(&mut after_count_flag) && is_iteration_count(token) {
-            continue;
-        }
-        if i == 0 {
-            out.push(token.rsplit('/').next().unwrap_or(token));
-            continue;
-        }
-
-        match token {
-            // Space-separated form: the ref is the next token.
-            "--commit" => skip_value = true,
-            "--verbose" | "-v" => {}
-            "--bench" | "--hotpath" | "--alloc" => {
-                out.push(token);
-                after_count_flag = true;
-            }
-            _ if token.starts_with("--commit=") => {}
-            _ => match strip_count_suffix(token) {
-                Some(flag) => out.push(flag),
-                None => out.push(token),
-            },
-        }
-    }
-
-    out.join(" ")
-}
-
-/// Whether `token` is a measurement-mode iteration count (all digits).
-fn is_iteration_count(token: &str) -> bool {
-    !token.is_empty() && token.bytes().all(|b| b.is_ascii_digit())
-}
-
-/// `--bench=3` -> `--bench` (likewise `--hotpath=`/`--alloc=`); `None` for
-/// any other token.
-fn strip_count_suffix(token: &str) -> Option<&str> {
-    let (flag, value) = token.split_once('=')?;
-    (matches!(flag, "--bench" | "--hotpath" | "--alloc") && is_iteration_count(value))
-        .then_some(flag)
 }
 
 fn compute_compare_widths(
@@ -969,6 +881,7 @@ mod tests {
             uuid: String::from("abcdef1234567890"),
             cli_args: String::new(),
             brokkr_args: String::new(),
+            arm_key: None,
             project: String::from("test"),
             stop_marker_requested: String::new(),
             stop_marker: String::new(),
@@ -991,13 +904,13 @@ mod tests {
             "read",
             "mmap",
             "denmark.osm.pbf",
-            "brokkr read --dataset denmark",
+            "pbfhogg/read/denmark/standard",
             "",
         );
         assert_eq!(key.command, "read");
         assert_eq!(key.mode, "mmap");
         assert_eq!(key.input_file, "denmark.osm.pbf");
-        assert_eq!(key.brokkr_args, "brokkr read --dataset denmark");
+        assert_eq!(key.arm_key, "pbfhogg/read/denmark/standard");
         assert_eq!(key.env_fingerprint, "");
     }
 
@@ -1018,124 +931,38 @@ mod tests {
     }
 
     #[test]
-    fn pair_key_distinguishes_by_brokkr_args() {
+    fn pair_key_distinguishes_by_arm_key() {
         // Same command/mode/input but different flags → different keys,
         // so --compare shows both runs instead of collapsing them.
         let k1 = pair_key(
             "apply-changes",
             "bench",
             "denmark.osm.pbf",
-            "brokkr apply-changes --bench",
+            "pbfhogg/apply-changes/direct-io=false",
             "",
         );
         let k2 = pair_key(
             "apply-changes",
             "bench",
             "denmark.osm.pbf",
-            "brokkr apply-changes --direct-io --bench",
+            "pbfhogg/apply-changes/direct-io=true",
             "",
         );
         assert_ne!(k1, k2);
     }
 
     #[test]
-    fn normalize_strips_commit_so_retro_rows_pair() {
-        // The motivating bug: a `--commit` run and a current-tree run of the
-        // same benchmark produced different keys, so `--compare` printed two
-        // separate rows with `--` in the change column instead of a delta.
-        // `--commit` is the comparison axis, not part of the subject.
-        let current = normalize_brokkr_args("brokkr hotpath --bench 1");
-        let retro = normalize_brokkr_args("brokkr hotpath --bench 1 --commit 736e18c");
-        assert_eq!(current, retro);
-    }
-
-    #[test]
-    fn normalize_strips_commit_equals_form() {
-        // clap accepts `--commit=REF` as readily as `--commit REF`.
-        let spaced = normalize_brokkr_args("brokkr hotpath --bench 1 --commit 736e18c");
-        let equals = normalize_brokkr_args("brokkr hotpath --bench 1 --commit=736e18c");
-        assert_eq!(spaced, equals);
-    }
-
-    #[test]
-    fn normalize_strips_verbose() {
-        // `-v` changes only what is printed, so it must not split a pair.
-        let quiet = normalize_brokkr_args("brokkr hotpath --bench 1");
-        assert_eq!(normalize_brokkr_args("brokkr hotpath --bench 1 -v"), quiet);
-        assert_eq!(
-            normalize_brokkr_args("brokkr hotpath --bench 1 --verbose"),
-            quiet
-        );
-    }
-
-    #[test]
-    fn normalize_keeps_arm_defining_flags() {
-        // The guard on the fix above: normalization must not reach flags that
-        // define a genuinely different benchmark arm.
-        let plain = normalize_brokkr_args("brokkr apply-changes --bench");
-        let direct = normalize_brokkr_args("brokkr apply-changes --direct-io --bench");
-        assert_ne!(plain, direct);
-        assert!(direct.contains("--direct-io"));
-    }
-
-    #[test]
-    fn normalize_does_not_eat_the_token_after_an_unrelated_flag() {
-        let out = normalize_brokkr_args("brokkr read --dataset denmark --bench 3");
-        assert_eq!(out, "brokkr read --dataset denmark --bench");
-    }
-
-    #[test]
-    fn normalize_strips_iteration_counts() {
-        // `--bench 3` and `--bench 5` drew different sample counts of the
-        // same benchmark; they must pair.
-        let bare = normalize_brokkr_args("brokkr read --bench");
-        for spelled in [
-            "brokkr read --bench 3",
-            "brokkr read --bench 5",
-            "brokkr read --bench=5",
-        ] {
-            assert_eq!(normalize_brokkr_args(spelled), bare, "{spelled}");
-        }
-        assert_eq!(
-            normalize_brokkr_args("brokkr cat --hotpath 2 --dataset dk"),
-            "brokkr cat --hotpath --dataset dk"
-        );
-        assert_eq!(
-            normalize_brokkr_args("brokkr cat --alloc=4"),
-            "brokkr cat --alloc"
-        );
-        // Only a count is consumed, never the next flag or value.
-        assert_eq!(
-            normalize_brokkr_args("brokkr cat --bench --dataset dk"),
-            "brokkr cat --bench --dataset dk"
-        );
-    }
-
-    #[test]
-    fn normalize_reduces_argv0_to_its_basename() {
-        let plain = normalize_brokkr_args("brokkr read --bench");
-        assert_eq!(
-            normalize_brokkr_args("/home/u/.cargo/bin/brokkr read --bench"),
-            plain
-        );
-        assert_eq!(
-            normalize_brokkr_args("target/release/brokkr read --bench 5"),
-            plain
-        );
-        // Only argv[0]: a path later in the line is an argument.
-        assert!(normalize_brokkr_args("brokkr read --pbf data/dk.pbf").contains("data/dk.pbf"));
-    }
-
-    #[test]
-    fn compare_pairs_retro_and_current_rows() {
-        // End-to-end at the pairing layer: same benchmark, one row recorded
-        // via `--commit`, and they must land on one row with a delta.
+    fn compare_pairs_rows_with_matching_parsed_arm_keys() {
+        // The parsed CLI excludes commit provenance before it produces the
+        // arm key, so matching work pairs without parsing argv here.
         let mut a = row("render", "bench", "", 300);
         a.commit = String::from("736e18c");
-        a.brokkr_args = String::from("brokkr hotpath --bench 1 --commit 736e18c");
+        a.brokkr_args = String::from(r#"["brokkr","hotpath","--bench","1","--commit","736e18c"]"#);
+        a.arm_key = Some(String::from("sluggrs/render/standard"));
         let mut b = row("render", "bench", "", 280);
         b.commit = String::from("b2371d8");
-        b.brokkr_args = String::from("brokkr hotpath --bench 1");
+        b.brokkr_args = String::from(r#"["brokkr","hotpath","--bench","1"]"#);
+        b.arm_key = Some(String::from("sluggrs/render/standard"));
 
         let pairs = build_comparison_pairs(&[a], &[b], &DatasetMatcher::empty());
         assert_eq!(

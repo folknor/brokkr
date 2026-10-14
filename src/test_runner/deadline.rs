@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use super::{KillCause, Leader, ObsEvent, StreamTap, capture_hung_test};
+use super::{KillCause, Leader, ObsEvent, RunContext, StreamTap, capture_hung_test};
 
 /// Why the shared deadline machinery declared a run over budget. This carries
 /// the clock that fired; test naming and confidence live in `Attribution`.
@@ -271,6 +271,7 @@ pub(super) fn enforce_deadline(
     verdict: DeadlineVerdict,
     hung: &Mutex<Option<HungTest>>,
     tap: Option<&StreamTap>,
+    context: &RunContext,
 ) {
     // Freeze before diagnosis: collection must not extend the execution budget.
     crate::process::signal_process_group(pid, libc::SIGSTOP).ok();
@@ -278,7 +279,7 @@ pub(super) fn enforce_deadline(
         &verdict.attribution,
         Attribution::Suspect { stale: true, .. }
     ) {
-        crate::output::warn(
+        context.warn(
             "no libtest lifecycle event was ever observed, so the test named below is \
              brokkr's best guess at which one burned the budget - the budget itself \
              was still exceeded.",
@@ -304,16 +305,6 @@ pub(super) fn enforce_deadline(
     }
     crate::process::signal_process_group(pid, libc::SIGKILL).ok();
 }
-
-/// Whole-sweep wall-clock backstop for a parallel test sweep, enforced from the
-/// watchdog's wall clock.
-///
-/// A parallel sweep enforces the same [`TEST_TIMEOUT`] cap per test as the serial
-/// path, aging each in-flight test from libtest's JSON `started`/`ok`/`failed`
-/// events. This ceiling covers what that cannot bill to any test: a stall with
-/// nothing in flight, or a wedge outside the test bodies entirely. Generous, so it
-/// only trips on something the per-test cap genuinely cannot see.
-pub(crate) const PARALLEL_SWEEP_TIMEOUT: Duration = Duration::from_secs(1800);
 
 #[derive(Clone, Debug)]
 pub(crate) struct HungTest {
@@ -552,6 +543,7 @@ pub(super) fn watchdog_loop(
     ceilings: Ceilings,
     started: Instant,
     tap: Option<StreamTap>,
+    context: RunContext,
 ) {
     watchdog_loop_with_timing(
         state_root,
@@ -564,6 +556,7 @@ pub(super) fn watchdog_loop(
         WATCHDOG_POLL,
         started,
         tap.as_ref(),
+        &context,
     );
 }
 
@@ -586,6 +579,7 @@ pub(super) fn watchdog_loop_with_timing(
     started: Instant,
     // Where the verdict is reported, before the kill it causes.
     tap: Option<&StreamTap>,
+    context: &RunContext,
 ) {
     let timeout = ceilings.per_test;
     loop {
@@ -624,7 +618,7 @@ pub(super) fn watchdog_loop_with_timing(
         if done.load(Ordering::SeqCst) {
             return;
         }
-        enforce_deadline(&state_root, cargo_pid, leader, verdict, &hung, tap);
+        enforce_deadline(&state_root, cargo_pid, leader, verdict, &hung, tap, context);
         return;
     }
 }

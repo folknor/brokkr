@@ -2,6 +2,7 @@
 
 use std::path::Path;
 
+use crate::clean::layout::PbfhoggLayout;
 use crate::error::DevError;
 use crate::harness::{BenchConfig, BenchHarness};
 
@@ -68,7 +69,8 @@ pub fn run(
     scratch_dir: &Path,
 ) -> Result<(), DevError> {
     std::fs::create_dir_all(scratch_dir)?;
-    let output_path = scratch_dir.join("bench-blob-filter-output.osm.pbf");
+    let output_path =
+        PbfhoggLayout::fixed_scratch_file(scratch_dir, "bench-blob-filter-output.osm.pbf");
     let output_str = output_path.display().to_string();
 
     let (indexed_basename, indexed_str) = super::path_strs(pbf_indexed)?;
@@ -111,7 +113,7 @@ pub fn run(
             input_file: Some(basename.to_owned()),
             input_mb: Some(file_mb),
             cargo_features: None,
-            cargo_profile: crate::build::CargoProfile::Release,
+            external_build: None,
             runs,
             cli_args: Some(crate::harness::format_cli_args(
                 &binary.display().to_string(),

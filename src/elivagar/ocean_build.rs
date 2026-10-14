@@ -14,8 +14,6 @@
 //! check` refuses on the artifact key until the corpus is re-blessed. That
 //! refusal is elivagar's job; brokkr just runs the commands.
 
-use std::path::Path;
-
 use crate::build;
 use crate::config::{self, OceanSpec};
 use crate::context::{bootstrap, bootstrap_config};
@@ -29,14 +27,15 @@ use super::{DEFAULT_TILEGEN, resolve_tilegen};
 pub fn run(
     dev_config: &config::DevConfig,
     project: Project,
-    project_root: &Path,
-    build_root: &Path,
+    project_root: &crate::project::ProjectRoot,
+    build_root: &crate::project::BuildRoot,
     dry_run: bool,
     lock: Option<&LockGuard>,
 ) -> Result<(), DevError> {
     project::require(project, Project::Elivagar, "ocean-build")?;
-    let pi = bootstrap(None)?;
+    let pi = bootstrap(build_root)?;
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
+    let build_root = build_root.as_path();
 
     let tg = resolve_tilegen(dev_config, DEFAULT_TILEGEN)?;
     let specs = tg
@@ -111,14 +110,14 @@ pub fn run(
         return Ok(());
     }
 
-    let binary = build::cargo_build(&build::BuildConfig::release(None), build_root)?;
+    let binary = build::cargo_build(&build::BuildConfig::release(None), build_root)?.path;
     let binary_str = binary.display().to_string();
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
 
     output::run_msg(&format!("{binary_str} {}", arg_refs.join(" ")));
     let out = output::run_passthrough_timed(&binary_str, &arg_refs, lock)?;
-    if out.code != 0 {
-        return Err(DevError::ExitCode(out.code));
+    if let Some(code) = out.failed_code(&[]) {
+        return Err(DevError::ExitCode(code));
     }
     Ok(())
 }

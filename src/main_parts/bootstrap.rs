@@ -6,7 +6,7 @@ fn run_measured<F>(
     detection: &project::Detection,
     dataset: &str,
     variant: &str,
-    brokkr_args: &str,
+    invocation: &crate::db::RunInvocation,
     f: F,
 ) -> Result<(), DevError>
 where
@@ -15,7 +15,11 @@ where
     let dev_config = &detection.config;
     let project = detection.project;
     let project_root = detection.project_root.as_path();
-    let mm = resolve_mode(mode)?;
+    let mm = if mode.is_measured() {
+        resolve_mode(mode)?
+    } else {
+        cli::invocation().spec().default_mode
+    };
     let features = resolve_features(dev_config, &mode.features);
     output::set_quiet(!mode.verbose);
     // The narration a measured run keeps off the console (per-run sidecar
@@ -24,12 +28,10 @@ where
     let _log = check_cmd::RunLog::begin(project_root, check_cmd::run_log_kind::MEASURE);
     // Detection carries the code tree (cwd) separately from the config/state
     // root, so worktree setup does not have to derive it again.
-    let parent_build_root =
-        context::parent_build_root(project_root, detection.build_root.as_path());
     context::with_worktree(
         Some(project),
-        project_root,
-        parent_build_root,
+        &detection.project_root,
+        &detection.build_root,
         mode.commit.as_deref(),
         mode.dry_run,
         dev_config.disable_toolchain,
@@ -39,14 +41,14 @@ where
                 dev_config,
                 project_config: &detection.project_config,
                 project,
-                project_root,
+                project_root: &detection.project_root,
                 build_root,
                 dataset,
                 variant,
                 features: &features,
                 force: mode.force,
                 mode: mm,
-                brokkr_args,
+                invocation,
                 dry_run: mode.dry_run,
                 stop_marker: mode.stop.as_deref(),
             };
@@ -55,29 +57,13 @@ where
     )
 }
 
-/// Build the canonical brokkr invocation string from `std::env::args()`.
-///
-/// Shell-quotes any argv element containing whitespace or special characters
-/// so the joined string is unambiguous. Stored on each result row in the
-/// `brokkr_args` column, parallel to `cli_args` (the subprocess invocation).
-fn capture_brokkr_args() -> String {
-    let argv: Vec<String> = std::env::args().collect();
-    let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
-    if let Some((program, args)) = refs.split_first() {
-        harness::format_cli_args(program, args)
-    } else {
-        String::new()
-    }
-}
-
 /// Parse argv, with subcommands that don't apply to the detected project
 /// hidden from `--help`.
 ///
 /// Hidden is not disabled: a hidden subcommand still parses and still reaches
-/// its handler, where `project::require()` produces the "only available in X
-/// projects" error it always did. The filtering is purely about what a help
-/// listing shows, so `brokkr --help` in a piners tree isn't a menu of tilegen
-/// and nidhogg commands.
+/// dispatch, which checks the same specification before entering the handler.
+/// The help menu and the command refusal therefore use the same applicability
+/// rule.
 ///
 /// The shared visual command has a separate `LitehtmlVisualArgs` group. Those
 /// options are hidden from sluggrs help and rejected during parsing there, so
@@ -91,10 +77,6 @@ fn capture_brokkr_args() -> String {
 fn parse_cli(project: Option<Project>) -> Cli {
     let argv = crate::runnables::bare_run_sentinel(std::env::args().collect());
 
-    let Some(project) = project else {
-        return Cli::parse_from(argv);
-    };
-
     let mut cmd = <Cli as clap::CommandFactory>::command();
     let names: Vec<String> = cmd
         .get_subcommands()
@@ -102,11 +84,16 @@ fn parse_cli(project: Option<Project>) -> Cli {
         .collect();
 
     for name in names {
-        if !cli::visible_in(&name, project) {
-            cmd = cmd.mut_subcommand(&name, |s| s.hide(true));
-        }
+        let spec = cli::CommandId::from_name(&name)
+            .expect("every clap command has an exhaustive command specification").spec();
+        let prefix = spec.help_prefix();
+        cmd = cmd.mut_subcommand(&name, |sub| {
+            let about = sub.get_about().map(ToString::to_string).unwrap_or_default();
+            sub.about(format!("{prefix}{about}"))
+                .hide(project.is_some_and(|project| !cli::visible_to(&spec.applies, project)))
+        });
     }
-    if project == Project::Sluggrs {
+    if project == Some(Project::Sluggrs) {
         cmd = cmd.mut_subcommand("visual", |visual| {
             visual
                 .mut_arg("suite", |arg| arg.hide(true))
@@ -122,7 +109,7 @@ fn parse_cli(project: Option<Project>) -> Cli {
         // render and exit exactly as `parse()` would.
         Err(e) => e.exit(),
     };
-    if project == Project::Sluggrs
+    if project == Some(Project::Sluggrs)
         && let Command::Visual { litehtml, .. } = &cli.command
         && (litehtml.suite.is_some() || litehtml.recapture)
     {
@@ -156,6 +143,7 @@ fn main() {
     };
     let help_project = detection.as_ref().map(|d| d.project);
     let cli = parse_cli(help_project);
+    cli::set_invocation(cli.command.id());
 
     // Lead our own process group before spawning anything or acquiring the
     // lock, so brokkr's internal `kill(-pgid, …)` sweeps can't escape upward
@@ -220,15 +208,7 @@ fn main() {
 /// unavailable. All other handlers historically propagated detection errors
 /// before dispatch; keep that policy while sharing the one startup result.
 fn detection_error_is_ignored(command: &Command) -> bool {
-    matches!(
-        command,
-        Command::Lock
-            | Command::Kill { .. }
-            | Command::Strays { .. }
-            | Command::Guard { .. }
-            | Command::History { .. }
-            | Command::Man { .. }
-    )
+    command.spec().config == cli::ConfigNeed::None
 }
 
 fn require_detection(
@@ -259,8 +239,8 @@ fn require_detection(
 fn run_fmt(args: &[String], detection: Option<&project::Detection>) -> Result<(), DevError> {
     match detection {
         Some(d) if d.config.disable_toolchain => {
-            toolchain::arm(Some(d.build_root.clone()));
-            let lock = acquire_cmd_lock(d.project, &d.build_root, "fmt")?;
+            toolchain::arm(Some(d.build_root.as_path().to_path_buf()));
+            let lock = context::reenter_command_lock()?;
             cmd_fmt(args, Some(&lock))
         }
         _ => cmd_fmt(args, None),
@@ -290,18 +270,18 @@ fn run_install(
     unlocked: bool,
     detection: Option<&project::Detection>,
 ) -> Result<(), DevError> {
-    let (project, bin_cfg, project_root) = match detection {
-        Some(d) => (Some(d.project), d.config.bin.as_ref(), d.build_root.clone()),
-        None => (None, None, std::env::current_dir()?),
+    let (bin_cfg, project_root) = match detection {
+        Some(d) => (d.config.bin.as_ref(), d.build_root.as_path().to_path_buf()),
+        None => (None, std::env::current_dir()?),
     };
-    let lock = acquire_cmd_lock_opt(project, &project_root, "install")?;
+    let lock = context::reenter_command_lock()?;
     runnables::cmd_install(&project_root, bin_cfg, debug, release, unlocked, Some(&lock))
 }
 
 /// `wc` lists source files in the code tree (cwd).
 fn run_wc(threshold: usize, detection: Option<&project::Detection>) -> Result<(), DevError> {
     match detection {
-        Some(d) => wc::run(&d.build_root, threshold),
+        Some(d) => wc::run(d.build_root.as_path(), threshold),
         None => {
             let cwd = std::env::current_dir()?;
             wc::run(&cwd, threshold)
@@ -322,11 +302,11 @@ fn run_program(
     detection: Option<&project::Detection>,
 ) -> Result<(), DevError> {
     let Some(commit) = commit else {
-        let (project, bin_cfg, project_root) = match detection {
-            Some(d) => (Some(d.project), d.config.bin.as_ref(), d.build_root.clone()),
-            None => (None, None, std::env::current_dir()?),
+        let (bin_cfg, project_root) = match detection {
+            Some(d) => (d.config.bin.as_ref(), d.build_root.as_path().to_path_buf()),
+            None => (None, std::env::current_dir()?),
         };
-        let lock = acquire_cmd_lock_opt(project, &project_root, "run")?;
+        let lock = context::reenter_command_lock()?;
         return runnables::cmd_run(
             &project_root,
             bin_cfg,
@@ -342,40 +322,37 @@ fn run_program(
     // root, its bookkeeping lives under the project root, and the lock is
     // taken inside the closure so the toolchain-disable lands on the
     // worktree rather than the live tree.
+    let fallback_roots = project::detect_roots()?;
     let (project, bin_cfg, project_root, build_root, disable_toolchain, keep) = match detection {
         Some(d) => {
             let keep = context::worktree_keep(&d.config)?;
             (
                 Some(d.project),
                 d.config.bin.as_ref(),
-                d.project_root.clone(),
-                d.build_root.clone(),
+                &d.project_root,
+                &d.build_root,
                 d.config.disable_toolchain,
                 keep,
             )
         }
         None => {
-            let cwd = std::env::current_dir()?;
-            (None, None, cwd.clone(), cwd, false, crate::worktree_record::DEFAULT_KEEP)
+            (None, None, &fallback_roots.0, &fallback_roots.1, false, crate::worktree_record::DEFAULT_KEEP)
         }
     };
-    let parent_build_root = context::parent_build_root(&project_root, &build_root);
     context::with_worktree(
         project,
-        &project_root,
-        parent_build_root,
+        project_root,
+        build_root,
         Some(commit),
         false,
         disable_toolchain,
         keep,
         |wt| {
-            let worktree = wt.ok_or_else(|| {
-                DevError::Config("internal error: --commit produced no worktree".into())
-            })?;
-            let lock = acquire_cmd_lock_opt(project, &project_root, "run")?;
+            let worktree = wt.as_path();
+            let lock = context::reenter_command_lock()?;
             runnables::cmd_run_commit(
                 worktree,
-                &build_root,
+                build_root.as_path(),
                 bin_cfg,
                 name,
                 debug,
@@ -390,34 +367,26 @@ fn run_program(
 
 /// `sync`: bare lists, a script runs, `--bench` measures, `--all` and
 /// `--gate all` run a cohort.
+#[allow(clippy::too_many_arguments)]
 fn run_sync(
-    command: &Command,
+    script: &Option<String>,
+    all: &bool,
+    filter: &Option<String>,
+    include_ignored: &bool,
+    bench: &Option<usize>,
+    force: &bool,
+    keep_artefacts: &bool,
+    debug: &bool,
+    release: &bool,
+    gate: &Option<String>,
+    as_baseline: &bool,
+    commit: &Option<String>,
     detection: &project::Detection,
-    brokkr_args: &str,
+    invocation: &crate::db::RunInvocation,
 ) -> Result<(), DevError> {
-    let Command::Sync {
-        script,
-        all,
-        filter,
-        include_ignored,
-        bench,
-        force,
-        keep_artefacts,
-        debug,
-        release,
-        gate,
-        as_baseline,
-        commit,
-    } = command
-    else {
-        return Err(DevError::Config(
-            "internal error: run_sync was handed another command".into(),
-        ));
-    };
     let project = detection.project;
     let dev_config = &detection.config;
-    let project_root = &detection.project_root;
-    let build_root = &detection.build_root;
+    let project_root = detection.project_root.as_path();
     project::require(project, Project::Ratatoskr, "sync")?;
     let ratatoskr_config = detection.project_config.ratatoskr()?;
     let cohort_gate = gate.as_deref() == Some(ratatoskr::sync::GATE_ALL);
@@ -442,7 +411,7 @@ fn run_sync(
     }
     if script.is_none() && !cohort_gate {
         if bench.is_some() {
-            return Err(DevError::Config(
+            return Err(DevError::Usage(
                 "sync: --bench needs a SCRIPT to measure (or --gate all to \
                  sweep every configured gate)"
                     .into(),
@@ -462,21 +431,20 @@ fn run_sync(
             profile_override: profile_override(*debug, *release),
         });
     };
-    let parent_build_root = context::parent_build_root(project_root, build_root);
     // A sync bench runs the sidecar, whose per-run narration is
     // run-log only: give it the measured runs' log.
     let _log = check_cmd::RunLog::begin(project_root, check_cmd::run_log_kind::MEASURE);
     with_worktree(
         Some(project),
-        project_root,
-        parent_build_root,
+        &detection.project_root,
+        &detection.build_root,
         commit.as_deref(),
         false,
         dev_config.disable_toolchain,
         context::worktree_keep(dev_config)?,
         |build_root| {
             let req = ratatoskr::sync::SyncBenchRequest {
-                project_root,
+                project_root: &detection.project_root,
                 build_root,
                 dev_config,
                 ratatoskr: ratatoskr_config,
@@ -487,7 +455,7 @@ fn run_sync(
                 force: *force,
                 keep_artefacts: *keep_artefacts,
                 profile_override: profile_override(*debug, *release),
-                brokkr_args: brokkr_args.to_owned(),
+                invocation: invocation.clone(),
                 gate: gate.as_deref(),
                 as_baseline: *as_baseline,
             };
@@ -505,7 +473,7 @@ fn run_sync(
 /// override, and a flag accepted and ignored would read as if it did something.
 fn refuse_unmeasured_force(mode: &cli::ModeArgs) -> Result<(), DevError> {
     if mode.force && !mode.is_measured() {
-        return Err(DevError::Config(
+        return Err(DevError::Usage(
             "corpus: `--force` applies to a measured run (`--hotpath`/`--alloc`) only; \
              a parity run has no runtime limit to bypass"
                 .into(),
@@ -514,157 +482,29 @@ fn refuse_unmeasured_force(mode: &cli::ModeArgs) -> Result<(), DevError> {
     Ok(())
 }
 
-/// The commands that work without a project root. `None` when `command` is
-/// another one.
-fn run_rootless(
-    command: &Command,
-    detection: Option<&project::Detection>,
-) -> Option<Result<(), DevError>> {
-    match command {
-        Command::Fmt { args } => Some(run_fmt(args, detection)),
-        Command::Man { topic, sections, full } => {
-            Some(run_man(topic.as_deref(), sections, *full, detection))
-        }
-        Command::Lock => Some(cmd_lock()),
-        Command::Kill { hard } => Some(cmd_kill(*hard)),
-        Command::Strays { kill } => Some(crate::stray::cmd_strays(*kill)),
-        Command::Guard { install, remove } => Some(crate::guard::cmd_guard(*install, *remove)),
-        Command::History {
-            id,
-            command,
-            project,
-            project_dir,
-            failed,
-            status,
-            since,
-            until,
-            slow,
-            limit,
-            all,
-        } => Some(history_cmd::cmd_history(history_cmd::HistoryQuery {
-            id: *id,
-            command: command.clone(),
-            project: project.clone(),
-            project_dir: project_dir.clone(),
-            failed: *failed,
-            status: *status,
-            since: since.clone(),
-            until: until.clone(),
-            slow: *slow,
-            limit: *limit,
-            all: *all,
-        })),
-        _ => None,
-    }
-}
-
-/// Project detection, the lock and the toolchain window all live inside
-/// `bench_cmd::run`, not in `run`: a `--commit` run must re-arm the
-/// toolchain-disable at the worktree *before* the lock activates it, or the
-/// pin moved aside would be the live tree's rather than the one being built.
-/// That ordering is the command's business, so this stays a one-line handoff.
-fn run_bench(command: Command) -> Result<(), DevError> {
-    let Command::Bench {
-        target,
-        commit,
-        compare,
-        baselines,
-        name,
-        lenient,
-        args,
-    } = command
-    else {
-        return Err(DevError::Config(
-            "internal error: run_bench was handed another command".into(),
-        ));
-    };
-    bench_cmd::run(&bench_cmd::BenchArgs {
-        target,
-        commit,
-        compare: compare
-            .map(|values| crate::request::compare_pair(values, "--compare"))
-            .transpose()?,
-        baselines,
-        name,
-        lenient,
-        args,
-    })
-}
-
-/// The commands that act on the code tree (cwd) and need only the optional
-/// detection: `run`, `install` and `wc`. `None` when `command` is another one.
-fn run_tree_command(
-    command: &Command,
-    detection: Option<&project::Detection>,
-) -> Option<Result<(), DevError>> {
-    match command {
-        Command::Run {
-            name,
-            debug,
-            release,
-            features,
-            all_features,
-            no_default_features,
-            commit,
-            args,
-        } => {
-            let feat = runnables::FeatureArgs {
-                features,
-                all: *all_features,
-                no_default: *no_default_features,
-            };
-            Some(run_program(
-                name.as_deref(),
-                *debug,
-                *release,
-                &feat,
-                commit.as_deref(),
-                args,
-                detection,
-            ))
-        }
-        Command::Install {
-            debug,
-            release,
-            unlocked,
-        } => Some(run_install(*debug, *release, *unlocked, detection)),
-        Command::Wc { threshold } => Some(run_wc(*threshold, detection)),
-        _ => None,
-    }
-}
-
 /// `check` builds, scans, and diffs the code tree, so it anchors on the build
 /// root (cwd). The config values it uses (`[[check]]` sweeps, dependency rules,
 /// gremlin excludes) come from wherever brokkr.toml was found, in cwd or one
 /// level up. The loaded Detection stays available to main's interrupt cleanup;
 /// the no-config path still composes the user-wide rules on their own.
-#[allow(clippy::too_many_lines)]
-fn run_check(command: &Command, detection: Option<&project::Detection>) -> Result<(), DevError> {
-    let Command::Check {
-        features,
-        no_default_features,
-        package,
-        profile,
-        gate,
-        force_rust,
-        json,
-        fix_gremlins,
-        timings,
-        commands,
-        textlint_names,
-        script_names,
-        args,
-    } = command
-    else {
-        return Err(DevError::Config(
-            "internal error: run_check was handed another command".into(),
-        ));
-    };
-    let no_config_cwd = if detection.is_none() {
-        Some(std::env::current_dir()?)
-    } else {
-        None
-    };
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+fn run_check(
+    features: &[String],
+    no_default_features: &bool,
+    package: &[String],
+    profile: &Option<String>,
+    gate: &bool,
+    force_rust: &bool,
+    json: &bool,
+    fix_gremlins: &bool,
+    timings: &bool,
+    commands: &bool,
+    textlint_names: &[String],
+    script_names: &[String],
+    args: &[String],
+    detection: Option<&project::Detection>,
+) -> Result<(), DevError> {
+    let no_config_roots = project::detect_roots()?;
     let user_config = if detection.is_none() {
         Some(config::load_user_only()?)
     } else {
@@ -703,9 +543,7 @@ fn run_check(command: &Command, detection: Option<&project::Detection>) -> Resul
         // No project config, but the user-wide layer applies to any tree
         // brokkr checks. A repo without brokkr.toml is exactly where a
         // personal convention may be the only rule in force.
-        let user = user_config.as_ref().ok_or_else(|| {
-            DevError::Config("internal error: no-config check has no user config".into())
-        })?;
+        let user = user_config.as_ref().expect("the unconfigured branch loaded user config");
         (
             &[][..],
             &[][..],
@@ -726,23 +564,23 @@ fn run_check(command: &Command, detection: Option<&project::Detection>) -> Resul
     let (project_root, state_root) = match detection {
         Some(d) => (d.build_root.as_path(), d.project_root.as_path()),
         None => {
-            let cwd = no_config_cwd.as_deref().ok_or_else(|| {
-                DevError::Config("internal error: no-config check has no current directory".into())
-            })?;
-            (cwd, cwd)
+            (no_config_roots.1.as_path(), no_config_roots.0.as_path())
         }
     };
     // The run log is reserved before the lock and opened under it, so its narration
     // lands in it, and closes after the watchdog's join (declared first,
     // dropped last).
     let _log = check_cmd::RunLog::begin(state_root, check_cmd::run_log_kind::CHECK);
-    let _lock = acquire_cmd_lock_opt(project, state_root, "check")?;
+    let _lock = context::reenter_command_lock()?;
     // The whole-run ceiling, armed once the lock is ours so a wait behind
     // another brokkr command is not charged against it. Fires by
     // SIGKILLing every descendant and letting this command unwind to
     // exit 124. Declared after `_lock`, so it disarms before the lock's
     // drop restores the toolchain pin.
     let _ceiling = check_cmd::CheckWatchdog::arm(check_cmd::CHECK_CEILING);
+    // The `[lints]` config, loaded once; a tree without one allows nothing.
+    let no_lints = config::LintsConfig::default();
+    let lints = clippy_cfg.unwrap_or(&no_lints);
     if !textlint_names.is_empty() || !script_names.is_empty() {
         return check_cmd::cmd_check_selected(
             project_root,
@@ -767,8 +605,7 @@ fn run_check(command: &Command, detection: Option<&project::Detection>) -> Resul
         script_checks,
         manifest_cfg,
         rustdoc_cfg,
-        clippy_cfg.map_or(&[][..], |c| &c.allow),
-        clippy_cfg.map_or(&[][..], |c| &c.allow_exact),
+        lints,
         features,
         *no_default_features,
         package,
@@ -788,44 +625,33 @@ fn run_check(command: &Command, detection: Option<&project::Detection>) -> Resul
 /// `run` activates when `acquire_cmd_lock_opt` takes the global lock below, so
 /// the clippy build honours pin-suppression. Detection is optional - `clippy`
 /// runs in any Rust+git repo with no config.
-fn run_clippy(command: &Command, detection: Option<&project::Detection>) -> Result<(), DevError> {
-    let Command::Clippy {
-        package,
-        all_features,
-        features,
-        no_default_features,
-        sweep,
-        env,
-        lib,
-    } = command
-    else {
-        return Err(DevError::Config(
-            "internal error: run_clippy was handed another command".into(),
-        ));
-    };
-    let no_config_cwd = if detection.is_none() {
-        Some(std::env::current_dir()?)
-    } else {
-        None
-    };
-    let (project, check_entries, clippy_cfg, project_root) = match detection {
+#[allow(clippy::too_many_arguments)]
+fn run_clippy(
+    package: &[String],
+    all_features: &bool,
+    features: &[String],
+    no_default_features: &bool,
+    sweep: &Option<String>,
+    env: &[String],
+    lib: &bool,
+    detection: Option<&project::Detection>,
+) -> Result<(), DevError> {
+    let no_config_roots = project::detect_roots()?;
+    let (check_entries, clippy_cfg, project_root) = match detection {
         Some(d) => (
-            Some(d.project),
             d.config.check.as_slice(),
             d.config.lints.as_ref(),
             d.build_root.as_path(),
         ),
         None => (
-            None,
             &[][..],
             None,
-            no_config_cwd.as_deref().ok_or_else(|| {
-                DevError::Config("internal error: no-config clippy has no current directory".into())
-            })?,
+            no_config_roots.1.as_path(),
         ),
     };
     let env_overrides = parse_env_overrides(env)?;
-    let _lock = acquire_cmd_lock_opt(project, project_root, "clippy")?;
+    let _lock = context::reenter_command_lock()?;
+    let no_lints = config::LintsConfig::default();
     check_cmd::cmd_clippy(
         project_root,
         check_entries,
@@ -836,8 +662,7 @@ fn run_clippy(command: &Command, detection: Option<&project::Detection>) -> Resu
         sweep.as_deref(),
         *lib,
         &env_overrides,
-        clippy_cfg.map_or(&[][..], |c| &c.allow),
-        clippy_cfg.map_or(&[][..], |c| &c.allow_exact),
+        clippy_cfg.unwrap_or(&no_lints),
     )
 }
 
@@ -852,19 +677,18 @@ fn run_deps(
     focus: Option<String>,
     detection: Option<&project::Detection>,
 ) -> Result<(), DevError> {
-    let (project, project_root, workspace_dep_ignore) = match detection {
+    let (project_root, workspace_dep_ignore) = match detection {
         Some(d) => (
-            Some(d.project),
-            d.build_root.clone(),
+            d.build_root.as_path().to_path_buf(),
             d.config
                 .deps
                 .as_ref()
                 .map(|c| c.workspace_dep_ignore.clone())
                 .unwrap_or_default(),
         ),
-        None => (None, std::env::current_dir()?, Vec::new()),
+        None => (std::env::current_dir()?, Vec::new()),
     };
-    let _lock = acquire_cmd_lock_opt(project, &project_root, "deps")?;
+    let _lock = context::reenter_command_lock()?;
     deps::run(
         &project_root,
         &deps::DepsArgs {
@@ -879,46 +703,132 @@ fn run_deps(
 // The command table: one arm per subcommand, so its size tracks the CLI's.
 #[allow(clippy::too_many_lines, clippy::cognitive_complexity)]
 fn run(cli: Cli, detection: Option<&project::Detection>) -> Result<(), DevError> {
-    // These commands work without a project root, and run before the
-    // toolchain pin is armed.
-    if let Some(result) = run_rootless(&cli.command, detection) {
-        return result;
+    let spec = cli.command.spec();
+    if spec.config == cli::ConfigNeed::Required {
+        spec.require(require_detection(detection)?.project)?;
+    } else if let Some(detection) = detection {
+        spec.require(detection.project)?;
     }
-
-    // When `disable_toolchain` is set, arm the build root whose pinned
-    // rust-toolchain should be moved aside. Nothing is moved here: the *global
-    // lock* activates it (and restores it on release), so the moved-aside window
-    // is exactly the locked window and concurrent brokkr runs can't race it. The
-    // file lives in the code tree (build root / cwd), not the config dir; a
-    // `--commit` run re-arms this at the worktree via `with_worktree`.
-    let disable_dir = match detection {
-        Some(d) if d.config.disable_toolchain => Some(d.build_root.clone()),
-        _ => None,
+    let fallback_roots = if detection.is_none() && spec.config != cli::ConfigNeed::None {
+        Some(project::detect_roots()?)
+    } else { None };
+    let state_root = detection.map(|d| &d.project_root)
+        .or_else(|| fallback_roots.as_ref().map(|roots| &roots.0));
+    let project = detection.map(|d| d.project);
+    let _log = spec.run_log.map(|kind|
+        crate::run_log::RunLog::begin(state_root.expect("logging commands resolve a state root").as_path(), kind));
+    let _lock = match spec.lock {
+        cli::LockPolicy::None => None,
+        cli::LockPolicy::Blocking | cli::LockPolicy::NonBlocking => {
+            let ctx = lockfile::LockContext {
+                project: project.map_or("brokkr", Project::name),
+                command: cli.command.id(),
+                project_root: state_root.expect("locking commands resolve a state root"),
+                build_root: detection.map(|d| &d.build_root)
+                    .or_else(|| fallback_roots.as_ref().map(|roots| &roots.1))
+                    .expect("locking commands resolve a build root"),
+            };
+            Some(if spec.lock == cli::LockPolicy::NonBlocking {
+                lockfile::try_acquire_without_toolchain(&ctx)?
+            } else {
+                lockfile::acquire_without_toolchain(&ctx)?
+            })
+        }
     };
+    let disable_dir = detection.filter(|d| d.config.disable_toolchain)
+        .map(|d| d.build_root.as_path().to_path_buf());
     toolchain::arm(disable_dir);
+    let historical = cli.command.uses_worktree();
+    let _toolchain = if !historical && spec.lock != cli::LockPolicy::None {
+        detection.filter(|d| d.config.disable_toolchain)
+            .map(|d| toolchain::DisabledToolchain::activate(d.build_root.as_path())).transpose()?
+    } else { None };
+    let _toolchain_registration = _toolchain.as_ref().and_then(|_| {
+        _lock.as_ref().map(|lock| lock.track_toolchain_dir(
+            detection.expect("toolchain suppression requires config").build_root.as_path()))
+    });
+    match &cli.command {
+        Command::Fmt { args } => run_fmt(args, detection),
+        Command::Man { topic, sections, full } => {
+            run_man(topic.as_deref(), sections, *full, detection)
+        }
+        Command::Lock => cmd_lock(),
+        Command::Kill { hard } => cmd_kill(*hard),
+        Command::Strays { kill } => crate::stray::cmd_strays(*kill),
+        Command::Guard { install, remove } => crate::guard::cmd_guard(*install, *remove),
+        Command::History {
+            id,
+            command,
+            project,
+            project_dir,
+            failed,
+            status,
+            since,
+            until,
+            slow,
+            limit,
+            all,
+        } => history_cmd::cmd_history(history_cmd::HistoryQuery {
+            id: *id,
+            command: command.clone(),
+            project: project.clone(),
+            project_dir: project_dir.clone(),
+            failed: *failed,
+            status: *status,
+            since: since.clone(),
+            until: until.clone(),
+            slow: *slow,
+            limit: *limit,
+            all: *all,
+        }),
 
-    if let Some(result) = run_tree_command(&cli.command, detection) {
-        return result;
+        Command::Run {
+            name,
+            debug,
+            release,
+            features,
+            all_features,
+            no_default_features,
+            commit,
+            args,
+        } => {
+            let feat = runnables::FeatureArgs {
+                features,
+                all: *all_features,
+                no_default: *no_default_features,
+            };
+            run_program(
+                name.as_deref(),
+                *debug,
+                *release,
+                &feat,
+                commit.as_deref(),
+                args,
+                detection,
+            )
+        }
+        Command::Install {
+            debug,
+            release,
+            unlocked,
+        } => run_install(*debug, *release, *unlocked, detection),
+        Command::Wc { threshold } => run_wc(*threshold, detection),
+        Command::Bench { target, commit, compare, baselines, name, lenient, args } =>
+            bench_cmd::run(&bench_cmd::BenchArgs {
+                target: target.clone(), commit: commit.clone(),
+                compare: compare.clone().map(|values| crate::request::compare_pair(values, "--compare")).transpose()?,
+                baselines: *baselines, name: name.clone(), lenient: *lenient, args: args.clone(),
+            }),
+        Command::Deps { json, no_fail, focus } => run_deps(*json, *no_fail, focus.clone(), detection),
+        Command::Check { features, no_default_features, package, profile, gate, force_rust, json, fix_gremlins, timings, commands, textlint_names, script_names, args } => run_check(features, no_default_features, package, profile, gate, force_rust, json, fix_gremlins, timings, commands, textlint_names, script_names, args, detection),
+        Command::Clippy { package, all_features, features, no_default_features, sweep, env, lib } => run_clippy(package, all_features, features, no_default_features, sweep, env, lib, detection),
+        _ => run_project(cli.command, require_detection(detection)?),
     }
-    if matches!(cli.command, Command::Bench { .. }) {
-        return run_bench(cli.command);
-    }
-    if let Command::Deps {
-        json,
-        no_fail,
-        focus,
-    } = cli.command
-    {
-        return run_deps(json, no_fail, focus, detection);
-    }
-    if matches!(cli.command, Command::Check { .. }) {
-        return run_check(&cli.command, detection);
-    }
-    if matches!(cli.command, Command::Clippy { .. }) {
-        return run_clippy(&cli.command, detection);
-    }
+}
 
-    let detection = require_detection(detection)?;
+// The project command table: one arm per subcommand, so its size tracks the CLI's.
+#[allow(clippy::too_many_lines, clippy::cognitive_complexity)]
+fn run_project(command: Command, detection: &project::Detection) -> Result<(), DevError> {
     let project = detection.project;
     let dev_config = &detection.config;
     // The section parsed for `project`. Load already refused a missing
@@ -927,73 +837,39 @@ fn run(cli: Cli, detection: Option<&project::Detection>) -> Result<(), DevError>
     let project_config = &detection.project_config;
     // The config dir (brokkr.toml's directory). Anchors data/ and .brokkr/.
     // The code tree is stored separately in `Detection.build_root`.
-    let project_root = &detection.project_root;
+    let project_root = detection.project_root.as_path();
     // The code tree (cwd), where cargo and git run. Coincides with
     // `project_root` in the common case (config in cwd) and differs only under
     // the one-level-up layout used to drive a foreign checkout.
-    let build_root = &detection.build_root;
-    let brokkr_args = capture_brokkr_args();
+    let build_root = detection.build_root.as_path();
+    let invocation = crate::run_invocation::capture();
 
-    // Pbfhogg measured commands → single dispatch path.
-    if let Some((mode, pbf, pbf_cmd, osc, mut params)) = cli.command.as_pbfhogg() {
-        params.direct_io = pbf.direct_io;
-        params.io_uring = pbf.io_uring;
-        params.compression = pbf.compression.clone();
-        return run_measured(
-            mode,
-            detection,
-            &pbf.dataset,
-            &pbf.variant,
-            &brokkr_args,
-            |req| measure::runner::run(req, &pbfhogg::plan::PbfhoggPlan { command: &pbf_cmd, osc_seq: osc, params: &params }),
-        );
-    }
-
-    match cli.command {
-        // Returned from before project detection, at the top of `run`. An
-        // error rather than `unreachable!()`: a reordering that let one fall
-        // through should fail the command, not panic the process.
-        Command::Lock
-        | Command::Kill { .. }
-        | Command::Strays { .. }
-        | Command::Guard { .. }
-        | Command::History { .. }
-        | Command::Check { .. }
-        | Command::Clippy { .. }
-        | Command::Fmt { .. }
-        | Command::Bench { .. }
-        | Command::Run { .. }
-        | Command::Install { .. }
-        | Command::Wc { .. }
-        | Command::Man { .. }
-        | Command::Deps { .. } => Err(DevError::Config(
-            "internal error: a pre-detection command reached project dispatch".into(),
-        )),
-        // Dispatched through `as_pbfhogg()` above the match. That function is
-        // an exhaustive match, so a new `Command` variant must be classified
-        // there (a compile error, not a silent `None`); this arm is what is
-        // left if a variant here stops mapping - the way `MultiExtract` once
-        // moved out - and it fails the command rather than panicking.
-        Command::Inspect { .. }
-        | Command::CheckRefs { .. }
-        | Command::CheckIds { .. }
-        | Command::Sort { .. }
-        | Command::Cat { .. }
-        | Command::TagsFilter { .. }
-        | Command::Getid { .. }
-        | Command::Getparents { .. }
-        | Command::Renumber { .. }
-        | Command::MergeChanges { .. }
-        | Command::ApplyChanges { .. }
-        | Command::AddLocationsToWays { .. }
-        | Command::Repack { .. }
-        | Command::Degrade { .. }
-        | Command::TimeFilter { .. }
-        | Command::Diff { .. }
-        | Command::BuildGeocodeIndex { .. } => Err(DevError::Config(
-            "internal error: a pbfhogg command has no as_pbfhogg() mapping".into(),
-        )),
-        Command::Env => cmd_env(dev_config, project, project_root),
+    let command = match command.into_route() {
+        command_input::RoutedCommand::Pbf { mode, pbf, command, osc, mut params } => {
+            params.direct_io = pbf.direct_io;
+            params.io_uring = pbf.io_uring;
+            params.compression = pbf.compression.clone();
+            return run_measured(&mode, detection, &pbf.dataset, &pbf.variant, &invocation,
+                |req| measure::runner::run(req, &pbfhogg::plan::PbfhoggPlan {
+                    command: &command, osc_seq: osc.as_deref(), params: &params,
+                }));
+        }
+        command_input::RoutedCommand::Other(command) => *command,
+    };
+    match command {
+        command @ (Command::Lock | Command::Kill { .. } | Command::Strays { .. }
+        | Command::Guard { .. } | Command::History { .. } | Command::Check { .. }
+        | Command::Clippy { .. } | Command::Fmt { .. } | Command::Bench { .. }
+        | Command::Run { .. } | Command::Install { .. } | Command::Wc { .. }
+        | Command::Man { .. } | Command::Deps { .. }
+        | Command::Inspect { .. } | Command::CheckRefs { .. } | Command::CheckIds { .. }
+        | Command::Sort { .. } | Command::Cat { .. } | Command::TagsFilter { .. }
+        | Command::Getid { .. } | Command::Getparents { .. } | Command::Renumber { .. }
+        | Command::MergeChanges { .. } | Command::ApplyChanges { .. }
+        | Command::AddLocationsToWays { .. } | Command::Repack { .. }
+        | Command::Degrade { .. } | Command::TimeFilter { .. } | Command::Diff { .. }
+        | Command::BuildGeocodeIndex { .. }) => run(Cli { command }, Some(detection)),
+        Command::Env => cmd_env(dev_config, project, &detection.project_root, &detection.build_root),
         Command::DiffSnapshots {
             mode,
             dataset,
@@ -1014,7 +890,7 @@ fn run(cli: Cli, detection: Option<&project::Detection>) -> Result<(), DevError>
                 detection,
                 &dataset,
                 &variant,
-                &brokkr_args,
+                &invocation,
                 |req| {
                     let cmd = pbfhogg::commands::PbfhoggCommand::DiffSnapshots { format };
                     measure::runner::run(req, &pbfhogg::plan::PbfhoggPlan { command: &cmd, osc_seq: None, params: &params })
@@ -1038,7 +914,7 @@ fn run(cli: Cli, detection: Option<&project::Detection>) -> Result<(), DevError>
                 detection,
                 &pbf.dataset,
                 &pbf.variant,
-                &brokkr_args,
+                &invocation,
                 |req| {
                     if strategy == "all" {
                         for strat in pbfhogg::commands::ExtractStrategy::all() {
@@ -1073,7 +949,7 @@ fn run(cli: Cli, detection: Option<&project::Detection>) -> Result<(), DevError>
                 detection,
                 &pbf.dataset,
                 &pbf.variant,
-                &brokkr_args,
+                &invocation,
                 |req| {
                     if strategy == "all" {
                         for strat in pbfhogg::commands::ExtractStrategy::all() {
@@ -1105,7 +981,7 @@ fn run(cli: Cli, detection: Option<&project::Detection>) -> Result<(), DevError>
             detection,
             &pbf.dataset,
             &pbf.variant,
-            &brokkr_args,
+            &invocation,
             |req| pbfhogg::cmd::bench_read(req, &modes, snapshot.as_deref()),
         ),
         Command::Write {
@@ -1117,7 +993,7 @@ fn run(cli: Cli, detection: Option<&project::Detection>) -> Result<(), DevError>
             detection,
             &pbf.dataset,
             &pbf.variant,
-            &brokkr_args,
+            &invocation,
             |req| pbfhogg::cmd::bench_write(req, &compressions),
         ),
         Command::MergeBench {
@@ -1131,7 +1007,7 @@ fn run(cli: Cli, detection: Option<&project::Detection>) -> Result<(), DevError>
             detection,
             &pbf.dataset,
             &pbf.variant,
-            &brokkr_args,
+            &invocation,
             |req| {
                 pbfhogg::cmd::bench_merge(req, osc_seq.as_deref(), uring, &compressions)
             },
@@ -1158,7 +1034,7 @@ fn run(cli: Cli, detection: Option<&project::Detection>) -> Result<(), DevError>
                 detection,
                 &dataset,
                 &variant,
-                &brokkr_args,
+                &invocation,
                 |req| measure::runner::run(req, &elivagar::plan::ElivagarPlan(&cmd)),
             )
         }
@@ -1173,7 +1049,7 @@ fn run(cli: Cli, detection: Option<&project::Detection>) -> Result<(), DevError>
                 detection,
                 "denmark",
                 "raw",
-                &brokkr_args,
+                &invocation,
                 |req| measure::runner::run(req, &elivagar::plan::ElivagarPlan(&cmd)),
             )
         }
@@ -1188,7 +1064,7 @@ fn run(cli: Cli, detection: Option<&project::Detection>) -> Result<(), DevError>
                 detection,
                 "denmark",
                 "raw",
-                &brokkr_args,
+                &invocation,
                 |req| measure::runner::run(req, &elivagar::plan::ElivagarPlan(&cmd)),
             )
         }
@@ -1205,7 +1081,7 @@ fn run(cli: Cli, detection: Option<&project::Detection>) -> Result<(), DevError>
                 detection,
                 &dataset,
                 &variant,
-                &brokkr_args,
+                &invocation,
                 |req| measure::runner::run(req, &elivagar::plan::ElivagarPlan(&cmd)),
             )
         }
@@ -1222,7 +1098,7 @@ fn run(cli: Cli, detection: Option<&project::Detection>) -> Result<(), DevError>
                 detection,
                 &dataset,
                 &variant,
-                &brokkr_args,
+                &invocation,
                 |req| measure::runner::run(req, &elivagar::plan::ElivagarPlan(&cmd)),
             )
         }
@@ -1239,7 +1115,7 @@ fn run(cli: Cli, detection: Option<&project::Detection>) -> Result<(), DevError>
                 detection,
                 &dataset,
                 "raw",
-                &brokkr_args,
+                &invocation,
                 |req| measure::runner::run(req, &nidhogg::plan::NidhoggPlan(&cmd)),
             )
         }
@@ -1254,7 +1130,7 @@ fn run(cli: Cli, detection: Option<&project::Detection>) -> Result<(), DevError>
                 detection,
                 &dataset,
                 &variant,
-                &brokkr_args,
+                &invocation,
                 |req| measure::runner::run(req, &nidhogg::plan::NidhoggPlan(&cmd)),
             )
         }
@@ -1273,7 +1149,7 @@ fn run(cli: Cli, detection: Option<&project::Detection>) -> Result<(), DevError>
                 detection,
                 &dataset,
                 "raw",
-                &brokkr_args,
+                &invocation,
                 |req| measure::runner::run(req, &nidhogg::plan::NidhoggPlan(&cmd)),
             )
         }
@@ -1287,7 +1163,7 @@ fn run(cli: Cli, detection: Option<&project::Detection>) -> Result<(), DevError>
             detection,
             "",
             "",
-            &brokkr_args,
+            &invocation,
             |req| dellingr::cmd::run(req, &lua),
         ),
 
@@ -1300,7 +1176,7 @@ fn run(cli: Cli, detection: Option<&project::Detection>) -> Result<(), DevError>
             detection,
             "",
             "",
-            &brokkr_args,
+            &invocation,
             |req| mogwai::cmd::run(req, target.as_deref(), &args),
         ),
 
@@ -1315,15 +1191,15 @@ fn run(cli: Cli, detection: Option<&project::Detection>) -> Result<(), DevError>
             detection,
             &dataset,
             &variant,
-            &brokkr_args,
+            &invocation,
             |req| {
                 if req.dry_run {
-                    return Err(DevError::Config(
+                    return Err(DevError::Usage(
                         "--dry-run is not yet supported for generic-hotpath".into(),
                     ));
                 }
-                if !req.is_alloc() && !matches!(req.mode, measure::MeasureMode::Hotpath { .. }) {
-                    return Err(DevError::Config(
+                if req.mode.profiled().is_none() {
+                    return Err(DevError::Usage(
                         "generic-hotpath only supports --hotpath or --alloc modes".into(),
                     ));
                 }
@@ -1342,10 +1218,10 @@ fn run(cli: Cli, detection: Option<&project::Detection>) -> Result<(), DevError>
             detection,
             &dataset,
             &variant,
-            &brokkr_args,
+            &invocation,
             |req| {
                 if req.dry_run {
-                    return Err(DevError::Config(
+                    return Err(DevError::Usage(
                         "--dry-run is not yet supported for suites".into(),
                     ));
                 }
@@ -1353,7 +1229,7 @@ fn run(cli: Cli, detection: Option<&project::Detection>) -> Result<(), DevError>
                     req.mode,
                     measure::MeasureMode::Run | measure::MeasureMode::Bench { .. }
                 ) {
-                    return Err(DevError::Config(
+                    return Err(DevError::Usage(
                         "suite mode only supports wall-clock timing".into(),
                     ));
                 }
@@ -1371,7 +1247,7 @@ fn run(cli: Cli, detection: Option<&project::Detection>) -> Result<(), DevError>
                         measure::runner::run(req, &nidhogg::plan::NidhoggPlan(&nidhogg::commands::NidhoggCommand::Api { query: None }))?;
                         measure::runner::run(req, &nidhogg::plan::NidhoggPlan(&nidhogg::commands::NidhoggCommand::Ingest))
                     }
-                    other => Err(DevError::Config(format!(
+                    other => Err(DevError::Usage(format!(
                         "unknown suite: {other} (expected: pbfhogg, elivagar, nidhogg)"
                     ))),
                 }
@@ -1385,7 +1261,7 @@ fn run(cli: Cli, detection: Option<&project::Detection>) -> Result<(), DevError>
             no_build,
             args,
         } => {
-            let _lock = acquire_cmd_lock(project, project_root, "run")?;
+            let _lock = context::reenter_command_lock()?;
             let features = resolve_features(dev_config, &features);
             let opts = RunOptions {
                 time,
@@ -1396,8 +1272,8 @@ fn run(cli: Cli, detection: Option<&project::Detection>) -> Result<(), DevError>
             cmd_run(
                 dev_config,
                 project,
-                project_root,
-                build_root,
+                &detection.project_root,
+                &detection.build_root,
                 &features,
                 &args,
                 &opts,
@@ -1520,7 +1396,7 @@ fn run(cli: Cli, detection: Option<&project::Detection>) -> Result<(), DevError>
                 }
             } else {
                 let uuid = query.ok_or_else(|| {
-                    DevError::Config("sidecar requires a UUID unless --compare is used".into())
+                    DevError::Usage("sidecar requires a UUID unless --compare is used".into())
                 })?;
                 if samples {
                     crate::request::SidecarView::Samples { uuid }
@@ -1565,7 +1441,7 @@ fn run(cli: Cli, detection: Option<&project::Detection>) -> Result<(), DevError>
             all,
             dry_run,
         } => {
-            let _lock = acquire_cmd_lock(project, project_root, "clean")?;
+            let _lock = context::reenter_command_lock()?;
             // `--all` folds in the worktrees, archives, and cargo sweeps.
             let cargo = if all { Some(cargo.unwrap_or(None)) } else { cargo };
             let cargo_swept = cargo.is_some();
@@ -1580,8 +1456,8 @@ fn run(cli: Cli, detection: Option<&project::Detection>) -> Result<(), DevError>
             cmd_clean(
                 dev_config,
                 project,
-                project_root,
-                build_root,
+                &detection.project_root,
+                &detection.build_root,
                 CleanOpts {
                     cargo_swept,
                     worktrees: worktrees || all,
@@ -1607,7 +1483,7 @@ fn run(cli: Cli, detection: Option<&project::Detection>) -> Result<(), DevError>
             // archive a concurrent `tilegen` is mid-write.
             if matches!(verify, VerifyCommand::ElivVerify { .. }) {
                 if commit.is_some() {
-                    return Err(DevError::Config(
+                    return Err(DevError::Usage(
                         "'brokkr verify --commit' rebuilds a historical binary, which \
                          'verify pmtiles' never needs - it reads the archive with the \
                          current one. Use 'brokkr verify pmtiles --commit <hash>' to \
@@ -1615,23 +1491,22 @@ fn run(cli: Cli, detection: Option<&project::Detection>) -> Result<(), DevError>
                             .to_string(),
                     ));
                 }
-                let _lock = acquire_cmd_lock(project, project_root, "verify pmtiles")?;
+                let _lock = context::reenter_command_lock()?;
                 return cmd_verify(
                     dev_config,
                     project,
-                    project_root,
-                    Some(build_root.as_path()),
+                    &detection.project_root,
+                    &detection.build_root,
                     verify,
                     &features,
                     verbose,
                 );
             }
-            let parent_build_root = context::parent_build_root(project_root, build_root);
-            with_worktree(Some(project), project_root, parent_build_root, commit.as_deref(), false, dev_config.disable_toolchain, context::worktree_keep(dev_config)?, |build_root| {
+            with_worktree(Some(project), &detection.project_root, &detection.build_root, commit.as_deref(), false, dev_config.disable_toolchain, context::worktree_keep(dev_config)?, |build_root| {
                 cmd_verify(
                     dev_config,
                     project,
-                    project_root,
+                    &detection.project_root,
                     build_root,
                     verify,
                     &features,
@@ -1646,12 +1521,12 @@ fn run(cli: Cli, detection: Option<&project::Detection>) -> Result<(), DevError>
             refresh,
             force,
         } => {
-            let _lock = acquire_cmd_lock(project, project_root, "download")?;
+            let _lock = context::reenter_command_lock()?;
             pbfhogg::cmd::download(
                 dev_config,
                 project,
-                project_root,
-                build_root,
+                &detection.project_root,
+                &detection.build_root,
                 &region,
                 osc_seq,
                 as_snapshot.as_deref(),
@@ -1675,12 +1550,12 @@ fn run(cli: Cli, detection: Option<&project::Detection>) -> Result<(), DevError>
             commit,
             file,
         } => {
-            let _lock = acquire_cmd_lock(project, project_root, "pmtiles-inspect")?;
+            let _lock = context::reenter_command_lock()?;
             elivagar::cmd::inspect(
                 dev_config,
                 project,
-                project_root,
-                build_root,
+                &detection.project_root,
+                &detection.build_root,
                 &dataset,
                 &variant,
                 commit.as_deref(),
@@ -1696,12 +1571,12 @@ fn run(cli: Cli, detection: Option<&project::Detection>) -> Result<(), DevError>
             x,
             y,
         } => {
-            let _lock = acquire_cmd_lock(project, project_root, "diag")?;
+            let _lock = context::reenter_command_lock()?;
             elivagar::cmd::diag(
                 dev_config,
                 project,
-                project_root,
-                build_root,
+                &detection.project_root,
+                &detection.build_root,
                 &dataset,
                 &variant,
                 commit.as_deref(),
@@ -1724,12 +1599,12 @@ fn run(cli: Cli, detection: Option<&project::Detection>) -> Result<(), DevError>
             layers,
             output,
         } => {
-            let _lock = acquire_cmd_lock(project, project_root, "svg")?;
+            let _lock = context::reenter_command_lock()?;
             elivagar::cmd::svg(
                 dev_config,
                 project,
-                project_root,
-                build_root,
+                &detection.project_root,
+                &detection.build_root,
                 &dataset,
                 &variant,
                 commit.as_deref(),
@@ -1763,12 +1638,12 @@ fn run(cli: Cli, detection: Option<&project::Detection>) -> Result<(), DevError>
             // `operational`: a failure before any verdict (lock, bootstrap,
             // resolution) exits regress's "could not complete" code, not 1.
             elivagar::cmd::operational(elivagar::regress::INCOMPLETE_EXIT, || {
-                let _lock = acquire_cmd_lock(project, project_root, "regress")?;
+                let _lock = context::reenter_command_lock()?;
                 elivagar::cmd::regress(
                     dev_config,
                     project,
-                    project_root,
-                    build_root,
+                    &detection.project_root,
+                    &detection.build_root,
                     &dataset,
                     &variant,
                     commit.as_deref(),
@@ -1787,35 +1662,35 @@ fn run(cli: Cli, detection: Option<&project::Detection>) -> Result<(), DevError>
         }
         Command::PmtilesCorpus { cmd } => {
             elivagar::cmd::operational(elivagar::corpus::INCOMPLETE_EXIT, || {
-                let _lock = acquire_cmd_lock(project, project_root, "pmtiles-corpus")?;
+                let _lock = context::reenter_command_lock()?;
                 elivagar::cmd::corpus(
                     dev_config,
                     project,
-                    project_root,
-                    build_root,
+                    &detection.project_root,
+                    &detection.build_root,
                     &cmd,
                     Some(&_lock),
                 )
             })
         }
         Command::DownloadOcean => {
-            let _lock = acquire_cmd_lock(project, project_root, "download-ocean")?;
-            elivagar::cmd::download_ocean(dev_config, project, project_root)
+            let _lock = context::reenter_command_lock()?;
+            elivagar::cmd::download_ocean(dev_config, project, &detection.project_root, &detection.build_root)
         }
         Command::OceanBuild { dry_run } => {
-            let _lock = acquire_cmd_lock(project, project_root, "ocean-build")?;
+            let _lock = context::reenter_command_lock()?;
             elivagar::ocean_build::run(
                 dev_config,
                 project,
-                project_root,
-                build_root,
+                &detection.project_root,
+                &detection.build_root,
                 dry_run,
                 Some(&_lock),
             )
         }
         Command::DownloadNaturalEarth => {
-            let _lock = acquire_cmd_lock(project, project_root, "download-natural-earth")?;
-            elivagar::cmd::download_natural_earth(dev_config, project, project_root)
+            let _lock = context::reenter_command_lock()?;
+            elivagar::cmd::download_natural_earth(dev_config, project, &detection.project_root, &detection.build_root)
         }
         Command::PmtilesStats { files } => cmd_pmtiles_stats(project, &files),
         Command::Serve {
@@ -1823,13 +1698,13 @@ fn run(cli: Cli, detection: Option<&project::Detection>) -> Result<(), DevError>
             dataset,
             tiles,
         } => {
-            let _lock = acquire_cmd_lock(project, project_root, "serve")?;
+            let _lock = context::reenter_command_lock()?;
             let features = resolve_features(dev_config, &[]);
             nidhogg::cmd::serve(
                 dev_config,
                 project,
-                project_root,
-                build_root,
+                &detection.project_root,
+                &detection.build_root,
                 data_dir.as_deref(),
                 &dataset,
                 tiles.as_deref(),
@@ -1839,20 +1714,20 @@ fn run(cli: Cli, detection: Option<&project::Detection>) -> Result<(), DevError>
         Command::Stop => nidhogg::cmd::stop(project, project_root),
         Command::Status => nidhogg::cmd::status(dev_config, project, project_root),
         Command::Ingest { variant, dataset } => {
-            let _lock = acquire_cmd_lock(project, project_root, "ingest")?;
+            let _lock = context::reenter_command_lock()?;
             let features = resolve_features(dev_config, &[]);
             nidhogg::cmd::ingest(
                 dev_config,
                 project,
-                project_root,
-                build_root,
+                &detection.project_root,
+                &detection.build_root,
                 &variant,
                 &dataset,
                 &features,
             )
         }
         Command::Update { args } => {
-            let _lock = acquire_cmd_lock(project, project_root, "update")?;
+            let _lock = context::reenter_command_lock()?;
             let features = resolve_features(dev_config, &[]);
             nidhogg::cmd::update(project, project_root, build_root, &args, &features)
         }
@@ -1870,7 +1745,7 @@ fn run(cli: Cli, detection: Option<&project::Detection>) -> Result<(), DevError>
             // otherwise contaminate) and what activates the armed
             // toolchain-disable. It was the one cargo-driving command reaching
             // its handler unlocked.
-            let _lock = acquire_cmd_lock(project, project_root, "visual")?;
+            let _lock = context::reenter_command_lock()?;
             match project_config {
                 ProjectConfig::Litehtml(litehtml_config) => litehtml::cmd::test(
                     project,
@@ -1887,9 +1762,11 @@ fn run(cli: Cli, detection: Option<&project::Detection>) -> Result<(), DevError>
                     sluggrs_config,
                     &args,
                 ),
-                _ => Err(DevError::Config(format!(
-                    "'visual' runs visual tests and is only available for litehtml/sluggrs projects (current: {project})"
-                )))
+                _ => Err(DevError::WrongProject {
+                    command: "visual".to_owned(),
+                    expected: "litehtml/sluggrs".to_owned(),
+                    current: project.to_string(),
+                })
             }
         }
         // ----- cargo single-test runner -----
@@ -1901,7 +1778,7 @@ fn run(cli: Cli, detection: Option<&project::Detection>) -> Result<(), DevError>
             // lands in it) and outlives the watchdog `test_cmd::run` arms, so
             // a 124 or 130 keeps everything up to the stop.
             let _log = check_cmd::RunLog::begin(project_root, check_cmd::run_log_kind::TEST);
-            let _lock = acquire_cmd_lock(project, project_root, "test")?;
+            let _lock = context::reenter_command_lock()?;
             // cargo runs in the code tree (build_root); brokkr's own
             // `.brokkr` state (hung-test snapshots) belongs under the
             // config dir (project_root), which differs under the
@@ -1912,9 +1789,11 @@ fn run(cli: Cli, detection: Option<&project::Detection>) -> Result<(), DevError>
             match project_config {
                 ProjectConfig::Litehtml(cfg) => litehtml::cmd::list(project, project_root, cfg),
                 ProjectConfig::Sluggrs(cfg) => sluggrs::cmd::list(project, project_root, cfg),
-                _ => Err(DevError::Config(format!(
-                    "'list' is only available for litehtml/sluggrs projects (current: {project})"
-                )))
+                _ => Err(DevError::WrongProject {
+                    command: "list".to_owned(),
+                    expected: "litehtml/sluggrs".to_owned(),
+                    current: project.to_string(),
+                })
             }
         }
         Command::Approve { fixture, all } => {
@@ -1924,26 +1803,32 @@ fn run(cli: Cli, detection: Option<&project::Detection>) -> Result<(), DevError>
             match project {
                 Project::Litehtml => litehtml::cmd::report(project, project_root, &run_id),
                 Project::Sluggrs => sluggrs::cmd::report(project, project_root, &run_id),
-                other => Err(DevError::Config(format!(
-                    "'report' is only available for litehtml/sluggrs projects (current: {other})"
-                )))
+                other => Err(DevError::WrongProject {
+                    command: "report".to_owned(),
+                    expected: "litehtml/sluggrs".to_owned(),
+                    current: other.to_string(),
+                })
             }
         }
         Command::VisualStatus => {
             match project_config {
                 ProjectConfig::Litehtml(cfg) => litehtml::cmd::status(project, project_root, cfg),
                 ProjectConfig::Sluggrs(cfg) => sluggrs::cmd::status(project, project_root, cfg),
-                _ => Err(DevError::Config(format!(
-                    "'visual-status' is only available for litehtml/sluggrs projects (current: {project})"
-                )))
+                _ => Err(DevError::WrongProject {
+                    command: "visual-status".to_owned(),
+                    expected: "litehtml/sluggrs".to_owned(),
+                    current: project.to_string(),
+                })
             }
         }
         // ----- litehtml-only commands -----
         Command::Prepare { input, output } => {
             let ProjectConfig::Litehtml(cfg) = project_config else {
-                return Err(DevError::Config(format!(
-                    "'prepare' is only available for litehtml projects (current: {project})"
-                )));
+                return Err(DevError::WrongProject {
+                    command: "prepare".to_owned(),
+                    expected: "litehtml".to_owned(),
+                    current: project.to_string(),
+                });
             };
             litehtml::cmd::prepare(project, project_root, cfg, &input, &output)
         }
@@ -1954,20 +1839,13 @@ fn run(cli: Cli, detection: Option<&project::Detection>) -> Result<(), DevError>
             litehtml::cmd::outline(project, project_root, &input, depth, full, selectors)
         }
         // ----- sluggrs-only commands -----
-        Command::Hotpath { mut mode, target } => {
-            project::require(project, Project::Sluggrs, "hotpath")?;
-            // The command is named for its default. A bare `brokkr hotpath`
-            // has always meant `--hotpath 1`; going through `run_measured`
-            // would otherwise resolve it to `Run`, which stores nothing.
-            if !mode.is_measured() {
-                mode.hotpath = Some(1);
-            }
+        Command::Hotpath { mode, target } => {
             run_measured(
                 &mode,
                 detection,
                 "n/a",
                 "n/a",
-                &brokkr_args,
+                &invocation,
                 |req| sluggrs::hotpath::cmd(req, &target),
             )
         }
@@ -2017,7 +1895,7 @@ fn run(cli: Cli, detection: Option<&project::Detection>) -> Result<(), DevError>
                 ratatoskr::cmd::service_list(project_root)
             }
         }
-        Command::Sync { .. } => run_sync(&cli.command, detection, &brokkr_args),
+        Command::Sync { script, all, filter, include_ignored, bench, force, keep_artefacts, debug, release, gate, as_baseline, commit } => run_sync(&script, &all, &filter, &include_ignored, &bench, &force, &keep_artefacts, &debug, &release, &gate, &as_baseline, &commit, detection, &invocation),
         Command::MockServe { fixture } => {
             project::require(project, Project::Ratatoskr, "mock-serve")?;
             let cfg = project_config.ratatoskr()?;
@@ -2066,7 +1944,7 @@ fn run(cli: Cli, detection: Option<&project::Detection>) -> Result<(), DevError>
                     detection,
                     "",
                     "",
-                    &brokkr_args,
+                    &invocation,
                     |req| piners::measured::run(req, &args),
                 )
             } else {

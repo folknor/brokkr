@@ -217,8 +217,8 @@ fn explain_lost_features(project_root: &Path, package: &str, env: &[(&str, &str)
     scoped.extend(unify.iter().map(String::as_str));
 
     let features_of = |args: &[&str]| -> Option<std::collections::BTreeMap<String, std::collections::BTreeSet<String>>> {
-        let captured = output::run_captured_with_env("cargo", args, project_root, env).ok()?;
-        if !captured.status.success() {
+        let captured = run_check_cargo(args, project_root, env).ok()?;
+        if !captured.success() {
             return None;
         }
         let stdout = String::from_utf8_lossy(&captured.stdout);
@@ -340,8 +340,8 @@ fn probe_missing_bin(
     let args = install_check_args(package, &selector, debug, allow_args);
     cargo_line(commands, &format!("cargo {}", args.join(" ")));
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let captured = output::run_captured_with_env("cargo", &arg_refs, project_root, env_refs)?;
-    if captured.status.success() {
+    let captured = run_check_cargo(&arg_refs, project_root, env_refs)?;
+    if captured.success() {
         return Ok(BinVerdict::Checked);
     }
 
@@ -406,11 +406,11 @@ fn check_one_install_package(
     output::status(&format!("install-feature {package}"));
     cargo_line(commands, &format!("cargo {}", args.join(" ")));
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let captured = output::run_captured_with_env("cargo", &arg_refs, project_root, env_refs)?;
+    let captured = run_check_cargo(&arg_refs, project_root, env_refs)?;
     let stdout = String::from_utf8_lossy(&captured.stdout);
     let stderr = String::from_utf8_lossy(&captured.stderr);
 
-    if !captured.status.success() {
+    if !captured.success() {
         let events = cargo_json::parse_cargo_diagnostics(&stdout);
         let errors: Vec<_> = events.iter().filter(|d| d.is_error()).collect();
         if is_toolchain_refusal(&stderr, !errors.is_empty()) {

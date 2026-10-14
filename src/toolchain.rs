@@ -176,9 +176,12 @@ impl DisabledToolchain {
                 // replacement changes bytes at a stable path; this operation
                 // must preserve the original and make that path absent.
                 std::fs::rename(&orig, &aside).map_err(|e| {
-                    DevError::Config(format!(
-                        "disable_toolchain: cannot move {} aside: {e}",
-                        orig.display()
+                    DevError::Io(std::io::Error::new(
+                        e.kind(),
+                        format!(
+                            "disable_toolchain: cannot move {} aside: {e}",
+                            orig.display()
+                        ),
                     ))
                 })?;
                 // Config-derived and identical on every run: the run log when

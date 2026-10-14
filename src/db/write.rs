@@ -63,6 +63,12 @@ fn insert_inner(conn: &rusqlite::Connection, row: &RunRow, uuid: &str) -> Result
     // Store one stable spelling regardless of whether the feature list came
     // from a host config, a request, or a per-row variant.
     let cargo_features = canonical_cargo_features(row.cargo_features.as_deref());
+    let brokkr_args = serde_json::to_string(&row.invocation.argv).map_err(|error| {
+        DevError::Database(format!("could not encode brokkr argv array: {error}"))
+    })?;
+    // An empty key would pair every such row with every other; store none,
+    // which pairs by the stored argv like a historical row.
+    let arm_key = (!row.invocation.arm_key.is_empty()).then_some(row.invocation.arm_key.as_str());
 
     // Envelope row.
     conn.execute(
@@ -93,7 +99,8 @@ fn insert_inner(conn: &rusqlite::Connection, row: &RunRow, uuid: &str) -> Result
             row.stop_marker
                 .as_ref()
                 .and_then(|(requested, _)| requested.as_deref()),
-            row.brokkr_args,
+            brokkr_args,
+            arm_key,
         ],
     )?;
     let run_id = conn.last_insert_rowid();
@@ -163,16 +170,27 @@ fn insert_timings(conn: &rusqlite::Connection, run_id: i64, row: &RunRow) -> Res
 }
 
 /// The hotpath child rows, plus the thread summary into `run_kv`.
+#[allow(clippy::too_many_lines)]
 fn insert_hotpath(
     conn: &rusqlite::Connection,
     run_id: i64,
     hp: &HotpathData,
 ) -> Result<(), DevError> {
+    // The legacy text columns carry each quantity's display spelling, display
+    // text included; the typed tables beside them hold numeric quantities only.
+    let text = |q: &Option<Quantity>| q.as_ref().map(ToString::to_string);
     for func in &hp.functions {
+        let percentile_text = |p: f64| {
+            func.percentiles
+                .iter()
+                .find(|(key, _)| (key.value() - p).abs() < f64::EPSILON)
+                .map(|(_, value)| value.to_string())
+        };
         conn.execute(
             "INSERT INTO hotpath_functions \
-             (run_id, section, description, ordinal, name, calls) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+             (run_id, section, description, ordinal, name, calls, avg, total, percent_total, \
+              p50, p95, p99) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             rusqlite::params![
                 run_id,
                 func.section,
@@ -180,13 +198,19 @@ fn insert_hotpath(
                 func.ordinal,
                 func.name,
                 func.calls,
+                text(&func.avg),
+                text(&func.total),
+                text(&func.percent_total),
+                percentile_text(50.0),
+                percentile_text(95.0),
+                percentile_text(99.0),
             ],
         )?;
         let function_id = conn.last_insert_rowid();
         for (metric, value) in [
-            ("avg", func.avg),
-            ("total", func.total),
-            ("percent_total", func.percent_total),
+            ("avg", &func.avg),
+            ("total", &func.total),
+            ("percent_total", &func.percent_total),
         ] {
             if let Some(value) = value {
                 insert_typed_hotpath_metric(
@@ -200,7 +224,9 @@ fn insert_hotpath(
             }
         }
         for (percentile, value) in &func.percentiles {
-            let (quantity_kind, value_int, value_real) = value.storage_parts();
+            let Some((quantity_kind, value_int, value_real)) = value.storage_parts() else {
+                continue;
+            };
             conn.execute(
                 "INSERT INTO hotpath_function_percentiles \
                  (function_id, percentile, quantity_kind, value_int, value_real) \
@@ -218,18 +244,29 @@ fn insert_hotpath(
     for thread in &hp.threads {
         conn.execute(
             "INSERT INTO hotpath_threads \
-             (run_id, name, status) \
-             VALUES (?1, ?2, ?3)",
-            rusqlite::params![run_id, thread.name, thread.status,],
+             (run_id, name, status, cpu_percent, cpu_percent_max, cpu_percent_avg, \
+              alloc_bytes, dealloc_bytes, mem_diff) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            rusqlite::params![
+                run_id,
+                thread.name,
+                thread.status,
+                text(&thread.cpu_percent),
+                text(&thread.cpu_percent_max),
+                text(&thread.cpu_percent_avg),
+                text(&thread.alloc_bytes),
+                text(&thread.dealloc_bytes),
+                text(&thread.mem_diff),
+            ],
         )?;
         let thread_id = conn.last_insert_rowid();
         for (metric, value) in [
-            ("cpu_percent", thread.cpu_percent),
-            ("cpu_percent_max", thread.cpu_percent_max),
-            ("cpu_percent_avg", thread.cpu_percent_avg),
-            ("alloc_bytes", thread.alloc_bytes),
-            ("dealloc_bytes", thread.dealloc_bytes),
-            ("mem_diff", thread.mem_diff),
+            ("cpu_percent", &thread.cpu_percent),
+            ("cpu_percent_max", &thread.cpu_percent_max),
+            ("cpu_percent_avg", &thread.cpu_percent_avg),
+            ("alloc_bytes", &thread.alloc_bytes),
+            ("dealloc_bytes", &thread.dealloc_bytes),
+            ("mem_diff", &thread.mem_diff),
         ] {
             if let Some(value) = value {
                 insert_typed_hotpath_metric(
@@ -262,9 +299,12 @@ fn insert_typed_hotpath_metric(
     owner_column: &str,
     owner_id: i64,
     metric: &str,
-    quantity: Quantity,
+    quantity: &Quantity,
 ) -> Result<(), DevError> {
-    let (quantity_kind, value_int, value_real) = quantity.storage_parts();
+    // Display text has no typed form; its legacy text column carries it.
+    let Some((quantity_kind, value_int, value_real)) = quantity.storage_parts() else {
+        return Ok(());
+    };
     conn.execute(
         &format!(
             "INSERT INTO {table} ({owner_column}, metric, quantity_kind, value_int, value_real) \
@@ -336,7 +376,7 @@ mod tests {
         clippy::let_underscore_must_use,
         clippy::useless_vec
     )]
-    use crate::db::{HotpathData, KvPair, QueryFilter, ResultsDb, RunRow};
+    use crate::db::{HotpathData, KvPair, QueryFilter, ResultsDb, RunInvocation, RunRow};
 
     #[test]
     fn db_open_and_insert_roundtrip() {
@@ -365,7 +405,14 @@ mod tests {
             avail_memory_mb: None,
             storage_notes: None,
             cli_args: Some(String::from("--fast")),
-            brokkr_args: Some(String::from("brokkr test --fast")),
+            invocation: RunInvocation {
+                argv: vec![
+                    String::from("brokkr"),
+                    String::from("test"),
+                    String::from("--fast"),
+                ],
+                arm_key: String::from("test/fast"),
+            },
             project: String::from("test"),
             stop_marker: None,
             kv: vec![],
@@ -396,7 +443,8 @@ mod tests {
         assert_eq!(rows[0].input_file, "denmark.osm.pbf");
         assert_eq!(rows[0].elapsed_ms, 1234);
         assert_eq!(rows[0].cli_args, "--fast");
-        assert_eq!(rows[0].brokkr_args, "brokkr test --fast");
+        assert_eq!(rows[0].brokkr_args, r#"["brokkr","test","--fast"]"#);
+        assert_eq!(rows[0].arm_key.as_deref(), Some("test/fast"));
 
         // Clean up.
         drop(std::fs::remove_file(&db_path));
@@ -441,7 +489,10 @@ mod tests {
             avail_memory_mb: None,
             storage_notes: None,
             cli_args: None,
-            brokkr_args: None,
+            invocation: RunInvocation {
+                argv: Vec::new(),
+                arm_key: String::new(),
+            },
             project: String::from("test"),
             stop_marker: None,
             kv,

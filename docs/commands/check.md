@@ -1,7 +1,9 @@
 # brokkr check + brokkr test
 
 Both commands share the sweep + profile machinery in `src/profile.rs` and the
-test-phase logic in `src/check_cmd.rs`. They differ in scope: `check` is the
+test-phase driver in `src/check_cmd/test_phase.rs`, with serial test execution
+in `src/check_cmd/test_execution.rs` and its environment in
+`src/check_cmd/sweep_env.rs`. They differ in scope: `check` is the
 full validation pass (gremlins + header + textlint + manifest + script checks +
 dependency rules + publish cycle + clippy + tests); `test` runs the cargo tests
 matching one name against the same sweep set.
@@ -783,7 +785,7 @@ leaked process carrying the run token is reaped at the next hold (see Strays).
 
 The limits are constants in `src/check_cmd/watchdog.rs` (`CHECK_CEILING` and
 `phase_ceiling`), `src/test_runner/deadline.rs` (`IDLE_TIMEOUT`, `TEST_TIMEOUT`,
-`SWEEP_WALL_TIMEOUT`, `PARALLEL_SWEEP_TIMEOUT`) and `src/test_runner/procgroup.rs`
+`SWEEP_WALL_TIMEOUT`) and `src/test_runner/procgroup.rs`
 (`DRAIN_GRACE`); there is no config key or flag.
 
 ## Strays
@@ -1214,8 +1216,9 @@ it were broken, no build on the machine would work.
 ## `gremlins` phase
 
 Runs first and fails the check if any banned Unicode character
-is found in `.rs`/`.toml`/`.md`/`.js`/`.sh` files (tracked or
-untracked-not-gitignored, so new plan docs are caught before staging) - see
+is found in `.rs`/`.toml`/`.md`/`.markdown`/`.js`/`.sh`/`.py`/`.yml`/`.yaml`
+files (case-insensitive, tracked or untracked-not-gitignored, so new plan docs
+are caught before staging) - see
 `src/gremlins.rs` for the banned set (invisible/zero-width, non-breaking
 spaces, bidi overrides, em/en dashes, typographic quotes, and emoji /
 pictographs: Misc Symbols, Dingbats, the emoji planes, and emoji variation
@@ -2032,7 +2035,8 @@ a marker the test's own output glued itself onto. `print!("hi")` arrived as
 and the watchdog blamed the wrong test; `println!("ok")` did the mirror image,
 clearing pending early and hiding a hang. Events state what that had to guess.
 
-The whole-sweep wall backstop (`PARALLEL_SWEEP_TIMEOUT`) covers a wedge the
+The whole-sweep wall backstop (`SWEEP_WALL_TIMEOUT`, shared with the serial
+sweeps) covers a wedge the
 per-test cap cannot charge to any test; it kills the process group and stops the
 run. It is the bound only for a caller that arms no phase watchdog: under
 `check` and `brokkr test` the `test` phase ceiling always fires first (see

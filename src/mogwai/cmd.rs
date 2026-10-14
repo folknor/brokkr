@@ -1,5 +1,6 @@
 //! `brokkr mogwai` - build a mogwai surface and measure one invocation.
 
+use crate::clean::layout::ProjectState;
 use crate::context::MeasurementSession;
 use crate::error::DevError;
 use crate::harness::{self, BenchConfig};
@@ -8,12 +9,6 @@ use crate::output;
 use crate::project::{self, Project};
 
 use super::targets;
-
-/// Scratch dir for the harness's hotpath report and marker FIFO.
-///
-/// Under `.brokkr/` rather than the configured `scratch_dir`, whose default
-/// (`data/scratch`) would create a `data/` tree in a project that has none.
-const SCRATCH_REL: &str = ".brokkr/mogwai";
 
 /// Build and run one invocation. `target` names a harness; `None` is the CLI.
 pub(crate) fn run(
@@ -45,7 +40,7 @@ pub(crate) fn run(
     // `required-features`), so dropping it under `--bench` would fail the build
     // rather than produce a leaner one.
     let mode_features: Vec<String> = if uses_hotpath(req) {
-        req.hotpath_features()
+        req.build_features()
             .into_iter()
             .map(str::to_owned)
             .collect()
@@ -62,7 +57,7 @@ pub(crate) fn run(
         return Ok(());
     }
 
-    let ctx = MeasurementSession::with_build_config_for_request(req, &resolved.build, "mogwai")?;
+    let ctx = MeasurementSession::with_build_config_for_request(req, &resolved.build)?;
 
     let binary_str = ctx.binary()?.display().to_string();
 
@@ -78,7 +73,7 @@ pub(crate) fn run(
         input_file: None,
         input_mb: None,
         cargo_features: None,
-        cargo_profile: crate::build::CargoProfile::Release,
+        external_build: None,
         runs: req.runs(),
         cli_args: Some(harness::format_cli_args(&binary_str, &argv)),
         metadata: vec![],
@@ -90,19 +85,25 @@ pub(crate) fn run(
     // it - the hotpath report is written to a file the child is told about, and
     // something has to set that up and read it back.
     if uses_hotpath(req) {
-        let scratch_dir = req.project_root.join(SCRATCH_REL);
+        let state = ProjectState::new(req.project_root.as_path());
+        let scratch_dir = state.mogwai().scratch().to_path_buf();
         std::fs::create_dir_all(&scratch_dir)?;
 
-        let label = harness::hotpath_feature(req.is_alloc());
+        let label = req
+            .mode
+            .profiled()
+            .map_or("", crate::measure::ProfiledMode::feature);
         output::detail(&format!("mogwai {label}: {}", resolved.name));
-        harness::hotpath_alloc_note(req.is_alloc());
+        if let Some(profiling) = req.mode.profiled() {
+            profiling.print_note();
+        }
 
         ctx.harness.run_hotpath(&config, ctx.binary()?, |_i| {
             let (result, _stderr, sidecar) = harness::run_hotpath_capture(
                 &binary_str,
                 &argv,
                 &scratch_dir,
-                req.project_root,
+                req.project_root.as_path(),
                 &[],
                 &[],
                 req.stop_marker,
@@ -120,7 +121,7 @@ pub(crate) fn run(
     // what `elapsed` means: markers keep the excluded setup visible as its own
     // phase instead of deleting it from the record.
     ctx.harness
-        .run_external(&config, ctx.binary()?, &argv, req.project_root)?;
+        .run_external(&config, ctx.binary()?, &argv, req.project_root.as_path())?;
 
     Ok(())
 }

@@ -49,7 +49,7 @@ use std::time::{Duration, Instant};
 use crate::artefacts::ArtefactDir;
 use crate::config::project_config::piners::PinersConfig;
 use crate::error::DevError;
-use crate::lockfile::{self, LockContext, LockGuard};
+use crate::lockfile::LockGuard;
 use crate::output;
 use crate::piners::contract::RunErrorRecord;
 use crate::piners::corpus_db::{CorpusDb, RunContext, RunRecord};
@@ -159,12 +159,7 @@ pub fn corpus(
     // are no longer the file's. Verify-only too: it would report drift for
     // bytes a reseed had just adopted. Held to the end, through ingest and
     // the bless write.
-    let project_root_str = project_root.display().to_string();
-    let lock = lockfile::acquire(&LockContext {
-        project: "piners",
-        command: "corpus",
-        project_root: &project_root_str,
-    })?;
+    let lock = crate::context::reenter_command_lock()?;
     let _sigterm = crate::shutdown::SigtermGuard::install();
 
     let sel_args = SelectArgs {
@@ -354,7 +349,7 @@ pub fn corpus(
     };
     lock.clear_child_pid();
 
-    let end = HarnessEnd::from_status(&capture.captured.status, capture.killed_on_deadline);
+    let end = HarnessEnd::from_ending(&capture.captured.ending);
     let output_cut = capture.output_cut;
     let captured = capture.captured;
     // Keep stdout/stderr on disk until ingest commits - the pre-ingest safety
@@ -376,7 +371,7 @@ pub fn corpus(
     let rec = &assessment.rec;
 
     let elapsed_ms = captured.elapsed.as_millis();
-    let harness_code = captured.status.code();
+    let harness_code = captured.code();
 
     // Evaluate the gate up front. It drives the pass/fail decision, feeds the
     // gate_miss table (selected probes the harness emitted no line for), and
@@ -733,11 +728,11 @@ impl AttemptEnv<'_> {
         {
             return AttemptOutcome::Stop(reason);
         }
-        if capture.killed_on_deadline {
+        if capture.killed_on_deadline() {
             // Never attributed to a probe: the subset ran out of shared time.
             return AttemptOutcome::Stop(StopReason::Deadline);
         }
-        let end = HarnessEnd::from_status(&capture.captured.status, false);
+        let end = HarnessEnd::from_ending(&capture.captured.ending);
         // The same assessment the original run gets, over this subset.
         let a = integrity::assess(subset, &capture.captured.stdout, end, capture.output_cut);
         output::corpus_msg(&format!(
@@ -855,7 +850,7 @@ impl RunStart {
             started_at: crate::piners::time::now_sqlite_utc(),
             commit_sha: crate::git::resolve_commit(project_root, "HEAD")
                 .ok()
-                .map(|c| c.full),
+                .map(|c| c.as_str().to_owned()),
             dirty: crate::git::has_uncommitted(project_root),
         }
     }

@@ -2,6 +2,7 @@
 
 use std::path::Path;
 
+use crate::clean::layout::PbfhoggLayout;
 use crate::error::DevError;
 use crate::harness::{BenchConfig, BenchHarness};
 
@@ -21,7 +22,7 @@ pub fn run(
 ) -> Result<(), DevError> {
     std::fs::create_dir_all(scratch_dir)?;
 
-    let output_path = scratch_dir.join("bench-merge-output.osm.pbf");
+    let output_path = PbfhoggLayout::fixed_scratch_file(scratch_dir, "bench-merge-output.osm.pbf");
     let (basename, pbf_str) = super::path_strs(pbf_path)?;
     let osc_str = osc_path
         .to_str()
@@ -62,7 +63,7 @@ pub fn run(
             input_file: Some(basename.clone()),
             input_mb: Some(file_mb),
             cargo_features: None,
-            cargo_profile: crate::build::CargoProfile::Release,
+            external_build: None,
             runs,
             cli_args: Some(crate::harness::format_cli_args(
                 &binary.display().to_string(),

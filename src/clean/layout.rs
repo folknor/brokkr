@@ -122,18 +122,24 @@ impl RatatoskrLayout {
         ]
     }
 
+    /// Service runs have a dedicated level so script stems cannot collide
+    /// with sync artifacts, mock state, or the gate database.
     pub(crate) fn service_artifacts(&self) -> PathBuf {
         self.root.join("service")
     }
 
+    /// Fixture state for service runs stays separate from both service
+    /// artifacts and mock-serve's stable readiness directory.
     pub(crate) fn service_mock_artifacts(&self) -> PathBuf {
         self.root.join("service-mock")
     }
 
+    /// Per-test artifacts for sync runs.
     pub(crate) fn sync_artifacts(&self) -> PathBuf {
         self.root.join("sync")
     }
 
+    /// Stable readiness sentinel directory for `mock-serve`.
     pub(crate) fn mock_artifacts(&self) -> PathBuf {
         self.root.join("mock")
     }
@@ -169,6 +175,8 @@ impl PinersLayout {
     }
 }
 
+/// Dellingr harness output, separate from configurable data scratch so a
+/// project without a data directory does not gain one just for brokkr files.
 #[derive(Debug, Clone)]
 pub(crate) struct DellingrLayout {
     scratch: PathBuf,
@@ -186,6 +194,8 @@ impl DellingrLayout {
     }
 }
 
+/// Mogwai harness output, separate from configurable data scratch so a
+/// project without a data directory does not gain one just for brokkr files.
 #[derive(Debug, Clone)]
 pub(crate) struct MogwaiLayout {
     scratch: PathBuf,
@@ -234,6 +244,20 @@ impl<'a> ElivagarLayout<'a> {
         &self.paths.scratch_dir
     }
 
+    pub(crate) fn data_dir(&self) -> &Path {
+        &self.paths.data_dir
+    }
+
+    pub(crate) fn tilegen_output(&self) -> PathBuf {
+        self.scratch().join("bench-self-output.pmtiles")
+    }
+
+    pub(crate) fn tilegen_hotpath_output(&self, alloc: bool) -> PathBuf {
+        let suffix = if alloc { "alloc-" } else { "" };
+        self.scratch()
+            .join(format!("hotpath-{suffix}output.pmtiles"))
+    }
+
     pub(crate) fn tilegen_tmp(&self) -> PathBuf {
         // The `--tmp-dir` argument passed to elivagar, under the data dir.
         Self::tilegen_tmp_in(&self.paths.data_dir)
@@ -255,12 +279,32 @@ impl<'a> ElivagarLayout<'a> {
         &self.paths.output_dir
     }
 
+    pub(crate) fn planetiler_output(&self) -> PathBuf {
+        self.scratch().join("planetiler-bench.pmtiles")
+    }
+
+    pub(crate) fn planetiler_tmp(&self) -> PathBuf {
+        self.scratch().join("planetiler_tmp")
+    }
+
+    pub(crate) fn planetiler_sources(&self) -> PathBuf {
+        self.paths.data_dir.join("sources")
+    }
+
+    pub(crate) fn planetiler_primed_marker(&self) -> PathBuf {
+        self.planetiler_sources().join(".brokkr-primed")
+    }
+
+    pub(crate) fn tilemaker_output(&self) -> PathBuf {
+        self.scratch().join("tilemaker-bench.pmtiles")
+    }
+
     pub(crate) fn datasets(&self) -> &HashMap<String, config::Dataset> {
         &self.paths.datasets
     }
 }
 
-/// Nidhogg's configured ingest output directory.
+/// Nidhogg's mode-specific ingest output directories.
 pub(crate) struct NidhoggLayout<'a> {
     paths: &'a config::ResolvedPaths,
 }
@@ -270,12 +314,16 @@ impl<'a> NidhoggLayout<'a> {
         Self { paths }
     }
 
-    pub(crate) fn ingest_output(&self) -> PathBuf {
-        Self::ingest_output_in(&self.paths.scratch_dir)
+    pub(crate) fn run_ingest_output(&self) -> PathBuf {
+        self.paths.scratch_dir.join("run-ingest-output")
     }
 
-    pub(crate) fn ingest_output_in(scratch_dir: &Path) -> PathBuf {
-        scratch_dir.join("bench-ingest-output")
+    pub(crate) fn bench_ingest_output(&self) -> PathBuf {
+        self.paths.scratch_dir.join("bench-ingest-output")
+    }
+
+    pub(crate) fn hotpath_ingest_output(&self) -> PathBuf {
+        self.paths.scratch_dir.join("hotpath-ingest-output")
     }
 }
 
@@ -285,8 +333,8 @@ pub(crate) enum PbfhoggFileKind {
     Osc,
 }
 
-/// Pbfhogg's known scratch outputs. These are names constructed by the
-/// command layer; arbitrary `.pbf`/`.osc.gz` files in scratch are not targets.
+/// Pbfhogg's known scratch outputs. These names come from the command layer;
+/// arbitrary `.pbf`/`.osc.gz` files in scratch are not targets.
 pub(crate) struct PbfhoggLayout<'a> {
     paths: &'a config::ResolvedPaths,
 }
@@ -325,8 +373,20 @@ impl<'a> PbfhoggLayout<'a> {
         scratch_dir.join("multi-extract")
     }
 
+    pub(crate) fn fixed_scratch_dir(scratch_dir: &Path, name: &str) -> PathBuf {
+        scratch_dir.join(name)
+    }
+
+    pub(crate) fn scratch_dir_with_dataset(
+        scratch_dir: &Path,
+        prefix: &str,
+        dataset: &str,
+    ) -> PathBuf {
+        scratch_dir.join(format!("{prefix}-{dataset}"))
+    }
+
     pub(crate) fn geocode_dir(scratch_dir: &Path, dataset: &str) -> PathBuf {
-        scratch_dir.join(format!("geocode-{dataset}"))
+        Self::scratch_dir_with_dataset(scratch_dir, "geocode", dataset)
     }
 
     pub(crate) fn merged_pbf_cache(

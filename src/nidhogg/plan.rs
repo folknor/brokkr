@@ -59,7 +59,7 @@ impl PlannedCommand for NidhoggPlan<'_> {
             req.mode,
             MeasureMode::Hotpath { .. } | MeasureMode::Alloc { .. }
         ) {
-            req.hotpath_features()
+            req.build_features()
         } else {
             req.feat_refs()
         };
@@ -116,7 +116,7 @@ impl PlannedCommand for NidhoggPlan<'_> {
                 hash.as_deref(),
                 *mb,
                 req.runs(),
-                req.project_root,
+                req.project_root.as_path(),
             ),
             NidhoggState::Ingest => unreachable!(),
         }
@@ -135,22 +135,21 @@ impl PlannedCommand for NidhoggPlan<'_> {
             req.dataset,
             req.variant,
             paths,
-            req.project_root,
+            req.project_root.as_path(),
         )?;
         let pbf_str = pbf
             .to_str()
             .ok_or_else(|| DevError::Config("PBF path is not valid UTF-8".into()))?;
         // Preserve each mode's historic scratch name: it is part of the
         // subprocess cli_args stored on existing measurement rows.
-        let output_name = match req.mode {
-            MeasureMode::Run => "run-ingest-output",
-            MeasureMode::Bench { .. } => self
-                .0
-                .scratch_output_dir()
-                .ok_or_else(|| DevError::Config("ingest has no scratch output".into()))?,
-            MeasureMode::Hotpath { .. } | MeasureMode::Alloc { .. } => "hotpath-ingest-output",
+        let layout = crate::clean::layout::NidhoggLayout::new(paths);
+        let output_dir = match req.mode {
+            MeasureMode::Run => layout.run_ingest_output(),
+            MeasureMode::Bench { .. } => layout.bench_ingest_output(),
+            MeasureMode::Hotpath { .. } | MeasureMode::Alloc { .. } => {
+                layout.hotpath_ingest_output()
+            }
         };
-        let output_dir = paths.scratch_dir.join(output_name);
         let args = self
             .0
             .build_args(pbf_str, &output_dir.display().to_string())?;
@@ -187,8 +186,13 @@ fn api_plan(
         .filter(|(n, _)| query.is_none_or(|q| q == n))
         .map(|(n, _)| n)
         .collect();
-    let pbf =
-        crate::resolve::resolve_pbf_path(req.dataset, req.variant, paths, req.project_root).ok();
+    let pbf = crate::resolve::resolve_pbf_path(
+        req.dataset,
+        req.variant,
+        paths,
+        req.project_root.as_path(),
+    )
+    .ok();
     let input_file = pbf
         .as_ref()
         .and_then(|p| p.file_name())
@@ -223,13 +227,16 @@ fn tiles_plan(
         .display()
         .to_string();
     let (tiles, mb) = match tiles_variant {
-        Some(v) => {
-            crate::resolve::resolve_pmtiles_with_size(req.dataset, v, paths, req.project_root)?
-        }
+        Some(v) => crate::resolve::resolve_pmtiles_with_size(
+            req.dataset,
+            v,
+            paths,
+            req.project_root.as_path(),
+        )?,
         None => crate::resolve::resolve_default_pmtiles_with_size(
             req.dataset,
             paths,
-            req.project_root,
+            req.project_root.as_path(),
         )?,
     };
     let coords = crate::pmtiles::sample_tile_coords(&tiles)?;

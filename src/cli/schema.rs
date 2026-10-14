@@ -436,7 +436,7 @@ In depth: `brokkr man clippy`."
     #[command(display_order = 1)]
     Env,
     // ----- pbfhogg tool CLI commands (display_order = 2) -----
-    /// [pbfhogg] Inspect PBF. Flags select mode:
+    /// Inspect PBF. Flags select mode:
     ///   no flag       → metadata (block count / bbox / stats)
     ///   `--nodes`     → node statistics
     ///   `--tags`      → tag frequencies (optionally narrowed by
@@ -481,7 +481,7 @@ In depth: `brokkr man clippy`."
         #[arg(long)]
         snapshot: Option<String>,
     },
-    /// [pbfhogg] Check referential integrity
+    /// Check referential integrity
     #[command(name = "check-refs", display_order = 2)]
     CheckRefs {
         #[command(flatten)]
@@ -494,7 +494,7 @@ In depth: `brokkr man clippy`."
         #[arg(long)]
         snapshot: Option<String>,
     },
-    /// [pbfhogg] Check ID ordering
+    /// Check ID ordering
     #[command(name = "check-ids", display_order = 2)]
     CheckIds {
         #[command(flatten)]
@@ -512,7 +512,7 @@ In depth: `brokkr man clippy`."
         #[arg(long)]
         snapshot: Option<String>,
     },
-    /// [pbfhogg] Sort PBF
+    /// Sort PBF
     #[command(name = "sort", display_order = 2)]
     Sort {
         #[command(flatten)]
@@ -526,7 +526,7 @@ In depth: `brokkr man clippy`."
         #[arg(long)]
         snapshot: Option<String>,
     },
-    /// [pbfhogg] Cat passthrough. Flags are orthogonal:
+    /// Cat passthrough. Flags are orthogonal:
     ///   `--type way|relation` restricts output to one object kind;
     ///   `--dedupe` runs the two-input dedupe path (and only this
     ///     combination supports `--io-uring`);
@@ -557,7 +557,7 @@ In depth: `brokkr man clippy`."
         #[arg(long)]
         snapshot: Option<String>,
     },
-    /// [pbfhogg] Tags filter. Orthogonal flags:
+    /// Tags filter. Orthogonal flags:
     ///   `--filter EXPR` - pbfhogg filter expression (default
     ///     `w/highway=primary`). Examples: `amenity=restaurant`,
     ///     `highway=primary`, `w/building=yes`.
@@ -610,7 +610,7 @@ In depth: `brokkr man clippy`."
         #[arg(short = 'j', long)]
         jobs: Option<usize>,
     },
-    /// [pbfhogg] Get elements by hardcoded ID set. Flags:
+    /// Get elements by hardcoded ID set. Flags:
     ///   `--add-referenced` - also pull in referenced objects (two-pass);
     ///   `--invert` - select everything NOT in the ID set.
     #[command(name = "getid", display_order = 2)]
@@ -632,7 +632,7 @@ In depth: `brokkr man clippy`."
         #[arg(long)]
         snapshot: Option<String>,
     },
-    /// [pbfhogg] Get parent elements
+    /// Get parent elements
     #[command(name = "getparents", display_order = 2)]
     Getparents {
         #[command(flatten)]
@@ -645,7 +645,7 @@ In depth: `brokkr man clippy`."
         #[arg(long)]
         snapshot: Option<String>,
     },
-    /// [pbfhogg] Renumber element IDs
+    /// Renumber element IDs
     #[command(name = "renumber", display_order = 2)]
     Renumber {
         #[command(flatten)]
@@ -658,7 +658,7 @@ In depth: `brokkr man clippy`."
         #[arg(long)]
         snapshot: Option<String>,
     },
-    /// [pbfhogg] Merge OSC changes. `--simplify` picks the BTreeMap dedupe
+    /// Merge OSC changes. `--simplify` picks the BTreeMap dedupe
     /// path (keep only the last change per object) instead of the default
     /// streaming concat path - a different code path worth measuring.
     #[command(name = "merge-changes", display_order = 2)]
@@ -682,7 +682,7 @@ In depth: `brokkr man clippy`."
         #[arg(long)]
         simplify: bool,
     },
-    /// [pbfhogg] Apply OSC changes to PBF
+    /// Apply OSC changes to PBF
     #[command(name = "apply-changes", display_order = 2)]
     ApplyChanges {
         #[command(flatten)]
@@ -707,7 +707,7 @@ In depth: `brokkr man clippy`."
         #[arg(short = 'j', long)]
         jobs: Option<usize>,
     },
-    /// [pbfhogg] Add location data to ways
+    /// Add location data to ways
     #[command(name = "add-locations-to-ways", display_order = 2)]
     AddLocationsToWays {
         #[command(flatten)]
@@ -739,7 +739,7 @@ In depth: `brokkr man clippy`."
         #[arg(long)]
         snapshot: Option<String>,
     },
-    /// [pbfhogg] Re-encode a PBF with a configurable elements-per-blob cap.
+    /// Re-encode a PBF with a configurable elements-per-blob cap.
     ///
     /// Default writes to scratch and is overwritten on each `--bench`
     /// iteration. Pass `--as-snapshot KEY` to promote the final iteration's
@@ -774,7 +774,7 @@ In depth: `brokkr man clippy`."
         #[arg(long)]
         force_repack: bool,
     },
-    /// [pbfhogg] Produce an adversarial PBF by stripping properties or
+    /// Produce an adversarial PBF by stripping properties or
     /// perturbing structure.
     ///
     /// Flags compose; pbfhogg requires at least one transformation flag and
@@ -815,7 +815,7 @@ In depth: `brokkr man clippy`."
         #[arg(long, requires = "as_snapshot")]
         replace_snapshot: bool,
     },
-    /// [pbfhogg] Multi-extract benchmark (N regions in one pbfhogg
+    /// Multi-extract benchmark (N regions in one pbfhogg
     /// invocation). `--strategy` picks pbfhogg's extract algorithm
     /// (simple / smart / complete / all).
     #[command(name = "multi-extract", display_order = 2)]
@@ -841,7 +841,7 @@ In depth: `brokkr man clippy`."
         #[arg(long)]
         snapshot: Option<String>,
     },
-    /// [pbfhogg] Filter by timestamp
+    /// Filter by timestamp
     #[command(name = "time-filter", display_order = 2)]
     TimeFilter {
         #[command(flatten)]
@@ -854,7 +854,7 @@ In depth: `brokkr man clippy`."
         #[arg(long)]
         snapshot: Option<String>,
     },
-    /// [pbfhogg] Diff base PBF against the applied-changes merged PBF.
+    /// Diff base PBF against the applied-changes merged PBF.
     /// `--format osc` switches output from summary (stdout) to an OSC
     /// file. The brokkr runner generates the merged PBF from base +
     /// OSC before diffing.
@@ -886,7 +886,7 @@ In depth: `brokkr man clippy`."
         #[arg(short = 'j', long)]
         jobs: Option<usize>,
     },
-    /// [pbfhogg] Diff two snapshots of the same dataset
+    /// Diff two snapshots of the same dataset
     #[command(
         name = "diff-snapshots",
         display_order = 2,
@@ -932,8 +932,8 @@ Examples:
         #[arg(short = 'j', long)]
         jobs: Option<usize>,
     },
-    /// [pbfhogg] Diff two PBFs (OSC output)
-    /// [pbfhogg] Build geocode index
+    /// Diff two PBFs (OSC output)
+    /// Build geocode index
     #[command(name = "build-geocode-index", display_order = 2)]
     BuildGeocodeIndex {
         #[command(flatten)]
@@ -946,7 +946,7 @@ Examples:
         #[arg(long)]
         snapshot: Option<String>,
     },
-    /// [pbfhogg] Extract by bounding box (configurable strategy)
+    /// Extract by bounding box (configurable strategy)
     #[command(name = "extract", display_order = 2)]
     Extract {
         #[command(flatten)]
@@ -965,7 +965,7 @@ Examples:
         #[arg(long)]
         snapshot: Option<String>,
     },
-    /// [pbfhogg] Read benchmark
+    /// Read benchmark
     #[command(name = "read", display_order = 2)]
     Read {
         #[command(flatten)]
@@ -983,7 +983,7 @@ Examples:
         #[arg(long)]
         snapshot: Option<String>,
     },
-    /// [pbfhogg] Write benchmark
+    /// Write benchmark
     #[command(name = "write", display_order = 2)]
     Write {
         #[command(flatten)]
@@ -994,7 +994,7 @@ Examples:
         #[arg(long, default_value = "none,zlib:6,zstd:3")]
         compressions: String,
     },
-    /// [pbfhogg] Merge benchmark
+    /// Merge benchmark
     #[command(name = "merge", display_order = 2)]
     MergeBench {
         #[command(flatten)]
@@ -1013,7 +1013,7 @@ Examples:
     },
 
     // ----- elivagar commands (display_order = 3) -----
-    /// [elivagar] Full tile generation pipeline
+    /// Full tile generation pipeline
     ///
     /// Pipeline configuration lives entirely in `[<host>.tilegen.default]` in
     /// brokkr.toml - ocean inputs, tile format, budgets, geometry. There are
@@ -1037,7 +1037,7 @@ Examples:
         #[arg(long)]
         skip_to: Option<String>,
     },
-    /// [elivagar] PMTiles writer micro-benchmark
+    /// PMTiles writer micro-benchmark
     #[command(name = "pmtiles-writer", display_order = 3)]
     PmtilesWriter {
         #[command(flatten)]
@@ -1046,7 +1046,7 @@ Examples:
         #[arg(long, default_value = "500000")]
         tiles: usize,
     },
-    /// [elivagar] SortedNodeStore micro-benchmark
+    /// SortedNodeStore micro-benchmark
     #[command(name = "node-store", display_order = 3)]
     NodeStore {
         #[command(flatten)]
@@ -1055,7 +1055,7 @@ Examples:
         #[arg(long, default_value = "50")]
         nodes: usize,
     },
-    /// [elivagar] Planetiler comparison baseline
+    /// Planetiler comparison baseline
     #[command(name = "planetiler", display_order = 3)]
     ElivPlanetiler {
         #[command(flatten)]
@@ -1067,7 +1067,7 @@ Examples:
         #[arg(long, default_value = "raw")]
         variant: String,
     },
-    /// [elivagar] Tilemaker comparison baseline
+    /// Tilemaker comparison baseline
     #[command(name = "tilemaker", display_order = 3)]
     ElivTilemaker {
         #[command(flatten)]
@@ -1081,7 +1081,7 @@ Examples:
     },
 
     // ----- nidhogg commands (display_order = 4) -----
-    /// [nidhogg] API query benchmark
+    /// API query benchmark
     #[command(name = "api", display_order = 4)]
     RunApi {
         #[command(flatten)]
@@ -1093,7 +1093,7 @@ Examples:
         #[arg(long)]
         query: Option<String>,
     },
-    /// [nidhogg] Ingest benchmark
+    /// Ingest benchmark
     #[command(name = "nid-ingest", display_order = 4)]
     RunNidIngest {
         #[command(flatten)]
@@ -1105,7 +1105,7 @@ Examples:
         #[arg(long, default_value = "raw")]
         variant: String,
     },
-    /// [nidhogg] Tile serving benchmark
+    /// Tile serving benchmark
     #[command(name = "tiles", display_order = 4)]
     RunTiles {
         #[command(flatten)]
@@ -1407,7 +1407,7 @@ In depth: `brokkr man measure`.",
         #[arg(long, num_args = 0..=1, value_name = "PKG")]
         cargo: Option<Option<String>>,
 
-        /// [elivagar] Prune canonical per-commit archives in the durable output
+        /// Prune canonical per-commit archives in the durable output
         /// store (`data/tilegen/<dataset>-<variant>-<commit>.pmtiles`), keeping
         /// the newest --keep per (dataset, variant). Groups are built by
         /// constructing each known (dataset, variant) prefix from config;
@@ -1619,7 +1619,7 @@ Examples:
         #[command(subcommand)]
         verify: VerifyCommand,
     },
-    /// [pbfhogg] Download a dataset from Geofabrik or planet.openstreetmap.org
+    /// Download a dataset from Geofabrik or planet.openstreetmap.org
     #[command(display_order = 20)]
     Download {
         /// Region name or Geofabrik path (e.g. denmark, europe/france, asia/japan/kanto)
@@ -1664,7 +1664,7 @@ Examples:
         #[arg(long, requires = "refresh")]
         force: bool,
     },
-    /// [elivagar] Compare feature counts between two PMTiles archives
+    /// Compare feature counts between two PMTiles archives
     #[command(display_order = 30)]
     CompareTiles {
         /// First PMTiles file
@@ -1675,10 +1675,10 @@ Examples:
         #[arg(long)]
         sample: Option<usize>,
     },
-    /// [elivagar] Download ocean shapefiles
+    /// Download ocean shapefiles
     #[command(display_order = 31)]
     DownloadOcean,
-    /// [elivagar] Build the world-ocean pmtiles artifact from the tilegen block
+    /// Build the world-ocean pmtiles artifact from the tilegen block
     #[command(
         display_order = 31,
         long_about = "\
@@ -1700,10 +1700,10 @@ In depth: `brokkr man elivagar` (config: `brokkr man elivagar-config`)."
         #[arg(long)]
         dry_run: bool,
     },
-    /// [elivagar] Download Natural Earth shapefiles for low-zoom layers
+    /// Download Natural Earth shapefiles for low-zoom layers
     #[command(display_order = 32)]
     DownloadNaturalEarth,
-    /// [elivagar] Inspect PMTiles header, tile stats, and metadata
+    /// Inspect PMTiles header, tile stats, and metadata
     #[command(name = "pmtiles-inspect", display_order = 33)]
     PmtilesInspect {
         /// Dataset name from brokkr.toml
@@ -1719,7 +1719,7 @@ In depth: `brokkr man elivagar` (config: `brokkr man elivagar-config`)."
         #[arg(long)]
         file: Option<String>,
     },
-    /// [elivagar] Per-ring winding/area diagnosis for one tile
+    /// Per-ring winding/area diagnosis for one tile
     #[command(display_order = 34)]
     Diag {
         /// Dataset name from brokkr.toml
@@ -1741,7 +1741,7 @@ In depth: `brokkr man elivagar` (config: `brokkr man elivagar-config`)."
         #[arg(short = 'y', long)]
         y: u32,
     },
-    /// [elivagar] Render one tile to SVG
+    /// Render one tile to SVG
     #[command(display_order = 35)]
     Svg {
         /// Dataset name from brokkr.toml
@@ -1773,7 +1773,7 @@ In depth: `brokkr man elivagar` (config: `brokkr man elivagar-config`)."
         #[arg(short = 'o', long)]
         output: Option<std::path::PathBuf>,
     },
-    /// [elivagar] Diff two explicit tilegen archives (tier-3 attribution)
+    /// Diff two explicit tilegen archives (tier-3 attribution)
     #[command(
         display_order = 36,
         long_about = "\
@@ -1839,7 +1839,7 @@ In depth: `brokkr man elivagar`.",
         #[arg(long)]
         json: bool,
     },
-    /// [elivagar] The corpus gate: adjudicate an archive against the committed baseline (check/bless/render/...).
+    /// The corpus gate: adjudicate an archive against the committed baseline (check/bless/render/...).
     ///
     /// In depth: `brokkr man elivagar`.
     #[command(display_order = 37, subcommand_help_heading = "Corpus subcommands")]
@@ -1854,7 +1854,7 @@ In depth: `brokkr man elivagar`.",
         #[arg(required = true)]
         files: Vec<String>,
     },
-    /// [nidhogg] Start the server
+    /// Start the server
     #[command(
         display_order = 40,
         long_about = "\
@@ -1914,13 +1914,13 @@ In depth: `brokkr man nidhogg`."
         #[arg(long, value_name = "VARIANT|PATH|none")]
         tiles: Option<String>,
     },
-    /// [nidhogg] Stop the server
+    /// Stop the server
     #[command(display_order = 41)]
     Stop,
-    /// [nidhogg] Check server status
+    /// Check server status
     #[command(display_order = 42)]
     Status,
-    /// [nidhogg] Ingest a PBF into disk format
+    /// Ingest a PBF into disk format
     #[command(display_order = 43)]
     Ingest {
         /// PBF variant to use (raw, indexed, locations)
@@ -1931,20 +1931,20 @@ In depth: `brokkr man nidhogg`."
         #[arg(long, default_value = "denmark")]
         dataset: String,
     },
-    /// [nidhogg] Run diff application
+    /// Run diff application
     #[command(display_order = 44)]
     Update {
         /// Arguments passed to nidhogg-update
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
-    /// [nidhogg] Send a test query
+    /// Send a test query
     #[command(display_order = 45)]
     Query {
         /// JSON query body (default: Copenhagen highways)
         json: Option<String>,
     },
-    /// [nidhogg] Test geocoding
+    /// Test geocoding
     #[command(display_order = 46)]
     Geocode {
         /// Search term (default: Kobenhavn)
@@ -1952,7 +1952,7 @@ In depth: `brokkr man nidhogg`."
         term: String,
     },
     // ----- visual testing commands (litehtml + sluggrs, display_order = 50) -----
-    /// [litehtml/sluggrs] Run visual tests against reference artifacts.
+    /// Run visual tests against reference artifacts.
     ///
     /// In depth: `brokkr man visual`.
     #[command(display_order = 50)]
@@ -2047,10 +2047,10 @@ In depth: `brokkr man nidhogg`."
         #[arg(long, value_name = "LABEL")]
         sweep: Option<String>,
     },
-    /// [litehtml/sluggrs] List fixtures/snapshots and approval state
+    /// List fixtures/snapshots and approval state
     #[command(display_order = 50)]
     List,
-    /// [litehtml/sluggrs] Record current output as accepted baseline (requires clean git tree)
+    /// Record current output as accepted baseline (requires clean git tree)
     #[command(display_order = 50)]
     Approve {
         /// Fixture/snapshot IDs (or unique prefixes). Repeatable.
@@ -2060,18 +2060,18 @@ In depth: `brokkr man nidhogg`."
         #[arg(long, conflicts_with = "fixture")]
         all: bool,
     },
-    /// [litehtml/sluggrs] Show detailed results for a past run
+    /// Show detailed results for a past run
     #[command(display_order = 50)]
     Report {
         /// Run ID (or prefix)
         run_id: String,
     },
-    /// [litehtml/sluggrs] Show current state of all fixtures/snapshots
+    /// Show current state of all fixtures/snapshots
     #[command(name = "visual-status", display_order = 50)]
     VisualStatus,
 
     // ----- litehtml-only commands (display_order = 51) -----
-    /// [litehtml] Normalize raw email HTML into a self-contained fixture
+    /// Normalize raw email HTML into a self-contained fixture
     #[command(display_order = 51)]
     Prepare {
         /// Input HTML file (raw email)
@@ -2079,7 +2079,7 @@ In depth: `brokkr man nidhogg`."
         /// Output HTML file (self-contained fixture)
         output: String,
     },
-    /// [litehtml] Extract a sub-fixture from a prepared HTML file
+    /// Extract a sub-fixture from a prepared HTML file
     #[command(name = "html-extract", display_order = 51)]
     HtmlExtract {
         /// Input HTML file (already prepared)
@@ -2096,7 +2096,7 @@ In depth: `brokkr man nidhogg`."
         /// Output HTML file (extracted sub-fixture)
         output: String,
     },
-    /// [litehtml] Print structural outline of a prepared HTML file
+    /// Print structural outline of a prepared HTML file
     #[command(display_order = 51)]
     Outline {
         /// Input HTML file (prepared)
@@ -2113,7 +2113,7 @@ In depth: `brokkr man nidhogg`."
     },
 
     // ----- sluggrs-only commands (display_order = 55) -----
-    /// [sluggrs] Rendering hotpath (defaults to --hotpath 1, use --alloc for allocation tracking)
+    /// Rendering hotpath (defaults to --hotpath 1, use --alloc for allocation tracking)
     ///
     /// Builds a cargo example target and runs it through the bench harness.
     /// `--target hotpath` (the default) builds the `hotpath` example and files
@@ -2138,7 +2138,7 @@ In depth: `brokkr man nidhogg`."
     },
 
     // ----- dellingr-only commands (display_order = 57) -----
-    /// [dellingr] Benchmark a registered Lua workload
+    /// Benchmark a registered Lua workload
     ///
     /// Builds the `[dellingr] example` harness target and runs it against the
     /// workload `--lua` names, resolved through the `[dellingr.workloads.*]`
@@ -2167,7 +2167,7 @@ In depth: `brokkr man nidhogg`."
     },
 
     // ----- mogwai-only commands (display_order = 58) -----
-    /// [mogwai] Benchmark a mogwai surface (CLI invocation or harness target)
+    /// Benchmark a mogwai surface (CLI invocation or harness target)
     ///
     /// Two kinds of surface, one row shape, no layers.
     ///
@@ -2201,7 +2201,7 @@ In depth: `brokkr man nidhogg`."
     },
 
     // ----- ratatoskr-only commands (display_order = 60) -----
-    /// [ratatoskr] List or run Service-subprocess test scripts (deterministic harness)
+    /// List or run Service-subprocess test scripts (deterministic harness)
     ///
     /// One command over the service-harness cohort, in brokkr's usual
     /// bare-is-an-index shape (`sync`, `results`, `man`, `deps`):
@@ -2294,7 +2294,7 @@ In depth: `brokkr man nidhogg`."
         keep_going: bool,
     },
 
-    /// [ratatoskr] List, run, or bench sync-test scripts against sæhrimnir
+    /// List, run, or bench sync-test scripts against sæhrimnir
     ///
     /// One command over the sync-harness cohort, in brokkr's usual
     /// bare-is-an-index shape (`results`, `man`, `deps`): `brokkr sync`
@@ -2417,7 +2417,7 @@ In depth: `brokkr man nidhogg`."
         commit: Option<String>,
     },
 
-    /// [ratatoskr] Spawn sæhrimnir against a fixture, print endpoints, run until Ctrl-C
+    /// Spawn sæhrimnir against a fixture, print endpoints, run until Ctrl-C
     ///
     /// Manual-exploration tool for plan 3. Resolves
     /// `[ratatoskr] mock_server_binary` and `[ratatoskr] fixtures_dir`
@@ -2440,7 +2440,7 @@ In depth: `brokkr man nidhogg`."
         fixture: String,
     },
 
-    /// [piners] Run a keyword-selected slice of the parity corpus
+    /// Run a keyword-selected slice of the parity corpus
     ///
     /// Resolves probes from the piners-owned registry (`pins.toml` +
     /// `<keyword>.toml` files under `[piners] registry_dir`), hard-verifies
@@ -2581,7 +2581,7 @@ In depth: `brokkr man nidhogg`."
         mode: ModeArgs,
     },
 
-    /// [piners] Query the corpus run store (.brokkr/piners/corpus/runs.db)
+    /// Query the corpus run store (.brokkr/piners/corpus/runs.db)
     #[command(
         name = "corpus-results",
         display_order = 71,
@@ -2693,7 +2693,7 @@ In depth: `brokkr man piners`."
         compare: Option<Vec<i64>>,
     },
 
-    /// [piners] Differential-lint corpus: piners vs pine-lint over .pine snippets
+    /// Differential-lint corpus: piners vs pine-lint over .pine snippets
     #[command(
         name = "lint-corpus",
         display_order = 72,
@@ -2773,7 +2773,7 @@ In depth: `brokkr man lint-corpus`."
         release: bool,
     },
 
-    /// [piners] Query the lint corpus run store (.brokkr/piners/lint/runs.db)
+    /// Query the lint corpus run store (.brokkr/piners/lint/runs.db)
     #[command(
         name = "lint-results",
         display_order = 73,
@@ -2928,19 +2928,19 @@ pub(crate) struct VerifyPbfArgs {
 
 #[derive(Subcommand)]
 pub(crate) enum VerifyCommand {
-    /// [pbfhogg] Cross-validate sort against osmium sort
+    /// Cross-validate sort against osmium sort
     #[command(display_order = 0)]
     Sort {
         #[command(flatten)]
         pbf: VerifyPbfArgs,
     },
-    /// [pbfhogg] Cross-validate cat (type filters) against osmium cat
+    /// Cross-validate cat (type filters) against osmium cat
     #[command(display_order = 1)]
     Cat {
         #[command(flatten)]
         pbf: VerifyPbfArgs,
     },
-    /// [pbfhogg] Cross-validate extract (bbox strategies) against osmium extract
+    /// Cross-validate extract (bbox strategies) against osmium extract
     #[command(display_order = 2)]
     Extract {
         #[command(flatten)]
@@ -2948,7 +2948,7 @@ pub(crate) enum VerifyCommand {
         #[arg(long)]
         bbox: Option<String>,
     },
-    /// [pbfhogg] Cross-validate multi-extract (single-pass vs sequential)
+    /// Cross-validate multi-extract (single-pass vs sequential)
     #[command(name = "multi-extract", display_order = 2)]
     MultiExtract {
         #[command(flatten)]
@@ -2959,19 +2959,19 @@ pub(crate) enum VerifyCommand {
         #[arg(long, default_value = "5")]
         regions: usize,
     },
-    /// [pbfhogg] Cross-validate tags-filter against osmium tags-filter
+    /// Cross-validate tags-filter against osmium tags-filter
     #[command(display_order = 3)]
     TagsFilter {
         #[command(flatten)]
         pbf: VerifyPbfArgs,
     },
-    /// [pbfhogg] Cross-validate getid/getid --invert against osmium getid
+    /// Cross-validate getid/getid --invert against osmium getid
     #[command(display_order = 4)]
     GetidRemoveid {
         #[command(flatten)]
         pbf: VerifyPbfArgs,
     },
-    /// [pbfhogg] Cross-validate add-locations-to-ways against osmium
+    /// Cross-validate add-locations-to-ways against osmium
     #[command(display_order = 5)]
     AddLocationsToWays {
         #[command(flatten)]
@@ -2989,13 +2989,13 @@ pub(crate) enum VerifyCommand {
         #[arg(long)]
         inject_prepass: bool,
     },
-    /// [pbfhogg] Cross-validate check --refs against osmium check-refs
+    /// Cross-validate check --refs against osmium check-refs
     #[command(display_order = 6)]
     CheckRefs {
         #[command(flatten)]
         pbf: VerifyPbfArgs,
     },
-    /// [pbfhogg] Cross-validate apply-changes against osmium/osmosis/osmconvert
+    /// Cross-validate apply-changes against osmium/osmosis/osmconvert
     #[command(display_order = 7)]
     Merge {
         #[command(flatten)]
@@ -3003,7 +3003,7 @@ pub(crate) enum VerifyCommand {
         #[arg(long)]
         osc_seq: Option<String>,
     },
-    /// [pbfhogg] Cross-validate diff --format osc roundtrip against osmium
+    /// Cross-validate diff --format osc roundtrip against osmium
     #[command(display_order = 8)]
     DeriveChanges {
         #[command(flatten)]
@@ -3011,7 +3011,7 @@ pub(crate) enum VerifyCommand {
         #[arg(long)]
         osc_seq: Option<String>,
     },
-    /// [pbfhogg] Cross-validate renumber against osmium renumber
+    /// Cross-validate renumber against osmium renumber
     #[command(display_order = 9)]
     Renumber {
         #[arg(long, default_value = "denmark", conflicts_with = "input")]
@@ -3033,7 +3033,7 @@ pub(crate) enum VerifyCommand {
         #[arg(long)]
         verbose: bool,
     },
-    /// [pbfhogg] Cross-validate diff summary against osmium diff
+    /// Cross-validate diff summary against osmium diff
     #[command(display_order = 10)]
     Diff {
         #[arg(long, default_value = "denmark", conflicts_with = "input")]
@@ -3052,7 +3052,7 @@ pub(crate) enum VerifyCommand {
         #[arg(long)]
         osc_seq: Option<String>,
     },
-    /// [pbfhogg] Run all verify commands sequentially
+    /// Run all verify commands sequentially
     #[command(display_order = 11)]
     All {
         #[command(flatten)]
@@ -3063,7 +3063,7 @@ pub(crate) enum VerifyCommand {
         bbox: Option<String>,
     },
 
-    /// [elivagar] Verify PMTiles output integrity
+    /// Verify PMTiles output integrity
     ///
     /// Addresses the durable output store through the same
     /// `[--dataset D] [--variant V] [--commit H | --file P]` resolver as
@@ -3097,21 +3097,21 @@ pub(crate) enum VerifyCommand {
         unique_payloads: bool,
     },
 
-    /// [nidhogg] Batch query verification
+    /// Batch query verification
     #[command(display_order = 20)]
     Batch {
         /// Dataset name from brokkr.toml
         #[arg(long, default_value = "denmark")]
         dataset: String,
     },
-    /// [nidhogg] Geocode verification
+    /// Geocode verification
     #[command(display_order = 21)]
     NidGeocode {
         /// Search terms to test
         #[arg(trailing_var_arg = true)]
         queries: Vec<String>,
     },
-    /// [nidhogg] Read-only filesystem verification
+    /// Read-only filesystem verification
     #[command(display_order = 22)]
     Readonly {
         /// Dataset name from brokkr.toml

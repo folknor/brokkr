@@ -106,8 +106,8 @@ impl Cleaner {
 pub(crate) fn cmd_clean(
     dev_config: &config::DevConfig,
     project: Project,
-    project_root: &Path,
-    build_root: &Path,
+    project_root: &crate::project::ProjectRoot,
+    build_root: &crate::project::BuildRoot,
     opts: CleanOpts,
 ) -> Result<(), DevError> {
     let CleanOpts {
@@ -132,9 +132,10 @@ pub(crate) fn cmd_clean(
     // states an invariant this function cannot enforce, and the caller already
     // holds the real one. Two roots that must agree should be threaded, not
     // independently recomputed and hoped to match.
-    let worktree_root = build_root;
-    let pi = bootstrap(Some(build_root))?;
+    let worktree_root = build_root.as_path();
+    let pi = bootstrap(build_root)?;
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
+    let project_root = project_root.as_path();
     let state = layout::ProjectState::new(project_root);
 
     // The verify harness writes only under target/verify.
@@ -263,7 +264,7 @@ pub(crate) fn cmd_clean(
 /// errors).
 pub(crate) fn cargo_clean_package(build_root: &Path, pkg: &str) -> Result<(), DevError> {
     output::run_msg(&format!("cargo clean -p {pkg}"));
-    let captured = output::run_captured("cargo", &["clean", "-p", pkg], build_root)?;
+    let captured = output::run_cargo(&["clean", "-p", pkg], build_root, &[], None)?;
     captured.check_success("cargo clean")?;
     // cargo clean reports "Removed N files, X total" on stderr.
     let stderr = String::from_utf8_lossy(&captured.stderr);
@@ -293,9 +294,9 @@ fn clean_scratch(project: Project, paths: &config::ResolvedPaths, c: &Cleaner) {
     }
 
     if project == Project::Nidhogg {
-        // This is the output path declared by NidhoggCommand. The similarly
-        // named project-root tmp directories are not created by brokkr.
-        let ingest_output = layout::NidhoggLayout::new(paths).ingest_output();
+        // This is the ingest output path declared by NidhoggLayout. The
+        // similarly named project-root tmp directories are not created by brokkr.
+        let ingest_output = layout::NidhoggLayout::new(paths).bench_ingest_output();
         if c.dir(&ingest_output) {
             output::run_msg(&format!("{} nidhogg ingest output", c.past()));
         }
@@ -473,7 +474,7 @@ fn clean_archives(paths: &config::ResolvedPaths, keep: usize, c: &Cleaner) {
     }
 }
 /// Remove the per-sweep isolated target dirs (`<target>/rustflags-<hash>`) that
-/// a `rustflags` `[[check]]` entry mints (see `check_cmd::output`'s
+/// a `rustflags` `[[check]]` entry mints (see `check_cmd::sweep_env`'s
 /// `isolated_target_dir`). They are reproducible build scratch - a full rebuild
 /// recreates them - and nothing else reclaims them: `cargo clean -p` only
 /// touches the default target dir, and editing a sweep's `rustflags` orphans the

@@ -216,13 +216,15 @@ never by parsing a filename back: dataset names carry hyphens, and a prefix test
 alone would let a variant claim a dash-extending sibling's files (`raw`
 swallowing `raw-fast`) and evict them. `brokkr clean --archives` uses the same
 store pruning operation with its configured keep count and dry-run policy.
-Host `features` are added to measured-request builds through the shared build
-context, and to the `passthrough`, `verify`, `serve`, `ingest`, and `update`
-paths. Standalone `run`, `install`, `check`, `clippy`, `test`, and Criterion
-`bench` use their own cargo/default or sweep feature selection and do not
-inherit host features. CLI `--features` are additive to host features in paths
-that apply them, with duplicates removed. Host `port` is the nidhogg server
-port (default 3033) that `serve`/`status`/`query`/`geocode`/`verify`/the benches
+**Host feature policy.** Host `features` are added to measured-request builds
+through the shared build context, and to the `passthrough`, `verify`, `serve`,
+`ingest`, and `update` paths. Standalone `run`, `install`, `check`, `clippy`,
+`test`, and Criterion `bench` use their own cargo/default or sweep feature
+selection and do not inherit host features. CLI `--features` are additive to
+host features in paths that apply them, with duplicates removed. This is the
+complete policy for which Cargo builds inherit host features. Host `port` is
+the nidhogg server port (default 3033) that
+`serve`/`status`/`query`/`geocode`/`verify`/the benches
 target; brokkr passes it to the server it spawns as `PORT`, but never reads
 `PORT` from its own environment - an unrelated `PORT` in the shell must not
 retarget the commands.
@@ -767,8 +769,10 @@ sort_dependencies = true    # keys sorted within each blank-line dependency grou
 - `sort_dependencies` (default `false`) - dependency keys must be alphabetical
   within each blank-line-separated group of a `[dependencies]` /
   `[dev-dependencies]` / `[build-dependencies]` / `[workspace.dependencies]`
-  table (target-cfg variants included). A blank line resets the ordering, so
-  intentionally grouped manifests pass.
+  table (including the Cargo underscore aliases and target-cfg variants).
+  Only package, target, and workspace dependency tables are checked; similarly
+  named tables under package metadata are ignored. A blank line resets the
+  ordering, so intentionally grouped manifests pass.
 - `section_order` (list; empty = off) - required relative order of top-level
   sections. Only sections both present and listed are constrained; a listed
   section appearing before an earlier-listed one is a violation.
@@ -800,7 +804,7 @@ granularity = "minor"
   root's `[workspace.dependencies]` (found by `marker`, a substring of the
   header comment) whose members must not be depended on by the crates in
   `forbidden_in`. A workspace-level check: it reads the group from the root
-  manifest and scans every member's dependency tables.
+  manifest and scans every member's package and target dependency tables.
 
 ```toml
 [manifest.adapter_group]
@@ -945,8 +949,9 @@ allow_exact = ["clippy::unused_async_trait_impl@crates/system/src/kernel.rs"]
   entries are announced up front, grouped by lint with a file count (a lint
   with one site keeps its path); one that suppressed nothing draws a stale
   notice, and that one is reported per entry, since it is the part a reader
-  has to act on. Parse-time rejection mirrors `allow`, plus the `@` split: exactly
-  one `@`, non-empty halves, no whitespace. See `docs/commands/check.md`.
+  has to act on. Parse-time rejection mirrors `allow`, plus the `@` split:
+  exactly one `@`, non-empty halves, no whitespace, and a relative path.
+  Absolute paths are rejected. See `docs/commands/check.md`.
 
   **The file scoping is clippy-phase only.** A lint that fails a *build* fails
   it during compilation, before any diagnostic reaches brokkr to be filtered,

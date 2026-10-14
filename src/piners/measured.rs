@@ -18,7 +18,7 @@
 //! until it does, that mode is refused with a clear error rather than recording
 //! a meaningless number.
 
-use crate::build::{BuildConfig, CargoProfile};
+use crate::build::BuildConfig;
 use crate::context::MeasurementSession;
 use crate::db::KvPair;
 use crate::error::DevError;
@@ -39,10 +39,11 @@ use crate::project::{self, Project};
 pub(crate) fn run(req: &MeasureRequest, args: &CorpusArgs) -> Result<(), DevError> {
     project::require(req.project, Project::Piners, "corpus")?;
 
-    let alloc = match req.mode {
-        MeasureMode::Hotpath { .. } | MeasureMode::Alloc { .. } => {
-            matches!(req.mode, MeasureMode::Alloc { .. })
-        }
+    let profiling = match req.mode {
+        MeasureMode::Hotpath { .. } | MeasureMode::Alloc { .. } => req
+            .mode
+            .profiled()
+            .ok_or_else(|| DevError::Internal("profiled mode without a profile".into()))?,
         MeasureMode::Bench { .. } => {
             return Err(DevError::Config(
                 "corpus --bench is not supported yet: the parity harness emits NDJSON \
@@ -55,27 +56,17 @@ pub(crate) fn run(req: &MeasureRequest, args: &CorpusArgs) -> Result<(), DevErro
     };
 
     let cfg = req.project_config.piners()?.clone();
-    crate::piners::layout::ensure_distinct_registry_dirs(req.project_root, &cfg)?;
+    crate::piners::layout::ensure_distinct_registry_dirs(req.project_root.as_path(), &cfg)?;
     let harness_cfg = cfg
         .harness
         .as_ref()
         .ok_or_else(crate::piners::cmd::missing_harness_config_error)?;
 
-    let lock_command = if alloc {
-        "corpus --alloc"
-    } else {
-        "corpus --hotpath"
-    };
     // Locked before the registry is read, as the parity path is (see
     // `cmd.rs`): verification must judge the pins and bytes the run uses.
     // `MeasurementSession` acquires again below; acquisition is re-entrant within
     // the process, so the hold is one and spans both.
-    let project_root_str = req.project_root.display().to_string();
-    let lock = crate::lockfile::acquire(&crate::lockfile::LockContext {
-        project: "piners",
-        command: lock_command,
-        project_root: &project_root_str,
-    })?;
+    let lock = crate::context::reenter_command_lock()?;
 
     // Selection and hash verification use the same preparation path as a
     // parity run. The measured lifecycle still owns its benchmark context.
@@ -91,7 +82,7 @@ pub(crate) fn run(req: &MeasureRequest, args: &CorpusArgs) -> Result<(), DevErro
         ids,
         verified,
         ..
-    } = prepare::prepare(req.project_root, &cfg, &lock, &sel)?;
+    } = prepare::prepare(req.project_root.as_path(), &cfg, &lock, &sel)?;
 
     // Measured runs default to release (meaningful timing); `--debug` profiles
     // the dev build instead. Parity runs default debug - see `cmd.rs`.
@@ -105,11 +96,9 @@ pub(crate) fn run(req: &MeasureRequest, args: &CorpusArgs) -> Result<(), DevErro
     let debug = args.profile_override.unwrap_or(false);
 
     let mut build_cfg = BuildConfig::for_harness(harness_cfg, debug);
-    build_cfg
-        .features
-        .push(harness::hotpath_feature(alloc).to_owned());
+    build_cfg.features.push(profiling.feature().to_owned());
 
-    let ctx = MeasurementSession::with_build_config_for_request(req, &build_cfg, lock_command)?;
+    let ctx = MeasurementSession::with_build_config_for_request(req, &build_cfg)?;
 
     // Manifest into the bench scratch dir. The harness writes its (ignored)
     // NDJSON there via BROKKR_HARNESS_ARTEFACT_DIR, and run_hotpath_capture
@@ -130,17 +119,17 @@ pub(crate) fn run(req: &MeasureRequest, args: &CorpusArgs) -> Result<(), DevErro
     let scratch_str = ctx.paths.scratch_dir.display().to_string();
     let bin_dir_str = bin_dir.display().to_string();
 
-    let label = harness::hotpath_feature(alloc);
     output::detail(&format!(
-        "corpus {label} ({})",
+        "corpus {} ({})",
+        profiling.feature(),
         output::count(verified.len(), "probe")
     ));
-    harness::hotpath_alloc_note(alloc);
+    profiling.print_note();
 
     let selector = selector_label(args);
-    // The profile lives in the `cargo_profile` column below. Rows recorded
-    // before `CargoProfile::Dev` existed carry `release` there and a
-    // `meta.profile = dev` patch instead.
+    // The profile lives in the row's `cargo_profile` column, stamped from the
+    // session's build. Rows recorded before `CargoProfile::Dev` existed carry
+    // `release` there and a `meta.profile = dev` patch instead.
     let metadata = vec![
         KvPair::int(
             "probe_count",
@@ -159,7 +148,7 @@ pub(crate) fn run(req: &MeasureRequest, args: &CorpusArgs) -> Result<(), DevErro
         input_file: Some(selector),
         input_mb: None,
         cargo_features: None,
-        cargo_profile: CargoProfile::for_debug(debug),
+        external_build: None,
         runs: req.runs(),
         cli_args: Some(harness::format_cli_args(&binary_str, &subprocess_args)),
         metadata,
@@ -170,7 +159,7 @@ pub(crate) fn run(req: &MeasureRequest, args: &CorpusArgs) -> Result<(), DevErro
         ("BROKKR_TEST_BIN_DIR", bin_dir_str.as_str()),
     ];
     let scratch_dir = ctx.paths.scratch_dir.clone();
-    let project_root = req.project_root.to_path_buf();
+    let project_root = req.project_root.as_path().to_path_buf();
     // Each measured iteration gets the parity path's hang backstop: a wedged
     // harness would otherwise hold the global lock until `brokkr kill`.
     // Applied through the sidecar's ambient scope because the child is
@@ -193,9 +182,9 @@ pub(crate) fn run(req: &MeasureRequest, args: &CorpusArgs) -> Result<(), DevErro
         // A stop marker that actually fired ends the run early by design, and
         // is not held to its selection or its status; every other run, a
         // configured marker that never fired included, is.
-        if !capture.stopped_by_marker {
+        if !matches!(capture.sidecar.ending, crate::output::Ending::StopMarker(_)) {
             // A backstop kill is brokkr's, never a spontaneous SIGKILL.
-            let end = HarnessEnd::from_status(&capture.status, capture.stopped_by_deadline);
+            let end = HarnessEnd::from_ending(&capture.sidecar.ending);
             if let Err(e) = check_iteration(i, &ids, end, &capture.stdout, &capture.stderr) {
                 capture.park_failure();
                 return Err(e);

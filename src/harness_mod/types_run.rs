@@ -6,11 +6,10 @@ use crate::config::DriveConfig;
 use crate::db::{
     self, Distribution, DistributionUs, HotpathData, KvClass, KvPair, KvValue, ResultsDb, RunRow,
 };
-use crate::env::EnvInfo;
 use crate::error::DevError;
 use crate::git::GitInfo;
 use crate::lockfile::LockGuard;
-use crate::output;
+use crate::output::{child, console};
 
 // ---------------------------------------------------------------------------
 // Configuration and result types
@@ -25,7 +24,11 @@ pub struct BenchConfig {
     /// the harness-wide build feature label; the DB writer stores a sorted,
     /// duplicate-free spelling so equivalent feature sets compare alike.
     pub cargo_features: Option<String>,
-    pub cargo_profile: CargoProfile,
+    /// The build identity of a row whose binary brokkr did not build with
+    /// cargo (planetiler's Java, tilemaker's CMake). `None` for every cargo
+    /// build: those rows take the profile the session's build actually used
+    /// ([`BenchHarness::with_build_identity`]).
+    pub external_build: Option<CargoProfile>,
     pub runs: usize,
     /// Literal subprocess invocation (pbfhogg/elivagar/...). Populated by
     /// dispatch from the argv it hands to the tool binary.
@@ -102,25 +105,32 @@ pub struct BenchHarness {
     /// The `.brokkr` stores the rows land in: the main tree's, also under
     /// `--commit` (`db_root`).
     state: crate::clean::layout::ProjectState,
-    env: EnvInfo,
+    /// The host facts a row records, read once from the typed host probes
+    /// (`crate::host`) - not the whole `brokkr env` report, whose tool and
+    /// dataset probes a measurement never reads.
+    host: HostFacts,
     git: GitInfo,
     storage_notes: Option<String>,
     cargo_features: Option<String>,
     project: crate::project::Project,
     stop_marker: Option<String>,
-    /// Literal `brokkr <...>` invocation (std::env::args joined). Set once
-    /// per harness via `with_brokkr_args`; every row built by this harness
-    /// inherits it via `build_row`. Lets individual bench writers stay
+    /// The brokkr invocation (exact argv and arm key, `crate::run_invocation`).
+    /// Set once per harness via `with_invocation`; every row built by this
+    /// harness inherits it via `build_row`. Lets individual bench writers stay
     /// agnostic of the brokkr-level invocation.
-    brokkr_args: Option<String>,
-    /// Measurement mode string (`"bench"`, `"hotpath"`, `"alloc"`). Set
-    /// once per harness via `with_measure_mode`. The single source of a
-    /// run's mode; read only through [`Self::effective_mode`].
-    measure_mode: Option<String>,
-    /// Whether measurements from this harness are persisted. A request in
-    /// run mode calls `with_measure_mode(None)`: it still reports the timing,
-    /// but must not write either results or sidecar rows.
+    invocation: crate::db::RunInvocation,
+    /// The recorded measurement mode. Set once per harness via
+    /// `with_measure_mode`. The single source of a run's mode; read only
+    /// through [`Self::effective_mode`].
+    measure_mode: crate::measure::RecordedMode,
+    /// Whether measurements from this harness are persisted - a switch apart
+    /// from the mode. A request in run mode calls `with_measure_mode(None)`:
+    /// it still reports the timing, but writes neither results nor sidecar
+    /// rows.
     store_results: bool,
+    /// What the session built, when it built the measured binary: the row's
+    /// `cargo_profile` and canonical `cargo_features` come from it.
+    build_identity: Option<BuildIdentity>,
     /// Env var snapshot captured at `with_request` time. Merged into
     /// every row's kv via `build_row` as `env.<NAME>` entries - lets
     /// env-gated code paths (A/B feature flags set from the shell) be
@@ -139,31 +149,48 @@ pub struct BenchHarness {
     measure_start_epoch: std::cell::Cell<i64>,
 }
 
-impl BenchHarness {
-    /// Create a new harness, acquiring the lockfile and collecting environment.
-    ///
-    /// When `db_root` is `Some`, the results DB is opened from that directory
-    /// instead of `project_root`. This is used for worktree-based benchmarking
-    /// where git info comes from the worktree but results are stored in the
-    /// main tree's database.
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        paths: &crate::config::ResolvedPaths,
-        project_root: &Path,
-        db_root: Option<&Path>,
-        project: crate::project::Project,
-        lock_command: &str,
-        force: bool,
-        stop_marker: Option<String>,
-    ) -> Result<Self, DevError> {
-        let lock = crate::lockfile::acquire(&crate::lockfile::LockContext {
-            project: project.name(),
-            command: lock_command,
-            project_root: &project_root.display().to_string(),
-        })?;
-        Self::new_with_lock(lock, paths, project_root, db_root, project, force, stop_marker)
-    }
+/// The machine facts every results row carries.
+struct HostFacts {
+    hostname: String,
+    kernel: Option<String>,
+    governor: Option<String>,
+    memory_available_mb: u64,
+}
 
+impl HostFacts {
+    fn collect(hostname: &str) -> Self {
+        Self {
+            hostname: hostname.to_owned(),
+            kernel: crate::host::kernel::collect().version,
+            governor: crate::host::cpu::collect().governor,
+            memory_available_mb: crate::host::memory::collect().available_mb,
+        }
+    }
+}
+
+/// How the measured binary was built, as a results row records it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuildIdentity {
+    pub profile: CargoProfile,
+    /// The canonical feature spelling (sorted, duplicate-free), `None` for a
+    /// default-features build.
+    pub features: Option<String>,
+}
+
+impl BuildIdentity {
+    /// The identity of a cargo build brokkr ran.
+    pub fn of(artifact: &crate::build::BuiltArtifact) -> Self {
+        let mut features: Vec<&str> = artifact.features.iter().map(String::as_str).collect();
+        features.sort_unstable();
+        features.dedup();
+        Self {
+            profile: artifact.profile,
+            features: (!features.is_empty()).then(|| features.join(",")),
+        }
+    }
+}
+
+impl BenchHarness {
     /// Create a new harness with a pre-acquired lock.
     ///
     /// Use this when the lock must be held before other work (e.g. cargo build)
@@ -178,7 +205,7 @@ impl BenchHarness {
         stop_marker: Option<String>,
     ) -> Result<Self, DevError> {
         std::fs::create_dir_all(&paths.scratch_dir)?;
-        let env = crate::env::collect(paths, project, project_root);
+        let host = HostFacts::collect(&paths.hostname);
         let git = crate::git::collect(project_root)?;
         let state = crate::clean::layout::ProjectState::new(db_root.unwrap_or(project_root));
         std::fs::create_dir_all(state.root())?;
@@ -190,7 +217,7 @@ impl BenchHarness {
                 // Name the database. This governs results.db only - a gated
                 // ratatoskr run still records into gate.db, and unqualified
                 // the two lines read as a contradiction.
-                output::warn("dirty tree - results will NOT be stored in results.db");
+                console::warn("dirty tree - results will NOT be stored in results.db");
             } else {
                 return Err(DevError::Preflight(vec![
                     "dirty tree - commit or stash changes before benchmarking".into(),
@@ -204,15 +231,16 @@ impl BenchHarness {
             lock,
             db,
             state,
-            env,
+            host,
             git,
             storage_notes,
             cargo_features: None,
             project,
             stop_marker,
-            brokkr_args: None,
-            measure_mode: None,
+            invocation: crate::db::RunInvocation { argv: Vec::new(), arm_key: String::new() },
+            measure_mode: crate::measure::RecordedMode::Bench,
             store_results: true,
+            build_identity: None,
             env_kv: Vec::new(),
             measure_start_epoch: std::cell::Cell::new(0),
         })
@@ -229,19 +257,30 @@ impl BenchHarness {
         self
     }
 
-    /// Set the literal `brokkr <...>` invocation string for this harness.
-    /// Every row takes its invocation from this session value.
-    pub fn with_brokkr_args(mut self, args: String) -> Self {
-        self.brokkr_args = Some(args);
+    /// Set the brokkr invocation for this harness. Every row takes its
+    /// invocation from this session value.
+    pub fn with_invocation(mut self, invocation: crate::db::RunInvocation) -> Self {
+        self.invocation = invocation;
         self
     }
 
-    /// Set the measurement mode string (`"bench"`, `"hotpath"`, `"alloc"`).
-    /// Individual writers do not supply the measurement mode. `None` denotes run mode: report
-    /// measurements without persisting result or sidecar records.
-    pub fn with_measure_mode(mut self, mode: Option<&str>) -> Self {
+    /// Set the recorded measurement mode. Individual writers do not supply
+    /// the measurement mode. `None` denotes run mode: report measurements
+    /// without persisting result or sidecar records.
+    pub fn with_measure_mode(mut self, mode: Option<crate::measure::RecordedMode>) -> Self {
         self.store_results = mode.is_some();
-        self.measure_mode = mode.map(str::to_owned);
+        if let Some(mode) = mode {
+            self.measure_mode = mode;
+        }
+        self
+    }
+
+    /// Record what the session built. Rows built by this harness take their
+    /// `cargo_profile` and `cargo_features` from it, unless a row names an
+    /// external tool's identity itself ([`BenchConfig::external_build`]).
+    pub fn with_build_identity(mut self, identity: BuildIdentity) -> Self {
+        self.cargo_features.clone_from(&identity.features);
+        self.build_identity = Some(identity);
         self
     }
 
@@ -331,16 +370,18 @@ impl BenchHarness {
                     // (parked by `run_hotpath_capture`) and every earlier
                     // run's - under `dirty`, as `run_external_*` do. The
                     // loop used to return here and drop all of it.
-                    let (pid, exit_code) = match take_failed_capture() {
+                    let (pid, ending) = match take_failed_capture() {
                         Some(failed) => {
+                            let pid = Some(failed.pid);
                             sidecar_runs.push(failed.data);
-                            (failed.pid, Some(failed.exit_code))
+                            let ending = sidecar_runs.last().map(|data| data.ending.clone());
+                            (pid, ending)
                         }
-                        None => (0, None),
+                        None => (None, None),
                     };
                     if !sidecar_runs.is_empty() {
                         let info =
-                            self.build_run_info(config, program, start_epoch, pid, exit_code);
+                            self.build_run_info(config, program, start_epoch, pid, ending);
                         let idx = sidecar_runs.len() - 1;
                         self.store_sidecar(None, &sidecar_runs, idx, Some(&info)).ok();
                     }
@@ -366,10 +407,12 @@ impl BenchHarness {
             best.ok_or_else(|| DevError::Config("benchmark requires at least 1 run".into()))?;
         best.iterations = walls;
 
-        // pid is unknown here (the child was reaped inside the closure); 0 is
-        // the sentinel. exit_code is 0 since a failing run would have errored
-        // out of the closure before reaching this point.
-        let info = self.build_run_info(config, program, start_epoch, 0, Some(0));
+        // The closure reaped the child, so its PID is unknown here. Preserve
+        // the actual ending from the sidecar payload and leave the PID absent.
+        let ending = sidecar_runs
+            .get(best_run_idx)
+            .map(|data| data.ending.clone());
+        let info = self.build_run_info(config, program, start_epoch, None, ending);
         let fired_stop_marker = sidecar_runs
             .get(best_run_idx)
             .and_then(|data| data.fired_stop_marker.as_deref());
@@ -459,7 +502,7 @@ impl BenchHarness {
         let mut best_us: Option<i64> = None;
         let mut best_run_idx: usize = 0;
         let mut best_stderr: Vec<u8> = Vec::new();
-        let mut last_pid: u32 = 0;
+        let mut pids: Vec<u32> = Vec::with_capacity(config.runs);
         let mut walls: Vec<i64> = Vec::with_capacity(config.runs);
         let mut walls_us: Vec<i64> = Vec::with_capacity(config.runs);
         let mut sidecar_runs: Vec<sidecar::SidecarData> = Vec::with_capacity(config.runs);
@@ -479,9 +522,10 @@ impl BenchHarness {
 
             let env = [("BROKKR_MARKER_FIFO", fifo_path_str.as_str())];
             let start = Instant::now();
-            let child = output::spawn_captured(&prog_str, args, cwd, &env, true)?;
-            last_pid = child.id();
-            self.lock.set_child_pid(last_pid);
+            let child = child::spawn_captured(&prog_str, args, cwd, &env, true, crate::output::SpawnProfile::Plain)?;
+            let pid = child.id();
+            pids.push(pid);
+            self.lock.set_child_pid(pid);
 
             // run_sidecar takes ownership of the child, drains stdout/stderr
             // in background threads, and returns everything when the child exits.
@@ -489,44 +533,32 @@ impl BenchHarness {
             // Iteration's child has reaped; clear so a stale PID can't
             // be SIGKILLed by `--hard` once the kernel recycles it.
             self.lock.clear_child_pid();
-            let stopped = result.stopped_by_marker;
-            let interrupted = result.stopped_by_signal;
-
-            let captured = output::CapturedOutput {
-                status: result.exit_status,
-                stdout: result.stdout,
-                stderr: result.stderr,
-                elapsed: result.elapsed,
-            };
-            let ms = elapsed_to_ms(&captured.elapsed);
-            let us = elapsed_to_us(&captured.elapsed);
+            let ending = result.data.ending.clone();
+            let ms = elapsed_to_ms(&result.elapsed);
+            let us = elapsed_to_us(&result.elapsed);
+            let stderr = result.stderr;
 
             // Always collect sidecar data - especially valuable when the
             // child is OOM-killed, since the /proc trajectory shows what
             // happened before the kill.
             sidecar_runs.push(result.data);
 
-            // `brokkr kill` caught SIGTERM and we killed the child in the
-            // sidecar loop. Save the partial data under `dirty` and bail.
-            if interrupted {
+            let error = match child::verdict(&ending, &prog_str, &stderr, ok_codes) {
+                child::IterationVerdict::Counted => None,
+                child::IterationVerdict::Failed(error) => Some(error),
+                child::IterationVerdict::Interrupted => Some(DevError::Interrupted),
+            };
+            if let Some(error) = error {
                 drop(fifo);
-                let exit_code = exit_code_from_status(&captured.status);
-                let info = self.build_run_info(config, program, start_epoch, last_pid, Some(exit_code));
+                let info = self.build_run_info(
+                    config,
+                    program,
+                    start_epoch,
+                    Some(pid),
+                    Some(ending),
+                );
                 self.store_sidecar(None, &sidecar_runs, i, Some(&info)).ok();
-                return Err(DevError::Interrupted);
-            }
-
-            // When the child was killed by a --stop marker, the exit status
-            // is SIGKILL - not a real failure.
-            if !stopped {
-                let exit_err = captured.check_success_or(&prog_str, ok_codes).err();
-                if let Some(e) = exit_err {
-                    drop(fifo);
-                    let exit_code = exit_code_from_status(&captured.status);
-                    let info = self.build_run_info(config, program, start_epoch, last_pid, Some(exit_code));
-                    self.store_sidecar(None, &sidecar_runs, i, Some(&info)).ok();
-                    return Err(e);
-                }
+                return Err(error);
             }
 
             // Recorded only past the failure checks above, so `walls` holds
@@ -537,7 +569,7 @@ impl BenchHarness {
             if best_us.is_none_or(|best| us < best) {
                 best_us = Some(us);
                 best_run_idx = i;
-                best_stderr = captured.stderr;
+                best_stderr = stderr;
             }
         }
 
@@ -567,7 +599,13 @@ impl BenchHarness {
             hotpath: None,
         };
 
-        let info = self.build_run_info(config, program, start_epoch, last_pid, Some(0));
+        let info = self.build_run_info(
+            config,
+            program,
+            start_epoch,
+            pids.get(best_run_idx).copied(),
+            sidecar_runs.get(best_run_idx).map(|data| data.ending.clone()),
+        );
         let fired_stop_marker = sidecar_runs
             .get(best_run_idx)
             .and_then(|data| data.fired_stop_marker.as_deref());
@@ -682,7 +720,7 @@ impl BenchHarness {
         let mut best: Option<BenchResult> = None;
         let mut best_stderr: Vec<u8> = Vec::new();
         let mut best_run_idx: usize = 0;
-        let mut last_pid: u32 = 0;
+        let mut pids: Vec<u32> = Vec::with_capacity(config.runs);
         let mut walls: Vec<i64> = Vec::with_capacity(config.runs);
         let mut walls_us: Vec<Option<i64>> = Vec::with_capacity(config.runs);
         let mut sidecar_runs: Vec<sidecar::SidecarData> = Vec::with_capacity(config.runs);
@@ -699,43 +737,35 @@ impl BenchHarness {
 
             let env = [("BROKKR_MARKER_FIFO", fifo_path_str.as_str())];
             let start = Instant::now();
-            let child = output::spawn_captured(&prog_str, args, cwd, &env, true)?;
-            last_pid = child.id();
-            self.lock.set_child_pid(last_pid);
+            let child = child::spawn_captured(&prog_str, args, cwd, &env, true, crate::output::SpawnProfile::Plain)?;
+            let pid = child.id();
+            pids.push(pid);
+            self.lock.set_child_pid(pid);
             let sidecar_result = sidecar::run_sidecar(child, &mut fifo, i, start, self.stop_marker.as_deref());
             self.lock.clear_child_pid();
-            let stopped = sidecar_result.stopped_by_marker;
-            let interrupted = sidecar_result.stopped_by_signal;
-
-            let captured = output::CapturedOutput {
-                status: sidecar_result.exit_status,
-                stdout: sidecar_result.stdout,
-                stderr: sidecar_result.stderr,
-                elapsed: sidecar_result.elapsed,
-            };
-
+            let ending = sidecar_result.data.ending.clone();
+            let stderr = sidecar_result.stderr;
             sidecar_runs.push(sidecar_result.data);
 
-            if interrupted {
+            let error = match child::verdict(&ending, &prog_str, &stderr, &[]) {
+                child::IterationVerdict::Counted => None,
+                child::IterationVerdict::Failed(error) => Some(error),
+                child::IterationVerdict::Interrupted => Some(DevError::Interrupted),
+            };
+            if let Some(error) = error {
                 drop(fifo);
-                let exit_code = exit_code_from_status(&captured.status);
-                let info = self.build_run_info(config, program, start_epoch, last_pid, Some(exit_code));
+                let info = self.build_run_info(
+                    config,
+                    program,
+                    start_epoch,
+                    Some(pid),
+                    Some(ending),
+                );
                 self.store_sidecar(None, &sidecar_runs, i, Some(&info)).ok();
-                return Err(DevError::Interrupted);
+                return Err(error);
             }
 
-            if !stopped {
-                let exit_err = captured.check_success(&prog_str).err();
-                if let Some(err) = exit_err {
-                    drop(fifo);
-                    let exit_code = exit_code_from_status(&captured.status);
-                    let info = self.build_run_info(config, program, start_epoch, last_pid, Some(exit_code));
-                    self.store_sidecar(None, &sidecar_runs, i, Some(&info)).ok();
-                    return Err(err);
-                }
-            }
-
-            let result = parse_kv_stderr(&captured.stderr)?;
+            let result = parse_kv_stderr(&stderr)?;
             // Self-reported elapsed from stderr, matching what this path
             // stores as the run's elapsed - not the external wall clock.
             // `parse_kv_stderr` always yields microseconds (a fractional
@@ -750,7 +780,7 @@ impl BenchHarness {
                 .as_ref()
                 .is_none_or(|b| bench_ordering_key(&result) < bench_ordering_key(b));
             if is_new_best {
-                best_stderr = captured.stderr;
+                best_stderr = stderr;
                 best_run_idx = i;
             }
             best = Some(pick_best(best, result));
@@ -762,7 +792,13 @@ impl BenchHarness {
             best.ok_or_else(|| DevError::Config("benchmark requires at least 1 run".into()))?;
         best.iterations = walls;
 
-        let info = self.build_run_info(config, program, start_epoch, last_pid, Some(0));
+        let info = self.build_run_info(
+            config,
+            program,
+            start_epoch,
+            pids.get(best_run_idx).copied(),
+            sidecar_runs.get(best_run_idx).map(|data| data.ending.clone()),
+        );
         let pending = PendingSidecar {
             runs: sidecar_runs,
             best_run_idx,
@@ -822,14 +858,14 @@ impl BenchHarness {
                 Ok(pair) => pair,
                 Err(e) => {
                     force_emit_result_lines(config, mode.as_deref(), result, &self.git);
-                    output::error(&format!("results.db insert failed - result not stored: {e}"));
+                    console::error(&format!("results.db insert failed - result not stored: {e}"));
                     return Err(e);
                 }
             };
             emit_result_lines(config, mode.as_deref(), result, &self.git);
             // The one line naming the stored row's id (also the sidecar
             // profile's). Not quiet-gated: it is how the run is found again.
-            output::run_msg(&format!("results.db {short}"));
+            console::run_msg(&format!("results.db {short}"));
             Ok(Some(uuid))
         } else {
             // Dirty tree: no DB insert, no UUID. Always print result line
@@ -842,7 +878,7 @@ impl BenchHarness {
     /// The measurement mode a row, `[result]` line and sidecar record
     /// carry: the session's `measure_mode`, set from the request.
     pub fn effective_mode(&self) -> Option<String> {
-        self.measure_mode.clone()
+        self.store_results.then(|| self.measure_mode.label().to_owned())
     }
 
     /// Record that measurement is starting now. For the loops that don't
@@ -857,20 +893,20 @@ impl BenchHarness {
         config: &BenchConfig,
         program: &Path,
         start_epoch: i64,
-        pid: u32,
-        exit_code: Option<i32>,
+        pid: Option<u32>,
+        ending: Option<child::Ending>,
     ) -> crate::db::sidecar::RunInfo {
         let binary_xxh128 = crate::preflight::compute_file_digest(program).map(|d| d.to_string()).ok();
         crate::db::sidecar::RunInfo {
             run_start_epoch: Some(start_epoch),
-            pid: Some(i64::from(pid)),
+            pid: pid.map(i64::from),
             command: Some(config.command.clone()),
             binary_path: Some(program.display().to_string()),
             binary_xxh128,
-            git_commit: Some(self.git.commit.clone()),
+            git_commit: Some(self.git.commit.as_str().to_owned()),
             mode: self.effective_mode(),
             dataset: config.input_file.clone(),
-            exit_code,
+            ending,
         }
     }
 
@@ -967,7 +1003,7 @@ impl BenchHarness {
         // Per-run attach and sample counts are run-log detail (`run_sidecar`);
         // the wall time is on the `[result]` line.
         let short = &store_uuid[..8.min(store_uuid.len())];
-        output::sidecar_msg(&sidecar_summary_line(
+        console::sidecar_msg(&sidecar_summary_line(
             short,
             is_dirty,
             sidecar_runs,
@@ -982,7 +1018,7 @@ impl BenchHarness {
         if let Err(e) = backup_sidecar(&sidecar_db_path, self.project) {
             // A warning, not narration: the quiet-gated sidecar line hid a
             // real loss of the backup.
-            output::warn(&format!("sidecar backup failed (non-fatal): {e}"));
+            console::warn(&format!("sidecar backup failed (non-fatal): {e}"));
         }
 
         Ok(())
@@ -1022,11 +1058,10 @@ impl BenchHarness {
         // don't have to know or care about the measurement mode or the
         // brokkr invocation string - the harness attaches them.
         let mode = self.effective_mode();
-        let brokkr_args = self.brokkr_args.clone();
 
         RunRow {
-            hostname: self.env.hostname.clone(),
-            commit: self.git.commit.clone(),
+            hostname: self.host.hostname.clone(),
+            commit: self.git.commit.as_str().to_owned(),
             subject: self.git.subject.clone(),
             command: config.command.clone(),
             mode,
@@ -1037,19 +1072,26 @@ impl BenchHarness {
                 .cargo_features
                 .clone()
                 .or_else(|| self.cargo_features.clone()),
-            cargo_profile: config.cargo_profile,
+            // An external tool's own identity, else what the session built.
+            // A session that measures a binary it did not build (a server the
+            // command started, a suite's own release builds) records release,
+            // the profile every such build path uses.
+            cargo_profile: config
+                .external_build
+                .or_else(|| self.build_identity.as_ref().map(|b| b.profile))
+                .unwrap_or(CargoProfile::Release),
             elapsed_ms: result.elapsed_ms,
             // Carried through, not recomputed: only the harness path that
             // produced the result knows whether sub-millisecond timing was
             // ever measured. `None` here means "never measured", which is
             // not the same as `elapsed_ms * 1000`.
             elapsed_us: result.elapsed_us,
-            kernel: Some(self.env.kernel.clone()),
-            cpu_governor: Some(self.env.governor.clone()),
-            avail_memory_mb: i64::try_from(self.env.memory_available_mb).ok(),
+            kernel: self.host.kernel.clone(),
+            cpu_governor: self.host.governor.clone(),
+            avail_memory_mb: i64::try_from(self.host.memory_available_mb).ok(),
             storage_notes: self.storage_notes.clone(),
             cli_args: config.cli_args.clone(),
-            brokkr_args,
+            invocation: self.invocation.clone(),
             project: self.project.name().to_owned(),
             stop_marker: if self.stop_marker.is_some() || fired_stop_marker.is_some() {
                 Some((

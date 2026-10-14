@@ -322,17 +322,24 @@ fn run_one_isolated_test(
     };
     let sink_origin = origin.clone();
     let sink = tap.sink(move |_| sink_origin.clone(), false);
-    let run = test_runner::run_libtest_parallel(
-        &case.binary.executable,
-        test_runner::Leader::TestBinary,
-        &args,
-        &cwd,
-        state_root,
-        &env_pairs,
-        test_runner::TEST_TIMEOUT,
-        test_runner::TEST_TIMEOUT,
-        None,
-        Some(&sink),
+    let observe = test_runner::Observe {
+        sink: Some(sink),
+        shim: test_runner::ShimMode::Off,
+    };
+    let run = test_runner::run_libtest(
+        test_runner::Launch::Direct {
+            program: &case.binary.executable,
+        },
+        test_runner::LibtestInvocation {
+            args: &args,
+            cwd: &cwd,
+            state_root,
+            env: &env_pairs,
+            context: test_runner::RunContext::process(),
+            abort: None,
+        },
+        test_runner::Ceilings::one_test(test_runner::TEST_TIMEOUT, name.clone()),
+        &observe,
         |_| {},
         |_| {},
         |_| {},
@@ -345,51 +352,47 @@ fn run_one_isolated_test(
     // A wall kill, or a hung test: this process has exactly one selected test,
     // so the kill is attributed from the selection even if its output hid a
     // JSON event.
-    if let LibtestOutcome::HungTest(hung) = &run.outcome {
-        output::error(&format!(
-            "test '{name}' in {}/{} exceeded its time budget in sweep '{sweep_label}' - stopping",
-            case.binary.package, case.binary.target
-        ));
-        output::error(&test_runner::format_hung_test(hung, project_root));
-        output::error(&format!("failing command: {command}"));
-        return Ok(IsolatedOutcome::TimedOut);
-    }
     let stdout = String::from_utf8_lossy(&run.captured.stdout);
-
-    if !run.captured.status.success() {
-        output::error(&format!("FAIL {name}"));
-        output::error(&format!("failing command: {command}"));
-        let stderr = String::from_utf8_lossy(&run.captured.stderr);
-        output::error(&test_runner::filter_test(&stdout, &stderr));
-        return Ok(IsolatedOutcome::Failed);
-    }
-
-    // The caller already routed `#[ignore]`d names away from execution, so
-    // an invocation that ran zero tests means the name stopped matching
-    // between enumeration and execution - an anomaly, not a skip.
-    let stdout_lines: Vec<&str> = stdout.lines().collect();
-
-    let parsed = test_runner::parse_test_output(&stdout_lines);
-    if zero_test_run(&parsed) {
-        output::error(&format!(
-            "FAIL {name}: invocation ran zero tests (name no longer matches?)"
-        ));
-        output::error(&format!("failing command: {command}"));
-        return Ok(IsolatedOutcome::Failed);
-    }
-
-    // This lane selects one test by name, so its terminal event is the whole
-    // point of the invocation: a stream that stopped before reporting it has not
-    // shown that the test passed, whatever the exit status says. `zero_test_run`
-    // returns false for an incomplete stream by design, which left this path
-    // reaching `Passed` on evidence that never arrived.
-    if let test_runner::Completeness::Incomplete { reason } = &parsed.completeness {
-        output::error(&format!(
-            "FAIL {name}: the test stream did not finish reporting: {reason}. The process exited \
-             successfully, but nothing reported this test's result, so there is no pass to record."
-        ));
-        output::error(&format!("failing command: {command}"));
-        return Ok(IsolatedOutcome::Failed);
+    match test_runner::lane_verdict(&run.outcome) {
+        test_runner::LaneVerdict::BudgetBlown => {
+            output::error(&format!(
+                "test '{name}' in {}/{} exceeded its time budget in sweep '{sweep_label}' - stopping",
+                case.binary.package, case.binary.target
+            ));
+            if let Some(hung) = &run.hung {
+                output::error(&test_runner::format_hung_test(hung, project_root));
+            }
+            output::error(&format!("failing command: {command}"));
+            return Ok(IsolatedOutcome::TimedOut);
+        }
+        test_runner::LaneVerdict::Stopped => return Err(DevError::Interrupted),
+        test_runner::LaneVerdict::Fail => {
+            output::error(&format!("FAIL {name}"));
+            output::error(&format!("failing command: {command}"));
+            let stderr = String::from_utf8_lossy(&run.captured.stderr);
+            output::error(&test_runner::filter_test(&stdout, &stderr));
+            return Ok(IsolatedOutcome::Failed);
+        }
+        test_runner::LaneVerdict::Incomplete => {
+            output::error(&format!(
+                "FAIL {name}: the observation stream did not report a complete run. The test may \
+                 have stopped talking before it reported a result."
+            ));
+            output::error(&format!("failing command: {command}"));
+            return Ok(IsolatedOutcome::Failed);
+        }
+        test_runner::LaneVerdict::Pass => {
+            if !matches!(
+                run.outcome.test_result(name),
+                Some(test_runner::TestResult::Ok | test_runner::TestResult::Ignored)
+            ) {
+                output::error(&format!(
+                    "FAIL {name}: the invocation did not report this selected test's result"
+                ));
+                output::error(&format!("failing command: {command}"));
+                return Ok(IsolatedOutcome::Failed);
+            }
+        }
     }
 
     // The roll-call: one line per test, into the run log. It used to print,

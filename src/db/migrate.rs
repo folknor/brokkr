@@ -2,27 +2,22 @@ use super::schema::HOTPATH_TYPED_DDL;
 use crate::error::DevError;
 
 /// Current schema version. Increment when adding new migrations.
-pub(super) const SCHEMA_VERSION: i64 = 22;
+pub(super) const SCHEMA_VERSION: i64 = 23;
 
-/// Run all pending migrations based on `PRAGMA user_version`.
-pub(super) fn run_migrations(conn: &rusqlite::Connection) -> Result<(), DevError> {
+/// Apply all migrations newer than `current`. Version checks and stamping are
+/// centralized in `db::store`.
+pub(super) fn run_migrations(conn: &rusqlite::Connection, current: i64) -> Result<(), DevError> {
     // Fresh database - no tables yet, nothing to migrate.
     if !has_table(conn, "runs") {
         return Ok(());
     }
 
-    let current: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
-
-    if current >= SCHEMA_VERSION {
-        return Ok(());
-    }
-
-    // Probe, don't trust the stamp: litehtml's `MechanicalDb` used to share
-    // this file and wrote `user_version = 1` for its own schema, so a legacy
-    // pre-uuid `runs` table can carry a stamp claiming v1 while lacking the
-    // column. Skipping the step there would also make `SCHEMA`'s
-    // `idx_runs_uuid` fail on the missing column. `migrate_uuid` is
-    // idempotent, so running it on a genuine v1 file is harmless.
+    // Probe, don't trust the stamp: older litehtml `MechanicalDb` versions
+    // shared this file and wrote `user_version = 1` for their schema. The
+    // current visual stores no longer own `user_version`, but legacy files can
+    // still carry that stamp on a pre-uuid `runs` table. Skipping the step
+    // would make `SCHEMA`'s `idx_runs_uuid` fail on the missing column.
+    // `migrate_uuid` is idempotent, so running it on a genuine v1 file is safe.
     if current < 1 || !has_column(conn, "runs", "uuid") {
         migrate_uuid(conn)?;
     }
@@ -90,8 +85,20 @@ pub(super) fn run_migrations(conn: &rusqlite::Connection) -> Result<(), DevError
     if current < 22 {
         migrate_v21_to_v22(conn)?;
     }
+    if current < 23 {
+        migrate_v22_to_v23(conn)?;
+    }
 
-    conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    Ok(())
+}
+
+/// Add the structured measurement-arm identity. Existing invocation strings
+/// remain untouched because argv boundaries lost by the old format cannot be
+/// reconstructed reliably.
+fn migrate_v22_to_v23(conn: &rusqlite::Connection) -> Result<(), DevError> {
+    if !has_column(conn, "runs", "arm_key") {
+        conn.execute_batch("ALTER TABLE runs ADD COLUMN arm_key TEXT")?;
+    }
     Ok(())
 }
 
@@ -1286,6 +1293,7 @@ mod tests {
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
         assert_eq!(version, SCHEMA_VERSION);
+        assert!(has_column(&db.conn, "runs", "arm_key"));
 
         drop(db);
         cleanup(&dir, &db_path);
@@ -2289,6 +2297,7 @@ mod tests {
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
         assert_eq!(version, SCHEMA_VERSION);
+        assert!(has_column(&db.conn, "runs", "arm_key"));
 
         drop(db);
         cleanup(&dir, &db_path);

@@ -256,7 +256,7 @@ pub(super) fn run_ready(
         // re-uplifts its support binaries - and held to its prepared record,
         // always. It says nothing unless it fails or finds drift: a routine
         // re-verification narrated as a second build reads like one.
-        check_cmd::enter_phase("test");
+        check_cmd::enter_phase(check_cmd::Phase::Test);
         let fresh;
         let r: &ReadySweep<'_> = match settle_sweep(prepared, cx, inventory, si, repeat) {
             Ok(Settled::Unchanged) => prepared,
@@ -299,7 +299,7 @@ pub(super) fn run_ready(
         };
         for n in 1..=repeat {
             // Each iteration is its own bounded unit, with its own phase clock.
-            check_cmd::enter_phase("test");
+            check_cmd::enter_phase(check_cmd::Phase::Test);
             let tap = inventory.map(|i| i.tap(si, n));
             if let Some(tap) = &tap {
                 tap.record(check_cmd::JournalRecord::LaneStarted { lane: tap.lane() });

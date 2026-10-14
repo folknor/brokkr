@@ -255,7 +255,7 @@ fn probe_guard(wrapper: &str) -> GuardProbe {
         Ok(c) => c,
         Err(e) => return GuardProbe::Stale(format!("could not be executed: {e}")),
     };
-    if capture.killed_on_deadline {
+    if capture.killed_on_deadline() {
         return GuardProbe::Stale("did not answer the handshake within 3s".into());
     }
     let stdout = String::from_utf8_lossy(&capture.captured.stdout);

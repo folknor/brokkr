@@ -1,18 +1,23 @@
 // The doc comments here are clap's `--help` text, rendered verbatim, not rustdoc
-// prose: `[pbfhogg] Sort PBF` is a project tag a user reads, and escaping it as a
-// link would print the backslashes, and `<dataset>` is a placeholder, not HTML.
+// prose: `<dataset>` is a placeholder, not HTML. Project prefixes are supplied
+// by the command specification when the clap command tree is constructed.
 #![allow(rustdoc::broken_intra_doc_links, rustdoc::invalid_html_tags)]
 
 include!("cli/schema.rs");
 include!("cli/validation.rs");
-include!("cli/visibility.rs");
+mod visibility;
+pub(crate) use visibility::*;
 
 #[cfg(test)]
 mod visibility_tests {
     #![allow(clippy::unwrap_used)]
-    use super::{Cli, TABLE, visible_in};
+    use super::{COMMANDS, Cli, CommandId, visible_to};
     use crate::project::Project;
     use clap::CommandFactory;
+
+    fn visible_in(name: &str, project: Project) -> bool {
+        CommandId::from_name(name).is_some_and(|id| visible_to(&id.spec().applies, project))
+    }
 
     /// `Cli::command()` on a thread with the main thread's stack: building the
     /// whole unoptimized `Command` tree overflows a libtest thread's 2 MiB.
@@ -39,7 +44,7 @@ mod visibility_tests {
         let missing: Vec<String> = cmd
             .get_subcommands()
             .map(|s| s.get_name().to_owned())
-            .filter(|name| !TABLE.iter().any(|(n, _)| n == name))
+            .filter(|name| CommandId::from_name(name).is_none())
             .collect();
         assert!(
             missing.is_empty(),
@@ -53,9 +58,9 @@ mod visibility_tests {
     fn table_has_no_stale_entries() {
         let cmd = command();
         let names: Vec<&str> = cmd.get_subcommands().map(clap::Command::get_name).collect();
-        let stale: Vec<&str> = TABLE
+        let stale: Vec<&str> = COMMANDS
             .iter()
-            .map(|(n, _)| *n)
+            .map(|id| id.spec().name)
             .filter(|n| !names.contains(n))
             .collect();
         assert!(

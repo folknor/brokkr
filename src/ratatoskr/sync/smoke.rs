@@ -5,7 +5,6 @@ use std::path::Path;
 use crate::artefacts;
 use crate::config::project_config::ratatoskr::RatatoskrConfig;
 use crate::error::DevError;
-use crate::lockfile::{self, LockContext};
 use crate::output;
 use crate::ratatoskr::build;
 
@@ -47,12 +46,7 @@ pub fn run_sync_smoke(req: &SyncSmokeRequest<'_>) -> Result<(), DevError> {
         validate_sync_config(req.project_root, req.ratatoskr)?;
     let resolved = resolve_single(req.script, &fixtures_dir)?;
 
-    let project_root_str = req.project_root.display().to_string();
-    let _lock = lockfile::acquire(&LockContext {
-        project: "ratatoskr",
-        command: "sync",
-        project_root: &project_root_str,
-    })?;
+    let _lock = crate::context::reenter_command_lock()?;
     // Cooperative SIGTERM for `brokkr kill`. Installed right after the
     // lock so every captured subprocess from here on - cargo build,
     // sæhrimnir spawn (no flag-poll, but Drop will hard-kill on unwind),

@@ -322,6 +322,7 @@ fn map_stored_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredRow> {
         brokkr_args: row
             .get::<_, Option<String>>("brokkr_args")?
             .unwrap_or_default(),
+        arm_key: row.get::<_, Option<String>>("arm_key")?,
         // Older or hand-written rows without attribution retain the original
         // results store's project identity.
         project: row
@@ -780,12 +781,15 @@ fn apply_legacy_function_metrics(
     for (function, old) in functions.iter_mut().zip(legacy) {
         function.avg = function
             .avg
+            .take()
             .or_else(|| old.avg.as_deref().and_then(Quantity::parse));
         function.total = function
             .total
+            .take()
             .or_else(|| old.total.as_deref().and_then(Quantity::parse));
         function.percent_total = function
             .percent_total
+            .take()
             .or_else(|| old.percent_total.as_deref().and_then(Quantity::parse));
         for (key, text) in [("p50", old.p50), ("p95", old.p95), ("p99", old.p99)] {
             if let (Some(percentile), Some(value)) = (
@@ -965,7 +969,14 @@ mod tests {
         clippy::useless_vec
     )]
     use super::*;
-    use crate::db::{ResultsDb, RunRow};
+    use crate::db::{ResultsDb, RunInvocation, RunRow};
+
+    fn test_invocation(raw: &str) -> RunInvocation {
+        RunInvocation {
+            argv: raw.split_whitespace().map(str::to_owned).collect(),
+            arm_key: raw.to_owned(),
+        }
+    }
 
     fn test_db(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
         let dir = std::env::temp_dir().join(format!("brokkr_test_{name}"));
@@ -1236,7 +1247,7 @@ mod tests {
             avail_memory_mb: None,
             storage_notes: None,
             cli_args: None,
-            brokkr_args: None,
+            invocation: test_invocation(""),
             project: String::from("test"),
             stop_marker: None,
             kv,
@@ -1340,7 +1351,7 @@ mod tests {
             avail_memory_mb: None,
             storage_notes: None,
             cli_args: None,
-            brokkr_args: None,
+            invocation: test_invocation(""),
             project: String::from("test"),
             stop_marker: None,
             kv: vec![],
@@ -1472,7 +1483,7 @@ mod tests {
             avail_memory_mb: None,
             storage_notes: None,
             cli_args: None,
-            brokkr_args: None,
+            invocation: test_invocation(""),
             project: String::from("test"),
             stop_marker: None,
             kv: vec![],
@@ -1568,7 +1579,7 @@ mod tests {
             avail_memory_mb: None,
             storage_notes: None,
             cli_args: None,
-            brokkr_args: None,
+            invocation: test_invocation(""),
             project: String::from("test"),
             stop_marker: None,
             kv: vec![
@@ -1713,7 +1724,7 @@ mod tests {
             avail_memory_mb: None,
             storage_notes: None,
             cli_args: Some(String::from(cli)),
-            brokkr_args: Some(String::from(brokkr)),
+            invocation: test_invocation(brokkr),
             project: String::from("test"),
             stop_marker: None,
             kv: vec![],
@@ -1843,7 +1854,7 @@ mod tests {
             avail_memory_mb: None,
             storage_notes: None,
             cli_args: Some(String::from(cli)),
-            brokkr_args: Some(String::from(brokkr)),
+            invocation: test_invocation(brokkr),
             project: String::from("test"),
             stop_marker: None,
             kv: vec![],
@@ -1965,7 +1976,7 @@ mod tests {
             avail_memory_mb: None,
             storage_notes: None,
             cli_args: Some(String::from("tilegen --zoom 14")),
-            brokkr_args: Some(String::from("brokkr tilegen --bench 3")),
+            invocation: test_invocation("brokkr tilegen --bench 3"),
             project: String::from("test"),
             stop_marker: None,
             kv: env
@@ -2047,7 +2058,7 @@ mod tests {
             avail_memory_mb: None,
             storage_notes: None,
             cli_args: None,
-            brokkr_args: None,
+            invocation: test_invocation(""),
             project: String::from("test"),
             stop_marker: None,
             kv,

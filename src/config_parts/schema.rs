@@ -166,11 +166,10 @@ pub enum InstallFeatureCheck {
 ///   and says so on the notice line. The narrow guarantee still holds where it
 ///   can be enforced (the clippy phase); the alternative was an `allow_exact`
 ///   that silently does nothing about the failure it was written for.
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(deny_unknown_fields, default)]
+#[derive(Debug, Clone, Default)]
 pub struct LintsConfig {
-    /// Lint names to suppress (`-A <lint>`) on every sweep, both phases.
-    pub allow: Vec<String>,
+    /// Parsed lint names to suppress (`-A <lint>`) on every sweep, both phases.
+    pub allow: Vec<check::LintName>,
     /// Sited suppressions (`"lint@path"`), filtered at diagnostic ingestion in
     /// the clippy phase, degraded to a build-wide `-A <lint>` in the test phase.
     pub allow_exact: Vec<SitedAllow>,
@@ -186,14 +185,14 @@ impl LintsConfig {
 
 /// One `[lints] allow_exact` entry: a lint suppressed in one file only.
 ///
-/// Deserialized from the `"lint@path"` string form; the split and both
-/// halves are validated during deserialization, so a constructed value is
-/// always well-formed. `path` is relative to the tree cargo compiles in
-/// (the build root) - exactly the path clippy's own diagnostics carry.
+/// Parsed from the `"lint@path"` string form; the split and both halves are
+/// validated during configuration loading, so a constructed value is always
+/// well-formed. `path` is relative to the tree cargo compiles in (the build
+/// root) - exactly the path clippy's own diagnostics carry.
 #[derive(Debug, Clone)]
 pub struct SitedAllow {
-    /// Bare lint name (`clippy::`-qualified or plain rustc name).
-    pub lint: String,
+    /// Parsed lint name (`clippy::`-qualified or plain rustc name).
+    pub lint: check::LintName,
     /// Build-root-relative file the suppression is scoped to.
     pub path: String,
 }
@@ -216,14 +215,18 @@ impl SitedAllow {
                  (e.g. \"clippy::unused_async@src/lib.rs\")."
             ));
         }
-        if path.is_empty() || path.chars().any(char::is_whitespace) || path.contains('@') {
+        if path.is_empty()
+            || Path::new(path).is_absolute()
+            || path.chars().any(char::is_whitespace)
+            || path.contains('@')
+        {
             return Err(format!(
                 "allow_exact entry '{s}' does not end with a single relative \
                  path (e.g. \"clippy::unused_async@src/lib.rs\")."
             ));
         }
         Ok(Self {
-            lint: lint.to_string(),
+            lint: check::LintName::parse(lint),
             path: path.to_string(),
         })
     }
@@ -231,7 +234,7 @@ impl SitedAllow {
 
 impl std::fmt::Display for SitedAllow {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}@{}", self.lint, self.path)
+        write!(f, "{}@{}", self.lint.as_str(), self.path)
     }
 }
 
@@ -759,13 +762,31 @@ pub struct DependencyRule {
     #[serde(default, deserialize_with = "string_or_vec")]
     pub except: Vec<String>,
     /// Dependency kinds the rule applies to (`normal` / `dev` / `build`). Empty
-    /// = all kinds. Validated when the phase runs. Single string or array.
-    #[serde(default, deserialize_with = "string_or_vec")]
-    pub kinds: Vec<String>,
+    /// = all kinds. Parsed at load; a single string or an array.
+    #[serde(default, deserialize_with = "dependency_kinds")]
+    pub kinds: Vec<crate::deps::DependencyKind>,
     /// When set, only match deps whose `optional` flag equals this. `false`
     /// expresses "must be optional". Unset = match regardless.
     #[serde(default)]
     pub optional: Option<bool>,
+}
+
+/// `kinds`: one kind or a list, each parsed into a [`crate::deps::DependencyKind`]
+/// at load, so an unknown spelling fails the config rather than the phase.
+fn dependency_kinds<'de, D>(deserializer: D) -> Result<Vec<crate::deps::DependencyKind>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    string_or_vec(deserializer)?
+        .iter()
+        .map(|kind| {
+            crate::deps::DependencyKind::parse_config(kind).ok_or_else(|| {
+                serde::de::Error::custom(format!(
+                    "unknown kind {kind:?} in `kinds`; expected \"normal\", \"dev\" or \"build\""
+                ))
+            })
+        })
+        .collect()
 }
 
 fn opt_string_or_vec<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
@@ -1159,30 +1180,21 @@ pub enum Isolation {
 /// It is **not** the `skip_phases` universe: `prepare` and `coverage` are not
 /// skippable (they run only under a `certifies = "complete"` profile, while
 /// `skip_phases` requires `certifies = "partial"`, and they are not gated on
-/// the skip predicate anyway). [`NON_SKIPPABLE_PHASES`] names that exclusion,
-/// and the `skip_phases` validator subtracts it from this list - so the two
-/// roles never let `skip_phases = ["coverage"]` load clean and announce a no-op.
-pub const PHASE_NAMES: [&str; 13] = [
-    "gremlins",
-    "header",
-    "textlint",
-    "manifest",
-    "script_check",
-    "dependency_rules",
-    "publish_cycle",
-    "clippy",
-    "rustdoc",
-    "prepare",
-    "test",
-    "coverage",
-    "install_feature",
-];
+/// the skip predicate anyway). [`skippable_phase_names`] is that universe, so
+/// `skip_phases = ["coverage"]` cannot load clean and announce a no-op.
+pub fn phase_names() -> impl Iterator<Item = &'static str> {
+    crate::check_cmd::Phase::ALL.into_iter().map(crate::check_cmd::Phase::as_str)
+}
 
-/// Phases that are real (valid `failed_phase` values) but that a `skip_phases`
-/// list may not name. Subtracted from [`PHASE_NAMES`] to form the skippable
-/// universe. Both belong to the complete claim alone; kept a named list so the
-/// reason travels with the data.
-pub const NON_SKIPPABLE_PHASES: [&str; 2] = ["prepare", "coverage"];
+/// The phases a `skip_phases` list may name: every phase the check phase
+/// type marks skippable. `prepare` and `coverage` belong to the complete
+/// claim alone, so they are not.
+pub fn skippable_phase_names() -> impl Iterator<Item = &'static str> {
+    crate::check_cmd::Phase::ALL
+        .into_iter()
+        .filter(|phase| phase.skippable())
+        .map(crate::check_cmd::Phase::as_str)
+}
 
 /// One `[[quarantine]]` entry: a justified, counted suppression.
 /// `issue` is required, not decorative - it
@@ -1239,12 +1251,9 @@ pub struct ProfileDef {
     /// Check phases this profile skips, subtractive (a new native phase
     /// is included everywhere until opted out, never silently excluded).
     /// Requires `certifies = "partial"` - the claim is what grants the
-    /// permission. Valid names are the [`PHASE_NAMES`] identifiers `gremlins`,
-    /// `header`, `textlint`, `manifest`, `script_check`,
-    /// `dependency_rules`, `publish_cycle`, `clippy`, `rustdoc`, `test`,
-    /// `install_feature` minus [`NON_SKIPPABLE_PHASES`] -
-    /// `prepare` and `coverage` are not skippable (they run only under a
-    /// complete claim). Not inherited through `extends`.
+    /// permission. Valid names are [`skippable_phase_names`] - every check
+    /// phase but `prepare` and `coverage`, which run only under a complete
+    /// claim. Not inherited through `extends`.
     pub skip_phases: Option<Vec<String>>,
     /// Run each of this profile's tests in its own process.
     /// `--test-threads=1` serializes tests

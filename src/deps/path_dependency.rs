@@ -7,11 +7,9 @@
 //! is usually either a dev shortcut (forgot to publish a fork) or a hand-
 //! patched dependency that wouldn't reproduce on a clean checkout.
 
-use std::collections::HashSet;
-
 use serde::Serialize;
 
-use super::CargoMetadata;
+use super::{CargoMetadata, PackageSourceKind};
 
 #[derive(Serialize)]
 pub(super) struct PathDependencyEvent {
@@ -23,18 +21,9 @@ pub(super) struct PathDependencyEvent {
 }
 
 pub fn run(metadata: &CargoMetadata) -> Vec<PathDependencyEvent> {
-    let workspace_set: HashSet<&str> = metadata
-        .workspace_members
-        .iter()
-        .map(String::as_str)
-        .collect();
-
     let mut events = Vec::new();
     for pkg in &metadata.packages {
-        if pkg.source.is_some() {
-            continue;
-        }
-        if workspace_set.contains(pkg.id.as_str()) {
+        if metadata.source_kind(&pkg.id) != PackageSourceKind::Path {
             continue;
         }
         events.push(PathDependencyEvent {

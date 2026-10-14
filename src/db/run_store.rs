@@ -60,9 +60,29 @@ pub(crate) struct RunStore {
 }
 
 impl RunStore {
-    /// Open each existing store. Missing files remain absent rather than
+    /// Open existing stores read-only. Missing files remain absent rather than
     /// being created just to answer a query.
-    pub(crate) fn open(results_path: &Path, sidecar_path: &Path) -> Result<Self, DevError> {
+    pub(crate) fn open_read_only(
+        results_path: &Path,
+        sidecar_path: &Path,
+    ) -> Result<Self, DevError> {
+        let results = results_path
+            .exists()
+            .then(|| ResultsDb::open_read_only(results_path))
+            .transpose()?;
+        let sidecar = sidecar_path
+            .exists()
+            .then(|| sidecar::SidecarDb::open_read_only(sidecar_path))
+            .transpose()?;
+        Ok(Self { results, sidecar })
+    }
+
+    /// Open existing stores for explicit deletion. This path is the only
+    /// query facade that also permits migration and writes.
+    pub(crate) fn open_for_delete(
+        results_path: &Path,
+        sidecar_path: &Path,
+    ) -> Result<Self, DevError> {
         let results = results_path
             .exists()
             .then(|| ResultsDb::open(results_path))

@@ -46,9 +46,7 @@ pub(crate) fn prepare(
                 .get(id)
                 .zip(registry.config(id))
                 .ok_or_else(|| {
-                    DevError::Config(format!(
-                        "piners: internal: selected id '{id}' absent from pins"
-                    ))
+                    DevError::Internal(format!("piners: selected id '{id}' absent from pins"))
                 })?;
         verified.push(registry::verify_probe(
             id,
@@ -86,8 +84,8 @@ fn verify_selected_feeds(
         .collect();
     for name in &referenced {
         let group = registry.feeds.get(name).ok_or_else(|| {
-            DevError::Config(format!(
-                "piners: internal: referenced feed group '{name}' absent from [feeds]"
+            DevError::Internal(format!(
+                "piners: referenced feed group '{name}' absent from [feeds]"
             ))
         })?;
         registry::verify_feed_group(name, group, corpus_root, project_root)?;

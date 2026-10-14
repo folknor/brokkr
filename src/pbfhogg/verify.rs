@@ -35,26 +35,22 @@ pub struct VerifyHarness {
 impl VerifyHarness {
     /// Build the CLI binary and prepare the verify output directory.
     ///
-    /// Acquires an exclusive lock via [`crate::lockfile::acquire`] so that
-    /// no other dev/bench/verify process runs concurrently.
+    /// Holds the invocation's lock (re-entered, [`crate::context::reenter_command_lock`])
+    /// so that no other dev/bench/verify process runs concurrently.
     pub fn new(
         project_root: &Path,
         target_dir: &Path,
-        build_root: Option<&Path>,
+        build_root: &Path,
         features: &[String],
     ) -> Result<Self, DevError> {
-        let lock = crate::lockfile::acquire(&crate::lockfile::LockContext {
-            project: "pbfhogg",
-            command: "verify",
-            project_root: &project_root.display().to_string(),
-        })?;
-        let effective = build_root.unwrap_or(project_root);
+        let lock = crate::context::reenter_command_lock()?;
+        let effective = build_root;
         let build_config = if features.is_empty() {
             build::BuildConfig::release(Some("pbfhogg-cli"))
         } else {
             build::BuildConfig::release_with_owned_features(Some("pbfhogg-cli"), features)
         };
-        let binary = build::cargo_build(&build_config, effective)?;
+        let binary = build::cargo_build(&build_config, effective)?.path;
         let output_dir = target_dir.join("verify");
 
         Ok(Self {
@@ -92,7 +88,7 @@ impl VerifyHarness {
         let pbf_str = pbf.display().to_string();
         let captured = self.run_pbfhogg(&["inspect", "--extended", &pbf_str])?;
 
-        if captured.status.success() {
+        if captured.success() {
             let stdout = String::from_utf8_lossy(&captured.stdout);
             for line in stdout.lines() {
                 output::verify_msg(&format!("  {label}: {line}"));
@@ -119,9 +115,12 @@ impl VerifyHarness {
         let captured = self.run_pbfhogg(&["diff", "--suppress-common", &a_str, &b_str])?;
         let stdout = String::from_utf8_lossy(&captured.stdout);
         let verdict =
-            diff_verdict(captured.status.code(), &stdout).map_err(|why| DevError::Subprocess {
+            diff_verdict(captured.code(), &stdout).map_err(|why| DevError::Subprocess {
                 program: format!("pbfhogg diff ({why})"),
-                code: captured.status.code(),
+                ending: captured
+                    .ending
+                    .process_ending()
+                    .unwrap_or(crate::error::ProcessEnding::Code(-1)),
                 stderr: String::from_utf8_lossy(&captured.stderr).into_owned(),
             })?;
         if verdict == Verdict::Fail {

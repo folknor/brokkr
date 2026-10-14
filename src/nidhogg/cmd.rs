@@ -40,16 +40,17 @@ fn build_config_with_features(package: Option<&str>, features: &[String]) -> bui
 pub(crate) fn serve(
     dev_config: &config::DevConfig,
     project: Project,
-    project_root: &Path,
-    build_root: &Path,
+    project_root: &crate::project::ProjectRoot,
+    build_root: &crate::project::BuildRoot,
     data_dir: Option<&str>,
     dataset: &str,
     tiles_variant: Option<&str>,
     features: &[String],
 ) -> Result<(), DevError> {
     project::require(project, Project::Nidhogg, "serve")?;
-    let pi = bootstrap(None)?;
+    let pi = bootstrap(build_root)?;
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
+    let (project_root, build_root) = (project_root.as_path(), build_root.as_path());
 
     // Resolve data directory: CLI override → dataset config → None (tiles-only).
     let data_dir_str = match data_dir {
@@ -73,7 +74,7 @@ pub(crate) fn serve(
 
     let port = resolve_port(dev_config)?;
     let build_config = build_config_with_features(Some("nidhogg"), features);
-    let binary = build::cargo_build(&build_config, build_root)?;
+    let binary = build::cargo_build(&build_config, build_root)?.path;
     super::server::serve(
         &binary,
         data_dir_str.as_deref(),
@@ -146,15 +147,16 @@ pub(crate) fn status(
 pub(crate) fn ingest(
     dev_config: &config::DevConfig,
     project: Project,
-    project_root: &Path,
-    build_root: &Path,
+    project_root: &crate::project::ProjectRoot,
+    build_root: &crate::project::BuildRoot,
     variant: &str,
     dataset: &str,
     features: &[String],
 ) -> Result<(), DevError> {
     project::require(project, Project::Nidhogg, "ingest")?;
-    let pi = bootstrap(None)?;
+    let pi = bootstrap(build_root)?;
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
+    let (project_root, build_root) = (project_root.as_path(), build_root.as_path());
     let pbf_path = resolve_pbf_path(dataset, variant, &paths, project_root)?;
 
     // Not `resolve_nidhogg_data_dir`: that requires the directory to exist,
@@ -162,7 +164,7 @@ pub(crate) fn ingest(
     let data_dir = resolve::nidhogg_data_dir_path(dataset, &paths)?;
 
     let build_config = build_config_with_features(Some("nidhogg"), features);
-    let binary = build::cargo_build(&build_config, build_root)?;
+    let binary = build::cargo_build(&build_config, build_root)?.path;
     super::ingest::run(&binary, &pbf_path, &data_dir, project_root)
 }
 
@@ -176,7 +178,7 @@ pub(crate) fn update(
     project::require(project, Project::Nidhogg, "update")?;
     let mut config = build_config_with_features(Some("nidhogg"), features);
     config.bin = Some("nidhogg-update".into());
-    let binary = build::cargo_build(&config, build_root)?;
+    let binary = build::cargo_build(&config, build_root)?.path;
     super::update::run(&binary, args, project_root)
 }
 
@@ -205,10 +207,11 @@ pub(crate) fn geocode(
 pub(crate) fn verify_batch(
     dev_config: &config::DevConfig,
     _project: Project,
-    project_root: &Path,
+    project_root: &crate::project::ProjectRoot,
+    build_root: &crate::project::BuildRoot,
     dataset: &str,
 ) -> Result<(), DevError> {
-    let pi = bootstrap(None)?;
+    let pi = bootstrap(build_root)?;
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
     let port = resolve_port(dev_config)?;
     let bbox = resolve_bbox(None, dataset, &paths)?;
@@ -233,13 +236,14 @@ pub(crate) fn verify_geocode(
 pub(crate) fn verify_readonly(
     dev_config: &config::DevConfig,
     _project: Project,
-    project_root: &Path,
-    build_root: Option<&Path>,
+    project_root: &crate::project::ProjectRoot,
+    build_root: &crate::project::BuildRoot,
     dataset: &str,
     features: &[String],
 ) -> Result<(), DevError> {
-    let pi = bootstrap(None)?;
+    let pi = bootstrap(build_root)?;
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
+    let (project_root, build_root) = (project_root.as_path(), build_root.as_path());
     let port = resolve_port(dev_config)?;
 
     let data_dir_str = resolve_nidhogg_data_dir(dataset, &paths)?
@@ -247,7 +251,7 @@ pub(crate) fn verify_readonly(
         .to_string();
 
     let build_config = build_config_with_features(Some("nidhogg"), features);
-    let binary = build::cargo_build(&build_config, build_root.unwrap_or(project_root))?;
+    let binary = build::cargo_build(&build_config, build_root)?.path;
     let bbox = resolve_bbox(None, dataset, &paths)?;
     super::verify_readonly::run(&binary, &data_dir_str, port, project_root, &bbox)
 }

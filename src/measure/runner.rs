@@ -27,7 +27,7 @@ impl RowSubject {
             input_file: self.input_file.clone(),
             input_mb: self.input_mb,
             cargo_features: None,
-            cargo_profile: crate::build::CargoProfile::Release,
+            external_build: None,
             runs,
             cli_args: self.cli_args.clone(),
             metadata: self.metadata.clone(),
@@ -66,7 +66,7 @@ pub(crate) trait PlannedCommand {
         req: &MeasureRequest<'_>,
     ) -> Result<Option<crate::build::BuildConfig>, DevError> {
         let features = if profiling(req) {
-            req.hotpath_features()
+            req.build_features()
         } else {
             req.feat_refs()
         };
@@ -81,6 +81,24 @@ pub(crate) trait PlannedCommand {
         paths: &crate::config::ResolvedPaths,
         binary: &Path,
     ) -> Result<CommandPlan<Self::State>, DevError>;
+    /// Return the resolved command description shown by `--dry-run`.
+    /// Projects can add resolved inputs after validating any alternate argv
+    /// shapes they support.
+    fn describe(
+        &self,
+        _req: &MeasureRequest<'_>,
+        plan: &CommandPlan<Self::State>,
+    ) -> Result<Vec<String>, DevError> {
+        Ok(vec![format!("{} args: {}", self.id(), plan.args.join(" "))])
+    }
+    /// Announce an individual command immediately before its benchmark runs.
+    fn announce(
+        &self,
+        _req: &MeasureRequest<'_>,
+        _plan: &CommandPlan<Self::State>,
+    ) -> Result<(), DevError> {
+        Ok(())
+    }
     fn prepare(
         &self,
         _req: &MeasureRequest<'_>,
@@ -110,7 +128,7 @@ pub(crate) trait PlannedCommand {
         _ctx: &MeasurementSession,
         _plan: &CommandPlan<Self::State>,
     ) -> Result<(), DevError> {
-        Err(DevError::Config("plan has no lifecycle executor".into()))
+        Err(DevError::Internal("plan has no lifecycle executor".into()))
     }
 }
 
@@ -134,17 +152,15 @@ pub(crate) fn run(req: &MeasureRequest<'_>, command: &impl PlannedCommand) -> Re
         let paths =
             crate::context::bootstrap_config(req.dev_config, req.project_root, &pi.target_dir)?;
         let plan = command.plan(req, &paths, Path::new(command.id()))?;
-        output::dry_run_msg(&format!("{} args: {}", command.id(), plan.args.join(" ")));
+        for line in command.describe(req, &plan)? {
+            output::dry_run_msg(&line);
+        }
         output::dry_run_msg("ok");
         return Ok(());
     }
-    let label = req.mode_label().unwrap_or("run");
-    let lock_command = format!("{label} {}", command.id());
     let ctx = match command.build_config(req)? {
-        Some(config) => {
-            MeasurementSession::with_build_config_for_request(req, &config, &lock_command)?
-        }
-        None => MeasurementSession::new_for_request(req, &lock_command)?,
+        Some(config) => MeasurementSession::with_build_config_for_request(req, &config)?,
+        None => MeasurementSession::new_for_request(req)?,
     };
     let binary = if matches!(command.kind(), PlanKind::Binary) {
         ctx.binary()?
@@ -174,30 +190,33 @@ pub(crate) fn run(req: &MeasureRequest<'_>, command: &impl PlannedCommand) -> Re
                 prepare()?;
                 output::run_msg(&format!("{program} {}", args.join(" ")));
                 let out = output::run_passthrough_timed(&program, &args, Some(ctx.harness.lock()))?;
-                if out.code != 0 && !command.ok_codes().contains(&out.code) {
-                    return Err(DevError::ExitCode(out.code));
+                if let Some(code) = out.failed_code(command.ok_codes()) {
+                    return Err(DevError::ExitCode(code));
                 }
                 output::run_msg(&format!("elapsed={}ms", crate::duration_ms(out.elapsed)));
             }
             MeasureMode::Bench { .. } => {
+                command.announce(req, &plan)?;
                 ctx.harness.run_external_prepared(
                     &config,
                     binary,
                     &args,
-                    req.project_root,
+                    req.project_root.as_path(),
                     command.ok_codes(),
                     prepare,
                 )?;
             }
             MeasureMode::Hotpath { .. } | MeasureMode::Alloc { .. } => {
-                harness::hotpath_alloc_note(req.is_alloc());
+                if let Some(profiling) = req.mode.profiled() {
+                    profiling.print_note();
+                }
                 ctx.harness.run_hotpath(&config, binary, |_| {
                     prepare()?;
                     let (mut result, stderr, sidecar) = harness::run_hotpath_capture(
                         &program,
                         &args,
                         &ctx.paths.scratch_dir,
-                        req.project_root,
+                        req.project_root.as_path(),
                         &command.env(),
                         command.ok_codes(),
                         req.stop_marker,
@@ -268,8 +287,8 @@ pub(crate) fn execute_external(
             let program = invocation.program.display().to_string();
             output::run_msg(&format!("{program} {}", args.join(" ")));
             let out = output::run_passthrough_timed(&program, &args, Some(ctx.harness.lock()))?;
-            if out.code != 0 {
-                return Err(DevError::ExitCode(out.code));
+            if let Some(code) = out.failed_code(&[]) {
+                return Err(DevError::ExitCode(code));
             }
             output::run_msg(&format!("elapsed={}ms", crate::duration_ms(out.elapsed)));
         }
@@ -278,7 +297,7 @@ pub(crate) fn execute_external(
                 &invocation.config,
                 &invocation.program,
                 &args,
-                req.project_root,
+                req.project_root.as_path(),
                 &[],
                 prepare,
             )?;
@@ -308,14 +327,14 @@ pub(crate) fn execute_example(
         MeasureMode::Run => {
             output::run_msg(&format!("{program} {}", args.join(" ")));
             let out = output::run_passthrough_timed(&program, args, Some(ctx.harness.lock()))?;
-            if out.code != 0 {
-                return Err(DevError::ExitCode(out.code));
+            if let Some(code) = out.failed_code(&[]) {
+                return Err(DevError::ExitCode(code));
             }
             output::run_msg(&format!("elapsed={}ms", crate::duration_ms(out.elapsed)));
         }
         MeasureMode::Bench { .. } => {
             ctx.harness.run_internal(config, |_| {
-                let captured = output::run_captured(&program, args, req.project_root)?;
+                let captured = output::run_captured(&program, args, req.project_root.as_path())?;
                 print!("{}", String::from_utf8_lossy(&captured.stdout));
                 eprint!("{}", String::from_utf8_lossy(&captured.stderr));
                 captured.check_success(&program)?;
@@ -330,13 +349,15 @@ pub(crate) fn execute_example(
             })?;
         }
         MeasureMode::Hotpath { .. } | MeasureMode::Alloc { .. } => {
-            harness::hotpath_alloc_note(req.is_alloc());
+            if let Some(profiling) = req.mode.profiled() {
+                profiling.print_note();
+            }
             ctx.harness.run_hotpath(config, binary, |_| {
                 let (result, _, sidecar) = harness::run_hotpath_capture(
                     &program,
                     args,
                     &ctx.paths.scratch_dir,
-                    req.project_root,
+                    req.project_root.as_path(),
                     &[],
                     &[],
                     req.stop_marker,

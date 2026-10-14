@@ -243,16 +243,27 @@ fn parse_bin(
 fn parse_lints(
     table: &toml::map::Map<String, toml::Value>,
 ) -> Result<Option<LintsConfig>, DevError> {
+    #[derive(Default, Deserialize)]
+    #[serde(deny_unknown_fields, default)]
+    struct RawLintsConfig {
+        allow: Vec<String>,
+        allow_exact: Vec<SitedAllow>,
+    }
+
     let mut merged: Option<LintsConfig> = None;
     for key in ["lints", "clippy"] {
         let Some(value) = table.get(key) else {
             continue;
         };
-        let cfg: LintsConfig = value
+        let raw: RawLintsConfig = value
             .clone()
             .try_into()
             .map_err(|e: toml::de::Error| DevError::Config(format!("[{key}]: {e}")))?;
-        for lint in &cfg.allow {
+        let mut cfg = LintsConfig {
+            allow: Vec::with_capacity(raw.allow.len()),
+            allow_exact: raw.allow_exact,
+        };
+        for lint in raw.allow {
             if lint.trim().is_empty() {
                 return Err(DevError::Config(format!(
                     "[{key}] allow has a blank entry - name a lint (e.g. \
@@ -265,6 +276,7 @@ fn parse_lints(
                      lint names only (e.g. \"clippy::unused_async\"), not flags."
                 )));
             }
+            cfg.allow.push(check::LintName::parse(&lint));
         }
         match &mut merged {
             Some(acc) => acc.merge(cfg),
@@ -1473,17 +1485,11 @@ fn validate_skip_phases(profile_name: &str, def: &ProfileDef) -> Result<(), DevE
              may not skip phases."
         )));
     }
-    // The skippable universe is every phase minus the non-skippable ones,
-    // derived from `PHASE_NAMES` so a renamed phase can't drift a second
-    // hard-coded list out of sync.
-    let skippable = || {
-        PHASE_NAMES
-            .iter()
-            .copied()
-            .filter(|n| !NON_SKIPPABLE_PHASES.contains(n))
-    };
+    // Both universes come from the check phase type, so a renamed phase
+    // cannot drift a second hard-coded list out of sync.
+    let skippable = skippable_phase_names;
     for p in phases {
-        if NON_SKIPPABLE_PHASES.contains(&p.as_str()) {
+        if phase_names().any(|n| n == p.as_str()) && !skippable().any(|n| n == p.as_str()) {
             return Err(DevError::Config(format!(
                 "[test.profiles.{profile_name}] skip_phases entry '{p}' \
                  cannot be skipped: it runs only under `certifies = \

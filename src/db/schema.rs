@@ -72,11 +72,11 @@ CREATE TABLE IF NOT EXISTS runs (
     stop_marker     TEXT,
     -- User's configured --stop spelling, retained separately from its outcome.
     stop_marker_requested TEXT,
-    -- Literal brokkr invocation (std::env::args joined). Parallel to
-    -- cli_args which captures the subprocess invocation of the tool.
-    -- Both are stored so queries can grep either the brokkr-level ask
-    -- or the tool-level subprocess invocation.
-    brokkr_args     TEXT
+    -- JSON argv array for new brokkr invocations. Historical rows retain
+    -- their original joined string. Parallel to cli_args, which captures the
+    -- subprocess invocation of the tool.
+    brokkr_args     TEXT,
+    arm_key         TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_runs_commit ON runs([commit]);
 CREATE INDEX IF NOT EXISTS idx_runs_command ON runs(command);
@@ -201,19 +201,19 @@ pub(super) const SELECT_COLS: &str = "\
 id, timestamp, hostname, [commit], subject, command, mode, \
 input_file, input_mb, elapsed_ms, elapsed_us, peak_rss_mb, cargo_features, cargo_profile, \
 kernel, cpu_governor, avail_memory_mb, storage_notes, uuid, \
-cli_args, project, stop_marker, stop_marker_requested, brokkr_args";
+cli_args, project, stop_marker, stop_marker_requested, brokkr_args, arm_key";
 
 pub(super) const INSERT_SQL: &str = "\
 INSERT INTO runs (\
     timestamp, hostname, [commit], subject, command, mode, \
     input_file, input_mb, elapsed_ms, elapsed_us, peak_rss_mb, cargo_features, cargo_profile, \
     kernel, cpu_governor, avail_memory_mb, storage_notes, uuid, \
-    cli_args, project, stop_marker, stop_marker_requested, brokkr_args\
+    cli_args, project, stop_marker, stop_marker_requested, brokkr_args, arm_key\
 ) VALUES (\
     datetime('now'), ?1, ?2, ?3, ?4, ?5, \
     ?6, ?7, ?8, ?9, ?10, ?11, \
     ?12, ?13, ?14, ?15, ?16, \
-    ?17, ?18, ?19, ?20, ?21, ?22\
+    ?17, ?18, ?19, ?20, ?21, ?22, ?23\
 )";
 
 // ---------------------------------------------------------------------------
@@ -222,26 +222,35 @@ INSERT INTO runs (\
 
 impl ResultsDb {
     /// Open (or create) the database at `path`. Creates schema and enables WAL
-    /// mode and foreign-key enforcement. Runs any pending migrations based on
-    /// `PRAGMA user_version`.
+    /// mode and foreign-key enforcement, then applies pending migrations.
     pub fn open(path: &Path) -> Result<Self, DevError> {
-        let conn = rusqlite::Connection::open(path)?;
-        // Current child tables declare ON DELETE CASCADE; SQLite requires this
-        // per-connection switch for those declarations to run. Tables from
-        // older schemas may lack the cascade, so `delete_by_uuid` still
-        // removes children explicitly.
-        conn.pragma_update(None, "foreign_keys", true)?;
-        conn.pragma_update(None, "journal_mode", "WAL")?;
-        // Migrate existing databases *before* applying SCHEMA so that
-        // indexes on columns added by migrations (e.g. `project`) exist
-        // by the time CREATE INDEX runs.
-        migrate::run_migrations(&conn)?;
-        conn.execute_batch(SCHEMA)?;
-        conn.execute_batch(HOTPATH_TYPED_DDL)?;
-        conn.execute_batch(RUN_ITERATIONS_DDL)?;
-        // For fresh databases run_migrations was a no-op, so ensure
-        // user_version reflects the schema we just created.
-        conn.pragma_update(None, "user_version", migrate::SCHEMA_VERSION)?;
+        let conn = super::store::open_read_write(path, "results.db", migrate::SCHEMA_VERSION)?;
+        super::store::migrate(
+            &conn,
+            "results.db",
+            migrate::SCHEMA_VERSION,
+            |conn, version| {
+                // Migrate existing databases before applying SCHEMA so indexes on
+                // migrated columns exist by the time CREATE INDEX runs.
+                migrate::run_migrations(conn, version)?;
+                conn.execute_batch(SCHEMA)?;
+                conn.execute_batch(HOTPATH_TYPED_DDL)?;
+                conn.execute_batch(RUN_ITERATIONS_DDL)?;
+                Ok(())
+            },
+        )?;
+        Ok(Self { conn })
+    }
+
+    /// Open an existing database for reading. An older schema is migrated
+    /// first (through [`Self::open`]); a newer one is refused.
+    pub(crate) fn open_read_only(path: &Path) -> Result<Self, DevError> {
+        let conn = super::store::open_read_only_migrating(
+            path,
+            "results.db",
+            migrate::SCHEMA_VERSION,
+            || Self::open(path).map(drop),
+        )?;
         Ok(Self { conn })
     }
 }

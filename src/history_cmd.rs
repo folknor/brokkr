@@ -1,10 +1,10 @@
 //! Implementation of the `history` command and best-effort history recording.
 
 use crate::config;
-use crate::env;
 use crate::error::DevError;
 use crate::git;
 use crate::history;
+use crate::host;
 use crate::project;
 
 pub(crate) struct HistoryQuery {
@@ -70,14 +70,10 @@ pub(crate) fn record_history(raw_args: &str, elapsed_ms: u64, exit_code: i32) {
         let (project_name, commit_hash, dirty) = match project::detect() {
             // Git info describes the code under test, so collect it from the
             // build root (cwd), not the config dir.
-            Ok(d) => match git::collect(&d.build_root) {
+            Ok(d) => match git::collect(d.build_root.as_path()) {
                 Ok(gi) => (
                     Some(d.project.name().to_owned()),
-                    if gi.commit.is_empty() {
-                        None
-                    } else {
-                        Some(gi.commit)
-                    },
+                    Some(gi.commit),
                     Some(!gi.is_clean),
                 ),
                 Err(_) => (Some(d.project.name().to_owned()), None, None),
@@ -85,11 +81,9 @@ pub(crate) fn record_history(raw_args: &str, elapsed_ms: u64, exit_code: i32) {
             Err(_) => (None, None, None),
         };
 
-        let kernel = std::fs::read_to_string("/proc/version")
-            .ok()
-            .and_then(|s| s.split_whitespace().nth(2).map(String::from));
-        let (_, avail) = env::read_memory();
-        let avail_memory_mb = i64::try_from(avail).ok();
+        let kernel = host::kernel::kernel_version();
+        let memory = host::memory::collect();
+        let avail_memory_mb = i64::try_from(memory.available_mb).ok();
 
         #[allow(clippy::cast_possible_wrap)]
         let elapsed = elapsed_ms as i64;

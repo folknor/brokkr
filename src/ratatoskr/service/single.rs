@@ -1,35 +1,19 @@
 //! Single-script service orchestration.
 
 use std::fs;
-use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::artefacts::{self, ArtefactDir};
+use crate::clean::layout::ProjectState;
 use crate::error::DevError;
-use crate::lockfile::{self, LockContext};
+use crate::lockfile;
 use crate::output;
 use crate::ratatoskr::build::{self, HarnessBuild};
 use crate::ratatoskr::discover::{self, PreserveDataDir};
 use crate::ratatoskr::timing::format_duration;
 
 use super::suite::{FixtureSession, directory_filter, service_suite, write_artefacts};
-
-/// Where per-test artefact directories live, relative to the project
-/// root. Allocator under [`ArtefactDir`] creates `<this>/<test_id>/run-N/`.
-///
-/// A dedicated `service/` level, not `.brokkr/ratatoskr` itself: there
-/// the script stem shared a namespace with brokkr's own entries (`sync/`,
-/// `mock/`, `gate.db`), so a `mock.lua` or `sync.lua` wrote into those
-/// trees.
-pub(super) const ARTEFACT_PARENT: &str = ".brokkr/ratatoskr/service";
-
-/// Where a service run's sæhrimnir state lives: `<this>/<fixture>/`.
-/// Separate from [`ARTEFACT_PARENT`] so a fixture name can never collide
-/// with a script stem, and from mock-serve's `.brokkr/ratatoskr/mock/`,
-/// where a fixture called `readiness` would otherwise become a directory
-/// on the path mock-serve deletes as a file.
-pub(super) const SERVICE_MOCK_PARENT: &str = ".brokkr/ratatoskr/service-mock";
 
 /// Run one or more service-script iterations through the harness binary
 /// built via `[ratatoskr.harness]`.
@@ -128,12 +112,7 @@ pub(crate) fn service_test(req: &crate::request::ServiceTestRequest<'_>) -> Resu
         )
     })?;
 
-    let project_root_str = project_root.display().to_string();
-    let _lock = lockfile::acquire(&LockContext {
-        project: "ratatoskr",
-        command: "service",
-        project_root: &project_root_str,
-    })?;
+    let _lock = crate::context::reenter_command_lock()?;
     // Cooperative SIGTERM for `brokkr kill`. See run_sync_smoke for rationale.
     let _sigterm = crate::shutdown::SigtermGuard::install();
 
@@ -147,7 +126,8 @@ pub(crate) fn service_test(req: &crate::request::ServiceTestRequest<'_>) -> Resu
         true, // isolate_pg: outer SigtermGuard active
     )?;
 
-    let artefact_parent = project_root.join(ARTEFACT_PARENT);
+    let state = ProjectState::new(project_root);
+    let artefact_parent = state.ratatoskr().service_artifacts();
     let repeat = repeat.max(1);
 
     // If the script's frontmatter declares a fixture, spawn sæhrimnir
@@ -359,7 +339,7 @@ pub(super) fn spawn_and_capture(
     // PID-recycled-to-something-else.
     lock.clear_child_pid();
 
-    let killed_on_deadline = deadline_capture.killed_on_deadline;
+    let killed_on_deadline = deadline_capture.killed_on_deadline();
     let captured = deadline_capture.captured;
 
     write_artefacts(artefacts.path(), script_abs, built, &captured, project_root)?;
@@ -368,14 +348,14 @@ pub(super) fn spawn_and_capture(
     let exit_label = if killed_on_deadline {
         format!("ceiling={}", format_duration(ceiling))
     } else {
-        match (captured.status.code(), captured.status.signal()) {
+        match (captured.code(), captured.signal()) {
             (Some(code), _) => format!("exit={code}"),
             (None, Some(sig)) => format!("signal={sig}"),
             (None, None) => "unknown exit".to_owned(),
         }
     };
 
-    let succeeded = !killed_on_deadline && captured.status.success();
+    let succeeded = !killed_on_deadline && captured.success();
     if succeeded {
         let path = artefacts.path().to_path_buf();
         artefacts.finalize_success()?;

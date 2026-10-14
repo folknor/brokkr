@@ -56,7 +56,7 @@ pub fn run(
             input_file: input_file.map(str::to_owned),
             input_mb,
             cargo_features: None,
-            cargo_profile: crate::build::CargoProfile::Release,
+            external_build: None,
             runs,
             cli_args: None,
             metadata: vec![KvPair::int("meta.port", port as i64)],
@@ -120,7 +120,7 @@ fn run_curl_timed(url: &str, body: &str) -> Result<std::time::Duration, DevError
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(DevError::Subprocess {
             program: "curl".into(),
-            code: output.status.code(),
+            ending: crate::error::ProcessEnding::from_status(&output.status),
             stderr: stderr.trim().to_owned(),
         });
     }
@@ -191,7 +191,7 @@ fn report_response_stats(url: &str, body: &str, name: &str) -> Result<(), DevErr
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(DevError::Subprocess {
             program: "curl".into(),
-            code: output.status.code(),
+            ending: crate::error::ProcessEnding::from_status(&output.status),
             stderr: format!("{name} stats request: {}", stderr.trim()),
         });
     }

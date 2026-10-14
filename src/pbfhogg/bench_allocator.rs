@@ -24,7 +24,7 @@ pub fn run(
             _ => BuildConfig::release(Some("pbfhogg-cli")),
         };
 
-        let binary = build::cargo_build(&build_config, project_root)?;
+        let binary = build::cargo_build(&build_config, project_root)?.path;
         let args: Vec<&str> = vec!["check", "--refs", pbf_str];
 
         let features_label = match name {
@@ -41,7 +41,7 @@ pub fn run(
             input_file: Some(basename.clone()),
             input_mb: Some(file_mb),
             cargo_features: features_label,
-            cargo_profile: crate::build::CargoProfile::Release,
+            external_build: None,
             runs,
             cli_args: Some(crate::harness::format_cli_args(
                 &binary.display().to_string(),

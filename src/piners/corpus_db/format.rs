@@ -107,7 +107,11 @@ pub fn commit_cell(r: &RunRow) -> String {
                 Some(false) => "",
                 None => "?",
             };
-            format!("{}{dirty}", crate::git::short_of(sha))
+            format!(
+                "{}{dirty}",
+                crate::git::ShortCommit::from_stored(sha)
+                    .map_or_else(|_| sha.to_owned(), |short| short.as_str().to_owned())
+            )
         }
         None => "-".to_owned(),
     }

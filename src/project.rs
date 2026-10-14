@@ -81,6 +81,80 @@ impl std::fmt::Display for Project {
     }
 }
 
+/// The configuration and durable state directory. Only detection constructs it.
+#[derive(Debug, Clone)]
+pub struct ProjectRoot(PathBuf);
+impl ProjectRoot {
+    pub fn as_path(&self) -> &Path {
+        &self.0
+    }
+    /// The project's `.brokkr` state, named by its one owner
+    /// (`clean::layout::ProjectState`).
+    pub(crate) fn state(&self) -> crate::clean::layout::ProjectState {
+        crate::clean::layout::ProjectState::new(&self.0)
+    }
+    pub fn bench_home(&self) -> PathBuf {
+        self.state().bench_dir()
+    }
+}
+
+/// The checkout whose git identity and cargo products a command uses.
+/// Its private representation prevents paths from being mistaken for roots.
+pub struct BuildRoot {
+    checkout: Checkout,
+}
+enum Checkout {
+    Live(PathBuf),
+    Worktree(crate::worktree::Worktree),
+}
+impl BuildRoot {
+    fn live(path: PathBuf) -> Self {
+        Self {
+            checkout: Checkout::Live(path),
+        }
+    }
+    pub fn as_path(&self) -> &Path {
+        match &self.checkout {
+            Checkout::Live(path) => path,
+            Checkout::Worktree(worktree) => &worktree.path,
+        }
+    }
+    pub(crate) fn record_name(&self) -> &str {
+        match &self.checkout {
+            Checkout::Worktree(wt) => &wt.record_name,
+            Checkout::Live(_) => "",
+        }
+    }
+    pub(crate) fn commit(&self) -> &str {
+        match &self.checkout {
+            Checkout::Worktree(wt) => wt.commit.as_str(),
+            Checkout::Live(_) => "",
+        }
+    }
+    pub(crate) fn subject(&self) -> &str {
+        match &self.checkout {
+            Checkout::Worktree(wt) => &wt.subject,
+            Checkout::Live(_) => "",
+        }
+    }
+    pub(crate) fn at_commit(
+        &self,
+        commit: &str,
+        on_cut: impl FnOnce(&Path),
+    ) -> Result<Self, DevError> {
+        crate::worktree::Worktree::create(self.as_path(), commit, on_cut).map(|worktree| Self {
+            checkout: Checkout::Worktree(worktree),
+        })
+    }
+}
+
+/// Mint both roots explicitly when a command permits an unconfigured checkout.
+pub(crate) fn detect_roots() -> Result<(ProjectRoot, BuildRoot), DevError> {
+    let cwd = std::env::current_dir()?;
+    let state = find_config_dir(&cwd).unwrap_or_else(|| cwd.clone());
+    Ok((ProjectRoot(state), BuildRoot::live(cwd)))
+}
+
 /// A resolved project: its identity, shared and project-specific config, and
 /// the two roots that resolution distinguishes.
 ///
@@ -94,18 +168,14 @@ impl std::fmt::Display for Project {
 /// only when the config was found one level *above* cwd - the layout used
 /// to drive a checkout that isn't ours, keeping brokkr's config and state in
 /// the parent so the foreign repo stays clean.
-// These paths still cross legacy measurement APIs as Path/PathBuf pairs.
-// Wrapping the fields alone would not centralize their cargo/store rules.
-// The lock disk gate deliberately has no access to this pair: its live-build
-// probe derives cwd independently, so config discovery cannot redirect it.
 pub struct Detection {
     pub project: Project,
     /// Shared host, check, and command settings.
     pub config: DevConfig,
     /// The section parsed for `project`; other projects' sections cannot load.
     pub project_config: ProjectConfig,
-    pub project_root: PathBuf,
-    pub build_root: PathBuf,
+    pub project_root: ProjectRoot,
+    pub build_root: BuildRoot,
 }
 
 /// Locate the `brokkr.toml` governing `cwd`: the file in `cwd` itself, or
@@ -149,8 +219,8 @@ pub fn detect() -> Result<Detection, DevError> {
         project,
         config,
         project_config,
-        project_root: config_dir,
-        build_root: cwd,
+        project_root: ProjectRoot(config_dir),
+        build_root: BuildRoot::live(cwd),
     })
 }
 
@@ -172,8 +242,8 @@ pub fn detect_optional() -> Result<Option<Detection>, DevError> {
         project,
         config,
         project_config,
-        project_root: config_dir,
-        build_root: cwd,
+        project_root: ProjectRoot(config_dir),
+        build_root: BuildRoot::live(cwd),
     }))
 }
 
@@ -181,15 +251,22 @@ pub fn detect_optional() -> Result<Option<Detection>, DevError> {
 /// Returns an error with a helpful message if mismatched.
 ///
 /// `command` is rendered as `'brokkr {command}'`, so it must be what the user
-/// actually types: its first word a real subcommand name (a key of
-/// `cli::TABLE`), optionally followed by a sub-subcommand (`"verify batch"`).
+/// actually types: its first word a real subcommand name (one the command
+/// catalogue knows, `cli::CommandId::from_name`), optionally followed by a sub-subcommand (`"verify batch"`).
 /// A literal label that names no command is caught by
 /// `tests::require_labels_are_real_commands`.
 pub fn require(current: Project, expected: Project, command: &str) -> Result<(), DevError> {
+    if let Some(id) =
+        crate::cli::CommandId::from_name(command.split_whitespace().next().unwrap_or(""))
+    {
+        id.spec().require(current)?;
+    }
     if current != expected {
-        return Err(DevError::Config(format!(
-            "'brokkr {command}' is only available in {expected} projects (current: {current})"
-        )));
+        return Err(DevError::WrongProject {
+            command: command.to_owned(),
+            expected: expected.to_string(),
+            current: current.to_string(),
+        });
     }
     Ok(())
 }
@@ -284,7 +361,7 @@ mod tests {
                 let label = &rest[..end];
                 seen += 1;
                 let head = label.split_whitespace().next().unwrap_or("");
-                if !crate::cli::TABLE.iter().any(|(name, _)| *name == head) {
+                if crate::cli::CommandId::from_name(head).is_none() {
                     bad.push(format!("{}: {label:?}", file.display()));
                 }
             }

@@ -55,10 +55,36 @@ impl CargoProfile {
             other => Err(UnknownCargoProfile(other.to_owned())),
         }
     }
+
+    /// Resolve a Cargo build profile into the profile vocabulary recorded by
+    /// results rows. Brokkr's cargo build configurations currently use the
+    /// standard `dev` and `release` profiles only; refusing another profile
+    /// keeps a row from claiming it was built in release by default.
+    fn from_build_config(profile: &str) -> Result<Self, DevError> {
+        match profile {
+            "release" => Ok(Self::Release),
+            "dev" => Ok(Self::Dev),
+            other => Err(DevError::Build(format!(
+                "cargo build used unsupported results profile {other:?}"
+            ))),
+        }
+    }
 }
 
 #[derive(Debug)]
 pub struct UnknownCargoProfile(pub String);
+
+/// The executable Cargo actually produced for a build request, together with
+/// the build settings needed to describe that artifact on a measurement row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuiltArtifact {
+    pub path: PathBuf,
+    pub profile: CargoProfile,
+    /// Explicit feature requests passed to this Cargo invocation.
+    pub features: Vec<String>,
+    /// Cargo target name reported with the executable artifact.
+    pub target: String,
+}
 
 // ---------------------------------------------------------------------------
 // Build configuration
@@ -223,13 +249,14 @@ pub fn project_info(cwd: Option<&Path>) -> Result<ProjectInfo, DevError> {
 pub fn metadata_no_deps(project_root: &Path) -> Result<serde_json::Value, DevError> {
     require_cargo_tree(project_root)?;
 
-    let captured = output::run_captured(
-        "cargo",
+    let captured = output::run_cargo(
         &["metadata", "--format-version", "1", "--no-deps"],
         project_root,
+        &[],
+        None,
     )?;
 
-    if !captured.status.success() {
+    if !captured.success() {
         let stderr = String::from_utf8_lossy(&captured.stderr);
         return Err(DevError::Build(format!("cargo metadata failed: {stderr}")));
     }
@@ -339,13 +366,13 @@ fn extract_string<'a>(val: &'a serde_json::Value, key: &str) -> Result<&'a str, 
 // cargo build
 // ---------------------------------------------------------------------------
 
-/// Build a crate and return the path to the compiled binary.
+/// Build a crate and return the compiled executable and its build identity.
 ///
 /// Parses `--message-format=json` output to find the `"executable"` field.
 ///
 /// Refuses unless this process holds the brokkr lock - see
 /// [`cargo_build_observed`].
-pub fn cargo_build(config: &BuildConfig, project_root: &Path) -> Result<PathBuf, DevError> {
+pub fn cargo_build(config: &BuildConfig, project_root: &Path) -> Result<BuiltArtifact, DevError> {
     cargo_build_observed(config, project_root, None, false)
 }
 
@@ -368,7 +395,7 @@ pub fn cargo_build_observed(
     project_root: &Path,
     on_spawn: Option<&dyn Fn(u32)>,
     isolate_pg: bool,
-) -> Result<PathBuf, DevError> {
+) -> Result<BuiltArtifact, DevError> {
     let hold = crate::lockfile::current_hold().ok_or_else(|| {
         DevError::Lock(
             "refusing to run cargo build outside the brokkr lock - this is a brokkr bug: \
@@ -393,7 +420,8 @@ fn cargo_build_locked(
     project_root: &Path,
     on_spawn: &dyn Fn(u32),
     isolate_pg: bool,
-) -> Result<PathBuf, DevError> {
+) -> Result<BuiltArtifact, DevError> {
+    let profile = CargoProfile::from_build_config(config.profile)?;
     let on_spawn = Some(on_spawn);
     let args = build_args(config);
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -430,10 +458,11 @@ fn cargo_build_locked(
         &env,
         on_spawn,
         isolate_pg,
+        output::SpawnProfile::Cargo { phase: None },
     )?;
     let elapsed = start.elapsed();
 
-    if !captured.status.success() {
+    if !captured.success() {
         // Everything cargo had to say is printed here, once; the error
         // returned is a bare label so `main` does not print it a second time.
         dump_compiler_messages(&captured.stdout);
@@ -451,15 +480,21 @@ fn cargo_build_locked(
         .as_deref()
         .or(config.example.as_deref())
         .or(config.package.as_deref());
-    let executable = find_executable(&captured.stdout, expected)?;
+    let executable = find_executable_artifact(&captured.stdout, expected)?;
+    let built = BuiltArtifact {
+        path: executable.path,
+        profile,
+        features: config.features.clone(),
+        target: executable.target,
+    };
 
     output::build_msg(&format!(
         "done in {:.1}s -> {}",
         elapsed.as_secs_f64(),
-        executable.display(),
+        built.path.display(),
     ));
 
-    Ok(executable)
+    Ok(built)
 }
 
 /// Resolve the expected release binary path from cargo metadata without
@@ -468,12 +503,13 @@ pub fn resolve_existing_binary(
     config: &BuildConfig,
     project_root: &Path,
 ) -> Result<PathBuf, DevError> {
-    let captured = output::run_captured(
-        "cargo",
+    let captured = output::run_cargo(
         &["metadata", "--format-version", "1", "--no-deps"],
         project_root,
+        &[],
+        None,
     )?;
-    if !captured.status.success() {
+    if !captured.success() {
         let stderr = String::from_utf8_lossy(&captured.stderr);
         return Err(DevError::Build(format!("cargo metadata failed: {stderr}")));
     }
@@ -639,10 +675,26 @@ fn resolve_bin_name(
 /// but not `target/release/nidhogg-update`).  Falls back to the last
 /// executable if no exact match is found.
 pub fn find_executable(stdout: &[u8], expected_name: Option<&str>) -> Result<PathBuf, DevError> {
+    find_executable_artifact(stdout, expected_name).map(|artifact| artifact.path)
+}
+
+struct CargoExecutableArtifact {
+    path: PathBuf,
+    target: String,
+}
+
+/// Find the executable Cargo artifact and retain the target name emitted in
+/// the same compiler-artifact message. Selection and ambiguity rules match
+/// `find_executable` so callers still identify the exact binary they asked
+/// Cargo to build.
+fn find_executable_artifact(
+    stdout: &[u8],
+    expected_name: Option<&str>,
+) -> Result<CargoExecutableArtifact, DevError> {
     let text = String::from_utf8_lossy(stdout);
-    let mut all_exes: Vec<PathBuf> = Vec::new();
-    let mut last_exe: Option<PathBuf> = None;
-    let mut matched_exe: Option<PathBuf> = None;
+    let mut all_exes: Vec<CargoExecutableArtifact> = Vec::new();
+    let mut last_exe: Option<CargoExecutableArtifact> = None;
+    let mut matched_exe: Option<CargoExecutableArtifact> = None;
 
     for line in text.lines() {
         let Ok(val) = serde_json::from_str::<serde_json::Value>(line) else {
@@ -650,12 +702,29 @@ pub fn find_executable(stdout: &[u8], expected_name: Option<&str>) -> Result<Pat
         };
         if let Some(exe) = val.get("executable").and_then(serde_json::Value::as_str) {
             let path = PathBuf::from(exe);
-            if expected_name.is_some() && path.file_stem().and_then(|s| s.to_str()) == expected_name
+            let target = val
+                .get("target")
+                .and_then(|target| target.get("name"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+                .or_else(|| path.file_stem().and_then(|s| s.to_str()).map(str::to_owned))
+                .ok_or_else(|| {
+                    DevError::Build("cargo executable artifact missing target name".into())
+                })?;
+            let artifact = CargoExecutableArtifact { path, target };
+            if expected_name.is_some()
+                && artifact.path.file_stem().and_then(|s| s.to_str()) == expected_name
             {
-                matched_exe = Some(path.clone());
+                matched_exe = Some(CargoExecutableArtifact {
+                    path: artifact.path.clone(),
+                    target: artifact.target.clone(),
+                });
             }
-            all_exes.push(path.clone());
-            last_exe = Some(path);
+            all_exes.push(CargoExecutableArtifact {
+                path: artifact.path.clone(),
+                target: artifact.target.clone(),
+            });
+            last_exe = Some(artifact);
         }
     }
 

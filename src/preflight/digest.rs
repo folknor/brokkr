@@ -621,7 +621,8 @@ mod hash_cache_tests {
     }
 
     fn cache_text(root: &Path) -> String {
-        std::fs::read_to_string(root.join(".brokkr/hash_cache")).unwrap_or_default()
+        std::fs::read_to_string(crate::clean::layout::ProjectState::new(root).hash_cache_file())
+            .unwrap_or_default()
     }
 
     #[test]

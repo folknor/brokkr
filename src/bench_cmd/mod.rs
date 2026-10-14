@@ -39,7 +39,7 @@
 mod discover;
 mod stamp;
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::context::{acquire_cmd_lock_opt, with_worktree};
 use crate::error::DevError;
@@ -63,19 +63,6 @@ pub struct BenchArgs {
     pub lenient: bool,
     /// Verbatim passthrough to the criterion harness.
     pub args: Vec<String>,
-}
-
-/// `.brokkr/bench` under the project root - the criterion home and the stamp
-/// store both live here.
-///
-/// The project root is the directory holding `brokkr.toml`, which is what
-/// anchors every other `.brokkr/` store (`results.db`, `sidecar.db`,
-/// artefacts). Two consequences: baselines measured at different commits land
-/// in one store rather than following each `--commit` worktree, and when the
-/// config lives one level above a foreign checkout, the baselines stay in the
-/// parent instead of appearing as untracked files in a repo that isn't ours.
-fn bench_home(project_root: &Path) -> PathBuf {
-    crate::clean::layout::ProjectState::new(project_root).bench_dir()
 }
 
 /// Entry point.
@@ -106,17 +93,23 @@ pub fn run(args: &BenchArgs) -> Result<(), DevError> {
                 )
             }
             None => {
-                let cwd = std::env::current_dir()?;
+                let (project_root, build_root) = crate::project::detect_roots()?;
                 (
                     None,
-                    cwd.clone(),
-                    cwd,
+                    project_root,
+                    build_root,
                     false,
                     crate::worktree_record::DEFAULT_KEEP,
                 )
             }
         };
-    let home = bench_home(&project_root);
+    // `.brokkr/bench` under the project root - the criterion home and the
+    // stamp store both live here. The project root (the directory holding
+    // `brokkr.toml`) anchors every other `.brokkr/` store, so baselines
+    // measured at different commits land in one store rather than following
+    // each `--commit` worktree, and a config one level above a foreign
+    // checkout keeps them out of a repo that isn't ours.
+    let home = project_root.bench_home();
 
     // Listing what we recorded needs neither cargo nor the lock.
     if args.baselines {
@@ -140,33 +133,31 @@ pub fn run(args: &BenchArgs) -> Result<(), DevError> {
         // Comparison samples nothing, and the bare index measures nothing;
         // neither needs a name, and neither should be blocked by a dirty tree.
         (Some(_), _) | (_, None) => None,
-        (None, Some(_)) => Some(resolve_baseline_name(&build_root, args)?),
+        (None, Some(_)) => Some(resolve_baseline_name(build_root.as_path(), args)?),
     };
 
     // `with_worktree` re-arms the toolchain-disable at the worktree before the
     // closure runs, so the lock taken *inside* moves that tree's pin aside
     // rather than the live root's. Hence lock-inside-closure, not outside.
-    // `with_worktree` cuts its worktree from the build root when the two roots
-    // differ, so the tree checked out is the code tree rather than the config
-    // directory above it.
-    let parent_build_root = (build_root != project_root).then_some(build_root.as_path());
+    // `with_worktree` cuts its worktree from the build root, so the tree
+    // checked out is the code tree rather than the config directory above it.
     // Worktree, toolchain and target-dir narration is run-log only.
-    let _log = crate::run_log::RunLog::begin(&project_root, crate::run_log::run_log_kind::BENCH);
+    let _log =
+        crate::run_log::RunLog::begin(project_root.as_path(), crate::run_log::run_log_kind::BENCH);
     with_worktree(
         project,
         &project_root,
-        parent_build_root,
+        &build_root,
         args.commit.as_deref(),
         false,
         disable_toolchain,
         keep,
         |wt| {
-            let build_root = wt.unwrap_or(&build_root);
-            // The lock context's root is the *project* root everywhere else in
-            // brokkr - it is what `brokkr lock` displays and what the
-            // `.sidecar-status` lookup keys on - so pass that, not the worktree
-            // or build root this closure happens to be building in.
-            let _lock = acquire_cmd_lock_opt(project, &project_root, "bench")?;
+            // The lock context's state root is the *project* root, what
+            // `brokkr lock` displays; its build root is the tree this closure
+            // builds in, whose `target` the disk gate probes.
+            let _lock = acquire_cmd_lock_opt(project, &project_root, wt)?;
+            let build_root = wt.as_path();
 
             let targets = discover::discover(build_root)?;
             if targets.is_empty() {
@@ -254,7 +245,7 @@ fn compare_baselines(
 ///
 /// A stored name is taken as-is. Otherwise, when `name` is a revision git can
 /// resolve, the baseline recorded for that commit: first under the fixed-width
-/// name ([`crate::git::short_of`]) a measuring run now saves under, then under
+/// name ([`crate::git::Commit::short`]) a measuring run now saves under, then under
 /// any shorter hash prefix of the same commit - the names `git rev-parse
 /// --short` produced before the width was pinned, which grew with the repo. So
 /// `--compare` takes a hash at whatever width it was copied, or a ref.
@@ -271,15 +262,16 @@ fn resolve_stored_baseline(home: &Path, build_root: &Path, name: &str) -> Result
     let Ok(commit) = crate::git::resolve_commit(build_root, name) else {
         return Err(missing());
     };
-    if stamp::stamp_path(home, &commit.short).exists() {
-        return Ok(commit.short);
+    let short = commit.short();
+    if stamp::stamp_path(home, short.as_str()).exists() {
+        return Ok(short.as_str().to_owned());
     }
     let legacy: Vec<String> = stored_baseline_names(home)
         .into_iter()
         .filter(|n| {
             n.len() >= 4
                 && n.bytes().all(|b| b.is_ascii_hexdigit())
-                && commit.full.starts_with(n.as_str())
+                && commit.as_str().starts_with(n.as_str())
         })
         .collect();
     match legacy.as_slice() {
@@ -385,13 +377,19 @@ fn resolve_baseline_name(build_root: &Path, args: &BenchArgs) -> Result<String, 
     // is nothing uncommitted in a tree nobody has edited. Resolved against the
     // live repo, before the worktree exists.
     //
-    // Named by the fixed-width abbreviation (`git::short_of`), so a commit's
+    // Named by the fixed-width abbreviation (`Commit::short`), so a commit's
     // baseline keeps its name as the repo grows and whatever ref or hash width
     // `--commit` was given.
     if let Some(commit) = &args.commit {
-        return Ok(crate::git::resolve_commit(build_root, commit)?.short);
+        return Ok(crate::git::resolve_commit(build_root, commit)?
+            .short()
+            .as_str()
+            .to_owned());
     }
-    let short = crate::git::resolve_commit(build_root, "HEAD")?.short;
+    let short = crate::git::resolve_commit(build_root, "HEAD")?
+        .short()
+        .as_str()
+        .to_owned();
     if is_dirty(build_root)? {
         return Err(DevError::Preflight(vec![
             format!(
@@ -495,14 +493,20 @@ fn cargo_bench(
     }
 
     let arg_refs: Vec<&str> = cargo_args.iter().map(String::as_str).collect();
-    let out = output::run_passthrough_in("cargo", &arg_refs, Some(build_root), &env, Some(lock))?;
-    if out.code == 0 {
+    let out = output::run_passthrough_in(
+        "cargo",
+        &arg_refs,
+        Some(build_root),
+        &env,
+        output::SpawnProfile::Cargo { phase: None },
+        Some(lock),
+    )?;
+    let Some(code) = out.failed_code(&[]) else {
         return Ok(());
-    }
+    };
     // Cargo and criterion printed their own diagnostics; echoing the exit code
     // back as `cargo bench exited with code N` under `[error]` added nothing.
     Err(DevError::Reported(format!(
-        "cargo bench failed (exit code {})",
-        out.code
+        "cargo bench failed (exit code {code})"
     )))
 }

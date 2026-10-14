@@ -137,8 +137,8 @@ pub fn isolated_target_dir(build_root: &Path) -> Option<PathBuf> {
 pub struct Worktree {
     /// Absolute path to the git worktree (inside its slot).
     pub path: PathBuf,
-    /// Short commit hash ([`crate::git::short_of`]).
-    pub commit: String,
+    /// Fixed-width commit abbreviation.
+    pub commit: crate::git::ShortCommit,
     /// First line of the commit message.
     pub subject: String,
     /// The slot's key in `.brokkr/worktrees.toml` ([`record_name`]).
@@ -178,13 +178,11 @@ impl Worktree {
         // The slot name is the fixed-width abbreviation, so the same commit
         // names the same worktree whatever width (or ref) it was asked for by,
         // and however large the repo has grown since.
-        let crate::git::CommitId {
-            full: full_hash,
-            short,
-        } = crate::git::resolve_commit(git_root, commit_ref)?;
-        let subject = run_git(git_root, &["log", "-1", "--format=%s", &full_hash])?;
+        let full_hash = crate::git::resolve_commit(git_root, commit_ref)?;
+        let short = full_hash.short();
+        let subject = run_git(git_root, &["log", "-1", "--format=%s", full_hash.as_str()])?;
 
-        let slot = checkout_dir(git_root)?.join(&short);
+        let slot = checkout_dir(git_root)?.join(short.as_str());
         let checkout = checkout_in(git_root, &slot);
         let record_name = record_name(&slot)
             .ok_or_else(|| DevError::Config(format!("bad worktree slot {}", slot.display())))?;
@@ -193,7 +191,7 @@ impl Worktree {
         // the requested commit, skip remove + re-add.
         if checkout.exists()
             && let Ok(head) = run_git(&checkout, &["rev-parse", "HEAD"])
-            && head == full_hash
+            && head == full_hash.as_str()
         {
             if !is_pristine(&checkout) {
                 return Err(DevError::Refused(format!(
@@ -252,7 +250,13 @@ impl Worktree {
         let checkout_str = checkout.display().to_string();
         run_git(
             git_root,
-            &["worktree", "add", "--detach", &checkout_str, &full_hash],
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                &checkout_str,
+                full_hash.as_str(),
+            ],
         )?;
         furnish(git_root, &slot, &checkout)?;
 
@@ -651,7 +655,7 @@ fn run_git(cwd: &Path, args: &[&str]) -> Result<String, DevError> {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(DevError::Subprocess {
             program: "git".into(),
-            code: output.status.code(),
+            ending: crate::error::ProcessEnding::from_status(&output.status),
             stderr: stderr.trim().to_owned(),
         });
     }

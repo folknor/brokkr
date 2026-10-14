@@ -219,7 +219,7 @@ fn run_pipeline(
 
     let captured = output::run_captured(&binary_str, &args, project_root)?;
 
-    if !captured.status.success() {
+    if !captured.success() {
         let stderr = String::from_utf8_lossy(&captured.stderr);
         return Err(DevError::Verify(format!(
             "pipeline failed for {}: {stderr}",
@@ -509,7 +509,7 @@ fn resolve_fixtures<'a>(
 
 fn build_pipeline(build_root: &Path) -> Result<PathBuf, DevError> {
     let config = build::BuildConfig::release(None);
-    build::cargo_build(&config, build_root)
+    build::cargo_build(&config, build_root).map(|artifact| artifact.path)
 }
 
 // ---------------------------------------------------------------------------
@@ -555,7 +555,7 @@ pub(crate) fn test(
     let short_id = crate::db::short_uuid(&run_id);
     let dirty = !git_info.is_clean;
 
-    db.insert_run(&run_id, &git_info.commit, dirty)?;
+    db.insert_run(&run_id, git_info.commit.as_str(), dirty)?;
 
     let dirty_label = if dirty { ", dirty" } else { "" };
     output::litehtml_msg(&format!(
@@ -692,7 +692,7 @@ fn capture_fixture(
         &[("NODE_PATH", &node_path)],
     )?;
 
-    if !captured.status.success() {
+    if !captured.success() {
         let stderr = String::from_utf8_lossy(&captured.stderr);
         // Puppeteer pins a browser build per version; a puppeteer bump
         // quietly invalidates the previously installed Chrome.
@@ -754,7 +754,12 @@ pub(crate) fn approve(
         )));
     };
 
-    db.set_approval(&fixture.id, &git_info.commit, pixel_pct, Some(element_pct))?;
+    db.set_approval(
+        &fixture.id,
+        git_info.commit.as_str(),
+        pixel_pct,
+        Some(element_pct),
+    )?;
 
     output::litehtml_msg(&format!(
         "approved '{}' at pixel={pixel_pct:.1}%, elements={element_pct:.0}% (commit {})",
@@ -962,9 +967,9 @@ fn ensure_prepare_script(project_root: &Path) -> Result<PathBuf, DevError> {
         None,
         false,
     )?;
-    if run.killed_on_deadline || !run.captured.status.success() {
+    if run.killed_on_deadline() || !run.captured.success() {
         drop(std::fs::remove_dir_all(&node_modules));
-        let why = if run.killed_on_deadline {
+        let why = if run.killed_on_deadline() {
             format!("timed out after {}s", PNPM_INSTALL_DEADLINE.as_secs())
         } else {
             String::from_utf8_lossy(&run.captured.stderr)
@@ -1009,7 +1014,8 @@ pub(crate) fn prepare(
     let output_resolved = project_root.join(output_path);
     let output_str = output_resolved.display().to_string();
 
-    let cache_dir = project_root.join(".brokkr").join("prepare-cache");
+    let state = crate::clean::layout::ProjectState::new(project_root);
+    let cache_dir = state.litehtml().prepare_cache().to_path_buf();
     std::fs::create_dir_all(&cache_dir)?;
     let cache_str = cache_dir.display().to_string();
 
@@ -1051,7 +1057,7 @@ pub(crate) fn prepare(
         }
     }
 
-    if !captured.status.success() {
+    if !captured.success() {
         return Err(DevError::Verify(format!("prepare failed for {input}",)));
     }
 
@@ -1117,7 +1123,7 @@ pub(crate) fn extract(
         }
     }
 
-    if !captured.status.success() {
+    if !captured.success() {
         return Err(DevError::Verify(format!("extract failed for {input}",)));
     }
 
@@ -1182,7 +1188,7 @@ pub(crate) fn outline(
         }
     }
 
-    if !captured.status.success() {
+    if !captured.success() {
         return Err(DevError::Verify(format!("outline failed for {input}",)));
     }
 

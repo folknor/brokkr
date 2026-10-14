@@ -46,26 +46,18 @@ pub(crate) const WATCHDOG_EXIT_CODE: i32 = 124;
 /// thread blocked somewhere no kill releases.
 const UNWIND_GRACE: std::time::Duration = std::time::Duration::from_secs(20);
 
-/// The per-phase ceilings, by `PHASE_NAMES` identifier. The source-reading
-/// phases finish in seconds, so two minutes is already generous; the build
-/// phases get what a cold store plausibly needs and no more. Clippy's five
-/// minutes is set against the observed hang, not against its normal cost
-/// (about 20s warm on the largest consuming workspace). `prepare` gets the
-/// test phase's fifteen: it does the test phase's builds - every lane's
-/// `cargo test --no-run`, cold on a fresh store - plus every listing.
-fn phase_ceiling(phase: &str) -> std::time::Duration {
-    let minutes = match phase {
-        "clippy" | "rustdoc" => 5,
-        "prepare" | "test" => 15,
-        "coverage" | "install_feature" | "script_check" => 5,
-        _ => 2,
-    };
-    std::time::Duration::from_secs(minutes * 60)
-}
+// The per-phase ceilings are `Phase::ceiling` (`phase_type.rs`), the one
+// source: the source-reading phases finish in seconds, so two minutes is
+// already generous; the build phases get what a cold store plausibly needs and
+// no more. Clippy's five minutes is set against the observed hang, not against
+// its normal cost (about 20s warm on the largest consuming workspace).
+// `prepare` gets the test phase's fifteen: it does the test phase's builds -
+// every lane's `cargo test --no-run`, cold on a fresh store - plus every
+// listing.
 
 /// The phase in flight and when it started. `None` outside a phase (before
 /// the first, or after the watchdog is disarmed).
-static PHASE_CLOCK: std::sync::Mutex<Option<(&'static str, std::time::Instant)>> =
+static PHASE_CLOCK: std::sync::Mutex<Option<(Phase, std::time::Instant)>> =
     std::sync::Mutex::new(None);
 
 /// Why a ceiling fired, once one has. Read by the command's exit path
@@ -76,24 +68,24 @@ static WATCHDOG_FIRED: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(
 /// summary's `failed_phase` on an error) and restarts the phase clock. Every
 /// phase entry in `run_convention_phases` / `run_build_phases` goes through
 /// here, so the two bookkeepings cannot drift.
-pub(crate) fn begin_phase(failing_phase: &mut Option<&'static str>, phase: &'static str) {
+pub(crate) fn begin_phase(failing_phase: &mut Option<Phase>, phase: Phase) {
     *failing_phase = Some(phase);
     enter_phase(phase);
-    output::detail(&format!("phase {phase}: started"));
-    output::status(phase);
+    output::detail(&format!("phase {}: started", phase.as_str()));
+    output::status(phase.as_str());
 }
 
 /// Restart the phase clock for `phase` alone - for the commands that borrow
 /// check's ceilings without its summary (`brokkr test`, `brokkr clippy`).
-pub(crate) fn enter_phase(phase: &'static str) {
+pub(crate) fn enter_phase(phase: Phase) {
     if let Ok(mut clock) = PHASE_CLOCK.lock() {
         *clock = Some((phase, std::time::Instant::now()));
     }
 }
 
-/// The phase in flight, if any: what a failure recorded outside the phase's
-/// own error path (`crate::cargo_env`) names as the phase that failed.
-pub(crate) fn current_phase() -> Option<&'static str> {
+/// The phase in flight, if any: the phase a cargo launch inside it names on
+/// its spawn profile, so a `[cargo_env]` failure is attributed to it.
+pub(crate) fn current_phase() -> Option<Phase> {
     PHASE_CLOCK.lock().ok().and_then(|c| c.map(|(phase, _)| phase))
 }
 
@@ -117,9 +109,9 @@ pub(crate) fn phase_time_left() -> Option<std::time::Duration> {
 
 /// [`phase_time_left`] over a given clock reading.
 fn phase_time_left_at(
-    clock: Option<(&str, std::time::Instant)>,
+    clock: Option<(Phase, std::time::Instant)>,
 ) -> Option<std::time::Duration> {
-    clock.map(|(phase, since)| phase_ceiling(phase).saturating_sub(since.elapsed()))
+    clock.map(|(phase, since)| phase.ceiling().saturating_sub(since.elapsed()))
 }
 
 /// Why the watchdog fired, if it has. A command that armed one checks this
@@ -172,14 +164,15 @@ impl CheckWatchdog {
                     }
                     let overrun = PHASE_CLOCK.lock().ok().and_then(|clock| {
                         clock.and_then(|(phase, since)| {
-                            let ceiling = phase_ceiling(phase);
+                            let ceiling = phase.ceiling();
                             (since.elapsed() >= ceiling).then_some((phase, ceiling))
                         })
                     });
                     if let Some((phase, ceiling)) = overrun {
                         fire(
                             &format!(
-                                "{command}'s {phase} phase exceeded its {} ceiling",
+                                "{command}'s {} phase exceeded its {} ceiling",
+                                phase.as_str(),
                                 crate::lockfile::format_duration(ceiling.as_secs()),
                             ),
                             &flag,
@@ -329,19 +322,19 @@ mod watchdog_tests {
 
     #[test]
     fn clippy_ceiling_is_five_minutes() {
-        assert_eq!(phase_ceiling("clippy"), std::time::Duration::from_secs(300));
-        assert!(phase_ceiling("test") > phase_ceiling("clippy"));
-        assert_eq!(phase_ceiling("prepare"), phase_ceiling("test"));
-        assert!(CHECK_CEILING > phase_ceiling("test"));
+        assert_eq!(Phase::Clippy.ceiling(), std::time::Duration::from_secs(300));
+        assert!(Phase::Test.ceiling() > Phase::Clippy.ceiling());
+        assert_eq!(Phase::Prepare.ceiling(), Phase::Test.ceiling());
+        assert!(CHECK_CEILING > Phase::Test.ceiling());
     }
 
     #[test]
     fn begin_phase_sets_both_bookkeepings() {
         let mut failing = None;
-        begin_phase(&mut failing, "gremlins");
-        assert_eq!(failing, Some("gremlins"));
+        begin_phase(&mut failing, Phase::Gremlins);
+        assert_eq!(failing, Some(Phase::Gremlins));
         let clock = PHASE_CLOCK.lock().expect("clock");
-        assert!(matches!(*clock, Some(("gremlins", _))));
+        assert!(matches!(*clock, Some((Phase::Gremlins, _))));
     }
 
     /// The real firing path journals the deadline itself, before anything is
@@ -418,16 +411,16 @@ mod watchdog_tests {
 
     #[test]
     fn phase_time_left_counts_down_from_the_ceiling() {
-        let ceiling = phase_ceiling("script_check");
+        let ceiling = Phase::ScriptCheck.ceiling();
         assert_eq!(phase_time_left_at(None), None);
-        let fresh = phase_time_left_at(Some(("script_check", std::time::Instant::now())))
+        let fresh = phase_time_left_at(Some((Phase::ScriptCheck, std::time::Instant::now())))
             .expect("in flight");
         assert!(fresh <= ceiling && fresh > ceiling - std::time::Duration::from_secs(5));
         // A phase already past its ceiling has nothing left, not a wrapped value.
         if let Some(overdue) =
             std::time::Instant::now().checked_sub(ceiling + std::time::Duration::from_secs(1))
         {
-            let spent = phase_time_left_at(Some(("script_check", overdue))).expect("in flight");
+            let spent = phase_time_left_at(Some((Phase::ScriptCheck, overdue))).expect("in flight");
             assert_eq!(spent, std::time::Duration::ZERO);
         }
     }

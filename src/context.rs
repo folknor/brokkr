@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::build;
 use crate::config;
@@ -6,8 +6,13 @@ use crate::error::DevError;
 use crate::harness;
 use crate::lockfile;
 use crate::output;
-use crate::project::Project;
-use crate::worktree;
+use crate::project::{BuildRoot, Project, ProjectRoot};
+
+/// Re-enter the invocation's hold without inventing a second lock label.
+pub(crate) fn reenter_command_lock() -> Result<lockfile::LockGuard, DevError> {
+    let (project_root, build_root) = crate::project::detect_roots()?;
+    acquire_cmd_lock_opt(None, &project_root, &build_root)
+}
 
 /// Acquire the global per-user lock for a non-bench command.
 ///
@@ -22,10 +27,10 @@ use crate::worktree;
 /// "handle" by bypassing the tool or inventing a polling loop.
 pub(crate) fn acquire_cmd_lock(
     project: Project,
-    project_root: &Path,
-    command: &str,
+    project_root: &ProjectRoot,
+    build_root: &BuildRoot,
 ) -> Result<lockfile::LockGuard, DevError> {
-    acquire_cmd_lock_opt(Some(project), project_root, command)
+    acquire_cmd_lock_opt(Some(project), project_root, build_root)
 }
 
 /// As [`acquire_cmd_lock`], but for commands that run outside a detected
@@ -33,45 +38,33 @@ pub(crate) fn acquire_cmd_lock(
 /// back to the project label `"brokkr"` when no project is detected.
 pub(crate) fn acquire_cmd_lock_opt(
     project: Option<Project>,
-    project_root: &Path,
-    command: &str,
+    project_root: &ProjectRoot,
+    build_root: &BuildRoot,
 ) -> Result<lockfile::LockGuard, DevError> {
     // The stray reap and the stale-guard warning run inside
     // `lockfile::acquire`'s fresh-hold path, so every acquirer gets them -
     // not only the commands that come through here.
     lockfile::acquire(&lockfile::LockContext {
         project: project.map_or("brokkr", Project::name),
-        command,
-        project_root: &project_root.display().to_string(),
+        command: crate::cli::invocation(),
+        project_root,
+        build_root,
     })
 }
 
-/// The subcommand this process was invoked as (`bench`, `run`, ...): the first
-/// argument that is not a flag, `"brokkr"` if there is none. For a lock taken
-/// on behalf of a command that has not told the callee its name.
-fn invoked_command() -> String {
-    command_from_args(std::env::args().skip(1))
-}
-
-fn command_from_args(args: impl Iterator<Item = String>) -> String {
-    args.into_iter()
-        .find(|a| !a.starts_with('-'))
-        .unwrap_or_else(|| "brokkr".to_owned())
-}
-
 /// Resolve project info (target_dir) using cargo metadata.
-pub(crate) fn bootstrap(build_root: Option<&Path>) -> Result<build::ProjectInfo, DevError> {
-    build::project_info(build_root)
+pub(crate) fn bootstrap(build_root: &BuildRoot) -> Result<build::ProjectInfo, DevError> {
+    build::project_info(Some(build_root.as_path()))
 }
 
 /// Resolve paths for the current host from an already-loaded config.
 pub(crate) fn bootstrap_config(
     dev_config: &config::DevConfig,
-    project_root: &Path,
+    project_root: &ProjectRoot,
     target_dir: &Path,
 ) -> Result<config::ResolvedPaths, DevError> {
     let hostname = config::hostname()?;
-    let paths = config::resolve_paths(dev_config, &hostname, project_root, target_dir);
+    let paths = config::resolve_paths(dev_config, &hostname, project_root.as_path(), target_dir);
     Ok(paths)
 }
 
@@ -80,7 +73,9 @@ pub(crate) fn bootstrap_config(
 pub(crate) struct MeasurementSession {
     pub(crate) paths: config::ResolvedPaths,
     pub(crate) harness: harness::BenchHarness,
-    binary: Option<PathBuf>,
+    /// The artifact a build-shaped session produced; its identity is on the
+    /// harness, which stamps every row with it.
+    binary: Option<build::BuiltArtifact>,
 }
 
 /// Whether a measurement request may run against a dirty tree.
@@ -109,26 +104,14 @@ impl DirtyPolicy {
     }
 }
 
-/// Shared bootstrap for the measurement session: resolve host paths
-/// and compute the effective build root + db root pair.
-fn resolve_bootstrap_paths<'a>(
+/// Resolve host paths without losing the distinction between state and code.
+fn resolve_bootstrap_paths(
     dev_config: &config::DevConfig,
-    project_root: &'a Path,
-    build_root: Option<&'a Path>,
-) -> Result<(config::ResolvedPaths, &'a Path, Option<&'a Path>), DevError> {
+    project_root: &ProjectRoot,
+    build_root: &BuildRoot,
+) -> Result<config::ResolvedPaths, DevError> {
     let pi = bootstrap(build_root)?;
-    let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
-    let effective = build_root.unwrap_or(project_root);
-    let db_root = build_root.map(|_| project_root);
-    Ok((paths, effective, db_root))
-}
-
-/// Return the code tree as an alternate build root only when it differs from
-/// the config/state root. Detection owns both paths; keeping this comparison
-/// here prevents callers from independently re-deriving the one-level-up
-/// layout rule.
-pub(crate) fn parent_build_root<'a>(project_root: &Path, build_root: &'a Path) -> Option<&'a Path> {
-    (build_root != project_root).then_some(build_root)
+    bootstrap_config(dev_config, project_root, &pi.target_dir)
 }
 
 /// Resolve the worktree retention value for this machine at the shared
@@ -144,14 +127,12 @@ impl MeasurementSession {
     /// its constructor performs the dirty-tree check.
     pub(crate) fn new_for_request(
         req: &crate::measure::MeasureRequest<'_>,
-        lock_command: &str,
     ) -> Result<Self, DevError> {
         Self::new(
             req.dev_config,
             req.project,
             req.project_root,
             req.build_root,
-            lock_command,
             DirtyPolicy::for_request(req).allowed(),
             req.stop_marker.map(str::to_owned),
         )
@@ -162,9 +143,8 @@ impl MeasurementSession {
     pub(crate) fn new(
         dev_config: &config::DevConfig,
         project: Project,
-        project_root: &Path,
-        build_root: Option<&Path>,
-        lock_command: &str,
+        project_root: &ProjectRoot,
+        build_root: &BuildRoot,
         force: bool,
         stop_marker: Option<String>,
     ) -> Result<Self, DevError> {
@@ -172,20 +152,19 @@ impl MeasurementSession {
         // `MeasurementSession::with_build_config`: `resolve_bootstrap_paths` runs
         // `cargo metadata`, and the lock activates the armed toolchain-disable.
         // Acquiring first keeps a worktree's committed pin from being live
-        // during that metadata call. (`BenchHarness::new` would otherwise take
-        // the lock only afterwards; we hand it a pre-acquired one instead.)
+        // during that metadata call. The harness is handed the held lock.
         let lock = lockfile::acquire(&lockfile::LockContext {
             project: project.name(),
-            command: lock_command,
-            project_root: &project_root.display().to_string(),
+            command: crate::cli::invocation(),
+            project_root,
+            build_root,
         })?;
-        let (paths, effective, db_root) =
-            resolve_bootstrap_paths(dev_config, project_root, build_root)?;
+        let paths = resolve_bootstrap_paths(dev_config, project_root, build_root)?;
         let harness = harness::BenchHarness::new_with_lock(
             lock,
             &paths,
-            effective,
-            db_root,
+            build_root.as_path(),
+            Some(project_root.as_path()),
             project,
             force,
             stop_marker,
@@ -204,8 +183,8 @@ impl MeasurementSession {
     pub(crate) fn with_request(mut self, req: &crate::measure::MeasureRequest) -> Self {
         self.harness = self
             .harness
-            .with_brokkr_args(req.brokkr_args.to_owned())
-            .with_measure_mode(req.mode_label())
+            .with_invocation(req.invocation.clone())
+            .with_measure_mode(req.mode.recorded())
             .with_env_kv(config::captured_env_pairs(req.dev_config));
         self
     }
@@ -216,7 +195,6 @@ impl MeasurementSession {
         package: Option<&str>,
         features: &[&str],
         default_features: bool,
-        lock_command: &str,
     ) -> Result<Self, DevError> {
         Self::build(
             req.dev_config,
@@ -226,7 +204,6 @@ impl MeasurementSession {
             package,
             features,
             default_features,
-            lock_command,
             DirtyPolicy::for_request(req).allowed(),
             req.stop_marker.map(str::to_owned),
         )
@@ -235,19 +212,18 @@ impl MeasurementSession {
 
     /// Create a new session with a built executable.
     ///
-    /// When `build_root` is `Some`, builds happen there (worktree) while data
+    /// Builds use the selected checkout while data
     /// paths and the results DB use `project_root` (main tree). Git info is
     /// collected from the build root so the commit hash matches the built code.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn build(
         dev_config: &config::DevConfig,
         project: Project,
-        project_root: &Path,
-        build_root: Option<&Path>,
+        project_root: &ProjectRoot,
+        build_root: &BuildRoot,
         package: Option<&str>,
         features: &[&str],
         default_features: bool,
-        lock_command: &str,
         force: bool,
         stop_marker: Option<String>,
     ) -> Result<Self, DevError> {
@@ -264,7 +240,6 @@ impl MeasurementSession {
             project_root,
             build_root,
             &build_config,
-            lock_command,
             force,
             stop_marker,
         )
@@ -281,10 +256,9 @@ impl MeasurementSession {
     pub(crate) fn with_build_config(
         dev_config: &config::DevConfig,
         project: Project,
-        project_root: &Path,
-        build_root: Option<&Path>,
+        project_root: &ProjectRoot,
+        build_root: &BuildRoot,
         build_config: &build::BuildConfig,
-        lock_command: &str,
         force: bool,
         stop_marker: Option<String>,
     ) -> Result<Self, DevError> {
@@ -293,11 +267,10 @@ impl MeasurementSession {
             project,
             project_root,
             build_root,
-            lock_command,
             force,
             stop_marker,
         )?;
-        let effective_build_root = build_root.unwrap_or(project_root);
+        let effective_build_root = build_root.as_path();
         // A session build always carries this host's configured defaults,
         // even when its caller built the BuildConfig through a different path.
         // Request callers may already have merged them into the request; the
@@ -313,14 +286,13 @@ impl MeasurementSession {
             all_features: build_config.all_features,
             profile: build_config.profile,
         };
-        let cargo_features = if effective_config.features.is_empty() {
-            None
-        } else {
-            Some(effective_config.features.join(","))
-        };
-        let binary = build::cargo_build(&effective_config, effective_build_root)?;
-        session.harness = session.harness.with_cargo_features(cargo_features);
-        session.binary = Some(binary);
+        let artifact = build::cargo_build(&effective_config, effective_build_root)?;
+        // The row's `cargo_profile` and canonical `cargo_features` describe
+        // the artifact cargo actually produced.
+        session.harness = session
+            .harness
+            .with_build_identity(harness::BuildIdentity::of(&artifact));
+        session.binary = Some(artifact);
         Ok(session)
     }
 
@@ -329,7 +301,6 @@ impl MeasurementSession {
     pub(crate) fn with_build_config_for_request(
         req: &crate::measure::MeasureRequest<'_>,
         build_config: &build::BuildConfig,
-        lock_command: &str,
     ) -> Result<Self, DevError> {
         Self::with_build_config(
             req.dev_config,
@@ -337,7 +308,6 @@ impl MeasurementSession {
             req.project_root,
             req.build_root,
             build_config,
-            lock_command,
             DirtyPolicy::for_request(req).allowed(),
             req.stop_marker.map(str::to_owned),
         )
@@ -346,8 +316,9 @@ impl MeasurementSession {
 
     pub(crate) fn binary(&self) -> Result<&Path, DevError> {
         self.binary
-            .as_deref()
-            .ok_or_else(|| DevError::Config("session has no built executable".into()))
+            .as_ref()
+            .map(|artifact| artifact.path.as_path())
+            .ok_or_else(|| DevError::Internal("session has no built executable".into()))
     }
 }
 
@@ -357,15 +328,9 @@ impl MeasurementSession {
 
 /// Run a closure with an optional git worktree for retroactive benchmarking.
 ///
-/// `parent_build_root` is the code tree to build/git against when it differs
-/// from `project_root` - i.e. `Some(cwd)` when `brokkr.toml` was found one
-/// level up, `None` in the common case where the config dir *is* the code
-/// tree. It is the default handed to `f` when no commit is requested, and the
-/// git repo a requested worktree is created from.
-///
-/// When `commit` is `Some`, creates (or reuses) a worktree at that commit and
-/// passes `Some(&worktree_path)` as `build_root` to the closure. When `None`,
-/// calls `f(parent_build_root)`.
+/// The code checkout supplies git identity; the separate project root owns
+/// bookkeeping. A commit selects a derived checkout and `f` always receives
+/// a concrete build root, including when no commit was requested.
 ///
 /// With a commit (and not `dry_run`), the global lock is taken before any
 /// worktree is evicted, replaced or created, and held until `f` returns; the
@@ -378,8 +343,8 @@ impl MeasurementSession {
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn with_worktree<F, T>(
     project: Option<Project>,
-    project_root: &Path,
-    parent_build_root: Option<&Path>,
+    project_root: &ProjectRoot,
+    build_root: &BuildRoot,
     commit: Option<&str>,
     dry_run: bool,
     disable_toolchain: bool,
@@ -387,15 +352,15 @@ pub(crate) fn with_worktree<F, T>(
     f: F,
 ) -> Result<T, DevError>
 where
-    F: FnOnce(Option<&Path>) -> Result<T, DevError>,
+    F: FnOnce(&BuildRoot) -> Result<T, DevError>,
 {
     // The git repo a worktree is cut from: the code tree (cwd) when the
     // config lives one level up, otherwise the project root itself.
-    let git_root = parent_build_root.unwrap_or(project_root);
+    let git_root = build_root.as_path();
     match commit {
         Some(hash) if dry_run => {
             output::dry_run_msg(&format!("skipping worktree creation for {hash}"));
-            f(parent_build_root)
+            f(build_root)
         }
         Some(hash) => {
             // Take the global lock BEFORE touching any worktree, and hold it
@@ -412,14 +377,14 @@ where
             // waiter's message show for the whole run (the closure's re-entrant
             // acquires never rewrite it), so it carries the caller's project
             // and the invoked command, not a bookkeeping name.
-            let invoked = invoked_command();
             // The live build root's armed pin is unrelated to this run. Keep
             // the configured arm untouched and explicitly activate the
             // worktree's pin below, once its checkout exists.
             let lock = lockfile::acquire_without_toolchain(&lockfile::LockContext {
                 project: project.map_or("brokkr", Project::name),
-                command: &invoked,
-                project_root: &project_root.display().to_string(),
+                command: crate::cli::invocation(),
+                project_root,
+                build_root,
             })?;
 
             // Retention runs from `create`'s cut hook: only when a worktree is
@@ -429,21 +394,23 @@ where
             // growing therefore never shrinks on its own - `clean --worktrees`
             // is the explicit hammer for that. Never fatal: housekeeping must
             // not fail the measurement that was actually asked for.
-            let wt = worktree::Worktree::create(git_root, hash, |cutting| {
+            let wt = build_root.at_commit(hash, |cutting| {
                 if let Err(e) =
-                    crate::worktree_record::enforce(project_root, git_root, keep, cutting)
+                    crate::worktree_record::enforce(project_root.as_path(), git_root, keep, cutting)
                 {
                     output::warn(&format!("worktree retention: {e}"));
                 }
             })?;
-            if let Err(e) = crate::worktree_record::Store::touch(project_root, &wt.record_name) {
+            if let Err(e) =
+                crate::worktree_record::Store::touch(project_root.as_path(), wt.record_name())
+            {
                 output::warn(&format!("worktree bookkeeping: {e}"));
             }
             // The one line naming the commit. Neutral wording: this serves
             // `run`, `bench` and the measured commands alike. Quiet-gated like
             // the bench narration it replaces.
             if !output::is_quiet() {
-                output::run_msg(&format!("commit {} ({})", wt.commit, wt.subject));
+                output::run_msg(&format!("commit {} ({})", wt.commit(), wt.subject()));
             }
             // The worktree is a checkout of `hash`, which may carry its own
             // committed rust-toolchain pin. Move it aside for the closure. Safe
@@ -452,39 +419,29 @@ where
             // held above; declared after `lock`, it drops - restoring the pin -
             // before the flock is released.
             let toolchain_guard = if disable_toolchain {
-                Some(crate::toolchain::DisabledToolchain::activate(&wt.path)?)
+                Some(crate::toolchain::DisabledToolchain::activate(wt.as_path())?)
             } else {
                 None
             };
             let _toolchain_registration = toolchain_guard
                 .as_ref()
-                .map(|_| lock.track_toolchain_dir(&wt.path));
-            let result = f(Some(&wt.path));
+                .map(|_| lock.track_toolchain_dir(wt.as_path()));
+            let result = f(&wt);
             drop(toolchain_guard);
             drop(_toolchain_registration);
             drop(lock);
             result
         }
-        None => f(parent_build_root),
+        None => f(build_root),
     }
 }
 
 #[cfg(test)]
-mod invoked_command_tests {
-    use super::command_from_args;
-
+mod command_label_tests {
     #[test]
-    fn the_first_non_flag_argument_names_the_command() {
-        let args = |v: &[&str]| {
-            v.iter()
-                .map(|s| (*s).to_owned())
-                .collect::<Vec<_>>()
-                .into_iter()
-        };
-        assert_eq!(
-            command_from_args(args(&["--quiet", "bench", "--commit", "abc"])),
-            "bench"
-        );
-        assert_eq!(command_from_args(args(&["--help"])), "brokkr");
+    fn lock_labels_are_command_names() {
+        for id in crate::cli::COMMANDS {
+            assert_eq!(crate::cli::CommandId::from_name(id.spec().name), Some(*id));
+        }
     }
 }

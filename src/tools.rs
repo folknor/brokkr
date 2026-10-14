@@ -473,7 +473,7 @@ pub(crate) fn download_file(url: &str, dest: &Path) -> Result<(), DevError> {
         // Dropping `staged` removes the partial download.
         return Err(DevError::Subprocess {
             program: "curl".into(),
-            code: status.code(),
+            ending: crate::error::ProcessEnding::from_status(&status),
             stderr: format!("download failed: {url}"),
         });
     }
@@ -562,7 +562,7 @@ pub(crate) fn head_url(url: &str) -> Result<HeadResponse, DevError> {
     if !output.status.success() {
         return Err(DevError::Subprocess {
             program: "curl".into(),
-            code: output.status.code(),
+            ending: crate::error::ProcessEnding::from_status(&output.status),
             stderr: format!(
                 "HEAD request failed for {url}: {}",
                 String::from_utf8_lossy(&output.stderr)

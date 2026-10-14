@@ -20,24 +20,6 @@ been verified.
    and they are never deduplicated through git history. Carry the context
    inline instead.
 
-## STR-001 - The project root and the build root are the same type, and are already swapped
-
-Reported by: config-cli, measurement.
-
-`Detection.project_root` (the config dir: `.brokkr/`, data, stores) and `Detection.build_root` (the cwd: cargo, git, `target/`) are both `PathBuf`, and call sites rebind them under each other's names. The disk gate no longer reads a root from `LockContext` (it probes the cwd's target itself), so the residue is the measurement and bootstrap plumbing below. `BenchHarness::new_with_lock(paths, project_root, db_root, ..)` is called with `project_root = <effective build root>` and `db_root = Some(project_root)`, so the parameter named `project_root` receives the build root, and git and env are collected from it. `MeasureRequest { project_root, build_root: Option<&Path> }`, `resolve_bootstrap_paths` returning `(paths, effective, db_root)`, `with_worktree(project_root, parent_build_root, ..)` and `bench_cmd::run` destructuring `(project, project_root, build_root, ..)` all carry the same pair. Comments in `bench_cmd/mod.rs` and `context.rs` spend paragraphs explaining which root is which. `run_measured`, the `Verify` arm and the `Sync` arm each recompute the build root from `std::env::current_dir()` and compare it with `project_root` to derive `parent_build_root`, though `detection.build_root` already holds that value.
-
-Proposed: `ProjectRoot(PathBuf)`, which owns `.brokkr/`, every store (`results_db()`, `sidecar_db()`, `bench_home()`) and the lock context, and `BuildRoot { Live(PathBuf) | Worktree(Worktree) }`, which owns git identity, cargo's cwd and the target dir. Both are minted only by `project::detect*`; the no-config case mints both explicitly from the cwd. `LockContext` takes a `BuildRoot` for the disk gate and a separate display label instead of a `&str` path. `BuildRoot::cargo_command()` sets `CARGO_TARGET_DIR` for the worktree variant, so no spawn can forget the isolation rule.
-
-## STR-002 - Dispatch has no model of a command
-
-Reported by: config-cli, process-control.
-
-Every property a command has is decided inline in a roughly 1750-line `run()` match: which projects it applies to, whether it needs a `brokkr.toml`, which root it anchors on, whether it takes the lock and under what label, whether it opens a run log, and which project section it requires. Several of these are decided a second time elsewhere: the help table, the `man` topic table, the handler's own `project::require` and the `[project]` tags in help text. `run()` is two halves with an ordering contract. First comes a chain of `if let Command::X = cli.command { return ...; }` for pre-detection commands, then `detect()`, then a `match` whose first two arms exist only to error if the chain was reordered ("internal error: a pre-detection command reached project dispatch"). Each arm independently chooses `detect_optional()?`, no detection, or `detect()`, and which root to use. Lock policy is likewise per arm, with free-text labels (`"run"` for `Passthrough`, `"verify pmtiles"`, `"regress"`). `Stop`, `Status`, `Query`, `Geocode`, `Results`, `Sidecar`, `Invalidate`, `CompareTiles`, `PmtilesStats`, `List`, `Report`, `Approve` and `Prepare` take no lock. `Approve` and `Prepare` (which runs Node) are the kind of handler the `Visual` arm's comment says was last time "the one cargo-driving command reaching its handler unlocked". `context::invoked_command()` is a third way to name the lock holder. `LockContext { project: &str, command: &str, project_root: &str }` carries the command as a string, and `disk_gate::check` exempts commands by comparing that string with `"clean"` and `"env"`, so a renamed subcommand silently loses its exemption. `env::collect_tools` is a per-project `match` on `Project` listing which tools to probe, another fact about a project stored outside it.
-
-`cli/schema.rs` (about 3250 lines) is one flat `Command` enum of about 85 variants, with project tags in doc strings and per-project arg structs (`PbfArgs`, `VerifyPbfArgs`, `ModeArgs`). `as_pbfhogg()`, which maps CLI variants to `PbfhoggCommand` and returns a 5-tuple under `#[allow(clippy::type_complexity)]`, is a pbfhogg concern living in the CLI module, so the edge points cli -> pbfhogg internals. Project argument plumbing also lives in the dispatcher: `Sync`'s mode resolution and `validate_gate_selection`, `Corpus`'s `--force` refusal, `Service`'s bare-is-an-index branching, `Suite`'s per-name `require`, and `mode.hotpath = Some(1)` written into `Hotpath` to express a per-command default mode.
-
-Proposed: a declarative `CommandSpec` reached through an exhaustive `fn spec(&self) -> &'static CommandSpec`, so a new variant is a compile error rather than a fail-open table miss. It holds `applies: Visibility`, `config: Required | Optional | None`, the lock policy `None | Blocking | NonBlocking` with a label derived from the name, whether the disk gate applies, the default mode and the tools to probe. Dispatch resolves what the spec needs (detection, lock, run log) into a `Ctx` and calls one `handle(self, ctx)` per command family module (`pbfhogg::cli`, `elivagar::cli`, `ratatoskr::cli`, ...), where each project defines its own commands next to its dispatch. The "internal error" arms and the `as_pbfhogg() -> None` safety arm disappear. Help filtering, the `[project]` help prefix and `man` topic visibility all read the spec. The gating half of this question is recorded in the hygiene platform document's project-applicability entry.
-
 ## STR-005 - `include!`-spliced fragments stand in for modules
 
 Reported by: config-cli, measurement, map-projects.
@@ -45,12 +27,6 @@ Reported by: config-cli, measurement, map-projects.
 `main.rs` `include!`s `main_parts/bootstrap.rs` and `main_parts/commands.rs`, and `cli.rs` `include!`s three files (which is why `visibility.rs` must use `//` comments). `harness.rs` is four `include!`s: `harness_mod/format_sidecar.rs` holds result-line formatting, `run_variants`, `hotpath_feature`, `elapsed_to_ms/us`, the hotpath capture runner and its thread-local parking slot, percentile maths, kv-stderr parsing and sidecar DB backup rotation, while `types_run.rs` holds the harness and all of its loops, and `foreign_loop.rs` is two hooks. `resolve.rs` splices `resolve_parts/schema.rs`, which contains no schema: it is the dataset entry resolver plus the PMTiles archive store, the nidhogg data dir and `file_size_mb`. It also splices `resolve_parts/runtime.rs`, which is three DB path functions, two of them piners-only, with `results_db_path` stranded at the bottom of `schema.rs`. `pbfhogg/download.rs` splices `pbfhogg_mod/*`, which is a directory of fragments rather than a module, holding generic pieces (dates, the snapshot promotion `dispatch.rs` calls) beside the download CLI. None of these has a privacy boundary, `use` hygiene or a module doc; everything shares one namespace. The ratatoskr shims are recorded in the hygiene projects document's ratatoskr module-shape entry.
 
 Proposed splits: real modules for `main_parts` and `cli`. Measurement: `measure/wall.rs`, `measure/loop.rs`, `measure/record.rs` (row building, `prev.*`, result line), `measure/capture.rs` (hotpath child runner), `measure/kv.rs` (stderr counter protocol), `sidecar/backup.rs`, and `bench_variants.rs` (`run_variants` is a dispatch helper, not harness). Resolve: `datasets::resolve` (entry resolution, `SnapshotRef`, `select_one`, typed errors), `elivagar::archive_store`, DB paths next to their DBs, `nidhogg_data_dir_path` into `nidhogg`. Download: a real `pbfhogg::download` with submodules `source` (Geofabrik/planet, aliases, URLs), `layout` (`raw_pbf_path`, `osc_filename`), `snapshot` (promotion, collision preflight, toml writes) and `modes`.
-
-## STR-006 - `main_parts/commands.rs` still holds unrelated handlers
-
-Reported by: config-cli, process-control.
-
-`clean` moved to `src/clean.rs`, `lock`/`kill` to `src/lock_cmd.rs` and `env` into `src/env.rs`. Residue: passthrough run and timing stats, `pmtiles-stats`, `verify` routing and the generic hotpath still live in `main_parts/commands.rs`, and `clean.rs` still branches on every project rather than asking each project module for its clean targets.
 
 ## STR-008 - A lane's execution kind is five loose fields and a priority ladder
 
@@ -60,69 +36,11 @@ Reported by: check-plan.
 
 Proposed: `enum LaneExec { Serial { threads }, Parallel { budget }, Isolated, Nextest { threads }, DocOnly }`, built once at resolution, with the conflicts as construction errors and the value carried on the planned sweep. `LaneKind` becomes a projection of it.
 
-## STR-014 - Selection decisions live outside the selection module
-
-Reported by: check-plan, check-exec.
-
-`selection.rs` claims "One decision, made once" for which runs exist. But `effective_unification`, the input that decides between `Resolutions::Combined` and `PerPackage`, is decided in `phase.rs::resolve_sweep_unification`, with its own promotion eligibility and metadata fetch, and written back onto the sweep. `parallel.rs` holds `unify_workspace`, `narrows_selection`, `reject_forwarded_selectors` and `target_selector`, which are selection and unification decisions that `profile.rs` and `selection.rs` call. They live in the parallel lane file only because the parallel lane was their first consumer; the file's own comment says the pin "now lives on the sweep". `parallel::repro_cargo_line` and `output.rs`'s `full_command` build the "failing command" line in two different ways. Proposed: promotion and `resolve_unification` move into selection, which already holds the feature oracle and the CLI scope. The argv classifiers move there too, as one typed forwarded-argv parser. One `ReproLine` builder works from the planned request. The parallel lane file keeps only budgeting, fan-out and per-binary reporting.
-
-## STR-017 - The test runner reaches into process globals
-
-Reported by: check-exec.
-
-`crate::shutdown::is_shutdown_requested()` is polled from inside `wait_parallel`, `run_listing`, `spawn_process_group` and the end of `streaming_run_libtest`. `crate::output::warn` is called from inside the watchdog thread and `join_drains`. `concurrency::SERIAL_BUILDS` is a process static set once per run and read by `run_grouped`. In each case the state sits apart from the behaviour that acts on it. Proposed: a `RunContext { stop: StopSignal, warn: &dyn Fn }` passed in, which makes the runner testable without the process-global flag, and `SERIAL_BUILDS` as a parameter of `run_grouped`.
-
-## STR-020 - The harness-shim observation still carries prose
-
-Reported by: check-exec.
-
-The shim session is one `Arc<SessionState>` with typed refusals and one bounded drain policy. Residue: the observation it emits is still `ObsEvent::AttributionError { detail: String }`. `ObsEvent` is serialised into the accounting journal, so typing the reason needs a stable serde shape per refusal, a decision about the io::Error detail text, and the `check_cmd/output.rs` fallback emitter updated with it.
-
-## STR-022 - `check_cmd/phase.rs` is still most of the command
-
-Reported by: check-report.
-
-`activation.rs`, `conventions.rs` and `verdict.rs` came out of it, and header/textlint/manifest findings share one renderer. Residue in `phase.rs`: the diagnostic pipeline and rendering (`run_per_build_shape`, allow announcement and staleness, manifest-lint attribution, merge and format, failed-run stream excerpting), `cmd_clippy`, the test phase driver (`run_test_phase`, `run_test_lane`, `record_phase_stop`) and build/audit orchestration. `finish_check` still takes its verdict inputs as loose arguments, and `Verdict`, `Phase` and `Reporter` are not yet types.
-
-## STR-023 - `check_cmd/output.rs` is not output
-
-Reported by: check-report.
-
-It holds test env construction (`build_test_env`, `sweep_cargo_env`, `sweep_runtime_env`, rustflags composition), isolated target-dir naming, support-artifact pre-builds and fingerprinting, the serial shim fallback, and `run_one_test_sweep`, the serial lane (about 400 lines). That is 3079 lines, about 1800 of them tests, and nothing in it is about printing. Its name also collides with `crate::output`, the real console module, and both are imported side by side. Proposed: `check_cmd/sweep_env.rs` (env and target dir, the owner of the isolated-target-dir decision), with the serial lane joining the execution files. The name `output` goes away entirely.
-
-## STR-024 - "Who is the audience for this line?" is a global plus ad-hoc bools
-
-Reported by: check-report.
-
-`run_per_build_shape` both schedules cargo runs and decides what to print for skipped, deduped and dropped lanes (`note`), switching between stdout and the run log on `report_active()`, a process global set by `check`. `announce_allows` takes two bools (`to_stdout`, `blanket_on_stdout`) and also consults `report_active()`. `run_clippy_phase` passes `commands || !report_active()` and `!echo_after`. Proposed: a `Reporter` value (`Check { commands } | Clippy`) passed explicitly, with methods `config_note`, `allow_notice` and `green_line`. The difference between `check` and `brokkr clippy` then becomes one type instead of a global and four flags.
-
-## STR-027 - Lock acquisition fails only as prose
+## STR-029 - The guard's admission decision is not testable
 
 Reported by: process-control.
 
-`lockfile::acquire` fails as `DevError::Lock(String)` for at least seven distinct, actionable reasons: the nested-descendant refusal, the inside-compilation refusal, drain timeout, flock infrastructure failure, metadata publish failure, no entropy and socket bind failure. The disk gate uses `Preflight(Vec<String>)`. A machine caller (`check --json`, an agent) cannot tell "your ancestor holds it, run it elsewhere" from "the kernel is out of lock records". The drain timeout says in its own text that it "is not a transient busy signal", exactly the fact a retry loop needs as data. Carrying a typed reason needs a `DevError` change in `src/error.rs` (`stray::kill`'s counts are already named fields). `cargo_env::FAILED: Mutex<Option<(String, Option<&'static str>)>>` stores the phase as a string from `check_cmd::current_phase()`, so it cannot be matched on. Proposed: an `AcquireRefusal` enum carried in `DevError::Lock`, with prose from `Display`.
-
-## STR-029 - `HoldEffects` is a test seam that has become the protocol's spine
-
-Reported by: process-control.
-
-`HoldEffects` is a struct of six function pointers and two bools, explained as "a seam, so unit tests can take real flocks". In practice it is also the only place that lists everything a fresh hold does: drain, toolchain, capability, reaps, guard warning, disk gate, service. That list is the protocol, and its order matters (the disk gate before the drain; the toolchain after the drain and before the capability). The order lives in the bodies of `acquire_at` and `drain_and_authorize`, under long comments. `INERT` in the tests switches every effect off together, so no test exercises any ordering between them, although ordering is the thing with a history of bugs (the capability published before fallible toolchain work, the `OnceLock` nonce). `hold::stamp_is_a_no_op_without_a_capability` asserts almost nothing, because the capability is a process global. The guard's `decide()` has no test because it reads env and `$HOME` directly, and `decide` is the security-relevant half. `host_after_fresh_hold` calls `crate::check_cmd::activate_run_log()` from `host_drain`, so the lock reaches up into `check_cmd`.
-
-Proposed: a typed hold state machine, `Flocked -> Gated -> Drained -> Authorized -> Live`, where each transition consumes the previous state. "Nothing fallible between publishing the capability and constructing `LockInner`" then becomes a property of the `Authorized -> Live` transition, and the order holds by construction. Effects stay injectable per transition, so a test can enable one effect (just the disk gate, say) instead of all or nothing. The command opens its run log before it acquires. The guard's `decide` takes injected `ProtocolPaths` and an env lookup.
-
-## STR-030 - `cargo_env` is a build-input feature filed as process control
-
-Reported by: process-control.
-
-`cargo_env` evaluates a `[cargo_env]` config section on every cargo spawn. Its process-control content is a bounded `sh -c` evaluator (deadline, drains, group kill) that duplicates `output::run_captured_with_env_and_deadline`, which `guard.rs` already uses for its probe. It reaches into `check_cmd::current_phase()` to label its failure, another upward edge. `cargo_env::apply` decides "is this program cargo?" by `file_name() == "cargo"`, which breaks for rustup's `+toolchain` proxy variants or a wrapper. Proposed: evaluation goes through the shared bounded runner, the phase is passed in typed, and the module becomes the pre-spawn step of a caller-chosen `Cargo` spawn profile, so no name sniffing is needed. The spawn-policy half is recorded in the hygiene platform document's spawning entry.
-
-## STR-031 - How a measured child ended is three bools, an i32 and sentinels
-
-Reported by: measurement.
-
-`SidecarRunResult { stopped_by_marker, stopped_by_signal, stopped_by_deadline: bool, exit_status }`, `HotpathCapture { stopped_by_marker, stopped_by_deadline, status_ok, status }`, `DeadlineCapture { killed_on_deadline, output_cut }`, `PassthroughOutput { code: i32 }`, `exit_code_from_status` (128+signal, with a -1 fallback), `HistoryRow.exit_status: i32` and `RunInfo.exit_code: Option<i32>`. `run_hotpath` records `pid 0, exit 0` as sentinels for "unknown", which `brokkr sidecar` then prints as if real. The bools are mutually exclusive by construction, but nothing says so, and each loop re-derives the classification in its own order (`interrupted` first, then `!stopped && check_success`). No `run_external_*` loop ever reads `stopped_by_deadline`, so a deadline kill there surfaces as a generic "killed by signal 9" subprocess error rather than "exceeded its deadline". "Did this child run succeed?" is answered at `CapturedOutput::check_success_or`, `HotpathCapture::status_ok` + `status_error` (which rebuilds a `CapturedOutput` with a zero duration just to call `check_success_or`), the `!stopped && check_success*` blocks in each loop, `run_hotpath_capture` (`!c.stopped_by_marker && !c.status_ok`), `run_passthrough_in` (signal -> `Subprocess`) and `cargo_bench` (`out.code == 0`). `DevError::Subprocess { code, stderr }` sometimes holds "killed by signal 9" in `stderr`, and `Display` sniffs `starts_with("killed by signal")`.
-
-Proposed: `enum Ending { Exited(i32), Signalled(i32), StopMarker(String /* resolved */), Deadline(Duration), Interrupted }`, produced once by the sidecar and captured runners, plus one `fn verdict(&Ending, ok_codes) -> IterationVerdict { Counted, Failed(DevError), Interrupted }`. `exit_code_from_status`, `check_success_or` and the per-loop branching collapse into that function. `RunInfo` takes `Option<Ending>`, and `Subprocess` carries `ended: Code(i32) | Signal(i32)`.
+Acquisition now moves through typed `Flocked -> Gated -> Drained -> Authorized` states that consume each other, with effects injectable per transition. Residue: the guard binary's `decide()` (`src/bin/rustc_guard.rs`) still reads the environment and `$HOME` directly, so the security-relevant half of the protocol has no test; it needs injected protocol paths and an env lookup.
 
 ## STR-034 - Measurement session residue
 
@@ -146,26 +64,20 @@ Reported by: measurement, map-projects.
 
 Proposed: both types move into `src/pbfhogg/`, and `measure.rs` keeps only `MeasureMode`/`MeasureRequest`. Resolved inputs become an enum mirroring `InputKind` (`ResolvedInputs::PbfAndOsc { pbf, osc }`, `OscRange { oscs }`, `TwoPbfs { a, b, origin: Merged | Snapshot }`, ...), so `build_body` pattern-matches and cannot ask for a missing input. Resolution returns runtime observations as typed values (`MergedCacheState`, `SnapshotSide { file, mb }`), and `metadata()` takes those rather than `&CommandContext`. The command fields become `InspectMode::{Default { extended }, Nodes, Tags { type_filter }}`, `TagsFilterInput::{Pbf { omit_referenced, invert, remove_tags }, Osc}` and `IoMode { direct_io, io_uring }` with `features()`/`args()`. Clap derive goes on the command enum itself (the variants are mostly the CLI already), so `cli_adapter.rs` disappears and allowed values live on the types. A per-variant descriptor holds promotion variant, `OutputKind` and io_uring support next to argv. The valuable test is a property over a catalogue of every variant: `build_args` is pure, every path it names is in the plan's artefact list, cleanup removes exactly those paths, and `supports_io_uring` agrees with the error text.
 
-## STR-036 - Two child-process supervisors, and a console module that is also a supervisor
-
-Reported by: measurement, process-control.
-
-Lines 1-500 of `output.rs` are a console renderer: prefixed output, the status line, the run log, the quiet flag, the pbfhogg-specific verify buffer, and per-project `*_msg` functions (litehtml, sluggrs, ratatoskr, corpus, lint, deps, wc). Lines 500 onwards are a process supervisor: `CapturedOutput`, deadline- and idle-limited runners, SIGTERM forwarding, pipe drains with settle, `spawn_captured`, passthrough. `output::run_captured_limited` and `sidecar::run_sidecar_with_deadline` each implement `try_wait` polling, a shutdown-flag check, a deadline kill, a process-group SIGKILL and stdout/stderr drains, and they have already diverged. The output runner bounds its drain join (`settle_drains`, `DRAIN_SETTLE`, with a comment about the hang the unbounded join caused); the sidecar joins unboundedly (filed in `bugs.md`). The output runner forwards SIGTERM with a budget; the sidecar SIGKILLs immediately. The output runner has an idle limit; the sidecar has a thread-local `DeadlineScope`. `cargo_env`'s bounded `sh -c` evaluator is a third copy. Proposed: split `output.rs` into `console` and `child`, and give the child half one supervisor with a pluggable per-tick observer (the sidecar's `/proc` sampler, FIFO drain and stop matcher), so fixes reach every caller.
-
 ## STR-037 - Remaining dependency edges pointing up
 
 Reported by: measurement, process-control, deps-misc.
 
 `RunLog` moved to `src/run_log.rs`, the cancellable pipe reader to `src/fs_probe.rs`, and the gate store under ratatoskr (`ratatoskr/gate_store.rs`). Residue: `cargo_env.rs` still calls `check_cmd::current_phase()` (implemented in `check_cmd/watchdog.rs`); `sidecar.rs` still uses the test runner's pipe reader; the `"pbfhogg"` default project is still hidden by name in `db/format/details.rs` and `db/format/single.rs`; `disk_gate`/`env` storage probing should sit below both.
 
-## STR-042 - Commit identity is a string everywhere
+## STR-042 - Stored commit fields are still strings
 
 Reported by: deps-misc.
 
-`git::CommitId { full: String, short: String }` has public string fields, and `short_of` returns a non-hash input unchanged, so anything can be a "short hash". `GitInfo.commit` is a short hash in a field named `commit`. Results rows store a `String`. Sites abbreviate independently of `SHORT_HASH_LEN`: `env.rs::read_git_rev` (filed in `bugs.md`), `invalidate_cmd.rs::preview` (`chars().take(8)`), `ratatoskr_sync/bench_gate.rs` (`take(8)`), and `db/gate.rs` slicing `&uuid[..8]` (a uuid, but the same display-width decision). Proposed: a `Commit` newtype (full hash, validated hex length) with `short()` as the one abbreviation, and `ShortCommit` as a distinct type for stored keys.
+`Commit` and `ShortCommit` own validation and the one abbreviation rule, and git, history, worktrees, bench, piners and the elivagar archive store use them. Residue: `RunRow`, `StoredRow` and `RunInfo` still hold commits as `String`; typing them as `ShortCommit` validated on read needs a decision on what a malformed legacy commit in an existing row does.
 
-## STR-043 - `env.rs` is five modules
+## STR-043 - Dataset status still lives in the env report
 
 Reported by: deps-misc.
 
-It is a host-facts collector (kernel, governor, CPU, memory, io_uring, memlock), a storage prober (mount-table parsing, statvfs, block-device model and rotational flag, used by `disk_gate`), a tool-version prober, a dataset verifier, a user-config reporter, and the printer for all of them. `history_cmd` calls `env::read_memory`. `disk_gate` calls `env::probe_path` and `env::format_bytes`, while `env` calls back into `disk_gate`. `bench_cmd::stamp` collects its own CPU facts. Proposed: `host/` facts (`memory`, `cpu`, `storage`) as libraries with typed results (`StorageInfo` already is one), consumed by `disk_gate`, `history_cmd`, `preflight`, the sidecar and `bench_cmd::stamp`. Dataset status moves next to dataset resolution, since `env` is only one renderer of it. `env.rs` becomes the report (collect and print), and `format_bytes` moves to `output`.
+Host facts are typed libraries under `src/host/`, consumed by `env`, `disk_gate`, history, `preflight` and the harness. Residue: `DatasetStatus` and the dataset hash-check helpers still live in `env.rs`; they belong next to dataset resolution (a `ResolvedPaths::dataset_status`), with `env` only rendering them.

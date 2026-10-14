@@ -3,6 +3,7 @@
 use std::path::Path;
 
 use crate::build;
+use crate::clean::layout::ElivagarLayout;
 use crate::config::ResolvedPaths;
 use crate::error::DevError;
 use crate::harness::BenchHarness;
@@ -22,25 +23,24 @@ pub fn run(
     pbf_path: &Path,
     file_mb: f64,
     runs: usize,
-    _data_dir: &Path,
-    _scratch_dir: &Path,
     tilegen: &crate::config::project_config::elivagar::TilegenConfig,
     opts: &super::PipelineOpts,
 ) -> Result<(), DevError> {
+    let layout = ElivagarLayout::new(paths);
     // 1. bench self -- full elivagar pipeline
     output::bench_msg("=== bench self ===");
     let binary = build::cargo_build(
         &build::BuildConfig::release_with_owned_features(None, &paths.features),
         project_root,
-    )?;
+    )?
+    .path;
     bench_self::run(
         harness,
         &binary,
         pbf_path,
         file_mb,
         runs,
-        &paths.data_dir,
-        &paths.scratch_dir,
+        &layout,
         project_root,
         None,
         tilegen,
@@ -56,15 +56,7 @@ pub fn run(
 
     // 2. bench planetiler -- comparison baseline
     output::bench_msg("=== bench planetiler ===");
-    if let Err(e) = bench_planetiler::run(
-        harness,
-        pbf_path,
-        file_mb,
-        runs,
-        &paths.data_dir,
-        &paths.scratch_dir,
-        project_root,
-    ) {
+    if let Err(e) = bench_planetiler::run(harness, pbf_path, file_mb, runs, &layout, project_root) {
         if matches!(e, DevError::Interrupted) {
             return Err(e);
         }
@@ -82,15 +74,7 @@ pub fn run(
 
     // 5. bench tilemaker -- comparison baseline
     output::bench_msg("=== bench tilemaker ===");
-    if let Err(e) = bench_tilemaker::run(
-        harness,
-        pbf_path,
-        file_mb,
-        runs,
-        &paths.data_dir,
-        &paths.scratch_dir,
-        project_root,
-    ) {
+    if let Err(e) = bench_tilemaker::run(harness, pbf_path, file_mb, runs, &layout, project_root) {
         if matches!(e, DevError::Interrupted) {
             return Err(e);
         }

@@ -116,14 +116,6 @@ impl NidhoggCommand {
             ))),
         }
     }
-
-    /// Scratch output directory name for commands that produce output.
-    pub fn scratch_output_dir(&self) -> Option<&'static str> {
-        match self {
-            Self::Ingest => Some("bench-ingest-output"),
-            Self::Api { .. } | Self::Tiles { .. } => None,
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------

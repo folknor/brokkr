@@ -7,7 +7,7 @@
 
 use serde::Serialize;
 
-use super::CargoMetadata;
+use super::{CargoMetadata, PackageSourceKind};
 
 #[derive(Serialize)]
 pub(super) struct GitDependencyEvent {
@@ -52,6 +52,9 @@ pub(super) enum GitRef {
 pub fn run(metadata: &CargoMetadata) -> Vec<GitDependencyEvent> {
     let mut events = Vec::new();
     for pkg in &metadata.packages {
+        if metadata.source_kind(&pkg.id) != PackageSourceKind::Git {
+            continue;
+        }
         let Some(source) = &pkg.source else { continue };
         let Some(parsed) = parse_git_source(source) else {
             continue;

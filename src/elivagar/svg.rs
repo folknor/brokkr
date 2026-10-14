@@ -22,7 +22,7 @@ pub fn run(
     layers: Option<&str>,
     output_path: Option<&Path>,
 ) -> Result<(), DevError> {
-    let binary = build::cargo_build(&build::BuildConfig::release(None), build_root)?;
+    let binary = build::cargo_build(&build::BuildConfig::release(None), build_root)?.path;
     let binary_str = binary.display().to_string();
     let pmtiles_str = pmtiles_path.display().to_string();
     let z_str = z.to_string();

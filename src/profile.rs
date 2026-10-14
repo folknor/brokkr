@@ -120,11 +120,19 @@ impl std::ops::Deref for PlannedSweep {
 
 impl PlannedSweep {
     pub fn resolve(declaration: SweepDecl, promotion_eligible: bool) -> Result<Self, DevError> {
-        let effective_unification = resolve_unification(&declaration, promotion_eligible)?;
-        Ok(Self {
+        crate::check_cmd::resolve_planned_sweep(declaration, promotion_eligible)
+    }
+
+    /// Construct a planned sweep after invocation selection has resolved its
+    /// effective feature-unification answer.
+    pub(crate) fn with_effective_unification(
+        declaration: SweepDecl,
+        effective_unification: EffectiveUnification,
+    ) -> Self {
+        Self {
             declaration,
             effective_unification,
-        })
+        }
     }
 
     pub fn effective_unification(&self) -> EffectiveUnification {
@@ -673,46 +681,6 @@ type BuildShapeKey = (
     EffectiveUnification,
 );
 
-/// Resolve one sweep's configured unification policy into the answer this
-/// invocation will use.
-///
-/// This is a RUNTIME decision, not a parse-time one, and it cannot be moved
-/// earlier: whether the parallel lane needs its workspace pin depends on the
-/// CLI `-p` scope and on forwarded cargo selectors, so the same config is
-/// promotion-eligible in one invocation and not in another.
-///
-/// `promotion_eligible` is the parallel lane's own gate (see
-/// `check_cmd::parallel::unify_workspace`): a whole-workspace fan-out whose
-/// per-binary re-entries would otherwise resolve a different feature graph
-/// from the prebuild that produced them.
-///
-/// Explicit `selected` is honoured everywhere, promotion-eligible sweeps
-/// included: the parallel fan-out executes the prebuilt binaries directly,
-/// so the prebuild's resolution is the run's resolution and there is nothing
-/// left to mismatch. (It was refused while the fan-out re-entered cargo per
-/// binary, where selected mode let a runner resolve a different graph.)
-pub fn resolve_unification(
-    sweep: &SweepDecl,
-    promotion_eligible: bool,
-) -> Result<EffectiveUnification, DevError> {
-    Ok(match sweep.feature_unification {
-        FeatureUnification::Package => EffectiveUnification::Pinned(CargoUnification::Package),
-        FeatureUnification::Workspace => EffectiveUnification::Pinned(CargoUnification::Workspace),
-        // An explicit `selected` is honoured everywhere, the parallel lane
-        // included: the fan-out executes the prebuilt binaries directly, so
-        // the prebuild's resolution IS the run's resolution and there is no
-        // re-entry left to mismatch. (This was a refusal when the fan-out
-        // re-entered cargo per binary.)
-        FeatureUnification::Selected => EffectiveUnification::Pinned(CargoUnification::Selected),
-        // The pre-existing behaviour, and the only value that defers to
-        // ambient config rather than pinning.
-        FeatureUnification::Auto if promotion_eligible => {
-            EffectiveUnification::Pinned(CargoUnification::Workspace)
-        }
-        FeatureUnification::Auto => EffectiveUnification::Ambient,
-    })
-}
-
 /// Synthesize a `SweepDecl` from a `CheckEntry` alone, with no
 /// profile filters. Used by the bare `brokkr check` path when
 /// `[[check]]` is configured but no profile is selected.
@@ -1178,6 +1146,7 @@ mod tests {
         clippy::too_many_lines
     )]
     use super::*;
+    use crate::check_cmd::resolve_unification;
 
     fn plan_decl(declaration: SweepDecl) -> PlannedSweep {
         PlannedSweep::resolve(declaration, false).unwrap()

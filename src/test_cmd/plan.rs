@@ -127,7 +127,7 @@ pub(super) fn prepare_sweep<'s>(
     let (profile_override, timeout) = (cx.profile_override, cx.timeout);
     // The sweep's pre-build, enumeration and first run share one phase clock,
     // as a `check` test phase's builds and runs do.
-    check_cmd::enter_phase("test");
+    check_cmd::enter_phase(check_cmd::Phase::Test);
 
     let debug = resolve_debug(profile_override, cx.test_cfg, sweep.profile);
     let profile_dir = if debug { "debug" } else { "release" };
@@ -574,7 +574,7 @@ pub(super) fn run_pre_build(
             output::run_msg(&line);
         })?;
 
-    if captured.status.success() {
+    if captured.success() {
         return Ok(Some(check_cmd::support_artifacts(
             &String::from_utf8_lossy(&captured.stdout),
             package,
@@ -628,8 +628,11 @@ pub(super) fn cargo_with_deadline(
         env,
         test_runner::IDLE_TIMEOUT,
         true,
+        output::SpawnProfile::Cargo {
+            phase: crate::check_cmd::current_phase(),
+        },
     )?;
-    if run.killed_on_deadline {
+    if run.killed_on_deadline() {
         let stderr = String::from_utf8_lossy(&run.captured.stderr);
         return Err(DevError::Build(format!(
             "{what} (`cargo {}`) printed nothing for {}s and was killed - cargo parked on \
@@ -826,7 +829,7 @@ pub(super) fn prebuild_targets(
         cargo_with_deadline(&arg_refs, project_root, env, "test build").inspect_err(|_| {
             announce();
         })?;
-    if !captured.status.success() {
+    if !captured.success() {
         announce();
         let stderr = String::from_utf8_lossy(&captured.stderr);
         let filtered = cargo_filter::filter_test_build_failure(&stderr);
@@ -925,9 +928,10 @@ pub(super) fn sweep_env(
 /// stops this command too, and a suppression that worked in one and not the
 /// other is the asymmetry the section exists to close.
 pub(super) fn lint_allow_flags(dev_config: &DevConfig) -> Vec<String> {
-    dev_config.lints.as_ref().map_or_else(Vec::new, |l| {
-        config::check::test_phase_allow_flags(&l.allow, &l.allow_exact)
-    })
+    dev_config
+        .lints
+        .as_ref()
+        .map_or_else(Vec::new, config::check::test_phase_allow_flags)
 }
 
 /// Resolve one sweep's cargo profile for `brokkr test` to a `debug` bool,

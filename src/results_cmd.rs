@@ -77,7 +77,7 @@ pub(crate) fn cmd_results(
     let sidecar_path = sidecar_db_path(project_root);
     let matcher = DatasetMatcher::new(config::all_dataset_keys(dev_config));
 
-    let store = db::RunStore::open(&db_path, &sidecar_path)?;
+    let store = db::RunStore::open_read_only(&db_path, &sidecar_path)?;
     if !store.has_results_db() {
         output::result_msg("no results yet (run a benchmark first)");
         return Ok(());

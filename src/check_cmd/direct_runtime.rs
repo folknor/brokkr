@@ -305,7 +305,7 @@ fn cargo_program(project_root: &Path, env: rustflags::EffectiveEnv<'_>) -> Strin
             project_root,
             env.pairs(),
         )
-        && out.status.success()
+        && out.success()
     {
         let resolved = String::from_utf8_lossy(&out.stdout).trim().to_owned();
         if !resolved.is_empty() {
@@ -347,12 +347,10 @@ fn is_rustup_proxy(cargo: &Path) -> bool {
 
 /// Every workspace member's manifest facts, keyed by full package id.
 fn workspace_pkg_meta(project_root: &Path) -> Result<HashMap<String, PkgRuntimeMeta>, DevError> {
-    let captured = output::run_captured(
-        "cargo",
-        &["metadata", "--no-deps", "--format-version", "1"],
-        project_root,
+    let captured = run_check_cargo(&["metadata", "--no-deps", "--format-version", "1"],
+        project_root, &[]
     )?;
-    if !captured.status.success() {
+    if !captured.success() {
         return Err(DevError::Build(format!(
             "cargo metadata failed: {}",
             String::from_utf8_lossy(&captured.stderr)

@@ -21,7 +21,7 @@ pub fn run(
     } else {
         build::BuildConfig::release_with_owned_features(None, features)
     };
-    let binary = build::cargo_build(&build_config, build_root)?;
+    let binary = build::cargo_build(&build_config, build_root)?.path;
     let binary_str = binary.display().to_string();
     let pmtiles_str = pmtiles_path.display().to_string();
 
@@ -36,7 +36,7 @@ pub fn run(
     }
     let captured = output::run_captured(&binary_str, &args, build_root)?;
 
-    if captured.status.success() {
+    if captured.success() {
         let stdout = String::from_utf8_lossy(&captured.stdout);
         for line in stdout.lines() {
             output::verify_msg(&format!("  {line}"));

@@ -7,6 +7,7 @@
 
 use std::path::Path;
 
+use crate::clean::layout::ElivagarLayout;
 use crate::error::DevError;
 use crate::harness::{self, BenchConfig, BenchHarness};
 use crate::output;
@@ -22,18 +23,10 @@ pub fn run(
     pbf_path: &Path,
     file_mb: f64,
     runs: usize,
-    data_dir: &Path,
-    scratch_dir: &Path,
+    layout: &ElivagarLayout<'_>,
     project_root: &Path,
 ) -> Result<(), DevError> {
-    let invocation = prepare(
-        pbf_path,
-        file_mb,
-        runs,
-        data_dir,
-        scratch_dir,
-        false,
-    )?;
+    let invocation = prepare(pbf_path, file_mb, runs, layout, false)?;
     let args: Vec<&str> = invocation.args.iter().map(String::as_str).collect();
     harness.run_external_prepared(
         &invocation.config,
@@ -51,10 +44,11 @@ pub(crate) fn prepare(
     pbf_path: &Path,
     file_mb: f64,
     runs: usize,
-    data_dir: &Path,
-    scratch_dir: &Path,
+    layout: &ElivagarLayout<'_>,
     dry_run: bool,
 ) -> Result<crate::measure::runner::ExternalInvocation, DevError> {
+    let data_dir = layout.data_dir();
+    let scratch_dir = layout.scratch();
     let tm = if dry_run {
         tools::TilemakerTools {
             tilemaker: data_dir.join("tilemaker/build/tilemaker"),
@@ -95,7 +89,7 @@ pub(crate) fn prepare(
     if !dry_run {
         std::fs::create_dir_all(scratch_dir)?;
     }
-    let output_path = scratch_dir.join("tilemaker-bench.pmtiles");
+    let output_path = layout.tilemaker_output();
     let output_str = output_path.display().to_string();
 
     if !dry_run {
@@ -125,7 +119,7 @@ pub(crate) fn prepare(
         input_file: Some(basename),
         input_mb: Some(file_mb),
         cargo_features: None,
-        cargo_profile: crate::build::CargoProfile::CMake,
+        external_build: Some(crate::build::CargoProfile::CMake),
         runs,
         cli_args: Some(harness::format_cli_args(
             &tm.tilemaker.display().to_string(),

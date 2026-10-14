@@ -63,7 +63,7 @@ fn resolve_read_pbf_with_size(
         &snapshot_ref,
         req.variant,
         paths,
-        req.project_root,
+        req.project_root.as_path(),
     )?;
     let file_mb = resolve::file_size_mb(&pbf_path)?;
     Ok((pbf_path, file_mb))
@@ -175,13 +175,7 @@ pub(crate) fn bench_read(
     }
 
     let feat_refs = req.feat_refs();
-    let ctx = MeasurementSession::build_for_request(
-        req,
-        Some("pbfhogg-cli"),
-        &feat_refs,
-        true,
-        "bench read",
-    )?;
+    let ctx = MeasurementSession::build_for_request(req, Some("pbfhogg-cli"), &feat_refs, true)?;
     let (pbf_path, file_mb) = resolve_read_pbf_with_size(req, snapshot, &ctx.paths)?;
     let modes = super::bench_read::parse_modes(modes_str)?;
     super::bench_read::run(
@@ -191,29 +185,28 @@ pub(crate) fn bench_read(
         file_mb,
         req.runs(),
         &modes,
-        req.project_root,
+        req.project_root.as_path(),
     )
 }
 
 pub(crate) fn bench_write(req: &MeasureRequest, compression_str: &str) -> Result<(), DevError> {
     if req.dry_run {
         let paths = dry_run_paths(req)?;
-        let _ = resolve_pbf_with_size(req.dataset, req.variant, &paths, req.project_root)?;
+        let _ =
+            resolve_pbf_with_size(req.dataset, req.variant, &paths, req.project_root.as_path())?;
         let _ = super::parse_compressions(compression_str, true)?;
         output::dry_run_msg("ok (bench write)");
         return Ok(());
     }
 
     let feat_refs = req.feat_refs();
-    let ctx = MeasurementSession::build_for_request(
-        req,
-        Some("pbfhogg-cli"),
-        &feat_refs,
-        true,
-        "bench write",
+    let ctx = MeasurementSession::build_for_request(req, Some("pbfhogg-cli"), &feat_refs, true)?;
+    let (pbf_path, file_mb) = resolve_pbf_with_size(
+        req.dataset,
+        req.variant,
+        &ctx.paths,
+        req.project_root.as_path(),
     )?;
-    let (pbf_path, file_mb) =
-        resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
     let compressions = super::parse_compressions(compression_str, true)?;
     super::bench_write::run(
         &ctx.harness,
@@ -222,7 +215,7 @@ pub(crate) fn bench_write(req: &MeasureRequest, compression_str: &str) -> Result
         file_mb,
         req.runs(),
         &compressions,
-        req.project_root,
+        req.project_root.as_path(),
     )
 }
 
@@ -238,10 +231,12 @@ pub(crate) fn bench_merge(
         }
         let paths = dry_run_paths(req)?;
         let (pbf_path, _file_mb) =
-            resolve_pbf_with_size(req.dataset, req.variant, &paths, req.project_root)?;
+            resolve_pbf_with_size(req.dataset, req.variant, &paths, req.project_root.as_path())?;
         let osc_path = match osc_seq {
-            Some(seq) => resolve::resolve_osc_path(req.dataset, seq, &paths, req.project_root)?,
-            None => resolve_default_osc_path(req.dataset, &paths, req.project_root)?,
+            Some(seq) => {
+                resolve::resolve_osc_path(req.dataset, seq, &paths, req.project_root.as_path())?
+            }
+            None => resolve_default_osc_path(req.dataset, &paths, req.project_root.as_path())?,
         };
         let _ = super::parse_compressions(compression_str, false)?;
         output::dry_run_msg(&format!("pbf: {}", pbf_path.display()));
@@ -258,18 +253,18 @@ pub(crate) fn bench_merge(
     if uring {
         all_features.push("linux-io-uring");
     }
-    let ctx = MeasurementSession::build_for_request(
-        req,
-        Some("pbfhogg-cli"),
-        &all_features,
-        true,
-        "bench merge",
+    let ctx = MeasurementSession::build_for_request(req, Some("pbfhogg-cli"), &all_features, true)?;
+    let (pbf_path, file_mb) = resolve_pbf_with_size(
+        req.dataset,
+        req.variant,
+        &ctx.paths,
+        req.project_root.as_path(),
     )?;
-    let (pbf_path, file_mb) =
-        resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
     let osc_path = match osc_seq {
-        Some(seq) => resolve::resolve_osc_path(req.dataset, seq, &ctx.paths, req.project_root)?,
-        None => resolve_default_osc_path(req.dataset, &ctx.paths, req.project_root)?,
+        Some(seq) => {
+            resolve::resolve_osc_path(req.dataset, seq, &ctx.paths, req.project_root.as_path())?
+        }
+        None => resolve_default_osc_path(req.dataset, &ctx.paths, req.project_root.as_path())?,
     };
     let compressions = super::parse_compressions(compression_str, false)?;
     super::bench_merge::run(
@@ -282,22 +277,27 @@ pub(crate) fn bench_merge(
         &compressions,
         uring,
         &ctx.paths.scratch_dir,
-        req.project_root,
+        req.project_root.as_path(),
     )
 }
 
 pub(crate) fn bench_all(req: &MeasureRequest) -> Result<(), DevError> {
     if req.dry_run {
         let paths = dry_run_paths(req)?;
-        let _ = resolve_pbf_with_size(req.dataset, req.variant, &paths, req.project_root)?;
+        let _ =
+            resolve_pbf_with_size(req.dataset, req.variant, &paths, req.project_root.as_path())?;
         output::dry_run_msg("ok (bench all)");
         return Ok(());
     }
 
-    let ctx = MeasurementSession::new_for_request(req, "bench all")?;
-    let (pbf_path, file_mb) =
-        resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
-    let effective = req.build_root.unwrap_or(req.project_root);
+    let ctx = MeasurementSession::new_for_request(req)?;
+    let (pbf_path, file_mb) = resolve_pbf_with_size(
+        req.dataset,
+        req.variant,
+        &ctx.paths,
+        req.project_root.as_path(),
+    )?;
+    let effective = req.build_root.as_path();
     super::bench_all::run(
         &ctx.harness,
         &ctx.paths,
@@ -319,8 +319,8 @@ fn dry_run_paths(req: &MeasureRequest) -> Result<config::ResolvedPaths, DevError
 pub(crate) fn verify(
     dev_config: &config::DevConfig,
     _project: Project,
-    project_root: &Path,
-    build_root: Option<&Path>,
+    project_root: &crate::project::ProjectRoot,
+    build_root: &crate::project::BuildRoot,
     verify: VerifyCommand,
     features: &[String],
     verbose: bool,
@@ -337,6 +337,7 @@ pub(crate) fn verify(
     }
     let pi = bootstrap(build_root)?;
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
+    let (project_root, build_root) = (project_root.as_path(), build_root.as_path());
 
     let harness =
         super::verify::VerifyHarness::new(project_root, &pi.target_dir, build_root, features)?;
@@ -617,8 +618,8 @@ pub(crate) fn verify(
         // and the other projects' variants (refused at the top). Errors, not
         // `unreachable!()`: those guards are ordering this match cannot see,
         // and a reordering should fail the command, not panic the process.
-        VerifyCommand::All { .. } => Err(DevError::Config(
-            "internal error: verify all reached the single-check path".into(),
+        VerifyCommand::All { .. } => Err(DevError::Internal(
+            "verify all reached the single-check path".into(),
         )),
         VerifyCommand::ElivVerify { .. }
         | VerifyCommand::Batch { .. }
@@ -631,9 +632,7 @@ pub(crate) fn verify(
 /// pbfhogg verifier. `cmd_verify` routes those by project first; this is the
 /// answer if one ever arrives here anyway.
 fn not_a_pbfhogg_verify() -> DevError {
-    DevError::Config(
-        "internal error: a non-pbfhogg verify subcommand reached the pbfhogg verifier".into(),
-    )
+    DevError::Internal("a non-pbfhogg verify subcommand reached the pbfhogg verifier".into())
 }
 
 /// The result-line name for a pbfhogg verify subcommand (matches the labels
@@ -664,8 +663,8 @@ fn verify_name(verify: &VerifyCommand) -> &'static str {
 pub(crate) fn download(
     dev_config: &config::DevConfig,
     project: Project,
-    project_root: &Path,
-    build_root: &Path,
+    project_root: &crate::project::ProjectRoot,
+    build_root: &crate::project::BuildRoot,
     region: &str,
     osc_seq: Option<u64>,
     as_snapshot: Option<&str>,
@@ -674,8 +673,9 @@ pub(crate) fn download(
 ) -> Result<(), DevError> {
     project::require(project, Project::Pbfhogg, "download")?;
 
-    let pi = bootstrap(None)?;
+    let pi = bootstrap(build_root)?;
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
+    let (project_root, build_root) = (project_root.as_path(), build_root.as_path());
 
     super::download::run(
         region,

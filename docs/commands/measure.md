@@ -238,10 +238,12 @@ hotpath/alloc data reaches sidecar.db via the `run_hotpath` wrapper, since
 (`SidecarDb`).
 
 The child process receives `BROKKR_MARKER_FIFO` env var pointing to a named
-pipe. Stdout/stderr are drained in background threads to prevent pipe-buffer
-deadlock. Child exit is detected via `try_wait()` and the exact exit time is
-recorded for wall-clock measurement. Sidecar data is stored even when the
-child fails (OOM, signal, non-zero exit).
+pipe. The shared supervisor in `src/output/child.rs` polls the child, handles
+stop markers, deadlines and interrupts, and drains stdout/stderr with a bounded
+settle period. It records one typed ending (`Exited`, `Signalled`, `StopMarker`,
+`Deadline`, `Interrupted`, or `WaitFailed`) before waiting for the drains. `src/sidecar.rs`
+supplies only the per-tick `/proc` sampler and FIFO observer. Sidecar data is
+stored even when the child fails (OOM, signal, deadline, or non-zero exit).
 
 ## Querying sidecar data
 

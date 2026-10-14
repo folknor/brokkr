@@ -281,9 +281,6 @@ const GREMLINS: &[(char, &str)] = &[
     ('\u{FFFC}', "OBJECT REPLACEMENT CHARACTER"),
 ];
 
-/// File extensions scanned by default.
-const SCANNED_EXTENSIONS: &[&str] = &["rs", "toml", "md", "js", "sh"];
-
 /// Scan every tracked file with a scannable extension, skipping any path
 /// under a `[gremlins].exclude` directory.
 pub fn scan(
@@ -523,7 +520,7 @@ fn is_scannable(rel: &Path) -> bool {
     let Some(ext) = rel.extension().and_then(|e| e.to_str()) else {
         return false;
     };
-    SCANNED_EXTENSIONS.contains(&ext)
+    crate::globs::is_scanned_extension(ext)
 }
 
 /// Tracked plus untracked-not-ignored files, via `git ls-files`.
@@ -546,7 +543,7 @@ pub(crate) fn tracked_files(project_root: &Path) -> Result<Vec<PathBuf>, DevErro
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
         return Err(DevError::Subprocess {
             program: "git ls-files".into(),
-            code: output.status.code(),
+            ending: crate::error::ProcessEnding::from_status(&output.status),
             stderr,
         });
     }
@@ -780,8 +777,13 @@ mod tests {
         assert!(is_scannable(Path::new("src/foo.rs")));
         assert!(is_scannable(Path::new("Cargo.toml")));
         assert!(is_scannable(Path::new("README.md")));
+        assert!(is_scannable(Path::new("README.MD")));
+        assert!(is_scannable(Path::new("guide.markdown")));
         assert!(is_scannable(Path::new("x.js")));
         assert!(is_scannable(Path::new("y.sh")));
+        assert!(is_scannable(Path::new("scripts/check.py")));
+        assert!(is_scannable(Path::new("config.yml")));
+        assert!(is_scannable(Path::new("config.yaml")));
         assert!(!is_scannable(Path::new("foo.html")));
         assert!(!is_scannable(Path::new("Cargo.lock")));
         assert!(!is_scannable(Path::new("no_ext")));

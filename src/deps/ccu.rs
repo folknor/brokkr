@@ -220,17 +220,16 @@ fn try_run(project_root: &Path) -> Result<(Vec<DepsEvent>, Vec<DepsEvent>), Stri
         }
         Err(err) => return Err(format!("spawn failed: {err}")),
     };
-    if run.killed_on_deadline {
+    if run.killed_on_deadline() {
         return Err(format!(
             "killed after {}s with no answer (network trouble?)",
             CCU_DEADLINE.as_secs()
         ));
     }
     let output = run.captured;
-    if !output.status.success() {
+    if !output.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let code = output
-            .status
             .code()
             .map_or("signal".to_string(), |c| c.to_string());
         let stderr_trimmed = stderr.trim();

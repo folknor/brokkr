@@ -4,6 +4,13 @@ Query the results database, `.brokkr/results.db` - the durable record every
 measured run writes. The sibling command `brokkr sidecar` queries the profiler
 store (`sidecar.db`); see `docs/commands/measure.md` for what lands in which.
 
+`results` and `sidecar` open existing stores read-only and do not create
+databases. A store on an older schema is migrated first (the same transactional
+migrations a measured write applies, then the query proceeds read-only), so an
+upgrade never makes existing history unreadable. A store stamped with a newer
+schema version than this brokkr knows is refused, by queries and writes alike;
+a stamp is never lowered.
+
 Uniform across all projects, piners included (for its hotpath/alloc runs). The
 exception is litehtml, whose only use of `results.db` is the unrelated
 `MechanicalDb` schema - so `results`, `sidecar` and `invalidate` are hidden
@@ -81,7 +88,9 @@ These row filters also narrow UUID lookups and apply to both sides of
 
 Substring match against the run's **invocation**, which spans three sources at
 once: the subprocess argv (`cli_args`), the brokkr argv (`brokkr_args`), and
-each captured env var rendered as `NAME=VALUE`.
+each captured env var rendered as `NAME=VALUE`. New `brokkr_args` values are
+JSON arrays, preserving spaces and punctuation inside each argument; older
+rows keep their original joined string.
 
 That third source is the point. An arm gated by an environment variable appears
 in no argv at all, so `--grep LAYER_STATS` is the only way to select it.
@@ -103,7 +112,7 @@ arm.
 
 When `brokkr results <uuid-prefix>` matches one result row, it prints a
 labelled block instead of a table row: full multi-line `cli_args`, the brokkr
-invocation, and the sidecar hint folded in as a field. For a `--bench N` row it
+argv array, and the sidecar hint folded in as a field. For a `--bench N` row it
 adds the per-iteration walls, and the `prev.*` provenance of what ran
 immediately before it - the neighbouring run is often the explanation for an
 outlier. A distribution row (nidhogg `api`) also gets its `samples`, `min`,
@@ -136,33 +145,25 @@ Prints the two commits side by side, one delta row per matched pair. Two rows
 pair when
 
 ```
-(command, mode, input_file, brokkr_args, env_fingerprint)
+(command, mode, input_file, arm_key, env_fingerprint)
 ```
 
-agree. `brokkr_args` is in the key deliberately: arm-defining flags like
-`--direct-io` must never collapse two different measurements into one averaged
-row.
+agree. `arm_key` represents measurement-affecting options, so arm-defining
+flags like `--direct-io` keep different measurements separate without
+reparsing argv in the comparison code.
 
 The command, mode, dataset, metadata, env, and invocation filters above apply
 to both commit result sets before pairing.
 
-But the tokens that name provenance or presentation rather than the arm are
-**normalized before the comparison** (`normalize_brokkr_args` in
-`src/db/format/compare.rs`):
+The caller supplies `arm_key` with the typed `RunInvocation`, while parsed CLI
+arguments are available. It excludes commit provenance, verbosity, and sample
+count, while retaining measurement-affecting options. The comparison layer
+treats it as an opaque identity and does not implement a second CLI grammar.
+Historical rows have no `arm_key`; those rows use their exact stored
+invocation string and can only pair when that spelling matches.
 
-- `--commit REF` (and `--commit=REF`) is stripped - because `--commit` *is* the
-  comparison axis. Keying on it would stop a retroactive row from ever pairing
-  with the current-tree row it exists to be compared against, which is the
-  entire purpose of recording it.
-- `--verbose` / `-v` is stripped - noise that changes no measurement.
-- The iteration count of `--bench N`, `--hotpath N` and `--alloc N` (and the
-  `=N` forms) is stripped; the flag stays. `--bench 3` and `--bench 5` drew
-  different numbers of samples of the same benchmark, so they pair.
-- argv[0] is reduced to its basename, so `brokkr` and `~/.cargo/bin/brokkr`
-  pair.
-
-Pairing is by invocation: two different brokkr commands that happen to run the
-same subprocess have different `brokkr_args` and stay separate rows.
+Pairing is by parsed command identity: two different brokkr commands that
+happen to run the same subprocess stay separate rows.
 
 Pairs whose **host conditions differed** (memory, governor, kernel) are
 annotated rather than silently rendered as a clean delta: the same numbers mean

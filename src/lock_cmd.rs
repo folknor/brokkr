@@ -1,6 +1,6 @@
 //! Lock status and termination commands.
 
-use crate::error::DevError;
+use crate::error::{DevError, LockError};
 use crate::lockfile;
 use crate::output;
 
@@ -284,10 +284,10 @@ fn kill_graceful(info: &lockfile::LockInfo) -> Result<(), DevError> {
             info.pid,
         )),
         Err(e) => {
-            return Err(DevError::Lock(format!(
+            return Err(DevError::Lock(LockError::from(format!(
                 "SIGTERM to brokkr PID {} failed: {e}",
                 info.pid
-            )));
+            ))));
         }
     }
     Ok(())
@@ -361,9 +361,9 @@ fn hard_kill(info: &lockfile::LockInfo) -> Result<(), DevError> {
 /// The all-or-nothing refusal: name the unverifiable target and state that
 /// nothing was signalled.
 fn refuse_kill(why: &str) -> DevError {
-    DevError::Lock(format!(
+    DevError::Lock(LockError::from(format!(
         "{why} - lock holder and child process identities must all verify from this PID/time namespace before killing; no signals were sent"
-    ))
+    )))
 }
 
 /// A signal target that passed preflight: identity verified, pidfd held

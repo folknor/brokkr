@@ -53,6 +53,9 @@ pub fn hotpath_data_from_json(extra: &serde_json::Value) -> Option<HotpathData> 
         if let Some(data) = threads_obj.get("data").and_then(|v| v.as_array()) {
             for entry in data {
                 let s = |k: &str| entry.get(k).and_then(|v| v.as_str()).map(String::from);
+                // The locked hotpath 0.21.5/0.22.0 formatters emit ns/µs/ms/s,
+                // B/KB/MB/GB/TB, and percentages; they do not emit KiB or
+                // compound durations. Keep unit normalization in Quantity.
                 let quantity = |k: &str| s(k).and_then(|value| Quantity::parse(&value));
                 threads.push(HotpathThread {
                     name: s("name").unwrap_or_default(),
@@ -95,6 +98,8 @@ fn parse_functions_section(
 
     for (ordinal, entry) in data.iter().enumerate() {
         let s = |k: &str| entry.get(k).and_then(|v| v.as_str()).map(String::from);
+        // Function durations and allocation sizes use the same formatter
+        // spellings as thread metrics.
         let quantity = |k: &str| s(k).and_then(|value| Quantity::parse(&value));
         let percentiles = entry
             .as_object()

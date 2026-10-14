@@ -25,18 +25,16 @@ impl BenchHarness {
     }
 
     /// Sidecar provenance for a run of `program` that began at `start_epoch`
-    /// (from [`begin_measurement`](Self::begin_measurement)). `exit` is the
-    /// last iteration's status, `None` for a clean finish (recorded as exit
-    /// code 0, as the harness's loops do).
+    /// (from [`begin_measurement`](Self::begin_measurement)). Both `pid` and
+    /// `ending` are absent when the caller cannot observe them.
     pub(crate) fn run_info_for(
         &self,
         config: &BenchConfig,
         program: &Path,
         start_epoch: i64,
-        pid: u32,
-        exit: Option<&std::process::ExitStatus>,
+        pid: Option<u32>,
+        ending: Option<child::Ending>,
     ) -> crate::db::sidecar::RunInfo {
-        let exit_code = exit.map_or(0, exit_code_from_status);
-        self.build_run_info(config, program, start_epoch, pid, Some(exit_code))
+        self.build_run_info(config, program, start_epoch, pid, ending)
     }
 }

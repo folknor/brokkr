@@ -121,12 +121,13 @@ fn discover(project_root: &Path) -> Result<Vec<Runnable>, DevError> {
 /// [`discover`], plus metadata's `workspace_root` - the directory cargo reads
 /// `Cargo.lock` from for every member, wherever the invocation started.
 fn discover_workspace(project_root: &Path) -> Result<(Vec<Runnable>, PathBuf), DevError> {
-    let captured = output::run_captured(
-        "cargo",
+    let captured = output::run_cargo(
         &["metadata", "--format-version", "1", "--no-deps"],
         project_root,
+        &[],
+        None,
     )?;
-    if !captured.status.success() {
+    if !captured.success() {
         let stderr = String::from_utf8_lossy(&captured.stderr);
         return Err(DevError::Build(format!("cargo metadata failed: {stderr}")));
     }
@@ -341,14 +342,21 @@ pub fn cmd_run_commit(
         },
     };
     let exe = crate::build::cargo_build(&build, worktree)?;
-    let exe_str = exe.display().to_string();
+    let exe_str = exe.path.display().to_string();
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let out = output::run_passthrough_in(&exe_str, &arg_refs, Some(run_dir), &[], Some(lock))?;
-    if out.code == 0 {
-        return Ok(());
-    }
+    let out = output::run_passthrough_in(
+        &exe_str,
+        &arg_refs,
+        Some(run_dir),
+        &[],
+        output::SpawnProfile::Plain,
+        Some(lock),
+    )?;
     // Same contract as `cmd_run`: the program's code, silently.
-    Err(DevError::ExitCode(out.code))
+    match out.failed_code(&[]) {
+        None => Ok(()),
+        Some(code) => Err(DevError::ExitCode(code)),
+    }
 }
 
 /// The `[bin] install` packages with their bin target names, through the
@@ -492,7 +500,7 @@ pub fn cmd_install(
 /// non-zero exit is the caller's to map, since `run` propagates it and
 /// `install` reports it.
 ///
-/// Goes through [`output::run_passthrough_timed`] rather than a bare
+/// Goes through [`output::run_passthrough_in`] (cargo spawn profile) rather than a bare
 /// `Command::status()`. A `brokkr run` child is a real, long-running workload,
 /// and a bare status call leaves brokkr with the default SIGTERM disposition:
 /// `brokkr kill` signals brokkr's PID alone, so brokkr dies and the child is
@@ -510,7 +518,15 @@ pub(crate) fn run_cargo(
     lock: Option<&crate::lockfile::LockGuard>,
 ) -> Result<i32, DevError> {
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    Ok(output::run_passthrough_timed("cargo", &arg_refs, lock)?.code)
+    let out = output::run_passthrough_in(
+        "cargo",
+        &arg_refs,
+        None,
+        &[],
+        output::SpawnProfile::Cargo { phase: None },
+        lock,
+    )?;
+    Ok(out.failed_code(&[]).unwrap_or(0))
 }
 
 #[cfg(test)]

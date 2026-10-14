@@ -29,30 +29,28 @@
 //! The child's stdout and stderr are piped (for error reporting). To avoid
 //! deadlock when the child fills the OS pipe buffer (~64 KiB), we take
 //! ownership of the pipe handles and drain them in background threads while
-//! the sidecar loop samples `/proc` and checks `try_wait()`.
+//! the shared child supervisor polls. A sidecar observer supplies `/proc`
+//! samples and marker checks on each supervisor tick.
 //! After the child exits, drains get a bounded grace period to reach EOF. If
 //! a descendant still holds a pipe open, capture is stopped and its end is
 //! closed so the sidecar cannot hang waiting for that descendant.
 //!
 //! # Timing
 //!
-//! Both the sidecar sample loop and the sleep scheduler use `CLOCK_MONOTONIC`.
-//! `Instant::now()` provides sample timestamps (it wraps `CLOCK_MONOTONIC` on
-//! Linux). `clock_nanosleep(TIMER_ABSTIME)` provides drift-free tick scheduling.
-//! The child's wall-clock time is captured at the moment `try_wait()` detects
-//! exit, not after the sidecar loop finishes draining.
+//! `Instant::now()` provides sample timestamps and drift-free tick scheduling
+//! through the shared child supervisor. The child's wall-clock time is
+//! captured when the supervisor observes the ending, before pipe drains settle.
 
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, ExitStatus};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::process::Child;
 use std::time::{Duration, Instant};
 
 use crate::error::DevError;
-use crate::output;
+use crate::output::child::{self, ChildLimit, Ending};
+use crate::output::console;
 use crate::process::{Pid, ProcStat};
 
 // ---------------------------------------------------------------------------
@@ -60,7 +58,7 @@ use crate::process::{Pid, ProcStat};
 // ---------------------------------------------------------------------------
 
 /// Sample interval in microseconds (100ms).
-const SAMPLE_INTERVAL_US: i64 = 100_000;
+const SAMPLE_INTERVAL_US: u64 = 100_000;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -308,32 +306,20 @@ pub struct SidecarData {
     /// This is `None` when the child exited naturally, even if a stop was
     /// requested.
     pub fired_stop_marker: Option<String>,
+    /// The termination cause assigned by the child supervisor.
+    pub ending: Ending,
     pub summary: SidecarSummary,
 }
 
 /// Result of a sidecar-monitored child process run.
 ///
-/// Contains both the child's exit information (status, stdout, stderr,
-/// wall-clock time) and the sidecar profile data.
+/// Contains captured output, the child's ending and wall-clock time, and the
+/// sidecar profile data.
 pub struct SidecarRunResult {
-    pub exit_status: ExitStatus,
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
     pub elapsed: Duration,
     pub data: SidecarData,
-    /// True when the child was killed because a `--stop` marker was received.
-    /// Callers should treat this as a successful exit even though the exit
-    /// status reflects SIGKILL.
-    pub stopped_by_marker: bool,
-    /// True when the child was killed because brokkr caught SIGTERM (via
-    /// `brokkr kill`). Callers store the partial sidecar and then abort
-    /// the bench, letting the outer layer run scratch cleanup.
-    pub stopped_by_signal: bool,
-    /// True when the child was killed for outliving the run's deadline
-    /// (see [`run_sidecar_with_deadline`]). The exit status reflects the
-    /// SIGKILL, so a caller that ignores this field still sees a failure;
-    /// callers that check it can name the cause.
-    pub stopped_by_deadline: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -713,30 +699,8 @@ impl Drop for SidecarFifo {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Sleep with CLOCK_MONOTONIC absolute time
-// ---------------------------------------------------------------------------
-
-/// Sleep until the specified absolute time (CLOCK_MONOTONIC, nanoseconds).
-///
-/// Uses `clock_nanosleep` with `TIMER_ABSTIME` to avoid drift from
-/// /proc read overhead (~30µs per tick).
-fn sleep_until_ns(target_ns: i64) {
-    let ts = libc::timespec {
-        tv_sec: target_ns / 1_000_000_000,
-        tv_nsec: target_ns % 1_000_000_000,
-    };
-    unsafe {
-        libc::clock_nanosleep(
-            libc::CLOCK_MONOTONIC,
-            libc::TIMER_ABSTIME,
-            &ts,
-            std::ptr::null_mut(),
-        );
-    }
-}
-
 /// Get current CLOCK_MONOTONIC time in nanoseconds.
+#[cfg(test)]
 fn monotonic_ns() -> i64 {
     let mut ts = libc::timespec {
         tv_sec: 0,
@@ -751,91 +715,6 @@ fn monotonic_ns() -> i64 {
 // ---------------------------------------------------------------------------
 // Sidecar loop
 // ---------------------------------------------------------------------------
-
-/// Drain a pipe handle in a cancellable thread.
-///
-/// Used to prevent deadlock: the child's stdout/stderr must be drained
-/// concurrently with the sidecar sampling loop, otherwise the child blocks
-/// once the OS pipe buffer (~64 KiB) fills. Polling reads let the caller stop
-/// a drain if a descendant keeps the pipe open after the child exits.
-fn drain_pipe(pipe: impl Read + std::os::fd::AsRawFd + Send + 'static) -> PipeDrain {
-    let buf = Arc::new(Mutex::new(Vec::new()));
-    let cancel = Arc::new(AtomicBool::new(false));
-    let (buf_t, cancel_t) = (Arc::clone(&buf), Arc::clone(&cancel));
-    let handle = std::thread::spawn(move || {
-        let mut reader = pipe;
-        let mut chunk = [0u8; 8192];
-        while let Some(n) =
-            crate::test_runner::read_unless_cancelled(&mut reader, &mut chunk, &cancel_t)
-        {
-            if let Ok(mut b) = buf_t.lock() {
-                b.extend_from_slice(&chunk[..n]);
-            }
-        }
-        // Closing our end makes a surviving writer see EPIPE rather than
-        // leaving an unbounded reader behind the completed run.
-    });
-    PipeDrain {
-        buf,
-        cancel,
-        handle,
-    }
-}
-
-/// One sidecar output drain: captured bytes, its stop switch, and its thread.
-struct PipeDrain {
-    buf: Arc<Mutex<Vec<u8>>>,
-    cancel: Arc<AtomicBool>,
-    handle: std::thread::JoinHandle<()>,
-}
-
-/// How long a child's output pipes get to close after the child exits.
-const DRAIN_SETTLE: Duration = Duration::from_secs(2);
-
-/// Wait up to [`DRAIN_SETTLE`] for all output pipes to reach EOF, then stop
-/// and join any remaining drains while preserving stdout/stderr positions.
-fn settle_drains(drains: Vec<Option<PipeDrain>>, run: usize) -> Vec<Vec<u8>> {
-    let until = Instant::now() + DRAIN_SETTLE;
-    while Instant::now() < until
-        && !drains
-            .iter()
-            .flatten()
-            .all(|drain| drain.handle.is_finished())
-    {
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    let cut = drains
-        .iter()
-        .flatten()
-        .any(|drain| !drain.handle.is_finished());
-    if cut {
-        output::sidecar_msg(&format!(
-            "run {run}: child exited but an output pipe stayed open for {}s; capture stopped \
-             there (a descendant may still hold the pipe)",
-            DRAIN_SETTLE.as_secs()
-        ));
-    }
-    drains
-        .into_iter()
-        .map(|drain| {
-            let Some(drain) = drain else {
-                return Vec::new();
-            };
-            drain.cancel.store(true, Ordering::Release);
-            drain.handle.join().ok();
-            drain.buf.lock().map(|b| b.clone()).unwrap_or_default()
-        })
-        .collect()
-}
-
-/// Represent an unavailable wait result as failure; the default Unix
-/// `ExitStatus` is exit 0 and would silently record this run as successful.
-fn unavailable_exit_status() -> ExitStatus {
-    use std::os::unix::process::ExitStatusExt;
-
-    // Unix wait status encoding for a normal exit with code 1.
-    ExitStatus::from_raw(1 << 8)
-}
 
 /// A parsed `--stop` request. Resolve the spelling once before entering the
 /// sidecar loop, then compare each fresh marker batch against the stored names.
@@ -878,7 +757,7 @@ thread_local! {
 
 /// Bounds every [`run_sidecar`] call on this thread while it lives: a child
 /// running longer than `limit` (measured from the caller's `start`) has its
-/// process group SIGKILLed and the run reports `stopped_by_deadline`.
+/// process group SIGKILLed and the run records `Ending::Deadline`.
 ///
 /// Scopes nest; dropping one restores the enclosing limit.
 pub(crate) struct DeadlineScope {
@@ -907,220 +786,99 @@ fn ambient_deadline() -> Option<Duration> {
 ///
 /// See [`run_sidecar_with_deadline`].
 pub(crate) fn run_sidecar(
-    child: Child,
+    child_process: Child,
     fifo: &mut SidecarFifo,
     run_idx: usize,
     start: Instant,
     stop_marker: Option<&str>,
 ) -> SidecarRunResult {
-    run_sidecar_with_deadline(child, fifo, run_idx, start, stop_marker, ambient_deadline())
+    run_sidecar_with_deadline(
+        child_process,
+        fifo,
+        run_idx,
+        start,
+        stop_marker,
+        ambient_deadline(),
+    )
 }
 
-/// Run the sidecar sampling loop for a single benchmark run.
-///
-/// Takes ownership of the `Child` process. Drains stdout/stderr in
-/// background threads to prevent pipe-buffer deadlock. Samples
-/// `/proc/{pid}/*` at 100ms intervals, drains FIFO markers, and detects
-/// child exit via `try_wait()`.
-///
-/// `deadline`, when set, is the longest the child may run, measured from
-/// `start`: past it the child's process group is SIGKILLed and the result
-/// carries `stopped_by_deadline`. Checked once per sample tick, so the kill
-/// lands within one interval of the limit. Without it a hung child holds the
-/// global lock until someone runs `brokkr kill`.
-///
-/// Returns a `SidecarRunResult` containing the child's exit status,
-/// captured output, wall-clock elapsed time, and sidecar profile data.
-#[allow(clippy::too_many_lines)]
+/// Run one sidecar-observed child. Process polling, stop/deadline killing,
+/// output draining, and waiting are owned by the shared child supervisor;
+/// this observer only samples procfs and drains the marker FIFO.
 pub(crate) fn run_sidecar_with_deadline(
-    mut child: Child,
+    child_process: Child,
     fifo: &mut SidecarFifo,
     run_idx: usize,
     start: Instant,
     stop_marker: Option<&str>,
     deadline: Option<Duration>,
 ) -> SidecarRunResult {
-    // Scope the SIGTERM handler to the sidecar window only. Outside this
-    // RAII guard's lifetime, `brokkr kill` falls through to the default
-    // terminate action - exactly what the user expects during cargo build
-    // / brokkr check / other non-sidecar work where there's no child to
-    // reap and no graceful partial-state to preserve.
     let _shutdown_guard = crate::shutdown::SigtermGuard::install();
-    let pid = child.id();
+    let pid = child_process.id();
 
-    // Take stdout/stderr handles from the child and drain them in background
-    // threads. This prevents the classic pipe-buffer deadlock: if the child
-    // writes >64 KiB to a piped stream, it blocks until someone reads, but
-    // the sidecar loop is waiting for the child to exit - deadlock.
-    let stdout_thread = child.stdout.take().map(drain_pipe);
-    let stderr_thread = child.stderr.take().map(drain_pipe);
+    let mut samples = Vec::new();
+    let mut markers = Vec::new();
+    let mut counters = Vec::new();
+    let mut last_hwm = 0;
+    let mut sample_idx = 0;
+    let mut marker_idx = 0;
+    let requested_stop = stop_marker.unwrap_or_default().to_owned();
+    let stop_spec = stop_marker.map(StopSpec::parse);
+    let mut fired_stop_marker = None;
 
-    let start_ns = monotonic_ns();
-    let mut samples: Vec<Sample> = Vec::new();
-    let mut markers: Vec<Marker> = Vec::new();
-    let mut counters: Vec<Counter> = Vec::new();
-    let mut last_hwm: i64 = 0;
-    let mut sample_idx: i32 = 0;
-    let mut marker_idx: i32 = 0;
-
-    let interval_ns = SAMPLE_INTERVAL_US * 1_000;
-    let mut next_tick_ns = start_ns + interval_ns;
-
-    // Ephemeral: the run log keeps it, the console does not (the run number
-    // is shown one-indexed, like the harness's own `run i/n` line).
-    output::detail(&format!(
+    console::detail(&format!(
         "sidecar attached to pid {pid}, run {}",
         run_idx + 1
     ));
 
-    // The exit status and elapsed time, captured at the moment try_wait
-    // detects exit (not after the loop finishes). This avoids including
-    // up to one sample interval of sidecar overhead in the timing.
-    let mut exit_status: Option<ExitStatus> = None;
-    #[allow(unused_assignments)] // initial None is never read; every branch assigns before use
-    let mut child_elapsed: Option<Duration> = None;
-    let mut stopped_by_marker = false;
-    let requested_stop = stop_marker.unwrap_or_default();
-    let stop_spec = stop_marker.map(StopSpec::parse);
-    let mut fired_stop_marker = None;
-    let mut stopped_by_signal = false;
-    let mut stopped_by_deadline = false;
-
-    loop {
-        #[allow(clippy::cast_possible_truncation)]
-        let elapsed_us = start.elapsed().as_micros() as i64;
-
-        // Sample /proc (3 file reads, ~30µs total).
-        // Gracefully skipped if /proc reads fail (process exiting).
-        if let Some(s) = read_proc_metrics(pid, sample_idx, elapsed_us) {
-            if s.vm_hwm_kb > last_hwm {
-                last_hwm = s.vm_hwm_kb;
+    let tick_interval = Duration::from_micros(SAMPLE_INTERVAL_US);
+    let limit = deadline.map_or(ChildLimit::None, ChildLimit::Wall);
+    let label = format!("sidecar run {}", run_idx + 1);
+    let run = child::supervise_child(
+        child_process,
+        &label,
+        start,
+        limit,
+        true,
+        tick_interval,
+        || {
+            let elapsed_us = i64::try_from(start.elapsed().as_micros()).unwrap_or(i64::MAX);
+            if let Some(sample) = read_proc_metrics(pid, sample_idx, elapsed_us) {
+                last_hwm = last_hwm.max(sample.vm_hwm_kb);
+                samples.push(sample);
+                sample_idx += 1;
             }
-            samples.push(s);
-            sample_idx += 1;
-        }
 
-        // Drain any pending markers from FIFO.
-        let marker_count_before = markers.len();
-        fifo.drain(&mut markers, &mut marker_idx, &mut counters);
-
-        // If a stop marker was requested, check if it was just emitted.
-        //
-        // Three accepted spellings, in priority order:
-        //   1. Verbatim:   `--stop FOO_END`        matches a marker named `FOO_END`.
-        //   2. Span-end:   `--stop -FOO`           matches `FOO_END` (the `-` sigil
-        //                                           mirrors the span-close semantics
-        //                                           we'd adopt if we ever introduce
-        //                                           a typed span protocol).
-        //   3. Fallback:   `--stop FOO`            matches `FOO_END` after the
-        //                                           verbatim check fails; prints a
-        //                                           one-line notice so the resolved
-        //                                           form is visible.
-        if let Some(spec) = &stop_spec {
+            let marker_count_before = markers.len();
+            fifo.drain(&mut markers, &mut marker_idx, &mut counters);
+            let Some(spec) = &stop_spec else {
+                return None;
+            };
             let timeline = Timeline::marker_batch(&markers[marker_count_before..]);
-            let matched = spec.matching_marker(&timeline);
-            if let Some(matched_name) = matched {
-                fired_stop_marker = Some(matched_name.clone());
-                let display = if matched_name == requested_stop {
-                    format!("stop marker \"{requested_stop}\" received, killing child")
-                } else {
-                    format!(
-                        "stop marker \"{requested_stop}\" → \"{matched_name}\" received, killing child"
-                    )
-                };
-                output::sidecar_msg(&display);
-                // SIGKILL the whole process group (the captured runner
-                // / harness child is its own PG leader) so descendants
-                // get reaped along with the leader.
-                crate::process::signal_process_group(child.id(), libc::SIGKILL).ok();
-                child.kill().ok();
-                // Wait for process to actually exit so we can collect status.
-                let status = child.wait().ok();
-                child_elapsed = Some(start.elapsed());
-                exit_status = status;
-                stopped_by_marker = true;
-                break;
-            }
-        }
+            let matched = spec.matching_marker(&timeline)?;
+            fired_stop_marker = Some(matched.clone());
+            let display = if matched == requested_stop {
+                format!("stop marker \"{requested_stop}\" received, killing child")
+            } else {
+                format!("stop marker \"{requested_stop}\" → \"{matched}\" received, killing child")
+            };
+            console::sidecar_msg(&display);
+            Some(matched)
+        },
+    );
 
-        // Graceful shutdown via `brokkr kill` (SIGTERM handler set this flag).
-        if crate::shutdown::is_shutdown_requested() {
-            output::sidecar_msg("shutdown requested, killing child");
-            crate::process::signal_process_group(child.id(), libc::SIGKILL).ok();
-            child.kill().ok();
-            let status = child.wait().ok();
-            child_elapsed = Some(start.elapsed());
-            exit_status = status;
-            stopped_by_signal = true;
-            break;
-        }
-
-        // Check child exit via handle (not bare PID - PIDs can be reused).
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                child_elapsed = Some(start.elapsed());
-                exit_status = Some(status);
-                break;
-            }
-            Ok(None) => {
-                // Checked only once try_wait has confirmed the child is still
-                // running, so a child that exited on the tick is never killed.
-                if let Some(limit) = deadline
-                    && start.elapsed() >= limit
-                {
-                    output::sidecar_msg(&format!(
-                        "child exceeded its {:.1}s deadline, killing it",
-                        limit.as_secs_f64()
-                    ));
-                    crate::process::signal_process_group(child.id(), libc::SIGKILL).ok();
-                    child.kill().ok();
-                    let status = child.wait().ok();
-                    child_elapsed = Some(start.elapsed());
-                    exit_status = status;
-                    stopped_by_deadline = true;
-                    break;
-                }
-            }
-            Err(_) => {
-                child_elapsed = Some(start.elapsed());
-                break;
-            }
-        }
-
-        // Sleep until next tick (CLOCK_MONOTONIC absolute time).
-        sleep_until_ns(next_tick_ns);
-        next_tick_ns += interval_ns;
+    fifo.drain(&mut markers, &mut marker_idx, &mut counters);
+    if let Ending::Deadline(limit) = &run.ending {
+        console::sidecar_msg(&format!(
+            "child exceeded its {:.1}s deadline, killing it",
+            limit.as_secs_f64()
+        ));
+    } else if matches!(&run.ending, Ending::Interrupted) {
+        console::sidecar_msg("shutdown requested, killing child");
     }
 
-    // Final drain - markers/counters may have arrived between last sample and exit.
-    fifo.drain(&mut markers, &mut marker_idx, &mut counters);
-
-    // Settle both streams against one shared grace period. A descendant that
-    // inherited either pipe must not keep the sidecar blocked after exit.
-    let mut outputs = settle_drains(vec![stdout_thread, stderr_thread], run_idx + 1).into_iter();
-    let stdout = outputs.next().unwrap_or_default();
-    let stderr = outputs.next().unwrap_or_default();
-
-    // Fall back to wait() if try_wait() never saw the exit (shouldn't happen,
-    // but defensive). This is safe because the pipe drain threads have already
-    // joined, so wait_with_output() won't deadlock.
-    let exit_status = exit_status.unwrap_or_else(|| {
-        child_elapsed = Some(start.elapsed());
-        child.wait().unwrap_or_else(|error| {
-            output::sidecar_msg(&format!(
-                "could not collect child exit status: {error}; recording a failure status"
-            ));
-            unavailable_exit_status()
-        })
-    });
-
-    let child_elapsed = child_elapsed.unwrap_or_else(|| start.elapsed());
-    #[allow(clippy::cast_possible_truncation)]
-    let wall_time_ms = child_elapsed.as_millis() as i64;
-
-    // Run-log only: the stored summary line (`store_sidecar`) carries the
-    // counts with the id, and the `[result]` line carries the wall time.
-    output::detail(&format!(
+    let wall_time_ms = i64::try_from(run.elapsed.as_millis()).unwrap_or(i64::MAX);
+    console::detail(&format!(
         "sidecar run {}: {} samples, {} markers, {} counters, {wall_time_ms}ms",
         run_idx + 1,
         samples.len(),
@@ -1129,15 +887,15 @@ pub(crate) fn run_sidecar_with_deadline(
     ));
 
     SidecarRunResult {
-        exit_status,
-        stdout,
-        stderr,
-        elapsed: child_elapsed,
+        stdout: run.stdout,
+        stderr: run.stderr,
+        elapsed: run.elapsed,
         data: SidecarData {
             samples,
             markers,
             counters,
             fired_stop_marker,
+            ending: run.ending,
             summary: SidecarSummary {
                 vm_hwm_kb: last_hwm,
                 sample_count: sample_idx,
@@ -1145,9 +903,6 @@ pub(crate) fn run_sidecar_with_deadline(
                 wall_time_ms,
             },
         },
-        stopped_by_marker,
-        stopped_by_signal,
-        stopped_by_deadline,
     }
 }
 

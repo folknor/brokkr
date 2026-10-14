@@ -76,7 +76,7 @@ impl PlannedCommand for PbfhoggPlan<'_> {
             req.mode,
             MeasureMode::Hotpath { .. } | MeasureMode::Alloc { .. }
         ) {
-            req.hotpath_features()
+            req.build_features()
         } else {
             req.feat_refs()
         };
@@ -117,6 +117,67 @@ impl PlannedCommand for PbfhoggPlan<'_> {
             state,
         })
     }
+    fn describe(
+        &self,
+        req: &MeasureRequest<'_>,
+        plan: &CommandPlan<CommandContext>,
+    ) -> Result<Vec<String>, DevError> {
+        // The selected argv was built by `plan`; check the alternate shape as
+        // well so a dry run catches missing inputs in either supported mode.
+        if self.command.supports_hotpath() {
+            let other_mode = match arg_mode(req) {
+                ArgMode::Bench => ArgMode::Hotpath,
+                ArgMode::Hotpath => ArgMode::Bench,
+            };
+            let _ = self.command.build_args(&plan.state, other_mode)?;
+        }
+
+        let mut lines = vec![format!(
+            "{} args: {}",
+            self.command.id(),
+            plan.args.join(" ")
+        )];
+        if let Some(path) = &plan.state.pbf_path {
+            lines.push(format!("pbf: {}", path.display()));
+        }
+        if let Some(path) = &plan.state.osc_path {
+            lines.push(format!("osc: {}", path.display()));
+        }
+        if plan.state.osc_paths.len() > 1 {
+            lines.push(format!(
+                "osc range: {} files ({} .. {})",
+                plan.state.osc_paths.len(),
+                plan.state
+                    .osc_paths
+                    .first()
+                    .map_or(String::new(), |path| path.display().to_string()),
+                plan.state
+                    .osc_paths
+                    .last()
+                    .map_or(String::new(), |path| path.display().to_string()),
+            ));
+        }
+        if let Some(path) = &plan.state.pbf_b_path {
+            lines.push(format!("pbf_b: {}", path.display()));
+        }
+        if let Some(bbox) = &plan.state.bbox {
+            lines.push(format!("bbox: {bbox}"));
+        }
+        Ok(lines)
+    }
+    fn announce(
+        &self,
+        req: &MeasureRequest<'_>,
+        plan: &CommandPlan<CommandContext>,
+    ) -> Result<(), DevError> {
+        let (_, file_mb) = result_input_metadata(self.command, &plan.state)?;
+        output::bench_msg(&format!(
+            "{} ({file_mb:.0} MB), {} run(s)",
+            self.command.id(),
+            req.runs(),
+        ));
+        Ok(())
+    }
     fn prepare(
         &self,
         req: &MeasureRequest<'_>,
@@ -137,7 +198,7 @@ impl PlannedCommand for PbfhoggPlan<'_> {
             &plan.state,
             arg_mode(req),
             &ctx.paths,
-            req.project_root,
+            req.project_root.as_path(),
         )?;
         cleanup_output(self.command, &plan.state, arg_mode(req))
     }
@@ -217,7 +278,7 @@ pub(crate) fn run_wallclock_core(
         input_file: Some(basename),
         input_mb: Some(file_mb),
         cargo_features: None,
-        cargo_profile: crate::build::CargoProfile::Release,
+        external_build: None,
         runs,
         cli_args: Some(harness::format_cli_args(
             &binary.display().to_string(),
@@ -318,7 +379,7 @@ fn build_pbfhogg_context(
             &snapshot_ref,
             req.variant,
             paths,
-            req.project_root,
+            req.project_root.as_path(),
         )?)
     };
 
@@ -338,7 +399,7 @@ fn build_pbfhogg_context(
                 &snapshot_ref,
                 range,
                 paths,
-                req.project_root,
+                req.project_root.as_path(),
             )?;
             (paths_vec.first().cloned(), paths_vec, None)
         } else {
@@ -347,7 +408,7 @@ fn build_pbfhogg_context(
                 &snapshot_ref,
                 osc_seq,
                 paths,
-                req.project_root,
+                req.project_root.as_path(),
             )?;
             (Some(path.clone()), vec![path], Some(seq_key))
         }
@@ -446,7 +507,7 @@ fn resolve_merged_pbf(
         snapshot_key,
         osc_seq_str,
         &paths.scratch_dir,
-        req.project_root,
+        req.project_root.as_path(),
         force_rebuild,
     )?;
     // Stash cache state in params so the command's metadata builder can
@@ -489,14 +550,14 @@ fn build_diff_snapshots_context(
         &from_ref,
         req.variant,
         paths,
-        req.project_root,
+        req.project_root.as_path(),
     )?;
     let to_path = resolve::resolve_snapshot_pbf_path(
         req.dataset,
         &to_ref,
         req.variant,
         paths,
-        req.project_root,
+        req.project_root.as_path(),
     )?;
 
     // Stash the to-side file's basename and size in params so the result row
@@ -623,13 +684,13 @@ pub(crate) fn merged_pbf_path(
     snapshot_key: &str,
     osc_seq: &str,
 ) -> std::path::PathBuf {
-    let stem = pbf_path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("input");
-    scratch_dir.join(format!(
-        "{stem}-snap{snapshot_key}-osc{osc_seq}-bench-merged.osm.pbf"
-    ))
+    // The layout owns the spelling, so clean and the writers agree on it.
+    crate::clean::layout::PbfhoggLayout::merged_pbf_cache(
+        scratch_dir,
+        pbf_path,
+        snapshot_key,
+        osc_seq,
+    )
 }
 
 /// Ensure a merged PBF exists in the scratch directory. Returns the path and

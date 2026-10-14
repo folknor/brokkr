@@ -17,7 +17,7 @@ use std::{collections::BTreeMap, fs};
 use serde::Deserialize;
 
 use crate::error::DevError;
-use crate::lockfile::{self, LockContext, LockGuard};
+use crate::lockfile::LockGuard;
 
 /// The shared part of a registry snapshot: its canonical file and keyword
 /// grouping files. The two registries parse the canonical text into different
@@ -150,11 +150,9 @@ pub fn write_atomic(path: &Path, contents: &str) -> Result<(), DevError> {
 /// Take the global brokkr lock for a registry writer that does not otherwise
 /// hold it (the two `--reseed` paths; the run-then-write paths already hold it
 /// for the run).
-pub fn lock(project_root: &Path, command: &'static str) -> Result<LockGuard, DevError> {
-    let project_root_str = project_root.display().to_string();
-    lockfile::acquire(&LockContext {
-        project: "piners",
-        command,
-        project_root: &project_root_str,
-    })
+///
+/// The lock records the parsed invocation (`corpus` / `lint-corpus`); the
+/// dispatcher normally holds it already, and this re-enters that hold.
+pub fn lock() -> Result<LockGuard, DevError> {
+    crate::context::reenter_command_lock()
 }

@@ -6,6 +6,31 @@ use crate::request::SidecarQuery;
 use crate::sidecar;
 
 /// Format a Unix epoch as a local ISO-8601 timestamp.
+/// The provenance line for an abnormal ending, `None` for a clean exit or an
+/// intentional stop-marker end.
+fn ending_line(ending: &crate::output::Ending) -> Option<String> {
+    use crate::output::Ending;
+    match ending {
+        Ending::Exited(0) | Ending::StopMarker(_) => None,
+        Ending::Exited(code) => Some(format!("[error]   exit code: {code}")),
+        Ending::Signalled(signal) => {
+            let name = match signal {
+                9 => " SIGKILL (OOM?)",
+                11 => " SIGSEGV",
+                6 => " SIGABRT",
+                _ => "",
+            };
+            Some(format!("[error]   killed by signal {signal}{name}"))
+        }
+        Ending::Deadline(limit) => Some(format!(
+            "[error]   killed at its {:.1}s deadline",
+            limit.as_secs_f64()
+        )),
+        Ending::Interrupted => Some("[error]   interrupted".to_owned()),
+        Ending::WaitFailed(why) => Some(format!("[error]   could not be waited on: {why}")),
+    }
+}
+
 fn format_epoch(epoch: i64) -> String {
     // Use libc localtime_r for zero-dependency local time formatting.
     let mut tm = unsafe { std::mem::zeroed::<libc::tm>() };
@@ -81,22 +106,9 @@ pub(crate) fn print_run_info(store: &db::RunStore, id: &db::RunId) {
         (None, None) => {}
     }
 
-    // Line 3: exit code (only if non-zero / abnormal).
-    match info.exit_code {
-        Some(0) | None => {}
-        Some(code) if code > 128 => {
-            let sig = code - 128;
-            let sig_name = match sig {
-                9 => " SIGKILL (OOM?)",
-                11 => " SIGSEGV",
-                6 => " SIGABRT",
-                _ => "",
-            };
-            eprintln!("[error]   exit code: {code} (signal {sig}{sig_name})");
-        }
-        Some(code) => {
-            eprintln!("[error]   exit code: {code}");
-        }
+    // Line 3: how the run ended (only if abnormal).
+    if let Some(line) = info.ending.as_ref().and_then(ending_line) {
+        eprintln!("{line}");
     }
 
     // Line 4-5: binary path and hash verification.

@@ -1,3 +1,4 @@
+use crate::clean::layout::ElivagarLayout;
 use crate::elivagar::commands::BuiltCommand;
 use crate::error::DevError;
 use crate::output;
@@ -20,14 +21,12 @@ use crate::output;
 /// output is left in place on every failure path so it can be moved by hand.
 pub(crate) fn rename_elivagar_output(
     command: &BuiltCommand<'_>,
-    scratch_dir: &std::path::Path,
-    output_dir: &std::path::Path,
-    data_dir: &std::path::Path,
+    layout: &ElivagarLayout<'_>,
     dataset: &str,
     variant: &str,
     git_root: &std::path::Path,
 ) -> Result<(), DevError> {
-    let output_files = command.output_files(scratch_dir);
+    let output_files = command.output_files(layout);
     if output_files.is_empty() {
         return Ok(());
     }
@@ -44,7 +43,7 @@ pub(crate) fn rename_elivagar_output(
     // `--commit <hash>` run that is the worktree's HEAD (`git_root`), NOT the
     // main tree's HEAD - collecting from the main tree would stamp an
     // unrelated commit onto an old build's output (and feed the same
-    // misattribution as a stale binary). Callers pass `effective_build_root()`.
+    // misattribution as a stale binary). Callers pass the request's build root.
     //
     // A git failure is fatal rather than a `-unknown` suffix: no resolver
     // constructs that name, so the archive would sit in the store unreachable
@@ -55,16 +54,18 @@ pub(crate) fn rename_elivagar_output(
                 "cannot name the tilegen archive: git commit of {} unavailable ({e}); \
                  output left in {}",
                 git_root.display(),
-                scratch_dir.display(),
+                layout.scratch().display(),
             )))
         })?
-        .commit;
+        .commit
+        .as_str()
+        .to_owned();
 
-    let store = super::archive_store::ArchiveStore::new(output_dir);
+    let store = super::archive_store::ArchiveStore::new(layout.output());
     let key = super::archive_store::ArchiveKey::new(dataset, variant, commit)?;
-    let tmp_dir = data_dir.join("tilegen_tmp");
+    let tmp_dir = layout.tilegen_tmp();
     for path in &output_files {
-        let dest = store.admit(path, &key, &[scratch_dir, &tmp_dir])?;
+        let dest = store.admit(path, &key, &[layout.scratch(), &tmp_dir])?;
         output::run_msg(&format!("output: {}", dest.display()));
     }
     Ok(())

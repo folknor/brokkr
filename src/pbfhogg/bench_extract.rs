@@ -58,7 +58,7 @@ pub fn run(
             input_file: Some(basename.clone()),
             input_mb: Some(file_mb),
             cargo_features: None,
-            cargo_profile: crate::build::CargoProfile::Release,
+            external_build: None,
             runs,
             cli_args: Some(crate::harness::format_cli_args(
                 &binary.display().to_string(),

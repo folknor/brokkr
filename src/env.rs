@@ -1,31 +1,20 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-
-use std::collections::HashMap;
 
 use crate::config::{Dataset, ResolvedPaths};
 use crate::context::{acquire_cmd_lock, bootstrap, bootstrap_config};
 use crate::error::DevError;
+use crate::host::storage::StorageInfo;
 use crate::output;
 use crate::project::Project;
 
 /// Environment information for the `dev env` subcommand.
 pub struct EnvInfo {
     pub hostname: String,
-    pub kernel: String,
-    pub cpu: String,
-    /// Physical cores sharing one last-level cache, and logical CPUs overall.
-    /// Reported because it is the default in-flight budget for a `parallel`
-    /// `[[check]]` sweep - a machine-dependent default nobody can audit unless
-    /// the machine's own number is printed somewhere. `None` when sysfs said
-    /// nothing usable.
-    pub cache_domain_cores: Option<usize>,
-    pub governor: String,
-    pub memory_total_mb: u64,
-    pub memory_available_mb: u64,
-    pub swap_total_mb: u64,
-    pub swap_free_mb: u64,
-    pub io_uring_status: String,
+    pub kernel: crate::host::kernel::KernelInfo,
+    pub cpu: crate::host::cpu::CpuInfo,
+    pub memory: crate::host::memory::MemoryInfo,
     pub drives: Vec<(String, String)>,
     pub storage: Vec<StorageInfo>,
     pub tools: Vec<(String, String)>,
@@ -49,19 +38,6 @@ pub struct UserConfigStatus {
     pub error: Option<String>,
 }
 
-/// Probed details for a configured storage path.
-pub struct StorageInfo {
-    pub label: String,
-    pub mount_point: String,
-    pub device: String,
-    pub fstype: String,
-    pub options: String,
-    pub model: Option<String>,
-    pub rotational: Option<bool>,
-    pub free_bytes: u64,
-    pub total_bytes: u64,
-}
-
 /// Whether a dataset path exists on disk and passes hash verification.
 ///
 /// Computed values retain their file-or-tree shape as `PathDigest`; configured
@@ -83,22 +59,19 @@ pub enum DatasetStatus {
 
 /// Collect all environment information.
 pub fn collect(paths: &ResolvedPaths, project: Project, project_root: &Path) -> EnvInfo {
-    let (mem_total, mem_avail) = read_memory();
-    let (swap_total, swap_free) = read_swap();
+    let storage_paths: [(&str, &Path); 3] = [
+        ("data", &paths.data_dir),
+        ("scratch", &paths.scratch_dir),
+        ("target", &paths.target_dir),
+    ];
 
     EnvInfo {
         hostname: paths.hostname.clone(),
-        kernel: read_kernel(),
-        cpu: read_cpu(),
-        cache_domain_cores: crate::cpu_topology::cache_domain_cores(),
-        governor: read_governor(),
-        memory_total_mb: mem_total,
-        memory_available_mb: mem_avail,
-        swap_total_mb: swap_total,
-        swap_free_mb: swap_free,
-        io_uring_status: read_io_uring_status(),
+        kernel: crate::host::kernel::collect(),
+        cpu: crate::host::cpu::collect(),
+        memory: crate::host::memory::collect(),
         drives: collect_drives(paths),
-        storage: collect_storage(paths),
+        storage: crate::host::storage::probe_paths(&storage_paths),
         tools: collect_tools(project, project_root),
         datasets: check_datasets(&paths.datasets, &paths.data_dir, project_root),
         user_config: collect_user_config(project_root),
@@ -109,7 +82,8 @@ pub fn collect(paths: &ResolvedPaths, project: Project, project_root: &Path) -> 
 pub(crate) fn cmd_env(
     dev_config: &crate::config::DevConfig,
     project: Project,
-    project_root: &Path,
+    project_root: &crate::project::ProjectRoot,
+    build_root: &crate::project::BuildRoot,
 ) -> Result<(), DevError> {
     // `bootstrap` shells out to `cargo metadata`, which rustup mediates - so in
     // a tree pinning a toolchain we don't have installed, `env` fails outright
@@ -117,16 +91,17 @@ pub(crate) fn cmd_env(
     // `crate::toolchain`), so reporting the environment has to take the lock
     // for the same reason `fmt` does, despite touching nothing. Only when
     // `disable_toolchain` is set: with nothing to move, `env` stays lock-free
-    // and can still be run alongside a long build.
+    // (its command spec takes no dispatcher hold) and can still be run
+    // alongside a long build.
     let _lock = if dev_config.disable_toolchain {
-        Some(acquire_cmd_lock(project, project_root, "env")?)
+        Some(acquire_cmd_lock(project, project_root, build_root)?)
     } else {
         None
     };
-    let pi = bootstrap(None)?;
+    let pi = bootstrap(build_root)?;
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
 
-    let info = collect(&paths, project, project_root);
+    let info = collect(&paths, project, project_root.as_path());
     print(&info);
     if let Some(note) = crate::config::unmatched_host_note(dev_config, &paths.hostname) {
         output::warn(&format!(
@@ -192,36 +167,44 @@ pub fn print(info: &EnvInfo) {
 
 fn print_header(info: &EnvInfo) {
     println!("{:<12} {}", "hostname:", info.hostname);
-    println!("{:<12} {}", "kernel:", info.kernel);
-    println!("{:<12} {}", "cpu:", info.cpu);
+    println!(
+        "{:<12} {}",
+        "kernel:",
+        info.kernel.version.as_deref().unwrap_or("unknown")
+    );
+    println!("{:<12} {}", "cpu:", info.cpu.summary());
     // The label ("CCX/CCD" on AMD, "die" on Intel) is cosmetic - it names the
     // number, never derives it - so a vendor miss costs a word and nothing else.
     // The `cpu:` line above already carries total cores/threads, so this one
     // adds only what it cannot: the cache-sharing boundary, and the fact that
     // it is what an unset `parallel` budget resolves to.
-    match info.cache_domain_cores {
+    match info.cpu.cache_domain_cores {
         Some(cores) => println!(
             "{:<12} {} cores per {} (parallel budget)",
             "l3 domain:",
             cores,
-            crate::cpu_topology::domain_label(&info.cpu),
+            crate::cpu_topology::domain_label(info.cpu.model.as_deref().unwrap_or("unknown")),
         ),
         None => println!("{:<12} not detected", "l3 domain:"),
     }
-    println!("{:<12} {}", "governor:", info.governor);
+    println!(
+        "{:<12} {}",
+        "governor:",
+        info.cpu.governor.as_deref().unwrap_or("unknown")
+    );
     println!(
         "{:<12} {} ({} available)",
         "memory:",
-        format_gib(info.memory_total_mb),
-        format_gib(info.memory_available_mb),
+        format_gib(info.memory.total_mb),
+        format_gib(info.memory.available_mb),
     );
     println!(
         "{:<12} {} ({} free)",
         "swap:",
-        format_gib(info.swap_total_mb),
-        format_gib(info.swap_free_mb),
+        format_gib(info.memory.swap_total_mb),
+        format_gib(info.memory.swap_free_mb),
     );
-    println!("{:<12} {}", "io_uring:", info.io_uring_status);
+    println!("{:<12} {}", "io_uring:", info.kernel.io_uring.status());
     if let Some(uc) = &info.user_config {
         let summary = if let Some(error) = &uc.error {
             format!("{} (composition error: {error})", uc.path.display())
@@ -299,8 +282,8 @@ fn format_storage_row(s: &StorageInfo) -> String {
         s.fstype,
         s.options,
         model,
-        format_bytes(s.free_bytes),
-        format_bytes(s.total_bytes),
+        output::format_bytes(s.free_bytes),
+        output::format_bytes(s.total_bytes),
         free_share(s.free_bytes, s.total_bytes),
     )
 }
@@ -360,216 +343,6 @@ fn first_line(msg: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// System readers
-// ---------------------------------------------------------------------------
-
-/// Read the kernel version from `/proc/version`.
-fn read_kernel() -> String {
-    let content = match std::fs::read_to_string("/proc/version") {
-        Ok(s) => s,
-        Err(_) => return "unknown".to_owned(),
-    };
-
-    // Format: "Linux version 6.18.0-9-generic ..."
-    // We want the third whitespace-delimited word (the version number).
-    extract_kernel_version(&content)
-}
-
-fn extract_kernel_version(content: &str) -> String {
-    content
-        .split_whitespace()
-        .nth(2)
-        .unwrap_or("unknown")
-        .to_owned()
-}
-
-/// Read the CPU frequency governor.
-fn read_governor() -> String {
-    read_trimmed("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor")
-}
-
-/// Build the CPU summary line: model, cores/threads, frequency range, boost.
-fn read_cpu() -> String {
-    let cpuinfo = std::fs::read_to_string("/proc/cpuinfo").unwrap_or_default();
-    let (model, cores, threads) = parse_cpuinfo(&cpuinfo);
-
-    let mut details: Vec<String> = Vec::with_capacity(3);
-    if let Some((cores, threads)) = cores.zip(threads) {
-        details.push(format!("{cores}c/{threads}t"));
-    }
-    if let Some(range) = read_freq_range() {
-        details.push(range);
-    }
-    if let Some(boost) = read_boost() {
-        details.push(boost);
-    }
-
-    if details.is_empty() {
-        model
-    } else {
-        format!("{} ({})", model, details.join(", "))
-    }
-}
-
-/// Extract model name, physical core count and logical thread count from
-/// `/proc/cpuinfo` content. Threads is the number of `processor` entries;
-/// cores comes from the `cpu cores` field (per-socket, fine for desktops).
-fn parse_cpuinfo(content: &str) -> (String, Option<u32>, Option<u32>) {
-    let mut model: Option<String> = None;
-    let mut cores: Option<u32> = None;
-    let mut threads: u32 = 0;
-    for line in content.lines() {
-        let Some((key, value)) = line.split_once(':') else {
-            continue;
-        };
-        match key.trim() {
-            "processor" => threads += 1,
-            "model name" if model.is_none() => model = Some(value.trim().to_owned()),
-            "cpu cores" if cores.is_none() => cores = value.trim().parse().ok(),
-            _ => {}
-        }
-    }
-    let threads = (threads > 0).then_some(threads);
-    (
-        model.unwrap_or_else(|| "unknown".to_owned()),
-        cores,
-        threads,
-    )
-}
-
-/// Read the hardware min/max frequency range, e.g. "0.6-5.0 GHz".
-fn read_freq_range() -> Option<String> {
-    let min = read_khz("/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_min_freq")?;
-    let max = read_khz("/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq")?;
-    Some(format!("{}-{} GHz", format_ghz(min), format_ghz(max)))
-}
-
-fn read_khz(path: &str) -> Option<u64> {
-    std::fs::read_to_string(path).ok()?.trim().parse().ok()
-}
-
-fn format_ghz(khz: u64) -> String {
-    format!("{:.1}", khz as f64 / 1_000_000.0)
-}
-
-/// Read frequency-boost state. Checks the generic cpufreq knob first, then
-/// the intel_pstate turbo knob (which is inverted). Returns `None` if
-/// neither interface exists.
-fn read_boost() -> Option<String> {
-    if let Ok(v) = std::fs::read_to_string("/sys/devices/system/cpu/cpufreq/boost") {
-        let state = if v.trim() == "0" { "off" } else { "on" };
-        return Some(format!("boost {state}"));
-    }
-    if let Ok(v) = std::fs::read_to_string("/sys/devices/system/cpu/intel_pstate/no_turbo") {
-        let state = if v.trim() == "0" { "on" } else { "off" };
-        return Some(format!("boost {state}"));
-    }
-    None
-}
-
-/// Read total and available memory from `/proc/meminfo`, returning MB values.
-pub(crate) fn read_memory() -> (u64, u64) {
-    let content = match std::fs::read_to_string("/proc/meminfo") {
-        Ok(s) => s,
-        Err(_) => return (0, 0),
-    };
-
-    let total = parse_meminfo_field(&content, "MemTotal:");
-    let avail = parse_meminfo_field(&content, "MemAvailable:");
-    (total, avail)
-}
-
-/// Read total and free swap from `/proc/meminfo`, returning MB values.
-pub(crate) fn read_swap() -> (u64, u64) {
-    let content = match std::fs::read_to_string("/proc/meminfo") {
-        Ok(s) => s,
-        Err(_) => return (0, 0),
-    };
-
-    let total = parse_meminfo_field(&content, "SwapTotal:");
-    let free = parse_meminfo_field(&content, "SwapFree:");
-    (total, free)
-}
-
-/// Find a line starting with `prefix` in meminfo content and parse the kB
-/// value, returning megabytes.
-fn parse_meminfo_field(content: &str, prefix: &str) -> u64 {
-    for line in content.lines() {
-        if let Some(rest) = line.strip_prefix(prefix) {
-            return parse_kb_to_mb(rest);
-        }
-    }
-    0
-}
-
-/// Parse a meminfo value like "  32637372 kB" into megabytes.
-fn parse_kb_to_mb(rest: &str) -> u64 {
-    let kb: u64 = rest
-        .split_whitespace()
-        .next()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
-    kb / 1024
-}
-
-/// Check io_uring support and memlock limit.
-///
-/// Checks the same kernel parameters as `preflight::uring_checks()`:
-/// kill switch, AppArmor io_uring restriction, and AppArmor userns restriction.
-fn read_io_uring_status() -> String {
-    let memlock = read_memlock_limit();
-
-    if let Some(reason) = check_uring_blocked() {
-        return format!("disabled: {reason} ({memlock})");
-    }
-
-    format!("supported ({memlock})")
-}
-
-/// Check if io_uring is blocked by any kernel parameter.
-/// Returns `Some(reason)` if blocked, `None` if all checks pass.
-fn check_uring_blocked() -> Option<&'static str> {
-    if kernel_param_nonzero("/proc/sys/kernel/io_uring_disabled") {
-        return Some("kernel kill switch");
-    }
-    if kernel_param_nonzero("/proc/sys/kernel/apparmor_restrict_unprivileged_io_uring") {
-        return Some("AppArmor io_uring restriction");
-    }
-    if kernel_param_nonzero("/proc/sys/kernel/apparmor_restrict_unprivileged_userns") {
-        return Some("AppArmor userns restriction");
-    }
-    None
-}
-
-/// Check if a kernel parameter file exists and has a non-zero value.
-fn kernel_param_nonzero(path: &str) -> bool {
-    match std::fs::read_to_string(path) {
-        Ok(content) => content.trim() != "0",
-        Err(_) => false,
-    }
-}
-
-/// Read RLIMIT_MEMLOCK and format it.
-fn read_memlock_limit() -> String {
-    let mut rlim: libc::rlimit = unsafe { std::mem::zeroed() };
-    let ret = unsafe { libc::getrlimit(libc::RLIMIT_MEMLOCK, &mut rlim) };
-
-    if ret != 0 {
-        return "memlock=unknown".to_owned();
-    }
-
-    format_memlock(rlim.rlim_cur)
-}
-
-fn format_memlock(cur: u64) -> String {
-    if cur == libc::RLIM_INFINITY {
-        "memlock=unlimited".to_owned()
-    } else {
-        format!("memlock={} KB", cur / 1024)
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Drives
 // ---------------------------------------------------------------------------
 
@@ -593,228 +366,18 @@ fn push_drive(out: &mut Vec<(String, String)>, label: &str, value: Option<&str>)
 }
 
 // ---------------------------------------------------------------------------
-// Storage probing
-// ---------------------------------------------------------------------------
-
-struct MountEntry {
-    device: String,
-    mount_point: String,
-    fstype: String,
-    options: String,
-}
-
-fn collect_storage(paths: &ResolvedPaths) -> Vec<StorageInfo> {
-    let mounts = read_mounts();
-    let candidates: [(&str, &Path); 3] = [
-        ("data", &paths.data_dir),
-        ("scratch", &paths.scratch_dir),
-        ("target", &paths.target_dir),
-    ];
-    candidates
-        .into_iter()
-        .filter_map(|(label, path)| probe_storage(label, path, &mounts))
-        .collect()
-}
-
-/// Probe the filesystem holding `path`, as `brokkr env` does for its storage
-/// rows: the nearest existing ancestor, symlinks resolved, so a `target`
-/// that is a symlink into a shared directory reports the disk it points at.
-/// `None` when the path's mount cannot be found; a zero `total_bytes` means
-/// `statvfs` failed.
-pub(crate) fn probe_path(label: &str, path: &Path) -> Option<StorageInfo> {
-    probe_storage(label, path, &read_mounts())
-}
-
-fn probe_storage(label: &str, path: &Path, mounts: &[MountEntry]) -> Option<StorageInfo> {
-    let existing = existing_ancestor(path)?;
-    let canonical = std::fs::canonicalize(&existing).unwrap_or(existing);
-    let mount = find_mount_for(&canonical, mounts)?;
-    let (model, rotational) = block_device_info(&mount.device);
-    let (free, total) = statvfs_bytes(&canonical).unwrap_or((0, 0));
-    Some(StorageInfo {
-        label: label.to_owned(),
-        mount_point: mount.mount_point.clone(),
-        device: mount.device.clone(),
-        fstype: mount.fstype.clone(),
-        options: mount.options.clone(),
-        model,
-        rotational,
-        free_bytes: free,
-        total_bytes: total,
-    })
-}
-
-fn existing_ancestor(path: &Path) -> Option<PathBuf> {
-    let mut cur: &Path = path;
-    loop {
-        if cur.exists() {
-            return Some(cur.to_path_buf());
-        }
-        cur = cur.parent()?;
-    }
-}
-
-fn read_mounts() -> Vec<MountEntry> {
-    let content = std::fs::read_to_string("/proc/mounts").unwrap_or_default();
-    content.lines().filter_map(parse_mount_line).collect()
-}
-
-fn parse_mount_line(line: &str) -> Option<MountEntry> {
-    let mut parts = line.split_whitespace();
-    let device = parts.next()?.to_owned();
-    let mount_point = unescape_mount_field(parts.next()?);
-    let fstype = parts.next()?.to_owned();
-    let options = parts.next()?.to_owned();
-    Some(MountEntry {
-        device,
-        mount_point,
-        fstype,
-        options,
-    })
-}
-
-/// `/proc/mounts` encodes spaces, tabs, newlines and backslashes as octal
-/// escapes (e.g. `\040` for space). Decode them so path matching works.
-fn unescape_mount_field(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out = String::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'\\' && i + 3 < bytes.len() {
-            let a = bytes[i + 1];
-            let b = bytes[i + 2];
-            let c = bytes[i + 3];
-            if a.is_ascii_digit() && b.is_ascii_digit() && c.is_ascii_digit() {
-                let val = (a - b'0') * 64 + (b - b'0') * 8 + (c - b'0');
-                out.push(val as char);
-                i += 4;
-                continue;
-            }
-        }
-        out.push(bytes[i] as char);
-        i += 1;
-    }
-    out
-}
-
-fn find_mount_for<'a>(path: &Path, mounts: &'a [MountEntry]) -> Option<&'a MountEntry> {
-    mounts
-        .iter()
-        .filter(|m| path.starts_with(&m.mount_point))
-        .max_by_key(|m| m.mount_point.len())
-}
-
-fn statvfs_bytes(path: &Path) -> Option<(u64, u64)> {
-    use std::ffi::CString;
-    use std::os::unix::ffi::OsStrExt;
-    let c_path = CString::new(path.as_os_str().as_bytes()).ok()?;
-    let mut buf: libc::statvfs = unsafe { std::mem::zeroed() };
-    let ret = unsafe { libc::statvfs(c_path.as_ptr(), &mut buf) };
-    if ret != 0 {
-        return None;
-    }
-    let frsize = buf.f_frsize as u64;
-    let total = (buf.f_blocks as u64).saturating_mul(frsize);
-    let free = (buf.f_bavail as u64).saturating_mul(frsize);
-    Some((free, total))
-}
-
-fn block_device_info(device: &str) -> (Option<String>, Option<bool>) {
-    let Some(name) = device.strip_prefix("/dev/") else {
-        return (None, None);
-    };
-    let parent = parent_block_device(name);
-    let model = std::fs::read_to_string(format!("/sys/block/{parent}/device/model"))
-        .ok()
-        .map(|s| s.trim().to_owned())
-        .filter(|s| !s.is_empty());
-    let rotational = std::fs::read_to_string(format!("/sys/block/{parent}/queue/rotational"))
-        .ok()
-        .and_then(|s| match s.trim() {
-            "0" => Some(false),
-            "1" => Some(true),
-            _ => None,
-        });
-    (model, rotational)
-}
-
-/// Strip a partition suffix to get the underlying block device name.
-/// `nvme0n1p1` -> `nvme0n1`, `mmcblk0p1` -> `mmcblk0`, `sda1` -> `sda`.
-fn parent_block_device(name: &str) -> String {
-    if let Some(idx) = name.rfind('p')
-        && idx > 0
-        && name[idx + 1..].chars().all(|c| c.is_ascii_digit())
-        && !name[idx + 1..].is_empty()
-    {
-        return name[..idx].to_owned();
-    }
-    let trimmed = name.trim_end_matches(|c: char| c.is_ascii_digit());
-    if trimmed.is_empty() {
-        name.to_owned()
-    } else {
-        trimmed.to_owned()
-    }
-}
-
-pub(crate) fn format_bytes(b: u64) -> String {
-    const KB: u64 = 1024;
-    const MB: u64 = KB * 1024;
-    const GB: u64 = MB * 1024;
-    const TB: u64 = GB * 1024;
-    if b >= TB {
-        format!("{:.1}T", b as f64 / TB as f64)
-    } else if b >= GB {
-        format!("{}G", b / GB)
-    } else if b >= MB {
-        format!("{}M", b / MB)
-    } else if b >= KB {
-        format!("{}K", b / KB)
-    } else {
-        format!("{b}B")
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Tools
 // ---------------------------------------------------------------------------
 
+/// One version row per tool the project's applicable commands use (their
+/// command specs name them, `crate::cli::tools_in`), then the project's own
+/// git revision.
 fn collect_tools(project: Project, project_root: &Path) -> Vec<(String, String)> {
-    let mut tools = vec![(
-        "cargo".to_owned(),
-        read_tool_version("cargo", &["--version"]),
-    )];
-
-    match project {
-        Project::Pbfhogg => {
-            tools.push((
-                "osmium".to_owned(),
-                read_tool_version("osmium", &["--version"]),
-            ));
-        }
-        Project::Elivagar => {
-            tools.push((
-                "samply".to_owned(),
-                read_tool_version("samply", &["--version"]),
-            ));
-        }
-        Project::Nidhogg => {
-            tools.push(("curl".to_owned(), read_tool_version("curl", &["--version"])));
-        }
-        Project::Litehtml => {
-            tools.push(("node".to_owned(), read_tool_version("node", &["--version"])));
-        }
-        Project::Sluggrs
-        | Project::Brokkr
-        | Project::Ratatoskr
-        | Project::Saehrimnir
-        | Project::Piners
-        | Project::Dellingr
-        | Project::Mogwai
-        | Project::Other(_) => {}
-    }
-
+    let mut tools: Vec<(String, String)> = crate::cli::tools_in(project)
+        .into_iter()
+        .map(|name| (name.to_owned(), read_tool_version(name, &["--version"])))
+        .collect();
     tools.push((project.name().to_owned(), read_git_rev(project_root)));
-
     tools
 }
 
@@ -844,7 +407,7 @@ fn extract_version_from_stdout(stdout: &[u8]) -> String {
         .to_owned()
 }
 
-/// Get the current git short rev for the project.
+/// Get the current fixed-width git short rev for the project.
 fn read_git_rev(project_root: &Path) -> String {
     let output = match Command::new("git")
         .args(["rev-parse", "HEAD"])
@@ -860,7 +423,10 @@ fn read_git_rev(project_root: &Path) -> String {
     }
 
     let full = String::from_utf8_lossy(&output.stdout);
-    crate::git::short_of(full.trim())
+    full.trim()
+        .parse::<crate::git::Commit>()
+        .map(|commit| commit.short().to_string())
+        .unwrap_or_else(|_| "unknown".to_owned())
 }
 
 // ---------------------------------------------------------------------------
@@ -958,18 +524,6 @@ fn check_hash_status(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/// Read a file and return its trimmed contents, or "unknown" on error.
-fn read_trimmed(path: &str) -> String {
-    match std::fs::read_to_string(path) {
-        Ok(s) => s.trim().to_owned(),
-        Err(_) => "unknown".to_owned(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     #![allow(
@@ -990,6 +544,8 @@ mod tests {
         clippy::useless_vec
     )]
     use super::*;
+    use crate::host::cpu::{format_ghz, parse_cpuinfo};
+    use crate::host::kernel::extract_kernel_version;
 
     #[test]
     fn free_share_shows_percent_and_flags_the_gate_floor() {
@@ -1068,7 +624,10 @@ mod tests {
                        model name\t: AMD Ryzen 9 5900X 12-Core Processor\n\
                        cpu cores\t: 12\n";
         let (model, cores, threads) = parse_cpuinfo(content);
-        assert_eq!(model, "AMD Ryzen 9 5900X 12-Core Processor");
+        assert_eq!(
+            model.as_deref(),
+            Some("AMD Ryzen 9 5900X 12-Core Processor")
+        );
         assert_eq!(cores, Some(12));
         assert_eq!(threads, Some(2));
     }
@@ -1076,7 +635,7 @@ mod tests {
     #[test]
     fn cpuinfo_empty() {
         let (model, cores, threads) = parse_cpuinfo("");
-        assert_eq!(model, "unknown");
+        assert_eq!(model, None);
         assert_eq!(cores, None);
         assert_eq!(threads, None);
     }
@@ -1086,7 +645,7 @@ mod tests {
         // ARM cpuinfo often lacks "cpu cores" and "model name".
         let content = "processor\t: 0\nBogoMIPS\t: 48.00\nprocessor\t: 1\n";
         let (model, cores, threads) = parse_cpuinfo(content);
-        assert_eq!(model, "unknown");
+        assert_eq!(model, None);
         assert_eq!(cores, None);
         assert_eq!(threads, Some(2));
     }
@@ -1125,33 +684,42 @@ mod tests {
     #[test]
     fn kernel_version_typical() {
         let content = "Linux version 6.18.0-9-generic (builder@host) (gcc 14.2.0)";
-        assert_eq!(extract_kernel_version(content), "6.18.0-9-generic");
+        assert_eq!(
+            extract_kernel_version(content).as_deref(),
+            Some("6.18.0-9-generic")
+        );
     }
 
     #[test]
     fn kernel_version_empty() {
-        assert_eq!(extract_kernel_version(""), "unknown");
+        assert_eq!(extract_kernel_version(""), None);
     }
 
     #[test]
     fn kernel_version_only_two_words() {
-        assert_eq!(extract_kernel_version("Linux version"), "unknown");
+        assert_eq!(extract_kernel_version("Linux version"), None);
     }
 
     #[test]
     fn kernel_version_exactly_three_words() {
-        assert_eq!(extract_kernel_version("Linux version 5.4.0"), "5.4.0");
+        assert_eq!(
+            extract_kernel_version("Linux version 5.4.0").as_deref(),
+            Some("5.4.0")
+        );
     }
 
     #[test]
     fn kernel_version_extra_whitespace() {
         // split_whitespace handles multiple spaces/tabs.
         let content = "Linux   version\t6.1.0-rc1  rest";
-        assert_eq!(extract_kernel_version(content), "6.1.0-rc1");
+        assert_eq!(
+            extract_kernel_version(content).as_deref(),
+            Some("6.1.0-rc1")
+        );
     }
 
     #[test]
     fn kernel_version_single_word() {
-        assert_eq!(extract_kernel_version("Linux"), "unknown");
+        assert_eq!(extract_kernel_version("Linux"), None);
     }
 }

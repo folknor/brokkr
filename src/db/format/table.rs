@@ -106,53 +106,27 @@ fn common_uppercase_prefix<'a>(keys: impl IntoIterator<Item = &'a str>) -> Optio
     Some(prefix.to_owned())
 }
 
-/// Build a compact args summary of the row's *distinguishing* flags.
-///
-/// Prefers `brokkr_args` - the invocation the user actually typed
-/// (`brokkr tilegen --bench 3 --dataset germany --variant locations`) -
-/// because the resolved `cli_args` are mostly scaffolding brokkr injects
-/// on every run (`--tmp-dir`, `--ocean`, `-o <output>`, the input path),
-/// which is invariant across rows and so carries no discriminating value.
-/// From `brokkr_args` we drop the leading `brokkr`, the subcommand token
-/// (already the `command` column) and `--dataset <x>` (already the
-/// `dataset` column). What's left - `--bench N`, `--variant <v>`,
-/// `--compress-sort-chunks <c>`, … - is exactly what separates one row
-/// from another.
-///
-/// Falls back to the legacy `cli_args` heuristic for rows written before
-/// `brokkr_args` was captured. Truncated to [`ARGS_MAX_WIDTH`] chars with
-/// a trailing `…`; empty for rows with neither source.
+/// Show the captured brokkr argv as a compact argument list. New rows store
+/// JSON arrays, so each argument boundary survives spaces and punctuation;
+/// old rows keep their original joined string. Truncated to
+/// [`ARGS_MAX_WIDTH`] chars with a trailing `…`.
 fn format_args_summary(row: &StoredRow) -> String {
     if !row.brokkr_args.is_empty() {
-        return truncate_args(&format_brokkr_args_summary(&row.brokkr_args));
+        return truncate_args(&format_brokkr_argv(&row.brokkr_args));
     }
     truncate_args(&format_cli_args_summary(&row.cli_args))
 }
 
-/// Summarize `brokkr_args`, dropping the `brokkr` prefix, the subcommand
-/// token, and the `--dataset <x>` / `--dataset=<x>` pair (redundant with
-/// the dedicated columns).
-fn format_brokkr_args_summary(brokkr_args: &str) -> String {
-    let mut tokens = brokkr_args.split_whitespace();
-    // Drop the leading `brokkr` and the subcommand token (the latter is
-    // already represented by the `command` column).
-    tokens.next();
-    tokens.next();
-
-    let mut kept: Vec<&str> = Vec::new();
-    let mut iter = tokens.peekable();
-    while let Some(tok) = iter.next() {
-        // `--dataset <x>` / `--dataset=<x>` - already the `dataset` column.
-        if tok == "--dataset" {
-            iter.next();
-            continue;
-        }
-        if tok.starts_with("--dataset=") {
-            continue;
-        }
-        kept.push(tok);
+fn format_brokkr_argv(brokkr_args: &str) -> String {
+    match serde_json::from_str::<Vec<String>>(brokkr_args) {
+        Ok(argv) => argv
+            .iter()
+            .skip(2)
+            .map(|arg| format!("{arg:?}"))
+            .collect::<Vec<_>>()
+            .join(" "),
+        Err(_) => brokkr_args.to_owned(),
     }
-    kept.join(" ")
 }
 
 /// Legacy summary from the resolved `cli_args`, dropping the binary path,
@@ -500,42 +474,14 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn brokkr_args_keeps_distinguishing_flags() {
-        // The two germany rows that motivated this: same resolved cli_args,
-        // but the brokkr invocation differs in --bench count and --variant.
-        // Those must survive; --dataset (dedicated column) must not.
+    fn brokkr_argv_display_preserves_argument_boundaries() {
         assert_eq!(
-            format_brokkr_args_summary("brokkr tilegen --bench 3 --dataset germany"),
-            "--bench 3"
+            format_brokkr_argv(r#"["brokkr","tilegen","--input","a b","--note","--commit"]"#),
+            r#""--input" "a b" "--note" "--commit""#
         );
         assert_eq!(
-            format_brokkr_args_summary(
-                "brokkr tilegen --bench 1 --dataset germany --variant locations"
-            ),
-            "--bench 1 --variant locations"
-        );
-    }
-
-    #[test]
-    fn brokkr_args_drops_dataset_both_spellings() {
-        assert_eq!(
-            format_brokkr_args_summary("brokkr tilegen --dataset=germany --variant locations"),
-            "--variant locations"
-        );
-        assert_eq!(
-            format_brokkr_args_summary(
-                "brokkr tilegen --dataset germany --compress-sort-chunks lz4"
-            ),
-            "--compress-sort-chunks lz4"
-        );
-    }
-
-    #[test]
-    fn brokkr_args_empty_when_only_scaffolding() {
-        // Nothing but the subcommand and dataset - no distinguishing knobs.
-        assert_eq!(
-            format_brokkr_args_summary("brokkr tilegen --dataset germany"),
-            ""
+            format_brokkr_argv("brokkr tilegen --bench 3"),
+            "brokkr tilegen --bench 3"
         );
     }
 

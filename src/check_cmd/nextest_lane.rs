@@ -274,7 +274,8 @@ pub(crate) fn build_nextest(
     extra_args: &[String],
     env: &LaneEnv,
 ) -> Result<NextestBuilt, DevError> {
-    let (cargo_extra, libtest_extra) = split_extra_args(extra_args);
+    let forwarded = ForwardedArgs::parse(extra_args);
+    let (cargo_extra, libtest_extra) = (forwarded.cargo(), forwarded.libtest());
     if !libtest_extra.is_empty() {
         return Err(DevError::Config(format!(
             "sweep '{}' runs under the nextest engine, which takes no raw libtest args; drop \
@@ -283,7 +284,10 @@ pub(crate) fn build_nextest(
             libtest_extra.join(" ")
         )));
     }
-    reject_unsupported_forwarded(sweep, cargo_extra)?;
+    // The engine executes the prebuilt binaries itself, so the same forwarded
+    // flags direct execution cannot honour are refused here (with advice that
+    // fits an engine lane, not a parallel one).
+    reject_direct_execution_args(sweep, &forwarded)?;
     let mut selection = env.allow_args.clone();
     // The engine lane is one cargo build over the whole selection: it does not
     // run per-package resolutions (config refuses package mode on it).
@@ -360,14 +364,12 @@ fn build_nextest_shape(
     let metadata_command = format!(
         "cargo metadata --format-version=1 --all-features --filter-platform {triple}"
     );
-    let metadata = output::run_captured_with_env(
-        "cargo",
-        &["metadata", "--format-version=1", "--all-features", "--filter-platform", &triple],
+    let metadata = run_check_cargo(&["metadata", "--format-version=1", "--all-features", "--filter-platform", &triple],
         project_root,
         &env_refs,
     )
     .map_err(|e| report_launch(&metadata_command, e))?;
-    if !metadata.status.success() {
+    if !metadata.success() {
         // The two-line failure form, for the metadata call as for any other
         // command a test lane runs. The identity leads, since `check` does not
         // echo the `Reported` label.
@@ -385,14 +387,14 @@ fn build_nextest_shape(
     // ids, build meta, dylib paths) are nextest's own reading of it.
     let mut args: Vec<String> = vec!["test".into(), "--no-run".into(), "--message-format=json".into()];
     args.extend(selection.iter().cloned());
-    if !has_target_selector(&args) {
+    if !ForwardedArgs::parse(&args).has_target_selector() {
         args.push("--tests".into());
     }
     cargo_line(inputs.commands, &format!("cargo {}", args.join(" ")));
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let build = output::run_captured_with_env("cargo", &arg_refs, project_root, &env_refs)
+    let build = run_check_cargo(&arg_refs, project_root, &env_refs)
         .map_err(|e| report_launch(&format!("cargo {}", args.join(" ")), e))?;
-    if !build.status.success() {
+    if !build.success() {
         let failed = format!("sweep '{label}' could not be prepared: build failed");
         output::error(&failed);
         output::error(&format!("failing command: cargo {}", args.join(" ")));
@@ -744,14 +746,19 @@ fn run_nextest_engine(
 
     configure_handle_inheritance(false)
         .map_err(|e| DevError::Build(format!("nextest handle setup: {e}")))?;
-    // One engine stream per lane: every test is its own process, and every
-    // record names its binary, so attribution needs no per-process stream.
-    let stream = crate::test_runner::next_stream_id();
-    let observe = |unit_id: String, event: ObsEvent| {
+    // Give each binary its own stream so repeated test names in different
+    // targets stay distinct in the shared outcome reduction.
+    let mut streams = std::collections::HashMap::<String, u64>::new();
+    let mut execution = crate::test_runner::ExecutionOutcome::default();
+    let mut observe = |unit_id: String, event: ObsEvent| {
+        let stream = *streams
+            .entry(unit_id.clone())
+            .or_insert_with(crate::test_runner::next_stream_id);
         let origin = match np.by_id.get(&unit_id) {
             Some(unit) => StreamOrigin::Engine { resolution: None, unit: unit.clone() },
             None => StreamOrigin::Unattributed { detail: format!("engine binary {unit_id}") },
         };
+        execution.observe_event(stream, crate::test_runner::StreamSource::Engine, &event);
         tap.record(JournalRecord::Observed { lane: tap.lane(), stream, origin, event });
     };
     // The run's outcome carries no counts; they ride the engine's own
@@ -813,50 +820,129 @@ fn run_nextest_engine(
     // `Reporter::finish` is infallible and returns only `ReporterStats`, which
     // this lane does not use.
     let _ = reporter.finish();
-    // A timeout's per-test termination is recorded at its terminal event and
-    // takes precedence over the engine's ensuing fail-fast cancellation.
+    let mut engine_error = None;
+    let succeeded = match outcome {
+        Ok(outcome) => matches!(outcome, RunOutcome::Success),
+        Err(error) => {
+            engine_error = Some(error.to_string());
+            false
+        }
+    };
+    if lane_cancel_cause == Some(TerminationCause::EngineError) {
+        engine_error.get_or_insert_with(|| "the engine reporter failed".into());
+    }
+    if !succeeded
+        && timed_out_test.is_none()
+        && execution.failed_tests().is_empty()
+        && lane_cancel_cause.is_none()
+    {
+        engine_error.get_or_insert_with(|| {
+            "the engine ended without a test failure or cancellation event".into()
+        });
+    }
+    if succeeded && finished.is_none() {
+        engine_error.get_or_insert_with(|| {
+            "nextest reported success without a run-finished event".into()
+        });
+    }
+    if let Some(detail) = &engine_error {
+        let stream = crate::test_runner::next_stream_id();
+        let event = ObsEvent::RunFailed {
+            reason: crate::test_runner::ExecutionFailure::EngineError,
+        };
+        execution.observe_event(stream, crate::test_runner::StreamSource::Engine, &event);
+        tap.record(JournalRecord::Observed {
+            lane: tap.lane(),
+            stream,
+            origin: StreamOrigin::Unattributed {
+                detail: "the nextest engine run".into(),
+            },
+            event,
+        });
+        tap.terminate(TerminationScope::Lane, TerminationCause::EngineError, None);
+        output::error(&format!("nextest run failed to execute: {detail}"));
+    }
+
+    // A timeout's per-test termination is already on its test event and wins
+    // over the engine's ensuing fail-fast cancellation.
     if timed_out_test.is_none()
+        && engine_error.is_none()
         && let Some(cause) = lane_cancel_cause
     {
         tap.terminate(TerminationScope::Lane, cause, None);
-    }
-    tap.record(JournalRecord::Observed {
-        lane: tap.lane(),
-        stream,
-        origin: StreamOrigin::Unattributed { detail: "the engine lane's stream".into() },
-        event: ObsEvent::StreamEnded { end: crate::test_runner::StreamEnd::Eof },
-    });
-    if let Some((test, unit)) = timed_out_test {
-        let test = unit.map_or(test.clone(), |unit| format!("{}::{test}", unit.package));
-        output::error(&format!(
-            "test `{test}` exceeded its {}s budget in sweep '{label}' - stopping",
-            np.per_test_timeout.as_secs(),
-        ));
-        return Err(DevError::Reported(format!(
-            "sweep '{label}' exceeded its per-test budget - stopping"
-        )));
-    }
-    let outcome = match outcome {
-        Ok(o) => o,
-        Err(e) => {
-            // The events up to the failure are already recorded; the failure
-            // is recorded as what it is, then voiced.
-            if !cancelling {
-                tap.terminate(TerminationScope::Lane, TerminationCause::EngineError, None);
-            }
-            return Err(DevError::Build(format!("nextest run failed to execute: {e}")));
-        }
-    };
-
-    let passed = matches!(outcome, RunOutcome::Success);
-    if passed {
-        // A success with no `RunFinished` would be a run brokkr cannot count,
-        // so it is not passed off as one with zero tests.
-        let Some(run_stats) = finished else {
-            return Err(DevError::Build(
-                "nextest reported success without a run-finished event".into(),
-            ));
+        let stream = crate::test_runner::next_stream_id();
+        let event = match cause {
+            TerminationCause::PerTestDeadline => ObsEvent::Killed {
+                cause: crate::test_runner::KillCause::PerTest,
+                test: None,
+            },
+            TerminationCause::RunDeadline => ObsEvent::Killed {
+                cause: crate::test_runner::KillCause::Wall,
+                test: None,
+            },
+            TerminationCause::PhaseDeadline | TerminationCause::Interrupt => ObsEvent::Killed {
+                cause: crate::test_runner::KillCause::Stopped,
+                test: None,
+            },
+            TerminationCause::SiblingTimeout | TerminationCause::FailFast => ObsEvent::Killed {
+                cause: crate::test_runner::KillCause::Cancelled,
+                test: None,
+            },
+            TerminationCause::EngineError => ObsEvent::RunFailed {
+                reason: crate::test_runner::ExecutionFailure::EngineError,
+            },
         };
+        execution.observe_event(stream, crate::test_runner::StreamSource::Engine, &event);
+        tap.record(JournalRecord::Observed {
+            lane: tap.lane(),
+            stream,
+            origin: StreamOrigin::Unattributed {
+                detail: "the nextest lane cancellation".into(),
+            },
+            event,
+        });
+    }
+
+    let end = if engine_error.is_some() {
+        crate::test_runner::StreamEnd::ReadError
+    } else {
+        crate::test_runner::StreamEnd::Eof
+    };
+    for (unit_id, stream) in &streams {
+        let origin = match np.by_id.get(unit_id) {
+            Some(unit) => StreamOrigin::Engine { resolution: None, unit: unit.clone() },
+            None => StreamOrigin::Unattributed { detail: format!("engine binary {unit_id}") },
+        };
+        let event = ObsEvent::StreamEnded { end };
+        execution.observe_event(*stream, crate::test_runner::StreamSource::Engine, &event);
+        tap.record(JournalRecord::Observed { lane: tap.lane(), stream: *stream, origin, event });
+    }
+
+    let verdict = crate::test_runner::lane_verdict(&execution);
+    if verdict == crate::test_runner::LaneVerdict::BudgetBlown {
+        if let Some((test, unit)) = &timed_out_test {
+            let test = unit.as_ref().map_or(test.clone(), |unit| format!("{}::{test}", unit.package));
+            output::error(&format!(
+                "test `{test}` exceeded its {}s budget in sweep '{label}' - stopping",
+                np.per_test_timeout.as_secs(),
+            ));
+            return Err(DevError::Reported(format!(
+                "sweep '{label}' exceeded its per-test budget - stopping"
+            )));
+        }
+        let message = format!("sweep '{label}' exceeded its run budget - stopping");
+        output::error(&message);
+        return Err(DevError::Reported(message));
+    }
+    if verdict == crate::test_runner::LaneVerdict::Stopped {
+        return Err(DevError::Interrupted);
+    }
+
+    if verdict == crate::test_runner::LaneVerdict::Pass {
+        // A success with no `RunFinished` would be a run brokkr cannot count,
+        // so it is not passed off as one with zero tests. The missing event is
+        // already a typed engine failure above.
+        let Some(run_stats) = finished else { return Ok(false) };
         // Into the grouped test line like every other lane. The engine's
         // `skipped` folds filtered-out and ignored tests into one number, so
         // it goes to the log rather than being passed off as either.
@@ -866,7 +952,7 @@ fn run_nextest_engine(
             run_stats.passed, run_stats.skipped
         ));
     }
-    Ok(passed)
+    Ok(verdict == crate::test_runner::LaneVerdict::Pass)
 }
 
 /// A successful cargo status alone cannot establish which binaries were built.

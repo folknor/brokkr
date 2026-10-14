@@ -626,9 +626,9 @@ fn serial_unattributable(
             ),
         });
     }
-    let (cargo_extra, _) = split_extra_args(extra_args);
-    serial_shim_fallback(inputs.project_root, cargo_extra, &env.project_env, &sweep.env).map(|reason| {
-        Unattributable {
+    let forwarded = ForwardedArgs::parse(extra_args);
+    serial_shim_fallback(inputs.project_root, forwarded.cargo(), &env.project_env, &sweep.env).map(
+        |reason| Unattributable {
             reason: UnavailableReason::NoShim(reason.clone()),
             refusal: format!(
                 "sweep '{}' cannot isolate its test harnesses ({reason}), so its executions cannot be \
@@ -636,8 +636,8 @@ fn serial_unattributable(
                  this lane under a profile that certifies nothing.",
                 sweep.label
             ),
-        }
-    })
+        },
+    )
 }
 
 /// Refuse, under a complete profile, a serial lane whose harnesses cannot be
@@ -753,13 +753,11 @@ impl DocFacts {
 }
 
 fn workspace_doc_facts(project_root: &Path, env_refs: &[(&str, &str)]) -> Result<DocFacts, DevError> {
-    let captured = output::run_captured_with_env(
-        "cargo",
-        &["metadata", "--no-deps", "--format-version", "1"],
+    let captured = run_check_cargo(&["metadata", "--no-deps", "--format-version", "1"],
         project_root,
         env_refs,
     )?;
-    if !captured.status.success() {
+    if !captured.success() {
         return Err(DevError::Build(format!(
             "cargo metadata failed: {}",
             String::from_utf8_lossy(&captured.stderr)
@@ -787,7 +785,8 @@ fn prepare_serial(
         }
         return Ok(PreparedLane::without_inventory(env.clone(), u.reason));
     }
-    let (_, libtest_extra) = split_extra_args(extra_args);
+    let forwarded = ForwardedArgs::parse(extra_args);
+    let libtest_extra = forwarded.libtest();
     let env_refs = env.refs();
     let doc_facts = workspace_doc_facts(inputs.project_root, &env_refs)?;
     let doc_obligation = attempt.runs().iter().any(|run| doc_facts.obliges(&run.selection));
@@ -835,7 +834,8 @@ fn build_serial(
     extra_args: &[String],
     env: &LaneEnv,
 ) -> Result<Option<CargoBuilt>, DevError> {
-    let (cargo_extra, _) = split_extra_args(extra_args);
+    let forwarded = ForwardedArgs::parse(extra_args);
+    let cargo_extra = forwarded.cargo();
     build_resolutions(inputs, attempt, &env.refs(), &|run| {
         let mut selection = env.allow_args.clone();
         selection.extend(sweep_selection_args(sweep, run));
@@ -845,40 +845,44 @@ fn build_serial(
 }
 
 /// A direct lane's forwarded `-- …` args, split the way they ride.
-struct Forwarded<'x> {
+struct Forwarded {
     /// Target selectors: they narrow the plan.
     selectors: Vec<String>,
     /// Everything else cargo-side: it rides the prebuild.
     cargo: Vec<String>,
     /// Appended to every direct execution.
-    libtest: &'x [String],
+    libtest: Vec<String>,
 }
 
 /// What the direct lanes refuse before building anything, and the forwarded
 /// args split the way they ride.
-fn direct_preflight<'x>(
+fn direct_preflight(
     inputs: &LaneInputs<'_>,
     sweep: &PlannedSweep,
-    extra_args: &'x [String],
+    extra_args: &[String],
     env: &LaneEnv,
     kind: LaneKind,
-) -> Result<Forwarded<'x>, DevError> {
-    if kind == LaneKind::Isolated && !extra_args.is_empty() {
+) -> Result<Forwarded, DevError> {
+    let forwarded = ForwardedArgs::parse(extra_args);
+    if kind == LaneKind::Isolated && forwarded.was_supplied() {
         return Err(DevError::Config(
             "`brokkr check -- …` extra args are not supported on a sweep with \
              `isolation = \"process\"` - the per-test invocations own their argv."
                 .into(),
         ));
     }
-    let (cargo_extra, libtest_extra) = split_extra_args(extra_args);
-    // Selectors narrow the PLAN; the rest rides on the prebuild. See
-    // `partition_target_selectors` for why mixing the two is a real bug.
-    let (extra_selectors, cargo_extra) = partition_target_selectors(cargo_extra);
-    reject_forwarded_selectors(sweep, &cargo_extra)?;
-    reject_unsupported_forwarded(sweep, &cargo_extra)?;
+    // Target selectors narrow the plan; the rest rides on the prebuild. The
+    // shared parser also applies package-mode and direct-execution refusals.
+    let (extra_selectors, cargo_extra) = forwarded.partition_targets();
+    reject_forwarded_package_selectors(sweep, &forwarded)?;
+    reject_direct_execution_args(sweep, &forwarded)?;
     // Direct execution would bypass a configured runner; refuse before building.
     refuse_configured_runner(inputs.project_root, &env.refs())?;
-    Ok(Forwarded { selectors: extra_selectors, cargo: cargo_extra, libtest: libtest_extra })
+    Ok(Forwarded {
+        selectors: extra_selectors,
+        cargo: cargo_extra,
+        libtest: forwarded.libtest().to_vec(),
+    })
 }
 
 /// The direct lanes' build, after [`direct_preflight`]. `Ok(None)` is a build
@@ -925,7 +929,7 @@ fn prepare_direct(
     let runtime = DirectRuntime::load(inputs.project_root, &env_refs, index)?;
     let mut prepared = PreparedLane::bare(env.clone());
     prepared.runtime_fingerprint = fingerprint;
-    prepared.include_ignored = lane_runs_ignored(sweep, libtest_extra);
+    prepared.include_ignored = lane_runs_ignored(sweep, &libtest_extra);
     // The sweep's own `--test` filters UNION with any the caller supplied,
     // matching cargo's semantics for repeated selection flags. Under package
     // mode the sweep's filters cannot ride the per-package prebuild (cargo
@@ -933,8 +937,8 @@ fn prepare_direct(
     prepared.target_filters = sweep.lane_filters().cargo_args();
     prepared.target_filters.extend(extra_selectors.iter().cloned());
     prepared.cargo_extra = cargo_extra;
-    prepared.libtest_extra = libtest_extra.to_vec();
-    list_direct_binaries(inputs, sweep, built, &mut prepared, libtest_extra, &env_refs, &runtime)?;
+    prepared.libtest_extra = libtest_extra.clone();
+    list_direct_binaries(inputs, sweep, built, &mut prepared, &libtest_extra, &env_refs, &runtime)?;
     prepared.runtime = Some(runtime);
     Ok(prepared)
 }
@@ -1301,6 +1305,7 @@ pub(crate) fn build_profile(
     sweeps: &[PlannedSweep],
     selection: &PhaseSelection,
     extra_args: &[String],
+    serial_builds: bool,
 ) -> ProfileBuilds {
     let keyed: Vec<(usize, PathBuf)> = sweeps
         .iter()
@@ -1309,7 +1314,7 @@ pub(crate) fn build_profile(
         .map(|(i, s)| (i, target_dir_key(s, inputs.target_dir)))
         .collect();
     let universes: std::sync::Mutex<UniverseBuilds> = std::sync::Mutex::new(HashMap::new());
-    let outcomes = run_grouped(&keyed, &|i| {
+    let outcomes = run_grouped(&keyed, serial_builds, &|i| {
         let sweep = &sweeps[i];
         let Some(attempt) = selection.attempt(LaneIdx::new(i)) else {
             return Err(DevError::Build(format!("sweep '{}' is not attempted", sweep.label)));
@@ -1416,7 +1421,8 @@ impl<'a> CargoPreparer<'a> {
 
 impl Preparer for CargoPreparer<'_> {
     fn include_ignored(&self, sweep: &PlannedSweep) -> bool {
-        let (_, libtest_extra) = split_extra_args(self.extra_args);
+        let forwarded = ForwardedArgs::parse(self.extra_args);
+        let libtest_extra = forwarded.libtest();
         sweep
             .lane_filters()
             .runs_ignored_with(libtest_extra.iter().map(String::as_str))

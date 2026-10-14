@@ -1,5 +1,6 @@
 mod activation;
 mod conventions;
+mod reporter;
 mod verdict;
 
 pub(crate) use activation::decide_active_sweeps;
@@ -8,18 +9,25 @@ use conventions::{
     report_script_stage, run_dependency_rules, run_gremlins, run_header, run_manifest,
     run_publish_cycle, run_script_checks, run_textlint, scope_order,
 };
+use reporter::Reporter;
 
 use crate::test_runner::hash_file;
 pub(crate) use verdict::TestTiming;
 #[cfg(test)]
 use verdict::verdict_context;
-use verdict::{emit_timings, finish_check, fmt_wall, run_stop};
+use verdict::{FinishInput, emit_timings, finish_check, fmt_wall, run_stop};
 
+include!("check_cmd/phase_type.rs");
 include!("check_cmd/phase.rs");
+include!("check_cmd/diagnostics.rs");
+include!("check_cmd/clippy_cmd.rs");
+include!("check_cmd/test_phase.rs");
 include!("check_cmd/concurrency.rs");
 include!("check_cmd/features.rs");
 include!("check_cmd/selection.rs");
-include!("check_cmd/output.rs");
+include!("check_cmd/sweep_env.rs");
+include!("check_cmd/test_execution.rs");
+include!("check_cmd/test_execution_tests.rs");
 include!("check_cmd/isolate.rs");
 include!("check_cmd/binary_timings.rs");
 include!("check_cmd/parallel.rs");

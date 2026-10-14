@@ -220,11 +220,14 @@ fn verify_pbfhogg_vs_osmium(
     // and whatever OSC it left behind is partial, so that is a hard error.
     // The OSC's existence is then a real signal: `subdir` emptied the
     // directory, so a file here was written by this run.
-    if !matches!(captured.status.code(), Some(0 | 1)) {
+    if !matches!(captured.code(), Some(0 | 1)) {
         let stderr = String::from_utf8_lossy(&captured.stderr);
         return Err(DevError::Subprocess {
             program: "pbfhogg diff --format osc".into(),
-            code: captured.status.code(),
+            ending: captured
+                .ending
+                .process_ending()
+                .unwrap_or(crate::error::ProcessEnding::Code(-1)),
             stderr: stderr.into_owned(),
         });
     }
@@ -434,7 +437,7 @@ fn run_osmosis(
         })?;
 
     Ok(output::CapturedOutput {
-        status: result.status,
+        ending: output::Ending::from_exit_status(&result.status),
         stdout: result.stdout,
         stderr: result.stderr,
         elapsed: start.elapsed(),

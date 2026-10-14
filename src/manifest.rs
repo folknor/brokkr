@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use toml_edit::{DocumentMut, Item, Table};
 
 use crate::config::{AdapterGroup, ManifestConfig, VersionAlign};
+use crate::deps::DependencyKind;
 use crate::error::DevError;
 use crate::{globs, gremlins};
 
@@ -29,14 +30,147 @@ pub fn format_one(v: &ManifestViolation) -> String {
     format!("{}: [{}] {}", v.file.display(), v.rule, v.message)
 }
 
-/// Names of the dependency tables a manifest carries, at any nesting depth
-/// (so `[target.'cfg(unix)'.dependencies]` is covered alongside the top-level
-/// three and `[workspace.dependencies]`).
-fn is_dependency_table_name(name: &str) -> bool {
-    matches!(
-        name,
-        "dependencies" | "dev-dependencies" | "build-dependencies"
-    )
+/// Cargo dependency table spellings and their shared kind. The underscore
+/// aliases are accepted by Cargo's manifest parser as well as the hyphenated
+/// forms. `ManifestDeps` applies these only in package, target, and workspace
+/// dependency locations, never in arbitrary metadata tables.
+const DEPENDENCY_TABLES: &[(&str, DependencyKind)] = &[
+    ("dependencies", DependencyKind::Normal),
+    ("dev-dependencies", DependencyKind::Dev),
+    ("dev_dependencies", DependencyKind::Dev),
+    ("build-dependencies", DependencyKind::Build),
+    ("build_dependencies", DependencyKind::Build),
+];
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ManifestDependencyScope {
+    Package,
+    Workspace,
+}
+
+/// One dependency table, by its dotted path (`target.cfg(unix).build-dependencies`
+/// carries the target and the kind in its spelling).
+pub(crate) struct ManifestDepTable<'a> {
+    pub(crate) table_path: String,
+    pub(crate) scope: ManifestDependencyScope,
+    table: &'a Table,
+}
+
+pub(crate) struct ManifestDep<'a> {
+    pub(crate) scope: ManifestDependencyScope,
+    pub(crate) key: &'a str,
+    pub(crate) real_name: String,
+    pub(crate) spec: &'a Item,
+}
+
+/// The one Cargo-manifest dependency walker used by structural checks and the
+/// workspace-inheritance audit. It follows only actual Cargo locations:
+/// package dependency tables, each `target.<cfg>` dependency table, and the
+/// declaration table at `workspace.dependencies`.
+pub(crate) struct ManifestDeps<'a> {
+    tables: Vec<ManifestDepTable<'a>>,
+    workspace_dependencies: Option<&'a Table>,
+}
+
+impl<'a> ManifestDeps<'a> {
+    pub(crate) fn new(doc: &'a DocumentMut) -> Self {
+        let root = doc.as_table();
+        let workspace_dependencies = Self::workspace_table(root);
+        let mut tables = Vec::new();
+
+        for (name, item) in root {
+            if dependency_table_kind(name).is_some() {
+                if let Some(table) = item.as_table() {
+                    tables.push(ManifestDepTable {
+                        table_path: name.to_owned(),
+                        scope: ManifestDependencyScope::Package,
+                        table,
+                    });
+                }
+            } else if name == "target" {
+                let Some(targets) = item.as_table() else {
+                    continue;
+                };
+                for (target_cfg, target_item) in targets {
+                    let Some(target_table) = target_item.as_table() else {
+                        continue;
+                    };
+                    for (dependency_table, dependency_item) in target_table {
+                        if dependency_table_kind(dependency_table).is_none() {
+                            continue;
+                        }
+                        let Some(table) = dependency_item.as_table() else {
+                            continue;
+                        };
+                        tables.push(ManifestDepTable {
+                            table_path: format!("target.{target_cfg}.{dependency_table}"),
+                            scope: ManifestDependencyScope::Package,
+                            table,
+                        });
+                    }
+                }
+            } else if name == "workspace"
+                && let Some(table) = workspace_dependencies
+            {
+                tables.push(ManifestDepTable {
+                    table_path: "workspace.dependencies".to_owned(),
+                    // Workspace declarations can be inherited as normal,
+                    // dev, or build dependencies; the member table supplies
+                    // that kind, so the declaration itself is untyped.
+                    scope: ManifestDependencyScope::Workspace,
+                    table,
+                });
+            }
+        }
+
+        Self {
+            tables,
+            workspace_dependencies,
+        }
+    }
+
+    pub(crate) fn tables(&self) -> impl Iterator<Item = &ManifestDepTable<'a>> {
+        self.tables.iter()
+    }
+
+    pub(crate) fn entries(&self) -> impl Iterator<Item = ManifestDep<'a>> + '_ {
+        let workspace_dependencies = self.workspace_dependencies;
+        self.tables.iter().flat_map(move |table| {
+            table.table.iter().map(move |(key, spec)| ManifestDep {
+                scope: table.scope,
+                key,
+                real_name: effective_package_name(key, spec, workspace_dependencies),
+                spec,
+            })
+        })
+    }
+
+    pub(crate) fn workspace_table(root: &'a Table) -> Option<&'a Table> {
+        root.get("workspace")
+            .and_then(Item::as_table)
+            .and_then(|workspace| workspace.get("dependencies"))
+            .and_then(Item::as_table)
+    }
+}
+
+fn dependency_table_kind(name: &str) -> Option<DependencyKind> {
+    DEPENDENCY_TABLES
+        .iter()
+        .find_map(|(table, kind)| (*table == name).then_some(*kind))
+}
+
+/// Parse the exact manifest bytes shared by the structural checker and the
+/// workspace-dependency phase. `toml_edit` preserves the decorations needed
+/// for grouping and ordering checks while exposing the same table values to
+/// the inheritance walker.
+pub(crate) fn parse_manifest_bytes(bytes: &[u8]) -> Result<DocumentMut, String> {
+    let text = std::str::from_utf8(bytes).map_err(|e| format!("not valid UTF-8 ({e})"))?;
+    text.parse::<DocumentMut>().map_err(|e| e.to_string())
+}
+
+pub(crate) fn read_manifest(path: &Path) -> Result<DocumentMut, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    parse_manifest_bytes(&bytes).map_err(|e| format!("cannot parse {}: {e}", path.display()))
 }
 
 /// Whether the leading decoration of a key contains a blank line - i.e. the key
@@ -116,10 +250,7 @@ pub fn scan(project_root: &Path, cfg: &ManifestConfig) -> Result<Vec<ManifestVio
         // template/fixture manifest must not down the whole phase either, so
         // it is one violation for that file - exempt it with
         // `[manifest].exclude` if it is deliberately not a real manifest.
-        let parsed = match std::str::from_utf8(&bytes) {
-            Ok(text) => text.parse::<DocumentMut>().map_err(|e| e.to_string()),
-            Err(e) => Err(format!("not valid UTF-8 ({e})")),
-        };
+        let parsed = parse_manifest_bytes(&bytes);
         match parsed {
             Ok(doc) => manifests.push((rel, doc)),
             Err(why) => out.push(unparseable(rel, &why)),
@@ -180,14 +311,21 @@ fn check_adapter_group(
             ag.marker
         ))
     })?;
+    let workspace_manifest = manifests
+        .iter()
+        .find(|(_, doc)| workspace_dependencies(doc).is_some())
+        .map(|(_, doc)| doc)
+        .expect("workspace dependencies came from a scanned manifest");
+    let workspace_walker = ManifestDeps::new(workspace_manifest);
+    let real_names: std::collections::BTreeMap<&str, String> = workspace_walker
+        .entries()
+        .filter(|dep| dep.scope == ManifestDependencyScope::Workspace)
+        .map(|dep| (dep.key, dep.real_name))
+        .collect();
     let adapter_packages: std::collections::BTreeSet<String> = group
         .keys
         .iter()
-        .filter_map(|key| {
-            workspace_deps
-                .get(key)
-                .map(|item| effective_package_name(key, item, None))
-        })
+        .filter_map(|key| real_names.get(key.as_str()).cloned())
         .collect();
     if adapter_packages.is_empty() {
         return Err(DevError::Config(format!(
@@ -215,8 +353,11 @@ fn check_adapter_group(
         if !ag.forbidden_in.iter().any(|f| f == name) {
             continue;
         }
-        let mut declared = std::collections::BTreeSet::new();
-        declared_dep_packages(doc.as_table(), Some(workspace_deps), &mut declared);
+        let declared: std::collections::BTreeSet<String> = ManifestDeps::new(doc)
+            .entries()
+            .filter(|dep| dep.scope == ManifestDependencyScope::Package)
+            .map(|dep| dep.real_name)
+            .collect();
         for dep in declared.intersection(&adapter_packages) {
             out.push(ManifestViolation {
                 file: rel.clone(),
@@ -229,10 +370,7 @@ fn check_adapter_group(
 }
 
 fn workspace_dependencies(doc: &DocumentMut) -> Option<&Table> {
-    doc.get("workspace")
-        .and_then(Item::as_table)
-        .and_then(|workspace| workspace.get("dependencies"))
-        .and_then(Item::as_table)
+    ManifestDeps::<'_>::workspace_table(doc.as_table())
 }
 
 fn package_name(doc: &DocumentMut) -> Option<&str> {
@@ -269,25 +407,6 @@ fn effective_package_name(name: &str, item: &Item, workspace_deps: Option<&Table
     name.to_owned()
 }
 
-fn declared_dep_packages(
-    table: &Table,
-    workspace_deps: Option<&Table>,
-    out: &mut std::collections::BTreeSet<String>,
-) {
-    for (key, item) in table {
-        let Some(child) = item.as_table() else {
-            continue;
-        };
-        if is_dependency_table_name(key) {
-            for (dep, spec) in child {
-                out.insert(effective_package_name(dep, spec, workspace_deps));
-            }
-        } else if key != "workspace" {
-            declared_dep_packages(child, workspace_deps, out);
-        }
-    }
-}
-
 /// The dependency-table group whose header comment contains `marker`.
 fn labelled_group(table: &Table, marker: &str) -> Option<DepGroup> {
     dependency_groups(table)
@@ -305,7 +424,7 @@ fn check_document(
 ) -> Result<(), DevError> {
     // Dependency-content checks (1, 10, 8) apply to every manifest.
     if cfg.sort_dependencies {
-        check_sorted_dependencies(rel, doc.as_table(), out);
+        check_sorted_dependencies(rel, doc, out);
     }
     if cfg.cargo_machete_ignored_declared {
         check_cargo_machete(rel, doc, out);
@@ -386,69 +505,42 @@ fn dep_version(item: &Item) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Find `name`'s version requirement in any dependency table (any depth).
+/// Find `name`'s version requirement in a Cargo dependency table.
 fn find_dep_version(
-    table: &Table,
+    doc: &DocumentMut,
     name: &str,
     workspace_deps: Option<&Table>,
 ) -> Result<Option<String>, DevError> {
-    for (k, item) in table {
-        let Some(child) = item.as_table() else {
+    for dep in ManifestDeps::new(doc).entries() {
+        if dep.key != name {
             continue;
-        };
-        if is_dependency_table_name(k) {
-            let Some(dep) = child.get(name) else {
-                continue;
-            };
-            if let Some(v) = dep_version(dep) {
-                return Ok(Some(v));
-            }
-            if dep
-                .as_table_like()
-                .and_then(|spec| spec.get("workspace"))
-                .and_then(Item::as_bool)
-                == Some(true)
-            {
-                let deps = workspace_deps.ok_or_else(|| {
-                    DevError::Config(format!(
-                        "[[manifest.version_align]] cannot resolve inherited dependency {name:?}: \
-                         the scanned manifests omit [workspace.dependencies]"
-                    ))
-                })?;
-                let inherited = deps.get(name).ok_or_else(|| {
-                    DevError::Config(format!(
-                        "[[manifest.version_align]] cannot resolve inherited dependency {name:?}: \
-                         it is absent from [workspace.dependencies]"
-                    ))
-                })?;
-                return Ok(dep_version(inherited));
-            }
-        } else if let Some(v) = find_dep_version(child, name, workspace_deps)? {
-            return Ok(Some(v));
+        }
+        if let Some(version) = dep_version(dep.spec) {
+            return Ok(Some(version));
+        }
+        if dep
+            .spec
+            .as_table_like()
+            .and_then(|spec| spec.get("workspace"))
+            .and_then(Item::as_bool)
+            == Some(true)
+        {
+            let deps = workspace_deps.ok_or_else(|| {
+                DevError::Config(format!(
+                    "[[manifest.version_align]] cannot resolve inherited dependency {name:?}: \
+                     the scanned manifests omit [workspace.dependencies]"
+                ))
+            })?;
+            let inherited = deps.get(name).ok_or_else(|| {
+                DevError::Config(format!(
+                    "[[manifest.version_align]] cannot resolve inherited dependency {name:?}: \
+                     it is absent from [workspace.dependencies]"
+                ))
+            })?;
+            return Ok(dep_version(inherited));
         }
     }
     Ok(None)
-}
-
-/// Every dependency name declared in any dependency table (any depth).
-fn declared_deps(table: &Table, out: &mut std::collections::BTreeSet<String>) {
-    for (k, item) in table {
-        let Some(child) = item.as_table() else {
-            continue;
-        };
-        if is_dependency_table_name(k) {
-            for (dep, _) in child {
-                out.insert(dep.to_string());
-            }
-        } else if k == "workspace" {
-            // `[workspace.dependencies]` is an inheritance-definition table, not
-            // the package's own deps - do not descend into it. Legitimate
-            // `[target.'cfg(...)'.dependencies]` live under `target`, not here.
-            continue;
-        } else {
-            declared_deps(child, out);
-        }
-    }
 }
 
 /// `[package.metadata.cargo-machete] ignored` must reference declared deps.
@@ -465,8 +557,11 @@ fn check_cargo_machete(rel: &Path, doc: &DocumentMut, out: &mut Vec<ManifestViol
     else {
         return;
     };
-    let mut declared = std::collections::BTreeSet::new();
-    declared_deps(doc.as_table(), &mut declared);
+    let declared: std::collections::BTreeSet<String> = ManifestDeps::new(doc)
+        .entries()
+        .filter(|dep| dep.scope == ManifestDependencyScope::Package)
+        .map(|dep| dep.key.to_owned())
+        .collect();
     for entry in ignored.iter().filter_map(|v| v.as_str()) {
         if !declared.contains(entry) {
             out.push(ManifestViolation {
@@ -496,7 +591,7 @@ fn check_version_align(
         };
         let mut found = Vec::new();
         for name in &g.crates {
-            let Some(ver) = find_dep_version(doc.as_table(), name, workspace_deps)? else {
+            let Some(ver) = find_dep_version(doc, name, workspace_deps)? else {
                 continue;
             };
             if let Some(key) = version_key(&ver, gran) {
@@ -659,20 +754,12 @@ fn check_crate_type_order(
     }
 }
 
-/// Walk every dependency table (at any depth) and require each blank-line
+/// Walk every Cargo dependency table and require each blank-line
 /// group's keys to be in order. A key smaller than the previous key *in the
 /// same group* is the violation; a new group resets the comparison.
-fn check_sorted_dependencies(rel: &Path, table: &Table, out: &mut Vec<ManifestViolation>) {
-    for (name, item) in table {
-        let Some(child) = item.as_table() else {
-            continue;
-        };
-        if is_dependency_table_name(name) {
-            check_sorted_table(rel, name, child, out);
-        } else {
-            // Recurse into container tables (`workspace`, `target.'cfg(..)'`).
-            check_sorted_dependencies(rel, child, out);
-        }
+fn check_sorted_dependencies(rel: &Path, doc: &DocumentMut, out: &mut Vec<ManifestViolation>) {
+    for table in ManifestDeps::new(doc).tables() {
+        check_sorted_table(rel, &table.table_path, table.table, out);
     }
 }
 
@@ -758,7 +845,7 @@ mod tests {
     fn violations(section_and_body: &str) -> Vec<String> {
         let doc: DocumentMut = section_and_body.parse().unwrap();
         let mut out = Vec::new();
-        check_sorted_dependencies(Path::new("Cargo.toml"), doc.as_table(), &mut out);
+        check_sorted_dependencies(Path::new("Cargo.toml"), &doc, &mut out);
         out.iter().map(|v| v.message.clone()).collect()
     }
 
@@ -1070,6 +1157,63 @@ mod tests {
         assert_eq!(groups.len(), 2);
         assert!(groups[1].labels.iter().any(|l| l == "Adapter dependencies"));
         assert_eq!(groups[1].keys, vec!["dydx-proto", "foo"]);
+    }
+
+    #[test]
+    fn manifest_dependencies_follow_cargo_scopes_and_keep_one_kind_model() {
+        let src = "\
+[dependencies]\n\
+alias = { package = \"real-package\", version = \"1\" }\n\
+[dev_dependencies]\n\
+test-util = { workspace = true }\n\
+[target.'cfg(unix)'.build-dependencies]\n\
+cc = \"1\"\n\
+[workspace.dependencies]\n\
+test-util = { package = \"real-test-util\", version = \"2\" }\n\
+[package.metadata.third-party.dependencies]\n\
+not-a-cargo-dependency = \"1\"\n";
+        let doc: DocumentMut = src.parse().unwrap();
+        let deps = ManifestDeps::new(&doc);
+        let entries: Vec<ManifestDep<'_>> = deps.entries().collect();
+
+        // Each walked table is a real Cargo location, named by its dotted
+        // path; the target and the kind ride in the spelling.
+        let paths: Vec<&str> = deps.tables().map(|table| table.table_path.as_str()).collect();
+        assert_eq!(
+            paths,
+            vec![
+                "dependencies",
+                "dev_dependencies",
+                "target.cfg(unix).build-dependencies",
+                "workspace.dependencies",
+            ]
+        );
+        assert_eq!(dependency_table_kind("dependencies"), Some(DependencyKind::Normal));
+        assert_eq!(dependency_table_kind("dev_dependencies"), Some(DependencyKind::Dev));
+        assert_eq!(dependency_table_kind("build-dependencies"), Some(DependencyKind::Build));
+        assert_eq!(dependency_table_kind("metadata"), None);
+
+        assert!(entries.iter().any(|dep| {
+            dep.key == "alias"
+                && dep.real_name == "real-package"
+                && dep.scope == ManifestDependencyScope::Package
+        }));
+        assert!(entries.iter().any(|dep| {
+            dep.key == "test-util"
+                && dep.real_name == "real-test-util"
+                && dep.scope == ManifestDependencyScope::Package
+        }));
+        assert!(entries.iter().any(|dep| dep.key == "cc"));
+        assert!(entries.iter().any(|dep| {
+            dep.key == "test-util"
+                && dep.real_name == "real-test-util"
+                && dep.scope == ManifestDependencyScope::Workspace
+        }));
+        assert!(
+            !entries
+                .iter()
+                .any(|dep| dep.key == "not-a-cargo-dependency")
+        );
     }
 
     #[test]

@@ -6,36 +6,19 @@
 //! `history.db` landed in `./brokkr/` under whatever directory brokkr happened
 //! to run in, and the sidecar backups became an untracked directory that
 //! dirtied the next run's tree. The cargo config lookup disagreed with itself
-//! about which spelling wins. One module, one rule each.
+//! about which spelling wins. One resolver owns these rules; the standalone
+//! guard includes the shared home and lock-path source.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
+mod paths;
+
+pub(crate) use paths::{brokkr_state_dir, compile_lock, home, lock_file};
+
 /// An environment variable's value, with an empty value treated as unset.
 fn non_empty_var(name: &str) -> Option<OsString> {
     std::env::var_os(name).filter(|v| !v.is_empty())
-}
-
-/// `$HOME`, if set to something non-empty.
-pub(crate) fn home() -> Option<PathBuf> {
-    non_empty_var("HOME").map(PathBuf::from)
-}
-
-/// The per-user directory for brokkr state that must be shared across
-/// projects and survive reboots. An unset or empty `HOME` has no cwd-relative
-/// fallback, since that would split global coordination by working directory.
-pub(crate) fn brokkr_state_dir() -> Option<PathBuf> {
-    home().map(|home| home.join(".brokkr"))
-}
-
-/// The global brokkr lock file.
-pub(crate) fn lock_file() -> Option<PathBuf> {
-    brokkr_state_dir().map(|dir| dir.join("brokkr.lock"))
-}
-
-/// The lock shared by rustc compilers and drained exclusively by a fresh hold.
-pub(crate) fn compile_lock() -> Option<PathBuf> {
-    brokkr_state_dir().map(|dir| dir.join("compile.lock"))
 }
 
 /// The control-socket directory for live lock acquisitions.

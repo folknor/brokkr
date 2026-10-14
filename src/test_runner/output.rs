@@ -33,11 +33,6 @@ pub(crate) struct ParsedTestFailure {
     pub name: String,
     pub location: Option<String>,
     pub message: Option<String>,
-    /// `name` is libtest's own word that this test failed - a detail block or
-    /// the `failures:` roster - rather than the thread name of a panic the
-    /// `--nocapture` fallback could not tie to the roster. A test can rename
-    /// its thread, so only a verdict name identifies a failed test.
-    pub verdict: bool,
 }
 
 /// Aggregated test results from one or more test suites.
@@ -420,7 +415,6 @@ fn complete_roster(failures: &mut Vec<ParsedTestFailure>, failed_names: &[String
                 name: name.clone(),
                 location: None,
                 message: None,
-                verdict: true,
             });
         }
     }
@@ -444,7 +438,6 @@ impl InlinePanicCollector {
                 name,
                 location: Some(loc),
                 message: msg,
-                verdict: false,
             });
             return;
         }
@@ -470,7 +463,6 @@ impl InlinePanicCollector {
         let vetted: Vec<ParsedTestFailure> = failed_names
             .iter()
             .filter_map(|n| self.panics.iter().rfind(|p| &p.name == n).cloned())
-            .map(|p| ParsedTestFailure { verdict: true, ..p })
             .collect();
         if vetted.is_empty() {
             self.panics
@@ -538,7 +530,6 @@ fn flush_parsed_failure(
         } else {
             Some(panic_msg.to_string())
         },
-        verdict: true,
     });
 }
 

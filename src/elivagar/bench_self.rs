@@ -11,6 +11,7 @@
 
 use std::path::Path;
 
+use crate::clean::layout::ElivagarLayout;
 use crate::error::DevError;
 use crate::harness::{BenchConfig, BenchHarness};
 use crate::output;
@@ -28,8 +29,7 @@ pub fn run(
     pbf_path: &Path,
     file_mb: f64,
     runs: usize,
-    data_dir: &Path,
-    scratch_dir: &Path,
+    layout: &ElivagarLayout<'_>,
     project_root: &Path,
     skip_to: Option<&str>,
     tilegen: &crate::config::project_config::elivagar::TilegenConfig,
@@ -46,7 +46,7 @@ pub fn run(
         .to_owned();
 
     let command = BuiltCommand::MainBinary { tilegen, skip_to };
-    let args = command.build_args(pbf_str, scratch_dir, data_dir, Some(opts))?;
+    let args = command.build_args(pbf_str, layout, Some(opts))?;
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
 
     output::bench_msg(&format!(
@@ -61,7 +61,7 @@ pub fn run(
         input_file: Some(basename),
         input_mb: Some(file_mb),
         cargo_features: None,
-        cargo_profile: crate::build::CargoProfile::Release,
+        external_build: None,
         runs,
         cli_args: Some(crate::harness::format_cli_args(
             &binary.display().to_string(),
@@ -74,7 +74,7 @@ pub fn run(
 
     // The self arm measures; it does not feed the durable store. Clean up on
     // failure too, so a half-written archive is not left in scratch.
-    for path in command.output_files(scratch_dir) {
+    for path in command.output_files(layout) {
         std::fs::remove_file(path).ok();
     }
 

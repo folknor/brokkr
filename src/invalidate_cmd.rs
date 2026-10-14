@@ -23,10 +23,11 @@ pub(crate) fn cmd_invalidate(
         db::like::require_prefix(commit, "commit")?;
     }
 
-    let store = RunStore::open(
-        &results_db_path(project_root),
-        &sidecar_db_path(project_root),
-    )?;
+    // The preview (and a dry run, the default) only reads: neither migrates
+    // nor writes a store. Only an explicit `--force` reopens them for delete.
+    let (results_path, sidecar_path) =
+        (results_db_path(project_root), sidecar_db_path(project_root));
+    let store = RunStore::open_read_only(&results_path, &sidecar_path)?;
     if !store.has_results_db() && !store.has_sidecar_db() {
         output::result_msg("no results.db or sidecar.db found - nothing to invalidate");
         return Ok(());
@@ -58,6 +59,8 @@ pub(crate) fn cmd_invalidate(
         return Ok(());
     }
 
+    drop(store);
+    let store = RunStore::open_for_delete(&results_path, &sidecar_path)?;
     let mut results_removed = 0usize;
     let mut sidecar_sessions_removed = 0usize;
     for id in &targets {
@@ -78,17 +81,20 @@ fn preview(ids: &[RunId], store: &RunStore, descriptor: &str) -> Result<(), DevE
         let results_row = store.result_preview(id)?;
         let sidecar_present = store.has_sidecar_data(id)?;
         let detail = match results_row {
-            Some(row) => format!(
-                "{} {} {} (elapsed {}ms)",
-                row.commit.chars().take(8).collect::<String>(),
-                row.command,
-                if row.mode.is_empty() {
-                    "-"
-                } else {
-                    row.mode.as_str()
-                },
-                row.elapsed_ms,
-            ),
+            Some(row) => {
+                let commit = crate::git::ShortCommit::from_stored(&row.commit)
+                    .map_or_else(|_| row.commit.clone(), |commit| commit.to_string());
+                format!(
+                    "{commit} {} {} (elapsed {}ms)",
+                    row.command,
+                    if row.mode.is_empty() {
+                        "-"
+                    } else {
+                        row.mode.as_str()
+                    },
+                    row.elapsed_ms,
+                )
+            }
             None => String::from("(sidecar-only, no results row)"),
         };
         let sc_tag = if sidecar_present { " [+sidecar]" } else { "" };

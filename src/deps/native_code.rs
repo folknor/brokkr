@@ -90,54 +90,38 @@ impl Serialize for NativeDependencyEvent {
 const TOOLCHAIN_CRATES: &[&str] = &["cc", "cmake", "cxx-build", "nasm-rs"];
 
 pub fn run(metadata: &CargoMetadata) -> Vec<NativeDependencyEvent> {
-    let workspace_set: HashSet<&str> = metadata
-        .workspace_members
-        .iter()
-        .map(String::as_str)
-        .collect();
-
-    let id_to_name: HashMap<&str, &str> = metadata
-        .packages
-        .iter()
-        .map(|p| (p.id.as_str(), p.name.as_str()))
-        .collect();
-
     let toolchain: HashSet<&str> = TOOLCHAIN_CRATES.iter().copied().collect();
 
-    // package id -> the toolchain build-deps it declares. Build kind is
-    // `dep_kinds[*].kind == Some("build")`; we only count edges whose
-    // target name is a known compiler-driver crate.
-    let mut compiles: HashMap<&str, BTreeSet<&str>> = HashMap::new();
-    for node in &metadata.resolve.nodes {
-        for d in &node.deps {
-            let is_build = d
-                .dep_kinds
-                .iter()
-                .any(|dk| dk.kind.as_deref() == Some("build"));
-            if !is_build {
+    // package id -> the toolchain build-deps it declares. Only structured
+    // `DependencyKind::Build` edges whose target name is a known compiler-
+    // driver crate count.
+    let mut compiles: HashMap<super::PackageId, BTreeSet<String>> = HashMap::new();
+    for pkg in &metadata.packages {
+        for dependency in metadata.resolved_dependencies(&pkg.id) {
+            if dependency.kind != super::DependencyKind::Build {
                 continue;
             }
-            let Some(dep_name) = id_to_name.get(d.pkg.as_str()) else {
+            let Some(dep_name) = metadata.name(&dependency.package) else {
                 continue;
             };
             if toolchain.contains(dep_name) {
                 compiles
-                    .entry(node.id.as_str())
+                    .entry(pkg.id.clone())
                     .or_default()
-                    .insert(dep_name);
+                    .insert(dep_name.to_owned());
             }
         }
     }
 
     let mut events = Vec::new();
     for pkg in &metadata.packages {
-        if workspace_set.contains(pkg.id.as_str()) {
+        if metadata.is_member(&pkg.id) {
             continue;
         }
         let links = pkg.links.clone();
         let toolchains: Vec<String> = compiles
-            .get(pkg.id.as_str())
-            .map(|set| set.iter().map(ToString::to_string).collect())
+            .get(&pkg.id)
+            .map(|set| set.iter().cloned().collect())
             .unwrap_or_default();
 
         if links.is_none() && toolchains.is_empty() {

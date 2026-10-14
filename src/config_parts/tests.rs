@@ -57,7 +57,10 @@ mod tests {
         let table: toml::map::Map<String, toml::Value> =
             toml::from_str("[clippy]\nallow = [\"clippy::unused_async\", \"dead_code\"]").unwrap();
         let cfg = parse_lints(&table).unwrap().unwrap();
-        assert_eq!(cfg.allow, vec!["clippy::unused_async", "dead_code"]);
+        assert_eq!(
+            cfg.allow.iter().map(check::LintName::as_str).collect::<Vec<_>>(),
+            vec!["clippy::unused_async", "dead_code"]
+        );
     }
 
     #[test]
@@ -78,7 +81,7 @@ mod tests {
         .unwrap();
         let cfg = parse_lints(&table).unwrap().unwrap();
         assert_eq!(cfg.allow_exact.len(), 2);
-        assert_eq!(cfg.allow_exact[0].lint, "clippy::unused_async");
+        assert_eq!(cfg.allow_exact[0].lint.as_str(), "clippy::unused_async");
         assert_eq!(cfg.allow_exact[0].path, "src/lib.rs");
         assert_eq!(cfg.allow_exact[1].to_string(), "dead_code@src/a.rs");
     }
@@ -86,7 +89,7 @@ mod tests {
     #[test]
     fn clippy_allow_exact_rejects_malformed_entries() {
         // No '@' (a blanket allow belongs in `allow`), empty halves, flag
-        // smuggling, whitespace, and a second '@' are all parse errors.
+        // smuggling, whitespace, an absolute path, and a second '@' are errors.
         for bad in [
             "clippy::unused_async",
             "@src/lib.rs",
@@ -94,6 +97,7 @@ mod tests {
             "-W clippy::pedantic@src/lib.rs",
             "dead_code@src/a b.rs",
             "dead_code@src@lib.rs",
+            "dead_code@/tmp/outside.rs",
         ] {
             let src = format!("[clippy]\nallow_exact = [\"{bad}\"]");
             let table: toml::map::Map<String, toml::Value> = toml::from_str(&src).unwrap();
@@ -106,7 +110,7 @@ mod tests {
         let table: toml::map::Map<String, toml::Value> =
             toml::from_str("[lints]\nallow = [\"deprecated\"]").unwrap();
         let cfg = parse_lints(&table).unwrap().unwrap();
-        assert_eq!(cfg.allow, vec!["deprecated"]);
+        assert_eq!(cfg.allow[0].as_str(), "deprecated");
     }
 
     #[test]
@@ -119,7 +123,10 @@ mod tests {
         )
         .unwrap();
         let cfg = parse_lints(&table).unwrap().unwrap();
-        assert_eq!(cfg.allow, vec!["deprecated", "dead_code"]);
+        assert_eq!(
+            cfg.allow.iter().map(check::LintName::as_str).collect::<Vec<_>>(),
+            vec!["deprecated", "dead_code"]
+        );
         assert_eq!(cfg.allow_exact.len(), 1);
     }
 
@@ -142,7 +149,7 @@ mod tests {
         .unwrap();
         let cfg = parse_lints(&table).unwrap().unwrap();
         assert_eq!(
-            test_phase_allow_flags(&cfg.allow, &cfg.allow_exact),
+            test_phase_allow_flags(&cfg),
             vec!["-A", "deprecated", "-A", "dead_code"]
         );
     }
@@ -158,7 +165,7 @@ mod tests {
         .unwrap();
         let cfg = parse_lints(&table).unwrap().unwrap();
         assert_eq!(
-            test_phase_allow_flags(&cfg.allow, &cfg.allow_exact),
+            test_phase_allow_flags(&cfg),
             vec!["-A", "deprecated"]
         );
     }
@@ -173,12 +180,12 @@ mod tests {
         )
         .unwrap();
         let cfg = parse_lints(&table).unwrap().unwrap();
-        assert_eq!(test_phase_allow_flags(&cfg.allow, &cfg.allow_exact), vec!["-A", "deprecated"]);
+        assert_eq!(test_phase_allow_flags(&cfg), vec!["-A", "deprecated"]);
     }
 
     #[test]
     fn test_phase_flags_empty_without_config() {
-        assert!(test_phase_allow_flags(&[], &[]).is_empty());
+        assert!(test_phase_allow_flags(&LintsConfig::default()).is_empty());
     }
 
     #[test]
@@ -731,11 +738,15 @@ preset = ["a", "b"]
         // S3-23: the non-skippable set must be a subset of the real phase set -
         // `coverage` stays a valid `failed_phase` value even though it can't be
         // skipped.
-        for p in NON_SKIPPABLE_PHASES {
-            assert!(PHASE_NAMES.contains(&p), "{p} missing from PHASE_NAMES");
+        let all: Vec<&str> = phase_names().collect();
+        let skippable: Vec<&str> = skippable_phase_names().collect();
+        for p in &skippable {
+            assert!(all.contains(p), "{p} missing from the phase names");
         }
-        assert!(NON_SKIPPABLE_PHASES.contains(&"coverage"));
-        assert!(NON_SKIPPABLE_PHASES.contains(&"prepare"));
+        for p in ["coverage", "prepare"] {
+            assert!(all.contains(&p), "{p} is a real phase");
+            assert!(!skippable.contains(&p), "{p} is not skippable");
+        }
     }
 
     #[test]

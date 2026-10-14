@@ -184,15 +184,15 @@ pub(crate) fn test_binaries_with_runtime(
     // already names a target (`--test <name>`) must not be broadened -
     // cargo unions selection flags, so `--test foo --tests` would build
     // every harness and enumerate tests the lane meant to exclude.
-    if !has_target_selector(&args) {
+    if !ForwardedArgs::parse(&args).has_target_selector() {
         args.push("--tests".into());
     }
 
     cargo_line(commands, &format!("cargo {}", args.join(" ")));
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let captured = output::run_captured_with_env("cargo", &arg_refs, project_root, env_refs)?;
+    let captured = run_check_cargo(&arg_refs, project_root, env_refs)?;
 
-    if !captured.status.success() {
+    if !captured.success() {
         output::error(&format!("failing command: cargo {}", args.join(" ")));
         let stderr = String::from_utf8_lossy(&captured.stderr);
         output::error(&stderr);
@@ -419,7 +419,7 @@ fn toolchain_libdir(
         env_refs,
     )?;
 
-    if !captured.status.success() {
+    if !captured.success() {
         return Err(DevError::Build(format!(
             "rustc --print target-libdir failed: {}",
             String::from_utf8_lossy(&captured.stderr)
@@ -463,6 +463,7 @@ fn binary_list(
         &cwd,
         &env,
         crate::test_runner::TEST_TIMEOUT,
+        &crate::test_runner::RunContext::process(),
     )?;
     if run.unsettled {
         output::error(&format!(
@@ -491,7 +492,7 @@ fn binary_list(
         return Ok(None);
     }
 
-    if !captured.status.success() {
+    if !captured.success() {
         output::error(&format!(
             "failing command: {} {}",
             binary.executable,

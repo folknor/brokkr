@@ -3,7 +3,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{self, Display, Formatter};
 
-use crate::test_runner::{ObsEvent, StreamEnd, TestResult};
+use crate::test_runner::{
+    ExecutionFailure, ExecutionOutcome, KillCause, LaneVerdict, ObsEvent, ProtocolIssue, StreamEnd,
+    StreamOutcome, StreamSource, TestResult, lane_verdict,
+};
 use super::journal::{JournalRecord, StreamOrigin, Termination, TerminationCause, TerminationScope};
 use super::plan::{AccountingPlan, BinaryUnit, ExecutionId, Inventory, LaneIdx, PairId};
 use super::super::Resolution;
@@ -297,6 +300,9 @@ pub(crate) struct Reconciliation {
     pub(crate) journal_closed: bool,
     pub(crate) journal_errors: Vec<String>,
     pub(crate) first_termination: Option<Termination>,
+    /// The shared observation reduction for each lane. The phase verdict and
+    /// the accounting gate read the same stream-derived outcome.
+    pub(crate) lane_verdicts: BTreeMap<usize, LaneVerdict>,
     /// Lanes whose plan stopped describing what they ran, by index, with the
     /// reason ([`JournalRecord::LaneSuperseded`]). Their executions are not
     /// in `accounted` and their observations were not read.
@@ -349,38 +355,42 @@ impl Reconciliation {
     pub(crate) fn green(&self) -> bool {
         self.status() == AccountingStatus::Complete
             && self.first_termination.is_none()
+            && self.lane_verdicts.values().all(|verdict| *verdict == LaneVerdict::Pass)
             && self.accounted.iter().all(|a| a.outcome == Outcome::Passed)
             && self.doctests.carriers.iter().all(|c| c.completed)
     }
 }
 
-/// Per-name protocol state within one stream.
-#[derive(Default, Clone, Copy)]
-struct NameState {
-    started: bool,
-    terminal: bool,
-}
-
 #[derive(Default)]
 struct StreamState {
+    stream_id: u64,
     lane: usize,
     origin: Option<StreamOrigin>,
-    suite_open: bool,
-    suite_counts: (u64, u64, u64),
-    /// Terminal records that were neither a pass nor an ignore.
-    bad_terminals: u64,
-    names: BTreeMap<(Option<BinaryUnit>, String), NameState>,
-    end: Option<StreamEnd>,
-    exit: Option<(Option<i32>, Option<i32>)>,
     kills: Vec<Termination>,
     reported_unattributed: bool,
-    doctest_suites_unclosed: bool,
+}
+
+fn reduced<'a>(
+    stream: &StreamState,
+    lanes: &'a BTreeMap<usize, ExecutionOutcome>,
+) -> Option<&'a StreamOutcome> {
+    lanes.get(&stream.lane)?.stream(stream.stream_id)
+}
+
+fn source_for(origin: &StreamOrigin) -> StreamSource {
+    match origin {
+        StreamOrigin::Binary { unit, .. } => StreamSource::Harness {
+            executable: unit.id(),
+        },
+        StreamOrigin::Engine { .. } => StreamSource::Engine,
+        StreamOrigin::Doctest => StreamSource::Rustdoc,
+        StreamOrigin::Unattributed { .. } => StreamSource::Process,
+    }
 }
 
 #[derive(Default)]
 struct ExecState {
     started_on: Option<u64>,
-    terminal: Option<TestResult>,
     /// The stream that first reported this execution - its harness
     /// invocation. Every later record must come from it.
     owner: Option<u64>,
@@ -511,6 +521,7 @@ pub(crate) fn reconcile(
         anomalies.push(Anomaly { kind, lane: lane.map(LaneIdx::new), detail });
     };
     let mut streams: BTreeMap<u64, StreamState> = BTreeMap::new();
+    let mut lane_outcomes: BTreeMap<usize, ExecutionOutcome> = BTreeMap::new();
     let mut execs: BTreeMap<ExecKey, ExecState> = BTreeMap::new();
     let mut lane_terms: BTreeMap<usize, Vec<Termination>> = BTreeMap::new();
     let mut run_terms: Vec<Termination> = Vec::new();
@@ -539,29 +550,31 @@ pub(crate) fn reconcile(
         match rec {
             JournalRecord::Observed { lane, .. } if superseded.contains_key(lane) => {}
             JournalRecord::Observed { lane, stream, origin, event } => {
+                lane_outcomes
+                    .entry(*lane)
+                    .or_default()
+                    .observe_event(*stream, source_for(origin), event);
                 let st = streams.entry(*stream).or_default();
+                st.stream_id = *stream;
                 st.lane = *lane;
                 if st.origin.is_none() {
                     st.origin = Some(origin.clone());
                 }
-                let (resolution, unit, libtest) = match origin {
-                    StreamOrigin::Binary { resolution, unit, .. } => (resolution.clone(), unit.clone(), true),
-                    StreamOrigin::Engine { resolution, unit } => (resolution.clone(), unit.clone(), false),
+                let (resolution, unit) = match origin {
+                    StreamOrigin::Binary { resolution, unit, .. } => (resolution.clone(), unit.clone()),
+                    StreamOrigin::Engine { resolution, unit } => (resolution.clone(), unit.clone()),
                     StreamOrigin::Doctest => {
                         match event {
-                            ObsEvent::SuiteStarted { .. } => st.doctest_suites_unclosed = true,
-                            ObsEvent::SuiteFinished { .. } => st.doctest_suites_unclosed = false,
                             ObsEvent::Finished { result, .. } => match result {
                                 TestResult::Ok => doctests.passed += 1,
                                 TestResult::Ignored => doctests.ignored += 1,
                                 _ => doctests.failed += 1,
                             },
-                            ObsEvent::StreamEnded { end } => st.end = Some(*end),
-                            ObsEvent::AttributionError { detail } => {
+                            ObsEvent::AttributionRefused { refusal } => {
                                 anomaly(
                                     AnomalyKind::AttributionError,
                                     Some(*lane),
-                                    AnomalyDetail::ExternalMessage(detail.clone()),
+                                    AnomalyDetail::ExternalMessage(refusal.detail()),
                                 );
                             }
                             _ => {}
@@ -570,14 +583,13 @@ pub(crate) fn reconcile(
                     }
                     StreamOrigin::Unattributed { detail } => {
                         match event {
-                            ObsEvent::AttributionError { detail } => {
+                            ObsEvent::AttributionRefused { refusal } => {
                                 anomaly(
                                     AnomalyKind::AttributionError,
                                     Some(*lane),
-                                    AnomalyDetail::ExternalMessage(detail.clone()),
+                                    AnomalyDetail::ExternalMessage(refusal.detail()),
                                 );
                             }
-                            ObsEvent::StreamEnded { end } => st.end = Some(*end),
                             ObsEvent::SuiteStarted { .. }
                             | ObsEvent::SuiteFinished { .. }
                             | ObsEvent::Started { .. }
@@ -597,37 +609,8 @@ pub(crate) fn reconcile(
                         continue;
                     }
                 };
-                let unit_key = (!libtest).then(|| unit.clone());
                 match event {
-                    ObsEvent::SuiteStarted { .. } => {
-                        if libtest {
-                            if st.suite_open {
-                                anomaly(
-                                    AnomalyKind::OverlappingSuite,
-                                    Some(*lane),
-                                    AnomalyDetail::OverlappingSuite { unit: unit.clone() },
-                                );
-                            }
-                            st.suite_open = true;
-                            st.suite_counts = (0, 0, 0);
-                        }
-                    }
                     ObsEvent::Started { name } => {
-                        let ns = st.names.entry((unit_key, name.clone())).or_default();
-                        if ns.terminal {
-                            anomaly(
-                                AnomalyKind::StartAfterTerminal,
-                                Some(*lane),
-                                AnomalyDetail::StartAfterTerminal { unit: unit.clone(), test: name.clone() },
-                            );
-                        } else if ns.started {
-                            anomaly(
-                                AnomalyKind::DuplicateStart,
-                                Some(*lane),
-                                AnomalyDetail::DuplicateStart { unit: unit.clone(), test: name.clone() },
-                            );
-                        }
-                        ns.started = true;
                         let key = ExecKey::new(*lane, resolution.as_deref(), &unit, name);
                         if expected.contains_key(&key) {
                             if let Some(d) = duplicate(&mut execs, &key, *stream) {
@@ -646,44 +629,10 @@ pub(crate) fn reconcile(
                         }
                     }
                     ObsEvent::Finished { name, result } => {
-                        let ns = st.names.entry((unit_key, name.clone())).or_default();
-                        if ns.terminal {
-                            anomaly(
-                                AnomalyKind::RepeatedTerminal,
-                                Some(*lane),
-                                AnomalyDetail::RepeatedTerminal { unit: unit.clone(), test: name.clone() },
-                            );
-                        } else if !ns.started {
-                            anomaly(
-                                AnomalyKind::TerminalWithoutStart,
-                                Some(*lane),
-                                AnomalyDetail::TerminalWithoutStart { unit: unit.clone(), test: name.clone() },
-                            );
-                        }
-                        ns.terminal = true;
-                        if !matches!(result, TestResult::Ok | TestResult::Ignored) {
-                            st.bad_terminals += 1;
-                        }
-                        if libtest && st.suite_open {
-                            match result {
-                                TestResult::Ok => st.suite_counts.0 += 1,
-                                TestResult::Ignored => st.suite_counts.2 += 1,
-                                _ => st.suite_counts.1 += 1,
-                            }
-                        }
                         let key = ExecKey::new(*lane, resolution.as_deref(), &unit, name);
                         if expected.contains_key(&key) {
                             if let Some(d) = duplicate(&mut execs, &key, *stream) {
                                 anomaly(AnomalyKind::DuplicateExecution, Some(*lane), d);
-                            }
-                            let e = execs.entry(key).or_default();
-                            // The owning stream's first terminal stands. A
-                            // second one is an anomaly, never a correction:
-                            // on the same stream a `repeated_terminal` above,
-                            // on another stream a `duplicate_execution` - whose
-                            // result, pass or fail, is never taken.
-                            if e.terminal.is_none() && e.owner == Some(*stream) {
-                                e.terminal = Some(*result);
                             }
                         } else if !(*result == TestResult::Ignored && ignored_selected.contains(&key))
                             && !outside_claim.contains(&key)
@@ -700,52 +649,77 @@ pub(crate) fn reconcile(
                         Some(*lane),
                         AnomalyDetail::SlowWarning { unit: unit.clone(), test: name.clone() },
                     ),
-                    ObsEvent::SuiteFinished { passed, failed, ignored } => {
-                        if libtest {
-                            if !st.suite_open {
-                                anomaly(
-                                    AnomalyKind::SuiteTotalsMismatch,
-                                    Some(*lane),
-                                    AnomalyDetail::SuiteSummaryWithoutOpen { unit: unit.clone() },
-                                );
-                            } else if st.suite_counts != (*passed, *failed, *ignored) {
-                                anomaly(
-                                    AnomalyKind::SuiteTotalsMismatch,
-                                    Some(*lane),
-                                    AnomalyDetail::SuiteTotalsMismatch {
-                                        unit: unit.clone(),
-                                        reported: (*passed, *failed, *ignored),
-                                        observed: st.suite_counts,
-                                    },
-                                );
-                            }
-                            st.suite_open = false;
-                        }
-                    }
-                    ObsEvent::StreamEnded { end } => st.end = Some(*end),
-                    ObsEvent::Exited { code, signal } => st.exit = Some((*code, *signal)),
-                    ObsEvent::Killed { .. } => {}
-                    ObsEvent::AttributionError { detail } => {
+                    ObsEvent::SuiteStarted { .. }
+                    | ObsEvent::SuiteFinished { .. }
+                    | ObsEvent::StreamEnded { .. }
+                    | ObsEvent::Exited { .. }
+                            | ObsEvent::Killed { .. }
+                    | ObsEvent::RunFailed { .. } => {}
+                    ObsEvent::AttributionRefused { refusal } => {
                         anomaly(
                             AnomalyKind::AttributionError,
                             Some(*lane),
-                            AnomalyDetail::ExternalMessage(detail.clone()),
+                            AnomalyDetail::ExternalMessage(refusal.detail()),
                         );
                     }
                 }
             }
             JournalRecord::ProcessExited { lane, stream, code, signal } => {
                 let st = streams.entry(*stream).or_default();
+                st.stream_id = *stream;
                 st.lane = *lane;
-                st.exit = Some((*code, *signal));
+                let source = st
+                    .origin
+                    .as_ref()
+                    .map_or(StreamSource::Process, source_for);
+                lane_outcomes
+                    .entry(*lane)
+                    .or_default()
+                    .observe_event(
+                        *stream,
+                        source,
+                        &ObsEvent::Exited { code: *code, signal: *signal },
+                    );
             }
             JournalRecord::SpawnFailed { lane, origin, .. } => spawn_failures.push((*lane, origin.clone())),
             JournalRecord::Terminated(t) => {
                 if first_termination.is_none() {
                     first_termination = Some(t.clone());
                 }
+                if let Some(lane) = t.lane {
+                    let event = match t.cause {
+                        TerminationCause::PerTestDeadline => ObsEvent::Killed {
+                            cause: KillCause::PerTest,
+                            test: t.test.clone(),
+                        },
+                        TerminationCause::RunDeadline => ObsEvent::Killed {
+                            cause: KillCause::Wall,
+                            test: t.test.clone(),
+                        },
+                        TerminationCause::PhaseDeadline | TerminationCause::Interrupt => {
+                            ObsEvent::Killed { cause: KillCause::Stopped, test: None }
+                        }
+                        TerminationCause::SiblingTimeout | TerminationCause::FailFast => {
+                            ObsEvent::Killed { cause: KillCause::Cancelled, test: None }
+                        }
+                        TerminationCause::EngineError => ObsEvent::RunFailed {
+                            reason: ExecutionFailure::EngineError,
+                        },
+                    };
+                    lane_outcomes
+                        .entry(lane)
+                        .or_default()
+                        .observe_event(t.stream.unwrap_or_default(), StreamSource::Process, &event);
+                }
                 match (t.scope, t.stream, t.lane) {
-                    (TerminationScope::Stream, Some(s), _) => streams.entry(s).or_default().kills.push(t.clone()),
+                    (TerminationScope::Stream, Some(s), lane) => {
+                        let st = streams.entry(s).or_default();
+                        st.stream_id = s;
+                        if let Some(lane) = lane {
+                            st.lane = lane;
+                        }
+                        st.kills.push(t.clone());
+                    }
                     (TerminationScope::Lane, _, Some(l)) => lane_terms.entry(l).or_default().push(t.clone()),
                     _ => run_terms.push(t.clone()),
                 }
@@ -763,6 +737,57 @@ pub(crate) fn reconcile(
         }
     }
 
+    // Protocol consistency is reduced once from observations, then translated
+    // into plan-aware accounting anomalies for the report.
+    for st in streams.values() {
+        let Some(unit) = (match &st.origin {
+            Some(StreamOrigin::Binary { unit, .. } | StreamOrigin::Engine { unit, .. }) => Some(unit),
+            _ => None,
+        }) else {
+            continue;
+        };
+        let Some(outcome) = reduced(st, &lane_outcomes) else {
+            continue;
+        };
+        for issue in outcome.issues() {
+            let (kind, detail) = match issue {
+                ProtocolIssue::OverlappingSuite => (
+                    AnomalyKind::OverlappingSuite,
+                    AnomalyDetail::OverlappingSuite { unit: (*unit).clone() },
+                ),
+                ProtocolIssue::SuiteSummaryWithoutOpen => (
+                    AnomalyKind::SuiteTotalsMismatch,
+                    AnomalyDetail::SuiteSummaryWithoutOpen { unit: (*unit).clone() },
+                ),
+                ProtocolIssue::SuiteTotalsMismatch { reported, observed } => (
+                    AnomalyKind::SuiteTotalsMismatch,
+                    AnomalyDetail::SuiteTotalsMismatch {
+                        unit: (*unit).clone(),
+                        reported: *reported,
+                        observed: *observed,
+                    },
+                ),
+                ProtocolIssue::DuplicateStart { name } => (
+                    AnomalyKind::DuplicateStart,
+                    AnomalyDetail::DuplicateStart { unit: (*unit).clone(), test: name.clone() },
+                ),
+                ProtocolIssue::StartAfterTerminal { name } => (
+                    AnomalyKind::StartAfterTerminal,
+                    AnomalyDetail::StartAfterTerminal { unit: (*unit).clone(), test: name.clone() },
+                ),
+                ProtocolIssue::RepeatedTerminal { name } => (
+                    AnomalyKind::RepeatedTerminal,
+                    AnomalyDetail::RepeatedTerminal { unit: (*unit).clone(), test: name.clone() },
+                ),
+                ProtocolIssue::TerminalWithoutStart { name } => (
+                    AnomalyKind::TerminalWithoutStart,
+                    AnomalyDetail::TerminalWithoutStart { unit: (*unit).clone(), test: name.clone() },
+                ),
+            };
+            anomaly(kind, Some(st.lane), detail);
+        }
+    }
+
     // A libtest stream its writer closed with the suite still open, with
     // nothing recorded to explain it: the harness ended mid-suite on its own.
     // A stream brokkr stopped reading (cancelled) or could not read is
@@ -775,7 +800,8 @@ pub(crate) fn reconcile(
         let explained = !st.kills.is_empty()
             || lane_terms.contains_key(&st.lane)
             || !run_terms.is_empty();
-        if st.suite_open && st.end == Some(StreamEnd::Eof) && !explained {
+        let observed = reduced(st, &lane_outcomes);
+        if observed.is_some_and(|o| o.suite_open() && o.end() == Some(StreamEnd::Eof)) && !explained {
             anomaly(
                 AnomalyKind::MissingSuiteClosure,
                 Some(st.lane),
@@ -792,16 +818,23 @@ pub(crate) fn reconcile(
         let Some(StreamOrigin::Binary { unit, .. }) = &st.origin else {
             continue;
         };
-        let Some((code, signal)) = st.exit else {
+        let Some((code, signal)) = reduced(st, &lane_outcomes).and_then(StreamOutcome::exit) else {
+            continue;
+        };
+        let Some(observed) = reduced(st, &lane_outcomes) else {
             continue;
         };
         let explained = !st.kills.is_empty() || lane_terms.contains_key(&st.lane) || !run_terms.is_empty();
         let unclean = signal.is_some() || code.is_some_and(|c| c != 0);
+        let tests = observed.tests();
+        let has_bad_terminal = tests.values().any(|test| {
+            test.terminal.is_some_and(|result| !matches!(result, TestResult::Ok | TestResult::Ignored))
+        });
         if unclean
             && !explained
-            && st.bad_terminals == 0
-            && !st.names.is_empty()
-            && st.names.values().all(|n| n.terminal)
+            && !has_bad_terminal
+            && !tests.is_empty()
+            && tests.values().all(|test| test.terminal.is_some())
         {
             let disposition = match (code, signal) {
                 (_, Some(signal)) => ExitDisposition::Signal(signal),
@@ -830,7 +863,8 @@ pub(crate) fn reconcile(
         let label = plan
             .lane(LaneIdx::new(st.lane))
             .map_or_else(|| format!("lane {}", st.lane), |l| l.label.clone());
-        match (st.end, &name) {
+        let end = reduced(st, &lane_outcomes).and_then(StreamOutcome::end);
+        match (end, &name) {
             (Some(StreamEnd::Cancelled), _) => truncated_streams.push(format!(
                 "{label}: stream {id}{} was cut short - brokkr stopped reading with the pipe open",
                 name.as_ref().map_or_else(String::new, |n| format!(" ({n})"))
@@ -856,7 +890,10 @@ pub(crate) fn reconcile(
         // library, its doctests must have presented at least one stream.
         let completed = lane_finished_clean.get(&lane.lane.get()).copied().unwrap_or(false)
             && (!lane.doc_streams_required || !doc_streams.is_empty())
-            && doc_streams.iter().all(|s| !s.doctest_suites_unclosed && s.end == Some(StreamEnd::Eof));
+            && doc_streams.iter().all(|s| {
+                reduced(s, &lane_outcomes)
+                    .is_some_and(|o| !o.suite_open() && o.end() == Some(StreamEnd::Eof))
+            });
         doctests.carriers.push(CarrierState { lane: lane.label.clone(), completed, streams: doc_streams.len() });
     }
 
@@ -867,11 +904,19 @@ pub(crate) fn reconcile(
         let unit = &key.unit;
         let test = key.test.as_str();
         let state = execs.get(key);
+        let terminal = state
+            .and_then(|state| state.owner)
+            .and_then(|stream_id| streams.get(&stream_id))
+            .and_then(|stream| reduced(stream, &lane_outcomes))
+            .and_then(|stream| stream.tests().get(test))
+            .and_then(|test| test.terminal);
         let mine = |s: &StreamState| match &s.origin {
             Some(StreamOrigin::Binary { resolution: r, unit: u, one_test }) => {
                 s.lane == lane && r == &resolution && u == unit && one_test.as_ref().is_none_or(|t| t == test)
             }
-            Some(StreamOrigin::Engine { .. }) => s.lane == lane,
+            Some(StreamOrigin::Engine { resolution: r, unit: u }) => {
+                s.lane == lane && r == &resolution && u == unit
+            }
             _ => false,
         };
         let my_streams: Vec<&StreamState> = streams.values().filter(|s| mine(s)).collect();
@@ -883,7 +928,7 @@ pub(crate) fn reconcile(
         let seen_as = |t: &Termination| t.detail_for(&resolution, unit, test);
         let wider = || lane_term.or(run_term).map(seen_as);
         let stream_kill = |s: &StreamState| s.kills.first().map(seen_as);
-        let (outcome, detail) = if let Some(result) = state.and_then(|s| s.terminal) {
+        let (outcome, detail) = if let Some(result) = terminal {
             match result {
                 TestResult::Ok => (Outcome::Passed, None),
                 TestResult::Failed => (Outcome::Failed, Some(Detail::Assertion)),
@@ -913,12 +958,12 @@ pub(crate) fn reconcile(
             let detail = s
                 .and_then(stream_kill)
                 .or_else(wider)
-                .or_else(|| match s.and_then(|s| s.end) {
+                .or_else(|| match s.and_then(|s| reduced(s, &lane_outcomes)).and_then(StreamOutcome::end) {
                     Some(StreamEnd::Cancelled) => Some(Detail::StreamTruncated),
                     Some(StreamEnd::ReadError) => Some(Detail::ReadError),
                     _ => None,
                 });
-            match (detail, s.and_then(|s| s.exit)) {
+            match (detail, s.and_then(|s| reduced(s, &lane_outcomes)).and_then(StreamOutcome::exit)) {
                 (Some(d), _) => (Outcome::Interrupted, Some(d)),
                 // A crash of a process that ran this one test is that test's
                 // failure; in a shared process it is only a suspect's.
@@ -927,7 +972,10 @@ pub(crate) fn reconcile(
                 (None, _) => (Outcome::Interrupted, Some(Detail::MissingTerminal)),
             }
         } else {
-            let one_test_crash = my_streams.iter().find_map(|s| match (&s.origin, s.exit) {
+            let one_test_crash = my_streams.iter().find_map(|s| match (
+                &s.origin,
+                reduced(s, &lane_outcomes).and_then(StreamOutcome::exit),
+            ) {
                 (Some(StreamOrigin::Binary { one_test: Some(_), .. }), Some((code, signal)))
                     if s.kills.is_empty() && (signal.is_some() || code.is_some_and(|c| c != 0)) =>
                 {
@@ -943,7 +991,9 @@ pub(crate) fn reconcile(
                         .find_map(|s| stream_kill(s))
                         .or_else(wider)
                         .or_else(|| {
-                            my_streams.iter().find_map(|s| match s.end {
+                            my_streams.iter().find_map(|s| match reduced(s, &lane_outcomes)
+                                .and_then(StreamOutcome::end)
+                            {
                                 Some(StreamEnd::Cancelled) => Some(Detail::StreamTruncated),
                                 Some(StreamEnd::ReadError) => Some(Detail::ReadError),
                                 _ => None,
@@ -960,6 +1010,11 @@ pub(crate) fn reconcile(
         });
     }
 
+    let lane_verdicts = lane_outcomes
+        .iter()
+        .map(|(lane, outcome)| (*lane, lane_verdict(outcome)))
+        .collect();
+
     Reconciliation {
         accounted,
         anomalies,
@@ -968,6 +1023,7 @@ pub(crate) fn reconcile(
         journal_closed,
         journal_errors,
         first_termination,
+        lane_verdicts,
         superseded,
         truncated_streams,
     }

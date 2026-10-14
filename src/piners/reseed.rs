@@ -105,7 +105,7 @@ pub fn run(project_root: &Path, cfg: &PinersConfig, args: &CorpusArgs) -> Result
 
     // Held across the read-modify-write, so a concurrent `--bless` (which
     // holds the same lock for its run) cannot interleave with this rewrite.
-    let _lock = registry_io::lock(project_root, "corpus-reseed")?;
+    let _lock = registry_io::lock()?;
 
     // Keep the raw text: the writer edits the existing document in place so
     // hand-written comments survive.

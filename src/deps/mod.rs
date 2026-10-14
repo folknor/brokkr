@@ -9,7 +9,7 @@
 
 use std::path::Path;
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::error::DevError;
 use crate::output;
@@ -18,6 +18,7 @@ mod ccu;
 mod duplicate_version;
 mod focus;
 mod git_dependency;
+mod model;
 mod native_code;
 mod path_dependency;
 mod phase;
@@ -26,6 +27,8 @@ mod render;
 mod workspace_dep;
 
 use focus::run_focus;
+pub use model::DependencyKind;
+pub(crate) use model::{CargoMetadata, CargoPackage, PackageId, PackageSourceKind};
 use phase::{Phase, PhaseOutcome, PhaseSummary};
 
 // --- Event model (NDJSON-serializable) ---
@@ -53,103 +56,6 @@ struct SummaryEvent {
     phases_run: Vec<Phase>,
     findings: usize,
     phase_outcomes: Vec<PhaseSummary>,
-}
-
-// --- Cargo metadata (minimal subset we use) ---
-
-#[derive(Deserialize)]
-pub(crate) struct CargoMetadata {
-    pub packages: Vec<CargoPackage>,
-    pub workspace_members: Vec<String>,
-    /// Null under `cargo metadata --no-deps`, which `publish_cycle`'s
-    /// standalone entry point uses - it reads declared manifests only, so
-    /// paying for the resolve graph would buy nothing. Defaults to empty
-    /// rather than erroring so that loader stays a one-liner.
-    #[serde(default, deserialize_with = "null_as_default")]
-    pub resolve: CargoResolve,
-    /// Cargo's absolute workspace root directory (holds the root
-    /// `Cargo.toml` with `[workspace.dependencies]`). Required by the metadata
-    /// format and used by `workspace_dep`.
-    pub workspace_root: String,
-}
-
-#[derive(Deserialize)]
-pub(crate) struct CargoPackage {
-    pub name: String,
-    pub version: String,
-    pub id: String,
-    #[serde(default)]
-    pub source: Option<String>,
-    pub manifest_path: String,
-    /// The manifest's `links` key, if set - the canonical marker for a
-    /// crate that links a native library. Used by `native_code`.
-    #[serde(default)]
-    pub links: Option<String>,
-    /// The manifest's `publish` key. `Some([])` is `publish = false`;
-    /// `None` is the unrestricted default. Used by `publish_cycle`.
-    #[serde(default)]
-    pub publish: Option<Vec<String>>,
-    /// Declared dependencies from this package's own manifest - what
-    /// `cargo publish` writes out, as opposed to `resolve`'s picked
-    /// graph. Used by `publish_cycle`.
-    #[serde(default)]
-    pub dependencies: Vec<PackageDep>,
-}
-
-/// One entry of `packages[].dependencies`.
-#[derive(Deserialize)]
-pub(crate) struct PackageDep {
-    pub name: String,
-    /// `None` is Normal; `Some("dev")` / `Some("build")` are the others.
-    #[serde(default)]
-    pub kind: Option<String>,
-    /// The version requirement. Cargo renders "none specified" - the
-    /// path-only form that publish strips from a dev-dep - as `*`.
-    #[serde(default)]
-    pub req: String,
-}
-
-#[derive(Deserialize, Default)]
-pub(crate) struct CargoResolve {
-    pub nodes: Vec<ResolveNode>,
-}
-
-/// `serde` treats an explicit `null` as a hard error even on a `default`
-/// field; cargo writes `"resolve": null` under `--no-deps`, so map it.
-fn null_as_default<'de, D, T>(d: D) -> Result<T, D::Error>
-where
-    D: serde::Deserializer<'de>,
-    T: Deserialize<'de> + Default,
-{
-    Ok(Option::<T>::deserialize(d)?.unwrap_or_default())
-}
-
-#[derive(Deserialize)]
-pub(crate) struct ResolveNode {
-    pub id: String,
-    /// Per-dep structured info. `dep_kinds[*].kind == null` is the Normal
-    /// kind we care about; `"dev"` and `"build"` get dropped before blame.
-    /// Cargo always populates this; default keeps deserialization
-    /// resilient if a future schema change drops it. We deliberately do
-    /// not deserialize the sibling `dependencies` array (the flat union
-    /// across all targets/features/kinds) - `deps` carries the same set
-    /// plus the kind metadata we need to filter on.
-    #[serde(default)]
-    pub deps: Vec<NodeDep>,
-}
-
-#[derive(Deserialize)]
-pub(crate) struct NodeDep {
-    pub pkg: String,
-    #[serde(default)]
-    pub dep_kinds: Vec<DepKind>,
-}
-
-#[derive(Deserialize)]
-pub(crate) struct DepKind {
-    /// `None` is Normal; `Some("dev")` / `Some("build")` are the others.
-    #[serde(default)]
-    pub kind: Option<String>,
 }
 
 // --- Entry point ---
@@ -328,8 +234,8 @@ fn load_metadata_host_filtered(project_root: &Path) -> Result<CargoMetadata, Dev
 }
 
 fn run_metadata(project_root: &Path, args: &[&str]) -> Result<CargoMetadata, DevError> {
-    let captured = output::run_captured("cargo", args, project_root)?;
-    if !captured.status.success() {
+    let captured = output::run_cargo(args, project_root, &[], None)?;
+    if !captured.success() {
         let stderr = String::from_utf8_lossy(&captured.stderr);
         return Err(DevError::Build(format!("cargo metadata failed: {stderr}")));
     }
@@ -340,7 +246,7 @@ fn run_metadata(project_root: &Path, args: &[&str]) -> Result<CargoMetadata, Dev
 
 fn host_triple() -> Result<String, DevError> {
     let captured = output::run_captured("rustc", &["-vV"], Path::new("."))?;
-    if !captured.status.success() {
+    if !captured.success() {
         let stderr = String::from_utf8_lossy(&captured.stderr);
         return Err(DevError::Build(format!("rustc -vV failed: {stderr}")));
     }

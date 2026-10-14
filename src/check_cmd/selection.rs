@@ -33,17 +33,363 @@
 // narrowing, a package-mode resolution, a support build) carries only the
 // tokens its packages route. `PlannedSweep` has no executable feature argv,
 // so no cargo argv builder can bypass the projection.
+//
+// This module also owns the invocation-wide feature-unification answer and
+// parses forwarded cargo/libtest args into one typed selection view. That
+// keeps promotion eligibility, package-mode refusals, target narrowing, and
+// the copy-pasteable request line grounded in the same planned inputs.
 
 mod selection {
     use std::collections::BTreeSet;
     use std::fmt::{self, Display, Formatter};
+    use std::path::Path;
 
     use super::features::{project, DroppedToken, FeatureOracle, Projected, WorkspaceFeatures};
-    use crate::config::check::EffectiveUnification;
-    use crate::config::{BinConfig, Certifies, SweepProfile};
-    use crate::error::DevError;
-    use crate::profile::PlannedSweep;
     use super::{LaneIdx, Lanes};
+    use crate::config::check::{CargoUnification, EffectiveUnification};
+    use crate::config::{BinConfig, Certifies, FeatureUnification, SweepProfile};
+    use crate::error::DevError;
+    use crate::profile::{LaneExec, PlannedSweep, SweepDecl};
+
+    /// Cargo-level arguments the invocation forwarded after `brokkr check --`
+    /// and libtest arguments after the optional second `--`, classified once
+    /// for every selection decision and runner.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub(crate) struct ForwardedArgs {
+        cargo: Vec<String>,
+        libtest: Vec<String>,
+        classified: Vec<ForwardedCargoArg>,
+        supplied: bool,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum ForwardedCargoArg {
+        Target(Vec<String>),
+        Package(Vec<String>),
+        Workspace(Vec<String>),
+        Unsupported(Vec<String>),
+        Other(Vec<String>),
+    }
+
+    impl ForwardedArgs {
+        pub(crate) fn parse(args: &[String]) -> Self {
+            let separator = args.iter().position(|arg| arg == "--");
+            let (cargo, libtest) =
+                separator.map_or((args, &[][..]), |i| (&args[..i], &args[i + 1..]));
+            Self {
+                cargo: cargo.to_vec(),
+                libtest: libtest.to_vec(),
+                classified: classify_cargo_args(cargo),
+                supplied: !args.is_empty(),
+            }
+        }
+
+        pub(crate) fn cargo(&self) -> &[String] {
+            &self.cargo
+        }
+
+        pub(crate) fn libtest(&self) -> &[String] {
+            &self.libtest
+        }
+
+        pub(crate) fn was_supplied(&self) -> bool {
+            self.supplied
+        }
+
+        /// Target selectors shape enumeration and are removed from each
+        /// per-binary cargo invocation. All other cargo tokens keep order.
+        pub(crate) fn partition_targets(&self) -> (Vec<String>, Vec<String>) {
+            let mut targets = Vec::new();
+            let mut rest = Vec::new();
+            for arg in &self.classified {
+                let (tokens, is_target) = match arg {
+                    ForwardedCargoArg::Target(tokens) => (tokens, true),
+                    ForwardedCargoArg::Package(tokens)
+                    | ForwardedCargoArg::Workspace(tokens)
+                    | ForwardedCargoArg::Unsupported(tokens)
+                    | ForwardedCargoArg::Other(tokens) => (tokens, false),
+                };
+                if is_target {
+                    targets.extend(tokens.iter().cloned());
+                } else {
+                    rest.extend(tokens.iter().cloned());
+                }
+            }
+            (targets, rest)
+        }
+
+        pub(crate) fn has_target_selector(&self) -> bool {
+            self.classified
+                .iter()
+                .any(|arg| matches!(arg, ForwardedCargoArg::Target(_)))
+        }
+
+        /// A package or exclusion selector narrows a bare workspace request;
+        /// `--workspace` alone does not narrow it.
+        pub(crate) fn narrows_package_selection(&self) -> bool {
+            self.classified
+                .iter()
+                .any(|arg| matches!(arg, ForwardedCargoArg::Package(_)))
+        }
+
+        fn package_mode_selectors(&self) -> Vec<String> {
+            self.classified
+                .iter()
+                .filter_map(|arg| match arg {
+                    ForwardedCargoArg::Package(tokens) | ForwardedCargoArg::Workspace(tokens) => {
+                        Some(tokens)
+                    }
+                    _ => None,
+                })
+                .flatten()
+                .cloned()
+                .collect()
+        }
+
+        fn unsupported_direct_options(&self) -> Vec<String> {
+            self.classified
+                .iter()
+                .filter_map(|arg| match arg {
+                    ForwardedCargoArg::Unsupported(tokens) => tokens.first().cloned(),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        /// Cargo argv that rides the prebuild or reproduction command after
+        /// target selectors have already narrowed the plan.
+        pub(crate) fn cargo_without_targets(&self) -> Vec<String> {
+            self.partition_targets().1
+        }
+    }
+
+    fn classify_cargo_args(args: &[String]) -> Vec<ForwardedCargoArg> {
+        const VALUED_TARGETS: [&str; 4] = ["--test", "--bin", "--example", "--bench"];
+        const BARE_TARGETS: [&str; 8] = [
+            "--lib",
+            "--doc",
+            "--tests",
+            "--bins",
+            "--examples",
+            "--benches",
+            "--all-targets",
+            "--doctests",
+        ];
+        let mut classified = Vec::new();
+        let mut i = 0;
+        while i < args.len() {
+            let arg = &args[i];
+            let head = arg.split_once('=').map_or(arg.as_str(), |(head, _)| head);
+            if VALUED_TARGETS.contains(&head) {
+                let tokens = if arg.contains('=') {
+                    vec![arg.clone()]
+                } else if let Some(value) = args.get(i + 1) {
+                    i += 1;
+                    vec![arg.clone(), value.clone()]
+                } else {
+                    vec![arg.clone()]
+                };
+                classified.push(ForwardedCargoArg::Target(tokens));
+            } else if BARE_TARGETS.contains(&arg.as_str()) {
+                classified.push(ForwardedCargoArg::Target(vec![arg.clone()]));
+            } else if ["-p", "--package", "--exclude"].contains(&head) {
+                let tokens = if arg.contains('=') {
+                    vec![arg.clone()]
+                } else if let Some(value) = args.get(i + 1) {
+                    i += 1;
+                    vec![arg.clone(), value.clone()]
+                } else {
+                    vec![arg.clone()]
+                };
+                classified.push(ForwardedCargoArg::Package(tokens));
+            } else if arg.starts_with("-p") && !arg.starts_with("--") && arg.len() > 2 {
+                classified.push(ForwardedCargoArg::Package(vec![arg.clone()]));
+            } else if arg == "--workspace" {
+                classified.push(ForwardedCargoArg::Workspace(vec![arg.clone()]));
+            } else {
+                let is_unsupported = [
+                    "--no-run",
+                    "--target",
+                    "--config",
+                    "--manifest-path",
+                    "--target-dir",
+                ]
+                .contains(&head);
+                classified.push(if is_unsupported {
+                    ForwardedCargoArg::Unsupported(vec![arg.clone()])
+                } else {
+                    ForwardedCargoArg::Other(vec![arg.clone()])
+                });
+            }
+            i += 1;
+        }
+        classified
+    }
+
+    /// The one invocation-wide resolution point: package scope, forwarded
+    /// cargo selectors, the lazy whole-workspace metadata fact, promotion,
+    /// configured unification, and package-mode refusals are resolved before
+    /// any phase can construct a cargo request.
+    pub(crate) fn resolve_invocation_sweeps(
+        sweeps: Vec<SweepDecl>,
+        project_root: &Path,
+        packages: &[String],
+        forwarded: &ForwardedArgs,
+    ) -> Result<Vec<PlannedSweep>, DevError> {
+        let any_candidate = sweeps.iter().any(|sweep| {
+            matches!(sweep.lane_exec(), LaneExec::Parallel { .. })
+                && sweep.packages.is_empty()
+                && sweep.test_exclude_packages.is_empty()
+                && packages.is_empty()
+                && !forwarded.narrows_package_selection()
+        });
+        let whole_workspace = if any_candidate {
+            crate::build::project_info(Some(project_root))?.bare_selection_is_whole_workspace
+        } else {
+            false
+        };
+
+        sweeps
+            .into_iter()
+            .map(|sweep| {
+                let promotion_eligible = matches!(sweep.lane_exec(), LaneExec::Parallel { .. })
+                    && sweep.packages.is_empty()
+                    && sweep.test_exclude_packages.is_empty()
+                    && packages.is_empty()
+                    && whole_workspace
+                    && !forwarded.narrows_package_selection();
+                let planned = resolve_planned_sweep(sweep, promotion_eligible)?;
+                reject_forwarded_package_selectors(&planned, forwarded)?;
+                Ok(planned)
+            })
+            .collect()
+    }
+
+    /// Resolve the configured unification policy using the invocation's one
+    /// promotion answer. This is a runtime decision: package scope, forwarded
+    /// cargo selectors, and cargo metadata determine whether `auto` promotes.
+    /// An explicit `selected` remains pinned on promoted sweeps because the
+    /// fan-out executes the prebuilt binaries directly; it no longer needs a
+    /// runner-side cargo re-entry to preserve the same graph.
+    pub(crate) fn resolve_planned_sweep(
+        declaration: SweepDecl,
+        promotion_eligible: bool,
+    ) -> Result<PlannedSweep, DevError> {
+        let effective = resolve_unification(&declaration, promotion_eligible)?;
+        Ok(PlannedSweep::with_effective_unification(declaration, effective))
+    }
+
+    pub(crate) fn resolve_unification(
+        sweep: &SweepDecl,
+        promotion_eligible: bool,
+    ) -> Result<EffectiveUnification, DevError> {
+        Ok(match sweep.feature_unification {
+            FeatureUnification::Package => EffectiveUnification::Pinned(CargoUnification::Package),
+            FeatureUnification::Workspace => {
+                EffectiveUnification::Pinned(CargoUnification::Workspace)
+            }
+            FeatureUnification::Selected => EffectiveUnification::Pinned(CargoUnification::Selected),
+            FeatureUnification::Auto if promotion_eligible => {
+                EffectiveUnification::Pinned(CargoUnification::Workspace)
+            }
+            FeatureUnification::Auto => EffectiveUnification::Ambient,
+        })
+    }
+
+    /// Reject forwarded package selectors that would escape a per-package
+    /// cargo resolution. The parsed selector set is shared with promotion.
+    pub(crate) fn reject_forwarded_package_selectors(
+        sweep: &PlannedSweep,
+        forwarded: &ForwardedArgs,
+    ) -> Result<(), DevError> {
+        if !sweep.effective_unification().is_per_package() {
+            return Ok(());
+        }
+        let offending = forwarded.package_mode_selectors();
+        if offending.is_empty() {
+            return Ok(());
+        }
+        Err(DevError::Config(format!(
+            "[[check]] '{}' runs under `feature_unification = \"package\"`, which resolves one cargo \
+             invocation per package, but the forwarded args carry package selectors ({}). cargo unions \
+             selection flags, so these would widen a resolution that must hold exactly one package. \
+             Use brokkr's own `-p`, or the entry's `packages`.",
+            sweep.label,
+            offending.join(" ")
+        )))
+    }
+
+    /// Direct execution can only honour args that shape the prebuild. These
+    /// flags would change the selected platform, execution policy, config, or
+    /// artifact roots and therefore fail before any build starts.
+    pub(crate) fn reject_direct_execution_args(
+        sweep: &PlannedSweep,
+        forwarded: &ForwardedArgs,
+    ) -> Result<(), DevError> {
+        let offending = forwarded.unsupported_direct_options();
+        if offending.is_empty() {
+            return Ok(());
+        }
+        Err(DevError::Config(format!(
+            "sweep '{}' runs its test binaries directly, and the forwarded cargo args carry {} - \
+             which only cargo-mediated execution can honour. Drop the flag, or configure a \
+             cargo-mediated test lane.",
+            sweep.label,
+            offending.join(" ")
+        )))
+    }
+
+    /// Cargo target selector for one known test binary. Library-flavoured
+    /// targets all map to `--lib`; the four named target kinds keep their name.
+    pub(crate) fn cargo_target_selector(kind: &str, target: &str) -> Vec<String> {
+        match kind {
+            "test" | "bin" | "example" | "bench" => vec![format!("--{kind}"), target.to_owned()],
+            _ => vec!["--lib".to_owned()],
+        }
+    }
+
+    /// The consistent, copy-pasteable cargo command rendered from a planned
+    /// request and one binary's target. Forwarded target selectors are already
+    /// reflected in the planned binary list and do not broaden the command.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub(crate) struct ReproLine(String);
+
+    impl ReproLine {
+        pub(crate) fn parallel_binary(
+            sweep: &PlannedSweep,
+            binary: &super::TestBinary,
+            request: Option<&ResolutionRun>,
+            allow_args: &[String],
+            forwarded: &ForwardedArgs,
+        ) -> Self {
+            let mut args = vec!["test".to_owned()];
+            args.extend(sweep.unification_args());
+            args.extend(allow_args.iter().cloned());
+            if let Some(request) = request {
+                args.extend(request.cargo_args());
+                args.extend(cargo_target_selector(binary.selector_kind(), &binary.target));
+            } else {
+                args.extend(["-p".to_owned(), binary.package.clone()]);
+                args.extend(cargo_target_selector(binary.selector_kind(), &binary.target));
+            }
+            if let Some(profile) = sweep.profile {
+                args.extend(profile.cargo_args().iter().map(|arg| (*arg).to_owned()));
+            }
+            args.extend(forwarded.cargo_without_targets());
+            let mut libtest = sweep.lane_filters().libtest_args();
+            libtest.extend(sweep.lane_filters().name_filters());
+            if !libtest.is_empty() {
+                args.push("--".into());
+                args.extend(libtest);
+            }
+            Self(format!("failing command: cargo {}", args.join(" ")))
+        }
+
+        pub(crate) fn as_str(&self) -> &str {
+            &self.0
+        }
+    }
+
 
     /// A versioned, length-prefixed encoder for identity keys. Fields are
     /// encoded in declaration order and enums use explicit tags; changing a
@@ -1356,7 +1702,7 @@ mod selection {
         pub(crate) fn build(
             sweeps: &[PlannedSweep],
             cli: &[String],
-            skip: &dyn Fn(&str) -> bool,
+            skip: &dyn Fn(super::Phase) -> bool,
             rustdoc_configured: bool,
             bin_cfg: Option<&BinConfig>,
             certifies: Option<Certifies>,
@@ -1366,7 +1712,7 @@ mod selection {
                 Some(reason) => Ok(PhaseSelection::disabled(p, sweeps, reason)),
                 None => PhaseSelection::for_check(p, sweeps, cli, oracle),
             };
-            let rustdoc_off = if skip("rustdoc") {
+            let rustdoc_off = if skip(super::Phase::Rustdoc) {
                 Some(PHASE_SKIPPED)
             } else if !rustdoc_configured {
                 Some("no [rustdoc] table")
@@ -1374,10 +1720,10 @@ mod selection {
                 None
             };
             Ok(Self {
-                clippy: phase(SelectionPhase::Clippy, skip("clippy").then_some(PHASE_SKIPPED))?,
+                clippy: phase(SelectionPhase::Clippy, skip(super::Phase::Clippy).then_some(PHASE_SKIPPED))?,
                 rustdoc: phase(SelectionPhase::Rustdoc, rustdoc_off)?,
-                test: phase(SelectionPhase::Test, skip("test").then_some(PHASE_SKIPPED))?,
-                install: InstallSelection::build(bin_cfg, cli, certifies, !skip("install_feature")),
+                test: phase(SelectionPhase::Test, skip(super::Phase::Test).then_some(PHASE_SKIPPED))?,
+                install: InstallSelection::build(bin_cfg, cli, certifies, !skip(super::Phase::InstallFeature)),
             })
         }
     }
@@ -1657,7 +2003,8 @@ mod selection {
             assert!(sel.entries().iter().all(|e| matches!(e, LaneEntry::Disabled(_)) && e.notes().is_empty()));
             assert!(!sel.is_enabled() && sel.refusal().is_none());
 
-            let skip = |p: &str| p == "test" || p == "clippy";
+            use crate::check_cmd::Phase;
+            let skip = |p: Phase| matches!(p, Phase::Test | Phase::Clippy);
             let oracle = FeatureOracle::unavailable();
             let all = CheckSelections::build(std::slice::from_ref(&invalid), &[], &skip, false, None, None, &oracle)
                 .unwrap();
@@ -2009,7 +2356,9 @@ mod selection {
 pub(crate) use selection::{
     feature_drop_lines, join_notes, AdmissionNote, AdmissionRule, Attempt, CheckSelections,
     DeclaredShape, InstallSelection, LaneEntry, PackageSource, PhaseSelection, ReachLedger,
-    Resolution, ResolutionRun, Selection, SelectionPhase, ShapeId, SupportRequest,
+    ForwardedArgs, ReproLine, Resolution, ResolutionRun, Selection, SelectionPhase, ShapeId,
+    SupportRequest, reject_direct_execution_args, reject_forwarded_package_selectors,
+    resolve_invocation_sweeps, resolve_planned_sweep,
 };
 #[cfg(test)]
-pub(crate) use selection::package_args;
+pub(crate) use selection::{package_args, resolve_unification};

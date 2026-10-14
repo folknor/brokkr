@@ -135,7 +135,7 @@ pub fn run(
         input_file: Some(tiles_file.to_owned()),
         input_mb: Some(tiles_mb),
         cargo_features: None,
-        cargo_profile: crate::build::CargoProfile::Release,
+        external_build: None,
         runs,
         cli_args: None,
         metadata,
@@ -307,7 +307,7 @@ fn run_lifecycle(
             .collect();
         return Err(DevError::Subprocess {
             program: binary.display().to_string(),
-            code: Some(code),
+            ending: crate::error::ProcessEnding::Code(code),
             stderr: stderr_preview,
         });
     }
@@ -396,7 +396,7 @@ fn curl_get_tile(port: u16, z: u32, x: u32, y: u32) -> Result<(), DevError> {
         // curl itself failed (not an HTTP error), that's a real problem.
         return Err(DevError::Subprocess {
             program: "curl".into(),
-            code: output.status.code(),
+            ending: crate::error::ProcessEnding::from_status(&output.status),
             stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
         });
     }

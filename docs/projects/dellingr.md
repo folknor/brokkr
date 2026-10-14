@@ -61,7 +61,7 @@ brokkr's standing convention across every project:
 
 `--bench` is the mode whose walls are trusted, which is exactly why it builds
 uninstrumented. Restating the two feature names per project would only create
-a way for them to disagree with `harness::hotpath_feature`.
+a way for them to disagree with `measure::ProfiledMode::feature`.
 
 `file` and `hotpath_file` are relative to the directory holding `brokkr.toml`;
 absolute paths are rejected at parse time, as are empty digests and a

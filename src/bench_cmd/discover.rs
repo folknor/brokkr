@@ -32,12 +32,13 @@ pub struct BenchTarget {
 
 /// Discover every bench target in the workspace.
 pub fn discover(build_root: &Path) -> Result<Vec<BenchTarget>, DevError> {
-    let captured = output::run_captured(
-        "cargo",
+    let captured = output::run_cargo(
         &["metadata", "--format-version", "1", "--no-deps"],
         build_root,
+        &[],
+        None,
     )?;
-    if !captured.status.success() {
+    if !captured.success() {
         let stderr = String::from_utf8_lossy(&captured.stderr);
         return Err(DevError::Build(format!("cargo metadata failed: {stderr}")));
     }

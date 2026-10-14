@@ -32,7 +32,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("time")
             .as_nanos();
-        cwd.join(".brokkr")
+        crate::clean::layout::ProjectState::new(&cwd)
+            .root()
             .join("test-artifacts")
             .join(format!("resolve-{name}-{}-{stamp}", std::process::id()))
     }

@@ -1,4 +1,4 @@
-use super::{ParallelBinaries, SitedAllow, SweepProfile};
+use super::{LintsConfig, ParallelBinaries, SweepProfile};
 
 /// The `-A <lint>` flag pairs the test phase injects into the build's
 /// rustflags: `allow` plus the lint names behind `allow_exact`, deduped and
@@ -16,28 +16,27 @@ use super::{ParallelBinaries, SitedAllow, SweepProfile};
 /// - cargo's own lints ([`is_cargo_lint`]): rustc knows no `cargo` lint tool,
 ///   so `-A cargo::...` would itself raise a diagnostic.
 ///
-/// A free function taking the two slices because that is how the check phases
-/// carry them - unbundled, straight off the config - so there is one definition
-/// of which lints reach a build rather than one per caller shape.
-pub fn test_phase_allow_flags(allow: &[String], allow_exact: &[SitedAllow]) -> Vec<String> {
+/// A free function taking the complete config so callers cannot accidentally
+/// separate the blanket and sited entries while deciding what reaches a build.
+pub fn test_phase_allow_flags(lints: &LintsConfig) -> Vec<String> {
     let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
     let mut out = Vec::new();
-    let names = allow
+    let names = lints
+        .allow
         .iter()
-        .map(String::as_str)
-        .chain(allow_exact.iter().map(|s| s.lint.as_str()))
-        .filter(|name| reaches_test_build(name));
+        .chain(lints.allow_exact.iter().map(|s| &s.lint))
+        .filter(|name| name.reaches_test_build());
     for name in names {
-        if seen.insert(name) {
+        if seen.insert(name.as_str()) {
             out.push("-A".to_string());
-            out.push(name.to_string());
+            out.push(name.as_str().to_string());
         }
     }
     out
 }
 
 /// The tool that owns a lint's namespace.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LintTool {
     Rustc,
     Clippy,
@@ -45,38 +44,53 @@ pub enum LintTool {
     Cargo,
 }
 
-/// A borrowed lint identity. Parsing separates namespace from name; config
-/// validation remains responsible for rejecting empty names and flag syntax.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct LintName<'a> {
-    pub tool: LintTool,
-    pub name: &'a str,
+/// An owned lint identity. Config stores this parsed form so namespace checks
+/// do not repeat for each phase or diagnostic.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct LintName {
+    tool: LintTool,
+    name: String,
+    spelling: String,
 }
 
-impl<'a> LintName<'a> {
-    pub fn parse(text: &'a str) -> Self {
+impl LintName {
+    pub fn parse(text: &str) -> Self {
         for (prefix, tool) in [
             ("clippy::", LintTool::Clippy),
             ("rustdoc::", LintTool::Rustdoc),
             ("cargo::", LintTool::Cargo),
         ] {
             if let Some(name) = text.strip_prefix(prefix) {
-                return Self { tool, name };
+                return Self {
+                    tool,
+                    name: name.to_owned(),
+                    spelling: text.to_owned(),
+                };
             }
         }
         Self {
             tool: LintTool::Rustc,
-            name: text,
+            name: text.to_owned(),
+            spelling: text.to_owned(),
         }
     }
 
-    pub fn reaches_test_build(self) -> bool {
+    /// The exact spelling supplied by config or reported by cargo.
+    pub fn as_str(&self) -> &str {
+        &self.spelling
+    }
+
+    pub fn tool(&self) -> LintTool {
+        self.tool
+    }
+
+    pub fn reaches_test_build(&self) -> bool {
         self.tool == LintTool::Rustc
     }
 
     /// Clippy accepts an unqualified spelling too. Rustdoc and cargo names
     /// must retain their namespaces; lint groups do not match member codes.
-    pub fn matches(self, code: Self) -> bool {
+    pub fn matches(&self, code: &Self) -> bool {
         self.name == code.name
             && (self.tool == code.tool
                 || matches!(
@@ -84,25 +98,20 @@ impl<'a> LintName<'a> {
                     (LintTool::Rustc, LintTool::Clippy) | (LintTool::Clippy, LintTool::Rustc)
                 ))
     }
-
-    /// Rustdoc judges its tool lints; clippy judges every other namespace.
-    pub fn judged_by_rustdoc(self) -> bool {
-        self.tool == LintTool::Rustdoc
-    }
 }
 
-/// Whether an allow for `name` becomes a test-phase build flag: only a lint
+/// Whether an allow becomes a test-phase build flag: only a lint
 /// rustc itself raises does ([`test_phase_allow_flags`]).
-pub fn reaches_test_build(name: &str) -> bool {
-    LintName::parse(name).reaches_test_build()
+pub fn reaches_test_build(name: &LintName) -> bool {
+    name.reaches_test_build()
 }
 
 /// Whether a lint name belongs to cargo's own namespace (`[lints.cargo]`:
 /// `cargo::unused_dependencies`, ...). Cargo reports these itself, on stderr,
 /// so an allow for one acts only where brokkr ingests diagnostics, never as a
 /// rustc `-A` flag.
-pub fn is_cargo_lint(name: &str) -> bool {
-    LintName::parse(name).tool == LintTool::Cargo
+pub fn is_cargo_lint(name: &LintName) -> bool {
+    name.tool() == LintTool::Cargo
 }
 
 /// A cargo feature-unification mode, with brokkr's `auto` policy resolved

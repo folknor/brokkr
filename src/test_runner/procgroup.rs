@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use super::HungTest;
+use super::{HungTest, RunContext};
 use crate::error::DevError;
 
 /// Read `pipe` into a shared buffer on a new thread until EOF or `cancel`.
@@ -37,8 +37,14 @@ pub(super) fn spawn_cargo_process_group(
     args: &[&str],
     cwd: &Path,
     env: &[(&str, &str)],
+    context: &RunContext,
 ) -> Result<std::process::Child, DevError> {
-    spawn_process_group("cargo", args, cwd, env)
+    // The cargo spawn profile, naming the check phase in flight (if any) so a
+    // `[cargo_env]` failure is attributed to it.
+    let profile = crate::cargo_env::SpawnProfile::Cargo {
+        phase: crate::check_cmd::current_phase(),
+    };
+    spawn_process_group("cargo", args, cwd, env, context, profile)
 }
 
 /// Spawn `program` in its own process group with piped output. The general
@@ -50,13 +56,15 @@ pub(super) fn spawn_process_group(
     args: &[&str],
     cwd: &Path,
     env: &[(&str, &str)],
+    context: &RunContext,
+    profile: crate::cargo_env::SpawnProfile,
 ) -> Result<std::process::Child, DevError> {
     use std::os::unix::process::CommandExt;
 
     // A shutdown already requested means the run is unwinding: a queued
     // parallel binary, or the next sweep, must not start a group the handler
     // will never see registered in time.
-    if crate::shutdown::is_shutdown_requested() {
+    if context.stop.is_requested() {
         return Err(DevError::Interrupted);
     }
 
@@ -70,7 +78,7 @@ pub(super) fn spawn_process_group(
     for &(key, value) in env {
         cmd.env(key, value);
     }
-    crate::cargo_env::apply(&mut cmd, program, args, Some(cwd), env)?;
+    crate::cargo_env::apply(&mut cmd, profile, args, Some(cwd), env)?;
     crate::oom::protect_child(&mut cmd);
     // The group is outside brokkr's own, so nothing aimed at brokkr reaches it.
     // Both runners register it with `shutdown::GroupReaper` for SIGINT/SIGTERM;
@@ -229,7 +237,11 @@ pub(super) const DRAIN_GRACE: Duration = Duration::from_secs(2);
 /// process group may be gone and its id reused. A leaked process that keeps
 /// writing gets `EPIPE`; one carrying the run token is reaped at the next hold
 /// (`crate::test_orphans`). Returns whether capture was cut short.
-pub(super) fn join_drains(drains: Vec<thread::JoinHandle<()>>, cancel: &AtomicBool) -> bool {
+pub(super) fn join_drains(
+    drains: Vec<thread::JoinHandle<()>>,
+    cancel: &AtomicBool,
+    context: &RunContext,
+) -> bool {
     let until = Instant::now() + DRAIN_GRACE;
     while Instant::now() < until && !drains.iter().all(thread::JoinHandle::is_finished) {
         thread::sleep(Duration::from_millis(10));
@@ -237,7 +249,7 @@ pub(super) fn join_drains(drains: Vec<thread::JoinHandle<()>>, cancel: &AtomicBo
     let cut = !drains.iter().all(thread::JoinHandle::is_finished);
     if cut {
         cancel.store(true, Ordering::Release);
-        crate::output::warn(&format!(
+        context.warn(&format!(
             "the test output did not close within {}s of the test process exiting; capture \
              stopped there. A process the tests started (a leaked daemon, say) may still hold \
              the output pipe",

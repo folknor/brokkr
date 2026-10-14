@@ -11,10 +11,12 @@
 //! enumerates `mime`, `mime_guess`, ... instead of erroring out -
 //! matches what people kept hand-rolling against `cargo metadata`.
 
-use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::BTreeSet;
 use std::path::Path;
 
-use super::{CargoMetadata, CargoPackage, load_metadata, load_metadata_host_filtered};
+use super::{
+    CargoMetadata, CargoPackage, PackageSourceKind, load_metadata, load_metadata_host_filtered,
+};
 use crate::error::DevError;
 use crate::output;
 
@@ -62,28 +64,6 @@ fn emit_traces(
     prefix_note: Option<&str>,
     json: bool,
 ) -> Result<(), DevError> {
-    let workspace_set: HashSet<&str> = md.workspace_members.iter().map(String::as_str).collect();
-    let id_to_label: HashMap<&str, String> = md
-        .packages
-        .iter()
-        .map(|p| (p.id.as_str(), format!("{} {}", p.name, p.version)))
-        .collect();
-
-    // Reverse adjacency over Normal-kind edges only - matches the
-    // duplicate_version blame filter so the chains shown here line up
-    // with the blame anchors shown by the full report.
-    let mut normal_parents: HashMap<&str, Vec<&str>> = HashMap::new();
-    for node in &md.resolve.nodes {
-        for d in &node.deps {
-            if d.dep_kinds.iter().any(|dk| dk.kind.is_none()) {
-                normal_parents
-                    .entry(d.pkg.as_str())
-                    .or_default()
-                    .push(node.id.as_str());
-            }
-        }
-    }
-
     let mut targets: Vec<&CargoPackage> = md.packages.iter().filter(|p| predicate(p)).collect();
     targets.sort_by(|a, b| a.name.cmp(&b.name).then(a.version.cmp(&b.version)));
 
@@ -92,14 +72,9 @@ fn emit_traces(
         .map(|p| ChainTrace {
             krate: p.name.clone(),
             version: p.version.clone(),
-            source: format_source(p, &workspace_set),
+            source: format_source(p, md.source_kind(&p.id)),
             manifest_path: tildify(&p.manifest_path),
-            chains: chains_to_workspace(
-                p.id.as_str(),
-                &workspace_set,
-                &normal_parents,
-                &id_to_label,
-            ),
+            chains: chains_to_workspace(md, &p.id),
         })
         .collect();
 
@@ -178,25 +153,28 @@ fn exact_predicate<'a>(
 /// sparse one (crates.io itself is canonicalised to its git-index id, but
 /// the sparse form is accepted too in case that ever changes). Both become
 /// `registry=<url>` - the protocol is transport, not provenance.
-fn format_source(p: &CargoPackage, workspace_set: &HashSet<&str>) -> String {
+fn format_source(p: &CargoPackage, source_kind: PackageSourceKind) -> String {
     const CRATES_IO: &str = "registry+https://github.com/rust-lang/crates.io-index";
     const CRATES_IO_SPARSE: &str = "sparse+https://index.crates.io/";
-    match p.source.as_deref() {
-        None => {
-            if workspace_set.contains(p.id.as_str()) {
-                "workspace".to_string()
-            } else {
-                "path".to_string()
+    match source_kind {
+        PackageSourceKind::Member => "workspace".to_string(),
+        PackageSourceKind::Path => "path".to_string(),
+        PackageSourceKind::Git => p.source.clone().unwrap_or_else(|| "git".to_string()),
+        PackageSourceKind::Registry => {
+            let Some(s) = p.source.as_deref() else {
+                return "path".to_string();
+            };
+            if s == CRATES_IO || s == CRATES_IO_SPARSE {
+                return "crates.io".to_string();
+            }
+            match s
+                .strip_prefix("registry+")
+                .or_else(|| s.strip_prefix("sparse+"))
+            {
+                Some(rest) => format!("registry={rest}"),
+                None => s.to_string(),
             }
         }
-        Some(s) if s == CRATES_IO || s == CRATES_IO_SPARSE => "crates.io".to_string(),
-        Some(s) => match s
-            .strip_prefix("registry+")
-            .or_else(|| s.strip_prefix("sparse+"))
-        {
-            Some(rest) => format!("registry={rest}"),
-            None => s.to_string(),
-        },
     }
 }
 
@@ -215,61 +193,14 @@ fn tildify(path: &str) -> String {
 /// BFS upward from `target_id`. Each branch ends when it reaches a
 /// workspace member. Cycle prevention only applies to non-workspace
 /// nodes so distinct paths can converge on the same workspace root.
-fn chains_to_workspace(
-    target_id: &str,
-    workspace_set: &HashSet<&str>,
-    normal_parents: &HashMap<&str, Vec<&str>>,
-    id_to_label: &HashMap<&str, String>,
-) -> Vec<Vec<String>> {
-    // Special case: the target itself is a workspace member. No upward
-    // walk to do; report the trivial chain.
-    if workspace_set.contains(target_id) {
-        return vec![vec![label(target_id, id_to_label)]];
-    }
-
-    let mut queue: VecDeque<Vec<&str>> = VecDeque::new();
-    queue.push_back(vec![target_id]);
-    let mut visited: HashSet<&str> = HashSet::new();
-    visited.insert(target_id);
-    let mut found: Vec<Vec<&str>> = Vec::new();
-
-    while let Some(path) = queue.pop_front() {
-        let last = *path.last().expect("path is non-empty by construction");
-        if workspace_set.contains(last) && path.len() > 1 {
-            found.push(path);
-            continue;
-        }
-        let Some(ps) = normal_parents.get(last) else {
-            continue;
-        };
-        for &p in ps {
-            if !workspace_set.contains(p) && !visited.insert(p) {
-                continue;
-            }
-            let mut next = path.clone();
-            next.push(p);
-            queue.push_back(next);
-        }
-    }
-
-    // Convert tail-first paths into root-first labelled chains, dedup.
-    let mut chains: BTreeSet<Vec<String>> = BTreeSet::new();
-    for path in found {
-        let labelled: Vec<String> = path
-            .iter()
-            .rev()
-            .map(|&id| label(id, id_to_label))
-            .collect();
-        chains.insert(labelled);
-    }
-    chains.into_iter().collect()
-}
-
-fn label(id: &str, id_to_label: &HashMap<&str, String>) -> String {
-    id_to_label
-        .get(id)
-        .cloned()
-        .unwrap_or_else(|| id.to_string())
+fn chains_to_workspace(metadata: &CargoMetadata, target_id: &super::PackageId) -> Vec<Vec<String>> {
+    metadata
+        .normal_paths_to_members(target_id, false)
+        .into_iter()
+        .map(|path| path.iter().rev().map(|id| metadata.label(id)).collect())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 #[cfg(test)]
@@ -280,7 +211,7 @@ mod tests {
         CargoPackage {
             name: "x".to_string(),
             version: "1.0.0".to_string(),
-            id: "x-id".to_string(),
+            id: "x-id".into(),
             source: source.map(str::to_string),
             manifest_path: String::new(),
             links: None,
@@ -291,8 +222,7 @@ mod tests {
 
     #[test]
     fn format_source_normalises_both_registry_protocols() {
-        let ws = HashSet::new();
-        let label = |s| format_source(&pkg(Some(s)), &ws);
+        let label = |s| format_source(&pkg(Some(s)), PackageSourceKind::Registry);
         assert_eq!(
             label("registry+https://github.com/rust-lang/crates.io-index"),
             "crates.io"
@@ -307,9 +237,16 @@ mod tests {
             "registry=https://example.com/index/"
         );
         assert_eq!(
-            label("git+https://example.com/r#abc"),
+            format_source(
+                &pkg(Some("git+https://example.com/r#abc")),
+                PackageSourceKind::Git,
+            ),
             "git+https://example.com/r#abc"
         );
-        assert_eq!(format_source(&pkg(None), &ws), "path");
+        assert_eq!(format_source(&pkg(None), PackageSourceKind::Path), "path");
+        assert_eq!(
+            format_source(&pkg(None), PackageSourceKind::Member),
+            "workspace"
+        );
     }
 }

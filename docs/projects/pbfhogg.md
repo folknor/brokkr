@@ -114,8 +114,8 @@ schema-universal flags (`--variant`, `--osc-seq`, `--tiles`) see
   (`src/pbfhogg/plan.rs`) calls `resolve_snapshot_pbf_path` regardless of
   which command is dispatching, so wiring a new pbfhogg command into the
   snapshot graph is just a matter of adding the field to its CLI variant in
-  `src/cli.rs` and propagating it to `CommandParams.snapshot` in
-  `src/pbfhogg/cli_adapter.rs`. The `read` throughput benchmark and the
+  `src/cli/schema.rs` and propagating it to `CommandParams.snapshot` in
+  `Command::into_route` (`src/command_input.rs`). The `read` throughput benchmark and the
   `verify` cross-validation suite accept `--snapshot` too (they resolve
   outside `build_pbfhogg_context` but share `resolve_snapshot_pbf_path` via
   `SnapshotRef::from_opt`); the synthetic `write`/`merge-bench`/etc. benches

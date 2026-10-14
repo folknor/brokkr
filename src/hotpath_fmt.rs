@@ -463,7 +463,7 @@ fn format_section_diff(
 fn format_change_str(a: Option<&Quantity>, b: Option<&Quantity>) -> String {
     match (a, b) {
         (Some(old), Some(new)) => new
-            .relative_change_from(*old)
+            .relative_change_from(old)
             .map_or_else(|| "--".to_owned(), |percent| format!("{percent:+.1}%")),
         (Some(_), None) => "(gone)".to_string(),
         (None, Some(_)) => "(new)".to_string(),

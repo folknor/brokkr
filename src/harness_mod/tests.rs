@@ -166,7 +166,7 @@ mod tests {
             input_file: None,
             input_mb: None,
             cargo_features: None,
-            cargo_profile: CargoProfile::Release,
+            external_build: None,
             runs: 1,
             cli_args: None,
             metadata: Vec::new(),
@@ -180,7 +180,7 @@ mod tests {
             hotpath: None,
         };
         let git = GitInfo {
-            commit: "abc".into(),
+            commit: "abc".parse().unwrap(),
             subject: String::new(),
             is_clean: true,
         };
@@ -238,7 +238,7 @@ mod tests {
             input_file: None,
             input_mb: None,
             cargo_features: None,
-            cargo_profile: CargoProfile::Release,
+            external_build: None,
             runs: 3,
             cli_args: None,
             metadata: Vec::new(),
@@ -253,7 +253,7 @@ mod tests {
             hotpath: None,
         };
         let git = GitInfo {
-            commit: "abc".into(),
+            commit: "abc".parse().unwrap(),
             subject: String::new(),
             is_clean: true,
         };
@@ -659,17 +659,16 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // hotpath_feature
+    // profiled-mode features
     // -----------------------------------------------------------------------
 
     #[test]
-    fn hotpath_feature_without_alloc() {
-        assert_eq!(hotpath_feature(false), "hotpath");
-    }
-
-    #[test]
-    fn hotpath_feature_with_alloc() {
-        assert_eq!(hotpath_feature(true), "hotpath-alloc");
+    fn profiled_modes_name_their_instrumentation_features() {
+        use crate::measure::ProfiledMode;
+        assert_eq!(ProfiledMode::Hotpath.feature(), "hotpath");
+        assert_eq!(ProfiledMode::Alloc.feature(), "hotpath-alloc");
+        assert!(ProfiledMode::Hotpath.note().is_none());
+        assert!(ProfiledMode::Alloc.note().is_some());
     }
 
     // -------------------------------------------------------------------

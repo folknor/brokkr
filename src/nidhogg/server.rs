@@ -52,6 +52,8 @@ pub fn serve(
 ) -> Result<(), DevError> {
     // Stop the server we recorded, if any.
     stop(project_root)?;
+    let state = crate::clean::layout::ProjectState::new(project_root);
+    let pid_path = state.nidhogg_pid_file();
 
     // Anything still answering is a server brokkr has no identity record
     // for. Without this check the health poll below would be satisfied by
@@ -59,19 +61,18 @@ pub fn serve(
     if status(port)? {
         return Err(DevError::Config(format!(
             "a server is already answering on port {port} and it is not one \
-             brokkr recorded in .brokkr/nidhogg.pid; stop it by hand or set \
-             a different [<host>] port in brokkr.toml"
+             brokkr recorded in {}; stop it by hand or set \
+             a different [<host>] port in brokkr.toml",
+            pid_path.display()
         )));
     }
 
     // Ensure logs/ and .brokkr/ directories exist.
     let logs_dir = project_root.join("logs");
     std::fs::create_dir_all(&logs_dir)?;
-    let state = crate::clean::layout::ProjectState::new(project_root);
     std::fs::create_dir_all(state.root())?;
 
     let log_path = logs_dir.join("serve.log");
-    let pid_path = state.nidhogg_pid_file();
 
     // Open log file for stdout and stderr.
     let log_file = std::fs::File::create(&log_path)?;

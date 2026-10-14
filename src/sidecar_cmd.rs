@@ -28,7 +28,7 @@ fn resolve_run_filter(
     let run_filter = match run_arg {
         Some("all") => None,
         Some(n) => Some(n.parse::<usize>().map_err(|_| {
-            DevError::Config(format!("--run: expected a number or 'all', got '{n}'"))
+            DevError::Usage(format!("--run: expected a number or 'all', got '{n}'"))
         })?),
         None => Some(best_idx),
     };
@@ -47,7 +47,7 @@ pub(crate) fn cmd_sidecar(project_root: &Path, q: &SidecarQuery) -> Result<(), D
     // used to fail open (a bad condition printed every sample, an unknown
     // field silently vanished), which reads as a real answer.
     validate_timeline_args(q)?;
-    let store = db::RunStore::open(
+    let store = db::RunStore::open_read_only(
         &results_db_path(project_root),
         &sidecar_db_path(project_root),
     )?;
@@ -77,7 +77,7 @@ pub(crate) fn cmd_sidecar(project_root: &Path, q: &SidecarQuery) -> Result<(), D
             let field = q
                 .stat
                 .as_deref()
-                .ok_or_else(|| DevError::Config("sidecar stat view requires a field".into()))?;
+                .ok_or_else(|| DevError::Usage("sidecar stat view requires a field".into()))?;
             with_resolved(&store, uuid, |id| run_stat(&store, id, field, q))
         }
     }

@@ -238,8 +238,8 @@ fn insert_disposition(
     if p.raw.is_empty() {
         // Only `report::parse` builds lines for ingest, and it always sets the
         // record; an empty one would store a row every projection reads NULL.
-        return Err(DevError::Database(format!(
-            "internal: probe '{}' reached the run store without its harness record",
+        return Err(DevError::Internal(format!(
+            "probe '{}' reached the run store without its harness record",
             p.probe
         )));
     }

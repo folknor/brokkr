@@ -21,7 +21,6 @@ use std::time::Duration;
 use crate::config::HarnessConfig;
 use crate::config::project_config::piners::PinersConfig;
 use crate::error::DevError;
-use crate::lockfile::{self, LockContext};
 use crate::output::{self, CapturedOutput};
 use crate::piners::lint::db::{LintDb, RunMeta};
 use crate::piners::lint::diff::classify;
@@ -114,16 +113,7 @@ pub fn lint_corpus(
     // (reseed, bless, reanchor) write under this lock, so verification must
     // judge the pins and bytes the run will use, not ones a writer replaced
     // while this waited. Verify-only included.
-    let project_root_str = project_root.display().to_string();
-    let _lock = lockfile::acquire(&LockContext {
-        project: "piners",
-        command: if mode.is_reanchor() {
-            "lint-reanchor"
-        } else {
-            "lint-corpus"
-        },
-        project_root: &project_root_str,
-    })?;
+    let _lock = crate::context::reenter_command_lock()?;
     let _sigterm = crate::shutdown::SigtermGuard::install();
 
     let registry_dir = project_root.join(lint_cfg.registry_dir());
@@ -155,9 +145,7 @@ pub fn lint_corpus(
     let mut abs_paths: BTreeMap<String, String> = BTreeMap::new();
     for id in &ids {
         let pin = registry.pins.get(id).ok_or_else(|| {
-            DevError::Config(format!(
-                "piners lint: internal: selected id '{id}' absent from pins"
-            ))
+            DevError::Internal(format!("piners lint: selected id '{id}' absent from pins"))
         })?;
         let abs = registry::verify_probe(id, pin, &corpus_root, project_root)?;
         abs_paths.insert(id.clone(), abs.display().to_string());
@@ -186,7 +174,7 @@ pub fn lint_corpus(
             );
             _lock.clear_child_pid();
             let r = r?;
-            if r.killed_on_deadline {
+            if r.killed_on_deadline() {
                 return Err(DevError::Verify(format!(
                     "{program} did not finish within {}s and was killed",
                     deadline.as_secs()

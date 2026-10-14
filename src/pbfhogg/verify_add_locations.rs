@@ -174,7 +174,7 @@ fn run_optional_variant(
 
     let result = run_pbfhogg_mode(harness, pbf_str, &out_path, Some(index_type), direct_io)?;
 
-    if result.status.success() {
+    if result.success() {
         findings.record(
             &format!("hash vs {index_type} diff"),
             report_diff(

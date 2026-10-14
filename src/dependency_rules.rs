@@ -8,11 +8,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use serde::Deserialize;
-
 use crate::config::DependencyRule;
+use crate::deps::{CargoMetadata, CargoPackage};
 use crate::error::DevError;
 use crate::output;
+
+pub use crate::deps::DependencyKind;
 
 #[derive(Debug, Clone)]
 pub struct DependencyViolation {
@@ -23,36 +24,6 @@ pub struct DependencyViolation {
     pub kind: DependencyKind,
     pub target: Option<String>,
     pub optional: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DependencyKind {
-    Normal,
-    Dev,
-    Build,
-    Unknown,
-}
-
-impl DependencyKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Normal => "normal",
-            Self::Dev => "dev",
-            Self::Build => "build",
-            Self::Unknown => "unknown",
-        }
-    }
-}
-
-impl From<Option<&str>> for DependencyKind {
-    fn from(value: Option<&str>) -> Self {
-        match value {
-            None => Self::Normal,
-            Some("dev") => Self::Dev,
-            Some("build") => Self::Build,
-            Some(_) => Self::Unknown,
-        }
-    }
 }
 
 enum RulePolarity<'a> {
@@ -86,17 +57,6 @@ fn rule_polarity(rule: &DependencyRule) -> Result<RulePolarity<'_>, DevError> {
     }
 }
 
-/// Parse a `kinds` config token into a filter kind. `Unknown` is never a valid
-/// config value (it only exists for future/odd metadata), so it is rejected.
-fn parse_config_kind(s: &str) -> Option<DependencyKind> {
-    match s {
-        "normal" => Some(DependencyKind::Normal),
-        "dev" => Some(DependencyKind::Dev),
-        "build" => Some(DependencyKind::Build),
-        _ => None,
-    }
-}
-
 #[derive(Debug)]
 pub struct DependencyReport {
     pub rules: usize,
@@ -104,36 +64,14 @@ pub struct DependencyReport {
     pub violations: Vec<DependencyViolation>,
 }
 
-#[derive(Deserialize)]
-struct CargoMetadata {
-    packages: Vec<CargoPackage>,
-    workspace_members: Vec<String>,
-}
-
-#[derive(Deserialize)]
-struct CargoPackage {
-    name: String,
-    id: String,
-    #[serde(default)]
-    dependencies: Vec<CargoDependency>,
-}
-
-#[derive(Deserialize)]
-struct CargoDependency {
-    name: String,
-    rename: Option<String>,
-    kind: Option<String>,
-    target: Option<String>,
-    optional: bool,
-}
-
 pub fn check(project_root: &Path, rules: &[DependencyRule]) -> Result<DependencyReport, DevError> {
-    let captured = output::run_captured(
-        "cargo",
+    let captured = output::run_cargo(
         &["metadata", "--format-version", "1", "--no-deps"],
         project_root,
+        &[],
+        None,
     )?;
-    if !captured.status.success() {
+    if !captured.success() {
         let stderr = String::from_utf8_lossy(&captured.stderr);
         return Err(DevError::Build(format!("cargo metadata failed: {stderr}")));
     }
@@ -147,15 +85,10 @@ pub fn check_metadata(
     rules: &[DependencyRule],
 ) -> Result<DependencyReport, DevError> {
     let metadata: CargoMetadata = serde_json::from_str(metadata_json)?;
-    let workspace_ids: BTreeSet<&str> = metadata
-        .workspace_members
-        .iter()
-        .map(String::as_str)
-        .collect();
     let workspace_packages: Vec<&CargoPackage> = metadata
         .packages
         .iter()
-        .filter(|pkg| workspace_ids.contains(pkg.id.as_str()))
+        .filter(|pkg| metadata.is_member(&pkg.id))
         .collect();
     let by_name: BTreeMap<&str, &CargoPackage> = workspace_packages
         .iter()
@@ -171,21 +104,8 @@ pub fn check_metadata(
         let polarity = rule_polarity(rule)?;
         let except: BTreeSet<&str> = rule.except.iter().map(String::as_str).collect();
 
-        // Resolve the kind filter once per rule. Empty = every kind.
-        let mut kinds = Vec::with_capacity(rule.kinds.len());
-        for k in &rule.kinds {
-            let Some(kind) = parse_config_kind(k) else {
-                return Err(DevError::Config(format!(
-                    "[[dependency_rule]]{}: unknown kind {k:?} in `kinds`; \
-                     expected \"normal\", \"dev\", or \"build\"",
-                    rule.name
-                        .as_deref()
-                        .map(|n| format!(" {n:?}"))
-                        .unwrap_or_default(),
-                )));
-            };
-            kinds.push(kind);
-        }
+        // The kind filter, parsed at config load. Empty = every kind.
+        let kinds = &rule.kinds;
 
         // Resolve the `from` set. `"*"` expands to every workspace package;
         // otherwise each named package is looked up. `except` drops packages
@@ -218,7 +138,7 @@ pub fn check_metadata(
                 if !polarity.violates(dep.name.as_str()) {
                     continue;
                 }
-                let dep_kind = DependencyKind::from(dep.kind.as_deref());
+                let dep_kind = dep.kind;
                 // `kinds` scopes to specific kinds (empty = all); `optional`
                 // scopes to a specific optional flag (unset = either).
                 if let Some(want) = rule.optional
@@ -229,11 +149,9 @@ pub fn check_metadata(
                 if !kinds.is_empty() {
                     if dep_kind == DependencyKind::Unknown {
                         return Err(DevError::Build(format!(
-                            "cargo metadata returned unrecognized dependency kind {:?} for {} -> {} \
+                            "cargo metadata returned an unrecognized dependency kind for {} -> {} \
                              while applying a `kinds` filter",
-                            dep.kind.as_deref(),
-                            pkg.name,
-                            dep.name,
+                            pkg.name, dep.name,
                         )));
                     }
                     // An unknown metadata kind is an error under an explicit
@@ -417,7 +335,7 @@ mod tests {
     }
 
     /// Build an `app` rule forbidding `to`, scoped by `kinds` / `optional`.
-    fn app_rule(to: &str, kinds: Vec<String>, optional: Option<bool>) -> DependencyRule {
+    fn app_rule(to: &str, kinds: Vec<DependencyKind>, optional: Option<bool>) -> DependencyRule {
         DependencyRule {
             name: None,
             from: vec!["app".into()],
@@ -433,7 +351,11 @@ mod tests {
     fn kinds_normal_allows_a_dev_dependency() {
         // `service-state` is a dev-dependency of `app`; `kinds = ["normal"]`
         // means the dev-dep is fine, while a normal dep (`db`) still trips.
-        let dev = vec![app_rule("service-state", vec!["normal".into()], None)];
+        let dev = vec![app_rule(
+            "service-state",
+            vec![DependencyKind::Normal],
+            None,
+        )];
         assert!(
             check_metadata(metadata(), &dev)
                 .unwrap()
@@ -441,7 +363,7 @@ mod tests {
                 .is_empty()
         );
 
-        let normal = vec![app_rule("db", vec!["normal".into()], None)];
+        let normal = vec![app_rule("db", vec![DependencyKind::Normal], None)];
         assert_eq!(
             check_metadata(metadata(), &normal)
                 .unwrap()
@@ -455,13 +377,13 @@ mod tests {
     fn kinds_dev_matches_only_the_dev_dependency() {
         // The inverse scope: `kinds = ["dev"]` catches `service-state` (dev)
         // but not `db` (normal).
-        let dev = vec![app_rule("service-state", vec!["dev".into()], None)];
+        let dev = vec![app_rule("service-state", vec![DependencyKind::Dev], None)];
         assert_eq!(
             check_metadata(metadata(), &dev).unwrap().violations.len(),
             1
         );
 
-        let normal = vec![app_rule("db", vec!["dev".into()], None)];
+        let normal = vec![app_rule("db", vec![DependencyKind::Dev], None)];
         assert!(
             check_metadata(metadata(), &normal)
                 .unwrap()
@@ -488,7 +410,7 @@ mod tests {
     }
 
     /// Build an allow-list rule over `from`.
-    fn allow_rule(from: &[&str], allow: &[&str], kinds: Vec<String>) -> DependencyRule {
+    fn allow_rule(from: &[&str], allow: &[&str], kinds: Vec<DependencyKind>) -> DependencyRule {
         DependencyRule {
             name: Some("leaf".into()),
             from: from.iter().map(|s| (*s).to_owned()).collect(),
@@ -525,7 +447,7 @@ mod tests {
 
     #[test]
     fn allow_scoped_by_kinds_leaves_dev_deps_unconstrained() {
-        let rules = vec![allow_rule(&["app"], &["db"], vec!["normal".into()])];
+        let rules = vec![allow_rule(&["app"], &["db"], vec![DependencyKind::Normal])];
         assert!(
             check_metadata(metadata(), &rules)
                 .unwrap()
@@ -567,11 +489,20 @@ mod tests {
         );
     }
 
+    // An unknown kind never reaches the phase: the config loader refuses it.
     #[test]
     fn unknown_kind_is_a_config_error() {
-        let rules = vec![app_rule("db", vec!["regular".into()], None)];
-        let err = check_metadata(metadata(), &rules).unwrap_err().to_string();
+        let err = toml::from_str::<DependencyRule>(
+            "from = \"app\"\nforbid = [\"db\"]\nkinds = [\"regular\"]\n",
+        )
+        .unwrap_err()
+        .to_string();
         assert!(err.contains("regular"), "got: {err}");
         assert!(err.contains("normal"), "got: {err}");
+        let one = toml::from_str::<DependencyRule>(
+            "from = \"app\"\nforbid = [\"db\"]\nkinds = \"dev\"\n",
+        )
+        .unwrap();
+        assert_eq!(one.kinds, vec![DependencyKind::Dev]);
     }
 }

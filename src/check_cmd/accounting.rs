@@ -698,6 +698,11 @@ mod accounting_tests {
         let mut records = clean_run(0, 1, &u, &["a"]);
         records.push(JournalRecord::LaneStarted { lane: 1 });
         records.push(rustdoc(1, 5, ObsEvent::SuiteStarted { test_count: 1 }));
+        // The suite's tally is checked against the tests the stream showed, so
+        // a doctest that passed is a started and finished record, not a bare
+        // summary.
+        records.push(rustdoc(1, 5, started("src/lib.rs - doc (line 1)")));
+        records.push(rustdoc(1, 5, finished("src/lib.rs - doc (line 1)", TestResult::Ok)));
         records.push(rustdoc(1, 5, ObsEvent::SuiteFinished { passed: 1, failed: 0, ignored: 0 }));
         records.push(rustdoc(1, 5, ObsEvent::StreamEnded { end: StreamEnd::Eof }));
         records.push(JournalRecord::LaneFinished { lane: 1, passed: true });

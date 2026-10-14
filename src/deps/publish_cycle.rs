@@ -59,30 +59,48 @@ pub(crate) struct PublishCycleEvent {
 pub(super) struct CycleEdge {
     pub(super) from: String,
     pub(super) to: String,
-    /// `normal`, `build`, or `dev` (a dev-dep carrying a version, the
-    /// only kind that survives into the published manifest).
-    pub(super) kind: &'static str,
+    /// `normal`, `build`, or `dev` (a dev-dep carrying a version, the only
+    /// kind that survives into the published manifest).
+    pub(super) kind: PublishedEdge,
 }
 
-/// How a cycle edge got into the published manifest. `dev_versioned` is
-/// the actionable one - the others are structural.
-const KIND_NORMAL: &str = "normal";
-const KIND_BUILD: &str = "build";
-const KIND_DEV_VERSIONED: &str = "dev";
+/// How a cycle edge got into the published manifest. `DevVersioned` is the
+/// publish-specific refinement of an ordinary dev-dependency.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub(super) enum PublishedEdge {
+    #[serde(rename = "normal")]
+    Normal,
+    #[serde(rename = "build")]
+    Build,
+    #[serde(rename = "dev")]
+    DevVersioned,
+}
+
+impl PublishedEdge {
+    fn rank(self) -> u8 {
+        match self {
+            Self::Normal => 0,
+            Self::Build => 1,
+            Self::DevVersioned => 2,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Normal => "normal",
+            Self::Build => "build",
+            Self::DevVersioned => "dev",
+        }
+    }
+}
 
 pub fn run(metadata: &CargoMetadata) -> Vec<PublishCycleEvent> {
-    let member_ids: HashSet<&str> = metadata
-        .workspace_members
-        .iter()
-        .map(String::as_str)
-        .collect();
-
     // Publishable workspace members, by package name. `publish` is
     // `Some([])` for `publish = false`, `Some([registry, ...])` for an
     // allow-list, `None` for the unrestricted default.
     let mut publishable: HashMap<&str, &super::CargoPackage> = HashMap::new();
     for pkg in &metadata.packages {
-        if !member_ids.contains(pkg.id.as_str()) {
+        if !metadata.is_member(&pkg.id) {
             continue;
         }
         if pkg.publish.as_ref().is_some_and(Vec::is_empty) {
@@ -95,19 +113,19 @@ pub fn run(metadata: &CargoMetadata) -> Vec<PublishCycleEvent> {
     // edges (the same pair declared as both normal and dev, say) collapse
     // to the first one seen in kind order, so the report names the edge
     // that would actually have to change.
-    let mut edges: HashMap<&str, Vec<(&str, &'static str)>> = HashMap::new();
+    let mut edges: HashMap<&str, Vec<(&str, PublishedEdge)>> = HashMap::new();
     for (name, pkg) in &publishable {
-        let mut out: Vec<(&str, &'static str)> = Vec::new();
+        let mut out: Vec<(&str, PublishedEdge)> = Vec::new();
         for dep in &pkg.dependencies {
-            let kind = match dep.kind.as_deref() {
-                None => KIND_NORMAL,
-                Some("build") => KIND_BUILD,
+            let kind = match dep.kind {
+                super::DependencyKind::Normal => PublishedEdge::Normal,
+                super::DependencyKind::Build => PublishedEdge::Build,
                 // A version-less dev-dep is stripped on publish and so
                 // cannot participate in a publication cycle. Cargo
                 // renders "no version requirement" as `*`.
-                Some("dev") if dep.req == "*" => continue,
-                Some("dev") => KIND_DEV_VERSIONED,
-                Some(_) => continue,
+                super::DependencyKind::Dev if dep.req == "*" => continue,
+                super::DependencyKind::Dev => PublishedEdge::DevVersioned,
+                super::DependencyKind::Unknown => continue,
             };
             let Some((target, _)) = publishable.get_key_value(dep.name.as_str()) else {
                 continue;
@@ -118,7 +136,7 @@ pub fn run(metadata: &CargoMetadata) -> Vec<PublishCycleEvent> {
             if let Some(slot) = out.iter_mut().find(|(t, _)| t == target) {
                 // Prefer the structural kind in the report: a normal edge
                 // can't be fixed by deleting a version key.
-                if rank(kind) < rank(slot.1) {
+                if kind.rank() < slot.1.rank() {
                     slot.1 = kind;
                 }
             } else {
@@ -153,21 +171,13 @@ pub fn run(metadata: &CargoMetadata) -> Vec<PublishCycleEvent> {
 }
 
 /// Lower binds tighter when two edges join the same pair.
-fn rank(kind: &str) -> u8 {
-    match kind {
-        KIND_NORMAL => 0,
-        KIND_BUILD => 1,
-        _ => 2,
-    }
-}
-
 /// Depth-first walk that reports one cycle per back edge. `visited`
 /// keeps the walk linear in the common acyclic case; a node is only
 /// marked visited once its whole subtree is explored, so a cycle
 /// reachable from two roots is still found from the first.
 fn walk<'a>(
     node: &'a str,
-    edges: &HashMap<&'a str, Vec<(&'a str, &'static str)>>,
+    edges: &HashMap<&'a str, Vec<(&'a str, PublishedEdge)>>,
     stack: &mut Vec<&'a str>,
     on_stack: &mut HashSet<&'a str>,
     visited: &mut HashSet<&'a str>,
@@ -183,11 +193,11 @@ fn walk<'a>(
         if on_stack.contains(next) {
             let start = stack.iter().position(|n| n == next).unwrap_or(0);
             let cycle: Vec<&str> = stack[start..].to_vec();
-            let mut kinds: Vec<&'static str> = cycle
+            let mut kinds: Vec<PublishedEdge> = cycle
                 .windows(2)
                 .map(|pair| edge_kind(edges, pair[0], pair[1]))
                 .collect();
-            kinds.push(kind);
+            kinds.push(*kind);
             record(&cycle, &kinds, seen, events);
         } else {
             walk(next, edges, stack, on_stack, visited, seen, events);
@@ -199,22 +209,22 @@ fn walk<'a>(
 }
 
 fn edge_kind<'a>(
-    edges: &HashMap<&'a str, Vec<(&'a str, &'static str)>>,
+    edges: &HashMap<&'a str, Vec<(&'a str, PublishedEdge)>>,
     from: &str,
     to: &str,
-) -> &'static str {
+) -> PublishedEdge {
     edges
         .get(from)
         .and_then(|outs| outs.iter().find(|(t, _)| *t == to))
         .map(|(_, k)| *k)
-        .unwrap_or(KIND_NORMAL)
+        .unwrap_or(PublishedEdge::Normal)
 }
 
 /// Rotate the cycle to start at its lexicographically smallest member so
 /// the same loop discovered from different roots dedups to one event.
 fn record<'a>(
     cycle: &[&'a str],
-    kinds: &[&'static str],
+    kinds: &[PublishedEdge],
     seen: &mut HashSet<Vec<&'a str>>,
     events: &mut Vec<PublishCycleEvent>,
 ) {
@@ -229,7 +239,7 @@ fn record<'a>(
     if !seen.insert(members.clone()) {
         return;
     }
-    let rotated_kinds: Vec<&'static str> = kinds[offset..]
+    let rotated_kinds: Vec<PublishedEdge> = kinds[offset..]
         .iter()
         .chain(kinds[..offset].iter())
         .copied()
@@ -278,10 +288,10 @@ pub fn render_lines(c: &PublishCycleEvent) -> Vec<String> {
     let mut chain = String::new();
     for edge in &c.edges {
         chain.push_str(&edge.from);
-        if edge.kind == KIND_NORMAL {
+        if edge.kind == PublishedEdge::Normal {
             chain.push_str(" -> ");
         } else {
-            chain.push_str(&format!(" -[{}]-> ", edge.kind));
+            chain.push_str(&format!(" -[{}]-> ", edge.kind.as_str()));
         }
     }
     // Close the loop back onto its first member: `edges` has one entry per
@@ -289,7 +299,11 @@ pub fn render_lines(c: &PublishCycleEvent) -> Vec<String> {
     chain.push_str(&c.edges[0].from);
 
     let mut lines = vec![chain];
-    for edge in c.edges.iter().filter(|e| e.kind == KIND_DEV_VERSIONED) {
+    for edge in c
+        .edges
+        .iter()
+        .filter(|e| e.kind == PublishedEdge::DevVersioned)
+    {
         lines.push(format!(
             "  dev-dependency {} -> {} names a version, so cargo publish keeps it; dropping the version key leaves a path-only dev-dep that publish strips",
             edge.from, edge.to,
@@ -305,13 +319,14 @@ pub fn render_lines(c: &PublishCycleEvent) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::deps::{CargoMetadata, CargoPackage, CargoResolve, PackageDep};
+    use crate::deps::model::{CargoResolve, PackageDep};
+    use crate::deps::{CargoMetadata, CargoPackage};
 
     fn pkg(name: &str, deps: Vec<PackageDep>) -> CargoPackage {
         CargoPackage {
             name: name.to_string(),
             version: "0.1.0".to_string(),
-            id: format!("path+file:///{name}#0.1.0"),
+            id: format!("path+file:///{name}#0.1.0").into(),
             source: None,
             manifest_path: format!("/ws/{name}/Cargo.toml"),
             links: None,
@@ -321,21 +336,28 @@ mod tests {
     }
 
     fn dep(name: &str, kind: Option<&str>, req: &str) -> PackageDep {
+        use crate::deps::DependencyKind;
+        let kind = kind.map_or(DependencyKind::Normal, |value| {
+            DependencyKind::from_metadata(Some(value))
+        });
         PackageDep {
             name: name.to_string(),
-            kind: kind.map(str::to_string),
+            rename: None,
+            kind,
+            target: None,
+            optional: false,
             req: req.to_string(),
         }
     }
 
     fn meta(packages: Vec<CargoPackage>) -> CargoMetadata {
-        let members = packages.iter().map(|p| p.id.clone()).collect();
-        CargoMetadata {
+        let members: Vec<_> = packages.iter().map(|p| p.id.clone()).collect();
+        CargoMetadata::new(
             packages,
-            workspace_members: members,
-            resolve: CargoResolve { nodes: Vec::new() },
-            workspace_root: "/ws".to_string(),
-        }
+            &members,
+            &CargoResolve { nodes: Vec::new() },
+            "/ws".to_string(),
+        )
     }
 
     #[test]
@@ -367,7 +389,11 @@ mod tests {
         let events = run(&m);
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].members, vec!["exec", "testkit", "trading"]);
-        let kinds: Vec<&str> = events[0].edges.iter().map(|e| e.kind).collect();
+        let kinds: Vec<&str> = events[0]
+            .edges
+            .iter()
+            .map(|edge| edge.kind.as_str())
+            .collect();
         assert_eq!(kinds, vec!["dev", "normal", "normal"]);
     }
 
@@ -453,6 +479,6 @@ mod tests {
         ]);
         let events = run(&m);
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0].edges[0].kind, "build");
+        assert_eq!(events[0].edges[0].kind.as_str(), "build");
     }
 }

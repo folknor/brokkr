@@ -3,8 +3,9 @@
 //! The enum shape records whether a command builds Rust code and, for built
 //! commands, whether it builds the main binary or a cargo example.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
+use crate::clean::layout::ElivagarLayout;
 use crate::config;
 use crate::db::KvPair;
 use crate::error::DevError;
@@ -72,8 +73,7 @@ impl BuiltCommand<'_> {
     pub fn build_args(
         &self,
         pbf_str: &str,
-        scratch_dir: &Path,
-        data_dir: &Path,
+        layout: &ElivagarLayout<'_>,
         opts: Option<&PipelineOpts>,
     ) -> Result<Vec<String>, DevError> {
         match self {
@@ -82,10 +82,10 @@ impl BuiltCommand<'_> {
                     DevError::Config("tilegen arguments require resolved PBF assertions".into())
                 })?;
 
-                let output_path = scratch_dir.join("bench-self-output.pmtiles");
+                let output_path = layout.tilegen_output();
                 let output_str = output_path.display().to_string();
 
-                let tmp_dir = data_dir.join("tilegen_tmp");
+                let tmp_dir = layout.tilegen_tmp();
                 let tmp_dir_str = tmp_dir.display().to_string();
 
                 let mut args: Vec<String> = vec![
@@ -105,7 +105,7 @@ impl BuiltCommand<'_> {
                     args.push("--compression-level".into());
                     args.push(level.to_string());
                 }
-                opts.push_args(tilegen, &mut args, data_dir)?;
+                opts.push_args(tilegen, &mut args, layout.data_dir())?;
 
                 Ok(args)
             }
@@ -142,9 +142,9 @@ impl BuiltCommand<'_> {
     }
 
     /// Files this command may produce in the scratch directory.
-    pub fn output_files(&self, scratch_dir: &Path) -> Vec<PathBuf> {
+    pub fn output_files(&self, layout: &ElivagarLayout<'_>) -> Vec<PathBuf> {
         match self {
-            Self::MainBinary { .. } => vec![scratch_dir.join("bench-self-output.pmtiles")],
+            Self::MainBinary { .. } => vec![layout.tilegen_output()],
             Self::Example(_) => vec![],
         }
     }

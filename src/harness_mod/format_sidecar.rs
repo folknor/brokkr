@@ -85,7 +85,7 @@ fn emit_result_lines(
     result: &BenchResult,
     git: &GitInfo,
 ) {
-    output::result_msg(&format_result_line(config, mode, result, git));
+    console::result_msg(&format_result_line(config, mode, result, git));
 }
 
 /// Emit a `[result]` line unconditionally (ignores quiet mode).
@@ -163,7 +163,7 @@ fn sidecar_summary_line(
 /// Print [`run_progress_line`] as bench narration, if there is one.
 pub(crate) fn announce_run(i: usize, runs: usize) {
     if let Some(line) = run_progress_line(i, runs) {
-        output::bench_msg(&line);
+        console::bench_msg(&line);
     }
 }
 
@@ -171,21 +171,6 @@ pub(crate) fn announce_run(i: usize, runs: usize) {
 ///
 /// Returns the exit code if the process exited normally, or `128 + signal`
 /// if it was killed by a signal (matching shell convention: 137 = OOM kill).
-fn exit_code_from_status(status: &std::process::ExitStatus) -> i32 {
-    if let Some(code) = status.code() {
-        return code;
-    }
-    // Killed by signal - use shell convention (128 + signum).
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::ExitStatusExt;
-        if let Some(sig) = status.signal() {
-            return 128 + sig;
-        }
-    }
-    -1
-}
-
 /// Current wall-clock time as seconds since the Unix epoch.
 fn wall_clock_epoch() -> i64 {
     std::time::SystemTime::now()
@@ -238,13 +223,13 @@ where
     let mut failures: Vec<&str> = Vec::new();
 
     for &variant in variants {
-        output::bench_msg(&format!("{label}: {variant}"));
+        console::bench_msg(&format!("{label}: {variant}"));
         match run_one(variant) {
             Ok(()) => {}
             // A cooperative shutdown ends the whole run, not one variant.
             Err(e @ DevError::Interrupted) => return Err(e),
             Err(e) => {
-                output::error(&format!("{variant} failed: {e}"));
+                console::error(&format!("{variant} failed: {e}"));
                 failures.push(variant);
             }
         }
@@ -275,20 +260,6 @@ fn maybe_quote(s: &str) -> String {
         format!("\"{s}\"")
     } else {
         s.to_owned()
-    }
-}
-
-/// Return the cargo feature name for hotpath mode: `"hotpath"` or `"hotpath-alloc"`.
-pub fn hotpath_feature(alloc: bool) -> &'static str {
-    if alloc { "hotpath-alloc" } else { "hotpath" }
-}
-
-/// Print the one standing caveat of `--alloc`: the allocation hooks distort
-/// wall time. A no-op when `alloc` is false, so every hotpath/alloc entry point
-/// can call it unconditionally and the wording lives in one place.
-pub fn hotpath_alloc_note(alloc: bool) {
-    if alloc {
-        output::hotpath_msg("NOTE: alloc profiling - wall-clock times are not meaningful");
     }
 }
 
@@ -323,7 +294,6 @@ pub fn elapsed_to_us(duration: &Duration) -> i64 {
 struct FailedCapture {
     data: crate::sidecar::SidecarData,
     pid: u32,
-    exit_code: i32,
 }
 
 thread_local! {
@@ -371,10 +341,16 @@ pub fn run_hotpath_capture(
         stop_marker,
         lock,
     )?;
-    if !c.stopped_by_marker && !c.status_ok {
-        let e = c.status_error(binary, ok_codes);
-        c.park_failure();
-        return Err(e);
+    match child::verdict(&c.sidecar.ending, binary, &c.stderr, ok_codes) {
+        child::IterationVerdict::Counted => {}
+        child::IterationVerdict::Failed(error) => {
+            c.park_failure();
+            return Err(error);
+        }
+        child::IterationVerdict::Interrupted => {
+            c.park_failure();
+            return Err(crate::error::DevError::Interrupted);
+        }
     }
     Ok((c.result, c.stderr, c.sidecar))
 }
@@ -386,38 +362,10 @@ pub struct HotpathCapture {
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
     pub sidecar: crate::sidecar::SidecarData,
-    /// The run was ended by its stop marker actually firing (not merely
-    /// configured), so it did not run to its natural end.
-    pub stopped_by_marker: bool,
-    /// The child was killed for outliving the ambient deadline (the hang
-    /// backstop): its SIGKILL status is brokkr's, not a spontaneous death.
-    pub stopped_by_deadline: bool,
-    pub status: std::process::ExitStatus,
-    /// `status` is success or one of the caller's `ok_codes`. When it is not,
-    /// `result.hotpath` is `None` (the report was not read).
-    pub status_ok: bool,
     pid: u32,
 }
 
 impl HotpathCapture {
-    /// The subprocess error a failed status stands for, carrying the whole
-    /// stderr (the signal named when there was one).
-    pub fn status_error(&self, binary: &str, ok_codes: &[i32]) -> crate::error::DevError {
-        let captured = output::CapturedOutput {
-            status: self.status,
-            stdout: Vec::new(),
-            stderr: self.stderr.clone(),
-            elapsed: std::time::Duration::ZERO,
-        };
-        captured.check_success_or(binary, ok_codes).err().unwrap_or_else(|| {
-            crate::error::DevError::Subprocess {
-                program: binary.to_owned(),
-                code: self.status.code(),
-                stderr: String::from_utf8_lossy(&self.stderr).into_owned(),
-            }
-        })
-    }
-
     /// Park this capture's sidecar data for the enclosing `run_hotpath` loop
     /// to store under `dirty` (see `FailedCapture`). For a caller about to
     /// fail the iteration after reading the capture.
@@ -425,13 +373,12 @@ impl HotpathCapture {
         park_failed_capture(FailedCapture {
             data: self.sidecar,
             pid: self.pid,
-            exit_code: exit_code_from_status(&self.status),
         });
     }
 }
 
-/// [`run_hotpath_capture`], keeping the child's stdout and NOT rejecting on
-/// the exit status: the caller reads the stream first and decides (the
+/// [`run_hotpath_capture`], keeping the child's stdout and not rejecting on
+/// an unsuccessful ending: the caller reads the stream first and decides (the
 /// piners corpus harness reports on stdout what it actually did, including a
 /// `run_error` explaining a failed exit). An interrupt still returns
 /// `Interrupted`. A caller that fails the iteration calls
@@ -462,7 +409,7 @@ pub fn run_hotpath_capture_with_stdout(
     env.extend_from_slice(extra_env);
 
     let start = std::time::Instant::now();
-    let child = output::spawn_captured(binary, args, project_root, &env, true)?;
+    let child = child::spawn_captured(binary, args, project_root, &env, true, crate::output::SpawnProfile::Plain)?;
     let pid = child.id();
     if let Some(lock) = lock {
         lock.set_child_pid(pid);
@@ -471,51 +418,47 @@ pub fn run_hotpath_capture_with_stdout(
     if let Some(lock) = lock {
         lock.clear_child_pid();
     }
-    let stopped = sidecar_result.stopped_by_marker;
-    let interrupted = sidecar_result.stopped_by_signal;
-    let stopped_by_deadline = sidecar_result.stopped_by_deadline;
-
     drop(fifo);
 
-    let captured = output::CapturedOutput {
-        status: sidecar_result.exit_status,
-        stdout: sidecar_result.stdout,
-        stderr: sidecar_result.stderr,
-        elapsed: sidecar_result.elapsed,
-    };
     // Failures park the sidecar data for the enclosing `run_hotpath` loop,
     // which stores it under `dirty` (see `FailedCapture`).
-    if interrupted {
+    if matches!(&sidecar_result.data.ending, child::Ending::Interrupted) {
         park_failed_capture(FailedCapture {
             data: sidecar_result.data,
             pid,
-            exit_code: exit_code_from_status(&captured.status),
         });
         return Err(crate::error::DevError::Interrupted);
     }
-    let status_ok = captured.check_success_or(binary, ok_codes).is_ok();
 
-    let ms = elapsed_to_ms(&captured.elapsed);
-    let us = elapsed_to_us(&captured.elapsed);
-    let (_stderr_ms, kv) = parse_kv_lines(&captured.stderr);
-    let status = captured.status;
-    let stderr = captured.stderr;
+    let ms = elapsed_to_ms(&sidecar_result.elapsed);
+    let us = elapsed_to_us(&sidecar_result.elapsed);
+    let (_stderr_ms, kv) = parse_kv_lines(&sidecar_result.stderr);
+    let status_ok = matches!(
+        child::verdict(
+            &sidecar_result.data.ending,
+            binary,
+            &sidecar_result.stderr,
+            ok_codes
+        ),
+        child::IterationVerdict::Counted
+    );
+    let stderr = sidecar_result.stderr;
 
     // A failed run's report is not read (it would only warn about a file the
-    // run never wrote); the caller fails the iteration on the status.
-    let hotpath = if !status_ok && !stopped {
+    // run never wrote); the caller classifies the ending after reading output.
+    let hotpath = if !status_ok {
         None
     } else {
         match std::fs::read_to_string(&json_file) {
             Ok(s) => match serde_json::from_str::<serde_json::Value>(&s) {
                 Ok(v) => db::hotpath_data_from_json(&v),
                 Err(e) => {
-                    output::warn(&format!("failed to parse hotpath JSON: {e}"));
+                    console::warn(&format!("failed to parse hotpath JSON: {e}"));
                     None
                 }
             },
             Err(e) => {
-                output::warn(&format!(
+                console::warn(&format!(
                     "failed to read hotpath report {}: {e}",
                     json_file.display()
                 ));
@@ -535,13 +478,9 @@ pub fn run_hotpath_capture_with_stdout(
             distribution: None,
             hotpath,
         },
-        stdout: captured.stdout,
+        stdout: sidecar_result.stdout,
         stderr,
         sidecar: sidecar_result.data,
-        stopped_by_marker: stopped,
-        stopped_by_deadline,
-        status,
-        status_ok,
         pid,
     })
 }
@@ -868,7 +807,7 @@ fn backup_sidecar_to(
     // link to the same inode, so the data is preserved regardless).
     staged.commit()?;
 
-    output::sidecar_msg(&format!("backup: {}", base.display()));
+    console::sidecar_msg(&format!("backup: {}", base.display()));
     Ok(())
 }
 

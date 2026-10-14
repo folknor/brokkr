@@ -47,8 +47,9 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use super::{
-    Ceilings, HungTest, JsonReconstructor, ObsEvent, ObservationSink, StreamEnd, StreamSource,
-    StreamTap, StrictPlan, TestTracker, WATCHDOG_POLL, hash_file,
+    AttributionRefusal, Ceilings, HungTest, JsonReconstructor, ObsEvent, ObservationSink,
+    RunContext, StreamEnd, StreamSource, StreamTap, StrictPlan, TestTracker, WATCHDOG_POLL,
+    hash_file,
 };
 use crate::error::DevError;
 use crate::process::{Pid, ProcStat, VerifiedProcess};
@@ -141,6 +142,7 @@ struct SessionState {
     watchdog_done: AtomicBool,
     stdout: Arc<Mutex<Vec<u8>>>,
     sink: Option<ObservationSink>,
+    context: RunContext,
     /// `Some` on a strict session: the harness executables (and content) this
     /// run may attribute, and whether a rustdoc may connect. Anything else,
     /// and any cargo child that fails the handshake, is refused.
@@ -158,6 +160,7 @@ impl Session {
         stdout: Arc<Mutex<Vec<u8>>>,
         sink: Option<ObservationSink>,
         strict: Option<StrictPlan>,
+        context: RunContext,
     ) -> Result<Self, DevError> {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         // Beside the other per-run state in ~/.brokkr, and short enough for a
@@ -191,6 +194,7 @@ impl Session {
                 watchdog_done: AtomicBool::new(false),
                 stdout,
                 sink,
+                context,
                 strict,
             }),
         })
@@ -216,7 +220,7 @@ impl Session {
             Ok(mut drains) => std::mem::take(&mut *drains),
             Err(poisoned) => std::mem::take(&mut *poisoned.into_inner()),
         };
-        super::procgroup::join_drains(drains, &self.state.drain_cancel);
+        super::procgroup::join_drains(drains, &self.state.drain_cancel, &self.state.context);
     }
 
     pub(super) fn stop_watchdog(&self) {
@@ -285,6 +289,7 @@ impl Session {
         primary: Option<StreamTap>,
     ) -> thread::JoinHandle<()> {
         let state = Arc::clone(&self.state);
+        let context = self.state.context.clone();
         let ceilings = ceilings.clone();
         let timeout = ceilings.per_test;
         thread::spawn(move || {
@@ -344,6 +349,7 @@ impl Session {
                         verdict,
                         &hung,
                         charged,
+                        &context,
                     );
                     return;
                 }
@@ -398,38 +404,52 @@ enum Refusal {
 }
 
 impl Refusal {
-    fn detail(&self) -> String {
+    fn observation(&self) -> Option<AttributionRefusal> {
         match self {
-            Self::NotCargoChild => String::new(),
-            Self::HandshakeIo(error) => {
-                format!("a cargo child failed the harness handshake: {error}")
-            }
-            Self::AuthenticationIo(error) => {
-                format!("a cargo child failed harness authentication: {error}")
-            }
-            Self::SessionIo(error) => {
-                format!("the harness session could not create or deliver its output pipe: {error}")
-            }
+            Self::NotCargoChild => None,
+            Self::HandshakeIo(error) => Some(AttributionRefusal::HandshakeIo {
+                detail: error.to_string(),
+            }),
+            Self::AuthenticationIo(error) => Some(AttributionRefusal::AuthenticationIo {
+                detail: error.to_string(),
+            }),
+            Self::SessionIo(error) => Some(AttributionRefusal::SessionIo {
+                detail: error.to_string(),
+            }),
             Self::UnplannedExecutable { executable } => {
-                format!("a harness ran an executable this run did not plan: {executable}")
+                Some(AttributionRefusal::UnplannedExecutable {
+                    executable: executable.clone(),
+                })
             }
-            Self::RebuiltExecutable { executable } => format!(
-                "{executable} is not the content the plan enumerated - it was rebuilt since the plan"
-            ),
-            Self::RustdocWithoutCarrier => {
-                "a rustdoc connected on a run the plan holds no doctest carrier for".into()
-            }
-            Self::UnknownRole { role } => format!("unknown harness handshake role {role}"),
+            Self::RebuiltExecutable { executable } => Some(AttributionRefusal::RebuiltExecutable {
+                executable: executable.clone(),
+            }),
+            Self::RustdocWithoutCarrier => Some(AttributionRefusal::RustdocWithoutCarrier),
+            Self::UnknownRole { role } => Some(AttributionRefusal::UnknownRole { role: *role }),
             Self::ExecutableHashFailed { executable, detail } => {
-                format!("{executable} could not be hashed: {detail}")
+                Some(AttributionRefusal::ExecutableHashFailed {
+                    executable: executable.clone(),
+                    detail: detail.clone(),
+                })
             }
-            Self::RunnerMismatch => "the runner is not this brokkr binary".into(),
-            Self::RunnerExitedDuringHandshake => "runner exited before handshake".into(),
-            Self::ProcessIdentityUnavailable => "runner has no process starttime".into(),
-            Self::DuplicateConnection => "second connection from one runner".into(),
-            Self::SessionClosing => "the harness session is closing".into(),
-            Self::StatePoisoned(name) => format!("harness session {name} mutex poisoned"),
+            Self::RunnerMismatch => Some(AttributionRefusal::RunnerMismatch),
+            Self::RunnerExitedDuringHandshake => {
+                Some(AttributionRefusal::RunnerExitedDuringHandshake)
+            }
+            Self::ProcessIdentityUnavailable => {
+                Some(AttributionRefusal::ProcessIdentityUnavailable)
+            }
+            Self::DuplicateConnection => Some(AttributionRefusal::DuplicateConnection),
+            Self::SessionClosing => Some(AttributionRefusal::SessionClosing),
+            Self::StatePoisoned(name) => Some(AttributionRefusal::StatePoisoned {
+                name: (*name).into(),
+            }),
         }
+    }
+
+    fn detail(&self) -> String {
+        self.observation()
+            .map_or_else(String::new, |refusal| refusal.detail())
     }
 }
 
@@ -447,12 +467,14 @@ fn refuse(stream: &UnixStream, refusal: &Refusal, s: &SessionState) {
         send_verdict(stream, REFUSE, None).ok();
     } else {
         send_verdict(stream, PASSTHROUGH, None).ok();
-        crate::output::warn(&format!(
+        s.context.warn(&format!(
             "a test harness could not be isolated and runs on the shared stream: {detail}"
         ));
     }
-    if let Some(sink) = s.sink.as_ref() {
-        StreamTap::new(sink, StreamSource::Process).emit(ObsEvent::AttributionError { detail });
+    if let Some(sink) = s.sink.as_ref()
+        && let Some(refusal) = refusal.observation()
+    {
+        StreamTap::new(sink, StreamSource::Process).emit(ObsEvent::AttributionRefused { refusal });
     }
 }
 
@@ -947,8 +969,10 @@ mod tests {
     #[test]
     fn session_has_distinct_socket_and_rustdoc_entrypoint() {
         let stdout = Arc::new(Mutex::new(Vec::new()));
-        let first = Session::new(Arc::clone(&stdout), None, None).expect("first session");
-        let second = Session::new(stdout, None, None).expect("second session");
+        let context = RunContext::new(super::super::StopSignal::new(|| false), |_| {});
+        let first =
+            Session::new(Arc::clone(&stdout), None, None, context.clone()).expect("first session");
+        let second = Session::new(stdout, None, None, context).expect("second session");
         assert_ne!(first.socket(), second.socket());
         assert_eq!(
             fs::read_link(first.rustdoc()).expect("rustdoc symlink"),
@@ -1021,6 +1045,7 @@ mod tests {
             watchdog_done: AtomicBool::new(false),
             stdout: Arc::new(Mutex::new(Vec::new())),
             sink,
+            context: RunContext::new(super::super::StopSignal::new(|| false), |_| {}),
             strict: Some(StrictPlan {
                 known: known
                     .iter()
@@ -1050,7 +1075,7 @@ mod tests {
     fn release(state: &SessionState) {
         state.accepting.store(false, Ordering::Release);
         let drains = std::mem::take(&mut *state.drains.lock().expect("drains"));
-        super::super::procgroup::join_drains(drains, &state.drain_cancel);
+        super::super::procgroup::join_drains(drains, &state.drain_cancel, &state.context);
     }
 
     /// Under a strict session a cargo child that fails the handshake is an
@@ -1076,7 +1101,7 @@ mod tests {
         assert!(
             events
                 .iter()
-                .any(|o| matches!(o.event, ObsEvent::AttributionError { .. })),
+                .any(|o| matches!(o.event, ObsEvent::AttributionRefused { .. })),
             "the refusal is recorded as an attribution error"
         );
     }
@@ -1098,7 +1123,7 @@ mod tests {
                 .expect("observed")
                 .iter()
                 .any(|observation| {
-                    matches!(observation.event, ObsEvent::AttributionError { .. })
+                    matches!(observation.event, ObsEvent::AttributionRefused { .. })
                 })
         );
     }
@@ -1123,7 +1148,9 @@ mod tests {
         ));
         assert!(observed.lock().expect("observed").iter().any(|o| matches!(
             &o.event,
-            ObsEvent::AttributionError { detail } if detail.contains("/elsewhere")
+            ObsEvent::AttributionRefused {
+                refusal: AttributionRefusal::UnplannedExecutable { executable },
+            } if executable == "/elsewhere"
         )));
 
         let (parent, shim) = UnixStream::pair().expect("socket pair");
@@ -1161,7 +1188,9 @@ mod tests {
         ));
         assert!(observed.lock().expect("observed").iter().any(|o| matches!(
             &o.event,
-            ObsEvent::AttributionError { detail } if detail.contains("rebuilt")
+            ObsEvent::AttributionRefused {
+                refusal: AttributionRefusal::RebuiltExecutable { .. },
+            }
         )));
     }
 
@@ -1197,7 +1226,9 @@ mod tests {
                 ));
                 assert!(observed.lock().expect("observed").iter().any(|o| matches!(
                     &o.event,
-                    ObsEvent::AttributionError { detail } if detail.contains("doctest carrier")
+                    ObsEvent::AttributionRefused {
+                        refusal: AttributionRefusal::RustdocWithoutCarrier,
+                    }
                 )));
             }
         }

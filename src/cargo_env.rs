@@ -6,9 +6,10 @@
 //! BA_SOURCE_IDENTITY = "python3 scripts/source_identity.py"
 //! ```
 //!
-//! Before each cargo invocation brokkr launches directly (the four spawn
-//! constructors: the captured runners and the passthrough runner in
-//! `output.rs`, and the process-group spawn in `test_runner.rs`), every entry's
+//! Before each cargo invocation brokkr launches directly - every spawn whose
+//! caller names the cargo [`SpawnProfile`] (the captured, sidecar and
+//! passthrough runners in `output/child.rs`, the process-group spawn in
+//! `test_runner/procgroup.rs`) - every entry's
 //! command runs with `sh -c` in the directory cargo is about to run in, and its
 //! trimmed stdout is set on that cargo as the variable. The use it exists for:
 //! a build script that must follow a content-exact input cargo cannot watch
@@ -48,9 +49,8 @@
 //!   against each invocation's own config chain and `--config` arguments.
 
 use std::collections::BTreeMap;
-use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -63,8 +63,53 @@ const EVAL_DEADLINE: Duration = Duration::from_secs(30);
 const STDOUT_LIMIT: usize = 4096;
 /// Stderr kept for the failure message; the rest is dropped and said to be.
 const STDERR_LIMIT: usize = 16 * 1024;
-/// How long the drains get to close once the command's group is gone.
-const DRAIN_GRACE: Duration = Duration::from_secs(2);
+
+/// The spawn caller chooses whether this child is Cargo. This deliberately
+/// avoids classifying by executable basename, which misses wrappers and
+/// rustup's `+toolchain` proxy form.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpawnProfile {
+    Plain,
+    Cargo { phase: Option<Phase> },
+}
+
+/// A check phase to attach to the first recorded evaluator failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Phase {
+    Gremlins,
+    Header,
+    Textlint,
+    Manifest,
+    ScriptCheck,
+    DependencyRules,
+    PublishCycle,
+    Clippy,
+    Rustdoc,
+    Prepare,
+    Test,
+    Coverage,
+    InstallFeature,
+}
+
+impl Phase {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Gremlins => "gremlins",
+            Self::Header => "header",
+            Self::Textlint => "textlint",
+            Self::Manifest => "manifest",
+            Self::ScriptCheck => "script_check",
+            Self::DependencyRules => "dependency_rules",
+            Self::PublishCycle => "publish_cycle",
+            Self::Clippy => "clippy",
+            Self::Rustdoc => "rustdoc",
+            Self::Prepare => "prepare",
+            Self::Test => "test",
+            Self::Coverage => "coverage",
+            Self::InstallFeature => "install_feature",
+        }
+    }
+}
 
 /// The configured entries, by name (sorted - entries are independent, so the
 /// order is only what makes evaluation deterministic).
@@ -72,7 +117,13 @@ static REGISTRY: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
 
 /// The first evaluation failure of this process, with the `check` phase it
 /// happened in (when there was one).
-static FAILED: Mutex<Option<(String, Option<&'static str>)>> = Mutex::new(None);
+static FAILED: Mutex<Option<FailureRecord>> = Mutex::new(None);
+
+#[derive(Debug, Clone)]
+struct FailureRecord {
+    message: String,
+    phase: Option<Phase>,
+}
 
 /// Install the project's `[cargo_env]` entries. Called by project detection;
 /// detection of one checkout installs the same entries however often it runs.
@@ -94,11 +145,12 @@ fn snapshot() -> Vec<(String, String)> {
 }
 
 /// The phase a recorded failure happened in, if one is recorded.
-pub fn failure() -> Option<(String, Option<&'static str>)> {
+pub fn failure() -> Option<(String, Option<Phase>)> {
     FAILED
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone()
+        .as_ref()
+        .map(|record| (record.message.clone(), record.phase))
 }
 
 /// The command's result with any recorded failure folded in: a run that
@@ -111,21 +163,19 @@ pub fn seal(result: Result<(), DevError>) -> Result<(), DevError> {
     }
 }
 
-/// Set every entry's value on `cmd`, a cargo about to be spawned with `args`,
-/// in `cwd` (the process's own when `None`), over `env`. A no-op for any
-/// other program, for an invocation that runs no build script, and with no
-/// entries configured.
+/// Set every entry's value on a cargo selected by the spawn caller, with
+/// `args` in `cwd` (the process's own when `None`) over `env`. A no-op for the
+/// plain spawn profile, invocations that run no build script, and no entries.
 pub fn apply(
     cmd: &mut Command,
-    program: &str,
+    profile: SpawnProfile,
     args: &[&str],
     cwd: Option<&Path>,
     env: &[(&str, &str)],
 ) -> Result<(), DevError> {
-    let is_cargo = Path::new(program).file_name().is_some_and(|n| n == "cargo");
-    if !is_cargo {
+    let SpawnProfile::Cargo { phase } = profile else {
         return Ok(());
-    }
+    };
     let entries = snapshot();
     if entries.is_empty() || !needs_evaluation(args) {
         return Ok(());
@@ -141,7 +191,7 @@ pub fn apply(
     };
     let names: Vec<&str> = entries.iter().map(|(n, _)| n.as_str()).collect();
     if let Some(conflict) = config_conflict(&names, &dir, args, env) {
-        return Err(record(conflict));
+        return Err(record(conflict, phase));
     }
     for (name, command) in &entries {
         if crate::shutdown::is_shutdown_requested() {
@@ -160,10 +210,10 @@ pub fn apply(
             }
             Err(Failure::Interrupted) => return Err(DevError::Interrupted),
             Err(Failure::Failed(why)) => {
-                return Err(record(format!(
-                    "{name}: `{command}` (in {}) {why}",
-                    dir.display()
-                )));
+                return Err(record(
+                    format!("{name}: `{command}` (in {}) {why}", dir.display()),
+                    phase,
+                ));
             }
         }
     }
@@ -180,13 +230,13 @@ const REPORTED: &str = "cargo_env failed";
 /// Record the first failure - printed once, here, so a caller that swallows
 /// the error cannot lose it and one that reports it cannot repeat it - and
 /// return the error for this spawn.
-fn record(message: String) -> DevError {
+fn record(message: String, phase: Option<Phase>) -> DevError {
     let mut failed = FAILED
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     if failed.is_none() {
         output::error(&format!("cargo_env: {message}"));
-        *failed = Some((message, crate::check_cmd::current_phase()));
+        *failed = Some(FailureRecord { message, phase });
     }
     DevError::CargoEnv(REPORTED.into())
 }
@@ -327,120 +377,56 @@ enum Failure {
     Failed(String),
 }
 
-/// What one drain read.
-enum Drained {
-    Done(Vec<u8>),
-    /// Stopped at the limit; the bytes so far.
-    Overflow(Vec<u8>),
-    Error(std::io::Error),
-}
-
-fn drain(pipe: impl Read + Send + 'static, limit: usize) -> std::sync::mpsc::Receiver<Drained> {
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let mut pipe = pipe;
-        let mut buf = Vec::new();
-        let mut chunk = [0u8; 4096];
-        let result = loop {
-            match pipe.read(&mut chunk) {
-                Ok(0) => break Drained::Done(buf),
-                Ok(n) => {
-                    buf.extend_from_slice(chunk.get(..n).unwrap_or_default());
-                    if buf.len() > limit {
-                        buf.truncate(limit);
-                        break Drained::Overflow(buf);
-                    }
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-                Err(e) => break Drained::Error(e),
-            }
-        };
-        tx.send(result).ok();
-    });
-    rx
-}
-
-/// Best-effort: a group that is already gone is the wanted outcome, and the
-/// group is this module's own child, so there is no identity to verify.
-fn kill_group(pgid: u32) {
-    crate::process::signal_process_group(pgid, libc::SIGKILL).ok();
-}
-
 /// Run one entry's command and return its value.
-#[allow(clippy::too_many_lines)] // spawn, bounded drain, then each failure shape in turn
 fn evaluate(
     command: &str,
     cwd: &Path,
     env: &[(&str, &str)],
     names: &[&str],
 ) -> Result<String, Failure> {
-    use std::os::unix::process::CommandExt;
-
-    let mut cmd = Command::new("sh");
-    cmd.args(["-c", command])
-        .current_dir(cwd)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .process_group(0);
-    for (k, v) in env {
-        cmd.env(k, v);
+    // `output` owns the shared deadline, process-group, drain and interrupt
+    // behavior. Scrub configured variables in the wrapper shell before the
+    // command is evaluated; the names come from config validation and are
+    // valid shell identifiers.
+    let script = format!("unset {}; exec sh -c \"$1\" </dev/null", names.join(" "));
+    let args = ["-c", script.as_str(), "brokkr-cargo-env", command];
+    let _signal_guard = crate::shutdown::SigtermGuard::install();
+    let pgid = std::cell::Cell::new(None::<u32>);
+    let observe_spawn = |pid: u32| pgid.set(Some(pid));
+    // Capture one byte past each limit: enough to tell "too long" from "at
+    // the limit", and no more held in memory however much the command prints.
+    let capture_result = crate::output::child::run_captured_bounded(
+        "sh",
+        &args,
+        cwd,
+        env,
+        EVAL_DEADLINE,
+        Some(&observe_spawn),
+        true,
+        crate::output::child::CaptureCap {
+            stdout: STDOUT_LIMIT + 1,
+            stderr: STDERR_LIMIT + 1,
+        },
+    );
+    // The evaluator's shell must not leave grandchildren behind, even when it
+    // exits successfully and those grandchildren closed the captured pipes.
+    if let Some(pgid) = pgid.get() {
+        crate::process::signal_process_group(pgid, libc::SIGKILL).ok();
     }
-    for n in names {
-        cmd.env_remove(n);
+    let capture = capture_result.map_err(|error| match error {
+        DevError::Interrupted => Failure::Interrupted,
+        other => Failure::Failed(format!("could not be started or waited on: {other}")),
+    })?;
+    if capture.captured.ending.is_deadline() {
+        return Err(Failure::Failed("was killed after 30s".into()));
     }
-    crate::hold::stamp(&mut cmd);
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| Failure::Failed(format!("could not be started: {e}")))?;
-    let pgid = child.id();
-    let (Some(out_pipe), Some(err_pipe)) = (child.stdout.take(), child.stderr.take()) else {
-        kill_group(pgid);
-        child.wait().ok();
-        return Err(Failure::Failed(
-            "could not be read (no output pipes)".into(),
-        ));
-    };
-    let out = drain(out_pipe, STDOUT_LIMIT);
-    let err = drain(err_pipe, STDERR_LIMIT);
-
-    let deadline = Instant::now() + EVAL_DEADLINE;
-    let mut stopped: Option<&str> = None;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break Some(status),
-            Ok(None) => {}
-            Err(e) => {
-                kill_group(pgid);
-                child.wait().ok();
-                return Err(Failure::Failed(format!("could not be waited on: {e}")));
-            }
-        }
-        if crate::shutdown::is_shutdown_requested() {
-            kill_group(pgid);
-            child.wait().ok();
-            return Err(Failure::Interrupted);
-        }
-        if Instant::now() >= deadline {
-            stopped = Some("was killed after 30s");
-            kill_group(pgid);
-            child.wait().ok();
-            break None;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    };
-    // Whatever the shell left behind in its group goes too: a descendant
-    // holding stdout open would otherwise keep the drain from ever closing.
-    kill_group(pgid);
-
-    let stderr_text = match err.recv_timeout(DRAIN_GRACE) {
-        Ok(Drained::Done(b)) => printable(&b),
-        Ok(Drained::Overflow(b)) => {
-            format!("{} [stderr cut at {STDERR_LIMIT} bytes]", printable(&b))
-        }
-        Ok(Drained::Error(e)) => format!("[stderr could not be read: {e}]"),
-        Err(_) => "[stderr did not close]".to_owned(),
-    };
+    let mut stderr = capture.captured.stderr;
+    let stderr_was_cut = stderr.len() > STDERR_LIMIT;
+    stderr.truncate(STDERR_LIMIT);
+    let mut stderr_text = printable(&stderr);
+    if stderr_was_cut {
+        stderr_text.push_str(&format!(" [stderr cut at {STDERR_LIMIT} bytes]"));
+    }
     let with_stderr = |why: String| {
         if stderr_text.trim().is_empty() {
             why
@@ -448,33 +434,35 @@ fn evaluate(
             format!("{why}; stderr:\n{}", stderr_text.trim_end())
         }
     };
-    if let Some(why) = stopped {
-        return Err(Failure::Failed(with_stderr(why.to_owned())));
+    if capture.output_cut {
+        return Err(Failure::Failed(with_stderr(
+            "output did not close cleanly after the command exited".into(),
+        )));
     }
-    let stdout = match out.recv_timeout(DRAIN_GRACE) {
-        Ok(Drained::Done(b)) => b,
-        Ok(Drained::Overflow(_)) => {
-            return Err(Failure::Failed(with_stderr(format!(
-                "printed more than {STDOUT_LIMIT} bytes"
-            ))));
-        }
-        Ok(Drained::Error(e)) => {
-            return Err(Failure::Failed(with_stderr(format!(
-                "output could not be read: {e}"
-            ))));
-        }
-        Err(_) => {
-            return Err(Failure::Failed(with_stderr(
-                "output did not close after it exited".into(),
-            )));
-        }
-    };
-    match status {
-        Some(s) if s.success() => {}
-        Some(s) => return Err(Failure::Failed(with_stderr(format!("failed ({s})")))),
-        None => return Err(Failure::Failed(with_stderr("did not finish".into()))),
+    if capture.captured.stdout.len() > STDOUT_LIMIT {
+        return Err(Failure::Failed(with_stderr(format!(
+            "printed more than {STDOUT_LIMIT} bytes"
+        ))));
     }
-    let Ok(text) = String::from_utf8(stdout) else {
+    if !matches!(
+        &capture.captured.ending,
+        crate::output::child::Ending::Exited(0)
+    ) {
+        let ending = match &capture.captured.ending {
+            crate::output::child::Ending::Exited(code) => format!("exit status: {code}"),
+            crate::output::child::Ending::Signalled(signal) => format!("signal: {signal}"),
+            crate::output::child::Ending::StopMarker(marker) => {
+                format!("unexpected stop marker: {marker}")
+            }
+            crate::output::child::Ending::Deadline(_) => "deadline exceeded".into(),
+            crate::output::child::Ending::Interrupted => "interrupted".into(),
+            crate::output::child::Ending::WaitFailed(message) => {
+                format!("wait failed: {message}")
+            }
+        };
+        return Err(Failure::Failed(with_stderr(format!("failed ({ending})"))));
+    }
+    let Ok(text) = String::from_utf8(capture.captured.stdout) else {
         return Err(Failure::Failed(with_stderr(
             "printed something that is not UTF-8".into(),
         )));

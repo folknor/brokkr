@@ -1,6 +1,6 @@
 // Convention scans and their findings; cargo diagnostic execution lives elsewhere.
 
-use super::{cargo_line, fmt_wall, phase_ceiling, phase_ok, phase_time_left};
+use super::{Phase, cargo_line, fmt_wall, phase_ok, phase_time_left};
 use crate::config::{
     DependencyRule, Diagnostics, GremlinsConfig, HeaderConfig, ManifestConfig, ScriptCheck, Stage,
     TextlintRule,
@@ -18,7 +18,7 @@ pub(super) fn run_gremlins(
     // `[gremlins] disable = true` skips the whole phase - both the scan and
     // `--fix-gremlins`.
     if config.is_some_and(|c| c.disable) {
-        phase_ok("gremlins", Some("disabled by config".into()));
+        phase_ok(Phase::Gremlins.label(), Some("disabled by config".into()));
         return Ok(());
     }
 
@@ -42,7 +42,7 @@ pub(super) fn run_gremlins(
     let found = gremlins::scan(project_root, config)?;
 
     if found.is_empty() {
-        phase_ok("gremlins", None);
+        phase_ok(Phase::Gremlins.label(), None);
         return Ok(());
     }
 
@@ -93,7 +93,7 @@ pub(super) fn run_header(
     let violations = crate::header::scan(project_root, cfg, year)?;
 
     if violations.is_empty() {
-        phase_ok("header", None);
+        phase_ok(Phase::Header.label(), None);
         return Ok(());
     }
 
@@ -120,7 +120,7 @@ pub(super) fn run_textlint(project_root: &Path, rules: &[TextlintRule]) -> Resul
         // cannot distinguish a clean tree from a rule whose `paths` glob has
         // stopped matching anything.
         phase_ok(
-            "textlint",
+            Phase::Textlint.label(),
             Some(format!(
                 "{}, {}",
                 output::count(rules.len(), "rule"),
@@ -151,7 +151,7 @@ pub(super) fn run_manifest(
     let violations = crate::manifest::scan(project_root, cfg)?;
 
     if violations.is_empty() {
-        phase_ok("manifest", None);
+        phase_ok(Phase::Manifest.label(), None);
         return Ok(());
     }
 
@@ -211,7 +211,7 @@ pub(super) fn run_script_checks(
         // - its output shown, the rest of the stage still run - rather than
         // letting the phase watchdog end the whole run. Outside a phase clock
         // (`check --script NAME`) the phase ceiling itself is the bound.
-        let budget = phase_time_left().unwrap_or_else(|| phase_ceiling("script_check"));
+        let budget = phase_time_left().unwrap_or_else(|| Phase::ScriptCheck.ceiling());
         let deadline = budget
             .saturating_sub(SCRIPT_CHECK_MARGIN)
             .max(std::time::Duration::from_secs(1));
@@ -238,7 +238,7 @@ pub(super) fn report_script_stage(
     // silently stopped running its checks is visible as a shrinking number.
     // Failures are unaffected; each one still prints its captured output below.
     if failures.is_empty() {
-        phase_ok("script-check", Some(output::count(total, noun)));
+        phase_ok(Phase::ScriptCheck.label(), Some(output::count(total, noun)));
         return Ok(());
     }
     if failures.len() < total {
@@ -410,7 +410,7 @@ pub(super) fn run_dependency_rules(
 
     if report.violations.is_empty() {
         phase_ok(
-            "dependency rules",
+            Phase::DependencyRules.label(),
             Some(format!(
                 "{}, {}",
                 output::count(report.rules, "rule"),
@@ -458,7 +458,7 @@ pub(super) fn run_publish_cycle(project_root: &Path, commands: bool) -> Result<(
     let cycles = crate::deps::publication_cycles(project_root)?;
 
     if cycles.is_empty() {
-        phase_ok("publish cycle", None);
+        phase_ok(Phase::PublishCycle.label(), None);
         return Ok(());
     }
 

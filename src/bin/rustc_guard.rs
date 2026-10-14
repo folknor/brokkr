@@ -49,26 +49,10 @@ mod lock_record {
 
 use lock_probe::{AuthHash, Nonce};
 
-/// The two per-user lock paths, by the same rule as the main crate's
-/// `user_dirs` (an unset or empty `$HOME` has no directory). Written out here
-/// because this bin links nothing from the brokkr crate, and `user_dirs.rs`
-/// carries inner docs and crate-relative tests that `include!` cannot take.
+/// The shared path source keeps the standalone guard and main crate on the same
+/// per-user lock-path rule without linking the brokkr crate.
 mod user_dirs {
-    use std::path::PathBuf;
-
-    fn brokkr_state_dir() -> Option<PathBuf> {
-        std::env::var_os("HOME")
-            .filter(|home| !home.is_empty())
-            .map(|home| PathBuf::from(home).join(".brokkr"))
-    }
-
-    pub(super) fn lock_file() -> Option<PathBuf> {
-        brokkr_state_dir().map(|dir| dir.join("brokkr.lock"))
-    }
-
-    pub(super) fn compile_lock() -> Option<PathBuf> {
-        brokkr_state_dir().map(|dir| dir.join("compile.lock"))
-    }
+    include!("../user_dirs/paths.rs");
 }
 
 fn main() {

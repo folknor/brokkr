@@ -7,7 +7,7 @@ use std::time::Duration;
 use crate::cargo_filter;
 use crate::error::DevError;
 use crate::output;
-use crate::test_runner::{self, LibtestOutcome};
+use crate::test_runner::{self, LaneVerdict};
 
 use super::display::{
     LineSink, RepeatState, flush_sink, make_stderr_forwarder, make_stdout_forwarder,
@@ -297,12 +297,16 @@ pub(super) fn run_one(
     let direct = launch != test_runner::Launch::Cargo;
     let sink: Option<LineSink> = buffered.then(LineSink::default);
     let built_tag = tag.to_owned();
-    let run = test_runner::streaming_run_libtest(
+    let run = test_runner::run_libtest(
         launch,
-        args,
-        cwd,
-        state_root,
-        env,
+        test_runner::LibtestInvocation {
+            args,
+            cwd,
+            state_root,
+            env,
+            context: test_runner::RunContext::process(),
+            abort: None,
+        },
         shape.ceilings.clone(),
         &shape.observe,
         make_stdout_forwarder(sink.clone()),
@@ -327,7 +331,6 @@ pub(super) fn run_one(
     // only place the FAIL footer can recover the message/location from.
     let parsed = test_runner::parse_test_output_with_stderr(&stdout_lines, &stderr_lines);
 
-    let has_test_result = stdout_lines.iter().any(|l| l.starts_with("test result:"));
     // Only cargo compiles; a directly run harness printing `error: ...` is a
     // test talking, never a build failure.
     let has_compile_error = !direct
@@ -343,11 +346,20 @@ pub(super) fn run_one(
     });
     let wall = format!("{:.2}s", test_wall.as_secs_f64());
 
-    if let LibtestOutcome::HungTest(hung) = &run.outcome {
-        return Ok(report_hung(shape, hung, &wall, cwd, repeat_state, sink));
+    let verdict = test_runner::lane_verdict(&run.outcome);
+    if verdict == LaneVerdict::BudgetBlown {
+        if let Some(hung) = &run.hung {
+            return Ok(report_hung(shape, hung, &wall, cwd, repeat_state, sink));
+        }
+        return Ok(RunReport::timed_out(
+            target,
+            "the runner observed a test budget expiry".into(),
+        ));
     }
-
-    if !has_test_result && has_compile_error {
+    if verdict == LaneVerdict::Stopped {
+        return Err(DevError::Interrupted);
+    }
+    if !run.outcome.has_test_activity() && has_compile_error {
         // One call: `first_sighting` records the signature, so asking twice
         // would answer `true` then `false` and suppress the block it just
         // decided to show.
@@ -364,25 +376,25 @@ pub(super) fn run_one(
     // Every failure this harness reported, not the first: the footer is how a
     // mutation check reads which tests went red, and a list cut to one entry
     // reads as "only this one".
-    let mut failures: Vec<Failure> = parsed
-        .failures
-        .iter()
-        .map(|f| Failure {
-            kind: failure_kind(f, shape.listed),
-            target: target.to_owned(),
-            what: f.name.clone(),
-            loc: f.location.clone(),
-            msg: f.message.clone(),
+    let mut failures: Vec<Failure> = run
+        .outcome
+        .failed_tests()
+        .into_iter()
+        .map(|name| {
+            let display = parsed.failures.iter().find(|failure| failure.name == name);
+            Failure {
+                kind: failure_kind(&name, shape.listed),
+                target: target.to_owned(),
+                what: name,
+                loc: display.and_then(|failure| failure.location.clone()),
+                msg: display.and_then(|failure| failure.message.clone()),
+            }
         })
         .collect();
-    // A harness that exited non-zero without finishing its report - or with
-    // nothing on the roster to account for the exit - failed at the harness
-    // level: a crash, an abort, a panic outside any test. It is a failure of
-    // its own, beside whatever tests it had already failed.
-    if !run.captured.status.success() && (!parsed.is_complete() || failures.is_empty()) {
+    if verdict == LaneVerdict::Fail && failures.is_empty() {
         failures.push(harness_failure(
             target,
-            &run.captured.status,
+            &run.captured.ending,
             direct,
             &stderr_lines,
             &run.in_flight,
@@ -393,10 +405,14 @@ pub(super) fn run_one(
     // mutation check reading "what went red" needs to see beside the failure.
     if !failures.is_empty()
         && let Some(want) = shape.expected
-        && parsed.is_complete()
-        && parsed.accounted() != want
+        && verdict == LaneVerdict::Fail
+        && run.outcome.terminal_count() != want
     {
-        failures.push(discovery_mismatch(target, want, parsed.accounted()));
+        failures.push(discovery_mismatch(
+            target,
+            want,
+            run.outcome.terminal_count(),
+        ));
     }
     if !failures.is_empty() {
         // Suppress the streamed block when this exact failure set already
@@ -411,8 +427,10 @@ pub(super) fn run_one(
         });
     }
 
-    if let Some(want) = shape.expected
-        && let Some(report) = disagrees_with_discovery(tag, target, &wall, want, &parsed)
+    if verdict == LaneVerdict::Pass
+        && let Some(want) = shape.expected
+        && let Some(report) =
+            disagrees_with_discovery(tag, target, &wall, want, verdict, &run.outcome)
     {
         flush_sink(sink, false);
         return Ok(report);
@@ -431,13 +449,13 @@ pub(super) fn run_one(
     //   first `test result:` line, a harness dying in a static initializer -
     //   has zero counts too, and calling that "no tests matched" turned a red
     //   run green: the name was fine, the binary blew up.
-    // - `is_complete()`: a stream that stopped mid-run has zeros because
+    // - The typed lane verdict: an incomplete stream has zeros because
     //   nothing reported them, not because nothing matched.
     // - `accounted()` rather than passed+failed: an invocation that matched
     //   only `#[ignore]`d tests really did match. Currently unreachable, since
     //   this command always passes `--include-ignored`, but the check should
     //   say what it means rather than rely on a flag elsewhere staying put.
-    if parsed.is_complete() && parsed.accounted() == 0 {
+    if verdict == LaneVerdict::Pass && run.outcome.terminal_count() == 0 {
         flush_sink(sink, false);
         return Ok(RunReport::bare(Outcome::NoMatch));
     }
@@ -451,9 +469,10 @@ pub(super) fn run_one(
     //
     // Fail closed. The counts are whatever was observed, so they still go in the
     // message - a partial report is useful, it just is not a pass.
-    if let test_runner::Completeness::Incomplete { reason } = &parsed.completeness {
+    if verdict == LaneVerdict::Incomplete {
+        let reason = run.outcome.incomplete_reason();
         flush_sink(sink, false);
-        return Ok(report_incomplete(tag, target, &wall, reason, &parsed));
+        return Ok(report_incomplete(tag, target, &wall, &reason, &run.outcome));
     }
 
     flush_sink(sink, false);
@@ -462,18 +481,11 @@ pub(super) fn run_one(
     Ok(RunReport::bare(Outcome::Pass))
 }
 
-/// What a parsed failure is. A `Test` needs libtest's verdict behind its name
-/// (`verdict`): the parser falls back to a panic's thread name when none ties
-/// to the failed roster, and a test can rename its thread - to `worker`, or to
-/// another selected test that then passes. Where discovery listed the harness,
-/// the name must also be one it listed. With no listing (a doc-only run) the
-/// verdict alone decides.
-pub(super) fn failure_kind(
-    f: &test_runner::ParsedTestFailure,
-    listed: Option<&[String]>,
-) -> FailureKind {
-    let selectable = listed.is_none_or(|l| l.contains(&f.name));
-    if f.verdict && selectable {
+/// Classify an observation-backed failed test for reporting. A listed harness
+/// cannot report a name discovery did not find; doc-only runs have no list.
+pub(super) fn failure_kind(name: &str, listed: Option<&[String]>) -> FailureKind {
+    let selectable = listed.is_none_or(|tests| tests.iter().any(|test| test == name));
+    if selectable {
         FailureKind::Test
     } else {
         FailureKind::Harness
@@ -550,12 +562,14 @@ pub(super) fn disagrees_with_discovery(
     target: &str,
     wall: &str,
     want: usize,
-    parsed: &test_runner::ParsedTestResults,
+    verdict: LaneVerdict,
+    outcome: &test_runner::ExecutionOutcome,
 ) -> Option<RunReport> {
-    if let test_runner::Completeness::Incomplete { reason } = &parsed.completeness {
-        return Some(report_incomplete(tag, target, wall, reason, parsed));
+    if verdict == LaneVerdict::Incomplete {
+        let reason = outcome.incomplete_reason();
+        return Some(report_incomplete(tag, target, wall, &reason, outcome));
     }
-    let got = parsed.accounted();
+    let got = outcome.terminal_count();
     if got == want {
         return None;
     }
@@ -652,13 +666,13 @@ pub(super) fn report_incomplete(
     target: &str,
     wall: &str,
     reason: &str,
-    parsed: &test_runner::ParsedTestResults,
+    outcome: &test_runner::ExecutionOutcome,
 ) -> RunReport {
+    let (passed, failed, ignored) = outcome.counts();
     println!(
         "[test]    FAIL {tag} ({wall}) - the test stream did not finish reporting: {reason}. \
-         Observed {} passed, {} failed, {} ignored. The process exited successfully, so this is a \
-         harness that stopped talking rather than a failing test.",
-        parsed.passed, parsed.failed, parsed.ignored
+         Observed {passed} passed, {failed} failed, {ignored} ignored. The observation stream \
+         stopped before it could establish a complete run."
     );
     std::io::stdout().flush().ok();
     RunReport {
@@ -686,7 +700,7 @@ pub(super) fn report_incomplete(
 /// start names nothing.
 pub(super) fn harness_failure(
     target: &str,
-    status: &std::process::ExitStatus,
+    status: &crate::output::Ending,
     direct: bool,
     stderr_lines: &[&str],
     in_flight: &[String],
@@ -702,7 +716,7 @@ pub(super) fn harness_failure(
                 let open = l.rfind(" (")?;
                 l[open + 2..].strip_suffix(')').map(str::to_owned)
             })
-            .unwrap_or_else(|| match status.code() {
+            .unwrap_or_else(|| match status.exit_code() {
                 Some(code) => format!("cargo exited with code {code}"),
                 None => "cargo was killed by a signal".to_owned(),
             })
@@ -725,8 +739,7 @@ pub(super) fn harness_failure(
 /// A directly run harness's exit status in cargo's words (`signal: 6,
 /// SIGABRT`, `exit status: 101`), so a crash reads the same whichever way the
 /// harness was launched.
-pub(super) fn describe_harness_status(status: &std::process::ExitStatus) -> String {
-    use std::os::unix::process::ExitStatusExt;
+pub(super) fn describe_harness_status(status: &crate::output::Ending) -> String {
     if let Some(sig) = status.signal() {
         let name = match sig {
             libc::SIGABRT => ", SIGABRT",
@@ -740,7 +753,7 @@ pub(super) fn describe_harness_status(status: &std::process::ExitStatus) -> Stri
         };
         return format!("signal: {sig}{name}");
     }
-    match status.code() {
+    match status.exit_code() {
         Some(code) => format!("exit status: {code}"),
         None => "ended without an exit status".to_owned(),
     }

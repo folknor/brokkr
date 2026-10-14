@@ -40,3 +40,12 @@ pattern = '\bnotes/'
 paths = ["src/**/*.rs"]
 region = "comment"
 message = "notes/ is transient; a code comment must carry its own context"
+
+# Project and per-user state paths belong to the typed layout owners.
+[[textlint]]
+name = "brokkr-state-paths-use-layouts"
+pattern = '"(?:[^"]*[/"])?\.brokkr(?:/|")'
+paths = ["src/**/*.rs"]
+exclude = ["src/clean/layout.rs", "src/user_dirs.rs", "src/user_dirs/paths.rs"]
+region = "string"
+message = "construct .brokkr paths through ProjectState, a project layout, or user_dirs"

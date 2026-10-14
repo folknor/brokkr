@@ -24,6 +24,8 @@ pub(crate) enum StreamSource {
     Harness { executable: String },
     /// The rustdoc entry point the shim accepted.
     Rustdoc,
+    /// The bundled nextest engine's event stream.
+    Engine,
 }
 
 /// How a stream stopped. Three different facts: the writer closed it, a read
@@ -49,6 +51,12 @@ pub(crate) enum TestResult {
     Interrupted,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ExecutionFailure {
+    EngineError,
+}
+
 /// Why the runner killed (or stopped waiting for) a process. Structured, so a
 /// consumer never has to read a cause back out of a signal status.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -66,6 +74,68 @@ pub(crate) enum KillCause {
     Cancelled,
     /// A cooperative shutdown: an interrupt or the phase watchdog.
     Stopped,
+}
+
+/// Why the harness shim refused to provide an attributable stream. Variant
+/// names and fields are part of the durable journal shape; dynamic OS error
+/// text is retained only on the I/O variants where it helps diagnose a local
+/// failure.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "reason", rename_all = "snake_case")]
+pub(crate) enum AttributionRefusal {
+    HandshakeIo { detail: String },
+    AuthenticationIo { detail: String },
+    SessionIo { detail: String },
+    UnplannedExecutable { executable: String },
+    RebuiltExecutable { executable: String },
+    MissingPlannedStream { executable: String, unit: String },
+    RustdocWithoutCarrier,
+    UnknownRole { role: u8 },
+    ExecutableHashFailed { executable: String, detail: String },
+    RunnerMismatch,
+    RunnerExitedDuringHandshake,
+    ProcessIdentityUnavailable,
+    DuplicateConnection,
+    SessionClosing,
+    StatePoisoned { name: String },
+}
+
+impl AttributionRefusal {
+    pub(crate) fn detail(&self) -> String {
+        match self {
+            Self::HandshakeIo { detail } => {
+                format!("a cargo child failed the harness handshake: {detail}")
+            }
+            Self::AuthenticationIo { detail } => {
+                format!("a cargo child failed harness authentication: {detail}")
+            }
+            Self::SessionIo { detail } => {
+                format!("the harness session could not create or deliver its output pipe: {detail}")
+            }
+            Self::UnplannedExecutable { executable } => {
+                format!("a harness ran an executable this run did not plan: {executable}")
+            }
+            Self::RebuiltExecutable { executable } => format!(
+                "{executable} is not the content the plan enumerated - it was rebuilt since the plan"
+            ),
+            Self::MissingPlannedStream { executable, unit } => format!(
+                "cargo exited successfully but the planned harness {unit} ({executable}) never presented its stream"
+            ),
+            Self::RustdocWithoutCarrier => {
+                "a rustdoc connected on a run the plan holds no doctest carrier for".into()
+            }
+            Self::UnknownRole { role } => format!("unknown harness handshake role {role}"),
+            Self::ExecutableHashFailed { executable, detail } => {
+                format!("{executable} could not be hashed: {detail}")
+            }
+            Self::RunnerMismatch => "the runner is not this brokkr binary".into(),
+            Self::RunnerExitedDuringHandshake => "runner exited before handshake".into(),
+            Self::ProcessIdentityUnavailable => "runner has no process starttime".into(),
+            Self::DuplicateConnection => "second connection from one runner".into(),
+            Self::SessionClosing => "the harness session is closing".into(),
+            Self::StatePoisoned { name } => format!("harness session {name} mutex poisoned"),
+        }
+    }
 }
 
 /// One thing the runner saw on one stream.
@@ -95,7 +165,7 @@ pub(crate) enum ObsEvent {
     StreamEnded {
         end: StreamEnd,
     },
-    /// A directly launched process's exit status.
+    /// The launched process's exit status, alongside the stream's end.
     Exited {
         code: Option<i32>,
         signal: Option<i32>,
@@ -104,9 +174,13 @@ pub(crate) enum ObsEvent {
         cause: KillCause,
         test: Option<String>,
     },
+    /// An execution engine failed after it stopped producing test events.
+    RunFailed {
+        reason: ExecutionFailure,
+    },
     /// The shim could not authenticate or attribute a harness.
-    AttributionError {
-        detail: String,
+    AttributionRefused {
+        refusal: AttributionRefusal,
     },
 }
 

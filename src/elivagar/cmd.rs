@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use super::archive_store::ArchiveStore;
+use crate::clean::layout::ElivagarLayout;
 use crate::cli::{CorpusArchiveArgs, PmtilesCorpusCommand};
 use crate::config;
 use crate::context::{MeasurementSession, bootstrap, bootstrap_config};
@@ -10,11 +11,15 @@ use crate::measure::MeasureRequest;
 use crate::project::{self, Project};
 
 pub(crate) fn bench_all(req: &MeasureRequest) -> Result<(), DevError> {
-    let ctx = MeasurementSession::new_for_request(req, "bench all")?;
+    let ctx = MeasurementSession::new_for_request(req)?;
     // The input assertions come from the same resolved entry that supplied
     // the path, not from a second lookup through the raw host config.
-    let pbf =
-        crate::resolve::resolve_pbf_entry(req.dataset, req.variant, &ctx.paths, req.project_root)?;
+    let pbf = crate::resolve::resolve_pbf_entry(
+        req.dataset,
+        req.variant,
+        &ctx.paths,
+        req.project_root.as_path(),
+    )?;
     let file_mb = crate::resolve::file_size_mb(&pbf.path)?;
     // `bench all`'s self arm is a tilegen run and takes the same contract one
     // gets. It used to hardcode a bare PipelineOpts and lean on ocean
@@ -25,12 +30,10 @@ pub(crate) fn bench_all(req: &MeasureRequest) -> Result<(), DevError> {
     super::bench_all::run(
         &ctx.harness,
         &ctx.paths,
-        req.effective_build_root(),
+        req.build_root.as_path(),
         &pbf_path,
         file_mb,
         req.runs(),
-        &ctx.paths.data_dir,
-        &ctx.paths.scratch_dir,
         tilegen,
         &opts,
     )
@@ -51,10 +54,11 @@ pub(crate) fn compare_tiles(
 pub(crate) fn download_ocean(
     dev_config: &config::DevConfig,
     project: Project,
-    project_root: &Path,
+    project_root: &crate::project::ProjectRoot,
+    build_root: &crate::project::BuildRoot,
 ) -> Result<(), DevError> {
     project::require(project, Project::Elivagar, "download-ocean")?;
-    let pi = bootstrap(None)?;
+    let pi = bootstrap(build_root)?;
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
     super::download_ocean::run(&paths.data_dir)
 }
@@ -62,10 +66,11 @@ pub(crate) fn download_ocean(
 pub(crate) fn download_natural_earth(
     dev_config: &config::DevConfig,
     project: Project,
-    project_root: &Path,
+    project_root: &crate::project::ProjectRoot,
+    build_root: &crate::project::BuildRoot,
 ) -> Result<(), DevError> {
     project::require(project, Project::Elivagar, "download-natural-earth")?;
-    let pi = bootstrap(None)?;
+    let pi = bootstrap(build_root)?;
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
     super::download_natural_earth::run(&paths.data_dir)
 }
@@ -74,8 +79,8 @@ pub(crate) fn download_natural_earth(
 pub(crate) fn verify(
     dev_config: &config::DevConfig,
     project: Project,
-    project_root: &Path,
-    build_root: &Path,
+    project_root: &crate::project::ProjectRoot,
+    build_root: &crate::project::BuildRoot,
     dataset: &str,
     variant: &str,
     commit: Option<&str>,
@@ -85,8 +90,9 @@ pub(crate) fn verify(
     unique_payloads: bool,
 ) -> Result<(), DevError> {
     project::require(project, Project::Elivagar, "verify")?;
-    let pi = bootstrap(Some(build_root))?;
+    let pi = bootstrap(build_root)?;
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
+    let build_root = build_root.as_path();
     let pmtiles_path = ArchiveStore::new(paths.output_dir.as_path())
         .resolve(dataset, variant, commit, file, build_root)?
         .path;
@@ -103,16 +109,17 @@ pub(crate) fn verify(
 pub(crate) fn inspect(
     dev_config: &config::DevConfig,
     project: Project,
-    project_root: &Path,
-    build_root: &Path,
+    project_root: &crate::project::ProjectRoot,
+    build_root: &crate::project::BuildRoot,
     dataset: &str,
     variant: &str,
     commit: Option<&str>,
     file: Option<&str>,
 ) -> Result<(), DevError> {
     project::require(project, Project::Elivagar, "pmtiles-inspect")?;
-    let pi = bootstrap(None)?;
+    let pi = bootstrap(build_root)?;
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
+    let build_root = build_root.as_path();
     let pmtiles_path = ArchiveStore::new(paths.output_dir.as_path())
         .resolve(dataset, variant, commit, file, build_root)?
         .path;
@@ -123,8 +130,8 @@ pub(crate) fn inspect(
 pub(crate) fn diag(
     dev_config: &config::DevConfig,
     project: Project,
-    project_root: &Path,
-    build_root: &Path,
+    project_root: &crate::project::ProjectRoot,
+    build_root: &crate::project::BuildRoot,
     dataset: &str,
     variant: &str,
     commit: Option<&str>,
@@ -134,8 +141,9 @@ pub(crate) fn diag(
     y: u32,
 ) -> Result<(), DevError> {
     project::require(project, Project::Elivagar, "diag")?;
-    let pi = bootstrap(None)?;
+    let pi = bootstrap(build_root)?;
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
+    let build_root = build_root.as_path();
     let pmtiles_path = ArchiveStore::new(paths.output_dir.as_path())
         .resolve(dataset, variant, commit, file, build_root)?
         .path;
@@ -146,8 +154,8 @@ pub(crate) fn diag(
 pub(crate) fn svg(
     dev_config: &config::DevConfig,
     project: Project,
-    project_root: &Path,
-    build_root: &Path,
+    project_root: &crate::project::ProjectRoot,
+    build_root: &crate::project::BuildRoot,
     dataset: &str,
     variant: &str,
     commit: Option<&str>,
@@ -161,8 +169,9 @@ pub(crate) fn svg(
     output_path: Option<&Path>,
 ) -> Result<(), DevError> {
     project::require(project, Project::Elivagar, "svg")?;
-    let pi = bootstrap(None)?;
+    let pi = bootstrap(build_root)?;
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
+    let build_root = build_root.as_path();
     let pmtiles_path = ArchiveStore::new(paths.output_dir.as_path())
         .resolve(dataset, variant, commit, file, build_root)?
         .path;
@@ -192,8 +201,8 @@ pub(crate) fn svg(
 pub(crate) fn regress(
     dev_config: &config::DevConfig,
     project: Project,
-    project_root: &Path,
-    build_root: &Path,
+    project_root: &crate::project::ProjectRoot,
+    build_root: &crate::project::BuildRoot,
     dataset: &str,
     variant: &str,
     commit: Option<&str>,
@@ -209,8 +218,9 @@ pub(crate) fn regress(
     json: bool,
 ) -> Result<(), DevError> {
     project::require(project, Project::Elivagar, "regress")?;
-    let pi = bootstrap(None)?;
+    let pi = bootstrap(build_root)?;
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
+    let build_root = build_root.as_path();
     let current = ArchiveStore::new(paths.output_dir.as_path())
         .resolve(dataset, variant, commit, file, build_root)?
         .path;
@@ -287,16 +297,17 @@ where
 pub(crate) fn corpus(
     dev_config: &config::DevConfig,
     project: Project,
-    project_root: &Path,
-    build_root: &Path,
+    project_root: &crate::project::ProjectRoot,
+    build_root: &crate::project::BuildRoot,
     cmd: &PmtilesCorpusCommand,
     _lock: Option<&LockGuard>,
 ) -> Result<(), DevError> {
     use super::corpus as gate;
 
     project::require(project, Project::Elivagar, "pmtiles-corpus")?;
-    let pi = bootstrap(None)?;
+    let pi = bootstrap(build_root)?;
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
+    let build_root = build_root.as_path();
 
     // Resolve an archive through the same commit/file resolver as
     // pmtiles-inspect/diag/svg. `variant` is `None` only alongside `--file`
@@ -399,7 +410,7 @@ pub(crate) fn corpus(
             let out_path = match output {
                 Some(o) => o.clone(),
                 None => {
-                    let dir = paths.data_dir.join(crate::CORPUS_CALIBRAND_DIR);
+                    let dir = ElivagarLayout::new(&paths).corpus_calibrands();
                     std::fs::create_dir_all(&dir).ok();
                     // With `--file` and no `--variant`, name the calibrand
                     // after the input file instead.

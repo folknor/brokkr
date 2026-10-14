@@ -1,6 +1,7 @@
 //! `brokkr dellingr` - build the Lua bench harness and run one workload.
 
 use crate::build;
+use crate::clean::layout::ProjectState;
 use crate::context::MeasurementSession;
 use crate::error::DevError;
 use crate::harness::{self, BenchConfig};
@@ -10,14 +11,6 @@ use crate::project::{self, Project};
 
 use super::workload;
 
-/// Scratch dir for the harness's hotpath report and marker FIFO.
-///
-/// Under `.brokkr/` rather than the configured `scratch_dir`, whose default
-/// (`data/scratch`) would create a `data/` tree in a project that has no data.
-/// Everything here is brokkr's own leavings, which is what `brokkr clean`
-/// expects of a `.brokkr/<project>` dir.
-const SCRATCH_REL: &str = ".brokkr/dellingr";
-
 /// Run one registered workload under the requested measurement mode.
 pub(crate) fn run(req: &MeasureRequest, lua: &str) -> Result<(), DevError> {
     project::require(req.project, Project::Dellingr, "dellingr")?;
@@ -26,7 +19,12 @@ pub(crate) fn run(req: &MeasureRequest, lua: &str) -> Result<(), DevError> {
     // cost nothing. The path deliberately comes from the current tree even
     // under `--commit` - see `workload::resolve`. Instrumented modes resolve
     // the workload's `hotpath_file` variant, not `file`.
-    let resolved = workload::resolve(req.project_config, req.project_root, lua, uses_hotpath(req))?;
+    let resolved = workload::resolve(
+        req.project_config,
+        req.project_root.as_path(),
+        lua,
+        uses_hotpath(req),
+    )?;
     let example = workload::config(req.project_config)?.example.clone();
     let lua_path = resolved.path_str()?.to_owned();
 
@@ -50,7 +48,7 @@ pub(crate) fn run(req: &MeasureRequest, lua: &str) -> Result<(), DevError> {
     // comparing, and hotpath instrumentation would tax every call it wraps.
     // The profiling modes add the standard feature for their instrument.
     let features: Vec<String> = if uses_hotpath(req) {
-        req.hotpath_features()
+        req.build_features()
             .into_iter()
             .map(str::to_owned)
             .collect()
@@ -68,9 +66,10 @@ pub(crate) fn run(req: &MeasureRequest, lua: &str) -> Result<(), DevError> {
         profile: "release",
     };
 
-    let ctx = MeasurementSession::with_build_config_for_request(req, &build_config, "dellingr")?;
+    let ctx = MeasurementSession::with_build_config_for_request(req, &build_config)?;
 
-    let scratch_dir = req.project_root.join(SCRATCH_REL);
+    let state = ProjectState::new(req.project_root.as_path());
+    let scratch_dir = state.dellingr().scratch().to_path_buf();
     std::fs::create_dir_all(&scratch_dir)?;
 
     let binary_str = ctx.binary()?.display().to_string();
@@ -86,23 +85,28 @@ pub(crate) fn run(req: &MeasureRequest, lua: &str) -> Result<(), DevError> {
         input_file: None,
         input_mb: None,
         cargo_features: None,
-        cargo_profile: build::CargoProfile::Release,
+        external_build: None,
         runs: req.runs(),
         cli_args: Some(harness::format_cli_args(&binary_str, &args)),
         metadata: vec![],
     };
 
     if uses_hotpath(req) {
-        let label = harness::hotpath_feature(req.is_alloc());
+        let label = req
+            .mode
+            .profiled()
+            .map_or("", crate::measure::ProfiledMode::feature);
         output::detail(&format!("dellingr {label}: {}", resolved.name));
-        harness::hotpath_alloc_note(req.is_alloc());
+        if let Some(profiling) = req.mode.profiled() {
+            profiling.print_note();
+        }
 
         ctx.harness.run_hotpath(&config, ctx.binary()?, |_i| {
             let (result, _stderr, sidecar) = harness::run_hotpath_capture(
                 &binary_str,
                 &args,
                 &scratch_dir,
-                req.project_root,
+                req.project_root.as_path(),
                 &[],
                 &[],
                 req.stop_marker,
@@ -117,7 +121,7 @@ pub(crate) fn run(req: &MeasureRequest, lua: &str) -> Result<(), DevError> {
             req.runs()
         ));
         ctx.harness
-            .run_external(&config, ctx.binary()?, &args, req.project_root)?;
+            .run_external(&config, ctx.binary()?, &args, req.project_root.as_path())?;
     }
 
     Ok(())
@@ -134,7 +138,7 @@ fn uses_hotpath(req: &MeasureRequest) -> bool {
 /// Human-readable feature summary for `--dry-run` output.
 fn feature_summary(req: &MeasureRequest) -> String {
     if uses_hotpath(req) {
-        format!("--features {}", req.hotpath_features().join(","))
+        format!("--features {}", req.build_features().join(","))
     } else {
         "no hotpath features".to_owned()
     }

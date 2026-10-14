@@ -1,8 +1,8 @@
 // Final verdict, stop precedence, summary schema, and run timings.
 
 use super::{
-    ContinuationReport, DoctestAccounting, ExecutionAccounting, PolicyCoverage, RunReport,
-    TerminationCause, TerminationSummary, WATCHDOG_EXIT_CODE, render_continuation,
+    ContinuationReport, DoctestAccounting, ExecutionAccounting, Phase, PolicyCoverage, RunReport,
+    SummaryScope, TerminationCause, TerminationSummary, WATCHDOG_EXIT_CODE, render_continuation,
 };
 #[cfg(test)]
 use super::{DoctestObserved, TESTS_FAILED, already_reported};
@@ -40,30 +40,127 @@ pub(super) fn run_stop(
     }
 }
 
-/// Print the summary line, emit the `--json` trailer, and map the claim to
-/// the exit contract. The claim decides the word and the exit code: `passed`
-/// stays with unclaimed legacy profiles (exactly as trustworthy as before
-/// `certifies` existed), `complete` owns the gate verdict, and `partial` may
-/// never print a success word a grep could mistake for one - it exits 10 so
-/// naive `&& git commit` chaining fails closed. Any failure exits 1, except a
-/// cooperative shutdown (`brokkr kill`), which keeps main's exit 130, and a
-/// fired time ceiling, which exits 124.
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-pub(super) fn finish_check(
-    outcome: &Result<(), DevError>,
-    stop: Option<RunStop>,
-    certifies: Option<Certifies>,
-    profile_label: &Option<String>,
-    sweep_labels: &[&str],
-    lints: (&[String], &[SitedAllow]),
-    skip_phases: &[String],
-    prose_only: bool,
-    package: Option<&str>,
-    failing_phase: Option<&'static str>,
-    mut report: RunReport,
-    json: bool,
-    started: std::time::Instant,
-) -> Result<(), DevError> {
+/// Why a check invocation failed after applying stop precedence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FailureKind {
+    Error,
+    Deadline,
+    Interrupt,
+}
+
+/// The human, JSON and exit-code forms of one completed check invocation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Verdict {
+    Passed { prose_only: bool },
+    Complete,
+    Partial { narrowed: Vec<String> },
+    Failed(FailureKind),
+}
+
+impl Verdict {
+    fn decide(
+        certifies: Option<Certifies>,
+        failure: Option<FailureKind>,
+        skip_phases: &[String],
+        prose_only: bool,
+        package: Option<&str>,
+    ) -> Self {
+        if let Some(failure) = failure {
+            return Self::Failed(failure);
+        }
+        match certifies {
+            None => Self::Passed { prose_only },
+            Some(Certifies::Complete) => Self::Complete,
+            Some(Certifies::Partial) => {
+                let mut narrowed = Vec::new();
+                if !skip_phases.is_empty() {
+                    narrowed.push(format!("skipped phases: {}", skip_phases.join(", ")));
+                }
+                if let Some(package) = package {
+                    narrowed.push(format!("scoped to -p {package}"));
+                }
+                Self::Partial { narrowed }
+            }
+        }
+    }
+
+    fn word(&self) -> &'static str {
+        match self {
+            Self::Passed { .. } => "passed",
+            Self::Complete => "complete",
+            Self::Partial { .. } => "partial",
+            Self::Failed(FailureKind::Error) => "failed",
+            Self::Failed(FailureKind::Deadline) => "stopped by its time ceiling",
+            Self::Failed(FailureKind::Interrupt) => "interrupted",
+        }
+    }
+
+    fn json_word(&self) -> &'static str {
+        match self {
+            Self::Failed(_) => "failed",
+            other => other.word(),
+        }
+    }
+
+    fn partial_suffix(&self) -> String {
+        let Self::Partial { narrowed } = self else {
+            return String::new();
+        };
+        if narrowed.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", narrowed.join("; "))
+        }
+    }
+
+    fn exit(&self) -> Result<(), DevError> {
+        match self {
+            Self::Passed { .. } | Self::Complete => Ok(()),
+            Self::Partial { .. } => Err(DevError::ExitCode(10)),
+            Self::Failed(FailureKind::Error) => Err(DevError::ExitCode(1)),
+            Self::Failed(FailureKind::Deadline) => Err(DevError::ExitCode(WATCHDOG_EXIT_CODE)),
+            Self::Failed(FailureKind::Interrupt) => Err(DevError::Interrupted),
+        }
+    }
+}
+
+pub(super) struct FinishInput<'a> {
+    pub(super) outcome: &'a Result<(), DevError>,
+    pub(super) stop: Option<RunStop>,
+    pub(super) certifies: Option<Certifies>,
+    pub(super) profile_label: &'a Option<String>,
+    pub(super) sweep_labels: &'a [&'a str],
+    pub(super) lints: &'a crate::config::LintsConfig,
+    pub(super) skip_phases: &'a [String],
+    pub(super) prose_only: bool,
+    pub(super) package: Option<&'a str>,
+    pub(super) failing_phase: Option<Phase>,
+    pub(super) report: RunReport,
+    pub(super) json: bool,
+    pub(super) started: std::time::Instant,
+}
+
+/// Print the summary line, emit the `--json` trailer, and return the enum's
+/// exit contract. All run facts arrive together so the human and JSON forms
+/// cannot select different outcomes.
+#[allow(clippy::too_many_lines)]
+pub(super) fn finish_check(input: FinishInput<'_>) -> Result<(), DevError> {
+    let FinishInput {
+        outcome,
+        stop,
+        certifies,
+        profile_label,
+        sweep_labels,
+        lints,
+        skip_phases,
+        prose_only,
+        package,
+        failing_phase,
+        mut report,
+        json,
+        started,
+    } = input;
+
     // Nothing is running any more; drop the status line before the verdict so
     // it is not redrawn under it.
     output::disable_status_line();
@@ -72,120 +169,132 @@ pub(super) fn finish_check(
     match stop {
         Some(RunStop::Watchdog) => {
             report.termination = Some(TerminationSummary {
-                kind: TerminationCause::PhaseDeadline.as_str().to_owned(),
-                scope: failing_phase.unwrap_or("run").to_owned(),
+                kind: TerminationCause::PhaseDeadline,
+                scope: failing_phase.map_or(SummaryScope::Run, SummaryScope::Phase),
             });
         }
         Some(RunStop::Interrupt) => {
             report.termination = Some(TerminationSummary {
-                kind: TerminationCause::Interrupt.as_str().to_owned(),
-                scope: "run".to_owned(),
+                kind: TerminationCause::Interrupt,
+                scope: SummaryScope::Run,
             });
         }
         None => {}
     }
-    let context = verdict_context(profile_label, sweep_labels.len(), lints.0, lints.1);
+    let context = verdict_context(profile_label, sweep_labels.len(), lints);
     // A stopped run is a failed run whatever its phases returned (see
     // [`run_stop`]): the stop takes the failure path even from `Ok(())`.
     let stopped_ok = DevError::Interrupted;
     let failure = match (outcome, stop) {
         (Ok(()), None) => None,
         (Ok(()), Some(_)) => Some(&stopped_ok),
-        (Err(e), _) => Some(e),
+        (Err(error), _) => Some(error),
     };
-    match failure {
-        None => {
+    let failure_kind = failure.map(|_| match stop {
+        Some(RunStop::Watchdog) => FailureKind::Deadline,
+        Some(RunStop::Interrupt) => FailureKind::Interrupt,
+        None => FailureKind::Error,
+    });
+    let verdict = Verdict::decide(certifies, failure_kind, skip_phases, prose_only, package);
+
+    match (&verdict, failure) {
+        (Verdict::Passed { prose_only }, None) => {
             // A run that passed has nothing to continue.
             report.continuation = None;
-            let (word, scope, suffix, result) = match certifies {
-                // A shortened run must not sign off in the same words a full
-                // one does - the announcement at the top has scrolled away by
-                // the time this line is read.
-                None => {
-                    let scope = if prose_only {
-                        " (markdown only - build phases skipped)"
-                    } else {
-                        ""
-                    };
-                    ("passed", scope, String::new(), Ok(()))
-                }
-                Some(Certifies::Complete) => ("complete", "", String::new(), Ok(())),
-                Some(Certifies::Partial) => {
-                    let mut narrowed: Vec<String> = Vec::new();
-                    if !skip_phases.is_empty() {
-                        narrowed.push(format!("skipped phases: {}", skip_phases.join(", ")));
-                    }
-                    if let Some(p) = package {
-                        narrowed.push(format!("scoped to -p {p}"));
-                    }
-                    let suffix = if narrowed.is_empty() {
-                        String::new()
-                    } else {
-                        format!(" ({})", narrowed.join("; "))
-                    };
-                    ("partial", "", suffix, Err(DevError::ExitCode(10)))
-                }
+            let scope = if *prose_only {
+                " (markdown only - build phases skipped)"
+            } else {
+                ""
             };
             output::result_msg(&format!(
-                "check {word}{scope} in {}{suffix}{context}",
+                "check {}{scope} in {}{context}",
+                verdict.word(),
                 fmt_wall(started.elapsed())
             ));
             if json {
                 emit_json_summary(
-                    word,
+                    &verdict,
                     certifies,
                     profile_label,
                     sweep_labels,
                     package,
                     None,
-                    prose_only,
+                    *prose_only,
                     report,
                     started.elapsed(),
                 );
             }
-            result
+            verdict.exit()
         }
-        Some(e) => {
-            // A `Reported` failure printed its own detail above. Every other
-            // error carries its diagnostic in the message and nobody has shown
-            // it yet - this used to assume the former of every failure, and a
-            // `cargo metadata` failure or a config refusal found at phase time
-            // ended in a bare `check failed` naming nothing.
-            // A fired watchdog killed the run's processes and raised the
-            // shutdown flag; whatever error that surfaced as (an interrupt, a
-            // killed test, a failed build) is its echo, not a cause to print.
-            let stopped = stop == Some(RunStop::Watchdog);
-            // Under a pending request, a failure is the interrupt's echo too: a
-            // child killed by it can surface as a failed build or test before
-            // anything polls the flag.
-            let interrupted = stop == Some(RunStop::Interrupt);
-            if !stopped
-                && !interrupted
-                && !e.already_printed()
-                && !matches!(e, DevError::ExitCode(_))
-            {
-                output::error(&e.to_string());
-            }
-            let word = if stopped {
-                "stopped by its time ceiling"
-            } else if interrupted {
-                "interrupted"
-            } else {
-                "failed"
-            };
-            output::error(&format!(
-                "check {word} in {}{context}",
+        (Verdict::Complete, None) => {
+            report.continuation = None;
+            output::result_msg(&format!(
+                "check {} in {}{context}",
+                verdict.word(),
                 fmt_wall(started.elapsed())
             ));
-            // After the verdict, before the trailer: what the failed run left
-            // unresolved, and the command that runs it again. Said for every
-            // way a run fails - a kill, a timeout, a fail-fast, an interrupt.
-            if let Some(c) = &report.continuation {
-                output::error(&render_continuation(c).join("\n"));
+            if json {
+                emit_json_summary(
+                    &verdict,
+                    certifies,
+                    profile_label,
+                    sweep_labels,
+                    package,
+                    None,
+                    false,
+                    report,
+                    started.elapsed(),
+                );
+            }
+            verdict.exit()
+        }
+        (Verdict::Partial { .. }, None) => {
+            report.continuation = None;
+            output::result_msg(&format!(
+                "check {} in {}{}{context}",
+                verdict.word(),
+                fmt_wall(started.elapsed()),
+                verdict.partial_suffix()
+            ));
+            if json {
+                emit_json_summary(
+                    &verdict,
+                    certifies,
+                    profile_label,
+                    sweep_labels,
+                    package,
+                    None,
+                    false,
+                    report,
+                    started.elapsed(),
+                );
+            }
+            verdict.exit()
+        }
+        (Verdict::Failed(kind), Some(error)) => {
+            // A `Reported` failure printed its own detail above. Every other
+            // error carries its diagnostic in the message and nobody has shown
+            // it yet - the summary names it before the verdict.
+            let stopped = *kind == FailureKind::Deadline;
+            let interrupted = *kind == FailureKind::Interrupt;
+            if !stopped
+                && !interrupted
+                && error.rendering_policy() != crate::error::RenderingPolicy::AlreadyPrinted
+                && !matches!(error, DevError::ExitCode(_))
+            {
+                output::error(&error.to_string());
+            }
+            output::error(&format!(
+                "check {} in {}{context}",
+                verdict.word(),
+                fmt_wall(started.elapsed())
+            ));
+            if let Some(continuation) = &report.continuation {
+                output::error(&render_continuation(continuation).join("\n"));
             }
             if json {
                 emit_json_summary(
-                    "failed",
+                    &verdict,
                     certifies,
                     profile_label,
                     sweep_labels,
@@ -196,19 +305,9 @@ pub(super) fn finish_check(
                     started.elapsed(),
                 );
             }
-            // A graceful `brokkr kill` keeps its own exit: main maps
-            // `Interrupted` to 130 and runs the scratch cleanup the
-            // cooperative-shutdown contract promises. Folding it into exit 1
-            // skipped both.
-            if stopped {
-                return Err(DevError::ExitCode(WATCHDOG_EXIT_CODE));
-            }
-            if interrupted {
-                return Err(DevError::Interrupted);
-            }
-            // Exit 1 without main echoing a second, timing-less `[error]`.
-            Err(DevError::ExitCode(1))
+            verdict.exit()
         }
+        _ => unreachable!("a failed verdict has a cause and a green verdict does not"),
     }
 }
 
@@ -230,9 +329,14 @@ pub(super) fn finish_check(
 pub(super) fn verdict_context(
     profile: &Option<String>,
     sweeps: usize,
-    allow: &[String],
-    allow_exact: &[SitedAllow],
+    lints: &crate::config::LintsConfig,
 ) -> String {
+    let allow_exact: &[SitedAllow] = &lints.allow_exact;
+    let allow: Vec<&str> = lints
+        .allow
+        .iter()
+        .map(crate::config::check::LintName::as_str)
+        .collect();
     let mut parts: Vec<String> = Vec::new();
     let mut run = Vec::new();
     if let Some(p) = profile {
@@ -287,6 +391,18 @@ pub(super) fn verdict_context(
 /// since the old `run` count meant "a reached lane listed it".
 const SUMMARY_SCHEMA: u32 = 2;
 
+impl serde::Serialize for Certifies {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(match self {
+            Self::Complete => "complete",
+            Self::Partial => "partial",
+        })
+    }
+}
+
 /// The `--json` summary object: one line, last on stdout. Versioned and
 /// additive within a version: fields are only ever added, consumers must
 /// tolerate unknown ones, and a bump is reserved for renames or semantic
@@ -298,7 +414,7 @@ const SUMMARY_SCHEMA: u32 = 2;
 #[derive(serde::Serialize)]
 struct CheckSummary<'a> {
     schema: u32,
-    certifies: Option<&'a str>,
+    certifies: Option<Certifies>,
     verdict: &'a str,
     profile: Option<&'a str>,
     sweeps: Vec<&'a str>,
@@ -306,7 +422,7 @@ struct CheckSummary<'a> {
     /// able to see that a green covered specific packages, not the
     /// workspace. A multi-package run joins the names with commas.
     package: Option<&'a str>,
-    failed_phase: Option<&'a str>,
+    failed_phase: Option<Phase>,
     /// `"prose_only"` when the markdown-only shortcut skipped the build
     /// phases, `null` on a full run. Without it a shortened run's `passed`
     /// was indistinguishable from a full one to a machine reader, which is
@@ -335,12 +451,12 @@ struct CheckSummary<'a> {
 
 #[allow(clippy::too_many_arguments)]
 fn emit_json_summary(
-    verdict: &str,
+    verdict: &Verdict,
     certifies: Option<Certifies>,
     profile: &Option<String>,
     sweeps: &[&str],
     package: Option<&str>,
-    failed_phase: Option<&'static str>,
+    failed_phase: Option<Phase>,
     prose_only: bool,
     report: RunReport,
     elapsed: std::time::Duration,
@@ -355,11 +471,8 @@ fn emit_json_summary(
     };
     let summary = CheckSummary {
         schema: SUMMARY_SCHEMA,
-        certifies: certifies.map(|c| match c {
-            Certifies::Complete => "complete",
-            Certifies::Partial => "partial",
-        }),
-        verdict,
+        certifies,
+        verdict: verdict.json_word(),
         profile: profile.as_deref(),
         sweeps: sweeps.to_vec(),
         package,
@@ -431,11 +544,11 @@ mod json_summary_tests {
     #![allow(clippy::unwrap_used)]
 
     use super::{
-        CheckSummary, DoctestAccounting, DoctestObserved, ExecutionAccounting, PolicyCoverage,
-        SUMMARY_SCHEMA, TerminationSummary,
+        CheckSummary, DoctestAccounting, DoctestObserved, ExecutionAccounting, Phase,
+        PolicyCoverage, SUMMARY_SCHEMA, SummaryScope, TerminationCause, TerminationSummary,
     };
 
-    fn summary<'a>(verdict: &'a str, failed_phase: Option<&'a str>) -> CheckSummary<'a> {
+    fn summary<'a>(verdict: &'a str, failed_phase: Option<Phase>) -> CheckSummary<'a> {
         CheckSummary {
             schema: SUMMARY_SCHEMA,
             certifies: None,
@@ -472,7 +585,7 @@ mod json_summary_tests {
 
     #[test]
     fn failed_summary_names_the_phase() {
-        let mut s = summary("failed", Some("clippy"));
+        let mut s = summary("failed", Some(Phase::Clippy));
         s.profile = None;
         s.package = Some("nautilus-betfair");
         let line = serde_json::to_string(&s).unwrap();
@@ -488,10 +601,10 @@ mod json_summary_tests {
     /// the doctest block, and the termination - each its own claim.
     #[test]
     fn schema_two_keeps_policy_and_execution_apart() {
-        let mut s = summary("failed", Some("test"));
+        let mut s = summary("failed", Some(Phase::Test));
         s.termination = Some(TerminationSummary {
-            kind: "per_test_timeout".into(),
-            scope: "serial".into(),
+            kind: TerminationCause::PerTestDeadline,
+            scope: SummaryScope::Lane("serial".into()),
         });
         s.policy_coverage = Some(PolicyCoverage {
             status: "passed",
@@ -536,7 +649,8 @@ mod json_summary_tests {
 #[cfg(test)]
 mod failure_exit_tests {
     use super::{
-        Certifies, RunReport, RunStop, TESTS_FAILED, already_reported, finish_check, run_stop,
+        Certifies, FinishInput, Phase, RunReport, RunStop, TESTS_FAILED, already_reported,
+        finish_check, run_stop,
     };
     use crate::error::DevError;
 
@@ -549,21 +663,21 @@ mod failure_exit_tests {
         stop: Option<RunStop>,
         certifies: Option<Certifies>,
     ) -> Result<(), DevError> {
-        finish_check(
+        finish_check(FinishInput {
             outcome,
             stop,
             certifies,
-            &None,
-            &[],
-            (&[], &[]),
-            &[],
-            false,
-            None,
-            Some("test"),
-            RunReport::default(),
-            false,
-            std::time::Instant::now(),
-        )
+            profile_label: &None,
+            sweep_labels: &[],
+            lints: &crate::config::LintsConfig::default(),
+            skip_phases: &[],
+            prose_only: false,
+            package: None,
+            failing_phase: Some(Phase::Test),
+            report: RunReport::default(),
+            json: false,
+            started: std::time::Instant::now(),
+        })
     }
 
     /// A graceful `brokkr kill` must reach main as `Interrupted`, which is

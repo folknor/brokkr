@@ -5,7 +5,6 @@ use std::path::Path;
 use crate::artefacts;
 use crate::config::project_config::ratatoskr::RatatoskrConfig;
 use crate::error::DevError;
-use crate::lockfile::{self, LockContext};
 use crate::output;
 use crate::ratatoskr::build;
 use crate::ratatoskr::discover::{self, ScriptInfo};
@@ -83,12 +82,7 @@ pub fn run_sync_all(req: &SyncAllRequest<'_>) -> Result<(), DevError> {
     // stall mid-way waiting behind one. With the build hoisted out of the
     // loop this is the path's only acquire; the re-entrant nesting story
     // lives with `--gate all` (see `lockfile::acquire`).
-    let project_root_str = req.project_root.display().to_string();
-    let _lock = lockfile::acquire(&LockContext {
-        project: "ratatoskr",
-        command: "sync",
-        project_root: &project_root_str,
-    })?;
+    let _lock = crate::context::reenter_command_lock()?;
     // One cooperative-SIGTERM guard for the whole sweep: the build and
     // every script run poll the same shutdown flag. See run_sync_smoke
     // for the mechanism.

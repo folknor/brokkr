@@ -75,7 +75,7 @@ fn uses_hotpath(req: &MeasureRequest) -> bool {
 /// Human-readable feature summary for `--dry-run` output.
 fn feature_summary(req: &MeasureRequest) -> String {
     if uses_hotpath(req) {
-        format!("--features {}", req.hotpath_features().join(","))
+        format!("--features {}", req.build_features().join(","))
     } else if req.features.is_empty() {
         "no hotpath features".to_owned()
     } else {
@@ -114,7 +114,7 @@ pub(crate) fn cmd(req: &MeasureRequest, target: &str) -> Result<(), DevError> {
     // `--bench` builds bare; the profiling modes prepend their instrument's
     // feature to the user/host features. See the module header.
     let features: Vec<String> = if uses_hotpath(req) {
-        req.hotpath_features()
+        req.build_features()
             .into_iter()
             .map(str::to_owned)
             .collect()
@@ -136,14 +136,14 @@ pub(crate) fn cmd(req: &MeasureRequest, target: &str) -> Result<(), DevError> {
     // `--commit`) while resolving data paths and the results DB against
     // `project_root`, and takes the global lock before the `cargo metadata`
     // call so a worktree's own toolchain pin is already disarmed.
-    let ctx = MeasurementSession::with_build_config_for_request(req, &build_config, "hotpath")?;
+    let ctx = MeasurementSession::with_build_config_for_request(req, &build_config)?;
 
     let scratch_dir = ctx.paths.scratch_dir.clone();
     run(
         &ctx,
         req,
         req.runs(),
-        req.effective_build_root(),
+        req.build_root.as_path(),
         &scratch_dir,
         &command_label,
     )
@@ -177,7 +177,7 @@ fn run(
         input_file: None,
         input_mb: None,
         cargo_features: None,
-        cargo_profile: build::CargoProfile::Release,
+        external_build: None,
         runs,
         cli_args: Some(harness::format_cli_args(&binary_str, &[])),
         metadata: vec![],
@@ -186,9 +186,14 @@ fn run(
     // Keep the child in the same tree as the built example. `--commit` may
     // make this a worktree distinct from the project root that stores results.
     if uses_hotpath(req) {
-        let label = harness::hotpath_feature(req.is_alloc());
+        let label = req
+            .mode
+            .profiled()
+            .map_or("", crate::measure::ProfiledMode::feature);
         output::detail(&format!("sluggrs {label}: {command_label}"));
-        harness::hotpath_alloc_note(req.is_alloc());
+        if let Some(profiling) = req.mode.profiled() {
+            profiling.print_note();
+        }
 
         ctx.harness.run_hotpath(&config, ctx.binary()?, |_i| {
             let (result, _stderr, sidecar) = harness::run_hotpath_capture(

@@ -9,6 +9,7 @@ use std::path::Path;
 use super::RunId;
 use super::like::{ESCAPE, prefix_pattern, require_prefix};
 use crate::error::DevError;
+use crate::output::Ending;
 use rusqlite::OptionalExtension;
 
 // ---------------------------------------------------------------------------
@@ -85,7 +86,8 @@ CREATE TABLE IF NOT EXISTS sidecar_meta (
     git_commit     TEXT,
     mode           TEXT,
     dataset        TEXT,
-    exit_code      INTEGER
+    exit_code      INTEGER,
+    ending         TEXT
 );
 
 CREATE TABLE IF NOT EXISTS sidecar_latest (
@@ -99,15 +101,11 @@ CREATE TABLE IF NOT EXISTS sidecar_latest (
 // ---------------------------------------------------------------------------
 
 /// Current sidecar schema version.
-const SIDECAR_VERSION: i64 = 5;
+const SIDECAR_VERSION: i64 = 6;
 
-/// Run pending migrations based on `PRAGMA user_version`.
-fn run_sidecar_migrations(conn: &rusqlite::Connection) -> Result<(), DevError> {
-    let current: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if current >= SIDECAR_VERSION {
-        return Ok(());
-    }
-
+/// Apply migrations newer than `current`; version checks and stamping are
+/// centralized in `db::store`.
+fn run_sidecar_migrations(conn: &rusqlite::Connection, current: i64) -> Result<(), DevError> {
     // v0 -> v1: initial schema (handled by CREATE TABLE IF NOT EXISTS in DDL).
     // v1 -> v2: add sidecar_meta table (handled by CREATE TABLE IF NOT EXISTS in DDL).
     // v2 -> v3: add sidecar_counters table (handled by CREATE TABLE IF NOT EXISTS in DDL).
@@ -154,9 +152,81 @@ fn run_sidecar_migrations(conn: &rusqlite::Connection) -> Result<(), DevError> {
             conn.execute_batch("ALTER TABLE sidecar_meta RENAME COLUMN variant TO mode")?;
         }
     }
+    // v5 -> v6: add `ending`, the supervisor's typed account of how the run
+    //           ended (`exit_code` alone could not say "deadline" or "stop
+    //           marker", and folded a signal into 128+N). Rows written before
+    //           it keep their `exit_code` and read back through it.
+    if current < 6 {
+        let columns = conn
+            .prepare("PRAGMA table_info(sidecar_meta)")
+            .and_then(|mut stmt| {
+                let names: Vec<String> = stmt
+                    .query_map([], |row| row.get::<_, String>(1))?
+                    .filter_map(Result::ok)
+                    .collect();
+                Ok(names)
+            })
+            .unwrap_or_default();
+        if !columns.is_empty() && !columns.iter().any(|name| name == "ending") {
+            conn.execute_batch("ALTER TABLE sidecar_meta ADD COLUMN ending TEXT")?;
+        }
+    }
 
-    conn.pragma_update(None, "user_version", SIDECAR_VERSION)?;
     Ok(())
+}
+
+/// The stored spelling of a run's ending: `exited:N`, `signal:N`,
+/// `deadline:MS`, `stop_marker:NAME`, `interrupted`, `wait_failed:WHY`.
+fn encode_ending(ending: &Ending) -> String {
+    match ending {
+        Ending::Exited(code) => format!("exited:{code}"),
+        Ending::Signalled(signal) => format!("signal:{signal}"),
+        Ending::Deadline(limit) => format!("deadline:{}", limit.as_millis()),
+        Ending::StopMarker(marker) => format!("stop_marker:{marker}"),
+        Ending::Interrupted => "interrupted".to_owned(),
+        Ending::WaitFailed(why) => format!("wait_failed:{why}"),
+    }
+}
+
+/// Read a stored ending back; `None` for a spelling this version does not
+/// know (never guessed into a different ending).
+fn decode_ending(text: &str) -> Option<Ending> {
+    let (kind, value) = text.split_once(':').unwrap_or((text, ""));
+    match kind {
+        "exited" => value.parse().ok().map(Ending::Exited),
+        "signal" => value.parse().ok().map(Ending::Signalled),
+        "deadline" => value
+            .parse()
+            .ok()
+            .map(|ms| Ending::Deadline(std::time::Duration::from_millis(ms))),
+        "stop_marker" => Some(Ending::StopMarker(value.to_owned())),
+        "interrupted" => Some(Ending::Interrupted),
+        "wait_failed" => Some(Ending::WaitFailed(value.to_owned())),
+        _ => None,
+    }
+}
+
+/// The legacy integer column, still written so older brokkr versions reading
+/// this database see what they always saw: the exit code, or `128 + signal`.
+fn legacy_exit_code(ending: &Ending) -> Option<i32> {
+    match ending {
+        Ending::Exited(code) => Some(*code),
+        Ending::Signalled(signal) => Some(128 + signal),
+        Ending::Deadline(_)
+        | Ending::StopMarker(_)
+        | Ending::Interrupted
+        | Ending::WaitFailed(_) => None,
+    }
+}
+
+/// A row from before v6: only the integer, read by the convention it was
+/// written with (above 128 is a signal).
+fn ending_from_legacy_exit_code(code: i32) -> Ending {
+    if code > 128 {
+        Ending::Signalled(code - 128)
+    } else {
+        Ending::Exited(code)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -174,7 +244,9 @@ pub struct RunInfo {
     pub git_commit: Option<String>,
     pub mode: Option<String>,
     pub dataset: Option<String>,
-    pub exit_code: Option<i32>,
+    /// How the run ended, as the child supervisor assigned it. `None` when
+    /// the caller could not observe it.
+    pub ending: Option<Ending>,
 }
 
 /// Handle to the sidecar profile database (`.brokkr/sidecar.db`).
@@ -189,14 +261,27 @@ impl SidecarDb {
         &self.conn
     }
 
-    /// Open (or create) the sidecar database at `path`. Creates schema,
-    /// enables WAL mode, and runs pending migrations.
+    /// Open (or create) the sidecar database at `path`, enable WAL, and apply
+    /// pending migrations.
     pub fn open(path: &Path) -> Result<Self, DevError> {
-        let conn = rusqlite::Connection::open(path)?;
-        conn.pragma_update(None, "journal_mode", "WAL")?;
-        run_sidecar_migrations(&conn)?;
-        conn.execute_batch(SIDECAR_SCHEMA)?;
-        conn.pragma_update(None, "user_version", SIDECAR_VERSION)?;
+        let conn = super::store::open_read_write(path, "sidecar.db", SIDECAR_VERSION)?;
+        super::store::migrate(&conn, "sidecar.db", SIDECAR_VERSION, |conn, version| {
+            run_sidecar_migrations(conn, version)?;
+            conn.execute_batch(SIDECAR_SCHEMA)?;
+            Ok(())
+        })?;
+        Ok(Self { conn })
+    }
+
+    /// Open an existing sidecar database for reading. An older schema is
+    /// migrated first (through [`Self::open`]); a newer one is refused.
+    pub(crate) fn open_read_only(path: &Path) -> Result<Self, DevError> {
+        let conn = super::store::open_read_only_migrating(
+            path,
+            "sidecar.db",
+            SIDECAR_VERSION,
+            || Self::open(path).map(drop),
+        )?;
         Ok(Self { conn })
     }
 
@@ -330,8 +415,8 @@ impl SidecarDb {
             "INSERT OR REPLACE INTO sidecar_meta (
                 result_uuid, best_run_idx, total_runs,
                 run_start_epoch, pid, command, binary_path, binary_xxh128,
-                git_commit, mode, dataset, exit_code
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                git_commit, mode, dataset, exit_code, ending
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             rusqlite::params![
                 result_uuid,
                 i64::try_from(best_run_idx).unwrap_or(0),
@@ -344,7 +429,10 @@ impl SidecarDb {
                 run_info.as_ref().and_then(|r| r.git_commit.as_deref()),
                 run_info.as_ref().and_then(|r| r.mode.as_deref()),
                 run_info.as_ref().and_then(|r| r.dataset.as_deref()),
-                run_info.and_then(|r| r.exit_code),
+                run_info
+                    .and_then(|r| r.ending.as_ref())
+                    .and_then(legacy_exit_code),
+                run_info.and_then(|r| r.ending.as_ref()).map(encode_ending),
             ],
         )?;
         Ok(())
@@ -377,10 +465,16 @@ impl SidecarDb {
             .conn
             .query_row(
                 "SELECT run_start_epoch, pid, command, binary_path, binary_xxh128,
-                        git_commit, mode, dataset, exit_code
+                        git_commit, mode, dataset, exit_code, ending
                  FROM sidecar_meta WHERE result_uuid = ?1",
                 rusqlite::params![id.as_str()],
                 |row| {
+                    let stored: Option<String> = row.get(9)?;
+                    let legacy: Option<i32> = row.get(8)?;
+                    let ending = match stored {
+                        Some(text) => decode_ending(&text),
+                        None => legacy.map(ending_from_legacy_exit_code),
+                    };
                     Ok(RunInfo {
                         run_start_epoch: row.get(0)?,
                         pid: row.get(1)?,
@@ -390,7 +484,7 @@ impl SidecarDb {
                         git_commit: row.get(5)?,
                         mode: row.get(6)?,
                         dataset: row.get(7)?,
-                        exit_code: row.get(8)?,
+                        ending,
                     })
                 },
             )
@@ -760,6 +854,59 @@ mod tests {
             .unwrap();
     }
 
+    // A read-only open of a store on the previous schema migrates it first and
+    // then reads current rows; existing history stays readable after an upgrade.
+    #[test]
+    fn read_only_open_migrates_an_older_store() {
+        let path = crate::test_scratch::scratch("db-sidecar", "ro_older").join("s.db");
+        let db = SidecarDb::open(&path).unwrap();
+        insert_session(&db, "old111", "M");
+        drop(db);
+        let raw = rusqlite::Connection::open(&path).unwrap();
+        raw.execute_batch("ALTER TABLE sidecar_meta DROP COLUMN ending")
+            .unwrap();
+        raw.pragma_update(None, "user_version", SIDECAR_VERSION - 1)
+            .unwrap();
+        drop(raw);
+
+        let ro = SidecarDb::open_read_only(&path).unwrap();
+        let version: i64 = ro
+            .conn()
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, SIDECAR_VERSION);
+        let has_ending = ro
+            .conn()
+            .prepare("SELECT ending FROM sidecar_meta")
+            .is_ok();
+        assert!(has_ending, "the migrated schema has the current column");
+        let markers: i64 = ro
+            .conn()
+            .query_row("SELECT COUNT(*) FROM sidecar_markers", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(markers, 1, "existing rows survive the migration");
+    }
+
+    // A store stamped newer than this brokkr knows is refused, and the stamp is
+    // left exactly as found.
+    #[test]
+    fn read_only_open_refuses_a_newer_store() {
+        let path = crate::test_scratch::scratch("db-sidecar", "ro_newer").join("s.db");
+        drop(SidecarDb::open(&path).unwrap());
+        let raw = rusqlite::Connection::open(&path).unwrap();
+        raw.pragma_update(None, "user_version", SIDECAR_VERSION + 1)
+            .unwrap();
+        drop(raw);
+
+        let err = SidecarDb::open_read_only(&path).err().expect("refused");
+        assert!(err.to_string().contains("newer than this brokkr"), "{err}");
+        let raw = rusqlite::Connection::open(&path).unwrap();
+        let version: i64 = raw
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, SIDECAR_VERSION + 1, "no downgrade");
+    }
+
     // A prefix shared by two sessions must be surfaced as ambiguous so callers
     // cannot accidentally combine two timelines.
     #[test]
@@ -769,7 +916,8 @@ mod tests {
         insert_session(&db, "abc111", "A");
         insert_session(&db, "abc222", "B");
 
-        let store = super::super::RunStore::open(&path.with_file_name("r.db"), &path).unwrap();
+        let store =
+            super::super::RunStore::open_read_only(&path.with_file_name("r.db"), &path).unwrap();
         let ids = match store.resolve(super::super::RunRef::Uuid("abc")).unwrap() {
             super::super::Resolved::Ambiguous(ids) => ids,
             _ => panic!("expected an ambiguous prefix"),
@@ -799,7 +947,8 @@ mod tests {
         let db = SidecarDb::open(&path).unwrap();
         insert_session(&db, "abc111", "A");
 
-        let store = super::super::RunStore::open(&path.with_file_name("r.db"), &path).unwrap();
+        let store =
+            super::super::RunStore::open_read_only(&path.with_file_name("r.db"), &path).unwrap();
         assert!(store.resolve(super::super::RunRef::Uuid("")).is_err());
         assert!(
             db.uuids_matching_prefix("a_c").unwrap().is_empty(),

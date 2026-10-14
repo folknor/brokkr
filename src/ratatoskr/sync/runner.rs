@@ -7,6 +7,7 @@ use std::time::Duration;
 use serde::Serialize;
 
 use crate::artefacts::ArtefactDir;
+use crate::clean::layout::ProjectState;
 use crate::config::HarnessConfig;
 use crate::config::project_config::ratatoskr::RatatoskrConfig;
 use crate::error::DevError;
@@ -19,9 +20,6 @@ use crate::ratatoskr::saehrimnir::{
     MockOutcome, MockServer, endpoint_env_pairs, require_path, resolve_fixture,
 };
 use crate::ratatoskr::timing::format_secs;
-
-/// Where per-test sync artefact dirs live relative to the project root.
-pub(super) const SYNC_ARTEFACT_PARENT: &str = ".brokkr/ratatoskr/sync";
 
 // ---------------------------------------------------------------------------
 // shared plumbing: config validation, script resolution, the per-script run
@@ -157,7 +155,8 @@ impl SyncRunner<'_> {
         let mut timings = PhaseTimings::default();
         let mut preserved = None;
         let result = (|| -> Result<(), DevError> {
-            let artefact_parent = self.project_root.join(SYNC_ARTEFACT_PARENT);
+            let state = ProjectState::new(self.project_root);
+            let artefact_parent = state.ratatoskr().sync_artifacts();
             let artefacts =
                 ArtefactDir::allocate(&artefact_parent, &resolved.test_id, self.keep_artefacts)?;
             let harness_dir = artefacts.path().join("harness");
@@ -311,15 +310,15 @@ impl SyncRunner<'_> {
             self.project_root,
         )?;
 
-        if dc.killed_on_deadline {
+        if dc.killed_on_deadline() {
             return Err(DevError::Config(format!(
                 "harness binary exceeded ceiling {ceiling:?}"
             )));
         }
-        if !dc.captured.status.success() {
+        if !dc.captured.success() {
             return Err(DevError::Config(format!(
-                "harness binary exited with {:?}",
-                dc.captured.status
+                "harness binary ended with {:?}",
+                dc.captured.ending
             )));
         }
         Ok(())
@@ -375,17 +374,16 @@ pub(super) fn render_run_toml(
     mock: &MockOutcome,
     git: Option<&git::GitInfo>,
 ) -> Result<String, DevError> {
-    use std::os::unix::process::ExitStatusExt;
     let meta = SyncRunMetadata {
         brokkr_version: env!("CARGO_PKG_VERSION").to_owned(),
         script: script_abs.display().to_string(),
         binary: built.binary.display().to_string(),
         features: built.features_label.clone(),
         elapsed_ms: u64::try_from(dc.captured.elapsed.as_millis()).unwrap_or(u64::MAX),
-        exit_code: dc.captured.status.code(),
-        signal: dc.captured.status.signal(),
-        killed_on_deadline: dc.killed_on_deadline,
-        git_commit: git.map(|g| g.commit.clone()),
+        exit_code: dc.captured.code(),
+        signal: dc.captured.signal(),
+        killed_on_deadline: dc.killed_on_deadline(),
+        git_commit: git.map(|g| g.commit.as_str().to_owned()),
         git_subject: git.map(|g| g.subject.clone()),
         git_clean: git.map(|g| g.is_clean),
         mock: SyncMockMetadata {

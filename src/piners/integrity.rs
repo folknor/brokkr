@@ -506,18 +506,20 @@ pub enum HarnessEnd {
 }
 
 impl HarnessEnd {
-    /// Classify a captured exit status. `killed_on_deadline` wins over the
-    /// SIGKILL it produced.
-    pub fn from_status(status: &std::process::ExitStatus, killed_on_deadline: bool) -> Self {
-        use std::os::unix::process::ExitStatusExt;
-        if killed_on_deadline {
-            return Self::Backstop;
-        }
-        match (status.code(), status.signal()) {
-            (Some(c), _) => Self::Code(c),
-            (None, Some(s)) => Self::Signal(s),
-            // Neither: not reachable on Unix; read as the generic failure.
-            (None, None) => Self::Code(-1),
+    /// Classify how the supervisor saw the harness end. A deadline kill is the
+    /// backstop, not the SIGKILL it produced.
+    pub fn from_ending(ending: &crate::output::Ending) -> Self {
+        use crate::output::Ending;
+        match ending {
+            Ending::Exited(c) => Self::Code(*c),
+            Ending::Signalled(s) => Self::Signal(*s),
+            Ending::Deadline(_) => Self::Backstop,
+            Ending::Interrupted => Self::Interrupted,
+            // A requested stop marker ends a measured iteration on purpose;
+            // it counts like a clean exit.
+            Ending::StopMarker(_) => Self::Code(0),
+            // The child could not be waited on: the generic failure.
+            Ending::WaitFailed(_) => Self::Code(-1),
         }
     }
 
@@ -832,16 +834,24 @@ not json at all
     }
 
     #[test]
-    fn status_classification_prefers_the_backstop_flag() {
-        use std::os::unix::process::ExitStatusExt;
-        let killed = std::process::ExitStatus::from_raw(9);
-        assert_eq!(HarnessEnd::from_status(&killed, true), HarnessEnd::Backstop);
+    fn ending_classification_names_the_backstop_not_its_sigkill() {
+        use crate::output::Ending;
         assert_eq!(
-            HarnessEnd::from_status(&killed, false),
+            HarnessEnd::from_ending(&Ending::Deadline(std::time::Duration::from_secs(1))),
+            HarnessEnd::Backstop
+        );
+        assert_eq!(
+            HarnessEnd::from_ending(&Ending::Signalled(9)),
             HarnessEnd::Signal(9)
         );
-        let two = std::process::ExitStatus::from_raw(2 << 8);
-        assert_eq!(HarnessEnd::from_status(&two, false), HarnessEnd::Code(2));
+        assert_eq!(
+            HarnessEnd::from_ending(&Ending::Exited(2)),
+            HarnessEnd::Code(2)
+        );
+        assert_eq!(
+            HarnessEnd::from_ending(&Ending::Interrupted),
+            HarnessEnd::Interrupted
+        );
     }
 
     const V1: &str = "\"version\":1";

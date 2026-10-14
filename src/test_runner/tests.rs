@@ -9,6 +9,10 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+fn test_context() -> RunContext {
+    RunContext::new(StopSignal::new(|| false), |_| {})
+}
+
 fn hung(reason: TimeoutReason, attribution: Attribution, elapsed: u64, ceiling: u64) -> HungTest {
     HungTest {
         reason,
@@ -118,7 +122,7 @@ fn a_leaked_pipe_holder_does_not_hang_the_drain_join() {
     child.wait().expect("sh exits");
     let started = Instant::now();
     assert!(
-        join_drains(vec![drain], &cancel),
+        join_drains(vec![drain], &cancel, &test_context()),
         "the leaked holder kept the pipe open"
     );
     assert!(started.elapsed() < DRAIN_GRACE + Duration::from_secs(2));
@@ -156,7 +160,7 @@ fn drained_end(script: &str) -> (Option<StreamEnd>, String) {
     let (b, t, c) = (Arc::clone(&buf), Arc::clone(&tracker), Arc::clone(&cancel));
     let drain = thread::spawn(move || drain_libtest_json(pipe, &b, &t, &c, Some(tap), |_| {}));
     child.wait().expect("sh exits");
-    join_drains(vec![drain], &cancel);
+    join_drains(vec![drain], &cancel, &test_context());
     let end = seen.lock().unwrap().iter().find_map(|o| match o.event {
         ObsEvent::StreamEnded { end } => Some(end),
         _ => None,
@@ -382,6 +386,7 @@ fn the_wall_deadline_fires_with_no_events_at_all() {
         Duration::from_millis(5),
         Instant::now(),
         None,
+        &test_context(),
     );
     child.wait().ok();
 
@@ -565,6 +570,7 @@ fn an_expired_per_test_cap_kills_even_with_the_wall_far_away() {
         Duration::from_millis(5),
         Instant::now(),
         None,
+        &test_context(),
     );
     child.wait().ok();
 
@@ -644,6 +650,7 @@ fn watchdog_kills_process_group_and_writes_snapshot() {
         Duration::from_millis(5),
         Instant::now(),
         None,
+        &test_context(),
     );
     child.wait().ok();
 

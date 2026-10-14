@@ -313,7 +313,8 @@ fn generate_indexed_pbf(
     let binary = build::cargo_build(
         &build::BuildConfig::release(Some("pbfhogg-cli")),
         build_root,
-    )?;
+    )?
+    .path;
     let binary_str = binary.display().to_string();
     let input_str = input.display().to_string();
     // Stable temp name, as for downloads: runs under the global lock, and a

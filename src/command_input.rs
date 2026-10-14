@@ -1,26 +1,25 @@
-//! Adapter from the `clap`-parsed CLI shape (`Command` enum in `cli.rs`) to
-//! the typed `PbfhoggCommand` the dispatch layer runs. Kept alongside the
-//! pbfhogg command definitions so the two surfaces stay in sync.
-
+//! Route the parsed command into a concrete execution input.
 use crate::cli::{Command, ModeArgs, PbfArgs};
 use crate::measure::CommandParams;
 use crate::pbfhogg::commands::PbfhoggCommand;
 
+// A routed command is built once per process and consumed at once, so the
+// size gap between the variants costs nothing worth a box on every arm.
+#[allow(clippy::large_enum_variant)]
+pub(crate) enum RoutedCommand {
+    Pbf {
+        mode: ModeArgs,
+        pbf: PbfArgs,
+        command: PbfhoggCommand,
+        osc: Option<String>,
+        params: CommandParams,
+    },
+    Other(Box<Command>),
+}
 impl Command {
-    /// Extract the pbfhogg measured-command parts from a CLI command variant.
-    ///
-    /// Returns `None` for non-pbfhogg commands (elivagar, nidhogg, shared, etc.).
-    /// The returned tuple is `(mode, pbf, command, osc_seq, params)`.
-    #[allow(clippy::too_many_lines, clippy::type_complexity)]
-    pub(crate) fn as_pbfhogg(
-        &self,
-    ) -> Option<(
-        &ModeArgs,
-        &PbfArgs,
-        PbfhoggCommand,
-        Option<&str>,
-        CommandParams,
-    )> {
+    // One arm per pbfhogg-routed variant: the match size tracks the CLI's.
+    #[allow(clippy::too_many_lines)]
+    pub(crate) fn into_route(self) -> RoutedCommand {
         match self {
             // Simple commands: mode + pbf, no extras
             Self::Inspect {
@@ -34,22 +33,22 @@ impl Command {
                 snapshot,
             } => {
                 let params = CommandParams {
-                    jobs: *jobs,
-                    snapshot: snapshot.clone(),
+                    jobs,
+                    snapshot,
                     ..Default::default()
                 };
-                Some((
+                RoutedCommand::Pbf {
                     mode,
                     pbf,
-                    PbfhoggCommand::Inspect {
-                        nodes: *nodes,
-                        tags: *tags,
-                        type_filter: type_filter.clone(),
-                        extended: *extended,
+                    command: PbfhoggCommand::Inspect {
+                        nodes,
+                        tags,
+                        type_filter,
+                        extended,
                     },
-                    None,
+                    osc: None,
                     params,
-                ))
+                }
             }
             Self::CheckRefs {
                 mode,
@@ -57,10 +56,16 @@ impl Command {
                 snapshot,
             } => {
                 let params = CommandParams {
-                    snapshot: snapshot.clone(),
+                    snapshot,
                     ..Default::default()
                 };
-                Some((mode, pbf, PbfhoggCommand::CheckRefs, None, params))
+                RoutedCommand::Pbf {
+                    mode,
+                    pbf,
+                    command: PbfhoggCommand::CheckRefs,
+                    osc: None,
+                    params,
+                }
             }
             Self::CheckIds {
                 mode,
@@ -69,16 +74,16 @@ impl Command {
                 snapshot,
             } => {
                 let params = CommandParams {
-                    snapshot: snapshot.clone(),
+                    snapshot,
                     ..Default::default()
                 };
-                Some((
+                RoutedCommand::Pbf {
                     mode,
                     pbf,
-                    PbfhoggCommand::CheckIds { full: *full },
-                    None,
+                    command: PbfhoggCommand::CheckIds { full },
+                    osc: None,
                     params,
-                ))
+                }
             }
             Self::Sort {
                 mode,
@@ -86,10 +91,16 @@ impl Command {
                 snapshot,
             } => {
                 let params = CommandParams {
-                    snapshot: snapshot.clone(),
+                    snapshot,
                     ..Default::default()
                 };
-                Some((mode, pbf, PbfhoggCommand::Sort, None, params))
+                RoutedCommand::Pbf {
+                    mode,
+                    pbf,
+                    command: PbfhoggCommand::Sort,
+                    osc: None,
+                    params,
+                }
             }
             Self::Cat {
                 mode,
@@ -106,20 +117,20 @@ impl Command {
                     .as_deref()
                     .and_then(|s| crate::pbfhogg::commands::CatTypeFilter::parse(s).ok());
                 let params = CommandParams {
-                    snapshot: snapshot.clone(),
+                    snapshot,
                     ..Default::default()
                 };
-                Some((
+                RoutedCommand::Pbf {
                     mode,
                     pbf,
-                    PbfhoggCommand::Cat {
+                    command: PbfhoggCommand::Cat {
                         type_filter: tf,
-                        dedupe: *dedupe,
-                        clean: *clean,
+                        dedupe,
+                        clean,
                     },
-                    None,
+                    osc: None,
                     params,
-                ))
+                }
             }
             Self::TagsFilter {
                 mode,
@@ -135,23 +146,23 @@ impl Command {
             } => {
                 let input_kind_osc = input_kind.as_deref() == Some("osc");
                 let params = CommandParams {
-                    snapshot: snapshot.clone(),
-                    jobs: *jobs,
+                    snapshot,
+                    jobs,
                     ..Default::default()
                 };
-                Some((
+                RoutedCommand::Pbf {
                     mode,
                     pbf,
-                    PbfhoggCommand::TagsFilter {
-                        filter: filter.clone(),
-                        omit_referenced: *omit_referenced,
-                        invert_match: *invert_match,
-                        remove_tags: *remove_tags,
+                    command: PbfhoggCommand::TagsFilter {
+                        filter,
+                        omit_referenced,
+                        invert_match,
+                        remove_tags,
                         input_kind_osc,
                     },
-                    osc_seq.as_deref(),
+                    osc: osc_seq,
                     params,
-                ))
+                }
             }
             Self::Getid {
                 mode,
@@ -161,19 +172,19 @@ impl Command {
                 snapshot,
             } => {
                 let params = CommandParams {
-                    snapshot: snapshot.clone(),
+                    snapshot,
                     ..Default::default()
                 };
-                Some((
+                RoutedCommand::Pbf {
                     mode,
                     pbf,
-                    PbfhoggCommand::Getid {
-                        add_referenced: *add_referenced,
-                        invert: *invert,
+                    command: PbfhoggCommand::Getid {
+                        add_referenced,
+                        invert,
                     },
-                    None,
+                    osc: None,
                     params,
-                ))
+                }
             }
             Self::Getparents {
                 mode,
@@ -181,10 +192,16 @@ impl Command {
                 snapshot,
             } => {
                 let params = CommandParams {
-                    snapshot: snapshot.clone(),
+                    snapshot,
                     ..Default::default()
                 };
-                Some((mode, pbf, PbfhoggCommand::Getparents, None, params))
+                RoutedCommand::Pbf {
+                    mode,
+                    pbf,
+                    command: PbfhoggCommand::Getparents,
+                    osc: None,
+                    params,
+                }
             }
             Self::Renumber {
                 mode,
@@ -192,25 +209,37 @@ impl Command {
                 snapshot,
             } => {
                 let params = CommandParams {
-                    snapshot: snapshot.clone(),
+                    snapshot,
                     ..Default::default()
                 };
-                Some((mode, pbf, PbfhoggCommand::Renumber, None, params))
+                RoutedCommand::Pbf {
+                    mode,
+                    pbf,
+                    command: PbfhoggCommand::Renumber,
+                    osc: None,
+                    params,
+                }
             }
             // MultiExtract carries a `--strategy` axis that may expand to
             // three runs ("all"). The fan-out happens in `main.rs`, same as
             // `extract --strategy all`, so this adapter no longer handles it.
-            Self::MultiExtract { .. } => None,
+            Self::MultiExtract { .. } => RoutedCommand::Other(Box::new(self)),
             Self::TimeFilter {
                 mode,
                 pbf,
                 snapshot,
             } => {
                 let params = CommandParams {
-                    snapshot: snapshot.clone(),
+                    snapshot,
                     ..Default::default()
                 };
-                Some((mode, pbf, PbfhoggCommand::TimeFilter, None, params))
+                RoutedCommand::Pbf {
+                    mode,
+                    pbf,
+                    command: PbfhoggCommand::TimeFilter,
+                    osc: None,
+                    params,
+                }
             }
             Self::BuildGeocodeIndex {
                 mode,
@@ -218,10 +247,16 @@ impl Command {
                 snapshot,
             } => {
                 let params = CommandParams {
-                    snapshot: snapshot.clone(),
+                    snapshot,
                     ..Default::default()
                 };
-                Some((mode, pbf, PbfhoggCommand::BuildGeocodeIndex, None, params))
+                RoutedCommand::Pbf {
+                    mode,
+                    pbf,
+                    command: PbfhoggCommand::BuildGeocodeIndex,
+                    osc: None,
+                    params,
+                }
             }
 
             // Commands with OSC sequence
@@ -234,19 +269,17 @@ impl Command {
                 simplify,
             } => {
                 let params = CommandParams {
-                    osc_range: osc_range.clone(),
-                    snapshot: snapshot.clone(),
+                    osc_range,
+                    snapshot,
                     ..Default::default()
                 };
-                Some((
+                RoutedCommand::Pbf {
                     mode,
                     pbf,
-                    PbfhoggCommand::MergeChanges {
-                        simplify: *simplify,
-                    },
-                    osc_seq.as_deref(),
+                    command: PbfhoggCommand::MergeChanges { simplify },
+                    osc: osc_seq,
                     params,
-                ))
+                }
             }
             Self::ApplyChanges {
                 mode,
@@ -257,18 +290,18 @@ impl Command {
                 jobs,
             } => {
                 let params = CommandParams {
-                    snapshot: snapshot.clone(),
-                    locations_on_ways: *locations_on_ways,
-                    jobs: *jobs,
+                    snapshot,
+                    locations_on_ways,
+                    jobs,
                     ..Default::default()
                 };
-                Some((
+                RoutedCommand::Pbf {
                     mode,
                     pbf,
-                    PbfhoggCommand::ApplyChanges,
-                    osc_seq.as_deref(),
+                    command: PbfhoggCommand::ApplyChanges,
+                    osc: osc_seq,
                     params,
-                ))
+                }
             }
             Self::Diff {
                 mode,
@@ -280,18 +313,18 @@ impl Command {
                 jobs,
             } => {
                 let params = CommandParams {
-                    keep_cache: *keep_cache,
-                    snapshot: snapshot.clone(),
-                    jobs: *jobs,
+                    keep_cache,
+                    snapshot,
+                    jobs,
                     ..Default::default()
                 };
-                Some((
+                RoutedCommand::Pbf {
                     mode,
                     pbf,
-                    PbfhoggCommand::Diff { format: *format },
-                    osc_seq.as_deref(),
+                    command: PbfhoggCommand::Diff { format },
+                    osc: osc_seq,
                     params,
-                ))
+                }
             }
 
             // Command with extra params
@@ -304,13 +337,19 @@ impl Command {
                 snapshot,
             } => {
                 let params = CommandParams {
-                    index_type: index_type.clone(),
-                    inject_prepass: *inject_prepass,
-                    force_altw: *force_altw,
-                    snapshot: snapshot.clone(),
+                    index_type,
+                    inject_prepass,
+                    force_altw,
+                    snapshot,
                     ..Default::default()
                 };
-                Some((mode, pbf, PbfhoggCommand::AddLocationsToWays, None, params))
+                RoutedCommand::Pbf {
+                    mode,
+                    pbf,
+                    command: PbfhoggCommand::AddLocationsToWays,
+                    osc: None,
+                    params,
+                }
             }
 
             Self::Repack {
@@ -323,21 +362,21 @@ impl Command {
                 force_repack,
             } => {
                 let params = CommandParams {
-                    snapshot: snapshot.clone(),
-                    as_snapshot: as_snapshot.clone(),
-                    replace_snapshot: *replace_snapshot,
+                    snapshot,
+                    as_snapshot,
+                    replace_snapshot,
                     ..Default::default()
                 };
-                Some((
+                RoutedCommand::Pbf {
                     mode,
                     pbf,
-                    PbfhoggCommand::Repack {
-                        elements_per_blob: *elements_per_blob,
-                        force: *force_repack,
+                    command: PbfhoggCommand::Repack {
+                        elements_per_blob,
+                        force: force_repack,
                     },
-                    None,
+                    osc: None,
                     params,
-                ))
+                }
             }
 
             Self::Degrade {
@@ -351,30 +390,27 @@ impl Command {
                 replace_snapshot,
             } => {
                 let params = CommandParams {
-                    snapshot: snapshot.clone(),
-                    as_snapshot: as_snapshot.clone(),
-                    replace_snapshot: *replace_snapshot,
+                    snapshot,
+                    as_snapshot,
+                    replace_snapshot,
                     ..Default::default()
                 };
-                Some((
+                RoutedCommand::Pbf {
                     mode,
                     pbf,
-                    PbfhoggCommand::Degrade {
-                        unsort: *unsort,
-                        strip_locations: *strip_locations,
-                        strip_indexdata: *strip_indexdata,
+                    command: PbfhoggCommand::Degrade {
+                        unsort,
+                        strip_locations,
+                        strip_indexdata,
                     },
-                    None,
+                    osc: None,
                     params,
-                ))
+                }
             }
 
-            // Every other command, named rather than `_`: this match is the
-            // one place a variant is classified as pbfhogg-dispatched or not,
-            // so a new `Command` variant must be a compile error here. With a
-            // wildcard it silently became `None`, and a pbfhogg command that
-            // stopped mapping reached `run`'s arm for it.
-            Self::Lock
+            // Every other command is named explicitly so adding a CLI
+            // variant requires classifying its execution input here.
+            command @ (Self::Lock
             | Self::Kill { .. }
             | Self::Strays { .. }
             | Self::Guard { .. }
@@ -446,7 +482,7 @@ impl Command {
             | Self::MockServe { .. }
             | Self::Corpus { .. }
             | Self::LintCorpus { .. }
-            | Self::LintResults { .. } => None,
+            | Self::LintResults { .. }) => RoutedCommand::Other(Box::new(command)),
         }
     }
 }

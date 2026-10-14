@@ -7,6 +7,7 @@ mod query;
 mod run_store;
 mod schema;
 pub(crate) mod sidecar;
+pub(crate) mod store;
 mod types;
 mod write;
 
@@ -17,7 +18,7 @@ pub use hotpath::hotpath_data_from_json;
 pub(crate) use run_store::{Resolved, RunId, RunRef, RunSelector, RunStore};
 pub use types::{
     Distribution, DistributionUs, HotpathData, HotpathFunction, HotpathThread, KvPair, KvValue,
-    Percentile, PreviousRun, Quantity, QueryFilter, RunRow, StoredRow,
+    Percentile, PreviousRun, Quantity, QueryFilter, RunInvocation, RunRow, StoredRow,
 };
 pub(crate) use types::{KvClass, generate_uuid, short_uuid};
 

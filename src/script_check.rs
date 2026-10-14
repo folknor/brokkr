@@ -78,8 +78,8 @@ pub fn run_one(check: &ScriptCheck, cwd: &Path, deadline: Duration) -> Result<Ou
         None,
         true,
     )?;
+    let timed_out = run.killed_on_deadline().then_some(deadline);
     let captured = run.captured;
-    let timed_out = run.killed_on_deadline.then_some(deadline);
     let passed = timed_out.is_none()
         && evaluate(
             &check.expect,

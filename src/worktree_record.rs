@@ -361,13 +361,13 @@ mod tests {
     #[test]
     fn an_unparseable_store_is_an_error_not_an_empty_store() {
         let dir = crate::test_scratch::scratch("worktree_record", "unparseable");
-        let brokkr = dir.join(".brokkr");
-        std::fs::create_dir_all(&brokkr).expect("mkdir");
-        std::fs::write(brokkr.join("worktrees.toml"), "[\"unterminated\n").expect("write");
+        let state = crate::clean::layout::ProjectState::new(&dir);
+        std::fs::create_dir_all(state.root()).expect("mkdir");
+        std::fs::write(state.worktrees_file(), "[\"unterminated\n").expect("write");
         assert!(Store::load(&dir).is_err());
         // And touch must not paper over it by rewriting the file.
         assert!(Store::touch(&dir, "x").is_err());
-        let after = std::fs::read_to_string(brokkr.join("worktrees.toml")).expect("read");
+        let after = std::fs::read_to_string(state.worktrees_file()).expect("read");
         assert_eq!(after, "[\"unterminated\n");
     }
 

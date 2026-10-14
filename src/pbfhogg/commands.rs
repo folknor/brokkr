@@ -7,6 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::clean::layout::{PbfhoggFileKind, PbfhoggLayout};
 use crate::error::DevError;
 use crate::measure::{CommandContext, CommandParams};
 use crate::resolve::Bbox;
@@ -1073,7 +1074,7 @@ pub(crate) fn multi_extract_config(output_dir: &Path, strips: &[Bbox]) -> Result
 
 /// Stable config filename shared by measured multi-extract and verification.
 pub(crate) fn multi_extract_config_path(scratch_dir: &Path) -> PathBuf {
-    scratch_dir.join("multi-extract-config.json")
+    PbfhoggLayout::fixed_scratch_file(scratch_dir, "multi-extract-config.json")
 }
 
 // ---------------------------------------------------------------------------
@@ -1099,20 +1100,20 @@ pub(crate) fn scratch_output_path(
     let name = cmd.id();
     let prefix = mode.scratch_prefix();
     Ok(match cmd.output_kind() {
-        OutputKind::ScratchPbf => ctx
-            .scratch_dir
-            .join(format!("{prefix}-{name}-output.osm.pbf")),
-        OutputKind::ScratchOsc => ctx
-            .scratch_dir
-            .join(format!("{prefix}-{name}-output.osc.gz")),
+        OutputKind::ScratchPbf => {
+            PbfhoggLayout::command_output_file(&ctx.scratch_dir, prefix, name, PbfhoggFileKind::Pbf)
+        }
+        OutputKind::ScratchOsc => {
+            PbfhoggLayout::command_output_file(&ctx.scratch_dir, prefix, name, PbfhoggFileKind::Osc)
+        }
         OutputKind::ScratchDir {
             name,
             dataset_suffix: true,
-        } => ctx.scratch_dir.join(format!("{name}-{}", ctx.dataset)),
+        } => PbfhoggLayout::scratch_dir_with_dataset(&ctx.scratch_dir, name, &ctx.dataset),
         OutputKind::ScratchDir {
             name,
             dataset_suffix: false,
-        } => ctx.scratch_dir.join(name),
+        } => PbfhoggLayout::fixed_scratch_dir(&ctx.scratch_dir, name),
         OutputKind::None => {
             return Err(DevError::Config(format!(
                 "command '{}' does not produce a scratch output",
@@ -1575,12 +1576,12 @@ mod tests {
             strategy: ExtractStrategy::Simple,
         };
         let args = cmd.build_args(&ctx, ArgMode::Bench).unwrap();
-        let config_path = ctx.scratch_dir.join("multi-extract-config.json");
+        let config_path = multi_extract_config_path(&ctx.scratch_dir);
         assert!(args.iter().any(|a| a == config_path.to_str().unwrap()));
         assert_eq!(std::fs::read_dir(&ctx.scratch_dir).unwrap().count(), 0);
 
         cmd.prepare_scratch(&ctx).unwrap();
-        assert!(ctx.scratch_dir.join("multi-extract").is_dir());
+        assert!(PbfhoggLayout::multi_extract_dir(&ctx.scratch_dir).is_dir());
         let json: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
         assert_eq!(json["extracts"].as_array().unwrap().len(), 3);

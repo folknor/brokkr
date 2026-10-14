@@ -20,9 +20,9 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use crate::clean::layout::ProjectState;
 use crate::config::project_config::ratatoskr::RatatoskrConfig;
 use crate::error::DevError;
-use crate::lockfile::{self, LockContext};
 use crate::output;
 use crate::ratatoskr::timing::{POLL_INTERVAL, SHUTDOWN_POLL_INTERVAL};
 pub use crate::ratatoskr::timing::{READINESS_BUDGET, SHUTDOWN_BUDGET};
@@ -469,8 +469,6 @@ impl Drop for MockServer {
 /// project root. Stable across runs so `brokkr clean` / manual
 /// inspection both have a known path. `sync` puts its sentinel
 /// inside the per-run artefact dir instead.
-const MOCK_DIR: &str = ".brokkr/ratatoskr/mock";
-
 /// Resolved inputs for `brokkr mock-serve`. Pulled out of the
 /// CLI-dispatch shell so the spawn-and-loop body can be unit-tested
 /// against synthetic paths if desired.
@@ -496,12 +494,7 @@ pub fn run_mock_serve(req: &MockServeRequest<'_>) -> Result<(), DevError> {
     let fixtures_dir = require_path(&req.config.fixtures_dir, req.project_root, "fixtures_dir")?;
     let fixture_path = resolve_fixture(&fixtures_dir, req.fixture)?;
 
-    let project_root_str = req.project_root.display().to_string();
-    let _lock = lockfile::acquire(&LockContext {
-        project: "ratatoskr",
-        command: "mock-serve",
-        project_root: &project_root_str,
-    })?;
+    let _lock = crate::context::reenter_command_lock()?;
 
     if !binary.exists() {
         return Err(DevError::Config(format!(
@@ -512,7 +505,8 @@ pub fn run_mock_serve(req: &MockServeRequest<'_>) -> Result<(), DevError> {
         )));
     }
 
-    let mock_dir = req.project_root.join(MOCK_DIR);
+    let state = ProjectState::new(req.project_root);
+    let mock_dir = state.ratatoskr().mock_artifacts();
     std::fs::create_dir_all(&mock_dir).map_err(DevError::Io)?;
     let readiness = mock_dir.join("readiness");
     // Stale sentinel from a prior crashed run would fool wait_for_sentinel

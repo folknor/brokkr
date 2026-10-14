@@ -150,10 +150,9 @@ fn validate_since_shape(s: &str) -> Result<String, String> {
 // Pbfhogg command extraction
 // ---------------------------------------------------------------------------
 //
-// `impl Command { fn as_pbfhogg(...) }` lives next to the pbfhogg command
-// definitions in `src/pbfhogg/cli_adapter.rs` - it's the bridge between
-// the CLI shape and the typed `PbfhoggCommand`, and grouping it with the
-// target type keeps both surfaces easy to change together.
+// `Command::into_route` (`src/command_input.rs`) consumes a pbfhogg command
+// variant into its typed `PbfhoggCommand` and parameters - the one bridge
+// between the CLI shape and the dispatch layer.
 
 #[cfg(test)]
 mod tests {

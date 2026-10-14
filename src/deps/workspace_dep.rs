@@ -15,6 +15,7 @@ use serde::Serialize;
 
 use super::CargoMetadata;
 use crate::error::DevError;
+use crate::manifest::{ManifestDependencyScope, ManifestDeps, read_manifest};
 
 #[derive(Serialize)]
 pub struct UnusedWorkspaceDepEvent {
@@ -41,20 +42,19 @@ pub fn run(
     }
     let root_manifest = Path::new(&metadata.workspace_root).join("Cargo.toml");
     let root = parse(&root_manifest)?;
-    let declared = workspace_deps(&root);
+    let declared: BTreeSet<String> = ManifestDeps::new(&root)
+        .entries()
+        .filter(|dep| dep.scope == ManifestDependencyScope::Workspace)
+        .map(|dep| dep.key.to_owned())
+        .collect();
     if declared.is_empty() {
         return Ok(Vec::new());
     }
 
-    let members: BTreeSet<&str> = metadata
-        .workspace_members
-        .iter()
-        .map(String::as_str)
-        .collect();
     let mut used = BTreeSet::new();
     collect_from(&root, &mut used);
     for pkg in &metadata.packages {
-        if members.contains(pkg.id.as_str()) {
+        if metadata.is_member(&pkg.id) {
             collect_from(&parse(Path::new(&pkg.manifest_path))?, &mut used);
         }
     }
@@ -80,60 +80,25 @@ fn ignored(name: &str, ignore: &[String]) -> bool {
     })
 }
 
-/// Keys of the root manifest's `[workspace.dependencies]`.
-fn workspace_deps(root: &toml::Value) -> BTreeSet<String> {
-    root.get("workspace")
-        .and_then(|w| w.get("dependencies"))
-        .and_then(toml::Value::as_table)
-        .map(|t| t.keys().cloned().collect())
-        .unwrap_or_default()
-}
-
 /// Names of deps this manifest inherits from the workspace
 /// (`dep = { workspace = true }`), across every dependency table.
-fn collect_from(value: &toml::Value, out: &mut BTreeSet<String>) {
-    let Some(table) = value.as_table() else {
-        return;
-    };
-    for (key, val) in table {
-        match key.as_str() {
-            "dependencies" | "dev-dependencies" | "build-dependencies" | "dev_dependencies"
-            | "build_dependencies" => {
-                if let Some(deps) = val.as_table() {
-                    for (name, spec) in deps {
-                        if spec.get("workspace").and_then(toml::Value::as_bool) == Some(true) {
-                            out.insert(name.clone());
-                        }
-                    }
-                }
-            }
-            // Descend through each `[target.'cfg(..)']` to its dependency
-            // tables; never into `[workspace.dependencies]` (a declaration).
-            "target" => {
-                if let Some(cfgs) = val.as_table() {
-                    for cfg_val in cfgs.values() {
-                        collect_from(cfg_val, out);
-                    }
-                }
-            }
-            _ => {}
+fn collect_from(doc: &toml_edit::DocumentMut, out: &mut BTreeSet<String>) {
+    for dep in ManifestDeps::new(doc).entries() {
+        if dep.scope == ManifestDependencyScope::Package
+            && dep
+                .spec
+                .as_table_like()
+                .and_then(|spec| spec.get("workspace"))
+                .and_then(toml_edit::Item::as_bool)
+                == Some(true)
+        {
+            out.insert(dep.key.to_owned());
         }
     }
 }
 
-fn parse(manifest: &Path) -> Result<toml::Value, DevError> {
-    let text = std::fs::read_to_string(manifest).map_err(|e| {
-        DevError::Config(format!(
-            "workspace_dep: cannot read {}: {e}",
-            manifest.display()
-        ))
-    })?;
-    toml::from_str(&text).map_err(|e| {
-        DevError::Config(format!(
-            "workspace_dep: cannot parse {}: {e}",
-            manifest.display()
-        ))
-    })
+fn parse(manifest: &Path) -> Result<toml_edit::DocumentMut, DevError> {
+    read_manifest(manifest).map_err(|why| DevError::Config(format!("workspace_dep: {why}")))
 }
 
 #[cfg(test)]
@@ -142,7 +107,7 @@ mod tests {
     use super::*;
 
     fn inherited(src: &str) -> BTreeSet<String> {
-        let value: toml::Value = toml::from_str(src).unwrap();
+        let value = crate::manifest::parse_manifest_bytes(src.as_bytes()).unwrap();
         let mut out = BTreeSet::new();
         collect_from(&value, &mut out);
         out

@@ -177,10 +177,11 @@ fn render_section<T: Render>(items: &[&T], singular: &str, plural: &str, suffix:
 fn render_duplicate_text(dup: &DuplicateVersionEvent) {
     output::deps_msg(&format!("  {}: {} versions", dup.krate, dup.pins.len()));
     for pin in &dup.pins {
-        let picked = if pin.picked_by.is_empty() {
+        let picked_by: Vec<String> = pin.picked_by.iter().map(super::duplicate_version::Picker::label).collect();
+        let picked = if picked_by.is_empty() {
             "(unknown)".to_string()
         } else {
-            pin.picked_by.join(", ")
+            picked_by.join(", ")
         };
         let suffix = if pin.via_workspace.is_empty() {
             String::new()

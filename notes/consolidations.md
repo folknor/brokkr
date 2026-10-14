@@ -21,28 +21,17 @@ been verified.
    and they are never deduplicated through git history. Carry the context
    inline instead.
 
-## CON-002 - "Did this run pass, fail, or blow its budget, and does that stop brokkr?" - lane-local answers
-
-Reported by: check-exec.
-
-One deadline verdict and one freeze/snapshot/kill sequence now serve every libtest lane, and the parallel lane's separate timeout outcome is gone. Residue:
-- Pass/fail/completeness is still decided per lane: serial and cargo-threaded in `check_cmd/output.rs`, `parallel::report_runs`, `test_cmd::run_one`, and `nextest_lane` mapping its own outcomes.
-- The lane verdicts still re-parse reconstructed human text (`cargo_filter::parse_test_output*`), while `accounting.rs` reconciles the same runs from the typed `ObsEvent` stream with its own reducer, so the lane verdict and the audit have two evidence bases that can disagree.
-- `nextest_lane` records `StreamEnded { Eof }` unconditionally, including after an engine error.
-
-Owner: an `ExecutionOutcome` reduced from the observation stream (shared with accounting) and one `lane_verdict(&ExecutionOutcome) -> Pass | Fail | Incomplete | BudgetBlown | Stopped`, with the reconstructed text display-only.
-
-## CON-014 - "Does this allow suppress this diagnostic?" and "which lint namespace is this name in?"
+## CON-014 - Diagnostic codes are still parsed at each comparison
 
 Reported by: check-report, config-cli.
 
-A borrowed `LintName`/`LintTool` in `config_parts/schema.rs` now owns namespace classification, test-build eligibility and blanket/sited matching. Residue: `allow`/`allow_exact` in config and `code` on diagnostics are still strings parsed at each use rather than at load and ingestion (needs an owned representation built in `parse_lints`), and `cmd_check`/`cmd_clippy` still receive `allow` and `allow_exact` as two loose slices rather than `&LintsConfig`. Also, `SitedAllow::parse` claims to validate relative paths but accepts absolute ones.
+`LintsConfig` stores owned `LintName`s parsed at load, `SitedAllow` refuses absolute paths, and the check, clippy and test commands receive `&LintsConfig` whole. Residue: `Diagnostic.code` stays a `String`, parsed into a lint name where it is compared (`diagnostic_lint` in `check_cmd/diagnostics.rs`) rather than once at ingestion.
 
-## CON-023 - "Does `[<host>] features` apply to this build?"
+## CON-023 - Host features are applied per build path
 
 Reported by: config-cli.
 
-Every `BenchContext` build now merges host features itself, and `docs/brokkr.toml.md` states which other commands apply them. Residue: `run`, `install`, `check`, `clippy`, `test` and `bench` keep their own feature selection and do not share `BenchContext` or a command descriptor, so whether host features apply is still a per-path decision rather than one policy.
+The policy is stated in `docs/brokkr.toml.md` and every measurement-session build applies host features. Residue: there is still no single build-purpose resolver; `run`, `install`, `check`, `clippy`, `test` and `bench` each decide by their own call path.
 
 ## CON-033 - Residual second sources beside the typed lane and command identity
 

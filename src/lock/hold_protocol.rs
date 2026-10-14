@@ -1,52 +1,54 @@
 use std::collections::HashMap;
 use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd, RawFd};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use super::record::{read_lock_contents, rewrite_from_state};
 use super::{
     AcqId, AuthHash, LockContext, LockGuard, LockInfo, LockInner, LockState, Nonce,
-    compile_lock_path, held_registry, open_lock_file, path_to_cstring, same_agent_hint,
+    compile_lock_path, held_registry, open_lock_file_raw, path_to_cstring, same_agent_hint,
     snapshot_of,
 };
-use crate::error::DevError;
+use crate::error::{AcquireRefusal, DevError, EntropyPurpose, LockError, MetadataStage};
 use crate::process::HostScope;
+
+/// The control socket a fresh hold starts: its acquisition id and the service.
+type ServiceStart =
+    fn(&LockContext<'_>) -> Result<Option<(AcqId, crate::lock_service::Service)>, DevError>;
 
 /// What a fresh hold does beyond taking the flock: the host-wide effects.
 ///
-/// A seam, so unit tests can take real flocks on scratch paths without any of
-/// them. Before it existed the test entry point ran the production drain on
-/// the real `~/.brokkr/compile.lock` - which, 20 s into a wait behind a live
-/// build, SIGKILLs whatever the stray reaper finds on the host, rust-analyzer's
-/// cargo included - and mutated toolchain-disable state that other tests read.
+/// Each effect is passed to the transition that owns it. The state types below
+/// define the protocol order; this value only supplies host behavior at those
+/// boundaries. Tests can replace one transition's effect while retaining the
+/// others.
 pub(super) struct HoldEffects {
+    /// Start the control socket while the acquisition is draining.
+    pub(super) service: ServiceStart,
+    /// Refuse the hold when the disks the command writes to are nearly full.
+    pub(super) disk_gate:
+        fn(crate::cli::CommandId, &crate::project::BuildRoot) -> Result<(), DevError>,
     /// Wait out earlier compilation leases; the returned descriptor is the
-    /// exclusive lease held while the capability is published. `None` means
-    /// no lease was taken (tests).
+    /// exclusive lease held while the capability is published.
     pub(super) drain: fn() -> Result<Option<OwnedFd>, DevError>,
     /// Activate the armed toolchain-disable ([`crate::toolchain`]).
     pub(super) toolchain: fn() -> Result<Option<crate::toolchain::DisabledToolchain>, DevError>,
-    /// Attach the minted nonce to this hold for child stamping.
-    pub(super) attach_capability: bool,
+    /// Attach this hold's minted nonce to the live guard for child stamping.
+    pub(super) capability: fn(Nonce) -> Option<Nonce>,
     /// Runs once the fresh hold is registered: the stray reap and the stale
     /// guard warning.
     pub(super) after_fresh_hold: fn(),
-    /// Refuse the hold when the disks the command writes to are nearly full
-    /// ([`crate::disk_gate`]).
-    pub(super) disk_gate: fn(&str) -> Result<(), DevError>,
-    /// Run this acquisition's control socket (`crate::lock_service`).
-    pub(super) service: bool,
 }
 
 /// The effects a real acquisition has.
 pub(super) const HOST_EFFECTS: HoldEffects = HoldEffects {
+    service: host_service,
+    disk_gate: crate::disk_gate::check,
     drain: host_drain,
     toolchain: crate::toolchain::activate_for_lock,
-    attach_capability: true,
+    capability: Some,
     after_fresh_hold: host_after_fresh_hold,
-    disk_gate: crate::disk_gate::check,
-    service: true,
 };
 
 fn no_toolchain() -> Result<Option<crate::toolchain::DisabledToolchain>, DevError> {
@@ -54,13 +56,27 @@ fn no_toolchain() -> Result<Option<crate::toolchain::DisabledToolchain>, DevErro
 }
 
 pub(super) const HOST_EFFECTS_WITHOUT_TOOLCHAIN: HoldEffects = HoldEffects {
+    service: host_service,
+    disk_gate: crate::disk_gate::check,
     drain: host_drain,
     toolchain: no_toolchain,
-    attach_capability: true,
+    capability: Some,
     after_fresh_hold: host_after_fresh_hold,
-    disk_gate: crate::disk_gate::check,
-    service: true,
 };
+
+fn host_service(
+    ctx: &LockContext<'_>,
+) -> Result<Option<(AcqId, crate::lock_service::Service)>, DevError> {
+    crate::lock_service::sweep_leftovers();
+    let id = crate::lock_service::mint_id().ok_or_else(|| {
+        DevError::Lock(LockError::acquisition(AcquireRefusal::Entropy {
+            purpose: EntropyPurpose::AcquisitionId,
+        }))
+    })?;
+    let identity = identity_of(ctx);
+    let service = crate::lock_service::Service::start(&id, identity)?;
+    Ok(Some((id, service)))
+}
 
 /// Refuse to start or continue an acquisition once this process has committed
 /// to stopping. Checked before re-entry, after the flock wait and after the
@@ -73,7 +89,7 @@ fn refuse_if_stopping() -> Result<(), DevError> {
 }
 
 fn host_drain() -> Result<Option<OwnedFd>, DevError> {
-    crate::check_cmd::activate_run_log();
+    crate::run_log::activate_run_log();
     drain_compile_leases().map(Some)
 }
 
@@ -103,6 +119,25 @@ pub(super) fn acquire_at(
     ctx: &LockContext<'_>,
     effects: &HoldEffects,
 ) -> Result<LockGuard, DevError> {
+    acquire_at_with(path, ctx, effects, FlockWait::Block)
+}
+
+/// Whether a fresh acquisition waits for a foreign holder or refuses at once.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum FlockWait {
+    Block,
+    NonBlocking,
+}
+
+/// [`acquire_at`] with the flock wait chosen by the caller. A non-blocking
+/// attempt runs the same successful-hold protocol; only a busy flock differs,
+/// returning the typed busy refusal instead of waiting.
+pub(super) fn acquire_at_with(
+    path: &Path,
+    ctx: &LockContext<'_>,
+    effects: &HoldEffects,
+    wait: FlockWait,
+) -> Result<LockGuard, DevError> {
     refuse_if_stopping()?;
     {
         let mut held = held_registry();
@@ -129,87 +164,195 @@ pub(super) fn acquire_at(
     // retain it after closing its own. It is the conservative direction in both
     // cases - a refusal, never a hang.
     if crate::hold::inside_admitted_compilation() {
-        return Err(DevError::Lock(format!(
-            "refusing to take the brokkr lock from inside a compilation brokkr admitted \
-             ({} is set). Taking it here would deadlock: this compiler holds a share of the \
-             compile lease that a new hold must drain. Run the brokkr command outside the \
-             build - a build script or proc macro cannot drive brokkr.",
-            crate::hold::LEASE_MARKER_ENV
+        return Err(DevError::Lock(LockError::acquisition(
+            AcquireRefusal::InsideCompilation {
+                marker: crate::hold::LEASE_MARKER_ENV,
+            },
         )));
     }
 
     let c_path = path_to_cstring(path)?;
-    let fd = open_lock_file(&c_path)?;
-
+    let fd = open_lock_file_raw(&c_path).map_err(|source| {
+        DevError::Lock(LockError::acquisition(AcquireRefusal::LockFileOpen {
+            path: path.to_owned(),
+            source,
+        }))
+    })?;
     let owned = unsafe { OwnedFd::from_raw_fd(fd) };
-    let inherited = crate::hold::inherited_capability_hash();
-    wait_for_flock(owned.as_raw_fd(), inherited.as_ref())?;
-    // A stop accepted while this thread waited on the flock.
-    refuse_if_stopping()?;
-    // The control socket exists before the drain, so a hold that is clearing
-    // compilers can already be asked about and stopped. Holding the flock
-    // proves every other acquisition is over, so their leftover sockets go
-    // first. Declared after `owned`, so on any error below it drops (refusing
-    // further stops) before the flock is released.
-    let service = if effects.service {
-        crate::lock_service::sweep_leftovers();
-        let id = crate::lock_service::mint_id().ok_or_else(|| {
-            DevError::Lock("could not read /dev/urandom to mint a lock acquisition id".into())
-        })?;
-        let identity = identity_of(ctx);
-        Some((
-            id.clone(),
-            crate::lock_service::Service::start(&id, identity)?,
-        ))
-    } else {
-        None
-    };
-    let acq_id = service.as_ref().map(|(id, _)| id.clone());
-    let service = service.map(|(_, s)| s);
-    // The free-space gate. After the flock, not before: the wait may have been
-    // behind a `brokkr clean` that freed the space, or a build that used it.
-    // Before the drain, so a refusal costs nothing but the release, which
-    // dropping `owned` does.
-    (effects.disk_gate)(ctx.command)?;
-    // We hold `brokkr.lock`, but the hold is not yet usable: compilers admitted
-    // under an earlier hold may still be running. On failure `owned` drops here,
-    // releasing `brokkr.lock`, and we never reach protected work - measuring
-    // alongside a compiler we failed to clear is the one outcome worse than not
-    // measuring at all.
-    let Authorized {
-        state,
-        nonce,
-        toolchain,
-    } = drain_and_authorize(owned.as_raw_fd(), ctx, effects, acq_id.as_ref())?;
-    // A stop accepted during the drain: never authorise work after it.
-    // `toolchain` drops here, restoring the moved-aside toolchain.
-    refuse_if_stopping()?;
-    if let Some(service) = &service {
-        service.update(snapshot_of(&state));
-    }
-
-    // Construct the owner with its capability before registering it. No
-    // process-global nonce is published, so a test hold or a later hold cannot
-    // clear or replace the capability owned by this one.
-    let mut active_toolchain_dirs = HashMap::new();
-    if let Some(disabled) = &toolchain {
-        active_toolchain_dirs.insert(disabled.directory().to_owned(), 1);
-    }
-    let inner = Arc::new(LockInner {
+    let flocked = Flocked {
         fd: owned,
         path: path.to_owned(),
-        state: Mutex::new(state),
-        toolchain,
-        capability: effects.attach_capability.then_some(nonce),
-        active_toolchain_dirs: Mutex::new(active_toolchain_dirs),
-        service,
-    });
-    // Register weakly so a later acquire in this process re-enters this hold
-    // instead of self-deadlocking on a second fd.
-    held_registry().push(Arc::downgrade(&inner));
-    let guard = LockGuard { inner };
-    (effects.after_fresh_hold)();
-    Ok(guard)
+        service: None,
+    };
+    match wait {
+        FlockWait::Block => {
+            let inherited = crate::hold::inherited_capability_hash();
+            wait_for_flock(flocked.fd.as_raw_fd(), inherited.as_ref())?;
+        }
+        FlockWait::NonBlocking => try_flock(flocked.fd.as_raw_fd())?,
+    }
+    // A stop accepted while this thread waited on the flock.
+    refuse_if_stopping()?;
+    // Each transition consumes its predecessor. Their order therefore stays
+    // visible here and cannot be rearranged without changing the types.
+    let flocked = flocked.start_service(ctx, effects.service)?;
+    let gated = flocked.gate(ctx, effects.disk_gate)?;
+    let drained = gated.drain(ctx, effects.drain)?;
+    let authorized = drained.authorize(effects.toolchain)?;
+    Ok(authorized.into_live(effects.capability, effects.after_fresh_hold))
+}
+
+/// A fresh exclusive flock, before the free-space gate has admitted work.
+struct Flocked {
+    // Fields are dropped in declaration order. The service must stop first,
+    // while the exclusive flock still prevents another acquisition from
+    // replacing it.
+    service: Option<(AcqId, crate::lock_service::Service)>,
+    fd: OwnedFd,
+    path: PathBuf,
+}
+
+impl Flocked {
+    /// The service is brought up while the acquisition is in progress so
+    /// another brokkr can stop a hold that is waiting for compilers to drain.
+    fn start_service(
+        mut self,
+        ctx: &LockContext<'_>,
+        start: ServiceStart,
+    ) -> Result<Self, DevError> {
+        self.service = start(ctx)?;
+        Ok(self)
+    }
+
+    /// Check the disk gate after taking the flock and before waiting on any
+    /// compiler lease.
+    fn gate(
+        self,
+        ctx: &LockContext<'_>,
+        gate: fn(crate::cli::CommandId, &crate::project::BuildRoot) -> Result<(), DevError>,
+    ) -> Result<Gated, DevError> {
+        gate(ctx.command, ctx.build_root).map_err(|error| match error {
+            DevError::Preflight(failures) => {
+                DevError::Lock(LockError::acquisition(AcquireRefusal::DiskGate(failures)))
+            }
+            other => other,
+        })?;
+        Ok(Gated(self))
+    }
+}
+
+/// A gated flock. No compiler drain has started yet.
+struct Gated(Flocked);
+
+impl Gated {
+    /// Publish a draining record, then obtain the exclusive compile lease.
+    fn drain(
+        self,
+        ctx: &LockContext<'_>,
+        drain: fn() -> Result<Option<OwnedFd>, DevError>,
+    ) -> Result<Drained, DevError> {
+        let acq_id = self.0.service.as_ref().map(|(id, _)| id);
+        let state = build_state(ctx, acq_id);
+        rewrite_from_state(self.0.fd.as_raw_fd(), &state).map_err(|source| {
+            DevError::Lock(LockError::acquisition(AcquireRefusal::MetadataPublish {
+                stage: MetadataStage::Draining,
+                source,
+            }))
+        })?;
+        let compile_lease = drain()?;
+        Ok(Drained {
+            compile_lease,
+            // `compile_lease` is declared first so an acquisition refused
+            // during authorization releases it before its flocked state.
+            flocked: self.0,
+            state,
+        })
+    }
+}
+
+/// A gated hold whose earlier compilation leases have all drained.
+struct Drained {
+    /// Held until the new capability is published under the exclusive lease.
+    compile_lease: Option<OwnedFd>,
+    flocked: Flocked,
+    state: LockState,
+}
+
+impl Drained {
+    /// Run fallible toolchain activation before publishing the capability.
+    /// Once this transition succeeds, `Authorized::into_live` performs no
+    /// fallible work before the new `LockInner` owns the capability.
+    fn authorize(
+        mut self,
+        toolchain_effect: fn() -> Result<Option<crate::toolchain::DisabledToolchain>, DevError>,
+    ) -> Result<Authorized, DevError> {
+        refuse_if_stopping()?;
+        let toolchain = toolchain_effect()?;
+        refuse_if_stopping()?;
+
+        let nonce = Nonce::mint().ok_or_else(|| {
+            DevError::Lock(LockError::acquisition(AcquireRefusal::Entropy {
+                purpose: EntropyPurpose::Capability,
+            }))
+        })?;
+        self.state.auth = Some(nonce.auth_hash());
+        self.state.draining = false;
+        rewrite_from_state(self.flocked.fd.as_raw_fd(), &self.state).map_err(|source| {
+            DevError::Lock(LockError::acquisition(AcquireRefusal::MetadataPublish {
+                stage: MetadataStage::Capability,
+                source,
+            }))
+        })?;
+
+        drop(self.compile_lease.take());
+        Ok(Authorized {
+            flocked: self.flocked,
+            state: self.state,
+            nonce,
+            toolchain,
+        })
+    }
+}
+
+/// The only state allowed to publish the capability to child processes.
+struct Authorized {
+    flocked: Flocked,
+    state: LockState,
+    nonce: Nonce,
+    toolchain: Option<crate::toolchain::DisabledToolchain>,
+}
+
+impl Authorized {
+    /// Move into the live RAII owner. This transition is intentionally
+    /// infallible: the published capability immediately becomes owned by the
+    /// `LockInner` that controls its lifetime.
+    fn into_live(
+        self,
+        attach_capability: fn(Nonce) -> Option<Nonce>,
+        after_fresh_hold: fn(),
+    ) -> LockGuard {
+        let service = self.flocked.service.map(|(_, service)| service);
+        if let Some(service) = &service {
+            service.update(snapshot_of(&self.state));
+        }
+        let mut active_toolchain_dirs = HashMap::new();
+        if let Some(disabled) = &self.toolchain {
+            active_toolchain_dirs.insert(disabled.directory().to_owned(), 1);
+        }
+        let inner = Arc::new(LockInner {
+            fd: self.flocked.fd,
+            path: self.flocked.path,
+            state: Mutex::new(self.state),
+            toolchain: self.toolchain,
+            capability: attach_capability(self.nonce),
+            active_toolchain_dirs: Mutex::new(active_toolchain_dirs),
+            service,
+        });
+        held_registry().push(Arc::downgrade(&inner));
+        let guard = LockGuard { inner };
+        after_fresh_hold();
+        guard
+    }
 }
 
 /// How often a waiting acquisition retries the flock and re-reads the holder.
@@ -270,13 +413,17 @@ pub(super) fn wait_for_flock(fd: RawFd, inherited: Option<&AuthHash>) -> Result<
         match err.raw_os_error() {
             Some(libc::EWOULDBLOCK) => {}
             Some(libc::EINTR) => continue,
-            _ => return Err(DevError::Lock(format!("flock failed: {err}"))),
+            _ => {
+                return Err(DevError::Lock(LockError::acquisition(
+                    AcquireRefusal::LockFlock { source: err },
+                )));
+            }
         }
         let holder = read_lock_contents(fd);
         if let (Some(mine), Some(info)) = (inherited, &holder)
             && info.auth.as_ref() == Some(mine)
         {
-            return Err(DevError::Lock(nested_refusal(info)));
+            return Err(DevError::Lock(LockError::acquisition(nested_refusal(info))));
         }
         if !announced {
             announced = true;
@@ -295,17 +442,37 @@ pub(super) fn wait_for_flock(fd: RawFd, inherited: Option<&AuthHash>) -> Result<
     }
 }
 
+/// One exclusive flock attempt. A held lock is the typed busy refusal, naming
+/// the holder's command when its record can be read.
+fn try_flock(fd: RawFd) -> Result<(), DevError> {
+    loop {
+        let ret = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
+        if ret == 0 {
+            return Ok(());
+        }
+        let err = std::io::Error::last_os_error();
+        match err.raw_os_error() {
+            Some(libc::EINTR) => {}
+            Some(libc::EWOULDBLOCK) => {
+                let holder = read_lock_contents(fd).map(|info| info.command);
+                return Err(DevError::Lock(LockError::acquisition(
+                    AcquireRefusal::Busy { holder },
+                )));
+            }
+            _ => {
+                return Err(DevError::Lock(LockError::acquisition(
+                    AcquireRefusal::LockFlock { source: err },
+                )));
+            }
+        }
+    }
+}
+
 /// The refusal for a descendant of the live holder.
-fn nested_refusal(holder: &LockInfo) -> String {
-    format!(
-        "cannot take the brokkr lock independently while the hold you were started under is \
-         active - it is held by your own ancestor (`brokkr {}`), which waiting here would never \
-         let go of. Run the inner command outside the outer one: run the built binary directly \
-         (for brokkr itself, build it and invoke `target/debug/brokkr ...`, or `brokkr install` \
-         and invoke the installed one), or run it before or after the outer command, not \
-         beneath it.",
-        holder.command
-    )
+fn nested_refusal(holder: &LockInfo) -> AcquireRefusal {
+    AcquireRefusal::NestedDescendant {
+        command: holder.command.clone(),
+    }
 }
 
 /// How long a fresh acquisition will wait for earlier compilation leases to
@@ -376,7 +543,12 @@ fn drain_compile_leases_at(
     reap: fn(),
 ) -> Result<OwnedFd, DevError> {
     let c_path = path_to_cstring(path)?;
-    let fd = open_lock_file(&c_path)?;
+    let fd = open_lock_file_raw(&c_path).map_err(|source| {
+        DevError::Lock(LockError::acquisition(AcquireRefusal::CompileLeaseOpen {
+            path: path.to_owned(),
+            source,
+        }))
+    })?;
     let owned = unsafe { OwnedFd::from_raw_fd(fd) };
 
     let start = Instant::now();
@@ -395,9 +567,11 @@ fn drain_compile_leases_at(
             // holder side fails closed here on purpose: brokkr must never run
             // protected work believing it has exclusion it never obtained.
             _ => {
-                return Err(DevError::Lock(format!(
-                    "could not take the compile lease lock at {}: {err}",
-                    path.display()
+                return Err(DevError::Lock(LockError::acquisition(
+                    AcquireRefusal::CompileLeaseFlock {
+                        path: path.to_owned(),
+                        source: err,
+                    },
                 )));
             }
         }
@@ -409,13 +583,10 @@ fn drain_compile_leases_at(
         }
         let waited = start.elapsed();
         if waited >= policy.budget {
-            return Err(DevError::Lock(format!(
-                "compilation leases did not drain within {}s. A compiler started before this \
-                 hold is still holding its lease, or a process that inherited its \
-                 descriptor is. This is not a transient busy signal - an unchanged blocker \
-                 will fail every retry. `brokkr strays` shows what is running; \
-                 `brokkr lock` shows the holder.",
-                policy.budget.as_secs()
+            return Err(DevError::Lock(LockError::acquisition(
+                AcquireRefusal::DrainTimeout {
+                    waited: policy.budget,
+                },
             )));
         }
         if !reaped && waited >= policy.reap_after {
@@ -427,77 +598,6 @@ fn drain_compile_leases_at(
         }
         std::thread::sleep(policy.poll);
     }
-}
-
-/// Turn a freshly-taken `brokkr.lock` into a usable hold: publish who we are,
-/// drain earlier compilation leases, then mint and publish this acquisition's
-/// capability. Returns the published state.
-///
-/// The order is the protocol, and every step depends on the one before it:
-///
-/// 1. Publish identity with `auth=` empty and `draining=1`. A guard reading an
-///    empty `auth` refuses, so no new compiler can be admitted while we clear -
-///    which is the anti-starvation property, obtained from the publication order
-///    rather than from a separate intent flag a crashed writer could leave
-///    behind. It also lets `brokkr lock` and `kill` see who is draining. This
-///    publication must succeed: a hold whose metadata never existed is
-///    indistinguishable from torn metadata for every reader, and `kill` could
-///    never target it.
-/// 2. Drain, and hold the exclusive compile lease.
-/// 3. Mint the capability and publish its hash *while still holding that
-///    exclusive lease*. A guard paused before taking its share resumes after we
-///    release, reads the new hash under its share, and so cannot turn an earlier
-///    hold's nonce into an admitted compiler.
-/// 4. Release the exclusive lease, so this hold's own descendants can take
-///    shares of it.
-fn drain_and_authorize(
-    fd: RawFd,
-    ctx: &LockContext<'_>,
-    effects: &HoldEffects,
-    acq_id: Option<&AcqId>,
-) -> Result<Authorized, DevError> {
-    let mut state = build_state(ctx, acq_id);
-    rewrite_from_state(fd, &state)
-        .map_err(|e| DevError::Lock(format!("failed to publish lock metadata: {e}")))?;
-
-    let compile_lease = (effects.drain)()?;
-
-    let nonce = Nonce::mint().ok_or_else(|| {
-        DevError::Lock(
-            "could not read /dev/urandom to mint a compilation capability; a hold that cannot \
-             mint one would have every one of its own compiles refused"
-                .into(),
-        )
-    })?;
-    state.auth = Some(nonce.auth_hash());
-    state.draining = false;
-    rewrite_from_state(fd, &state).map_err(|e| {
-        DevError::Lock(format!("failed to publish the compilation capability: {e}"))
-    })?;
-
-    // Activate the armed toolchain-disable here: after the drain, so the
-    // moved-aside window never spans a wait on other processes, and before the
-    // new `LockInner` takes ownership of the nonce. If activation fails, the
-    // published lock-file hash has no matching child capability and the hold
-    // is refused before protected work starts.
-    let toolchain = (effects.toolchain)()?;
-
-    drop(compile_lease);
-    Ok(Authorized {
-        state,
-        nonce,
-        toolchain,
-    })
-}
-
-/// A drained, authorized hold, ready for its [`LockInner`] to take ownership.
-///
-/// The nonce is carried out rather than attached here on purpose: it only
-/// becomes available to child stamping when the owning `LockInner` is built.
-struct Authorized {
-    state: LockState,
-    nonce: Nonce,
-    toolchain: Option<crate::toolchain::DisabledToolchain>,
 }
 
 /// Build the initial `LockState` for a freshly-acquired lock. Captures the
@@ -538,9 +638,9 @@ fn identity_of(ctx: &LockContext<'_>) -> crate::lock_service::Identity {
     };
     crate::lock_service::Identity {
         project: ctx.project.to_owned(),
-        command: ctx.command.to_owned(),
+        command: ctx.command.spec().name.to_owned(),
         args: current_invocation_args(),
-        root: ctx.project_root.to_owned(),
+        root: ctx.project_root.as_path().display().to_string(),
         pid_ns: ns("/proc/self/ns/pid"),
         // The thread reading `starttime` is this one, and its time namespace
         // is what offsets the value it reads.

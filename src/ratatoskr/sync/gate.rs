@@ -6,7 +6,6 @@ use crate::build::CargoProfile;
 use crate::config::project_config::ratatoskr::{GateConfig, RatatoskrConfig};
 use crate::error::DevError;
 use crate::git;
-use crate::lockfile::{self, LockContext};
 use crate::output;
 use crate::ratatoskr::gate as gate_eval;
 use crate::ratatoskr::gate_store::{GateDb, GateRow};
@@ -93,7 +92,7 @@ pub fn run_gate_cohort(req: &SyncBenchRequest<'_>) -> Result<(), DevError> {
         let script = if gate.script.is_absolute() {
             gate.script.clone()
         } else {
-            req.project_root.join(&gate.script)
+            req.project_root.as_path().join(&gate.script)
         };
         if !script.is_file() {
             return Err(DevError::Config(format!(
@@ -121,8 +120,8 @@ pub fn run_gate_cohort(req: &SyncBenchRequest<'_>) -> Result<(), DevError> {
     ));
 
     // Hold the global measurement lock for the entire sweep. Each
-    // `run_sync_bench` below re-enters this same hold through
-    // `BenchHarness::new` - `lockfile::acquire` is re-entrant within the
+    // `run_sync_bench` below re-enters this same hold through its
+    // measurement session - `lockfile::acquire` is re-entrant within the
     // process precisely so this hoist doesn't self-deadlock on a second
     // flock fd. Without it the lock dropped between gates, so a concurrent
     // brokkr could run a build or bench in the gap and contaminate the next
@@ -131,12 +130,7 @@ pub fn run_gate_cohort(req: &SyncBenchRequest<'_>) -> Result<(), DevError> {
     // indistinguishable from a real regression. Holding across the sweep
     // also keeps the cohort contiguous in time - it can't stall mid-way
     // waiting behind someone else's run.
-    let project_root_str = req.project_root.display().to_string();
-    let _lock = lockfile::acquire(&LockContext {
-        project: "ratatoskr",
-        command: "sync",
-        project_root: &project_root_str,
-    })?;
+    let _lock = crate::context::reenter_command_lock()?;
 
     let mut failures: Vec<(&str, String)> = Vec::new();
     let mut ran = 0usize;
@@ -153,7 +147,7 @@ pub fn run_gate_cohort(req: &SyncBenchRequest<'_>) -> Result<(), DevError> {
             force: req.force,
             keep_artefacts: req.keep_artefacts,
             profile_override: req.profile_override,
-            brokkr_args: req.brokkr_args.clone(),
+            invocation: req.invocation.clone(),
             gate: Some(name),
             as_baseline: false,
         };
@@ -249,14 +243,14 @@ pub(super) fn run_gate_hook(ctx: &GateHookCtx<'_>) -> Result<(), DevError> {
     // records the commit it measured rather than whatever HEAD happens to
     // be. `gate.db` itself stays under the main `project_root` below - a
     // worktree is disposable, and the baselines are not.
-    let git_info = git::collect(ctx.req.build_root.unwrap_or(ctx.project_root))?;
+    let git_info = git::collect(ctx.req.build_root.as_path())?;
     let profile_name = CargoProfile::for_debug(ctx.debug).as_str();
 
     let sidecar_blob = sidecar_to_json(ctx.sidecar_data);
     let meta_blob = meta_to_json(ctx.summary);
 
     let row = GateRow {
-        git_commit: git_info.commit.clone(),
+        git_commit: git_info.commit.as_str().to_owned(),
         dirty: !git_info.is_clean,
         hostname: hostname.clone(),
         gate_name: ctx.gate_name.to_owned(),
@@ -274,7 +268,8 @@ pub(super) fn run_gate_hook(ctx: &GateHookCtx<'_>) -> Result<(), DevError> {
         features: ctx.features.to_owned(),
     };
 
-    let db_path = ctx.project_root.join(".brokkr/ratatoskr/gate.db");
+    let state = crate::clean::layout::ProjectState::new(ctx.project_root);
+    let db_path = state.ratatoskr().gate_db();
     let db = GateDb::open(&db_path)?;
     let uuid = db.insert(&row)?;
     let short = &uuid[..8.min(uuid.len())];
@@ -408,7 +403,7 @@ fn missing_baseline_error(
             format!(
                 "gate.db does have {siblings} other row(s) for `{gate_name}` on this \
                  host, so the pinned row specifically is gone (pruned, or written to \
-                 a different .brokkr/ratatoskr/gate.db)."
+                 a different ratatoskr gate database)."
             )
         }
     } else {
@@ -949,7 +944,6 @@ mod tests {
     /// open. It must round-trip whatever the strings hold.
     #[test]
     fn run_toml_round_trips_hostile_strings() {
-        use std::os::unix::process::ExitStatusExt;
         let built = HarnessBuild {
             binary: PathBuf::from("/odd \"dir\"/back\\slash/app"),
             bin_dir: PathBuf::from("/odd \"dir\"/back\\slash"),
@@ -957,12 +951,11 @@ mod tests {
         };
         let dc = output::DeadlineCapture {
             captured: output::CapturedOutput {
-                status: std::process::ExitStatus::from_raw(3 << 8),
+                ending: output::Ending::Exited(3),
                 stdout: Vec::new(),
                 stderr: Vec::new(),
                 elapsed: Duration::from_millis(42),
             },
-            killed_on_deadline: true,
             output_cut: false,
         };
         let mock = MockOutcome {
@@ -972,7 +965,7 @@ mod tests {
             shutdown_elapsed: Duration::ZERO,
         };
         let git = git::GitInfo {
-            commit: "abc1234".to_owned(),
+            commit: "abc1234".parse().unwrap(),
             subject: "fix \"quoted\" \\ thing".to_owned(),
             is_clean: false,
         };
@@ -997,7 +990,9 @@ mod tests {
         );
         assert_eq!(parsed["exit_code"].as_integer(), Some(3));
         assert_eq!(parsed["elapsed_ms"].as_integer(), Some(42));
-        assert_eq!(parsed["killed_on_deadline"].as_bool(), Some(true));
+        // A child that exited by itself was not killed at its deadline; the
+        // flag is elided rather than written false.
+        assert!(parsed.get("killed_on_deadline").is_none());
         assert_eq!(parsed["mock"]["signal"].as_integer(), Some(9));
         assert_eq!(parsed["mock"]["killed_after_budget"].as_bool(), Some(true));
         assert!(parsed["mock"].get("exit_code").is_none());

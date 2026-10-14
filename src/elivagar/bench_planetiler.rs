@@ -6,6 +6,7 @@
 
 use std::path::Path;
 
+use crate::clean::layout::ElivagarLayout;
 use crate::db::KvPair;
 use crate::error::DevError;
 use crate::harness::{BenchConfig, BenchHarness};
@@ -22,19 +23,10 @@ pub fn run(
     pbf_path: &Path,
     file_mb: f64,
     runs: usize,
-    data_dir: &Path,
-    scratch_dir: &Path,
+    layout: &ElivagarLayout<'_>,
     project_root: &Path,
 ) -> Result<(), DevError> {
-    let invocation = prepare(
-        pbf_path,
-        file_mb,
-        runs,
-        data_dir,
-        scratch_dir,
-        project_root,
-        false,
-    )?;
+    let invocation = prepare(pbf_path, file_mb, runs, layout, project_root, false)?;
     let args: Vec<&str> = invocation.args.iter().map(String::as_str).collect();
     harness.run_external_prepared(
         &invocation.config,
@@ -78,15 +70,17 @@ fn prime_sources(
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 pub(crate) fn prepare(
     pbf_path: &Path,
     file_mb: f64,
     runs: usize,
-    data_dir: &Path,
-    scratch_dir: &Path,
+    layout: &ElivagarLayout<'_>,
     project_root: &Path,
     dry_run: bool,
 ) -> Result<crate::measure::runner::ExternalInvocation, DevError> {
+    let data_dir = layout.data_dir();
+    let scratch_dir = layout.scratch();
     let pt = if dry_run {
         tools::PlanetilerTools {
             java: data_dir.join("jdk/bin/java"),
@@ -121,10 +115,10 @@ pub(crate) fn prepare(
     if !dry_run {
         std::fs::create_dir_all(scratch_dir)?;
     }
-    let output_path = scratch_dir.join("planetiler-bench.pmtiles");
+    let output_path = layout.planetiler_output();
     let output_str = output_path.display().to_string();
 
-    let tmpdir = scratch_dir.join("planetiler_tmp");
+    let tmpdir = layout.planetiler_tmp();
     let tmpdir_str = tmpdir.display().to_string();
 
     // Where Planetiler keeps its source downloads (ocean + natural earth),
@@ -139,12 +133,12 @@ pub(crate) fn prepare(
     // planetiler's `Arguments` looks keys up rather than validating the
     // command line, so a wrong name may well pass silently; the post-priming
     // check below is what catches it either way.
-    let sources_dir = data_dir.join("sources");
+    let sources_dir = layout.planetiler_sources();
     let download_dir_arg = format!("--download_dir={}", sources_dir.display());
     // Written only after a priming run succeeds. The bare directory is not
     // evidence of anything: an interrupted download leaves it behind, half
     // full, and every later run would then measure against partial sources.
-    let primed_marker = sources_dir.join(".brokkr-primed");
+    let primed_marker = layout.planetiler_primed_marker();
 
     // Prime Planetiler source data on first run - the only invocation that
     // passes `--download`, so network time never lands inside a timed run.
@@ -169,7 +163,13 @@ pub(crate) fn prepare(
             "--nodemap-type=sparsearray",
             &tmp_arg,
         ];
-        prime_sources(java_str, &prime_args, project_root, &sources_dir, &primed_marker)?;
+        prime_sources(
+            java_str,
+            &prime_args,
+            project_root,
+            &sources_dir,
+            &primed_marker,
+        )?;
     }
 
     if !dry_run {
@@ -210,7 +210,7 @@ pub(crate) fn prepare(
         input_file: Some(basename),
         input_mb: Some(file_mb),
         cargo_features: None,
-        cargo_profile: crate::build::CargoProfile::Java,
+        external_build: Some(crate::build::CargoProfile::Java),
         runs,
         cli_args: Some(crate::harness::format_cli_args(
             &pt.java.display().to_string(),

@@ -6,7 +6,7 @@
 //! lands. The project root's is not: `.brokkr/` and the results stores are
 //! small, and a root on a full disk with `target` symlinked onto a roomy one
 //! must not be refused for a build that writes nothing to the root's disk.
-//! The target is probed as `<cwd>/target` with symlinks resolved,
+//! The target is probed as `<build root>/target` with symlinks resolved,
 //! which is what makes one rule cover every host: a plain per-project dir
 //! (or a `target` not created yet, which resolves to its nearest existing
 //! ancestor) reports the build directory's disk; a `target` symlinked into
@@ -25,9 +25,10 @@
 //! check would otherwise refuse every command on a full home disk, including
 //! builds that write nothing to it.
 //!
-//! `clean` is exempt, since it is the remedy, and so is `env`, which reports
-//! free space and is how you look: its storage rows show each disk's free
-//! share and flag one under the floor by this module's rule.
+//! Exemption is a field of the command's spec (`crate::cli`): `clean` is
+//! exempt, since it is the remedy, and so is `env`, which reports free space
+//! and is how you look: its storage rows show each disk's free share and flag
+//! one under the floor by this module's rule.
 
 use std::path::{Path, PathBuf};
 
@@ -36,25 +37,21 @@ use crate::error::DevError;
 /// Refuse below this share of a filesystem's size available.
 pub(crate) const MIN_FREE_PERCENT: u64 = 5;
 
-/// Commands the gate never refuses.
-const EXEMPT: [&str; 2] = ["clean", "env"];
-
-/// The host gate, run on every fresh lock hold.
-pub(crate) fn check(command: &str) -> Result<(), DevError> {
-    if EXEMPT.contains(&command) {
+/// The host gate, run on every fresh lock hold. The command's spec decides
+/// whether it is gated at all (`clean` and `env` are not); the build root is
+/// the code tree whose `target` the build writes, never the config/state root.
+pub(crate) fn check(
+    command: crate::cli::CommandId,
+    build_root: &crate::project::BuildRoot,
+) -> Result<(), DevError> {
+    if !command.spec().disk_gate {
         return Ok(());
     }
-    // LockContext's root is a display/state label: with parent-level config
-    // it is not cargo's cwd. Do not accept it here, even as a typed wrapper.
-    // Live commands build from the invocation directory; worktree targets
-    // and cargo-config target overrides remain separate resolution concerns.
-    // An unreadable cwd (deleted directory) fails open like any other
-    // unreadable size; the command's own work reports it properly.
-    let Ok(build_root) = std::env::current_dir() else {
-        return Ok(());
-    };
     let cargo_target_dir = std::env::var_os("CARGO_TARGET_DIR").filter(|d| !d.is_empty());
-    check_paths(&candidates(&build_root, cargo_target_dir.as_deref()))
+    check_paths(&candidates(
+        build_root.as_path(),
+        cargo_target_dir.as_deref(),
+    ))
 }
 
 /// The gate over an explicit list of `(label, path)`s, deduplicated by mount.
@@ -65,7 +62,7 @@ pub(crate) fn check_paths(paths: &[(&str, PathBuf)]) -> Result<(), DevError> {
     let mut seen: Vec<String> = Vec::new();
     let mut low: Vec<String> = Vec::new();
     for (label, path) in paths {
-        let Some(fs) = crate::env::probe_path(label, path) else {
+        let Some(fs) = crate::host::storage::probe_path(label, path) else {
             continue;
         };
         if seen.contains(&fs.mount_point) {
@@ -77,8 +74,8 @@ pub(crate) fn check_paths(paths: &[(&str, PathBuf)]) -> Result<(), DevError> {
                 "{label} ({}) is on {}, which has {} available of {} ({:.1}%)",
                 path.display(),
                 fs.mount_point,
-                crate::env::format_bytes(fs.free_bytes),
-                crate::env::format_bytes(fs.total_bytes),
+                crate::output::format_bytes(fs.free_bytes),
+                crate::output::format_bytes(fs.total_bytes),
                 percent(fs.free_bytes, fs.total_bytes),
             ));
         }
@@ -122,6 +119,7 @@ pub(crate) fn percent(free: u64, total: u64) -> f64 {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
     use super::*;
 
     #[test]
@@ -148,8 +146,18 @@ mod tests {
 
     #[test]
     fn exempt_commands_skip_the_probe() {
-        for command in EXEMPT {
-            assert!(check(command).is_ok());
+        let (_, build_root) = crate::project::detect_roots().unwrap();
+        let exempt: Vec<_> = crate::cli::COMMANDS
+            .iter()
+            .filter(|id| !id.spec().disk_gate)
+            .collect();
+        assert!(
+            exempt.iter().any(|id| id.spec().name == "clean")
+                && exempt.iter().any(|id| id.spec().name == "env"),
+            "clean is the remedy and env is how you look"
+        );
+        for command in exempt {
+            assert!(check(*command, &build_root).is_ok());
         }
     }
 }

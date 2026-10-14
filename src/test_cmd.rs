@@ -279,7 +279,8 @@ mod tests {
     #[test]
     fn a_harness_failure_names_the_signal_and_only_suspects_a_test() {
         use std::os::unix::process::ExitStatusExt;
-        let status = std::process::ExitStatus::from_raw(101 << 8);
+        let status =
+            crate::output::Ending::from_exit_status(&std::process::ExitStatus::from_raw(101 << 8));
         let stderr = [
             "error: test failed, to rerun pass `-p pkg --test cli`",
             "",
@@ -316,10 +317,13 @@ mod tests {
     #[test]
     fn a_direct_harness_failure_reads_its_own_status() {
         use std::os::unix::process::ExitStatusExt;
-        let aborted = std::process::ExitStatus::from_raw(libc::SIGABRT);
+        let aborted = crate::output::Ending::from_exit_status(&std::process::ExitStatus::from_raw(
+            libc::SIGABRT,
+        ));
         let f = harness_failure("test:cli", &aborted, true, &[], &[]);
         assert_eq!(f.what, "test harness failed (signal: 6, SIGABRT)");
-        let exited = std::process::ExitStatus::from_raw(101 << 8);
+        let exited =
+            crate::output::Ending::from_exit_status(&std::process::ExitStatus::from_raw(101 << 8));
         let f = harness_failure("test:cli", &exited, true, &[], &[]);
         assert_eq!(f.what, "test harness failed (exit status: 101)");
     }

@@ -18,16 +18,13 @@
 //   managed, awaited work: a detached descendant of a build script or listing
 //   is outside them.
 
-/// `[test] serial_builds`, or a cargo build dir configured anywhere: every
-/// group collapses into one. Set once per `check` run, before any phase.
-static SERIAL_BUILDS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-/// Decide, for this run, whether the build phases may run target-dir groups
-/// concurrently. A configured build dir (`CARGO_BUILD_BUILD_DIR` - inherited
-/// or in a sweep's own `env` - or `build.build-dir` anywhere in the config
-/// chain) holds intermediate artifacts that target dirs do not separate, so it
-/// forces one group.
-fn set_serial_builds(project_root: &Path, configured: bool, sweeps: &[PlannedSweep]) {
+/// Decide, for this run, whether the build phases collapse every target-dir
+/// group into one chain: `[test] serial_builds`, or a configured build dir
+/// (`CARGO_BUILD_BUILD_DIR` - inherited or in a sweep's own `env` - or
+/// `build.build-dir` anywhere in the config chain), which holds intermediate
+/// artifacts that target dirs do not separate. Resolved once per run and
+/// passed to every [`run_grouped`] call.
+fn resolve_serial_builds(project_root: &Path, configured: bool, sweeps: &[PlannedSweep]) -> bool {
     let sweep_build_dir = sweeps.iter().any(|sweep| {
         let env: Vec<(&str, &str)> = sweep
             .env
@@ -48,7 +45,7 @@ fn set_serial_builds(project_root: &Path, configured: bool, sweeps: &[PlannedSwe
     if serial && !configured {
         output::detail("build phases: one cargo chain (a cargo build dir is configured)");
     }
-    SERIAL_BUILDS.store(serial, std::sync::atomic::Ordering::Relaxed);
+    serial
 }
 
 fn build_dir_configured(
@@ -71,11 +68,13 @@ fn target_dir_key(sweep: &PlannedSweep, meta_target_dir: &Path) -> PathBuf {
 /// threads. Every item runs whatever an earlier one returned - except after a
 /// stop (`Interrupted`, or the shutdown flag), which ends its chain; the rest
 /// of that chain is `None`. Results come back in the order of `items`.
+/// `serial` (the run's [`resolve_serial_builds`] answer) makes every item one
+/// chain.
 fn run_grouped<T: Send>(
     items: &[(usize, PathBuf)],
+    serial: bool,
     work: &(dyn Fn(usize) -> Result<T, DevError> + Sync),
 ) -> Vec<(usize, Option<Result<T, DevError>>)> {
-    let serial = SERIAL_BUILDS.load(std::sync::atomic::Ordering::Relaxed);
     let mut chains: Vec<(PathBuf, Vec<usize>)> = Vec::new();
     for (pos, (_, key)) in items.iter().enumerate() {
         match chains.iter_mut().find(|(k, _)| serial || k == key) {
@@ -145,7 +144,7 @@ impl BackgroundScripts {
             "script-check: {} started in the background",
             output::count(entries.len(), "check")
         ));
-        let deadline = phase_ceiling("script_check");
+        let deadline = Phase::ScriptCheck.ceiling();
         let running = entries
             .into_iter()
             .map(|check| {
@@ -254,7 +253,7 @@ mod concurrency_tests {
             (5, "b".into()),
         ];
         let order = std::sync::Mutex::new(Vec::new());
-        let out = run_grouped(&items, &|i| {
+        let out = run_grouped(&items, false, &|i| {
             order.lock().unwrap().push(i);
             match i {
                 2 => Err(DevError::Build("two".into())),
@@ -270,6 +269,17 @@ mod concurrency_tests {
         let order = order.into_inner().unwrap();
         let a: Vec<usize> = order.iter().copied().filter(|i| i % 2 == 0).collect();
         assert_eq!(a, vec![0, 2, 4], "chain `a` ran in order, past its error");
+    }
+
+    /// A serial run is one chain: a stop anywhere ends every later item.
+    #[test]
+    fn serial_builds_make_one_chain() {
+        let items: Vec<(usize, PathBuf)> = vec![(0, "a".into()), (1, "b".into()), (2, "a".into())];
+        let out = run_grouped(&items, true, &|i| {
+            if i == 0 { Err(DevError::Interrupted) } else { Ok(i) }
+        });
+        let got: Vec<(usize, bool)> = out.iter().map(|(i, r)| (*i, r.is_some())).collect();
+        assert_eq!(got, vec![(0, true), (1, false), (2, false)]);
     }
 
     /// A snapshot names exactly the files whose content moved.

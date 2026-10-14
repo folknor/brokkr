@@ -106,7 +106,7 @@ fn build_snapshot_binary(build_root: &Path) -> Result<PathBuf, DevError> {
         all_features: false,
         profile: "release",
     };
-    build::cargo_build(&config, build_root)
+    build::cargo_build(&config, build_root).map(|artifact| artifact.path)
 }
 
 /// Parse the JSON metadata line from snapshot binary stdout.
@@ -209,7 +209,7 @@ fn run_snapshot(
 
     let captured = output::run_captured(&binary_str, &args, project_root)?;
 
-    if !captured.status.success() {
+    if !captured.success() {
         let stderr = String::from_utf8_lossy(&captured.stderr);
         output::sluggrs_msg(&format!(
             "  ERROR: {}",
@@ -421,7 +421,7 @@ pub(crate) fn test(
     let dirty = !git_info.is_clean;
 
     // We'll update adapter_name after the first snapshot runs.
-    db.insert_run(&run_id, &git_info.commit, dirty, None)?;
+    db.insert_run(&run_id, git_info.commit.as_str(), dirty, None)?;
 
     let dirty_label = if dirty { ", dirty" } else { "" };
     output::sluggrs_msg(&format!(
@@ -535,7 +535,7 @@ pub(crate) fn approve(
     // Dropping `staged` on either error removes the staged copy.
     let staged = crate::atomic_write::Staged::stable(&approved_png)?;
     std::fs::copy(&output_png, staged.tmp_path())?;
-    db.set_approval(&snapshot.id, &git_info.commit, pixel_pct)?;
+    db.set_approval(&snapshot.id, git_info.commit.as_str(), pixel_pct)?;
     staged.commit()?;
 
     output::sluggrs_msg(&format!(

@@ -3,7 +3,7 @@ use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
 
-use crate::error::DevError;
+use crate::error::{DevError, LockError};
 use crate::process::{HostScope, Pid, ProcIdentity, StartTicks};
 
 mod hold_protocol;
@@ -310,9 +310,13 @@ impl LockGuard {
 /// Context written to the lock file so `brokkr lock` can explain who holds it.
 pub struct LockContext<'a> {
     pub project: &'a str,
-    pub command: &'a str,
-    /// Display identity only, not a cargo cwd or a disk-probe path.
-    pub project_root: &'a str,
+    /// The parsed command; its spec decides the disk-gate exemption and its
+    /// name is what the lock file records.
+    pub command: crate::cli::CommandId,
+    /// The config/state root, recorded as the holder's display identity.
+    pub project_root: &'a crate::project::ProjectRoot,
+    /// The code tree whose `target` the disk gate probes.
+    pub build_root: &'a crate::project::BuildRoot,
 }
 
 /// Registration of a toolchain directory whose pin is currently held aside.
@@ -367,11 +371,13 @@ impl Drop for ToolchainRegistration {
 /// default, so this errors rather than inventing a cwd-relative one.
 fn lock_path() -> Result<PathBuf, DevError> {
     let path = crate::user_dirs::lock_file().ok_or_else(|| {
-        DevError::Lock("$HOME is not set or is empty - cannot locate the brokkr lock".into())
+        DevError::Lock(LockError::from(
+            "$HOME is not set or is empty - cannot locate the brokkr lock",
+        ))
     })?;
-    let dir = path
-        .parent()
-        .ok_or_else(|| DevError::Lock("cannot resolve the brokkr lock directory".into()))?;
+    let dir = path.parent().ok_or_else(|| {
+        DevError::Lock(LockError::from("cannot resolve the brokkr lock directory"))
+    })?;
     std::fs::create_dir_all(dir)?;
     Ok(path)
 }
@@ -387,7 +393,7 @@ fn lock_path() -> Result<PathBuf, DevError> {
 /// flock is released only when the last guard drops. This exists for the
 /// gate cohort (`sync --gate all`): it acquires once around the whole sweep
 /// so measurement stays serialized end-to-end, while each swept member
-/// (`BenchHarness::new`) still contains its own acquire for the
+/// (its measurement session) still contains its own acquire for the
 /// single-invocation path. Without re-entrancy the inner acquire would open
 /// a second fd on the same file and `flock(2)` would block it on the lock
 /// this very process holds - a self-deadlock. (`sync --all` also holds the
@@ -412,8 +418,9 @@ fn lock_path() -> Result<PathBuf, DevError> {
 /// ratatoskr) silently skipped both. A nested acquire runs neither - the
 /// outer hold already did.
 ///
-/// Refusal reasons cross the string-only `DevError::Lock` boundary; a caller
-/// cannot tell a nested-holder refusal from a stop by type.
+/// A typed acquisition refusal lets callers distinguish a nested-holder
+/// refusal, a drain timeout and lock infrastructure failures without parsing
+/// the message.
 pub fn acquire(ctx: &LockContext<'_>) -> Result<LockGuard, DevError> {
     let path = lock_path()?;
     acquire_at(&path, ctx, &HOST_EFFECTS)
@@ -426,6 +433,19 @@ pub fn acquire(ctx: &LockContext<'_>) -> Result<LockGuard, DevError> {
 pub(crate) fn acquire_without_toolchain(ctx: &LockContext<'_>) -> Result<LockGuard, DevError> {
     let path = lock_path()?;
     acquire_at(&path, ctx, &HOST_EFFECTS_WITHOUT_TOOLCHAIN)
+}
+
+/// As [`acquire_without_toolchain`], but a lock held by another process is
+/// refused at once with the typed busy refusal instead of waited for. Re-entry
+/// into this process's own hold still succeeds.
+pub(crate) fn try_acquire_without_toolchain(ctx: &LockContext<'_>) -> Result<LockGuard, DevError> {
+    let path = lock_path()?;
+    hold_protocol::acquire_at_with(
+        &path,
+        ctx,
+        &HOST_EFFECTS_WITHOUT_TOOLCHAIN,
+        hold_protocol::FlockWait::NonBlocking,
+    )
 }
 
 /// This process's live hold on the global lock, as one more guard on it, or
@@ -517,7 +537,9 @@ pub fn status() -> Result<Option<LockInfo>, DevError> {
         Err(err) => {
             // SAFETY: valid fd from open_lock_file, unique ownership.
             let _close = unsafe { OwnedFd::from_raw_fd(fd) };
-            return Err(DevError::Lock(format!("could not probe the lock: {err}")));
+            return Err(DevError::Lock(LockError::from(format!(
+                "could not probe the lock: {err}"
+            ))));
         }
     }
 
@@ -552,6 +574,14 @@ pub fn status() -> Result<Option<LockInfo>, DevError> {
 
 /// Open (or create) the lock file, returning the raw fd.
 fn open_lock_file(c_path: &std::ffi::CString) -> Result<RawFd, DevError> {
+    open_lock_file_raw(c_path).map_err(|source| {
+        DevError::Lock(LockError::from(format!(
+            "failed to open lock file: {source}"
+        )))
+    })
+}
+
+fn open_lock_file_raw(c_path: &std::ffi::CString) -> std::io::Result<RawFd> {
     let fd = unsafe {
         libc::open(
             c_path.as_ptr(),
@@ -561,10 +591,7 @@ fn open_lock_file(c_path: &std::ffi::CString) -> Result<RawFd, DevError> {
     };
 
     if fd < 0 {
-        return Err(DevError::Lock(format!(
-            "failed to open lock file: {}",
-            std::io::Error::last_os_error()
-        )));
+        return Err(std::io::Error::last_os_error());
     }
 
     Ok(fd)
@@ -581,7 +608,9 @@ pub fn compile_lock_path() -> Result<PathBuf, DevError> {
     // `lock_path` first: it creates the shared directory and owns the error.
     lock_path()?;
     crate::user_dirs::compile_lock().ok_or_else(|| {
-        DevError::Lock("$HOME is not set or is empty - cannot locate the compile lock".into())
+        DevError::Lock(LockError::from(
+            "$HOME is not set or is empty - cannot locate the compile lock",
+        ))
     })
 }
 
@@ -590,8 +619,12 @@ pub fn compile_lock_path() -> Result<PathBuf, DevError> {
 fn path_to_cstring(path: &std::path::Path) -> Result<std::ffi::CString, DevError> {
     use std::os::unix::ffi::OsStrExt;
 
-    std::ffi::CString::new(path.as_os_str().as_bytes())
-        .map_err(|_| DevError::Lock(format!("lock path contains nul byte: {}", path.display())))
+    std::ffi::CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+        DevError::Lock(LockError::from(format!(
+            "lock path contains nul byte: {}",
+            path.display()
+        )))
+    })
 }
 
 #[cfg(test)]
@@ -619,7 +652,20 @@ mod tests {
 
     fn nothing_after() {}
 
-    fn no_disk_gate(_: &str) -> Result<(), DevError> {
+    fn no_service(
+        _: &LockContext<'_>,
+    ) -> Result<Option<(AcqId, crate::lock_service::Service)>, DevError> {
+        Ok(None)
+    }
+
+    fn no_capability(_: Nonce) -> Option<Nonce> {
+        None
+    }
+
+    fn no_disk_gate(
+        _: crate::cli::CommandId,
+        _: &crate::project::BuildRoot,
+    ) -> Result<(), DevError> {
         Ok(())
     }
 
@@ -630,12 +676,12 @@ mod tests {
     /// the host's disk is full). What remains is exactly what these tests are
     /// about: the flock, re-entry, and the lock-file metadata.
     const INERT: HoldEffects = HoldEffects {
+        service: no_service,
+        disk_gate: no_disk_gate,
         drain: no_drain,
         toolchain: no_toolchain,
-        attach_capability: false,
+        capability: no_capability,
         after_fresh_hold: nothing_after,
-        disk_gate: no_disk_gate,
-        service: false,
     };
 
     /// A holder on `path` publishing `auth`, as a second descriptor of this
@@ -731,15 +777,11 @@ mod tests {
     /// A refused gate releases the lock: the next acquirer takes it at once.
     #[test]
     fn a_refused_disk_gate_releases_the_lock() {
-        fn refuse(_: &str) -> Result<(), DevError> {
+        fn refuse(_: crate::cli::CommandId, _: &crate::project::BuildRoot) -> Result<(), DevError> {
             Err(DevError::Preflight(vec!["disk full".to_owned()]))
         }
         let path = tmp_lock("disk-gate.lock");
-        let ctx = LockContext {
-            project: "p",
-            command: "check",
-            project_root: "/r",
-        };
+        let ctx = ctx();
         let refusing = HoldEffects {
             disk_gate: refuse,
             ..INERT
@@ -805,11 +847,20 @@ mod tests {
         );
     }
 
+    /// Fixture roots are minted through detection (the only constructor),
+    /// once per test process, and leaked so the context can be `'static`.
     fn ctx() -> LockContext<'static> {
+        static ROOTS: std::sync::OnceLock<(
+            crate::project::ProjectRoot,
+            crate::project::BuildRoot,
+        )> = std::sync::OnceLock::new();
+        let roots =
+            ROOTS.get_or_init(|| crate::project::detect_roots().expect("test cwd resolves"));
         LockContext {
             project: "test",
-            command: "lock-test",
-            project_root: "/nonexistent",
+            command: crate::cli::CommandId::Lock,
+            project_root: &roots.0,
+            build_root: &roots.1,
         }
     }
 

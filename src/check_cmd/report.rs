@@ -18,7 +18,7 @@
 // inside the lanes (post-join parallel reporting, per-resolution test runs),
 // and there is one run per process.
 
-pub(crate) use crate::run_log::{RunLog, activate_run_log, run_log_kind};
+pub(crate) use crate::run_log::{RunLog, run_log_kind};
 
 /// One convention phase's green result: its name and, where it has them,
 /// the counts that make the line falsifiable (a rule whose glob stopped
@@ -62,12 +62,6 @@ fn with_report<R>(f: impl FnOnce(&mut Report) -> R) -> Option<R> {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     guard.as_mut().map(f)
-}
-
-/// Whether a `check` run's report is collecting - false under `brokkr clippy`,
-/// which shares the diagnostic pipeline but prints its own verdict.
-fn report_active() -> bool {
-    with_report(|_| ()).is_some()
 }
 
 /// Start a fresh report. Called once per `cmd_check`.

@@ -11,12 +11,6 @@ Hygiene findings from the hunt for process control (lock, hold, guard, strays, s
    page - before the entry is removed, so the finding is not hunted again.
 4. Once all findings are resolved, the file gets deleted.
 
-## PLT-001 - Remaining hand-built `.brokkr` paths
-
-Reported by: config-cli-bootstrap, test-execution, measurement-storage, ratatoskr, piners, small-benches, pbfhogg-nidhogg.
-
-`ProjectState` and the per-project layouts (`clean/layout.rs`) now own the project state paths, and the stores, run log, accounting base, parallel timings, worktree record, nextest files, hash cache, hung-test snapshots and nidhogg pid file go through them; per-user state goes through `user_dirs`. Residue, each with a matching accessor already in the layout but not yet used outside `clean`: ratatoskr `ARTEFACT_PARENT` and `SERVICE_MOCK_PARENT` (`service/single.rs`), `SYNC_ARTEFACT_PARENT` (`sync/runner.rs`), `MOCK_DIR` (`saehrimnir.rs`) and the `gate.db` path (`sync/gate.rs`); dellingr and mogwai `SCRATCH_REL`; litehtml `prepare-cache` (`litehtml/cmd.rs`); pbfhogg scratch writers (`commands.rs` scratch output and multi-extract config paths, `plan.rs` merged PBF path, fixed-output writers in `bench_merge.rs`, `bench_blob_filter.rs`, `bench_all.rs`); nidhogg `commands.rs`/`plan.rs` scratch; elivagar's scratch, tmp and calibrand paths (and `main.rs` re-exporting `CORPUS_CALIBRAND_DIR`); and `bin/rustc_guard.rs`'s own state-root helper. Once they move, a textlint rule forbidding `".brokkr"` outside the layout owners holds it.
-
 ## PLT-002 - brokkr enforces very little of its own convention on itself
 
 Reported by: every hunter (check-core, process-control, config-cli-bootstrap, measurement-storage, pbfhogg-nidhogg, ratatoskr, piners, small-benches).
@@ -70,23 +64,6 @@ Reported by: process-control, config-cli-bootstrap, ratatoskr, pbfhogg-nidhogg, 
 Enforcement proposed: `clippy.toml` `disallowed-methods = ["std::process::Command::new"]` with `#[allow]` only at the choke-point module.
 
 Design hunt (process-control): the spawn sequence `cargo_env::apply` -> `oom::protect_child` -> (`die_with_parent`) -> (`test_orphans::stamp`) -> `hold::stamp` ("last, so nothing displaces it") is written out at `output.rs` three times (captured, sidecar, passthrough runners), `test_runner.rs` once (with the two extra steps), `ratatoskr/saehrimnir.rs`, `nidhogg/server.rs` and `nidhogg/bench_tiles.rs` (`hold::stamp` only), and `hold::cargo_config_overrides` (capability, rustc-info cache and orphan token for nextest - a second encoding of the same env policy in TOML). Whether the three project sites also need `protect_child`, `die_with_parent` or the orphan token is decided independently at each one. `oom::protect_child` does the opposite of its name: it sets `oom_score_adj = 1000`, making the child the OOM killer's preferred victim, to protect the desktop. Proposed: a `spawn::ChildPolicy` (or a `BrokkrCommand` builder) with named profiles - `Cargo`, `TestProcess`, `Service`, `Plain` - applying every step in the one correct order, able to `render_env() -> Vec<(&str, String)>` so `cargo_config_overrides` serialises the policy rather than re-listing it; `hold`, `test_orphans`, `oom` and the death-signal piece of `shutdown` each export a step and are never called from call sites. A caller-chosen `Cargo` profile also replaces `cargo_env::apply`'s `file_name() == "cargo"` sniff.
-
-## PLT-007 - Errors lose their subject or carry the wrong class
-
-Reported by: config-cli-bootstrap, convention-engines, measurement-storage, ratatoskr, pbfhogg-nidhogg, elivagar, check-core.
-
-- `From<io::Error>` gives `io: No such file or directory` naming no path (`HistoryDb::open` `create_dir_all`, `cmd_run` `create_dir_all(scratch)`, `resolve::file_size_mb`, `preflight::cached_xxh128`, `wc`); ratatoskr "canonicalize script: {e}" (and `run_sync_bench` canonicalizes before its `is_file` check, so the friendlier message is unreachable); pbfhogg "failed to remove cached merged PBF: {e}", "failed to create scratch dir: {e}" (also as `Config`).
-- `From<toml::de::Error>` in `config::load` never says which `brokkr.toml` (cwd or parent); the user layer wraps with its path.
-- `From<serde_json::Error>` → `DevError::Build` (adoptium API JSON, cargo metadata schema mismatches: VAL-038); `hostname()` failure → `Config`.
-- Runtime failures as `Config`: ratatoskr "harness binary exited", "gate FAILED", readiness timeouts, "no successful iterations" (users see `config: gate ... FAILED`; `sync.md` shows it), while service returns `ExitCode(1)`; pbfhogg `verify_geocode`/`verify_readonly` failures and `ensure_merged_pbf`/`bench_*` IO failures as `Config` while `verify_batch` uses `Verify`.
-- `Verify` for non-verify failures: `run_variants` wraps benchmark failures, `compare_tiles` plain IO, check test timeouts.
-- `brokkr deps nosuchcrate` → `Build`.
-- piners: every non-`Interrupted` error from `run_captured_with_env_and_deadline` recorded as "harness failed to spawn", and that branch never calls `clear_child_pid`.
-- UTF-8 path helpers: five variants with messages that disagree, some not naming the path (PRJ-010).
-
-Enforcement proposed: remove the blanket `From<io::Error>` to force context; a `Spawn` variant (BUG-036).
-
-Design hunt (config-cli, measurement, other-projects): `DevError` is mostly `Variant(String)`, and `Config` is used for everything not obviously something else ("cannot determine current directory", "--dry-run is not yet supported", "'visual' is only available for ...", "internal error: a pre-detection command reached project dispatch", "run count must be >= 1", argument conflicts clap could not express), so a caller cannot tell a malformed `brokkr.toml` from a wrong-project invocation from a dispatch-ordering bug. Proposed split: `Config` (file), `Usage`, `WrongProject { command, expected, current }` (one rendering for `project::require`, the four "only available for litehtml/sluggrs" messages and `cmd_pmtiles_stats`), `Internal`. `already_printed()` keys off `Reported` and `CargoEnv` while `Refused` renders bare but is "first print": a rendering policy encoded three ways (variant choice, `Display` arm, `already_printed`) that wants one method returning `AlreadyPrinted | Bare | Prefixed(category)`. Measurement: a missing self-reported `elapsed_ms` in `parse_kv_stderr` is `Config` with a 500-char stderr preview (a target contract violation, not config); `run_variants` ends with `Reported("N of M variants failed: ...")`, the failed names existing only in the string; `SidecarDb::resolve_session` ambiguity is `Config` with the candidates formatted in. ratatoskr's gate returns `Config("gate ... FAILED")` for a breached rule, so a regression, a misconfigured gate and an identity refusal ("incomparable") share a variant and an exit code, and `--gate all`'s cohort loop cannot tell them apart; proposed `GateVerdict { Passed, Breached(Vec<RuleOutcome>), Incomparable(Mismatch) }` with a distinct exit for `Breached`.
 
 ## PLT-008 - Errors swallowed into defaults (platform code)
 
@@ -418,3 +395,15 @@ Reported by: the wave-7 reviewer, laterally.
 - The nidhogg ingest dry-run is not strictly read-only although `measure/runner.rs` says planning is: `IngestPlan::plan` calls `resolve_pbf_with_size`, which can hash-verify the PBF and write `.brokkr/hash_cache`.
 - Older-generation finding IDs (`S3-xx`) remain in code comments in `clean.rs`, `test_cmd.rs`, `check_cmd/{coverage,output,phase}.rs`, `man/render.rs` and `config_parts/{tests,parser}.rs`; they cite a tracker that no longer exists.
 - `format_clippy_multi` zips `parse.diagnostics` with `events`, relying on `clippy_parse_from_events` keeping order one-to-one; it could read `package_id` from the diagnostics directly.
+
+## PLT-051 - Decisions and leftovers from the command-spec wave
+
+Reported by: the wave-9 reviewer.
+
+- Lock policy changes the command specs made on purpose and nothing documents yet: `approve` and `prepare` now take the lock; `verify batch`/`verify geocode` now lock (the `verify_cmd.rs` comment still says they take none); every measured command's `--dry-run` now waits on the lock, where dry-run used to bootstrap without one. Document or reverse each.
+- `brokkr env`'s tool rows now come from the command specs: elivagar loses `samply` and gains `java`, `cmake`, `g++`, `make` and `curl`; nidhogg and pbfhogg gain `curl`/`osmium`. Confirm the intended set.
+- `run_project`'s first arm re-dispatches `Lock`/`Check`/... and the routed pbfhogg variants back to `run()`; it is unreachable today, but reaching it would recurse through `run`'s spec and lock setup. An `unreachable!` with a reason would say so.
+- `cargo_env::Phase` doubles as `check_cmd::Phase` (re-exported and extended in `check_cmd/phase_type.rs`); the type belongs in `check_cmd` with `cargo_env` depending on it.
+- Cargo-threaded `test_threads` sweeps no longer get the parallel lane's separate wall; they run under the shared-harness ceilings like serial sweeps. Confirm that is the intended bound.
+- `BenchHarness::new_with_lock` still takes `&Path` roots and `db_root: Option` rather than the typed roots, and project argument building has not moved into per-project `cli` modules.
+- The `bootstrap.rs`/`command_input.rs` dispatch tables, `finish_check`, `insert_hotpath` and `bench_planetiler::prepare` carry `too_many_lines`/`too_many_arguments` allows added to get the gate green.

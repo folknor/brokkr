@@ -50,7 +50,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::error::DevError;
+use crate::error::{AcquireRefusal, DevError, LockError};
 use crate::lockfile::AcqId;
 
 /// Longest request line accepted. `stop <32 hex>` is 37 bytes.
@@ -103,7 +103,9 @@ pub struct Service {
 /// `~/.brokkr/lock`, created 0700.
 fn socket_dir() -> Result<PathBuf, DevError> {
     let dir = crate::user_dirs::socket_dir().ok_or_else(|| {
-        DevError::Lock("$HOME is not set or is empty - cannot place the lock socket".into())
+        DevError::Lock(LockError::acquisition(AcquireRefusal::SocketDirectory {
+            reason: "$HOME is not set or is empty - cannot place the lock socket".into(),
+        }))
     })?;
     std::fs::create_dir_all(&dir)?;
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
@@ -150,8 +152,11 @@ impl Service {
         let path = socket_path(&socket_dir()?, id);
         // `bind` refuses an existing path; a collision on a fresh 128-bit id is
         // a bug, not something to unlink over.
-        let listener = UnixListener::bind(&path).map_err(|e| {
-            DevError::Lock(format!("cannot bind lock socket {}: {e}", path.display()))
+        let listener = UnixListener::bind(&path).map_err(|source| {
+            DevError::Lock(LockError::acquisition(AcquireRefusal::SocketBind {
+                path: path.clone(),
+                source,
+            }))
         })?;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).ok();
         listener.set_nonblocking(true)?;
@@ -171,8 +176,8 @@ impl Service {
             .spawn(move || serve(&listener, &serving));
         if let Err(e) = spawned {
             std::fs::remove_file(&path).ok();
-            return Err(DevError::Lock(format!(
-                "cannot start the lock service thread: {e}"
+            return Err(DevError::Lock(LockError::acquisition(
+                AcquireRefusal::ServiceThread { source: e },
             )));
         }
         Ok(Self { shared, path })
@@ -264,12 +269,11 @@ fn stop_reply(shared: &Shared) -> String {
         return "gone\n".into();
     }
     crate::shutdown::commit_stop();
-    let signal_error =
-        match crate::process::signal_pid(std::process::id(),libc::SIGTERM) {
-            Ok(true) => None,
-            Ok(false) => Some(io::Error::from_raw_os_error(libc::ESRCH)),
-            Err(error) => Some(error),
-        };
+    let signal_error = match crate::process::signal_pid(std::process::id(), libc::SIGTERM) {
+        Ok(true) => None,
+        Ok(false) => Some(io::Error::from_raw_os_error(libc::ESRCH)),
+        Err(error) => Some(error),
+    };
     drop(live);
     match signal_error {
         None => "accepted\n".into(),

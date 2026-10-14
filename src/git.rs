@@ -1,5 +1,7 @@
+use std::fmt;
 use std::path::Path;
 use std::process::Command;
+use std::str::FromStr;
 
 use crate::error::DevError;
 
@@ -15,26 +17,104 @@ use crate::error::DevError;
 /// ambiguous abbreviation - the name must be a pure function of the commit.
 pub const SHORT_HASH_LEN: usize = 9;
 
-/// `full`'s [`SHORT_HASH_LEN`]-digit abbreviation - the one way brokkr
-/// shortens a hash. A string shorter than that (already abbreviated, or not a
-/// hash at all) comes back unchanged.
-pub fn short_of(full: &str) -> String {
-    full.get(..SHORT_HASH_LEN).unwrap_or(full).to_owned()
+/// A full Git commit object id. Only SHA-1 (40 hex digits) and SHA-256
+/// (64 hex digits) object ids are accepted.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Commit(String);
+
+impl Commit {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// The single abbreviation rule used for commit identity throughout
+    /// brokkr.
+    pub fn short(&self) -> ShortCommit {
+        ShortCommit(self.0[..SHORT_HASH_LEN].to_owned())
+    }
 }
 
-/// A commit resolved from a user-supplied revision (hash of any width, branch,
-/// tag, `HEAD~N`).
-pub struct CommitId {
-    /// The full 40-digit hash.
-    pub full: String,
-    /// [`short_of`] the full hash.
-    pub short: String,
+impl FromStr for Commit {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        if !matches!(value.len(), 40 | 64) || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(format!(
+                "commit id must be 40 or 64 hexadecimal characters; got {value:?}"
+            ));
+        }
+        Ok(Self(value.to_ascii_lowercase()))
+    }
+}
+
+impl fmt::Debug for Commit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Commit({})", self.0)
+    }
+}
+
+impl fmt::Display for Commit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// A validated commit abbreviation used for persistent keys and display.
+/// Stored legacy prefixes may be shorter than the current fixed width; new
+/// abbreviations always come from [`Commit::short`] and have
+/// [`SHORT_HASH_LEN`] digits.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ShortCommit(String);
+
+impl ShortCommit {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Convert a persisted commit field written by older brokkr versions.
+    /// New rows are abbreviated, while some external stores may retain the
+    /// full object id.
+    pub fn from_stored(value: &str) -> Result<Self, String> {
+        if matches!(value.len(), 40 | 64) {
+            value.parse::<Commit>().map(|commit| commit.short())
+        } else {
+            value.parse()
+        }
+    }
+}
+
+impl FromStr for ShortCommit {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        if value.is_empty()
+            || value.len() > SHORT_HASH_LEN
+            || !value.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(format!(
+                "short commit id must contain 1 to {SHORT_HASH_LEN} hexadecimal characters; got {value:?}"
+            ));
+        }
+        Ok(Self(value.to_ascii_lowercase()))
+    }
+}
+
+impl fmt::Debug for ShortCommit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "ShortCommit({})", self.0)
+    }
+}
+
+impl fmt::Display for ShortCommit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
 }
 
 /// Resolve `rev` to the commit it names, peeling tags. The single entry point
 /// for turning a user-typed revision into brokkr's commit identity, so a hash
 /// pasted at any width names the same worktree, baseline and archive.
-pub fn resolve_commit(repo: &Path, rev: &str) -> Result<CommitId, DevError> {
+pub fn resolve_commit(repo: &Path, rev: &str) -> Result<Commit, DevError> {
     let spec = format!("{rev}^{{commit}}");
     let output = Command::new("git")
         .args(["rev-parse", "--verify", "--quiet", &spec])
@@ -50,9 +130,14 @@ pub fn resolve_commit(repo: &Path, rev: &str) -> Result<CommitId, DevError> {
             repo.display()
         )));
     }
-    let full = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    let short = short_of(&full);
-    Ok(CommitId { full, short })
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse()
+        .map_err(|error: String| {
+            DevError::Config(format!(
+                "git returned an invalid commit id for {rev:?}: {error}"
+            ))
+        })
 }
 
 /// Whether `repo` has any uncommitted change - staged, unstaged or untracked
@@ -137,8 +222,8 @@ pub fn has_uncommitted(repo: &Path) -> Option<bool> {
 
 /// Structured git state for the benchmark harness.
 pub struct GitInfo {
-    /// `HEAD`'s hash, abbreviated by [`short_of`].
-    pub commit: String,
+    /// `HEAD`'s fixed-width abbreviation.
+    pub commit: ShortCommit,
     /// First line of the commit message.
     pub subject: String,
     /// True when the working tree has no staged or unstaged changes.
@@ -147,7 +232,7 @@ pub struct GitInfo {
 
 /// Collect git information from the working directory.
 pub fn collect(workspace_root: &Path) -> Result<GitInfo, DevError> {
-    let commit = read_commit_hash(workspace_root)?;
+    let commit = read_commit_hash(workspace_root)?.short();
     let subject = read_commit_subject(workspace_root)?;
     let is_clean = check_clean(workspace_root);
 
@@ -158,7 +243,7 @@ pub fn collect(workspace_root: &Path) -> Result<GitInfo, DevError> {
     })
 }
 
-fn read_commit_hash(workspace_root: &Path) -> Result<String, DevError> {
+fn read_commit_hash(workspace_root: &Path) -> Result<Commit, DevError> {
     let output = Command::new("git")
         .args(["rev-parse", "HEAD"])
         .current_dir(workspace_root)
@@ -171,12 +256,17 @@ fn read_commit_hash(workspace_root: &Path) -> Result<String, DevError> {
     if !output.status.success() {
         return Err(DevError::Subprocess {
             program: "git".to_owned(),
-            code: output.status.code(),
+            ending: crate::error::ProcessEnding::from_status(&output.status),
             stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
         });
     }
 
-    Ok(short_of(String::from_utf8_lossy(&output.stdout).trim()))
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse()
+        .map_err(|error: String| {
+            DevError::Config(format!("git returned an invalid HEAD commit id: {error}"))
+        })
 }
 
 fn read_commit_subject(workspace_root: &Path) -> Result<String, DevError> {
@@ -192,7 +282,7 @@ fn read_commit_subject(workspace_root: &Path) -> Result<String, DevError> {
     if !output.status.success() {
         return Err(DevError::Subprocess {
             program: "git".to_owned(),
-            code: output.status.code(),
+            ending: crate::error::ProcessEnding::from_status(&output.status),
             stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
         });
     }

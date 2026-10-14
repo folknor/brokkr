@@ -54,7 +54,7 @@ impl Stamp {
             fields.insert("rustc".into(), version);
             fields.insert("host".into(), host);
         }
-        if let Some(cpu) = cpu_model() {
+        if let Some(cpu) = crate::host::cpu::collect().model {
             fields.insert("cpu".into(), cpu);
         }
         // Both spellings matter: cargo re-exports the encoded form to build
@@ -125,7 +125,7 @@ impl Stamp {
 /// `(version string, host triple)` from `rustc -vV`.
 fn rustc_version(build_root: &Path) -> Option<(String, String)> {
     let captured = crate::output::run_captured("rustc", &["-vV"], build_root).ok()?;
-    if !captured.status.success() {
+    if !captured.success() {
         return None;
     }
     let text = String::from_utf8_lossy(&captured.stdout);
@@ -139,19 +139,6 @@ fn rustc_version(build_root: &Path) -> Option<(String, String)> {
         }
     }
     Some((version?, host?))
-}
-
-/// First `model name` in `/proc/cpuinfo`.
-fn cpu_model() -> Option<String> {
-    let content = std::fs::read_to_string("/proc/cpuinfo").ok()?;
-    for line in content.lines() {
-        if let Some((key, value)) = line.split_once(':')
-            && key.trim() == "model name"
-        {
-            return Some(value.trim().to_owned());
-        }
-    }
-    None
 }
 
 /// Digest of the user's cargo config, the usual home of standing rustflags.

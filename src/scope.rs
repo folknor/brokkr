@@ -65,7 +65,9 @@ fn git_paths(project_root: &Path, args: &[&str]) -> Option<Vec<PathBuf>> {
 /// prose here. That is deliberate, not a bug: markdown is never dirt, the
 /// cost of a missed doctest or rustdoc break is one later full run, and
 /// `--force-rust` asks for the build when a docs edit warrants it. A scan of
-/// every source for `include_str!` targets was tried and reverted.
+/// every source for `include_str!` targets was tried and reverted. The
+/// case-insensitive markdown extensions come from the same table gremlins
+/// scans, so prose-only changes still receive the text safety scan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Dirt {
     /// Not a git repo, or git could not be asked. Never shortens a run: the
@@ -80,9 +82,6 @@ pub enum Dirt {
     /// At least one uncommitted path is not markdown.
     Code,
 }
-
-/// Extensions the prose-only shortcut treats as documentation.
-const PROSE_EXTENSIONS: [&str; 2] = ["md", "markdown"];
 
 /// Classify the working tree. Staged, unstaged and untracked-not-ignored paths
 /// all count: what matters is whether anything not yet committed could change
@@ -133,7 +132,7 @@ fn classify_status(stdout: &[u8]) -> Dirt {
         let is_prose = Path::new(path)
             .extension()
             .and_then(|e| e.to_str())
-            .is_some_and(|e| PROSE_EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()));
+            .is_some_and(crate::globs::is_prose_extension);
         if !is_prose {
             prose_only = false;
         }
@@ -217,7 +216,7 @@ mod tests {
 
     #[test]
     fn markdown_only_changes_are_prose() {
-        let status = b" M docs/guide.md\0?? notes/todo.markdown\0A  README.MD\0";
+        let status = b" M docs/guide.md\0?? notes/todo.MARKDOWN\0A  README.MD\0";
         assert_eq!(classify_status(status), Dirt::ProseOnly);
     }
 

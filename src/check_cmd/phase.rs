@@ -25,18 +25,18 @@ use crate::cargo_filter;
 use crate::cargo_json;
 use crate::diagnostic::{Diagnostic, Owner, OwnerIndex};
 use crate::config::{
-    Certifies, CheckEntry, Claim, DependencyRule, GremlinsConfig, HeaderConfig,
-    ManifestConfig, RustdocConfig, NON_SKIPPABLE_PHASES, PHASE_NAMES, QuarantineEntry, ScriptCheck, SitedAllow,
+    Certifies, CheckEntry, Claim, DependencyRule, GremlinsConfig, HeaderConfig, LintsConfig,
+    ManifestConfig, RustdocConfig, QuarantineEntry, ScriptCheck, SitedAllow,
     Stage, TestConfig, TextlintRule,
 };
 use crate::rustflags;
 use crate::error::DevError;
 use crate::output;
-use crate::profile::{self, DeclaredFilter, FilterKind, LaneExec, PlannedSweep, SweepDecl, Threads};
+use crate::profile::{self, DeclaredFilter, FilterKind, LaneExec, PlannedSweep, Threads};
 use crate::project::Project;
 use crate::scope;
 use crate::rustc_text::{self, BlockKind, Level};
-use crate::test_runner::{self, LibtestOutcome};
+use crate::test_runner;
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(crate) fn cmd_check(
@@ -54,8 +54,7 @@ pub(crate) fn cmd_check(
     script_checks: &[ScriptCheck],
     manifest_cfg: Option<&ManifestConfig>,
     rustdoc_cfg: Option<&RustdocConfig>,
-    clippy_allow: &[String],
-    clippy_allow_exact: &[SitedAllow],
+    lints: &LintsConfig,
     features: &[String],
     no_default_features: bool,
     packages: &[String],
@@ -116,9 +115,10 @@ pub(crate) fn cmd_check(
     let mut ledger = ReachLedger::new(&active_sweeps);
     // Doctests off unless `[test] doctests = true` (nextest/CI never runs them).
     let doctests = test_cfg.is_some_and(|c| c.doctests);
-    set_serial_builds(project_root, test_cfg.is_some_and(|c| c.serial_builds), &active_sweeps);
+    let serial_builds =
+        resolve_serial_builds(project_root, test_cfg.is_some_and(|c| c.serial_builds), &active_sweeps);
 
-    // A partial profile may skip phases (validated against PHASE_NAMES at
+    // A partial profile may skip phases (validated against Phase::ALL at
     // load time). Announce the omission up front - a narrowed run must
     // never look like a full one in the log.
     announce_skipped_phases(skip_phases);
@@ -132,8 +132,9 @@ pub(crate) fn cmd_check(
         no_default_features || !features.is_empty() || !packages.is_empty() || !extra_args.is_empty();
     let waived = force_rust || shaped || profile_label.is_some();
     let prose_skips = prose_only_skips(project_root, waived);
-    let skip =
-        |phase: &str| skip_phases.iter().any(|s| s == phase) || prose_skips.contains(&phase);
+    let skip = |phase: Phase| {
+        skip_phases.iter().any(|name| name == phase.as_str()) || prose_skips.contains(&phase)
+    };
 
     // Which lanes each phase is eligible to attempt, with which packages:
     // decided once, here, and read by every phase. A structural error (package
@@ -163,8 +164,8 @@ pub(crate) fn cmd_check(
     // `failing_phase` names the phase about to run and is cleared on
     // success, so after an Err it names the phase that failed - the one
     // per-phase datum the `--json` summary carries.
-    let mut failing_phase: Option<&'static str> = None;
-    let background = BackgroundScripts::start(project_root, script_checks, skip("script_check"));
+    let mut failing_phase: Option<Phase> = None;
+    let background = BackgroundScripts::start(project_root, script_checks, skip(Phase::ScriptCheck));
     let mut run_phases = || -> Result<(), DevError> {
         run_convention_phases(
             &ConventionPhaseArgs {
@@ -190,8 +191,8 @@ pub(crate) fn cmd_check(
                 state_root,
                 active_sweeps: &active_sweeps,
                 selections: &selections,
-                clippy_allow,
-                clippy_allow_exact,
+                lints,
+                serial_builds,
                 quarantine,
                 rustdoc_cfg,
                 claim,
@@ -213,7 +214,7 @@ pub(crate) fn cmd_check(
     // failed phase whatever later phase also failed.
     let joined = background.join();
     if background.failed() {
-        failing_phase = Some("script_check");
+        failing_phase = Some(Phase::ScriptCheck);
     }
     // A `[cargo_env]` failure a tolerant path swallowed (a non-certifying
     // preparation, a universe retry) still fails the run, under the phase it
@@ -230,7 +231,7 @@ pub(crate) fn cmd_check(
         Err(e) if outcome.is_ok() => outcome = Err(e),
         // The run's own error is the one the summary prints; this one would
         // otherwise go unsaid.
-        Err(e) if !e.already_printed() && !matches!(e, DevError::Interrupted) => output::error(&e.to_string()),
+        Err(e) if e.rendering_policy() != crate::error::RenderingPolicy::AlreadyPrinted && !matches!(e, DevError::Interrupted) => output::error(&e.to_string()),
         _ => {}
     }
 
@@ -245,21 +246,21 @@ pub(crate) fn cmd_check(
     let package_label = (!packages.is_empty()).then(|| packages.join(","));
 
     let stop = run_stop(&outcome, watchdog_fired().is_some(), crate::shutdown::is_shutdown_requested());
-    finish_check(
-        &outcome,
+    finish_check(FinishInput {
+        outcome: &outcome,
         stop,
         certifies,
-        &profile_label,
-        &ran_labels,
-        (clippy_allow, clippy_allow_exact),
+        profile_label: &profile_label,
+        sweep_labels: &ran_labels,
+        lints,
         skip_phases,
-        !prose_skips.is_empty(),
-        package_label.as_deref(),
+        prose_only: !prose_skips.is_empty(),
+        package: package_label.as_deref(),
         failing_phase,
-        run_report,
+        report: run_report,
         json,
         started,
-    )
+    })
 }
 
 /// `check --textlint NAME` / `--script NAME`: run the named `[[textlint]]` rules
@@ -324,7 +325,7 @@ pub(crate) fn cmd_check_selected(
 /// not decorate with an `[error]` line.
 fn selection_failure(failed: &[DevError]) -> Result<(), DevError> {
     for e in failed {
-        if !e.already_printed() && !matches!(e, DevError::ExitCode(_)) {
+        if e.rendering_policy() != crate::error::RenderingPolicy::AlreadyPrinted && !matches!(e, DevError::ExitCode(_)) {
             output::error(&e.to_string());
         }
     }
@@ -547,14 +548,6 @@ fn announce_skipped_phases(skip_phases: &[String]) {
     }
 }
 
-/// The phases the prose-only shortcut keeps. Everything else in
-/// [`PHASE_NAMES`] is skipped when nothing but markdown is uncommitted.
-///
-/// These three are the ones that read prose. `header` and `manifest` are not
-/// here: they police source files and manifests, which the run has just
-/// established nobody touched.
-const PROSE_PHASES: [&str; 3] = ["gremlins", "textlint", "script_check"];
-
 /// Decide the phases to skip because the working tree holds documentation
 /// edits and nothing else. Empty means "run everything", which is the answer
 /// whenever the shortcut cannot be justified.
@@ -563,20 +556,43 @@ const PROSE_PHASES: [&str; 3] = ["gremlins", "textlint", "script_check"];
 /// any flag that shapes the build. A shortcut that could quietly skip the
 /// certifying run would be worse than no shortcut at all - `--gate` has to mean
 /// the same thing on every tree it is ever run on.
-fn prose_only_skips(project_root: &Path, build_requested: bool) -> Vec<&'static str> {
+fn prose_only_skips(project_root: &Path, build_requested: bool) -> Vec<Phase> {
     if build_requested || scope::dirt(project_root) != scope::Dirt::ProseOnly {
         return Vec::new();
     }
-    let skipped: Vec<&'static str> = PHASE_NAMES
+    let skipped: Vec<Phase> = Phase::ALL
         .iter()
         .copied()
-        .filter(|p| !PROSE_PHASES.contains(p) && !NON_SKIPPABLE_PHASES.contains(p))
+        .filter(|phase| phase.skippable() && !phase.reads_prose())
         .collect();
+    let kept = Phase::ALL
+        .iter()
+        .copied()
+        .filter(|phase| phase.reads_prose())
+        .map(Phase::as_str)
+        .collect::<Vec<_>>()
+        .join(", ");
     output::run_msg(&format!(
-        "markdown-only tree: running {} (--force-rust to check the build too)",
-        PROSE_PHASES.join(", ")
+        "markdown-only tree: running {kept} (--force-rust to check the build too)"
     ));
     skipped
+}
+
+/// A captured `cargo` launched by `check`/`test`/`clippy`: the cargo spawn
+/// profile, naming the phase in flight so a `[cargo_env]` failure is
+/// attributed to it.
+fn run_check_cargo(
+    args: &[&str],
+    cwd: &Path,
+    env: &[(&str, &str)],
+) -> Result<output::CapturedOutput, DevError> {
+    output::run_cargo(args, cwd, env, current_phase())
+}
+
+/// Point the verdict's failing phase at `phase` and restart the watchdog's
+/// phase clock for it.
+fn start_phase(failing_phase: &mut Option<Phase>, phase: Phase) {
+    begin_phase(failing_phase, phase);
 }
 
 /// Everything the seven convention phases (gremlins through dependency
@@ -597,8 +613,8 @@ struct ConventionPhaseArgs<'a> {
 /// keeping `failing_phase` pointed at the phase in flight.
 fn run_convention_phases(
     a: &ConventionPhaseArgs<'_>,
-    skip: &dyn Fn(&str) -> bool,
-    failing_phase: &mut Option<&'static str>,
+    skip: &dyn Fn(Phase) -> bool,
+    failing_phase: &mut Option<Phase>,
 ) -> Result<(), DevError> {
     // The seven phases share one green line: each is seconds at most and
     // "ok" plus its counts is all a pass has to say.
@@ -611,41 +627,41 @@ fn run_convention_phases(
 
 fn run_convention_phases_inner(
     a: &ConventionPhaseArgs<'_>,
-    skip: &dyn Fn(&str) -> bool,
-    failing_phase: &mut Option<&'static str>,
+    skip: &dyn Fn(Phase) -> bool,
+    failing_phase: &mut Option<Phase>,
 ) -> Result<(), DevError> {
-    if !skip("gremlins") {
-        begin_phase(failing_phase, "gremlins");
+    if !skip(Phase::Gremlins) {
+        start_phase(failing_phase, Phase::Gremlins);
         run_gremlins(a.project_root, a.gremlins_cfg, a.fix_gremlins)?;
     }
 
-    if !skip("header") {
-        begin_phase(failing_phase, "header");
+    if !skip(Phase::Header) {
+        start_phase(failing_phase, Phase::Header);
         run_header(a.project_root, a.header_cfg)?;
     }
 
-    if !skip("textlint") {
-        begin_phase(failing_phase, "textlint");
+    if !skip(Phase::Textlint) {
+        start_phase(failing_phase, Phase::Textlint);
         run_textlint(a.project_root, a.textlint_rules)?;
     }
 
-    if !skip("manifest") {
-        begin_phase(failing_phase, "manifest");
+    if !skip(Phase::Manifest) {
+        start_phase(failing_phase, Phase::Manifest);
         run_manifest(a.project_root, a.manifest_cfg)?;
     }
 
-    if !skip("script_check") {
-        begin_phase(failing_phase, "script_check");
+    if !skip(Phase::ScriptCheck) {
+        start_phase(failing_phase, Phase::ScriptCheck);
         run_script_checks(a.project_root, a.script_checks, Stage::PreClippy)?;
     }
 
-    if !skip("dependency_rules") {
-        begin_phase(failing_phase, "dependency_rules");
+    if !skip(Phase::DependencyRules) {
+        start_phase(failing_phase, Phase::DependencyRules);
         run_dependency_rules(a.project_root, a.dependency_rules, a.commands)?;
     }
 
-    if !skip("publish_cycle") {
-        begin_phase(failing_phase, "publish_cycle");
+    if !skip(Phase::PublishCycle) {
+        start_phase(failing_phase, Phase::PublishCycle);
         run_publish_cycle(a.project_root, a.commands)?;
     }
     Ok(())
@@ -666,10 +682,12 @@ struct BuildPhaseArgs<'a> {
     /// Which lanes each phase may attempt, with which packages - aligned with
     /// `active_sweeps` - and the install-feature phase's package set.
     selections: &'a CheckSelections,
-    /// The `[clippy] allow` lint list, suppressed via `-A` on every sweep.
-    clippy_allow: &'a [String],
-    /// The `[clippy] allow_exact` sited list, filtered at JSON ingestion.
-    clippy_allow_exact: &'a [SitedAllow],
+    /// `[lints]`: `allow`, suppressed via `-A` on every sweep, and the sited
+    /// `allow_exact` list, filtered at JSON ingestion.
+    lints: &'a LintsConfig,
+    /// One cargo chain for every build phase (`[test] serial_builds`, or a
+    /// configured cargo build dir), resolved once for the run.
+    serial_builds: bool,
     quarantine: &'a [QuarantineEntry],
     /// `[rustdoc]`; `None` leaves the rustdoc phase inert.
     rustdoc_cfg: Option<&'a RustdocConfig>,
@@ -714,8 +732,8 @@ struct Prepared {
 #[allow(clippy::too_many_arguments)]
 fn run_build_phases(
     a: &BuildPhaseArgs<'_>,
-    skip: &dyn Fn(&str) -> bool,
-    failing_phase: &mut Option<&'static str>,
+    skip: &dyn Fn(Phase) -> bool,
+    failing_phase: &mut Option<Phase>,
     ledger: &mut ReachLedger,
     collected_timings: Option<&mut Vec<TestTiming>>,
     run_report: &mut RunReport,
@@ -725,26 +743,26 @@ fn run_build_phases(
     verify_doc_only_rules(a)?;
     run_diagnostic_phases(a, skip, failing_phase, ledger)?;
 
-    if !skip("script_check") {
-        begin_phase(failing_phase, "script_check");
+    if !skip(Phase::ScriptCheck) {
+        start_phase(failing_phase, Phase::ScriptCheck);
         run_script_checks(a.project_root, a.script_checks, Stage::PreTest)?;
     }
 
     let certifying = a.claim.requires_attribution();
     let mut test_failure: Option<DevError> = None;
     let mut prepared: Option<Prepared> = None;
-    if !skip("test") {
+    if !skip(Phase::Test) {
         // A `-p` that rules every lane out of the test phase is refused
         // before preparation, under the test phase's name: a run that will
         // test nothing compiles nothing for it.
         if a.selections.test.refusal().is_some() {
-            begin_phase(failing_phase, "test");
+            start_phase(failing_phase, Phase::Test);
             a.selections.test.check_refusal()?;
         }
         // Every run prepares: the execution inventory is what a stop is
         // reported against, certifying or not. Only the certifying claim
         // makes a preparation failure fatal.
-        begin_phase(failing_phase, "prepare");
+        start_phase(failing_phase, Phase::Prepare);
         let p = run_prepare_phase(a, certifying)?;
         let proceed = if certifying {
             p.prep.error.is_none() && p.prep.plan.complete && p.paths.is_some()
@@ -764,7 +782,7 @@ fn run_build_phases(
             if let Some(p) = prepared.as_mut() {
                 p.test_phase_ran = true;
             }
-            begin_phase(failing_phase, "test");
+            start_phase(failing_phase, Phase::Test);
             let lanes = prepared.as_ref().map(|p| &p.prep.lanes);
             test_failure = run_test_phase(
                 &TestPhaseArgs {
@@ -776,8 +794,7 @@ fn run_build_phases(
                     doctests: a.doctests,
                     commands: a.commands,
                     extra_args: a.extra_args,
-                    allow: a.clippy_allow,
-                    allow_exact: a.clippy_allow_exact,
+                    lints: a.lints,
                     certifying,
                 },
                 lanes,
@@ -813,7 +830,7 @@ fn run_prepare_phase(a: &BuildPhaseArgs<'_>, certifying: bool) -> Result<Prepare
         &info.member_manifests,
     );
     let target_dir = info.target_dir;
-    let allow_flags = crate::config::check::test_phase_allow_flags(a.clippy_allow, a.clippy_allow_exact);
+    let allow_flags = crate::config::check::test_phase_allow_flags(a.lints);
     let inputs = LaneInputs {
         project: a.project,
         project_root: a.project_root,
@@ -827,7 +844,7 @@ fn run_prepare_phase(a: &BuildPhaseArgs<'_>, certifying: bool) -> Result<Prepare
     // Two steps: every lane built (target-dir chains, concurrent), then every
     // lane listed one at a time with nothing compiling. The background
     // script checks may compile, so they are joined in between.
-    let builds = build_profile(&inputs, a.active_sweeps, &a.selections.test, a.extra_args);
+    let builds = build_profile(&inputs, a.active_sweeps, &a.selections.test, a.extra_args, a.serial_builds);
     a.background.join()?;
     let mut preparer = CargoPreparer::new(inputs, a.extra_args, builds);
     let prep = prepare_profile(a.active_sweeps, &a.selections.test, a.doctests, certifying, &mut preparer);
@@ -879,36 +896,35 @@ fn run_prepare_phase(a: &BuildPhaseArgs<'_>, certifying: bool) -> Result<Prepare
 /// the tests because a doc link is cheaper to fail on than a test suite.
 fn run_diagnostic_phases(
     a: &BuildPhaseArgs<'_>,
-    skip: &dyn Fn(&str) -> bool,
-    failing_phase: &mut Option<&'static str>,
+    skip: &dyn Fn(Phase) -> bool,
+    failing_phase: &mut Option<Phase>,
     ledger: &mut ReachLedger,
 ) -> Result<(), DevError> {
-    if !skip("clippy") {
-        begin_phase(failing_phase, "clippy");
+    if !skip(Phase::Clippy) {
+        start_phase(failing_phase, Phase::Clippy);
         run_clippy_phase(
             a.project_root,
             a.active_sweeps,
             &a.selections.clippy,
-            a.clippy_allow,
-            a.clippy_allow_exact,
-            a.commands,
+            a.lints,
+            Reporter::Check { commands: a.commands },
             &mut |i| ledger.reach_diagnostics(LaneIdx::new(i)),
             false,
-            false,
+            a.serial_builds,
         )?;
     }
 
-    if !skip("rustdoc") {
-        begin_phase(failing_phase, "rustdoc");
+    if !skip(Phase::Rustdoc) {
+        start_phase(failing_phase, Phase::Rustdoc);
         run_rustdoc_phase(
             a.project_root,
             a.rustdoc_cfg,
             a.active_sweeps,
             &a.selections.rustdoc,
-            a.clippy_allow,
-            a.clippy_allow_exact,
-            a.commands,
+            a.lints,
+            Reporter::Check { commands: a.commands },
             &mut |i| ledger.reach_diagnostics(LaneIdx::new(i)),
+            a.serial_builds,
         )?;
     }
     Ok(())
@@ -918,8 +934,8 @@ fn run_diagnostic_phases(
 /// claim, the test verdict, the post-test script checks and install-feature.
 fn finish_build_phases(
     a: &BuildPhaseArgs<'_>,
-    skip: &dyn Fn(&str) -> bool,
-    failing_phase: &mut Option<&'static str>,
+    skip: &dyn Fn(Phase) -> bool,
+    failing_phase: &mut Option<Phase>,
     prepared: Option<Prepared>,
     run_report: &mut RunReport,
     test_failure: Option<DevError>,
@@ -934,7 +950,7 @@ fn finish_build_phases(
             // Stays on the phase that failed - the audit only contributes its
             // findings and counts there.
             if test_failure.is_none() {
-                begin_phase(failing_phase, "coverage");
+                start_phase(failing_phase, Phase::Coverage);
             }
             let audit = audit_coverage(&prepared, a.active_sweeps, a.quarantine, test_failure.is_none());
             // Counts first, verdict second: the summary carries them even when
@@ -966,8 +982,8 @@ fn finish_build_phases(
     // markdown-only shortcut) also leaves `test_failure` empty, and a
     // post-test check run there judges a test phase that never happened.
     // Named, not silent - a narrowed run must never look like a full one.
-    if !skip("script_check") {
-        if skip("test") {
+    if !skip(Phase::ScriptCheck) {
+        if skip(Phase::Test) {
             let held = a.script_checks.iter().filter(|c| c.stage == Stage::PostTest).count();
             if held > 0 {
                 output::run_msg(&format!(
@@ -976,7 +992,7 @@ fn finish_build_phases(
                 ));
             }
         } else {
-            begin_phase(failing_phase, "script_check");
+            start_phase(failing_phase, Phase::ScriptCheck);
             run_script_checks(a.project_root, a.script_checks, Stage::PostTest)?;
         }
     }
@@ -984,12 +1000,12 @@ fn finish_build_phases(
     // Last on purpose: package-mode resolution can compile duplicate variants
     // of shared dependencies, making this the most expensive phase on a cold
     // store, and the repo's ordering rule is cheap-fails-first.
-    if !skip("install_feature") {
-        begin_phase(failing_phase, "install_feature");
+    if !skip(Phase::InstallFeature) {
+        start_phase(failing_phase, Phase::InstallFeature);
         run_install_feature_phase(
             a.project_root,
             &a.selections.install,
-            &crate::config::check::test_phase_allow_flags(a.clippy_allow, a.clippy_allow_exact),
+            &crate::config::check::test_phase_allow_flags(a.lints),
             a.commands,
         )?;
     }
@@ -1040,8 +1056,7 @@ fn verify_doc_only_rules(a: &BuildPhaseArgs<'_>) -> Result<(), DevError> {
         .map(|(_, s)| s)
         .collect();
     if !attempted.is_empty() {
-        let (cargo_extra, _) = split_extra_args(a.extra_args);
-        let (selectors, _) = partition_target_selectors(cargo_extra);
+        let (selectors, _) = ForwardedArgs::parse(a.extra_args).partition_targets();
         if !selectors.is_empty() {
             return Err(DevError::Config(format!(
                 "sweep '{}' is doc-only (`cargo test --doc`, an exclusive selector), and the \
@@ -1391,57 +1406,9 @@ fn active_sweeps_resolved(
 ) -> Result<Vec<PlannedSweep>, DevError> {
     let sweeps =
         decide_active_sweeps(check_entries, test_cfg, profile_name, shaping.0, shaping.1)?;
-    plan_sweeps(sweeps, invocation.0, invocation.1, invocation.2)
-}
-
-/// Turn every sweep's configured `feature_unification` policy into the answer
-/// this invocation uses, once, before any phase builds a cargo command.
-///
-/// One resolution point is the whole design. Clippy, the pre-build, the test
-/// run, the parallel prebuild, each per-binary re-entry and the coverage
-/// enumeration must all agree on the graph they are talking about; deciding it
-/// separately in each is how an audit ends up describing a build that never
-/// ran. Carrying the answer on the planned sweep also puts it in the build
-/// shape, which is what stops a promoted and an unpromoted lane deduping into
-/// one.
-///
-/// The `cargo metadata` call that answers "is the bare selection the whole
-/// workspace" is paid only when some sweep could actually be promoted - the
-/// ordinary run does not gain a subprocess for a question it never asks.
-fn plan_sweeps(
-    sweeps: Vec<SweepDecl>,
-    project_root: &Path,
-    packages: &[String],
-    extra_args: &[String],
-) -> Result<Vec<PlannedSweep>, DevError> {
-    let cli_scope: Vec<&str> = packages.iter().map(String::as_str).collect();
-    let (cargo_extra, _) = split_extra_args(extra_args);
-    // Only a parallel lane is ever promoted, and only one whose selection is
-    // unscoped in every channel. Everything else resolves without asking.
-    let any_candidate = sweeps.iter().any(|s| {
-        matches!(s.lane_exec(), LaneExec::Parallel { .. })
-            && unify_workspace(s, &cli_scope, true, cargo_extra)
-    });
-    let whole_workspace = if any_candidate {
-        build::project_info(Some(project_root))?.bare_selection_is_whole_workspace
-    } else {
-        false
-    };
-
-    sweeps
-        .into_iter()
-        .map(|sweep| {
-            let eligible = matches!(sweep.lane_exec(), LaneExec::Parallel { .. })
-                && unify_workspace(&sweep, &cli_scope, whole_workspace, cargo_extra);
-            let planned = PlannedSweep::resolve(sweep, eligible)?;
-            // Refused here rather than at each phase: the forwarded args are
-            // one invocation-wide input, so one refusal covers clippy, the
-            // pre-build, the test run and the audit, and none of them can be
-            // reached with a selection brokkr did not plan.
-            reject_forwarded_selectors(&planned, cargo_extra)?;
-            Ok(planned)
-        })
-        .collect()
+    // The selection module is the one resolution point for promotion,
+    // unification and the forwarded-selector refusals (`selection.rs`).
+    resolve_invocation_sweeps(sweeps, invocation.0, invocation.1, &ForwardedArgs::parse(invocation.2))
 }
 
 /// The certifies permission table governs CLI flags too: `-p` scopes the
@@ -1515,1875 +1482,6 @@ fn already_reported(e: DevError, sentinel: &str) -> DevError {
 /// surfaced diagnostic as a hard failure at the call site. `allow` is the
 /// `[clippy] allow` list, emitted as `-A <lint>` so the suppressed lints
 /// never reach the diagnostic stream (no carve-outs in the fail decision).
-fn clippy_args(sweep: &PlannedSweep, run: &ResolutionRun, allow: &[String]) -> Vec<String> {
-    let mut args: Vec<String> = vec![
-        "clippy".into(),
-        "--keep-going".into(),
-        // `--all-targets` on every gate sweep; `--lib` only under the
-        // investigative `brokkr clippy --lib`, which exists to reproduce the
-        // lint surface of a plain lib build. See `PlannedSweep::lib_only`.
-        if sweep.lib_only {
-            "--lib".into()
-        } else {
-            "--all-targets".into()
-        },
-        "--message-format=json".into(),
-    ];
-    // A sweep pinned to a profile is linted in it: `cfg(debug_assertions)`
-    // decides which code exists, so linting a release sweep in dev checks
-    // source the release build never compiles - and misses the source it
-    // does.
-    args.extend(sweep_profile_args(sweep));
-    // Same reason as the profile above, one level out: package and workspace
-    // resolution enable different features, so they compile different source
-    // and present different lint surfaces. Linting a package-mode sweep under
-    // ambient resolution checks code its own build never compiles - and misses
-    // the `#[cfg(feature)]` arms that only its resolution turns on, which is
-    // exactly the defect class the mode exists to catch.
-    args.extend(sweep.unification_args());
-    // `-p <pkg>` scoping is also what makes `--features` valid in a virtual
-    // workspace, where cargo rejects features at the root. The features are
-    // the run's projection: only the tokens its packages route.
-    args.extend(run.cargo_args());
-    args.push("--".into());
-    args.push("--cap-lints=warn".into());
-    // Cargo's own lints are allowed at ingestion instead (`code_allowed`):
-    // rustc knows no `cargo` lint tool.
-    for lint in allow.iter().filter(|l| !crate::config::check::is_cargo_lint(l)) {
-        args.push("-A".into());
-        args.push(lint.clone());
-    }
-    args
-}
-
-/// One `cargo clippy` run: one sweep, one cargo resolution.
-///
-/// Split out because package mode makes this a loop body rather than a
-/// straight line - a package-mode sweep lints once per package, for the same
-/// reason it tests once per package. A batched multi-`-p` clippy resolves a
-/// graph that is none of the graphs the lane builds, so its lint surface would
-/// belong to no real compile.
-fn run_one_clippy(
-    project_root: &Path,
-    sweep: &PlannedSweep,
-    run: &ResolutionRun,
-    allow: &[String],
-    meta_target_dir: Option<&Path>,
-    commands: bool,
-) -> Result<SweepResult, DevError> {
-    let args = clippy_args(sweep, run, allow);
-    let result = run_one_diagnostic_cargo("clippy", project_root, sweep, &args, run, meta_target_dir, commands);
-    // No SweepResult reaches the normal reporter on a spawn error, interrupt
-    // or captured-run deadline. Preserve the investigative command there too.
-    if result.is_err() && !commands && !report_active() {
-        output::error(&format!(
-            "{}: {}",
-            phase_sweep_tag("clippy", &sweep.label),
-            describe_sweep(sweep, false, &run.selection, run.feature_args())
-        ));
-        output::error(&format!("failing command: cargo {}", args.join(" ")));
-    }
-    result
-}
-
-/// `cargo doc` argv for one sweep resolution. The selection half is clippy's -
-/// profile, unification, packages, features - because rustdoc resolves `cfg`
-/// exactly as the build does, so documenting a sweep under any other shape
-/// judges doc comments on code that shape never compiles.
-///
-/// No `--cap-lints`, unlike clippy: that flag exists there to finish the graph
-/// past a denied lint, and `--keep-going` already does that for doc. No `-A`
-/// either - rustdoc takes lint flags only through rustdocflags, where every
-/// change re-fingerprints the doc units - so `[lints] allow` is applied at
-/// ingestion instead ([`code_allowed`]). The lint-only `--check` flags do go
-/// through rustdocflags, added in [`run_one_diagnostic_cargo`]
-/// (`crate::rustdoc_check`).
-fn doc_args(sweep: &PlannedSweep, run: &ResolutionRun, cfg: &RustdocConfig) -> Vec<String> {
-    let mut args: Vec<String> = vec![
-        "doc".into(),
-        "--no-deps".into(),
-        "--keep-going".into(),
-        "--message-format=json".into(),
-    ];
-    if cfg.document_private_items {
-        args.push("--document-private-items".into());
-    }
-    args.extend(sweep_profile_args(sweep));
-    args.extend(sweep.unification_args());
-    args.extend(run.cargo_args());
-    args
-}
-
-/// One cargo run whose stdout is a `--message-format=json` diagnostic stream:
-/// the sweep's env, and its isolated target dir when it has one, so the run
-/// reuses the artifacts its test phase builds rather than rebuilding beside
-/// them. `phase` names the run in the log line.
-fn run_one_diagnostic_cargo(
-    phase: &str,
-    project_root: &Path,
-    sweep: &PlannedSweep,
-    args: &[String],
-    run: &ResolutionRun,
-    meta_target_dir: Option<&Path>,
-    commands: bool,
-) -> Result<SweepResult, DevError> {
-    let selection = &run.selection;
-    // Apply the sweep's env to the clippy build too, so a build-affecting
-    // var (codegen toggle, etc.) is set consistently across every phase -
-    // clippy, the test pre-build, and the test run - not just the tests.
-    // A sweep with `rustflags` (or package-mode unification) clippy-checks
-    // under the same cfg + isolated target dir as its tests, so the gate's
-    // lints match its build. Plain sweeps contribute nothing here, and for
-    // those `meta_target_dir` is `None` (computed by the caller).
-    //
-    // No lint allows in the env here: clippy passes the same `-A` set on its
-    // own argv (`clippy_args`), and a second copy in RUSTFLAGS would only
-    // change the build fingerprint away from the test phase's, costing a
-    // rebuild for no change in what is suppressed.
-    let brokkr_env = meta_target_dir.map_or_else(Vec::new, |dir| sweep_cargo_env(sweep, dir, &[]));
-    // Composed through `merged_env`, the test phase's rule, so every phase
-    // agrees on who wins a collision: the sweep's env. Config loading refuses
-    // the colliding keys (`RUSTFLAGS`, `CARGO_TARGET_DIR`, ...) in `[[check]]`
-    // and profile env, so a collision only arises from `brokkr clippy --env`,
-    // which is documented to win over every other source - appending brokkr's
-    // pair after it used to silently undo the override.
-    let mut env_owned = merged_env(&sweep.env, &brokkr_env);
-    let mut args = args.to_vec();
-    // rustdoc's lint-only mode when the toolchain has it: the phase reads the
-    // diagnostics and never the rendered site (`rustdoc_check`). An env
-    // placement is shown on the command line, since it changes what ran.
-    let mut env_prefix = String::new();
-    let doc_check = phase == "rustdoc" && crate::rustdoc_check::supported(project_root, &env_owned);
-    if doc_check {
-        match crate::rustdoc_check::place(&env_owned) {
-            crate::rustdoc_check::Placement::Env { key, value } => {
-                env_prefix = format!("{key}={value:?} ");
-                env_owned.retain(|(k, _)| k != key);
-                env_owned.push((key.to_owned(), value));
-            }
-            crate::rustdoc_check::Placement::Config(extra) => args.extend(extra),
-        }
-    }
-    let shape = describe_sweep(sweep, false, selection, run.feature_args());
-    let command = format!("{env_prefix}cargo {}", args.join(" "));
-    let line_shape = format!("{}: {shape}", phase_sweep_tag(phase, &sweep.label));
-    if report_active() {
-        announce_sweep(&line_shape, Some(&command), commands);
-    } else {
-        // Investigative clippy echoes the command after the run and the shape
-        // on failure. It has no log; avoid silently dropping log-only writes
-        // or printing that same command twice.
-        output::status(&line_shape);
-    }
-
-    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let env_refs: Vec<(&str, &str)> = env_owned
-        .iter()
-        .map(|(k, v)| (k.as_str(), v.as_str()))
-        .collect();
-    let started = std::time::SystemTime::now();
-    let captured = output::run_captured_with_env("cargo", &arg_refs, project_root, &env_refs)?;
-    let stdout = String::from_utf8_lossy(&captured.stdout).into_owned();
-    if doc_check {
-        // The sweep's isolated target dir when it has one (its env points
-        // cargo there), else the one cargo metadata reports. A lookup failure
-        // only costs the stamp: the next run re-documents.
-        let target_dir = match meta_target_dir {
-            Some(dir) => Some(dir.to_path_buf()),
-            None => build::project_info(Some(project_root)).ok().map(|i| i.target_dir),
-        };
-        if let Some(dir) = target_dir {
-            crate::rustdoc_check::stamp_outputs(&stdout, &dir.join("doc"), started);
-        }
-    }
-    let diagnostics = cargo_json::parse_cargo_diagnostics(&stdout);
-    let stderr = String::from_utf8_lossy(&captured.stderr).into_owned();
-    let suppressed_manifest_blocks =
-        cargo_json::manifest_lints_by_block(&rustc_text::rustc_blocks(&stderr))
-            .into_iter()
-            .filter_map(|(block, diagnostic)| diagnostic.is_warning().then_some(block))
-            .collect();
-    Ok(SweepResult {
-        label: sweep.label.clone(),
-        shape,
-        command,
-        stdout,
-        stderr,
-        success: captured.status.success(),
-        selected: selection.packages().map(<[String]>::to_vec),
-        diagnostics,
-        suppressed_manifest_blocks,
-        listed_manifest_errors: Vec::new(),
-    })
-}
-
-#[allow(clippy::too_many_arguments)]
-fn run_clippy_phase(
-    project_root: &Path,
-    sweeps: &[PlannedSweep],
-    selection: &PhaseSelection,
-    allow: &[String],
-    allow_exact: &[SitedAllow],
-    commands: bool,
-    reach: &mut dyn FnMut(usize),
-    // The caller's word that this run lints less than the gate's whole
-    // surface, beyond what a CLI `-p` already says (`brokkr clippy`'s probe
-    // shapes). Only silences the stale-allow report.
-    narrowed: bool,
-    // `brokkr clippy`: the cargo command is printed once, after the run -
-    // on a green run as the command line, on a failure as the failing-command
-    // pair `report_diagnostic_phase` prints - never streamed beforehand too.
-    // The command carries the blanket `-A` flags, so their own line is
-    // log-only.
-    echo_after: bool,
-) -> Result<(), DevError> {
-    // Inside `check` the verdict line names every suppression once, for all
-    // the phases it narrows; `brokkr clippy` (and `--commands`, which asks
-    // for the long form) prints them here.
-    announce_allows(allow, allow_exact, commands || !report_active(), !echo_after);
-
-    // A phase that attempts nothing says so before asking cargo anything: a
-    // metadata failure must not replace a refusal already decided.
-    selection.check_refusal()?;
-    let info = build::project_info(Some(project_root))?;
-    let mut ran = run_per_build_shape("clippy", &info, sweeps, selection, reach, |sweep, run, dir| {
-        run_one_clippy(project_root, sweep, run, allow, dir, commands)
-    })?;
-    let active_sweep_count = ran.active_sweep_count;
-    let mut results = std::mem::take(&mut ran.results);
-    let owners = OwnerIndex::from_metadata_at(
-        &info.workspace_root,
-        project_root,
-        &info.workspace_members,
-        &info.member_manifests,
-    );
-    for r in &mut results {
-        for diagnostic in &mut r.diagnostics {
-            diagnostic.classify_owner(&owners);
-        }
-        for (block, diagnostic) in attribute_manifest_lints(r, &info, &owners) {
-            if diagnostic.is_error() {
-                r.listed_manifest_errors.push((block, diagnostic.clone()));
-            }
-            r.diagnostics.push(diagnostic);
-        }
-    }
-
-    report_stale_sited_allows(
-        "clippy",
-        &results,
-        allow_exact,
-        narrowed || !selection.overrides().is_empty(),
-    );
-
-    // With `--cap-lints=warn`, a lint no longer makes cargo exit non-zero, so
-    // the pass/fail decision is brokkr's own: every diagnostic is a failure,
-    // whatever its (capped) level, except a dependency's warning. A failed run
-    // with nothing parseable still fails.
-    // Cargo's manifest lints never saw clippy's `-A` flags, so `[lints] allow`
-    // reaches them here.
-    let keep = |d: &Diagnostic| {
-        !d.is_dependency_warning()
-            && !sited_allowed(d, allow_exact)
-            && !(d.code.as_deref().is_some_and(crate::config::check::is_cargo_lint) && code_allowed(d, allow))
-    };
-    let outcome =
-        ran.verdict(|failed| {
-            report_diagnostic_phase(
-                "clippy",
-                &results,
-                &info,
-                project_root,
-                &keep,
-                active_sweep_count,
-                failed,
-            )
-        });
-    if echo_after && outcome.is_ok() {
-        for r in &results {
-            output::run_msg(&r.command);
-        }
-    }
-    outcome
-}
-
-/// Cargo's manifest lints from a clippy run's stderr, classified by the same
-/// metadata index as compiler diagnostics. Member manifests follow the run's
-/// selection; the workspace root and path dependencies remain distinct owners
-/// without synthetic package ids.
-fn attribute_manifest_lints(
-    r: &SweepResult,
-    info: &build::ProjectInfo,
-    owners: &OwnerIndex,
-) -> Vec<(usize, Diagnostic)> {
-    let blocks = rustc_text::rustc_blocks(&r.stderr);
-    cargo_json::manifest_lints_by_block(&blocks)
-        .into_iter()
-        .filter_map(|(block, mut diagnostic)| {
-            diagnostic.classify_owner(owners);
-            match &diagnostic.owner {
-                Owner::Member(id) => {
-                    if !r.selects(id, info) {
-                        return None;
-                    }
-                    diagnostic.package_id = Some(id.clone());
-                }
-                Owner::WorkspaceRoot | Owner::NonMember(_) | Owner::Unknown => {}
-            }
-            Some((block, diagnostic))
-        })
-        .collect()
-}
-
-/// The `rustdoc` phase: `cargo doc --no-deps` per build shape, failing on any
-/// diagnostic, rendered through clippy's formatter. Inert without `[rustdoc]`.
-///
-/// Every surviving diagnostic fails, warnings included, the same rule clippy's
-/// gate applies: a rustdoc warning nobody is made to read is a doc link rotting
-/// in silence, which is the defect class the phase exists for. `[lints] allow`
-/// removes a lint by code, `allow_exact` by site.
-#[allow(clippy::too_many_arguments)]
-fn run_rustdoc_phase(
-    project_root: &Path,
-    cfg: Option<&RustdocConfig>,
-    sweeps: &[PlannedSweep],
-    selection: &PhaseSelection,
-    allow: &[String],
-    allow_exact: &[SitedAllow],
-    commands: bool,
-    reach: &mut dyn FnMut(usize),
-) -> Result<(), DevError> {
-    let Some(cfg) = cfg else {
-        return Ok(());
-    };
-    // As in clippy: the decided refusal before any cargo query.
-    selection.check_refusal()?;
-    let info = build::project_info(Some(project_root))?;
-    // A doc-only sweep is a doctest carrier: it names no compile shape of its
-    // own, so documenting it re-reports another sweep's diagnostics under a
-    // second label - and may not dedupe, when it inherits from config what the
-    // sibling passes on argv. The selection marks it not applicable.
-    let mut ran = run_per_build_shape("rustdoc", &info, sweeps, selection, reach, |sweep, run, dir| {
-        let args = doc_args(sweep, run, cfg);
-        run_one_diagnostic_cargo("rustdoc", project_root, sweep, &args, run, dir, commands)
-    })?;
-    let active_sweep_count = ran.active_sweep_count;
-    let mut results = std::mem::take(&mut ran.results);
-    // The `rustdoc::` half of the sited list is judged here, where those lints
-    // can actually appear; clippy judges the rest.
-    report_stale_sited_allows("rustdoc", &results, allow_exact, !selection.overrides().is_empty());
-    let owners = OwnerIndex::from_metadata_at(
-        &info.workspace_root,
-        project_root,
-        &info.workspace_members,
-        &info.member_manifests,
-    );
-    for result in &mut results {
-        for diagnostic in &mut result.diagnostics {
-            diagnostic.classify_owner(&owners);
-        }
-    }
-    let keep = |d: &Diagnostic| {
-        !d.is_dependency_warning()
-            && !code_allowed(d, allow)
-            && !sited_allowed(d, allow_exact)
-    };
-    ran.verdict(|failed| {
-        report_diagnostic_phase(
-            "rustdoc",
-            &results,
-            &info,
-            project_root,
-            &keep,
-            active_sweep_count,
-            failed,
-        )
-    })
-}
-
-/// Whether `[lints] allow` names this diagnostic's lint. Matched on the parsed
-/// identity cargo reports (`rustdoc::broken_intra_doc_links`,
-/// `cargo::unused_dependencies`); a lint group name matches nothing here,
-/// since diagnostics carry the member lint's code. The ingestion-side allow
-/// for the lints no `-A` flag can reach: rustdoc's (no `-A` without changing
-/// the doc fingerprint) and cargo's own (no `-A` at all).
-fn code_allowed(d: &Diagnostic, allow: &[String]) -> bool {
-    d.code.as_deref().is_some_and(|code| {
-        let code = crate::config::check::LintName::parse(code);
-        allow.iter().any(|allow| crate::config::check::LintName::parse(allow).matches(code))
-    })
-}
-
-/// Whether an `allow_exact` entry suppresses this diagnostic.
-fn sited_allowed(d: &Diagnostic, allow_exact: &[SitedAllow]) -> bool {
-    allow_exact.iter().any(|s| sited_match(s, d))
-}
-
-/// `phase sweep-label`, or just `phase` when the sweep is labelled after it:
-/// `brokkr clippy`'s ad-hoc sweep is labelled "clippy", and `clippy clippy:`
-/// says the one fact twice.
-fn phase_sweep_tag(phase: &str, label: &str) -> String {
-    if label == phase {
-        phase.to_owned()
-    } else {
-        format!("{phase} {label}")
-    }
-}
-
-/// Decide and report a diagnostic phase from its cargo runs: any failed run
-/// or any diagnostic `keep` admits fails it. Prints the failing commands, then
-/// the scoped, cross-sweep summary. `already_failed`: a run the phase could
-/// not make failed it before these results were read, so a clean set prints
-/// no green line.
-#[allow(clippy::too_many_arguments)]
-fn report_diagnostic_phase(
-    phase: &str,
-    results: &[SweepResult],
-    info: &build::ProjectInfo,
-    project_root: &Path,
-    keep: &dyn Fn(&Diagnostic) -> bool,
-    active_sweep_count: usize,
-    already_failed: bool,
-) -> Result<(), DevError> {
-    let run_failed = |r: &SweepResult| !r.success || r.diagnostics.iter().any(keep);
-    if !results.iter().any(run_failed) {
-        // The phase's one green line. Only inside `check`: `brokkr clippy`
-        // closes with its own `clippy clean` verdict.
-        if report_active() && !already_failed {
-            output::run_msg(&format!(
-                "{phase}: ok ({}) in {}",
-                output::count(active_sweep_count, "sweep"),
-                fmt_wall(phase_elapsed())
-            ));
-        }
-        return Ok(());
-    }
-
-    // A green run printed neither the shape nor the command; a failing sweep
-    // is exactly where both earn their place - under `--commands` too, whose
-    // streamed line is neither beside the failure nor attributable among runs.
-    for r in results.iter().filter(|r| run_failed(r)) {
-        output::error(&format!("{}: {}", phase_sweep_tag(phase, &r.label), r.shape));
-        output::error(&format!("failing command: {}", r.command));
-    }
-
-    output::error(&format_clippy_multi(
-        &format!("cargo {}", if phase == "rustdoc" { "doc" } else { phase }),
-        results,
-        Some(info),
-        project_root,
-        active_sweep_count,
-        keep,
-    ));
-    Err(DevError::Reported(format!("{phase} failed")))
-}
-
-/// Run `run_one` once per cargo resolution of every lane the phase's selection
-/// attempts - one per distinct build shape, one per package under
-/// package-mode unification - calling `reach(i)` for each sweep whose run
-/// returns an outcome. The dedupe, the CLI `-p` intersection and the
-/// nothing-reached refusal were all decided by the selection, which every
-/// per-shape diagnostic phase reads, so they cannot drift apart; the stored
-/// refusal is reported here, at the phase's start.
-#[allow(clippy::too_many_arguments)]
-fn run_per_build_shape(
-    phase: &str,
-    info: &build::ProjectInfo,
-    sweeps: &[PlannedSweep],
-    selection: &PhaseSelection,
-    reach: &mut dyn FnMut(usize),
-    run_one: impl Fn(&PlannedSweep, &ResolutionRun, Option<&Path>) -> Result<SweepResult, DevError> + Sync,
-) -> Result<PhaseRuns, DevError> {
-    selection.check_refusal()?;
-    // cargo's resolved target dir, so a `rustflags` sweep clippy-checks in the
-    // *same* isolated `<target>/rustflags-<hash>` its test phase builds into -
-    // they must agree on the location, and a workspace can place it off the
-    // project root (S3-20). Passed only when some sweep needs it: "any sweep
-    // needs an isolated dir", not "any sweep has rustflags" - a package-mode
-    // sweep isolates on its own, and the old predicate would have left it
-    // clippy-checking in the shared dir while its tests built in the isolated
-    // one, the two disagreeing about where the artifacts are.
-    let meta_target_dir = sweeps
-        .iter()
-        .any(|sweep| sweep.target_location().is_isolated())
-        .then(|| info.target_dir.clone());
-
-    // Every cargo run the phase makes, in configured order: (sweep, run).
-    let mut jobs: Vec<(usize, &ResolutionRun)> = Vec::new();
-    // Log only inside `check`, whose run log keeps them and which announced
-    // the package rules once, up front (`announce_package_rules`) - repeating
-    // them per phase was noise. `brokkr clippy` keeps no run log and announces
-    // nothing, so there they print. Every disposition is config plus
-    // invocation, the same every run, so none of it is stdout news in `check`.
-    let note = |line: &str| if report_active() { output::detail(line) } else { output::run_msg(line) };
-    for (i, sweep) in sweeps.iter().enumerate() {
-        let Some(entry) = selection.entry(LaneIdx::new(i)) else { continue };
-        // A lane keeping some packages drops the rest with a note; a lane
-        // keeping none says so once, as its skip reason.
-        if matches!(entry, LaneEntry::Attempt(_) | LaneEntry::Deduped(_)) {
-            for dropped_note in entry.notes() {
-                note(&format!("{phase} {}: {dropped_note} (dropped)", sweep.label));
-            }
-        }
-        let attempt = match entry {
-            LaneEntry::Attempt(a) => a,
-            // Diagnostic phases are per-build-shape while tests are per-lane:
-            // two lanes compiling the same requests (a shared `[[check]]`
-            // entry, or two sweeps a `-p` narrows to the same projection) are
-            // linted or documented once.
-            LaneEntry::Deduped(_) => {
-                note(&format!("{phase} {}: deduped (build shape already checked)", sweep.label));
-                continue;
-            }
-            other => {
-                if let Some(reason) = other.skip_reason() {
-                    note(&format!("{phase} {}: skipped ({reason})", sweep.label));
-                }
-                continue;
-            }
-        };
-        // Package mode lints one package per cargo run, for the same reason it
-        // tests one per run: a batched multi-`-p` clippy resolves a graph that
-        // is not any of the graphs the lane actually builds, so its lint
-        // surface belongs to no real compile.
-        for run in attempt.runs() {
-            jobs.push((i, run));
-        }
-    }
-
-    // One chain per target directory, the chains concurrent
-    // (`run_grouped`): runs sharing a directory would only queue on cargo's
-    // build-dir lock.
-    let keyed: Vec<(usize, PathBuf)> = jobs
-        .iter()
-        .enumerate()
-        .map(|(j, (i, _))| (j, target_dir_key(&sweeps[*i], &info.target_dir)))
-        .collect();
-    let outcomes = run_grouped(&keyed, &|j| {
-        let (i, run) = jobs[j];
-        run_one(&sweeps[i], run, meta_target_dir.as_deref())
-    });
-    let mut reached = vec![false; sweeps.len()];
-    let mut ran = PhaseRuns {
-        results: Vec::with_capacity(jobs.len()),
-        error: None,
-        active_sweep_count: 0,
-    };
-    // Record every completed chain before an interrupt can return early from
-    // the result pass below. Other target-dir chains may already have run.
-    for (j, (_, outcome)) in outcomes.iter().enumerate() {
-        if outcome.is_some() {
-            let sweep_index = jobs[j].0;
-            reach(sweep_index);
-            reached[sweep_index] = true;
-        }
-    }
-    ran.active_sweep_count = reached.into_iter().filter(|was_reached| *was_reached).count();
-    for (_, outcome) in outcomes {
-        let Some(outcome) = outcome else { continue };
-        match outcome {
-            Ok(r) => ran.results.push(r),
-            // A stop ends the phase at once: nothing more is reported.
-            Err(DevError::Interrupted) => return Err(DevError::Interrupted),
-            // A run that could not be made is the phase's failure, but not
-            // a reason to lose what the other runs found: the first is
-            // returned beside the results, any further one printed here.
-            Err(e) if ran.error.is_some() => {
-                if !e.already_printed() {
-                    output::error(&e.to_string());
-                }
-            }
-            Err(e) => ran.error = Some(e),
-        }
-    }
-    Ok(ran)
-}
-
-/// What a per-build-shape phase's cargo runs produced: every run's result,
-/// and the first run that could not be made (others already printed).
-struct PhaseRuns {
-    results: Vec<SweepResult>,
-    error: Option<DevError>,
-    /// Distinct sweeps that got at least one cargo run, independent of how
-    /// many package-mode resolutions each sweep expanded into.
-    active_sweep_count: usize,
-}
-
-impl PhaseRuns {
-    /// The phase's verdict: a run that could not be made fails it whatever
-    /// the others found. `report` reports the runs that were made, and is
-    /// told whether the phase already failed - a failed phase has no green
-    /// line to print, even when every run it did make was clean.
-    fn verdict(self, report: impl FnOnce(bool) -> Result<(), DevError>) -> Result<(), DevError> {
-        let reported = report(self.error.is_some());
-        match self.error {
-            Some(e) => Err(e),
-            None => reported,
-        }
-    }
-}
-
-/// Record the test phase's lint suppressions, and where they were injected, in
-/// the run log. The verdict line is what names the suppressions on the console;
-/// only an injection point that may be inert (below) earns a printed warning.
-///
-/// The clippy phase can say "allowing X" and leave it there - it passes `-A` on
-/// its own argv. The test phase cannot: it has no rustc passthrough, so the
-/// flags go into cargo's rustflags at whichever layer [`rustflags::sink`] found
-/// live, and injecting at the `build.rustflags` layer while some
-/// `target.<cfg>` table actually wins is inert. That case is not an error - it
-/// is the deliberately safe direction, since the alternative silently discards
-/// the project's own flags - but it must be visible, or a suppression that
-/// quietly does nothing reads as a brokkr bug.
-fn announce_test_allows(
-    project_root: &Path,
-    sweeps: &[PlannedSweep],
-    allow_flags: &[String],
-    allow_exact: &[SitedAllow],
-) {
-    if allow_flags.is_empty() {
-        return;
-    }
-    let lints: Vec<&str> = allow_flags
-        .iter()
-        .filter(|f| *f != "-A")
-        .map(String::as_str)
-        .collect();
-    // The sink can differ per sweep (a `rustflags` sweep exports an env var and
-    // so always lands in the env layer); report the plain-sweep shape explicitly.
-    let sink = rustflags::sink(project_root, false);
-    // One clause, not a second line: that a sited entry widens here is a
-    // property of the phase, not news about any particular entry, so it does
-    // not earn a line of its own - let alone one per entry.
-    // Only rustc's own lints reach the build (`test_phase_allow_flags`).
-    let widened = if !allow_exact.iter().any(|s| crate::config::check::reaches_test_build(&s.lint)) {
-        ""
-    } else {
-        "; allow_exact applies build-wide here"
-    };
-    // Logged, not printed: the verdict line names the suppressions, and a
-    // sink brokkr is sure of does what it says. The one case a reader must
-    // see is the sink chosen on a guess - then the allows may do nothing,
-    // and a lint the gate claims to suppress fails the test build instead.
-    output::detail(&format!(
-        "test: allowing {} via {} ([lints]{widened})",
-        lints.join(", "),
-        sink.describe()
-    ));
-    let plain: Vec<&str> = sweeps
-        .iter()
-        .filter(|s| s.rustflags.is_empty())
-        .map(|s| s.label.as_str())
-        .collect();
-    if !plain.is_empty() && rustflags::sink_may_be_inert(project_root) {
-        output::warn(&format!(
-            "[lints] allows ride `{}` for the test, coverage and install builds of {}, but a \
-             `target.*.rustflags` table in the cargo config has a selector brokkr cannot \
-             evaluate. If it matches this host, cargo reads that table instead and the allows \
-             do nothing there.",
-            rustflags::Sink::BuildConfig.describe(),
-            plain.join(", ")
-        ));
-    }
-}
-
-/// Announce the clippy phase's suppressions in one line.
-///
-/// A narrowed gate must not read as a full one, so the allowed lints are named
-/// on every run - but *naming the lints* is the whole requirement, and this
-/// used to print one line per `allow_exact` entry. At three entries that reads
-/// as a list; at seventy it is a wall that buries the rest of the run, and the
-/// paths in it are already in `brokkr.toml` where they can be read at leisure.
-/// So sited entries collapse to their distinct lints with a count each.
-///
-/// The per-entry detail that is *not* in the config - which entries matched
-/// nothing - is reported separately by [`report_stale_sited_allows`], and that
-/// one still prints per entry. It is the inverse: rare, actionable, and the
-/// only part of this a reader has to act on.
-///
-/// `blanket_on_stdout` is false when the printed cargo command already shows
-/// the blanket `[lints] allow` set as `-A` flags (`brokkr clippy`): the line
-/// then goes to the run log only, while `allow_exact` - which never reaches the
-/// command line - keeps its stdout line.
-fn announce_allows(allow: &[String], allow_exact: &[SitedAllow], to_stdout: bool, blanket_on_stdout: bool) {
-    let say = |msg: &str| {
-        if to_stdout {
-            output::run_msg(msg);
-        } else {
-            output::detail(msg);
-        }
-    };
-    if !allow.is_empty() {
-        let msg = format!("clippy: allowing {} ([lints] allow)", allow.join(", "));
-        if blanket_on_stdout {
-            say(&msg);
-        } else if report_active() {
-            // Clippy's console command already carries every blanket -A.
-            output::detail(&msg);
-        }
-    }
-    if !allow_exact.is_empty() {
-        say(&format!(
-            "clippy: allowing {} ([lints] allow_exact)",
-            summarize_sited(allow_exact)
-        ));
-    }
-}
-
-/// `lint (n files)` per distinct lint, in first-seen order - or `lint at path`
-/// when a lint has just the one site, since the path is short and is the more
-/// useful thing to see.
-fn summarize_sited(allow_exact: &[SitedAllow]) -> String {
-    let mut order: Vec<&str> = Vec::new();
-    let mut sites: HashMap<&str, Vec<&str>> = HashMap::new();
-    for s in allow_exact {
-        let entry = sites.entry(s.lint.as_str()).or_default();
-        if entry.is_empty() {
-            order.push(s.lint.as_str());
-        }
-        entry.push(s.path.as_str());
-    }
-    order
-        .iter()
-        .map(|lint| match sites.get(lint).map(Vec::as_slice) {
-            Some([one]) => format!("{lint} at {one}"),
-            Some(many) => format!("{lint} ({} files)", many.len()),
-            _ => (*lint).to_string(),
-        })
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-/// A sited suppression that matched nothing across every sweep is dead
-/// weight: either upstream fixed the site (delete the entry) or the file
-/// moved (re-site it). Say so - a notice, not a failure - so the list never
-/// accretes silently. Only an unscoped run can testify: a `-p`-narrowed run
-/// simply doesn't check the entry's file when it lives in another package,
-/// so "suppressed nothing" there is noise, not evidence of staleness. The
-/// caller folds every such narrowing into `narrowed` (a CLI `-p`, and for
-/// `brokkr clippy` a probe shape smaller than the gate's).
-///
-/// Each phase testifies only for the entries it can produce: `rustdoc::` lints
-/// never appear in clippy's stream, and every other lint is clippy's to judge
-/// (rustdoc re-reports a subset of rustc lints, but clippy sees those too). So
-/// clippy passes judgement on the non-`rustdoc::` entries and the rustdoc
-/// phase on the `rustdoc::` ones - judged by clippy alone, a `rustdoc::`
-/// entry warned "suppressed nothing" on every run. A project with no
-/// `[rustdoc]` runs no rustdoc phase and so never judges those entries.
-fn report_stale_sited_allows(
-    phase: &str,
-    results: &[SweepResult],
-    allow_exact: &[SitedAllow],
-    narrowed: bool,
-) {
-    if narrowed {
-        return;
-    }
-    let judged: Vec<&SitedAllow> = allow_exact
-        .iter()
-        .filter(|s| is_rustdoc_lint(&s.lint) == (phase == "rustdoc"))
-        .collect();
-    if judged.is_empty() {
-        return;
-    }
-    let mut matched = vec![false; judged.len()];
-    for r in results {
-        for d in &r.diagnostics {
-            for (i, s) in judged.iter().enumerate() {
-                if sited_match(s, d) {
-                    matched[i] = true;
-                }
-            }
-        }
-    }
-    for (s, hit) in judged.iter().zip(&matched) {
-        if !hit {
-            output::warn(&format!(
-                "{phase}: allow_exact {s} suppressed nothing (stale entry?)"
-            ));
-        }
-    }
-}
-
-/// Whether a lint name belongs to rustdoc's tool namespace.
-fn is_rustdoc_lint(lint: &str) -> bool {
-    crate::config::check::LintName::parse(lint).judged_by_rustdoc()
-}
-
-/// Does a `[clippy] allow_exact` entry suppress this diagnostic? Lint names
-/// match with or without the `clippy::` qualifier (mirroring what `allow`
-/// accepts); the file must equal the entry's path exactly - cargo emits
-/// build-root-relative paths, which is also what the entry is written from.
-fn sited_match(s: &SitedAllow, d: &Diagnostic) -> bool {
-    let Some(code) = &d.code else {
-        return false;
-    };
-    let lint_matches = crate::config::check::LintName::parse(&s.lint)
-        .matches(crate::config::check::LintName::parse(code));
-    lint_matches && d.path() == Some(Path::new(s.path.as_str()))
-}
-
-/// Parse a sweep's stdout and drop every diagnostic a `[clippy] allow_exact`
-/// entry suppresses. This is the ingestion-side gate the sited allows act
-/// through: unlike `allow`'s `-A`, which a source site's own lint-level
-/// attribute can defeat (the `#[expect]`-sibling interaction in
-/// `docs/commands/check.md`), a diagnostic filtered here is gone from the
-/// pass/fail decision no matter how clippy leveled it. The phases apply the
-/// same gate through [`sited_allowed`] inside their `keep` predicate; this
-/// whole-stream form remains for the parser tests.
-#[cfg(test)]
-fn gated_diags(
-    stdout: &str,
-    allow_exact: &[SitedAllow],
-) -> Vec<Diagnostic> {
-    let mut events = cargo_json::parse_cargo_diagnostics(stdout);
-    if !allow_exact.is_empty() {
-        events.retain(|d| !allow_exact.iter().any(|s| sited_match(s, d)));
-    }
-    events
-}
-
-/// Investigative single-phase clippy runner (`brokkr clippy`). Builds one
-/// `PlannedSweep` from the CLI shape, runs the shared clippy pipeline, and
-/// reports the same summary line `brokkr check` does.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn cmd_clippy(
-    project_root: &Path,
-    check_entries: &[CheckEntry],
-    packages: &[String],
-    all_features: bool,
-    features: &[String],
-    no_default_features: bool,
-    sweep_name: Option<&str>,
-    lib_only: bool,
-    env_overrides: &[(String, String)],
-    clippy_allow: &[String],
-    clippy_allow_exact: &[SitedAllow],
-) -> Result<(), DevError> {
-    let started = std::time::Instant::now();
-    // `check`'s clippy ceiling applies here too: the ceilings exist because of
-    // an observed 1h15m clippy hang, and this runner drives the same pipeline.
-    // The caller already holds the lock, so a wait behind another command is
-    // not charged. Declared before the guard, so the guard drops first.
-    let _ceiling = CheckWatchdog::arm_for("brokkr clippy", None);
-    enter_phase("clippy");
-    let _interrupts = crate::shutdown::SigtermGuard::install();
-    let mut declaration = build_clippy_sweep(
-        check_entries,
-        packages,
-        all_features,
-        features,
-        no_default_features,
-        sweep_name,
-        env_overrides,
-    )?;
-    // Applied after construction rather than inside `build_clippy_sweep`: the
-    // target selector is orthogonal to where the sweep's shape came from, so
-    // `--lib` composes with `--sweep NAME` the same way it does with ad-hoc
-    // `-p`, without the borrowed entry having to know about it.
-    declaration.lib_only = lib_only;
-    // The same resolution point `check` uses, so `--sweep NAME` replays the
-    // entry's graph and not just its flags: a `feature_unification =
-    // "package"` entry lints once per package under the package pin, and a
-    // parallel `auto` entry that `check` promotes to a workspace pin is
-    // promoted here too. Without this the sweep kept its unresolved `Ambient`
-    // default and linted one ambient invocation - a lint surface no gate
-    // build compiles. An ad-hoc sweep is never parallel, so it resolves to
-    // exactly what it was. The CLI scope is empty on purpose: ad-hoc `-p`
-    // lives in `sweep.packages`, where it already disqualifies promotion.
-    let sweep = plan_sweeps(vec![declaration], project_root, &[], &[])?
-        .pop()
-        .expect("one declaration plans one sweep");
-
-    // One sweep -> run_clippy_phase runs `multi = false`, so output carries no
-    // sweep-label tags. The selection has no CLI override: ad-hoc `-p` is
-    // already in sweep.packages, so the entry is the sweep's own Explicit (or
-    // Bare) selection. `commands = false, echo_after = true`: this is the
-    // *investigative* runner, invoked to find out what a given target shape
-    // actually does, so the full cargo line is the point - but said once,
-    // after the run (the command line when green, the failing-command pair
-    // when not), not streamed before a failure that then repeats it.
-    // The investigative runner has no `--json` trailer, so nothing records
-    // which sweeps were reached.
-    //
-    // `narrowed`: one probe shape cannot testify that a sited allow is stale
-    // unless it covers everything `check`'s sweeps together would - see
-    // `probe_is_narrowed`.
-    let sweeps = std::slice::from_ref(&sweep);
-    let oracle = FeatureOracle::at(project_root);
-    let selection = PhaseSelection::for_check(SelectionPhase::Clippy, sweeps, &[], &oracle)?;
-    let outcome = run_clippy_phase(
-        project_root,
-        sweeps,
-        &selection,
-        clippy_allow,
-        clippy_allow_exact,
-        false,
-        &mut |_| {},
-        probe_is_narrowed(&sweep),
-        true,
-    );
-    // The watchdog already said why it killed the run; whatever the kill
-    // surfaced as is its echo. Checked whatever the outcome: a ceiling that
-    // fired just as the last child exited can leave an `Ok` behind it, and a
-    // run the watchdog killed is not "clean".
-    if watchdog_fired().is_some() {
-        return Err(DevError::ExitCode(WATCHDOG_EXIT_CODE));
-    }
-    match outcome {
-        Ok(()) => {
-            output::result_msg(&format!("clippy clean in {}", fmt_wall(started.elapsed())));
-            Ok(())
-        }
-        // A *rendered* clippy failure: the phase already printed the diagnostics,
-        // so add the summary and exit 1 without main echoing a second line.
-        //
-        // Matched on the phase's own verdict, not on any `Build`: the phase
-        // also returns `Build` from `project_info` ("cargo metadata failed:
-        // ...", "no Cargo.toml ..."), and those carry their whole diagnostic
-        // in the message - swallowing them printed `clippy failed in 0.0s`
-        // with no cause in a non-Rust directory. The verdict is a
-        // `DevError::Reported`, the variant for "detail already printed".
-        Err(DevError::Reported(m)) if m == CLIPPY_FAILED => {
-            output::error(&format!("clippy failed in {}", fmt_wall(started.elapsed())));
-            Err(DevError::ExitCode(1))
-        }
-        // Anything else (no Cargo.toml, cargo metadata failure, cargo missing,
-        // spawn failure, cooperative interrupt) is NOT an already-rendered lint
-        // result - propagate the real cause so main reports it, instead of
-        // masking it behind "clippy failed".
-        Err(other) => Err(other),
-    }
-}
-
-/// The label `report_diagnostic_phase` returns (as `DevError::Reported`) for a
-/// failed clippy phase - the one error from it whose detail is already on
-/// screen.
-const CLIPPY_FAILED: &str = "clippy failed";
-
-/// Whether a `brokkr clippy` probe covers less than the gate's lint surface,
-/// in which case "this sited allow suppressed nothing" is not evidence the
-/// entry is stale - the site may simply be outside what was linted. A package
-/// scope (ad-hoc `-p` or a `--sweep` entry's `packages`) leaves other crates
-/// unlinted; `--lib` leaves every test-only site unlinted; and a feature set
-/// short of `--all-features` leaves feature-gated sites unlinted.
-fn probe_is_narrowed(sweep: &PlannedSweep) -> bool {
-    !sweep.packages.is_empty()
-        || sweep.lib_only
-        || !sweep.features.all_features
-}
-
-struct SweepResult {
-    label: String,
-    /// The sweep's human shape ([`describe_sweep`]). A green run never prints
-    /// it; a failing run reports each failing sweep with its own, because
-    /// the diagnostic phases report after every sweep has run and no ambient
-    /// "current sweep" can say which one a failure belongs to.
-    shape: String,
-    /// The full `cargo clippy ...` line, kept so a failing sweep can reprint it
-    /// even when the collapsed (default) log form suppressed it on the way in.
-    command: String,
-    stdout: String,
-    stderr: String,
-    success: bool,
-    /// The packages this run selected by name; `None` for a bare selection,
-    /// which builds the workspace's default members. What the run covered,
-    /// for deciding whether a diagnostic it did not report is news.
-    selected: Option<Vec<String>>,
-    /// Structured diagnostics parsed once from cargo JSON. Clippy appends its
-    /// stderr-only manifest lints here after assigning their owners.
-    diagnostics: Vec<Diagnostic>,
-    /// Manifest warnings already handled by the structured pipeline (selected
-    /// or filtered by owner). These blocks never reappear in raw stderr.
-    suppressed_manifest_blocks: Vec<usize>,
-    /// Denied manifest lints listed in `diagnostics`, with the stderr block
-    /// each came from. Such a block is consumed only while the phase's filter
-    /// keeps its diagnostic: an error an allow removed from the list is still
-    /// cargo's reason for failing, so its raw block prints.
-    listed_manifest_errors: Vec<(usize, Diagnostic)>,
-}
-
-impl SweepResult {
-    /// Whether this run selected the package `id`.
-    fn selects(&self, id: &str, info: &build::ProjectInfo) -> bool {
-        match &self.selected {
-            None => info.default_members.contains(id),
-            Some(names) => info.workspace_members.get(id).is_some_and(|n| names.contains(n)),
-        }
-    }
-}
-
-/// One row of merged-across-sweep clippy output for the text formatter.
-struct MergedDiag<'a> {
-    diag: &'a crate::diagnostic::Diagnostic,
-    sweeps: Vec<String>,
-}
-
-/// The merge identity of one listed diagnostic: code, site and message, at
-/// the level the list renders every entry at. A diagnostic is an error in
-/// this list whatever level cargo gave it (see [`clippy_parse_from_events`]),
-/// so a capped lint and its uncapped twin from another sweep are one entry.
-fn merge_key(d: &crate::diagnostic::Diagnostic) -> crate::diagnostic::DiagnosticKey {
-    d.key_as(Level::Error)
-}
-
-/// Merge clippy diagnostics across sweeps, deduplicating by [`merge_key`].
-/// `parses` is `(label, parse_result)` pairs from each sweep; sweep labels
-/// are owned strings since `[[check]]` entry names are user-defined.
-fn merge_clippy<'a>(
-    parses: &'a [(String, cargo_filter::ClippyParse)],
-) -> Vec<MergedDiag<'a>> {
-    let mut order: Vec<crate::diagnostic::DiagnosticKey> = Vec::new();
-    let mut by_key: HashMap<crate::diagnostic::DiagnosticKey, MergedDiag<'a>> = HashMap::new();
-
-    for (label, parsed) in parses {
-        for d in &parsed.diagnostics {
-            let key = merge_key(d);
-            if let Some(existing) = by_key.get_mut(&key) {
-                if !existing.sweeps.contains(label) {
-                    existing.sweeps.push(label.clone());
-                }
-            } else {
-                order.push(key.clone());
-                by_key.insert(
-                    key,
-                    MergedDiag {
-                        diag: d,
-                        sweeps: vec![label.clone()],
-                    },
-                );
-            }
-        }
-    }
-
-    order
-        .into_iter()
-        .filter_map(|k| by_key.remove(&k))
-        .collect()
-}
-
-/// Render the per-diagnostic sweep tag.
-///
-/// `active_sweep_count` is the number of sweeps `brokkr check`
-/// actually ran for this invocation. The `[both]` shorthand is only
-/// honest when the diagnostic appeared in *every* active sweep and
-/// there are exactly two of them; with three+ active sweeps,
-/// `[both]` would hide which two produced the hit. In that case fall
-/// through to the explicit `[a+b]` form.
-fn sweep_tag(sweeps: &[String], active_sweep_count: usize) -> Option<String> {
-    match sweeps.len() {
-        0 => None,
-        1 => Some(format!("[{}]", sweeps[0])),
-        2 if active_sweep_count == 2 => Some("[both]".to_string()),
-        _ => Some(format!("[{}]", sweeps.join("+"))),
-    }
-}
-
-/// The tag for one merged diagnostic, or `None` when it would say nothing.
-///
-/// A diagnostic reported by every run that selected its package is a property
-/// of the code, not of a build shape, and naming the sweeps only lengthens the
-/// line. The tag earns its place when some run covering the package did *not*
-/// report it - a diagnostic only one feature shape produces, say - so that is
-/// the only time it is printed. `package` is the diagnostic's package id; with
-/// no id or no project info every run counts as covering, which tags anything
-/// not reported by all of them.
-fn coverage_tag(
-    reported_by: &[String],
-    package: Option<&str>,
-    results: &[SweepResult],
-    info: Option<&build::ProjectInfo>,
-    active_sweep_count: usize,
-) -> Option<String> {
-    let covering: Vec<&str> = results
-        .iter()
-        .filter(|r| match (package, info) {
-            (Some(id), Some(info)) => r.selects(id, info),
-            _ => true,
-        })
-        .map(|r| r.label.as_str())
-        .collect();
-    let reported_everywhere = !covering.is_empty()
-        && covering.iter().all(|label| reported_by.iter().any(|s| s == label));
-    if reported_everywhere {
-        return None;
-    }
-    sweep_tag(reported_by, active_sweep_count)
-}
-
-/// Multi-sweep version of the text formatter: gathers each sweep's
-/// diagnostics ([`SweepResult::diagnostics`]), merges + dedups them, orders
-/// them by scope, and when `multi` tags a line with the sweeps that reported
-/// it - only where some sweep covering its package did not ([`coverage_tag`]).
-/// A sweep whose cargo failed with no error-level diagnostic also gets its
-/// captured streams after the list ([`failed_run_streams`]).
-#[allow(clippy::too_many_arguments)]
-fn format_clippy_multi(
-    tool: &str,
-    results: &[SweepResult],
-    info: Option<&build::ProjectInfo>,
-    project_root: &Path,
-    active_sweep_count: usize,
-    keep: &dyn Fn(&Diagnostic) -> bool,
-) -> String {
-    let multi = active_sweep_count > 1;
-    // Each diagnostic's package, keyed as the merge keys it: identical
-    // diagnostics from two runs come from the same source line, so the same
-    // package.
-    let mut package_of: HashMap<crate::diagnostic::DiagnosticKey, String> = HashMap::new();
-    let parses: Vec<(String, cargo_filter::ClippyParse)> = results
-        .iter()
-        .map(|r| {
-            let mut events = r.diagnostics.clone();
-            events.retain(|d| keep(d));
-            let parse = clippy_parse_from_events(&events, !r.success);
-            for (d, e) in parse.diagnostics.iter().zip(&events) {
-                if let Some(id) = &e.package_id {
-                    package_of.entry(merge_key(d)).or_insert_with(|| id.clone());
-                }
-            }
-            (r.label.clone(), parse)
-        })
-        .collect();
-
-    // A run that failed for a reason the list cannot name gets its captured
-    // streams after the list: no error-level diagnostic at all, or an error on
-    // stderr the list does not carry - under `--keep-going` a build script can
-    // panic in the same run that reports another crate's rustc error, and
-    // hiding it until that error is fixed is the one-failure-per-run loop
-    // `--keep-going` exists to break.
-    let mut streams = String::new();
-    for (r, (_, p)) in results.iter().zip(&parses) {
-        if r.success || !(p.parse_failed || has_unlisted_stderr_error(r, keep)) {
-            continue;
-        }
-        if multi {
-            if !streams.is_empty() {
-                streams.push('\n');
-            }
-            streams.push_str(&format!("[{}]\n", r.label));
-        }
-        streams.push_str(&failed_run_streams(r, keep));
-    }
-
-    let merged = merge_clippy(&parses);
-
-    if merged.is_empty() {
-        if !streams.is_empty() {
-            return streams;
-        }
-        return format!("{tool}: no issues");
-    }
-
-    let total = merged.len();
-    let mut refs: Vec<&MergedDiag<'_>> = merged.iter().collect();
-    // Sort so every hit of a single lint clumps together, by lint code, file,
-    // line, column; `scope_order` then moves unstaged files to the front,
-    // keeping this order within each group. Cached keys keep the location
-    // parsing to one pass per diagnostic.
-    refs.sort_by_cached_key(|m| clippy_sort_key(m.diag));
-    let displayed = scope_order(refs, project_root, |m| {
-        m.diag.path().unwrap_or_else(|| Path::new(""))
-    });
-
-    let errors = if total == 1 { "error" } else { "errors" };
-    let header = if multi {
-        format!("{tool}: {total} {errors} ({active_sweep_count} sweeps)\n")
-    } else {
-        format!("{tool}: {total} {errors}\n")
-    };
-
-    let mut out = header;
-    for m in &displayed {
-        out.push_str("  ");
-        if multi
-            && let Some(tag) = coverage_tag(
-                &m.sweeps,
-                package_of.get(&merge_key(m.diag)).map(String::as_str),
-                results,
-                info,
-                active_sweep_count,
-            )
-        {
-            out.push_str(&tag);
-            out.push(' ');
-        }
-        out.push_str(&m.diag.format_as(Level::Error));
-        out.push('\n');
-    }
-    if !streams.is_empty() {
-        out.push('\n');
-        out.push_str(&streams);
-    }
-    out.trim_end().to_string()
-}
-
-/// The stderr blocks the diagnostic list already carries: every manifest
-/// warning (including those filtered by owner or selection, which never
-/// reappear as raw text) and the denied manifest lints `keep` still lists.
-fn consumed_manifest_blocks(
-    r: &SweepResult,
-    keep: &dyn Fn(&Diagnostic) -> bool,
-) -> std::collections::HashSet<usize> {
-    r.suppressed_manifest_blocks
-        .iter()
-        .copied()
-        .chain(
-            r.listed_manifest_errors
-                .iter()
-                .filter(|(_, d)| keep(d))
-                .map(|(block, _)| *block),
-        )
-        .collect()
-}
-
-/// Whether a failed run's stderr holds an `error` block the list does not
-/// explain: anything but a consumed manifest block and cargo's own summaries of
-/// a failure reported elsewhere (`rustc_text::BlockKind::FailureSummary`).
-fn has_unlisted_stderr_error(r: &SweepResult, keep: &dyn Fn(&Diagnostic) -> bool) -> bool {
-    let listed = consumed_manifest_blocks(r, keep);
-    rustc_text::rustc_blocks(&r.stderr)
-        .iter()
-        .enumerate()
-        .any(|(i, b)| {
-            b.level == Level::Error
-                && !listed.contains(&i)
-                && rustc_text::classify_block(b) != BlockKind::FailureSummary
-        })
-}
-
-/// The captured streams of a failed cargo run whose failure the diagnostic
-/// list does not explain - a build script that panicked, a manifest cargo
-/// refused, an error an allow filtered. Narrowed by kind, never by a line
-/// budget:
-///
-/// - stdout is cargo's `--message-format=json` event stream, so its records
-///   are dropped - they are the bulk of the stream (one `compiler-artifact`
-///   record per unit, some tens of KB long; measured on a slint workspace
-///   whose fontconfig build script failed: 1118 JSON lines, about 850 KB,
-///   beside around 130 lines of cargo's own words). The exception is an
-///   error-level `compiler-message` the phase's `keep` rejected, kept as its
-///   `rendered` text: an allow filtered it from the list, and it is still a
-///   reason cargo failed. Any non-JSON line stays.
-/// - stderr, when it holds an `error` block, prints its error blocks and
-///   withholds the rest, with a trailer counting the warnings withheld -
-///   `append_rustc_errors`'s rule, for the same reason: the same run printed a
-///   slint build script's warnings by the hundred beside the one panic that
-///   mattered. Every `error` block prints except those the list carries
-///   (consumed manifest blocks are already handled structurally), and a build
-///   script's `--- stdout` inside one loses
-///   its `cargo:` directives ([`drop_build_directives`]). Any other block is
-///   withheld only when it is self-contained ([`is_self_contained`]); one that
-///   swallowed unindented text after its header prints whole, since that text
-///   may be the failure's cause - that check comes before any other reason to
-///   drop a block. Not counted as withheld: manifest lints, cargo's
-///   `generated N warnings` tallies and its `build failed, waiting` status.
-///   With no `error` block, stderr is the evidence and prints without manifest
-///   lints already handled by the structured path.
-fn failed_run_streams(r: &SweepResult, keep: &dyn Fn(&Diagnostic) -> bool) -> String {
-    let mut out = String::new();
-    let blocks = rustc_text::rustc_blocks(&r.stderr);
-    if blocks.iter().any(|b| b.level == Level::Error) {
-        let listed = consumed_manifest_blocks(r, keep);
-        let mut withheld = 0usize;
-        for (i, block) in blocks.iter().enumerate() {
-            let print = if listed.contains(&i) {
-                false
-            } else {
-                match block.level {
-                    Level::Error => true,
-                    Level::Warning => {
-                        let contained = is_self_contained(&block.text, true);
-                        if contained && rustc_text::classify_block(block) != BlockKind::CargoStatus {
-                            withheld += 1;
-                        }
-                        !contained
-                    }
-                    // cargo's `Compiling` progress is indented; anything else
-                    // ahead of the first header is kept.
-                    Level::Other => !is_self_contained(&block.text, false),
-                }
-            };
-            if print {
-                let text = if block.level == Level::Error {
-                    drop_build_directives(&block.text)
-                } else {
-                    block.text.clone()
-                };
-                out.push_str(&text);
-                out.push('\n');
-            }
-        }
-        if withheld > 0 {
-            out.push_str(&format!("{} not shown\n", output::count(withheld, "warning")));
-        }
-    } else {
-        out.push_str(&stderr_without_manifest_lints(&r.stderr));
-    }
-    for text in r.stdout.lines().filter_map(|l| failed_stdout_line(l, keep)) {
-        out.push_str(&text);
-        out.push('\n');
-    }
-    out
-}
-
-/// A failed build script's report with the `cargo:` directives in its
-/// `--- stdout` section dropped and counted. Those lines are instructions to
-/// cargo - one `cargo:rerun-if-env-changed=` per variable a `-sys` crate
-/// probes, dozens before the panic that matters - not an account of the
-/// failure. `cargo:warning=` and `cargo::error=` lines are messages and stay,
-/// as does everything in `--- stderr` and any non-directive stdout.
-fn drop_build_directives(text: &str) -> String {
-    let mut out = String::new();
-    let mut in_stdout = false;
-    let mut dropped = 0usize;
-    for line in text.lines() {
-        let trimmed = line.trim_start();
-        match trimmed {
-            "--- stdout" => in_stdout = true,
-            "--- stderr" => in_stdout = false,
-            _ => {}
-        }
-        let directive = trimmed
-            .strip_prefix("cargo::")
-            .or_else(|| trimmed.strip_prefix("cargo:"))
-            .is_some_and(|rest| !rest.starts_with("warning=") && !rest.starts_with("error="));
-        if in_stdout && directive {
-            dropped += 1;
-            continue;
-        }
-        out.push_str(line);
-        out.push('\n');
-    }
-    if dropped > 0 {
-        out.push_str(&format!(
-            "  ({} not shown)\n",
-            output::count(dropped, "build-script directive")
-        ));
-    }
-    out.trim_end().to_owned()
-}
-
-/// Whether a stderr block holds nothing but its own diagnostic: every line
-/// (after the header, when `has_header`) blank, indented, a column-zero
-/// `help:`/`note:`/`= ` continuation, or a source-excerpt line whose line
-/// number reaches column zero (`150 | config = "0.15"`) - the lines rustc and
-/// cargo attach to a diagnostic. Text that fails this is something
-/// `rustc_text::rustc_blocks` merged into the block only because no header came
-/// between.
-fn is_self_contained(text: &str, has_header: bool) -> bool {
-    text.lines().skip(usize::from(has_header)).all(|l| {
-        let after_number = l.trim_start_matches(|c: char| c.is_ascii_digit());
-        l.is_empty()
-            || l.starts_with(char::is_whitespace)
-            || l.starts_with("help:")
-            || l.starts_with("note:")
-            || l.starts_with("= ")
-            || (after_number.len() < l.len() && after_number.starts_with(" |"))
-    })
-}
-
-/// What one line of a failed run's stdout contributes to its report
-/// ([`failed_run_streams`]): a non-JSON line itself, an error-level
-/// `compiler-message` that `keep` rejected as a typed diagnostic, any other
-/// cargo record nothing.
-/// Parsed rather than prefix-matched, so a tool line that merely starts with
-/// `{` survives.
-fn failed_stdout_line(line: &str, keep: &dyn Fn(&Diagnostic) -> bool) -> Option<String> {
-    use serde_json::Value;
-    let record = line
-        .starts_with('{')
-        .then(|| serde_json::from_str::<Value>(line).ok())
-        .flatten()
-        .filter(|v| v.get("reason").is_some_and(Value::is_string));
-    let Some(record) = record else {
-        return Some(line.to_owned());
-    };
-    if record.get("reason").and_then(Value::as_str) != Some("compiler-message") {
-        return None;
-    }
-    // The list's own reading of the record: an event it keeps is already
-    // shown, and one it parses to nothing is summary noise (`aborting due
-    // to ...`).
-    let diagnostic = cargo_json::parse_cargo_diagnostics(line).into_iter().next()?;
-    if !is_error_level(&diagnostic) || keep(&diagnostic) {
-        return None;
-    }
-    Some(diagnostic.format_as(Level::Error))
-}
-
-/// Whether a diagnostic is at error level. The reader maps rustc's ICE
-/// spelling (`error: internal compiler error`) to [`Level::Error`] as well.
-fn is_error_level(d: &Diagnostic) -> bool {
-    d.is_error()
-}
-
-/// Parse cargo's `--message-format=json` stdout into a
-/// [`ClippyParse`](cargo_filter::ClippyParse).
-///
-/// Every compiler-message JSON event, in discovery order. `parse_failed`
-/// follows [`clippy_parse_from_events`]'s rule.
-#[cfg(test)]
-fn parse_clippy_from_json(
-    stdout: &str,
-    sweep_failed: bool,
-    allow_exact: &[SitedAllow],
-) -> cargo_filter::ClippyParse {
-    clippy_parse_from_events(&gated_diags(stdout, allow_exact), sweep_failed)
-}
-
-/// Collect already-filtered diagnostic events for the list, in discovery
-/// order, levels as cargo gave them. `parse_failed` is set when cargo failed
-/// and left no `error`-level event, so callers also print the captured
-/// streams: under `--cap-lints=warn` a lint never fails cargo, so a failed run
-/// with warnings alone failed for a reason no diagnostic names - a build
-/// script's panic beside some crate's lints, which the old "no event at all"
-/// rule hid.
-///
-/// The list renders every entry as an error ([`merge_key`], `format_as`),
-/// whatever level cargo gave it: the one kind of warning `check` does not
-/// treat as a failure - a dependency's - was dropped upstream through
-/// [`Diagnostic::is_dependency_warning`], and clippy runs under `--cap-lints=warn` only
-/// so a denied lint cannot abort its crate's compile.
-fn clippy_parse_from_events(
-    events: &[Diagnostic],
-    sweep_failed: bool,
-) -> cargo_filter::ClippyParse {
-    let parse_failed = sweep_failed && !events.iter().any(is_error_level);
-    cargo_filter::ClippyParse {
-        diagnostics: events.to_vec(),
-        parse_failed,
-    }
-}
-
-/// Sort key for the diagnostic list: by lint code (so every hit of a rule
-/// clumps together), then file, line and column for stable in-rule ordering.
-/// A diagnostic with no code sorts to the end.
-fn clippy_sort_key(d: &crate::diagnostic::Diagnostic) -> (String, PathBuf, u64, u64) {
-    // A key that sorts after any real code.
-    let lint_key = d.code.clone().unwrap_or_else(|| "\u{10FFFF}".to_owned());
-    let (file, line, column) = match &d.site {
-        Some(site) => (site.file.clone(), site.line.unwrap_or(0), site.column.unwrap_or(0)),
-        None => (PathBuf::new(), 0, 0),
-    };
-    (lint_key, file, line, column)
-}
-
-/// Split `brokkr check`'s trailing args into a cargo-level slice and a
-/// libtest-level slice on the first literal `--`. With no separator,
-/// every token is cargo-level. Documented shapes:
-/// - `brokkr check -- --test read_paths` -> cargo: `[--test, read_paths]`,
-///   libtest: `[]`.
-/// - `brokkr check -- -- --ignored` -> cargo: `[]`,
-///   libtest: `[--ignored]`.
-/// - `brokkr check -- --test cli -- --ignored` -> cargo: `[--test, cli]`,
-///   libtest: `[--ignored]`.
-fn split_extra_args(extra: &[String]) -> (&[String], &[String]) {
-    match extra.iter().position(|a| a == "--") {
-        Some(i) => (&extra[..i], &extra[i + 1..]),
-        None => (extra, &[][..]),
-    }
-}
-
-/// The run-wide inputs of the test phase.
-struct TestPhaseArgs<'a> {
-    project: Option<Project>,
-    project_root: &'a Path,
-    state_root: &'a Path,
-    sweeps: &'a [PlannedSweep],
-    /// The test phase's selection, aligned with `sweeps`.
-    selection: &'a PhaseSelection,
-    doctests: bool,
-    commands: bool,
-    extra_args: &'a [String],
-    allow: &'a [String],
-    allow_exact: &'a [SitedAllow],
-    /// The run is held to a `certifies = "complete"` claim.
-    certifying: bool,
-}
-
-/// Iterate the lanes the test selection attempts, pre-building each sweep's
-/// `build_packages` and then running `cargo test` for it. Fails fast on the
-/// first sweep that fails (build or test), mirroring how the clippy phase
-/// short-circuits on a non-zero status. A "nothing reached" refusal was
-/// reported before preparation, so this phase never meets one.
-///
-/// `prepared` is the plan's per-lane preparation under a complete claim. Every
-/// lane journals what it observes; a lane the fail-fast never reaches has
-/// that recorded as a termination too, so its planned executions read as
-/// unobserved for a stated reason. `stop` receives the termination that
-/// decided the phase, when one did.
-fn run_test_phase(
-    t: &TestPhaseArgs<'_>,
-    prepared: Option<&Lanes<Option<PreparedLane>>>,
-    mut timings: Option<&mut Vec<TestTiming>>,
-    ledger: &mut ReachLedger,
-    stop: &mut Option<TerminationSummary>,
-) -> Result<(), DevError> {
-    let TestPhaseArgs {
-        project,
-        project_root,
-        state_root,
-        sweeps,
-        selection,
-        doctests,
-        commands,
-        extra_args,
-        allow,
-        allow_exact,
-        certifying,
-    } = *t;
-    let multi = sweeps.len() > 1;
-    let allow_flags = crate::config::check::test_phase_allow_flags(allow, allow_exact);
-    announce_test_allows(project_root, sweeps, &allow_flags, allow_exact);
-    // `brokkr check`'s test phase runs `cargo test` in the dev profile
-    // unless the sweep's `[[check]] profile` says otherwise, so each
-    // sweep's `build_packages` artefacts land in that profile's
-    // `<target>/` subdirectory. Tests that spawn the just-rebuilt binary
-    // read BROKKR_TEST_BIN_DIR to skip the `cfg!(debug_assertions)`
-    // profile guess (which silently lies when a workspace pins
-    // `[profile.test]` overrides, and now also when a sweep opts into
-    // release).
-    // `whole_workspace` is a property of the tree, not of any sweep. It now
-    // feeds `resolve_unification` rather than the parallel lane directly.
-    let info = build::project_info(Some(project_root))?;
-    let owners = OwnerIndex::from_metadata_at(
-        &info.workspace_root,
-        project_root,
-        &info.workspace_members,
-        &info.member_manifests,
-    );
-    let target_dir = info.target_dir;
-
-    let mut sweeps_run = 0usize;
-    let mut outcome: Result<(), DevError> = Ok(());
-    for (i, sweep) in sweeps.iter().enumerate() {
-        // The CLI `-p` set intersected with the sweep's selection when the
-        // selection was built: ruled-out packages are dropped with a note, and
-        // the lane is excluded only when nothing survives. Logged only: `-p`
-        // is this invocation's doing, so `check` announced it once, up front
-        // (`announce_package_rules`), rather than once per phase.
-        let lane_idx = LaneIdx::new(i);
-        let attempt = match selection.entry(lane_idx) {
-            Some(LaneEntry::Attempt(a)) => a,
-            other => {
-                let reason = other.and_then(LaneEntry::skip_reason).unwrap_or_default();
-                output::detail(&format!("test {}: skipped ({reason})", sweep.label));
-                continue;
-            }
-        };
-        for note in attempt.notes() {
-            output::detail(&format!("test {}: {note} (dropped)", sweep.label));
-        }
-        sweeps_run += 1;
-        // Record before the run: the sweep is reached, pass or fail. A sweep
-        // the loop never reaches (an earlier one failed fast) stays unreached.
-        ledger.reach_test(lane_idx);
-
-        let tap = LaneTap::new(i);
-        tap.record(JournalRecord::LaneStarted { lane: i });
-        let lane = run_test_lane(
-            &LaneArgs {
-                project,
-                project_root,
-                state_root,
-                target_dir: &target_dir,
-                sweep,
-                attempt,
-                extra_args,
-                allow_flags: &allow_flags,
-                doctests,
-                multi,
-                commands,
-                certifying,
-            },
-            prepared.and_then(|p| p.get(lane_idx)).and_then(Option::as_ref),
-            &owners,
-            &tap,
-            timings.as_deref_mut(),
-        );
-        tap.record(JournalRecord::LaneFinished { lane: i, passed: matches!(lane, Ok(true)) });
-        // A green run never printed this sweep's shape, so a failure leaving
-        // the lane - a red test, or any error: a pre-build, a lane refusal, a
-        // spawn failure - names it here, once, whatever path it took.
-        let failed = match lane {
-            Ok(true) => None,
-            Ok(false) => Some(DevError::Build(TESTS_FAILED.into())),
-            Err(e) => Some(e),
-        };
-        // Every failed lane ends this loop; even an ordinary nextest `Ok(false)`
-        // does not advance to another sweep. Timeouts return `Err` so their
-        // per-test stop reason survives instead of becoming a generic red run.
-        if let Some(e) = failed {
-            output::error(&format!(
-                "test {}: {}",
-                sweep.label,
-                describe_sweep(sweep, true, attempt.selection(), attempt.described_features())
-            ));
-            let decisive = record_phase_stop(i, sweeps.len(), &e, &tap);
-            let label = |l: usize| sweeps.get(l).map(|s| s.label.clone());
-            *stop = decisive.as_ref().map(|d| TerminationSummary::of(d, label));
-            outcome = Err(e);
-            break;
-        }
-    }
-
-    // Held warnings print either way: a warning from a sweep that passed
-    // before a later one failed is still a warning.
-    flush_warnings(sweeps_run);
-    outcome?;
-
-    print_test_line(sweeps_run, phase_elapsed());
-    Ok(())
-}
-
-/// Record why the test phase stopped at lane `failed`, and return the
-/// termination that decided it.
-///
-/// - A lane whose tests failed stops the phase by fail-fast: every later lane
-///   is recorded as stopped by it, so its planned executions are unobserved
-///   for that stated reason, not for none.
-/// - A stop (interrupt, phase watchdog) is the run's.
-/// - Anything else that ends the phase - a blown budget, a refusal - is the
-///   run's too, carrying the lane's own decisive termination when it recorded
-///   one: a per-test timeout stops brokkr, and everything after it is
-///   unobserved because of that timeout.
-fn record_phase_stop(failed: usize, lanes: usize, e: &DevError, tap: &LaneTap) -> Option<Termination> {
-    let own = tap.decisive_termination();
-    match e {
-        DevError::Build(m) if m == TESTS_FAILED => {
-            let mut first = None;
-            for lane in failed + 1..lanes {
-                let t = Termination {
-                    scope: TerminationScope::Lane,
-                    lane: Some(lane),
-                    stream: None,
-                    cause: TerminationCause::FailFast,
-                    test: None,
-                    charged: None,
-                };
-                journal_append(&JournalRecord::Terminated(t.clone()));
-                first.get_or_insert(t);
-            }
-            own.or(first)
-        }
-        other => record_run_stop(other, own),
-    }
-}
-
-/// What one test lane needs from the phase, bundled so the lane body can be
-/// its own function - which is what lets the phase attach the sweep's shape
-/// to every way out of it.
-struct LaneArgs<'a> {
-    project: Option<Project>,
-    project_root: &'a Path,
-    state_root: &'a Path,
-    target_dir: &'a Path,
-    sweep: &'a PlannedSweep,
-    /// The lane's selection and resolutions: what it builds and runs.
-    attempt: &'a Attempt,
-    extra_args: &'a [String],
-    allow_flags: &'a [String],
-    doctests: bool,
-    multi: bool,
-    commands: bool,
-    certifying: bool,
-}
-
-/// A lane's `build_packages` pre-builds, run again before a lane that builds.
-fn build_lane_support(
-    a: &LaneArgs<'_>,
-    sweep: &PlannedSweep,
-    env: &LaneEnv,
-    owners: &OwnerIndex,
-) -> Result<Vec<SupportArtifact>, DevError> {
-    let mut support: Vec<SupportArtifact> = Vec::new();
-    for req in a.attempt.support() {
-        support.extend(run_sweep_pre_build(
-            a.project_root,
-            sweep,
-            req,
-            &env.project_env,
-            &env.allow_args,
-            owners,
-            a.commands,
-        )?);
-    }
-    Ok(support)
-}
-
-/// Run one sweep's test lane: its pre-builds (unless it runs its prepared
-/// snapshot), then whichever harness it names. `Ok(false)` is a failure
-/// already reported.
-///
-/// `prepared` is the lane's plan: its artifacts are verified against it before
-/// anything runs, and the lane executes exactly what it lists. Where the
-/// up-front preparation failed, the lane reports that failure once (the
-/// lanes that need a selection) or runs without an inventory (serial); it is
-/// never prepared again. Only an inventory gone stale (artifacts replaced by
-/// another lane's build) re-prepares.
-#[allow(clippy::too_many_lines)]
-fn run_test_lane(
-    a: &LaneArgs<'_>,
-    prepared: Option<&PreparedLane>,
-    owners: &OwnerIndex,
-    tap: &LaneTap,
-    timings: Option<&mut Vec<TestTiming>>,
-) -> Result<bool, DevError> {
-    let sweep = a.sweep;
-    // A lane whose up-front preparation failed has no inventory and is not
-    // prepared a second time: preparing lists (executes) every binary, so a
-    // retry would run each listing twice in one invocation. A lane that needs a
-    // selection to execute reports the recorded failure; a serial lane runs
-    // through cargo, as it does with any other lane without an inventory.
-    let prepared = match prepared {
-        Some(p) if p.prepare_failed.is_some() => {
-            if let Some(f) = &p.prepare_failed
-                && matches!(lane_kind(sweep), LaneKind::Parallel | LaneKind::Isolated | LaneKind::Nextest)
-            {
-                for line in &f.held {
-                    output::error(line);
-                }
-                return Err(DevError::Reported(f.message.clone()));
-            }
-            None
-        }
-        other => other,
-    };
-    let inputs = LaneInputs {
-        project: a.project,
-        project_root: a.project_root,
-        state_root: a.state_root,
-        target_dir: a.target_dir,
-        allow_flags: a.allow_flags,
-        owners,
-        commands: a.commands,
-        certifying: a.certifying,
-    };
-    // Per-sweep: a sweep carrying `rustflags` runs in its own isolated
-    // target dir with a matching BROKKR_TEST_BIN_DIR + RUSTFLAGS, so a
-    // global cfg (e.g. `--cfg madsim`) never thrashes the plain sweeps. The
-    // lint allows reach the pre-build and the test run alike - a pre-build
-    // compiling the same crate under the unsuppressed lint fails before
-    // `cargo test` is ever reached.
-    let env = prepared.map_or_else(|| lane_env(&inputs, sweep), |p| p.env.clone());
-    let kind = lane_kind(sweep);
-    let needs_selection = matches!(kind, LaneKind::Parallel | LaneKind::Isolated | LaneKind::Nextest);
-
-    // A lane that executes its binaries directly runs its prepared snapshot:
-    // when every executable it runs or hands its tests still has the content
-    // the plan listed, it runs as planned, with no cargo invocation. A build
-    // here would only ask whether building again changes anything - and a
-    // project whose build scripts rerun on every build answers yes, which is
-    // drift this lane never had. Any mismatch takes the rebuild-and-compare
-    // path below. A serial lane runs `cargo test`, which builds anyway.
-    let unchanged = prepared.is_some_and(|p| {
-        needs_selection
-            && p.verify
-            && p.unavailable.is_none()
-            && p.snapshot.as_ref().is_some_and(|s| snapshot_drift(s).is_empty())
-    });
-    let own;
-    let prepared = match prepared {
-        Some(p) if unchanged => Some(p),
-        // A serial lane whose harnesses cannot be attributed: it runs through
-        // cargo, as it always has, with no plan to hold it to.
-        Some(p) if p.unavailable.is_some() => {
-            build_lane_support(a, sweep, &env, owners)?;
-            None
-        }
-        Some(p) if !p.verify => {
-            build_lane_support(a, sweep, &env, owners)?;
-            Some(p)
-        }
-        Some(p) => {
-            // Something the plan listed changed since: build the lane again
-            // (re-uplifting the support binaries first) and prove it is about
-            // to run what was enumerated.
-            let support = build_lane_support(a, sweep, &env, owners)?;
-            let drift = lane_drift_of(&inputs, sweep, p, &support)?;
-            if drift.is_empty() {
-                Some(p)
-            } else if a.certifying {
-                // Never a silent re-plan: a plan that follows the artifacts
-                // around certifies whatever happens to be on disk.
-                return Err(drift_error(&sweep.label, &drift));
-            } else {
-                // Nothing is certified here, so the lane is not refused for a
-                // plan that went stale - an earlier lane's build can replace
-                // an artifact in place, and before there was an inventory
-                // every lane prepared just before it ran. It runs what it
-                // builds now, and the record says its inventory no longer
-                // describes it: its observations are not read against a
-                // selection it did not run.
-                let reason = format!("artifacts changed since the plan - {}", drift.join("; "));
-                tap.record(JournalRecord::LaneSuperseded { lane: tap.lane(), reason: reason.clone() });
-                output::detail(&format!(
-                    "test {}: {reason}; the lane runs what it builds now, and its inventory is unavailable",
-                    sweep.label
-                ));
-                if needs_selection {
-                    own = prepare_lane(&inputs, sweep, a.attempt, a.extra_args)?;
-                    Some(&own)
-                } else {
-                    None
-                }
-            }
-        }
-        None => {
-            build_lane_support(a, sweep, &env, owners)?;
-            if needs_selection {
-                own = prepare_lane(&inputs, sweep, a.attempt, a.extra_args)?;
-                Some(&own)
-            } else {
-                None
-            }
-        }
-    };
-
-    match (kind, prepared) {
-        (LaneKind::Nextest, Some(p)) => run_nextest_sweep(sweep, a.attempt, p, tap, a.commands),
-        (LaneKind::Parallel, Some(p)) => run_parallel_sweep(
-            a.project_root,
-            a.state_root,
-            sweep,
-            a.attempt,
-            match sweep.lane_exec() {
-                LaneExec::Parallel { budget } => budget,
-                _ => 1,
-            },
-            p,
-            tap,
-            a.commands,
-            timings,
-        ),
-        (LaneKind::Isolated, Some(p)) => run_isolated_sweep(
-            a.project_root,
-            a.state_root,
-            sweep,
-            a.attempt,
-            p,
-            tap,
-            a.doctests,
-            a.commands,
-            timings,
-        ),
-        _ => run_sequential_resolutions(
-            a.project_root,
-            a.state_root,
-            sweep,
-            a.attempt,
-            a.extra_args,
-            &env,
-            owners,
-            (a.doctests, a.multi, a.commands, a.certifying),
-            timings,
-            prepared,
-            tap,
-        ),
-    }
-}
-
 #[cfg(test)]
 mod select_named_tests {
     #![allow(clippy::unwrap_used)]
@@ -3424,60 +1522,6 @@ mod select_named_tests {
         assert!(err.to_string().contains("none defined"));
     }
 }
-
-#[cfg(test)]
-mod sited_summary_tests {
-    #![allow(clippy::unwrap_used)]
-    use super::summarize_sited;
-    use crate::config::SitedAllow;
-
-    fn sited(entries: &[&str]) -> Vec<SitedAllow> {
-        entries.iter().map(|s| SitedAllow::parse(s).unwrap()).collect()
-    }
-
-    #[test]
-    fn a_lone_site_keeps_its_path() {
-        // One entry: the path is short and is the useful part.
-        let s = sited(&["deprecated@src/a.rs"]);
-        assert_eq!(summarize_sited(&s), "deprecated at src/a.rs");
-    }
-
-    #[test]
-    fn repeated_lint_collapses_to_a_count() {
-        // The regression this exists for: a project with 59 sited entries for
-        // one lint printed 59 lines and buried the rest of the run.
-        let s = sited(&[
-            "clippy::assert_is_empty@a.rs",
-            "clippy::assert_is_empty@b.rs",
-            "clippy::assert_is_empty@c.rs",
-        ]);
-        assert_eq!(summarize_sited(&s), "clippy::assert_is_empty (3 files)");
-    }
-
-    #[test]
-    fn distinct_lints_are_listed_in_first_seen_order() {
-        let s = sited(&[
-            "deprecated@a.rs",
-            "clippy::foo@b.rs",
-            "deprecated@c.rs",
-            "clippy::foo@d.rs",
-        ]);
-        assert_eq!(
-            summarize_sited(&s),
-            "deprecated (2 files), clippy::foo (2 files)"
-        );
-    }
-
-    #[test]
-    fn the_summary_is_one_line_however_many_entries() {
-        let entries: Vec<String> = (0..70).map(|i| format!("deprecated@src/f{i}.rs")).collect();
-        let refs: Vec<&str> = entries.iter().map(String::as_str).collect();
-        let out = summarize_sited(&sited(&refs));
-        assert!(!out.contains('\n'), "got: {out}");
-        assert_eq!(out, "deprecated (70 files)");
-    }
-}
-
 
 #[cfg(test)]
 mod ran_labels_tests {
@@ -3690,7 +1734,7 @@ mod continuation_gate_tests {
             ..LaneRecord::empty(LaneIdx::new(0), "default".into(), LaneKind::Serial, "s".into())
         };
         let plan = AccountingPlan { run_id: "1700000000000-1".into(), complete: true, lanes: vec![lane], ..AccountingPlan::default() };
-        let sweeps = [PlannedSweep::from(SweepDecl::default())];
+        let sweeps = [PlannedSweep::from(crate::profile::SweepDecl::default())];
         Prepared {
             prep: ProfilePrep { plan, lanes: Lanes::from_sweeps(&sweeps, |_, _| None), error: None },
             paths: Some(AccountingPaths { plan: dir.join("plan.json"), journal }),
@@ -3726,8 +1770,8 @@ mod continuation_gate_tests {
     /// A sweep labelled after its phase names the phase once.
     #[test]
     fn a_sweep_labelled_after_its_phase_does_not_stutter() {
-        assert_eq!(phase_sweep_tag("clippy", "clippy"), "clippy");
-        assert_eq!(phase_sweep_tag("clippy", "default"), "clippy default");
+        assert_eq!(phase_sweep_tag(Phase::Clippy, "clippy"), "clippy");
+        assert_eq!(phase_sweep_tag(Phase::Clippy, "default"), "clippy default");
     }
 }
 

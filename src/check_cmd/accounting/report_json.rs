@@ -1,14 +1,50 @@
 // Schema-2 JSON blocks derived from reconciliation and policy coverage.
 
-use super::journal::{Termination, TerminationScope};
+use super::journal::{Termination, TerminationCause, TerminationScope};
 use super::reconcile::{DoctestObserved, Outcome, Reconciliation};
 
 // ----- the `--json` summary, schema 2 -----
 
-#[derive(Debug, Clone, serde::Serialize)]
+/// How a run stopped, for the trailer. Serialized as two strings (`kind` the
+/// cause's snake_case name, `scope` `run`, a lane label or a phase name), so
+/// the JSON shape is unchanged.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub(crate) struct TerminationSummary {
-    pub(crate) kind: String,
-    pub(crate) scope: String,
+    /// Serialized by its trailer name (`TerminationCause::as_str`), which is
+    /// not always the journal's serde spelling.
+    #[serde(serialize_with = "serialize_cause")]
+    pub(crate) kind: TerminationCause,
+    pub(crate) scope: SummaryScope,
+}
+
+fn serialize_cause<S: serde::Serializer>(cause: &TerminationCause, serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(cause.as_str())
+}
+
+/// What a stop covered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SummaryScope {
+    Run,
+    /// The lane, by its label.
+    Lane(String),
+    /// The check phase a ceiling fired in.
+    Phase(crate::check_cmd::Phase),
+}
+
+impl SummaryScope {
+    pub(crate) fn as_str(&self) -> &str {
+        match self {
+            Self::Run => "run",
+            Self::Lane(label) => label,
+            Self::Phase(phase) => phase.as_str(),
+        }
+    }
+}
+
+impl serde::Serialize for SummaryScope {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
 }
 
 impl TerminationSummary {
@@ -16,10 +52,10 @@ impl TerminationSummary {
     /// label for a lane or stream, `run` otherwise.
     pub(crate) fn of(t: &Termination, label: impl Fn(usize) -> Option<String>) -> Self {
         let scope = match (t.scope, t.lane) {
-            (TerminationScope::Run, _) | (_, None) => "run".to_owned(),
-            (_, Some(l)) => label(l).unwrap_or_else(|| format!("lane {l}")),
+            (TerminationScope::Run, _) | (_, None) => SummaryScope::Run,
+            (_, Some(l)) => SummaryScope::Lane(label(l).unwrap_or_else(|| format!("lane {l}"))),
         };
-        Self { kind: t.cause.as_str().to_owned(), scope }
+        Self { kind: t.cause, scope }
     }
 }
 

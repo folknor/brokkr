@@ -32,6 +32,8 @@ pub enum Check {
         min_bytes: u64,
         description: &'static str,
     },
+    /// io_uring must be usable by this process (`crate::host::kernel::io_uring`).
+    IoUring,
 }
 
 /// Run all checks, collecting failures. If any fail, return `DevError::Preflight`
@@ -73,6 +75,10 @@ fn run_single(check: &Check) -> Option<String> {
             min_bytes,
             description,
         } => check_rlimit(*resource, *min_bytes, description),
+        Check::IoUring => {
+            let failures = crate::host::kernel::io_uring().failures();
+            (!failures.is_empty()).then(|| failures.join("\n"))
+        }
     }
 }
 
@@ -109,7 +115,7 @@ fn check_file(path: &Path, description: &str) -> Option<String> {
 }
 
 fn check_disk_space(path: &Path, min_bytes: u64) -> Option<String> {
-    match available_bytes(path) {
+    match crate::host::storage::available_bytes(path) {
         Some(avail) if avail >= min_bytes => None,
         Some(avail) => Some(format!(
             "insufficient disk space at {}: {} MB available, {} MB required",
@@ -119,22 +125,6 @@ fn check_disk_space(path: &Path, min_bytes: u64) -> Option<String> {
         )),
         None => Some(format!("could not check disk space at {}", path.display())),
     }
-}
-
-///// Query available disk space via `libc::statvfs`.
-fn available_bytes(path: &Path) -> Option<u64> {
-    use std::os::unix::ffi::OsStrExt;
-    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
-
-    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
-    let ret = unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) };
-
-    if ret != 0 {
-        return None;
-    }
-
-    // f_bavail and f_frsize are both c_ulong (u64 on 64-bit Linux).
-    Some(stat.f_bavail * stat.f_frsize)
 }
 
 fn check_kernel_param(path: &str, expected: &str, description: &str) -> Option<String> {
@@ -200,42 +190,12 @@ fn check_rlimit(
 // Convenience check sets
 // ---------------------------------------------------------------------------
 
-/// Preflight checks for io_uring.
-///
-/// Four tunables can block io_uring:
-/// 1. `/proc/sys/kernel/io_uring_disabled` must be 0 (upstream kill switch, kernel ≥6.6)
-/// 2. `/proc/sys/kernel/apparmor_restrict_unprivileged_io_uring` must be 0 (Ubuntu/Debian)
-/// 3. `/proc/sys/kernel/apparmor_restrict_unprivileged_userns` must be 0 (Ubuntu/Debian)
-/// 4. `RLIMIT_MEMLOCK` >= 16 MB (for pinned ring buffers)
-///
-/// The kernel param checks pass when the file is absent (older kernels, non-Ubuntu).
+/// Preflight checks for io_uring: the kernel kill switch, the two AppArmor
+/// restrictions and `RLIMIT_MEMLOCK`, read by the one host fact that `brokkr
+/// env` reports too (`crate::host::kernel::io_uring`), so the report and the
+/// refusal cannot disagree.
 pub fn uring_checks() -> Vec<Check> {
-    vec![
-        Check::KernelParamAtMost {
-            path: "/proc/sys/kernel/io_uring_disabled",
-            max_value: 0,
-            description: "io_uring is disabled by kernel\n\
-                          Fix: sudo sysctl -w kernel.io_uring_disabled=0",
-        },
-        Check::KernelParamAtMost {
-            path: "/proc/sys/kernel/apparmor_restrict_unprivileged_io_uring",
-            max_value: 0,
-            description: "AppArmor restricts unprivileged io_uring\n\
-                          Fix: sudo sysctl -w kernel.apparmor_restrict_unprivileged_io_uring=0",
-        },
-        Check::KernelParamAtMost {
-            path: "/proc/sys/kernel/apparmor_restrict_unprivileged_userns",
-            max_value: 0,
-            description: "AppArmor restricts unprivileged user namespaces\n\
-                          Fix: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0",
-        },
-        Check::Rlimit {
-            resource: libc::RLIMIT_MEMLOCK,
-            min_bytes: 16 * 1024 * 1024,
-            description: "RLIMIT_MEMLOCK too low for io_uring\n\
-                          Fix: sudo prlimit --pid=$$ --memlock=unlimited:unlimited",
-        },
-    ]
+    vec![Check::IoUring]
 }
 
 // ---------------------------------------------------------------------------

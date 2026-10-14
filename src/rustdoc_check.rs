@@ -60,9 +60,7 @@ pub fn supported(project_root: &Path, env: &[(String, String)]) -> bool {
             &["-Z", "unstable-options", "--help"],
             project_root,
         )
-        .is_ok_and(|out| {
-            out.status.success() && help_lists_check(&String::from_utf8_lossy(&out.stdout))
-        })
+        .is_ok_and(|out| out.success() && help_lists_check(&String::from_utf8_lossy(&out.stdout)))
     })
 }
 
