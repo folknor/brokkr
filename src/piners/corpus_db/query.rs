@@ -715,16 +715,23 @@ mod tests {
 
     use super::*;
     use crate::piners::report::parse;
+    use crate::piners::run_model::RunVerdict;
 
     /// Record one run from an NDJSON literal, no gate context, no wall.
-    fn record(db: &CorpusDb, result: &str, nd: &[u8]) {
-        record_full(db, "{}", None, result, nd);
+    fn record(db: &CorpusDb, verdict: &RunVerdict, nd: &[u8]) {
+        record_full(db, "{}", None, verdict, nd);
     }
 
     /// Record a run with an explicit `selector` JSON and measured `wall_ms` -
     /// the inputs the superset-wall estimator reads.
-    fn record_full(db: &CorpusDb, selector: &str, wall_ms: Option<f64>, result: &str, nd: &[u8]) {
-        record_exit(db, selector, wall_ms, Some(0), result, nd);
+    fn record_full(
+        db: &CorpusDb,
+        selector: &str,
+        wall_ms: Option<f64>,
+        verdict: &RunVerdict,
+        nd: &[u8],
+    ) {
+        record_exit(db, selector, wall_ms, Some(0), verdict, nd);
     }
 
     /// [`record_full`] with an explicit harness exit code.
@@ -733,10 +740,10 @@ mod tests {
         selector: &str,
         wall_ms: Option<f64>,
         exit: Option<i32>,
-        result: &str,
+        verdict: &RunVerdict,
         nd: &[u8],
     ) {
-        record_protocol(db, selector, wall_ms, exit, result, nd, Some(0));
+        record_protocol(db, selector, wall_ms, exit, verdict, nd, Some(0));
     }
 
     /// [`record_exit`] with an explicit protocol-violation count (`None` =
@@ -746,7 +753,7 @@ mod tests {
         selector: &str,
         wall_ms: Option<f64>,
         exit: Option<i32>,
-        result: &str,
+        verdict: &RunVerdict,
         nd: &[u8],
         protocol_violations: Option<i64>,
     ) {
@@ -759,8 +766,7 @@ mod tests {
             selector,
             context: None,
             gated: true,
-            result,
-            fail_reason: None,
+            verdict,
             harness_exit_code: exit,
             stderr: "",
             wall_ms,
@@ -830,7 +836,7 @@ mod tests {
         let db = CorpusDb::open_in_memory().unwrap();
         record(
             &db,
-            "pass",
+            &RunVerdict::Pass,
             br#"{"probe":"a","outcome":"parity","acceptance":{"tier":"accepted"},"boundary_anchor":"carry_tv","ts_shift":{"entry_considered":4,"entry_shifted":3,"entry_share_pct":75.0,"exit_considered":4,"exit_shifted":0,"exit_share_pct":0.0}}
 {"probe":"b","outcome":"parity","acceptance":{"tier":"byte_exact"},"ts_shift":{"entry_considered":9,"entry_shifted":0,"entry_share_pct":0.0,"exit_considered":9,"exit_shifted":0,"exit_share_pct":0.0}}
 "#,
@@ -866,7 +872,7 @@ mod tests {
         let db = CorpusDb::open_in_memory().unwrap();
         record(
             &db,
-            "pass",
+            &RunVerdict::Pass,
             br#"{"probe":"a","outcome":"parity","acceptance":{"tier":"accepted"},"boundary_anchor":"carry_tv","boundary_rules":{"start_ours":0,"tail_ours":0,"start_tv":1,"end_tv":0,"start_anchor_consumed":true},"ts_shift":{"entry_considered":2,"entry_shifted":1,"entry_share_pct":50.0,"exit_considered":0,"exit_shifted":0}}
 "#,
         );
@@ -897,7 +903,7 @@ mod tests {
         let db = CorpusDb::open_in_memory().unwrap();
         record(
             &db,
-            "pass",
+            &RunVerdict::Pass,
             br#"{"probe":"slow","outcome":"parity","runtime_ms":300000}
 {"probe":"fast","outcome":"parity","runtime_ms":100}
 "#,
@@ -905,7 +911,7 @@ mod tests {
         // `slow` re-runs faster; the latest value must win (not the max).
         record(
             &db,
-            "pass",
+            &RunVerdict::Pass,
             br#"{"probe":"slow","outcome":"parity","runtime_ms":5000}
 "#,
         );

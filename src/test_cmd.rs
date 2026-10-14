@@ -382,7 +382,7 @@ mod tests {
     #[test]
     fn the_doc_only_run_shares_the_libtest_half() {
         let sweep = ResolvedSweep {
-            doc_only: true,
+            lane_exec: crate::profile::LaneExec::doc_only(),
             ..ResolvedSweep::default()
         };
         let one = one_package(&sweep, "pkg");
@@ -820,7 +820,7 @@ lanes = ["tier1", "serial"]
         };
         let twin = ResolvedSweep {
             label: "doctests".into(),
-            doc_only: true,
+            lane_exec: crate::profile::LaneExec::doc_only(),
             ..Default::default()
         };
         let sweeps = vec![lib, twin];
@@ -860,9 +860,7 @@ env = { BROKKR_TEST_PLATFORM = "1", FOO = "bar" }
         );
         assert_eq!(sweeps[0].env.get("FOO").map(String::as_str), Some("bar"));
         // libtest filters dropped (per `brokkr test` design).
-        assert!(sweeps[0].libtest_args.is_empty());
-        assert!(sweeps[0].cargo_test_filters.is_empty());
-        assert!(sweeps[0].name_filters.is_empty());
+        assert_eq!(sweeps[0].filters, crate::profile::LaneFilters::default());
     }
 
     #[test]
@@ -1210,7 +1208,7 @@ include_ignored = false
         }];
         let sweep = ResolvedSweep {
             label: "docs".into(),
-            doc_only: true,
+            lane_exec: crate::profile::LaneExec::doc_only(),
             ..ResolvedSweep::default()
         };
         let mut harness = check_cmd::test_binary_for_tests("core", "test", "suite");

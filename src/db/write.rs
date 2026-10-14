@@ -3,10 +3,8 @@
 use super::ResultsDb;
 use super::run_store::RunId;
 use super::schema::INSERT_SQL;
-use super::types::{
-    HotpathData, KvClass, KvPair, KvValue, RunRow, canonical_cargo_features, generate_uuid,
-    short_uuid,
-};
+use super::types::{HotpathData, KvClass, KvPair, KvValue, RunRow, canonical_cargo_features};
+use super::{generate_uuid, short_uuid};
 use crate::error::DevError;
 
 // ---------------------------------------------------------------------------

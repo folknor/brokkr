@@ -758,7 +758,7 @@ where
         let mut reader = pipe;
         let mut chunk = [0u8; 8192];
         while let Some(n) =
-            crate::test_runner::read_unless_cancelled(&mut reader, &mut chunk, &cancel_t)
+            crate::fs_probe::read_unless_cancelled(&mut reader, &mut chunk, &cancel_t)
         {
             if let Ok(mut b) = buf_t.lock() {
                 b.extend_from_slice(chunk.get(..n).unwrap_or_default());

@@ -1,6 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use crate::preflight::{FileDigest, Xxh128};
+
 use serde::de::{self, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 
@@ -1020,7 +1022,7 @@ pub struct CheckEntry {
     /// with `profile = "release"` and puts the timing tests in it; the rest
     /// of the suite keeps the fast dev build.
     ///
-    /// Part of the build shape ([`crate::profile::ResolvedSweep::build_shape_key`]):
+    /// Part of the build shape (the sweep's build shape key):
     /// `cfg(debug_assertions)` decides which code exists, so a dev and a
     /// release sweep of the same features are two different compiles and
     /// two different lint surfaces, and neither may dedupe into the other.
@@ -1530,8 +1532,7 @@ pub struct ProfileDef {
 #[allow(dead_code)]
 pub struct PbfEntry {
     pub file: String,
-    #[serde(alias = "sha256")]
-    pub xxhash: Option<String>,
+    pub xxhash: Option<FileDigest>,
     pub seq: Option<u64>,
     /// Force `--locations-on-ways` when the PBF header does not declare it.
     #[serde(default)]
@@ -1546,8 +1547,7 @@ pub struct PbfEntry {
 #[serde(deny_unknown_fields)]
 pub struct OscEntry {
     pub file: String,
-    #[serde(alias = "sha256")]
-    pub xxhash: Option<String>,
+    pub xxhash: Option<FileDigest>,
 }
 
 /// A PMTiles archive entry, keyed by variant name (e.g. "elivagar").
@@ -1555,8 +1555,7 @@ pub struct OscEntry {
 #[serde(deny_unknown_fields)]
 pub struct PmtilesEntry {
     pub file: String,
-    #[serde(alias = "sha256")]
-    pub xxhash: Option<String>,
+    pub xxhash: Option<FileDigest>,
 }
 
 /// A historical snapshot of a dataset - a different point-in-time capture
@@ -1623,16 +1622,18 @@ pub struct Dataset {
     /// delivery is two `.csv.zst` archives beside three JSON descriptors, and
     /// the consuming CLI takes the directory), and a pin that could only name
     /// one file inside it would leave the real input unpinned while reading as
-    /// verified. See [`crate::preflight::compute_xxh128_tree`].
+    /// verified. See [`crate::preflight::cached_xxh128`].
     ///
     /// This is not a substitute for the run's own content verification, which
     /// asks a different question - whether the data is what the ledger says.
     /// This asks whether the bytes moved under a recorded row.
     #[serde(default)]
     pub path: Option<PathBuf>,
-    /// Expected XXH128 digest of [`Dataset::path`].
+    /// Expected XXH128 digest of [`Dataset::path`], parsed as 32 hexadecimal
+    /// digits. The runtime determines whether this digest covers a file or a
+    /// directory tree from the path on disk.
     ///
-    /// XXH128 is brokkr's standard file hash, NOT the SHA-256 that delivery
+    /// XXH128 is brokkr's standard content digest, NOT the SHA-256 that delivery
     /// manifests carry, so transcribing a manifest is not enough - register the
     /// digest brokkr reports. A second hash implementation would buy nothing
     /// against what this defends (drift, not tampering) and would forfeit the
@@ -1642,7 +1643,7 @@ pub struct Dataset {
     /// can be registered: `brokkr env` lists an entry without one and prints
     /// the digest computed from disk, ready to paste back.
     #[serde(default)]
-    pub xxh128: Option<String>,
+    pub xxh128: Option<Xxh128>,
 }
 
 impl Dataset {
@@ -2129,16 +2130,16 @@ pub struct DellingrConfig {
 /// workload without it refuses `--hotpath`/`--alloc` rather than risk the
 /// memory cliff.
 ///
-/// Both pins get identical parse-time validation in `parse_dellingr`
-/// (repo-relative path, non-empty digest), and the hotpath pair must be whole
-/// - `hotpath_file` and `hotpath_xxh128` are rejected apart.
-#[derive(Debug, Clone, Default, Deserialize)]
+/// Both pins are parsed as [`FileDigest`] values during config deserialization;
+/// `parse_dellingr` checks that their paths are repo-relative, and the hotpath
+/// pair must be whole - `hotpath_file` and `hotpath_xxh128` are rejected apart.
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DellingrWorkload {
     /// Path to the `.lua` file, relative to the directory holding `brokkr.toml`.
     pub file: PathBuf,
-    /// Expected xxh128 hex digest (brokkr's standard file hash).
-    pub xxh128: String,
+    /// Expected 32-hex XXH128 file digest (brokkr's standard content digest).
+    pub xxh128: FileDigest,
     /// Instrumentation-scale variant resolved by `--hotpath` / `--alloc`
     /// (tens-of-ms per `_bench` call, not seconds). Must be registered
     /// together with `hotpath_xxh128`.
@@ -2146,7 +2147,7 @@ pub struct DellingrWorkload {
     pub hotpath_file: Option<PathBuf>,
     /// Pinned digest of `hotpath_file`. Must be registered together with it.
     #[serde(default)]
-    pub hotpath_xxh128: Option<String>,
+    pub hotpath_xxh128: Option<FileDigest>,
 }
 
 impl DellingrConfig {

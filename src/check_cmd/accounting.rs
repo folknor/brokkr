@@ -107,7 +107,7 @@ mod accounting_tests {
         let a = r
             .accounted
             .iter()
-            .find(|a| a.id.lane == lane && a.id.pair.test == test)
+            .find(|a| a.id.lane.get() == lane && a.id.pair.test == test)
             .unwrap();
         (a.outcome, a.detail)
     }
@@ -735,13 +735,24 @@ mod accounting_tests {
         assert!(!lane_runs_doctests(&serial, false));
         let narrowed = ResolvedSweep {
             label: "narrowed".into(),
-            cargo_test_filters: vec!["--test".into(), "cli".into()],
+            filters: crate::profile::LaneFilters {
+                targets: vec![crate::profile::TargetName::new("cli")],
+                ..Default::default()
+            },
             ..ResolvedSweep::default()
         };
         assert!(!lane_runs_doctests(&narrowed, true), "a target selector turns doctests off");
-        let doc = ResolvedSweep { label: "doc".into(), doc_only: true, ..ResolvedSweep::default() };
+        let doc = ResolvedSweep {
+            label: "doc".into(),
+            lane_exec: crate::profile::LaneExec::doc_only(),
+            ..ResolvedSweep::default()
+        };
         assert!(lane_runs_doctests(&doc, false));
-        let parallel = ResolvedSweep { label: "p".into(), parallel_budget: Some(4), ..ResolvedSweep::default() };
+        let parallel = ResolvedSweep {
+            label: "p".into(),
+            lane_exec: crate::profile::LaneExec::Parallel { budget: 4 },
+            ..ResolvedSweep::default()
+        };
         assert!(!lane_runs_doctests(&parallel, true));
     }
 

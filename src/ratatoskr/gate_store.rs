@@ -1,4 +1,4 @@
-//! Gate database for ratatoskr `sync --bench` regression gating.
+//! SQLite store for ratatoskr `sync --bench` regression gating.
 //!
 //! Per-project SQLite DB at `.brokkr/ratatoskr/gate.db` (committed,
 //! same convention as `.brokkr/results.db`). One row per gated
@@ -12,7 +12,6 @@ use std::path::Path;
 
 use rusqlite::Connection;
 
-use super::types::generate_uuid;
 use crate::error::DevError;
 
 /// v1: the original table. v2: `features` (the harness build's cargo
@@ -57,6 +56,17 @@ pub fn canonical_features(features: &[String]) -> String {
     names.sort_unstable();
     names.dedup();
     names.join(",")
+}
+
+/// Generate a UUIDv4 as 32 hex chars (no dashes).
+fn generate_uuid() -> Result<String, DevError> {
+    use std::io::Read;
+
+    let mut bytes = [0u8; 16];
+    std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
 const CREATE_INDEX: &str = "\

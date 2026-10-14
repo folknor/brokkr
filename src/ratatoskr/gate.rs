@@ -4,15 +4,15 @@
 //! configured rules into typed metric selectors and predicates, pulls scalar
 //! values out of two JSON-encoded `gate_runs` rows (current + baseline), and
 //! reports per-rule pass/fail. Storage and CLI plumbing live in
-//! `src/db/gate.rs` and `src/ratatoskr/sync.rs`.
+//! `src/ratatoskr/gate_store.rs` and `src/ratatoskr/sync.rs`.
 
 use std::fmt::{self, Write};
 
 use serde_json::{Map, Value};
 
 use crate::config::{GateConfig, MetricRule};
-use crate::db::gate::GateEntry;
 use crate::error::DevError;
+use crate::ratatoskr::gate_store::GateEntry;
 
 /// Outcome of evaluating one rule against one metric.
 #[derive(Debug)]

@@ -45,6 +45,9 @@ hotpath_file = "examples/fields/same_obj_read.lua"
 hotpath_xxh128 = "..."
 ```
 
+Each pin is a parsed XXH128 file digest: exactly 32 hexadecimal characters.
+SHA-256 values are rejected when brokkr loads the config.
+
 `example` is the cargo `--example` target implementing the bench harness.
 
 **Features are not configured.** The measurement mode picks them, using

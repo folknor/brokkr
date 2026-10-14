@@ -14,9 +14,10 @@ use crate::test_runner;
 
 use super::display::{RepeatState, lone_test_tag, show_failed_invocation, show_reproduction};
 use super::plan::{
-    BuildShape, FocusedPlan, NoMatchNote, ReadySweep, Searched, SweepContext, SweepOutcome, direct_libtest_args,
-    exclusion_describe, lint_allow_flags, prebuild_targets, prepare_sweep, resolve_debug,
-    resolve_package, resolve_sweeps, run_pre_build, single_run, sweep_plan_line, test_argv,
+    BuildShape, FocusedPlan, NoMatchNote, ReadySweep, Searched, SweepContext, SweepOutcome,
+    direct_libtest_args, exclusion_describe, lint_allow_flags, prebuild_targets, prepare_sweep,
+    resolve_debug, resolve_package, resolve_sweeps, run_pre_build, single_run, sweep_plan_line,
+    test_argv,
 };
 use super::verdict::{
     OneRun, Outcome, RunReport, aggregate_exit, ceilings_for, format_repeat_summary, run_one,
@@ -715,9 +716,7 @@ pub(super) fn run_iteration(
         if announce {
             output::detail(&invocation);
         }
-        let test_tag = |test: &str, wall: &str| {
-            lone_test_tag(plan, &run.label, n, test, wall)
-        };
+        let test_tag = |test: &str, wall: &str| lone_test_tag(plan, &run.label, n, test, wall);
         let env: Vec<(&str, &str)> = run
             .env
             .iter()

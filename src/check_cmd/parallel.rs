@@ -439,20 +439,21 @@ fn direct_libtest_args(
     libtest_args.extend(filters.name_filters());
     libtest_args.extend(libtest_extra.iter().cloned());
 
-    // The budget is the single source of in-flight count, so a `--test-threads`
-    // arriving from anywhere else is a second one. Refused rather than
-    // silently overridden: the two numbers multiply into a concurrency nobody
-    // asked for, which is exactly the failure the budget key exists to prevent.
-    if effective_test_threads(&libtest_args)?.is_some()
-        // A synthetic/legacy sweep may still carry an execution flag in the
-        // compatibility argv field. Resolved profiles keep only typed
-        // filters there, but refuse that stale spelling too.
-        || effective_test_threads(&sweep.libtest_args)?.is_some()
-    {
+    // This runner is only valid for the typed parallel lane. Its budget
+    // allocates the one in-flight count passed to each prebuilt binary; the
+    // only remaining source of a competing --test-threads flag is forwarded
+    // libtest argv.
+    if !matches!(sweep.lane_exec, crate::profile::LaneExec::Parallel { .. }) {
+        return Err(DevError::Config(format!(
+            "sweep '{}' reached the parallel runner without a parallel execution policy.",
+            sweep.label
+        )));
+    }
+    if effective_test_threads(&libtest_args)?.is_some() {
         return Err(DevError::Config(format!(
             "sweep '{}' sets `parallel.budget` and also carries a --test-threads \
-             override; the budget owns per-binary thread counts. Drop the \
-             override, or drop `parallel` from the [[check]] entry.",
+             override; the budget owns per-binary thread counts. Drop the override, \
+             or drop `parallel` from the [[check]] entry.",
             sweep.label
         )));
     }
@@ -465,7 +466,7 @@ fn direct_libtest_args(
     if libtest_args.iter().any(|a| a == "--format") {
         return Err(DevError::Config(format!(
             "sweep '{}' drives libtest's JSON output for the per-test watchdog; \
-             remove the `--format` override from this profile's libtest_args",
+             remove the forwarded `--format` override",
             sweep.label
         )));
     }
@@ -1392,8 +1393,24 @@ mod parallel_lane_tests {
     #[test]
     fn direct_argv_is_libtest_only_with_threads_and_json() {
         let mut sweep = bare_sweep();
-        sweep.libtest_args = v(&["--skip", "slow_io"]);
-        sweep.name_filters = v(&["fast_"]);
+        sweep.lane_exec = crate::profile::LaneExec::Parallel { budget: 4 };
+        sweep.filters = crate::profile::LaneFilters {
+            filters: vec![
+                crate::profile::Filter {
+                    kind: crate::profile::FilterKind::Skip,
+                    pattern: "slow_io".into(),
+                    package: None,
+                    origin: crate::profile::FilterOrigin::Entry("default".into()),
+                },
+                crate::profile::Filter {
+                    kind: crate::profile::FilterKind::Only,
+                    pattern: "fast_".into(),
+                    package: None,
+                    origin: crate::profile::FilterOrigin::Entry("default".into()),
+                },
+            ],
+            ..Default::default()
+        };
         let args = direct_libtest_args(&sweep, 3, &[]).unwrap();
         assert_eq!(
             args,
@@ -1414,10 +1431,11 @@ mod parallel_lane_tests {
     // budget owns it, so it is refused, exactly as before the rewrite.
     #[test]
     fn a_foreign_test_threads_override_is_still_refused() {
-        let mut sweep = bare_sweep();
-        sweep.libtest_args = v(&["--test-threads=4"]);
-        assert!(direct_libtest_args(&sweep, 3, &[]).is_err());
-        assert!(direct_libtest_args(&bare_sweep(), 3, &v(&["--test-threads", "2"])).is_err());
+        // A sweep that is not on the parallel lane never reaches this runner.
+        assert!(direct_libtest_args(&bare_sweep(), 3, &[]).is_err());
+        let mut parallel = bare_sweep();
+        parallel.lane_exec = crate::profile::LaneExec::Parallel { budget: 4 };
+        assert!(direct_libtest_args(&parallel, 3, &v(&["--test-threads", "2"])).is_err());
     }
 
     // The failure reprint stays cargo-shaped (rebuilds and supplies env when

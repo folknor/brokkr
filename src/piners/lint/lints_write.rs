@@ -16,11 +16,12 @@
 
 use std::collections::BTreeMap;
 
-use toml_edit::{DocumentMut, Item, RawString, Table, Value};
+use toml_edit::{DocumentMut, Item, Table, Value};
 
 use crate::error::DevError;
 use crate::piners::lint::registry::{LintPin, TvDiag};
 use crate::piners::registry::FilePin;
+use crate::piners::toml_writer::{self, set_block_prefix, set_value, sort_fields, sync_opt};
 
 /// Field order inside a `[probes.<id>]` entry: the contract fields and TV
 /// anchor first (each followed by the scope it was stamped under), then the
@@ -145,57 +146,6 @@ fn finalize_layout(doc: &mut DocumentMut, probes: &BTreeMap<String, LintPin>) {
     }
 }
 
-/// Normalize a block's leading decor without disturbing comments: the first
-/// block sheds a pure-newline prefix (no blank line at the top of the file),
-/// every later block gains a `\n` when it has no prefix at all.
-fn set_block_prefix(table: &mut Table, first: bool) {
-    let decor = table.decor_mut();
-    let prefix = decor
-        .prefix()
-        .and_then(RawString::as_str)
-        .unwrap_or("")
-        .to_owned();
-    if first {
-        if !prefix.is_empty() && prefix.chars().all(|c| c == '\n') {
-            decor.set_prefix("");
-        }
-    } else if prefix.is_empty() {
-        decor.set_prefix("\n");
-    }
-}
-
-/// Set `key = value`, preserving the existing value's decor (the spacing
-/// around `=` and any trailing `# comment`) when the key already exists.
-fn set_value(table: &mut Table, key: &str, new: Value) {
-    if let Some(Item::Value(existing)) = table.get_mut(key) {
-        let mut new = new;
-        *new.decor_mut() = existing.decor().clone();
-        *existing = new;
-    } else {
-        table.insert(key, Item::Value(new));
-    }
-}
-
-/// [`set_value`] for an optional field: `None` removes the key.
-fn sync_opt(table: &mut Table, key: &str, value: Option<Value>) {
-    match value {
-        Some(v) => set_value(table, key, v),
-        None => {
-            table.remove(key);
-        }
-    }
-}
-
-/// Order a table's keys by `order` (unknown keys last, stable). Key decor
-/// (a comment above a key) travels with its key.
-fn sort_fields(table: &mut Table, order: &[&str]) {
-    table.sort_values_by(|k1, _, k2, _| rank(order, k1.get()).cmp(&rank(order, k2.get())));
-}
-
-fn rank(order: &[&str], key: &str) -> usize {
-    order.iter().position(|k| *k == key).unwrap_or(order.len())
-}
-
 /// The `tv` fingerprint as an inline array of inline tables, or `None` (drop
 /// the key) when the anchor is empty. `col` is omitted per element when unset:
 /// `tv = [ { line = 4, col = 8, severity = "error" }, { line = 9, severity = "warning" } ]`.
@@ -204,7 +154,10 @@ fn tv_value(tv: &[TvDiag]) -> Result<Option<Value>, DevError> {
         return Ok(None);
     }
     let elems: Vec<String> = tv.iter().map(tv_elem).collect();
-    let value = parse_value(&format!("[ {} ]", elems.join(", ")))?;
+    let value = toml_writer::parse_value(
+        &format!("[ {} ]", elems.join(", ")),
+        "piners lint: lints.toml",
+    )?;
     Ok(Some(value))
 }
 
@@ -216,42 +169,14 @@ fn tv_elem(diag: &TvDiag) -> String {
     }
     out.push_str(&format!(
         ", severity = {} }}",
-        toml_str(diag.severity.as_str())
+        toml_writer::toml_string(diag.severity.as_str())
     ));
     out
 }
 
 /// A [`FilePin`] as an inline `{ path, xxh128 }` value in house spacing.
 fn pin_value(pin: &FilePin) -> Result<Value, DevError> {
-    parse_value(&format!(
-        "{{ path = {}, xxh128 = {} }}",
-        toml_str(&pin.path.to_string_lossy()),
-        toml_str(&pin.xxh128),
-    ))
-}
-
-/// Parse a value the writer itself formatted; failure is a writer bug.
-fn parse_value(text: &str) -> Result<Value, DevError> {
-    text.parse().map_err(|e| {
-        DevError::Config(format!(
-            "piners lint: lints.toml writer produced an invalid TOML value `{text}`: {e}"
-        ))
-    })
-}
-
-/// A TOML basic string with `"` and `\` escaped.
-fn toml_str(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('"');
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            _ => out.push(c),
-        }
-    }
-    out.push('"');
-    out
+    toml_writer::file_pin(pin, "piners lint: lints.toml")
 }
 
 #[cfg(test)]

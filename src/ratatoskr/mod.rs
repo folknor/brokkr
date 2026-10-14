@@ -13,6 +13,7 @@ pub mod build;
 pub mod cmd;
 pub mod discover;
 pub mod gate;
+pub(crate) mod gate_store;
 pub mod process;
 pub mod saehrimnir;
 pub mod service;

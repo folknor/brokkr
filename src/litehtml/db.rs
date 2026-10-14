@@ -1,12 +1,18 @@
-//! Database tables for the litehtml visual reference testing system.
+//! Database adapter for litehtml's visual result tables.
 
 use std::path::Path;
 
 use rusqlite::Connection;
 
 use crate::error::DevError;
-use crate::litehtml::compare::Status;
+use crate::visual::db::{self, DbSubject, VisualDb};
+use crate::visual::status::Status;
 
+pub(crate) type Approval = db::Approval;
+pub(crate) type RunSummary = db::RunSummary;
+pub(crate) type ResultRow = db::ResultRow;
+
+#[cfg(test)]
 const SCHEMA_RUNS: &str = "\
 CREATE TABLE IF NOT EXISTS mechanical_runs (
     run_id          TEXT PRIMARY KEY,
@@ -15,72 +21,19 @@ CREATE TABLE IF NOT EXISTS mechanical_runs (
     dirty           INTEGER NOT NULL DEFAULT 0
 )";
 
-const SCHEMA_RESULTS: &str = "\
-CREATE TABLE IF NOT EXISTS mechanical_results (
-    run_id          TEXT NOT NULL REFERENCES mechanical_runs(run_id),
-    fixture_id      TEXT NOT NULL,
-    pixel_diff_pct  REAL,
-    element_match_pct REAL,
-    status          TEXT NOT NULL,
-    PRIMARY KEY (run_id, fixture_id)
-)";
-
-const SCHEMA_APPROVALS: &str = "\
-CREATE TABLE IF NOT EXISTS mechanical_approvals (
-    fixture_id          TEXT PRIMARY KEY,
-    approved_at         TEXT NOT NULL DEFAULT (datetime('now')),
-    [commit]            TEXT NOT NULL,
-    pixel_diff_pct      REAL NOT NULL,
-    element_match_pct   REAL
-)";
-
-#[allow(dead_code)]
-pub(crate) struct Approval {
-    pub fixture_id: String,
-    pub approved_at: String,
-    pub commit: String,
-    pub pixel_diff_pct: f64,
-    pub element_match_pct: Option<f64>,
-}
-
-#[allow(dead_code)]
-pub(crate) struct RunSummary {
-    pub run_id: String,
-    pub timestamp: String,
-    pub commit: String,
-    pub dirty: bool,
-}
-
-#[allow(dead_code)]
-pub(crate) struct ResultRow {
-    pub run_id: String,
-    pub fixture_id: String,
-    pub pixel_diff_pct: Option<f64>,
-    pub element_match_pct: Option<f64>,
-    pub status: Status,
-}
-
 pub(crate) struct MechanicalDb {
-    conn: Connection,
+    inner: VisualDb,
 }
 
 impl MechanicalDb {
     pub fn open(path: &Path) -> Result<Self, DevError> {
-        let conn = Connection::open(path)?;
-        conn.pragma_update(None, "journal_mode", "WAL")?;
-        conn.execute(SCHEMA_RUNS, [])?;
-        conn.execute(SCHEMA_RESULTS, [])?;
-        conn.execute(SCHEMA_APPROVALS, [])?;
-        migrate(&conn)?;
-        Ok(Self { conn })
+        let inner = VisualDb::open(path, DbSubject::Litehtml)?;
+        migrate(inner.connection())?;
+        Ok(Self { inner })
     }
 
     pub fn insert_run(&self, run_id: &str, commit: &str, dirty: bool) -> Result<(), DevError> {
-        self.conn.execute(
-            "INSERT INTO mechanical_runs (run_id, [commit], dirty) VALUES (?1, ?2, ?3)",
-            rusqlite::params![run_id, commit, dirty as i32],
-        )?;
-        Ok(())
+        self.inner.insert_run(run_id, commit, dirty, None)
     }
 
     pub fn insert_result(
@@ -91,32 +44,17 @@ impl MechanicalDb {
         element_match_pct: Option<f64>,
         status: Status,
     ) -> Result<(), DevError> {
-        self.conn.execute(
-            "INSERT INTO mechanical_results \
-             (run_id, fixture_id, pixel_diff_pct, element_match_pct, status) \
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            rusqlite::params![
-                run_id,
-                fixture_id,
-                pixel_diff_pct,
-                element_match_pct,
-                status.as_str()
-            ],
-        )?;
-        Ok(())
+        self.inner.insert_result(
+            run_id,
+            fixture_id,
+            pixel_diff_pct,
+            element_match_pct,
+            status,
+        )
     }
 
     pub fn get_approval(&self, fixture_id: &str) -> Result<Option<Approval>, DevError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT fixture_id, approved_at, [commit], pixel_diff_pct, element_match_pct \
-             FROM mechanical_approvals WHERE fixture_id = ?1",
-        )?;
-        let mut rows = stmt.query_map(rusqlite::params![fixture_id], map_approval)?;
-        match rows.next() {
-            Some(Ok(approval)) => Ok(Some(approval)),
-            Some(Err(e)) => Err(e.into()),
-            None => Ok(None),
-        }
+        self.inner.get_approval(fixture_id)
     }
 
     pub fn set_approval(
@@ -126,114 +64,33 @@ impl MechanicalDb {
         pixel_diff_pct: f64,
         element_match_pct: Option<f64>,
     ) -> Result<(), DevError> {
-        self.conn.execute(
-            "INSERT OR REPLACE INTO mechanical_approvals \
-             (fixture_id, [commit], pixel_diff_pct, element_match_pct) \
-             VALUES (?1, ?2, ?3, ?4)",
-            rusqlite::params![fixture_id, commit, pixel_diff_pct, element_match_pct],
-        )?;
-        Ok(())
+        self.inner
+            .set_approval(fixture_id, commit, pixel_diff_pct, element_match_pct)
     }
 
     #[allow(dead_code)]
     pub fn latest_run(&self) -> Result<Option<RunSummary>, DevError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT run_id, timestamp, [commit], dirty \
-             FROM mechanical_runs ORDER BY timestamp DESC, rowid DESC LIMIT 1",
-        )?;
-        let mut rows = stmt.query_map([], map_run_summary)?;
-        match rows.next() {
-            Some(Ok(summary)) => Ok(Some(summary)),
-            Some(Err(e)) => Err(e.into()),
-            None => Ok(None),
-        }
+        self.inner.latest_run()
     }
 
     pub fn run_results(&self, run_id: &str) -> Result<Vec<ResultRow>, DevError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT run_id, fixture_id, pixel_diff_pct, element_match_pct, status \
-             FROM mechanical_results WHERE run_id = ?1",
-        )?;
-        let rows = stmt.query_map(rusqlite::params![run_id], map_result_row)?;
-        let mut out = Vec::new();
-        for row in rows {
-            out.push(row?);
-        }
-        Ok(out)
+        self.inner.run_results(run_id)
     }
 
     pub fn all_approvals(&self) -> Result<Vec<Approval>, DevError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT fixture_id, approved_at, [commit], pixel_diff_pct, element_match_pct \
-             FROM mechanical_approvals ORDER BY fixture_id",
-        )?;
-        let rows = stmt.query_map([], map_approval)?;
-        let mut out = Vec::new();
-        for row in rows {
-            out.push(row?);
-        }
-        Ok(out)
+        self.inner.all_approvals()
     }
 
     pub fn latest_result_for_fixture(
         &self,
         fixture_id: &str,
     ) -> Result<Option<ResultRow>, DevError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT r.run_id, r.fixture_id, r.pixel_diff_pct, r.element_match_pct, r.status \
-             FROM mechanical_results r \
-             JOIN mechanical_runs mr ON mr.run_id = r.run_id \
-             WHERE r.fixture_id = ?1 \
-             ORDER BY mr.timestamp DESC, mr.rowid DESC LIMIT 1",
-        )?;
-        let mut rows = stmt.query_map(rusqlite::params![fixture_id], map_result_row)?;
-        match rows.next() {
-            Some(Ok(row)) => Ok(Some(row)),
-            Some(Err(e)) => Err(e.into()),
-            None => Ok(None),
-        }
+        self.inner.latest_result_for_subject(fixture_id)
     }
 }
 
-fn map_approval(row: &rusqlite::Row<'_>) -> rusqlite::Result<Approval> {
-    Ok(Approval {
-        fixture_id: row.get(0)?,
-        approved_at: row.get(1)?,
-        commit: row.get(2)?,
-        pixel_diff_pct: row.get(3)?,
-        element_match_pct: row.get(4)?,
-    })
-}
-
-#[allow(dead_code)]
-fn map_run_summary(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunSummary> {
-    Ok(RunSummary {
-        run_id: row.get(0)?,
-        timestamp: row.get(1)?,
-        commit: row.get(2)?,
-        dirty: row.get::<_, i32>(3)? != 0,
-    })
-}
-
-fn map_result_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ResultRow> {
-    Ok(ResultRow {
-        run_id: row.get(0)?,
-        fixture_id: row.get(1)?,
-        pixel_diff_pct: row.get(2)?,
-        element_match_pct: row.get(3)?,
-        status: row.get(4)?,
-    })
-}
-
-/// Bring the `mechanical_*` tables up to the current shape.
-///
-/// Deliberately keyed on the schema itself (column probes), never on
-/// `PRAGMA user_version`: this file is `results.db`, whose `user_version`
-/// belongs to `ResultsDb` (`src/db/schema.rs`). Reading it here saw
-/// `ResultsDb`'s number, so a litehtml step gated on `version < N` was dead
-/// on any file `ResultsDb` had touched; writing it stamped a fresh or legacy
-/// file with litehtml's number, so `ResultsDb` then skipped its own early
-/// migrations. Every step below must be idempotent and self-detecting.
+/// Migrations here inspect this visual table's columns. `user_version` belongs
+/// to `ResultsDb` because both stores share `results.db`.
 fn migrate(conn: &Connection) -> Result<(), DevError> {
     if has_column(conn, "mechanical_results", "artifact_dir") {
         conn.execute(
@@ -267,7 +124,7 @@ mod tests {
         drop(MechanicalDb::open(&path).unwrap());
         let conn = Connection::open(&path).unwrap();
         let v: i32 = conn
-            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
         assert_eq!(v, 0);
 
@@ -276,7 +133,7 @@ mod tests {
         drop(MechanicalDb::open(&path).unwrap());
         let conn = Connection::open(&path).unwrap();
         let v: i32 = conn
-            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
         assert_eq!(v, 18);
     }

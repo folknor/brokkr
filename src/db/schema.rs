@@ -66,6 +66,7 @@ CREATE TABLE IF NOT EXISTS runs (
     uuid            TEXT,
     cli_args        TEXT,
     metadata        TEXT,
+    -- Results predating project attribution belong to the original pbfhogg store.
     project         TEXT NOT NULL DEFAULT 'pbfhogg',
     -- Marker that actually ended the child; NULL unless --stop fired.
     stop_marker     TEXT,

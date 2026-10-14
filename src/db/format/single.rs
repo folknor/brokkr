@@ -26,7 +26,7 @@ pub fn format_single_result(row: &StoredRow, has_sidecar: bool) -> String {
     let invo = invocation_fields(row);
     let extras = extras_fields(row);
     let sidecar: Vec<(String, String)> = if has_sidecar {
-        let short = &row.uuid[..8.min(row.uuid.len())];
+        let short = short_uuid(&row.uuid);
         vec![(
             "sidecar".into(),
             format!("brokkr sidecar {short} (+ --samples/--markers/--durations/--counters/--stat)"),

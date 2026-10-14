@@ -6,6 +6,7 @@ use std::time::SystemTime;
 
 use crate::error::DevError;
 use crate::output;
+use crate::preflight::Sha256;
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -491,8 +492,13 @@ fn fetch_verified(url: &str, dest: &Path, sha256: Option<&str>) -> Result<(), De
     let tmp_str = staged.tmp_path().display().to_string();
     run_curl(&["-fsSL", "-o", &tmp_str, url], Path::new("."))?;
     if let Some(expected) = sha256 {
+        let expected: Sha256 = expected.parse().map_err(|error| {
+            DevError::Config(format!(
+                "invalid SHA-256 digest from release metadata: {error}"
+            ))
+        })?;
         let actual = sha256_file(staged.tmp_path())?;
-        if !actual.eq_ignore_ascii_case(expected) {
+        if actual != expected {
             return Err(DevError::Preflight(vec![format!(
                 "sha256 mismatch downloading {url}\n  expected: {expected}\n  actual:   {actual}"
             )]));
@@ -505,7 +511,7 @@ fn fetch_verified(url: &str, dest: &Path, sha256: Option<&str>) -> Result<(), De
 /// SHA-256 of a file as lowercase hex, via `sha256sum` (coreutils) or, where
 /// that is absent (macOS), `shasum -a 256`. Shelled out like the rest of this
 /// module's tooling rather than linking a hash crate for one caller.
-fn sha256_file(path: &Path) -> Result<String, DevError> {
+fn sha256_file(path: &Path) -> Result<Sha256, DevError> {
     let path_str = path.display().to_string();
     let coreutils = output::run_captured("sha256sum", &[&path_str], Path::new("."));
     let (program, captured) = match coreutils {
@@ -516,11 +522,16 @@ fn sha256_file(path: &Path) -> Result<String, DevError> {
         other => ("sha256sum", other?),
     };
     captured.check_success(program)?;
-    String::from_utf8_lossy(&captured.stdout)
+    let stdout = String::from_utf8_lossy(&captured.stdout);
+    let digest = stdout
         .split_whitespace()
         .next()
-        .map(str::to_ascii_lowercase)
-        .ok_or_else(|| DevError::Config(format!("{program} printed no digest for {path_str}")))
+        .ok_or_else(|| DevError::Config(format!("{program} printed no digest for {path_str}")))?;
+    digest.parse().map_err(|error| {
+        DevError::Config(format!(
+            "{program} printed an invalid SHA-256 digest for {path_str}: {error}"
+        ))
+    })
 }
 
 /// Result of an HTTP HEAD request to a URL. Used by `download::run_refresh`
@@ -843,7 +854,7 @@ mod tests {
         let path = dir.join("abc");
         std::fs::write(&path, b"abc").unwrap();
         assert_eq!(
-            sha256_file(&path).unwrap(),
+            sha256_file(&path).unwrap().to_string(),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
     }

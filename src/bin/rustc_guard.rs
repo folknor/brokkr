@@ -26,13 +26,14 @@
 //!    not held - exec while keeping the lease through the compiler; held -
 //!    exec only with a matching `BROKKR_HOLD_NONCE`, refuse (exit 1) otherwise.
 //!
-//! Fail-open everywhere except a demonstrably held flock: an unreadable
-//! `/proc`, an unset or empty `$HOME`, or a missing lock file all exec. The
+//! Fail-open everywhere except a demonstrably held flock: an unset or empty
+//! `$HOME`, a missing lock file, or broken lease infrastructure all exec. The
 //! guard is a benchmark-hygiene fence, not a security boundary - a wrong
 //! refusal breaks someone's build, a wrong pass costs one reap cycle.
 //!
 //! Self-contained: no clap, no history row, no brokkr crate (the package has
-//! no lib target). The `/proc` stat parse mirrors `src/stray.rs`.
+//! no lib target). It reads nothing from `/proc`: process ancestry plays no
+//! part in the decision (see the note above [`lock_is_held`]).
 
 use std::os::unix::io::RawFd;
 use std::os::unix::process::CommandExt;

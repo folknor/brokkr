@@ -38,10 +38,12 @@ not silently treated as a new snapshot.
 ## Module layout
 
 - `src/sluggrs/cmd.rs` - snapshot rendering, approval, and status commands.
-- `src/sluggrs/db.rs` - the `snapshot_*` tables in `.brokkr/results.db`.
+- `src/sluggrs/db.rs` - the sluggrs adapter for the `snapshot_*` tables in
+  `.brokkr/results.db`; shared SQLite operations live in `src/visual/db.rs`.
 - `src/sluggrs/hotpath.rs` - the sluggrs rendering benchmark path.
-- `src/litehtml/compare.rs` - the shared pixel comparison and visual status
-  model.
+- `src/visual/` - shared pixel comparison, typed visual statuses, run engine,
+  database operations, and common command formatting. Sluggrs has no
+  dependency on litehtml's comparison module.
 
 For the shared command surface and status meanings see
 `docs/commands/visual.md`.

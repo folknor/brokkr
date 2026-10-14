@@ -1,10 +1,144 @@
-//! Shared persisted-selection shape and compact run-table rendering.
+//! Shared registry selection, persisted-selection shape and run-table rendering.
 //!
 //! Corpus and lint runs keep the selection flags plus resolved ids in JSON.
 //! All run tables use the intent label from this module so they do not expose
-//! the full id list or disagree when users combine selectors.
+//! the full id list or disagree when users combine selectors. The ordered,
+//! deduplicating selection algorithm is shared here too; command wrappers pass
+//! the policy differences for pending pins and verify-only errors.
+
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use serde_json::{Map, Value, json};
+
+use crate::error::DevError;
+
+pub(crate) struct SelectionArgs<'a> {
+    pub keywords: &'a [String],
+    pub probes: &'a [String],
+    pub all: bool,
+    pub whole_universe: bool,
+}
+
+pub(crate) struct SelectionPolicy<'a> {
+    pub label: &'a str,
+    pub registry_file: &'a str,
+    /// Corpus verification rejects named selectors alongside `--verify-only`;
+    /// lint verification deliberately ignores them.
+    pub whole_universe_named_error: Option<&'a str>,
+    /// Set for the registry that supports registered-but-unpinned probes.
+    pub pending_hint: Option<&'a str>,
+}
+
+/// Resolve keyword and direct selections with one ordered, deduplicating
+/// implementation. Callers own the pending-probe notice rendering.
+pub(crate) fn resolve_selection<P>(
+    pins: &BTreeMap<String, P>,
+    keywords: &BTreeMap<String, Vec<String>>,
+    pending_ids: &BTreeSet<String>,
+    args: &SelectionArgs<'_>,
+    policy: &SelectionPolicy<'_>,
+    mut notify_pending: impl FnMut(&[String]),
+) -> Result<Vec<String>, DevError> {
+    if args.whole_universe
+        && (!args.keywords.is_empty() || !args.probes.is_empty())
+        && let Some(message) = policy.whole_universe_named_error
+    {
+        return Err(DevError::Config(message.to_owned()));
+    }
+
+    if args.whole_universe || args.all {
+        let pending: Vec<String> = pending_ids.iter().cloned().collect();
+        if !pending.is_empty() {
+            notify_pending(&pending);
+        }
+        if pins.is_empty() {
+            return Err(DevError::Config(if pending.is_empty() {
+                format!(
+                    "{}: {} is empty - nothing to select",
+                    policy.label, policy.registry_file
+                )
+            } else {
+                format!(
+                    "{}: nothing pinned yet - every probe is [pending]: {}",
+                    policy.label,
+                    pending.join(", ")
+                )
+            }));
+        }
+        return Ok(pins.keys().cloned().collect());
+    }
+
+    let available = || {
+        let names: Vec<&str> = keywords.keys().map(String::as_str).collect();
+        if names.is_empty() {
+            "none".to_owned()
+        } else {
+            names.join(", ")
+        }
+    };
+    let mut selected = Vec::new();
+    let mut seen = HashSet::new();
+    let mut pending = Vec::new();
+
+    for keyword in args.keywords {
+        let ids = keywords.get(keyword).ok_or_else(|| {
+            DevError::Config(format!(
+                "{}: unknown keyword '{keyword}' (available: {})",
+                policy.label,
+                available()
+            ))
+        })?;
+        for id in ids {
+            if pending_ids.contains(id) {
+                if !pending.contains(id) {
+                    pending.push(id.clone());
+                }
+            } else if seen.insert(id.clone()) {
+                selected.push(id.clone());
+            }
+        }
+    }
+
+    for probe in args.probes {
+        if pending_ids.contains(probe)
+            && let Some(suggestion) = policy.pending_hint
+        {
+            return Err(DevError::Config(format!(
+                "{}: probe '{probe}' is [pending], not pinned - pin it with `{suggestion}{probe}`",
+                policy.label
+            )));
+        }
+        if !pins.contains_key(probe) {
+            return Err(DevError::Config(format!(
+                "{}: unknown probe '{probe}' - not pinned in {}",
+                policy.label, policy.registry_file
+            )));
+        }
+        if seen.insert(probe.clone()) {
+            selected.push(probe.clone());
+        }
+    }
+
+    if !pending.is_empty() {
+        notify_pending(&pending);
+    }
+    if selected.is_empty() && !pending.is_empty() {
+        return Err(DevError::Config(format!(
+            "{}: nothing runnable - every selected probe is [pending]: {}",
+            policy.label,
+            pending.join(", ")
+        )));
+    }
+    if selected.is_empty() {
+        return Err(DevError::Config(format!(
+            "{}: no probes selected. Pass --keyword <k> (repeatable), \
+             --probe <id>, or --all. Available keywords: {}",
+            policy.label,
+            available()
+        )));
+    }
+    Ok(selected)
+}
 
 /// Serialize the shared selection fields and optional corpus run context.
 pub(crate) fn json(

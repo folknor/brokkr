@@ -9,8 +9,8 @@ use crate::error::DevError;
 use crate::git;
 use crate::output;
 use crate::project::{self, Project};
-use crate::resolve;
 use crate::user_dirs;
+use crate::visual::engine::{self, Subject, SubjectItem, SummaryOptions};
 
 use super::compare;
 use super::db::MechanicalDb;
@@ -81,8 +81,7 @@ fn expected_outcome(fixture: &LitehtmlFixture) -> Result<ExpectedOutcome, DevErr
 }
 
 fn open_db(project_root: &Path) -> Result<MechanicalDb, DevError> {
-    let db_path = resolve::results_db_path(project_root);
-    MechanicalDb::open(&db_path)
+    engine::open_results_db(project_root, MechanicalDb::open)
 }
 
 struct FixtureOutcome {
@@ -130,6 +129,56 @@ struct TestContext<'a> {
     db: &'a MechanicalDb,
     run_id: &'a str,
     capture_script: Option<&'a Path>,
+}
+
+impl Subject for TestContext<'_> {
+    type Item = LitehtmlFixture;
+    type Outcome = FixtureOutcome;
+
+    fn run_item(&mut self, fixture: &Self::Item) -> Result<Self::Outcome, DevError> {
+        run_fixture(self, fixture)
+    }
+
+    fn status(outcome: &Self::Outcome) -> compare::Status {
+        outcome.status
+    }
+
+    fn is_unexpected_pass(outcome: &Self::Outcome) -> bool {
+        outcome.unexpected_pass
+    }
+
+    fn print_result(&mut self, fixture: &Self::Item, outcome: &Self::Outcome) {
+        let px = engine::format_pct(outcome.pixel_diff_pct, 1);
+        let el = engine::format_pct(outcome.element_match_pct, 0);
+        let note = if outcome.unexpected_pass {
+            " (unexpected pass: drop `expected = \"fail\"`)"
+        } else {
+            ""
+        };
+        output::litehtml_msg(&format!(
+            "  {:<25} {:<9} {:<11} {}{note}",
+            fixture.id, px, el, outcome.status,
+        ));
+
+        if matches!(
+            outcome.status,
+            compare::Status::FailThreshold | compare::Status::Regression
+        ) {
+            print_offenders(&fixture.id, &outcome.offenders);
+        }
+    }
+
+    fn finish(&mut self, tally: &compare::StatusTally) -> Result<(), DevError> {
+        print_run_summary(tally)
+    }
+}
+
+impl SubjectItem for LitehtmlFixture {
+    const KIND: &'static str = "fixture";
+
+    fn id(&self) -> &str {
+        &self.id
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -408,43 +457,21 @@ fn print_offenders(fixture_id: &str, offenders: &[compare::Offender]) {
 // ---------------------------------------------------------------------------
 
 fn format_pct(v: Option<f64>, decimals: usize) -> String {
-    match v {
-        Some(val) => format!("{val:.decimals$}%"),
-        None => "\u{2014}".into(),
-    }
+    engine::format_pct(v, decimals)
 }
 
 fn print_table_header() {
-    output::litehtml_msg(&format!(
-        "  {:<25} {:<9} {:<11} {}",
-        "Fixture", "Pixels", "Elements", "Status",
-    ));
-    output::litehtml_msg(&format!("  {}", "\u{2500}".repeat(60)));
+    engine::print_result_header("Fixture", true, output::litehtml_msg);
 }
 
 fn resolve_fixture<'a>(
     manifest: &'a LitehtmlConfig,
     id: &str,
 ) -> Result<&'a LitehtmlFixture, DevError> {
-    if let Some(entry) = manifest.fixture_by_id(id) {
-        return Ok(entry);
+    if let Some(fixture) = manifest.fixture_by_id(id) {
+        return Ok(fixture);
     }
-    let matches: Vec<_> = manifest
-        .fixtures
-        .iter()
-        .filter(|f| f.id.starts_with(id))
-        .collect();
-    match matches.len() {
-        0 => Err(DevError::Config(format!("fixture not found: {id}"))),
-        1 => Ok(matches[0]),
-        _ => {
-            let ids: Vec<&str> = matches.iter().map(|f| f.id.as_str()).collect();
-            Err(DevError::Config(format!(
-                "ambiguous fixture prefix '{id}', matches: {}",
-                ids.join(", "),
-            )))
-        }
-    }
+    engine::resolve_prefix(&manifest.fixtures, id)
 }
 
 fn resolve_fixtures<'a>(
@@ -521,8 +548,8 @@ pub(crate) fn test(
         None
     };
 
-    let run_id = super::generate_run_id()?;
-    let short_id = &run_id[..8.min(run_id.len())];
+    let run_id = crate::db::generate_uuid()?;
+    let short_id = crate::db::short_uuid(&run_id);
     let dirty = !git_info.is_clean;
 
     db.insert_run(&run_id, &git_info.commit, dirty)?;
@@ -535,7 +562,7 @@ pub(crate) fn test(
     output::litehtml_msg("");
     print_table_header();
 
-    let ctx = TestContext {
+    let mut ctx = TestContext {
         binary: &binary,
         config: litehtml_config,
         project_root,
@@ -543,71 +570,24 @@ pub(crate) fn test(
         run_id: &run_id,
         capture_script: recapture_script.as_ref().map(|s| s.path.as_path()),
     };
-
-    let mut counts = compare::StatusTally::default();
-
-    for fixture in &fixtures {
-        let outcome = run_fixture(&ctx, fixture)?;
-
-        let px = format_pct(outcome.pixel_diff_pct, 1);
-        let el = format_pct(outcome.element_match_pct, 0);
-        let note = if outcome.unexpected_pass {
-            " (unexpected pass: drop `expected = \"fail\"`)"
-        } else {
-            ""
-        };
-        output::litehtml_msg(&format!(
-            "  {:<25} {:<9} {:<11} {}{note}",
-            fixture.id, px, el, outcome.status,
-        ));
-
-        // The single most useful debugging output for a bad element
-        // score: which elements, and how far off. Quiet on PASS - a
-        // within-tolerance run's stragglers are noise.
-        if matches!(
-            outcome.status,
-            compare::Status::FailThreshold | compare::Status::Regression
-        ) {
-            print_offenders(&fixture.id, &outcome.offenders);
-        }
-
-        counts.record(outcome.status, outcome.unexpected_pass);
-    }
+    engine::run(&mut ctx, &fixtures)?;
 
     drop(recapture_script);
-
-    print_run_summary(&counts)?;
     Ok(())
 }
 
 /// An unexpected pass is reported but does not fail the run: the render got
 /// better, and the only thing wrong is the manifest's stale expectation.
 fn print_run_summary(counts: &compare::StatusTally) -> Result<(), DevError> {
-    output::litehtml_msg(&format!("  {}", "\u{2500}".repeat(60)));
-
-    let failed =
-        counts.count(compare::Status::FailThreshold) + counts.count(compare::Status::Regression);
-    let parts = [
-        (counts.ordinary_passes(), "passed"),
-        (failed, "failed"),
-        (counts.count(compare::Status::ExpectedFail), "expected fail"),
-        (counts.count(compare::Status::Error), "error"),
-        (
-            counts.count(compare::Status::NoBaseline),
-            "awaiting approval",
-        ),
-        (counts.unexpected_passes(), "unexpected pass"),
-    ]
-    .into_iter()
-    .filter(|(count, _)| *count > 0)
-    .map(|(count, label)| format!("{count} {label}"))
-    .collect::<Vec<_>>();
-    output::litehtml_msg(&format!("  {}", parts.join(", ")));
-
-    if counts.fails_run() {
-        return Err(DevError::ExitCode(1));
-    }
-    Ok(())
+    engine::print_run_summary(
+        counts,
+        &SummaryOptions {
+            divider_width: 60,
+            show_unexpected_passes: true,
+            no_baseline_hint: None,
+        },
+        output::litehtml_msg,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -745,12 +725,7 @@ pub(crate) fn approve(
     project::require(project, Project::Litehtml, "approve")?;
     validate_config(litehtml_config)?;
 
-    let git_info = git::collect(build_root)?;
-    if !git_info.is_clean {
-        return Err(DevError::Verify(
-            "litehtml approve requires a clean git tree".into(),
-        ));
-    }
+    let git_info = engine::collect_clean_approval("litehtml", build_root)?;
 
     let db = open_db(project_root)?;
 
@@ -809,7 +784,7 @@ pub(crate) fn report(project: Project, project_root: &Path, run_id: &str) -> Res
         let el = format_pct(row.element_match_pct, 0);
         output::litehtml_msg(&format!(
             "  {:<25} {:<9} {:<11} {}",
-            row.fixture_id, px, el, row.status,
+            row.subject_id, px, el, row.status,
         ));
     }
 
@@ -849,7 +824,7 @@ fn print_fixture_status(
     approvals: &[super::db::Approval],
     db: &MechanicalDb,
 ) -> Result<(), DevError> {
-    let approval = approvals.iter().find(|a| a.fixture_id == fixture.id);
+    let approval = approvals.iter().find(|a| a.subject_id == fixture.id);
     let latest = db.latest_result_for_fixture(&fixture.id)?;
 
     let approved_str = approval
@@ -862,9 +837,13 @@ fn print_fixture_status(
         approval.map(|entry| entry.pixel_diff_pct),
         true,
     );
-    output::litehtml_msg(&format!(
-        "  {:<25} {:<11} {:<11} {:<9} {}{}",
-        fixture.id, approved_str, columns.pixel, columns.delta, columns.status, columns.annotation,
+    output::litehtml_msg(&engine::format_status_row(
+        &fixture.id,
+        &approved_str,
+        &columns.pixel,
+        &columns.delta,
+        &columns.status,
+        &columns.annotation,
     ));
 
     Ok(())

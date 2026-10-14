@@ -132,18 +132,27 @@ fn discover(snippets_dir: &Path) -> Result<BTreeMap<String, PathBuf>, DevError> 
 }
 
 fn walk(dir: &Path, found: &mut BTreeMap<String, PathBuf>) -> Result<(), DevError> {
-    let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)
+    let mut entries: Vec<_> = std::fs::read_dir(dir)
         .map_err(DevError::Io)?
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .collect();
-    entries.sort();
-    for path in entries {
+        .map(|entry| {
+            let entry = entry.map_err(DevError::Io)?;
+            let file_type = entry.file_type().map_err(DevError::Io)?;
+            Ok((entry.path(), file_type))
+        })
+        .collect::<Result<_, DevError>>()?;
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    for (path, file_type) in entries {
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned());
         if name.as_deref().is_some_and(|n| n.starts_with('.')) {
             continue;
         }
-        if path.is_dir() {
+        // Use the entry's own type: `Path::is_dir` follows symlinks and can
+        // recurse forever through a loop back into this directory tree.
+        if file_type.is_dir() {
             walk(&path, found)?;
+            continue;
+        }
+        if !file_type.is_file() {
             continue;
         }
         if path.extension().and_then(|e| e.to_str()) != Some("pine") {
@@ -195,30 +204,19 @@ fn stamp_one(id: &str, abs: &Path, corpus_root: &Path) -> Result<LintPin, DevErr
 /// content-stamped pin. A snippet new to the corpus stays unblessed (the
 /// gate's "must bless").
 fn carry_preserved(new: &mut BTreeMap<String, LintPin>, old: &BTreeMap<String, LintPin>) {
-    for (id, pin) in new.iter_mut() {
-        if let Some(prev) = old.get(id) {
-            pin.expected = prev.expected;
-            pin.expected_scope = prev.expected_scope.clone();
-            pin.tv_anchored_at = prev.tv_anchored_at.clone();
-            pin.tv_scope = prev.tv_scope.clone();
-            pin.tv = prev.tv.clone();
-        }
-    }
+    registry_io::carry_by_id(new, old, |pin, previous| {
+        pin.expected = previous.expected;
+        pin.expected_scope = previous.expected_scope.clone();
+        pin.tv_anchored_at = previous.tv_anchored_at.clone();
+        pin.tv_scope = previous.tv_scope.clone();
+        pin.tv = previous.tv.clone();
+    });
 }
 
 /// Added/changed/removed counts between the old and new pin sets.
 fn diff(old: &BTreeMap<String, LintPin>, new: &BTreeMap<String, LintPin>) -> (usize, usize, usize) {
-    let mut added = 0;
-    let mut changed = 0;
-    for (id, pin) in new {
-        match old.get(id) {
-            None => added += 1,
-            Some(prev) if prev != pin => changed += 1,
-            Some(_) => {}
-        }
-    }
-    let removed = old.keys().filter(|k| !new.contains_key(*k)).count();
-    (added, changed, removed)
+    let counts = registry_io::diff_counts(old, new);
+    (counts.added, counts.changed, counts.removed)
 }
 
 #[cfg(test)]

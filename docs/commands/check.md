@@ -2953,6 +2953,10 @@ that passed, left nothing unresolved, or failed before `prepare`:
 }
 ```
 
+`candidates[].execution.pair.shape` is an opaque declared-shape digest. Its
+versioned encoding can change the digest value between brokkr versions; the
+schema and field remain unchanged, and the digest is not a cross-run key.
+
 `policy_coverage` stays `null` for a run that certifies nothing, and
 `execution_accounting` is not populated there either (see "The summary
 objects"): the inventory's scope is stated once, here.

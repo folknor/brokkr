@@ -84,11 +84,11 @@ Reported by: check-plan.
 
 Proposed: `enum LaneExec { Serial { threads }, Parallel { budget }, Isolated, Nextest { threads }, DocOnly }`, built once at resolution, with the conflicts as construction errors and the value carried on the planned sweep. `LaneKind` becomes a projection of it.
 
-## STR-009 - Plan identity is primitives, and plan failures are prose
+## STR-009 - Plan wire records are still primitives
 
 Reported by: check-plan.
 
-In `accounting.rs`: `shape: String` (a hex digest), `resolution: Option<String>` (a package name, or "combined"), `lane: usize` (the sweep index), `hash: String` (xxh3 hex), `executable: String` and `BinaryUnit.kind: String`. `artifact_drift` takes `&[(Option<String>, String, String)]`, an anonymous resolution/path/hash triple. The universes map in `prepare_profile` is keyed `(String, Option<String>)` and can be swapped with the many other pairs of that shape. Failures reach callers only as prose: `PhaseSelection.refusal: Option<String>` surfaces as `DevError::Config(msg)`, along with `plan.incomplete: Vec<String>`, `Anomaly.detail: String` and `DeadFilterRecord { sweeps: String /* comma-joined */, origin: String, label: String }`, and `--json` consumers receive the same prose. Proposed: `ShapeId`, `Resolution` (`enum { Combined, Package(PkgName) }`, which `Resolutions` in `selection.rs` already matches), `LaneIdx` and `ContentHash` newtypes, and typed refusal and anomaly enums with the prose produced by `Display`.
+`ShapeId`, `LaneIdx`, `Resolution`, `ContentHash`, `TargetKind`, typed refusals and typed anomaly details now exist, serialised transparently. Residue: `prepare.rs` still builds `PairId`, `PlannedArtifact`, `ShapeRecord` and `LaneRecord` from strings and `usize` (nine fields), `AccountingPlan.incomplete` is `Vec<String>`, `DeadFilterRecord` keeps three string fields, the universe maps are keyed `(String, Option<String>)`, and `artifact_drift` keeps a tuple-taking adapter around its typed core.
 
 ## STR-010 - A lane's inventory state is three overlapping fields, and continuation is stringly typed
 
@@ -134,15 +134,11 @@ Reported by: check-exec.
 
 `Session` holds about ten `Arc` fields, cloned field by field into `Shared<'a>` for each accept; one `Arc<SessionState>` would do. `finish()` joins drains with no grace bound and relies on each drain noticing `done` within a poll, while the unisolated path uses `join_drains` with `DRAIN_GRACE` and a warning: two drain-shutdown policies for one concern. `Refusal::Unplanned(String)` carries its cause as prose, and accounting receives `ObsEvent::AttributionError { detail: String }`. The cases (unplanned executable, rebuilt since the plan, rustdoc with no carrier, unknown role, handshake I/O) are a closed set and should be a typed enum on the observation.
 
-## STR-021 - Diagnostics are strings re-parsed out of their own rendering, and three modules read rustc text
+## STR-021 - The check pipeline does not yet consume the shared Diagnostic
 
 Reported by: check-report.
 
-`cargo_json::DiagnosticEvent.level: String` is filtered by `matches!(level, "error" | "warning" | "error: internal compiler error")`, `is_error_level` re-decides with `starts_with("error")`, and `is_dependency_warning` uses `== "warning"`. `script_check::Level` is already an enum, yet `cargo_json::manifest_lint_header` converts it *back* into a `&'static str` to build a `DiagnosticEvent`. `event_to_clippy` renders `code` into `header = "error[{c}]"` and `location = "{f}:{l}:{c}"`. `clippy_sort_key` then recovers the code with `extract_lint_code` (a bracket scan) and the file, line and column with `parse_location` (`rsplitn(':')`). `ClippyDiagnostic::path` splits the location on the *first* `:`, so a path containing `:` is handled differently by the two. `ClippyDiagnostic.is_error` is set `true` unconditionally by `event_to_clippy` and carries nothing on the JSON path. `DiagKey(String, String, String)` builds dedupe identity from rendered header, rendered location and message.
-
-The block splitter, header rule and noise classification now live in `src/rustc_text.rs`, shared by script_check, cargo_json, cargo_filter and phase.rs. `cargo_filter` still carries the `ClippyDiagnostic` formatter primitive the JSON path also uses and, unrelated to that, the whole libtest output parser (`parse_test_output*`, `ParsedTestResults`, `Completeness`, panic collection, `filter_test`, linker-failure detail).
-
-Proposed: one `Diagnostic { level: Level, code: Option<LintName>, message, site: Option<Site { file, line, col }>, detail, package: Option<PackageId> }`, produced by both the JSON reader and the manifest-lint reader and rendered exactly once at the edge, with sort and dedupe keys derived from fields. Modules: `src/rustc_text.rs` (block splitter, `Level`, block classification), `src/cargo_json.rs` (JSON messages to `Diagnostic`, with manifest lints read via `rustc_text`), and `src/diagnostic.rs` (the type, `Owner`, `LintName`, rendering). Libtest parsing moves to the test-execution side. `parse_clippy` retires entirely: the test build and the support pre-build run with `--message-format=json` (the serial lane already parses cargo JSON for executables in `build.rs`) and render through the clippy pipeline. The header's reason for keeping the text path ("not worth a second JSON pass") no longer holds once the formatter is shared.
+`src/diagnostic.rs` holds one `Diagnostic` (typed severity, site, `LintName` view, field-derived dedupe key, one renderer), produced by both the cargo JSON and the text readers. Residue: `check_cmd/phase.rs` still converts through `event_to_clippy`, dedupes on the string `DiagKey`, and recovers code and location with `extract_lint_code`/`parse_location`; it should carry `Diagnostic` in `SweepResult`, sort and dedupe from `code` and `site`, and render through the shared renderer, rustdoc included. The test-build warning path still reads text rather than `--message-format=json`, and `cargo_filter` still holds the libtest output parser.
 
 ## STR-022 - `check_cmd/phase.rs` is still most of the command
 
@@ -174,19 +170,6 @@ Reported by: process-control.
 
 `lockfile::acquire` fails as `DevError::Lock(String)` for at least seven distinct, actionable reasons: the nested-descendant refusal, the inside-compilation refusal, drain timeout, flock infrastructure failure, metadata publish failure, no entropy and socket bind failure. The disk gate uses `Preflight(Vec<String>)`. A machine caller (`check --json`, an agent) cannot tell "your ancestor holds it, run it elsewhere" from "the kernel is out of lock records". The drain timeout says in its own text that it "is not a transient busy signal", exactly the fact a retry loop needs as data. Carrying a typed reason needs a `DevError` change in `src/error.rs` (`stray::kill`'s counts are already named fields). `cargo_env::FAILED: Mutex<Option<(String, Option<&'static str>)>>` stores the phase as a string from `check_cmd::current_phase()`, so it cannot be matched on. Proposed: an `AcquireRefusal` enum carried in `DevError::Lock`, with prose from `Display`.
 
-## STR-028 - `lockfile.rs` is five modules
-
-Reported by: process-control.
-
-At about 2000 lines it holds:
-1. The flock mutex, the re-entry registry and `LockGuard` (`acquire_at`, `current_hold`, `HELD`).
-2. The acquisition protocol (`HoldEffects`, `drain_and_authorize`, `drain_compile_leases`, the ordering argument).
-3. The lock-record wire format (`rewrite_from_state`, `parse_lock_contents`, escaping, double-read).
-4. Process identity and verification (`proc_starttime`, `verify_identity`, `pidfd_open`, `pidfd_send_signal`, `ns_inode`, `shares_namespaces`, `foreign_holder_ns`, `local_boot_id`).
-5. Presentation (`verified_summary`, `process_summary_unverified`, `format_duration`, `format_bytes*`, `same_agent_hint`, `nested_refusal`).
-
-Item 4 is used by `stray`, `test_orphans`, `shutdown`, `nidhogg::server`, `harness_shim`, `watchdog` and `commands.rs`. It is the most widely depended-on thing in the scope, yet it lives in a file named for something else, so every consumer imports "lockfile" to ask about a process. Item 5 is CLI rendering for `brokkr lock`. Proposed layout: `src/process/` (`identity.rs`, `table.rs`, `reap.rs`, `spawn.rs`), `src/lock/` (`mod.rs` for acquire, `LockGuard` and `current_hold`; `hold_protocol.rs`; `record.rs`; `service.rs`, today's `lock_service`; `probe.rs`), `src/protocol.rs` shared with the guard binary, and `src/lock_cmd.rs` for `brokkr lock`/`brokkr kill`. The process-identity half is recorded in the hygiene platform document's `/proc` entry.
-
 ## STR-029 - `HoldEffects` is a test seam that has become the protocol's spine
 
 Reported by: process-control.
@@ -213,13 +196,13 @@ Proposed: `enum Ending { Exited(i32), Signalled(i32), StopMarker(String /* resol
 
 Reported by: measurement.
 
-`HotpathFunction { avg, total, percent_total, p50, p95, p99: Option<String> }`, and `HotpathThread` likewise. `hotpath_fmt::parse_metric` reverse-engineers units (`ns`/`us`/`ms`/`s`/`B`/`KB`/`%`) to compute diffs. The `db/hotpath.rs` header admits that the three percentile names are hard-coded in parser, schema and formatter, and that `p99.9` is silently dropped. Proposed: parse once at ingest into `Quantity { Duration(ns) | Bytes(u64) | Percent(f64) }` and `percentiles: BTreeMap<Percentile, Quantity>`, so the diff and the renderer never see a unit string. The schema change the header calls "a real project" is the right project.
+Still current: `HotpathFunction`/`HotpathThread` carry six optional metric strings each, stored as `TEXT`, and `hotpath_fmt::parse_metric` re-derives units to diff them; only p50/p95/p99 survive. A worked design exists: parse at ingest into a `Quantity { DurationNs(i64) | Bytes(i64) | Percent(f64) }` (signed, since `mem_diff` can be negative) and a `Percentile` key that orders fractional values such as 99.9; a schema migration adds child tables `hotpath_function_metrics`, `hotpath_function_percentiles` and `hotpath_thread_metrics` with a `quantity_kind` check, keyed by the parent row with `ON DELETE CASCADE`; new writes go to the typed tables and reads fall back to parsing the old text columns, so no backfill is needed; diffs require matching quantity kinds. The fixer needs `src/db/**` (types, schema, write, query, migrate) and `src/hotpath_fmt.rs` together, and `docs/commands/measure.md`'s hotpath contract.
 
-## STR-034 - The measurement session: two contexts, a config struct with dead fallbacks, and positional bools
+## STR-034 - The measurement session is two contexts and a config with dead fallbacks
 
 Reported by: measurement, map-projects.
 
-`BenchContext` and `HarnessContext` both acquire the lock with the same `LockContext` literal, call `resolve_bootstrap_paths`, build a harness, and have byte-identical `with_request`. The real difference is whether there is a build. `BenchContext::new(..., true, &label, true|req.force, stop)` takes two positional bools, the second meaning "dirty tree allowed". Every dispatcher passes literals, and the source formatting (`true,        req.stop_marker...`) shows these lines were machine-edited. `BenchConfig` mixes per-row identity (`command`, `input_file`, `input_mb`, `cli_args`, `metadata`), loop control (`runs`), build provenance (`cargo_profile`, `cargo_features`) and dead fallbacks (`mode`, `brokkr_args`). `db/query.rs` (1724 lines) and `db/migrate.rs` (2184) are mostly test fixtures that build full `RunRow` literals by hand, with 13+ copies of every field. Proposed: one `MeasureSession` builder (`lock -> paths -> optional build -> harness(request)`) that takes the `MeasureRequest` at construction, so a harness without request provenance cannot exist. `enum DirtyPolicy { Allow, Gate { force } }` makes "run mode never stores" structural. `RowSubject { command, input, cli_args, metadata }` takes the per-row part, with runs coming from the request and provenance from the artifact. A `RunRow::fixture()` builder serves the tests.
+`DirtyPolicy` and `RowSubject` now exist (`src/measure/runner.rs`, `context.rs`). Residue: `BenchContext` and `HarnessContext` are still two contexts with duplicated lock, path and `with_request` setup; `BenchConfig` still mixes row identity, loop control, build provenance and the dead `mode`/`brokkr_args` fallbacks; the db tests still build full `RunRow` literals by hand rather than through a fixture builder.
 
 ## STR-035 - The shared core owns pbfhogg's types, and pbfhogg's command inputs are checked at argv time
 
@@ -243,34 +226,23 @@ Reported by: measurement, process-control.
 
 Lines 1-500 of `output.rs` are a console renderer: prefixed output, the status line, the run log, the quiet flag, the pbfhogg-specific verify buffer, and per-project `*_msg` functions (litehtml, sluggrs, ratatoskr, corpus, lint, deps, wc). Lines 500 onwards are a process supervisor: `CapturedOutput`, deadline- and idle-limited runners, SIGTERM forwarding, pipe drains with settle, `spawn_captured`, passthrough. `output::run_captured_limited` and `sidecar::run_sidecar_with_deadline` each implement `try_wait` polling, a shutdown-flag check, a deadline kill, a process-group SIGKILL and stdout/stderr drains, and they have already diverged. The output runner bounds its drain join (`settle_drains`, `DRAIN_SETTLE`, with a comment about the hang the unbounded join caused); the sidecar joins unboundedly (filed in `bugs.md`). The output runner forwards SIGTERM with a budget; the sidecar SIGKILLs immediately. The output runner has an idle limit; the sidecar has a thread-local `DeadlineScope`. `cargo_env`'s bounded `sh -c` evaluator is a third copy. Proposed: split `output.rs` into `console` and `child`, and give the child half one supervisor with a pluggable per-tick observer (the sidecar's `/proc` sampler, FIFO drain and stop matcher), so fixes reach every caller.
 
-## STR-037 - Dependency edges point up from the core, and from the core into project modules
+## STR-037 - Remaining dependency edges pointing up
 
 Reported by: measurement, process-control, deps-misc.
 
-- `output.rs::drain_stamped` calls `crate::test_runner::read_unless_cancelled`: the console/process core depends on the test runner.
-- `bench_cmd` calls `crate::check_cmd::RunLog`. `RunLog` is shared infrastructure living in `check_cmd`.
-- `lockfile`'s `host_drain` calls `crate::check_cmd::activate_run_log()`, and `cargo_env` calls `check_cmd::current_phase()`.
-- `db/gate.rs` is ratatoskr's `gate.db` living inside the shared `db` module, reaching into `db::types::generate_uuid`. It belongs in ratatoskr's module.
-- `db/format/details.rs` hard-codes `row.project != "pbfhogg"` as the default project to hide.
-- `disk_gate` depends on `crate::env` (the `brokkr env` command module) for `probe_path`/`format_bytes`, while `env` depends on `disk_gate` for the policy (`free_share` calls `disk_gate::is_low`/`MIN_FREE_PERCENT`). A host-wide gate running inside lock acquisition depends on a command's presentation module, and the two form a cycle.
+`RunLog` moved to `src/run_log.rs`, the cancellable pipe reader to `src/fs_probe.rs`, and the gate store under ratatoskr (`ratatoskr/gate_store.rs`). Residue: `cargo_env.rs` still calls `check_cmd::current_phase()` (implemented in `check_cmd/watchdog.rs`); `sidecar.rs` still uses the test runner's pipe reader; the `"pbfhogg"` default project is still hidden by name in `db/format/details.rs` and `db/format/single.rs`; `disk_gate`/`env` storage probing should sit below both.
 
-Proposed: `RunLog` and the cancellable read move into shared infrastructure, the gate store moves under ratatoskr, and an `fs_probe` (or host-storage) module sits below both `disk_gate` and `env`. Edges point from project to core, never from core to project. The `crate::ratatoskr::process` edges are recorded in the hygiene platform document's `/proc` entry.
-
-## STR-038 - Three project dispatchers that should be one runner over a command plan
+## STR-038 - pbfhogg and elivagar still have their own dispatchers
 
 Reported by: map-projects.
 
-`pbfhogg/dispatch.rs`, `elivagar/dispatch.rs` and `nidhogg/dispatch.rs` each re-implement the same skeleton: project gate, dry-run, then a match over `Run | Bench | Hotpath/Alloc`, then `BenchContext::new` (9 positional args), resolve inputs, `build_args`, a `BenchConfig {...}` literal (the same 11-field literal about eight times), run, cleanup. The per-command enums each expose the same informal interface (`id`, `result_command`, `supports_hotpath`, `metadata`, `package`, `build_args`), and several of its methods are dead or constant. `PbfhoggCommand::supports_hotpath` is always `true`, so its dispatch check cannot be reached. `ElivagarCommand::package` is always `None`, `metadata` is always empty, and `needs_data_dir`/`needs_scratch` are `#[allow(dead_code)]` "prepared for future ... unification". `NidhoggCommand` has an `#[allow(dead_code)]` impl block whose `build_args`, `scratch_output_dir`, `package`, `needs_build` and `needs_server` are unused, while dispatch hard-codes `Some("nidhogg")`, `"bench-ingest-output"` and the `["ingest", pbf, out]` argv. So nidhogg's `commands.rs` describes the commands, and the code that runs them ignores the description: a second decision for every fact in it.
+A shared command-plan runner exists in `src/measure/runner.rs`, and nidhogg ingest uses it in all four modes (dry-run now supported, fresh scratch per sample, scratch kept on failure). Residue: pbfhogg's dispatcher, elivagar's dispatcher, elivagar's external tools and nidhogg's api/tiles server lifecycle still run their own skeletons, each deciding dry-run purity, run-mode recording and cleanup-on-failure itself; elivagar's argv construction still creates directories during dry-run. Migrating them onto the runner (external tools and server lifecycles as plan kinds) is the remaining work.
 
-The per-project answers to policy questions disagree. "May dry-run write?" has three answers: pbfhogg says no (`build_args` is pure because dry-run validates with it, and `prepare_scratch` materialises separately); elivagar says yes (`ElivagarCommand::build_args` runs `create_dir_all` on scratch and `tilegen_tmp`, and dispatch's doc excuses it for dry-run); nidhogg has `--dry-run` "not yet supported". Whether a run records results is decided per dispatcher (a suspected defect is filed in `bugs.md`). Cleanup on failure differs: run mode deletes the scratch output on a non-zero exit while bench mode (`run_external_ok` erroring) leaves it in place, which contradicts `rename_elivagar_output`'s doc that outputs are "left in place on every failure path". `elivagar::detect_locations_on_ways_stderr` is the "source of truth" for the locations-on-ways path but runs only in hotpath mode, so bench rows (FIFO counters only) carry no such observation, and the two modes record different facts for the same run.
-
-Proposed, and the hunter calls this the big rewrite worth doing in the scope: a command produces a **plan** (build spec: package/bin/example plus features; inputs to resolve; argv given resolved inputs; scratch artefacts; ok exit codes; observations to metadata; a post-success action such as archive or snapshot promotion), and one shared **runner** executes that plan under a mode. A `MeasuredCommand` trait (or a `CommandPlan` data struct) lives in the measurement core, with an implementation per project. The three dispatchers collapse into one, and dry-run, the run-mode recording question, the cleanup-on-failure policy and the I/O-flag appending are each decided once. Nidhogg's Api/Tiles and elivagar's external tools become plan kinds (`ServerLifecycle`, `ExternalTool`) rather than escape hatches in the dispatch match.
-
-## STR-039 - Digests are strings, and hash verification lives in "preflight"
+## STR-039 - Digest typing residue
 
 Reported by: map-projects, config-cli, deps-misc.
 
-xxh128 digests are `String`s compared with `eq_ignore_ascii_case` in `preflight::verify_file_hash`, `env::check_hash_status` and `tools.rs`; they agree today. The `FileEntry` trait yields `Option<&str>` for `xxhash`. `PbfEntry/OscEntry/PmtilesEntry.xxhash: Option<String>`, the dellingr and mogwai pins and `datasets.xxh128` are all strings. `tools.rs` has a separate `sha256_file -> String`. The tree digest (`compute_xxh128_tree`) is also a `String`, and nothing at the type level says whether a digest is of a file or a tree. AGENTS.md explicitly warns that delivery manifests carry sha256, yet pasting one into an xxh128 field is accepted until first use. `env::DatasetStatus::HashError(String)` is prose. `preflight.rs` is two subsystems: host-capability checks (io_uring sysctls, rlimit, a binary-on-PATH check that spawns `which`) and content integrity (the xxh128 hash cache, tree digests and the racy-window stamp logic). Hash verification is used by every dataset resolver, by dellingr and by mogwai, so it is not "preflight". Proposed: `Xxh128([u8; 16])`, parsed, length-checked and normalised at config load, plus a `Sha256` type and a file/tree distinction. Preflight splits into `digest` (the types, cache and tree fold) and `host_checks` (the io_uring set), and `check_binary` becomes a PATH walk.
+`Xxh128`/`Sha256` and `FileDigest`/`TreeDigest`/`PathDigest` exist in `preflight/digest.rs`, config fields deserialize into them (a sha256 in an xxh128 field fails at load), and `preflight` is split into `digest` and `host_checks`. Residue: `env.rs` dataset status still compares and holds digest strings; config tests still construct digests from strings.
 
 ## STR-040 - The PMTiles archive store has no owner
 

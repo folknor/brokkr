@@ -7,11 +7,9 @@
 - `src/nidhogg/commands.rs` - `NidhoggCommand` enum (Api/Ingest/Tiles) with
   `id()`, `supports_hotpath()`, `needs_build()`, `needs_server()`,
   `metadata()`.
-- `src/nidhogg/dispatch.rs` - exposes `run_command()`. Delegates to per-module
-  functions (server lifecycle, ingest, query, geocode, etc.) due to divergent
-  lifecycles. Does NOT use `BenchContext` for everything (unlike pbfhogg /
-  elivagar) - benchmarking commands route through `BenchContext` but server
-  commands have their own lifecycle.
+- `src/nidhogg/dispatch.rs` - exposes `run_command()`. Ingest produces a
+  standalone command plan for `src/measure/runner.rs`; API and tiles delegate
+  to their specialized server lifecycles.
 - `src/nidhogg/...` - server lifecycle (serve/stop/status), ingest, update,
   query, geocode, benchmarks (api, ingest, tiles), verify (batch, geocode,
   readonly), hotpath.
@@ -69,3 +67,21 @@ read 0 for such a query; rows recorded before schema v19 have only those, so
 their sub-millisecond detail is gone.
 
 See `docs/brokkr.toml.md` for full dataset schema.
+
+## Measured ingest lifecycle
+
+`nid-ingest` uses one standalone runner for run, bench, hotpath and alloc.
+Run executes once without recording; stored modes take their sample count and
+invocation provenance from the request. The result command remains
+`nid-ingest`, and subprocess argv retains the existing mode-specific output
+names (`run-ingest-output`, `bench-ingest-output`, `hotpath-ingest-output`).
+
+`--dry-run` is supported for ingest: resolve the input and construct argv,
+without building, executing, or creating scratch directories. API and tiles
+still reject dry-run and hotpath/alloc because they need server lifecycle plans.
+
+Scratch is reset before every sample in every mode, run and hotpath/alloc
+included, so no sample can find data an earlier one ingested. A successful
+invocation removes its scratch; any failure, a nonzero exit included, leaves
+the current scratch in place for diagnosis. Stored modes gate a dirty tree
+unless forced; run allows one.

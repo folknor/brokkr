@@ -643,39 +643,33 @@ pub fn die_with_parent(cmd: &mut std::process::Command) {
 // ---------------------------------------------------------------------------
 
 /// Every live process whose parent chain reaches `root`, deepest first, each
-/// paired with its `/proc` starttime (the identity token) from the same read
-/// as its parent pid. Deepest first so a leaf dies before its parent can
-/// notice and respawn it. `root` itself is not included.
-pub fn descendants(root: u32) -> Vec<(u32, String)> {
-    let mut children: HashMap<u32, Vec<(u32, String)>> = HashMap::new();
-    let Ok(entries) = std::fs::read_dir("/proc") else {
+/// carrying the typed identity read with its parent PID. Deepest first so a
+/// leaf dies before its parent can notice and respawn it. `root` is excluded.
+pub fn descendants(root: u32) -> Vec<crate::process::ProcIdentity> {
+    let mut children: HashMap<u32, Vec<crate::process::ProcIdentity>> = HashMap::new();
+    let Ok(snapshot) = crate::process::ProcTable::snapshot() else {
         return Vec::new();
     };
-    for entry in entries.flatten() {
-        let Some(pid) = entry
-            .file_name()
-            .to_str()
-            .and_then(|s| s.parse::<u32>().ok())
-        else {
-            continue;
-        };
-        if let Some((ppid, starttime)) = proc_ppid_and_starttime(pid) {
-            children.entry(ppid).or_default().push((pid, starttime));
-        }
+    for (_, stat) in snapshot.iter() {
+        let parent = stat.parent().map_or(0, crate::process::Pid::get);
+        children.entry(parent).or_default().push(stat.identity());
     }
     let mut out = Vec::new();
-    let mut stack: Vec<(u32, String)> = vec![(root, String::new())];
+    let mut stack: Vec<(u32, Option<crate::process::ProcIdentity>)> = vec![(root, None)];
     // Bounded: a consistent snapshot has no parent cycle, but an inconsistent
     // one (a pid reused mid-scan) could, and a bound costs nothing.
-    while let Some((pid, starttime)) = stack.pop() {
+    while let Some((pid, identity)) = stack.pop() {
         if out.len() > 65_536 {
             break;
         }
-        if pid != root {
-            out.push((pid, starttime));
+        if let Some(identity) = identity {
+            out.push(identity);
         }
         if let Some(kids) = children.remove(&pid) {
-            stack.extend(kids);
+            stack.extend(
+                kids.into_iter()
+                    .map(|identity| (identity.pid().get(), Some(identity))),
+            );
         }
     }
     out.reverse();
@@ -694,34 +688,15 @@ pub fn descendants(root: u32) -> Vec<(u32, String)> {
 /// root first so nothing new is started from it.
 pub fn kill_descendants(root: u32) -> usize {
     let mut killed = 0usize;
-    for (pid, starttime) in descendants(root) {
-        if starttime.is_empty()
-            || crate::lockfile::proc_starttime(pid).as_deref() != Some(starttime.as_str())
-        {
-            continue;
-        }
-        // SAFETY: SIGKILL to a pid whose identity was re-verified immediately
-        // above; ESRCH (already gone) is benign, and the residual window is
-        // the one every pid-addressed signal has.
-        if unsafe { libc::kill(pid.cast_signed(), libc::SIGKILL) } == 0 {
+    for identity in descendants(root) {
+        if matches!(
+            crate::process::kill_verified(identity, libc::SIGKILL),
+            Ok(crate::process::Delivery::Signalled)
+        ) {
             killed += 1;
         }
     }
     killed
-}
-
-/// The parent pid and starttime from `/proc/<pid>/stat`, from one read so the
-/// pair is coherent. The fields follow the parenthesised comm (which may
-/// itself contain spaces and parentheses, hence the `rfind`): state, then
-/// ppid; starttime is field 22 of the whole line, index 19 after the comm -
-/// the same indexing as `lockfile::proc_starttime`.
-fn proc_ppid_and_starttime(pid: u32) -> Option<(u32, String)> {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    let comm_end = stat.rfind(')')?;
-    let post: Vec<&str> = stat.get(comm_end + 2..)?.split_whitespace().collect();
-    let ppid = post.get(1)?.parse().ok()?;
-    let starttime = post.get(19).map(|s| (*s).to_owned()).unwrap_or_default();
-    Some((ppid, starttime))
 }
 
 #[cfg(test)]
@@ -732,21 +707,31 @@ mod tests {
     #[test]
     fn own_process_is_a_descendant_of_its_grandparent() {
         let me = std::process::id();
-        let (parent, _) = proc_ppid_and_starttime(me).unwrap();
-        let (grandparent, _) = proc_ppid_and_starttime(parent).unwrap();
+        let parent_of = |pid: u32| {
+            let stat = crate::process::ProcStat::read(crate::process::Pid::new(pid)?).ok()?;
+            Some(stat.parent().map_or(0, crate::process::Pid::get))
+        };
+        let parent = parent_of(me).unwrap();
+        let grandparent = parent_of(parent).unwrap();
         if grandparent == 0 {
             return; // init as parent: no grandparent to walk from
         }
         let found = descendants(grandparent);
-        let mine = found.iter().find(|(pid, _)| *pid == me).unwrap();
-        // The identity token comes from the same read as the topology.
-        assert_eq!(Some(mine.1.clone()), crate::lockfile::proc_starttime(me));
+        let mine = found
+            .iter()
+            .find(|identity| identity.pid().get() == me)
+            .unwrap();
+        assert_eq!(Some(mine.start()), crate::process::proc_starttime(me),);
     }
 
     #[test]
     fn descendants_exclude_the_root() {
         let me = std::process::id();
-        assert!(!descendants(me).iter().any(|(pid, _)| *pid == me));
+        assert!(
+            !descendants(me)
+                .iter()
+                .any(|identity| identity.pid().get() == me)
+        );
     }
 
     /// A registration occupies a slot for exactly its guard's lifetime, and

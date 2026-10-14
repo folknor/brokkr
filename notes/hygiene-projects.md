@@ -305,13 +305,11 @@ Reported by: ratatoskr.
 
 The service and sync `include!` shims are real modules and internal argument-count waivers became context structs. Residue: the service entry points still carry `too_many_arguments`/`too_many_lines` waivers because their callers in `main_parts/bootstrap.rs` pass loose arguments (request structs would remove them), and `harness_mod/foreign_loop.rs` has a comment naming the old module path.
 
-## PRJ-044 - piners has two registry stacks copied almost line for line
+## PRJ-044 - piners registry residue
 
 Reported by: piners.
 
-`Registry::load`/`lint` vs `LintRegistry::load`/`lint`; `select.rs` vs `lint/select.rs` ("mirrors"); `pins_write.rs` vs `lints_write.rs` (`set_value`, `sync_opt`, `sort_fields`, `rank`, `set_block_prefix`, `pin_value`, `parse_value`, `toml_str` - a third copy is `rustflags::toml_string`); reseed diff/carry-forward; `grid` in `corpus_db/format.rs` and `lint/db.rs`. Bless is implemented twice with different rules (BUG-090). Directory walks differ: corpus reseed `file_type()` (no symlink follow), lint reseed `is_dir()` (follows; a symlink loop recurses). `lint/cmd.rs` rebuilds a `HarnessConfig` by hand from `LintConfig`'s package/binary/features/debug fields; the config could embed `HarnessConfig`. Hunter's recommendation: a single generic registry, selector, writer and run store with a per-corpus pin type - a rewrite with real payoff.
-
-Design hunt (other-projects): the run verdict is decided in both `piners/cmd.rs::corpus` and `piners/lint/cmd.rs::lint_corpus` - `gate_blocks = !args.bless && !args.no_gate && <deviations>`, a separate `gated = !args.no_gate && !args.bless` for the DB row (four sites for one fact), `run_pass`, the `fail_reason` precedence chain, the `"pass"`/`"fail"` string, the bless short-circuit and its "tool/harness failed: nothing blessed" exit, the final `PASS`/`FAIL` line and `ExitCode(1)`. The run mode is spread over `reseed`, `reanchor`, `bless`, `verify_only` and `no_gate` bools held exclusive by clap `conflicts_with` and "dispatch-rejected" comments. `RunRecord::result: &str` and `RunMeta::result: &str` are documented as `"pass"`/`"fail"` but also receive `"error"` and `"interrupted"`, with `fail_reason: Option<String>` beside them admitting pass-with-reason and fail-without. Inside `cmd.rs` (1295 lines), `classify_attempt`, `store_attempt_streams`, `AttemptEnv` and `diagnose` are isolation machinery belonging in `isolate.rs`, and `reserve_run_id`/`record_unfinished` belong in `corpus_db`. `registry.rs` (1885 lines) holds schema, loading, keyword index, lint, feed groups, harness-file pins and xxh128 verification, with `cmd.rs::verify_selected_feeds` a third piece of verification outside it; `report.rs` (1412 lines) mixes NDJSON parsing, the disposition vocabulary, aggregation and terminal rendering. Proposed: `enum CorpusMode { Verify, Run { gate: Enforce | ReportOnly }, Bless, Reseed, Reanchor }`, `enum RunResult { Pass, Fail(Reason), Error(Reason), Interrupted }`, one `RunVerdict::decide(integrity_failures, gate_deviations, mode)` with one test table, a `corpus_engine` with a `Subject` trait (select/verify/execute/classify) giving both commands one protocol implementation, `registry::{schema, load, lint, verify}`, and rendering in its own file.
+Selection, registry file loading and dangling-key checks, reseed carry-forward, TOML writer primitives, the table formatter, the run-mode model and the run verdict are shared (`piners/selector.rs`, `run_model.rs`, `toml_writer.rs`, `table.rs`); the remaining differences between the corpus and lint registries are deliberate schema and bless-policy differences. Residue: `lint/cmd.rs` still copies four build fields from `LintConfig` into a synthesized `HarnessConfig` (embedding the common config needs `config_parts/schema.rs`), and `rustflags.rs::toml_string` is a third TOML string quoter.
 
 ## PRJ-047 - piners logging gaps
 
@@ -355,13 +353,11 @@ Reported by: piners.
 
 `RunMeta.stderr` and the lint `run.stderr` column always `""` (one call site); lint `run_migrations` scaffolding has no migrations; the duplicated `project::require` in `measured.rs`. Compatibility paths whose continued need can't be checked from this repo: `report.rs` skipping a legacy `summary` line ("the harness no longer emits one") and `fmt_selector` accepting the legacy string `probe` shape - depends on the piners harness and existing `runs.db` rows.
 
-## PRJ-053 - litehtml and sluggrs visual layers are near-clones that have diverged
+## PRJ-053 - Visual flags are refused by hand
 
 Reported by: small-benches.
 
-`open_db`, `format_pct`, `print_table_header`, prefix-matching `resolve_fixture`/`resolve_snapshot`, `print_run_summary`, `format_status_columns` and the approve clean-tree check are cloned; the two `db.rs` differ only in column names. `sluggrs_msg` wraps nothing. Hunter's view: one `visual/` module generic over subject, with a structural rule that `sluggrs` doesn't import `crate::litehtml`.
-
-Design hunt (other-projects): both also have `cmd.rs` with `test`/`list`/`approve`/`report`/`status`, `print_X_status`, `db.rs` with the same three tables and `map_*` row mappers, and `generate_run_id`; `sluggrs` already imports `crate::litehtml::compare`, so the shared core is filed under one of its two clients, and the shared `visual` CLI command refuses litehtml-only flags in sluggrs by hand. Proposed: `src/visual/{engine, compare, db, status}` owning the run loop, the status tally, the approval/ratchet policy and the DB, with a `Subject` trait (`render`, `reference`, `scores`) - litehtml rendering through the pipeline and scoring against a Chrome capture on pixel and element metrics, sluggrs rendering a snapshot and scoring against `approved.png` on pixels only - and per-project flags (`--suite`, `--recapture`) in the subject's argument type so the refusal is structural. The double-status defect that shows the copies drifting is filed in `bugs.md`.
+`src/visual/` now owns the status model, the engine, the shared database operations and pixel comparison; sluggrs no longer imports litehtml. Residue: sluggrs still refuses the litehtml-only `--suite` and `--recapture` by hand; moving those flags into a litehtml-only argument type needs `cli/schema.rs` and `main_parts/commands.rs`.
 
 ## PRJ-054 - Three inline-tag lists disagree
 

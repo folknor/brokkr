@@ -114,7 +114,7 @@ fn parse_cli(project: Option<Project>) -> Cli {
 
 fn main() {
     if let Some(code) = test_runner::maybe_run_harness_shim() {
-        process::exit(code);
+        std::process::exit(code);
     }
     let raw_args: String = std::env::args().skip(1).collect::<Vec<_>>().join(" ");
     let start = Instant::now();
@@ -161,7 +161,7 @@ fn main() {
 
     match result {
         Ok(()) => {}
-        Err(DevError::ExitCode(code)) => process::exit(code),
+        Err(DevError::ExitCode(code)) => std::process::exit(code),
         Err(DevError::Interrupted) => {
             output::run_msg("interrupted - running scratch cleanup");
             crate::shutdown::admit_exit_cleanup();
@@ -179,11 +179,11 @@ fn main() {
             {
                 output::error(&format!("cleanup failed: {e}"));
             }
-            process::exit(130);
+            std::process::exit(130);
         }
         Err(e) => {
             output::error(&e.to_string());
-            process::exit(1);
+            std::process::exit(1);
         }
     }
 }

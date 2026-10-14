@@ -155,8 +155,7 @@ pub fn run(args: &BenchArgs) -> Result<(), DevError> {
     // directory above it.
     let parent_build_root = (build_root != project_root).then_some(build_root.as_path());
     // Worktree, toolchain and target-dir narration is run-log only.
-    let _log =
-        crate::check_cmd::RunLog::begin(&project_root, crate::check_cmd::run_log_kind::BENCH);
+    let _log = crate::run_log::RunLog::begin(&project_root, crate::run_log::run_log_kind::BENCH);
     with_worktree(
         project,
         &project_root,

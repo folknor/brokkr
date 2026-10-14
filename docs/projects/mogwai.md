@@ -43,6 +43,9 @@ path   = "research/market-data/databento/mnqv/2026-07.full.tbbo"
 xxh128 = "280ade40376bd49f50c579bb127f3fbd"
 ```
 
+The input pin is parsed as XXH128: exactly 32 hexadecimal characters.
+SHA-256 manifest digests are rejected when brokkr loads the config.
+
 - **CLI surfaces need no registration.** The bin is registered once; the argv is
   composed at the call site.
 - **Harness surfaces resolve by name** against `[mogwai.targets.*]`. Adding one

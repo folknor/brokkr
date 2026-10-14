@@ -85,6 +85,14 @@ pub(crate) struct LaneInventoryOut {
     pub(crate) expected_executions: usize,
 }
 
+/// One lane/resolution/binary group with any observed execution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ReachedGroup {
+    pub(crate) lane: LaneIdx,
+    pub(crate) resolution: Resolution,
+    pub(crate) unit: BinaryUnit,
+}
+
 /// A test name a lane whose streams cannot be attributed to binaries blamed
 /// at a stop: a suspect, named by the shared stream, with no binary.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -123,14 +131,14 @@ pub(crate) struct ContinuationReport {
     /// a start, a terminal, anything but silence. A group missing from it was
     /// never reached; the report says so. Not part of the trailer.
     #[serde(skip)]
-    pub(crate) reached: Vec<(usize, Option<String>, BinaryUnit)>,
+    pub(crate) reached: Vec<ReachedGroup>,
 }
 
 fn lane_inventory(plan: &AccountingPlan, recon: &Reconciliation) -> Vec<LaneInventoryOut> {
     plan.lanes
         .iter()
         .map(|l| {
-            let expected = recon.accounted.iter().filter(|a| a.id.lane == l.lane).count();
+            let expected = recon.accounted.iter().filter(|a| a.id.lane.get() == l.lane).count();
             let (availability, reason) = if let Some(why) = recon.superseded.get(&l.lane) {
                 ("unavailable", Some(format!("the plan stopped describing this lane: {why}")))
             } else if let Some(why) = &l.skipped {
@@ -228,7 +236,7 @@ pub(crate) fn build_continuation(
     let candidates: Vec<CandidateOut> = cands
         .iter()
         .map(|c| CandidateOut {
-            lane: label_of(c.id.lane),
+            lane: label_of(c.id.lane.get()),
             resolution: c.id.pair.resolution.clone(),
             package: c.id.pair.unit.package.clone(),
             binary: format!("{}:{}", c.id.pair.unit.kind, c.id.pair.unit.target),
@@ -259,7 +267,11 @@ pub(crate) fn build_continuation(
             .accounted
             .iter()
             .filter(|a| a.outcome != Outcome::Unobserved)
-            .map(|a| (a.id.lane, a.id.pair.resolution.clone(), a.id.pair.unit.clone()))
+            .map(|a| ReachedGroup {
+                lane: a.id.lane,
+                resolution: Resolution::from_option(a.id.pair.resolution.as_deref()),
+                unit: a.id.pair.unit.clone(),
+            })
             .collect(),
     })
 }
@@ -291,10 +303,10 @@ pub(crate) fn render_continuation(report: &ContinuationReport) -> Vec<String> {
     }
     for (key, members) in &groups {
         let seen = members.iter().any(|c| {
-            report.reached.iter().any(|(lane, resolution, unit)| {
-                *lane == c.execution.lane
-                    && *resolution == c.execution.pair.resolution
-                    && *unit == c.execution.pair.unit
+            report.reached.iter().any(|group| {
+                group.lane == c.execution.lane
+                    && group.resolution.as_option() == c.execution.pair.resolution.as_deref()
+                    && group.unit == c.execution.pair.unit
             })
         });
         // Fail-fast casualties are summarised by count: the failure that

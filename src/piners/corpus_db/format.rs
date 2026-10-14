@@ -9,40 +9,7 @@ use super::compare::{self, Comparison, Presence, ProbeDelta};
 use super::query::{
     DispositionRow, GateMissRow, RawTable, RunRow, RuntimeRow, ShiftCensus, TradeDiffRow, TrendRow,
 };
-
-/// Render a header + rows as a left-aligned, space-padded grid. Empty rows
-/// yield `"(none)"`.
-fn grid(headers: &[&str], rows: &[Vec<String>]) -> String {
-    if rows.is_empty() {
-        return "(none)".to_owned();
-    }
-    let mut widths: Vec<usize> = headers.iter().map(|h| h.len()).collect();
-    for row in rows {
-        for (i, cell) in row.iter().enumerate() {
-            if i < widths.len() {
-                widths[i] = widths[i].max(cell.len());
-            }
-        }
-    }
-    let mut out = String::new();
-    let header_line: Vec<String> = headers
-        .iter()
-        .enumerate()
-        .map(|(i, h)| format!("{:<width$}", h, width = widths[i]))
-        .collect();
-    out.push_str(header_line.join("  ").trim_end());
-    out.push('\n');
-    for row in rows {
-        let line: Vec<String> = row
-            .iter()
-            .enumerate()
-            .map(|(i, c)| format!("{:<width$}", c, width = widths.get(i).copied().unwrap_or(0)))
-            .collect();
-        out.push_str(line.join("  ").trim_end());
-        out.push('\n');
-    }
-    out.trim_end().to_owned()
-}
+use crate::piners::table::grid;
 
 /// Compact float formatting: trims trailing zeros, `-` for `None`. Exact
 /// values are always available via `--sql`.

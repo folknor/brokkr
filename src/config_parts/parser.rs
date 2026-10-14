@@ -1,3 +1,48 @@
+/// The obligations a profile claim places on config validation and check
+/// execution. Keep the complete-claim policy here so parsers and phases ask
+/// the same named question instead of interpreting `Certifies::Complete`
+/// independently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Claim(Option<Certifies>);
+
+impl Claim {
+    pub(crate) const fn new(certifies: Option<Certifies>) -> Self {
+        Self(certifies)
+    }
+
+    const fn is_complete(self) -> bool {
+        matches!(self.0, Some(Certifies::Complete))
+    }
+
+    pub(crate) const fn allows_skipping_phases(self) -> bool {
+        matches!(self.0, Some(Certifies::Partial))
+    }
+
+    pub(crate) const fn refuses_scoping(self) -> bool {
+        self.is_complete()
+    }
+
+    pub(crate) const fn refuses_trailing_args(self) -> bool {
+        self.is_complete()
+    }
+
+    pub(crate) const fn enumerates_universe(self) -> bool {
+        self.is_complete()
+    }
+
+    pub(crate) const fn requires_attribution(self) -> bool {
+        self.is_complete()
+    }
+
+    pub(crate) fn runs_install_feature(self, mode: Option<InstallFeatureCheck>) -> bool {
+        match mode.unwrap_or(InstallFeatureCheck::Gate) {
+            InstallFeatureCheck::Off => false,
+            InstallFeatureCheck::Gate => self.enumerates_universe(),
+            InstallFeatureCheck::Always => true,
+        }
+    }
+}
+
 /// Load `brokkr.toml` from the project root directory, with the user-wide
 /// config composed beneath its include layers.
 pub fn load(project_root: &Path) -> Result<(Project, DevConfig), DevError> {
@@ -79,6 +124,7 @@ fn parse_dev_config(table: &toml::Table) -> Result<DevConfig, DevError> {
     let bin = parse_bin(table)?;
     let disable_toolchain = parse_disable_toolchain(table)?;
     let cargo_env = parse_cargo_env(table, &capture_env)?;
+    refuse_retired_sha256(table)?;
     let hosts = parse_hosts(table)?;
     validate_datasets(&hosts)?;
     validate_tilegen(&hosts)?;
@@ -913,11 +959,11 @@ fn parse_dellingr(
         ));
     }
     for (name, workload) in &config.workloads {
-        check_workload_pin(name, ("file", "xxh128"), &workload.file, &workload.xxh128)?;
+        check_workload_pin(name, "file", &workload.file)?;
 
         match (&workload.hotpath_file, &workload.hotpath_xxh128) {
-            (Some(file), Some(digest)) => {
-                check_workload_pin(name, ("hotpath_file", "hotpath_xxh128"), file, digest)?;
+            (Some(file), Some(_)) => {
+                check_workload_pin(name, "hotpath_file", file)?;
             }
             (None, None) => {}
             (present, _) => {
@@ -937,29 +983,18 @@ fn parse_dellingr(
     Ok(Some(config))
 }
 
-/// Validate one path/digest workload pin.
+/// Validate one workload pin's path. The digest half needs no check here: it
+/// deserialized as a `FileDigest`, so an empty or malformed value was already
+/// refused, naming the key.
 ///
-/// `keys` is the `(path, digest)` key pair being checked, so the error points
-/// at the offending line: a workload carries two independent pins (`file` +
-/// `xxh128` and `hotpath_file` + `hotpath_xxh128`) and the fix differs between
-/// them.
-fn check_workload_pin(
-    name: &str,
-    keys: (&str, &str),
-    file: &Path,
-    xxh128: &str,
-) -> Result<(), DevError> {
-    let (path_key, digest_key) = keys;
+/// `path_key` is the key being checked, so the error points at the offending
+/// line: a workload carries two independent pins (`file` + `xxh128` and
+/// `hotpath_file` + `hotpath_xxh128`) and the fix differs between them.
+fn check_workload_pin(name: &str, path_key: &str, file: &Path) -> Result<(), DevError> {
     if file.is_absolute() {
         return Err(DevError::Config(format!(
             "[dellingr.workloads.{name}].{path_key} {file:?} is absolute; \
              workload paths are relative to the directory holding brokkr.toml."
-        )));
-    }
-    if xxh128.trim().is_empty() {
-        return Err(DevError::Config(format!(
-            "[dellingr.workloads.{name}].{digest_key} is empty - a workload \
-             without a pinned digest cannot be checked for drift."
         )));
     }
     Ok(())
@@ -1617,7 +1652,7 @@ fn validate_skip_phases(profile_name: &str, def: &ProfileDef) -> Result<(), DevE
     let Some(phases) = &def.skip_phases else {
         return Ok(());
     };
-    if def.certifies != Some(Certifies::Partial) {
+    if !Claim::new(def.certifies).allows_skipping_phases() {
         return Err(DevError::Config(format!(
             "[test.profiles.{profile_name}] sets `skip_phases` without \
              `certifies = \"partial\"`. Skipping phases is a permission \
@@ -1709,7 +1744,7 @@ fn validate_check_against_test(
                 "[test].gate_profile = '{gate}' names no `[test.profiles.*]` entry."
             )));
         };
-        if def.certifies != Some(Certifies::Complete) {
+        if !Claim::new(def.certifies).enumerates_universe() {
             return Err(DevError::Config(format!(
                 "[test].gate_profile = '{gate}' must name a profile with \
                  `certifies = \"complete\"` - the gate invocation is exactly \
@@ -1736,6 +1771,7 @@ fn validate_check_against_test(
     }
     let names: BTreeSet<&str> = check.iter().map(|e| e.name.as_str()).collect();
     for (profile_name, def) in &t.profiles {
+        let claim = Claim::new(def.certifies);
         // A profile's `env` reaches the sweep too (`build_resolved_sweep`
         // merges it into `sweep.env`, which then wins over the composed
         // isolation in `merged_env`), so the same reserved keys are rejected
@@ -1776,14 +1812,14 @@ fn validate_check_against_test(
         // narrowing (`skip`/`only`) is audited at run time by the coverage
         // phase against `[[quarantine]]`. A lanes profile was already
         // checked per-lane above.
-        if def.certifies == Some(Certifies::Complete) && def.lanes.is_none() {
+        if claim.enumerates_universe() && def.lanes.is_none() {
             validate_complete_profile(profile_name, def)?;
         }
         // The universe of a complete profile is every `[[check]]` entry, not
         // its own sweep list - checked once at the certifying-profile level
         // (a single lane referencing a subset is correct; the composed
         // profile's union must be total).
-        if def.certifies == Some(Certifies::Complete) {
+        if claim.enumerates_universe() {
             validate_complete_universe(profile_name, t, check)?;
         }
         let Some(sweeps) = &def.sweeps else {
@@ -1815,7 +1851,7 @@ fn validate_complete_test_threads(
     resolved_profiles: &BTreeMap<String, Vec<crate::profile::ResolvedSweep>>,
 ) -> Result<(), DevError> {
     for (claim, def) in &t.profiles {
-        if def.certifies != Some(Certifies::Complete) {
+        if !Claim::new(def.certifies).requires_attribution() {
             continue;
         }
         let mut runs: BTreeSet<String> = BTreeSet::new();
@@ -1928,7 +1964,7 @@ fn validate_lanes_profile(
                  lanes do not nest."
             )));
         }
-        if def.certifies == Some(Certifies::Complete) {
+        if Claim::new(def.certifies).enumerates_universe() {
             validate_complete_profile(lane, lane_def).map_err(|e| match e {
                 DevError::Config(msg) => DevError::Config(format!(
                     "[test.profiles.{name}] certifies \"complete\" via lanes: {msg}"
@@ -1982,7 +2018,7 @@ fn validate_doctest_ledger(
     let complete: Vec<&str> = t
         .profiles
         .iter()
-        .filter(|(_, d)| d.certifies == Some(Certifies::Complete))
+        .filter(|(_, d)| Claim::new(d.certifies).enumerates_universe())
         .map(|(n, _)| n.as_str())
         .collect();
     if complete.is_empty() {
@@ -2126,6 +2162,40 @@ fn validate_complete_universe(
              universe), or delete the entry.",
             unreferenced.join(", "),
         )));
+    }
+    Ok(())
+}
+
+/// Refuse the retired `sha256` key anywhere under `[<host>.datasets]`, before
+/// serde sees it. The key was once an alias of `xxhash`, and dataset blocks are
+/// shared between projects through `include`, so a sibling's config can still
+/// carry it; without this pass it would surface as a bare unknown-field error
+/// that says nothing about what to do. brokkr pins XXH128 only, under `xxhash`
+/// (`path` entries use `xxh128`); `brokkr env` prints the digest of every
+/// registered file that has no pin.
+fn refuse_retired_sha256(table: &toml::Table) -> Result<(), DevError> {
+    fn walk(value: &toml::Value, at: &str) -> Result<(), DevError> {
+        let Some(table) = value.as_table() else {
+            return Ok(());
+        };
+        for (key, child) in table {
+            let here = format!("{at}.{key}");
+            if key == "sha256" {
+                return Err(DevError::Config(format!(
+                    "{here}: the `sha256` key is retired - brokkr pins datasets by XXH128 under \
+                     `xxhash`. If the value is already a 32-hex XXH128 digest, rename the key; \
+                     otherwise delete it and run `brokkr env`, which prints the XXH128 of every \
+                     registered file without a pin, and paste that in as `xxhash`."
+                )));
+            }
+            walk(child, &here)?;
+        }
+        Ok(())
+    }
+    for (host, value) in table {
+        if let Some(datasets) = value.as_table().and_then(|t| t.get("datasets")) {
+            walk(datasets, &format!("{host}.datasets"))?;
+        }
     }
     Ok(())
 }

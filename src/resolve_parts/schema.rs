@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use crate::config;
 use crate::error::DevError;
-use crate::preflight;
+use crate::preflight::{self, FileDigest};
 
 // ---------------------------------------------------------------------------
 // FileEntry trait - unifies PBF, OSC, and PMTiles entry types
@@ -11,15 +11,15 @@ use crate::preflight;
 
 pub(crate) trait FileEntry {
     fn file(&self) -> &str;
-    fn xxhash(&self) -> Option<&str>;
+    fn xxhash(&self) -> Option<&FileDigest>;
 }
 
 impl FileEntry for config::PbfEntry {
     fn file(&self) -> &str {
         &self.file
     }
-    fn xxhash(&self) -> Option<&str> {
-        self.xxhash.as_deref()
+    fn xxhash(&self) -> Option<&FileDigest> {
+        self.xxhash.as_ref()
     }
 }
 
@@ -27,8 +27,8 @@ impl FileEntry for config::OscEntry {
     fn file(&self) -> &str {
         &self.file
     }
-    fn xxhash(&self) -> Option<&str> {
-        self.xxhash.as_deref()
+    fn xxhash(&self) -> Option<&FileDigest> {
+        self.xxhash.as_ref()
     }
 }
 
@@ -36,8 +36,8 @@ impl FileEntry for config::PmtilesEntry {
     fn file(&self) -> &str {
         &self.file
     }
-    fn xxhash(&self) -> Option<&str> {
-        self.xxhash.as_deref()
+    fn xxhash(&self) -> Option<&FileDigest> {
+        self.xxhash.as_ref()
     }
 }
 
@@ -96,7 +96,7 @@ fn finalize_entry_path<E: FileEntry>(
     }
 
     if let Some(expected) = entry.xxhash() {
-        preflight::verify_file_hash(&path, expected, project_root, origin)?;
+        preflight::verify_file_digest(&path, expected, project_root, origin)?;
     }
 
     Ok(path)

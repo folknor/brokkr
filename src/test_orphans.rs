@@ -245,9 +245,7 @@ fn claim_dead(dir: &Path) -> Vec<DeadRun> {
 struct ProcRow {
     ppid: u32,
     comm: String,
-    /// `/proc/<pid>/stat` starttime, the identity token the SIGKILL is
-    /// checked against.
-    starttime: String,
+    start: crate::process::StartTicks,
     /// The [`MARKER_ENV`] value from `/proc/<pid>/environ`, when readable and
     /// present. Unreadable (another user's process, a kernel thread, a zombie)
     /// reads as unmarked.
@@ -259,7 +257,7 @@ struct ProcRow {
 struct Orphan {
     pid: u32,
     comm: String,
-    starttime: String,
+    identity: crate::process::ProcIdentity,
     token: RunToken,
 }
 
@@ -276,45 +274,20 @@ fn marker_in_environ(environ: &[u8]) -> Option<String> {
 
 fn read_table() -> HashMap<u32, ProcRow> {
     let mut table = HashMap::new();
-    let Ok(entries) = std::fs::read_dir("/proc") else {
+    let Ok(snapshot) = crate::process::ProcTable::snapshot() else {
         return table;
     };
-    for entry in entries.flatten() {
-        let Some(pid) = entry
-            .file_name()
-            .to_str()
-            .and_then(|s| s.parse::<u32>().ok())
-        else {
-            continue;
-        };
-        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
-            continue;
-        };
-        // Same parsing as `stray::read_proc`: comm may contain spaces and
-        // parentheses, so split at the LAST `)`; ppid is the second field
-        // after it, starttime index 19, both from this one read.
-        let (Some(open), Some(close)) = (stat.find('('), stat.rfind(')')) else {
-            continue;
-        };
-        let comm = stat.get(open + 1..close).unwrap_or_default().to_owned();
-        let post: Vec<&str> = stat
-            .get(close + 2..)
-            .unwrap_or_default()
-            .split_whitespace()
-            .collect();
-        let Some(ppid) = post.get(1).and_then(|p| p.parse().ok()) else {
-            continue;
-        };
-        let starttime = post.get(19).map(|s| (*s).to_owned()).unwrap_or_default();
-        let token = std::fs::read(format!("/proc/{pid}/environ"))
+    for (pid, stat) in snapshot.iter() {
+        let pid_num = pid.get();
+        let token = std::fs::read(format!("/proc/{pid_num}/environ"))
             .ok()
             .and_then(|env| marker_in_environ(&env));
         table.insert(
-            pid,
+            pid_num,
             ProcRow {
-                ppid,
-                comm,
-                starttime,
+                ppid: stat.parent().map_or(0, crate::process::Pid::get),
+                comm: stat.comm().to_owned(),
+                start: stat.start(),
                 token,
             },
         );
@@ -326,7 +299,7 @@ fn read_table() -> HashMap<u32, ProcRow> {
 /// descendants, newest first. Pure over the table so the selection is
 /// unit-testable.
 fn select(table: &HashMap<u32, ProcRow>, dead: &HashSet<RunToken>, me: u32) -> Vec<Orphan> {
-    let exemptions = crate::stray::ReaperExemptions::from_parent_pairs(
+    let exemptions = crate::process::ReaperExemptions::from_parent_pairs(
         me,
         table.iter().map(|(&pid, row)| (pid, row.ppid)),
     );
@@ -341,10 +314,11 @@ fn select(table: &HashMap<u32, ProcRow>, dead: &HashSet<RunToken>, me: u32) -> V
             if exemptions.contains(pid) {
                 return None;
             }
+            let process_pid = crate::process::Pid::new(pid)?;
             Some(Orphan {
                 pid,
                 comm: row.comm.clone(),
-                starttime: row.starttime.clone(),
+                identity: crate::process::ProcIdentity::new(process_pid, row.start),
                 token,
             })
         })
@@ -352,21 +326,20 @@ fn select(table: &HashMap<u32, ProcRow>, dead: &HashSet<RunToken>, me: u32) -> V
     // A child starts after its parent, so newest first is leaves first: a
     // test binary dies before a surviving parent could notice and react.
     out.sort_by(|a, b| {
-        let a_start = a.starttime.parse::<u64>().unwrap_or(0);
-        let b_start = b.starttime.parse::<u64>().unwrap_or(0);
-        b_start.cmp(&a_start).then(a.pid.cmp(&b.pid))
+        b.identity
+            .start()
+            .cmp(&a.identity.start())
+            .then(a.pid.cmp(&b.pid))
     });
     out
 }
 
 /// SIGKILL `pid` if it still has the starttime it was selected with.
-fn sigkill_verified(pid: u32, starttime: &str) -> bool {
-    if starttime.is_empty() || crate::lockfile::proc_starttime(pid).as_deref() != Some(starttime) {
-        return false;
-    }
-    // SAFETY: identity re-verified immediately above; ESRCH is benign, and the
-    // residual window is the one every pid-addressed signal has.
-    unsafe { libc::kill(pid.cast_signed(), libc::SIGKILL) == 0 }
+fn sigkill_verified(identity: crate::process::ProcIdentity) -> bool {
+    matches!(
+        crate::process::kill_verified(identity, libc::SIGKILL),
+        Ok(crate::process::Delivery::Signalled)
+    )
 }
 
 /// What one reap did.
@@ -382,14 +355,13 @@ struct ReapReport {
 /// dead. A zombie's environment reads empty, so it no longer counts as a
 /// carrier anyway; this only decides how long [`settle`] waits.
 fn is_running(pid: u32) -> bool {
-    let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+    let Some(pid) = crate::process::Pid::new(pid) else {
         return false;
     };
-    let state = stat
-        .rfind(')')
-        .and_then(|close| stat.get(close + 2..))
-        .and_then(|post| post.split_whitespace().next());
-    !matches!(state, None | Some("Z" | "X"))
+    let Ok(stat) = crate::process::ProcStat::read(pid) else {
+        return false;
+    };
+    !matches!(stat.state(), 'Z' | 'X')
 }
 
 /// Wait, briefly, for signalled processes to finish dying, so the rescan that
@@ -422,9 +394,10 @@ fn reap_in(dir: &Path, me: u32) -> ReapReport {
         }
         let mut this_pass = Vec::new();
         for orphan in &remaining {
-            if sigkill_verified(orphan.pid, &orphan.starttime) {
-                this_pass.push(orphan.pid);
-                if signalled.insert(orphan.pid) {
+            let pid = orphan.pid;
+            if sigkill_verified(orphan.identity) {
+                this_pass.push(pid);
+                if signalled.insert(pid) {
                     report.killed.push(orphan.comm.clone());
                 }
             }
@@ -514,7 +487,7 @@ mod tests {
         ProcRow {
             ppid,
             comm: comm.to_owned(),
-            starttime: starttime.to_string(),
+            start: crate::process::StartTicks::new(starttime),
             token: token.map(str::to_owned),
         }
     }

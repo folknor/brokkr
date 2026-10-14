@@ -1,12 +1,15 @@
 //! Resolve `brokkr lint-corpus` selection flags to a concrete probe-id set.
 //!
-//! Mirrors `src/piners/select.rs`: selection is over the pinned universe in
-//! `lints.toml`; `--keyword` unions groupings, `--probe` picks ids directly,
+//! Uses the shared selector engine in `src/piners/selector.rs` over the lint
+//! universe in `lints.toml`; lint has no pending-probe state, and
 //! `--all`/`--verify-only` take the whole universe. A bare invocation is an
 //! error, so the full pass never runs by accident.
 
+use std::collections::BTreeSet;
+
 use crate::error::DevError;
 use crate::piners::lint::registry::LintRegistry;
+use crate::piners::selector::{self, SelectionArgs, SelectionPolicy};
 
 /// Flags that drive selection, lifted off the CLI command.
 #[derive(Debug, Default)]
@@ -20,61 +23,25 @@ pub struct SelectArgs {
 
 /// Resolve `args` against `registry` to an ordered, de-duplicated id list.
 pub fn resolve(registry: &LintRegistry, args: &SelectArgs) -> Result<Vec<String>, DevError> {
-    if args.all_universe || args.all {
-        if registry.pins.is_empty() {
-            return Err(DevError::Config(
-                "piners lint: lints.toml is empty - nothing to select".into(),
-            ));
-        }
-        return Ok(registry.pins.keys().cloned().collect());
-    }
-
-    let mut selected: Vec<String> = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-
-    for keyword in &args.keywords {
-        let ids = registry.keywords.get(keyword).ok_or_else(|| {
-            DevError::Config(format!(
-                "piners lint: unknown keyword '{keyword}' (available: {})",
-                available(registry)
-            ))
-        })?;
-        for id in ids {
-            if seen.insert(id.clone()) {
-                selected.push(id.clone());
-            }
-        }
-    }
-
-    for probe in &args.probe {
-        if !registry.pins.contains_key(probe) {
-            return Err(DevError::Config(format!(
-                "piners lint: unknown probe '{probe}' - not pinned in lints.toml"
-            )));
-        }
-        if seen.insert(probe.clone()) {
-            selected.push(probe.clone());
-        }
-    }
-
-    if selected.is_empty() {
-        return Err(DevError::Config(format!(
-            "piners lint: no probes selected. Pass --keyword <k> (repeatable), \
-             --probe <id>, or --all. Available keywords: {}",
-            available(registry)
-        )));
-    }
-
-    Ok(selected)
-}
-
-fn available(registry: &LintRegistry) -> String {
-    let names = registry.keyword_names();
-    if names.is_empty() {
-        "none".to_owned()
-    } else {
-        names.join(", ")
-    }
+    let pending = BTreeSet::new();
+    selector::resolve_selection(
+        &registry.pins,
+        &registry.keywords,
+        &pending,
+        &SelectionArgs {
+            keywords: &args.keywords,
+            probes: &args.probe,
+            all: args.all,
+            whole_universe: args.all_universe,
+        },
+        &SelectionPolicy {
+            label: "piners lint",
+            registry_file: "lints.toml",
+            whole_universe_named_error: None,
+            pending_hint: None,
+        },
+        |_| {},
+    )
 }
 
 #[cfg(test)]

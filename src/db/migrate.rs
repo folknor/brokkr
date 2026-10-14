@@ -130,7 +130,7 @@ fn migrate_uuid(conn: &rusqlite::Connection) -> Result<(), DevError> {
 
     let mut update = conn.prepare("UPDATE runs SET uuid = ?1 WHERE id = ?2")?;
     for id in ids {
-        let uuid = super::types::generate_uuid()?;
+        let uuid = super::generate_uuid()?;
         update.execute(rusqlite::params![uuid, id])?;
     }
 
@@ -157,6 +157,7 @@ fn migrate_v2_to_v3(conn: &rusqlite::Connection) -> Result<(), DevError> {
         conn.execute_batch("ALTER TABLE runs ADD COLUMN peak_rss_mb REAL")?;
     }
     if !has_column(conn, "runs", "project") {
+        // Existing rows in the original results database belong to pbfhogg.
         conn.execute_batch("ALTER TABLE runs ADD COLUMN project TEXT NOT NULL DEFAULT 'pbfhogg'")?;
     }
 

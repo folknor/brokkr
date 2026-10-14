@@ -36,11 +36,129 @@
 
 mod selection {
     use std::collections::BTreeSet;
+    use std::fmt::{self, Display, Formatter};
 
     use super::features::{project, DroppedToken, FeatureOracle, Projected, WorkspaceFeatures};
     use crate::config::{BinConfig, Certifies, EffectiveUnification, SweepProfile};
     use crate::error::DevError;
     use crate::profile::ResolvedSweep;
+
+    /// A versioned, length-prefixed encoder for identity keys. Fields are
+    /// encoded in declaration order and enums use explicit tags; changing a
+    /// Rust `Debug` implementation therefore cannot silently change identity.
+    #[derive(Default)]
+    struct StableEncoder(Vec<u8>);
+
+    impl StableEncoder {
+        fn tag(&mut self, value: u8) {
+            self.0.push(value);
+        }
+
+        fn count(&mut self, value: usize) {
+            self.0.extend_from_slice(&(value as u64).to_be_bytes());
+        }
+
+        fn string(&mut self, value: &str) {
+            self.count(value.len());
+            self.0.extend_from_slice(value.as_bytes());
+        }
+
+        fn strings(&mut self, values: &[String]) {
+            self.count(values.len());
+            for value in values {
+                self.string(value);
+            }
+        }
+
+        fn pairs(&mut self, values: &[(String, String)]) {
+            self.count(values.len());
+            for (key, value) in values {
+                self.string(key);
+                self.string(value);
+            }
+        }
+
+        fn profile(&mut self, value: Option<SweepProfile>) {
+            match value {
+                None => self.tag(0),
+                Some(SweepProfile::Dev) => self.tag(1),
+                Some(SweepProfile::Release) => self.tag(2),
+            }
+        }
+
+        fn unification(&mut self, value: EffectiveUnification) {
+            match value.describe() {
+                None => self.tag(0),
+                Some(mode) => {
+                    self.tag(1);
+                    self.string(mode);
+                }
+            }
+        }
+
+        fn finish(self) -> Vec<u8> {
+            self.0
+        }
+    }
+
+    /// The configured package/feature shape used to group policy universes.
+    /// The test package exclusions are included because they change the
+    /// enumerated universe. Support binaries are omitted: they are execution
+    /// inputs, not part of the set of test pairs a shape can contain.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub(crate) struct DeclaredShape {
+        packages: Vec<String>,
+        test_exclude_packages: Vec<String>,
+        features: Vec<String>,
+        rustflags: Vec<String>,
+        env: Vec<(String, String)>,
+        profile: Option<SweepProfile>,
+        unification: EffectiveUnification,
+    }
+
+    impl DeclaredShape {
+        pub(crate) fn of(sweep: &ResolvedSweep) -> Self {
+            Self {
+                packages: sweep.packages.clone(),
+                test_exclude_packages: sweep.test_exclude_packages.clone(),
+                features: sweep.features.configured_key(),
+                rustflags: sweep.rustflags.clone(),
+                env: sweep.env.iter().map(|(key, value)| (key.clone(), value.clone())).collect(),
+                profile: sweep.profile,
+                unification: sweep.effective_unification,
+            }
+        }
+
+        fn stable_encoding(&self) -> Vec<u8> {
+            let mut out = StableEncoder::default();
+            out.string("brokkr.declared-shape.v1");
+            out.strings(&self.packages);
+            out.strings(&self.test_exclude_packages);
+            out.strings(&self.features);
+            out.strings(&self.rustflags);
+            out.pairs(&self.env);
+            out.profile(self.profile);
+            out.unification(self.unification);
+            out.finish()
+        }
+
+        pub(crate) fn id(&self) -> ShapeId {
+            let encoding = self.stable_encoding();
+            ShapeId(format!("{:016x}", xxhash_rust::xxh3::xxh3_64(&encoding)))
+        }
+    }
+
+    /// Stable text form of one declared policy shape. It is minted only from
+    /// `DeclaredShape`, never from an effective request or a debug rendering.
+    #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
+    #[serde(transparent)]
+    pub(crate) struct ShapeId(String);
+
+    impl Display for ShapeId {
+        fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+            f.write_str(&self.0)
+        }
+    }
 
     /// The phases a per-sweep selection exists for. Preparation reads Test's.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -310,6 +428,133 @@ mod selection {
                 Selection::Bare => Self::Bare,
             }
         }
+
+        fn encode(&self, out: &mut StableEncoder) {
+            match self {
+                Self::Packages(packages) => {
+                    out.tag(1);
+                    out.strings(packages);
+                }
+                Self::WorkspaceExcluding(packages) => {
+                    out.tag(2);
+                    out.strings(packages);
+                }
+                Self::Bare => out.tag(3),
+            }
+        }
+    }
+
+    /// A package name inside a build-identity key, where its type must not be
+    /// confused with a feature, flag, path, or test filter.
+    #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub(crate) struct PkgName(String);
+
+    impl PkgName {
+        fn encode(&self, out: &mut StableEncoder) {
+            out.string(&self.0);
+        }
+
+        fn as_str(&self) -> &str {
+            &self.0
+        }
+    }
+
+    /// Resolution boundary for one request in an effective build.
+    #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub(crate) enum Resolution {
+        Combined,
+        Package(PkgName),
+    }
+
+    impl Resolution {
+        pub(crate) fn from_option(value: Option<&str>) -> Self {
+            match value {
+                Some(package) => Self::Package(PkgName(package.to_owned())),
+                None => Self::Combined,
+            }
+        }
+
+        pub(crate) fn as_option(&self) -> Option<&str> {
+            match self {
+                Self::Combined => None,
+                Self::Package(package) => Some(package.as_str()),
+            }
+        }
+
+        fn encode(&self, out: &mut StableEncoder) {
+            match self {
+                Self::Combined => out.tag(0),
+                Self::Package(package) => {
+                    out.tag(1);
+                    package.encode(out);
+                }
+            }
+        }
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct EffectiveBuildRequest {
+        selection: ProjectedSelection,
+        resolution: Resolution,
+        features: Vec<String>,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct SupportBuild {
+        package: PkgName,
+        features: Vec<String>,
+    }
+
+    /// What a lane effectively builds: compile settings plus every concrete
+    /// cargo request, with selection provenance removed. The named request
+    /// types and versioned encoding keep field roles and identity explicit.
+    #[derive(Debug, Clone)]
+    struct EffectiveBuild {
+        profile: Option<SweepProfile>,
+        rustflags: Vec<String>,
+        env: Vec<(String, String)>,
+        unification: EffectiveUnification,
+        runs: Vec<EffectiveBuildRequest>,
+        support: Vec<SupportBuild>,
+    }
+
+    impl EffectiveBuild {
+        fn stable_encoding(&self) -> Vec<u8> {
+            let mut out = StableEncoder::default();
+            out.string("brokkr.effective-build.v1");
+            out.profile(self.profile);
+            out.strings(&self.rustflags);
+            out.pairs(&self.env);
+            out.unification(self.unification);
+            out.count(self.runs.len());
+            for run in &self.runs {
+                run.selection.encode(&mut out);
+                run.resolution.encode(&mut out);
+                out.strings(&run.features);
+            }
+            out.count(self.support.len());
+            for support in &self.support {
+                support.package.encode(&mut out);
+                out.strings(&support.features);
+            }
+            out.finish()
+        }
+    }
+
+    impl PartialEq for EffectiveBuild {
+        fn eq(&self, other: &Self) -> bool {
+            // The stable encoding is the identity contract: new fields that
+            // affect compilation must be added to `stable_encoding`.
+            self.stable_encoding() == other.stable_encoding()
+        }
+    }
+
+    impl Eq for EffectiveBuild {}
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum SupportIdentity {
+        Exclude,
+        Include,
     }
 
     /// The sweep's features projected onto `selected`, with `domain` (plus
@@ -363,6 +608,8 @@ mod selection {
         TestExcluded,
         /// The sweep has a `packages` list and it is not on it.
         NotListed,
+        /// The install-feature phase: the package is not in `[bin] install`.
+        NotInstalled,
     }
 
     /// A package the invocation named and a sweep's rules did not admit.
@@ -381,6 +628,9 @@ mod selection {
                 AdmissionRule::NotListed => {
                     write!(f, "-p {} is not in this sweep's packages list", self.package)
                 }
+                AdmissionRule::NotInstalled => {
+                    write!(f, "-p {} is not in [bin] install", self.package)
+                }
             }
         }
     }
@@ -397,14 +647,28 @@ mod selection {
     /// The package rules. The exclusion list is checked before the packages
     /// list, so a package both rule out is reported as excluded.
     fn admit(sweep: &ResolvedSweep, packages: &[String], phase: SelectionPhase) -> Admission {
+        let excluded: &[String] =
+            if phase.honours_test_exclusions() { &sweep.test_exclude_packages } else { &[] };
+        let allowlist = (!sweep.packages.is_empty())
+            .then_some((sweep.packages.as_slice(), AdmissionRule::NotListed));
+        admit_against(packages, excluded, allowlist)
+    }
+
+    /// The one admission rule every selection shares: `excluded` rules a
+    /// package out first, then a package off `allowlist` (when there is one) is
+    /// ruled out under the paired rule. Kept packages are in `packages` order,
+    /// each once; every refused package gets one note.
+    fn admit_against(
+        packages: &[String],
+        excluded: &[String],
+        allowlist: Option<(&[String], AdmissionRule)>,
+    ) -> Admission {
         let mut out = Admission::default();
         for pkg in packages {
-            let rule = if phase.honours_test_exclusions() && sweep.test_exclude_packages.contains(pkg) {
+            let rule = if excluded.contains(pkg) {
                 Some(AdmissionRule::TestExcluded)
-            } else if !sweep.packages.is_empty() && !sweep.packages.contains(pkg) {
-                Some(AdmissionRule::NotListed)
             } else {
-                None
+                allowlist.and_then(|(list, rule)| (!list.contains(pkg)).then_some(rule))
             };
             match rule {
                 Some(rule) => {
@@ -508,8 +772,13 @@ mod selection {
         /// compile-affecting about the sweep plus every request, provenance
         /// excluded. `profile` is `None` where the caller substitutes its own
         /// answer (`brokkr test`'s effective debug).
-        fn effective_key(&self, sweep: &ResolvedSweep, profile: Option<SweepProfile>) -> EffectiveKey {
-            EffectiveKey {
+        fn effective_build(
+            &self,
+            sweep: &ResolvedSweep,
+            profile: Option<SweepProfile>,
+            support_identity: SupportIdentity,
+        ) -> EffectiveBuild {
+            EffectiveBuild {
                 profile,
                 rustflags: sweep.rustflags.clone(),
                 env: sweep.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
@@ -517,9 +786,23 @@ mod selection {
                 runs: self
                     .runs
                     .iter()
-                    .map(|r| (ProjectedSelection::of(&r.selection), r.resolution.clone(), r.features.clone()))
+                    .map(|r| EffectiveBuildRequest {
+                        selection: ProjectedSelection::of(&r.selection),
+                        resolution: Resolution::from_option(r.resolution.as_deref()),
+                        features: r.features.clone(),
+                    })
                     .collect(),
-                support: self.support.iter().map(|s| (s.package.clone(), s.features.clone())).collect(),
+                support: match support_identity {
+                    SupportIdentity::Exclude => Vec::new(),
+                    SupportIdentity::Include => self
+                        .support
+                        .iter()
+                        .map(|s| SupportBuild {
+                            package: PkgName(s.package.clone()),
+                            features: s.features.clone(),
+                        })
+                        .collect(),
+                },
             }
         }
 
@@ -543,21 +826,6 @@ mod selection {
         pub(crate) fn run_for(&self, resolution: Option<&str>) -> Option<&ResolutionRun> {
             self.runs.iter().find(|r| r.resolution.as_deref() == resolution)
         }
-    }
-
-    /// What two lanes compile, compared for dedupe: the compile-affecting
-    /// parts of the build shape other than packages and features (profile,
-    /// rustflags, env, unification), plus the full ordered list of run
-    /// requests - effective selection without provenance, resolution
-    /// boundary, projected features - and the support requests with theirs.
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    struct EffectiveKey {
-        profile: Option<SweepProfile>,
-        rustflags: Vec<String>,
-        env: Vec<(String, String)>,
-        unification: EffectiveUnification,
-        runs: Vec<(ProjectedSelection, Option<String>, Vec<String>)>,
-        support: Vec<(String, Vec<String>)>,
     }
 
     /// A lane whose rules admit none of the invocation's packages.
@@ -676,12 +944,38 @@ mod selection {
         /// policies differ even where their builds do not.
         Never,
         /// Clippy and rustdoc: two lanes compiling the same requests under
-        /// the same compile inputs ([`EffectiveKey`]) are one lint (or doc)
+        /// the same compile inputs ([`EffectiveBuild`]) are one lint (or doc)
         /// surface.
         BuildShape,
         /// `brokkr test`: two lanes that would execute identically
         /// ([`ExecProjection`]), with each sweep's effective debug answer.
         Execution(&'a dyn Fn(&ResolvedSweep) -> bool),
+    }
+
+    /// A selection refusal with structured fields; its displayed wording is
+    /// the user-facing message passed to the existing command error path.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub(crate) enum SelectionRefusal {
+        NothingReached { phase: SelectionPhase, packages: Vec<String>, applicable: Vec<String> },
+    }
+
+    impl Display for SelectionRefusal {
+        fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+            match self {
+                Self::NothingReached { phase: SelectionPhase::Test, packages, .. } => write!(
+                    f,
+                    "-p {}: every sweep's config rules the selection out; zero tests ran",
+                    packages.join(" -p ")
+                ),
+                Self::NothingReached { phase, packages, applicable } => write!(
+                    f,
+                    "-p {}: every sweep's config rules the selection out ({}); nothing reached {}",
+                    packages.join(" -p "),
+                    applicable.join(", "),
+                    phase.name()
+                ),
+            }
+        }
     }
 
     /// One phase's selection: one entry per active sweep, in order.
@@ -695,7 +989,7 @@ mod selection {
         entries: Vec<LaneEntry>,
         /// "Nothing reached this phase" - stored here at construction and
         /// reported at the phase boundary, never raised here.
-        refusal: Option<String>,
+        refusal: Option<SelectionRefusal>,
     }
 
     impl PhaseSelection {
@@ -760,7 +1054,7 @@ mod selection {
             oracle: &FeatureOracle<'_>,
         ) -> Result<Self, DevError> {
             let mut entries: Vec<LaneEntry> = Vec::with_capacity(sweeps.len());
-            let mut shapes: Vec<(EffectiveKey, usize)> = Vec::new();
+            let mut shapes: Vec<(EffectiveBuild, usize)> = Vec::new();
             let mut projections: Vec<(ExecProjection, usize)> = Vec::new();
             for (i, sweep) in sweeps.iter().enumerate() {
                 let admission = match provenance {
@@ -793,10 +1087,10 @@ mod selection {
                 let onto = match dedupe {
                     Dedupe::Never => None,
                     Dedupe::BuildShape => {
-                        let key = attempt.effective_key(sweep, sweep.profile);
-                        let onto = shapes.iter().find(|(k, _)| *k == key).map(|(_, j)| *j);
+                        let build = attempt.effective_build(sweep, sweep.profile, SupportIdentity::Exclude);
+                        let onto = shapes.iter().find(|(candidate, _)| *candidate == build).map(|(_, j)| *j);
                         if onto.is_none() {
-                            shapes.push((key, i));
+                            shapes.push((build, i));
                         }
                         onto
                     }
@@ -824,7 +1118,7 @@ mod selection {
         /// out of this phase: nothing would be checked, which must not read as
         /// clean. A phase with no applicable sweep at all (rustdoc over only
         /// doctest carriers) is not refused.
-        fn nothing_reached(&self, sweeps: &[ResolvedSweep]) -> Option<String> {
+        fn nothing_reached(&self, sweeps: &[ResolvedSweep]) -> Option<SelectionRefusal> {
             if !self.enabled || self.overrides.is_empty() {
                 return None;
             }
@@ -841,16 +1135,10 @@ mod selection {
             if applicable.is_empty() {
                 return None;
             }
-            let scope = self.overrides.join(" -p ");
-            Some(match self.phase {
-                SelectionPhase::Test => {
-                    format!("-p {scope}: every sweep's config rules the selection out; zero tests ran")
-                }
-                SelectionPhase::Clippy | SelectionPhase::Rustdoc => format!(
-                    "-p {scope}: every sweep's config rules the selection out ({}); nothing reached {}",
-                    applicable.join(", "),
-                    self.phase.name()
-                ),
+            Some(SelectionRefusal::NothingReached {
+                phase: self.phase,
+                packages: self.overrides.clone(),
+                applicable: applicable.into_iter().map(str::to_owned).collect(),
             })
         }
 
@@ -879,14 +1167,14 @@ mod selection {
             self.entry(sweep).and_then(LaneEntry::attempt)
         }
 
-        pub(crate) fn refusal(&self) -> Option<&str> {
-            self.refusal.as_deref()
+        pub(crate) fn refusal(&self) -> Option<&SelectionRefusal> {
+            self.refusal.as_ref()
         }
 
         /// Report the stored refusal, at the phase boundary.
         pub(crate) fn check_refusal(&self) -> Result<(), DevError> {
             match &self.refusal {
-                Some(m) => Err(DevError::Config(m.clone())),
+                Some(refusal) => Err(DevError::Config(refusal.to_string())),
                 None => Ok(()),
             }
         }
@@ -895,7 +1183,7 @@ mod selection {
     /// What `brokkr test` dedupes on: everything that decides what a lane
     /// builds and executes, and nothing about where its selection came from.
     ///
-    /// The lane's [`EffectiveKey`] - every run request (effective selection
+    /// The lane's [`EffectiveBuild`] - every run request (effective selection
     /// WITHOUT provenance, resolution boundary, projected features) and
     /// support request, unification, rustflags, env - with the effective
     /// debug answer in place of the configured profile (which `--debug`/
@@ -903,7 +1191,7 @@ mod selection {
     /// twin run different things. Admission notes are outside it.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub(crate) struct ExecProjection {
-        key: EffectiveKey,
+        key: EffectiveBuild,
         debug: bool,
         doc_only: bool,
     }
@@ -911,7 +1199,7 @@ mod selection {
     impl ExecProjection {
         fn of(sweep: &ResolvedSweep, attempt: &Attempt, debug: bool) -> Self {
             Self {
-                key: attempt.effective_key(sweep, None),
+                key: attempt.effective_build(sweep, None, SupportIdentity::Include),
                 debug,
                 doc_only: matches!(sweep.lane_exec(), crate::profile::LaneExec::DocOnly { .. }),
             }
@@ -983,9 +1271,11 @@ mod selection {
         /// The CLI `-p` set rules every install package out. A visible skip,
         /// never a refusal.
         Skipped(&'static str),
-        /// The install packages to check, in config order. Which of their bins
-        /// are eligible stays a runtime fact (cargo's own answer).
-        Eligible { packages: Vec<String>, configured: usize, debug: bool },
+        /// The install packages to check: config order with no `-p`, the
+        /// invocation's order under one. Which of their bins are eligible
+        /// stays a runtime fact (cargo's own answer). `notes` name every `-p`
+        /// package the install set did not admit.
+        Eligible { packages: Vec<String>, configured: usize, debug: bool, notes: Vec<AdmissionNote> },
     }
 
     impl InstallSelection {
@@ -1007,17 +1297,19 @@ mod selection {
             if !super::install_feature_applies(cfg.install_feature_check, certifies) {
                 return Self::NotApplicable("install_feature_check rules this run out");
             }
-            // CLI `-p` intersects, matching every other phase. (Under the gate
-            // this is unreachable - a complete profile refuses `-p` outright.)
-            let packages: Vec<String> = if cli.is_empty() {
-                cfg.install.clone()
-            } else {
-                cfg.install.iter().filter(|p| cli.contains(p)).cloned().collect()
-            };
-            if packages.is_empty() {
+            // CLI `-p` is admitted through the same rule every other phase
+            // uses, with `[bin] install` as the allowlist. (Under the gate this
+            // is unreachable - a complete profile refuses `-p` outright.)
+            let requested = if cli.is_empty() { &cfg.install } else { cli };
+            let Admission { kept, notes } = admit_against(
+                requested,
+                &[],
+                Some((cfg.install.as_slice(), AdmissionRule::NotInstalled)),
+            );
+            if kept.is_empty() {
                 return Self::Skipped("-p rules the install set out");
             }
-            Self::Eligible { packages, configured: cfg.install.len(), debug: cfg.debug }
+            Self::Eligible { packages: kept, configured: cfg.install.len(), debug: cfg.debug, notes }
         }
     }
 
@@ -1289,7 +1581,10 @@ mod selection {
 
         #[test]
         fn rustdoc_does_not_apply_to_doctest_carriers() {
-            let doc = ResolvedSweep { doc_only: true, ..excluding("docs", &["bin"]) };
+            let doc = ResolvedSweep {
+                lane_exec: crate::profile::LaneExec::doc_only(),
+                ..excluding("docs", &["bin"])
+            };
             let sweeps = vec![sweep("default"), doc];
             let sel = for_check(SelectionPhase::Rustdoc, &sweeps, &s(&["lib"])).unwrap();
             assert!(sel.attempt(0).is_some());
@@ -1298,7 +1593,7 @@ mod selection {
                 other => panic!("expected not applicable, got {other:?}"),
             }
             // A rustdoc phase over carriers alone is not refused.
-            let only_doc = vec![ResolvedSweep { doc_only: true, ..sweep("docs") }];
+            let only_doc = vec![ResolvedSweep { lane_exec: crate::profile::LaneExec::doc_only(), ..sweep("docs") }];
             let sel = for_check(SelectionPhase::Rustdoc, &only_doc, &s(&["x"])).unwrap();
             assert!(sel.refusal().is_none());
         }
@@ -1328,14 +1623,14 @@ mod selection {
             let sweeps = vec![listed("ffi", &["a"]), listed("vm", &["b"])];
             let test = for_check(SelectionPhase::Test, &sweeps, &s(&["z"])).unwrap();
             assert_eq!(
-                test.refusal(),
-                Some("-p z: every sweep's config rules the selection out; zero tests ran")
+                test.refusal().unwrap().to_string(),
+                "-p z: every sweep's config rules the selection out; zero tests ran"
             );
             assert!(test.check_refusal().is_err());
             let clippy = for_check(SelectionPhase::Clippy, &sweeps, &s(&["z"])).unwrap();
             assert_eq!(
-                clippy.refusal(),
-                Some("-p z: every sweep's config rules the selection out (ffi, vm); nothing reached clippy")
+                clippy.refusal().unwrap().to_string(),
+                "-p z: every sweep's config rules the selection out (ffi, vm); nothing reached clippy"
             );
             // One admitting sweep is enough; no `-p` never refuses.
             let ok = for_check(SelectionPhase::Test, &sweeps, &s(&["a"])).unwrap();
@@ -1379,7 +1674,7 @@ mod selection {
 
         #[test]
         fn exec_projection_keeps_a_doctest_twin_and_differing_support_builds_apart() {
-            let twin = ResolvedSweep { doc_only: true, ..sweep("docs") };
+            let twin = ResolvedSweep { lane_exec: crate::profile::LaneExec::doc_only(), ..sweep("docs") };
             let sel =
                 for_brokkr_test(&[sweep("default"), twin], "a", PackageSource::Cli, &debug_of(false))
                     .unwrap();
@@ -1620,11 +1915,26 @@ mod selection {
             };
             assert_eq!(
                 InstallSelection::build(Some(&cfg), &[], None, true),
-                InstallSelection::Eligible { packages: s(&["daemon", "cli"]), configured: 2, debug: false }
+                InstallSelection::Eligible {
+                    packages: s(&["daemon", "cli"]),
+                    configured: 2,
+                    debug: false,
+                    notes: Vec::new(),
+                }
             );
             assert_eq!(
                 InstallSelection::build(Some(&cfg), &s(&["cli"]), None, true),
-                InstallSelection::Eligible { packages: s(&["cli"]), configured: 2, debug: false }
+                InstallSelection::Eligible { packages: s(&["cli"]), configured: 2, debug: false, notes: Vec::new() }
+            );
+            // A `-p` package outside the install set is named, not dropped silently.
+            assert_eq!(
+                InstallSelection::build(Some(&cfg), &s(&["cli", "x"]), None, true),
+                InstallSelection::Eligible {
+                    packages: s(&["cli"]),
+                    configured: 2,
+                    debug: false,
+                    notes: vec![AdmissionNote { package: "x".into(), rule: AdmissionRule::NotInstalled }],
+                }
             );
             assert!(matches!(InstallSelection::build(Some(&cfg), &s(&["x"]), None, true), InstallSelection::Skipped(_)));
             assert!(matches!(InstallSelection::build(Some(&cfg), &[], None, false), InstallSelection::NotApplicable(_)));
@@ -1650,8 +1960,8 @@ mod selection {
 
 pub(crate) use selection::{
     feature_drop_lines, join_notes, AdmissionNote, AdmissionRule, Attempt, CheckSelections,
-    InstallSelection, LaneEntry, PackageSource, PhaseSelection, ReachLedger, ResolutionRun, Selection,
-    SelectionPhase, SupportRequest,
+    DeclaredShape, InstallSelection, LaneEntry, PackageSource, PhaseSelection, ReachLedger,
+    Resolution, ResolutionRun, Selection, SelectionPhase, SupportRequest,
 };
 #[cfg(test)]
 pub(crate) use selection::package_args;

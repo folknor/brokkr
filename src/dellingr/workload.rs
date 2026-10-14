@@ -107,7 +107,7 @@ pub(crate) fn resolve(
     // Names the pin, not just the table: a workload has two of them, and the
     // fix is to re-register the one that actually drifted.
     let origin = format!("[dellingr.workloads.{name}].{origin_key} in brokkr.toml");
-    preflight::verify_file_hash(&path, xxh128, project_root, Some(&origin))?;
+    preflight::verify_file_digest(&path, xxh128, project_root, Some(&origin))?;
 
     Ok(Resolved {
         name: name.to_owned(),
@@ -237,7 +237,7 @@ mod tests {
             dir.join("brokkr.toml"),
             "project = \"dellingr\"\n\n[dellingr]\nexample = \"hotpath\"\n\n\
              [dellingr.workloads.read]\nfile = \"bench/read.lua\"\n\
-             xxh128 = \"00\"\nhotpath_file = \"examples/fields/read.lua\"\n",
+             xxh128 = \"00000000000000000000000000000000\"\nhotpath_file = \"examples/fields/read.lua\"\n",
         )
         .unwrap();
 
@@ -311,8 +311,8 @@ mod tests {
         let cfg = config_with(
             &root,
             "project = \"dellingr\"\n\n[dellingr]\nexample = \"hotpath\"\n\n\
-             [dellingr.workloads.alpha]\nfile = \"a.lua\"\nxxh128 = \"00\"\n\n\
-             [dellingr.workloads.beta]\nfile = \"b.lua\"\nxxh128 = \"11\"\n",
+             [dellingr.workloads.alpha]\nfile = \"a.lua\"\nxxh128 = \"00000000000000000000000000000000\"\n\n\
+             [dellingr.workloads.beta]\nfile = \"b.lua\"\nxxh128 = \"11111111111111111111111111111111\"\n",
         );
 
         let err = resolve(&cfg, &root, "gamma", false).unwrap_err();
@@ -328,7 +328,7 @@ mod tests {
         let cfg = config_with(
             &root,
             "project = \"dellingr\"\n\n[dellingr]\nexample = \"hotpath\"\n\n\
-             [dellingr.workloads.w]\nfile = \"nope/w.lua\"\nxxh128 = \"00\"\n",
+             [dellingr.workloads.w]\nfile = \"nope/w.lua\"\nxxh128 = \"00000000000000000000000000000000\"\n",
         );
 
         let err = resolve(&cfg, &root, "w", false).unwrap_err();

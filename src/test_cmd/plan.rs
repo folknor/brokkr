@@ -168,7 +168,7 @@ pub(super) fn prepare_sweep<'s>(
         jobs: cx.jobs,
         debug,
     };
-    let (focused, runtime_fingerprint) = if sweep.doc_only {
+    let (focused, runtime_fingerprint) = if sweep.lane_exec.is_doc_only() {
         if timeout.is_some() {
             return Err(doc_only_timeout_refusal(sweep));
         }
@@ -1045,17 +1045,9 @@ pub(super) fn decide_sweeps(
     for s in &mut sweeps {
         // The user's `<name>` is the libtest filter. Profile-level
         // `only` / `skip` / `tests` would either narrow it further (rare,
-        // surprising) or cause silent zero-match failures; drop them.
-        s.libtest_args.clear();
-        s.cargo_test_filters.clear();
-        s.name_filters.clear();
-        s.qualified_skips.clear();
-        // Nothing declared applies any more, so nothing can be audited as
-        // dead here either - and `brokkr test` runs no coverage phase anyway.
-        s.declared_filters.clear();
-        // The typed selection is the canonical copy; clear it too rather
-        // than relying on `lane_filters()` noticing the argv projections
-        // disagree with it.
+        // surprising) or cause silent zero-match failures; drop them. With
+        // nothing declared applying, nothing can be audited as dead here
+        // either - and `brokkr test` runs no coverage phase anyway.
         s.filters = crate::profile::LaneFilters::default();
         // `brokkr test` has no parallel fan-out to promote for, so the only
         // question is what the entry pinned. Resolving it here rather than

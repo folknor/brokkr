@@ -21,6 +21,7 @@ use super::{DiagKey, DiagSet, PinnableDisposition, Severity};
 use crate::error::DevError;
 use crate::lockfile::LockGuard;
 use crate::piners::registry::FilePin;
+use crate::piners::registry_io;
 use crate::preflight;
 
 /// File name of the canonical lint pin file inside the registry directory.
@@ -112,13 +113,6 @@ pub struct LintsData {
     pub probes: BTreeMap<String, LintPin>,
 }
 
-#[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct KeywordFile {
-    #[serde(default)]
-    probes: Vec<String>,
-}
-
 /// The loaded lint registry: the pinned universe plus the keyword index.
 #[derive(Debug, Default)]
 pub struct LintRegistry {
@@ -149,66 +143,22 @@ impl LintRegistry {
     }
 
     fn load_unlocked(registry_dir: &Path) -> Result<Self, DevError> {
-        if !registry_dir.is_dir() {
-            return Err(DevError::Config(format!(
-                "piners lint: registry directory not found: {}",
-                registry_dir.display()
-            )));
-        }
+        let files = registry_io::load_files(registry_dir, LINTS_FILE, "piners lint")?;
         let lints_path = registry_dir.join(LINTS_FILE);
-        let text = std::fs::read_to_string(&lints_path).map_err(|e| {
-            DevError::Config(format!(
-                "piners lint: failed to read {}: {e}",
-                lints_path.display()
-            ))
-        })?;
-        let data = parse_lints(&text, &lints_path)?;
-
-        let mut keywords = BTreeMap::new();
-        let mut entries: Vec<PathBuf> = std::fs::read_dir(registry_dir)
-            .map_err(DevError::Io)?
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .collect();
-        entries.sort();
-        for path in entries {
-            if path.file_name().and_then(|n| n.to_str()) == Some(LINTS_FILE) {
-                continue;
-            }
-            if path.extension().and_then(|e| e.to_str()) != Some("toml") {
-                continue;
-            }
-            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
-                continue;
-            };
-            let text = std::fs::read_to_string(&path).map_err(|e| {
-                DevError::Config(format!(
-                    "piners lint: failed to read keyword file {}: {e}",
-                    path.display()
-                ))
-            })?;
-            let kw: KeywordFile = toml::from_str(&text)
-                .map_err(|e| DevError::Config(format!("piners lint: {}: {e}", path.display())))?;
-            keywords.insert(stem.to_owned(), kw.probes);
-        }
+        let data = parse_lints(&files.canonical_text, &lints_path)?;
 
         Ok(Self {
             pins: data.probes,
-            keywords,
-            lints_text: text,
+            keywords: files.keywords,
+            lints_text: files.canonical_text,
         })
     }
 
     /// Structural lint: every keyword id must be pinned. Deserialization
     /// restricts `expected` to the pinnable disposition enum.
     pub fn lint(&self) -> Result<(), DevError> {
-        let mut dangling = Vec::new();
-        for (keyword, ids) in &self.keywords {
-            for id in ids {
-                if !self.pins.contains_key(id) {
-                    dangling.push(format!("{keyword}.toml -> {id}"));
-                }
-            }
-        }
+        let dangling =
+            registry_io::dangling_keywords(&self.keywords, |id| self.pins.contains_key(id));
         let mut errs = Vec::new();
         if !dangling.is_empty() {
             errs.push(format!(
@@ -224,11 +174,6 @@ impl LintRegistry {
                 errs.join("\n")
             )))
         }
-    }
-
-    /// Sorted keyword names for error/help messages.
-    pub fn keyword_names(&self) -> Vec<&str> {
-        self.keywords.keys().map(String::as_str).collect()
     }
 }
 

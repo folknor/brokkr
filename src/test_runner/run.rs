@@ -8,9 +8,10 @@ use std::time::{Duration, Instant};
 
 use super::harness_shim;
 use super::{
-    Ceilings, HungTest, KillCause, ObsEvent, ObservationSink, StreamSource, StreamTap, StrictPlan, TestTracker, WallShape,
-    WATCHDOG_POLL, clone_buffer, clone_hung, drain_libtest_json, drain_stderr, drain_to_buffer,
-    join_drains, kill_process_group, spawn_cargo_process_group, spawn_process_group, watchdog_loop,
+    Ceilings, HungTest, KillCause, ObsEvent, ObservationSink, StreamSource, StreamTap, StrictPlan,
+    TestTracker, WATCHDOG_POLL, WallShape, clone_buffer, clone_hung, drain_libtest_json,
+    drain_stderr, drain_to_buffer, join_drains, kill_process_group, spawn_cargo_process_group,
+    spawn_process_group, watchdog_loop,
 };
 use crate::error::DevError;
 use crate::output::CapturedOutput;

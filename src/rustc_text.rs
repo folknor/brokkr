@@ -5,7 +5,7 @@
 //! summary classification here gives those readers one definition of a block.
 
 /// The severity of a rustc-shaped diagnostic block.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Level {
     /// An `error:` / `error[CODE]:` block - the actionable class.
     Error,
@@ -96,15 +96,16 @@ pub fn classify_line(line: &str) -> BlockKind {
     })
 }
 
-/// Classify a cargo JSON diagnostic message using its level and message text.
+/// Classify a cargo JSON diagnostic message after its textual level has been
+/// parsed once.
 ///
 /// Cargo omits the rendered `error:` / `warning:` prefix from the JSON message,
-/// so this adapter restores it before asking the shared block classifier.
-pub fn classify_message(level: &str, message: &str) -> BlockKind {
-    let (level, prefix) = match level {
-        "warning" => (Level::Warning, "warning"),
-        "error" | "error: internal compiler error" => (Level::Error, "error"),
-        _ => (Level::Other, ""),
+/// so this restores it before asking the shared block classifier.
+pub fn classify_diagnostic(level: Level, message: &str) -> BlockKind {
+    let prefix = match level {
+        Level::Warning => "warning",
+        Level::Error => "error",
+        Level::Other => "",
     };
     let text = if prefix.is_empty() {
         message.to_owned()

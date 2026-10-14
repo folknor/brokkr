@@ -1,6 +1,5 @@
 mod compare;
 mod format;
-pub mod gate;
 mod hotpath;
 pub(crate) mod like;
 mod migrate;
@@ -16,11 +15,11 @@ pub use format::{
 };
 pub use hotpath::hotpath_data_from_json;
 pub(crate) use run_store::{Resolved, RunId, RunRef, RunSelector, RunStore};
-pub(crate) use types::KvClass;
 pub use types::{
     Distribution, DistributionUs, HotpathData, HotpathFunction, HotpathThread, KvPair, KvValue,
     PreviousRun, QueryFilter, RunRow, StoredRow,
 };
+pub(crate) use types::{KvClass, generate_uuid, short_uuid};
 
 /// Handle to the results database.
 pub struct ResultsDb {

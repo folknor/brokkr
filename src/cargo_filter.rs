@@ -7,85 +7,16 @@
 //! Test output parsing is split into a shared structured layer ([`parse_test_output`])
 //! so that both text and JSON modes can consume the same parsed results.
 //!
-//! # Why two clippy paths exist
-//!
-//! [`parse_clippy`] (text-mode parser) used to be the primary clippy
-//! ingestion path: it scraped cargo's pretty-printed stderr. That worked
-//! but lost the lint code on every warning past the first per-rule -
-//! cargo only emits `= note: #[warn(rule)]` once per crate compilation,
-//! so repeats of the same lint came through as bare `warning` headers.
-//!
-//! The clippy phase in `src/check_cmd.rs` now ingests cargo's
-//! `--message-format=json` output via [`crate::cargo_json`] instead and
-//! converts each [`crate::cargo_json::DiagnosticEvent`] into a
-//! [`ClippyDiagnostic`] for formatting - so every warning keeps its lint
-//! code in the header regardless of repeat count.
-//!
-//! [`parse_clippy`] and [`filter_clippy`] are kept because the test
-//! phase (`run_test_phase` in check_cmd.rs) still falls back to
-//! [`filter_clippy`] when a `cargo test` build emits compile errors on
-//! stderr - it's not worth a second JSON pass for the rare build-error
-//! case.
+//! Both the cargo JSON reader and the remaining text reader produce the
+//! shared [`Diagnostic`] model. The JSON path retains every code cargo emits;
+//! the text path remains for successful test builds whose warnings are read
+//! from stderr. The test build can move to JSON independently of the shared
+//! model and owner classification.
 
 use std::path::Path;
 
+use crate::diagnostic::{Diagnostic, OwnerIndex};
 use crate::rustc_text::{self, BlockKind, Level};
-
-/// One parsed clippy diagnostic. [`parse_clippy`] returns these so callers
-/// can filter/partition by source path before formatting.
-pub struct ClippyDiagnostic {
-    pub is_error: bool,
-    /// `error[E0308]` / `warning[unused_variables]` / bare `error` / bare `warning`.
-    pub header: String,
-    /// `file:line:col` (unformatted, as clippy prints it).
-    pub location: Option<String>,
-    pub message: String,
-    pub detail: Option<String>,
-}
-
-impl ClippyDiagnostic {
-    /// Extract the file portion of `location` for scope matching.
-    pub fn path(&self) -> Option<&Path> {
-        let loc = self.location.as_deref()?;
-        // A bare path is a location too: a manifest lint cargo could not
-        // place within its `Cargo.toml`.
-        let file = loc.split_once(':').map_or(loc, |(file, _)| file);
-        Some(Path::new(file))
-    }
-
-    /// True when this is a cargo *manifest* warning about a `Cargo.toml`
-    /// outside `project_root`.
-    ///
-    /// Manifest warnings carry no span, so cargo prints the manifest path as
-    /// the head of the message (`warning: /abs/path/Cargo.toml: <complaint>`)
-    /// rather than in a `file:line:col` location. Matching on that shape - and
-    /// requiring an absolute path, since a relative one is by definition in
-    /// this tree - keeps the rule from swallowing ordinary lints.
-    pub fn is_foreign_manifest_warning(&self, project_root: &Path) -> bool {
-        if self.is_error || self.location.is_some() {
-            return false;
-        }
-        let Some((path, _)) = self.message.split_once(": ") else {
-            return false;
-        };
-        let path = Path::new(path);
-        path.is_absolute()
-            && path.file_name().is_some_and(|n| n == "Cargo.toml")
-            && !path.starts_with(project_root)
-    }
-
-    /// Format as a single line, matching [`filter_clippy`]'s shape.
-    pub fn format_one(&self) -> String {
-        let base = match &self.location {
-            Some(loc) => format!("{} {} {}", self.header, loc, self.message),
-            None => format!("{} {}", self.header, self.message),
-        };
-        match &self.detail {
-            Some(d) => format!("{base} - {d}"),
-            None => base,
-        }
-    }
-}
 
 /// Parsed clippy output.
 ///
@@ -97,13 +28,13 @@ impl ClippyDiagnostic {
 /// failed run left no error-level diagnostic, and prints the captured streams
 /// after the list (`check_cmd::phase::clippy_parse_from_events`).
 pub struct ClippyParse {
-    pub diagnostics: Vec<ClippyDiagnostic>,
+    pub diagnostics: Vec<Diagnostic>,
     pub parse_failed: bool,
 }
 
 /// Parse cargo clippy text output into structured diagnostics.
 pub fn parse_clippy(output: &str) -> ClippyParse {
-    let mut diagnostics: Vec<ClippyDiagnostic> = Vec::new();
+    let mut diagnostics: Vec<Diagnostic> = Vec::new();
     let mut saw_header = false;
     let mut kept: Vec<&str> = Vec::new();
     for line in output.lines() {
@@ -127,11 +58,12 @@ pub fn parse_clippy(output: &str) -> ClippyParse {
             continue;
         }
         let lines = block.text.lines().map(str::to_owned).collect::<Vec<_>>();
-        diagnostics.push(parse_block(&lines, block.level == Level::Error));
+        diagnostics.push(parse_block(&lines, block.level));
     }
 
     // Errors first, then warnings; each half keeps discovery order.
-    let (errors, warnings): (Vec<_>, Vec<_>) = diagnostics.into_iter().partition(|d| d.is_error);
+    let (errors, warnings): (Vec<_>, Vec<_>) =
+        diagnostics.into_iter().partition(Diagnostic::is_error);
     let mut sorted = errors;
     sorted.extend(warnings);
 
@@ -154,33 +86,26 @@ pub fn parse_clippy(output: &str) -> ClippyParse {
 ///   warning[clippy::needless_return] src/d.rs:4:5 this could be simplified
 /// ```
 pub fn filter_clippy(output: &str) -> String {
-    filter_clippy_in_tree(output, None)
+    filter_clippy_with_owners(output, None)
 }
 
-/// Like [`filter_clippy`], but drops manifest-level warnings raised against a
-/// `Cargo.toml` outside `project_root`.
-///
-/// Cargo prints its own manifest complaints (deprecated `lints.*` keys, unused
-/// manifest keys) once per dependency it loads, path dependencies included. A
-/// project that builds against a vendored fork therefore gets dozens of lines
-/// about a manifest it does not own and cannot edit, on every `brokkr check`.
-/// They are not diagnostics about this repo, so they are cut here rather than
-/// merely deprioritised. Warnings about the project's own manifests survive.
-pub fn filter_clippy_in_tree(output: &str, project_root: Option<&Path>) -> String {
+/// Like [`filter_clippy`], resolving warning ownership from cargo metadata.
+pub fn filter_clippy_with_owners(output: &str, owners: Option<&OwnerIndex>) -> String {
     let mut parsed = parse_clippy(output);
     if parsed.parse_failed {
         return output.to_string();
     }
-    if let Some(root) = project_root {
-        parsed
-            .diagnostics
-            .retain(|d| !d.is_foreign_manifest_warning(root));
+    if let Some(owners) = owners {
+        for diagnostic in &mut parsed.diagnostics {
+            diagnostic.classify_owner(owners);
+        }
+        parsed.diagnostics.retain(|d| !d.is_dependency_warning());
     }
     if parsed.diagnostics.is_empty() {
         return "cargo clippy: no issues".into();
     }
 
-    let errors = parsed.diagnostics.iter().filter(|d| d.is_error).count();
+    let errors = parsed.diagnostics.iter().filter(|d| d.is_error()).count();
     let warnings = parsed.diagnostics.len() - errors;
 
     let mut result = format!("cargo clippy: {errors} errors, {warnings} warnings\n");
@@ -1162,8 +1087,8 @@ fn extract_detail(block: &[String]) -> Option<String> {
 /// Parse a diagnostic block into structured fields.
 ///
 /// `["error[E0425]: cannot find value ...", " --> src/foo.rs:10:5", ...]`
-/// → `ClippyDiagnostic { header: "error[E0425]", location: Some("src/foo.rs:10:5"), ... }`
-fn parse_block(block: &[String], is_error: bool) -> ClippyDiagnostic {
+/// → `Diagnostic { level: Error, code: Some("E0425"), site: ..., ... }`
+fn parse_block(block: &[String], level: Level) -> Diagnostic {
     let (mut header, message) = parse_header(&block[0]);
     // If the header didn't carry a [rule], try to recover one from a
     // `= note: \`#[warn(rule)]\`` line in the block. Real cargo/clippy
@@ -1173,16 +1098,39 @@ fn parse_block(block: &[String], is_error: bool) -> ClippyDiagnostic {
     {
         header = format!("{header}[{rule}]");
     }
-    let location = extract_location(block);
-    let detail = extract_detail(block);
+    let mut diagnostic = Diagnostic::new(level, code_from_header(&header), message);
+    diagnostic.site = extract_location(block)
+        .as_deref()
+        .and_then(parse_site);
+    diagnostic.detail = extract_detail(block);
+    diagnostic
+}
 
-    ClippyDiagnostic {
-        is_error,
-        header,
-        location,
-        message,
-        detail,
+fn code_from_header(header: &str) -> Option<String> {
+    let start = header.find('[')? + 1;
+    let end = header[start..].find(']')? + start;
+    (end > start).then(|| header[start..end].to_owned())
+}
+
+fn parse_site(location: &str) -> Option<crate::diagnostic::Site> {
+    let location = location.trim();
+    if location.is_empty() {
+        return None;
     }
+    let mut parts = location.rsplitn(3, ':');
+    let parsed = match (parts.next(), parts.next(), parts.next()) {
+        (Some(column), Some(line), Some(file)) => match (line.parse(), column.parse()) {
+            (Ok(line), Ok(column)) => Some((file, Some(line), Some(column))),
+            _ => None,
+        },
+        _ => None,
+    };
+    let (file, line, column) = parsed.unwrap_or((location, None, None));
+    Some(crate::diagnostic::Site {
+        file: std::path::PathBuf::from(file),
+        line,
+        column,
+    })
 }
 
 /// Parse `"N <label>"` from a test result line.
@@ -1223,6 +1171,23 @@ mod tests {
     )]
     use super::*;
 
+    /// Filter with ownership resolved against a workspace at `/home/me/proj`
+    /// whose one member is the root package.
+    fn filter_clippy_in_tree(output: &str) -> String {
+        let root = Path::new("/home/me/proj");
+        let manifests = std::collections::HashMap::from([(
+            root.join("Cargo.toml"),
+            "path+file:///home/me/proj#proj@0.1.0".to_owned(),
+        )]);
+        let owners = OwnerIndex::from_metadata_at(
+            root,
+            root,
+            &std::collections::HashMap::new(),
+            &manifests,
+        );
+        filter_clippy_with_owners(output, Some(&owners))
+    }
+
     #[test]
     fn foreign_manifest_warnings_are_dropped() {
         let output = "\
@@ -1231,7 +1196,7 @@ warning: /home/me/proj/Cargo.toml: `lints.clippy.map-entry` is deprecated
 warning: unused variable: `x`
  --> src/a.rs:1:9
 ";
-        let filtered = filter_clippy_in_tree(output, Some(Path::new("/home/me/proj")));
+        let filtered = filter_clippy_in_tree(output);
         assert!(!filtered.contains("/elsewhere/"));
         assert!(filtered.contains("/home/me/proj/Cargo.toml"));
         assert!(filtered.contains("unused variable"));
@@ -1244,7 +1209,7 @@ warning: unused variable: `x`
             "warning: /elsewhere/iced/Cargo.toml: `lints.clippy.map-entry` is deprecated\n";
         assert!(filter_clippy(output).contains("/elsewhere/"));
         assert_eq!(
-            filter_clippy_in_tree(output, Some(Path::new("/home/me/proj"))),
+            filter_clippy_in_tree(output),
             "cargo clippy: no issues"
         );
     }
@@ -1956,50 +1921,54 @@ warning: unused variable: `x` [unused_variables]
         assert!(!parsed.parse_failed);
         assert_eq!(parsed.diagnostics.len(), 2);
         // Errors come first.
-        assert!(parsed.diagnostics[0].is_error);
-        assert_eq!(parsed.diagnostics[0].header, "error[E0308]");
+        assert!(parsed.diagnostics[0].is_error());
+        assert_eq!(parsed.diagnostics[0].code.as_deref(), Some("E0308"));
         assert_eq!(
-            parsed.diagnostics[0].location.as_deref(),
+            parsed.diagnostics[0].location().as_deref(),
             Some("src/foo.rs:20:5")
         );
         assert_eq!(parsed.diagnostics[0].message, "mismatched types");
-        assert!(!parsed.diagnostics[1].is_error);
-        assert_eq!(parsed.diagnostics[1].header, "warning[unused_variables]");
+        assert!(!parsed.diagnostics[1].is_error());
+        assert_eq!(
+            parsed.diagnostics[1].code.as_deref(),
+            Some("unused_variables")
+        );
     }
 
     #[test]
     fn clippy_diagnostic_path_extracts_file() {
-        let d = ClippyDiagnostic {
-            is_error: true,
-            header: "error[E0308]".into(),
-            location: Some("src/foo.rs:20:5".into()),
-            message: "mismatched types".into(),
-            detail: None,
-        };
+        let mut d = Diagnostic::new(
+            Level::Error,
+            Some("E0308".into()),
+            "mismatched types".into(),
+        );
+        d.site = Some(crate::diagnostic::Site {
+            file: "src/foo.rs".into(),
+            line: Some(20),
+            column: Some(5),
+        });
         assert_eq!(d.path(), Some(Path::new("src/foo.rs")));
     }
 
     #[test]
     fn clippy_diagnostic_path_none_without_location() {
-        let d = ClippyDiagnostic {
-            is_error: false,
-            header: "warning".into(),
-            location: None,
-            message: "something".into(),
-            detail: None,
-        };
+        let d = Diagnostic::new(Level::Warning, None, "something".into());
         assert!(d.path().is_none());
     }
 
     #[test]
     fn clippy_diagnostic_format_one_matches_filter_output() {
-        let d = ClippyDiagnostic {
-            is_error: true,
-            header: "error[E0308]".into(),
-            location: Some("src/foo.rs:20:5".into()),
-            message: "mismatched types".into(),
-            detail: Some("expected `i32`, found `&str`".into()),
-        };
+        let mut d = Diagnostic::new(
+            Level::Error,
+            Some("E0308".into()),
+            "mismatched types".into(),
+        );
+        d.site = Some(crate::diagnostic::Site {
+            file: "src/foo.rs".into(),
+            line: Some(20),
+            column: Some(5),
+        });
+        d.detail = Some("expected `i32`, found `&str`".into());
         assert_eq!(
             d.format_one(),
             "error[E0308] src/foo.rs:20:5 mismatched types - expected `i32`, found `&str`"

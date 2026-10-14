@@ -1,267 +1,112 @@
-//! Unified dispatch layer for nidhogg commands.
+//! Nidhogg dispatch: standalone ingest uses the shared plan runner;
+//! API and tiles retain their specialized server lifecycles.
 
-use crate::context::BenchContext;
 use crate::error::DevError;
-use crate::harness::{self, BenchConfig};
+use crate::measure::runner::{self, CommandPlan, PlannedCommand, RowSubject};
 use crate::measure::{MeasureMode, MeasureRequest};
-use crate::nidhogg;
-use crate::output;
+use crate::nidhogg::commands::NidhoggCommand;
 use crate::project::{self, Project};
-use crate::resolve::resolve_pbf_with_size;
 
-/// Run a nidhogg command with the specified measurement mode.
-///
-/// Ingest follows the standard build+run_external pattern (like pbfhogg).
-/// Api and Tiles have custom lifecycles and delegate to per-module functions.
 pub(crate) fn run_command(
-    req: &MeasureRequest,
-    command: &crate::nidhogg::commands::NidhoggCommand,
+    req: &MeasureRequest<'_>,
+    command: &NidhoggCommand,
 ) -> Result<(), DevError> {
-    use crate::nidhogg::commands::NidhoggCommand;
-
     project::require(req.project, Project::Nidhogg, command.id())?;
-
-    if req.dry_run {
-        return Err(DevError::Config(
-            "--dry-run is not yet supported for nidhogg commands".into(),
-        ));
-    }
-
-    match req.mode {
-        MeasureMode::Run => match command {
-            NidhoggCommand::Ingest => run_nidhogg_ingest_run(req),
-            // Reuse the specialized measurement lifecycle for one sample;
-            // the run-mode harness reports it without persisting a result.
-            NidhoggCommand::Api { query } => nidhogg::cmd::bench_api(req, query.as_deref()),
-            NidhoggCommand::Tiles {
-                tiles_variant,
-                uring,
-            } => nidhogg::cmd::bench_tiles(req, tiles_variant.as_deref(), *uring),
-        },
-        MeasureMode::Bench { .. } => match command {
-            NidhoggCommand::Ingest => run_nidhogg_ingest_bench(req, command),
-            NidhoggCommand::Api { query } => nidhogg::cmd::bench_api(req, query.as_deref()),
-            NidhoggCommand::Tiles {
-                tiles_variant,
-                uring,
-            } => nidhogg::cmd::bench_tiles(req, tiles_variant.as_deref(), *uring),
-        },
-        MeasureMode::Hotpath { .. } | MeasureMode::Alloc { .. } => {
-            if !command.supports_hotpath() {
-                return Err(DevError::Config(format!(
-                    "command '{}' does not support hotpath/alloc profiling",
-                    command.id(),
-                )));
-            }
-            run_nidhogg_hotpath(req, command)
+    match command {
+        NidhoggCommand::Ingest => runner::run(req, &IngestPlan(command)),
+        NidhoggCommand::Api { query } => {
+            validate_server_mode(req, command)?;
+            crate::nidhogg::cmd::bench_api(req, query.as_deref())
+        }
+        NidhoggCommand::Tiles {
+            tiles_variant,
+            uring,
+        } => {
+            validate_server_mode(req, command)?;
+            crate::nidhogg::cmd::bench_tiles(req, tiles_variant.as_deref(), *uring)
         }
     }
 }
 
-/// Nidhogg ingest: lightweight run mode (build, run once, print timing, no DB).
-fn run_nidhogg_ingest_run(req: &MeasureRequest) -> Result<(), DevError> {
-    let feat_refs = req.feat_refs();
-    let ctx = BenchContext::new_for_request(
-        req,
-        Some("nidhogg"),
-        &feat_refs,
-        true,
-        &format!("run {}", "nid-ingest"),
-    )?;
+fn validate_server_mode(
+    req: &MeasureRequest<'_>,
+    command: &NidhoggCommand,
+) -> Result<(), DevError> {
+    if req.dry_run {
+        return Err(DevError::Config(
+            "--dry-run is not yet supported for nidhogg server commands".into(),
+        ));
+    }
+    if matches!(
+        req.mode,
+        MeasureMode::Hotpath { .. } | MeasureMode::Alloc { .. }
+    ) {
+        return Err(DevError::Config(format!(
+            "command '{}' does not support hotpath/alloc profiling",
+            command.id(),
+        )));
+    }
+    Ok(())
+}
 
-    let (pbf_path, _) =
-        resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
-    let pbf_str = pbf_path
-        .to_str()
-        .ok_or_else(|| DevError::Config("PBF path is not valid UTF-8".into()))?;
+/// Only ingest has a standalone argv contract. Server commands deliberately
+/// cannot be passed to the runner without a lifecycle-aware plan.
+struct IngestPlan<'a>(&'a NidhoggCommand);
 
-    let output_dir = ctx.paths.scratch_dir.join("run-ingest-output");
-    std::fs::create_dir_all(&output_dir)?;
-    let output_str = output_dir.display().to_string();
-
-    let binary_str = ctx.binary.display().to_string();
-    let args = ["ingest", pbf_str, &output_str];
-    output::run_msg(&format!("{binary_str} {}", args.join(" ")));
-
-    let out = output::run_passthrough_timed(&binary_str, &args, Some(ctx.harness.lock()))?;
-
-    // Clean up ingest output.
-    std::fs::remove_dir_all(&output_dir).ok();
-
-    if out.code != 0 {
-        return Err(DevError::ExitCode(out.code));
+impl PlannedCommand for IngestPlan<'_> {
+    fn project(&self) -> Project {
+        Project::Nidhogg
+    }
+    fn id(&self) -> &'static str {
+        self.0.id()
+    }
+    fn package(&self) -> Option<&'static str> {
+        self.0.package()
     }
 
-    let ms = crate::duration_ms(out.elapsed);
-    output::run_msg(&format!("elapsed={ms}ms"));
-    Ok(())
-}
-
-/// Nidhogg ingest: bench mode via BenchContext + run_external.
-///
-/// Uses `run_internal` with per-run scratch cleanup (ingest produces a
-/// data directory that must be cleaned between runs for accurate timing).
-fn run_nidhogg_ingest_bench(
-    req: &MeasureRequest,
-    command: &crate::nidhogg::commands::NidhoggCommand,
-) -> Result<(), DevError> {
-    let feat_refs = req.feat_refs();
-    let ctx = BenchContext::new_for_request(
-        req,
-        Some("nidhogg"),
-        &feat_refs,
-        true,
-        &format!("bench {}", command.id()),
-    )?;
-
-    let (pbf_path, file_mb) =
-        resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
-    let pbf_str = pbf_path
-        .to_str()
-        .ok_or_else(|| DevError::Config("PBF path is not valid UTF-8".into()))?;
-
-    let basename = pbf_path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or_default()
-        .to_owned();
-
-    let output_dir = ctx.paths.scratch_dir.join("bench-ingest-output");
-    let output_str = output_dir.display().to_string();
-
-    output::bench_msg(&format!(
-        "nidhogg ingest: {basename} ({file_mb:.0} MB), {} run(s)",
-        req.runs(),
-    ));
-
-    let args: Vec<&str> = vec!["ingest", pbf_str, &output_str];
-
-    let config = BenchConfig {
-        command: command.id().into(),
-        mode: None,
-        input_file: Some(basename),
-        input_mb: Some(file_mb),
-        cargo_features: None,
-        cargo_profile: crate::build::CargoProfile::Release,
-        runs: req.runs(),
-        cli_args: Some(harness::format_cli_args(
-            &ctx.binary.display().to_string(),
-            &args,
-        )),
-        brokkr_args: None,
-        metadata: command.metadata(),
-    };
-
-    // Clean scratch before first run.
-    clean_nidhogg_scratch(&output_dir)?;
-
-    // Per-run cleanup: ingest produces a data directory that must be
-    // cleaned between runs for accurate timing.
-    ctx.harness.run_internal(&config, |_i| {
-        clean_nidhogg_scratch(&output_dir)?;
-
-        let captured =
-            output::run_captured(&ctx.binary.display().to_string(), &args, req.project_root)?;
-        let ms = harness::elapsed_to_ms(&captured.elapsed);
-        captured.check_success(&ctx.binary.display().to_string())?;
-
-        Ok(harness::BenchResult {
-            elapsed_ms: ms,
-            elapsed_us: None,
-            kv: vec![],
-            iterations: Vec::new(),
-            distribution: None,
-            hotpath: None,
-        })
-    })?;
-
-    std::fs::remove_dir_all(&output_dir).ok();
-    Ok(())
-}
-
-/// Nidhogg hotpath/alloc via the dispatch layer.
-///
-/// Builds the nidhogg binary with hotpath features, resolves PBF,
-/// runs via `run_hotpath_capture`, same pattern as pbfhogg and elivagar.
-fn run_nidhogg_hotpath(
-    req: &MeasureRequest,
-    command: &crate::nidhogg::commands::NidhoggCommand,
-) -> Result<(), DevError> {
-    let alloc = req.is_alloc();
-    let feature = harness::hotpath_feature(alloc);
-
-    output::detail(&format!("nidhogg {} {feature}", command.id()));
-    harness::hotpath_alloc_note(alloc);
-
-    let hotpath_features = req.hotpath_features();
-    let ctx = BenchContext::new_for_request(
-        req,
-        Some("nidhogg"),
-        &hotpath_features,
-        true,
-        &format!("hotpath {}", command.id()),
-    )?;
-
-    let (pbf_path, file_mb) =
-        resolve_pbf_with_size(req.dataset, req.variant, &ctx.paths, req.project_root)?;
-
-    let pbf_str = pbf_path
-        .to_str()
-        .ok_or_else(|| DevError::Config("PBF path is not valid UTF-8".into()))?;
-
-    let basename = pbf_path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or_default()
-        .to_owned();
-
-    let output_dir = ctx.paths.scratch_dir.join("hotpath-ingest-output");
-    let output_str = output_dir.display().to_string();
-    std::fs::create_dir_all(&output_dir)?;
-
-    let args: Vec<&str> = vec!["ingest", pbf_str, &output_str];
-
-    let config = BenchConfig {
-        command: command.id().into(),
-        mode: None,
-        input_file: Some(basename),
-        input_mb: Some(file_mb),
-        cargo_features: None,
-        cargo_profile: crate::build::CargoProfile::Release,
-        runs: req.runs(),
-        cli_args: Some(harness::format_cli_args(
-            &ctx.binary.display().to_string(),
-            &args,
-        )),
-        brokkr_args: None,
-        metadata: vec![],
-    };
-
-    let binary_str = ctx.binary.display().to_string();
-
-    ctx.harness.run_hotpath(&config, &ctx.binary, |_i| {
-        let (result, _stderr, sidecar) = harness::run_hotpath_capture(
-            &binary_str,
-            &args,
-            &ctx.paths.scratch_dir,
+    fn plan(
+        &self,
+        req: &MeasureRequest<'_>,
+        paths: &crate::config::ResolvedPaths,
+    ) -> Result<CommandPlan, DevError> {
+        let (pbf, file_mb) = crate::resolve::resolve_pbf_with_size(
+            req.dataset,
+            req.variant,
+            paths,
             req.project_root,
-            &[],
-            &[],
-            req.stop_marker,
-            Some(ctx.harness.lock()),
         )?;
-        Ok((result, sidecar))
-    })?;
-
-    std::fs::remove_dir_all(&output_dir).ok();
-    Ok(())
-}
-
-/// Remove and recreate a scratch directory (used by nidhogg ingest between runs).
-fn clean_nidhogg_scratch(dir: &std::path::Path) -> Result<(), DevError> {
-    if dir.exists() {
-        std::fs::remove_dir_all(dir)?;
+        let pbf_str = pbf
+            .to_str()
+            .ok_or_else(|| DevError::Config("PBF path is not valid UTF-8".into()))?;
+        // Preserve each mode's historic scratch name: it is part of the
+        // subprocess cli_args stored on existing measurement rows.
+        let output_name = match req.mode {
+            MeasureMode::Run => "run-ingest-output",
+            MeasureMode::Bench { .. } => self
+                .0
+                .scratch_output_dir()
+                .ok_or_else(|| DevError::Config("ingest has no scratch output".into()))?,
+            MeasureMode::Hotpath { .. } | MeasureMode::Alloc { .. } => "hotpath-ingest-output",
+        };
+        let output_dir = paths.scratch_dir.join(output_name);
+        let args = self
+            .0
+            .build_args(pbf_str, &output_dir.display().to_string())?;
+        Ok(CommandPlan {
+            args,
+            scratch_dirs: vec![output_dir],
+            subject: RowSubject {
+                command: self.0.id().into(),
+                input_file: Some(
+                    pbf.file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or_default()
+                        .to_owned(),
+                ),
+                input_mb: Some(file_mb),
+                cli_args: None,
+                metadata: self.0.metadata(),
+            },
+        })
     }
-    std::fs::create_dir_all(dir)?;
-    Ok(())
 }

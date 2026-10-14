@@ -67,11 +67,12 @@ pub fn apply(
 
     // Each line's derived label (for naming a refusal) and its validated one
     // (`report::valid_label`, the validator integrity and the gate share).
-    let actual: BTreeMap<&str, (String, Option<crate::piners::registry::CorpusDisposition>)> = report
-        .probes
-        .iter()
-        .map(|p| (p.probe.as_str(), (p.disposition(), p.valid_disposition())))
-        .collect();
+    let actual: BTreeMap<&str, (String, Option<crate::piners::registry::CorpusDisposition>)> =
+        report
+            .probes
+            .iter()
+            .map(|p| (p.probe.as_str(), (p.disposition(), p.valid_disposition())))
+            .collect();
 
     // Validate every stamp before mutating anything.
     let mut missing: Vec<&str> = Vec::new();

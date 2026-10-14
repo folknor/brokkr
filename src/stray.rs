@@ -24,91 +24,22 @@
 //! reaper also protects a verified lock holder and its namespace. Ownership is
 //! decided by process identities, never by an ancestor being named `brokkr`;
 //! see [`Ownership`] for why a name is not enough. Signals are
-//! identity-checked against a recorded starttime, and a stray's descendant
+//! identity-checked against a typed process generation, and a stray's descendant
 //! tree dies with it, stopping at anything brokkr owns.
 
 use std::collections::{HashMap, HashSet};
 
 use crate::error::DevError;
 use crate::output;
-
-/// The process-tree boundary every reaper must spare: this process, its
-/// visible ancestors, and its visible descendants. Both stray cleanup and
-/// orphan cleanup use this same set so one cannot kill a process the other
-/// considers part of the active brokkr invocation.
-///
-/// An ancestor Cargo can hold the target-dir lock, and killing it could free
-/// that lock for nested Cargo. It would also abort the Cargo operation that
-/// launched this brokkr, so the reapers preserve the invocation chain even if
-/// that leaves a recursive Cargo lock wait unresolved.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ReaperExemptions {
-    pids: HashSet<u32>,
-}
-
-impl ReaperExemptions {
-    /// Build the shared self/ancestor/descendant exemption set from a process
-    /// table represented as `(pid, ppid)` pairs.
-    pub(crate) fn from_parent_pairs(
-        me: u32,
-        parent_pairs: impl IntoIterator<Item = (u32, u32)>,
-    ) -> Self {
-        let parents: HashMap<u32, u32> = parent_pairs.into_iter().collect();
-        let mut pids = HashSet::from([me]);
-
-        // The process and every visible ancestor are exempt. Bound the walk
-        // by the visited set against an inconsistent /proc snapshot or a
-        // reused PID.
-        let mut cursor = me;
-        while let Some(&parent) = parents.get(&cursor) {
-            if parent == 0 || parent == cursor || !pids.insert(parent) {
-                break;
-            }
-            cursor = parent;
-        }
-
-        // Walk children from `me`; the visited set makes even an inconsistent
-        // parent cycle finite and keeps this full-table scan linear.
-        let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
-        for (&pid, &parent) in &parents {
-            if parent != 0 && parent != pid {
-                children.entry(parent).or_default().push(pid);
-            }
-        }
-        let mut pending = vec![me];
-        while let Some(parent) = pending.pop() {
-            if let Some(descendants) = children.get(&parent) {
-                for &child in descendants {
-                    if pids.insert(child) {
-                        pending.push(child);
-                    }
-                }
-            }
-        }
-
-        Self { pids }
-    }
-
-    pub(crate) fn contains(&self, pid: u32) -> bool {
-        self.pids.contains(&pid)
-    }
-}
+pub(crate) use crate::process::ReaperExemptions;
 
 /// One cargo-family process selected for cleanup outside brokkr's protected
 /// invocation and ownership trees.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Stray {
     pub pid: u32,
-    /// `/proc/<pid>/stat` starttime, the identity token that makes the PID
-    /// safe to signal later.
-    ///
-    /// A PID alone is not an identity: between classification and the SIGKILL
-    /// the process can exit and the number be reused, and then the reaper
-    /// signals something it never classified - potentially brokkr itself or any
-    /// unrelated process of this user. `src/lockfile.rs` has paired every PID
-    /// with a starttime for exactly this reason since it was written; this path
-    /// did not, and that was a real hole rather than a theoretical one.
-    pub starttime: String,
+    /// Typed process generation captured in the same proc row as its parent.
+    pub identity: crate::process::ProcIdentity,
     /// `/proc/<pid>/comm`, kernel-truncated to 15 bytes.
     pub comm: String,
     /// Depth below the process tree's root, used to kill leaves first.
@@ -254,11 +185,16 @@ fn within_ns(pid: u32, ns: u64) -> bool {
 fn current_ownership() -> Ownership {
     let info = crate::lockfile::status().ok().flatten();
     let holder = info.as_ref().and_then(|info| {
-        (crate::lockfile::shares_namespaces(info)
-            && crate::lockfile::verify_identity(info.pid, &info.starttime, &info.boot_id))
+        let identity = info.process_identity()?;
+        let boot = crate::process::BootId::new(&info.boot_id)?;
+        (crate::process::shares_namespace_tokens(&info.pid_ns, &info.time_ns)
+            && crate::process::verify_identity(identity, &boot))
         .then_some(info.pid)
     });
-    let foreign_ns = info.as_ref().and_then(crate::lockfile::foreign_holder_ns);
+    let foreign_ns = info
+        .as_ref()
+        .and_then(|info| crate::process::foreign_pid_namespace(&info.pid_ns))
+        .map(crate::process::NsInode::get);
     Ownership {
         me: std::process::id(),
         holder,
@@ -269,52 +205,21 @@ fn current_ownership() -> Ownership {
 struct ProcEntry {
     ppid: u32,
     comm: String,
-    /// Field 22 of `/proc/<pid>/stat`, the PID's identity token.
-    starttime: String,
+    identity: crate::process::ProcIdentity,
 }
 
 fn read_proc() -> HashMap<u32, ProcEntry> {
     let mut table = HashMap::new();
-    let Ok(entries) = std::fs::read_dir("/proc") else {
+    let Ok(snapshot) = crate::process::ProcTable::snapshot() else {
         return table;
     };
-    for entry in entries.flatten() {
-        let Some(pid) = entry
-            .file_name()
-            .to_str()
-            .and_then(|s| s.parse::<u32>().ok())
-        else {
-            continue;
-        };
-        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
-            continue;
-        };
-        // `comm` sits in parentheses and may contain spaces or parentheses
-        // itself, so split at the LAST `)`; ppid is the second field after it.
-        let Some(open) = stat.find('(') else { continue };
-        let Some(close) = stat.rfind(')') else {
-            continue;
-        };
-        let comm = stat[open + 1..close].to_owned();
-        let post: Vec<&str> = stat[close + 2..].split_whitespace().collect();
-        // Post-comm field 0 is state, 1 is ppid; starttime is field 22 of the
-        // whole line, which is index 19 here. Same indexing as
-        // `lockfile::proc_starttime`, and read from the *same* line as ppid so
-        // the pair is coherent.
-        let Some(ppid) = post
-            .first()
-            .and_then(|_| post.get(1))
-            .and_then(|p| p.parse().ok())
-        else {
-            continue;
-        };
-        let starttime = post.get(19).map(|s| (*s).to_owned()).unwrap_or_default();
+    for (pid, stat) in snapshot.iter() {
         table.insert(
-            pid,
+            pid.get(),
             ProcEntry {
-                ppid,
-                comm,
-                starttime,
+                ppid: stat.parent().map_or(0, crate::process::Pid::get),
+                comm: stat.comm().to_owned(),
+                identity: stat.identity(),
             },
         );
     }
@@ -363,7 +268,7 @@ fn classify(table: &HashMap<u32, ProcEntry>, ownership: Ownership) -> Vec<Stray>
         }
         strays.push(Stray {
             pid,
-            starttime: entry.starttime.clone(),
+            identity: entry.identity,
             comm: entry.comm.clone(),
             depth,
             started_by: started_by.unwrap_or_else(|| "unknown".to_owned()),
@@ -394,7 +299,7 @@ fn collect_descendants(
     ownership: &Ownership,
     exemptions: &ReaperExemptions,
     seen: &mut HashSet<u32>,
-    out: &mut Vec<(usize, u32, String)>,
+    out: &mut Vec<(usize, crate::process::ProcIdentity)>,
 ) {
     if depth > 64 || ownership.owns(pid, exemptions) {
         return;
@@ -406,7 +311,7 @@ fn collect_descendants(
         if !seen.insert(child) {
             continue;
         }
-        out.push((depth + 1, child, entry.starttime.clone()));
+        out.push((depth + 1, entry.identity));
         collect_descendants(table, child, depth + 1, ownership, exemptions, seen, out);
     }
 }
@@ -436,25 +341,21 @@ pub fn kill(strays: &[Stray]) -> KillCounts {
         table.iter().map(|(&pid, entry)| (pid, entry.ppid)),
     );
 
-    // Signal `pid` only if it is still the process whose starttime we recorded.
+    // Signal only if it is still the process generation we recorded.
     // A bare PID is not an identity: between classification and the kill the
     // process can exit and the number be reused, and then this signals something
     // it never classified.
-    let sigkill = |pid: u32, expect: &str| {
+    let sigkill = |identity: crate::process::ProcIdentity| {
+        let pid = identity.pid().get();
         // Every target, descendants and starters included, not just the
         // classified strays: an owned process is never signalled.
-        if expect.is_empty() || ownership.owns(pid, &exemptions) {
+        if ownership.owns(pid, &exemptions) {
             return false;
         }
-        match crate::lockfile::proc_starttime(pid) {
-            Some(now) if now == expect => {
-                // SAFETY: identity re-verified immediately above; ESRCH is
-                // benign, and the residual window is the one every
-                // PID-addressed signal has.
-                unsafe { libc::kill(pid.cast_signed(), libc::SIGKILL) == 0 }
-            }
-            _ => false,
-        }
+        matches!(
+            crate::process::kill_verified(identity, libc::SIGKILL),
+            Ok(crate::process::Delivery::Signalled)
+        )
     };
 
     // Descendants of each stray, deepest first, before the strays themselves.
@@ -476,7 +377,7 @@ pub fn kill(strays: &[Stray]) -> KillCounts {
     // and the signal - so it narrows the hole rather than closing it. Closing it
     // needs a cgroup, which is a larger change than this reaper is.
     let mut seen: HashSet<u32> = HashSet::new();
-    let mut descendants: Vec<(usize, u32, String)> = Vec::new();
+    let mut descendants: Vec<(usize, crate::process::ProcIdentity)> = Vec::new();
     for s in strays {
         collect_descendants(
             &table,
@@ -488,19 +389,16 @@ pub fn kill(strays: &[Stray]) -> KillCounts {
             &mut descendants,
         );
     }
-    descendants.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
-    for (_, pid, starttime) in &descendants {
-        if !strays.iter().any(|s| s.pid == *pid) {
-            sigkill(*pid, starttime);
+    descendants.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.pid().cmp(&b.1.pid())));
+    for (_, identity) in &descendants {
+        if !strays.iter().any(|s| s.pid == identity.pid().get()) {
+            sigkill(*identity);
         }
     }
-    let killed = strays
-        .iter()
-        .filter(|s| sigkill(s.pid, &s.starttime))
-        .count();
+    let killed = strays.iter().filter(|s| sigkill(s.identity)).count();
     let starters = starters_to_kill(strays)
         .into_iter()
-        .filter(|(pid, _)| table.get(pid).is_some_and(|e| sigkill(*pid, &e.starttime)))
+        .filter(|(pid, _)| table.get(pid).is_some_and(|entry| sigkill(entry.identity)))
         .count();
     KillCounts {
         strays_signalled: killed,
@@ -634,6 +532,8 @@ pub fn cmd_strays(kill_them: bool) -> Result<(), DevError> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
+
     use super::*;
 
     fn table(rows: &[(u32, u32, &str)]) -> HashMap<u32, ProcEntry> {
@@ -644,9 +544,10 @@ mod tests {
                     ProcEntry {
                         ppid,
                         comm: comm.to_owned(),
-                        // Distinct per pid, so a test that checks identity
-                        // verification cannot pass by accident.
-                        starttime: format!("{pid}00"),
+                        identity: crate::process::ProcIdentity::new(
+                            crate::process::Pid::new(pid).unwrap(),
+                            crate::process::StartTicks::new(u64::from(pid) * 100),
+                        ),
                     },
                 )
             })
@@ -660,7 +561,9 @@ mod tests {
     #[allow(clippy::unwrap_used)]
     fn namespace_containment_walks_to_our_own_namespace() {
         let me = std::process::id();
-        let own = crate::lockfile::ns_inode("/proc/self/ns/pid").unwrap();
+        let own = crate::process::namespace_inode("/proc/self/ns/pid")
+            .unwrap()
+            .get();
         assert!(within_ns(me, own));
         assert!(!within_ns(me, own.wrapping_add(1)));
         let o = Ownership {
@@ -771,7 +674,10 @@ mod tests {
         let mut seen = HashSet::new();
         let mut out = Vec::new();
         collect_descendants(&t, 10, 0, &own, &exemptions, &mut seen, &mut out);
-        let reached: Vec<u32> = out.iter().map(|(_, pid, _)| *pid).collect();
+        let reached: Vec<u32> = out
+            .iter()
+            .map(|(_, identity)| identity.pid().get())
+            .collect();
         assert!(
             reached.is_empty(),
             "descendant expansion must stop at the shared exemption boundary: {reached:?}"
@@ -796,15 +702,18 @@ mod tests {
         // Both roots cover 30; it must appear once.
         collect_descendants(&t, 10, 0, &foreign(), &exemptions, &mut seen, &mut out);
         collect_descendants(&t, 20, 0, &foreign(), &exemptions, &mut seen, &mut out);
-        let mut pids: Vec<u32> = out.iter().map(|(_, pid, _)| *pid).collect();
+        let mut pids: Vec<u32> = out
+            .iter()
+            .map(|(_, identity)| identity.pid().get())
+            .collect();
         pids.sort_unstable();
         assert_eq!(pids, vec![20, 30]);
     }
 
-    /// Every stray carries the identity token its later SIGKILL is checked
-    /// against.
+    /// Every stray carries the typed process generation captured with its
+    /// parent row.
     #[test]
-    fn strays_record_the_identity_token_for_their_pid() {
+    fn strays_keep_the_typed_identity_for_their_pid() {
         let t = table(&[
             (1, 0, "systemd"),
             (10, 1, "rust-analyzer"),
@@ -812,10 +721,7 @@ mod tests {
         ]);
         let strays = classify(&t, foreign());
         assert_eq!(strays.len(), 1);
-        assert_eq!(
-            strays[0].starttime, "2000",
-            "the token must come from the same /proc read"
-        );
+        assert_eq!(strays[0].identity.start().get(), 2_000);
     }
 
     /// A guard that outlives the cargo above it is itself reapable now.

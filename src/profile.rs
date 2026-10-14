@@ -21,7 +21,7 @@ use crate::config::ParallelBinaries;
 use crate::config::rustflags_target_key;
 use crate::config::{
     CargoUnification, CheckEntry, EffectiveUnification, FeatureUnification, Harness, Isolation,
-    ProfileDef, QualifiedSkip, SkipSpec, SweepProfile, TestConfig,
+    ProfileDef, SkipSpec, SweepProfile, TestConfig,
 };
 use crate::error::DevError;
 
@@ -49,19 +49,7 @@ pub struct ResolvedSweep {
     /// `--workspace --exclude <pkg>`. From the `[[check]]` entry's
     /// `test_exclude_packages`. Test phase only; clippy stays workspace-wide.
     pub test_exclude_packages: Vec<String>,
-    /// Raw configured value retained for callers that still need nextest's
-    /// exact setting. Cargo-mediated libtest policy is resolved once in
-    /// `lane_exec` as `Threads`.
-    pub test_threads: Option<u32>,
-    /// Compatibility argv projection of `filters`, emitted after `--` to
-    /// libtest. New launch code renders the typed filters at the boundary.
-    pub libtest_args: Vec<String>,
-    /// Compatibility argv projection of `filters.targets`.
-    pub cargo_test_filters: Vec<String>,
-    /// Compatibility projection of `filters`' positional filters.
-    pub name_filters: Vec<String>,
-    /// Canonical typed selection. The argv fields above remain compatibility
-    /// projections for call sites outside profile resolution.
+    /// Canonical typed selection. Launchers render argv only at the boundary.
     pub filters: LaneFilters,
     /// Env vars to export to the cargo subprocess.
     pub env: BTreeMap<String, String>,
@@ -70,35 +58,17 @@ pub struct ResolvedSweep {
     /// execution layer (`sweep_runtime_env`) turns these into the `RUSTFLAGS`
     /// and `CARGO_TARGET_DIR` env pair. From the `[[check]]` entry's `rustflags`.
     pub rustflags: Vec<String>,
-    /// From the `[[check]]` entry's `parallel.budget`: run this sweep's test
-    /// binaries concurrently under a budget of in-flight tests, rather than
-    /// letting cargo run them one after another. Execution policy only -
-    /// never part of the build shape, since it changes neither what is
-    /// compiled nor which tests are selected. Mutually exclusive with
-    /// `process_isolation` (enforced at resolve time): one runs every test in
-    /// its own process, the other runs many binaries' tests at once, and a
-    /// sweep cannot mean both.
-    pub parallel_budget: Option<u32>,
-    /// Compatibility flag for `lane_exec = Isolated`.
-    pub process_isolation: bool,
-    /// Resolved execution policy. Config resolution stores `Some`; `None`
-    /// remains available to synthetic sweeps and older struct literals.
-    pub lane_exec: Option<LaneExec>,
-    /// Compatibility projection of package-scoped skip filters.
-    pub qualified_skips: Vec<QualifiedSkip>,
+    /// Resolved execution policy, including the thread policy where applicable.
+    pub lane_exec: LaneExec,
     /// From the `[[check]]` entry's `curated`: the entry runs a hand-picked
     /// subset, and its shape's non-run pairs are exempt from the coverage
     /// universe. Audit policy only - never part of the build shape, and the
     /// audit exempts a shape only when *every* sweep producing it is curated.
     pub curated: bool,
-    /// Deprecated compatibility slot. Resolved sweeps leave it empty; old
-    /// synthetic sweeps may still populate it, in which case
-    /// [`ResolvedSweep::lane_filters`] adapts it.
-    pub declared_filters: Vec<DeclaredFilter>,
     /// The `[[check]]` entry's `profile`: the cargo profile this sweep
     /// compiles and runs under, or `None` for the command's default (dev
     /// under `brokkr check`; the CLI/`[test] debug` answer under `brokkr
-    /// test`). Part of the build shape - see [`ResolvedSweep::build_shape_key`].
+    /// test`). Part of the build shape.
     pub profile: Option<SweepProfile>,
     /// The `[[check]]` entry's `feature_unification`, as configured. Policy,
     /// not yet an answer: `auto` resolves differently depending on CLI scope
@@ -111,15 +81,6 @@ pub struct ResolvedSweep {
     /// from an `auto` sweep that was not, and keying on the configured `auto`
     /// would let those two dedupe into one.
     pub effective_unification: EffectiveUnification,
-    /// The `[[check]]` entry's `harness`: which engine executes this sweep's
-    /// test phase. Execution policy, deliberately NOT part of the build
-    /// shape - a nextest and a libtest sweep with equal compile inputs are
-    /// one clippy surface and share the target dir.
-    pub harness: Harness,
-    /// The `[[check]]` entry's `doc_only`: the sweep runs `cargo test --doc`
-    /// and nothing else. Execution policy, never part of the build shape,
-    /// and outside the coverage pair audit (doctests cannot be enumerated).
-    pub doc_only: bool,
     /// The bare `[[check]]` entry name, NEVER lane-qualified - `label` becomes
     /// `tier1/default` under a lanes profile, this stays `default`. The key
     /// for state that belongs to the entry rather than the run, today the
@@ -138,7 +99,7 @@ pub struct ResolvedSweep {
     /// lib build rejects it. Without this flag that class is reproducible only
     /// by the phase that happened to catch it - which is not a probe.
     ///
-    /// Deliberately absent from [`ResolvedSweep::build_shape_key`]: the key
+    /// Deliberately absent from the build shape key: the key
     /// serves clippy/rustdoc dedupe and coverage grouping, all of which only
     /// ever see gate sweeps, and the one sweep that can carry this
     /// runs alone under `cmd_clippy` with nothing to dedupe against.
@@ -267,6 +228,21 @@ impl LaneExec {
     /// attributes tests to individual processes and packages.
     pub fn applies_qualified_skips(self) -> bool {
         matches!(self, Self::Isolated | Self::Nextest { .. })
+    }
+
+    /// The doctest-only lane (`[[check]] doc_only`): `cargo test --doc` and
+    /// nothing else. Execution policy, never part of the build shape, and
+    /// outside the coverage pair audit (doctests cannot be enumerated).
+    pub fn is_doc_only(self) -> bool {
+        matches!(self, Self::DocOnly { .. })
+    }
+
+    /// The watchdogged doctest-only lane, as a test fixture builds it.
+    #[cfg(test)]
+    pub fn doc_only() -> Self {
+        Self::DocOnly {
+            threads: Threads::Watchdogged,
+        }
     }
 
     /// Cargo-mediated thread policy, where applicable.
@@ -481,6 +457,10 @@ pub type DeclaredFilter = Filter;
 pub struct TargetName(String);
 
 impl TargetName {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self(name.into())
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -550,135 +530,26 @@ impl LaneFilters {
     pub fn name_filters(&self) -> Vec<String> {
         self.only().map(|filter| filter.pattern.clone()).collect()
     }
-
-    fn qualified_skips(&self) -> Vec<QualifiedSkip> {
-        self.skips()
-            .filter_map(|filter| {
-                filter.package.as_ref().map(|package| QualifiedSkip {
-                    package: package.clone(),
-                    pattern: filter.pattern.clone(),
-                })
-            })
-            .collect()
-    }
 }
 
 impl ResolvedSweep {
-    /// The resolved execution policy, with a compatibility derivation for
-    /// synthetic sweeps that still use `ResolvedSweep { ..Default::default() }`.
+    /// The resolved execution policy.
     pub fn lane_exec(&self) -> LaneExec {
-        self.lane_exec.unwrap_or_else(|| {
-            let budget = self.parallel_budget;
-            LaneExec::resolve(
-                &self.label,
-                self.harness,
-                self.doc_only,
-                budget,
-                self.process_isolation,
-                self.test_threads,
-            )
-            .unwrap_or_else(|_| {
-                // The configuration parser rejects conflicting combinations.
-                // Keep a deterministic projection for hand-built legacy
-                // sweeps so their callers can still report the state.
-                if self.harness == Harness::Nextest {
-                    LaneExec::Nextest {
-                        threads: self.test_threads,
-                    }
-                } else if self.doc_only {
-                    LaneExec::DocOnly {
-                        threads: Threads::from_config(self.test_threads),
-                    }
-                } else if let Some(budget) = budget {
-                    LaneExec::Parallel { budget }
-                } else if self.process_isolation {
-                    LaneExec::Isolated
-                } else {
-                    LaneExec::Serial {
-                        threads: Threads::from_config(self.test_threads),
-                    }
-                }
-            })
-        })
+        self.lane_exec
     }
 
-    /// The sweep's semantic filters. The compatibility projection is used
-    /// when an older caller has directly edited one of the argv fields.
-    pub fn lane_filters(&self) -> LaneFilters {
-        let canonical = &self.filters;
-        let argv_matches = canonical.libtest_args() == self.libtest_args
-            && canonical.name_filters() == self.name_filters
-            && canonical.cargo_args() == self.cargo_test_filters
-            && canonical.qualified_skips() == self.qualified_skips;
-        if argv_matches
-            && (self.declared_filters.is_empty() || canonical.filters == self.declared_filters)
-            && !(canonical.filters.is_empty() && !self.declared_filters.is_empty())
-        {
-            return canonical.clone();
-        }
-
-        let mut filters = self.declared_filters.clone();
-        if filters.is_empty() {
-            let mut args = self.libtest_args.iter();
-            while let Some(arg) = args.next() {
-                if arg == "--skip"
-                    && let Some(pattern) = args.next()
-                {
-                    filters.push(Filter {
-                        kind: FilterKind::Skip,
-                        pattern: pattern.clone(),
-                        package: None,
-                        origin: FilterOrigin::Entry(self.entry_name.clone()),
-                    });
-                }
-            }
-            filters.extend(self.name_filters.iter().map(|pattern| Filter {
-                kind: FilterKind::Only,
-                pattern: pattern.clone(),
-                package: None,
-                origin: FilterOrigin::Entry(self.entry_name.clone()),
-            }));
-        }
-        for skip in &self.qualified_skips {
-            if !filters.iter().any(|filter| {
-                filter.kind == FilterKind::Skip
-                    && filter.package.as_deref() == Some(skip.package.as_str())
-                    && filter.pattern == skip.pattern
-            }) {
-                filters.push(Filter {
-                    kind: FilterKind::Skip,
-                    pattern: skip.pattern.clone(),
-                    package: Some(skip.package.clone()),
-                    origin: FilterOrigin::Entry(self.entry_name.clone()),
-                });
-            }
-        }
-        let mut targets = Vec::new();
-        let mut cargo_args = self.cargo_test_filters.iter();
-        while let Some(arg) = cargo_args.next() {
-            if arg == "--test"
-                && let Some(name) = cargo_args.next()
-            {
-                targets.push(TargetName(name.clone()));
-            }
-        }
-        LaneFilters {
-            filters,
-            targets,
-            include_ignored: self
-                .libtest_args
-                .iter()
-                .any(|arg| arg == "--include-ignored"),
-        }
+    /// The sweep's semantic filters.
+    pub fn lane_filters(&self) -> &LaneFilters {
+        &self.filters
     }
 
     /// Wall-clock-ordered argv for the libtest (post-`--`) section.
     /// Helper for tests.
     #[cfg(test)]
     pub fn libtest_argv(&self) -> Vec<String> {
-        let mut out = self.libtest_args.clone();
-        for n in &self.name_filters {
-            out.push(n.clone());
+        let mut out = self.filters.libtest_args();
+        for n in self.filters.name_filters() {
+            out.push(n);
         }
         out
     }
@@ -718,6 +589,7 @@ impl ResolvedSweep {
     /// selection - a `-p` narrowing or a package-mode resolution projects
     /// the features per run - so clippy/rustdoc dedupe and `brokkr test`'s
     /// execution dedupe compare the selection module's effective key instead.
+    #[cfg(test)]
     pub fn build_shape_key(&self) -> BuildShapeKey {
         (
             self.packages.clone(),
@@ -770,8 +642,9 @@ impl ResolvedSweep {
     }
 }
 
-/// See [`ResolvedSweep::build_shape_key`].
-pub type BuildShapeKey = (
+/// The tuple `ResolvedSweep::build_shape_key` compares.
+#[cfg(test)]
+type BuildShapeKey = (
     Vec<String>,
     Vec<String>,
     Vec<String>,
@@ -828,13 +701,9 @@ pub fn sweep_from_check_entry(entry: &CheckEntry) -> ResolvedSweep {
     // No profile in play, so the entry's own filters are all there is.
     let filters = LaneFilters {
         filters: entry_filters(entry),
-        targets: entry.tests.iter().cloned().map(TargetName).collect(),
+        targets: entry.tests.iter().cloned().map(TargetName::new).collect(),
         include_ignored: false,
     };
-    let libtest_args = filters.libtest_args();
-    let cargo_test_filters = filters.cargo_args();
-    let name_filters = filters.name_filters();
-    let qualified_skips = filters.qualified_skips();
     let lane_exec = LaneExec::resolve(
         &entry.name,
         entry.harness,
@@ -851,26 +720,16 @@ pub fn sweep_from_check_entry(entry: &CheckEntry) -> ResolvedSweep {
         build_packages: entry.build_packages.clone(),
         packages: entry.packages.clone(),
         test_exclude_packages: entry.test_exclude_packages.clone(),
-        libtest_args,
-        cargo_test_filters,
-        name_filters,
-        filters: filters.clone(),
+        filters,
         env: entry.env.clone(),
-        test_threads: None,
         rustflags: entry.rustflags.clone(),
         feature_unification: entry.feature_unification,
         // Unresolved until the CLI scope is known; `resolve_unification`
         // fills it in before any cargo command is built.
         effective_unification: EffectiveUnification::Ambient,
-        parallel_budget: entry.parallel.map(ParallelBinaries::resolved_budget),
-        process_isolation: false,
-        lane_exec: Some(lane_exec),
-        qualified_skips,
-        declared_filters: Vec::new(),
+        lane_exec,
         curated: entry.curated,
         profile: entry.profile,
-        harness: entry.harness,
-        doc_only: entry.doc_only,
         entry_name: entry.name.clone(),
         // A gate sweep always lints every target; only the investigative
         // `brokkr clippy --lib` narrows, and it sets this after construction.
@@ -1115,15 +974,11 @@ fn collect_extends_chain<'a>(
 /// deliberately inherits no entry.
 #[derive(Debug, Clone, Default)]
 pub struct RunShaping {
-    libtest_args: Vec<String>,
-    cargo_test_filters: Vec<String>,
-    name_filters: Vec<String>,
     filters: LaneFilters,
     env: BTreeMap<String, String>,
-    test_threads: Option<u32>,
-    process_isolation: bool,
-    lane_exec: Option<LaneExec>,
-    qualified_skips: Vec<QualifiedSkip>,
+    configured_threads: Option<u32>,
+    process_isolated: bool,
+    lane_exec: LaneExec,
 }
 
 impl RunShaping {
@@ -1131,28 +986,18 @@ impl RunShaping {
     /// declaring no filters. Lets the caller say "no filters applied"
     /// rather than name a profile that changed nothing.
     pub fn is_empty(&self) -> bool {
-        self.libtest_args.is_empty()
-            && self.cargo_test_filters.is_empty()
-            && self.name_filters.is_empty()
+        self.filters == LaneFilters::default()
             && self.env.is_empty()
-            && self.test_threads.is_none()
-            && !self.process_isolation
-            && self.qualified_skips.is_empty()
+            && self.configured_threads.is_none()
+            && !self.process_isolated
     }
 
     /// Overlay onto an ad-hoc sweep. Assignment, not merge: an ad-hoc sweep
     /// carries no `[[check]]` entry, so there is nothing to AND with.
     pub fn apply(self, sweep: &mut ResolvedSweep) {
-        sweep.libtest_args = self.libtest_args;
-        sweep.cargo_test_filters = self.cargo_test_filters;
-        sweep.name_filters = self.name_filters;
         sweep.filters = self.filters;
         sweep.env = self.env;
-        sweep.test_threads = self.test_threads;
-        sweep.process_isolation = self.process_isolation;
         sweep.lane_exec = self.lane_exec;
-        sweep.qualified_skips = self.qualified_skips;
-        sweep.declared_filters.clear();
     }
 }
 
@@ -1168,7 +1013,7 @@ impl RunShaping {
 /// and it cannot be inherited from there: a profile may carry
 /// package-qualified skips legitimately because every sweep it names is a
 /// nextest lane, and handing those skips to an ad-hoc libtest lane - where
-/// `qualified_skips` is never read - would silently run the tests they
+/// package-scoped filtering is unavailable - would silently run the tests they
 /// exclude. Refused, never dropped.
 pub fn run_shaping(cfg: &TestConfig, name: &str) -> Result<RunShaping, DevError> {
     if cfg.profiles.get(name).is_some_and(|d| d.lanes.is_some()) {
@@ -1180,8 +1025,8 @@ pub fn run_shaping(cfg: &TestConfig, name: &str) -> Result<RunShaping, DevError>
         Harness::Libtest,
         false,
         None,
-        shaping.process_isolation,
-        shaping.test_threads,
+        shaping.process_isolated,
+        shaping.configured_threads,
     )?;
     if shaping
         .filters
@@ -1197,7 +1042,7 @@ pub fn run_shaping(cfg: &TestConfig, name: &str) -> Result<RunShaping, DevError>
              skips (`--profile`), or set `isolation = \"process\"` on it."
         )));
     }
-    shaping.lane_exec = Some(lane_exec);
+    shaping.lane_exec = lane_exec;
     Ok(shaping)
 }
 
@@ -1205,10 +1050,9 @@ pub fn run_shaping(cfg: &TestConfig, name: &str) -> Result<RunShaping, DevError>
 /// product of an `extends` chain and has no name of its own, but a dead-filter
 /// report has to name a block the reader can open.
 fn shaping_from(profile: &ResolvedProfile, profile_name: &str) -> RunShaping {
-    // `test_threads` is NOT pushed into `libtest_args` here. It is carried raw
-    // on the sweep so each consumer applies its own policy: the check test
-    // phase turns it into `--test-threads=N` (or a parallel run), while
-    // `brokkr test` ignores it and forces `--test-threads=1`.
+    // Keep the configured thread count as resolution input until the sweep's
+    // harness and other execution settings are known. The resolved sweep
+    // stores only its typed `LaneExec`.
     // Provenance is per list, not per profile: `extends` replaces `only` and
     // `skip` wholesale, so each names the def that actually declared it.
     let skip_at = FilterOrigin::Profile(
@@ -1247,24 +1091,15 @@ fn shaping_from(profile: &ResolvedProfile, profile_name: &str) -> RunShaping {
 
     let filters = LaneFilters {
         filters,
-        targets: profile.tests.iter().cloned().map(TargetName).collect(),
+        targets: profile.tests.iter().cloned().map(TargetName::new).collect(),
         include_ignored: profile.include_ignored,
     };
-    let libtest_args = filters.libtest_args();
-    let cargo_test_filters = filters.cargo_args();
-    let name_filters = filters.name_filters();
-    let qualified_skips = filters.qualified_skips();
-
     RunShaping {
-        libtest_args,
-        cargo_test_filters,
-        name_filters,
         filters,
         env: profile.env.clone(),
-        test_threads: profile.test_threads,
-        process_isolation: profile.isolation == Some(Isolation::Process),
-        lane_exec: None,
-        qualified_skips,
+        configured_threads: profile.test_threads,
+        process_isolated: profile.isolation == Some(Isolation::Process),
+        lane_exec: LaneExec::default(),
     }
 }
 
@@ -1278,12 +1113,7 @@ fn build_resolved_sweep(
     filters.filters.extend(entry_filters(entry));
     filters
         .targets
-        .extend(entry.tests.iter().cloned().map(TargetName));
-    let libtest_args = filters.libtest_args();
-    let cargo_test_filters = filters.cargo_args();
-    let name_filters = filters.name_filters();
-    let qualified_skips = filters.qualified_skips();
-
+        .extend(entry.tests.iter().cloned().map(TargetName::new));
     // Profile env is the base; the entry's own env overlays it so a
     // sweep-specific var wins on a key collision.
     let mut env = shaping.env;
@@ -1309,24 +1139,14 @@ fn build_resolved_sweep(
         build_packages: entry.build_packages.clone(),
         packages: entry.packages.clone(),
         test_exclude_packages: entry.test_exclude_packages.clone(),
-        libtest_args,
-        cargo_test_filters,
-        name_filters,
         filters,
         env,
-        test_threads: profile.test_threads,
         rustflags: entry.rustflags.clone(),
         feature_unification: entry.feature_unification,
         effective_unification: EffectiveUnification::Ambient,
-        parallel_budget,
-        process_isolation,
-        lane_exec: Some(lane_exec),
-        qualified_skips,
-        declared_filters: Vec::new(),
+        lane_exec,
         curated: entry.curated,
         profile: entry.profile,
-        harness: entry.harness,
-        doc_only: entry.doc_only,
         entry_name: entry.name.clone(),
         // A gate sweep always lints every target; only the investigative
         // `brokkr clippy --lib` narrows, and it sets this after construction.
@@ -1389,9 +1209,19 @@ lanes = ["tier1", "serial"]
         // Each lane keeps its own filters and thread policy - a lanes
         // profile is a list of runs, not a merge...
         assert_eq!(sweeps[0].libtest_argv(), vec!["--skip", "serial::"]);
-        assert_eq!(sweeps[0].test_threads, Some(0));
+        assert_eq!(
+            sweeps[0].lane_exec,
+            LaneExec::Serial {
+                threads: Threads::CargoDefault
+            }
+        );
         assert_eq!(sweeps[1].libtest_argv(), vec!["serial::"]);
-        assert_eq!(sweeps[1].test_threads, Some(1));
+        assert_eq!(
+            sweeps[1].lane_exec,
+            LaneExec::Serial {
+                threads: Threads::Watchdogged
+            }
+        );
         // ...while the build shape is identical, which is exactly what
         // clippy (and `brokkr test`) dedupe on.
         assert_eq!(sweeps[0].build_shape_key(), sweeps[1].build_shape_key());
@@ -1411,7 +1241,7 @@ isolation = "process"
 "#,
         );
         let sweeps = resolve(&cfg, &checks, "serial").unwrap();
-        assert!(sweeps[0].process_isolation);
+        assert_eq!(sweeps[0].lane_exec, LaneExec::Isolated);
 
         // Execution policy, not build shape: an isolated and a plain sweep
         // of the same entry still dedupe to one clippy run.
@@ -1423,7 +1253,7 @@ isolation = "process"
     fn ad_hoc_shaping_refuses_qualified_skips_it_cannot_apply() {
         // The profile is legal on its own sweeps (all nextest), but the
         // ad-hoc path hands its shaping to one shared-process libtest lane
-        // that never reads `qualified_skips` - the excluded tests would run.
+        // that cannot apply package-scoped filters - the excluded tests would run.
         let (checks, cfg) = parse_fragment(
             r#"
 [[check]]
@@ -1602,8 +1432,18 @@ skip = [{ package = "a", pattern = "slow" }]
             ..Default::default()
         });
         let mut filtered = plain.clone();
-        filtered.libtest_args = vec!["--skip".into(), "slow::".into()];
-        filtered.test_threads = Some(0);
+        filtered.filters = LaneFilters {
+            filters: vec![Filter {
+                kind: FilterKind::Skip,
+                pattern: "slow::".into(),
+                package: None,
+                origin: FilterOrigin::Entry("default".into()),
+            }],
+            ..Default::default()
+        };
+        filtered.lane_exec = LaneExec::Serial {
+            threads: Threads::CargoDefault,
+        };
         // Filters and thread policy don't change what cargo builds.
         assert_eq!(plain.build_shape_key(), filtered.build_shape_key());
 
@@ -1758,9 +1598,9 @@ sweeps = ["sim-live"]
             vec!["--no-default-features", "--features", "commands"]
         );
         assert_eq!(s.build_packages, vec!["pbfhogg-cli"]);
-        assert!(s.libtest_args.is_empty());
-        assert!(s.cargo_test_filters.is_empty());
-        assert!(s.name_filters.is_empty());
+        assert!(s.filters.libtest_args().is_empty());
+        assert!(s.filters.cargo_args().is_empty());
+        assert!(s.filters.name_filters().is_empty());
     }
 
     #[test]
@@ -1775,9 +1615,9 @@ sweeps = ["sim-live"]
         };
         let s = sweep_from_check_entry(&entry);
         assert_eq!(s.rustflags, vec!["--cfg", "madsim"]);
-        assert_eq!(s.cargo_test_filters, vec!["--test", "reconciliation"]);
-        assert_eq!(s.libtest_args, vec!["--skip", "flaky::"]);
-        assert_eq!(s.name_filters, vec!["virtual_time"]);
+        assert_eq!(s.filters.cargo_args(), vec!["--test", "reconciliation"]);
+        assert_eq!(s.filters.libtest_args(), vec!["--skip", "flaky::"]);
+        assert_eq!(s.filters.name_filters(), vec!["virtual_time"]);
     }
 
     #[test]
@@ -1804,14 +1644,14 @@ only = ["profile_only"]
         let s = &resolved[0];
         assert_eq!(s.rustflags, vec!["--cfg", "madsim"]);
         assert_eq!(
-            s.libtest_args,
+            s.filters.libtest_args(),
             vec!["--skip", "profile_skip::", "--skip", "entry_skip::"]
         );
         assert_eq!(
-            s.cargo_test_filters,
+            s.filters.cargo_args(),
             vec!["--test", "profile_test", "--test", "entry_test"]
         );
-        assert_eq!(s.name_filters, vec!["profile_only", "entry_only"]);
+        assert_eq!(s.filters.name_filters(), vec!["profile_only", "entry_only"]);
     }
 
     #[test]
@@ -1836,11 +1676,11 @@ include_ignored = false
         assert_eq!(s.features.configured_key(), vec!["--features", "a,b"]);
         assert_eq!(s.build_packages, vec!["pbfhogg-cli"]);
         assert_eq!(
-            s.libtest_args,
+            s.filters.libtest_args(),
             vec!["--skip", "tier2::", "--skip", "platform::"]
         );
-        assert!(s.cargo_test_filters.is_empty());
-        assert!(s.name_filters.is_empty());
+        assert!(s.filters.cargo_args().is_empty());
+        assert!(s.filters.name_filters().is_empty());
     }
 
     #[test]
@@ -1876,10 +1716,10 @@ skip = ["platform::", "serial::"]
         assert_eq!(s0.label, "all");
         assert_eq!(s0.features.configured_key(), vec!["--features", "a"]);
         assert_eq!(
-            s0.libtest_args,
+            s0.filters.libtest_args(),
             vec!["--skip", "platform::", "--skip", "serial::"]
         );
-        assert_eq!(s0.cargo_test_filters, vec!["--test", "cli_sort"]);
+        assert_eq!(s0.filters.cargo_args(), vec!["--test", "cli_sort"]);
 
         let s1 = &resolved[1];
         assert_eq!(s1.label, "consumer");
@@ -1906,22 +1746,19 @@ env = { BROKKR_TEST_PLATFORM = "1" }
 "#,
         );
         let r = resolve(&cfg, &checks, "serial").unwrap();
-        assert_eq!(r[0].name_filters, vec!["serial::"]);
+        assert_eq!(r[0].filters.name_filters(), vec!["serial::"]);
         assert!(
-            r[0].libtest_args.contains(&"--include-ignored".into()),
+            r[0].filters
+                .libtest_args()
+                .contains(&"--include-ignored".into()),
             "got: {:?}",
-            r[0].libtest_args
+            r[0].filters.libtest_args()
         );
-        // test_threads is carried raw on the sweep, not pushed into
-        // libtest_args (consumers apply their own thread policy).
-        assert_eq!(r[0].test_threads, Some(1));
-        assert!(
-            !r[0]
-                .libtest_args
-                .iter()
-                .any(|a| a.starts_with("--test-threads")),
-            "test_threads must not be pushed into libtest_args: {:?}",
-            r[0].libtest_args
+        assert_eq!(
+            r[0].lane_exec,
+            LaneExec::Serial {
+                threads: Threads::Watchdogged
+            }
         );
         assert_eq!(
             r[0].env.get("BROKKR_TEST_PLATFORM").map(String::as_str),
@@ -2003,12 +1840,11 @@ test_threads = 8
 "#,
         );
         let r = resolve(&cfg, &checks, "fast").unwrap();
-        assert_eq!(r[0].test_threads, Some(8));
-        assert!(
-            !r[0]
-                .libtest_args
-                .iter()
-                .any(|a| a.starts_with("--test-threads"))
+        assert_eq!(
+            r[0].lane_exec,
+            LaneExec::Serial {
+                threads: Threads::Cargo(NonZeroU32::new(8).unwrap())
+            }
         );
     }
 
@@ -2105,10 +1941,15 @@ tests = ["cli_x"]
         );
         let r = resolve(&cfg, &checks, "ch").unwrap();
         assert_eq!(r.len(), 1);
-        assert_eq!(r[0].cargo_test_filters, vec!["--test", "cli_x"]);
-        assert!(r[0].libtest_args.contains(&"--include-ignored".into()));
+        assert_eq!(r[0].filters.cargo_args(), vec!["--test", "cli_x"]);
+        assert!(
+            r[0].filters
+                .libtest_args()
+                .contains(&"--include-ignored".into())
+        );
         assert_eq!(
-            r[0].libtest_args
+            r[0].filters
+                .libtest_args()
                 .iter()
                 .filter(|s| s.as_str() == "a::")
                 .count(),
@@ -2140,12 +1981,16 @@ tests = ["cli_x"]
     fn libtest_argv_concats_args_and_name_filters() {
         let s = ResolvedSweep {
             label: "x".into(),
-            build_packages: Vec::new(),
-            packages: Vec::new(),
-            libtest_args: vec!["--include-ignored".into()],
-            cargo_test_filters: Vec::new(),
-            name_filters: vec!["tier2::".into()],
-            env: BTreeMap::new(),
+            filters: LaneFilters {
+                include_ignored: true,
+                filters: vec![Filter {
+                    kind: FilterKind::Only,
+                    pattern: "tier2::".into(),
+                    package: None,
+                    origin: FilterOrigin::Entry("x".into()),
+                }],
+                ..Default::default()
+            },
             ..Default::default()
         };
         assert_eq!(s.libtest_argv(), vec!["--include-ignored", "tier2::"]);

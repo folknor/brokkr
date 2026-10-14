@@ -1,34 +1,14 @@
 //! Parser for cargo's `--message-format=json` output.
 //!
-//! Turns cargo/clippy/rustc JSON diagnostics into structured [`DiagnosticEvent`]
+//! Turns cargo/clippy/rustc JSON diagnostics into structured [`Diagnostic`]
 //! values that the `check` text renderer formats. This is how brokkr *reads*
 //! cargo - there is no machine-readable output mode of brokkr's own.
 
-// --- Diagnostic model ---
+use crate::diagnostic::Diagnostic;
+use crate::rustc_text::Level;
 
-/// A parsed compiler/clippy diagnostic. Field set mirrors the parts of cargo's
-/// JSON the text renderer consumes.
-#[derive(Clone)]
-pub struct DiagnosticEvent {
-    pub level: String,
-    pub code: Option<String>,
-    pub message: String,
-    pub file: Option<String>,
-    pub line: Option<u64>,
-    pub column: Option<u64>,
-    /// Inline label on the primary span, e.g. "expected `i32`, found `&str`".
-    pub primary_label: Option<String>,
-    pub children: Vec<ChildDiagnostic>,
-    /// The package cargo compiled when rustc emitted this: the
-    /// `compiler-message`'s top-level `package_id`, in the same form
-    /// `cargo metadata` lists `workspace_members`.
-    pub package_id: Option<String>,
-}
-
-#[derive(Clone)]
-pub struct ChildDiagnostic {
-    pub message: String,
-}
+/// The cargo reader's historical name for the shared diagnostic model.
+pub type DiagnosticEvent = Diagnostic;
 
 // --- Parsing ---
 
@@ -38,7 +18,7 @@ pub struct ChildDiagnostic {
 /// `"reason": "compiler-message"` are extracted; everything else is skipped.
 ///
 #[allow(clippy::too_many_lines)] // JSON walk - splitting just shuffles match arms
-pub fn parse_cargo_diagnostics(stdout: &str) -> Vec<DiagnosticEvent> {
+pub fn parse_cargo_diagnostics(stdout: &str) -> Vec<Diagnostic> {
     let mut events = Vec::new();
 
     for line in stdout.lines() {
@@ -52,24 +32,21 @@ pub fn parse_cargo_diagnostics(stdout: &str) -> Vec<DiagnosticEvent> {
             continue;
         };
 
-        let level = msg
+        let level_name = msg
             .get("level")
             .and_then(|v| v.as_str())
-            .unwrap_or("unknown")
-            .to_string();
+            .unwrap_or("unknown");
+        let level = match level_name {
+            "warning" => Level::Warning,
+            "error" | "error: internal compiler error" => Level::Error,
+            _ => continue,
+        };
 
         // Only the levels a finding is reported at. rustc also emits top-level
         // `failure-note` messages ("For more information about this error,
         // try `rustc --explain E0027`") and could emit bare `note`/`help`;
         // `check` counts every diagnostic it keeps as an error, so those would
         // surface as phantom errors.
-        if !matches!(
-            level.as_str(),
-            "error" | "warning" | "error: internal compiler error"
-        ) {
-            continue;
-        }
-
         let code = msg
             .get("code")
             .and_then(|c| c.get("code"))
@@ -97,7 +74,7 @@ pub fn parse_cargo_diagnostics(stdout: &str) -> Vec<DiagnosticEvent> {
         if spans_empty
             && code.is_none()
             && matches!(
-                crate::rustc_text::classify_message(&level, &message),
+                crate::rustc_text::classify_diagnostic(level, &message),
                 crate::rustc_text::BlockKind::FailureSummary
                     | crate::rustc_text::BlockKind::CargoStatus
                     | crate::rustc_text::BlockKind::Progress
@@ -116,53 +93,50 @@ pub fn parse_cargo_diagnostics(stdout: &str) -> Vec<DiagnosticEvent> {
                     .find(|s| s.get("is_primary") == Some(&serde_json::Value::Bool(true)))
             });
 
-        let (file, line_start, col_start, primary_label) = match primary_span {
+        let site = match primary_span {
             Some(span) => (
                 span.get("file_name")
                     .and_then(|v| v.as_str())
-                    .map(std::string::ToString::to_string),
+                    .map(std::path::PathBuf::from),
                 span.get("line_start").and_then(serde_json::Value::as_u64),
                 span.get("column_start").and_then(serde_json::Value::as_u64),
-                span.get("label")
-                    .and_then(|v| v.as_str())
-                    .filter(|s| !s.is_empty())
-                    .map(std::string::ToString::to_string),
             ),
-            None => (None, None, None, None),
+            None => (None, None, None),
         };
+        let site = site.0.map(|file| crate::diagnostic::Site {
+            file,
+            line: site.1,
+            column: site.2,
+        });
+        let primary_label = primary_span.and_then(|span| {
+            span.get("label")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(std::string::ToString::to_string)
+        });
 
         // Child diagnostics - only the message is consumed (the text renderer
         // scrapes the "expected/found" detail line from it).
-        let children = msg
+        let children: Vec<String> = msg
             .get("children")
             .and_then(|c| c.as_array())
             .map(|arr| {
                 arr.iter()
-                    .filter_map(|child| {
-                        let child_msg = child.get("message")?.as_str()?.to_string();
-                        if child_msg.is_empty() {
-                            return None;
-                        }
-                        Some(ChildDiagnostic { message: child_msg })
-                    })
+                    .filter_map(|child| child.get("message")?.as_str())
+                    .filter(|child_msg| !child_msg.is_empty())
+                    .map(str::to_owned)
                     .collect()
             })
             .unwrap_or_default();
 
-        events.push(DiagnosticEvent {
-            level,
-            code,
-            message,
-            file,
-            line: line_start,
-            column: col_start,
-            primary_label,
-            children,
-            package_id: val
-                .get("package_id")
-                .and_then(|v| v.as_str())
-                .map(std::string::ToString::to_string),
-        });
+        let mut diagnostic = Diagnostic::new(level, code, message);
+        diagnostic.site = site;
+        diagnostic.detail = detail_from_json(primary_label.as_deref(), &children);
+        diagnostic.package_id = val
+            .get("package_id")
+            .and_then(|v| v.as_str())
+            .map(std::string::ToString::to_string);
+        events.push(diagnostic);
     }
 
     events
@@ -195,12 +169,10 @@ pub fn parse_cargo_diagnostics(stdout: &str) -> Vec<DiagnosticEvent> {
 /// (`attribute_manifest_lints`), since cargo's parsing lints also cover
 /// path-sourced packages that are not members. The path is as cargo printed
 /// it: relative to the workspace root, whatever directory cargo ran in.
-pub fn manifest_lints_by_block(
-    blocks: &[crate::rustc_text::Block],
-) -> Vec<(usize, DiagnosticEvent)> {
+pub fn manifest_lints_by_block(blocks: &[crate::rustc_text::Block]) -> Vec<(usize, Diagnostic)> {
     struct Candidate<'a> {
         index: usize,
-        level: &'static str,
+        level: Level,
         message: &'a str,
         file: &'a str,
         line: Option<u64>,
@@ -253,36 +225,51 @@ pub fn manifest_lints_by_block(
                     (*codes.first()?).to_owned()
                 }
             };
-            Some((
-                c.index,
-                DiagnosticEvent {
-                    level: c.level.to_owned(),
-                    code: Some(code),
-                    message: c.message.to_owned(),
-                    file: Some(c.file.to_owned()),
-                    line: c.line,
-                    column: c.column,
-                    primary_label: None,
-                    children: Vec::new(),
-                    package_id: None,
-                },
-            ))
+            let mut diagnostic = Diagnostic::new(c.level, Some(code), c.message.to_owned());
+            diagnostic.site = Some(crate::diagnostic::Site {
+                file: std::path::PathBuf::from(c.file),
+                line: c.line,
+                column: c.column,
+            });
+            Some((c.index, diagnostic))
         })
         .collect()
 }
 
 /// The level and message of a block's header line (`warning: unused
 /// dependency `x``, `error[code]: ...`).
-fn manifest_lint_header(block: &crate::rustc_text::Block) -> Option<(&'static str, &str)> {
-    use crate::rustc_text::Level;
+fn manifest_lint_header(block: &crate::rustc_text::Block) -> Option<(Level, &str)> {
     let level = match block.level {
-        Level::Error => "error",
-        Level::Warning => "warning",
+        Level::Error => Level::Error,
+        Level::Warning => Level::Warning,
         Level::Other => return None,
     };
     let header = block.text.lines().next()?;
-    let (_, message) = header.split_once(": ")?;
+    let message = header
+        .strip_prefix("error: ")
+        .or_else(|| header.strip_prefix("warning: "))
+        .or_else(|| {
+            let end = header.find("]: ")? + 3;
+            header.get(end..)
+        })?;
     Some((level, message))
+}
+
+fn detail_from_json(primary_label: Option<&str>, children: &[String]) -> Option<String> {
+    if let Some(label) = primary_label
+        && label.contains("expected")
+        && label.contains("found")
+    {
+        return Some(collapse_whitespace(label));
+    }
+    children
+        .iter()
+        .find(|child| child.contains("expected") && child.contains("found"))
+        .map(|child| collapse_whitespace(&child.replace('\n', ", ")))
+}
+
+fn collapse_whitespace(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// The location of the block's first `-->` arrow, when it names a
@@ -351,12 +338,12 @@ mod tests {
     }
 
     #[test]
-    fn parse_captures_primary_span_label() {
+    fn parse_captures_primary_span_detail() {
         let input = r#"{"reason":"compiler-message","message":{"level":"error","code":{"code":"E0308"},"message":"mismatched types","spans":[{"file_name":"src/foo.rs","line_start":20,"column_start":5,"line_end":20,"column_end":10,"is_primary":true,"label":"expected `i32`, found `&str`"}],"children":[],"rendered":"rendered"}}"#;
         let events = parse_cargo_diagnostics(input);
         assert_eq!(events.len(), 1);
         assert_eq!(
-            events[0].primary_label.as_deref(),
+            events[0].detail.as_deref(),
             Some("expected `i32`, found `&str`")
         );
     }
@@ -365,7 +352,7 @@ mod tests {
     fn parse_omits_empty_primary_label() {
         let input = r#"{"reason":"compiler-message","message":{"level":"warning","code":{"code":"unused_variables"},"message":"unused","spans":[{"file_name":"src/a.rs","line_start":1,"column_start":1,"line_end":1,"column_end":2,"is_primary":true,"label":""}],"children":[],"rendered":"rendered"}}"#;
         let events = parse_cargo_diagnostics(input);
-        assert!(events[0].primary_label.is_none());
+        assert!(events[0].detail.is_none());
     }
 
     /// Seen on a failed clippy run: rustc's spanless `--explain` pointer arrives
@@ -383,14 +370,14 @@ mod tests {
         let events = parse_cargo_diagnostics(&input);
         assert_eq!(events.len(), 1);
         let d = &events[0];
-        assert_eq!(d.level, "error");
+        assert_eq!(d.level, Level::Error);
         assert_eq!(d.code.as_deref(), Some("E0425"));
         assert_eq!(d.message, "cannot find value");
-        assert_eq!(d.file.as_deref(), Some("src/main.rs"));
-        assert_eq!(d.line, Some(10));
-        assert_eq!(d.column, Some(5));
-        assert_eq!(d.children.len(), 1);
-        assert_eq!(d.children[0].message, "try this");
+        let site = d.site.as_ref().unwrap();
+        assert_eq!(site.file, std::path::PathBuf::from("src/main.rs"));
+        assert_eq!(site.line, Some(10));
+        assert_eq!(site.column, Some(5));
+        assert_eq!(d.detail, None);
     }
 
     #[test]
@@ -420,7 +407,10 @@ mod tests {
         let events = parse_cargo_diagnostics(&input);
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].code.as_deref(), Some("clippy::needless_return"));
-        assert_eq!(events[0].file.as_deref(), Some("src/a.rs"));
+        assert_eq!(
+            events[0].site.as_ref().map(|site| site.file.as_path()),
+            Some(std::path::Path::new("src/a.rs"))
+        );
     }
 
     #[test]
@@ -508,11 +498,17 @@ warning: `jaerlogg-test` (manifest) generated 2 warnings
             .map(|e| {
                 format!(
                     "{} {} {}:{}:{} {}",
-                    e.level,
+                    match e.level {
+                        crate::rustc_text::Level::Error => "error",
+                        crate::rustc_text::Level::Warning => "warning",
+                        crate::rustc_text::Level::Other => "other",
+                    },
                     e.code.as_deref().unwrap_or("-"),
-                    e.file.as_deref().unwrap_or("-"),
-                    e.line.unwrap_or(0),
-                    e.column.unwrap_or(0),
+                    e.site
+                        .as_ref()
+                        .map_or("-", |site| site.file.to_str().unwrap_or("-")),
+                    e.site.as_ref().and_then(|site| site.line).unwrap_or(0),
+                    e.site.as_ref().and_then(|site| site.column).unwrap_or(0),
                     e.message
                 )
             })
@@ -616,7 +612,13 @@ warning: unused dependency `toml`
 ";
         let events = parse_manifest_lints(stderr);
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0].file.as_deref(), Some("a/Cargo.toml"));
-        assert_eq!((events[0].line, events[0].column), (None, None));
+        assert_eq!(
+            events[0].site.as_ref().map(|site| site.file.as_path()),
+            Some(std::path::Path::new("a/Cargo.toml"))
+        );
+        assert_eq!(
+            events[0].site.as_ref().map(|site| (site.line, site.column)),
+            Some((None, None))
+        );
     }
 }

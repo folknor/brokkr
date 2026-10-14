@@ -872,6 +872,15 @@ capture_env = ["  PBFHOGG*  ", "MALLOC_CONF"]
         assert_eq!(got, vec!["PBFHOGG*", "MALLOC_CONF"]);
     }
 
+    /// A well-formed 32-hex XXH128 pin made of one repeated hex digit.
+    fn hex32(digit: char) -> String {
+        digit.to_string().repeat(32)
+    }
+
+    fn pin(digit: char) -> crate::preflight::FileDigest {
+        hex32(digit).parse().unwrap()
+    }
+
     fn empty_dataset() -> Dataset {
         Dataset {
             origin: None,
@@ -948,7 +957,7 @@ capture_env = ["  PBFHOGG*  ", "MALLOC_CONF"]
             "raw".into(),
             PbfEntry {
                 file: "dk-raw.osm.pbf".into(),
-                xxhash: Some("aaa".into()),
+                xxhash: Some(pin('a')),
                 seq: Some(4704),
                 ..Default::default()
             },
@@ -957,7 +966,7 @@ capture_env = ["  PBFHOGG*  ", "MALLOC_CONF"]
             "indexed".into(),
             PbfEntry {
                 file: "dk-indexed.osm.pbf".into(),
-                xxhash: Some("bbb".into()),
+                xxhash: Some(pin('b')),
                 ..Default::default()
             },
         );
@@ -996,10 +1005,10 @@ capture_env = ["  PBFHOGG*  ", "MALLOC_CONF"]
         let resolved = resolve_paths(&config, "myhost", Path::new("/proj"), Path::new("/target"));
         let dk = resolved.datasets.get("dk").unwrap();
         assert_eq!(dk.pbf.len(), 3);
-        assert_eq!(dk.pbf.get("raw").unwrap().xxhash.as_deref(), Some("aaa"));
+        assert_eq!(dk.pbf.get("raw").unwrap().xxhash.as_deref(), Some(hex32('a').as_str()));
         assert_eq!(
             dk.pbf.get("indexed").unwrap().xxhash.as_deref(),
-            Some("bbb")
+            Some(hex32('b').as_str())
         );
     }
 
@@ -1010,7 +1019,7 @@ capture_env = ["  PBFHOGG*  ", "MALLOC_CONF"]
             "4705".into(),
             OscEntry {
                 file: "dk-4705.osc.gz".into(),
-                xxhash: Some("ccc".into()),
+                xxhash: Some(pin('c')),
             },
         );
         osc.insert(
@@ -1067,16 +1076,16 @@ bbox = "8.0,54.5,13.0,58.0"
 
 [myhost.datasets.denmark.pbf.raw]
 file = "dk-raw.osm.pbf"
-sha256 = "aaa"
+xxhash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 seq = 4704
 
 [myhost.datasets.denmark.pbf.indexed]
 file = "dk-indexed.osm.pbf"
-sha256 = "bbb"
+xxhash = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
 
 [myhost.datasets.denmark.osc.4705]
 file = "dk-4705.osc.gz"
-sha256 = "ccc"
+xxhash = "cccccccccccccccccccccccccccccccc"
 "#;
         let root: toml::Value = toml::from_str(toml_str).unwrap();
         let table = root.as_table().unwrap();
@@ -1088,9 +1097,10 @@ sha256 = "ccc"
         assert_eq!(dk.bbox.as_deref(), Some("8.0,54.5,13.0,58.0"));
         assert_eq!(dk.pbf.get("raw").unwrap().file, "dk-raw.osm.pbf");
         assert_eq!(dk.pbf.get("raw").unwrap().seq, Some(4704));
+        // Upper-case hex is accepted and normalised to lower case.
         assert_eq!(
             dk.pbf.get("indexed").unwrap().xxhash.as_deref(),
-            Some("bbb")
+            Some(hex32('b').as_str())
         );
         assert_eq!(dk.osc.get("4705").unwrap().file, "dk-4705.osc.gz");
     }
@@ -1112,11 +1122,11 @@ seq = 4969
 
 [myhost.datasets.planet.snapshot.20260411.pbf.raw]
 file = "planet-20260411.osm.pbf"
-xxhash = "deadbeef"
+xxhash = "000000000000000000000000deadbeef"
 
 [myhost.datasets.planet.snapshot.20260411.pbf.indexed]
 file = "planet-20260411-with-indexdata.osm.pbf"
-xxhash = "feedface"
+xxhash = "000000000000000000000000feedface"
 "#;
         let root: toml::Value = toml::from_str(toml_str).unwrap();
         let table = root.as_table().unwrap();
@@ -1128,7 +1138,7 @@ xxhash = "feedface"
         assert_eq!(snap.download_date.as_deref(), Some("2026-04-11"));
         assert_eq!(snap.seq, Some(4969));
         assert_eq!(snap.pbf.get("raw").unwrap().file, "planet-20260411.osm.pbf");
-        assert_eq!(snap.pbf.get("raw").unwrap().xxhash.as_deref(), Some("deadbeef"));
+        assert_eq!(snap.pbf.get("raw").unwrap().xxhash.as_deref(), Some("000000000000000000000000deadbeef"));
         assert_eq!(
             snap.pbf.get("indexed").unwrap().file,
             "planet-20260411-with-indexdata.osm.pbf"
@@ -1222,22 +1232,31 @@ xxhash = "feedface"
     }
 
     #[test]
-    fn both_sha256_and_xxhash_is_rejected() {
+    fn the_retired_sha256_key_is_refused_with_the_remedy() {
         let toml_str = r#"
 project = "pbfhogg"
 
-[myhost.datasets.dk.pbf.raw]
+[myhost.datasets.dk.snapshot.s1.pbf.raw]
 file = "test.pbf"
 sha256 = "aaa"
-xxhash = "bbb"
 "#;
         let root: toml::Value = toml::from_str(toml_str).unwrap();
         let table = root.as_table().unwrap();
-        let result = parse_hosts(table);
-        assert!(
-            result.is_err(),
-            "should reject entry with both sha256 and xxhash"
-        );
+        let err = refuse_retired_sha256(table).unwrap_err().to_string();
+        assert!(err.contains("myhost.datasets.dk.snapshot.s1.pbf.raw.sha256"), "{err}");
+        assert!(err.contains("brokkr env"), "{err}");
+    }
+
+    #[test]
+    fn a_short_or_sha256_length_digest_is_refused() {
+        let sha256_length = "a".repeat(64);
+        for value in ["bbb", sha256_length.as_str()] {
+            let toml_str = format!(
+                "project = \"pbfhogg\"\n[myhost.datasets.dk.pbf.raw]\nfile = \"t.pbf\"\nxxhash = \"{value}\"\n"
+            );
+            let root: toml::Value = toml::from_str(&toml_str).unwrap();
+            assert!(parse_hosts(root.as_table().unwrap()).is_err(), "{value} accepted");
+        }
     }
 
     #[test]
@@ -1256,7 +1275,7 @@ project = "nidhogg"
 
 [myhost.datasets.denmark.pmtiles.elivagar]
 file = "denmark-elivagar.pmtiles"
-sha256 = "ddd"
+xxhash = "dddddddddddddddddddddddddddddddd"
 "#;
         let root: toml::Value = toml::from_str(toml_str).unwrap();
         let table = root.as_table().unwrap();
@@ -1270,7 +1289,7 @@ sha256 = "ddd"
         );
         assert_eq!(
             dk.pmtiles.get("elivagar").unwrap().xxhash.as_deref(),
-            Some("ddd")
+            Some(hex32('d').as_str())
         );
     }
 
@@ -2320,20 +2339,20 @@ debug = true
     #[test]
     fn dellingr_accepts_a_workload_with_both_pins() {
         let cfg = parse_dellingr(&dellingr_table(
-            "file = \"bench/w.lua\"\nxxh128 = \"00\"\n\
-             hotpath_file = \"examples/w.lua\"\nhotpath_xxh128 = \"11\"\n",
+            "file = \"bench/w.lua\"\nxxh128 = \"00000000000000000000000000000000\"\n\
+             hotpath_file = \"examples/w.lua\"\nhotpath_xxh128 = \"11111111111111111111111111111111\"\n",
         ))
         .unwrap()
         .unwrap();
         let w = &cfg.workloads["w"];
         assert_eq!(w.hotpath_file.as_deref(), Some(Path::new("examples/w.lua")));
-        assert_eq!(w.hotpath_xxh128.as_deref(), Some("11"));
+        assert_eq!(w.hotpath_xxh128.as_deref(), Some("11111111111111111111111111111111"));
     }
 
     #[test]
     fn dellingr_accepts_a_workload_with_no_hotpath_pin() {
         let cfg = parse_dellingr(&dellingr_table(
-            "file = \"bench/w.lua\"\nxxh128 = \"00\"\n",
+            "file = \"bench/w.lua\"\nxxh128 = \"00000000000000000000000000000000\"\n",
         ))
         .unwrap()
         .unwrap();
@@ -2346,8 +2365,8 @@ debug = true
     #[test]
     fn dellingr_rejects_an_absolute_hotpath_file() {
         let err = parse_dellingr(&dellingr_table(
-            "file = \"bench/w.lua\"\nxxh128 = \"00\"\n\
-             hotpath_file = \"/elsewhere/w.lua\"\nhotpath_xxh128 = \"11\"\n",
+            "file = \"bench/w.lua\"\nxxh128 = \"00000000000000000000000000000000\"\n\
+             hotpath_file = \"/elsewhere/w.lua\"\nhotpath_xxh128 = \"11111111111111111111111111111111\"\n",
         ))
         .unwrap_err();
         let msg = format!("{err}");
@@ -2358,7 +2377,7 @@ debug = true
     #[test]
     fn dellingr_rejects_an_absolute_file() {
         let err = parse_dellingr(&dellingr_table(
-            "file = \"/elsewhere/w.lua\"\nxxh128 = \"00\"\n",
+            "file = \"/elsewhere/w.lua\"\nxxh128 = \"00000000000000000000000000000000\"\n",
         ))
         .unwrap_err();
         let msg = format!("{err}");
@@ -2366,25 +2385,23 @@ debug = true
         assert!(msg.contains("absolute"), "{msg}");
     }
 
-    /// An empty digest would otherwise surface as a hash mismatch at run time,
-    /// which reads like drift rather than the config hole it is.
+    /// An empty or malformed digest would otherwise surface as a hash mismatch
+    /// at run time, which reads like drift rather than the config hole it is.
+    /// Both pins are typed, so the refusal comes from deserialization.
     #[test]
     fn dellingr_rejects_an_empty_digest_on_either_pin() {
         let err = parse_dellingr(&dellingr_table(
             "file = \"bench/w.lua\"\nxxh128 = \"  \"\n",
         ))
         .unwrap_err();
-        assert!(format!("{err}").contains(".xxh128 is empty"), "{err}");
+        assert!(format!("{err}").contains("XXH128"), "{err}");
 
         let err = parse_dellingr(&dellingr_table(
-            "file = \"bench/w.lua\"\nxxh128 = \"00\"\n\
+            "file = \"bench/w.lua\"\nxxh128 = \"00000000000000000000000000000000\"\n\
              hotpath_file = \"examples/w.lua\"\nhotpath_xxh128 = \"\"\n",
         ))
         .unwrap_err();
-        assert!(
-            format!("{err}").contains(".hotpath_xxh128 is empty"),
-            "{err}"
-        );
+        assert!(format!("{err}").contains("XXH128"), "{err}");
     }
 
     /// Named at parse time, so a half-registered workload is reported even
@@ -2392,7 +2409,7 @@ debug = true
     #[test]
     fn dellingr_rejects_a_half_registered_hotpath_pair() {
         let err = parse_dellingr(&dellingr_table(
-            "file = \"bench/w.lua\"\nxxh128 = \"00\"\n\
+            "file = \"bench/w.lua\"\nxxh128 = \"00000000000000000000000000000000\"\n\
              hotpath_file = \"examples/w.lua\"\n",
         ))
         .unwrap_err();
@@ -2400,7 +2417,7 @@ debug = true
         assert!(msg.contains("hotpath_file without hotpath_xxh128"), "{msg}");
 
         let err = parse_dellingr(&dellingr_table(
-            "file = \"bench/w.lua\"\nxxh128 = \"00\"\nhotpath_xxh128 = \"11\"\n",
+            "file = \"bench/w.lua\"\nxxh128 = \"00000000000000000000000000000000\"\nhotpath_xxh128 = \"11111111111111111111111111111111\"\n",
         ))
         .unwrap_err();
         let msg = format!("{err}");

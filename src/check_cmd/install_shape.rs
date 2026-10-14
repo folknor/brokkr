@@ -108,12 +108,7 @@ fn install_feature_applies(
     mode: Option<crate::config::InstallFeatureCheck>,
     certifies: Option<Certifies>,
 ) -> bool {
-    use crate::config::InstallFeatureCheck as M;
-    match mode.unwrap_or(M::Gate) {
-        M::Off => false,
-        M::Gate => certifies == Some(Certifies::Complete),
-        M::Always => true,
-    }
+    crate::config::Claim::new(certifies).runs_install_feature(mode)
 }
 
 /// The bin targets the artifact stream must contain for a package to be
@@ -353,7 +348,7 @@ fn probe_missing_bin(
     let stdout = String::from_utf8_lossy(&captured.stdout);
     let stderr = String::from_utf8_lossy(&captured.stderr);
     let events = cargo_json::parse_cargo_diagnostics(&stdout);
-    let errors: Vec<_> = events.iter().filter(|d| d.level == "error").collect();
+    let errors: Vec<_> = events.iter().filter(|d| d.is_error()).collect();
 
     // Cargo's target-selection refusal, and it must name THIS target -
     // a `requires the features` line about some other target is not an
@@ -383,7 +378,7 @@ fn report_errors(package: &str, errors: &[&cargo_json::DiagnosticEvent]) {
     );
     for d in errors {
         msg.push_str("  ");
-        msg.push_str(&event_to_clippy(d).format_one());
+        msg.push_str(&d.format_one());
         msg.push('\n');
     }
     output::error(msg.trim_end());
@@ -417,7 +412,7 @@ fn check_one_install_package(
 
     if !captured.status.success() {
         let events = cargo_json::parse_cargo_diagnostics(&stdout);
-        let errors: Vec<_> = events.iter().filter(|d| d.level == "error").collect();
+        let errors: Vec<_> = events.iter().filter(|d| d.is_error()).collect();
         if is_toolchain_refusal(&stderr, !errors.is_empty()) {
             // No silent fallback: running un-pinned would recreate the
             // workspace-unified graph this phase exists to leave. A hard
@@ -527,7 +522,12 @@ fn run_install_feature_phase(
             output::run_msg(&format!("install-feature: skipped ({reason})"));
             return Ok(());
         }
-        InstallSelection::Eligible { packages, configured, debug } => (packages, *configured, *debug),
+        InstallSelection::Eligible { packages, configured, debug, notes } => {
+            for note in notes {
+                output::detail(&format!("install-feature: {note}"));
+            }
+            (packages, *configured, *debug)
+        }
     };
     // A `-p` narrowing is folded into the phase's one ok line below (it is
     // named there as "N of M install packages"); the log keeps the names.

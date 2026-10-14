@@ -19,6 +19,7 @@ use super::CorpusDb;
 use crate::error::DevError;
 use crate::piners::gate::GateDiff;
 use crate::piners::report::{HarnessReport, ProbeLine, TradeDiffLine};
+use crate::piners::run_model::RunVerdict;
 
 /// Execution context resolved before building/running the corpus harness.
 /// The same values are stored in dedicated run columns so comparisons do not
@@ -52,10 +53,9 @@ pub struct RunRecord<'a> {
     pub context: Option<&'a RunContext>,
     /// Was the per-probe gate enforced (`!--no-gate`)?
     pub gated: bool,
-    /// `"pass"` or `"fail"`.
-    pub result: &'a str,
-    /// One-line failure classification (`None` on pass).
-    pub fail_reason: Option<&'a str>,
+    /// One result and its reason, with `pass`/`fail`/`error`/`interrupted`
+    /// represented by the shared piners verdict type.
+    pub verdict: &'a RunVerdict,
     /// Harness process exit code (`None` if killed by signal / never spawned).
     pub harness_exit_code: Option<i32>,
     /// Captured harness stderr (or a spawn-error message).
@@ -150,8 +150,8 @@ fn record_inner(
         params![
             run.selector,
             i64::from(run.gated),
-            run.result,
-            run.fail_reason,
+            run.verdict.result(),
+            run.verdict.reason(),
             run.harness_exit_code,
             as_i64(report.probes.len()),
             run.stderr,
@@ -344,8 +344,7 @@ mod tests {
             selector: r#"{"keywords":["magnifier"]}"#,
             context: None,
             gated: true,
-            result: "fail",
-            fail_reason: Some("1 gate deviation(s)"),
+            verdict: &RunVerdict::Fail("1 gate deviation(s)".to_owned()),
             harness_exit_code: Some(0),
             stderr: "",
             wall_ms: Some(1234.0),
@@ -410,8 +409,7 @@ mod tests {
             selector: "not-json",
             context: Some(&context),
             gated: true,
-            result: "pass",
-            fail_reason: None,
+            verdict: &RunVerdict::Pass,
             harness_exit_code: Some(0),
             stderr: "",
             wall_ms: None,
@@ -441,8 +439,7 @@ mod tests {
             selector: "{}",
             context: None,
             gated: true,
-            result: "pass",
-            fail_reason: None,
+            verdict: &RunVerdict::Pass,
             harness_exit_code: Some(0),
             stderr: "",
             wall_ms: None,
@@ -491,8 +488,7 @@ mod tests {
             selector: "{}",
             context: None,
             gated: true,
-            result: "fail",
-            fail_reason: Some("1 gate deviation(s)"),
+            verdict: &RunVerdict::Fail("1 gate deviation(s)".to_owned()),
             harness_exit_code: Some(0),
             stderr: "",
             wall_ms: None,
@@ -525,8 +521,9 @@ mod tests {
             selector: "{}",
             context: None,
             gated: true,
-            result: "fail",
-            fail_reason: Some("run_error at stage feed_load (feed eth, role base): oom"),
+            verdict: &RunVerdict::Fail(
+                "run_error at stage feed_load (feed eth, role base): oom".to_owned(),
+            ),
             harness_exit_code: Some(2),
             stderr: "",
             wall_ms: Some(10.0),
@@ -557,8 +554,7 @@ mod tests {
             selector: "{}",
             context: None,
             gated: true,
-            result: "fail",
-            fail_reason: Some("harness exited 2 before reporting 3 of 3"),
+            verdict: &RunVerdict::Fail("harness exited 2 before reporting 3 of 3".to_owned()),
             harness_exit_code: Some(2),
             stderr: "boom",
             wall_ms: Some(900.0),

@@ -4,12 +4,12 @@ use std::path::Path;
 
 use crate::build::CargoProfile;
 use crate::config::{GateConfig, RatatoskrConfig};
-use crate::db::gate::{GateDb, GateRow};
 use crate::error::DevError;
 use crate::git;
 use crate::lockfile::{self, LockContext};
 use crate::output;
 use crate::ratatoskr::gate as gate_eval;
+use crate::ratatoskr::gate_store::{GateDb, GateRow};
 use crate::sidecar;
 
 use super::bench::{SyncBenchRequest, run_sync_bench};

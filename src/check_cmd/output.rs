@@ -999,7 +999,23 @@ fn run_one_test_sweep(
     // passing run still needs to say.
     // Held until the phase ends and merged with the identical block every other
     // sweep produced: one cargo warning seen by four sweeps is one warning.
-    let filtered = cargo_filter::filter_clippy_in_tree(&stderr, Some(project_root));
+    // The text path and the JSON diagnostic path use the same ownership
+    // classifier. Cargo metadata is only needed when stderr contains a
+    // diagnostic site or manifest path; if unavailable, unknown ownership
+    // keeps the warning.
+    let owners = if stderr.contains("--> ") || stderr.contains("Cargo.toml") {
+        build::project_info(Some(project_root)).ok().map(|info| {
+            crate::diagnostic::OwnerIndex::from_metadata_at(
+                &info.workspace_root,
+                project_root,
+                &info.workspace_members,
+                &info.member_manifests,
+            )
+        })
+    } else {
+        None
+    };
+    let filtered = cargo_filter::filter_clippy_with_owners(&stderr, owners.as_ref());
     if filtered != "cargo clippy: no issues" {
         let relabeled = filtered.replacen("cargo clippy:", "cargo test:", 1);
         note_warning(&relabeled, &sweep.label);
@@ -1202,7 +1218,7 @@ mod tests {
         assert_eq!(sweeps[0].label, "all-features");
         assert_eq!(sweeps[0].features.configured_key(), vec!["--all-features"]);
         assert!(sweeps[0].build_packages.is_empty());
-        assert!(sweeps[0].libtest_args.is_empty());
+        assert!(sweeps[0].filters.libtest_args().is_empty());
     }
 
     #[test]
@@ -1272,7 +1288,7 @@ mod tests {
         assert_eq!(sweeps[0].label, "all");
         assert_eq!(sweeps[0].features.configured_key(), vec!["--features", "a,b"]);
         assert_eq!(sweeps[0].build_packages, vec!["pbfhogg-cli"]);
-        assert!(sweeps[0].libtest_args.is_empty());
+        assert!(sweeps[0].filters.libtest_args().is_empty());
         assert_eq!(sweeps[1].label, "consumer");
     }
 
@@ -1298,7 +1314,7 @@ include_ignored = false
             decide_active_sweeps(&entries, Some(&test_cfg), None, &[], false).unwrap();
         assert_eq!(sweeps.len(), 1);
         assert_eq!(sweeps[0].label, "all");
-        assert_eq!(sweeps[0].libtest_args, vec!["--skip", "tier2::"]);
+        assert_eq!(sweeps[0].filters.libtest_args(), vec!["--skip", "tier2::"]);
     }
 
     #[test]
@@ -1324,7 +1340,7 @@ include_ignored = true
         let sweeps =
             decide_active_sweeps(&entries, Some(&test_cfg), Some("full"), &[], false).unwrap();
         assert_eq!(sweeps.len(), 1);
-        assert!(sweeps[0].libtest_args.contains(&"--include-ignored".into()));
+        assert!(sweeps[0].filters.libtest_args().contains(&"--include-ignored".into()));
     }
 
     /// The regression this whole split exists for: `check -p <pkg>
@@ -1368,10 +1384,13 @@ test_threads = 0
         assert!(sweeps[0].build_packages.is_empty());
         // Run shaping is NOT: the profile's filters and thread policy ride along.
         assert_eq!(
-            sweeps[0].libtest_args,
+            sweeps[0].filters.libtest_args(),
             vec!["--skip", "serial_tests::", "--skip", "logging::macros::"]
         );
-        assert_eq!(sweeps[0].test_threads, Some(0));
+        assert_eq!(
+            sweeps[0].lane_exec,
+            crate::profile::LaneExec::Serial { threads: crate::profile::Threads::CargoDefault }
+        );
     }
 
     /// The quiet half of the same defect: entry-level `env` is a
@@ -1515,7 +1534,7 @@ skip = ["serial_tests::"]
         )
         .unwrap();
         assert_eq!(sweeps.len(), 1);
-        assert!(sweeps[0].libtest_args.is_empty());
+        assert!(sweeps[0].filters.libtest_args().is_empty());
     }
 
     /// `--profile` still selects which shaping an ad-hoc run inherits.
@@ -1545,7 +1564,7 @@ skip = ["edit_only::"]
             false,
         )
         .unwrap();
-        assert_eq!(sweeps[0].libtest_args, vec!["--skip", "edit_only::"]);
+        assert_eq!(sweeps[0].filters.libtest_args(), vec!["--skip", "edit_only::"]);
     }
 
     /// No `[test]` section at all: nothing to inherit, and the ad-hoc sweep
@@ -1554,8 +1573,8 @@ skip = ["edit_only::"]
     fn ad_hoc_without_test_config_is_unshaped() {
         let sweeps =
             decide_active_sweeps(&[], None, None, &["defi".to_owned()], false).unwrap();
-        assert!(sweeps[0].libtest_args.is_empty());
-        assert_eq!(sweeps[0].test_threads, None);
+        assert!(sweeps[0].filters.libtest_args().is_empty());
+        assert_eq!(sweeps[0].lane_exec, crate::profile::LaneExec::default());
     }
 
     #[test]
@@ -1820,30 +1839,45 @@ warning: `b` (manifest) generated 1 warning
         let stderr = ["core/Cargo.toml", "./daemon/../core/Cargo.toml", "Cargo.toml", "../sibling/Cargo.toml", "vendor/x/Cargo.toml"]
             .map(lint)
             .concat();
-        let owners = |selected: Option<&[&str]>| -> Vec<(String, Option<String>)> {
+        let owners = |selected: Option<&[&str]>| -> Vec<(String, crate::diagnostic::Owner)> {
             let mut r = run("r", selected);
             r.stderr.clone_from(&stderr);
             attribute_manifest_lints(&r, &info)
                 .into_iter()
-                .map(|(_, e)| (e.file.unwrap_or_default(), e.package_id))
+                .map(|(_, e)| {
+                    (
+                        e.site
+                            .as_ref()
+                            .map_or_else(String::new, |site| site.file.display().to_string()),
+                        e.owner,
+                    )
+                })
                 .collect()
         };
-        let id = |s: &str| Some(s.to_owned());
         assert_eq!(
             owners(None),
             [
-                ("core/Cargo.toml".to_owned(), id("id-core")),
-                ("./daemon/../core/Cargo.toml".to_owned(), id("id-core")),
-                ("Cargo.toml".to_owned(), None),
-                ("../sibling/Cargo.toml".to_owned(), id("manifest+/sibling/Cargo.toml")),
-                ("vendor/x/Cargo.toml".to_owned(), id("manifest+/ws/vendor/x/Cargo.toml")),
+                ("core/Cargo.toml".to_owned(), crate::diagnostic::Owner::Member("id-core".into())),
+                ("./daemon/../core/Cargo.toml".to_owned(), crate::diagnostic::Owner::Member("id-core".into())),
+                ("Cargo.toml".to_owned(), crate::diagnostic::Owner::WorkspaceRoot),
+                (
+                    "../sibling/Cargo.toml".to_owned(),
+                    crate::diagnostic::Owner::NonMember(crate::diagnostic::NonMemberOwner::Path(
+                        "/sibling/Cargo.toml".into(),
+                    )),
+                ),
+                (
+                    "vendor/x/Cargo.toml".to_owned(),
+                    crate::diagnostic::Owner::NonMember(crate::diagnostic::NonMemberOwner::Path(
+                        "/ws/vendor/x/Cargo.toml".into(),
+                    )),
+                ),
             ]
         );
         // `-p daemon`: core's manifest is not this run's; the root's still is.
         let narrowed: Vec<String> = owners(Some(&["daemon"])).into_iter().map(|(f, _)| f).collect();
         assert_eq!(narrowed, ["Cargo.toml", "../sibling/Cargo.toml", "vendor/x/Cargo.toml"]);
 
-        let members = Some(&info.workspace_members);
         let dependency = |file: &str| {
             let r = attributed(
                 SweepResult {
@@ -1852,7 +1886,7 @@ warning: `b` (manifest) generated 1 warning
                 },
                 &info,
             );
-            is_dependency_warning(&r.manifest[0].1, members)
+            r.manifest[0].1.is_dependency_warning()
         };
         assert!(!dependency("core/Cargo.toml"));
         assert!(!dependency("Cargo.toml"));
@@ -2013,7 +2047,9 @@ warning: z [too_many_lines]
         assert!(!parsed.parse_failed);
         assert_eq!(parsed.diagnostics.len(), 2);
         for d in &parsed.diagnostics {
-            assert_eq!(d.header, "error[clippy::collapsible_if]");
+            assert!(d
+                .format_as(crate::rustc_text::Level::Error)
+                .starts_with("error[clippy::collapsible_if] src/compose.rs:"));
         }
     }
 
@@ -2023,9 +2059,14 @@ warning: z [too_many_lines]
         let parsed = parse_clippy_from_json(input, false, &[]);
         assert_eq!(parsed.diagnostics.len(), 1);
         let d = &parsed.diagnostics[0];
-        assert_eq!(d.header, "error[E0308]");
         assert_eq!(
-            d.format_one(),
+            d.format_as(crate::rustc_text::Level::Error)
+                .split(' ')
+                .next(),
+            Some("error[E0308]")
+        );
+        assert_eq!(
+            d.format_as(crate::rustc_text::Level::Error),
             "error[E0308] src/foo.rs:20:5 mismatched types - expected `i32`, found `&str`"
         );
     }
@@ -2058,7 +2099,13 @@ warning: z [too_many_lines]
         );
         let parsed = parse_clippy_from_json(&input, false, &[]);
         assert_eq!(parsed.diagnostics.len(), 1);
-        assert_eq!(parsed.diagnostics[0].header, "error");
+        assert_eq!(
+            parsed.diagnostics[0]
+                .format_as(crate::rustc_text::Level::Error)
+                .split(' ')
+                .next(),
+            Some("error")
+        );
     }
 
     /// Only a warning from outside the workspace is exempt. The same warning
@@ -2076,11 +2123,24 @@ warning: z [too_many_lines]
         let members: HashMap<String, String> = [("member#a@1.0.0".to_owned(), "a".to_owned())].into();
         let dep = "path+file:///elsewhere#b@1.0.0";
 
-        assert!(is_dependency_warning(&event("warning", Some(dep)), Some(&members)));
-        assert!(!is_dependency_warning(&event("warning", Some("member#a@1.0.0")), Some(&members)));
-        assert!(!is_dependency_warning(&event("warning", None), Some(&members)));
-        assert!(!is_dependency_warning(&event("error", Some(dep)), Some(&members)));
-        assert!(!is_dependency_warning(&event("warning", Some(dep)), None));
+        // The warning with no package id sits at `src/a.rs`, which only the
+        // member's manifest directory makes the workspace's own.
+        let manifests: HashMap<std::path::PathBuf, String> =
+            [(std::path::PathBuf::from("/ws/Cargo.toml"), "member#a@1.0.0".to_owned())].into();
+        let owners = crate::diagnostic::OwnerIndex::from_metadata_at(
+            Path::new("/ws"),
+            Path::new("/ws"),
+            &members,
+            &manifests,
+        );
+        let is_dependency_warning = |mut diagnostic: crate::diagnostic::Diagnostic| {
+            diagnostic.classify_owner(&owners);
+            diagnostic.is_dependency_warning()
+        };
+        assert!(is_dependency_warning(event("warning", Some(dep))));
+        assert!(!is_dependency_warning(event("warning", Some("member#a@1.0.0"))));
+        assert!(!is_dependency_warning(event("warning", None)));
+        assert!(!is_dependency_warning(event("error", Some(dep))));
     }
 
     #[test]
@@ -2097,10 +2157,10 @@ warning: z [too_many_lines]
         );
         let parsed = parse_clippy_from_json(&input, false, &[]);
         assert_eq!(parsed.diagnostics.len(), 1);
-        assert!(parsed.diagnostics[0].is_error);
+        assert_eq!(parsed.diagnostics[0].level, crate::rustc_text::Level::Warning);
         assert_eq!(
-            parsed.diagnostics[0].header,
-            "error[clippy::manual_string_new]"
+            parsed.diagnostics[0].format_as(crate::rustc_text::Level::Error).split(' ').next(),
+            Some("error[clippy::manual_string_new]")
         );
     }
 
@@ -2150,7 +2210,7 @@ warning: z [too_many_lines]
         let parsed = parse_clippy_from_json(&input, false, &sited);
         assert_eq!(parsed.diagnostics.len(), 1);
         assert_eq!(
-            parsed.diagnostics[0].location.as_deref(),
+            parsed.diagnostics[0].location().as_deref(),
             Some("src/b.rs:2:2")
         );
     }
@@ -2187,14 +2247,28 @@ warning: z [too_many_lines]
         assert!(parsed.diagnostics.is_empty());
     }
 
-    fn diag(header: &str, location: &str) -> cargo_filter::ClippyDiagnostic {
-        cargo_filter::ClippyDiagnostic {
-            is_error: header.starts_with("error"),
-            header: header.to_string(),
-            location: Some(location.to_string()),
-            message: "msg".to_string(),
-            detail: None,
-        }
+    fn diag(header: &str, location: &str) -> crate::diagnostic::Diagnostic {
+        let level = if header.starts_with("error") {
+            crate::rustc_text::Level::Error
+        } else {
+            crate::rustc_text::Level::Warning
+        };
+        let code = header.find('[').and_then(|start| {
+            header[start + 1..]
+                .find(']')
+                .map(|end| header[start + 1..start + 1 + end].to_owned())
+        });
+        let mut diagnostic = crate::diagnostic::Diagnostic::new(level, code, "msg".into());
+        let mut parts = location.rsplitn(3, ':');
+        let column = parts.next().and_then(|part| part.parse().ok());
+        let line = parts.next().and_then(|part| part.parse().ok());
+        let file = parts.next().unwrap_or(location);
+        diagnostic.site = Some(crate::diagnostic::Site {
+            file: file.into(),
+            line,
+            column,
+        });
+        diagnostic
     }
 
     #[test]
@@ -2215,12 +2289,12 @@ warning: z [too_many_lines]
             diag("warning[clippy::collapsible_if]", "src/a.rs:1:1"),
         ];
         diags.sort_by_cached_key(clippy_sort_key);
-        assert_eq!(diags[0].header, "warning[clippy::collapsible_if]");
-        assert_eq!(diags[1].header, "warning[clippy::collapsible_if]");
-        assert_eq!(diags[2].header, "warning[clippy::needless_return]");
+        assert_eq!(diags[0].code.as_deref(), Some("clippy::collapsible_if"));
+        assert_eq!(diags[1].code.as_deref(), Some("clippy::collapsible_if"));
+        assert_eq!(diags[2].code.as_deref(), Some("clippy::needless_return"));
         // Within the same lint, file order kicks in: a.rs before b.rs.
-        assert_eq!(diags[0].location.as_deref(), Some("src/a.rs:1:1"));
-        assert_eq!(diags[1].location.as_deref(), Some("src/b.rs:1:1"));
+        assert_eq!(diags[0].location().as_deref(), Some("src/a.rs:1:1"));
+        assert_eq!(diags[1].location().as_deref(), Some("src/b.rs:1:1"));
     }
 
     #[test]
@@ -2232,8 +2306,8 @@ warning: z [too_many_lines]
             diag("warning[clippy::xxx]", "src/a.rs:9:1"),
         ];
         diags.sort_by_cached_key(clippy_sort_key);
-        assert_eq!(diags[0].location.as_deref(), Some("src/a.rs:9:1"));
-        assert_eq!(diags[1].location.as_deref(), Some("src/a.rs:100:1"));
+        assert_eq!(diags[0].location().as_deref(), Some("src/a.rs:9:1"));
+        assert_eq!(diags[1].location().as_deref(), Some("src/a.rs:100:1"));
     }
 
     #[test]
@@ -2246,29 +2320,9 @@ warning: z [too_many_lines]
             diag("warning[clippy::aaa]", "src/c.rs:1:1"),
         ];
         diags.sort_by_cached_key(clippy_sort_key);
-        assert_eq!(diags[0].header, "warning[clippy::aaa]");
-        assert_eq!(diags[1].header, "warning[clippy::zzz]");
-        assert_eq!(diags[2].header, "warning");
-    }
-
-    #[test]
-    fn parse_location_handles_normal_path_line_col() {
-        assert_eq!(
-            parse_location(Some("src/foo.rs:10:5")),
-            ("src/foo.rs".to_string(), 10, 5)
-        );
-    }
-
-    #[test]
-    fn parse_location_handles_none() {
-        assert_eq!(parse_location(None), (String::new(), 0, 0));
-    }
-
-    #[test]
-    fn extract_lint_code_pulls_bracketed_name() {
-        assert_eq!(extract_lint_code("warning[clippy::foo]"), "clippy::foo");
-        assert_eq!(extract_lint_code("error[E0308]"), "E0308");
-        assert_eq!(extract_lint_code("warning"), "");
+        assert_eq!(diags[0].code.as_deref(), Some("clippy::aaa"));
+        assert_eq!(diags[1].code.as_deref(), Some("clippy::zzz"));
+        assert_eq!(diags[2].code, None);
     }
 
     fn s(parts: &[&str]) -> Vec<String> {
@@ -2852,15 +2906,24 @@ warning: z [too_many_lines]
     fn describe_sweep_summarises_libtest_filters_by_count() {
         // The 14-skip list is the bulk of nautilus's command line and is
         // identical across its three sweeps - a count is the whole signal.
-        let mut libtest_args = Vec::new();
-        for name in ["a", "b", "c"] {
-            libtest_args.push("--skip".to_owned());
-            libtest_args.push(name.to_owned());
-        }
-        libtest_args.push("--include-ignored".to_owned());
+        let skips = ["a", "b", "c"]
+            .into_iter()
+            .map(|name| crate::profile::Filter {
+                kind: crate::profile::FilterKind::Skip,
+                pattern: name.to_owned(),
+                package: None,
+                origin: crate::profile::FilterOrigin::Profile("tier1".into()),
+            })
+            .collect();
         let tier = ResolvedSweep {
-            libtest_args,
-            test_threads: Some(0),
+            filters: crate::profile::LaneFilters {
+                filters: skips,
+                targets: Vec::new(),
+                include_ignored: true,
+            },
+            lane_exec: crate::profile::LaneExec::Serial {
+                threads: crate::profile::Threads::CargoDefault,
+            },
             ..sweep("tier1")
         };
         assert_eq!(
@@ -2873,11 +2936,15 @@ warning: z [too_many_lines]
 
     #[test]
     fn describe_sweep_joins_test_filter_pairs() {
-        // S3-35: `cargo_test_filters` is flattened `["--test", "cli_sort"]`;
-        // the shape must render each filter as one item, not `--test` and the
-        // bare name as two comma-separated fragments.
+        // Cargo renders a target selector as the pair `--test cli_sort`; the
+        // shape must show each target as one item, not `--test` and the bare
+        // name as two comma-separated fragments.
+        let targets = |names: &[&str]| crate::profile::LaneFilters {
+            targets: names.iter().map(|n| crate::profile::TargetName::new(*n)).collect(),
+            ..Default::default()
+        };
         let one = ResolvedSweep {
-            cargo_test_filters: s(&["--test", "cli_sort"]),
+            filters: targets(&["cli_sort"]),
             ..sweep("sort")
         };
         assert_eq!(
@@ -2887,7 +2954,7 @@ warning: z [too_many_lines]
 
         // Two filters stay two distinct items, each self-contained.
         let two = ResolvedSweep {
-            cargo_test_filters: s(&["--test", "cli_sort", "--test", "cli_env"]),
+            filters: targets(&["cli_sort", "cli_env"]),
             ..sweep("sort")
         };
         assert_eq!(
@@ -2901,17 +2968,19 @@ warning: z [too_many_lines]
 
     #[test]
     fn describe_sweep_thread_policy_tracks_watchdog_lane() {
-        // None and Some(1) both mean the serial per-test watchdog lane.
-        for threads in [None, Some(1)] {
-            let serial = ResolvedSweep {
-                test_threads: threads,
-                ..sweep("serial")
-            };
-            assert_eq!(describe(&serial, true, &Selection::Bare), "default selection, serial");
-        }
-        for threads in [Some(0), Some(4)] {
+        // The watchdogged serial lane (`test_threads` unset or 1) says serial;
+        // libtest-mediated threads (`test_threads` 0 or above 1) say parallel.
+        let serial = ResolvedSweep {
+            lane_exec: crate::profile::LaneExec::Serial {
+                threads: crate::profile::Threads::Watchdogged,
+            },
+            ..sweep("serial")
+        };
+        assert_eq!(describe(&serial, true, &Selection::Bare), "default selection, serial");
+        let four = std::num::NonZeroU32::new(4).unwrap();
+        for threads in [crate::profile::Threads::CargoDefault, crate::profile::Threads::Cargo(four)] {
             let parallel = ResolvedSweep {
-                test_threads: threads,
+                lane_exec: crate::profile::LaneExec::Serial { threads },
                 ..sweep("par")
             };
             assert_eq!(describe(&parallel, true, &Selection::Bare), "default selection, parallel");
@@ -2989,7 +3058,7 @@ warning: z [too_many_lines]
         // `doc_only` sweep, and `check -p <that crate>` must then skip the
         // doctest lane rather than run `cargo test --doc -p <crate>`.
         let doctests = ResolvedSweep {
-            doc_only: true,
+            lane_exec: crate::profile::LaneExec::doc_only(),
             test_exclude_packages: s(&["bin-only"]),
             ..sweep("doctests")
         };

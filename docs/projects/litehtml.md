@@ -9,12 +9,16 @@ visual-test surface, different pipeline binary).
   `extract` / `outline` by shelling out to a bundled Node.js script.
 - `src/litehtml/capture.js` - Puppeteer reference capture script, bundled into
   brokkr and materialized in its per-user runtime cache.
-- `src/litehtml/db.rs` - `MechanicalDb`: the `mechanical_*` tables in
+- `src/litehtml/db.rs` - the litehtml adapter and legacy schema migration for
+  `MechanicalDb`; shared SQLite operations live in `src/visual/db.rs`. The
+  `mechanical_*` tables are in
   `.brokkr/results.db`. That file's `PRAGMA user_version` belongs to
   `ResultsDb`, so `MechanicalDb` (and sluggrs' `SnapshotDb`) never read or
   write it; migrations detect the schema directly (column probes).
-- `src/litehtml/compare.rs` - pixel + element comparison.
-- `src/litehtml/mod.rs` - UUID generation.
+- `src/litehtml/compare.rs` - element geometry comparison.
+- `src/visual/` - shared pixel comparison, typed visual statuses, run engine,
+  database operations, and common command formatting. Run IDs use the shared
+  UUID helpers in `src/db/types.rs`.
 - `scripts/litehtml-prepare/` - Node.js fixture preprocessing (cheerio +
   pngjs). `prepare.js` handles `prepare`, `extract`, and `outline`
   subcommands. Dependencies managed via pnpm (`package.json`,

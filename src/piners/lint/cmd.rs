@@ -28,6 +28,7 @@ use crate::piners::lint::registry::{self, LintPin, LintRegistry, TvDiag};
 use crate::piners::lint::select::{self, SelectArgs};
 use crate::piners::lint::{self, DiagSet, ProbeResult, validators};
 use crate::piners::registry_io;
+use crate::piners::run_model::{Mode, ModeFlags, RunVerdict};
 use crate::piners::time::now_rfc3339;
 use crate::ratatoskr::build;
 use crate::resolve::lint_runs_db_path;
@@ -94,10 +95,17 @@ pub fn lint_corpus(
         )
     })?;
     crate::piners::layout::ensure_distinct_registry_dirs(project_root, &piners_cfg)?;
+    let mode = Mode::resolve(ModeFlags {
+        verify_only: args.verify_only,
+        reseed: args.reseed,
+        reanchor: args.reanchor,
+        bless: args.bless,
+        no_gate: args.no_gate,
+    })?;
 
     // Reseed stamps lints.toml from the snippet tree - no registry to load (it
     // may not exist yet), no build, no run. Route early.
-    if args.reseed {
+    if mode.is_reseed() {
         return crate::piners::lint::reseed::run(project_root, &piners_cfg, lint_cfg, args);
     }
 
@@ -108,7 +116,7 @@ pub fn lint_corpus(
     let project_root_str = project_root.display().to_string();
     let _lock = lockfile::acquire(&LockContext {
         project: "piners",
-        command: if args.reanchor {
+        command: if mode.is_reanchor() {
             "lint-reanchor"
         } else {
             "lint-corpus"
@@ -125,13 +133,13 @@ pub fn lint_corpus(
         keywords: args.keywords.clone(),
         probe: args.probe.clone(),
         all: args.all,
-        all_universe: args.verify_only || (args.reanchor && args.all),
+        all_universe: mode.is_verify_only() || (mode.is_reanchor() && args.all),
     };
     let ids = select::resolve(&registry, &sel)?;
 
     // A missing external partner would otherwise become the same per-probe
     // `lint_error` for the whole selection (and needlessly hash every file).
-    if !args.verify_only {
+    if !mode.is_verify_only() {
         ensure_program_available(lint_cfg.pine_lint_bin(), project_root)?;
     }
 
@@ -154,7 +162,7 @@ pub fn lint_corpus(
         abs_paths.insert(id.clone(), abs.display().to_string());
     }
 
-    if args.verify_only {
+    if mode.is_verify_only() {
         output::lint_msg(&format!(
             "verify-only: {} OK",
             output::count(ids.len(), "snippet")
@@ -194,7 +202,7 @@ pub fn lint_corpus(
     // --reanchor: refresh the TV fingerprint via `pine-lint --tv`, write the
     // registry, and return. No validator build, no run store. The anchor is
     // filtered to the run's scope, which is recorded beside it (`tv_scope`).
-    if args.reanchor {
+    if mode.is_reanchor() {
         return reanchor(
             &registry_dir,
             &mut registry,
@@ -208,6 +216,8 @@ pub fn lint_corpus(
 
     // Build the piners validator from the dirty tree (debug by default - lint
     // is opt-level-independent and the fast build keeps the loop cache-warm).
+    // Only the shared cargo-build fields are projected; lint keeps its own
+    // subcommand, registry and external-validator settings.
     let harness_cfg = HarnessConfig {
         package: lint_cfg.package.clone(),
         binary: lint_cfg.binary.clone(),
@@ -271,7 +281,7 @@ pub fn lint_corpus(
         ));
     }
 
-    render(&results, &registry, args.no_gate, scope);
+    render(&results, &registry, mode.report_only(), scope);
 
     // Persist the run before any registry mutation. A tool error fails the
     // run whatever the pin says: it describes the tooling, not the snippet
@@ -283,24 +293,19 @@ pub fn lint_corpus(
         .collect();
     let tool_error = !tool_errors.is_empty();
     let deviations = results.iter().filter(|r| !r.gate_ok).count();
-    let gate_blocks = !args.bless && !args.no_gate && deviations > 0;
-    let run_pass = !tool_error && !gate_blocks;
-    let fail_reason: Option<String> = if run_pass {
-        None
-    } else if tool_error {
-        Some(output::count(tool_errors.len(), "validator error"))
-    } else {
-        Some(output::count(deviations, "gate deviation"))
-    };
+    let verdict = RunVerdict::decide(
+        tool_error.then(|| output::count(tool_errors.len(), "validator error")),
+        mode,
+        (deviations > 0).then(|| output::count(deviations, "gate deviation")),
+    );
+    let run_pass = verdict.is_pass();
 
-    let selector = selector_json(args, &ids);
+    let selector = selector_json(args, &ids, mode.is_bless());
     let meta = RunMeta {
         started_at: &now_rfc3339(),
         selector: &selector,
-        // A bless run ignores the gate verdict, so it is not a gated run.
-        gated: !args.no_gate && !args.bless,
-        result: if run_pass { "pass" } else { "fail" },
-        fail_reason: fail_reason.as_deref(),
+        gated: mode.gated(),
+        verdict: &verdict,
         probe_count: results.len(),
         stderr: "",
     };
@@ -313,7 +318,7 @@ pub fn lint_corpus(
     // stamped - its disposition says nothing about the snippet - and makes the
     // bless fail once the rest are written, so a missing or broken tool is
     // loud rather than pinned.
-    if args.bless {
+    if mode.is_bless() {
         let recorded_scope = scope.recorded_label();
         let mut blessed = 0usize;
         let mut changed = 0usize;
@@ -352,7 +357,7 @@ pub fn lint_corpus(
         output::lint_msg(&format!("PASS: {}", output::count(results.len(), "probe")));
         Ok(())
     } else {
-        let reason = fail_reason.unwrap_or_else(|| "fail".to_owned());
+        let reason = verdict.reason().unwrap_or("fail");
         output::lint_msg(&format!(
             "FAIL: {reason} (recorded; see `brokkr lint-results`)"
         ));
@@ -610,8 +615,8 @@ fn render(
 }
 
 /// The `selector` JSON stored on the run row.
-fn selector_json(args: &LintArgs, ids: &[String]) -> String {
-    crate::piners::selector::json(args.all, &args.keywords, &args.probe, args.bless, ids, None)
+fn selector_json(args: &LintArgs, ids: &[String], bless: bool) -> String {
+    crate::piners::selector::json(args.all, &args.keywords, &args.probe, bless, ids, None)
 }
 
 fn ensure_program_available(program: &str, project_root: &Path) -> Result<(), DevError> {

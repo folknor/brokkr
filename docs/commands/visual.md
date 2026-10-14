@@ -131,7 +131,8 @@ describing the tree.
 ## Statuses
 
 `PASS`, `NO_BASELINE`, `FAIL_THRESHOLD`, `REGRESSION`, `EXPECTED_FAIL`,
-`ERROR` (`compare::Status`, `src/litehtml/compare.rs`). Sluggrs reaches all
+`ERROR` (`visual::status::Status`, `src/visual/status.rs`). Litehtml's
+element comparison remains in `src/litehtml/compare.rs`. Sluggrs reaches all
 but `EXPECTED_FAIL`, which needs a per-fixture `expected_fail` flag that
 `[[sluggrs.snapshot]]` does not have.
 

@@ -47,9 +47,6 @@ pub(crate) fn decide_active_sweeps(
             features: profile::FeatureConfig::explicit(features, no_default_features, false),
             build_packages: Vec::new(),
             packages: Vec::new(),
-            libtest_args: Vec::new(),
-            cargo_test_filters: Vec::new(),
-            name_filters: Vec::new(),
             env: std::collections::BTreeMap::new(),
             ..Default::default()
         };
@@ -118,9 +115,6 @@ pub(crate) fn decide_active_sweeps(
         },
         build_packages: Vec::new(),
         packages: Vec::new(),
-        libtest_args: Vec::new(),
-        cargo_test_filters: Vec::new(),
-        name_filters: Vec::new(),
         env: std::collections::BTreeMap::new(),
         ..Default::default()
     }])

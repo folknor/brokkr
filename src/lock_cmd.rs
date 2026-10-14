@@ -53,12 +53,12 @@ pub(crate) fn cmd_lock() -> Result<(), DevError> {
     // one is shown only when the namespaces match and its identity tokens
     // verify against this namespace's /proc - an unverified PID's stats
     // belong to some other process and are suppressed wholesale.
-    if !lockfile::shares_namespaces(&info) {
+    if !crate::process::shares_namespace_tokens(&info.pid_ns, &info.time_ns) {
         output::lock_msg(&invocation);
         output::lock_msg(&format!(
             "the holder did not answer its control socket, and it runs in {} - its process cannot \
              be inspected from here",
-            if lockfile::foreign_holder_ns(&info).is_some() {
+            if crate::process::foreign_pid_namespace(&info.pid_ns).is_some() {
                 "another PID namespace (a sandboxed command)"
             } else {
                 "a PID or time namespace this process cannot verify"
@@ -67,14 +67,16 @@ pub(crate) fn cmd_lock() -> Result<(), DevError> {
         output::lock_msg(&format!("root: {}", info.project_root));
         return Ok(());
     }
-    let holder_verified = lockfile::verify_identity(info.pid, &info.starttime, &info.boot_id);
-    let uptime_suffix = if holder_verified {
-        lockfile::verified_uptime(info.pid, &info.starttime, &info.boot_id)
-            .map(|u| format!(" running {u}"))
-            .unwrap_or_default()
-    } else {
-        String::new()
-    };
+    let holder_identity = info.process_identity();
+    let holder_boot = crate::process::BootId::new(&info.boot_id);
+    let verified_holder = holder_identity
+        .zip(holder_boot.as_ref())
+        .filter(|&(identity, boot)| crate::process::verify_identity(identity, boot));
+    let holder_verified = verified_holder.is_some();
+    let uptime_suffix = verified_holder
+        .and_then(|(identity, boot)| lockfile::verified_uptime_for(identity, boot))
+        .map(|u| format!(" running {u}"))
+        .unwrap_or_default();
     if holder_verified {
         output::lock_msg(&format!(
             "brokkr PID {}{}: {}",
@@ -89,9 +91,11 @@ pub(crate) fn cmd_lock() -> Result<(), DevError> {
     output::lock_msg(&format!("root: {}", info.project_root));
 
     // Line 3: child process stats (if brokkr is currently running one).
+    let boot = crate::process::BootId::new(&info.boot_id);
     if let Some((child_pid, child_starttime)) = &info.child
-        && let Some(summary) =
-            lockfile::verified_summary(*child_pid, child_starttime, &info.boot_id)
+        && let Some(identity) = typed_process_identity(*child_pid, child_starttime)
+        && let Some(boot) = boot.as_ref()
+        && let Some(summary) = lockfile::verified_summary_for(identity, boot)
     {
         let prefix = info
             .progress
@@ -105,7 +109,10 @@ pub(crate) fn cmd_lock() -> Result<(), DevError> {
     // can be more than one line; sync / single-script service
     // emit at most one).
     for (mock_pid, mock_starttime) in &info.mocks {
-        if let Some(summary) = lockfile::verified_summary(*mock_pid, mock_starttime, &info.boot_id)
+        if let (Some(identity), Some(boot)) = (
+            typed_process_identity(*mock_pid, mock_starttime),
+            boot.as_ref(),
+        ) && let Some(summary) = lockfile::verified_summary_for(identity, boot)
         {
             output::lock_msg(&format!("mock PID {mock_pid} {summary}"));
         }
@@ -168,7 +175,7 @@ fn print_holder_status(info: &lockfile::LockInfo, s: &crate::lock_service::Holde
         output::lock_msg(&work.join(", "));
     }
 
-    if lockfile::foreign_holder_ns(info).is_some() {
+    if crate::process::foreign_pid_namespace(&info.pid_ns).is_some() {
         output::lock_msg(
             "the holder runs in another PID namespace (a sandboxed command); `brokkr kill` asks it \
              to stop over its control socket, `brokkr kill --hard` cannot reach it from here",
@@ -177,7 +184,7 @@ fn print_holder_status(info: &lockfile::LockInfo, s: &crate::lock_service::Holde
     if let Some(hint) = lockfile::same_agent_hint(info) {
         output::lock_msg(&hint);
     }
-    if lockfile::shares_namespaces(info)
+    if crate::process::shares_namespace_tokens(&info.pid_ns, &info.time_ns)
         && info.pid > 0
         && let Some(marker) = crate::sidecar::read_status(info.pid)
     {
@@ -217,7 +224,7 @@ pub(crate) fn cmd_kill(hard: bool) -> Result<(), DevError> {
 
     // Hard kill signals by number, so every recorded PID must mean the same
     // thing here as it did to the holder.
-    if !lockfile::shares_namespaces(&info) {
+    if !crate::process::shares_namespace_tokens(&info.pid_ns, &info.time_ns) {
         return Err(refuse_kill(
             "the holder runs in another PID or time namespace (a sandboxed command); `brokkr kill` \
              without --hard asks it to stop over its control socket, or stop the session that owns \
@@ -260,7 +267,7 @@ fn kill_graceful(info: &lockfile::LockInfo) -> Result<(), DevError> {
     };
     // No answer (an older brokkr, or a stopped holder): the numeric path,
     // only where the recorded PID means the same thing here.
-    if !lockfile::shares_namespaces(info) {
+    if !crate::process::shares_namespace_tokens(&info.pid_ns, &info.time_ns) {
         return Err(refuse_kill(&format!(
             "{unanswered}, and the holder runs in a PID or time namespace this process cannot \
              verify"
@@ -287,7 +294,7 @@ fn kill_graceful(info: &lockfile::LockInfo) -> Result<(), DevError> {
 }
 
 /// SIGSTOP the holder, SIGKILL its recorded children, everything beneath it,
-/// then the holder. Callers have checked `shares_namespaces`.
+/// then the holder. Callers have checked `shares_namespace_tokens`.
 fn hard_kill(info: &lockfile::LockInfo) -> Result<(), DevError> {
     // Preflight every advertised target: verify identity, open and retain a
     // pidfd (pinning the process generation for the whole operation, PG
@@ -364,8 +371,7 @@ fn refuse_kill(why: &str) -> DevError {
 struct KillTarget {
     role: &'static str,
     pid: u32,
-    starttime: String,
-    pidfd: std::os::unix::io::OwnedFd,
+    process: crate::process::VerifiedProcess,
     /// `getpgid(pid) == pid` for a tracked child: spawns that called
     /// `process_group(0)` become their own PG leader, and `kill(-pid, ...)`
     /// sweeps the whole group (rustc, sæhrimnir's helpers, etc.).
@@ -383,30 +389,70 @@ struct KillTarget {
 /// holder is always signalled through its pidfd alone, never as a process
 /// group (see `pg_leader`).
 fn preflight_holder(info: &lockfile::LockInfo) -> Result<KillTarget, String> {
-    let mut holder = preflight_target("brokkr", info.pid, &info.starttime, &info.boot_id)?;
+    let identity = info.process_identity().ok_or_else(|| {
+        format!(
+            "brokkr PID {}: identity could not be verified from this namespace",
+            info.pid
+        )
+    })?;
+    let boot = info
+        .host_scope()
+        .map(|scope| scope.boot().clone())
+        .or_else(|| crate::process::BootId::new(&info.boot_id))
+        .ok_or_else(|| {
+            format!(
+                "brokkr PID {}: identity could not be verified from this namespace",
+                info.pid
+            )
+        })?;
+    let mut holder = preflight_identity("brokkr", info.pid, identity, &boot)?;
     holder.pg_leader = false;
     Ok(holder)
 }
 
-/// Authenticate one recorded PID and open a pidfd on it (see
-/// [`lockfile::open_verified_pidfd`] for the verify -> open -> re-verify order).
+/// Authenticate one recorded PID and pin it to a pidfd before any signal.
 fn preflight_target(
     role: &'static str,
     pid: u32,
     starttime: &str,
     boot_id: &str,
 ) -> Result<KillTarget, String> {
-    let pidfd = lockfile::open_verified_pidfd(pid, starttime, boot_id).map_err(|r| match r {
-        lockfile::PidfdRefusal::Unverified => {
-            format!("{role} PID {pid}: identity could not be verified from this namespace")
-        }
-        lockfile::PidfdRefusal::OpenFailed => {
-            format!("{role} PID {pid}: could not open a pidfd (process gone or namespace-isolated)")
-        }
-        lockfile::PidfdRefusal::IdentityChanged => {
-            format!("{role} PID {pid}: process changed identity during verification")
-        }
+    let identity = typed_process_identity(pid, starttime).ok_or_else(|| {
+        format!("{role} PID {pid}: identity could not be verified from this namespace")
     })?;
+    let boot = crate::process::BootId::new(boot_id).ok_or_else(|| {
+        format!("{role} PID {pid}: identity could not be verified from this namespace")
+    })?;
+    preflight_identity(role, pid, identity, &boot)
+}
+
+fn typed_process_identity(pid: u32, starttime: &str) -> Option<crate::process::ProcIdentity> {
+    Some(crate::process::ProcIdentity::new(
+        crate::process::Pid::new(pid)?,
+        crate::process::StartTicks::parse(starttime)?,
+    ))
+}
+
+fn preflight_identity(
+    role: &'static str,
+    pid: u32,
+    identity: crate::process::ProcIdentity,
+    boot: &crate::process::BootId,
+) -> Result<KillTarget, String> {
+    let process =
+        crate::process::VerifiedProcess::open(identity, Some(boot)).map_err(|r| match r {
+            crate::process::PidfdRefusal::Unverified => {
+                format!("{role} PID {pid}: identity could not be verified from this namespace")
+            }
+            crate::process::PidfdRefusal::OpenFailed => {
+                format!(
+                    "{role} PID {pid}: could not open a pidfd (process gone or namespace-isolated)"
+                )
+            }
+            crate::process::PidfdRefusal::IdentityChanged => {
+                format!("{role} PID {pid}: process changed identity during verification")
+            }
+        })?;
     let pgid = unsafe { libc::getpgid(pid.cast_signed()) };
     // Cast guarded by `pgid > 0`; `cast_unsigned` is the documented
     // i32->u32 conversion that clippy doesn't flag (mirrors the
@@ -415,8 +461,7 @@ fn preflight_target(
     Ok(KillTarget {
         role,
         pid,
-        starttime: starttime.to_owned(),
-        pidfd,
+        process,
         pg_leader,
     })
 }
@@ -433,7 +478,7 @@ fn preflight_target(
 /// documented residual race we accept.
 fn signal_target(target: &KillTarget, signal: libc::c_int) -> std::io::Result<bool> {
     if target.pg_leader {
-        if lockfile::proc_starttime(target.pid).as_deref() != Some(target.starttime.as_str()) {
+        if !crate::process::identity_matches(target.process.identity()) {
             return Ok(false);
         }
         let ret = unsafe { libc::kill(-target.pid.cast_signed(), signal) };
@@ -446,7 +491,7 @@ fn signal_target(target: &KillTarget, signal: libc::c_int) -> std::io::Result<bo
         }
         return Err(err);
     }
-    lockfile::pidfd_send_signal(&target.pidfd, signal)
+    target.process.send_signal(signal)
 }
 
 fn describe_delivery(result: &std::io::Result<bool>) -> String {

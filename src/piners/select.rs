@@ -6,8 +6,11 @@
 //! implicit "run everything" - a bare invocation is an error, so the slow
 //! full-corpus pass is never triggered by accident.
 
+use std::collections::BTreeSet;
+
 use crate::error::DevError;
 use crate::piners::registry::Registry;
+use crate::piners::selector::{self, SelectionArgs, SelectionPolicy};
 
 /// Flags that drive selection, lifted off the CLI command.
 #[derive(Debug, Default)]
@@ -31,94 +34,28 @@ pub struct SelectArgs {
 /// invocation with no flags - is a hard error listing the available
 /// keywords, mirroring the dataset-resolver error style.
 pub fn resolve(registry: &Registry, args: &SelectArgs) -> Result<Vec<String>, DevError> {
-    if args.verify_only && (!args.keywords.is_empty() || !args.probe.is_empty()) {
-        return Err(DevError::Config(
-            "piners: --verify-only checks the whole pinned universe and cannot be combined with \
-             --keyword or --probe."
-                .into(),
-        ));
-    }
-
-    if args.verify_only || args.all {
-        // The whole universe leaves every [pending] probe out: name them.
-        let pending: Vec<String> = registry.pending.keys().cloned().collect();
-        if !pending.is_empty() {
-            crate::output::corpus_msg(&pending_notice(&pending));
-        }
-        if registry.pins.is_empty() {
-            return Err(DevError::Config(if pending.is_empty() {
-                "piners: pins.toml is empty - nothing to select".into()
-            } else {
-                format!(
-                    "piners: nothing pinned yet - every probe is [pending]: {}",
-                    pending.join(", ")
-                )
-            }));
-        }
-        return Ok(registry.pins.keys().cloned().collect());
-    }
-
-    let mut selected: Vec<String> = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-
-    // A keyword may list a [pending] probe; it is skipped (it has no hashes to
-    // verify), and named so the gap is visible.
-    let mut pending: Vec<String> = Vec::new();
-    for keyword in &args.keywords {
-        let ids = registry.keywords.get(keyword).ok_or_else(|| {
-            DevError::Config(format!(
-                "piners: unknown keyword '{keyword}' (available: {})",
-                available(registry)
-            ))
-        })?;
-        for id in ids {
-            if registry.pending.contains_key(id) {
-                if !pending.contains(id) {
-                    pending.push(id.clone());
-                }
-                continue;
-            }
-            if seen.insert(id.clone()) {
-                selected.push(id.clone());
-            }
-        }
-    }
-
-    for probe in &args.probe {
-        if registry.pending.contains_key(probe) {
-            return Err(DevError::Config(format!(
-                "piners: probe '{probe}' is [pending], not pinned - pin it with `brokkr corpus \
-                 --reseed --probe {probe}`"
-            )));
-        }
-        if !registry.pins.contains_key(probe) {
-            return Err(DevError::Config(format!(
-                "piners: unknown probe '{probe}' - not pinned in pins.toml"
-            )));
-        }
-        if seen.insert(probe.clone()) {
-            selected.push(probe.clone());
-        }
-    }
-
-    if !pending.is_empty() {
-        crate::output::corpus_msg(&pending_notice(&pending));
-    }
-    if selected.is_empty() && !pending.is_empty() {
-        return Err(DevError::Config(format!(
-            "piners: nothing runnable - every selected probe is [pending]: {}",
-            pending.join(", ")
-        )));
-    }
-    if selected.is_empty() {
-        return Err(DevError::Config(format!(
-            "piners: no probes selected. Pass --keyword <k> (repeatable), \
-             --probe <id>, or --all. Available keywords: {}",
-            available(registry)
-        )));
-    }
-
-    Ok(selected)
+    let pending: BTreeSet<String> = registry.pending.keys().cloned().collect();
+    selector::resolve_selection(
+        &registry.pins,
+        &registry.keywords,
+        &pending,
+        &SelectionArgs {
+            keywords: &args.keywords,
+            probes: &args.probe,
+            all: args.all,
+            whole_universe: args.verify_only,
+        },
+        &SelectionPolicy {
+            label: "piners",
+            registry_file: "pins.toml",
+            whole_universe_named_error: Some(
+                "piners: --verify-only checks the whole pinned universe and cannot be combined with \
+                 --keyword or --probe.",
+            ),
+            pending_hint: Some("brokkr corpus --reseed --probe "),
+        },
+        |ids| crate::output::corpus_msg(&pending_notice(ids)),
+    )
 }
 
 /// The one-line notice for registered-but-unpinned probes left out of a
@@ -130,15 +67,6 @@ pub fn pending_notice(ids: &[String]) -> String {
         crate::output::count(ids.len(), "[pending] probe"),
         ids.join(", ")
     )
-}
-
-fn available(registry: &Registry) -> String {
-    let names = registry.keyword_names();
-    if names.is_empty() {
-        "none".to_owned()
-    } else {
-        names.join(", ")
-    }
 }
 
 #[cfg(test)]

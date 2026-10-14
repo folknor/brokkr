@@ -21,6 +21,8 @@ use rusqlite::params;
 use crate::error::DevError;
 use crate::piners::lint::diff::Signature;
 use crate::piners::lint::{PinnableDisposition, ProbeResult};
+use crate::piners::run_model::RunVerdict;
+use crate::piners::table::grid;
 
 /// Current schema version. Increment when adding a migration in [`run_migrations`].
 const SCHEMA_VERSION: i64 = 1;
@@ -70,10 +72,8 @@ pub struct RunMeta<'a> {
     pub selector: &'a str,
     /// Was the per-probe gate enforced?
     pub gated: bool,
-    /// `"pass"` or `"fail"`.
-    pub result: &'a str,
-    /// One-line failure classification (`None` on pass).
-    pub fail_reason: Option<&'a str>,
+    /// The shared result and reason for the run.
+    pub verdict: &'a RunVerdict,
     /// Number of probes in the run.
     pub probe_count: usize,
     /// Captured validator stderr (or a spawn-error message).
@@ -133,8 +133,8 @@ impl LintDb {
                 meta.started_at,
                 meta.selector,
                 i64::from(meta.gated),
-                meta.result,
-                meta.fail_reason,
+                meta.verdict.result(),
+                meta.verdict.reason(),
                 as_i64(meta.probe_count),
                 meta.stderr,
             ],
@@ -342,40 +342,6 @@ fn has_table(conn: &rusqlite::Connection, table: &str) -> bool {
     .unwrap_or(false)
 }
 
-/// Render a header + rows as a left-aligned, space-padded grid. Empty rows
-/// yield `"(none)"`. Mirrors `corpus_db::format::grid`.
-fn grid(headers: &[&str], rows: &[Vec<String>]) -> String {
-    if rows.is_empty() {
-        return "(none)".to_owned();
-    }
-    let mut widths: Vec<usize> = headers.iter().map(|h| h.len()).collect();
-    for row in rows {
-        for (i, cell) in row.iter().enumerate() {
-            if i < widths.len() {
-                widths[i] = widths[i].max(cell.len());
-            }
-        }
-    }
-    let mut out = String::new();
-    let header_line: Vec<String> = headers
-        .iter()
-        .enumerate()
-        .map(|(i, h)| format!("{:<width$}", h, width = widths[i]))
-        .collect();
-    out.push_str(header_line.join("  ").trim_end());
-    out.push('\n');
-    for row in rows {
-        let line: Vec<String> = row
-            .iter()
-            .enumerate()
-            .map(|(i, c)| format!("{:<width$}", c, width = widths.get(i).copied().unwrap_or(0)))
-            .collect();
-        out.push_str(line.join("  ").trim_end());
-        out.push('\n');
-    }
-    out.trim_end().to_owned()
-}
-
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -423,8 +389,7 @@ mod tests {
             started_at: "2026-06-22T00:00:00Z",
             selector: r#"{"keywords":["bracket"]}"#,
             gated: true,
-            result: "fail",
-            fail_reason: Some("1 gate deviation(s)"),
+            verdict: &RunVerdict::Fail("1 gate deviation(s)".to_owned()),
             probe_count: probes.len(),
             stderr: "",
         };

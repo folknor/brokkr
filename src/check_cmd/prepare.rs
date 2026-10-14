@@ -1928,7 +1928,11 @@ mod prepare_tests {
     }
 
     fn sweep(label: &str) -> ResolvedSweep {
-        ResolvedSweep { label: label.into(), parallel_budget: Some(4), ..ResolvedSweep::default() }
+        ResolvedSweep {
+            label: label.into(),
+            lane_exec: crate::profile::LaneExec::Parallel { budget: 4 },
+            ..ResolvedSweep::default()
+        }
     }
 
     #[test]
@@ -2042,7 +2046,7 @@ mod prepare_tests {
 
     /// Validation case: a forwarded ignored flag counts. `brokkr check -- --
     /// --ignored` lists ignored tests only, and they must stay in the
-    /// expected executions - the sweep's own libtest args alone said
+    /// expected executions - the sweep's own typed filters alone said
     /// "exclude" and dropped every one of them.
     #[test]
     fn forwarded_ignored_flags_reach_the_lane_s_ignored_mode() {
@@ -2051,7 +2055,10 @@ mod prepare_tests {
         assert!(!lane_runs_ignored(&plain, &[]));
         assert!(lane_runs_ignored(&plain, &forwarded(&["--ignored"])));
         assert!(lane_runs_ignored(&plain, &forwarded(&["--include-ignored"])));
-        let lifting = ResolvedSweep { libtest_args: forwarded(&["--include-ignored"]), ..ResolvedSweep::default() };
+        let lifting = ResolvedSweep {
+            filters: crate::profile::LaneFilters { include_ignored: true, ..Default::default() },
+            ..ResolvedSweep::default()
+        };
         assert!(lane_runs_ignored(&lifting, &[]));
         // `--skip`'s value is never read as a flag.
         assert!(!plain.lane_filters().runs_ignored_with(["--skip", "--ignored", "x"]));
@@ -2500,14 +2507,18 @@ mod prepare_tests {
         };
         let parallel_serial = ResolvedSweep {
             label: "threaded".into(),
-            test_threads: Some(0),
+            lane_exec: crate::profile::LaneExec::Serial { threads: crate::profile::Threads::CargoDefault },
             ..ResolvedSweep::default()
         };
         let err = refuse_unattributable_serial(&inputs, &parallel_serial, &LaneEnv::default(), &[])
             .unwrap_err()
             .to_string();
         assert!(err.contains("parallel = { budget = N }"), "{err}");
-        let serial = ResolvedSweep { label: "serial".into(), test_threads: Some(1), ..ResolvedSweep::default() };
+        let serial = ResolvedSweep {
+            label: "serial".into(),
+            lane_exec: crate::profile::LaneExec::Serial { threads: crate::profile::Threads::Watchdogged },
+            ..ResolvedSweep::default()
+        };
         // The serial sweep passes the parallelism check; whether the shim can
         // run on this host is the second check, decided by the environment.
         let second = refuse_unattributable_serial(&inputs, &serial, &LaneEnv::default(), &[]);
@@ -2567,7 +2578,11 @@ mod prepare_tests {
     /// inventing names, and the run is not refused for it.
     #[test]
     fn an_unattributable_lane_has_no_inventory_and_is_not_refused() {
-        let threaded = ResolvedSweep { label: "threaded".into(), test_threads: Some(0), ..ResolvedSweep::default() };
+        let threaded = ResolvedSweep {
+            label: "threaded".into(),
+            lane_exec: crate::profile::LaneExec::Serial { threads: crate::profile::Threads::CargoDefault },
+            ..ResolvedSweep::default()
+        };
         let prep = prepare_all(&[threaded], false, &mut Blind);
         assert!(prep.error.is_none(), "unavailable by design is not a failure: {:?}", prep.error);
         let lane = &prep.plan.lanes[0];

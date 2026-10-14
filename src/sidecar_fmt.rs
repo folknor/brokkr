@@ -26,8 +26,8 @@ fn format_epoch(epoch: i64) -> String {
 ///
 /// Writes to stderr so it never contaminates the raw JSONL stream on
 /// stdout (`--samples`, `--markers`, the default phase summary, etc.).
-pub(crate) fn print_run_info(sdb: &db::sidecar::SidecarDb, uuid_prefix: &str) {
-    let Some(info) = sdb.query_run_info(uuid_prefix) else {
+pub(crate) fn print_run_info(store: &db::RunStore, id: &db::RunId) {
+    let Some(info) = store.query_sidecar_run_info(id).ok().flatten() else {
         return;
     };
     // Only print if we have at least some provenance data.
@@ -55,8 +55,8 @@ pub(crate) fn print_run_info(sdb: &db::sidecar::SidecarDb, uuid_prefix: &str) {
     }
 
     // Line 2: git commit + wall time from sidecar summary.
-    let (best_idx, _) = sdb.query_meta(uuid_prefix);
-    let samples = sdb.query_samples(uuid_prefix, Some(best_idx)).ok();
+    let (best_idx, _) = store.query_sidecar_meta(id).unwrap_or((0, 1));
+    let samples = store.query_sidecar_samples(id, Some(best_idx)).ok();
     let wall_time = samples.as_ref().and_then(|s| {
         if s.len() < 2 {
             return None;
@@ -970,10 +970,10 @@ fn print_marker_durations_human(
 /// JSONL (`{"type":"compare","name":...,"a":{...},"b":{...},"delta_pct":...}`);
 /// `human = true` gives the fixed-width table.
 pub(crate) fn print_compare_timeline(
-    uuid_a: &str,
+    uuid_a: &db::RunId,
     samples_a: &[sidecar::Sample],
     markers_a: &[sidecar::Marker],
-    uuid_b: &str,
+    uuid_b: &db::RunId,
     samples_b: &[sidecar::Sample],
     markers_b: &[sidecar::Marker],
     human: bool,
@@ -996,16 +996,16 @@ pub(crate) fn print_compare_timeline(
 
 #[allow(clippy::too_many_arguments)]
 fn print_compare_timeline_human(
-    uuid_a: &str,
+    uuid_a: &db::RunId,
     samples_a: &[sidecar::Sample],
     phases_a: &[(String, i64, i64)],
     samples_b: &[sidecar::Sample],
     phases_b: &[(String, i64, i64)],
-    uuid_b: &str,
+    uuid_b: &db::RunId,
     clk_tck: i64,
 ) {
-    let short_a = &uuid_a[..8.min(uuid_a.len())];
-    let short_b = &uuid_b[..8.min(uuid_b.len())];
+    let short_a = uuid_a.short();
+    let short_b = uuid_b.short();
 
     println!(
         "{:<20} {:>30} {:>30} {:>8}",
@@ -1070,18 +1070,18 @@ fn print_compare_timeline_human(
 
 #[allow(clippy::too_many_arguments)]
 fn print_compare_timeline_jsonl(
-    uuid_a: &str,
+    uuid_a: &db::RunId,
     samples_a: &[sidecar::Sample],
     phases_a: &[(String, i64, i64)],
     samples_b: &[sidecar::Sample],
     phases_b: &[(String, i64, i64)],
-    uuid_b: &str,
+    uuid_b: &db::RunId,
     clk_tck: i64,
 ) {
     let header = serde_json::json!({
         "type": "compare_summary",
-        "a_uuid": uuid_a,
-        "b_uuid": uuid_b,
+        "a_uuid": uuid_a.as_str(),
+        "b_uuid": uuid_b.as_str(),
         "phases": phases_a.len(),
     });
     println!("{header}");

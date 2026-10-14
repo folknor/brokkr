@@ -138,7 +138,10 @@ fn snapshot_line(hung: &HungTest, cwd: &Path) -> String {
     match &hung.snapshot_error {
         Some(err) => format!("snapshot failed: {err}"),
         None => {
-            let path = hung.snapshot_dir.strip_prefix(cwd).unwrap_or(&hung.snapshot_dir);
+            let path = hung
+                .snapshot_dir
+                .strip_prefix(cwd)
+                .unwrap_or(&hung.snapshot_dir);
             format!("full snapshot: {}", path.display())
         }
     }

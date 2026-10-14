@@ -16,9 +16,9 @@ use crate::ratatoskr::build::{self, HarnessBuild};
 use crate::ratatoskr::discover::{self, Expected, PreserveDataDir, SCRIPT_DIR, ScriptInfo};
 use crate::ratatoskr::saehrimnir::{MockServer, endpoint_env_pairs, require_path, resolve_fixture};
 
+use super::single::{ARTEFACT_PARENT, RunResult, SERVICE_MOCK_PARENT, spawn_and_capture};
 #[cfg(test)]
 use super::single::{format_iter_line, format_soak_summary};
-use super::single::{ARTEFACT_PARENT, RunResult, SERVICE_MOCK_PARENT, spawn_and_capture};
 
 /// `brokkr service --all` - run every discovered script (optionally
 /// filtered) against a single shared harness build.

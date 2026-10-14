@@ -27,13 +27,14 @@ use libtest_json::JsonReconstructor;
 pub(crate) use plan::{StrictPlan, hash_file};
 pub(crate) use procgroup::{Chunk, read_chunk, read_unless_cancelled};
 pub(crate) use run::{
-    Launch, Leader, LibtestOutcome, Observe, ShimMode, effective_test_threads, run_libtest_parallel, run_listing, streaming_run_libtest,
+    Launch, Leader, LibtestOutcome, Observe, ShimMode, effective_test_threads,
+    run_libtest_parallel, run_listing, streaming_run_libtest,
 };
 
 // Internal paths shared only among runner modules and the harness shim.
+use deadline::{DeadlineReading, TestTracker, WATCHDOG_POLL, enforce_deadline, watchdog_loop};
 #[cfg(test)]
 use deadline::{Expiry, watchdog_loop_with_timing};
-use deadline::{DeadlineReading, TestTracker, WATCHDOG_POLL, enforce_deadline, watchdog_loop};
 use hung::capture_hung_test;
 #[cfg(test)]
 use hung::sanitize_path_component;
@@ -41,9 +42,8 @@ use libtest_json::drain_libtest_json;
 #[cfg(test)]
 use procgroup::DRAIN_GRACE;
 use procgroup::{
-    clone_buffer, clone_hung, direct_child_pids, drain_stderr, drain_to_buffer,
-    join_drains, kill_process_group, spawn_cargo_process_group, spawn_process_group,
-    stop_process_group,
+    clone_buffer, clone_hung, direct_child_pids, drain_stderr, drain_to_buffer, join_drains,
+    kill_process_group, spawn_cargo_process_group, spawn_process_group, stop_process_group,
 };
 
 /// Run as the harness shim when this process was launched as one; `None`

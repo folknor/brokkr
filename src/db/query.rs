@@ -322,6 +322,8 @@ fn map_stored_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredRow> {
         brokkr_args: row
             .get::<_, Option<String>>("brokkr_args")?
             .unwrap_or_default(),
+        // Older or hand-written rows without attribution retain the original
+        // results store's project identity.
         project: row
             .get::<_, Option<String>>("project")?
             .unwrap_or_else(|| "pbfhogg".to_owned()),

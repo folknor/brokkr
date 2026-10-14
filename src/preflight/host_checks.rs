@@ -1,0 +1,241 @@
+use std::path::{Path, PathBuf};
+
+use crate::error::DevError;
+
+/// A single requirement that must be satisfied before a subcommand runs.
+///
+/// Some variants (File, DiskSpace, KernelParam) are dispatched in `run_check`
+/// but not yet constructed by any caller - they exist for future preflight checks.
+#[allow(dead_code)]
+pub enum Check {
+    /// Binary must exist in PATH.
+    Binary { name: String, help: String },
+    /// File must exist at path.
+    File { path: PathBuf, description: String },
+    /// Minimum free disk space in bytes.
+    DiskSpace { path: PathBuf, min_bytes: u64 },
+    /// Read a /proc or /sys file and check it contains expected value.
+    KernelParam {
+        path: &'static str,
+        expected: &'static str,
+        description: &'static str,
+    },
+    /// Read an integer from /proc or /sys and check it is at most `max_value`.
+    KernelParamAtMost {
+        path: &'static str,
+        max_value: i32,
+        description: &'static str,
+    },
+    /// Resource limit (rlimit) must be at least `min_bytes`.
+    Rlimit {
+        resource: libc::__rlimit_resource_t,
+        min_bytes: u64,
+        description: &'static str,
+    },
+}
+
+/// Run all checks, collecting failures. If any fail, return `DevError::Preflight`
+/// with all failure messages (not just the first).
+pub fn run_preflight(checks: &[Check]) -> Result<(), DevError> {
+    let mut failures = Vec::new();
+
+    for check in checks {
+        if let Some(msg) = run_single(check) {
+            failures.push(msg);
+        }
+    }
+
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(DevError::Preflight(failures))
+    }
+}
+
+/// Run a single check. Returns `Some(message)` on failure, `None` on success.
+fn run_single(check: &Check) -> Option<String> {
+    match check {
+        Check::Binary { name, help } => check_binary(name, help),
+        Check::File { path, description } => check_file(path, description),
+        Check::DiskSpace { path, min_bytes } => check_disk_space(path, *min_bytes),
+        Check::KernelParam {
+            path,
+            expected,
+            description,
+        } => check_kernel_param(path, expected, description),
+        Check::KernelParamAtMost {
+            path,
+            max_value,
+            description,
+        } => check_kernel_param_at_most(path, *max_value, description),
+        Check::Rlimit {
+            resource,
+            min_bytes,
+            description,
+        } => check_rlimit(*resource, *min_bytes, description),
+    }
+}
+
+fn check_binary(name: &str, help: &str) -> Option<String> {
+    let requested = Path::new(name);
+    let found = if requested.is_absolute() || name.contains(std::path::MAIN_SEPARATOR) {
+        is_executable(requested)
+    } else {
+        std::env::var_os("PATH").is_some_and(|path| {
+            std::env::split_paths(&path).any(|dir| is_executable(&dir.join(name)))
+        })
+    };
+
+    if found {
+        None
+    } else {
+        Some(format!("'{name}' not found in PATH ({help})"))
+    }
+}
+
+fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::metadata(path)
+        .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+}
+
+fn check_file(path: &Path, description: &str) -> Option<String> {
+    if path.exists() {
+        None
+    } else {
+        Some(format!("{description}: {}", path.display()))
+    }
+}
+
+fn check_disk_space(path: &Path, min_bytes: u64) -> Option<String> {
+    match available_bytes(path) {
+        Some(avail) if avail >= min_bytes => None,
+        Some(avail) => Some(format!(
+            "insufficient disk space at {}: {} MB available, {} MB required",
+            path.display(),
+            avail / (1024 * 1024),
+            min_bytes / (1024 * 1024),
+        )),
+        None => Some(format!("could not check disk space at {}", path.display())),
+    }
+}
+
+///// Query available disk space via `libc::statvfs`.
+fn available_bytes(path: &Path) -> Option<u64> {
+    use std::os::unix::ffi::OsStrExt;
+    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+
+    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+    let ret = unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) };
+
+    if ret != 0 {
+        return None;
+    }
+
+    // f_bavail and f_frsize are both c_ulong (u64 on 64-bit Linux).
+    Some(stat.f_bavail * stat.f_frsize)
+}
+
+fn check_kernel_param(path: &str, expected: &str, description: &str) -> Option<String> {
+    let content = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        // Not on Linux, or procfs not mounted - skip the check.
+        Err(_) => return None,
+    };
+
+    let trimmed = content.trim();
+    if trimmed == expected {
+        None
+    } else {
+        Some(format!(
+            "{description}: expected '{expected}', got '{trimmed}' (in {path})"
+        ))
+    }
+}
+
+fn check_kernel_param_at_most(path: &str, max_value: i32, description: &str) -> Option<String> {
+    let content = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        // Not on Linux, or procfs not mounted - skip the check.
+        Err(_) => return None,
+    };
+
+    let value: i32 = match content.trim().parse() {
+        Ok(v) => v,
+        Err(_) => return Some(format!("{description}: could not parse {path}")),
+    };
+
+    if value <= max_value {
+        None
+    } else {
+        Some(format!(
+            "{description}: {path} is {value}, need <= {max_value}"
+        ))
+    }
+}
+
+fn check_rlimit(
+    resource: libc::__rlimit_resource_t,
+    min_bytes: u64,
+    description: &str,
+) -> Option<String> {
+    let mut rlim: libc::rlimit = unsafe { std::mem::zeroed() };
+    let ret = unsafe { libc::getrlimit(resource, &mut rlim) };
+    if ret != 0 {
+        return Some(format!("{description}: could not read resource limit"));
+    }
+    if rlim.rlim_cur >= min_bytes {
+        None
+    } else {
+        let cur_mb = rlim.rlim_cur / (1024 * 1024);
+        let min_mb = min_bytes / (1024 * 1024);
+        Some(format!(
+            "{description}: current {cur_mb} MB, need >= {min_mb} MB"
+        ))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Convenience check sets
+// ---------------------------------------------------------------------------
+
+/// Preflight checks for io_uring.
+///
+/// Four tunables can block io_uring:
+/// 1. `/proc/sys/kernel/io_uring_disabled` must be 0 (upstream kill switch, kernel ≥6.6)
+/// 2. `/proc/sys/kernel/apparmor_restrict_unprivileged_io_uring` must be 0 (Ubuntu/Debian)
+/// 3. `/proc/sys/kernel/apparmor_restrict_unprivileged_userns` must be 0 (Ubuntu/Debian)
+/// 4. `RLIMIT_MEMLOCK` >= 16 MB (for pinned ring buffers)
+///
+/// The kernel param checks pass when the file is absent (older kernels, non-Ubuntu).
+pub fn uring_checks() -> Vec<Check> {
+    vec![
+        Check::KernelParamAtMost {
+            path: "/proc/sys/kernel/io_uring_disabled",
+            max_value: 0,
+            description: "io_uring is disabled by kernel\n\
+                          Fix: sudo sysctl -w kernel.io_uring_disabled=0",
+        },
+        Check::KernelParamAtMost {
+            path: "/proc/sys/kernel/apparmor_restrict_unprivileged_io_uring",
+            max_value: 0,
+            description: "AppArmor restricts unprivileged io_uring\n\
+                          Fix: sudo sysctl -w kernel.apparmor_restrict_unprivileged_io_uring=0",
+        },
+        Check::KernelParamAtMost {
+            path: "/proc/sys/kernel/apparmor_restrict_unprivileged_userns",
+            max_value: 0,
+            description: "AppArmor restricts unprivileged user namespaces\n\
+                          Fix: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0",
+        },
+        Check::Rlimit {
+            resource: libc::RLIMIT_MEMLOCK,
+            min_bytes: 16 * 1024 * 1024,
+            description: "RLIMIT_MEMLOCK too low for io_uring\n\
+                          Fix: sudo prlimit --pid=$$ --memlock=unlimited:unlimited",
+        },
+    ]
+}
+
+// ---------------------------------------------------------------------------

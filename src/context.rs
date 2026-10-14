@@ -90,8 +90,26 @@ pub(crate) struct HarnessContext {
 ///
 /// Run mode does not persist results, so it is safe regardless of the tree
 /// state. Stored measurement modes still require the explicit `--force` flag.
-fn dirty_tree_allowed(req: &crate::measure::MeasureRequest<'_>) -> bool {
-    req.force || matches!(req.mode, crate::measure::MeasureMode::Run)
+#[derive(Clone, Copy)]
+pub(crate) enum DirtyPolicy {
+    Allow,
+    Gate { force: bool },
+}
+
+impl DirtyPolicy {
+    pub(crate) fn for_request(req: &crate::measure::MeasureRequest<'_>) -> Self {
+        match req.mode {
+            crate::measure::MeasureMode::Run => Self::Allow,
+            _ => Self::Gate { force: req.force },
+        }
+    }
+
+    fn allowed(self) -> bool {
+        match self {
+            Self::Allow => true,
+            Self::Gate { force } => force,
+        }
+    }
 }
 
 /// Shared bootstrap step for both context constructors: resolve host paths
@@ -137,7 +155,7 @@ impl HarnessContext {
             req.project_root,
             req.build_root,
             lock_command,
-            dirty_tree_allowed(req),
+            DirtyPolicy::for_request(req).allowed(),
             req.stop_marker.map(str::to_owned),
         )
         .map(|ctx| ctx.with_request(req))
@@ -220,7 +238,7 @@ impl BenchContext {
             features,
             default_features,
             lock_command,
-            dirty_tree_allowed(req),
+            DirtyPolicy::for_request(req).allowed(),
             req.stop_marker.map(str::to_owned),
         )
         .map(|ctx| ctx.with_request(req))
@@ -347,7 +365,7 @@ impl BenchContext {
             req.build_root,
             build_config,
             lock_command,
-            dirty_tree_allowed(req),
+            DirtyPolicy::for_request(req).allowed(),
             req.stop_marker.map(str::to_owned),
         )
         .map(|ctx| ctx.with_request(req))

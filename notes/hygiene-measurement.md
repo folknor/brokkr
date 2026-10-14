@@ -39,23 +39,17 @@ Enforcement proposed: the harness takes `MeasureMode`; `NonZeroUsize` in `Measur
 
 Design hunt (measurement, other-projects): after the request the mode becomes `Option<String>` (`with_measure_mode(req.mode_label())`), stored on `BenchHarness.measure_mode`, cloned into `RunRow.mode` and `RunInfo.mode`; `BenchConfig.mode` is a dead fallback (`effective_mode` = harness or config; every writer sets `None`; its doc admits it caused two bugs); the DB tests insert `"mmap"`, `"zlib"`, `"release"` into the column; a `HarnessContext` built without `with_request` silently writes `mode = NULL`. `hotpath_feature(alloc: bool)`, `hotpath_alloc_note(alloc: bool)`, `MeasureRequest::is_alloc()` and `hotpath_features()` are called by pbfhogg, elivagar, nidhogg, dellingr, mogwai, sluggrs, piners and main_parts, each computing `alloc` itself, and several use `hotpath_feature(alloc)` as a label, conflating feature name and recorded mode. Proposed: `enum RecordedMode { Bench, Hotpath, Alloc }` via `MeasureMode::recorded()`, a non-optional harness field, `NonZeroUsize` runs, and a `ProfiledMode { Hotpath, Alloc }` with `.feature()`, `.label()`, `.note()` owned by `measure.rs`; delete `BenchConfig.mode` and `BenchConfig.brokkr_args`.
 
-## MEA-004 - UUID generation and short-UUID slicing are duplicated
+## MEA-004 - UUID generation still has inline copies
 
 Reported by: measurement-storage, small-benches.
 
-UUIDv4: `db::types::generate_uuid`, an inline `/dev/urandom` block in `store_sidecar` (`harness_mod/types_run.rs`), `litehtml/mod.rs::generate_run_id`, `sluggrs/mod.rs::generate_run_id`. `[..8.min(len)]` short-UUID slicing is spelled 6+ times (three in litehtml/sluggrs) despite `types::short_uuid`.
+`db` exports `generate_uuid`, `short_uuid` and `RunId::short()`, and results, sidecar, litehtml and sluggrs use them. Residue: `harness_mod/types_run.rs` still generates dirty-run uuids inline from `/dev/urandom`, and `ratatoskr/gate_store.rs` has its own UUIDv4 generator. A textlint ban on `/dev/urandom` must exempt the lock-token code, which needs randomness that is not a uuid.
 
-Enforcement proposed: textlint banning `"/dev/urandom"` outside `db/types.rs` and `hold.rs`.
-
-Design hunt (measurement): run ids, sidecar `dirty` aliases and uuid prefixes all travel as `&str`. Proposed: a `RunId` minted once with `.short()`, and `RunRef { Prefix | Alias }` resolved once per command (the resolution question is filed in `consolidations.md`).
-
-## MEA-005 - Small store helpers and clocks copied
+## MEA-005 - Small store helpers still copied
 
 Reported by: measurement-storage, piners, ratatoskr.
 
-`percentile` copied into `sidecar_fmt::print_field_stat` ("same as harness::percentile", unheld); legacy project default `'pbfhogg'` twice (schema `DEFAULT`, `map_stored_row`); `has_table` in `migrate.rs`, `gate.rs` and three more across the repo (piners), `has_column` twice (including twice inside `run_sidecar_migrations`), `as_i64` twice; wall-clock-to-epoch three ways (`wall_clock_epoch`, `gate::unix_now`, SQLite `datetime('now')`), and `prev.gap_seconds` subtracts a Rust clock from an SQLite timestamp; the piners stores use `datetime('now')` and the lint store a hand-rolled `now_rfc3339`.
-
-Design hunt (measurement): `db/format/details.rs` hides `project` when it equals the literal `"pbfhogg"` - a display default tied to one project in the shared formatter.
+Residue: `has_table` exists in five helpers and `has_column` in three plus one inline scan; `as_i64` is duplicated in piners; percentile interpolation is duplicated between `sidecar_fmt::print_field_stat` and the harness formatter. (The `pbfhogg` project default is now documented as a compatibility fallback; piners shares one clock conversion and keeps two timestamp formats on purpose; `prev.gap_seconds` compares whole seconds from both sources.)
 
 ## MEA-006 - Each sidecar sample field is spelled in about seven places
 

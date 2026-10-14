@@ -15,6 +15,10 @@ impl RunId {
         &self.0
     }
 
+    pub(crate) fn short(&self) -> String {
+        super::types::short_uuid(&self.0)
+    }
+
     pub(super) fn new(uuid: String) -> Self {
         Self(uuid)
     }
@@ -78,14 +82,15 @@ impl RunStore {
         self.sidecar.is_some()
     }
 
-    /// The formatter interface still consumes the database handle directly;
-    /// command selection and all run identity decisions stay in this facade.
-    pub(crate) fn sidecar_db(&self) -> Option<&sidecar::SidecarDb> {
-        self.sidecar.as_ref()
-    }
-
     pub(crate) fn results_db(&self) -> Option<&ResultsDb> {
         self.results.as_ref()
+    }
+
+    pub(crate) fn query_sidecar_run_info(
+        &self,
+        id: &RunId,
+    ) -> Result<Option<sidecar::RunInfo>, DevError> {
+        self.sidecar_required()?.query_run_info_for(id)
     }
 
     pub(crate) fn query_sidecar_meta(&self, id: &RunId) -> Result<(usize, usize), DevError> {

@@ -1,9 +1,12 @@
 # brokkr.toml datasets
 
-Dataset config consumed by the map-data projects (pbfhogg, elivagar, nidhogg).
-litehtml, sluggrs, ratatoskr, and piners do not use any of this. Datasets are
-host-scoped - they live under `[<hostname>.datasets.<name>]`, never a global
-`[datasets]` table. See the host example in `docs/brokkr.toml.md`.
+Host dataset config is consumed by the map-data projects (pbfhogg, elivagar,
+nidhogg) and by Mogwai's out-of-git input pins. Mogwai uses `path` plus
+`xxh128`; map-data projects use the PBF, OSC and PMTiles entries described
+below. litehtml, sluggrs, ratatoskr, and piners do not use these datasets.
+Datasets are host-scoped - they live under `[<hostname>.datasets.<name>]`,
+never a global `[datasets]` table. See the host example in
+`docs/brokkr.toml.md`.
 
 Host dataset blocks may live in a file shared between projects and pulled in
 with `include` (`brokkr man config include`). Registration edits the file that
@@ -14,7 +17,12 @@ paths still resolve against each including project's root.
 
 - `pbf.<variant>` - PBF file entries keyed by variant name (e.g. `raw`,
   `indexed`, `locations`). Each has `file`, optional `xxhash` (XXH128),
-  optional `seq`. `sha256` is accepted as an alias during migration.
+  optional `seq`. Digest values are parsed as 32 hexadecimal XXH128 digits
+  (either case); anything else, a 64-digit SHA-256 included, is rejected at
+  config load. The old `sha256` key, once an alias of `xxhash`, is refused
+  anywhere under `[<host>.datasets]` with the remedy: rename it to `xxhash`
+  when its value already is a 32-digit XXH128, otherwise delete it and take
+  the digest `brokkr env` prints for the unpinned file.
   Two optional booleans assert properties of the file itself, both default
   `false`: `locations_on_ways` (node coordinates are embedded in ways) and
   `force_sorted` (nodes are monotonic, so the compact node store is safe).
@@ -24,13 +32,13 @@ paths still resolve against each including project's root.
   describe the input, not the pipeline - a block would otherwise have to know
   which variant it was about to be run against.
 - `osc.<seq>` - OSC diff file entries keyed by sequence number. Each has
-  `file`, optional `xxhash`. `sha256` accepted as alias.
+  `file`, optional `xxhash` (XXH128).
 - `pmtiles.<variant>` - PMTiles archive entries keyed by variant name (e.g.
-  `elivagar`). Each has `file`, optional `xxhash`. `sha256` accepted as alias.
+  `elivagar`). Each has `file`, optional `xxhash` (XXH128).
   Used by nidhogg `serve` and `bench tiles`.
 - `blessed` - the singular regress reference archive (elivagar). Fields:
   `file` (relative to the data dir, conventionally `blessed/<dataset>-<commit>.pmtiles`),
-  `commit` (source commit, for provenance), optional `xxhash` (`sha256` alias).
+  `commit` (source commit, for provenance), optional `xxhash` (XXH128).
   Written by `brokkr bless`, read + hash-verified by `brokkr regress`. The
   archive lives under gitignored `data/blessed/`; only this registration is
   committed. Singular (not keyed by variant) - one pmtiles variant exists

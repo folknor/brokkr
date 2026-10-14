@@ -24,7 +24,7 @@ use crate::build;
 use crate::cargo_filter;
 use crate::cargo_json;
 use crate::config::{
-    Certifies, CheckEntry, DependencyRule, GremlinsConfig, HeaderConfig,
+    Certifies, CheckEntry, Claim, DependencyRule, GremlinsConfig, HeaderConfig,
     ManifestConfig, RustdocConfig, NON_SKIPPABLE_PHASES, PHASE_NAMES, QuarantineEntry, ScriptCheck, SitedAllow,
     Stage, TestConfig, TextlintRule,
 };
@@ -88,8 +88,9 @@ pub(crate) fn cmd_check(
         None
     };
     let (certifies, skip_phases) = profile_claim(&profile_label, test_cfg);
-    reject_scoped_complete(certifies, packages)?;
-    reject_extra_args_complete(certifies, extra_args)?;
+    let claim = Claim::new(certifies);
+    reject_scoped_complete(claim, packages)?;
+    reject_extra_args_complete(claim, extra_args)?;
 
     announce_profile_header(&active_sweeps, &profile_label);
     announce_invocation_shaping(packages, extra_args);
@@ -192,7 +193,7 @@ pub(crate) fn cmd_check(
                 clippy_allow_exact,
                 quarantine,
                 rustdoc_cfg,
-                certifies,
+                claim,
                 doctests,
                 commands,
                 extra_args,
@@ -671,7 +672,7 @@ struct BuildPhaseArgs<'a> {
     quarantine: &'a [QuarantineEntry],
     /// `[rustdoc]`; `None` leaves the rustdoc phase inert.
     rustdoc_cfg: Option<&'a RustdocConfig>,
-    certifies: Option<Certifies>,
+    claim: Claim,
     doctests: bool,
     commands: bool,
     extra_args: &'a [String],
@@ -728,7 +729,7 @@ fn run_build_phases(
         run_script_checks(a.project_root, a.script_checks, Stage::PreTest)?;
     }
 
-    let certifying = a.certifies == Some(Certifies::Complete);
+    let certifying = a.claim.requires_attribution();
     let mut test_failure: Option<DevError> = None;
     let mut prepared: Option<Prepared> = None;
     if !skip("test") {
@@ -920,7 +921,7 @@ fn finish_build_phases(
     // needs no process the shutdown flag would refuse, and the worksheet is
     // most needed exactly on the unhealthy runs.
     if let Some(prepared) = prepared {
-        if a.certifies == Some(Certifies::Complete) {
+        if a.claim.enumerates_universe() {
             // Stays on the phase that failed - the audit only contributes its
             // findings and counts there.
             if test_failure.is_none() {
@@ -1054,7 +1055,7 @@ fn verify_doc_only_rules(a: &BuildPhaseArgs<'_>) -> Result<(), DevError> {
             }
         }
     }
-    if a.certifies != Some(Certifies::Complete) {
+    if !a.claim.enumerates_universe() {
         return Ok(());
     }
     for s in &doc_sweeps {
@@ -1434,10 +1435,10 @@ fn resolve_sweep_unification(
 /// unification changes with the package set - the B41 hazard), so a
 /// complete profile rejects it before anything compiles.
 fn reject_scoped_complete(
-    certifies: Option<Certifies>,
+    claim: Claim,
     packages: &[String],
 ) -> Result<(), DevError> {
-    if certifies == Some(Certifies::Complete) && !packages.is_empty() {
+    if claim.refuses_scoping() && !packages.is_empty() {
         return Err(DevError::Config(
             "package scoping (`-p`) is rejected under `certifies = \"complete\"`: \
              a scoped build's green is not comparable to the full build's. Use a \
@@ -1459,10 +1460,10 @@ fn reject_scoped_complete(
 /// `default_profile`, and for the ordinary-lane profiles that
 /// `run_isolated_sweep`'s per-sweep guard never covers.
 fn reject_extra_args_complete(
-    certifies: Option<Certifies>,
+    claim: Claim,
     extra_args: &[String],
 ) -> Result<(), DevError> {
-    if certifies == Some(Certifies::Complete) && !extra_args.is_empty() {
+    if claim.refuses_trailing_args() && !extra_args.is_empty() {
         return Err(DevError::Config(
             "trailing `-- …` test args are rejected under `certifies = \
              \"complete\"`: they narrow the test run (a libtest `--skip`, a \
@@ -1797,10 +1798,16 @@ fn attribute_manifest_lints(
 ) -> Vec<(usize, cargo_json::DiagnosticEvent)> {
     let blocks = rustc_text::rustc_blocks(&r.stderr);
     let root_manifest = info.workspace_root.join("Cargo.toml");
+    let owners = crate::diagnostic::OwnerIndex::from_metadata_at(
+        &info.workspace_root,
+        &info.workspace_root,
+        &info.workspace_members,
+        &info.member_manifests,
+    );
     cargo_json::manifest_lints_by_block(&blocks)
         .into_iter()
         .filter_map(|(i, mut e)| {
-            let path = lexical_normalize(&info.workspace_root.join(e.file.as_deref()?));
+            let path = lexical_normalize(&info.workspace_root.join(e.path()?));
             match info.member_manifests.get(&path) {
                 // A non-virtual root is a member too, but its manifest still
                 // holds the workspace's tables: reported by every run.
@@ -1810,6 +1817,7 @@ fn attribute_manifest_lints(
                 None if path == root_manifest => {}
                 None => e.package_id = Some(format!("manifest+{}", path.display())),
             }
+            e.classify_owner(&owners);
             Some((i, e))
         })
         .collect()
@@ -2309,7 +2317,7 @@ fn sited_match(s: &SitedAllow, d: &cargo_json::DiagnosticEvent) -> bool {
     };
     let lint_matches = crate::config::LintName::parse(&s.lint)
         .matches(crate::config::LintName::parse(code));
-    lint_matches && d.file.as_deref() == Some(s.path.as_str())
+    lint_matches && d.path() == Some(Path::new(s.path.as_str()))
 }
 
 /// Parse a sweep's stdout and drop every diagnostic a `[clippy] allow_exact`
@@ -2505,23 +2513,30 @@ impl SweepResult {
 
 /// One row of merged-across-sweep clippy output for the text formatter.
 struct MergedDiag<'a> {
-    diag: &'a cargo_filter::ClippyDiagnostic,
+    diag: &'a crate::diagnostic::Diagnostic,
     sweeps: Vec<String>,
 }
 
-/// Merge clippy diagnostics across sweeps, deduplicating by
-/// (header, location, message). `parses` is `(label, parse_result)`
-/// pairs from each sweep; sweep labels are owned strings since
-/// `[[check]]` entry names are user-defined.
+/// The merge identity of one listed diagnostic: code, site and message, at
+/// the level the list renders every entry at. A diagnostic is an error in
+/// this list whatever level cargo gave it (see [`clippy_parse_from_events`]),
+/// so a capped lint and its uncapped twin from another sweep are one entry.
+fn merge_key(d: &crate::diagnostic::Diagnostic) -> crate::diagnostic::DiagnosticKey {
+    d.key_as(Level::Error)
+}
+
+/// Merge clippy diagnostics across sweeps, deduplicating by [`merge_key`].
+/// `parses` is `(label, parse_result)` pairs from each sweep; sweep labels
+/// are owned strings since `[[check]]` entry names are user-defined.
 fn merge_clippy<'a>(
     parses: &'a [(String, cargo_filter::ClippyParse)],
 ) -> Vec<MergedDiag<'a>> {
-    let mut order: Vec<DiagKey> = Vec::new();
-    let mut by_key: HashMap<DiagKey, MergedDiag<'a>> = HashMap::new();
+    let mut order: Vec<crate::diagnostic::DiagnosticKey> = Vec::new();
+    let mut by_key: HashMap<crate::diagnostic::DiagnosticKey, MergedDiag<'a>> = HashMap::new();
 
     for (label, parsed) in parses {
         for d in &parsed.diagnostics {
-            let key = DiagKey::from(d);
+            let key = merge_key(d);
             if let Some(existing) = by_key.get_mut(&key) {
                 if !existing.sweeps.contains(label) {
                     existing.sweeps.push(label.clone());
@@ -2543,19 +2558,6 @@ fn merge_clippy<'a>(
         .into_iter()
         .filter_map(|k| by_key.remove(&k))
         .collect()
-}
-
-#[derive(Clone, PartialEq, Eq, Hash)]
-struct DiagKey(String, String, String);
-
-impl From<&cargo_filter::ClippyDiagnostic> for DiagKey {
-    fn from(d: &cargo_filter::ClippyDiagnostic) -> Self {
-        DiagKey(
-            d.header.clone(),
-            d.location.clone().unwrap_or_default(),
-            d.message.clone(),
-        )
-    }
 }
 
 /// Render the per-diagnostic sweep tag.
@@ -2626,7 +2628,7 @@ fn format_clippy_multi(
     // Each diagnostic's package, keyed as the merge keys it: identical
     // diagnostics from two runs come from the same source line, so the same
     // package.
-    let mut package_of: HashMap<DiagKey, String> = HashMap::new();
+    let mut package_of: HashMap<crate::diagnostic::DiagnosticKey, String> = HashMap::new();
     let parses: Vec<(String, cargo_filter::ClippyParse)> = results
         .iter()
         .map(|r| {
@@ -2635,7 +2637,7 @@ fn format_clippy_multi(
             let parse = clippy_parse_from_events(&events, !r.success);
             for (d, e) in parse.diagnostics.iter().zip(&events) {
                 if let Some(id) = &e.package_id {
-                    package_of.entry(DiagKey::from(d)).or_insert_with(|| id.clone());
+                    package_of.entry(merge_key(d)).or_insert_with(|| id.clone());
                 }
             }
             (r.label.clone(), parse)
@@ -2695,7 +2697,7 @@ fn format_clippy_multi(
         if multi
             && let Some(tag) = coverage_tag(
                 &m.sweeps,
-                package_of.get(&DiagKey::from(m.diag)).map(String::as_str),
+                package_of.get(&merge_key(m.diag)).map(String::as_str),
                 results,
                 info,
                 active_sweep_count,
@@ -2704,7 +2706,7 @@ fn format_clippy_multi(
             out.push_str(&tag);
             out.push(' ');
         }
-        out.push_str(&m.diag.format_one());
+        out.push_str(&m.diag.format_as(Level::Error));
         out.push('\n');
     }
     if !streams.is_empty() {
@@ -2896,18 +2898,17 @@ fn failed_stdout_line(line: &str, keep: &dyn Fn(&cargo_json::DiagnosticEvent) ->
     message.get("rendered").and_then(Value::as_str).map(|s| s.trim_end().to_owned())
 }
 
-/// Whether a diagnostic is at error level. rustc spells an ICE `error:
-/// internal compiler error`, so a prefix, not an equality.
+/// Whether a diagnostic is at error level. The reader maps rustc's ICE
+/// spelling (`error: internal compiler error`) to [`Level::Error`] as well.
 fn is_error_level(d: &cargo_json::DiagnosticEvent) -> bool {
-    d.level.starts_with("error")
+    d.is_error()
 }
 
 /// Parse cargo's `--message-format=json` stdout into a
 /// [`ClippyParse`](cargo_filter::ClippyParse).
 ///
-/// Walks each compiler-message JSON event and maps it to the formatter
-/// primitive used by `merge_clippy` and `format_one()`, in discovery order.
-/// `parse_failed` follows [`clippy_parse_from_events`]'s rule.
+/// Every compiler-message JSON event, in discovery order. `parse_failed`
+/// follows [`clippy_parse_from_events`]'s rule.
 #[cfg(test)]
 fn parse_clippy_from_json(
     stdout: &str,
@@ -2917,56 +2918,27 @@ fn parse_clippy_from_json(
     clippy_parse_from_events(&gated_diags(stdout, allow_exact), sweep_failed)
 }
 
-/// Map already-filtered diagnostic events to the formatter primitive, in
-/// discovery order. `parse_failed` is set when cargo failed and left no
-/// `error`-level event, so callers also print the captured streams: under
-/// `--cap-lints=warn` a lint never fails cargo, so a failed run with warnings
-/// alone failed for a reason no diagnostic names - a build script's panic
-/// beside some crate's lints, which the old "no event at all" rule hid.
+/// Collect already-filtered diagnostic events for the list, in discovery
+/// order, levels as cargo gave them. `parse_failed` is set when cargo failed
+/// and left no `error`-level event, so callers also print the captured
+/// streams: under `--cap-lints=warn` a lint never fails cargo, so a failed run
+/// with warnings alone failed for a reason no diagnostic names - a build
+/// script's panic beside some crate's lints, which the old "no event at all"
+/// rule hid.
+///
+/// The list renders every entry as an error ([`merge_key`], `format_as`),
+/// whatever level cargo gave it: the one kind of warning `check` does not
+/// treat as a failure - a dependency's - was dropped upstream
+/// ([`is_dependency_warning`]), and clippy runs under `--cap-lints=warn` only
+/// so a denied lint cannot abort its crate's compile.
 fn clippy_parse_from_events(
     events: &[cargo_json::DiagnosticEvent],
     sweep_failed: bool,
 ) -> cargo_filter::ClippyParse {
-    let diagnostics: Vec<cargo_filter::ClippyDiagnostic> =
-        events.iter().map(event_to_clippy).collect();
     let parse_failed = sweep_failed && !events.iter().any(is_error_level);
     cargo_filter::ClippyParse {
-        diagnostics,
+        diagnostics: events.to_vec(),
         parse_failed,
-    }
-}
-
-/// Convert a cargo JSON diagnostic event into the formatter primitive.
-///
-/// `header` always carries the lint code when cargo populated it (every
-/// diagnostic, not just first-of-kind), so bulk triage by rule works in
-/// text mode. `detail` is recovered from the primary span's inline
-/// label first ("expected `i32`, found `&str`"), then from a child note
-/// that mentions both "expected" and "found" - matching the two shapes
-/// the old text scraper handled.
-///
-/// Every event reaching here is an error, whatever level cargo gave it: the
-/// one kind of warning `check` does not treat as a failure - a dependency's -
-/// was dropped upstream ([`is_dependency_warning`]), and clippy runs under
-/// `--cap-lints=warn` only so a denied lint cannot abort its crate's compile.
-fn event_to_clippy(d: &cargo_json::DiagnosticEvent) -> cargo_filter::ClippyDiagnostic {
-    let header = match &d.code {
-        Some(c) => format!("error[{c}]"),
-        None => "error".to_string(),
-    };
-    let location = match (&d.file, d.line, d.column) {
-        (Some(f), Some(l), Some(c)) => Some(format!("{f}:{l}:{c}")),
-        // A manifest lint cargo could not place within its `Cargo.toml`.
-        (Some(f), None, None) => Some(f.clone()),
-        _ => None,
-    };
-    let detail = extract_detail_from_event(d);
-    cargo_filter::ClippyDiagnostic {
-        is_error: true,
-        header,
-        location,
-        message: d.message.clone(),
-        detail,
     }
 }
 
@@ -2985,66 +2957,21 @@ fn is_dependency_warning(
     d: &cargo_json::DiagnosticEvent,
     members: Option<&HashMap<String, String>>,
 ) -> bool {
-    d.level == "warning"
+    d.is_warning()
         && matches!((members, &d.package_id), (Some(m), Some(id)) if !m.contains_key(id))
 }
 
-/// Pull a one-line "expected X, found Y" detail out of the primary
-/// span label or a child note. Returns `None` if neither shape applies.
-fn extract_detail_from_event(d: &cargo_json::DiagnosticEvent) -> Option<String> {
-    if let Some(label) = &d.primary_label
-        && label.contains("expected")
-        && label.contains("found")
-    {
-        return Some(collapse_whitespace(label));
-    }
-    for child in &d.children {
-        if child.message.contains("expected") && child.message.contains("found") {
-            return Some(collapse_whitespace(&child.message.replace('\n', ", ")));
-        }
-    }
-    None
-}
-
-fn collapse_whitespace(s: &str) -> String {
-    s.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
 /// Sort key for the diagnostic list: by lint code (so every hit of a rule
-/// clumps together), then file and line for stable in-rule ordering. A bare
-/// `error` header (no code) sorts to the end.
-fn clippy_sort_key(d: &cargo_filter::ClippyDiagnostic) -> (String, String, u64, u64) {
-    let lint = extract_lint_code(&d.header);
-    // Push bare-level diagnostics to the end of their level by giving
-    // them a key that sorts after any real code.
-    let lint_key = if lint.is_empty() {
-        "\u{10FFFF}".to_string()
-    } else {
-        lint.to_string()
+/// clumps together), then file, line and column for stable in-rule ordering.
+/// A diagnostic with no code sorts to the end.
+fn clippy_sort_key(d: &crate::diagnostic::Diagnostic) -> (String, PathBuf, u64, u64) {
+    // A key that sorts after any real code.
+    let lint_key = d.code.clone().unwrap_or_else(|| "\u{10FFFF}".to_owned());
+    let (file, line, column) = match &d.site {
+        Some(site) => (site.file.clone(), site.line.unwrap_or(0), site.column.unwrap_or(0)),
+        None => (PathBuf::new(), 0, 0),
     };
-    let (file, line, col) = parse_location(d.location.as_deref());
-    (lint_key, file, line, col)
-}
-
-fn extract_lint_code(header: &str) -> &str {
-    if let Some(start) = header.find('[')
-        && let Some(end) = header.find(']')
-        && start < end
-    {
-        return &header[start + 1..end];
-    }
-    ""
-}
-
-fn parse_location(location: Option<&str>) -> (String, u64, u64) {
-    let Some(loc) = location else {
-        return (String::new(), 0, 0);
-    };
-    let mut parts = loc.rsplitn(3, ':');
-    let col = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
-    let line = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
-    let file = parts.next().unwrap_or(loc).to_string();
-    (file, line, col)
+    (lint_key, file, line, column)
 }
 
 /// Split `brokkr check`'s trailing args into a cargo-level slice and a
@@ -3061,21 +2988,6 @@ fn split_extra_args(extra: &[String]) -> (&[String], &[String]) {
         Some(i) => (&extra[..i], &extra[i + 1..]),
         None => (extra, &[][..]),
     }
-}
-
-/// Two execution policies that cannot both hold: one runs every test in its
-/// own process, the other runs many binaries' tests at once. Refused here
-/// rather than at resolve time because that is where both are read; it fires
-/// before any test runs either way.
-fn reject_conflicting_lanes(sweep: &ResolvedSweep) -> Result<(), DevError> {
-    if sweep.process_isolation && sweep.parallel_budget.is_some() {
-        return Err(DevError::Config(format!(
-            "sweep '{}' sets both `isolation = \"process\"` and `parallel`; process isolation \
-             runs one test at a time, and `parallel` runs many at once. Pick one.",
-            sweep.label
-        )));
-    }
-    Ok(())
 }
 
 /// The run-wide inputs of the test phase.
@@ -3337,7 +3249,6 @@ fn run_test_lane(
     // compiling the same crate under the unsuppressed lint fails before
     // `cargo test` is ever reached.
     let env = prepared.map_or_else(|| lane_env(&inputs, sweep), |p| p.env.clone());
-    reject_conflicting_lanes(sweep)?;
     let kind = lane_kind(sweep);
     let needs_selection = matches!(kind, LaneKind::Parallel | LaneKind::Isolated | LaneKind::Nextest);
 
@@ -3689,7 +3600,7 @@ mod package_rules_tests {
 mod complete_rejection_tests {
     #![allow(clippy::unwrap_used)]
 
-    use super::{reject_extra_args_complete, reject_scoped_complete};
+    use super::{Claim, reject_extra_args_complete, reject_scoped_complete};
     use crate::config::Certifies;
 
     #[test]
@@ -3698,7 +3609,7 @@ mod complete_rejection_tests {
         // real run but not the plan, so the skipped pairs would stay expected
         // with nothing running them. Rejected before anything compiles.
         let args = vec!["--".to_owned(), "--skip".to_owned(), "expensive_".to_owned()];
-        let err = reject_extra_args_complete(Some(Certifies::Complete), &args)
+        let err = reject_extra_args_complete(Claim::new(Some(Certifies::Complete)), &args)
             .unwrap_err()
             .to_string();
         assert!(err.contains("trailing"), "got: {err}");
@@ -3707,23 +3618,23 @@ mod complete_rejection_tests {
 
     #[test]
     fn complete_allows_no_trailing_args() {
-        reject_extra_args_complete(Some(Certifies::Complete), &[]).unwrap();
+        reject_extra_args_complete(Claim::new(Some(Certifies::Complete)), &[]).unwrap();
     }
 
     #[test]
     fn partial_and_legacy_allow_trailing_args() {
         let args = vec!["--lib".to_owned()];
-        reject_extra_args_complete(Some(Certifies::Partial), &args).unwrap();
-        reject_extra_args_complete(None, &args).unwrap();
+        reject_extra_args_complete(Claim::new(Some(Certifies::Partial)), &args).unwrap();
+        reject_extra_args_complete(Claim::new(None), &args).unwrap();
     }
 
     #[test]
     fn scoped_complete_still_rejected() {
         // Sanity: the sibling `-p` guard is unchanged.
         let pkgs = vec!["pkg".to_owned()];
-        assert!(reject_scoped_complete(Some(Certifies::Complete), &pkgs).is_err());
-        reject_scoped_complete(Some(Certifies::Complete), &[]).unwrap();
-        reject_scoped_complete(Some(Certifies::Partial), &pkgs).unwrap();
+        assert!(reject_scoped_complete(Claim::new(Some(Certifies::Complete)), &pkgs).is_err());
+        reject_scoped_complete(Claim::new(Some(Certifies::Complete)), &[]).unwrap();
+        reject_scoped_complete(Claim::new(Some(Certifies::Partial)), &pkgs).unwrap();
     }
 }
 

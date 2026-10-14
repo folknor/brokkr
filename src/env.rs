@@ -66,10 +66,10 @@ pub struct StorageInfo {
 pub enum DatasetStatus {
     /// File exists and hash matches.
     Verified,
-    /// File exists but no hash is configured. Contains computed hash.
-    Present(String),
-    /// File exists but hash does not match. Contains actual hash.
-    HashMismatch(String),
+    /// File exists but no hash is configured. Contains the computed digest.
+    Present(crate::preflight::PathDigest),
+    /// File exists but hash does not match. Contains the actual digest.
+    HashMismatch(crate::preflight::PathDigest),
     /// File does not exist.
     Missing,
     /// The digest could not be computed. Contains why.
@@ -891,7 +891,7 @@ fn check_datasets(
         // `data_dir`: a delivery commonly sits outside the repository.
         if let Some(path) = ds.resolve_path(project_root) {
             let status = if path.exists() {
-                check_hash_status(&path, ds.xxh128.as_deref(), project_root)
+                check_hash_status(&path, ds.xxh128, project_root)
             } else {
                 DatasetStatus::Missing
             };
@@ -923,26 +923,31 @@ fn check_file_entries<E: crate::resolve::FileEntry>(
         let status = if !path.exists() {
             DatasetStatus::Missing
         } else {
-            check_hash_status(&path, entry.xxhash(), project_root)
+            check_hash_status(&path, entry.xxhash().map(crate::preflight::FileDigest::value), project_root)
         };
         out.push((label, status));
     }
 }
 
-fn check_hash_status(path: &Path, expected: Option<&str>, project_root: &Path) -> DatasetStatus {
+fn check_hash_status(
+    path: &Path,
+    expected: Option<crate::preflight::Xxh128>,
+    project_root: &Path,
+) -> DatasetStatus {
     // A digest that could not be computed is reported WITH its reason. The
     // previous bare "error" was indistinguishable between an unreadable file,
     // an empty directory and a permission problem - and `brokkr env` is
     // precisely where someone goes to find out why a pin will not take.
-    let hash = match crate::preflight::cached_xxh128(path, project_root) {
-        Ok(hash) => hash,
+    let digest = match crate::preflight::cached_path_digest(path, project_root) {
+        Ok(digest) => digest,
         Err(e) => return DatasetStatus::HashError(first_line(&e.to_string())),
     };
 
+    // Typed comparison: hex case and spelling were normalised at parse time.
     match expected {
-        None => DatasetStatus::Present(hash),
-        Some(hex) if hash.eq_ignore_ascii_case(hex) => DatasetStatus::Verified,
-        Some(_) => DatasetStatus::HashMismatch(hash),
+        None => DatasetStatus::Present(digest),
+        Some(pin) if digest.value() == pin => DatasetStatus::Verified,
+        Some(_) => DatasetStatus::HashMismatch(digest),
     }
 }
 

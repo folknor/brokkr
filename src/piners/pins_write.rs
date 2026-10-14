@@ -25,10 +25,11 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use toml_edit::{DocumentMut, Item, RawString, Table, Value};
+use toml_edit::{DocumentMut, Item, Table, Value};
 
 use crate::error::DevError;
 use crate::piners::registry::{self, FeedGroup, FilePin, HarnessFile, Pin};
+use crate::piners::toml_writer::{self, set_block_prefix, set_value, sort_fields, sync_opt};
 
 /// Field order inside a `[probes.<id>]` entry: the blessed contract first,
 /// then the volatile hashes.
@@ -291,87 +292,9 @@ fn finalize_layout(
     }
 }
 
-/// Normalize a block's leading decor without disturbing comments: a prefix
-/// that is only whitespace becomes nothing for the first block (no blank
-/// line at the top of the file) and exactly one blank line for every later
-/// one. A prefix holding a comment is left as written. The whitespace case
-/// matters beyond tidiness: an entry deleted by hand usually leaves its blank
-/// lines behind, and the next table would otherwise keep them for good.
-fn set_block_prefix(table: &mut Table, first: bool) {
-    let decor = table.decor_mut();
-    let prefix = decor
-        .prefix()
-        .and_then(RawString::as_str)
-        .unwrap_or("")
-        .to_owned();
-    if prefix.chars().all(char::is_whitespace) {
-        decor.set_prefix(if first { "" } else { "\n" });
-    }
-}
-
-/// Set `key = value`, preserving the existing value's decor (the spacing
-/// around `=` and any trailing `# comment`) when the key already exists.
-fn set_value(table: &mut Table, key: &str, new: Value) {
-    if let Some(Item::Value(existing)) = table.get_mut(key) {
-        let mut new = new;
-        *new.decor_mut() = existing.decor().clone();
-        *existing = new;
-    } else {
-        table.insert(key, Item::Value(new));
-    }
-}
-
-/// [`set_value`] for an optional field: `None` removes the key.
-fn sync_opt(table: &mut Table, key: &str, value: Option<Value>) {
-    match value {
-        Some(v) => set_value(table, key, v),
-        None => {
-            table.remove(key);
-        }
-    }
-}
-
-/// Order a table's keys by `order` (unknown keys last, stable). Key decor
-/// (a comment above a key) travels with its key.
-fn sort_fields(table: &mut Table, order: &[&str]) {
-    table.sort_values_by(|k1, _, k2, _| rank(order, k1.get()).cmp(&rank(order, k2.get())));
-}
-
-fn rank(order: &[&str], key: &str) -> usize {
-    order.iter().position(|k| *k == key).unwrap_or(order.len())
-}
-
 /// A [`FilePin`] as an inline `{ path, xxh128 }` value in house spacing.
 fn pin_value(pin: &FilePin) -> Result<Value, DevError> {
-    parse_value(&format!(
-        "{{ path = {}, xxh128 = {} }}",
-        toml_str(&pin.path.to_string_lossy()),
-        toml_str(&pin.xxh128),
-    ))
-}
-
-/// Parse a value the writer itself formatted; failure is a writer bug.
-fn parse_value(text: &str) -> Result<Value, DevError> {
-    text.parse().map_err(|e| {
-        DevError::Config(format!(
-            "piners: pins.toml writer produced an invalid TOML value `{text}`: {e}"
-        ))
-    })
-}
-
-/// A TOML basic string with `"` and `\` escaped.
-fn toml_str(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('"');
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            _ => out.push(c),
-        }
-    }
-    out.push('"');
-    out
+    toml_writer::file_pin(pin, "piners: pins.toml")
 }
 
 #[cfg(test)]

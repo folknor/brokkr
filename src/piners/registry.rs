@@ -43,6 +43,7 @@ use serde::Deserialize;
 
 use crate::error::DevError;
 use crate::lockfile::LockGuard;
+use crate::piners::registry_io;
 use crate::preflight;
 
 /// File name of the canonical pin file inside the registry directory.
@@ -522,14 +523,6 @@ pub struct PinsData {
     pub probes: BTreeMap<String, Pin>,
 }
 
-/// Raw keyword-file shape: `probes = [ids]`.
-#[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct KeywordFile {
-    #[serde(default)]
-    probes: Vec<String>,
-}
-
 /// The loaded registry: the pinned universe plus the keyword index.
 #[derive(Debug, Default)]
 pub struct Registry {
@@ -906,49 +899,10 @@ impl Registry {
     }
 
     fn load_unlocked(registry_dir: &Path, corpus_root: &Path) -> Result<Self, DevError> {
-        if !registry_dir.is_dir() {
-            return Err(DevError::Config(format!(
-                "piners: registry directory not found: {}",
-                registry_dir.display()
-            )));
-        }
-
+        let files = registry_io::load_files(registry_dir, PINS_FILE, "piners")?;
         let pins_path = registry_dir.join(PINS_FILE);
-        let pins_text = std::fs::read_to_string(&pins_path).map_err(|e| {
-            DevError::Config(format!(
-                "piners: failed to read {}: {e}",
-                pins_path.display()
-            ))
-        })?;
-        let data = parse_pins(&pins_text, &pins_path)?;
+        let data = parse_pins(&files.canonical_text, &pins_path)?;
         check_pending_location(&data.pending, &pins_path, registry_dir, corpus_root)?;
-
-        let mut keywords = BTreeMap::new();
-        let mut entries: Vec<PathBuf> = std::fs::read_dir(registry_dir)
-            .map_err(DevError::Io)?
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .collect();
-        entries.sort();
-        for path in entries {
-            if path.file_name().and_then(|n| n.to_str()) == Some(PINS_FILE) {
-                continue;
-            }
-            if path.extension().and_then(|e| e.to_str()) != Some("toml") {
-                continue;
-            }
-            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
-                continue;
-            };
-            let text = std::fs::read_to_string(&path).map_err(|e| {
-                DevError::Config(format!(
-                    "piners: failed to read keyword file {}: {e}",
-                    path.display()
-                ))
-            })?;
-            let kw: KeywordFile = toml::from_str(&text)
-                .map_err(|e| DevError::Config(format!("piners: {}: {e}", path.display())))?;
-            keywords.insert(stem.to_owned(), kw.probes);
-        }
 
         Ok(Self {
             pins: data.probes,
@@ -956,8 +910,8 @@ impl Registry {
             harness_files: data.harness_files,
             probe_config: data.probe_config,
             pending: data.pending,
-            keywords,
-            pins_text,
+            keywords: files.keywords,
+            pins_text: files.canonical_text,
         })
     }
 
@@ -975,14 +929,9 @@ impl Registry {
     /// deserialized as [`CorpusDisposition`], so an unknown label is refused
     /// while loading rather than checked again here.
     pub fn lint(&self) -> Result<(), DevError> {
-        let mut dangling: Vec<String> = Vec::new();
-        for (keyword, ids) in &self.keywords {
-            for id in ids {
-                if !self.pins.contains_key(id) && !self.pending.contains_key(id) {
-                    dangling.push(format!("{keyword}.toml -> {id}"));
-                }
-            }
-        }
+        let dangling = registry_io::dangling_keywords(&self.keywords, |id| {
+            self.pins.contains_key(id) || self.pending.contains_key(id)
+        });
         let mut bad_feed: Vec<String> = Vec::new();
         for (prefix, entry) in &self.probe_config {
             if let Some(feed) = &entry.feed
@@ -1038,11 +987,6 @@ impl Registry {
             .filter(|(_, ids)| ids.iter().any(|p| p == id))
             .map(|(k, _)| k.clone())
             .collect()
-    }
-
-    /// Sorted list of keyword names for error/help messages.
-    pub fn keyword_names(&self) -> Vec<&str> {
-        self.keywords.keys().map(String::as_str).collect()
     }
 }
 

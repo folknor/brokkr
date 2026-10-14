@@ -627,8 +627,7 @@ mod coverage_tests {
         ResolutionRun, ResolvedSweep,
         SelectionPhase, ShapeCoverage,
     };
-    use crate::config::QualifiedSkip;
-    use crate::profile::FilterOrigin;
+    use crate::profile::{FilterOrigin, LaneFilters};
     use std::collections::BTreeSet;
 
     #[test]
@@ -705,6 +704,22 @@ mod coverage_tests {
         }
     }
 
+    fn sweep_with_filters(
+        label: &str,
+        filters: Vec<DeclaredFilter>,
+        include_ignored: bool,
+    ) -> ResolvedSweep {
+        ResolvedSweep {
+            label: label.into(),
+            filters: LaneFilters {
+                filters,
+                include_ignored,
+                ..Default::default()
+            },
+            ..ResolvedSweep::default()
+        }
+    }
+
     fn candidates(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
         pairs
             .iter()
@@ -750,16 +765,8 @@ mod coverage_tests {
             package: None,
             origin: FilterOrigin::Profile("gate".into()),
         };
-        let workspace = ResolvedSweep {
-            label: "workspace".into(),
-            declared_filters: vec![profile_skip.clone()],
-            ..ResolvedSweep::default()
-        };
-        let instrumented = ResolvedSweep {
-            label: "instrumented".into(),
-            declared_filters: vec![profile_skip],
-            ..ResolvedSweep::default()
-        };
+        let workspace = sweep_with_filters("workspace", vec![profile_skip.clone()], false);
+        let instrumented = sweep_with_filters("instrumented", vec![profile_skip], false);
         let wide = candidates(&[("mogwai-server", "server_only_probe")]);
         let scoped = candidates(&[("mogwai-data", "unrelated")]);
 
@@ -781,11 +788,7 @@ mod coverage_tests {
     #[test]
     fn a_filter_with_an_unlisted_sweep_is_not_reported_dead() {
         let skip = filter(FilterKind::Skip, "renamed_away");
-        let listed = ResolvedSweep {
-            label: "listed".into(),
-            declared_filters: vec![skip.clone()],
-            ..ResolvedSweep::default()
-        };
+        let listed = sweep_with_filters("listed", vec![skip.clone()], false);
         let cands = candidates(&[("core", "plain")]);
         let mut ledger = FilterLedger::default();
         for (f, live) in filter_liveness(&listed, &cands, &BTreeSet::new()) {
@@ -800,26 +803,26 @@ mod coverage_tests {
         // Provenance is the scope key, so the same union rule gives an entry
         // filter a narrower reference set: two `[[check]]` entries carrying the
         // same pattern are two filters, and one living cannot cover the other.
-        let live_entry = ResolvedSweep {
-            label: "workspace".into(),
-            declared_filters: vec![DeclaredFilter {
+        let live_entry = sweep_with_filters(
+            "workspace",
+            vec![DeclaredFilter {
                 kind: FilterKind::Skip,
                 pattern: "shared_name".into(),
                 package: None,
                 origin: FilterOrigin::Entry("workspace".into()),
             }],
-            ..ResolvedSweep::default()
-        };
-        let dead_entry = ResolvedSweep {
-            label: "instrumented".into(),
-            declared_filters: vec![DeclaredFilter {
+            false,
+        );
+        let dead_entry = sweep_with_filters(
+            "instrumented",
+            vec![DeclaredFilter {
                 kind: FilterKind::Skip,
                 pattern: "shared_name".into(),
                 package: None,
                 origin: FilterOrigin::Entry("instrumented".into()),
             }],
-            ..ResolvedSweep::default()
-        };
+            false,
+        );
         let wide = candidates(&[("core", "shared_name_test")]);
         let scoped = candidates(&[("data", "unrelated")]);
         assert_eq!(
@@ -830,13 +833,14 @@ mod coverage_tests {
 
     #[test]
     fn a_skip_matching_nothing_is_dead_and_a_matching_one_is_not() {
-        let sweep = ResolvedSweep {
-            declared_filters: vec![
+        let sweep = sweep_with_filters(
+            "default",
+            vec![
                 filter(FilterKind::Skip, "serial_tests::"),
                 filter(FilterKind::Skip, "renamed_away"),
             ],
-            ..ResolvedSweep::default()
-        };
+            false,
+        );
         let cands = candidates(&[("core", "serial_tests::a"), ("core", "plain")]);
         assert_eq!(
             dead_labels(&sweep, &cands, &BTreeSet::new()),
@@ -849,10 +853,11 @@ mod coverage_tests {
         // The shape's universe carries `tape::budget`, but this lane narrows to
         // one target with `--test`, so the skip removes nothing HERE. Judged
         // against the wider universe it would read as alive.
-        let sweep = ResolvedSweep {
-            declared_filters: vec![filter(FilterKind::Skip, "tape::budget")],
-            ..ResolvedSweep::default()
-        };
+        let sweep = sweep_with_filters(
+            "default",
+            vec![filter(FilterKind::Skip, "tape::budget")],
+            false,
+        );
         let lane_only = candidates(&[("core", "unit::a")]);
         assert_eq!(
             dead_labels(&sweep, &lane_only, &BTreeSet::new()),
@@ -868,13 +873,14 @@ mod coverage_tests {
         // libtest ORs positional filters, so this lane runs tests and looks
         // healthy. Folding the assertion the way libtest folds the filters
         // would let the live sibling cover for the dead one.
-        let sweep = ResolvedSweep {
-            declared_filters: vec![
+        let sweep = sweep_with_filters(
+            "default",
+            vec![
                 filter(FilterKind::Only, "read_market_latency"),
                 filter(FilterKind::Only, "write_market_latency"),
             ],
-            ..ResolvedSweep::default()
-        };
+            false,
+        );
         let cands = candidates(&[("core", "read_market_latency_p99")]);
         assert_eq!(
             dead_labels(&sweep, &cands, &BTreeSet::new()),
@@ -886,13 +892,14 @@ mod coverage_tests {
     fn an_only_whose_every_match_is_skipped_or_ignored_is_dead() {
         // "Matched something" is satisfied here and the lane still evaluates
         // nothing - the vanished gate.
-        let sweep = ResolvedSweep {
-            declared_filters: vec![
+        let sweep = sweep_with_filters(
+            "default",
+            vec![
                 filter(FilterKind::Skip, "_slow"),
                 filter(FilterKind::Only, "latency"),
             ],
-            ..ResolvedSweep::default()
-        };
+            false,
+        );
         let cands = candidates(&[("core", "latency_slow"), ("core", "other")]);
         assert_eq!(
             dead_labels(&sweep, &cands, &BTreeSet::new()),
@@ -900,10 +907,11 @@ mod coverage_tests {
         );
 
         // Same shape via `#[ignore]` rather than a skip.
-        let sweep = ResolvedSweep {
-            declared_filters: vec![filter(FilterKind::Only, "latency")],
-            ..ResolvedSweep::default()
-        };
+        let sweep = sweep_with_filters(
+            "default",
+            vec![filter(FilterKind::Only, "latency")],
+            false,
+        );
         let ignored: BTreeSet<(String, String)> =
             candidates(&[("core", "latency_manual")]).into_iter().collect();
         let cands = candidates(&[("core", "latency_manual")]);
@@ -913,10 +921,7 @@ mod coverage_tests {
         );
 
         // ...and alive again once the lane lifts the ignore.
-        let lifted = ResolvedSweep {
-            libtest_args: vec!["--include-ignored".into()],
-            ..sweep
-        };
+        let lifted = sweep_with_filters("default", sweep.filters.filters, true);
         assert!(dead_labels(&lifted, &cands, &ignored).is_empty());
     }
 
@@ -924,14 +929,7 @@ mod coverage_tests {
     fn a_qualified_skip_is_dead_when_its_package_has_no_match() {
         let mut scoped = filter(FilterKind::Skip, "serial_tests::");
         scoped.package = Some("nautilus-infrastructure".into());
-        let sweep = ResolvedSweep {
-            declared_filters: vec![scoped],
-            qualified_skips: vec![QualifiedSkip {
-                package: "nautilus-infrastructure".into(),
-                pattern: "serial_tests::".into(),
-            }],
-            ..ResolvedSweep::default()
-        };
+        let sweep = sweep_with_filters("default", vec![scoped], false);
         let cands = candidates(&[("nautilus-backtest", "serial_tests::t")]);
         assert_eq!(
             dead_labels(&sweep, &cands, &BTreeSet::new()),

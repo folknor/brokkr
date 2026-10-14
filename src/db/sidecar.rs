@@ -138,26 +138,18 @@ fn run_sidecar_migrations(conn: &rusqlite::Connection) -> Result<(), DevError> {
     //           still exists (fresh DBs created with the v5 DDL already
     //           have `mode`).
     if current < 5 {
-        let has_variant = conn
+        let columns = conn
             .prepare("PRAGMA table_info(sidecar_meta)")
             .and_then(|mut stmt| {
                 let names: Vec<String> = stmt
                     .query_map([], |row| row.get::<_, String>(1))?
                     .filter_map(Result::ok)
                     .collect();
-                Ok(names.iter().any(|n| n == "variant"))
+                Ok(names)
             })
-            .unwrap_or(false);
-        let has_mode = conn
-            .prepare("PRAGMA table_info(sidecar_meta)")
-            .and_then(|mut stmt| {
-                let names: Vec<String> = stmt
-                    .query_map([], |row| row.get::<_, String>(1))?
-                    .filter_map(Result::ok)
-                    .collect();
-                Ok(names.iter().any(|n| n == "mode"))
-            })
-            .unwrap_or(false);
+            .unwrap_or_default();
+        let has_variant = columns.iter().any(|name| name == "variant");
+        let has_mode = columns.iter().any(|name| name == "mode");
         if has_variant && !has_mode {
             conn.execute_batch("ALTER TABLE sidecar_meta RENAME COLUMN variant TO mode")?;
         }
@@ -358,15 +350,6 @@ impl SidecarDb {
         Ok(())
     }
 
-    /// Compatibility wrapper for callers that still have a prefix. Commands
-    /// resolve once through `RunStore` and use [`Self::query_meta_for`] below.
-    pub fn query_meta(&self, uuid_prefix: &str) -> (usize, usize) {
-        let Ok(uuid) = self.resolve_session(uuid_prefix) else {
-            return (0, 1);
-        };
-        self.query_meta_for(&RunId::new(uuid)).unwrap_or((0, 1))
-    }
-
     /// Query metadata for one identity already resolved by `RunStore`.
     /// Missing metadata keeps the historical default, while database errors
     /// remain visible to the caller.
@@ -386,13 +369,6 @@ impl SidecarDb {
             )
             .optional()?;
         Ok(found.unwrap_or((0, 1)))
-    }
-
-    /// Query run provenance for a result UUID prefix. `None` when absent or
-    /// when the prefix does not name exactly one session.
-    pub fn query_run_info(&self, uuid_prefix: &str) -> Option<RunInfo> {
-        let uuid = self.resolve_session(uuid_prefix).ok()?;
-        self.query_run_info_for(&RunId::new(uuid)).ok().flatten()
     }
 
     /// Query provenance for one identity already resolved by `RunStore`.
@@ -449,57 +425,9 @@ impl SidecarDb {
             .unwrap_or_else(|_| uuid_prefix.to_owned())
     }
 
-    /// Resolve a user-supplied prefix (or latest-key alias such as `dirty`)
-    /// to the one session it names.
-    ///
-    /// The read queries then match `result_uuid` exactly, so a
-    /// prefix shared by two sessions can no longer merge their samples,
-    /// markers and counters into one timeline - it is an error listing the
-    /// candidates instead. A prefix matching nothing comes back unchanged
-    /// (the exact-match queries then find nothing, and the caller reports
-    /// "no sidecar data"). An empty prefix is refused outright.
-    pub fn resolve_session(&self, uuid_prefix: &str) -> Result<String, DevError> {
-        let resolved = self.resolve_latest(uuid_prefix);
-        require_prefix(&resolved, "uuid")?;
-        let candidates = self.uuids_matching_prefix(&resolved)?;
-        match candidates.as_slice() {
-            [] => Ok(resolved),
-            [only] => Ok(only.clone()),
-            many => {
-                const SHOWN: usize = 10;
-                let listed: Vec<&str> = many.iter().take(SHOWN).map(String::as_str).collect();
-                let more = many.len().saturating_sub(SHOWN);
-                let tail = if more > 0 {
-                    format!(", and {more} more")
-                } else {
-                    String::new()
-                };
-                Err(DevError::Config(format!(
-                    "uuid prefix '{uuid_prefix}' is ambiguous - it matches {} sidecar sessions: {}{tail}",
-                    many.len(),
-                    listed.join(", "),
-                )))
-            }
-        }
-    }
-
     // -------------------------------------------------------------------
     // Read
     // -------------------------------------------------------------------
-
-    /// Query sidecar samples for a result UUID prefix.
-    ///
-    /// If `run_idx` is `Some`, filters to that run only. If `None`, returns
-    /// all runs. Resolves latest-keys (e.g. "dirty") and the prefix via
-    /// [`Self::resolve_session`] - an ambiguous prefix is an error.
-    pub fn query_samples(
-        &self,
-        uuid_prefix: &str,
-        run_idx: Option<usize>,
-    ) -> Result<Vec<crate::sidecar::Sample>, DevError> {
-        let id = RunId::new(self.resolve_session(uuid_prefix)?);
-        self.query_samples_for(&id, run_idx)
-    }
 
     /// Query samples for an identity already resolved by `RunStore`.
     pub(crate) fn query_samples_for(
@@ -675,7 +603,7 @@ impl SidecarDb {
 
     /// Enumerate distinct `result_uuid` values whose prefix matches, sorted.
     /// Used by `brokkr invalidate` to find sidecar-only runs (dirty/failed)
-    /// that have no row in the results DB, and by [`Self::resolve_session`].
+    /// that have no row in the results DB, and by [`super::RunStore`].
     pub fn uuids_matching_prefix(&self, uuid_prefix: &str) -> Result<Vec<String>, DevError> {
         require_prefix(uuid_prefix, "uuid")?;
         let mut stmt = self.conn.prepare(&format!(
@@ -832,28 +760,37 @@ mod tests {
             .unwrap();
     }
 
-    // A prefix shared by two sessions used to concatenate both timelines.
+    // A prefix shared by two sessions must be surfaced as ambiguous so callers
+    // cannot accidentally combine two timelines.
     #[test]
-    fn ambiguous_prefix_is_an_error_not_a_merge() {
+    fn ambiguous_prefix_is_reported_not_merged() {
         let path = crate::test_scratch::scratch("db-sidecar", "ambiguous").join("s.db");
         let db = SidecarDb::open(&path).unwrap();
         insert_session(&db, "abc111", "A");
         insert_session(&db, "abc222", "B");
 
-        let err = db
-            .resolve_session("abc")
-            .expect_err("ambiguous prefix must fail");
-        let msg = err.to_string();
+        let store = super::super::RunStore::open(&path.with_file_name("r.db"), &path).unwrap();
+        let ids = match store.resolve(super::super::RunRef::Uuid("abc")).unwrap() {
+            super::super::Resolved::Ambiguous(ids) => ids,
+            _ => panic!("expected an ambiguous prefix"),
+        };
         assert!(
-            msg.contains("abc111") && msg.contains("abc222"),
-            "lists candidates: {msg}"
+            ids.iter().any(|id| id.as_str() == "abc111")
+                && ids.iter().any(|id| id.as_str() == "abc222"),
+            "lists both candidates: {ids:?}"
         );
 
-        let id = RunId::new(db.resolve_session("abc1").unwrap());
-        let markers = db.query_markers_for(&id, None).unwrap();
+        let id = match store.resolve(super::super::RunRef::Uuid("abc1")).unwrap() {
+            super::super::Resolved::One(id) => id,
+            _ => panic!("expected one result"),
+        };
+        let markers = store.query_sidecar_markers(&id, None).unwrap();
         assert_eq!(markers.len(), 1);
         assert_eq!(markers[0].name, "A");
-        assert_eq!(db.resolve_session("abc2").unwrap(), "abc222");
+        assert!(matches!(
+            store.resolve(super::super::RunRef::Uuid("abc2")).unwrap(),
+            super::super::Resolved::One(id) if id.as_str() == "abc222"
+        ));
     }
 
     #[test]
@@ -862,7 +799,8 @@ mod tests {
         let db = SidecarDb::open(&path).unwrap();
         insert_session(&db, "abc111", "A");
 
-        assert!(db.resolve_session("").is_err());
+        let store = super::super::RunStore::open(&path.with_file_name("r.db"), &path).unwrap();
+        assert!(store.resolve(super::super::RunRef::Uuid("")).is_err());
         assert!(
             db.uuids_matching_prefix("a_c").unwrap().is_empty(),
             "_ is literal"

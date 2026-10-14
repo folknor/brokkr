@@ -82,9 +82,7 @@ pub(crate) fn cmd_sidecar(project_root: &Path, q: &SidecarQuery) -> Result<(), D
 }
 
 fn print_resolved_run_info(store: &db::RunStore, id: &db::RunId) {
-    if let Some(sdb) = store.sidecar_db() {
-        print_run_info(sdb, id.as_str());
-    }
+    print_run_info(store, id);
 }
 
 fn with_resolved(
@@ -298,13 +296,7 @@ fn run_compare(
     let markers_a = store.query_sidecar_markers(&id_a, Some(best_a))?;
     let markers_b = store.query_sidecar_markers(&id_b, Some(best_b))?;
     print_compare_timeline(
-        id_a.as_str(),
-        &samples_a,
-        &markers_a,
-        id_b.as_str(),
-        &samples_b,
-        &markers_b,
-        human,
+        &id_a, &samples_a, &markers_a, &id_b, &samples_b, &markers_b, human,
     );
     Ok(())
 }

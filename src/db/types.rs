@@ -361,7 +361,8 @@ pub struct PreviousRun {
     pub uuid: String,
     pub command: String,
     pub input_file: Option<String>,
-    /// The previous run's recorded timestamp as a Unix epoch. Deliberately
+    /// The previous run's recorded timestamp as whole Unix seconds (SQLite
+    /// converts the stored timestamp with `strftime('%s', ...)`). Deliberately
     /// raw rather than a pre-computed gap: rows are timestamped when they are
     /// *inserted*, i.e. when that run finished, and the gap that matters is
     /// measured to the moment the current run *started*. Computing it here

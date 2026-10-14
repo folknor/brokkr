@@ -32,7 +32,7 @@
 //   filterset string to escape); a package-qualified skip becomes the
 //   filterset `not (package(P) & test(~X))`, folding the one predicate
 //   brokkr used to evaluate itself back into the tool.
-// - Brokkr owns CONCURRENCY: the profile's `test_threads` maps onto the
+// - Brokkr owns CONCURRENCY: the resolved nextest thread count maps onto the
 //   engine's in-flight count (unset = the engine's num-cpus default).
 // - The engine owns execution and rendering: process-per-test scheduling
 //   and its reporter. Brokkr wraps it in the usual sweep lines, records the
@@ -597,7 +597,7 @@ pub(crate) fn assemble_nextest_lane(
 
     let mut prepared = PreparedLane::bare(env.clone());
     prepared.runtime_fingerprint = artifacts.runtime_fingerprint;
-    prepared.include_ignored = sweep.lane_filters().include_ignored;
+    prepared.include_ignored = sweep.filters.include_ignored;
     prepared.enumerated = lane_binaries.len();
     prepared.resolutions.push(PreparedResolution { resolution: None, selection, binaries });
     prepared.nextest = Some(NextestPrepared {
@@ -663,7 +663,13 @@ fn run_nextest_sweep(
         None,
         commands,
     );
-    run_nextest_engine(&sweep.label, sweep.test_threads, np, tap)
+    let crate::profile::LaneExec::Nextest { threads } = sweep.lane_exec else {
+        return Err(DevError::Build(format!(
+            "sweep '{}' reached the nextest lane with {:?}",
+            sweep.label, sweep.lane_exec
+        )));
+    };
+    run_nextest_engine(&sweep.label, threads, np, tap)
 }
 
 /// Execute a prepared engine lane under the lane's own policy, returning
@@ -671,12 +677,12 @@ fn run_nextest_sweep(
 #[allow(clippy::too_many_lines)]
 fn run_nextest_engine(
     label: &str,
-    test_threads: Option<u32>,
+    threads: Option<u32>,
     np: &NextestPrepared,
     tap: &LaneTap,
 ) -> Result<bool, DevError> {
-    // Concurrency is brokkr policy: the profile's `test_threads` maps onto
-    // the engine's in-flight count. Unset (or 0) leaves the engine's
+    // Concurrency is brokkr policy: the resolved thread count maps onto the
+    // engine's in-flight count. Unset (or 0) leaves the engine's
     // num-cpus default; there is no serial-by-default here, because
     // process-per-test needs no watchdog attribution trick - the synthesized
     // slow-timeout kills a hung test by name at any concurrency.
@@ -701,7 +707,7 @@ fn run_nextest_engine(
         max_fail: 1,
         terminate: nextest_runner::config::elements::TerminateMode::Immediate,
     });
-    if let Some(n) = test_threads
+    if let Some(n) = threads
         && n >= 1
     {
         let count = i64::from(n).try_into().map_err(|_| {
@@ -887,33 +893,23 @@ fn sweep_engine_filter(
     pcx: &ParseContext<'_>,
     known_groups: &nextest_filtering::KnownGroups,
 ) -> Result<TestFilter, DevError> {
-    let mut patterns = TestFilterPatterns::new(sweep.name_filters.clone());
-    let mut run_ignored = RunIgnored::default();
-    let mut it = sweep.libtest_args.iter();
-    while let Some(tok) = it.next() {
-        match tok.as_str() {
-            "--skip" => {
-                let Some(v) = it.next() else {
-                    return Err(DevError::Config("--skip without a value".into()));
-                };
-                patterns.add_skip_pattern(v.clone());
-            }
-            "--include-ignored" => run_ignored = RunIgnored::All,
-            other => {
-                return Err(DevError::Config(format!(
-                    "sweep '{}' carries libtest arg `{other}`, which the nextest lane cannot \
-                     translate; drop it from the profile, or use a libtest entry.",
-                    sweep.label
-                )));
-            }
-        }
+    let mut patterns = TestFilterPatterns::new(
+        sweep.filters.only().map(|filter| filter.pattern.clone()).collect(),
+    );
+    let run_ignored = if sweep.filters.include_ignored {
+        RunIgnored::All
+    } else {
+        RunIgnored::default()
+    };
+    for filter in sweep.filters.skips().filter(|filter| filter.package.is_none()) {
+        patterns.add_skip_pattern(filter.pattern.clone());
     }
     // ONE filterset: the engine ORs the filtersets it is handed (a test runs if
     // any of them admits it), so one filterset per skip made disjoint skips
     // admit everything - `not A` admits what `not B` excludes. The skips are
     // subtractions that must all hold, so they are one conjunction.
     let mut filtersets: Vec<Filterset> = Vec::new();
-    if let Some(expr) = qualified_skips_filterset(&sweep.qualified_skips)? {
+    if let Some(expr) = qualified_skips_filterset(sweep.filters.skips())? {
         let parsed = Filterset::parse(expr.clone(), pcx, FiltersetKind::Test, known_groups).map_err(|e| {
             DevError::Config(format!("qualified skips `{expr}` did not compile: {e:?}"))
         })?;
@@ -925,10 +921,13 @@ fn sweep_engine_filter(
 
 /// Every package-qualified skip as one filterset: the conjunction of their
 /// negations, `None` when there are none.
-fn qualified_skips_filterset(skips: &[crate::config::QualifiedSkip]) -> Result<Option<String>, DevError> {
-    let mut terms = Vec::with_capacity(skips.len());
-    for qs in skips {
-        terms.push(format!("({})", qualified_skip_filterset(qs)?));
+fn qualified_skips_filterset<'a>(
+    skips: impl IntoIterator<Item = &'a crate::profile::Filter>,
+) -> Result<Option<String>, DevError> {
+    let mut terms = Vec::new();
+    for skip in skips.into_iter().filter(|filter| filter.package.is_some()) {
+        let package = skip.package.as_deref().expect("qualified skip");
+        terms.push(format!("({})", qualified_skip_filterset(package, &skip.pattern)?));
     }
     Ok((!terms.is_empty()).then(|| terms.join(" & ")))
 }
@@ -941,21 +940,20 @@ fn qualified_skips_filterset(skips: &[crate::config::QualifiedSkip]) -> Result<O
 /// restricted to what a test path or package name can contain - anything
 /// else is refused rather than escaped, because a wrongly-escaped filter
 /// silently changes which tests run.
-fn qualified_skip_filterset(qs: &crate::config::QualifiedSkip) -> Result<String, DevError> {
+fn qualified_skip_filterset(package: &str, pattern: &str) -> Result<String, DevError> {
     let ok = |s: &str| {
         !s.is_empty()
             && s.chars()
                 .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | ':' | '-'))
     };
-    if !ok(&qs.package) || !ok(&qs.pattern) {
+    if !ok(package) || !ok(pattern) {
         return Err(DevError::Config(format!(
-            "qualified skip {{ package = \"{}\", pattern = \"{}\" }} contains characters the \
+            "qualified skip {{ package = \"{package}\", pattern = \"{pattern}\" }} contains characters the \
              nextest filterset translation does not interpolate; use a libtest entry for this \
-             shape.",
-            qs.package, qs.pattern
+             shape."
         )));
     }
-    Ok(format!("not (package({}) & test(~{}))", qs.package, qs.pattern))
+    Ok(format!("not (package({package}) & test(~{pattern}))"))
 }
 
 #[cfg(test)]
@@ -1065,18 +1063,27 @@ mod nextest_lane_tests {
     /// ONE filterset, the conjunction of the negations.
     #[test]
     fn qualified_skips_are_one_conjunction_of_negations() {
-        use crate::config::QualifiedSkip;
-        let skip = |package: &str, pattern: &str| QualifiedSkip { package: package.into(), pattern: pattern.into() };
-        assert_eq!(qualified_skips_filterset(&[]).unwrap(), None);
+        use crate::profile::{Filter, FilterKind, FilterOrigin};
+        let skip = |package: &str, pattern: &str| Filter {
+            kind: FilterKind::Skip,
+            pattern: pattern.into(),
+            package: Some(package.into()),
+            origin: FilterOrigin::Entry("e".into()),
+        };
+        let empty: [Filter; 0] = [];
+        assert_eq!(qualified_skips_filterset(empty.iter()).unwrap(), None);
+        let one = [skip("a", "slow")];
         assert_eq!(
-            qualified_skips_filterset(&[skip("a", "slow")]).unwrap().as_deref(),
+            qualified_skips_filterset(one.iter()).unwrap().as_deref(),
             Some("(not (package(a) & test(~slow)))")
         );
-        let both = qualified_skips_filterset(&[skip("a", "slow"), skip("b", "flaky")]).unwrap().unwrap();
+        let both = [skip("a", "slow"), skip("b", "flaky")];
+        let both = qualified_skips_filterset(both.iter()).unwrap().unwrap();
         assert_eq!(both, "(not (package(a) & test(~slow))) & (not (package(b) & test(~flaky)))");
         assert!(!both.contains('|'), "no alternative: every skip must hold: {both}");
         // The interpolation rule still holds for every entry.
-        assert!(qualified_skips_filterset(&[skip("a", "slow"), skip("b", "has space")]).is_err());
+        let invalid = [skip("a", "slow"), skip("b", "has space")];
+        assert!(qualified_skips_filterset(invalid.iter()).is_err());
     }
 
     /// A one-package workspace laid out under `root`: its `cargo metadata`
@@ -1167,7 +1174,11 @@ mod nextest_lane_tests {
         };
 
         // Both tests listed; the slow one runs into the cap.
-        let sweep = ResolvedSweep { label: "engine".into(), harness: crate::config::Harness::Nextest, ..ResolvedSweep::default() };
+        let sweep = ResolvedSweep {
+            label: "engine".into(),
+            lane_exec: crate::profile::LaneExec::Nextest { threads: Some(1) },
+            ..ResolvedSweep::default()
+        };
         let prepared = assemble(&sweep);
         assert_eq!(prepared.resolutions[0].binaries[0].selected, ["fast", "slow"]);
         let np = prepared.nextest.as_ref().expect("an engine lane");
@@ -1181,7 +1192,18 @@ mod nextest_lane_tests {
         );
 
         // A selection that never reaches the slow test finishes clean.
-        let fast = ResolvedSweep { name_filters: vec!["fast".into()], ..sweep.clone() };
+        let fast = ResolvedSweep {
+            filters: crate::profile::LaneFilters {
+                filters: vec![crate::profile::Filter {
+                    kind: crate::profile::FilterKind::Only,
+                    pattern: "fast".into(),
+                    package: None,
+                    origin: crate::profile::FilterOrigin::Entry("engine".into()),
+                }],
+                ..Default::default()
+            },
+            ..sweep.clone()
+        };
         let quick = assemble(&fast);
         let passed = run_nextest_engine("engine", Some(1), quick.nextest.as_ref().unwrap(), &LaneTap::new(0)).unwrap();
         assert!(passed);

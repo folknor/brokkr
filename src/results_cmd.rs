@@ -55,10 +55,10 @@ fn render_single_or_multi(
         }
     }
     // One hint for the whole set, naming the rows it applies to.
-    let with_sidecar: Vec<&str> = rows
+    let with_sidecar: Vec<String> = rows
         .iter()
         .filter(|r| has_sidecar(&r.uuid))
-        .map(|r| &r.uuid[..8.min(r.uuid.len())])
+        .map(|r| db::short_uuid(&r.uuid))
         .collect();
     if !with_sidecar.is_empty() {
         output::sidecar_msg(&format!(

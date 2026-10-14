@@ -443,11 +443,7 @@ fn stamp_file(
 /// the freshly stamped one. A probe new to the corpus stays `expected: None`
 /// (unblessed), which the gate treats as a hard "must bless".
 fn carry_expected(new: &mut BTreeMap<String, Pin>, old: &BTreeMap<String, Pin>) {
-    for (id, pin) in new.iter_mut() {
-        if let Some(prev) = old.get(id) {
-            pin.expected = prev.expected;
-        }
-    }
+    registry_io::carry_by_id(new, old, |pin, previous| pin.expected = previous.expected);
 }
 
 /// Re-stamp every `[feeds]` group's file hashes from the corpus filesystem
@@ -528,26 +524,21 @@ struct Diff {
 
 impl Diff {
     fn compute(old: &BTreeMap<String, Pin>, new: &BTreeMap<String, Pin>) -> Self {
-        let mut added = 0;
-        let mut changed = 0;
+        let counts = registry_io::diff_counts(old, new);
         let mut oracle_switched = Vec::new();
         for (id, pin) in new {
-            match old.get(id) {
-                None => added += 1,
-                Some(prev) if prev != pin => {
-                    changed += 1;
-                    if pin.expected.is_some() && prev.record.is_some() != pin.record.is_some() {
-                        oracle_switched.push(id.clone());
-                    }
-                }
-                Some(_) => {}
+            if let Some(prev) = old.get(id)
+                && prev != pin
+                && pin.expected.is_some()
+                && prev.record.is_some() != pin.record.is_some()
+            {
+                oracle_switched.push(id.clone());
             }
         }
-        let removed = old.keys().filter(|k| !new.contains_key(*k)).count();
         Self {
-            added,
-            changed,
-            removed,
+            added: counts.added,
+            changed: counts.changed,
+            removed: counts.removed,
             oracle_switched,
         }
     }

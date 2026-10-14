@@ -1,10 +1,12 @@
 // Pure interpretation of the prepared plan and its journal.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::{self, Display, Formatter};
 
 use crate::test_runner::{ObsEvent, StreamEnd, TestResult};
 use super::journal::{JournalRecord, StreamOrigin, Termination, TerminationCause, TerminationScope};
-use super::plan::{AccountingPlan, BinaryUnit, ExecutionId, PairId};
+use super::plan::{AccountingPlan, BinaryUnit, ExecutionId, LaneIdx, PairId};
+use super::super::Resolution;
 
 // ----- outcomes -----
 
@@ -118,11 +120,117 @@ pub(crate) enum AnomalyKind {
     UncleanExit,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ExitDisposition {
+    Signal(i32),
+    Code(i32),
+    Unknown,
+}
+
+/// Structured context for a reconciliation anomaly. The serializer emits the
+/// same prose string as before, while reconciliation keeps the cause and its
+/// data typed until presentation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AnomalyDetail {
+    ExternalMessage(String),
+    UnattributedEvents { reason: String },
+    OverlappingSuite { unit: BinaryUnit },
+    StartAfterTerminal { unit: BinaryUnit, test: String },
+    DuplicateStart { unit: BinaryUnit, test: String },
+    DuplicateExecution { unit: BinaryUnit, test: String, stream: u64 },
+    UnplannedStart { unit: BinaryUnit, test: String },
+    RepeatedTerminal { unit: BinaryUnit, test: String },
+    TerminalWithoutStart { unit: BinaryUnit, test: String },
+    UnplannedTerminal { unit: BinaryUnit, test: String },
+    SlowWarning { unit: BinaryUnit, test: String },
+    SuiteSummaryWithoutOpen { unit: BinaryUnit },
+    SuiteTotalsMismatch {
+        unit: BinaryUnit,
+        reported: (u64, u64, u64),
+        observed: (u64, u64, u64),
+    },
+    MissingSuiteClosure { unit: BinaryUnit },
+    UncleanExit { unit: BinaryUnit, disposition: ExitDisposition },
+}
+
+impl Display for AnomalyDetail {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ExternalMessage(message) => f.write_str(message),
+            Self::UnattributedEvents { reason } => {
+                write!(f, "test records on a stream the plan cannot attribute ({reason})")
+            }
+            Self::OverlappingSuite { unit } => write!(f, "{}: a suite started inside an open suite", unit.id()),
+            Self::StartAfterTerminal { unit, test } => {
+                write!(f, "{}/{test} started again after its terminal record", unit.id())
+            }
+            Self::DuplicateStart { unit, test } => write!(f, "{}/{test} started twice", unit.id()),
+            Self::DuplicateExecution { unit, test, stream } => write!(
+                f,
+                "{}/{test} was reported by a second harness invocation (stream {stream}); the plan expects it run once",
+                unit.id()
+            ),
+            Self::UnplannedStart { unit, test } => {
+                write!(f, "{}/{test} started but the plan does not expect it", unit.id())
+            }
+            Self::RepeatedTerminal { unit, test } => {
+                write!(f, "{}/{test} reported a second terminal record", unit.id())
+            }
+            Self::TerminalWithoutStart { unit, test } => {
+                write!(f, "{}/{test} reported a result it was never seen starting", unit.id())
+            }
+            Self::UnplannedTerminal { unit, test } => {
+                write!(f, "{}/{test} reported a result the plan does not expect", unit.id())
+            }
+            Self::SlowWarning { unit, test } => {
+                write!(f, "{}/{test} ran past libtest's 60s warning", unit.id())
+            }
+            Self::SuiteSummaryWithoutOpen { unit } => {
+                write!(f, "{}: a suite summary with no open suite", unit.id())
+            }
+            Self::SuiteTotalsMismatch {
+                unit,
+                reported: (passed, failed, ignored),
+                observed: (observed_passed, observed_failed, observed_ignored),
+            } => write!(
+                f,
+                "{}: the suite claims {passed} passed, {failed} failed, {ignored} ignored; its records show {observed_passed}, {observed_failed}, {observed_ignored}",
+                unit.id()
+            ),
+            Self::MissingSuiteClosure { unit } => {
+                write!(f, "{}: the stream ended with its suite still open", unit.id())
+            }
+            Self::UncleanExit { unit, disposition } => {
+                write!(f, "{}: the harness process {disposition} though every test it reported passed", unit.id())
+            }
+        }
+    }
+}
+
+impl Display for ExitDisposition {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Signal(signal) => write!(f, "was killed by signal {signal}"),
+            Self::Code(code) => write!(f, "exited with code {code}"),
+            Self::Unknown => f.write_str("exited uncleanly"),
+        }
+    }
+}
+
+impl serde::Serialize for AnomalyDetail {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub(crate) struct Anomaly {
     pub(crate) kind: AnomalyKind,
-    pub(crate) lane: Option<usize>,
-    pub(crate) detail: String,
+    pub(crate) lane: Option<LaneIdx>,
+    pub(crate) detail: AnomalyDetail,
 }
 
 /// One expected execution's account.
@@ -319,7 +427,28 @@ impl Termination {
     }
 }
 
-type ExecKey = (usize, Option<String>, BinaryUnit, String);
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct ExecKey {
+    lane: LaneIdx,
+    resolution: Resolution,
+    unit: BinaryUnit,
+    test: String,
+}
+
+impl ExecKey {
+    fn new(lane: usize, resolution: Option<&str>, unit: &BinaryUnit, test: &str) -> Self {
+        Self {
+            lane: LaneIdx::new(lane),
+            resolution: Resolution::from_option(resolution),
+            unit: unit.clone(),
+            test: test.to_owned(),
+        }
+    }
+
+    fn resolution_option(&self) -> Option<String> {
+        self.resolution.as_option().map(str::to_owned)
+    }
+}
 
 /// Reconcile a plan against its journal. Pure: reads nothing but its
 /// arguments.
@@ -345,21 +474,21 @@ pub(crate) fn reconcile(
     for lane in plan.lanes.iter().filter(|l| !superseded.contains_key(&l.lane)) {
         for pair in &lane.executions {
             expected.insert(
-                (lane.lane, pair.resolution.clone(), pair.unit.clone(), pair.test.clone()),
+                ExecKey::new(lane.lane, pair.resolution.as_deref(), &pair.unit, &pair.test),
                 pair.clone(),
             );
         }
         for pair in &lane.ignored_selected {
-            ignored_selected.insert((lane.lane, pair.resolution.clone(), pair.unit.clone(), pair.test.clone()));
+            ignored_selected.insert(ExecKey::new(lane.lane, pair.resolution.as_deref(), &pair.unit, &pair.test));
         }
         for pair in &lane.outside_claim {
-            outside_claim.insert((lane.lane, pair.resolution.clone(), pair.unit.clone(), pair.test.clone()));
+            outside_claim.insert(ExecKey::new(lane.lane, pair.resolution.as_deref(), &pair.unit, &pair.test));
         }
     }
 
     let mut anomalies: Vec<Anomaly> = Vec::new();
-    let mut anomaly = |kind: AnomalyKind, lane: Option<usize>, detail: String| {
-        anomalies.push(Anomaly { kind, lane, detail });
+    let mut anomaly = |kind: AnomalyKind, lane: Option<usize>, detail: AnomalyDetail| {
+        anomalies.push(Anomaly { kind, lane: lane.map(LaneIdx::new), detail });
     };
     let mut streams: BTreeMap<u64, StreamState> = BTreeMap::new();
     let mut execs: BTreeMap<ExecKey, ExecState> = BTreeMap::new();
@@ -372,16 +501,16 @@ pub(crate) fn reconcile(
     // lane caused does not reach back and unsettle a carrier that had ended.
     let mut lane_finished_clean: BTreeMap<usize, bool> = BTreeMap::new();
     let mut doctests = DoctestObserved::default();
-    let duplicate = |execs: &mut BTreeMap<ExecKey, ExecState>, key: &ExecKey, stream: u64| -> Option<String> {
+    let duplicate =
+        |execs: &mut BTreeMap<ExecKey, ExecState>, key: &ExecKey, stream: u64| -> Option<AnomalyDetail> {
         let e = execs.entry(key.clone()).or_default();
         match e.claim(stream) {
             Ok(()) => None,
-            Err(true) => Some(format!(
-                "{}/{} was reported by a second harness invocation (stream {stream}); the plan \
-                 expects it run once",
-                key.2.id(),
-                key.3
-            )),
+            Err(true) => Some(AnomalyDetail::DuplicateExecution {
+                unit: key.unit.clone(),
+                test: key.test.clone(),
+                stream,
+            }),
             Err(false) => None,
         }
     };
@@ -409,7 +538,11 @@ pub(crate) fn reconcile(
                             },
                             ObsEvent::StreamEnded { end } => st.end = Some(*end),
                             ObsEvent::AttributionError { detail } => {
-                                anomaly(AnomalyKind::AttributionError, Some(*lane), detail.clone());
+                                anomaly(
+                                    AnomalyKind::AttributionError,
+                                    Some(*lane),
+                                    AnomalyDetail::ExternalMessage(detail.clone()),
+                                );
                             }
                             _ => {}
                         }
@@ -418,7 +551,11 @@ pub(crate) fn reconcile(
                     StreamOrigin::Unattributed { detail } => {
                         match event {
                             ObsEvent::AttributionError { detail } => {
-                                anomaly(AnomalyKind::AttributionError, Some(*lane), detail.clone());
+                                anomaly(
+                                    AnomalyKind::AttributionError,
+                                    Some(*lane),
+                                    AnomalyDetail::ExternalMessage(detail.clone()),
+                                );
                             }
                             ObsEvent::StreamEnded { end } => st.end = Some(*end),
                             ObsEvent::SuiteStarted { .. }
@@ -432,7 +569,7 @@ pub(crate) fn reconcile(
                                 anomaly(
                                     AnomalyKind::UnattributedEvents,
                                     Some(*lane),
-                                    format!("test records on a stream the plan cannot attribute ({detail})"),
+                                    AnomalyDetail::UnattributedEvents { reason: detail.clone() },
                                 );
                             }
                             _ => {}
@@ -448,7 +585,7 @@ pub(crate) fn reconcile(
                                 anomaly(
                                     AnomalyKind::OverlappingSuite,
                                     Some(*lane),
-                                    format!("{}: a suite started inside an open suite", unit.id()),
+                                    AnomalyDetail::OverlappingSuite { unit: unit.clone() },
                                 );
                             }
                             st.suite_open = true;
@@ -461,17 +598,17 @@ pub(crate) fn reconcile(
                             anomaly(
                                 AnomalyKind::StartAfterTerminal,
                                 Some(*lane),
-                                format!("{}/{name} started again after its terminal record", unit.id()),
+                                AnomalyDetail::StartAfterTerminal { unit: unit.clone(), test: name.clone() },
                             );
                         } else if ns.started {
                             anomaly(
                                 AnomalyKind::DuplicateStart,
                                 Some(*lane),
-                                format!("{}/{name} started twice", unit.id()),
+                                AnomalyDetail::DuplicateStart { unit: unit.clone(), test: name.clone() },
                             );
                         }
                         ns.started = true;
-                        let key = (*lane, resolution.clone(), unit.clone(), name.clone());
+                        let key = ExecKey::new(*lane, resolution.as_deref(), &unit, name);
                         if expected.contains_key(&key) {
                             if let Some(d) = duplicate(&mut execs, &key, *stream) {
                                 anomaly(AnomalyKind::DuplicateExecution, Some(*lane), d);
@@ -484,7 +621,7 @@ pub(crate) fn reconcile(
                             anomaly(
                                 AnomalyKind::UnplannedTest,
                                 Some(*lane),
-                                format!("{}/{name} started but the plan does not expect it", unit.id()),
+                                AnomalyDetail::UnplannedStart { unit: unit.clone(), test: name.clone() },
                             );
                         }
                     }
@@ -494,13 +631,13 @@ pub(crate) fn reconcile(
                             anomaly(
                                 AnomalyKind::RepeatedTerminal,
                                 Some(*lane),
-                                format!("{}/{name} reported a second terminal record", unit.id()),
+                                AnomalyDetail::RepeatedTerminal { unit: unit.clone(), test: name.clone() },
                             );
                         } else if !ns.started {
                             anomaly(
                                 AnomalyKind::TerminalWithoutStart,
                                 Some(*lane),
-                                format!("{}/{name} reported a result it was never seen starting", unit.id()),
+                                AnomalyDetail::TerminalWithoutStart { unit: unit.clone(), test: name.clone() },
                             );
                         }
                         ns.terminal = true;
@@ -514,7 +651,7 @@ pub(crate) fn reconcile(
                                 _ => st.suite_counts.1 += 1,
                             }
                         }
-                        let key = (*lane, resolution.clone(), unit.clone(), name.clone());
+                        let key = ExecKey::new(*lane, resolution.as_deref(), &unit, name);
                         if expected.contains_key(&key) {
                             if let Some(d) = duplicate(&mut execs, &key, *stream) {
                                 anomaly(AnomalyKind::DuplicateExecution, Some(*lane), d);
@@ -534,14 +671,14 @@ pub(crate) fn reconcile(
                             anomaly(
                                 AnomalyKind::UnplannedTest,
                                 Some(*lane),
-                                format!("{}/{name} reported a result the plan does not expect", unit.id()),
+                                AnomalyDetail::UnplannedTerminal { unit: unit.clone(), test: name.clone() },
                             );
                         }
                     }
                     ObsEvent::SlowWarning { name } => anomaly(
                         AnomalyKind::SlowWarning,
                         Some(*lane),
-                        format!("{}/{name} ran past libtest's 60s warning", unit.id()),
+                        AnomalyDetail::SlowWarning { unit: unit.clone(), test: name.clone() },
                     ),
                     ObsEvent::SuiteFinished { passed, failed, ignored } => {
                         if libtest {
@@ -549,18 +686,17 @@ pub(crate) fn reconcile(
                                 anomaly(
                                     AnomalyKind::SuiteTotalsMismatch,
                                     Some(*lane),
-                                    format!("{}: a suite summary with no open suite", unit.id()),
+                                    AnomalyDetail::SuiteSummaryWithoutOpen { unit: unit.clone() },
                                 );
                             } else if st.suite_counts != (*passed, *failed, *ignored) {
-                                let (p, f, i) = st.suite_counts;
                                 anomaly(
                                     AnomalyKind::SuiteTotalsMismatch,
                                     Some(*lane),
-                                    format!(
-                                        "{}: the suite claims {passed} passed, {failed} failed, \
-                                         {ignored} ignored; its records show {p}, {f}, {i}",
-                                        unit.id()
-                                    ),
+                                    AnomalyDetail::SuiteTotalsMismatch {
+                                        unit: unit.clone(),
+                                        reported: (*passed, *failed, *ignored),
+                                        observed: st.suite_counts,
+                                    },
                                 );
                             }
                             st.suite_open = false;
@@ -570,7 +706,11 @@ pub(crate) fn reconcile(
                     ObsEvent::Exited { code, signal } => st.exit = Some((*code, *signal)),
                     ObsEvent::Killed { .. } => {}
                     ObsEvent::AttributionError { detail } => {
-                        anomaly(AnomalyKind::AttributionError, Some(*lane), detail.clone());
+                        anomaly(
+                            AnomalyKind::AttributionError,
+                            Some(*lane),
+                            AnomalyDetail::ExternalMessage(detail.clone()),
+                        );
                     }
                 }
             }
@@ -619,7 +759,7 @@ pub(crate) fn reconcile(
             anomaly(
                 AnomalyKind::MissingSuiteClosure,
                 Some(st.lane),
-                format!("{}: the stream ended with its suite still open", unit.id()),
+                AnomalyDetail::MissingSuiteClosure { unit: unit.clone() },
             );
         }
     }
@@ -643,15 +783,15 @@ pub(crate) fn reconcile(
             && !st.names.is_empty()
             && st.names.values().all(|n| n.terminal)
         {
-            let how = match (code, signal) {
-                (_, Some(s)) => format!("was killed by signal {s}"),
-                (Some(c), None) => format!("exited with code {c}"),
-                (None, None) => "exited uncleanly".to_owned(),
+            let disposition = match (code, signal) {
+                (_, Some(signal)) => ExitDisposition::Signal(signal),
+                (Some(code), None) => ExitDisposition::Code(code),
+                (None, None) => ExitDisposition::Unknown,
             };
             anomaly(
                 AnomalyKind::UncleanExit,
                 Some(st.lane),
-                format!("{}: the harness process {how} though every test it reported passed", unit.id()),
+                AnomalyDetail::UncleanExit { unit: unit.clone(), disposition },
             );
         }
     }
@@ -700,22 +840,25 @@ pub(crate) fn reconcile(
 
     let mut accounted = Vec::with_capacity(expected.len());
     for (key, pair) in &expected {
-        let (lane, resolution, unit, test) = key;
+        let lane = key.lane.get();
+        let resolution = key.resolution_option();
+        let unit = &key.unit;
+        let test = key.test.as_str();
         let state = execs.get(key);
         let mine = |s: &StreamState| match &s.origin {
             Some(StreamOrigin::Binary { resolution: r, unit: u, one_test }) => {
-                s.lane == *lane && r == resolution && u == unit && one_test.as_ref().is_none_or(|t| t == test)
+                s.lane == lane && r == &resolution && u == unit && one_test.as_ref().is_none_or(|t| t == test)
             }
-            Some(StreamOrigin::Engine { .. }) => s.lane == *lane,
+            Some(StreamOrigin::Engine { .. }) => s.lane == lane,
             _ => false,
         };
         let my_streams: Vec<&StreamState> = streams.values().filter(|s| mine(s)).collect();
-        let lane_term = lane_terms.get(lane).and_then(|v| v.first());
+        let lane_term = lane_terms.get(&lane).and_then(|v| v.first());
         let run_term = run_terms.first();
         // Every termination read from this execution's point of view: a
         // per-test deadline charged to it is its own, one charged elsewhere
         // is a sibling's timeout.
-        let seen_as = |t: &Termination| t.detail_for(resolution, unit, test);
+        let seen_as = |t: &Termination| t.detail_for(&resolution, unit, test);
         let wider = || lane_term.or(run_term).map(seen_as);
         let stream_kill = |s: &StreamState| s.kills.first().map(seen_as);
         let (outcome, detail) = if let Some(result) = state.and_then(|s| s.terminal) {
@@ -726,15 +869,15 @@ pub(crate) fn reconcile(
                 TestResult::TimedOut => (Outcome::TimedOut, Some(Detail::PerTestDeadline)),
                 TestResult::Interrupted => (Outcome::Interrupted, Some(wider().unwrap_or(Detail::FailFast))),
             }
-        } else if my_streams.iter().any(|s| s.kills.iter().any(|k| k.charges(resolution, unit, test)))
-            || lane_terms.get(lane).is_some_and(|v| v.iter().any(|t| t.charges(resolution, unit, test)))
+        } else if my_streams.iter().any(|s| s.kills.iter().any(|k| k.charges(&resolution, unit, test)))
+            || lane_terms.get(&lane).is_some_and(|v| v.iter().any(|t| t.charges(&resolution, unit, test)))
         {
             (Outcome::TimedOut, Some(Detail::PerTestDeadline))
         } else if spawn_failures.iter().any(|(l, o)| {
-            *l == *lane
+            *l == lane
                 && match o {
                     StreamOrigin::Binary { resolution: r, unit: u, one_test } => {
-                        r == resolution && u == unit && one_test.as_ref().is_none_or(|t| t == test)
+                        r == &resolution && u == unit && one_test.as_ref().is_none_or(|t| t == test)
                     }
                     _ => false,
                 }
@@ -789,7 +932,7 @@ pub(crate) fn reconcile(
             }
         };
         accounted.push(Accounted {
-            id: ExecutionId { lane: *lane, attempt: 1, pair: pair.clone() },
+            id: ExecutionId { lane: key.lane, attempt: 1, pair: pair.clone() },
             outcome,
             detail,
         });

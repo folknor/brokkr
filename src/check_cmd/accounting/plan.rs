@@ -1,9 +1,90 @@
 // Plan types, the persisted lane wire form, and plan-domain predicates.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::{self, Display, Formatter};
 
 use crate::profile::ResolvedSweep;
-use super::super::{has_target_selector, lane_kind, selector_kind_of, TestBinary};
+use super::super::{lane_kind, selector_kind_of, DeclaredShape, Resolution, TestBinary};
+
+/// Index of one lane in the invocation's ordered plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+pub(crate) struct LaneIdx(usize);
+
+impl LaneIdx {
+    pub(crate) fn new(value: usize) -> Self {
+        Self(value)
+    }
+
+    pub(crate) fn get(self) -> usize {
+        self.0
+    }
+}
+
+impl From<LaneIdx> for usize {
+    fn from(value: LaneIdx) -> Self {
+        value.get()
+    }
+}
+
+/// xxh3-64 content fingerprint. Its serde form remains the same hexadecimal
+/// string used by the existing plan record.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+pub(crate) struct ContentHash(String);
+
+/// Executable path, kept separate from its content fingerprint.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct ExecutablePath(String);
+
+/// Cargo target kind after brokkr's selector normalization (`lib`, `bin`,
+/// `test`, and the other cargo target kinds).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+pub(crate) struct TargetKind(String);
+
+impl From<String> for TargetKind {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+
+impl From<&str> for TargetKind {
+    fn from(value: &str) -> Self {
+        Self(value.to_owned())
+    }
+}
+
+impl PartialEq<&str> for TargetKind {
+    fn eq(&self, other: &&str) -> bool {
+        self.0.as_str() == *other
+    }
+}
+
+impl Display for TargetKind {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// Typed artifact fingerprint used by drift comparison. The plan and prepare
+/// boundary still speak their existing wire primitives.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct ArtifactFingerprint {
+    pub(crate) resolution: Resolution,
+    pub(crate) executable: ExecutablePath,
+    pub(crate) hash: ContentHash,
+}
+
+impl ArtifactFingerprint {
+    pub(crate) fn new(resolution: Option<&str>, executable: String, hash: String) -> Self {
+        Self {
+            resolution: Resolution::from_option(resolution),
+            executable: ExecutablePath(executable),
+            hash: ContentHash(hash),
+        }
+    }
+}
 
 /// What one test binary IS: its package, its normalized target kind and its
 /// target name. The executable path is launch metadata, not identity - the
@@ -19,7 +100,7 @@ use super::super::{has_target_selector, lane_kind, selector_kind_of, TestBinary}
 pub(crate) struct BinaryUnit {
     pub(crate) package_id: String,
     pub(crate) package: String,
-    pub(crate) kind: String,
+    pub(crate) kind: TargetKind,
     pub(crate) target: String,
 }
 
@@ -28,7 +109,7 @@ impl BinaryUnit {
         Self {
             package_id: binary.package_id.clone(),
             package: binary.package.clone(),
-            kind: selector_kind_of(&binary.kind).to_owned(),
+            kind: selector_kind_of(&binary.kind).to_owned().into(),
             target: binary.target.clone(),
         }
     }
@@ -38,21 +119,19 @@ impl BinaryUnit {
     pub(crate) fn id(&self) -> String {
         nextest_metadata::RustBinaryId::from_parts(
             &self.package,
-            &nextest_metadata::RustTestBinaryKind::new(self.kind.clone()),
+            &nextest_metadata::RustTestBinaryKind::new(self.kind.0.clone()),
             &self.target,
         )
         .to_string()
     }
 }
 
-/// A sweep's build shape as a stable string: everything that decides what
-/// cargo compiles ([`ResolvedSweep::build_shape_key`]), hashed. Two lanes of
-/// one `[[check]]` entry share it; two shapes never do.
+/// A sweep's declared policy-shape digest, used to group policy universes.
+/// The identity is minted from the named, explicitly encoded `DeclaredShape`;
+/// two lanes with one declared shape share it even when their support
+/// pre-builds differ.
 pub(crate) fn shape_id(sweep: &ResolvedSweep) -> String {
-    format!(
-        "{:016x}",
-        xxhash_rust::xxh3::xxh3_64(format!("{:?}", sweep.build_shape_key()).as_bytes())
-    )
+    DeclaredShape::of(sweep).id().to_string()
 }
 
 /// The unit policy works on: one test, in one binary, of one cargo resolution
@@ -80,7 +159,7 @@ pub(crate) struct PairId {
 /// `duplicate_execution` anomaly, never a second chance to pass or fail.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
 pub(crate) struct ExecutionId {
-    pub(crate) lane: usize,
+    pub(crate) lane: LaneIdx,
     pub(crate) attempt: u32,
     pub(crate) pair: PairId,
 }
@@ -354,7 +433,8 @@ pub(crate) struct AccountingPlan {
 }
 
 impl AccountingPlan {
-    pub(crate) fn lane(&self, lane: usize) -> Option<&LaneRecord> {
+    pub(crate) fn lane(&self, lane: impl Into<usize>) -> Option<&LaneRecord> {
+        let lane = lane.into();
         self.lanes.iter().find(|l| l.lane == lane)
     }
 }
@@ -370,7 +450,7 @@ pub(crate) fn lane_runs_doctests(sweep: &ResolvedSweep, doctests: bool) -> bool 
         // The package selection, profile and feature flags never name a
         // target, so the lane's own target filters decide it, whatever
         // packages the lane selects.
-        LaneKind::Serial => doctests && !has_target_selector(&sweep.cargo_test_filters),
+        LaneKind::Serial => doctests && sweep.filters.targets.is_empty(),
         LaneKind::Parallel | LaneKind::Isolated | LaneKind::Nextest => false,
     }
 }
@@ -385,15 +465,30 @@ pub(crate) fn artifact_drift(
     planned: &[PlannedArtifact],
     current: &[(Option<String>, String, String)],
 ) -> Vec<String> {
-    let mut out = Vec::new();
-    let now: BTreeMap<(&Option<String>, &str), &str> = current
+    let current: Vec<ArtifactFingerprint> = current
         .iter()
-        .map(|(res, path, hash)| ((res, path.as_str()), hash.as_str()))
+        .map(|(resolution, executable, hash)| {
+            ArtifactFingerprint::new(resolution.as_deref(), executable.clone(), hash.clone())
+        })
+        .collect();
+    artifact_drift_typed(planned, &current)
+}
+
+pub(crate) fn artifact_drift_typed(
+    planned: &[PlannedArtifact],
+    current: &[ArtifactFingerprint],
+) -> Vec<String> {
+    let mut out = Vec::new();
+    let now: BTreeMap<(&Resolution, &ExecutablePath), &ContentHash> = current
+        .iter()
+        .map(|artifact| ((&artifact.resolution, &artifact.executable), &artifact.hash))
         .collect();
     for p in planned {
-        match now.get(&(&p.resolution, p.executable.as_str())) {
+        let resolution = Resolution::from_option(p.resolution.as_deref());
+        let executable = ExecutablePath(p.executable.clone());
+        match now.get(&(&resolution, &executable)) {
             None => out.push(format!("{} ({}) is gone", p.unit.id(), p.executable)),
-            Some(hash) if *hash != p.hash => out.push(format!(
+            Some(hash) if hash.0.as_str() != p.hash.as_str() => out.push(format!(
                 "{} ({}) was rebuilt with different content",
                 p.unit.id(),
                 p.executable
@@ -401,11 +496,13 @@ pub(crate) fn artifact_drift(
             Some(_) => {}
         }
     }
-    let known: BTreeSet<(&Option<String>, &str)> =
-        planned.iter().map(|p| (&p.resolution, p.executable.as_str())).collect();
-    for (res, path, _) in current {
-        if !known.contains(&(res, path.as_str())) {
-            out.push(format!("{path} was not in the plan"));
+    let known: BTreeSet<(Resolution, ExecutablePath)> = planned
+        .iter()
+        .map(|p| (Resolution::from_option(p.resolution.as_deref()), ExecutablePath(p.executable.clone())))
+        .collect();
+    for artifact in current {
+        if !known.contains(&(artifact.resolution.clone(), artifact.executable.clone())) {
+            out.push(format!("{} was not in the plan", artifact.executable.0));
         }
     }
     out
