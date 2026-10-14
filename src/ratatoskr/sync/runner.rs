@@ -13,12 +13,12 @@ use crate::error::DevError;
 use crate::git;
 use crate::lockfile;
 use crate::output;
+use crate::output::format_duration;
 use crate::ratatoskr::build::HarnessBuild;
 use crate::ratatoskr::discover::{self, ScriptInfo, ScriptKind};
 use crate::ratatoskr::saehrimnir::{
     ManagedMock, MockArtifactScope, MockOutcome, MockPaths, resolve_fixture,
 };
-use crate::ratatoskr::timing::format_elapsed;
 use crate::ratatoskr::{HARNESS_MODE_FLAG, harness_env};
 
 use super::gate::validate_reserved_gate;
@@ -213,21 +213,21 @@ impl PhaseTimings {
         let mut parts: Vec<String> = Vec::new();
         let mut total = Duration::ZERO;
         if let Some(d) = self.mock_ready {
-            parts.push(format!("mock {}", format_elapsed(d)));
+            parts.push(format!("mock {}", format_duration(d)));
             total += d;
         }
         if let Some(d) = self.harness {
-            parts.push(format!("harness {}", format_elapsed(d)));
+            parts.push(format!("harness {}", format_duration(d)));
             total += d;
         }
         if let Some(d) = self.mock_shutdown {
-            parts.push(format!("shutdown {}", format_elapsed(d)));
+            parts.push(format!("shutdown {}", format_duration(d)));
             total += d;
         }
         if parts.is_empty() {
             String::new()
         } else {
-            format!(" in {} ({})", format_elapsed(total), parts.join(", "))
+            format!(" in {} ({})", format_duration(total), parts.join(", "))
         }
     }
 }

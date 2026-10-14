@@ -353,7 +353,7 @@ fn write_stdout(text: &str) {
     if let Err(e) = std::io::stdout().write_all(text.as_bytes())
         && e.kind() != std::io::ErrorKind::BrokenPipe
     {
-        eprintln!("brokkr man: write error: {e}");
+        crate::output::warn(&format!("man: write error: {e}"));
     }
 }
 

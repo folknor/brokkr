@@ -14,6 +14,7 @@ trait Render {
     fn render(&self);
 }
 
+#[allow(clippy::print_stdout)] // Data output; preserve its bytes and stdout stream.
 pub(super) fn render_json(events: &[DepsEvent]) -> Result<(), DevError> {
     for event in events {
         let line = serde_json::to_string(event).map_err(|error| {

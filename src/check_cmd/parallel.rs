@@ -749,18 +749,18 @@ fn report_runs(
         // Omitted for a single binary, where it would only restate the line's
         // own duration.
         let critical = if binaries > 1 {
-            format!(", slowest {} {:.1}s", slowest.0, slowest.1.as_secs_f64())
+            format!(", slowest {} {}", slowest.0, output::format_duration(slowest.1))
         } else {
             String::new()
         };
         output::detail(&format!(
-            "test {}: {} passed in {:.1}s ({} {}, built in {:.1}s{})",
+            "test {}: {} passed in {} ({} {}, built in {}{})",
             sweep.label,
             passed,
-            started.elapsed().as_secs_f64(),
+            output::format_duration(started.elapsed()),
             binaries,
             if binaries == 1 { "binary" } else { "binaries" },
-            build_elapsed.as_secs_f64(),
+            output::format_duration(build_elapsed),
             critical,
         ));
         note_tests(passed, ignored, 0);

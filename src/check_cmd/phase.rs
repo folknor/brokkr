@@ -305,7 +305,7 @@ pub(crate) fn cmd_check_selected(
         }
         run_script_checks(project_root, &checks, Stage::PreClippy)
     };
-    let elapsed = started.elapsed().as_secs_f64();
+    let elapsed = output::format_duration(started.elapsed());
     if watchdog_fired().is_some() {
         return Err(DevError::ExitCode(WATCHDOG_EXIT_CODE));
     }
@@ -319,7 +319,7 @@ pub(crate) fn cmd_check_selected(
     // came first, which would hide a script failure behind textlint's.
     let failed: Vec<DevError> = [textlint, scripts].into_iter().filter_map(Result::err).collect();
     if failed.is_empty() {
-        output::run_msg(&format!("selection passed ({elapsed:.1}s)"));
+        output::run_msg(&format!("selection passed ({elapsed})"));
         return Ok(());
     }
     selection_failure(&failed)

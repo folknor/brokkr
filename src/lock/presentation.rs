@@ -58,21 +58,9 @@ fn process_uptime_str(pid: u32) -> Option<String> {
 
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let elapsed = elapsed_secs as u64;
-    Some(format_duration(elapsed))
-}
-
-/// Format a second count as `3h05m` / `3m12s` / `42s`.
-pub fn format_duration(secs: u64) -> String {
-    let hours = secs / 3600;
-    let minutes = (secs % 3600) / 60;
-    let seconds = secs % 60;
-    if hours > 0 {
-        format!("{hours}h{minutes:02}m")
-    } else if minutes > 0 {
-        format!("{minutes}m{seconds:02}s")
-    } else {
-        format!("{seconds}s")
-    }
+    Some(crate::output::format_duration(
+        std::time::Duration::from_secs(elapsed),
+    ))
 }
 
 /// Build a one-line summary of a running, identity-verified process from

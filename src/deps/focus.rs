@@ -58,6 +58,7 @@ pub(super) fn run_focus(project_root: &Path, spec: &str, json: bool) -> Result<(
     emit_traces(&unfiltered, &predicate, Some(&note), json)
 }
 
+#[allow(clippy::print_stdout)] // Data output; preserve its bytes and stdout stream.
 fn emit_traces(
     md: &CargoMetadata,
     predicate: &dyn Fn(&CargoPackage) -> bool,

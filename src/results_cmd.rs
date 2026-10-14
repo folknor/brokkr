@@ -19,6 +19,7 @@ use crate::request::{ResultsQuery, ResultsView};
 /// cli_args, brokkr_args surfaced, sidecar hint folded in as a field.
 /// When the result set has multiple rows (a UUID prefix that matched
 /// many), fall back to `format_table` + per-row `format_details`.
+#[allow(clippy::print_stdout)] // Data output; preserve its bytes and stdout stream.
 fn render_single_or_multi(
     rows: &[db::StoredRow],
     sidecar_ids: &std::collections::BTreeSet<String>,
@@ -69,6 +70,7 @@ fn render_single_or_multi(
     }
 }
 
+#[allow(clippy::print_stdout)] // Data output; preserve its bytes and stdout stream.
 pub(crate) fn cmd_results(
     dev_config: &DevConfig,
     project_root: &Path,

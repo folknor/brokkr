@@ -12,7 +12,7 @@ fn ending_line(ending: &crate::output::Ending) -> Option<String> {
     use crate::output::Ending;
     match ending {
         Ending::Exited(0) | Ending::StopMarker(_) => None,
-        Ending::Exited(code) => Some(format!("[error]   exit code: {code}")),
+        Ending::Exited(code) => Some(format!("exit code: {code}")),
         Ending::Signalled(signal) => {
             let name = match signal {
                 9 => " SIGKILL (OOM?)",
@@ -20,14 +20,14 @@ fn ending_line(ending: &crate::output::Ending) -> Option<String> {
                 6 => " SIGABRT",
                 _ => "",
             };
-            Some(format!("[error]   killed by signal {signal}{name}"))
+            Some(format!("killed by signal {signal}{name}"))
         }
         Ending::Deadline(limit) => Some(format!(
-            "[error]   killed at its {:.1}s deadline",
-            limit.as_secs_f64()
+            "killed at its {} deadline",
+            crate::output::format_duration(*limit)
         )),
-        Ending::Interrupted => Some("[error]   interrupted".to_owned()),
-        Ending::WaitFailed(why) => Some(format!("[error]   could not be waited on: {why}")),
+        Ending::Interrupted => Some("interrupted".to_owned()),
+        Ending::WaitFailed(why) => Some(format!("could not be waited on: {why}")),
     }
 }
 
@@ -76,7 +76,7 @@ pub(crate) fn print_run_info(store: &db::RunStore, id: &db::RunId) -> Result<(),
         if let Some(ref dataset) = info.dataset {
             parts.push(format!("dataset: {dataset}"));
         }
-        crate::output::console::plain_stderr(&format!("[sidecar] {}", parts.join("  ")));
+        crate::output::sidecar_info(&parts.join("  "));
     }
 
     // Line 2: git commit + wall time measured from the selected sample run.
@@ -92,33 +92,33 @@ pub(crate) fn print_run_info(store: &db::RunStore, id: &db::RunId) -> Result<(),
     };
     match (&info.git_commit, wall_time) {
         (Some(commit), Some(secs)) => {
-            let (m, s) = (secs / 60, secs % 60);
-            crate::output::console::plain_stderr(&format!(
-                "[sidecar] commit: {commit}  wall: {m}m{s:02}s"
+            let wall = crate::output::format_duration(std::time::Duration::from_secs(
+                u64::try_from(secs).unwrap_or(0),
             ));
+            crate::output::sidecar_info(&format!("commit: {commit}  wall: {wall}"));
         }
         (Some(commit), None) => {
-            crate::output::console::plain_stderr(&format!("[sidecar] commit: {commit}"));
+            crate::output::sidecar_info(&format!("commit: {commit}"));
         }
         (None, Some(secs)) => {
-            let (m, s) = (secs / 60, secs % 60);
-            crate::output::console::plain_stderr(&format!("[sidecar] wall: {m}m{s:02}s"));
+            let wall = crate::output::format_duration(std::time::Duration::from_secs(
+                u64::try_from(secs).unwrap_or(0),
+            ));
+            crate::output::sidecar_info(&format!("wall: {wall}"));
         }
         (None, None) => {}
     }
 
     // Line 3: how the run ended (only if abnormal).
     if let Some(line) = info.ending.as_ref().and_then(ending_line) {
-        crate::output::console::plain_stderr(&line);
+        crate::output::sidecar_error(&line);
     }
 
     // Line 4-5: binary path and hash verification.
     if let Some(ref path) = info.binary_path {
         if let Some(ref hash) = info.binary_xxh128 {
             let short = &hash[..12.min(hash.len())];
-            crate::output::console::plain_stderr(&format!(
-                "[sidecar] binary: {path} (xxh128: {short}...)"
-            ));
+            crate::output::sidecar_info(&format!("binary: {path} (xxh128: {short}...)"));
 
             // Check if current binary on disk still matches.
             match crate::preflight::compute_file_digest(std::path::Path::new(path))
@@ -126,24 +126,20 @@ pub(crate) fn print_run_info(store: &db::RunStore, id: &db::RunId) -> Result<(),
             {
                 Ok(current_hash) => {
                     if current_hash == *hash {
-                        crate::output::console::plain_stderr(
-                            "[sidecar] current binary xxh128: match",
-                        );
+                        crate::output::sidecar_info("current binary xxh128: match");
                     } else {
                         let current_short = &current_hash[..12.min(current_hash.len())];
-                        crate::output::console::plain_stderr(&format!(
-                            "[error]   current binary differs (xxh128: {current_short}...)"
+                        crate::output::sidecar_warn(&format!(
+                            "current binary differs (xxh128: {current_short}...)"
                         ));
                     }
                 }
                 Err(_) => {
-                    crate::output::console::plain_stderr(
-                        "[sidecar] current binary: not found (deleted or moved)",
-                    );
+                    crate::output::sidecar_info("current binary: not found (deleted or moved)");
                 }
             }
         } else {
-            crate::output::console::plain_stderr(&format!("[sidecar] binary: {path}"));
+            crate::output::sidecar_info(&format!("binary: {path}"));
         }
     }
     Ok(())
@@ -315,6 +311,7 @@ pub(crate) fn apply_timeline_filter<'a>(
 }
 
 /// Print min/max/avg/p50/p95 for a field across the given samples.
+#[allow(clippy::print_stdout)] // Data output; preserve its bytes and stdout stream.
 pub(crate) fn print_field_stat(samples: &[&sidecar::Sample], field: &str) -> Result<(), DevError> {
     let mut values: Vec<i64> = samples
         .iter()
@@ -571,6 +568,7 @@ pub(crate) fn print_phase_summary(
     }
 }
 
+#[allow(clippy::print_stdout)] // Data output; preserve its bytes and stdout stream.
 fn print_phase_summary_human(summaries: &[PhaseSummary], clk_tck: i64) {
     println!(
         "{:<24} {:>8} {:>10} {:>10} {:>10} {:>12} {:>12} {:>10}",
@@ -617,6 +615,7 @@ fn print_phase_summary_human(summaries: &[PhaseSummary], clk_tck: i64) {
     }
 }
 
+#[allow(clippy::print_stdout)] // Data output; preserve its bytes and stdout stream.
 fn print_phase_summary_jsonl(
     summaries: &[PhaseSummary],
     samples: &[sidecar::Sample],
@@ -708,6 +707,7 @@ pub(crate) fn print_marker_durations(markers: &[sidecar::Marker], human: bool, c
     }
 }
 
+#[allow(clippy::print_stdout)] // Data output; preserve its bytes and stdout stream.
 fn print_marker_durations_jsonl(pairs: &[sidecar::TimelineSpan], standalone: &[&sidecar::Marker]) {
     for span in pairs {
         let obj = serde_json::json!({
@@ -784,6 +784,7 @@ fn group_duration_pairs(pairs: &[sidecar::TimelineSpan]) -> DurationGroups<'_> {
 /// `--stalls` remains the right view for accumulated blocking time (it rolls
 /// up `*_wait_ns` counters); this is only here so that a run which emits
 /// high-frequency spans as markers still has a readable `--durations` table.
+#[allow(clippy::print_stdout)] // Data output; preserve its bytes and stdout stream.
 fn print_repeated_spans(groups: &DurationGroups<'_>, had_singles: bool) {
     if groups.repeats.is_empty() {
         return;
@@ -846,6 +847,7 @@ fn print_repeated_spans(groups: &DurationGroups<'_>, had_singles: bool) {
 }
 
 /// One `Phase / Start / End / Duration` row.
+#[allow(clippy::print_stdout)] // Data output; preserve its bytes and stdout stream.
 fn print_duration_row(name: &str, start_us: i64, end_us: i64) {
     let start_ms = start_us / 1_000;
     let dur_ms = (end_us - start_us) / 1_000;
@@ -853,6 +855,7 @@ fn print_duration_row(name: &str, start_us: i64, end_us: i64) {
     println!("{name:<32} {start_ms:>9}ms {end_ms:>9}ms {dur_ms:>9}ms");
 }
 
+#[allow(clippy::print_stdout)] // Data output; preserve its bytes and stdout stream.
 fn print_marker_durations_human(
     pairs: &[sidecar::TimelineSpan],
     standalone: &[&sidecar::Marker],
@@ -932,6 +935,7 @@ pub(crate) fn print_compare_timeline(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::print_stdout)] // Data output; preserve its bytes and stdout stream.
 fn print_compare_timeline_human(
     uuid_a: &db::RunId,
     samples_a: &[sidecar::Sample],
@@ -1006,6 +1010,7 @@ fn print_compare_timeline_human(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::print_stdout)] // Data output; preserve its bytes and stdout stream.
 fn print_compare_timeline_jsonl(
     uuid_a: &db::RunId,
     samples_a: &[sidecar::Sample],
@@ -1229,6 +1234,7 @@ pub(crate) fn print_stalls(counters: &[sidecar::Counter], wall_us: i64, human: b
     }
 }
 
+#[allow(clippy::print_stdout)] // Data output; preserve its bytes and stdout stream.
 fn print_stalls_human(totals_ns: &std::collections::BTreeMap<String, i64>, wall_us: i64) {
     println!("{:<28} {:>12} {:>10}", "Category", "Total", "% of wall");
     println!("{}", "-".repeat(52));
@@ -1242,6 +1248,7 @@ fn print_stalls_human(totals_ns: &std::collections::BTreeMap<String, i64>, wall_
     }
 }
 
+#[allow(clippy::print_stdout)] // Data output; preserve its bytes and stdout stream.
 fn print_stalls_jsonl(totals_ns: &std::collections::BTreeMap<String, i64>, wall_us: i64) {
     for (cat, total_ns) in totals_ns {
         let obj = serde_json::json!({
@@ -1270,6 +1277,7 @@ fn wall_pct(total_ns: i64, wall_us: i64) -> Option<f64> {
 
 /// Print START/END marker pairs with duration + peak RSS and majflt from samples.
 /// Print counters as a simple list.
+#[allow(clippy::print_stdout)] // Data output; preserve its bytes and stdout stream.
 pub(crate) fn print_counters(counters: &[sidecar::Counter], human: bool) {
     if human {
         for c in counters {

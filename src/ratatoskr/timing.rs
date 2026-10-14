@@ -1,4 +1,4 @@
-//! Shared timing policy and duration spelling for ratatoskr orchestration.
+//! Lifecycle timing budgets and frontmatter duration syntax for ratatoskr.
 
 use std::time::Duration;
 
@@ -48,7 +48,7 @@ fn split_unit(value: &str) -> (&str, &str) {
 }
 
 /// Format a duration in the same grammar accepted by [`parse_duration`].
-pub(crate) fn format_duration(duration: Duration) -> String {
+pub(crate) fn format_frontmatter_duration(duration: Duration) -> String {
     let millis = duration.as_millis();
     if !duration.subsec_nanos().is_multiple_of(1_000_000) {
         return format!("{millis}ms");
@@ -69,20 +69,9 @@ pub(crate) fn format_duration(duration: Duration) -> String {
     format!("{secs}s")
 }
 
-/// Format elapsed time in the integer-millisecond unit used by ratatoskr
-/// run summaries. Stored durations may retain higher precision separately.
-pub(crate) fn format_elapsed(duration: Duration) -> String {
-    format_elapsed_ms(duration.as_millis())
-}
-
-/// Format an already-truncated elapsed millisecond count.
-pub(crate) fn format_elapsed_ms(milliseconds: impl std::fmt::Display) -> String {
-    format!("{milliseconds}ms")
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{format_duration, parse_duration};
+    use super::{format_frontmatter_duration, parse_duration};
     use std::time::Duration;
 
     #[test]
@@ -97,7 +86,7 @@ mod tests {
             Duration::from_secs(3_600),
             Duration::from_secs(7_200),
         ] {
-            let spelling = format_duration(duration);
+            let spelling = format_frontmatter_duration(duration);
             assert_eq!(parse_duration(&spelling), Some(duration), "{spelling}");
         }
     }

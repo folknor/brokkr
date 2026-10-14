@@ -347,8 +347,8 @@ pub(crate) fn execute_example(
         MeasureMode::Bench { .. } => {
             ctx.harness.run_internal(config, |_| {
                 let captured = output::run_captured(&program, args, req.project_root.as_path())?;
-                print!("{}", String::from_utf8_lossy(&captured.stdout));
-                eprint!("{}", String::from_utf8_lossy(&captured.stderr));
+                output::raw_stdout(&String::from_utf8_lossy(&captured.stdout));
+                output::raw_stderr(&String::from_utf8_lossy(&captured.stderr));
                 captured.check_success(&program)?;
                 Ok(harness::BenchResult {
                     elapsed_ms: harness::elapsed_to_ms(&captured.elapsed),

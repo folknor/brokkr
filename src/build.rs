@@ -416,8 +416,8 @@ fn cargo_build_locked(
     };
 
     output::build_msg(&format!(
-        "done in {:.1}s -> {}",
-        elapsed.as_secs_f64(),
+        "done in {} -> {}",
+        output::format_duration(elapsed),
         built.path.display(),
     ));
 

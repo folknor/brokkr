@@ -68,7 +68,7 @@ fn watchdog_fired_lock() -> std::sync::MutexGuard<'static, Option<String>> {
             let fired = poisoned.into_inner();
             WATCHDOG_FIRED.clear_poison();
             if !WATCHDOG_FIRED_POISON_REPORTED.swap(true, std::sync::atomic::Ordering::SeqCst) {
-                crate::output::warn_stderr(
+                crate::output::warn_forced(
                     "watchdog result mutex was poisoned; recovered its recorded result",
                 );
             }
@@ -175,7 +175,7 @@ impl CheckWatchdog {
                         fire(
                             &format!(
                                 "{command} exceeded its {} whole-run ceiling",
-                                crate::lockfile::format_duration(limit.as_secs()),
+                                crate::output::format_duration(limit),
                             ),
                             &flag,
                         );
@@ -190,7 +190,7 @@ impl CheckWatchdog {
                             &format!(
                                 "{command}'s {} phase exceeded its {} ceiling",
                                 phase.as_str(),
-                                crate::lockfile::format_duration(ceiling.as_secs()),
+                                crate::output::format_duration(ceiling),
                             ),
                             &flag,
                         );

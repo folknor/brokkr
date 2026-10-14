@@ -13,7 +13,7 @@ use crate::output;
 use crate::ratatoskr::build::{self, HarnessBuild};
 use crate::ratatoskr::discover::{self, PreserveDataDir};
 use crate::ratatoskr::saehrimnir::MockPaths;
-use crate::ratatoskr::timing::{format_duration, format_elapsed_ms};
+use crate::ratatoskr::timing::format_frontmatter_duration;
 use crate::ratatoskr::{HARNESS_MODE_FLAG, harness_env};
 
 use super::suite::{FixtureSession, directory_filter, service_suite, write_artefacts};
@@ -250,7 +250,10 @@ fn run_single(run: &ServiceRun<'_>) -> Result<(), DevError> {
         run.lock,
     )?;
     if result.succeeded {
-        output::ratatoskr_msg(&format!("PASS in {}", format_elapsed_ms(result.elapsed_ms)));
+        output::ratatoskr_msg(&format!(
+            "PASS in {}",
+            crate::output::format_duration_ms(result.elapsed_ms)
+        ));
         Ok(())
     } else {
         let dir = result
@@ -261,7 +264,7 @@ fn run_single(run: &ServiceRun<'_>) -> Result<(), DevError> {
         output::ratatoskr_msg(&format!(
             "FAIL {} in {} (artefacts: {dir})",
             result.exit_label,
-            format_elapsed_ms(result.elapsed_ms)
+            crate::output::format_duration_ms(result.elapsed_ms)
         ));
         artefacts::emit_clean_hint(output::ratatoskr_msg);
         Err(DevError::Reported("service harness failed".into()))
@@ -432,7 +435,7 @@ pub(super) fn classify_capture(
     ceiling: Duration,
 ) -> (bool, String) {
     let exit_label = if killed_on_deadline {
-        format!("ceiling={}", format_duration(ceiling))
+        format!("ceiling={}", format_frontmatter_duration(ceiling))
     } else {
         match (captured.code(), captured.signal()) {
             (Some(code), _) => format!("exit={code}"),
@@ -450,7 +453,7 @@ pub(super) fn format_iter_line(iter: u32, total: u32, result: &RunResult) -> Str
     if result.succeeded {
         format!(
             "iter {iter}/{total}: PASS in {}",
-            format_elapsed_ms(result.elapsed_ms)
+            crate::output::format_duration_ms(result.elapsed_ms)
         )
     } else {
         let dir = result
@@ -461,7 +464,7 @@ pub(super) fn format_iter_line(iter: u32, total: u32, result: &RunResult) -> Str
         format!(
             "iter {iter}/{total}: FAIL {} in {} (artefacts: {dir})",
             result.exit_label,
-            format_elapsed_ms(result.elapsed_ms)
+            crate::output::format_duration_ms(result.elapsed_ms)
         )
     }
 }
@@ -495,9 +498,9 @@ pub(super) fn format_soak_summary(results: &[(u32, RunResult)], total: u32) -> S
         };
         format!(
             "soak: {pass_count}/{total} passed (min {}, max {}, avg {})",
-            format_elapsed_ms(min),
-            format_elapsed_ms(max),
-            format_elapsed_ms(avg)
+            crate::output::format_duration_ms(min),
+            crate::output::format_duration_ms(max),
+            crate::output::format_duration_ms(avg)
         )
     } else if stopped_early {
         // keep_going = false path: by construction there's exactly one

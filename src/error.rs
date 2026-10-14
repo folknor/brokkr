@@ -416,8 +416,8 @@ impl fmt::Display for DevError {
             DevError::ChildFailure { program, failure } => match failure {
                 ChildFailureKind::Deadline(limit) => write!(
                     f,
-                    "{program} exceeded its {:.1}s deadline",
-                    limit.as_secs_f64()
+                    "{program} exceeded its {} deadline",
+                    crate::output::format_duration(*limit)
                 ),
                 ChildFailureKind::CaptureLimit { stream, limit } => write!(
                     f,
@@ -425,8 +425,8 @@ impl fmt::Display for DevError {
                 ),
                 ChildFailureKind::OutputDrain { grace } => write!(
                     f,
-                    "{program} exited but its output stayed open beyond {}s; capture may be incomplete",
-                    grace.as_secs_f64()
+                    "{program} exited but its output stayed open beyond {}; capture may be incomplete",
+                    crate::output::format_duration(*grace)
                 ),
             },
             DevError::Spawn { program, error } => write!(f, "could not run {program}: {error}"),

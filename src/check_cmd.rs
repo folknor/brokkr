@@ -1,4 +1,5 @@
 use crate::build_purpose::activation;
+use crate::output::format_duration as fmt_wall;
 mod conventions;
 mod reporter;
 mod verdict;
@@ -15,7 +16,7 @@ use crate::test_runner::hash_file;
 pub(crate) use verdict::TestTiming;
 #[cfg(test)]
 use verdict::verdict_context;
-use verdict::{FinishInput, emit_timings, finish_check, fmt_wall, run_stop};
+use verdict::{FinishInput, emit_timings, finish_check, run_stop};
 
 include!("check_cmd/phase_type.rs");
 include!("check_cmd/phase.rs");

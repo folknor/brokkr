@@ -65,7 +65,7 @@ impl LockInfo {
 pub(super) fn publish(fd: RawFd, state: &LockState) {
     if let Err(e) = rewrite_from_state(fd, state) {
         invalidate_mutable_metadata(fd, state);
-        crate::output::warn_stderr(&format!("lock: failed to write lock metadata: {e}"));
+        crate::output::warn_forced(&format!("lock: failed to write lock metadata: {e}"));
     }
 }
 
@@ -102,7 +102,7 @@ fn invalidate_mutable_metadata(fd: RawFd, state: &LockState) {
     };
     if let Err(e) = rewrite_from_state(fd, &cleared) {
         invalidate_metadata(fd);
-        crate::output::warn_stderr(&format!("lock: failed to preserve lock authorization: {e}"));
+        crate::output::warn_forced(&format!("lock: failed to preserve lock authorization: {e}"));
     }
 }
 
@@ -111,7 +111,7 @@ fn invalidate_mutable_metadata(fd: RawFd, state: &LockState) {
 pub(super) fn invalidate_metadata(fd: RawFd) {
     unsafe {
         if libc::ftruncate(fd, 0) == -1 {
-            crate::output::warn_stderr(&format!(
+            crate::output::warn_forced(&format!(
                 "lock: failed to invalidate lock metadata: {}",
                 std::io::Error::last_os_error()
             ));

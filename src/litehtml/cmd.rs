@@ -1141,6 +1141,7 @@ pub(crate) fn extract(
 // Outline command
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::print_stdout)] // Data output; preserve its bytes and stdout stream.
 pub(crate) fn outline(
     project_root: &Path,
     input: &str,

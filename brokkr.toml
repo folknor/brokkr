@@ -112,3 +112,19 @@ command = "python3 scripts/guard-decision-probe.py"
 expect = "all guard decision paths behaved as specified"
 match = "last-line"
 stage = "pre-test"
+
+# Even data-printer lint exceptions must not hand-roll operator prefixes.
+[[textlint]]
+name = "operator-prefixes-use-output"
+pattern = '(?:e?print(?:ln)?!|plain(?:_stderr)?)\s*\(\s*(?:&format!\s*\(\s*)?"\[(?:build|run|result|bench|verify|hotpath|download|lock|strays|guard|sidecar|error|warn|test|ratatoskr|corpus|lint|litehtml|sluggrs)\]'
+paths = ["src/**/*.rs"]
+exclude = ["src/output/console.rs"]
+message = "send operator messages through the matching output printer"
+
+[[textlint]]
+name = "warnings-use-output-levels"
+pattern = '\[warn\]|WARNING:'
+paths = ["src/**/*.rs"]
+exclude = ["src/output/console.rs"]
+region = "string"
+message = "use output::warn rather than embedding a warning tag in another level"

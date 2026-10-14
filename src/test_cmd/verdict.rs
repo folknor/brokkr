@@ -315,10 +315,10 @@ pub(super) fn run_one(
         make_stderr_forwarder(sink.clone(), direct),
         move |elapsed| {
             if announce {
-                println!(
-                    "[test]    {built_tag}: built in {:.1}s; running tests",
-                    elapsed.as_secs_f64()
-                );
+                output::test_msg(&format!(
+                    "{built_tag}: built in {}; running tests",
+                    output::format_duration(elapsed)
+                ));
             }
         },
     )?;
@@ -344,7 +344,7 @@ pub(super) fn run_one(
     let test_wall = run.build_elapsed.map_or(run.captured.elapsed, |b| {
         run.captured.elapsed.saturating_sub(b)
     });
-    let wall = format!("{:.2}s", test_wall.as_secs_f64());
+    let wall = output::format_duration(test_wall);
 
     let verdict = test_runner::lane_verdict(&run.outcome);
     if verdict == LaneVerdict::BudgetBlown {
@@ -476,7 +476,7 @@ pub(super) fn run_one(
     }
 
     flush_sink(sink, false);
-    println!("[test]    PASS {tag} ({wall})");
+    output::test_msg(&format!("PASS {tag} ({wall})"));
     std::io::stdout().flush().ok();
     Ok(RunReport::bare(Outcome::Pass))
 }
@@ -512,15 +512,15 @@ pub(super) fn report_hung(
     if let Some(test_tag) = hung_test_tag(shape, hung)
         && let Some(name) = hung.attribution.test_name()
     {
-        println!(
-            "[test]    FAIL {} - hung test exceeded {secs}s",
+        output::test_msg(&format!(
+            "FAIL {} - hung test exceeded {secs}s",
             test_tag(name, wall)
-        );
+        ));
     } else {
-        println!(
-            "[test]    FAIL {} ({wall}) - hung test exceeded {secs}s",
+        output::test_msg(&format!(
+            "FAIL {} ({wall}) - hung test exceeded {secs}s",
             shape.tag
-        );
+        ));
     }
     std::io::stdout().flush().ok();
     RunReport::timed_out(
@@ -574,7 +574,7 @@ pub(super) fn disagrees_with_discovery(
         return None;
     }
     let failure = discovery_mismatch(target, want, got);
-    println!("[test]    FAIL {tag} ({wall}) - {}", failure.describe());
+    output::test_msg(&format!("FAIL {tag} ({wall}) - {}", failure.describe()));
     std::io::stdout().flush().ok();
     Some(RunReport {
         outcome: Outcome::Fail,
@@ -609,7 +609,7 @@ pub(super) fn discovery_mismatch(target: &str, want: usize, got: usize) -> Failu
 pub(super) fn stop_for_budget(reports: &[RunReport], repeat: u32, label: &str) -> DevError {
     if repeat > 1 {
         for line in format_repeat_summary(reports) {
-            println!("{line}");
+            output::plain(&line);
         }
     }
     // `Reported`: the hung test's FAIL line and diagnosis already printed.
@@ -647,7 +647,7 @@ pub(super) fn report_build_failure(
             output::error(&filtered);
         }
     }
-    println!("[test]    BUILD FAILED {tag} ({wall})");
+    output::test_msg(&format!("BUILD FAILED {tag} ({wall})"));
     std::io::stdout().flush().ok();
     RunReport::bare(Outcome::BuildFailed)
 }
@@ -669,11 +669,11 @@ pub(super) fn report_incomplete(
     outcome: &test_runner::ExecutionOutcome,
 ) -> RunReport {
     let (passed, failed, ignored) = outcome.counts();
-    println!(
-        "[test]    FAIL {tag} ({wall}) - the test stream did not finish reporting: {reason}. \
+    output::test_msg(&format!(
+        "FAIL {tag} ({wall}) - the test stream did not finish reporting: {reason}. \
          Observed {passed} passed, {failed} failed, {ignored} ignored. The observation stream \
          stopped before it could establish a complete run."
-    );
+    ));
     std::io::stdout().flush().ok();
     RunReport {
         outcome: Outcome::Fail,
@@ -782,16 +782,16 @@ pub(super) fn print_fail_footer(
             (None, Some(l)) => format!(" - @ {l}"),
             (None, None) => String::new(),
         };
-        println!("[test]    FAIL {}{detail}", test_tag(&only.what, wall));
+        output::test_msg(&format!("FAIL {}{detail}", test_tag(&only.what, wall)));
     } else if let [only] = failures {
-        println!("[test]    FAIL {tag} ({wall}) - {}", only.describe());
+        output::test_msg(&format!("FAIL {tag} ({wall}) - {}", only.describe()));
     } else {
-        println!(
-            "[test]    FAIL {tag} ({wall}) - {} failures:",
+        output::test_msg(&format!(
+            "FAIL {tag} ({wall}) - {} failures:",
             failures.len()
-        );
+        ));
         for f in failures {
-            println!("[test]      {}", f.describe());
+            output::test_msg(&format!("  {}", f.describe()));
         }
     }
     std::io::stdout().flush().ok();

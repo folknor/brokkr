@@ -37,6 +37,7 @@ use crate::piners::corpus_db::{self, CorpusDb, Shaped};
 use crate::piners::db_paths::corpus_runs_db_path;
 use crate::request::CorpusQuery;
 
+#[allow(clippy::print_stdout)] // Data output; preserve its bytes and stdout stream.
 pub fn cmd(project_root: &Path, q: &CorpusQuery) -> Result<(), DevError> {
     validate_query(q)?;
 
@@ -264,6 +265,7 @@ fn no_run(run_id: i64) -> DevError {
     ))
 }
 
+#[allow(clippy::print_stdout)] // Data output; preserve its bytes and stdout stream.
 fn render_probe(db: &CorpusDb, run_id: i64, probe: &str) -> Result<(), DevError> {
     let run = db.run(run_id)?.ok_or_else(|| no_run(run_id))?;
     match db.disposition_for_probe(run_id, probe)? {
@@ -296,6 +298,7 @@ fn shown_by_default(d: &DispositionRow) -> bool {
     !d.gate_ok || d.disposition == crate::piners::registry::CorpusDisposition::HarnessAbort.as_str()
 }
 
+#[allow(clippy::print_stdout)] // Data output; preserve its bytes and stdout stream.
 fn render_run_detail(db: &CorpusDb, run_id: i64, full: bool) -> Result<(), DevError> {
     let run = db.run(run_id)?.ok_or_else(|| no_run(run_id))?;
     println!("{}", corpus_db::run_header(&run));

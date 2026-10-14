@@ -124,7 +124,7 @@ fn phase_clock_lock() -> std::sync::MutexGuard<'static, Option<(Phase, Instant)>
             let clock = poisoned.into_inner();
             PHASE_CLOCK.clear_poison();
             if !PHASE_CLOCK_POISON_REPORTED.swap(true, std::sync::atomic::Ordering::SeqCst) {
-                crate::output::warn_stderr(
+                crate::output::warn_forced(
                     "phase clock mutex was poisoned; recovered its recorded state and will continue enforcing phase deadlines",
                 );
             }

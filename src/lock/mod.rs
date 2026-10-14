@@ -12,9 +12,7 @@ mod record;
 use self::hold_protocol::{HOST_EFFECTS, HOST_EFFECTS_WITHOUT_TOOLCHAIN, acquire_at};
 #[cfg(test)]
 use self::hold_protocol::{HoldEffects, LOCK_POLL, wait_for_flock};
-pub use self::presentation::{
-    format_duration, same_agent_hint, verified_summary_for, verified_uptime_for,
-};
+pub use self::presentation::{same_agent_hint, verified_summary_for, verified_uptime_for};
 pub use self::record::LockInfo;
 use self::record::{invalidate_metadata, publish, read_lock_contents};
 

@@ -222,7 +222,7 @@ impl Drop for DisabledToolchain {
             if let Err(e) = std::fs::rename(aside, orig) {
                 // Best-effort: warn rather than panic in a destructor. The next
                 // `activate` will re-adopt the sidecar and try again.
-                output::error(&format!(
+                output::warn(&format!(
                     "disable_toolchain: failed to restore {}: {e}",
                     orig.display()
                 ));

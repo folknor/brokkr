@@ -158,7 +158,7 @@ pub(super) fn run_sweeps(
     let mut reports: Vec<RunReport> = Vec::new();
 
     if multi {
-        println!("{}", sweep_plan_line(&sweeps, &selection, &pkg));
+        output::plain(&sweep_plan_line(&sweeps, &selection, &pkg));
     }
     // No per-sweep header lines: every line that belongs to one sweep says
     // which (the build line, the PASS/FAIL tags), when several run.
@@ -181,10 +181,10 @@ pub(super) fn run_sweeps(
             // sweep has no plan line, so it says so here.
             LaneEntry::Excluded(e) => {
                 if !multi {
-                    println!(
-                        "[test]    SKIP {pkg}::{name} - {}",
+                    output::test_msg(&format!(
+                        "SKIP {pkg}::{name} - {}",
                         exclusion_describe(e.notes())
-                    );
+                    ));
                 }
                 reports.push(RunReport::bare(Outcome::NoMatch));
                 continue;
@@ -230,16 +230,16 @@ pub(super) fn run_sweeps(
         .any(|r| matches!(r.outcome, Outcome::Pass | Outcome::Fail))
     {
         for note in &notes {
-            println!(
-                "[test]    SKIP {pkg}::{name} [{}] - {}",
+            output::test_msg(&format!(
+                "SKIP {pkg}::{name} [{}] - {}",
                 note.label, note.detail
-            );
+            ));
         }
     }
 
     if repeat > 1 {
         for line in format_repeat_summary(&reports) {
-            println!("{line}");
+            output::plain(&line);
         }
     }
 

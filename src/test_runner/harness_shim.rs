@@ -870,6 +870,7 @@ fn recv_verdict(stream: &UnixStream) -> io::Result<Verdict> {
 /// Run as the shim when invoked as one: `argv[1]` is [`RUNNER_ARG`] (cargo's
 /// runner) or `argv[0]` is the rustdoc link. `None` means this is an ordinary
 /// brokkr invocation. Only returns at all when the exec failed.
+#[allow(clippy::print_stderr)] // Subprocess protocol error; the parent owns operator rendering.
 pub(crate) fn maybe_run() -> Option<i32> {
     let mut args = std::env::args_os();
     let invoked = args.next()?;

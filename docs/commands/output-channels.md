@@ -37,13 +37,31 @@ and keeps a drawn status line intact; none writes to the console directly.
 Each prefix is padded to ten columns, and a longer tag (`[ratatoskr]`) overflows
 by one space instead of being cut. Lines go to stdout, except `[sidecar]`
 narration (stderr, so `brokkr sidecar ... | jq` stays clean) and the deliberately
-renderer-free `[warn]` bookkeeping paths. `[lock]` is for lock events,
+bounded `[warn]` bookkeeping paths, which attempt both logging and rendering.
+These late warnings use stderr so a final JSON summary remains the last stdout
+line. Sidecar provenance errors and warnings also stay on stderr. `[lock]` is for lock events,
 `[strays]` for the stray-process reaps and `brokkr strays`, and `[guard]` for
 `brokkr guard`; `[dry-run]` marks a planned action under `--dry-run`.
 
+Quiet mode hides progress on the console but retains it in the run log.
+Warnings, errors, requested test verdicts and lock/guard/stray actions remain
+visible. The output channel owns all `[result]` framing; an unretrievable result
+(a dirty run or a failed database insert) uses the same printer without quiet
+suppression. Non-fatal bookkeeping failures are warnings.
+
+JSON, query tables, outline and other data output retain their exact bytes and
+streams. Direct print macros are denied by this crate's Clippy configuration;
+function-scoped exceptions identify genuine data and subprocess protocols.
+Captured raw replay uses the output renderer without adding a newline. The
+shared elapsed-duration formatter affects operator prose, not numeric stored
+metrics or table formats. Allocation-profile notes have one owner in
+`measure::ProfiledMode`.
+
 Captured and passthrough subprocesses run through `src/output/child.rs`, which
 owns child polling, typed endings, deadlines, signal forwarding, and bounded
-stdout/stderr drains.
+stdout/stderr drains. Nidhogg ingest progress is replayed live on stderr
+(stdout stays captured); update replays both streams live. The replay keeps
+pipe bytes unchanged, including chunks split inside a UTF-8 sequence.
 
 ## The three transport channels
 

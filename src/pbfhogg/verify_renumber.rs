@@ -185,8 +185,8 @@ pub fn run(
     let osmium_elapsed = captured.elapsed;
     let osmium_size = fs::metadata(&osmium_out).map(|m| m.len()).unwrap_or(0);
     verify_msg(&format!(
-        "  osmium renumber: {:.1}s, {} output",
-        osmium_elapsed.as_secs_f64(),
+        "  osmium renumber: {}, {} output",
+        crate::output::format_duration(osmium_elapsed),
         fmt_size(osmium_size),
     ));
 
@@ -201,8 +201,8 @@ pub fn run(
     let pbfhogg_elapsed = captured.elapsed;
     let pbfhogg_size = fs::metadata(&pbfhogg_out).map(|m| m.len()).unwrap_or(0);
     verify_msg(&format!(
-        "  pbfhogg renumber: {:.1}s, {} output",
-        pbfhogg_elapsed.as_secs_f64(),
+        "  pbfhogg renumber: {}, {} output",
+        crate::output::format_duration(pbfhogg_elapsed),
         fmt_size(pbfhogg_size),
     ));
 

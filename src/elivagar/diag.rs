@@ -1,7 +1,7 @@
 //! Diagnose one PMTiles tile's ring winding/area.
 //!
 //! Builds the release binary and runs `elivagar diag <pmtiles-file> -z Z -x X
-//! -y Y`, streaming its output directly for the caller to read or pipe.
+//! -y Y`, capturing and then replaying its output for the caller to read or pipe.
 
 use std::path::Path;
 

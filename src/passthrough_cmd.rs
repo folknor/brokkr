@@ -58,6 +58,7 @@ pub(crate) fn summarize_runs(samples_ms: &[u64]) -> Result<RunStats, DevError> {
     })
 }
 
+#[allow(clippy::print_stdout)] // Data output; preserve its bytes and stdout stream.
 pub(crate) fn print_run_timing(
     opts: &RunOptions,
     build_ms: u64,

@@ -396,7 +396,7 @@ fn run_one_isolated_test(
     // test in flight on a terminal, which is what the roll-call was for.
     let elapsed = run.completed.first().map(|(_, e)| *e);
     match elapsed {
-        Some(e) => output::detail(&format!("PASS {name} ({:.1}s)", e.as_secs_f64())),
+        Some(e) => output::detail(&format!("PASS {name} ({})", output::format_duration(e))),
         None => output::detail(&format!("PASS {name}")),
     }
     Ok(IsolatedOutcome::Passed(elapsed))

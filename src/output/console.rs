@@ -18,8 +18,8 @@ pub fn is_quiet() -> bool {
 // Every prefixed printer goes through `emit_text`, so each line reaches the run
 // log and the renderer (which keeps a drawn status line intact) - none writes
 // to the console directly. Prefixed output defaults to stdout; `sidecar_msg`
-// narration is stderr, and `warn_stderr` is the one deliberate exception that
-// bypasses the renderer (shutdown and late-history paths must not wait on it).
+// narration is stderr. Late bookkeeping warnings also use stderr to preserve
+// a final JSON trailer; their bounded path still attempts both log and renderer.
 // Other stderr users are free-standing output (a subcommand's own report, the
 // man pager), not prefixed lines.
 //
@@ -82,7 +82,9 @@ pub fn verify_buffer_flush() {
 //
 // Two locks, never nested: the log writer and the renderer. The watchdog must
 // reach `exit(124)` whatever state either is in, so its path (`error_forced`)
-// only ever try-locks, and writes around a lock it cannot get.
+// only ever try-locks, skipping a busy destination. Late bookkeeping warnings
+// use the same bounded mutex policy, but write straight to stderr when the
+// renderer stays busy rather than dropping the warning.
 
 struct Renderer {
     status: Option<String>,
@@ -130,7 +132,7 @@ pub fn disable_status_line() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     r.status = None;
-    render(&mut r, Stream::Out, "");
+    render(&mut r, Stream::Out, b"");
     STATUS_ENABLED.store(false, Ordering::Relaxed);
 }
 
@@ -148,7 +150,7 @@ pub fn status(msg: &str) {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     r.status = Some(line);
-    render(&mut r, Stream::Out, "");
+    render(&mut r, Stream::Out, b"");
 }
 
 /// Narration for the run log only: what a passing run no longer prints but a
@@ -194,6 +196,10 @@ fn prefixed(prefix: &str, msg: &str) -> String {
 /// Append to the run log, if one is open. `forced` try-locks rather than
 /// waiting (the watchdog path).
 fn log_write(text: &str, forced: bool) {
+    log_write_bytes(text.as_bytes(), forced);
+}
+
+fn log_write_bytes(text: &[u8], forced: bool) {
     use std::io::Write;
     let guard = if forced {
         lock_patiently(&RUN_LOG)
@@ -207,7 +213,7 @@ fn log_write(text: &str, forced: bool) {
     if let Some(mut guard) = guard
         && let Some(file) = guard.as_mut()
     {
-        file.write_all(text.as_bytes()).ok();
+        file.write_all(text).ok();
     }
 }
 
@@ -237,7 +243,7 @@ enum Stream {
 /// Write `text` (whole lines) to `stream` under the renderer: clear a drawn
 /// status line, write, redraw it. Write errors are ignored - a reader that
 /// closed the pipe must not turn into a panic that stops the run log.
-fn render(r: &mut Renderer, stream: Stream, text: &str) {
+fn render(r: &mut Renderer, stream: Stream, text: &[u8]) {
     use std::io::Write;
     let mut out = std::io::stdout().lock();
     if r.drawn {
@@ -246,13 +252,13 @@ fn render(r: &mut Renderer, stream: Stream, text: &str) {
     }
     match stream {
         Stream::Out => {
-            out.write_all(text.as_bytes()).ok();
+            out.write_all(text).ok();
         }
         Stream::Err => {
             // Order the clear before the stderr write on a shared terminal.
             out.flush().ok();
             let mut err = std::io::stderr().lock();
-            err.write_all(text.as_bytes()).ok();
+            err.write_all(text).ok();
             err.flush().ok();
         }
     }
@@ -272,12 +278,22 @@ fn emit_text(stream: Stream, text: &str) {
     let mut r = RENDER
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    render(&mut r, stream, text);
+    render(&mut r, stream, text.as_bytes());
 }
 
 /// Print a persistent block (every line prefixed) and tee it to the run log.
 fn emit(prefix: &str, msg: &str) {
     emit_text(Stream::Out, &prefixed(prefix, msg));
+}
+
+/// Quiet hides progress on the console, while retaining it in the run log.
+fn emit_progress(prefix: &str, msg: &str) {
+    let text = prefixed(prefix, msg);
+    if is_quiet() {
+        log_write(&text, false);
+    } else {
+        emit_text(Stream::Out, &text);
+    }
 }
 
 /// The prefix for `tag` (brackets included): padded to the 10-column prefix
@@ -300,7 +316,7 @@ pub fn error_forced(msg: &str) {
     let text = prefixed("[error]   ", msg);
     log_write(&text, true);
     if let Some(mut r) = lock_patiently(&RENDER) {
-        render(&mut r, Stream::Out, &text);
+        render(&mut r, Stream::Out, text.as_bytes());
     }
 }
 
@@ -310,15 +326,45 @@ pub fn plain(msg: &str) {
     emit("", msg);
 }
 
+/// Replay captured stdout without adding or removing bytes.
+pub fn raw_stdout(text: &str) {
+    raw_stdout_bytes(text.as_bytes());
+}
+
+/// Replay captured stderr without adding or removing bytes.
+pub fn raw_stderr(text: &str) {
+    raw_stderr_bytes(text.as_bytes());
+}
+
+/// Raw pipe chunks retain arbitrary bytes, including split UTF-8 sequences.
+pub fn raw_stdout_bytes(bytes: &[u8]) {
+    emit_bytes(Stream::Out, bytes);
+}
+
+pub fn raw_stderr_bytes(bytes: &[u8]) {
+    emit_bytes(Stream::Err, bytes);
+}
+
+fn emit_bytes(stream: Stream, bytes: &[u8]) {
+    log_write_bytes(bytes, false);
+    let mut r = RENDER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    render(&mut r, stream, bytes);
+}
+
+/// Test narration is the requested command result, visible in quiet mode too.
+pub fn test_msg(msg: &str) {
+    emit_tag("[test]", msg);
+}
+
 /// Print a block on stderr through the renderer and run log.
 pub fn plain_stderr(msg: &str) {
     emit_text(Stream::Err, &prefixed("", msg));
 }
 
 pub fn build_msg(msg: &str) {
-    if !is_quiet() {
-        emit("[build]   ", msg);
-    }
+    emit_progress("[build]   ", msg);
 }
 
 pub fn run_msg(msg: &str) {
@@ -326,15 +372,25 @@ pub fn run_msg(msg: &str) {
 }
 
 pub fn result_msg(msg: &str) {
-    if !is_quiet() {
-        emit("[result]  ", msg);
+    emit_result(msg, false);
+}
+
+/// A result which cannot be retrieved later must remain visible in quiet mode.
+pub fn result_forced(msg: &str) {
+    emit_result(msg, true);
+}
+
+fn emit_result(msg: &str, forced: bool) {
+    let text = prefixed("[result]  ", msg);
+    if !forced && is_quiet() {
+        log_write(&text, false);
+    } else {
+        emit_text(Stream::Out, &text);
     }
 }
 
 pub fn bench_msg(msg: &str) {
-    if !is_quiet() {
-        emit_tag("[bench]", msg);
-    }
+    emit_progress(&tag_prefix("[bench]"), msg);
 }
 
 pub fn verify_msg(msg: &str) {
@@ -388,14 +444,29 @@ pub fn guard_msg(msg: &str) {
     emit_tag("[guard]", msg);
 }
 
+/// Sidecar narration stays off its query data stream on stdout.
 pub fn sidecar_msg(msg: &str) {
-    if !is_quiet() {
-        // Always stderr - every [sidecar] line is narration (run provenance,
-        // the stored-profile summary, "showing run N/M"), never the data the caller
-        // is asking for. Keeping them off stdout lets `brokkr sidecar ...
-        // --samples | jq` Just Work.
-        emit_text(Stream::Err, &prefixed(&tag_prefix("[sidecar]"), msg));
+    let text = prefixed(&tag_prefix("[sidecar]"), msg);
+    if is_quiet() {
+        log_write(&text, false);
+    } else {
+        emit_text(Stream::Err, &text);
     }
+}
+
+/// Requested sidecar provenance remains visible in quiet mode.
+pub fn sidecar_info(msg: &str) {
+    emit_text(Stream::Err, &prefixed(&tag_prefix("[sidecar]"), msg));
+}
+
+/// A warning in sidecar provenance, kept off the query data stream.
+pub fn sidecar_warn(msg: &str) {
+    emit_text(Stream::Err, &prefixed("[warn]    ", msg));
+}
+
+/// An error in sidecar provenance, kept off the query data stream.
+pub fn sidecar_error(msg: &str) {
+    emit_text(Stream::Err, &prefixed("[error]   ", msg));
 }
 
 pub fn litehtml_msg(msg: &str) {
@@ -479,13 +550,22 @@ pub fn warn(msg: &str) {
     }
 }
 
-/// A warning on stderr, without the console renderer or run-log locks.
+/// A late bookkeeping warning on stderr, with bounded log and renderer waits.
 /// For lock metadata and late history writes: shutdown must not wait on a
 /// renderer held by another thread, and stdout may already end in JSON.
 /// This is ordinary thread code, never an async signal handler.
-pub fn warn_stderr(msg: &str) {
+pub fn warn_forced(msg: &str) {
     if !msg.is_empty() {
-        eprint!("{}", prefixed("[warn]    ", msg));
+        let text = prefixed("[warn]    ", msg);
+        log_write(&text, true);
+        if let Some(mut r) = lock_patiently(&RENDER) {
+            render(&mut r, Stream::Err, text.as_bytes());
+        } else {
+            // A renderer held elsewhere must not swallow the warning: write it
+            // straight to stderr, as the pre-renderer path always did.
+            use std::io::Write;
+            std::io::stderr().lock().write_all(text.as_bytes()).ok();
+        }
     }
 }
 
@@ -501,6 +581,30 @@ pub fn count(n: usize, noun: &str) -> String {
     } else {
         format!("{n} {noun}s")
     }
+}
+
+/// Human-facing elapsed duration: milliseconds below one second, tenths of a
+/// second below one minute, then whole minutes/seconds or hours/minutes.
+pub fn format_duration(duration: Duration) -> String {
+    if duration < Duration::from_secs(1) {
+        return format!("{}ms", duration.as_millis());
+    }
+    if duration < Duration::from_secs(60) {
+        return format!("{:.1}s", duration.as_secs_f64());
+    }
+    let secs = duration.as_secs();
+    if secs >= 3600 {
+        format!("{}h{:02}m", secs / 3600, (secs % 3600) / 60)
+    } else {
+        format!("{}m{:02}s", secs / 60, secs % 60)
+    }
+}
+
+/// Adapt integer-millisecond measurements to the shared duration formatter.
+pub fn format_duration_ms(milliseconds: u128) -> String {
+    format_duration(Duration::from_millis(
+        u64::try_from(milliseconds).unwrap_or(u64::MAX),
+    ))
 }
 
 /// A byte count in binary units, `df`-style: `512B`, `3K`, `14G`, `1.8T`.
@@ -575,5 +679,157 @@ mod capture_tests {
         assert!(HELD_ERRORS.with(|h| h.borrow().is_none()));
         let (_, nothing) = capture_errors(|| ());
         assert!(nothing.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod channel_tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+
+    /// Exercise the real stdout/stderr and run-log boundary in an isolated
+    /// process, so parallel unit tests cannot mutate the renderer or quiet flag.
+    #[test]
+    fn messages_log_quiet_progress_and_preserve_raw_streams() {
+        const CHILD_LOG: &str = "BROKKR_OUTPUT_CHANNEL_TEST_LOG";
+        if let Some(path) = std::env::var_os(CHILD_LOG) {
+            open_run_log(std::fs::File::create(path).unwrap());
+            set_quiet(true);
+            build_msg("hidden build");
+            bench_msg("hidden bench");
+            result_msg("hidden result");
+            sidecar_msg("hidden sidecar");
+            result_forced("unretrievable result");
+            warn("visible warning");
+            set_quiet(false);
+            for printer in [
+                lock_msg,
+                strays_msg,
+                guard_msg,
+                hotpath_msg,
+                download_msg,
+                verify_summary,
+                litehtml_msg,
+                sluggrs_msg,
+                ratatoskr_msg,
+                corpus_msg,
+                lint_msg,
+                deps_msg,
+                wc_msg,
+                run_msg,
+                dry_run_msg,
+            ] {
+                printer("logged action");
+            }
+            verify_buffer_begin();
+            verify_msg("buffered detail");
+            verify_buffer_flush();
+            // Simulate a drawn terminal status line even though stdout is a pipe.
+            RENDER.lock().unwrap().drawn = true;
+            test_msg("clears status");
+            sidecar_info("query provenance");
+            warn_forced("late bookkeeping");
+            {
+                let _busy = RENDER.lock().unwrap();
+                warn_forced("renderer busy during shutdown");
+            }
+            raw_stdout("raw stdout without newline");
+            raw_stderr("raw stderr without newline");
+            close_run_log();
+            return;
+        }
+        let path = crate::test_scratch::scratch_path("output", "channel-log");
+        let captured = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "output::console::channel_tests::messages_log_quiet_progress_and_preserve_raw_streams", "--nocapture"])
+            .env(CHILD_LOG, &path)
+            .output()
+            .unwrap();
+        assert!(captured.status.success());
+        let stdout = String::from_utf8(captured.stdout).unwrap();
+        let stderr = String::from_utf8(captured.stderr).unwrap();
+        let log = std::fs::read_to_string(path).unwrap();
+        for text in [
+            "hidden build",
+            "hidden bench",
+            "hidden result",
+            "hidden sidecar",
+        ] {
+            assert!(log.contains(text), "quiet lost from log: {text}");
+            assert!(!stdout.contains(text) && !stderr.contains(text));
+        }
+        assert!(stdout.contains("[result]  unretrievable result\n"));
+        assert!(stdout.contains("[warn]    visible warning\n"));
+        assert!(stdout.contains("\r\x1b[2K[test]    clears status\n"));
+        assert!(stdout.contains("[verify]  buffered detail\n"));
+        assert_eq!(log.matches("logged action").count(), 15);
+        assert!(!log.contains('\x1b'));
+        assert!(stderr.contains("[sidecar] query provenance\n"));
+        assert!(stderr.contains("[warn]    late bookkeeping\n"));
+        assert!(log.contains("[warn]    late bookkeeping\n"));
+        assert!(log.contains("[warn]    renderer busy during shutdown\n"));
+        assert!(!stdout.contains("renderer busy during shutdown"));
+        assert!(stderr.contains("[warn]    renderer busy during shutdown\n"));
+        assert!(stdout.contains("raw stdout without newline"));
+        assert!(stderr.ends_with("raw stderr without newline"));
+        assert!(log.ends_with("raw stdout without newlineraw stderr without newline"));
+    }
+
+    /// A stderr-only replay must arrive before child exit, preserve arbitrary
+    /// bytes, and keep captured stdout off the console (the ingest contract).
+    #[test]
+    fn streamed_progress_arrives_before_exit_without_byte_conversion() {
+        use std::io::Read;
+        const CHILD_LOG: &str = "BROKKR_STREAMED_CHANNEL_TEST_LOG";
+        if let Some(path) = std::env::var_os(CHILD_LOG) {
+            open_run_log(std::fs::File::create(path).unwrap());
+            let captured = crate::output::run_streamed(
+                "/bin/sh",
+                &["-c", "printf 'stdout suppressed'; printf '\\303' >&2; printf '\\251\\377progress\\n' >&2; sleep 2"],
+                std::path::Path::new("."),
+                crate::output::Replay::Stderr,
+            ).unwrap();
+            captured.check_success("streaming fixture").unwrap();
+            assert_eq!(captured.stdout, b"stdout suppressed");
+            assert_eq!(captured.stderr, b"\xc3\xa9\xffprogress\n");
+            close_run_log();
+            return;
+        }
+        let path = crate::test_scratch::scratch_path("output", "streamed-log");
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "output::console::channel_tests::streamed_progress_arrives_before_exit_without_byte_conversion", "--nocapture"])
+            .env(CHILD_LOG, &path)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn().unwrap();
+        let mut progress = [0; 12];
+        child
+            .stderr
+            .take()
+            .unwrap()
+            .read_exact(&mut progress)
+            .unwrap();
+        assert_eq!(&progress, b"\xc3\xa9\xffprogress\n");
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "progress was buffered until exit"
+        );
+        let captured = child.wait_with_output().unwrap();
+        assert!(captured.status.success());
+        assert!(!String::from_utf8_lossy(&captured.stdout).contains("stdout suppressed"));
+        assert_eq!(std::fs::read(path).unwrap(), progress);
+    }
+
+    #[test]
+    fn durations_share_precision_and_unit_boundaries() {
+        for (duration, expected) in [
+            (Duration::ZERO, "0ms"),
+            (Duration::from_millis(412), "412ms"),
+            (Duration::from_millis(1500), "1.5s"),
+            (Duration::from_secs(60), "1m00s"),
+            (Duration::from_secs(83), "1m23s"),
+            (Duration::from_secs(3900), "1h05m"),
+        ] {
+            assert_eq!(format_duration(duration), expected);
+        }
     }
 }

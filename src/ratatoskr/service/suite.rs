@@ -16,7 +16,6 @@ use crate::output::{self, CapturedOutput};
 use crate::ratatoskr::build::{self, HarnessBuild};
 use crate::ratatoskr::discover::{self, PreserveDataDir, SCRIPT_DIR, ScriptInfo, Selection};
 use crate::ratatoskr::saehrimnir::{ManagedMock, MockArtifactScope, MockPaths, Protocol};
-use crate::ratatoskr::timing::format_elapsed_ms;
 
 use super::single::{RunResult, spawn_and_capture};
 #[cfg(test)]
@@ -438,7 +437,7 @@ fn format_suite_iter_line(
     if result.succeeded {
         format!(
             "{prefix} PASS {name} in {}",
-            format_elapsed_ms(result.elapsed_ms)
+            crate::output::format_duration_ms(result.elapsed_ms)
         )
     } else {
         let dir = result
@@ -449,7 +448,7 @@ fn format_suite_iter_line(
         format!(
             "{prefix} FAIL {name} {} in {} (artefacts: {dir})",
             result.exit_label,
-            format_elapsed_ms(result.elapsed_ms)
+            crate::output::format_duration_ms(result.elapsed_ms)
         )
     }
 }
@@ -482,9 +481,9 @@ fn format_suite_summary(results: &[CycleRun], total: usize, cycles: u32, bailed:
         format!(
             "soak: {pass_count}/{cohort_total} cohort runs passed across {cycles} cycles \
              (min {}, max {}, avg {})",
-            format_elapsed_ms(min),
-            format_elapsed_ms(max),
-            format_elapsed_ms(avg)
+            crate::output::format_duration_ms(min),
+            crate::output::format_duration_ms(max),
+            crate::output::format_duration_ms(avg)
         )
     } else if bailed {
         // First failure stops the cohort; report the cycle and script.
@@ -555,9 +554,9 @@ fn format_single_cycle_summary(results: &[CycleRun], total: usize, bailed: bool)
         };
         format!(
             "suite: {pass_count}/{total} passed (min {}, max {}, avg {})",
-            format_elapsed_ms(min),
-            format_elapsed_ms(max),
-            format_elapsed_ms(avg)
+            crate::output::format_duration_ms(min),
+            crate::output::format_duration_ms(max),
+            crate::output::format_duration_ms(avg)
         )
     } else if bailed {
         let first_fail = fail_names[0];

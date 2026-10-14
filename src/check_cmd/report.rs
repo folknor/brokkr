@@ -229,8 +229,8 @@ fn print_test_line(sweeps_run: usize, elapsed: std::time::Duration) {
     let mut detail = vec![output::count(sweeps_run, "sweep")];
     if let Some((sweep, binary, wall)) = &t.slowest_parallel {
         detail.push(format!(
-            "slowest parallel binary {binary} {:.1}s in {sweep}",
-            wall.as_secs_f64()
+            "slowest parallel binary {binary} {} in {sweep}",
+            output::format_duration(*wall)
         ));
     }
     // Named, never folded into the total: a lane that validated nothing is

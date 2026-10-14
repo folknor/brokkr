@@ -2,7 +2,8 @@
 
 use super::{
     ContinuationReport, DoctestAccounting, ExecutionAccounting, Phase, PolicyCoverage, RunReport,
-    SummaryScope, TerminationCause, TerminationSummary, WATCHDOG_EXIT_CODE, render_continuation,
+    SummaryScope, TerminationCause, TerminationSummary, WATCHDOG_EXIT_CODE, fmt_wall,
+    render_continuation,
 };
 #[cfg(test)]
 use super::{DoctestObserved, PhaseFailure};
@@ -546,20 +547,6 @@ fn emit_json_summary(
         Ok(line) => output::plain(&line),
         Err(e) => output::error(&format!("--json summary serialization failed: {e}")),
     }
-}
-
-/// Format a wall-clock duration as a compact `1m23s` (or `8.4s` under a
-/// minute) for the `brokkr check` summary line.
-pub(super) fn fmt_wall(d: std::time::Duration) -> String {
-    let secs = d.as_secs_f64();
-    if secs < 60.0 {
-        return format!("{secs:.1}s");
-    }
-    // Whole seconds straight from the duration - no float->int cast to trip
-    // the truncation/sign-loss lints, and sub-second precision is noise at
-    // this scale anyway.
-    let total = d.as_secs();
-    format!("{}m{:02}s", total / 60, total % 60)
 }
 
 /// One test timing observation, tagged with its sweep label so the merged

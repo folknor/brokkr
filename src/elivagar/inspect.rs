@@ -1,7 +1,7 @@
 //! Inspect elivagar PMTiles output.
 //!
 //! Builds the release binary and runs `elivagar inspect <pmtiles-file>`,
-//! streaming its output directly (header, tile stats, section layout, and
+//! capturing and then replaying its output (header, tile stats, section layout, and
 //! metadata) for the caller to read or pipe.
 
 use std::path::Path;

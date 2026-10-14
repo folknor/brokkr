@@ -59,6 +59,7 @@ mod user_dirs {
     include!("../user_dirs/paths.rs");
 }
 
+#[allow(clippy::print_stdout, clippy::print_stderr)] // Data or subprocess protocol output; preserve its bytes and stream.
 fn main() {
     let mut args = std::env::args_os();
     let _self = args.next();

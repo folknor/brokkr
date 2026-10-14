@@ -105,10 +105,7 @@ pub(super) fn force_emit_result_lines(
     result: &BenchResult,
     git: &GitInfo,
 ) {
-    console::plain(&format!(
-        "[result]  {}",
-        format_result_line(config, mode, result, git)
-    ));
+    console::result_forced(&format_result_line(config, mode, result, git));
 }
 
 /// Look up an integer KV pair by key.

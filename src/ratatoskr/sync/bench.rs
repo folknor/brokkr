@@ -15,12 +15,12 @@ use crate::db::{KvKey, KvPair};
 use crate::error::DevError;
 use crate::harness::{BenchConfig, BenchHarness, WallSource};
 use crate::output;
+use crate::output::format_duration;
 use crate::project::{BuildRoot, Project, ProjectRoot};
 use crate::ratatoskr::build::{self, HarnessBuild};
 use crate::ratatoskr::gate as gate_eval;
 use crate::ratatoskr::gate_store::canonical_features;
 use crate::ratatoskr::saehrimnir::{ManagedMock, MockArtifactScope};
-use crate::ratatoskr::timing::{format_elapsed, format_elapsed_ms};
 use crate::ratatoskr::{HARNESS_MODE_FLAG, harness_env};
 
 use super::gate::{self, GateHookCtx};
@@ -297,7 +297,7 @@ fn bench_loop(ctx: BenchLoopCtx<'_>) -> Result<(), DevError> {
     )?;
     output::ratatoskr_msg(&format!(
         "mock ready in {}",
-        format_elapsed(mock.ready_elapsed())
+        format_duration(mock.ready_elapsed())
     ));
     let endpoint_envs = mock.env_pair_refs();
 
@@ -399,7 +399,7 @@ fn bench_loop(ctx: BenchLoopCtx<'_>) -> Result<(), DevError> {
     if let Ok(mock_outcome) = &mock_shutdown {
         output::ratatoskr_msg(&format!(
             "mock shutdown in {}",
-            format_elapsed(mock_outcome.shutdown_elapsed)
+            format_duration(mock_outcome.shutdown_elapsed)
         ));
     }
     let killed_after_budget = mock_shutdown
@@ -444,7 +444,7 @@ fn bench_loop(ctx: BenchLoopCtx<'_>) -> Result<(), DevError> {
     output::ratatoskr_msg(&format!(
         "best-of-{}: {} (iter {})",
         req.bench.get(),
-        format_elapsed_ms(elapsed_ms),
+        crate::output::format_duration_ms(u128::try_from(elapsed_ms).unwrap_or(0)),
         best_idx + 1,
     ));
 

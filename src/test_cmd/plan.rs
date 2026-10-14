@@ -382,12 +382,12 @@ pub(super) fn plan_focused(
     let split = focused::eligibility(binaries)?;
     if !split.excluded.is_empty() {
         let labels: Vec<String> = split.excluded.iter().map(|b| b.label()).collect();
-        println!(
-            "[test]    {}not searched: {} - `harness = false` targets are excluded from a focused \
+        output::test_msg(&format!(
+            "{}not searched: {} - `harness = false` targets are excluded from a focused \
              run, which selects libtest test names",
             sweep_prefix(label),
             labels.join(", ")
-        );
+        ));
     }
     let mut listed: Vec<(&check_cmd::TestBinary, Vec<String>)> = Vec::new();
     for b in &split.eligible {
@@ -466,14 +466,14 @@ pub(super) fn plan_focused(
     }
     if !runs.is_empty() {
         let labels: Vec<&str> = runs.iter().map(|r| r.label.as_str()).collect();
-        println!(
-            "[test]    {}{} of {} {} a match: {}",
+        output::test_msg(&format!(
+            "{}{} of {} {} a match: {}",
             sweep_prefix(label),
             runs.len(),
             output::count(searched, "harness"),
             if runs.len() == 1 { "holds" } else { "hold" },
             labels.join(", ")
-        );
+        ));
     }
     let mut artifacts = Vec::with_capacity(binaries.len());
     for b in binaries {
@@ -585,7 +585,7 @@ pub(super) fn run_pre_build(
     if !filtered.is_empty() {
         output::error(&filtered);
     }
-    println!("[test]    BUILD FAILED {package} (sweep: {})", sweep.label);
+    output::test_msg(&format!("BUILD FAILED {package} (sweep: {})", sweep.label));
     Ok(None)
 }
 
@@ -819,11 +819,11 @@ pub(super) fn prebuild_targets(
         if !filtered.is_empty() {
             output::error(&filtered);
         }
-        println!(
-            "[test]    BUILD FAILED {} (sweep: {})",
+        output::test_msg(&format!(
+            "BUILD FAILED {} (sweep: {})",
             shape.pkg(),
             shape.sweep.label
-        );
+        ));
         return Ok(None);
     }
     // An unrecognised stream is not an empty one: treating it as "no harnesses"
@@ -838,12 +838,12 @@ pub(super) fn prebuild_targets(
         )));
     };
     if !quiet {
-        println!(
-            "[test]    {}{} built in {:.1}s",
+        output::test_msg(&format!(
+            "{}{} built in {}",
             sweep_prefix(label),
             output::count(built.0.len(), "harness"),
-            started.elapsed().as_secs_f64(),
-        );
+            output::format_duration(started.elapsed()),
+        ));
     }
     Ok(Some(built))
 }

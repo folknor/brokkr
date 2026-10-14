@@ -198,6 +198,7 @@ fn run_phase_summary(
     Ok(())
 }
 
+#[allow(clippy::print_stdout)] // Data output; preserve its bytes and stdout stream.
 fn run_samples(store: &db::RunStore, id: &db::RunId, q: &SidecarQuery) -> Result<(), DevError> {
     print_resolved_run_info(store, id)?;
     let run_filter = resolve_run_filter(store, id, q.run.as_deref())?;
@@ -229,6 +230,7 @@ fn run_samples(store: &db::RunStore, id: &db::RunId, q: &SidecarQuery) -> Result
     Ok(())
 }
 
+#[allow(clippy::print_stdout)] // Data output; preserve its bytes and stdout stream.
 fn run_markers(store: &db::RunStore, id: &db::RunId, q: &SidecarQuery) -> Result<(), DevError> {
     print_resolved_run_info(store, id)?;
     let run_filter = resolve_run_filter(store, id, q.run.as_deref())?;

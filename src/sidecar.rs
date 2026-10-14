@@ -1021,8 +1021,8 @@ impl StopSpec {
 fn announce_ending(ending: &Ending) {
     if let Ending::Deadline(limit) = ending {
         console::sidecar_msg(&format!(
-            "child exceeded its {:.1}s deadline, killing it",
-            limit.as_secs_f64()
+            "child exceeded its {} deadline, killing it",
+            console::format_duration(*limit)
         ));
     } else if matches!(ending, Ending::Interrupted) {
         console::sidecar_msg("shutdown requested, killing child");

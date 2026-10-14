@@ -19,6 +19,7 @@ pub(crate) struct HistoryQuery {
     pub all: bool,
 }
 
+#[allow(clippy::print_stdout)] // Data output; preserve its bytes and stdout stream.
 pub(crate) fn cmd_history(q: HistoryQuery) -> Result<(), DevError> {
     let db = history::HistoryDb::open()?;
     if let Some(id) = q.id {
@@ -111,6 +112,6 @@ pub(crate) fn record_history(
         Ok(()) => {}
         Err(e) if e.is_environmental() => {}
         // Keep late bookkeeping off stdout, which may end in a JSON trailer.
-        Err(e) => crate::output::warn_stderr(&format!("history: failed to write history: {e}")),
+        Err(e) => crate::output::warn_forced(&format!("history: failed to write history: {e}")),
     }
 }

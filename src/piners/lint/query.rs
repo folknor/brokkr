@@ -25,6 +25,7 @@ pub struct LintQuery {
 }
 
 /// Entry point for `brokkr lint-results`.
+#[allow(clippy::print_stdout)] // Data output; preserve its bytes and stdout stream.
 pub fn cmd(project_root: &Path, q: &LintQuery) -> Result<(), DevError> {
     let db_path = lint_runs_db_path(project_root);
     if !db_path.exists() {

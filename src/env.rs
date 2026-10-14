@@ -136,6 +136,7 @@ pub fn print(info: &EnvInfo) {
     print_datasets(info);
 }
 
+#[allow(clippy::print_stdout)] // Data output; preserve its bytes and stdout stream.
 fn print_header(info: &EnvInfo) {
     println!("{:<12} {}", "hostname:", info.hostname);
     println!(
@@ -196,6 +197,7 @@ fn format_gib(mib: u64) -> String {
     format!("{:.1} GiB", mib as f64 / 1024.0)
 }
 
+#[allow(clippy::print_stdout)] // Data output; preserve its bytes and stdout stream.
 fn print_drives(info: &EnvInfo) {
     let parts: Vec<String> = info
         .drives
@@ -205,6 +207,7 @@ fn print_drives(info: &EnvInfo) {
     println!("{:<12} {}", "drives:", parts.join("  "));
 }
 
+#[allow(clippy::print_stdout)] // Data output; preserve its bytes and stdout stream.
 fn print_storage(info: &EnvInfo) {
     if info.storage.is_empty() {
         return;
@@ -275,6 +278,7 @@ fn free_share(free: u64, total: u64) -> String {
     }
 }
 
+#[allow(clippy::print_stdout)] // Data output; preserve its bytes and stdout stream.
 fn print_tools(info: &EnvInfo) {
     let parts: Vec<String> = info
         .tools
@@ -284,6 +288,7 @@ fn print_tools(info: &EnvInfo) {
     println!("{:<12} {}", "tools:", parts.join("  "));
 }
 
+#[allow(clippy::print_stdout)] // Data output; preserve its bytes and stdout stream.
 fn print_datasets(info: &EnvInfo) {
     for (i, (name, status)) in info.datasets.iter().enumerate() {
         let label = if i == 0 { "datasets:" } else { "" };

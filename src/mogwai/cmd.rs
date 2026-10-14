@@ -10,6 +10,7 @@ use crate::project::{self, Project};
 use super::targets;
 
 /// Build and run one invocation. `target` names a harness; `None` is the CLI.
+#[allow(clippy::print_stdout)] // Data output; preserve its bytes and stdout stream.
 pub(crate) fn run(
     req: &MeasureRequest,
     target: Option<&str>,

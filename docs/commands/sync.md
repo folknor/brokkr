@@ -175,7 +175,7 @@ string-formatted, so a quote or backslash in a path cannot corrupt it, and
 its field names match `service`'s `run.toml`.
 
 The PASS/FAIL line carries a phase summary so a slow run is decomposable at
-a glance: `PASS in 3700ms (mock 400ms, harness 3200ms, shutdown 100ms)`. Phases
+a glance: `PASS in 3.7s (mock 400ms, harness 3.2s, shutdown 100ms)`. Phases
 that didn't run (e.g. a spawn-side failure before the harness started) are
 omitted, and the leading `in <total>` is dropped entirely if no phase
 recorded.

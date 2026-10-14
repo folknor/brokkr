@@ -1,8 +1,8 @@
 //! Render one PMTiles tile to SVG.
 //!
 //! Builds the release binary and runs `elivagar svg <pmtiles-file> -z Z -x X
-//! -y Y [-W width] [-H height] [-l layers] [-o output]`, streaming its
-//! output directly for the caller to read or pipe.
+//! -y Y [-W width] [-H height] [-l layers] [-o output]`, capturing and then replaying its
+//! output for the caller to read or pipe.
 
 use std::path::Path;
 

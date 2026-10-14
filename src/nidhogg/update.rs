@@ -20,19 +20,7 @@ pub fn run(binary: &Path, args: &[String], project_root: &Path) -> Result<(), De
 
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
 
-    let captured = output::run_captured(binary_str, &arg_refs, project_root)?;
-
-    // Show stdout.
-    let stdout = String::from_utf8_lossy(&captured.stdout);
-    if !stdout.is_empty() {
-        print!("{stdout}");
-    }
-
-    // Show stderr.
-    let stderr = String::from_utf8_lossy(&captured.stderr);
-    if !stderr.is_empty() {
-        eprint!("{stderr}");
-    }
+    let captured = output::run_streamed(binary_str, &arg_refs, project_root, output::Replay::Both)?;
 
     captured.check_success(binary_str)?;
 

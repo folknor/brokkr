@@ -894,8 +894,8 @@ fn run_one_test_sweep(
 /// and test time, for the log and the status line.
 fn built_line(unit: &str, elapsed: std::time::Duration, lane: &str) {
     let msg = format!(
-        "test {unit}: test binaries built in {:.1}s; running tests{lane}",
-        elapsed.as_secs_f64()
+        "test {unit}: test binaries built in {}; running tests{lane}",
+        output::format_duration(elapsed)
     );
     output::detail(&msg);
     output::status(&msg);

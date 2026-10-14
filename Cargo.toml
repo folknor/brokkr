@@ -83,6 +83,8 @@ nextest-filtering = "0.23.0"
 camino = "1"
 
 [lints.clippy]
+print_stdout = "deny"
+print_stderr = "deny"
 uninlined_format_args = "deny"
 cloned_instead_of_copied = "deny"
 redundant_closure_for_method_calls = "deny"

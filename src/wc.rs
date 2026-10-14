@@ -17,6 +17,7 @@ struct Entry {
     lines: usize,
 }
 
+#[allow(clippy::print_stdout)] // Data output; preserve its bytes and stdout stream.
 pub fn run(project_root: &Path, threshold: usize) -> Result<(), DevError> {
     let mut entries: Vec<Entry> = Vec::new();
     for rel in rust_files(project_root)? {

@@ -140,12 +140,9 @@ fn print_holder_status(info: &lockfile::LockInfo, s: &crate::lock_service::Holde
         format!("{} {}", s.identity.project, s.identity.args)
     };
     let mut facts = Vec::new();
-    facts.push(format!(
-        "holding {}",
-        lockfile::format_duration(s.held.as_secs())
-    ));
+    facts.push(format!("holding {}", output::format_duration(s.held)));
     if let Some(cpu) = s.cpu {
-        facts.push(format!("{} CPU", lockfile::format_duration(cpu.as_secs())));
+        facts.push(format!("{} CPU", output::format_duration(cpu)));
     }
     if let Some(kb) = s.rss_kb {
         facts.push(format!("RSS {} MB", kb / 1024));
