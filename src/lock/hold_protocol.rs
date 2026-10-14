@@ -565,7 +565,6 @@ fn drain_compile_leases_at(
     let owned = unsafe { OwnedFd::from_raw_fd(fd) };
 
     let start = Instant::now();
-    let mut announced = false;
     let mut reaped = false;
     loop {
         let rc = unsafe { libc::flock(owned.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
@@ -588,12 +587,8 @@ fn drain_compile_leases_at(
                 )));
             }
         }
-        if !announced {
-            announced = true;
-            crate::output::lock_msg(
-                "waiting for compilers started before this hold (an earlier hold's, or an IDE's) to finish - brokkr clears them before measuring",
-            );
-        }
+        // Silent wait: an IDE check in flight at acquisition is the ordinary
+        // case, and the reap below reports anything it kills on its own.
         let waited = start.elapsed();
         if waited >= policy.budget {
             return Err(DevError::Lock(LockError::acquisition(
@@ -604,9 +599,6 @@ fn drain_compile_leases_at(
         }
         if !reaped && waited >= policy.reap_after {
             reaped = true;
-            crate::output::lock_msg(
-                "compilers have not drained; reaping strays once, then waiting again",
-            );
             reap();
         }
         std::thread::sleep(policy.poll);
