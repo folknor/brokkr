@@ -317,10 +317,25 @@ fn serial_shim_fallback(
         .iter()
         .map(|(key, value)| (key.as_str(), value.as_str()))
         .collect();
-    let launch = crate::rustflags::CargoLaunchConfig::discover(
+    let launch = match crate::rustflags::CargoLaunchConfig::discover(
         root,
         crate::rustflags::EffectiveEnv::new(&cargo_env_refs),
-    );
+    ) {
+        Ok(launch) => launch,
+        Err(error) => {
+            return Some(format!("Cargo config could not be validated: {error}"));
+        }
+    };
+    serial_shim_fallback_with_config(forwarded, &launch)
+}
+
+/// The snapshot variant used when lane setup already validated the Cargo
+/// config chain. This keeps runner and rustdoc refusal on the same config view
+/// the lane uses to reconstruct its launch environment.
+pub(crate) fn serial_shim_fallback_with_config(
+    forwarded: &ForwardedArgs,
+    launch: &crate::rustflags::CargoLaunchConfig,
+) -> Option<String> {
     if forwarded.changes_config_or_target() {
         return Some("forwarded --config or --target".into());
     }

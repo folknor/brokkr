@@ -14,6 +14,21 @@ struct TestPhaseArgs<'a> {
     certifying: bool,
 }
 
+/// Preserve the distinction between a lane whose tests failed and an
+/// operational error. The phase uses that distinction for fail-fast journal
+/// records and the final verdict; matching a `DevError` message would make
+/// either behavior depend on user-visible text.
+enum TestPhaseFailure {
+    TestsFailed,
+    Error(DevError),
+}
+
+impl From<DevError> for TestPhaseFailure {
+    fn from(error: DevError) -> Self {
+        Self::Error(error)
+    }
+}
+
 /// Iterate the lanes the test selection attempts, pre-building each sweep's
 /// `build_packages` and then running `cargo test` for it. Fails fast on the
 /// first sweep that fails (build or test), mirroring how the clippy phase
@@ -31,7 +46,7 @@ fn run_test_phase(
     mut timings: Option<&mut Vec<TestTiming>>,
     ledger: &mut ReachLedger,
     stop: &mut Option<TerminationSummary>,
-) -> Result<(), DevError> {
+) -> Result<(), TestPhaseFailure> {
     let TestPhaseArgs {
         project,
         project_root,
@@ -67,7 +82,7 @@ fn run_test_phase(
     let target_dir = info.target_dir;
 
     let mut sweeps_run = 0usize;
-    let mut outcome: Result<(), DevError> = Ok(());
+    let mut outcome: Result<(), TestPhaseFailure> = Ok(());
     for (i, sweep) in sweeps.iter().enumerate() {
         // The CLI `-p` set intersected with the sweep's selection when the
         // selection was built: ruled-out packages are dropped with a note, and
@@ -119,8 +134,8 @@ fn run_test_phase(
         // spawn failure - names it here, once, whatever path it took.
         let failed = match lane {
             Ok(true) => None,
-            Ok(false) => Some(DevError::Build(TESTS_FAILED.into())),
-            Err(e) => Some(e),
+            Ok(false) => Some(TestPhaseFailure::TestsFailed),
+            Err(e) => Some(TestPhaseFailure::Error(e)),
         };
         // Every failed lane ends this loop; even an ordinary nextest `Ok(false)`
         // does not advance to another sweep. Timeouts return `Err` so their
@@ -159,10 +174,15 @@ fn run_test_phase(
 ///   run's too, carrying the lane's own decisive termination when it recorded
 ///   one: a per-test timeout stops brokkr, and everything after it is
 ///   unobserved because of that timeout.
-fn record_phase_stop(failed: usize, lanes: usize, e: &DevError, tap: &LaneTap) -> Option<Termination> {
+fn record_phase_stop(
+    failed: usize,
+    lanes: usize,
+    e: &TestPhaseFailure,
+    tap: &LaneTap,
+) -> Option<Termination> {
     let own = tap.decisive_termination();
     match e {
-        DevError::Build(m) if m == TESTS_FAILED => {
+        TestPhaseFailure::TestsFailed => {
             let mut first = None;
             for lane in failed + 1..lanes {
                 let t = Termination {
@@ -178,7 +198,7 @@ fn record_phase_stop(failed: usize, lanes: usize, e: &DevError, tap: &LaneTap) -
             }
             own.or(first)
         }
-        other => record_run_stop(other, own),
+        TestPhaseFailure::Error(other) => record_run_stop(other, own),
     }
 }
 
@@ -277,7 +297,10 @@ fn run_test_lane(
     // lint allows reach the pre-build and the test run alike - a pre-build
     // compiling the same crate under the unsuppressed lint fails before
     // `cargo test` is ever reached.
-    let env = prepared.map_or_else(|| lane_env(&inputs, sweep), |p| p.env.clone());
+    let env = match prepared {
+        Some(p) => p.env.clone(),
+        None => lane_env(&inputs, sweep)?,
+    };
     let kind = lane_kind(sweep);
     let needs_selection = matches!(kind, LaneKind::Parallel | LaneKind::Isolated | LaneKind::Nextest);
 

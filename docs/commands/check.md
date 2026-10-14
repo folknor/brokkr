@@ -1530,7 +1530,9 @@ build-dir lock; the groups run concurrently. Every run is made and the verdict
 is decided once all of them are in, exactly as for a serial phase - a lint
 found early in one group never cuts another group's runs short. The rustdoc
 phase is grouped the same way. `[test] serial_builds`, or a configured cargo
-build dir, makes it one group (`docs/brokkr.toml.md`;
+build dir, makes it one group. If Cargo config cannot be fully inspected, the
+probe also chooses one group; the Cargo invocation reports unreadable or
+invalid config files (`docs/brokkr.toml.md`;
 `src/check_cmd/concurrency.rs`).
 
 ### Cargo's manifest lints
@@ -1831,7 +1833,10 @@ phase compiles rather than reads diagnostics:
   or uses `--config` at the active target/build layer. The notice line names
   inherited rustflags environment sources. See
   [`[lints]`](../brokkr.toml.md#lints-section) for the full rule, including why
-  an injection can be deliberately inert.
+  an injection can be deliberately inert. If a live environment value is not
+  UTF-8, brokkr refuses to compose it because the launch API cannot preserve
+  it. If Cargo config cannot be fully read, the sink stays at the potentially
+  inert build layer; Cargo reports its own config error before compiling.
 
 The flags reach **every call site in the run that compiles**, not only the
 `cargo test` invocation: the sweep pre-build (which would otherwise fail on the
@@ -2223,10 +2228,22 @@ configured build target (`build.target`, `CARGO_BUILD_TARGET` - the host's
 included, since setting one moves the artifacts), refuses
 every direct-execution path (this lane, the process-isolated one, and `brokkr
 test`) at resolution time - read from the environment cargo builds under, so a
-sweep `env` setting either counts - and on this lane forwarded
-cargo args only cargo-mediated execution can honour (`--no-run`, `--target`,
-`--config`, `--manifest-path`, `--target-dir`) are rejected. The
-process-isolated lane refuses forwarded args altogether.
+sweep `env` setting either counts. An unreadable or malformed selected Cargo
+config, or a missing required include, also refuses launch reconstruction.
+The chain is read once per lane, when its environment is decided, and that one
+snapshot feeds the runner refusal, the serial shim decision and the direct
+runtime - so such a config fails every lane kind, serial included, before it
+builds.
+Missing config search locations and missing optional includes are accepted as
+absent. Forwarded cargo args that direct execution
+cannot honour (`--no-run`, `--target`, `--config`, `--manifest-path`,
+`--target-dir`) are rejected. Other cargo args shape the direct lanes'
+prebuild, and target selectors narrow the prepared plan. Their
+libtest args shape listing and selection. The parallel lane replays them for
+each binary. The process-isolated lane keeps `--exact <case>` and
+`--test-threads=1` on each child, so it applies positional filters during
+planning and forwards option args to each one-test child; `--format` and
+`--test-threads` remain runner-owned.
 `CARGO_TARGET_TMPDIR` is deliberately not reproduced at runtime - cargo's
 contract makes it compile-time (`env!`) only.
 
@@ -3162,6 +3179,9 @@ plumbing as the test phase. The CLI `--config` outranks a repo's committed
 `.cargo/config.toml`, so a workspace-mode unification pin (adopted for the
 parallel lane) and this phase coexist. Every package is checked even after
 an earlier one fails, so one run reports the whole install set.
+The package builds and their `--bin NAME` eligibility probes all use the
+`unify-package` target directory beside Cargo's metadata-resolved target dir,
+keeping this package graph out of the workspace-shared cache.
 
 Per package rather than one batched multi-`-p` invocation, from a measured
 false positive: cargo dedupes units across a batched graph, so with two

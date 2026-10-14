@@ -34,6 +34,12 @@ pub struct Gremlin {
     pub name: &'static str,
 }
 
+/// Result counters for one gremlin scan, used by the convention status line.
+pub(crate) struct GremlinsScan {
+    pub violations: Vec<Gremlin>,
+    pub files: usize,
+}
+
 /// Format a gremlin occurrence as a one-liner matching cargo_filter style.
 ///
 /// `src/foo.rs:10:5 U+200B ZERO WIDTH SPACE`
@@ -282,15 +288,24 @@ const GREMLINS: &[(char, &str)] = &[
 
 /// Scan every snapshot file with a scannable extension, skipping any path
 /// under a `[gremlins].exclude` directory.
+#[cfg(test)]
 pub fn scan(
     tree: &crate::scope::TreeSnapshot,
     config: Option<&GremlinsConfig>,
 ) -> Result<Vec<Gremlin>, DevError> {
+    Ok(scan_report(tree, config)?.violations)
+}
+
+pub(crate) fn scan_report(
+    tree: &crate::scope::TreeSnapshot,
+    config: Option<&GremlinsConfig>,
+) -> Result<GremlinsScan, DevError> {
     let allow = allow_set(config);
     let ban = ban_set(config);
     let files = tree.files();
     validate_excludes(files, config)?;
     let mut out = Vec::new();
+    let mut scanned = 0usize;
     for rel in files {
         if !is_scannable(rel) || is_excluded(rel, config) {
             continue;
@@ -298,9 +313,13 @@ pub fn scan(
         let Some(bytes) = tree.read_file(rel)? else {
             continue;
         };
+        scanned += 1;
         scan_bytes(rel, bytes.as_ref(), &mut out, &allow, &ban);
     }
-    Ok(out)
+    Ok(GremlinsScan {
+        violations: out,
+        files: scanned,
+    })
 }
 
 /// Label for a byte that is not part of any valid UTF-8 sequence. Its

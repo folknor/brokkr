@@ -69,36 +69,23 @@ pub(crate) fn isolated_target_dir(
 /// the whole point is to beat the project's `-Dwarnings`. When the config layer
 /// is the live one, `extra` is empty here and the flags ride cargo's
 /// `--config` instead.
-fn composed_rustflags_env(rustflags: &[String], extra: &[String]) -> Option<(String, String)> {
+/// A live rustflags value that is not UTF-8 refuses composition; the launcher
+/// cannot preserve it through the string environment API.
+fn composed_rustflags_env(
+    rustflags: &[String],
+    extra: &[String],
+) -> Result<Option<(String, String)>, crate::error::DevError> {
     if rustflags.is_empty() && extra.is_empty() {
-        return None;
+        return Ok(None);
     }
-    if let Ok(existing) = std::env::var("CARGO_ENCODED_RUSTFLAGS") {
-        let mut parts: Vec<String> = if existing.is_empty() {
-            Vec::new()
-        } else {
-            existing.split('\u{1f}').map(str::to_owned).collect()
-        };
-        parts.extend(rustflags.iter().cloned());
-        parts.extend(extra.iter().cloned());
-        return Some(("CARGO_ENCODED_RUSTFLAGS".into(), parts.join("\u{1f}")));
-    }
-    let mut flags = std::env::var("RUSTFLAGS")
-        .ok()
-        .filter(|v| !v.trim().is_empty())
-        .unwrap_or_default();
-    for flag in rustflags.iter().chain(extra) {
-        if !flags.is_empty() {
-            flags.push(' ');
-        }
-        flags.push_str(flag);
-    }
-    Some(("RUSTFLAGS".into(), flags))
+    let additions: Vec<String> = rustflags.iter().chain(extra).cloned().collect();
+    crate::rustflags::RustflagsEnv::process().compose(&additions)
 }
 
 
 /// The `CARGO_TARGET_DIR` + `RUSTFLAGS` pair a sweep's `rustflags` imply, or an
-/// empty vec when it sets none. Used by the clippy phase (which needs no
+/// empty vec when it sets none. Composition can return a config error when it
+/// cannot safely append to an inherited rustflags source. Used by clippy (which needs no
 /// `BROKKR_TEST_BIN_DIR`); the test phase gets the same knobs plus the bin dir
 /// through [`sweep_runtime_env`].
 /// `allow_flags` carries the environment's share of the `[lints] allow` flags,
@@ -111,13 +98,13 @@ pub(crate) fn sweep_cargo_env(
     sweep: &PlannedSweep,
     meta_target_dir: &Path,
     allow_flags: &[String],
-) -> Vec<(String, String)> {
+) -> Result<Vec<(String, String)>, crate::error::DevError> {
     let mut out = Vec::new();
     if let Some(dir) = isolated_target_dir(sweep, meta_target_dir) {
         out.push(("CARGO_TARGET_DIR".into(), dir.to_string_lossy().into_owned()));
     }
-    out.extend(composed_rustflags_env(&sweep.rustflags, allow_flags));
-    out
+    out.extend(composed_rustflags_env(&sweep.rustflags, allow_flags)?);
+    Ok(out)
 }
 
 /// The full base env for one sweep's test/pre-build cargo runs: `build_test_env`
@@ -135,7 +122,7 @@ pub(crate) fn sweep_runtime_env(
     meta_target_dir: &Path,
     profile_dir: &str,
     allow_flags: &[String],
-) -> Vec<(String, String)> {
+) -> Result<Vec<(String, String)>, crate::error::DevError> {
     let isolated = isolated_target_dir(sweep, meta_target_dir);
     let effective: &Path = isolated.as_deref().unwrap_or(meta_target_dir);
 
@@ -143,8 +130,8 @@ pub(crate) fn sweep_runtime_env(
     if let Some(dir) = &isolated {
         out.push(("CARGO_TARGET_DIR".into(), dir.to_string_lossy().into_owned()));
     }
-    out.extend(composed_rustflags_env(&sweep.rustflags, allow_flags));
-    out
+    out.extend(composed_rustflags_env(&sweep.rustflags, allow_flags)?);
+    Ok(out)
 }
 
 /// Combine the sweep's profile-defined env with the project's

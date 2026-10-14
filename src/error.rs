@@ -284,6 +284,15 @@ impl fmt::Display for ProcessEnding {
     }
 }
 
+/// A supervised child produced an outcome brokkr could not accept as a
+/// complete run result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChildFailureKind {
+    Deadline(Duration),
+    CaptureLimit { stream: &'static str, limit: usize },
+    OutputDrain { grace: Duration },
+}
+
 /// No `Box` wrapping - this is a binary, not a library. Keeping it simple.
 #[derive(Debug)]
 pub enum DevError {
@@ -312,6 +321,12 @@ pub enum DevError {
         program: String,
         ending: ProcessEnding,
         stderr: String,
+    },
+    /// A child exceeded a runtime deadline, capture limit, or output-drain
+    /// grace. These are execution failures, not configuration errors.
+    ChildFailure {
+        program: String,
+        failure: ChildFailureKind,
     },
     /// A subprocess could not be started (or waited on) at all - `program` is
     /// missing, not executable, or the OS refused. Distinct from
@@ -394,6 +409,22 @@ impl fmt::Display for DevError {
                 }
                 Ok(())
             }
+            DevError::ChildFailure { program, failure } => match failure {
+                ChildFailureKind::Deadline(limit) => write!(
+                    f,
+                    "{program} exceeded its {:.1}s deadline",
+                    limit.as_secs_f64()
+                ),
+                ChildFailureKind::CaptureLimit { stream, limit } => write!(
+                    f,
+                    "{program} exceeded the {stream} capture limit of {limit} bytes"
+                ),
+                ChildFailureKind::OutputDrain { grace } => write!(
+                    f,
+                    "{program} exited but its output stayed open beyond {}s; capture may be incomplete",
+                    grace.as_secs_f64()
+                ),
+            },
             DevError::Spawn { program, error } => write!(f, "could not run {program}: {error}"),
             DevError::Reported(label) | DevError::Refused(label) => write!(f, "{label}"),
             DevError::Lock(msg) => write_message(f, policy, &msg.to_string()),
@@ -414,6 +445,7 @@ impl DevError {
             Self::Reported(_) | Self::CargoEnv(_) => RenderingPolicy::AlreadyPrinted,
             Self::Refused(_)
             | Self::Subprocess { .. }
+            | Self::ChildFailure { .. }
             | Self::Spawn { .. }
             | Self::ExitCode(_)
             | Self::Interrupted => RenderingPolicy::Bare,
@@ -461,6 +493,7 @@ impl StdError for DevError {
             | DevError::Build(_)
             | DevError::Preflight(_)
             | DevError::Subprocess { .. }
+            | DevError::ChildFailure { .. }
             | DevError::Database(_)
             | DevError::Verify(_)
             | DevError::CargoEnv(_)
@@ -486,7 +519,7 @@ impl From<toml::de::Error> for DevError {
 
 impl From<serde_json::Error> for DevError {
     fn from(err: serde_json::Error) -> DevError {
-        DevError::Build(format!("json: {err}"))
+        DevError::Internal(format!("json: {err}"))
     }
 }
 

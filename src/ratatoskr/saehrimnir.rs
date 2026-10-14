@@ -16,7 +16,6 @@
 
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::clean::layout::ProjectState;
@@ -679,17 +678,14 @@ pub fn run_mock_serve(req: &MockServeRequest<'_>) -> Result<(), DevError> {
         fixture_str
     ));
 
-    // Install SIGINT + SIGTERM handlers BEFORE we spawn sæhrimnir so a
-    // `brokkr kill` arriving during the readiness window can't default-
-    // terminate brokkr and orphan the freshly-spawned child. Default
-    // handlers would also kill brokkr immediately during the foreground
-    // wait phase; intercepting lets us drain the child within
-    // [`SHUTDOWN_BUDGET`].
-    let _signals = MockServeSignalGuard::install();
+    // Install the shared SIGINT + SIGTERM guard before spawning sæhrimnir so
+    // a `brokkr kill` during readiness cannot orphan the child. The shared
+    // shutdown state also lets nested brokkr guards preserve one request.
+    let _signals = crate::shutdown::SigtermGuard::install();
 
     // Own process group so the SIGTERM/SIGKILL paths reach sæhrimnir's
     // helper listeners via `kill(-pgid, ...)`. Safe here because
-    // MockServeSignalGuard (installed above) bridges terminal signals.
+    // `SigtermGuard` (installed above) bridges terminal signals.
     use std::os::unix::process::CommandExt;
     let mut child = Command::new(&binary)
         .args([
@@ -710,8 +706,7 @@ pub fn run_mock_serve(req: &MockServeRequest<'_>) -> Result<(), DevError> {
     let child_pid = child.id();
     _lock.set_child_pid(child_pid);
 
-    let endpoints = match wait_for_endpoints_signal_aware(&mut child, &readiness, READINESS_BUDGET)
-    {
+    let endpoints = match wait_for_endpoints(&mut child, &readiness, READINESS_BUDGET) {
         Ok(ep) => ep,
         Err(e) => {
             // Bounded cleanup if sæhrimnir spawned but never wrote the
@@ -872,48 +867,17 @@ fn fixture_is_inside(fixtures_dir: &Path, candidate: &Path) -> Result<bool, DevE
 /// exits before writing the sentinel (covers fixture-validation errors,
 /// port-in-use, etc.) or if the budget expires.
 ///
-/// Also polls the cooperative-shutdown flag, so a `brokkr kill` landing
-/// while an orchestrator's `SigtermGuard` is active aborts the wait with
-/// `DevError::Interrupted` (and [`MockServer::spawn_observed`] reaps the
-/// child) instead of waiting out the readiness budget. Without a guard the
-/// flag is never set, so this costs nothing there.
+/// Also polls the shared cooperative-shutdown state, so a `brokkr kill`
+/// landing while a `SigtermGuard` is active aborts the wait with
+/// `DevError::Interrupted` instead of waiting out the readiness budget.
 pub fn wait_for_endpoints(
     child: &mut std::process::Child,
     readiness: &Path,
     budget: Duration,
 ) -> Result<Endpoints, DevError> {
-    wait_for_endpoints_inner(
-        child,
-        readiness,
-        budget,
-        &crate::shutdown::is_shutdown_requested,
-    )
-}
-
-/// As [`wait_for_endpoints`], but also polls a caller-supplied signal
-/// predicate every tick. Returning `true` from the predicate aborts the
-/// wait with `DevError::Interrupted` so a cooperative shutdown reaches
-/// the caller during the readiness window. Used by `mock-serve` to honor
-/// `brokkr kill` arriving before sæhrimnir is ready.
-pub fn wait_for_endpoints_signal_aware(
-    child: &mut std::process::Child,
-    readiness: &Path,
-    budget: Duration,
-) -> Result<Endpoints, DevError> {
-    wait_for_endpoints_inner(child, readiness, budget, &|| {
-        MOCK_SIGNAL_FLAG.load(Ordering::Relaxed)
-    })
-}
-
-fn wait_for_endpoints_inner(
-    child: &mut std::process::Child,
-    readiness: &Path,
-    budget: Duration,
-    interrupted: &dyn Fn() -> bool,
-) -> Result<Endpoints, DevError> {
     let started = Instant::now();
     loop {
-        if interrupted() {
+        if crate::shutdown::is_shutdown_requested() {
             return Err(DevError::Interrupted);
         }
         if let Some(status) = child.try_wait().map_err(DevError::Io)? {
@@ -959,7 +923,7 @@ fn kill_for_shutdown(pid: u32, signum: i32) {
     crate::process::signal_process_group(pid, signum).ok();
 }
 
-/// Wait for the child while watching the SIGINT/SIGTERM flag. On signal
+/// Wait for the child while watching the shared shutdown state. On signal
 /// we send SIGTERM and grant [`SHUTDOWN_BUDGET`] before SIGKILL; on
 /// child-exit we just reap.
 fn wait_with_signals(
@@ -976,7 +940,7 @@ fn wait_with_signals(
                 return Err(DevError::Io(error));
             }
         }
-        if MOCK_SIGNAL_FLAG.load(Ordering::Relaxed) {
+        if crate::shutdown::is_shutdown_requested() {
             output::ratatoskr_msg("signal received, shutting saehrimnir down");
             kill_for_shutdown(pid, libc::SIGTERM);
             return wait_with_deadline(child, pid, SHUTDOWN_BUDGET).map(|waited| waited.status);
@@ -1023,52 +987,6 @@ pub fn wait_with_deadline(
                 .map_err(DevError::Io);
         }
         std::thread::sleep(SHUTDOWN_POLL_INTERVAL);
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Signal handling for mock-serve. Scoped via RAII guard so non-mock-serve
-// code keeps its default SIGINT/SIGTERM behaviour. Separate atomic from
-// `crate::shutdown`'s state machine so the global `brokkr kill` flow
-// (which expects a sidecar polling that flag) and this command don't
-// interfere with each other.
-// ---------------------------------------------------------------------------
-
-static MOCK_SIGNAL_FLAG: AtomicBool = AtomicBool::new(false);
-
-extern "C" fn mock_signal_handler(_: libc::c_int) {
-    MOCK_SIGNAL_FLAG.store(true, Ordering::Relaxed);
-}
-
-fn set_handler(sig: libc::c_int, handler: libc::sighandler_t) {
-    // SAFETY: handler body only writes an AtomicBool, which is
-    // async-signal-safe. Function pointer cast matches libc::signal's
-    // expected shape.
-    unsafe {
-        libc::signal(sig, handler);
-    }
-}
-
-struct MockServeSignalGuard;
-
-impl MockServeSignalGuard {
-    fn install() -> Self {
-        MOCK_SIGNAL_FLAG.store(false, Ordering::Relaxed);
-        let h: libc::sighandler_t = mock_signal_handler as *const () as usize;
-        set_handler(libc::SIGINT, h);
-        set_handler(libc::SIGTERM, h);
-        Self
-    }
-}
-
-impl Drop for MockServeSignalGuard {
-    fn drop(&mut self) {
-        // Mirror `crate::shutdown::SigtermGuard::Drop`: also reset the
-        // flag so a captured subprocess invoked AFTER this guard ends
-        // doesn't see a sticky `true` from a SIGTERM that already fired.
-        MOCK_SIGNAL_FLAG.store(false, Ordering::Relaxed);
-        set_handler(libc::SIGINT, libc::SIG_DFL);
-        set_handler(libc::SIGTERM, libc::SIG_DFL);
     }
 }
 

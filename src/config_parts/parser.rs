@@ -46,6 +46,7 @@ impl Claim {
 /// Load `brokkr.toml` from the project root directory, with the user-wide
 /// config composed beneath its include layers. The tuple carries project
 /// identity, shared settings, and the project-owned section in that order.
+#[cfg(test)]
 pub fn load(
     project_root: &Path,
 ) -> Result<(Project, DevConfig, project_config::ProjectConfig), DevError> {
@@ -299,6 +300,7 @@ fn parse_manifest(
         .clone()
         .try_into()
         .map_err(|e: toml::de::Error| DevError::Config(format!("[manifest]: {e}")))?;
+    crate::manifest::validate_config(&cfg)?;
     if let Some(ag) = &cfg.adapter_group {
         // The engine's `labelled_group_keys` finds the group whose header
         // comment `contains(marker)`, and `contains("")` is always true - a
@@ -369,6 +371,7 @@ fn parse_header(
     if cfg.pattern.trim().is_empty() {
         return Err(DevError::Config("[header] requires a non-empty `pattern`".into()));
     }
+    crate::header::validate_config(&cfg)?;
     Ok(Some(cfg))
 }
 
@@ -616,6 +619,7 @@ fn parse_textlint(
             return Err(unreferenced_preset_err(name));
         }
     }
+    crate::textlint::compile_rules(&mut rules)?;
     Ok(rules)
 }
 

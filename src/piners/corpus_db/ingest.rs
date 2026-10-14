@@ -16,6 +16,7 @@ use std::collections::BTreeMap;
 use rusqlite::params;
 
 use super::CorpusDb;
+use crate::db::store::as_i64;
 use crate::error::DevError;
 use crate::piners::gate::GateDiff;
 use crate::piners::report::{HarnessReport, ProbeLine, TradeDiffLine};
@@ -145,12 +146,6 @@ fn prune_run_history(conn: &rusqlite::Connection, keep: i64) -> Result<(), DevEr
         [keep],
     )?;
     Ok(())
-}
-
-/// SQLite stores signed i64; harness counts are `u64`/`usize`. Clamp rather
-/// than wrap - these are trade/probe counts that never approach `i64::MAX`.
-fn as_i64<T: TryInto<i64>>(v: T) -> i64 {
-    v.try_into().unwrap_or(i64::MAX)
 }
 
 fn record_inner(

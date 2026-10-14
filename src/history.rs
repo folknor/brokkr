@@ -639,11 +639,7 @@ fn db_path() -> Result<PathBuf, DevError> {
 /// shared store policy instead of being stamped down.
 fn run_migrations(conn: &Connection) -> Result<(), StoreError> {
     crate::db::store::migrate(conn, "command history", SCHEMA_VERSION, |conn, current| {
-        let has_history: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='history')",
-            [],
-            |row| row.get(0),
-        )?;
+        let has_history = crate::db::store::table_exists(conn, "history")?;
         if current < 2 && has_history {
             // Version 1 stored absolute working directories and machine
             // hostnames. Rebuild the table so those values leave the store.
@@ -695,16 +691,6 @@ fn redact_project_dir_commands(conn: &Connection) -> Result<(), DevError> {
     Ok(())
 }
 
-#[cfg(test)]
-fn has_table(conn: &Connection, table: &str) -> bool {
-    conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
-        [table],
-        |row| row.get(0),
-    )
-    .unwrap_or(false)
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -751,7 +737,7 @@ mod tests {
     fn migration_initialises_once_and_is_idempotent() {
         let conn = Connection::open_in_memory().unwrap();
         run_migrations(&conn).unwrap();
-        assert!(has_table(&conn, "history"));
+        assert!(crate::db::store::table_exists(&conn, "history").unwrap());
         run_migrations(&conn).unwrap();
         let v: i64 = conn
             .pragma_query_value(None, "user_version", |r| r.get(0))

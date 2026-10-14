@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use crate::preflight::{FileDigest, Xxh128};
 
 use serde::de::{self, SeqAccess, Visitor};
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::error::DevError;
 use crate::project::Project;
@@ -351,7 +351,7 @@ pub struct HeaderConfig {
 /// (match `madsim` or `cfg\(test\)`, not the whole attribute) so a wrapped
 /// attribute still suppresses within the window. This is the same per-line
 /// blindness as the upstream awk hooks, so parity holds.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ContextWindow {
     /// Window depth: how many physical lines above/below the match to scan.
@@ -473,7 +473,7 @@ pub struct ScriptCheck {
 /// `[textlint_preset.<name>]` block named by the rule's `preset` key - a
 /// parse-time merge, so by the time this struct exists the preset is already
 /// folded in and there is no runtime notion of a preset.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct TextlintRule {
     /// Human label surfaced in violation output.
@@ -579,6 +579,10 @@ pub struct TextlintRule {
     /// `tokio::select!` block), a violation unless it appears in the window.
     #[serde(default)]
     pub require_below: Option<ContextWindow>,
+    /// Regexes and globs compiled by config parsing. This execution state is
+    /// skipped by Serde and is not part of the user-facing rule schema.
+    #[serde(skip)]
+    pub(crate) compiled: Option<crate::textlint::Compiled>,
 }
 
 /// `[rustdoc]` section: opt into the `rustdoc` phase of `brokkr check`, which

@@ -248,12 +248,43 @@ impl BenchHarness {
         drop(signal_guard);
         self.lock.clear_child_pid();
         let ending = capture.data.ending.clone();
-        let error = match child::verdict(&ending, &program_str, &capture.stderr, ok_codes) {
-            child::IterationVerdict::Counted => None,
-            child::IterationVerdict::Failed(error) => Some(error),
-            child::IterationVerdict::Interrupted => Some(DevError::Interrupted),
+        let capture_failure = if capture.stdout_truncated {
+            Some(crate::error::ChildFailureKind::CaptureLimit {
+                stream: "stdout",
+                limit: crate::output::child::CaptureCap::MEASUREMENT.stdout,
+            })
+        } else if capture.stderr_truncated {
+            Some(crate::error::ChildFailureKind::CaptureLimit {
+                stream: "stderr",
+                limit: crate::output::child::CaptureCap::MEASUREMENT.stderr,
+            })
+        } else if capture.output_cut {
+            Some(crate::error::ChildFailureKind::OutputDrain {
+                grace: crate::output::child::ChildOptions::MEASUREMENT.drain_grace,
+            })
+        } else {
+            None
         };
-        let (_, kv) = parse_kv_lines_us(&capture.stderr);
+        let incomplete_output = capture_failure.is_some();
+        let error = if matches!(&ending, child::Ending::Interrupted) {
+            Some(DevError::Interrupted)
+        } else if let Some(failure) = capture_failure {
+            Some(DevError::ChildFailure {
+                program: program_str.clone(),
+                failure,
+            })
+        } else {
+            match child::verdict(&ending, &program_str, &capture.stderr, ok_codes) {
+                child::IterationVerdict::Counted => None,
+                child::IterationVerdict::Failed(error) => Some(error),
+                child::IterationVerdict::Interrupted => Some(DevError::Interrupted),
+            }
+        };
+        let (_, kv) = if incomplete_output {
+            (None, Vec::new())
+        } else {
+            parse_kv_lines_us(&capture.stderr)
+        };
         Ok(Iteration {
             result: Some(BenchResult { elapsed_ms: elapsed_to_ms(&capture.elapsed),
                 elapsed_us: Some(elapsed_to_us(&capture.elapsed)), kv, iterations: Vec::new(),

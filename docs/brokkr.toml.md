@@ -1650,7 +1650,9 @@ include_ignored = true
   outside its `OUT_DIR` - into the source tree or a shared directory - so a
   project whose build scripts do that sets this. A cargo build dir configured
   anywhere (`CARGO_BUILD_BUILD_DIR`, `build.build-dir`) holds intermediate
-  artifacts across target dirs and forces one chain on its own.
+  artifacts across target dirs and forces one chain on its own. If Cargo
+  config cannot be fully inspected, brokkr also uses one chain; Cargo reports
+  unreadable or invalid config files when the build runs.
 - `default_profile` is the validation profile `brokkr check` uses when no
   `--profile` is passed. With no profile config, `brokkr check` runs every
   `[[check]]` entry without libtest filters; with no `[[check]]` either, it

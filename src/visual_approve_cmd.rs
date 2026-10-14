@@ -23,6 +23,8 @@ pub(crate) fn cmd_approve(
         ));
     }
 
+    // Dispatch has already applied the shared command visibility policy;
+    // this match selects the visual backend from its typed project config.
     match project_config {
         ProjectConfig::Litehtml(cfg) => {
             let ids = if all {
@@ -46,10 +48,8 @@ pub(crate) fn cmd_approve(
             }
             Ok(())
         }
-        _ => Err(DevError::WrongProject {
-            command: "approve".to_owned(),
-            expected: "litehtml/sluggrs".to_owned(),
-            current: project.to_string(),
-        }),
+        _ => Err(DevError::Internal(
+            "approve received a non-visual project config after command visibility gating".into(),
+        )),
     }
 }

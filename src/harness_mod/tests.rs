@@ -667,13 +667,7 @@ mod tests {
     // -------------------------------------------------------------------
 
     fn temp_dir(suffix: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "brokkr-harness-test-{}-{}",
-            std::process::id(),
-            suffix,
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+        crate::test_scratch::scratch("harness-mod-tests", suffix)
     }
 
     /// Create a minimal sidecar DB at the given path.

@@ -1352,7 +1352,8 @@ warning: z [too_many_lines]
             Path::new("/meta/target"),
             "debug",
             &[],
-        );
+        )
+        .unwrap();
         // S3-20: the isolated dir sits beside cargo's resolved target dir, not
         // under an assumed `<project_root>/target`.
         let dir = format!("/meta/target/rustflags-{key}");
@@ -1377,7 +1378,8 @@ warning: z [too_many_lines]
             Path::new("/media/folk/Banan/cargo"),
             "debug",
             &[],
-        );
+        )
+        .unwrap();
         assert_eq!(
             get(&env, "CARGO_TARGET_DIR"),
             Some(format!("/media/folk/Banan/cargo/rustflags-{key}").as_str())
@@ -1392,7 +1394,8 @@ warning: z [too_many_lines]
             Path::new("/meta/target"),
             "debug",
             &[],
-        );
+        )
+        .unwrap();
         assert_eq!(get(&env, "BROKKR_TEST_BIN_DIR"), Some("/meta/target/debug"));
         assert!(get(&env, "CARGO_TARGET_DIR").is_none());
         assert!(rustflags_value(&env).is_none());
@@ -1401,7 +1404,7 @@ warning: z [too_many_lines]
     #[test]
     fn sweep_cargo_env_omits_bin_dir() {
         let key = crate::config::check::rustflags_target_key(&rustflags_sweep().rustflags).unwrap();
-        let env = sweep_cargo_env(&rustflags_sweep(), Path::new("/meta/target"), &[]);
+        let env = sweep_cargo_env(&rustflags_sweep(), Path::new("/meta/target"), &[]).unwrap();
         // Clippy shares the same isolated dir the test phase builds into.
         assert_eq!(
             get(&env, "CARGO_TARGET_DIR"),
@@ -1412,11 +1415,11 @@ warning: z [too_many_lines]
         assert!(get(&env, "BROKKR_TEST_BIN_DIR").is_none());
         // A plain sweep contributes nothing.
         assert!(
-            sweep_cargo_env(&crate::profile::PlannedSweep::from(crate::profile::SweepDecl::default()), Path::new("/meta/target"), &[]).is_empty()
+            sweep_cargo_env(&crate::profile::PlannedSweep::from(crate::profile::SweepDecl::default()), Path::new("/meta/target"), &[]).unwrap().is_empty()
         );
         // A plain sweep with env-sink lint allows carries them and nothing else.
         let allows = vec!["-Aclippy::assert_is_empty".to_owned()];
-        let env = sweep_cargo_env(&crate::profile::PlannedSweep::from(crate::profile::SweepDecl::default()), Path::new("/meta/target"), &allows);
+        let env = sweep_cargo_env(&crate::profile::PlannedSweep::from(crate::profile::SweepDecl::default()), Path::new("/meta/target"), &allows).unwrap();
         assert!(get(&env, "CARGO_TARGET_DIR").is_none());
         assert!(rustflags_value(&env)
             .expect("allow flags reach the env")

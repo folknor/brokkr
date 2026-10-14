@@ -9,10 +9,11 @@ use crate::output;
 use crate::project::{BuildRoot, Project, ProjectRoot};
 
 /// The build root whose pinned toolchain a fresh hold moves aside, recorded
-/// once at startup from the detected config (`disable_toolchain`). Like
-/// [`crate::cli::invocation`], it is a write-once fact about this invocation,
-/// read only to fill [`lockfile::LockContext::disable_toolchain_dir`]; the lock
-/// layer itself never reads it.
+/// once at startup from the detected config (`disable_toolchain`). A brokkr
+/// process handles one CLI invocation, and every nested lock acquisition in
+/// that invocation inherits this detected policy. This is invocation context,
+/// used to fill [`lockfile::LockContext::disable_toolchain_dir`]. The lock
+/// layer stores active paths on each hold, including worktree paths.
 static CONFIGURED_TOOLCHAIN_DIR: std::sync::OnceLock<Option<std::path::PathBuf>> =
     std::sync::OnceLock::new();
 

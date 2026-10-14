@@ -40,7 +40,7 @@
 // - Target runners (`[target.<triple>].runner`): a configured runner means
 //   direct execution would silently bypass a wrapper (qemu, wine, valgrind),
 //   so the direct-execution lanes REFUSE at resolution time instead - see
-//   [`refuse_configured_runner`].
+//   [`refuse_configured_runner_with_config`].
 
 /// One workspace package's manifest facts, the source for the `CARGO_PKG_*`
 /// family. Parsed from `cargo metadata --no-deps`.
@@ -110,21 +110,24 @@ pub(crate) struct DirectRuntime {
     libdir: String,
     /// What `CARGO` is set to: the cargo executable this brokkr runs.
     cargo: String,
-    /// `[env]` from the config chain, highest-precedence file first.
-    config_env: Vec<crate::rustflags::ConfigEnvEntry>,
+    /// Validated launch settings from the cargo config chain. Retaining the
+    /// snapshot keeps the reconstructed `[env]` values tied to one discovery.
+    launch_config: rustflags::CargoLaunchConfig,
 }
 
 impl DirectRuntime {
     /// Assemble the runtime for one sweep: cargo metadata for the package
-    /// facts, the prebuild's artifact index, and the cargo config chain.
-    pub(crate) fn load(
+    /// facts, the prebuild's artifact index, and the launch config snapshot
+    /// already validated during lane setup, so config values are not
+    /// rediscovered before each direct lane action.
+    pub(crate) fn load_with_config(
         project_root: &Path,
         env_refs: &[(&str, &str)],
         index: BuildRuntimeIndex,
+        launch_config: rustflags::CargoLaunchConfig,
     ) -> Result<Self, DevError> {
         let linked_paths = index.all_linked_paths();
         let effective_env = rustflags::EffectiveEnv::new(env_refs);
-        let cargo_config = rustflags::CargoLaunchConfig::discover(project_root, effective_env);
         Ok(Self {
             project_root: project_root.to_path_buf(),
             packages: workspace_pkg_meta(project_root)?,
@@ -132,7 +135,7 @@ impl DirectRuntime {
             index,
             libdir: toolchain_libdir(project_root, env_refs)?,
             cargo: cargo_program(project_root, effective_env),
-            config_env: cargo_config.env,
+            launch_config,
         })
     }
 
@@ -167,7 +170,7 @@ impl DirectRuntime {
         // cargo's own rule. First occurrence in the chain wins, and the chain
         // is ordered highest-precedence first, so skip a key already applied.
         let mut applied: Vec<&str> = Vec::new();
-        for entry in &self.config_env {
+        for entry in &self.launch_config.env {
             if applied.iter().any(|k| *k == entry.key) {
                 continue;
             }
@@ -434,17 +437,15 @@ fn workspace_pkg_meta(project_root: &Path) -> Result<HashMap<String, PkgRuntimeM
 /// The environment checked is the one cargo builds under: `env` (the sweep's,
 /// which reaches cargo as its process environment) over brokkr's own. A sweep
 /// `env` setting a runner or a target is as configured as a shell export.
-pub(crate) fn refuse_configured_runner(
-    project_root: &Path,
-    env: &[(&str, &str)],
+///
+/// Cargo reads these env-backed settings even when empty: an empty target
+/// remains a configured target, and an empty runner is an invalid empty
+/// command. Direct execution must not bypass either Cargo behavior. Takes the
+/// snapshot the lane already resolved so every direct consumer applies the
+/// same runner and target rules.
+pub(crate) fn refuse_configured_runner_with_config(
+    launch: &rustflags::CargoLaunchConfig,
 ) -> Result<(), DevError> {
-    // Cargo reads these env-backed settings even when empty: an empty target
-    // remains a configured target, and an empty runner is an invalid empty
-    // command. Direct execution must not bypass either Cargo behavior.
-    let launch = rustflags::CargoLaunchConfig::discover(
-        project_root,
-        rustflags::EffectiveEnv::new(env),
-    );
     if let Some(target) = &launch.build_target {
         let detail = match &target.origin {
             rustflags::SourceOrigin::Environment(value) => {
@@ -538,7 +539,7 @@ mod direct_runtime_tests {
             index,
             libdir: "/toolchain/lib".into(),
             cargo: "/usr/bin/cargo".into(),
-            config_env: Vec::new(),
+            launch_config: rustflags::CargoLaunchConfig::default(),
         }
     }
 
@@ -687,15 +688,17 @@ mod direct_runtime_tests {
     #[test]
     fn config_env_respects_force_semantics() {
         let mut rt = runtime_with(BuildRuntimeIndex::default(), HashMap::new());
-        rt.config_env = vec![
+        rt.launch_config.env = vec![
             rustflags::ConfigEnvEntry {
                 key: "FIXTURE_ROOT".into(),
                 value: "/cfg/fixtures".into(),
+                source: PathBuf::from("/workspace/.cargo/config.toml"),
                 force: false,
             },
             rustflags::ConfigEnvEntry {
                 key: "FORCED".into(),
                 value: "cfg".into(),
+                source: PathBuf::from("/workspace/.cargo/config.toml"),
                 force: true,
             },
         ];

@@ -299,7 +299,8 @@ once ingest commits, unless `--keep-artefacts` or diagnostic isolation ran
 (the `attempt-<n>/` dirs are evidence the DB holds only as the `diagnosis`
 note, so the dir is preserved). Nothing a diagnostic attempt reports is
 ingested. A run that ends before its
-output is ingested - interrupted, a spawn failure, an unwritable manifest -
+output is ingested - interrupted, a spawn failure, an output capture limit, an
+unwritable manifest -
 records a row under its id and keeps its dir. An ingest failure preserves the
 dir and propagates. `brokkr clean` removes the `run-<id>/` dirs but spares
 `runs.db`.

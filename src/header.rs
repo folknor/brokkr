@@ -24,6 +24,12 @@ pub struct HeaderViolation {
     pub file: PathBuf,
 }
 
+/// Result counters for one header scan, used by the convention status line.
+pub(crate) struct HeaderScan {
+    pub violations: Vec<HeaderViolation>,
+    pub files: usize,
+}
+
 /// `` file: missing or stale header (expected `<pattern>`) ``.
 pub fn format_one(v: &HeaderViolation, expected: &str) -> String {
     format!(
@@ -71,11 +77,32 @@ pub fn expand(pattern: &str, year: i32) -> String {
 /// Scan snapshot files matching `cfg.paths` (minus `cfg.exempt`) for the
 /// expanded header text anywhere in each file. `year` is injected so the check
 /// is deterministic and testable.
+#[cfg(test)]
 pub fn scan(
     tree: &crate::scope::TreeSnapshot,
     cfg: &HeaderConfig,
     year: i32,
 ) -> Result<Vec<HeaderViolation>, DevError> {
+    Ok(scan_report(tree, cfg, year)?.violations)
+}
+
+/// Validate path patterns while config is loaded, before any phase runs.
+pub(crate) fn validate_config(cfg: &HeaderConfig) -> Result<(), DevError> {
+    if cfg.paths.is_empty() {
+        return Err(DevError::Config(
+            "[header].paths is empty - list the files that require the header".into(),
+        ));
+    }
+    globs::build_set(&cfg.paths, "[header].paths")?;
+    globs::build_set(&cfg.exempt, "[header].exempt")?;
+    Ok(())
+}
+
+pub(crate) fn scan_report(
+    tree: &crate::scope::TreeSnapshot,
+    cfg: &HeaderConfig,
+    year: i32,
+) -> Result<HeaderScan, DevError> {
     if cfg.paths.is_empty() {
         return Err(DevError::Config(
             "[header].paths is empty - list the files that require the header".into(),
@@ -99,6 +126,7 @@ pub fn scan(
     }
 
     let mut out = Vec::new();
+    let mut scanned = 0usize;
     for rel in &selected {
         if globs::matches(&exempt, rel) {
             continue;
@@ -111,11 +139,15 @@ pub fn scan(
         let Some(bytes) = tree.read_file(rel)? else {
             continue;
         };
+        scanned += 1;
         if !contains_bytes(bytes.as_ref(), expected.as_bytes()) {
             out.push(HeaderViolation { file: rel.clone() });
         }
     }
-    Ok(out)
+    Ok(HeaderScan {
+        violations: out,
+        files: scanned,
+    })
 }
 
 /// Whether `needle` occurs in `haystack`. An empty needle always does, as

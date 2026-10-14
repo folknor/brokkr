@@ -19,13 +19,14 @@
 //! parse diagnostics for malformed records and dropped diagnostic subrecords
 //! (protocol violations remain counted separately). On a fresh database,
 //! the schema DDL in `schema.rs` creates the current tables (columns included)
-//! inside the shared migration transaction. The `has_table` helper lives here
-//! so a future column add stays a localized change, exactly as in `ResultsDb`.
+//! inside the shared migration transaction. Schema inspection uses the shared
+//! `db::store` helpers, which preserve errors and recognize generated columns.
 
 use rusqlite::params;
 use serde_json::{Map, Value};
 
 use super::schema::disposition_ddl;
+use crate::db::store::{column_exists as has_column, table_exists as has_table};
 use crate::error::DevError;
 
 /// Current schema version. Increment when adding a migration below.
@@ -46,7 +47,7 @@ pub(super) fn run_migrations(conn: &rusqlite::Connection) -> Result<(), DevError
         "piners corpus runs",
         SCHEMA_VERSION,
         |conn, current| {
-            if has_table(conn, "run") {
+            if has_table(conn, "run")? {
                 migrate_from(conn, current)?;
             }
             conn.execute_batch(super::schema::SCHEMA)?;
@@ -77,7 +78,7 @@ fn newer_store(version: i64) -> DevError {
 fn migrate_from(conn: &rusqlite::Connection, current: i64) -> Result<(), DevError> {
     // v1 -> v2: add the per-probe wall-clock runtime column. IF NOT EXISTS-style
     // guard via `has_column` keeps the migration idempotent if rerun.
-    if current < 2 && !has_column(conn, "disposition", "runtime_ms") {
+    if current < 2 && !has_column(conn, "disposition", "runtime_ms")? {
         conn.execute("ALTER TABLE disposition ADD COLUMN runtime_ms REAL", [])?;
     }
 
@@ -86,13 +87,13 @@ fn migrate_from(conn: &rusqlite::Connection, current: i64) -> Result<(), DevErro
     // no discount recorded) read back as zero, which is exactly "nothing
     // discounted". Idempotency guarded by `has_column` as above.
     if current < 3 {
-        if !has_column(conn, "disposition", "boundary_ours") {
+        if !has_column(conn, "disposition", "boundary_ours")? {
             conn.execute(
                 "ALTER TABLE disposition ADD COLUMN boundary_ours INTEGER NOT NULL DEFAULT 0",
                 [],
             )?;
         }
-        if !has_column(conn, "disposition", "boundary_tv") {
+        if !has_column(conn, "disposition", "boundary_tv")? {
             conn.execute(
                 "ALTER TABLE disposition ADD COLUMN boundary_tv INTEGER NOT NULL DEFAULT 0",
                 [],
@@ -104,7 +105,7 @@ fn migrate_from(conn: &rusqlite::Connection, current: i64) -> Result<(), DevErro
     // runs never recorded it, and a spawn failure has no wall), so no DEFAULT -
     // an absent wall reads back as NULL, "no measured wall for this run".
     // Idempotency guarded by `has_column`.
-    if current < 4 && !has_column(conn, "run", "wall_ms") {
+    if current < 4 && !has_column(conn, "run", "wall_ms")? {
         conn.execute("ALTER TABLE run ADD COLUMN wall_ms REAL", [])?;
     }
 
@@ -112,7 +113,9 @@ fn migrate_from(conn: &rusqlite::Connection, current: i64) -> Result<(), DevErro
     // column cannot become a generated one in place, so the rows move to a
     // staging table - each with a record rebuilt from exactly the columns it
     // kept - and are checked against the old columns before the swap.
-    if current < 5 && has_table(conn, "disposition") && !has_column(conn, "disposition", "raw_json")
+    if current < 5
+        && has_table(conn, "disposition")?
+        && !has_column(conn, "disposition", "raw_json")?
     {
         rebuild_disposition(conn)?;
     }
@@ -121,10 +124,10 @@ fn migrate_from(conn: &rusqlite::Connection, current: i64) -> Result<(), DevErro
     // an older run never recorded it, and neither does a run outside a git
     // repo, so NULL is "unknown", never "clean".
     if current < 6 {
-        if !has_column(conn, "run", "commit_sha") {
+        if !has_column(conn, "run", "commit_sha")? {
             conn.execute("ALTER TABLE run ADD COLUMN commit_sha TEXT", [])?;
         }
-        if !has_column(conn, "run", "dirty") {
+        if !has_column(conn, "run", "dirty")? {
             conn.execute("ALTER TABLE run ADD COLUMN dirty INTEGER", [])?;
         }
     }
@@ -133,17 +136,17 @@ fn migrate_from(conn: &rusqlite::Connection, current: i64) -> Result<(), DevErro
     // default: an older run never counted its protocol violations, so NULL
     // is "not recorded", never "clean".
     if current < 7 {
-        if !has_column(conn, "run", "protocol_violations") {
+        if !has_column(conn, "run", "protocol_violations")? {
             conn.execute("ALTER TABLE run ADD COLUMN protocol_violations INTEGER", [])?;
         }
-        if !has_column(conn, "run", "diagnosis") {
+        if !has_column(conn, "run", "diagnosis")? {
             conn.execute("ALTER TABLE run ADD COLUMN diagnosis TEXT", [])?;
         }
     }
 
     // v7 -> v8: the harness's run_error record, whole, as JSON. NULL for a
     // run that reported none (and for every older run, which could not).
-    if current < 8 && !has_column(conn, "run", "run_error") {
+    if current < 8 && !has_column(conn, "run", "run_error")? {
         conn.execute("ALTER TABLE run ADD COLUMN run_error TEXT", [])?;
     }
 
@@ -151,10 +154,10 @@ fn migrate_from(conn: &rusqlite::Connection, current: i64) -> Result<(), DevErro
     // are a source only when each field parses with its exact type; missing or
     // malformed values remain NULL and cannot imply comparability.
     if current < 9 {
-        if !has_column(conn, "run", "debug") {
+        if !has_column(conn, "run", "debug")? {
             conn.execute("ALTER TABLE run ADD COLUMN debug INTEGER", [])?;
         }
-        if !has_column(conn, "run", "harness_args") {
+        if !has_column(conn, "run", "harness_args")? {
             conn.execute("ALTER TABLE run ADD COLUMN harness_args TEXT", [])?;
         }
         backfill_run_context(conn)?;
@@ -163,7 +166,7 @@ fn migrate_from(conn: &rusqlite::Connection, current: i64) -> Result<(), DevErro
     // v9 -> v10: parse diagnostics for malformed records and dropped
     // subrecords. Older runs have no such diagnostics, so they read as an
     // empty JSON array.
-    if current < 10 && !has_column(conn, "run", "report_warnings") {
+    if current < 10 && !has_column(conn, "run", "report_warnings")? {
         conn.execute(
             "ALTER TABLE run ADD COLUMN report_warnings TEXT NOT NULL DEFAULT '[]'",
             [],
@@ -392,34 +395,6 @@ fn reconstruct(row: &rusqlite::Row<'_>) -> Result<String, DevError> {
     Ok(Value::Object(rec).to_string())
 }
 
-/// Check whether a column exists on a table (via `PRAGMA table_xinfo`, which
-/// unlike `table_info` lists generated columns too).
-fn has_column(conn: &rusqlite::Connection, table: &str, column: &str) -> bool {
-    conn.prepare(&format!("PRAGMA table_xinfo({table})"))
-        .and_then(|mut stmt| {
-            let names = stmt.query_map([], |row| row.get::<_, String>(1))?;
-            let mut found = false;
-            for name in names {
-                if name? == column {
-                    found = true;
-                }
-            }
-            Ok(found)
-        })
-        .unwrap_or(false)
-}
-
-/// Check whether a table exists in the database.
-fn has_table(conn: &rusqlite::Connection, table: &str) -> bool {
-    conn.query_row(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
-        [table],
-        |row| row.get::<_, i64>(0),
-    )
-    .map(|count| count > 0)
-    .unwrap_or(false)
-}
-
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -446,19 +421,19 @@ mod tests {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch(V1_SCHEMA).unwrap();
         conn.pragma_update(None, "user_version", 1).unwrap();
-        assert!(!has_column(&conn, "disposition", "runtime_ms"));
-        assert!(!has_column(&conn, "disposition", "boundary_ours"));
+        assert!(!has_column(&conn, "disposition", "runtime_ms").unwrap());
+        assert!(!has_column(&conn, "disposition", "boundary_ours").unwrap());
 
         run_migrations(&conn).unwrap();
         // Every migration through the current schema runs when starting from v1.
-        assert!(has_column(&conn, "disposition", "raw_json"));
-        assert!(has_column(&conn, "disposition", "runtime_ms"));
-        assert!(has_column(&conn, "disposition", "boundary_ours"));
-        assert!(has_column(&conn, "disposition", "ts_entry_share_pct"));
-        assert!(has_column(&conn, "run", "wall_ms"));
-        assert!(has_column(&conn, "run", "protocol_violations"));
-        assert!(has_column(&conn, "run", "diagnosis"));
-        assert!(has_column(&conn, "run", "run_error"));
+        assert!(has_column(&conn, "disposition", "raw_json").unwrap());
+        assert!(has_column(&conn, "disposition", "runtime_ms").unwrap());
+        assert!(has_column(&conn, "disposition", "boundary_ours").unwrap());
+        assert!(has_column(&conn, "disposition", "ts_entry_share_pct").unwrap());
+        assert!(has_column(&conn, "run", "wall_ms").unwrap());
+        assert!(has_column(&conn, "run", "protocol_violations").unwrap());
+        assert!(has_column(&conn, "run", "diagnosis").unwrap());
+        assert!(has_column(&conn, "run", "run_error").unwrap());
         let version: i64 = conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
@@ -467,7 +442,7 @@ mod tests {
         // Rerunning is a no-op (the version guard short-circuits; has_column
         // would also prevent a duplicate ALTER).
         run_migrations(&conn).unwrap();
-        assert!(has_column(&conn, "disposition", "boundary_ours"));
+        assert!(has_column(&conn, "disposition", "boundary_ours").unwrap());
     }
 
     #[test]
@@ -630,7 +605,7 @@ mod tests {
         // went with the v4 table, the staging one is dropped by name. The
         // migration's own schema step recreates `idx_disposition_probe` from
         // the DDL, so it is the only index left.
-        assert!(!has_table(&conn, "disposition_v5"));
+        assert!(!has_table(&conn, "disposition_v5").unwrap());
         let indexes: Vec<String> = conn
             .prepare(
                 "SELECT name FROM sqlite_master WHERE type = 'index' \
@@ -661,10 +636,10 @@ mod tests {
         conn.pragma_update(None, "user_version", 1).unwrap();
         let err = run_migrations(&conn).unwrap_err();
         assert!(format!("{err:?}").contains("does not reproduce the old one"));
-        assert!(!has_column(&conn, "disposition", "raw_json"));
-        assert!(!has_column(&conn, "disposition", "runtime_ms"));
-        assert!(!has_column(&conn, "run", "wall_ms"));
-        assert!(!has_table(&conn, "disposition_v5"));
+        assert!(!has_column(&conn, "disposition", "raw_json").unwrap());
+        assert!(!has_column(&conn, "disposition", "runtime_ms").unwrap());
+        assert!(!has_column(&conn, "run", "wall_ms").unwrap());
+        assert!(!has_table(&conn, "disposition_v5").unwrap());
         let version: i64 = conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();

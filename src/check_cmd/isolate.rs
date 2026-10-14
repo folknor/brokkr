@@ -92,6 +92,7 @@ fn run_isolated_sweep(
             case,
             runtime,
             plan.include_ignored,
+            &prepared.libtest_extra,
             &env_refs,
             tap,
             commands,
@@ -284,13 +285,22 @@ fn run_one_isolated_test(
     case: &IsolatedCase,
     runtime: &DirectRuntime,
     include_ignored: bool,
+    libtest_extra: &[String],
     env_refs: &[(&str, &str)],
     tap: &LaneTap,
     commands: bool,
     sweep_label: &str,
 ) -> Result<IsolatedOutcome, DevError> {
     let name = &case.name;
-    let args = isolated_args(name, include_ignored);
+    let extra_has_ignored_mode = libtest_extra
+        .iter()
+        .any(|arg| matches!(arg.as_str(), "--ignored" | "--include-ignored"));
+    let mut args: Vec<String> = isolated_args(name, include_ignored && !extra_has_ignored_mode)
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    args.extend(isolated_forwarded_flags(libtest_extra)?);
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
 
     let command = format!("{} {}", case.binary.executable, args.join(" "));
     cargo_line(commands, &command);
@@ -312,7 +322,10 @@ fn run_one_isolated_test(
             program: &case.binary.executable,
         },
         test_runner::LibtestInvocation {
-            args: test_runner::LibtestArgs::from_argv(test_runner::Launch::Direct { program: &case.binary.executable }, &args)?,
+            args: test_runner::LibtestArgs::from_argv(
+                test_runner::Launch::Direct { program: &case.binary.executable },
+                &arg_refs,
+            )?,
             cwd: &cwd,
             state_root,
             env: &env_pairs,
@@ -387,6 +400,32 @@ fn run_one_isolated_test(
         None => output::detail(&format!("PASS {name}")),
     }
     Ok(IsolatedOutcome::Passed(elapsed))
+}
+
+/// Forward option arguments to each exact test invocation. Positional filters
+/// already shaped the prepared plan, so repeating them would add another
+/// libtest filter beside the exact case name. Keep option values with their
+/// flags; the runner owns `--format` and `--test-threads`.
+fn isolated_forwarded_flags(args: &[String]) -> Result<Vec<String>, DevError> {
+    test_runner::LibtestArgs::validate_passthrough(args)?;
+    let mut forwarded = Vec::new();
+    let mut index = 0;
+    while let Some(arg) = args.get(index) {
+        if arg.starts_with('-') {
+            forwarded.push(arg.clone());
+            if matches!(
+                arg.as_str(),
+                "--skip" | "-Z" | "--color" | "--logfile" | "--shuffle-seed"
+            )
+                && let Some(value) = args.get(index + 1)
+            {
+                forwarded.push(value.clone());
+                index += 1;
+            }
+        }
+        index += 1;
+    }
+    Ok(forwarded)
 }
 
 /// Parse libtest `--list` output: one `module::name: test` line per test

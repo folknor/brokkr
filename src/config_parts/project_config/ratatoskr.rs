@@ -85,8 +85,12 @@ pub struct GateConfig {
     pub metrics: BTreeMap<String, MetricRule>,
 }
 
-/// One metric's threshold rules. All fields are optional; multiple
-/// fields stack as logical AND. See `docs/commands/ratatoskr-gate.md`.
+/// Raw TOML shape for one metric's threshold rules. The predicates remain
+/// independent so multiple checks can stack as logical AND; making this a
+/// one-of enum would reject that supported configuration. This is not the
+/// validated runtime form: `validate_gates` compiles every metric when the
+/// config loads, and rejects any metric with no effective predicate.
+/// See `docs/commands/ratatoskr-gate.md`.
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct MetricRule {
@@ -154,6 +158,9 @@ pub(crate) fn parse(
 /// reaches them: the reserved `all` name, every metric rule, and every
 /// baseline pin. An empty rule set stays legal here - it is what
 /// `--as-baseline` records against - and is refused only by an evaluating run.
+/// `MetricRule` intentionally remains a raw set of optional conjunctive
+/// predicates; compiling it here turns each metric into a nonempty executable
+/// rule set before any gate can run.
 fn validate_gates(config: &RatatoskrConfig) -> Result<(), DevError> {
     let reserved = crate::ratatoskr::sync::GATE_ALL;
     if config.gate.contains_key(reserved) {

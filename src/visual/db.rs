@@ -447,19 +447,23 @@ fn initialize(conn: &Connection, layout: &Layout) -> Result<(), DevError> {
         layout.runs, layout.results, layout.runs, layout.id, layout.id, layout.approvals, layout.id,
     ))?;
 
-    if layout.adapter && !has_column(conn, layout.runs, "adapter_name")? {
+    if layout.adapter && !crate::db::store::column_exists(conn, layout.runs, "adapter_name")? {
         conn.execute_batch(&format!(
             "ALTER TABLE {} ADD COLUMN adapter_name TEXT",
             layout.runs
         ))?;
     }
-    if layout.element && !has_column(conn, layout.results, "element_match_pct")? {
+    if layout.element
+        && !crate::db::store::column_exists(conn, layout.results, "element_match_pct")?
+    {
         conn.execute_batch(&format!(
             "ALTER TABLE {} ADD COLUMN element_match_pct REAL",
             layout.results
         ))?;
     }
-    if layout.element && !has_column(conn, layout.approvals, "element_match_pct")? {
+    if layout.element
+        && !crate::db::store::column_exists(conn, layout.approvals, "element_match_pct")?
+    {
         conn.execute_batch(&format!(
             "ALTER TABLE {} ADD COLUMN element_match_pct REAL",
             layout.approvals
@@ -468,37 +472,15 @@ fn initialize(conn: &Connection, layout: &Layout) -> Result<(), DevError> {
     Ok(())
 }
 
-fn has_table(conn: &Connection, table: &str) -> Result<bool, DevError> {
-    Ok(conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
-        [table],
-        |row| row.get(0),
-    )?)
-}
-
-fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool, DevError> {
-    let mut stmt = conn.prepare("SELECT name FROM pragma_table_info(?1)")?;
-    let columns = stmt
-        .query_map([table], |row| row.get::<_, String>(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(columns.iter().any(|name| name == column))
-}
-
-fn legacy_imported(conn: &Connection) -> rusqlite::Result<bool> {
-    let has_marker: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' \
-         AND name='brokkr_imports')",
-        [],
-        |row| row.get(0),
-    )?;
-    if !has_marker {
+fn legacy_imported(conn: &Connection) -> Result<bool, DevError> {
+    if !crate::db::store::table_exists(conn, "brokkr_imports")? {
         return Ok(false);
     }
-    conn.query_row(
+    Ok(conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM brokkr_imports WHERE migration = ?1)",
         [LEGACY_IMPORT],
         |row| row.get(0),
-    )
+    )?)
 }
 
 fn has_legacy_tables(path: &Path, layout: &Layout) -> Result<bool, DevError> {
@@ -506,9 +488,9 @@ fn has_legacy_tables(path: &Path, layout: &Layout) -> Result<bool, DevError> {
         return Ok(false);
     }
     let conn = crate::db::store::open_read_only(path)?;
-    Ok(has_table(&conn, layout.runs)?
-        || has_table(&conn, layout.results)?
-        || has_table(&conn, layout.approvals)?)
+    Ok(crate::db::store::table_exists(&conn, layout.runs)?
+        || crate::db::store::table_exists(&conn, layout.results)?
+        || crate::db::store::table_exists(&conn, layout.approvals)?)
 }
 
 fn read_legacy(path: &Path, layout: &Layout) -> Result<Option<LegacyData>, DevError> {
@@ -516,9 +498,9 @@ fn read_legacy(path: &Path, layout: &Layout) -> Result<Option<LegacyData>, DevEr
         return Ok(None);
     }
     let conn = crate::db::store::open_read_only(path)?;
-    let has_runs = has_table(&conn, layout.runs)?;
-    let has_results = has_table(&conn, layout.results)?;
-    let has_approvals = has_table(&conn, layout.approvals)?;
+    let has_runs = crate::db::store::table_exists(&conn, layout.runs)?;
+    let has_results = crate::db::store::table_exists(&conn, layout.results)?;
+    let has_approvals = crate::db::store::table_exists(&conn, layout.approvals)?;
     if !has_runs && !has_results && !has_approvals {
         return Ok(None);
     }
@@ -528,7 +510,9 @@ fn read_legacy(path: &Path, layout: &Layout) -> Result<Option<LegacyData>, DevEr
         ..LegacyData::default()
     };
     if has_runs {
-        let adapter = if layout.adapter && has_column(&conn, layout.runs, "adapter_name")? {
+        let adapter = if layout.adapter
+            && crate::db::store::column_exists(&conn, layout.runs, "adapter_name")?
+        {
             "adapter_name"
         } else {
             "NULL"
@@ -550,7 +534,9 @@ fn read_legacy(path: &Path, layout: &Layout) -> Result<Option<LegacyData>, DevEr
             .collect::<rusqlite::Result<Vec<_>>>()?;
     }
     if has_results {
-        let element = if layout.element && has_column(&conn, layout.results, "element_match_pct")? {
+        let element = if layout.element
+            && crate::db::store::column_exists(&conn, layout.results, "element_match_pct")?
+        {
             "element_match_pct"
         } else {
             "NULL"
@@ -572,7 +558,8 @@ fn read_legacy(path: &Path, layout: &Layout) -> Result<Option<LegacyData>, DevEr
             .collect::<rusqlite::Result<Vec<_>>>()?;
     }
     if has_approvals {
-        let element = if layout.element && has_column(&conn, layout.approvals, "element_match_pct")?
+        let element = if layout.element
+            && crate::db::store::column_exists(&conn, layout.approvals, "element_match_pct")?
         {
             "element_match_pct"
         } else {
@@ -620,7 +607,7 @@ fn import_legacy_data(
     conn.pragma_update(None, "foreign_keys", false)?;
     let import = (|| {
         conn.execute_batch("BEGIN IMMEDIATE")?;
-        let result = (|| -> rusqlite::Result<()> {
+        let result = (|| -> Result<(), DevError> {
             if legacy_imported(conn)? {
                 return Ok(());
             }
@@ -635,7 +622,7 @@ fn import_legacy_data(
         })();
         if let Err(error) = result {
             conn.execute_batch("ROLLBACK").ok();
-            return Err(DevError::from(error));
+            return Err(error);
         }
         if let Err(error) = conn.execute_batch("COMMIT") {
             conn.execute_batch("ROLLBACK").ok();

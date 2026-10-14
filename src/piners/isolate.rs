@@ -83,6 +83,9 @@ pub enum StopReason {
     Interrupted,
     /// An attempt could not be started.
     SpawnFailed(String),
+    /// An attempt's stdout or stderr exceeded its bound, so its evidence was
+    /// incomplete and the subset result could not be trusted.
+    CaptureIncomplete(String),
     /// An attempt could not be prepared (its dir or manifest).
     Setup(String),
     /// An attempt's captured streams could not be stored, so its evidence
@@ -119,6 +122,9 @@ impl StopReason {
                 .to_owned(),
             StopReason::Interrupted => "interrupted".to_owned(),
             StopReason::SpawnFailed(e) => format!("an attempt failed to spawn: {e}"),
+            StopReason::CaptureIncomplete(e) => {
+                format!("an attempt produced incomplete captured output: {e}")
+            }
             StopReason::Setup(e) => format!("an attempt could not be prepared: {e}"),
             StopReason::EvidenceStorage(e) => {
                 format!("an attempt's evidence could not be stored: {e}")
@@ -134,6 +140,7 @@ impl StopReason {
             StopReason::Deadline => "stopped at the deadline",
             StopReason::Interrupted => "interrupted",
             StopReason::SpawnFailed(_) => "stopped on a spawn failure",
+            StopReason::CaptureIncomplete(_) => "stopped on incomplete capture",
             StopReason::Setup(_) => "stopped on a setup failure",
             StopReason::EvidenceStorage(_) => "stopped on an evidence-storage failure",
             StopReason::HarnessFailure(_) => "stopped on a harness run_error",

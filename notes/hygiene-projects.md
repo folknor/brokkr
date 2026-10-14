@@ -59,12 +59,6 @@ Reported by: pbfhogg-nidhogg.
 
 `bench_tiles::is_ready_line` keys on the substring "listening" in nidhogg's stderr; pbfhogg `inspect` and `diff` text formats and nidhogg's shutdown kv are parsed without a pinned contract. The hunter says these can't be enforced mechanically from here; they need a structured output mode in those tools or a pinned fixture test on each side.
 
-## PRJ-018 - Dead code in pbfhogg/nidhogg
-
-Reported by: pbfhogg-nidhogg.
-
-Residue: unused context parameters still reach the pbfhogg/nidhogg handlers from `verify_cmd.rs` and `bootstrap.rs`.
-
 ## PRJ-024 - elivagar configuration and tunables
 
 Reported by: elivagar.
@@ -89,36 +83,6 @@ Reported by: ratatoskr.
 
 Residue: the hard-coded saehrimnir binary path lives in the external ratatoskr checkout, which nothing in this repository can change.
 
-## PRJ-035 - ratatoskr timing residue
-
-Reported by: ratatoskr.
-
-Residue: the generic child runner's copied wait constants in `output/child.rs` are still not injectable (the `"3"` literal is fixed).
-
-## PRJ-037 - ratatoskr errors
-
-Reported by: ratatoskr.
-
-Residue: `output/child.rs::verdict` still classifies `Ending::Deadline` as `DevError::Config`.
-
-## PRJ-039 - ratatoskr gate rules that can't fail
-
-Reported by: ratatoskr.
-
-Residue: load-time rejection exists (`validate_gates` -> `GateRules::compile`), but `MetricRule` still deserializes seven independent optional predicates, and no code-site note records the adjudication.
-
-## PRJ-044 - piners registry residue
-
-Reported by: piners.
-
-Residue: the duplicate TOML quoter in `rustflags.rs` remains beside `piners/toml_writer.rs::toml_string`.
-
-## PRJ-051 - piners resources and cross-module reach
-
-Reported by: piners.
-
-Residue: the shared captured-process runner still buffers whole streams (`CaptureCap::UNBOUNDED`).
-
 ## PRJ-055 - Visual and small-bench defaults, paths and rules duplicated
 
 Reported by: small-benches.
@@ -130,9 +94,3 @@ Residue: the `approved.png` exemption in `git/tree_state.rs` still restates slug
 Reported by: small-benches.
 
 Residue: visual thresholds and offender limits are still not configurable (Puppeteer is pinned, with an unverified hand-written lockfile).
-
-## PRJ-059 - Visual/small-bench tests
-
-Reported by: small-benches.
-
-Residue: the litehtml smoke script is still not registered as a `[[script_check]]`.

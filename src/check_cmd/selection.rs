@@ -59,7 +59,6 @@ mod selection {
         cargo: Vec<String>,
         libtest: Vec<String>,
         classified: Vec<ForwardedCargoArg>,
-        supplied: bool,
     }
 
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -80,7 +79,6 @@ mod selection {
                 cargo: cargo.to_vec(),
                 libtest: libtest.to_vec(),
                 classified: classify_cargo_args(cargo),
-                supplied: !args.is_empty(),
             }
         }
 
@@ -90,10 +88,6 @@ mod selection {
 
         pub(crate) fn libtest(&self) -> &[String] {
             &self.libtest
-        }
-
-        pub(crate) fn was_supplied(&self) -> bool {
-            self.supplied
         }
 
         /// Target selectors shape enumeration and are removed from each

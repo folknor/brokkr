@@ -480,6 +480,16 @@ When any limit omits data, the run warns and stores a truncation flag beside
 that iteration's sidecar rows; querying an affected run with `brokkr sidecar`
 warns that the stored trajectory is incomplete.
 
+The shared child supervisor also bounds captured stdout and stderr: 16 MiB per
+stream for ordinary commands and sidecar measurements, 64 MiB for the ratatoskr
+harness and piners corpus report, and 128 MiB for Cargo output. The
+`[cargo_env]` evaluator and `script_check` have smaller contract-specific limits.
+The supervisor keeps reading after a limit so the child cannot block on a full
+pipe. A captured command that exceeds its limit fails with a capture error rather
+than returning partial bytes to a result parser. A sidecar measurement retains
+the bounded bytes, marks its trajectory incomplete, and fails that iteration
+when a child stream exceeds its limit.
+
 ## Sidecar backup & rotation
 
 After each stored run (while the bench lock is still held), `backup_sidecar`

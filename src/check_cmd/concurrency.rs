@@ -25,7 +25,7 @@
 /// artifacts that target dirs do not separate. Resolved once per run and
 /// passed to every [`run_grouped`] call.
 fn resolve_serial_builds(project_root: &Path, configured: bool, sweeps: &[PlannedSweep]) -> bool {
-    let sweep_build_dir = sweeps.iter().any(|sweep| {
+    let sweep_probes: Vec<(bool, bool)> = sweeps.iter().map(|sweep| {
         let env: Vec<(&str, &str)> = sweep
             .env
             .iter()
@@ -35,15 +35,23 @@ fn resolve_serial_builds(project_root: &Path, configured: bool, sweeps: &[Planne
             project_root,
             crate::rustflags::EffectiveEnv::new(&env),
         )
-    });
-    let default_build_dir = sweeps.is_empty()
-        && build_dir_configured(
+    }).collect();
+    let default_probe = sweeps.is_empty().then(|| build_dir_configured(
             project_root,
             crate::rustflags::EffectiveEnv::new(&[]),
-        );
+        ));
+    let sweep_build_dir = sweep_probes.iter().any(|(configured, _)| *configured);
+    let config_unreadable = sweep_probes.iter().any(|(_, unreadable)| *unreadable)
+        || default_probe.is_some_and(|(_, unreadable)| unreadable);
+    let default_build_dir = default_probe.is_some_and(|(configured, _)| configured);
     let serial = configured || sweep_build_dir || default_build_dir;
     if serial && !configured {
-        output::detail("build phases: one cargo chain (a cargo build dir is configured)");
+        let reason = if config_unreadable {
+            "Cargo config could not be fully inspected"
+        } else {
+            "a cargo build dir is configured"
+        };
+        output::detail(&format!("build phases: one cargo chain ({reason})"));
     }
     serial
 }
@@ -51,8 +59,15 @@ fn resolve_serial_builds(project_root: &Path, configured: bool, sweeps: &[Planne
 fn build_dir_configured(
     project_root: &Path,
     env: crate::rustflags::EffectiveEnv<'_>,
-) -> bool {
-    crate::rustflags::CargoLaunchConfig::discover(project_root, env).build_dir
+) -> (bool, bool) {
+    match crate::rustflags::CargoLaunchConfig::discover(project_root, env) {
+        Ok(config) => (config.build_dir, false),
+        // This probe only chooses whether build groups may overlap. An
+        // incomplete config view must choose the serial path; the Cargo
+        // invocation that follows remains responsible for reporting its own
+        // unreadable or invalid config file.
+        Err(_) => (true, true),
+    }
 }
 
 /// The directory a sweep's cargo invocations write: its isolated target dir,

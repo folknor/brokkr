@@ -584,9 +584,10 @@ run alone (`src/piners/isolate.rs`). Evidence only, never scoring.
 - **Bounds.** At most 64 attempts (every invocation counts), and one shared
   deadline - the hang backstop, counted from the original launch - of which
   each attempt gets only what remains. Diagnosis stops on an interrupt, a
-  requested shutdown, the deadline, or a failure to spawn or prepare an
-  attempt; a diagnostic timeout is never attributed to a probe. On the cap or
-  the deadline it prints the unresolved subsets and why it stopped.
+  requested shutdown, the deadline, a failure to spawn or prepare an attempt,
+  or an attempt that exceeds its stdout/stderr capture bound; a diagnostic
+  timeout is never attributed to a probe. On the cap or the deadline it prints
+  the unresolved subsets and why it stopped.
 - **Wording.** It claims only what the attempts showed. A singleton that
   aborts: `probe X aborts when run alone (exit E / signal S; artefacts
   <dir>)` followed by its stderr (identical stderr from several singletons is

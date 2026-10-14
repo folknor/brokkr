@@ -16,6 +16,9 @@ pub(crate) fn cmd_verify(
     features: &[String],
     verbose: bool,
 ) -> Result<(), DevError> {
+    // The command catalogue admits the union of verify projects. Keep these
+    // variant checks here because each nested verify operation belongs to
+    // exactly one project.
     match verify {
         // ----- elivagar verify variants -----
         VerifyCommand::ElivVerify {
@@ -53,31 +56,23 @@ pub(crate) fn cmd_verify(
         // refuses to run without one).
         VerifyCommand::Batch { dataset } => {
             project::require(project, Project::Nidhogg, "verify batch")?;
-            nidhogg::cmd::verify_batch(dev_config, project, project_root, build_root, &dataset)
+            nidhogg::cmd::verify_batch(dev_config, project_root, build_root, &dataset)
         }
         VerifyCommand::NidGeocode { queries } => {
             project::require(project, Project::Nidhogg, "verify geocode")?;
-            nidhogg::cmd::verify_geocode(dev_config, project, project_root.as_path(), &queries)
+            nidhogg::cmd::verify_geocode(dev_config, &queries)
         }
         VerifyCommand::Readonly { dataset } => {
             project::require(project, Project::Nidhogg, "verify readonly")?;
             // Re-enters the hold when a `--commit` worktree already took it.
             let _lock = context::reenter_command_lock()?;
-            nidhogg::cmd::verify_readonly(
-                dev_config,
-                project,
-                project_root,
-                build_root,
-                &dataset,
-                features,
-            )
+            nidhogg::cmd::verify_readonly(dev_config, project_root, build_root, &dataset, features)
         }
         // ----- pbfhogg verify variants -----
         _ => {
             project::require(project, Project::Pbfhogg, "verify")?;
             pbfhogg::cmd::verify(
                 dev_config,
-                project,
                 project_root,
                 build_root,
                 verify,

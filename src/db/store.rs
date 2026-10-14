@@ -1,4 +1,4 @@
-//! Shared SQLite connection and schema-version policy for measurement stores.
+//! Shared SQLite connection and schema-version policy for brokkr stores.
 
 use std::path::Path;
 use std::time::Duration;
@@ -28,11 +28,19 @@ pub(crate) fn column_exists(
     column: &str,
 ) -> Result<bool, DevError> {
     let quoted_table = format!("\"{}\"", table.replace('"', "\"\""));
-    let mut stmt = conn.prepare(&format!("PRAGMA table_info({quoted_table})"))?;
+    // `table_xinfo` also sees generated columns, which piners uses to verify
+    // its projected schema during migration.
+    let mut stmt = conn.prepare(&format!("PRAGMA table_xinfo({quoted_table})"))?;
     let columns = stmt
         .query_map([], |row| row.get::<_, String>(1))?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(columns.iter().any(|name| name == column))
+}
+
+/// Convert a count or size to SQLite's signed integer domain, saturating
+/// instead of wrapping when the input is too large.
+pub(crate) fn as_i64<T: TryInto<i64>>(value: T) -> i64 {
+    value.try_into().unwrap_or(i64::MAX)
 }
 
 /// Open a database for a store that may create or migrate data.

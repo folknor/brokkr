@@ -87,16 +87,11 @@ pub struct GateRow {
     pub features: String,
 }
 
-/// Row data returned from queries (full row including generated `uuid`
-/// and `created_at`).
-#[allow(dead_code)]
+/// Row data needed to validate and evaluate a baseline, including its UUID.
 #[derive(Debug)]
 pub struct GateEntry {
     pub uuid: String,
-    pub created_at: i64,
-    pub git_commit: String,
     pub dirty: bool,
-    pub hostname: String,
     pub gate_name: String,
     pub script: String,
     pub fixture: String,
@@ -188,9 +183,8 @@ impl GateDb {
     ) -> Result<Option<GateEntry>, DevError> {
         let pin_len = validate_pin(pin)?;
         let mut stmt = self.conn.prepare(
-            "SELECT uuid, created_at, git_commit, dirty, hostname, gate_name, \
-                    script, fixture, profile, elapsed_ms, exit_code, success, \
-                    sidecar, meta, features \
+            "SELECT uuid, dirty, gate_name, script, fixture, profile, \
+                    elapsed_ms, exit_code, success, sidecar, meta, features \
              FROM gate_runs \
              WHERE substr(uuid, 1, ?2) = ?1 AND hostname = ?3 AND uuid != ?4 \
              ORDER BY uuid LIMIT ?5",
@@ -289,20 +283,17 @@ fn validate_pin(pin: &str) -> Result<i64, DevError> {
 fn row_to_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<GateEntry> {
     Ok(GateEntry {
         uuid: row.get(0)?,
-        created_at: row.get(1)?,
-        git_commit: row.get(2)?,
-        dirty: row.get::<_, i64>(3)? != 0,
-        hostname: row.get(4)?,
-        gate_name: row.get(5)?,
-        script: row.get(6)?,
-        fixture: row.get(7)?,
-        profile: row.get(8)?,
-        elapsed_ms: row.get(9)?,
-        exit_code: row.get(10)?,
-        success: row.get::<_, i64>(11)? != 0,
-        sidecar: row.get(12)?,
-        meta: row.get(13)?,
-        features: row.get(14)?,
+        dirty: row.get::<_, i64>(1)? != 0,
+        gate_name: row.get(2)?,
+        script: row.get(3)?,
+        fixture: row.get(4)?,
+        profile: row.get(5)?,
+        elapsed_ms: row.get(6)?,
+        exit_code: row.get(7)?,
+        success: row.get::<_, i64>(8)? != 0,
+        sidecar: row.get(9)?,
+        meta: row.get(10)?,
+        features: row.get(11)?,
     })
 }
 
@@ -337,9 +328,9 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
-    fn open_mem() -> GateDb {
-        let conn = Connection::open_in_memory().unwrap();
-        GateDb::initialize(conn).unwrap()
+    fn open_test_db(test_name: &str) -> GateDb {
+        let dir = crate::test_scratch::scratch("ratatoskr-gate-store", test_name);
+        GateDb::open(&dir.join("gate.db")).unwrap()
     }
 
     fn sample_row() -> GateRow {
@@ -374,28 +365,37 @@ mod tests {
 
     #[test]
     fn v1_database_migrates_with_legacy_rows_unrecorded() {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(CREATE_TABLE_V1).unwrap();
-        conn.pragma_update(None, "user_version", 1).unwrap();
-        conn.execute(
-            "INSERT INTO gate_runs VALUES ('legacy1', 0, 'abc', 0, 'host-a', \
-             'jmap_small', 's.lua', 'fx', 'release', 10, 0, 1, '{}', '{}')",
-            [],
-        )
-        .unwrap();
-        run_migrations(&conn).unwrap();
-        // Idempotent: a second pass must not try to re-add the column.
-        run_migrations(&conn).unwrap();
-        let version: i64 = conn
+        let dir = crate::test_scratch::scratch(
+            "ratatoskr-gate-store",
+            "v1_database_migrates_with_legacy_rows_unrecorded",
+        );
+        let path = dir.join("gate.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(CREATE_TABLE_V1).unwrap();
+            conn.pragma_update(None, "user_version", 1).unwrap();
+            conn.execute(
+                "INSERT INTO gate_runs VALUES ('legacy1', 0, 'abc', 0, 'host-a', \
+                 'jmap_small', 's.lua', 'fx', 'release', 10, 0, 1, '{}', '{}')",
+                [],
+            )
+            .unwrap();
+        }
+        let db = GateDb::open(&path).unwrap();
+        let version: i64 = db
+            .conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
         assert_eq!(version, SCHEMA_VERSION);
-        let db = GateDb { conn };
         let legacy = db
             .lookup_baseline("legacy1", "host-a", "current")
             .unwrap()
             .unwrap();
         assert_eq!(legacy.features, None);
+        drop(db);
+
+        // Reopening at the current version must not repeat the migration.
+        let db = GateDb::open(&path).unwrap();
         let uuid = db.insert(&sample_row()).unwrap();
         let fresh = db
             .lookup_baseline(&uuid, "host-a", "current")
@@ -406,7 +406,11 @@ mod tests {
 
     #[test]
     fn open_migrates_v1_file_and_enables_wal() {
-        let path = crate::test_scratch::scratch_path("db-gate", "open_migrates_v1_file");
+        let dir = crate::test_scratch::scratch(
+            "ratatoskr-gate-store",
+            "open_migrates_v1_file_and_enables_wal",
+        );
+        let path = dir.join("gate.db");
         {
             let conn = Connection::open(&path).unwrap();
             conn.execute_batch(CREATE_TABLE_V1).unwrap();
@@ -473,13 +477,20 @@ mod tests {
 
     #[test]
     fn insert_then_lookup_by_full_uuid() {
-        let db = open_mem();
+        let db = open_test_db("insert_then_lookup_by_full_uuid");
         let uuid = db.insert(&sample_row()).unwrap();
         let entry = db
             .lookup_baseline(&uuid, "host-a", "current")
             .unwrap()
             .unwrap();
+        assert!(!entry.dirty);
         assert_eq!(entry.gate_name, "jmap_small");
+        assert_eq!(entry.script, "tests/sync/jmap.lua");
+        assert_eq!(entry.fixture, "jmap-init");
+        assert_eq!(entry.profile, "release");
+        assert_eq!(entry.elapsed_ms, 1234);
+        assert_eq!(entry.exit_code, 0);
+        assert!(entry.success);
         assert_eq!(entry.sidecar, r#"{"rss_peak_kb":8192,"sample_count":12}"#);
         assert_eq!(entry.meta, r#"{"correct":1}"#);
         assert_eq!(entry.features.as_deref(), Some("fast-sync"));
@@ -487,7 +498,7 @@ mod tests {
 
     #[test]
     fn lookup_by_prefix() {
-        let db = open_mem();
+        let db = open_test_db("lookup_by_prefix");
         let uuid = db.insert(&sample_row()).unwrap();
         let prefix = &uuid[..8];
         let entry = db
@@ -499,7 +510,7 @@ mod tests {
 
     #[test]
     fn lookup_scoped_by_hostname() {
-        let db = open_mem();
+        let db = open_test_db("lookup_scoped_by_hostname");
         let uuid = db.insert(&sample_row()).unwrap();
         // Same UUID, wrong host => not found.
         assert!(
@@ -511,7 +522,7 @@ mod tests {
 
     #[test]
     fn empty_pin_is_refused() {
-        let db = open_mem();
+        let db = open_test_db("empty_pin_is_refused");
         db.insert(&sample_row()).unwrap();
         assert!(db.lookup_baseline("", "host-a", "current").is_err());
         assert!(db.lookup_baseline("ab cd", "host-a", "current").is_err());
@@ -522,7 +533,7 @@ mod tests {
     /// prefixes it must never make it its own baseline.
     #[test]
     fn lookup_never_matches_the_current_run() {
-        let db = open_mem();
+        let db = open_test_db("lookup_never_matches_the_current_run");
         insert_with_uuid(&db, "aaaa1111");
         assert!(
             db.lookup_baseline("aaaa", "host-a", "aaaa1111")
@@ -545,7 +556,7 @@ mod tests {
 
     #[test]
     fn ambiguous_prefix_is_refused() {
-        let db = open_mem();
+        let db = open_test_db("ambiguous_prefix_is_refused");
         insert_with_uuid(&db, "bbbb1111");
         insert_with_uuid(&db, "bbbb2222");
         let err = db.lookup_baseline("bbbb", "host-a", "current").unwrap_err();
@@ -565,7 +576,7 @@ mod tests {
 
     #[test]
     fn exact_match_wins_over_longer_prefixed_rows() {
-        let db = open_mem();
+        let db = open_test_db("exact_match_wins_over_longer_prefixed_rows");
         insert_with_uuid(&db, "cccc");
         insert_with_uuid(&db, "cccc9999");
         let entry = db
@@ -577,7 +588,7 @@ mod tests {
 
     #[test]
     fn like_wildcards_are_literal() {
-        let db = open_mem();
+        let db = open_test_db("like_wildcards_are_literal");
         insert_with_uuid(&db, "dddd1111");
         assert!(
             db.lookup_baseline("%", "host-a", "current")
@@ -594,7 +605,7 @@ mod tests {
 
     #[test]
     fn hosts_with_uuid_ignores_host_scope() {
-        let db = open_mem();
+        let db = open_test_db("hosts_with_uuid_ignores_host_scope");
         let uuid = db.insert(&sample_row()).unwrap();
         // The row is on host-a; asking from host-b's perspective, the
         // lookup fails but the UUID is still locatable.
@@ -609,7 +620,7 @@ mod tests {
 
     #[test]
     fn count_for_gate_excludes_current_run() {
-        let db = open_mem();
+        let db = open_test_db("count_for_gate_excludes_current_run");
         let first = db.insert(&sample_row()).unwrap();
         let current = db.insert(&sample_row()).unwrap();
         assert_eq!(
@@ -628,7 +639,7 @@ mod tests {
 
     #[test]
     fn lookup_missing_returns_none() {
-        let db = open_mem();
+        let db = open_test_db("lookup_missing_returns_none");
         assert!(
             db.lookup_baseline("deadbeef", "host-a", "current")
                 .unwrap()

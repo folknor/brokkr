@@ -19,7 +19,6 @@ mod tests {
     )]
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     use crate::config::{Dataset, OscEntry, PbfEntry, PmtilesEntry, ResolvedPaths};
     use crate::elivagar::archive_store::{ArchiveKey, ArchiveStore};
@@ -27,15 +26,7 @@ mod tests {
     use super::*;
 
     fn unique_test_dir(name: &str) -> PathBuf {
-        let cwd = std::env::current_dir().expect("cwd");
-        let stamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("time")
-            .as_nanos();
-        crate::clean::layout::ProjectState::new(&cwd)
-            .root()
-            .join("test-artifacts")
-            .join(format!("resolve-{name}-{}-{stamp}", std::process::id()))
+        crate::test_scratch::scratch("resolve-parts", name)
     }
 
     fn mk_paths(data_dir: &Path, datasets: HashMap<String, Dataset>) -> ResolvedPaths {
@@ -97,7 +88,6 @@ mod tests {
     #[test]
     fn resolve_default_osc_path_uses_single_entry() {
         let dir = unique_test_dir("single-osc");
-        std::fs::create_dir_all(&dir).expect("mkdir");
         let osc = dir.join("one.osc.gz");
         std::fs::write(&osc, "x").expect("write");
 
@@ -213,7 +203,6 @@ mod tests {
     #[test]
     fn resolve_snapshot_pbf_path_base_uses_legacy_table() {
         let dir = unique_test_dir("snap-base");
-        std::fs::create_dir_all(&dir).expect("mkdir");
         std::fs::write(dir.join("planet-base.osm.pbf"), "x").expect("write");
 
         let mut ds = empty_dataset();
@@ -246,7 +235,6 @@ mod tests {
         use crate::config::Snapshot;
 
         let dir = unique_test_dir("snap-named");
-        std::fs::create_dir_all(&dir).expect("mkdir");
         std::fs::write(dir.join("planet-20260411.osm.pbf"), "x").expect("write");
 
         let mut snap = Snapshot {
@@ -286,7 +274,6 @@ mod tests {
         use crate::config::Snapshot;
 
         let dir = unique_test_dir("snap-missing-variant");
-        std::fs::create_dir_all(&dir).expect("mkdir");
         std::fs::write(dir.join("planet-20260411.osm.pbf"), "x").expect("write");
 
         // Snapshot has only `raw` - user asks for `indexed`. The error should
@@ -371,7 +358,6 @@ mod tests {
     #[test]
     fn resolve_single_osc_returns_explicit_seq() {
         let dir = unique_test_dir("single-osc-explicit");
-        std::fs::create_dir_all(&dir).expect("mkdir");
         std::fs::write(dir.join("planet-4914.osc.gz"), "x").expect("write");
 
         let mut ds = empty_dataset();
@@ -403,7 +389,6 @@ mod tests {
     #[test]
     fn resolve_single_osc_auto_selects_when_one_configured() {
         let dir = unique_test_dir("single-osc-auto");
-        std::fs::create_dir_all(&dir).expect("mkdir");
         std::fs::write(dir.join("denmark-4705.osc.gz"), "x").expect("write");
 
         let mut ds = empty_dataset();
@@ -466,7 +451,6 @@ mod tests {
         use crate::config::Snapshot;
 
         let dir = unique_test_dir("snap-osc-named");
-        std::fs::create_dir_all(&dir).expect("mkdir");
         std::fs::write(dir.join("planet-20260411-seq4969.osc.gz"), "x").expect("write");
 
         let mut snap = Snapshot {
@@ -507,7 +491,6 @@ mod tests {
         use crate::config::Snapshot;
 
         let dir = unique_test_dir("snap-osc-range");
-        std::fs::create_dir_all(&dir).expect("mkdir");
         for n in 4969..=4971 {
             std::fs::write(dir.join(format!("planet-20260411-seq{n}.osc.gz")), "x")
                 .expect("write");
@@ -578,7 +561,6 @@ mod tests {
     #[test]
     fn resolve_osc_range_returns_paths_in_seq_order() {
         let dir = unique_test_dir("osc-range-ok");
-        std::fs::create_dir_all(&dir).expect("mkdir");
         for n in 4914..=4916 {
             std::fs::write(dir.join(format!("planet-{n}.osc.gz")), "x").expect("write");
         }
@@ -616,7 +598,6 @@ mod tests {
     #[test]
     fn resolve_osc_range_fails_fast_on_missing_seq() {
         let dir = unique_test_dir("osc-range-missing");
-        std::fs::create_dir_all(&dir).expect("mkdir");
         std::fs::write(dir.join("planet-4914.osc.gz"), "x").expect("write");
         std::fs::write(dir.join("planet-4916.osc.gz"), "x").expect("write");
 

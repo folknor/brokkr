@@ -295,12 +295,16 @@ mod tests {
     #[test]
     fn drop_without_finalize_preserves() {
         let parent = tmpdir("artefacts_drop");
-        let path = {
+        let (path, evidence) = {
             let dir = ArtefactDir::allocate(&parent, "test_zeta", false).unwrap();
-            dir.path().to_owned()
+            let path = dir.path().to_owned();
+            let evidence = path.join("diagnostic.txt");
+            fs::write(&evidence, "failed run evidence").unwrap();
+            (path, evidence)
         };
         // Dropped without a finalize call - safer to keep diagnostics.
-        assert!(path.exists());
+        assert!(path.is_dir());
+        assert_eq!(fs::read_to_string(evidence).unwrap(), "failed run evidence");
     }
 
     #[test]

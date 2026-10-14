@@ -774,14 +774,7 @@ mod tests {
     use std::path::PathBuf;
 
     fn temp_dir(suffix: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "brokkr-sidecar-test-{}-{}",
-            std::process::id(),
-            suffix,
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+        crate::test_scratch::scratch("db-sidecar", suffix)
     }
 
     /// Create a sidecar DB and insert a minimal marker row, returning the path.

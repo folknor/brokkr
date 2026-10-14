@@ -174,6 +174,9 @@ pub struct GitInfo {
 /// exactly as `brokkr.toml` itself is: brokkr writes dataset registrations
 /// into whichever file holds the dataset.
 pub fn collect(workspace_root: &Path) -> Result<GitInfo, DevError> {
+    // This convenience path remains for callers that only have a repository
+    // path. Callers with startup `ConfigSources` must pass `sources.included()`
+    // to `collect_with_config_paths` so provenance is not recomposed here.
     collect_with_config_paths(workspace_root, &included_config_files(workspace_root))
 }
 

@@ -222,7 +222,7 @@ fn try_run(project_root: &Path) -> Result<(Vec<DepsEvent>, Vec<DepsEvent>), Stri
         Err(DevError::Spawn { error, .. }) if error.kind() == ErrorKind::NotFound => {
             return Err(INSTALL_HINT.to_string());
         }
-        Err(err) => return Err(format!("spawn failed: {err}")),
+        Err(err) => return Err(format!("failed to run {TOOL}: {err}")),
     };
     if run.killed_on_deadline() {
         return Err(format!(

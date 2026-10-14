@@ -69,6 +69,10 @@ impl GateRules {
             let key = MetricKey::parse(name)
                 .map_err(|reason| DevError::Config(format!("gate `{gate_name}`: {reason}")))?;
             let predicates = compile_predicates(gate_name, name, rule)?;
+            // MetricRule is the deserialized TOML shape, where an all-None
+            // rule is representable. Keep this boundary check here as well as
+            // in config loading: callers constructing GateConfig directly
+            // must not turn a no-op rule into a passing metric.
             if predicates.is_empty() {
                 return Err(DevError::Config(format!(
                     "gate `{gate_name}`: no predicate set on metric `{name}` - a rule like that \

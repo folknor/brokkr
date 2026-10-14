@@ -25,6 +25,12 @@ pub struct ManifestViolation {
     pub message: String,
 }
 
+/// Result counters for one manifest scan, used by the convention status line.
+pub(crate) struct ManifestScan {
+    pub violations: Vec<ManifestViolation>,
+    pub files: usize,
+}
+
 /// `file:line-less: [rule] message` - manifests are reported at file scope.
 pub fn format_one(v: &ManifestViolation) -> String {
     format!("{}: [{}] {}", v.file.display(), v.rule, v.message)
@@ -195,10 +201,44 @@ fn starts_new_group(prefix: &str) -> bool {
 
 /// Scan every snapshot manifest matching the config's globs and run the enabled
 /// checks, newest concern first in declaration order.
+#[cfg(test)]
 pub fn scan(
     tree: &crate::scope::TreeSnapshot,
     cfg: &ManifestConfig,
 ) -> Result<Vec<ManifestViolation>, DevError> {
+    Ok(scan_report(tree, cfg)?.violations)
+}
+
+/// Validate manifest globs and version granularity while config is loaded.
+pub(crate) fn validate_config(cfg: &ManifestConfig) -> Result<(), DevError> {
+    let default_paths = [String::from("**/Cargo.toml")];
+    let path_globs = if cfg.paths.is_empty() {
+        &default_paths[..]
+    } else {
+        &cfg.paths[..]
+    };
+    globs::build_set(path_globs, "[manifest] paths")?;
+    globs::build_set(&cfg.exclude, "[manifest] exclude")?;
+    globs::build_set(&cfg.shape_exclude, "[manifest] shape_exclude")?;
+    validate_granularity(cfg)
+}
+
+fn validate_granularity(cfg: &ManifestConfig) -> Result<(), DevError> {
+    for g in &cfg.version_align {
+        if !matches!(g.granularity.as_str(), "" | "major" | "minor") {
+            return Err(DevError::Config(format!(
+                "[[manifest.version_align]] granularity {:?} must be \"major\" or \"minor\"",
+                g.granularity
+            )));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn scan_report(
+    tree: &crate::scope::TreeSnapshot,
+    cfg: &ManifestConfig,
+) -> Result<ManifestScan, DevError> {
     let default_paths = [String::from("**/Cargo.toml")];
     let path_globs = if cfg.paths.is_empty() {
         &default_paths[..]
@@ -208,14 +248,7 @@ pub fn scan(
     let paths = globs::build_set(path_globs, "[manifest] paths")?;
     let exclude = globs::build_set(&cfg.exclude, "[manifest] exclude")?;
     let shape_exclude = globs::build_set(&cfg.shape_exclude, "[manifest] shape_exclude")?;
-    for g in &cfg.version_align {
-        if !matches!(g.granularity.as_str(), "" | "major" | "minor") {
-            return Err(DevError::Config(format!(
-                "[[manifest.version_align]] granularity {:?} must be \"major\" or \"minor\"",
-                g.granularity
-            )));
-        }
-    }
+    validate_granularity(cfg)?;
 
     let files = tree.files();
     // Dead globs are warned about, not refused - see `globs::warn_unmatched`.
@@ -240,12 +273,14 @@ pub fn scan(
 
     let mut manifests: Vec<(PathBuf, DocumentMut)> = Vec::new();
     let mut out = Vec::new();
+    let mut scanned = 0usize;
     for rel in included {
         // An unreadable file is an error (see `TreeSnapshot::read_file`); only a
         // path deleted from the working tree is skipped.
         let Some(bytes) = tree.read_file(&rel)? else {
             continue;
         };
+        scanned += 1;
         // A manifest that is not UTF-8 or not TOML is reported, not skipped:
         // skipping it passed every enabled check on a file none of them looked
         // at, and the adapter-group check silently lost that crate. A broken
@@ -277,7 +312,10 @@ pub fn scan(
     if let Some(ag) = &cfg.adapter_group {
         check_adapter_group(&manifests, ag, &mut out)?;
     }
-    Ok(out)
+    Ok(ManifestScan {
+        violations: out,
+        files: scanned,
+    })
 }
 
 /// The violation for an in-scope manifest no check could read. `why` is

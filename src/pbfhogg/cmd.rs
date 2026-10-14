@@ -7,7 +7,7 @@ use crate::error::DevError;
 use crate::measure::MeasureRequest;
 use crate::output;
 use crate::preflight;
-use crate::project::{self, Project};
+use crate::project::Project;
 use crate::resolve::{self, resolve_bbox, resolve_pbf_with_size};
 use crate::tools;
 
@@ -338,7 +338,6 @@ fn dry_run_paths(req: &MeasureRequest) -> Result<config::ResolvedPaths, DevError
 #[allow(clippy::too_many_lines)]
 pub(crate) fn verify(
     dev_config: &config::DevConfig,
-    _project: Project,
     project_root: &crate::project::ProjectRoot,
     build_root: &crate::project::BuildRoot,
     verify: VerifyCommand,
@@ -681,7 +680,6 @@ fn verify_name(verify: &VerifyCommand) -> &'static str {
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn download(
     dev_config: &config::DevConfig,
-    project: Project,
     project_root: &crate::project::ProjectRoot,
     build_root: &crate::project::BuildRoot,
     region: &str,
@@ -690,8 +688,6 @@ pub(crate) fn download(
     refresh: bool,
     force: bool,
 ) -> Result<(), DevError> {
-    project::require(project, Project::Pbfhogg, "download")?;
-
     let pi = bootstrap(build_root)?;
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
     let (project_root, build_root) = (project_root.as_path(), build_root.as_path());

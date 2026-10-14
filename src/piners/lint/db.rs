@@ -18,6 +18,7 @@ use std::path::Path;
 
 use rusqlite::params;
 
+use crate::db::store::as_i64;
 use crate::error::DevError;
 use crate::piners::lint::diff::Signature;
 use crate::piners::lint::{PinnableDisposition, ProbeResult};
@@ -78,12 +79,6 @@ pub struct RunMeta<'a> {
     pub probe_count: usize,
     /// Captured validator stderr (or a spawn-error message).
     pub stderr: &'a str,
-}
-
-/// SQLite stores signed i64; counts are `usize`. Clamp rather than wrap -
-/// these are diagnostic/probe counts that never approach `i64::MAX`.
-fn as_i64<T: TryInto<i64>>(v: T) -> i64 {
-    v.try_into().unwrap_or(i64::MAX)
 }
 
 /// Map an `Option<bool>` to the `0/1/NULL` SQLite tri-state.

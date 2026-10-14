@@ -278,7 +278,7 @@ impl SyncRunner<'_> {
         let binary_str = self.built.binary.display().to_string();
         // Guards nest; this one is the borrow the process-group isolation needs.
         let signal_guard = crate::shutdown::SigtermGuard::install();
-        let deadline_capture = output::run_captured_with_env_and_deadline(
+        let deadline_capture = output::run_captured_with_env_and_deadline_with_options(
             &binary_str,
             &[HARNESS_MODE_FLAG, &script_str],
             self.project_root,
@@ -286,6 +286,11 @@ impl SyncRunner<'_> {
             ceiling,
             Some(&|pid| lock.set_child_pid(pid)),
             crate::shutdown::ChildIsolation::ProcessGroup(&signal_guard),
+            output::child::ChildOptions {
+                capture_cap: output::child::CaptureCap::LARGE,
+                sigterm_grace: crate::ratatoskr::saehrimnir::SHUTDOWN_BUDGET,
+                ..output::child::ChildOptions::DEFAULT
+            },
         );
         drop(signal_guard);
 

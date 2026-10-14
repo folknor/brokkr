@@ -835,7 +835,7 @@ fn run(cli: Cli, detection: Option<&project::Detection>) -> Result<(), DevError>
                 target: target.clone(), commit: commit.clone(),
                 compare: compare.clone().map(|values| crate::request::compare_pair(values, "--compare")).transpose()?,
                 baselines: *baselines, name: name.clone(), lenient: *lenient, args: args.clone(),
-            }),
+            }, detection),
         Command::Deps { json, no_fail, focus } => run_deps(*json, *no_fail, focus.clone(), detection),
         Command::Check { features, no_default_features, package, profile, gate, force_rust, json, fix_gremlins, timings, commands, textlint_names, script_names, args } => run_check(features, no_default_features, package, profile, gate, force_rust, json, fix_gremlins, timings, commands, textlint_names, script_names, args, detection),
         Command::Clippy { package, all_features, features, no_default_features, sweep, env, lib } => run_clippy(package, all_features, features, no_default_features, sweep, env, lib, detection),
@@ -890,7 +890,7 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
         | Command::BuildGeocodeIndex { .. } => unreachable!(
             "top-level command dispatch must not re-enter through run_project"
         ),
-        Command::Env => cmd_env(dev_config, project, &detection.project_root, &detection.build_root),
+        Command::Env => cmd_env(dev_config, project, &detection.project_root, &detection.build_root, &detection.config_sources),
         Command::DiffSnapshots {
             mode,
             dataset,
@@ -1544,7 +1544,6 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
             let _lock = context::reenter_command_lock()?;
             pbfhogg::cmd::download(
                 dev_config,
-                project,
                 &detection.project_root,
                 &detection.build_root,
                 &region,
@@ -1725,7 +1724,6 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
             let features = resolve_features(dev_config, &[]);
             nidhogg::cmd::serve(
                 dev_config,
-                project,
                 &detection.project_root,
                 &detection.build_root,
                 data_dir.as_deref(),
@@ -1734,14 +1732,13 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
                 &features,
             )
         }
-        Command::Stop => nidhogg::cmd::stop(project, project_root),
-        Command::Status => nidhogg::cmd::status(dev_config, project, project_root),
+        Command::Stop => nidhogg::cmd::stop(project_root),
+        Command::Status => nidhogg::cmd::status(dev_config),
         Command::Ingest { variant, dataset } => {
             let _lock = context::reenter_command_lock()?;
             let features = resolve_features(dev_config, &[]);
             nidhogg::cmd::ingest(
                 dev_config,
-                project,
                 &detection.project_root,
                 &detection.build_root,
                 &variant,
@@ -1752,13 +1749,13 @@ fn run_project(command: Command, detection: &project::Detection) -> Result<(), D
         Command::Update { args } => {
             let _lock = context::reenter_command_lock()?;
             let features = resolve_features(dev_config, &[]);
-            nidhogg::cmd::update(project, project_root, build_root, &args, &features)
+            nidhogg::cmd::update(project_root, build_root, &args, &features)
         }
         Command::Query { json } => {
-            nidhogg::cmd::query(dev_config, project, project_root, json.as_deref())
+            nidhogg::cmd::query(dev_config, json.as_deref())
         }
         Command::Geocode { term } => {
-            nidhogg::cmd::geocode(dev_config, project, project_root, &term)
+            nidhogg::cmd::geocode(dev_config, &term)
         }
         // ----- visual testing commands (litehtml + sluggrs) -----
         Command::Visual { args, litehtml } => {

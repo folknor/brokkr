@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::config::{self, DevConfig, project_config::ProjectConfig};
+use crate::config::{self, ConfigSources, DevConfig, project_config::ProjectConfig};
 use crate::error::DevError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,7 +21,9 @@ pub enum Project {
     Mogwai,
     /// Any project not in the hardcoded set. Gets generic command support
     /// (check, run, hotpath, results, env, clean, history).
-    /// The `&'static str` is leaked once at startup from the TOML value.
+    /// The parser leaks the TOML value once so `Project` can remain `Copy`.
+    /// Removing that allocation requires an owned representation and a
+    /// coordinated update to the parser and its project consumers.
     Other(&'static str),
 }
 
@@ -186,6 +188,10 @@ pub struct Detection {
     pub project_config: ProjectConfig,
     pub project_root: ProjectRoot,
     pub build_root: BuildRoot,
+    /// Which files the composed config came from (user layer, includes,
+    /// `brokkr.toml`), recorded once at startup so later consumers (`env`,
+    /// `bench`'s dirty check) never recompose.
+    pub config_sources: ConfigSources,
 }
 
 /// Locate the `brokkr.toml` governing `cwd`: the file in `cwd` itself, or
@@ -212,7 +218,7 @@ pub(crate) fn find_config_dir(cwd: &Path) -> Option<PathBuf> {
 /// (in cwd, or one level up).
 ///
 /// This is the single entry point - `brokkr.toml` is read and parsed exactly
-/// once via [`config::load`]. Errors when no `brokkr.toml` is found at either
+/// once via [`config::load_with_sources`]. Errors when no `brokkr.toml` is found at either
 /// location.
 pub fn detect() -> Result<Detection, DevError> {
     let cwd = std::env::current_dir()
@@ -223,7 +229,7 @@ pub fn detect() -> Result<Detection, DevError> {
             cwd.display()
         ))
     })?;
-    let (project, config, project_config) = config::load(&config_dir)?;
+    let (project, config, project_config, config_sources) = config::load_with_sources(&config_dir)?;
     crate::cargo_env::install(&config.cargo_env);
     Ok(Detection {
         project,
@@ -231,6 +237,7 @@ pub fn detect() -> Result<Detection, DevError> {
         project_config,
         project_root: ProjectRoot(config_dir),
         build_root: BuildRoot::live(cwd),
+        config_sources,
     })
 }
 
@@ -246,7 +253,7 @@ pub fn detect_optional() -> Result<Option<Detection>, DevError> {
     let Some(config_dir) = find_config_dir(&cwd) else {
         return Ok(None);
     };
-    let (project, config, project_config) = config::load(&config_dir)?;
+    let (project, config, project_config, config_sources) = config::load_with_sources(&config_dir)?;
     crate::cargo_env::install(&config.cargo_env);
     Ok(Some(Detection {
         project,
@@ -254,6 +261,7 @@ pub fn detect_optional() -> Result<Option<Detection>, DevError> {
         project_config,
         project_root: ProjectRoot(config_dir),
         build_root: BuildRoot::live(cwd),
+        config_sources,
     }))
 }
 

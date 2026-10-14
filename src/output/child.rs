@@ -7,6 +7,10 @@ pub use crate::cargo_env::SpawnProfile;
 use crate::error::DevError;
 use crate::shutdown::ChildIsolation;
 
+const DEFAULT_CAPTURE_BYTES: usize = 16 * 1024 * 1024;
+const LARGE_CAPTURE_BYTES: usize = 64 * 1024 * 1024;
+const CARGO_CAPTURE_BYTES: usize = 128 * 1024 * 1024;
+
 /// Why a child stopped. The supervisor assigns this once at the event that
 /// ended the run, so callers do not reconstruct it from competing flags.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -100,10 +104,10 @@ pub fn verdict(
             program: program.to_owned(),
             error: std::io::Error::other(message.clone()),
         }),
-        Ending::Deadline(limit) => IterationVerdict::Failed(DevError::Config(format!(
-            "{program} exceeded its {:.1}s deadline",
-            limit.as_secs_f64()
-        ))),
+        Ending::Deadline(limit) => IterationVerdict::Failed(DevError::ChildFailure {
+            program: program.to_owned(),
+            failure: crate::error::ChildFailureKind::Deadline(*limit),
+        }),
         Ending::StopMarker(_) => IterationVerdict::Counted,
         Ending::Exited(code) if *code == 0 || ok_codes.contains(code) => IterationVerdict::Counted,
         Ending::Exited(code) => IterationVerdict::Failed(DevError::Subprocess {
@@ -163,8 +167,9 @@ impl CapturedOutput {
         self.ending.signal()
     }
 
-    /// Return `Ok(())` if the process exited successfully, or a `DevError::Subprocess`
-    /// with the captured stderr if it failed.
+    /// Return `Ok(())` if the process exited successfully, a
+    /// `DevError::Subprocess` for an unsuccessful exit, or `ChildFailure` for
+    /// a supervised deadline.
     pub fn check_success(&self, program: &str) -> Result<(), DevError> {
         self.check_success_or(program, &[])
     }
@@ -183,7 +188,8 @@ impl CapturedOutput {
 /// Run a subprocess, capturing stdout and stderr.
 ///
 /// Returns `CapturedOutput` on success (even if the process exited non-zero).
-/// Returns `DevError::Spawn` only if the process could not be spawned.
+/// Returns `DevError::Spawn` if the process could not be spawned, or a
+/// `DevError::ChildFailure` if capture exceeded its bound or did not close.
 ///
 /// A plain child: `[cargo_env]` is never evaluated for it. A cargo launch goes
 /// through [`run_cargo`], which says so explicitly.
@@ -209,9 +215,10 @@ pub fn run_cargo(
         None,
         ChildIsolation::Inherit,
         SpawnProfile::Cargo { phase },
-        CaptureCap::UNBOUNDED,
+        ChildOptions::CARGO,
+        false,
     )?;
-    Ok(dc.captured)
+    captured_without_incomplete_output("cargo", dc, ChildOptions::CARGO)
 }
 
 /// As [`run_captured`], but invokes `on_spawn` with the child's PID
@@ -238,9 +245,10 @@ pub fn run_captured_observed(
         on_spawn,
         isolation,
         profile,
-        CaptureCap::UNBOUNDED,
+        ChildOptions::CARGO,
+        false,
     )?;
-    Ok(dc.captured)
+    captured_without_incomplete_output(program, dc, ChildOptions::CARGO)
 }
 
 /// Run a subprocess with extra environment variables, capturing stdout and stderr.
@@ -266,7 +274,7 @@ pub fn run_captured_with_env(
         None,
         ChildIsolation::Inherit,
     )?;
-    Ok(dc.captured)
+    captured_without_incomplete_output(program, dc, ChildOptions::DEFAULT)
 }
 
 /// [`run_captured_with_env_and_deadline`] keeping at most `cap` bytes of each
@@ -284,6 +292,10 @@ pub(crate) fn run_captured_bounded(
     isolation: ChildIsolation<'_>,
     cap: CaptureCap,
 ) -> Result<DeadlineCapture, DevError> {
+    let options = ChildOptions {
+        capture_cap: cap,
+        ..ChildOptions::DEFAULT
+    };
     run_captured_limited(
         program,
         args,
@@ -293,7 +305,8 @@ pub(crate) fn run_captured_bounded(
         on_spawn,
         isolation,
         SpawnProfile::Plain,
-        cap,
+        options,
+        true,
     )
 }
 
@@ -335,12 +348,15 @@ pub(crate) struct SupervisedChild {
     pub stderr: Vec<u8>,
     pub elapsed: Duration,
     pub output_cut: bool,
+    pub stdout_truncated: bool,
+    pub stderr_truncated: bool,
 }
 
 /// Spawn a subprocess with captured stdio and a wall-clock deadline.
 ///
 /// The shared supervisor owns polling, signal forwarding, deadline kills,
-/// stdout/stderr drains, and their bounded settle period.
+/// bounded stdout/stderr drains, and their settle period. An over-limit
+/// stream or a pipe that stays open past the grace returns `ChildFailure`.
 pub fn run_captured_with_env_and_deadline(
     program: &str,
     args: &[&str],
@@ -349,6 +365,62 @@ pub fn run_captured_with_env_and_deadline(
     deadline: Duration,
     on_spawn: Option<&dyn Fn(u32)>,
     isolation: ChildIsolation<'_>,
+) -> Result<DeadlineCapture, DevError> {
+    run_captured_with_env_and_deadline_with_options(
+        program,
+        args,
+        cwd,
+        env,
+        deadline,
+        on_spawn,
+        isolation,
+        ChildOptions::DEFAULT,
+    )
+}
+
+/// As [`run_captured_with_env_and_deadline`], with an explicit capture bound
+/// and supervision grace periods for callers with a different output or
+/// shutdown contract.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_captured_with_env_and_deadline_with_options(
+    program: &str,
+    args: &[&str],
+    cwd: &Path,
+    env: &[(&str, &str)],
+    deadline: Duration,
+    on_spawn: Option<&dyn Fn(u32)>,
+    isolation: ChildIsolation<'_>,
+    options: ChildOptions,
+) -> Result<DeadlineCapture, DevError> {
+    let capture = run_captured_limited(
+        program,
+        args,
+        cwd,
+        env,
+        ChildLimit::Wall(deadline),
+        on_spawn,
+        isolation,
+        SpawnProfile::Plain,
+        options,
+        false,
+    )?;
+    deadline_capture_without_incomplete_output(program, capture, options)
+}
+
+/// Like [`run_captured_with_env_and_deadline_with_options`], but returns a
+/// capture whose output pipe stayed open past the drain grace. This is for
+/// callers that record incomplete output as part of their own integrity
+/// assessment.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_captured_with_env_and_deadline_allow_output_cut(
+    program: &str,
+    args: &[&str],
+    cwd: &Path,
+    env: &[(&str, &str)],
+    deadline: Duration,
+    on_spawn: Option<&dyn Fn(u32)>,
+    isolation: ChildIsolation<'_>,
+    options: ChildOptions,
 ) -> Result<DeadlineCapture, DevError> {
     run_captured_limited(
         program,
@@ -359,7 +431,8 @@ pub fn run_captured_with_env_and_deadline(
         on_spawn,
         isolation,
         SpawnProfile::Plain,
-        CaptureCap::UNBOUNDED,
+        options,
+        false,
     )
 }
 
@@ -383,7 +456,8 @@ pub fn run_captured_with_idle_deadline(
         None,
         isolation,
         profile,
-        CaptureCap::UNBOUNDED,
+        ChildOptions::CARGO,
+        false,
     )
 }
 
@@ -404,17 +478,28 @@ where
 {
     let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let (buf_t, cancel_t) = (std::sync::Arc::clone(&buf), std::sync::Arc::clone(&cancel));
+    let truncated = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (buf_t, cancel_t, truncated_t) = (
+        std::sync::Arc::clone(&buf),
+        std::sync::Arc::clone(&cancel),
+        std::sync::Arc::clone(&truncated),
+    );
     let handle = std::thread::spawn(move || {
         let mut reader = pipe;
         let mut chunk = [0u8; 8192];
         while let Some(n) =
             crate::fs_probe::read_unless_cancelled(&mut reader, &mut chunk, &cancel_t)
         {
-            if let Ok(mut b) = buf_t.lock() {
-                let room = cap.saturating_sub(b.len());
-                let take = n.min(room);
-                b.extend_from_slice(chunk.get(..take).unwrap_or_default());
+            match buf_t.lock() {
+                Ok(mut b) => {
+                    let room = cap.saturating_sub(b.len());
+                    let take = n.min(room);
+                    b.extend_from_slice(chunk.get(..take).unwrap_or_default());
+                    if take < n {
+                        truncated_t.store(true, Ordering::Release);
+                    }
+                }
+                Err(_) => truncated_t.store(true, Ordering::Release),
             }
             let now = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
             last_output_ms.store(now, Ordering::Relaxed);
@@ -423,6 +508,7 @@ where
     Drain {
         buf,
         cancel,
+        truncated,
         handle,
     }
 }
@@ -430,13 +516,24 @@ where
 struct Drain {
     buf: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
     cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    truncated: std::sync::Arc<std::sync::atomic::AtomicBool>,
     handle: std::thread::JoinHandle<()>,
+}
+
+#[derive(Default)]
+struct DrainOutput {
+    bytes: Vec<u8>,
+    truncated: bool,
 }
 
 const DRAIN_SETTLE: Duration = Duration::from_secs(2);
 
-fn settle_drains(drains: Vec<Option<Drain>>, label: &str) -> (Vec<Vec<u8>>, bool) {
-    let until = Instant::now() + DRAIN_SETTLE;
+fn settle_drains(
+    drains: Vec<Option<Drain>>,
+    label: &str,
+    drain_grace: Duration,
+) -> (Vec<DrainOutput>, bool) {
+    let until = Instant::now() + drain_grace;
     while Instant::now() < until
         && !drains
             .iter()
@@ -451,23 +548,26 @@ fn settle_drains(drains: Vec<Option<Drain>>, label: &str) -> (Vec<Vec<u8>>, bool
         .any(|drain| !drain.handle.is_finished());
     if cut {
         super::console::warn(&format!(
-            "{label} exited but its output did not close within {}s - something it started \
+            "{label} exited but its output did not close within {:.1}s - something it started \
              still holds the pipe; capture stopped there",
-            DRAIN_SETTLE.as_secs()
+            drain_grace.as_secs_f64()
         ));
     }
-    let bufs = drains
+    let outputs = drains
         .into_iter()
         .map(|drain| {
             let Some(drain) = drain else {
-                return Vec::new();
+                return DrainOutput::default();
             };
             drain.cancel.store(true, Ordering::Release);
             drain.handle.join().ok();
-            drain.buf.lock().map(|b| b.clone()).unwrap_or_default()
+            DrainOutput {
+                bytes: drain.buf.lock().map(|b| b.clone()).unwrap_or_default(),
+                truncated: drain.truncated.load(Ordering::Acquire),
+            }
         })
         .collect();
-    (bufs, cut)
+    (outputs, cut)
 }
 
 /// Supervise a spawned child. The observer runs once before each child poll and
@@ -479,19 +579,10 @@ pub(crate) fn supervise_child(
     start: Instant,
     limit: ChildLimit,
     isolation: ChildIsolation<'_>,
-    tick_interval: Duration,
+    options: ChildOptions,
     observe: impl FnMut() -> Option<String>,
 ) -> SupervisedChild {
-    supervise_child_capped(
-        child,
-        label,
-        start,
-        limit,
-        isolation,
-        tick_interval,
-        CaptureCap::UNBOUNDED,
-        observe,
-    )
+    supervise_child_capped(child, label, start, limit, isolation, options, observe)
 }
 
 /// How many bytes of each stream a captured run keeps.
@@ -502,9 +593,59 @@ pub(crate) struct CaptureCap {
 }
 
 impl CaptureCap {
-    pub(crate) const UNBOUNDED: Self = Self {
-        stdout: usize::MAX,
-        stderr: usize::MAX,
+    pub(crate) const DEFAULT: Self = Self {
+        stdout: DEFAULT_CAPTURE_BYTES,
+        stderr: DEFAULT_CAPTURE_BYTES,
+    };
+
+    pub(crate) const LARGE: Self = Self {
+        stdout: LARGE_CAPTURE_BYTES,
+        stderr: LARGE_CAPTURE_BYTES,
+    };
+
+    pub(crate) const CARGO: Self = Self {
+        stdout: CARGO_CAPTURE_BYTES,
+        stderr: CARGO_CAPTURE_BYTES,
+    };
+
+    pub(crate) const MEASUREMENT: Self = Self {
+        stdout: DEFAULT_CAPTURE_BYTES,
+        stderr: DEFAULT_CAPTURE_BYTES,
+    };
+}
+
+/// Per-run capture and shutdown policy for the shared child supervisor.
+/// Callers that own a separate child-lifecycle budget can override the grace
+/// periods here instead of inheriting the shared defaults.
+#[derive(Clone, Copy)]
+pub(crate) struct ChildOptions {
+    pub capture_cap: CaptureCap,
+    pub poll_interval: Duration,
+    pub sigterm_grace: Duration,
+    pub drain_grace: Duration,
+}
+
+impl ChildOptions {
+    pub(crate) const DEFAULT: Self = Self {
+        capture_cap: CaptureCap::DEFAULT,
+        poll_interval: DEADLINE_POLL_INTERVAL,
+        sigterm_grace: SIGTERM_FORWARD_BUDGET,
+        drain_grace: DRAIN_SETTLE,
+    };
+
+    pub(crate) const CARGO: Self = Self {
+        capture_cap: CaptureCap::CARGO,
+        ..Self::DEFAULT
+    };
+
+    pub(crate) const LARGE: Self = Self {
+        capture_cap: CaptureCap::LARGE,
+        ..Self::DEFAULT
+    };
+
+    pub(crate) const MEASUREMENT: Self = Self {
+        capture_cap: CaptureCap::MEASUREMENT,
+        ..Self::DEFAULT
     };
 }
 
@@ -515,22 +656,29 @@ fn supervise_child_capped(
     start: Instant,
     limit: ChildLimit,
     isolation: ChildIsolation<'_>,
-    tick_interval: Duration,
-    cap: CaptureCap,
+    options: ChildOptions,
     mut observe: impl FnMut() -> Option<String>,
 ) -> SupervisedChild {
     use std::sync::Arc;
     use std::sync::atomic::AtomicU64;
 
     let last_output_ms = Arc::new(AtomicU64::new(0));
-    let stdout_thread = child
-        .stdout
-        .take()
-        .map(|pipe| drain_stamped(pipe, start, Arc::clone(&last_output_ms), cap.stdout));
-    let stderr_thread = child
-        .stderr
-        .take()
-        .map(|pipe| drain_stamped(pipe, start, Arc::clone(&last_output_ms), cap.stderr));
+    let stdout_thread = child.stdout.take().map(|pipe| {
+        drain_stamped(
+            pipe,
+            start,
+            Arc::clone(&last_output_ms),
+            options.capture_cap.stdout,
+        )
+    });
+    let stderr_thread = child.stderr.take().map(|pipe| {
+        drain_stamped(
+            pipe,
+            start,
+            Arc::clone(&last_output_ms),
+            options.capture_cap.stderr,
+        )
+    });
 
     let expired = || match limit {
         ChildLimit::None => None,
@@ -546,21 +694,20 @@ fn supervise_child_capped(
     let mut next_tick = Instant::now();
     let ending = loop {
         if let Some(marker) = observe() {
-            terminate_child(&mut child, isolation, false);
-            let ending = child.wait().map_or_else(
-                |error| Ending::WaitFailed(error.to_string()),
-                |_| Ending::StopMarker(marker),
+            let ending = terminate_and_wait(
+                &mut child,
+                isolation,
+                false,
+                &options,
+                Ending::StopMarker(marker),
             );
             child_elapsed = Some(start.elapsed());
             break ending;
         }
 
         if crate::shutdown::is_shutdown_requested() {
-            terminate_child(&mut child, isolation, true);
-            let ending = child.wait().map_or_else(
-                |error| Ending::WaitFailed(error.to_string()),
-                |_| Ending::Interrupted,
-            );
+            let ending =
+                terminate_and_wait(&mut child, isolation, true, &options, Ending::Interrupted);
             child_elapsed = Some(start.elapsed());
             break ending;
         }
@@ -574,36 +721,48 @@ fn supervise_child_capped(
             }
             Ok(None) => {
                 if let Some(duration) = expired() {
-                    terminate_child(&mut child, isolation, false);
-                    let ending = child.wait().map_or_else(
-                        |error| Ending::WaitFailed(error.to_string()),
-                        |_| Ending::Deadline(duration),
+                    let ending = terminate_and_wait(
+                        &mut child,
+                        isolation,
+                        false,
+                        &options,
+                        Ending::Deadline(duration),
                     );
                     child_elapsed = Some(start.elapsed());
                     break ending;
                 }
             }
             Err(error) => {
-                terminate_child(&mut child, isolation, false);
+                terminate_child(
+                    &mut child,
+                    isolation,
+                    false,
+                    options.sigterm_grace,
+                    options.poll_interval,
+                );
                 child.wait().ok();
                 child_elapsed = Some(start.elapsed());
                 break Ending::WaitFailed(error.to_string());
             }
         }
 
-        next_tick += tick_interval;
+        next_tick += options.poll_interval;
         std::thread::sleep(next_tick.saturating_duration_since(Instant::now()));
     };
 
     let drains = vec![stdout_thread, stderr_thread];
-    let (bufs, output_cut) = settle_drains(drains, label);
+    let (bufs, output_cut) = settle_drains(drains, label, options.drain_grace);
     let mut bufs = bufs.into_iter();
+    let stdout = bufs.next().unwrap_or_default();
+    let stderr = bufs.next().unwrap_or_default();
     SupervisedChild {
         ending,
-        stdout: bufs.next().unwrap_or_default(),
-        stderr: bufs.next().unwrap_or_default(),
+        stdout: stdout.bytes,
+        stderr: stderr.bytes,
         elapsed: child_elapsed.unwrap_or_else(|| start.elapsed()),
         output_cut,
+        stdout_truncated: stdout.truncated,
+        stderr_truncated: stderr.truncated,
     }
 }
 
@@ -618,28 +777,41 @@ fn run_captured_limited(
     on_spawn: Option<&dyn Fn(u32)>,
     isolation: ChildIsolation<'_>,
     profile: SpawnProfile,
-    cap: CaptureCap,
+    options: ChildOptions,
+    allow_capture_truncation: bool,
 ) -> Result<DeadlineCapture, DevError> {
     let start = Instant::now();
     let policy = crate::process::spawn::ChildPolicy::from_cargo_profile(profile);
     let mut cmd = policy.command(program, args, Some(cwd), env, isolation)?;
     crate::process::spawn::capture_stdio(&mut cmd);
     let child = crate::process::spawn::spawn(cmd, on_spawn)?;
-    let run = supervise_child_capped(
-        child,
-        program,
-        start,
-        limit,
-        isolation,
-        DEADLINE_POLL_INTERVAL,
-        cap,
-        || None,
-    );
+    let run = supervise_child_capped(child, program, start, limit, isolation, options, || None);
     let classification = verdict(&run.ending, program, &run.stderr, &[]);
     match (&run.ending, classification) {
         (_, IterationVerdict::Interrupted) => return Err(DevError::Interrupted),
         (Ending::WaitFailed(_), IterationVerdict::Failed(error)) => return Err(error),
         _ => {}
+    }
+    if !allow_capture_truncation {
+        let failure = if run.stdout_truncated {
+            Some(crate::error::ChildFailureKind::CaptureLimit {
+                stream: "stdout",
+                limit: options.capture_cap.stdout,
+            })
+        } else if run.stderr_truncated {
+            Some(crate::error::ChildFailureKind::CaptureLimit {
+                stream: "stderr",
+                limit: options.capture_cap.stderr,
+            })
+        } else {
+            None
+        };
+        if let Some(failure) = failure {
+            return Err(DevError::ChildFailure {
+                program: program.to_owned(),
+                failure,
+            });
+        }
     }
     Ok(DeadlineCapture {
         captured: CapturedOutput {
@@ -652,11 +824,58 @@ fn run_captured_limited(
     })
 }
 
+fn captured_without_incomplete_output(
+    program: &str,
+    capture: DeadlineCapture,
+    options: ChildOptions,
+) -> Result<CapturedOutput, DevError> {
+    Ok(deadline_capture_without_incomplete_output(program, capture, options)?.captured)
+}
+
+fn deadline_capture_without_incomplete_output(
+    program: &str,
+    capture: DeadlineCapture,
+    options: ChildOptions,
+) -> Result<DeadlineCapture, DevError> {
+    if capture.output_cut {
+        return Err(DevError::ChildFailure {
+            program: program.to_owned(),
+            failure: crate::error::ChildFailureKind::OutputDrain {
+                grace: options.drain_grace,
+            },
+        });
+    }
+    Ok(capture)
+}
+
 /// End a child with SIGKILL, optionally forwarding SIGTERM first.
+/// Terminate the child, wait for it, and report `ending` unless the wait
+/// itself failed.
+fn terminate_and_wait(
+    child: &mut std::process::Child,
+    isolation: ChildIsolation<'_>,
+    forward_term: bool,
+    options: &ChildOptions,
+    ending: Ending,
+) -> Ending {
+    terminate_child(
+        child,
+        isolation,
+        forward_term,
+        options.sigterm_grace,
+        options.poll_interval,
+    );
+    child
+        .wait()
+        .map_or_else(|error| Ending::WaitFailed(error.to_string()), |_| ending)
+}
+
 fn terminate_child(
     child: &mut std::process::Child,
     isolation: ChildIsolation<'_>,
     forward_term: bool,
+    sigterm_grace: Duration,
+    poll_interval: Duration,
 ) {
     let pid = child.id();
     if forward_term {
@@ -666,10 +885,10 @@ fn terminate_child(
             crate::process::signal_pid(pid, libc::SIGTERM).ok();
         }
         let term_sent = Instant::now();
-        while term_sent.elapsed() < SIGTERM_FORWARD_BUDGET {
+        while term_sent.elapsed() < sigterm_grace {
             match child.try_wait() {
                 Ok(Some(_)) => return,
-                Ok(None) => std::thread::sleep(DEADLINE_POLL_INTERVAL),
+                Ok(None) => std::thread::sleep(poll_interval),
                 Err(_) => break,
             }
         }
@@ -680,11 +899,9 @@ fn terminate_child(
     child.kill().ok();
 }
 
-/// How long to give a captured child to honour SIGTERM after `brokkr kill`
-/// before we escalate to SIGKILL. Matches sæhrimnir's
-/// [`crate::ratatoskr::saehrimnir::SHUTDOWN_BUDGET`] in spirit: long enough
-/// for cooperative cleanup, short enough that the user doesn't think
-/// `brokkr kill` hung.
+/// Default time to give a captured child to honour SIGTERM after `brokkr kill`
+/// before escalating to SIGKILL. Project runners can pass their own budget
+/// through [`ChildOptions`].
 const SIGTERM_FORWARD_BUDGET: Duration = Duration::from_millis(1500);
 
 /// Spawn a subprocess with captured stdio, returning the `Child` handle.
@@ -761,7 +978,7 @@ pub fn run_passthrough_in(
         start,
         ChildLimit::None,
         ChildIsolation::Inherit,
-        DEADLINE_POLL_INTERVAL,
+        ChildOptions::DEFAULT,
         || None,
     );
     if let Some(lock) = lock {

@@ -736,10 +736,6 @@ struct RunReport {
     continuation: Option<ContinuationReport>,
 }
 
-// The message `test_phase.rs` carries in `DevError::Build` when a lane's tests
-// failed. The caller adapts that result to `PhaseFailure`.
-const TESTS_FAILED: &str = "tests failed";
-
 /// The prepared profile and where its record lives on disk.
 struct Prepared {
     prep: ProfilePrep,
@@ -832,12 +828,12 @@ fn run_build_phases(
             )
             .err()
             .map(|error| match error {
-                // The test phase reports red tests as a `DevError::Build`
-                // sentinel; adapt it to a printed failure at this boundary.
-                DevError::Build(message) if message == TESTS_FAILED => {
-                    PhaseFailure::Printed(DevError::Reported(message))
+                // Red test outcomes have already printed their failure list;
+                // operational errors still need the ordinary phase rendering.
+                TestPhaseFailure::TestsFailed => {
+                    PhaseFailure::Printed(DevError::Reported("tests failed".into()))
                 }
-                other => other.into(),
+                TestPhaseFailure::Error(other) => other.into(),
             });
         }
         // The test phase is over, however it ended: the journal says so. A

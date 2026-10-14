@@ -2,6 +2,8 @@
 use crate::{cli, error::DevError, output, pmtiles, project::Project};
 
 pub(crate) fn cmd_pmtiles_stats(project: Project, files: &[String]) -> Result<(), DevError> {
+    // Dispatch applies this same catalogue entry; keeping the direct-entry
+    // guard here reuses that policy rather than defining a second project map.
     cli::CommandId::PmtilesStats.spec().require(project)?;
 
     // Every file is attempted - one bad archive does not hide the stats of the

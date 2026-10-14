@@ -25,6 +25,11 @@ import tempfile
 guard = sys.argv[1] if len(sys.argv) > 1 else str(
     pathlib.Path.home() / ".cargo" / "bin" / "brokkr-rustc-guard"
 )
+if not os.access(guard, os.X_OK):
+    # Fail, not skip: `brokkr install` installs this bin beside brokkr, so a
+    # host that runs brokkr's own check without it has an incomplete install.
+    print(f"FAILED: no executable guard at {guard}; run `brokkr install` first")
+    sys.exit(1)
 real = "/usr/bin/true"
 project_state = pathlib.Path(__file__).resolve().parents[1] / ".brokkr"
 system_tmp = pathlib.Path("/tmp").resolve()

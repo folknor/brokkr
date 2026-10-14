@@ -1042,10 +1042,8 @@ mod tests {
 
     /// Create a temp directory and db path with a unique name per test.
     fn test_db(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
-        let dir = std::env::temp_dir().join(format!("brokkr_test_{name}"));
-        drop(std::fs::create_dir_all(&dir));
+        let dir = crate::test_scratch::scratch("db-migrate", name);
         let db_path = dir.join("test.db");
-        drop(std::fs::remove_file(&db_path));
         (dir, db_path)
     }
 

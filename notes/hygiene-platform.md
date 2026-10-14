@@ -50,18 +50,6 @@ Reported by: process-control, config-cli-bootstrap, ratatoskr, pbfhogg-nidhogg, 
 
 Residue: direct `Command` construction remains in `test_runner/procgroup.rs`, `ratatoskr/saehrimnir.rs`, nidhogg, `env.rs`, `gremlins.rs`, `litehtml/cmd.rs`, `tools.rs`, `worktree.rs`, `scope.rs`, `git.rs` and `git/tree_state.rs`.
 
-## PLT-012 - Interrupt handling residue outside `SigtermGuard`
-
-Reported by: process-control, ratatoskr.
-
-Residue: ratatoskr's `MOCK_SIGNAL_FLAG` `AtomicBool` is not migrated to the shared guard.
-
-## PLT-013 - Hold-scoped state still partly in process globals
-
-Reported by: process-control.
-
-Residue: the toolchain-path write-once global in `context.rs` and the process-wide `HELD` registry remain.
-
 ## PLT-015 - `cargo metadata` is spawned and deserialized many times
 
 Reported by: convention-engines, check-core, process-control.
@@ -90,19 +78,19 @@ Residue: harness profile resolution is still bool-based at the ratatoskr/piners 
 
 Reported by: config-cli-bootstrap, process-control.
 
-Residue: `env.rs`, `bench_cmd` and `git::collect` still compose or resolve config independently of startup detection.
+Residue: `git::collect` still recomposes config for callers that only pass a repository path (`collect_with_config_paths` is the provenance-carrying form); `history_cmd.rs` re-runs `project::detect()` after startup and then calls `git::collect`, and other modules call `git::collect` too.
 
 ## PLT-023 - "Which command runs in which project" has two owners
 
 Reported by: config-cli-bootstrap, small-benches, elivagar.
 
-Residue: duplicate project checks remain in `verify_cmd.rs`, `visual_approve_cmd.rs`, `pmtiles_stats_cmd.rs` and project handlers.
+Residue: handler-side `project::require` checks remain in `elivagar/cmd.rs`, `litehtml/cmd.rs` and `sluggrs/cmd.rs` (the `verify` nested-variant checks are deliberate and commented).
 
 ## PLT-024 - Project name ↔ variant mapping is duplicated
 
 Reported by: config-cli-bootstrap, ratatoskr, pbfhogg-nidhogg.
 
-Residue: `Project::Other` still uses `Box::leak` in the parser.
+Residue: `Project::Other` still uses `Box::leak` in `config_parts/parser.rs`.
 
 ## PLT-025 - Configuration is validated at use instead of at load
 
@@ -122,35 +110,23 @@ Reported by: config-cli-bootstrap, elivagar.
 
 Residue: nidhogg's separate curl timeout contract and mutable map-data URLs remain.
 
-## PLT-036 - Guard verification scripts are claims, not gates
-
-Reported by: process-control.
-
-Residue: the guard decision probe still has no `[[script_check]]` gate (its `/tmp` use is fixed).
-
 ## PLT-037 - Secrets and personal data can reach durable logs
 
 Reported by: config-cli-bootstrap, check-core.
 
 Residue: argv and `env.*` redaction in `db/write.rs` and raw script-check output rendering remain (stored cwd/hostname are gone).
 
-## PLT-038 - Tests write to `/tmp` and use ad-hoc scratch allocators
+## PLT-052 - The guard-decision script check tests the installed guard, not the tree's
 
-Reported by: test-execution, measurement-storage, piners, config-cli-bootstrap, pbfhogg-nidhogg, elivagar.
+Reported by: the wave-1 reviewer, laterally.
 
-Residue: `std::env::temp_dir()` test paths remain in `db/{write,query,sidecar,migrate}.rs` and `harness_mod/tests.rs`, plus ad-hoc paths in `resolve_parts/tests.rs`.
+`scripts/guard-decision-probe.py` (a pre-clippy `[[script_check]]`) runs the `brokkr-rustc-guard` installed in `CARGO_HOME`, so a change to `src/bin/rustc_guard.rs` is only gated after the next `brokkr install`: check can pass on stale code or fail on a fixed one. It should target the freshly built guard from this tree.
 
-## PLT-039 - Tests mutate process state or depend on the host
+## PLT-053 - Malformed external JSON now renders as an internal error
 
-Reported by: config-cli-bootstrap, process-control, measurement-storage, ratatoskr, check-core, test-execution.
+Reported by: the wave-1 reviewer, laterally.
 
-Residue: host-dependent tests remain (`resolve_parts/tests.rs` builds paths from `current_dir` and the clock).
-
-## PLT-049 - `env` composes the config a second time to read the user layer
-
-Reported by: the wave-5 reviewer, laterally.
-
-Residue: `env` still recomposes config instead of receiving `ConfigSources` from detection.
+`DevError::from(serde_json::Error)` moved from `Build` to `Internal`. Sites where the JSON is an external contract (cargo output, harness reports) are not brokkr bugs; they should map to a contract-violation kind at the call site rather than through the blanket conversion.
 
 ## PLT-051 - Decisions and leftovers from the command-spec wave
 

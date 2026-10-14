@@ -5,7 +5,7 @@ use crate::config;
 use crate::context::{bootstrap, bootstrap_config};
 use crate::error::DevError;
 use crate::output;
-use crate::project::{self, Project};
+use crate::project::Project;
 use crate::resolve::{self, resolve_bbox, resolve_nidhogg_data_dir, resolve_pbf_path};
 
 /// The nidhogg server port: `[<host>] port` in brokkr.toml, else
@@ -39,7 +39,6 @@ fn build_config_with_features(package: Option<&str>, features: &[String]) -> bui
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn serve(
     dev_config: &config::DevConfig,
-    project: Project,
     project_root: &crate::project::ProjectRoot,
     build_root: &crate::project::BuildRoot,
     data_dir: Option<&str>,
@@ -47,7 +46,6 @@ pub(crate) fn serve(
     tiles_variant: Option<&str>,
     features: &[String],
 ) -> Result<(), DevError> {
-    project::require(project, Project::Nidhogg, "serve")?;
     let pi = bootstrap(build_root)?;
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
     let (project_root, build_root) = (project_root.as_path(), build_root.as_path());
@@ -131,17 +129,11 @@ fn resolve_serve_tiles(
     }
 }
 
-pub(crate) fn stop(project: Project, project_root: &Path) -> Result<(), DevError> {
-    project::require(project, Project::Nidhogg, "stop")?;
+pub(crate) fn stop(project_root: &Path) -> Result<(), DevError> {
     super::server::stop(project_root)
 }
 
-pub(crate) fn status(
-    dev_config: &config::DevConfig,
-    project: Project,
-    _project_root: &Path,
-) -> Result<(), DevError> {
-    project::require(project, Project::Nidhogg, "status")?;
+pub(crate) fn status(dev_config: &config::DevConfig) -> Result<(), DevError> {
     let port = resolve_port(dev_config)?;
     let running = super::server::status(port)?;
     if running {
@@ -154,14 +146,12 @@ pub(crate) fn status(
 
 pub(crate) fn ingest(
     dev_config: &config::DevConfig,
-    project: Project,
     project_root: &crate::project::ProjectRoot,
     build_root: &crate::project::BuildRoot,
     variant: &str,
     dataset: &str,
     features: &[String],
 ) -> Result<(), DevError> {
-    project::require(project, Project::Nidhogg, "ingest")?;
     let pi = bootstrap(build_root)?;
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
     let (project_root, build_root) = (project_root.as_path(), build_root.as_path());
@@ -177,44 +167,29 @@ pub(crate) fn ingest(
 }
 
 pub(crate) fn update(
-    project: Project,
     project_root: &Path,
     build_root: &Path,
     args: &[String],
     features: &[String],
 ) -> Result<(), DevError> {
-    project::require(project, Project::Nidhogg, "update")?;
     let mut config = build_config_with_features(Project::Nidhogg.cli_package(), features);
     config.bin = Some("nidhogg-update".into());
     let binary = build::cargo_build(&config, build_root)?.path;
     super::update::run(&binary, args, project_root)
 }
 
-pub(crate) fn query(
-    dev_config: &config::DevConfig,
-    project: Project,
-    _project_root: &Path,
-    json: Option<&str>,
-) -> Result<(), DevError> {
-    project::require(project, Project::Nidhogg, "query")?;
+pub(crate) fn query(dev_config: &config::DevConfig, json: Option<&str>) -> Result<(), DevError> {
     let port = resolve_port(dev_config)?;
     super::query::run(port, json)
 }
 
-pub(crate) fn geocode(
-    dev_config: &config::DevConfig,
-    project: Project,
-    _project_root: &Path,
-    term: &str,
-) -> Result<(), DevError> {
-    project::require(project, Project::Nidhogg, "geocode")?;
+pub(crate) fn geocode(dev_config: &config::DevConfig, term: &str) -> Result<(), DevError> {
     let port = resolve_port(dev_config)?;
     super::geocode::run(port, term)
 }
 
 pub(crate) fn verify_batch(
     dev_config: &config::DevConfig,
-    _project: Project,
     project_root: &crate::project::ProjectRoot,
     build_root: &crate::project::BuildRoot,
     dataset: &str,
@@ -228,8 +203,6 @@ pub(crate) fn verify_batch(
 
 pub(crate) fn verify_geocode(
     dev_config: &config::DevConfig,
-    _project: Project,
-    _project_root: &Path,
     queries: &[String],
 ) -> Result<(), DevError> {
     let port = resolve_port(dev_config)?;
@@ -239,7 +212,6 @@ pub(crate) fn verify_geocode(
 
 pub(crate) fn verify_readonly(
     dev_config: &config::DevConfig,
-    _project: Project,
     project_root: &crate::project::ProjectRoot,
     build_root: &crate::project::BuildRoot,
     dataset: &str,

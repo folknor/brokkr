@@ -124,7 +124,10 @@ fn run_one_diagnostic_cargo(
     // own argv (`clippy_args`), and a second copy in RUSTFLAGS would only
     // change the build fingerprint away from the test phase's, costing a
     // rebuild for no change in what is suppressed.
-    let brokkr_env = meta_target_dir.map_or_else(Vec::new, |dir| sweep_cargo_env(sweep, dir, &[]));
+    let brokkr_env = match meta_target_dir {
+        Some(dir) => sweep_cargo_env(sweep, dir, &[])?,
+        None => Vec::new(),
+    };
     // Composed through `merged_env`, the test phase's rule, so every phase
     // agrees on who wins a collision: the sweep's env. Config loading refuses
     // the colliding keys (`RUSTFLAGS`, `CARGO_TARGET_DIR`, ...) in `[[check]]`

@@ -190,7 +190,7 @@ pub fn apply(
         None => std::env::current_dir()?,
     };
     let names: Vec<&str> = entries.iter().map(|(n, _)| n.as_str()).collect();
-    if let Some(conflict) = config_conflict(&names, &dir, args, env) {
+    if let Some(conflict) = config_conflict(&names, &dir, args, env)? {
         return Err(record(conflict, phase));
     }
     for (name, command) in &entries {
@@ -313,7 +313,7 @@ fn config_conflict(
     cwd: &Path,
     args: &[&str],
     env: &[(&str, &str)],
-) -> Option<String> {
+) -> Result<Option<String>, DevError> {
     let names_in = |doc: &toml::Table| -> Option<String> {
         let table = doc.get("env")?.as_table()?;
         names
@@ -321,16 +321,16 @@ fn config_conflict(
             .find(|n| table.contains_key(**n))
             .map(|n| (*n).to_owned())
     };
-    for path in crate::rustflags::config_paths_under(cwd, crate::rustflags::EffectiveEnv::new(env))
-    {
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        let Ok(doc) = text.parse::<toml::Table>() else {
-            continue;
-        };
-        if let Some(name) = names_in(&doc) {
-            return Some(conflict_message(&name, &path.display().to_string()));
+    let launch = crate::rustflags::CargoLaunchConfig::discover(
+        cwd,
+        crate::rustflags::EffectiveEnv::new(env),
+    )?;
+    for entry in launch.env {
+        if names.contains(&entry.key.as_str()) {
+            return Ok(Some(conflict_message(
+                &entry.key,
+                &entry.source.display().to_string(),
+            )));
         }
     }
     let mut i = 0;
@@ -347,22 +347,24 @@ fn config_conflict(
         if let Some(v) = value {
             let file = cwd.join(v);
             if file.is_file() {
-                let doc = std::fs::read_to_string(&file)
-                    .ok()
-                    .and_then(|t| t.parse::<toml::Table>().ok());
-                if let Some(name) = doc.as_ref().and_then(names_in) {
-                    return Some(conflict_message(&name, &file.display().to_string()));
+                for (config_path, doc) in crate::rustflags::read_config_file(&file)? {
+                    if let Some(name) = names_in(&doc) {
+                        return Ok(Some(conflict_message(
+                            &name,
+                            &config_path.display().to_string(),
+                        )));
+                    }
                 }
             } else if let Some(name) = names
                 .iter()
                 .find(|n| v.trim_start().starts_with(&format!("env.{n}")))
             {
-                return Some(conflict_message(name, &format!("--config {v}")));
+                return Ok(Some(conflict_message(name, &format!("--config {v}"))));
             }
         }
         i += 1;
     }
-    None
+    Ok(None)
 }
 
 fn conflict_message(name: &str, source: &str) -> String {
@@ -565,6 +567,7 @@ mod tests {
                 &["--config", "env.FX_ID=\"x\"", "build"],
                 &[]
             )
+            .unwrap()
             .is_some()
         );
         assert!(
@@ -574,10 +577,15 @@ mod tests {
                 &["--config", "env.OTHER=\"x\"", "build"],
                 &[]
             )
+            .unwrap()
             .is_none()
         );
         std::fs::create_dir_all(dir.join(".cargo")).unwrap();
         std::fs::write(dir.join(".cargo/config.toml"), "[env]\nFX_ID = \"x\"\n").unwrap();
-        assert!(config_conflict(&["FX_ID"], &dir, &["build"], &[]).is_some());
+        assert!(
+            config_conflict(&["FX_ID"], &dir, &["build"], &[])
+                .unwrap()
+                .is_some()
+        );
     }
 }

@@ -65,6 +65,28 @@ mod tests {
         parse_textlint(&table)
     }
 
+    #[test]
+    fn textlint_preset_fields_track_rule_fields() {
+        let rules = textlint_of(
+            "[[textlint]]\nname = \"r\"\npattern = \"p\"\npaths = [\"**\"]\nmessage = \"m\"\n",
+        )
+        .unwrap();
+        let rule_fields: std::collections::BTreeSet<String> = serde_json::to_value(&rules[0])
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .keys()
+            .filter(|key| !matches!(key.as_str(), "name" | "pattern" | "message"))
+            .cloned()
+            .collect();
+        let preset_fields: std::collections::BTreeSet<String> = TEXTLINT_PRESET_FIELDS
+            .iter()
+            .map(|field| (*field).to_owned())
+            .collect();
+
+        assert_eq!(preset_fields, rule_fields);
+    }
+
     fn script_checks_of(src: &str) -> Result<Vec<ScriptCheck>, DevError> {
         let table: toml::map::Map<String, toml::Value> = toml::from_str(src).unwrap();
         parse_script_checks(&table)
@@ -276,7 +298,8 @@ paths = ["crates/*/src/**/*.rs"]
 exclude = ["crates/adapters/**"]
 region = "code"
 allow_marker = "dst-ok"
-join_wrapped_use = true
+only_if_file_matches = "Instant"
+only_if_file_matches_above = true
 
 [[textlint]]
 name = "inherits"
@@ -290,7 +313,7 @@ pattern = "Utc::now"
 message = "m"
 preset = "dst-scope"
 allow_marker = "clock-ok"
-join_wrapped_use = false
+only_if_file_matches_above = false
 "#,
         )
         .unwrap();
@@ -298,13 +321,13 @@ join_wrapped_use = false
         assert_eq!(rules[0].paths, vec!["crates/*/src/**/*.rs".to_owned()]);
         assert_eq!(rules[0].region.as_deref(), Some("code"));
         assert_eq!(rules[0].allow_marker.as_deref(), Some("dst-ok"));
-        assert!(rules[0].join_wrapped_use);
+        assert!(rules[0].only_if_file_matches_above);
 
         // Nearest value wins - including one explicitly set back to the field's
         // own default, which a post-deserialization merge could not distinguish
         // from "unset".
         assert_eq!(rules[1].allow_marker.as_deref(), Some("clock-ok"));
-        assert!(!rules[1].join_wrapped_use);
+        assert!(!rules[1].only_if_file_matches_above);
     }
 
     #[test]

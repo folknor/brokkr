@@ -66,10 +66,14 @@ pub(super) fn run_gremlins(
         }
     }
 
-    let found = gremlins::scan(tree, config)?;
+    let scan = gremlins::scan_report(tree, config)?;
+    let found = scan.violations;
 
     if found.is_empty() {
-        phase_ok(Phase::Gremlins.label(), None);
+        phase_ok(
+            Phase::Gremlins.label(),
+            Some(output::count(scan.files, "file")),
+        );
         return Ok(());
     }
 
@@ -128,10 +132,14 @@ pub(super) fn run_header(
     let expected = crate::header::expand(&cfg.pattern, year);
 
     let tree = tree.get()?;
-    let violations = crate::header::scan(tree, cfg, year)?;
+    let scan = crate::header::scan_report(tree, cfg, year)?;
+    let violations = scan.violations;
 
     if violations.is_empty() {
-        phase_ok(Phase::Header.label(), None);
+        phase_ok(
+            Phase::Header.label(),
+            Some(output::count(scan.files, "file")),
+        );
         return Ok(());
     }
 
@@ -188,10 +196,14 @@ pub(super) fn run_manifest(
     };
 
     let tree = tree.get()?;
-    let violations = crate::manifest::scan(tree, cfg)?;
+    let scan = crate::manifest::scan_report(tree, cfg)?;
+    let violations = scan.violations;
 
     if violations.is_empty() {
-        phase_ok(Phase::Manifest.label(), None);
+        phase_ok(
+            Phase::Manifest.label(),
+            Some(output::count(scan.files, "manifest")),
+        );
         return Ok(());
     }
 
@@ -463,13 +475,15 @@ pub(super) fn run_dependency_rules(
         return Ok(());
     }
 
-    // A fixed invocation with no per-project variation - it says strictly less
-    // than the `dependency rules: ...` line below it, so it is `--commands`-only
-    // like every other cargo line. The phase is otherwise silent until its
-    // result, matching the native phases (header/textlint).
+    // The displayed argv is the query's own construction, so it cannot drift
+    // from the loader. The loader memoizes per invocation, so the line names
+    // the query the phase reads, which another phase may already have run.
     cargo_line(
         commands,
-        "cargo metadata --format-version 1 --no-deps (dependency rules)",
+        &format!(
+            "{} (dependency rules)",
+            crate::cargo::metadata::Query::workspace().display()
+        ),
     );
     let report = dependency_rules::check(project_root, rules)?;
 
@@ -516,9 +530,13 @@ pub(super) fn run_dependency_rules(
 /// The analysis is `deps`' - literally the same `publish_cycle::run` - so
 /// `brokkr check` and `brokkr deps` can never disagree about a tree.
 pub(super) fn run_publish_cycle(project_root: &Path, commands: bool) -> Result<(), DevError> {
+    // See `run_dependency_rules`: the argv comes from the query itself.
     cargo_line(
         commands,
-        "cargo metadata --format-version 1 --no-deps (publish cycle)",
+        &format!(
+            "{} (publish cycle)",
+            crate::cargo::metadata::Query::workspace().display()
+        ),
     );
     let cycles = crate::deps::publication_cycles(project_root)?;
 

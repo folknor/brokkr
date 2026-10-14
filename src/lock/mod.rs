@@ -198,12 +198,15 @@ pub struct LockGuard {
     inner: Arc<LockInner>,
 }
 
-/// The locks this process currently holds, weakly. [`acquire`] consults this
-/// to re-enter an existing hold instead of opening a second fd on the same
-/// file - `flock(2)` treats each fd as an independent contender even within
-/// one process, so that second fd would block forever on a lock the process
-/// itself holds (the self-deadlock trap that makes naive "hoist an acquire
-/// around a loop of acquiring callees" fatal).
+/// The locks this process currently holds, weakly. This registry is
+/// intentionally process-wide: any thread can re-enter a process-owned flock,
+/// and the watchdog thread also reads the active hold's toolchain paths. A
+/// thread-local index could miss the existing hold and self-deadlock.
+/// [`acquire`] consults this to re-enter an existing hold instead of opening
+/// a second fd on the same file. `flock(2)` treats each fd as an independent
+/// contender even within one process, so that second fd would block forever
+/// on a lock the process itself holds (the self-deadlock trap that makes naive
+/// "hoist an acquire around a loop of acquiring callees" fatal).
 ///
 /// `Weak` so the registry never extends a hold: release is driven purely by
 /// guard drops. Dead entries are swept opportunistically on each access.

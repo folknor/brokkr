@@ -9,6 +9,10 @@
 // and keeps the failed run's files under the repository's .brokkr/ scratch
 // directory for inspection; cleans up on success. Nothing is written to the
 // system temporary directory.
+// The smoke itself is offline and does not launch Chrome, but it needs the
+// package's pnpm-managed modules. Litehtml commands provision those lazily, and
+// a fresh install may download them and Puppeteer's browser. Keep that optional
+// setup out of every `brokkr check`.
 
 const fs = require("fs");
 const path = require("path");

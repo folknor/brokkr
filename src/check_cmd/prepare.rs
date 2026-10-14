@@ -48,6 +48,11 @@ pub(crate) struct LaneEnv {
     pub(crate) project_env: Vec<(String, String)>,
     /// The sweep's env over brokkr's ([`merged_env`]): what cargo sees.
     pub(crate) env: Vec<(String, String)>,
+    /// The cargo config chain as cargo will see it under `env`, discovered
+    /// once per lane: the runner refusal, the serial shim decision and every
+    /// direct runtime of the lane read this one snapshot, and a malformed or
+    /// unreadable config fails the lane here instead of at each consumer.
+    pub(crate) launch_config: rustflags::CargoLaunchConfig,
 }
 
 impl LaneEnv {
@@ -72,7 +77,7 @@ pub(crate) struct LaneInputs<'a> {
     pub(crate) certifying: bool,
 }
 
-pub(crate) fn lane_env(inputs: &LaneInputs<'_>, sweep: &PlannedSweep) -> LaneEnv {
+pub(crate) fn lane_env(inputs: &LaneInputs<'_>, sweep: &PlannedSweep) -> Result<LaneEnv, DevError> {
     // A lint allow reaches this build through exactly one layer, and which
     // one is per sweep: a sweep carrying `rustflags` exports an env var, so
     // the env is live for it whatever the config chain says.
@@ -83,9 +88,13 @@ pub(crate) fn lane_env(inputs: &LaneInputs<'_>, sweep: &PlannedSweep) -> LaneEnv
     let profile_dir = sweep
         .profile
         .map_or("debug", crate::config::SweepProfile::target_subdir);
-    let project_env = sweep_runtime_env(sweep, inputs.project, inputs.target_dir, profile_dir, env_allows);
+    let project_env = sweep_runtime_env(sweep, inputs.project, inputs.target_dir, profile_dir, env_allows)?;
     let env = merged_env(&sweep.env, &project_env);
-    LaneEnv { allow_args, project_env, env }
+    // Cargo sees the merged environment; a sweep CARGO_HOME changes the chain.
+    let env_refs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    let launch_config =
+        rustflags::CargoLaunchConfig::discover(inputs.project_root, rustflags::EffectiveEnv::new(&env_refs))?;
+    Ok(LaneEnv { allow_args, project_env, env, launch_config })
 }
 
 /// How a sweep's tests execute.
@@ -482,7 +491,7 @@ fn prepare_lane_from(
     extra_args: &[String],
     prebuilt: Option<ShapeBuild>,
 ) -> Result<PreparedLane, DevError> {
-    let env = lane_env(inputs, sweep);
+    let env = lane_env(inputs, sweep)?;
     let kind = lane_kind(sweep);
     let mut prepared = match (kind, prebuilt) {
         (LaneKind::Nextest, Some(ShapeBuild::Nextest(built))) => {
@@ -492,12 +501,19 @@ fn prepare_lane_from(
         (LaneKind::Nextest, _) => prepare_nextest(inputs, sweep, attempt, extra_args, &env)?,
         (LaneKind::DocOnly, _) => {
             if inputs.certifying {
-                refuse_unattributable_serial(inputs, sweep, &env, extra_args)?;
+                refuse_unattributable_serial(sweep, &env, extra_args)?;
             }
             PreparedLane::bare(env)
         }
         (LaneKind::Parallel | LaneKind::Isolated, prebuilt) => {
-            prepare_direct(inputs, sweep, attempt, extra_args, &env, kind, prebuilt.and_then(ShapeBuild::cargo))?
+            prepare_direct(
+                inputs,
+                sweep,
+                attempt,
+                extra_args,
+                &env,
+                prebuilt.and_then(ShapeBuild::cargo),
+            )?
         }
         (LaneKind::Serial, prebuilt) => {
             prepare_serial(inputs, sweep, attempt, extra_args, &env, prebuilt.and_then(ShapeBuild::cargo))?
@@ -601,7 +617,6 @@ struct Unattributable {
 ///   target, a configured rustdoc - `serial_shim_fallback`) leaves every
 ///   harness on cargo's one stream.
 fn serial_unattributable(
-    inputs: &LaneInputs<'_>,
     sweep: &PlannedSweep,
     env: &LaneEnv,
     extra_args: &[String],
@@ -623,7 +638,7 @@ fn serial_unattributable(
         });
     }
     let forwarded = ForwardedArgs::parse(extra_args);
-    serial_shim_fallback(inputs.project_root, &forwarded, &env.project_env, &sweep.env).map(
+    serial_shim_fallback_with_config(&forwarded, &env.launch_config).map(
         |reason| Unattributable {
             reason: UnavailableReason::NoShim(reason.clone()),
             refusal: format!(
@@ -639,12 +654,11 @@ fn serial_unattributable(
 /// Refuse, under a complete profile, a serial lane whose harnesses cannot be
 /// attributed ([`serial_unattributable`]).
 fn refuse_unattributable_serial(
-    inputs: &LaneInputs<'_>,
     sweep: &PlannedSweep,
     env: &LaneEnv,
     extra_args: &[String],
 ) -> Result<(), DevError> {
-    match serial_unattributable(inputs, sweep, env, extra_args) {
+    match serial_unattributable(sweep, env, extra_args) {
         Some(u) => Err(DevError::Config(u.refusal)),
         None => Ok(()),
     }
@@ -776,7 +790,7 @@ fn prepare_serial(
     env: &LaneEnv,
     prebuilt: Option<CargoBuilt>,
 ) -> Result<PreparedLane, DevError> {
-    if let Some(u) = serial_unattributable(inputs, sweep, env, extra_args) {
+    if let Some(u) = serial_unattributable(sweep, env, extra_args) {
         if inputs.certifying {
             return Err(DevError::Config(u.refusal));
         }
@@ -793,7 +807,8 @@ fn prepare_serial(
     };
     let CargoBuilt { built, index } = built;
     let fingerprint = Some(index.fingerprint()?);
-    let runtime = DirectRuntime::load(inputs.project_root, &env_refs, index)?;
+    let runtime =
+        DirectRuntime::load_with_config(inputs.project_root, &env_refs, index, env.launch_config.clone())?;
     let filter_args = lane_filter_args(sweep, libtest_extra);
     let mut prepared = PreparedLane::bare(env.clone());
     prepared.runtime_fingerprint = fingerprint;
@@ -859,27 +874,21 @@ struct Forwarded {
 /// What the direct lanes refuse before building anything, and the forwarded
 /// args split the way they ride.
 fn direct_preflight(
-    inputs: &LaneInputs<'_>,
     sweep: &PlannedSweep,
     extra_args: &[String],
     env: &LaneEnv,
-    kind: LaneKind,
 ) -> Result<Forwarded, DevError> {
     let forwarded = ForwardedArgs::parse(extra_args);
-    if kind == LaneKind::Isolated && forwarded.was_supplied() {
-        return Err(DevError::Config(
-            "`brokkr check -- …` extra args are not supported on a sweep with \
-             `isolation = \"process\"` - the per-test invocations own their argv."
-                .into(),
-        ));
-    }
     // Target selectors narrow the plan; the rest rides on the prebuild. The
     // shared parser also applies package-mode and direct-execution refusals.
+    // The isolated runner reconstructs each child argv from its prepared case
+    // and the forwarded libtest options, so its selection remains exact.
     let (extra_selectors, cargo_extra) = forwarded.partition_targets();
     reject_forwarded_package_selectors(sweep, &forwarded)?;
     reject_direct_execution_args(sweep, &forwarded)?;
+    test_runner::LibtestArgs::validate_passthrough(forwarded.libtest())?;
     // Direct execution would bypass a configured runner; refuse before building.
-    refuse_configured_runner(inputs.project_root, &env.refs())?;
+    refuse_configured_runner_with_config(&env.launch_config)?;
     Ok(Forwarded {
         selectors: extra_selectors,
         cargo: cargo_extra,
@@ -895,9 +904,8 @@ fn build_direct(
     attempt: &Attempt,
     extra_args: &[String],
     env: &LaneEnv,
-    kind: LaneKind,
 ) -> Result<Option<CargoBuilt>, DevError> {
-    let forwarded = direct_preflight(inputs, sweep, extra_args, env, kind)?;
+    let forwarded = direct_preflight(sweep, extra_args, env)?;
     build_resolutions(inputs, attempt, &env.refs(), &|run| {
         let mut selection = env.allow_args.clone();
         selection.extend(resolution_selection(sweep, run));
@@ -916,19 +924,19 @@ fn prepare_direct(
     attempt: &Attempt,
     extra_args: &[String],
     env: &LaneEnv,
-    kind: LaneKind,
     prebuilt: Option<CargoBuilt>,
 ) -> Result<PreparedLane, DevError> {
     let Forwarded { selectors: extra_selectors, cargo: cargo_extra, libtest: libtest_extra } =
-        direct_preflight(inputs, sweep, extra_args, env, kind)?;
+        direct_preflight(sweep, extra_args, env)?;
     let env_refs = env.refs();
     let built = match prebuilt {
         Some(b) => b,
-        None => build_direct(inputs, sweep, attempt, extra_args, env, kind)?.ok_or_else(|| not_prepared(sweep))?,
+        None => build_direct(inputs, sweep, attempt, extra_args, env)?.ok_or_else(|| not_prepared(sweep))?,
     };
     let CargoBuilt { built, index } = built;
     let fingerprint = Some(index.fingerprint()?);
-    let runtime = DirectRuntime::load(inputs.project_root, &env_refs, index)?;
+    let runtime =
+        DirectRuntime::load_with_config(inputs.project_root, &env_refs, index, env.launch_config.clone())?;
     let mut prepared = PreparedLane::bare(env.clone());
     prepared.runtime_fingerprint = fingerprint;
     prepared.include_ignored = lane_runs_ignored(sweep, &libtest_extra);
@@ -1184,7 +1192,12 @@ fn list_universe(
     built: UniverseBuilt,
 ) -> Result<Universe, DevError> {
     let env_refs = env.refs();
-    let runtime = DirectRuntime::load(inputs.project_root, &env_refs, built.index)?;
+    let runtime = DirectRuntime::load_with_config(
+        inputs.project_root,
+        &env_refs,
+        built.index,
+        env.launch_config.clone(),
+    )?;
     universe_from_binaries(sweep, &built.binaries, &env_refs, &runtime)
 }
 
@@ -1347,7 +1360,7 @@ fn build_lane(
     extra_args: &[String],
     universes: Option<&std::sync::Mutex<UniverseBuilds>>,
 ) -> Result<LaneBuild, DevError> {
-    let env = lane_env(inputs, sweep);
+    let env = lane_env(inputs, sweep)?;
     let kind = lane_kind(sweep);
     if let Some(universes) = universes
         && inputs.certifying
@@ -1386,9 +1399,10 @@ fn build_lane(
             Some(ShapeBuild::Nextest(Box::new(build_nextest(inputs, sweep, attempt, extra_args, &env)?)))
         }
         LaneKind::Parallel | LaneKind::Isolated => Some(ShapeBuild::Cargo(
-            build_direct(inputs, sweep, attempt, extra_args, &env, kind)?.ok_or_else(|| not_prepared(sweep))?,
+            build_direct(inputs, sweep, attempt, extra_args, &env)?
+                .ok_or_else(|| not_prepared(sweep))?,
         )),
-        LaneKind::Serial if serial_unattributable(inputs, sweep, &env, extra_args).is_some() => None,
+        LaneKind::Serial if serial_unattributable(sweep, &env, extra_args).is_some() => None,
         LaneKind::Serial => Some(ShapeBuild::Cargo(
             build_serial(inputs, sweep, attempt, extra_args, &env)?.ok_or_else(|| not_prepared(sweep))?,
         )),
@@ -1998,7 +2012,7 @@ mod prepare_tests {
             index: BuildRuntimeIndex::default(),
             libdir: "/toolchain/lib".into(),
             cargo: "cargo".into(),
-            config_env: Vec::new(),
+            launch_config: crate::rustflags::CargoLaunchConfig::default(),
         };
         let inputs = LaneInputs {
             project: None,
@@ -2045,7 +2059,7 @@ mod prepare_tests {
             index: BuildRuntimeIndex::default(),
             libdir: "/toolchain/lib".into(),
             cargo: "cargo".into(),
-            config_env: Vec::new(),
+            launch_config: crate::rustflags::CargoLaunchConfig::default(),
         };
         (dir, marker, target, runtime)
     }
@@ -2401,22 +2415,12 @@ mod prepare_tests {
     /// refused under a complete claim, pointing at the attributable lane.
     #[test]
     fn cargo_mediated_parallelism_is_refused_under_complete() {
-        let inputs = LaneInputs {
-            project: None,
-            project_root: Path::new("/nonexistent"),
-            state_root: Path::new("/nonexistent"),
-            target_dir: Path::new("/nonexistent/target"),
-            allow_flags: &[],
-            owners: no_owners(),
-            commands: false,
-            certifying: true,
-        };
         let parallel_serial = planned(crate::profile::SweepDecl {
             label: "threaded".into(),
             lane_exec: crate::profile::LaneExec::Serial { threads: crate::profile::Threads::CargoDefault },
             ..Default::default()
         });
-        let err = refuse_unattributable_serial(&inputs, &parallel_serial, &LaneEnv::default(), &[])
+        let err = refuse_unattributable_serial(&parallel_serial, &LaneEnv::default(), &[])
             .unwrap_err()
             .to_string();
         assert!(err.contains("parallel = { budget = N }"), "{err}");
@@ -2427,7 +2431,7 @@ mod prepare_tests {
         });
         // The serial sweep passes the parallelism check; whether the shim can
         // run on this host is the second check, decided by the environment.
-        let second = refuse_unattributable_serial(&inputs, &serial, &LaneEnv::default(), &[]);
+        let second = refuse_unattributable_serial(&serial, &LaneEnv::default(), &[]);
         assert!(second.as_ref().is_ok() || second.unwrap_err().to_string().contains("cannot isolate"));
     }
 

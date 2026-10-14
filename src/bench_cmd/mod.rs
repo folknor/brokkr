@@ -39,7 +39,7 @@
 mod discover;
 mod stamp;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::context::{acquire_cmd_lock_opt, with_worktree};
 use crate::error::DevError;
@@ -65,12 +65,13 @@ pub struct BenchArgs {
     pub args: Vec<String>,
 }
 
-/// Entry point.
-///
-/// Detects the project itself rather than being handed one, because `bench`
-/// works in a tree with no `brokkr.toml` at all - target discovery comes from
-/// cargo metadata, and the config only supplies `disable_toolchain`.
-pub fn run(args: &BenchArgs) -> Result<(), DevError> {
+/// Entry point. Startup detection is optional because `bench` also works in a
+/// tree with no `brokkr.toml`; when present, it supplies the already-loaded
+/// config and source provenance used by tree-state policy.
+pub fn run(
+    args: &BenchArgs,
+    detection: Option<&crate::project::Detection>,
+) -> Result<(), DevError> {
     // The two roots are distinct and both matter here. `project_root` holds
     // `brokkr.toml` and anchors everything brokkr owns, including `.brokkr/`;
     // `build_root` is the working directory where cargo and git run. They
@@ -80,27 +81,35 @@ pub fn run(args: &BenchArgs) -> Result<(), DevError> {
     // stays clean. Anchoring the baseline store to the build root would write
     // into that repo and, worse, dirty the very tree whose cleanliness decides
     // whether a baseline may be saved.
-    let (project, project_root, build_root, disable_toolchain, keep) =
-        match crate::project::detect_optional()? {
-            Some(d) => {
+    let fallback_roots = detection
+        .is_none()
+        .then(crate::project::detect_roots)
+        .transpose()?;
+    let (project, project_root, build_root, disable_toolchain, keep, included_config_files) =
+        match (detection, fallback_roots.as_ref()) {
+            (Some(d), _) => {
                 let keep = d.config.worktree_keep(&crate::config::hostname()?);
                 (
                     Some(d.project),
-                    d.project_root,
-                    d.build_root,
+                    &d.project_root,
+                    &d.build_root,
                     d.config.disable_toolchain,
                     keep,
+                    d.config_sources.included().to_vec(),
                 )
             }
-            None => {
-                let (project_root, build_root) = crate::project::detect_roots()?;
-                (
-                    None,
-                    project_root,
-                    build_root,
-                    false,
-                    crate::worktree_record::DEFAULT_KEEP,
-                )
+            (None, Some((project_root, build_root))) => (
+                None,
+                project_root,
+                build_root,
+                false,
+                crate::worktree_record::DEFAULT_KEEP,
+                Vec::new(),
+            ),
+            (None, None) => {
+                return Err(DevError::Internal(
+                    "bench roots were not resolved for an unconfigured tree".into(),
+                ));
             }
         };
     // `.brokkr/bench` under the project root - the criterion home and the
@@ -133,7 +142,11 @@ pub fn run(args: &BenchArgs) -> Result<(), DevError> {
         // Comparison samples nothing, and the bare index measures nothing;
         // neither needs a name, and neither should be blocked by a dirty tree.
         (Some(_), _) | (_, None) => None,
-        (None, Some(_)) => Some(resolve_baseline_name(build_root.as_path(), args)?),
+        (None, Some(_)) => Some(resolve_baseline_name(
+            build_root.as_path(),
+            &included_config_files,
+            args,
+        )?),
     };
 
     // Under `--commit`, `with_worktree` holds the lock and moves the
@@ -147,8 +160,8 @@ pub fn run(args: &BenchArgs) -> Result<(), DevError> {
         crate::run_log::RunLog::begin(project_root.as_path(), crate::run_log::run_log_kind::BENCH);
     with_worktree(
         project,
-        &project_root,
-        &build_root,
+        project_root,
+        build_root,
         args.commit.as_deref(),
         false,
         disable_toolchain,
@@ -157,7 +170,7 @@ pub fn run(args: &BenchArgs) -> Result<(), DevError> {
             // The lock context's state root is the *project* root, what
             // `brokkr lock` displays; its build root is the tree this closure
             // builds in, whose `target` the disk gate probes.
-            let _lock = acquire_cmd_lock_opt(project, &project_root, wt)?;
+            let _lock = acquire_cmd_lock_opt(project, project_root, wt)?;
             let build_root = wt.as_path();
 
             let targets = discover::discover(build_root)?;
@@ -368,7 +381,11 @@ fn check_environments(home: &Path, a: &str, b: &str, lenient: bool) -> Result<()
 /// Both git questions are asked of the *build* root: that is the repo whose
 /// commit names the baseline, and whose cleanliness decides whether a name can
 /// be derived at all. The config directory above it may not even be a git repo.
-fn resolve_baseline_name(build_root: &Path, args: &BenchArgs) -> Result<String, DevError> {
+fn resolve_baseline_name(
+    build_root: &Path,
+    included_config_files: &[PathBuf],
+    args: &BenchArgs,
+) -> Result<String, DevError> {
     if let Some(name) = &args.name {
         stamp::validate_label(name)?;
         return Ok(name.clone());
@@ -391,7 +408,7 @@ fn resolve_baseline_name(build_root: &Path, args: &BenchArgs) -> Result<String, 
         .short()
         .as_str()
         .to_owned();
-    if is_dirty(build_root)? {
+    if is_dirty(build_root, included_config_files)? {
         return Err(DevError::Preflight(vec![
             format!(
                 "the tree has uncommitted changes, so '{short}' would not \
@@ -408,18 +425,15 @@ fn resolve_baseline_name(build_root: &Path, args: &BenchArgs) -> Result<String, 
 /// measured binary. The shared tree snapshot also ignores prose, config
 /// outputs, approved baselines, and an unchanged toolchain pin moved aside by
 /// brokkr.
-fn is_dirty(build_root: &Path) -> Result<bool, DevError> {
-    crate::git::TreeState::read_for_measurement(
-        build_root,
-        &crate::git::included_config_files(build_root),
-    )
-    .map(|state| state.for_measurement())
-    .ok_or_else(|| {
-        DevError::Preflight(vec![format!(
-            "could not determine git status for {}",
-            build_root.display()
-        )])
-    })
+fn is_dirty(build_root: &Path, included_config_files: &[PathBuf]) -> Result<bool, DevError> {
+    crate::git::TreeState::read_for_measurement(build_root, included_config_files)
+        .map(|state| state.for_measurement())
+        .ok_or_else(|| {
+            DevError::Preflight(vec![format!(
+                "could not determine git status for {}",
+                build_root.display()
+            )])
+        })
 }
 
 /// Print the recorded baselines and the environment each was taken under.

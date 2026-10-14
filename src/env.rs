@@ -32,14 +32,15 @@ pub struct UserConfigStatus {
     pub present: bool,
     pub textlint: usize,
     pub script_checks: usize,
-    /// A failure while reading the composed config. The project config loader
-    /// normally reports this first; retaining it here avoids presenting a
-    /// broken layer as absent if the file changes during `env` collection.
-    pub error: Option<String>,
 }
 
 /// Collect all environment information.
-pub fn collect(paths: &ResolvedPaths, project: Project, project_root: &Path) -> EnvInfo {
+pub fn collect(
+    paths: &ResolvedPaths,
+    project: Project,
+    project_root: &Path,
+    sources: &crate::config::ConfigSources,
+) -> EnvInfo {
     let storage_paths: [(&str, &Path); 3] = [
         ("data", &paths.data_dir),
         ("scratch", &paths.scratch_dir),
@@ -55,7 +56,7 @@ pub fn collect(paths: &ResolvedPaths, project: Project, project_root: &Path) -> 
         storage: crate::host::storage::probe_paths(&storage_paths),
         tools: collect_tools(project, project_root),
         datasets: paths.dataset_status(project_root),
-        user_config: collect_user_config(project_root),
+        user_config: collect_user_config(sources),
     }
 }
 
@@ -65,6 +66,7 @@ pub(crate) fn cmd_env(
     project: Project,
     project_root: &crate::project::ProjectRoot,
     build_root: &crate::project::BuildRoot,
+    sources: &crate::config::ConfigSources,
 ) -> Result<(), DevError> {
     // `bootstrap` shells out to `cargo metadata`, which rustup mediates - so in
     // a tree pinning a toolchain we don't have installed, `env` fails outright
@@ -82,7 +84,7 @@ pub(crate) fn cmd_env(
     let pi = bootstrap(build_root)?;
     let paths = bootstrap_config(dev_config, project_root, &pi.target_dir)?;
 
-    let info = collect(&paths, project, project_root.as_path());
+    let info = collect(&paths, project, project_root.as_path(), sources);
     print(&info);
     if let Some(note) = crate::config::unmatched_host_note(dev_config, &paths.hostname) {
         output::warn(&format!(
@@ -92,34 +94,23 @@ pub(crate) fn cmd_env(
     Ok(())
 }
 
-/// Report the user layer from the same composition path used by project
-/// loading. Reading its entries in isolation would reject valid references to
-/// project presets and could turn a broken layer into an "absent" status.
-fn collect_user_config(project_root: &Path) -> Option<UserConfigStatus> {
+/// Report the user layer recorded by startup detection. Reading its entries in
+/// isolation would reject valid references to project presets and recomposing
+/// here could report a different file state from the config brokkr loaded.
+fn collect_user_config(sources: &crate::config::ConfigSources) -> Option<UserConfigStatus> {
     let configured_path = configured_user_config_path();
-    match crate::config::compose(&project_root.join("brokkr.toml")) {
-        Ok((_, sources)) => match sources.user_layer() {
-            Some(user) => Some(UserConfigStatus {
-                path: user.path.clone(),
-                present: true,
-                textlint: user.textlint,
-                script_checks: user.script_checks,
-                error: None,
-            }),
-            None => Some(UserConfigStatus {
-                path: configured_path?,
-                present: false,
-                textlint: 0,
-                script_checks: 0,
-                error: None,
-            }),
-        },
-        Err(error) => Some(UserConfigStatus {
+    match sources.user_layer() {
+        Some(user) => Some(UserConfigStatus {
+            path: user.path.clone(),
+            present: true,
+            textlint: user.textlint,
+            script_checks: user.script_checks,
+        }),
+        None => Some(UserConfigStatus {
             path: configured_path?,
             present: false,
             textlint: 0,
             script_checks: 0,
-            error: Some(error.to_string()),
         }),
     }
 }
@@ -187,9 +178,7 @@ fn print_header(info: &EnvInfo) {
     );
     println!("{:<12} {}", "io_uring:", info.kernel.io_uring.status());
     if let Some(uc) = &info.user_config {
-        let summary = if let Some(error) = &uc.error {
-            format!("{} (composition error: {error})", uc.path.display())
-        } else if uc.present {
+        let summary = if uc.present {
             format!(
                 "{} ({} textlint, {} script_check)",
                 uc.path.display(),

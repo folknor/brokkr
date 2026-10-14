@@ -378,8 +378,8 @@ pub struct SidecarSummary {
     pub sample_count: i32,
     pub marker_count: i32,
     pub wall_time_ms: i64,
-    /// At least one sample, marker, counter, or FIFO record was omitted after
-    /// a configured storage limit was reached.
+    /// A configured storage or child-output limit omitted samples, markers,
+    /// counters, FIFO records, or stdout/stderr bytes.
     pub capture_truncated: bool,
 }
 
@@ -399,11 +399,14 @@ pub struct SidecarData {
 
 /// Result of a sidecar-monitored child process run.
 ///
-/// Contains captured output, the child's ending and wall-clock time, and the
-/// sidecar profile data.
+/// Contains bounded captured output with per-stream completeness flags, the
+/// child's ending and wall-clock time, and the sidecar profile data.
 pub struct SidecarRunResult {
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
+    pub stdout_truncated: bool,
+    pub stderr_truncated: bool,
+    pub output_cut: bool,
     pub elapsed: Duration,
     pub data: SidecarData,
 }
@@ -1026,6 +1029,24 @@ fn announce_ending(ending: &Ending) {
     }
 }
 
+/// The console line announcing that a stop marker fired and the child is dying.
+fn stop_marker_message(requested: &str, matched: &str) -> String {
+    if matched == requested {
+        format!("stop marker \"{requested}\" received, killing child")
+    } else {
+        format!("stop marker \"{requested}\" → \"{matched}\" received, killing child")
+    }
+}
+
+/// The per-run summary: `counts` is samples, markers and counters in order.
+fn run_summary_line(run_idx: usize, counts: [usize; 3], wall_time_ms: impl std::fmt::Display) -> String {
+    let [samples, markers, counters] = counts;
+    format!(
+        "sidecar run {}: {samples} samples, {markers} markers, {counters} counters, {wall_time_ms}ms",
+        run_idx + 1,
+    )
+}
+
 /// Run one sidecar-observed child, killing its process group once it has run
 /// longer than `deadline` (measured from the caller's `start`) when one is
 /// given. Process polling, stop/deadline killing,
@@ -1067,13 +1088,17 @@ pub(crate) fn run_sidecar_with_deadline(
     let tick_interval = tunables.sample_interval;
     let limit = deadline.map_or(ChildLimit::None, ChildLimit::Wall);
     let label = format!("sidecar run {}", run_idx + 1);
+    let options = child::ChildOptions {
+        poll_interval: tick_interval,
+        ..child::ChildOptions::MEASUREMENT
+    };
     let run = child::supervise_child(
         child_process,
         &label,
         start,
         limit,
         crate::shutdown::ChildIsolation::ProcessGroup(&shutdown_guard),
-        tick_interval,
+        options,
         || {
             let elapsed_us =
                 i64::try_from(sampler.elapsed_since(start).as_micros()).unwrap_or(i64::MAX);
@@ -1097,12 +1122,7 @@ pub(crate) fn run_sidecar_with_deadline(
             );
             let matched = matched?;
             fired_stop_marker = Some(matched.clone());
-            let display = if matched == requested_stop {
-                format!("stop marker \"{requested_stop}\" received, killing child")
-            } else {
-                format!("stop marker \"{requested_stop}\" → \"{matched}\" received, killing child")
-            };
-            console::sidecar_msg(&display);
+            console::sidecar_msg(&stop_marker_message(&requested_stop, &matched));
             Some(matched)
         },
     );
@@ -1115,22 +1135,20 @@ pub(crate) fn run_sidecar_with_deadline(
         tunables.max_fifo_line_bytes,
         &mut capture_truncated,
     );
+    let (stdout_truncated, stderr_truncated) = (run.stdout_truncated, run.stderr_truncated);
+    capture_truncated |= stdout_truncated || stderr_truncated || run.output_cut;
     if capture_truncated {
-        console::warn(
-            "sidecar profile reached a storage limit; later trajectory records were omitted",
-        );
+        console::warn("sidecar profile reached a storage limit; trajectory records or child output were omitted");
     }
     announce_ending(&run.ending);
 
     // The shared nearest-millisecond rule, so the sidecar summary agrees with
     // the results row's rounded wall.
     let wall_time_ms = crate::harness::elapsed_to_ms(&run.elapsed);
-    console::detail(&format!(
-        "sidecar run {}: {} samples, {} markers, {} counters, {wall_time_ms}ms",
-        run_idx + 1,
-        samples.len(),
-        markers.len(),
-        counters.len(),
+    console::detail(&run_summary_line(
+        run_idx,
+        [samples.len(), markers.len(), counters.len()],
+        wall_time_ms,
     ));
 
     let sample_count = i32::try_from(samples.len()).unwrap_or(i32::MAX);
@@ -1139,6 +1157,9 @@ pub(crate) fn run_sidecar_with_deadline(
     SidecarRunResult {
         stdout: run.stdout,
         stderr: run.stderr,
+        stdout_truncated,
+        stderr_truncated,
+        output_cut: run.output_cut,
         elapsed: run.elapsed,
         data: SidecarData {
             samples,

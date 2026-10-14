@@ -376,8 +376,7 @@ mod tests {
 
     #[test]
     fn db_open_and_insert_roundtrip() {
-        let dir = std::env::temp_dir().join("brokkr_test_db_roundtrip");
-        drop(std::fs::create_dir_all(&dir));
+        let dir = crate::test_scratch::scratch("db-write", "db_open_insert_roundtrip");
         let db_path = dir.join("test.db");
         // Clean up from previous runs.
         drop(std::fs::remove_file(&db_path));
@@ -432,8 +431,7 @@ mod tests {
 
     #[test]
     fn db_migrations_are_idempotent() {
-        let dir = std::env::temp_dir().join("brokkr_test_db_migrations");
-        drop(std::fs::create_dir_all(&dir));
+        let dir = crate::test_scratch::scratch("db-write", "db_migrations_idempotent");
         let db_path = dir.join("test.db");
         drop(std::fs::remove_file(&db_path));
 

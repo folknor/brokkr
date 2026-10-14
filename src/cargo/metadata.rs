@@ -32,6 +32,36 @@ impl Query {
     pub(crate) fn resolving() -> Self {
         Self::default()
     }
+
+    /// The cargo argv (without the `cargo` program) this query runs. The one
+    /// construction both the loader and `--commands` displays read, so a
+    /// displayed line cannot drift from the subprocess.
+    pub(crate) fn cargo_args(&self) -> Vec<String> {
+        let mut args = vec![
+            "metadata".to_owned(),
+            "--format-version".to_owned(),
+            "1".to_owned(),
+        ];
+        if self.no_deps {
+            args.push("--no-deps".to_owned());
+        }
+        if let Some(platform) = &self.platform {
+            args.push("--filter-platform".to_owned());
+            args.push(platform.clone());
+        }
+        if self.locked {
+            args.push("--locked".to_owned());
+        }
+        if self.all_features {
+            args.push("--all-features".to_owned());
+        }
+        args
+    }
+
+    /// `cargo <args>` as a display line.
+    pub(crate) fn display(&self) -> String {
+        format!("cargo {}", self.cargo_args().join(" "))
+    }
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -109,6 +139,10 @@ fn clone_error(error: &DevError) -> DevError {
             ending: *ending,
             stderr: stderr.clone(),
         },
+        DevError::ChildFailure { program, failure } => DevError::ChildFailure {
+            program: program.clone(),
+            failure: *failure,
+        },
         DevError::Spawn { program, error } => DevError::Spawn {
             program: program.clone(),
             error: std::io::Error::new(error.kind(), error.to_string()),
@@ -145,38 +179,55 @@ fn load_uncached(
                  run the command from inside that checkout, not from here",
             );
         }
-        return Err(DevError::Build(message));
+        return Err(DevError::Usage(message));
     }
 
-    let mut args = vec![
-        "metadata".to_owned(),
-        "--format-version".to_owned(),
-        "1".to_owned(),
-    ];
-    if query.no_deps {
-        args.push("--no-deps".to_owned());
-    }
-    if let Some(platform) = &query.platform {
-        args.push("--filter-platform".to_owned());
-        args.push(platform.clone());
-    }
-    if query.locked {
-        args.push("--locked".to_owned());
-    }
-    if query.all_features {
-        args.push("--all-features".to_owned());
-    }
+    let args = query.cargo_args();
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let captured = output::run_cargo(&args, root, env, phase)?;
     if !captured.success() {
-        let stderr = String::from_utf8_lossy(&captured.stderr);
-        return Err(DevError::Build(format!("cargo metadata failed: {stderr}")));
+        let error = match captured.check_success("cargo metadata") {
+            Err(error) => error,
+            Ok(()) => DevError::Internal(
+                "cargo metadata returned an unsuccessful result without a process error".into(),
+            ),
+        };
+        return Err(with_locked_metadata_hint(error, query.locked));
     }
     let mut metadata: CargoMetadata = serde_json::from_slice(&captured.stdout)?;
     metadata.raw_json = Some(Arc::from(
         String::from_utf8_lossy(&captured.stdout).as_ref(),
     ));
     Ok(metadata)
+}
+
+fn with_locked_metadata_hint(error: DevError, locked: bool) -> DevError {
+    if !locked {
+        return error;
+    }
+
+    match error {
+        DevError::Subprocess {
+            program,
+            ending,
+            stderr,
+        } => {
+            let hint = "`brokkr deps` runs cargo metadata with --locked: it audits Cargo.lock as \
+                       committed and never rewrites it. A missing or out-of-date lockfile must be \
+                       brought current by a build first.";
+            let stderr = if stderr.is_empty() {
+                hint.to_owned()
+            } else {
+                format!("{stderr}\n{hint}")
+            };
+            DevError::Subprocess {
+                program,
+                ending,
+                stderr,
+            }
+        }
+        other => other,
+    }
 }
 
 /// Cargo's opaque package identity. Names and versions are not unique in a

@@ -325,7 +325,7 @@ pub(super) fn spawn_and_capture(
 
     // Guards nest; this one is the borrow the process-group isolation needs.
     let signal_guard = crate::shutdown::SigtermGuard::install();
-    let deadline_capture = match output::run_captured_with_env_and_deadline(
+    let deadline_capture = match output::run_captured_with_env_and_deadline_with_options(
         &binary_str,
         &[HARNESS_MODE_FLAG, &script_str],
         project_root,
@@ -333,6 +333,11 @@ pub(super) fn spawn_and_capture(
         ceiling,
         Some(&|pid| lock.set_child_pid(pid)),
         crate::shutdown::ChildIsolation::ProcessGroup(&signal_guard),
+        output::child::ChildOptions {
+            capture_cap: output::child::CaptureCap::LARGE,
+            sigterm_grace: crate::ratatoskr::saehrimnir::SHUTDOWN_BUDGET,
+            ..output::child::ChildOptions::DEFAULT
+        },
     ) {
         Ok(c) => c,
         // `Interrupted` means the child spawned and ran fine until
@@ -344,9 +349,14 @@ pub(super) fn spawn_and_capture(
             return Err(DevError::Interrupted);
         }
         Err(e) => {
+            let (name, description) = if matches!(&e, DevError::ChildFailure { .. }) {
+                ("capture-error.txt", "failed to capture")
+            } else {
+                ("spawn-error.txt", "failed to spawn")
+            };
             fs::write(
-                artefacts.path().join("spawn-error.txt"),
-                format!("failed to spawn {}: {e}\n", built.binary.display()),
+                artefacts.path().join(name),
+                format!("{description} {}: {e}\n", built.binary.display()),
             )
             .ok();
             artefacts.finalize_failure();

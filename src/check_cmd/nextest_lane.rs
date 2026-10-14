@@ -149,7 +149,7 @@ fn engine_cargo_configs(project_root: &Path, state_root: &Path, env: &[(&str, &s
     // the sweep's CARGO_HOME. The engine's ordinary constructor discovers from
     // process cwd, which need not be the build root. Its isolated constructor
     // avoids that ambient dependency without changing cwd process-wide.
-    for path in crate::rustflags::config_paths_under(project_root, effective) {
+    for path in crate::rustflags::config_paths_under(project_root, effective)? {
         overrides.push(path.to_str().ok_or_else(||
             DevError::Config(format!("cargo config path is not UTF-8: {}", path.display())))?.to_owned());
     }

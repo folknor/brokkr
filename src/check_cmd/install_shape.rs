@@ -72,6 +72,18 @@ fn package_unification_args() -> [String; 3] {
     crate::config::check::CargoUnification::Package.cargo_args()
 }
 
+/// The install-shaped package resolve has the same cache boundary as a
+/// package-unification sweep without per-sweep rustflags. Keep it in the
+/// profile's canonical target-location model so the directory name cannot
+/// drift from `PlannedSweep::target_location`.
+fn install_target_dir(meta_target_dir: &std::path::Path) -> std::path::PathBuf {
+    crate::profile::TargetLocation::Isolated(crate::profile::IsolatedTargetKey::Unify {
+        mode: crate::config::check::CargoUnification::Package,
+        rustflags_hash: None,
+    })
+    .target_dir(meta_target_dir)
+}
+
 
 /// Should the phase run under this mode and profile claim?
 fn install_feature_applies(
@@ -515,10 +527,17 @@ fn run_install_feature_phase(
     // Lint allows reach this build the same way they reach the test phase -
     // env or `--config`, whichever layer is live (see `rustflags`).
     let (env_allows, allow_args) = rustflags::plumbing(project_root, false, allow_flags);
-    let env_pairs = rustflags::RustflagsEnv::process()
+    let target_dir = install_target_dir(&build::project_info(Some(project_root))?.target_dir);
+    let mut env_pairs = rustflags::RustflagsEnv::process()
         .compose(env_allows)?
         .into_iter()
         .collect::<Vec<_>>();
+    // Both the broad bin build and every missing-bin probe share this env, so
+    // they ask Cargo about the same package-mode artifact cache.
+    env_pairs.push((
+        "CARGO_TARGET_DIR".into(),
+        target_dir.to_string_lossy().into_owned(),
+    ));
     let env_refs: Vec<(&str, &str)> = env_pairs
         .iter()
         .map(|(k, v)| (k.as_str(), v.as_str()))

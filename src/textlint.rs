@@ -57,17 +57,21 @@ pub fn format_one(v: &TextlintViolation) -> String {
 /// a match for `re`; a hit suppresses the match. The direction and which anchor
 /// it counts from live in the call site; every orientation shares this one
 /// "is the pattern present in the window" test.
+#[derive(Debug, Clone)]
 struct Window {
     lines: usize,
     re: Regex,
 }
 
 /// A rule with its regexes and glob set compiled once, up front.
-struct Compiled {
+#[derive(Debug, Clone)]
+pub(crate) struct Compiled {
     name: String,
     pattern: Regex,
     paths: globset::GlobSet,
+    path_patterns: Vec<globset::GlobSet>,
     exclude: globset::GlobSet,
+    exclude_patterns: Vec<globset::GlobSet>,
     message: String,
     allow_marker: Option<String>,
     allow_marker_above: usize,
@@ -155,11 +159,21 @@ fn compile(rules: &[TextlintRule]) -> Result<Vec<Compiled>, DevError> {
                 rule.name,
             )));
         }
-        let paths = globs::build_set(&rule.paths, &format!("[[textlint]] {:?} paths", rule.name))?;
-        let exclude = globs::build_set(
-            &rule.exclude,
-            &format!("[[textlint]] {:?} exclude", rule.name),
-        )?;
+        let paths_field = format!("[[textlint]] {:?} paths", rule.name);
+        let paths = globs::build_set(&rule.paths, &paths_field)?;
+        let mut path_patterns = Vec::with_capacity(rule.paths.len());
+        for path in &rule.paths {
+            path_patterns.push(globs::build_set(std::slice::from_ref(path), &paths_field)?);
+        }
+        let exclude_field = format!("[[textlint]] {:?} exclude", rule.name);
+        let exclude = globs::build_set(&rule.exclude, &exclude_field)?;
+        let mut exclude_patterns = Vec::with_capacity(rule.exclude.len());
+        for pattern in &rule.exclude {
+            exclude_patterns.push(globs::build_set(
+                std::slice::from_ref(pattern),
+                &exclude_field,
+            )?);
+        }
         let skip_after = match &rule.skip_after {
             Some(p) => Some(Regex::new(p).map_err(|e| {
                 DevError::Config(format!(
@@ -208,7 +222,9 @@ fn compile(rules: &[TextlintRule]) -> Result<Vec<Compiled>, DevError> {
             name: rule.name.clone(),
             pattern,
             paths,
+            path_patterns,
             exclude,
+            exclude_patterns,
             message: rule.message.clone(),
             allow_marker: rule.allow_marker.clone(),
             allow_marker_above: rule.allow_marker_above,
@@ -227,6 +243,17 @@ fn compile(rules: &[TextlintRule]) -> Result<Vec<Compiled>, DevError> {
         });
     }
     Ok(out)
+}
+
+/// Compile and cache every rule while config is being parsed. This moves
+/// malformed regexes, globs, and incoherent rule combinations out of the
+/// convention phase. The cached values are skipped when config rules serialize.
+pub(crate) fn compile_rules(rules: &mut [TextlintRule]) -> Result<(), DevError> {
+    let compiled = compile(rules)?;
+    for (rule, compiled) in rules.iter_mut().zip(compiled) {
+        rule.compiled = Some(compiled);
+    }
+    Ok(())
 }
 
 /// Compile one optional context-window gate, rejecting a zero-line window (the
@@ -284,6 +311,21 @@ pub struct TextlintScan {
     pub files: usize,
 }
 
+fn warn_unmatched_compiled(
+    patterns: &[String],
+    sets: &[globset::GlobSet],
+    paths: &[PathBuf],
+    field: &str,
+) {
+    for (pattern, set) in patterns.iter().zip(sets) {
+        if !paths.iter().any(|path| globs::matches(set, path)) {
+            crate::output::warn(&format!(
+                "{field}: glob {pattern:?} matches no in-scope tracked path"
+            ));
+        }
+    }
+}
+
 /// Scan one tree snapshot against every rule, one pass per file.
 pub fn scan(
     tree: &crate::scope::TreeSnapshot,
@@ -296,7 +338,17 @@ pub fn scan(
         });
     }
     let files = tree.files();
-    for rule in rules {
+    let compiled = if rules.iter().all(|rule| rule.compiled.is_some()) {
+        rules
+            .iter()
+            .filter_map(|rule| rule.compiled.clone())
+            .collect()
+    } else {
+        // Keep the scanner usable with rules constructed directly by callers
+        // and tests; parsed config uses the cache compiled by compile_rules.
+        compile(rules)?
+    };
+    for (rule, compiled_rule) in rules.iter().zip(&compiled) {
         let paths_field = format!("[[textlint]] {:?} paths", rule.name);
         if rule.paths.is_empty() {
             return Err(DevError::Config(format!(
@@ -307,20 +359,28 @@ pub fn scan(
         // Dead scope is warned about, not refused (`globs::warn_unmatched`):
         // user-wide rules reach every tree brokkr checks, and most trees lack
         // most of the paths a personal rule names.
-        globs::warn_unmatched(&rule.paths, files, &paths_field)?;
-        let path_set = globs::build_set(&rule.paths, &paths_field)?;
+        warn_unmatched_compiled(
+            &rule.paths,
+            &compiled_rule.path_patterns,
+            files,
+            &paths_field,
+        );
         let in_scope: Vec<PathBuf> = files
             .iter()
-            .filter(|rel| globs::matches(&path_set, rel))
+            .filter(|rel| globs::matches(&compiled_rule.paths, rel))
             .cloned()
             .collect();
         let exclude_field = format!("[[textlint]] {:?} exclude", rule.name);
-        globs::warn_unmatched(&rule.exclude, &in_scope, &exclude_field)?;
-        let exclude_set = globs::build_set(&rule.exclude, &exclude_field)?;
+        warn_unmatched_compiled(
+            &rule.exclude,
+            &compiled_rule.exclude_patterns,
+            &in_scope,
+            &exclude_field,
+        );
         if !in_scope.is_empty()
             && !in_scope
                 .iter()
-                .any(|rel| !globs::matches(&exclude_set, rel))
+                .any(|rel| !globs::matches(&compiled_rule.exclude, rel))
         {
             crate::output::warn(&format!(
                 "[[textlint]] {:?}: exclude excuses every file paths selects",
@@ -328,7 +388,6 @@ pub fn scan(
             ));
         }
     }
-    let compiled = compile(rules)?;
     let mut out = Vec::new();
     let mut scanned = 0usize;
     for rel in files {
@@ -718,6 +777,7 @@ mod tests {
             except_below: None,
             require_above: None,
             require_below: None,
+            compiled: None,
         }
     }
 

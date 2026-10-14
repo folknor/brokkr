@@ -11,47 +11,17 @@ Hygiene findings from the hunt for the `check`/`test`/`clippy` pipeline, test ex
    page - before the entry is removed, so the finding is not hunted again.
 4. Once all findings are resolved, the file gets deleted.
 
-## VAL-001 - The rustflags env resolution rule has three copies that already disagree
-
-Reported by: check-core.
-
-Residue: `check_cmd/sweep_env.rs::composed_rustflags_env` still reads `CARGO_ENCODED_RUSTFLAGS`/`RUSTFLAGS` directly instead of through `RustflagsEnv`.
-
-## VAL-003 - Failure sentinels and tool labels are strings matched by content
-
-Reported by: check-core, test-execution.
-
-Residue: the test phase still signals red tests through the `TESTS_FAILED` string sentinel matched in `test_phase.rs` and `phase.rs`.
-
-## VAL-009 - Two owners of `-Zfeature-unification` support; package-mode builds in two target dirs
-
-Reported by: test-execution.
-
-Residue: `check_cmd/install_shape.rs` install-feature builds and missing-bin probes still do not run in the package-unification isolated target dir.
-
 ## VAL-011 - Check/test tunables have no index and no injection point
 
 Reported by: check-core, test-execution, config-cli-bootstrap.
 
 Residue: `PHASE_CLOCK` poison handling, CPU-topology and run-log-retention tunables are untouched (only accounting retention got an injection point).
 
-## VAL-015 - The same condition is handled differently across test lanes
-
-Reported by: test-execution.
-
-Residue: `prepare.rs::direct_preflight` still refuses all forwarded args for isolated lanes (the doctest-carrier half is stale per `validate_complete_doctest_carriers`).
-
 ## VAL-016 - Check run-state policy is per call site
 
 Reported by: check-core.
 
 Residue: the silent `PHASE_CLOCK` poison path in `watchdog.rs` and wall-clock run-log pruning in `run_log.rs` remain.
-
-## VAL-018 - Test lanes read cargo config late and fail open
-
-Reported by: test-execution.
-
-Residue: `rustflags.rs::CargoLaunchConfig::discover` still skips read/parse failures and no validated cargo-config snapshot is carried into lane setup.
 
 ## VAL-021 - Check/test tests that cannot fail
 
@@ -89,41 +59,11 @@ Reported by: check-core, test-execution.
 
 Residue: `resolve_planned_sweep` is infallible and its callers are migrated, but the "other listed residues in S- and I-owned files" were not identified or verified.
 
-## VAL-032 - `TEXTLINT_PRESET_FIELDS` mirrors `TextlintRule` by hand
-
-Reported by: convention-engines.
-
-Residue: `TEXTLINT_PRESET_FIELDS` is still hand-maintained with no parity check.
-
-## VAL-034 - The displayed cargo argv is a second copy of the real one
-
-Reported by: convention-engines.
-
-Residue: `check_cmd/conventions.rs` still prints a literal cargo metadata command.
-
-## VAL-035 - Convention-engine config is validated when the phase runs, not at load
-
-Reported by: convention-engines, config-cli-bootstrap, check-core.
-
-Residue: textlint compilation and manifest glob/granularity validation still happen at scan time.
-
-## VAL-037 - Convention-engine output is inconsistent
-
-Reported by: convention-engines.
-
-Residue: the gremlins, header and manifest green lines are still bare `phase_ok`.
-
 ## VAL-038 - Convention-engine and deps errors misclassified
 
 Reported by: convention-engines.
 
-Residue: the shared JSON conversion in `error.rs` and cargo metadata failures in `cargo/metadata.rs` still map to `Build`.
-
-## VAL-039 - Convention-engine tests that prove little
-
-Reported by: convention-engines.
-
-Residue: textlint preset-field parity is untested.
+Residue: callers outside the shared conversion still label cargo metadata errors as `Build`: `dependency_rules.rs`, `check_cmd/features.rs`, `check_cmd/nextest_lane.rs`, `check_cmd/prepare.rs`, `check_cmd/direct_runtime.rs`.
 
 ## VAL-040 - Convention-engine guards that fail open
 

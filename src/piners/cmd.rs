@@ -704,7 +704,7 @@ impl AttemptEnv<'_> {
         let lock = self.lock;
         // Guards nest; this one is the borrow the process-group isolation needs.
         let signal_guard = crate::shutdown::SigtermGuard::install();
-        let capture = output::run_captured_with_env_and_deadline(
+        let capture = output::run_captured_with_env_and_deadline_allow_output_cut(
             self.binary,
             &argv,
             self.project_root,
@@ -712,12 +712,16 @@ impl AttemptEnv<'_> {
             remaining,
             Some(&|pid| lock.set_child_pid(pid)),
             crate::shutdown::ChildIsolation::ProcessGroup(&signal_guard),
+            output::child::ChildOptions::LARGE,
         );
         drop(signal_guard);
         lock.clear_child_pid();
         let capture = match capture {
             Ok(c) => c,
             Err(DevError::Interrupted) => return AttemptOutcome::Stop(StopReason::Interrupted),
+            Err(e @ DevError::ChildFailure { .. }) => {
+                return AttemptOutcome::Stop(StopReason::CaptureIncomplete(e.to_string()));
+            }
             Err(e) => return AttemptOutcome::Stop(StopReason::SpawnFailed(e.to_string())),
         };
         // The streams are the evidence the run will claim to preserve: a
@@ -917,8 +921,15 @@ fn capture_harness(
     on_spawn: Option<&dyn Fn(u32)>,
     isolation: crate::shutdown::ChildIsolation<'_>,
 ) -> Result<output::DeadlineCapture, DevError> {
-    output::run_captured_with_env_and_deadline(
-        program, argv, cwd, env, deadline, on_spawn, isolation,
+    output::run_captured_with_env_and_deadline_allow_output_cut(
+        program,
+        argv,
+        cwd,
+        env,
+        deadline,
+        on_spawn,
+        isolation,
+        output::child::ChildOptions::LARGE,
     )
 }
 
